@@ -1,0 +1,6 @@
+targets:
+  $default:
+    builders:
+      hive_generator:
+        options:
+          nullable_getter: true

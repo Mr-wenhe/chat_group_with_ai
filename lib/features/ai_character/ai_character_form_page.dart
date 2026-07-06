@@ -1,0 +1,369 @@
+import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:chat_group/core/models/ai_character.dart';
+import 'providers/ai_character_providers.dart';
+import '../settings/providers/api_config_providers.dart';
+import '../settings/api_config_form_page.dart';
+
+class AICharacterFormPage extends ConsumerStatefulWidget {
+  final AICharacter? character;
+
+  const AICharacterFormPage({super.key, this.character});
+
+  @override
+  ConsumerState<AICharacterFormPage> createState() => _AICharacterFormPageState();
+}
+
+class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
+  final _formKey = GlobalKey<FormState>();
+  late TextEditingController _nameController;
+  late TextEditingController _avatarController;
+  late TextEditingController _ageController;
+  late TextEditingController _roleController;
+  late TextEditingController _systemPromptController;
+  late TextEditingController _personalityController;
+  late TextEditingController _hourlyLimitController;
+
+  bool _isEditing = false;
+  String? _existingCharacterId;
+  String _selectedApiConfigId = '';
+  bool _isSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _isEditing = widget.character != null;
+    _existingCharacterId = widget.character?.id;
+    final c = widget.character;
+
+    _nameController = TextEditingController(text: c?.name ?? '');
+    _avatarController = TextEditingController(text: c?.avatar ?? '');
+    _ageController = TextEditingController(text: c != null ? c.age.toString() : '');
+    _roleController = TextEditingController(text: c?.role ?? '');
+    _systemPromptController = TextEditingController(text: c?.systemPrompt ?? '');
+    _personalityController = TextEditingController(text: c == null ? '' : c.personalityTags.join(', '));
+    _hourlyLimitController = TextEditingController(text: (c?.hourlyReplyLimit ?? 5).toString());
+
+    _selectedApiConfigId = c?.apiConfigId ?? '';
+  }
+
+  @override
+  void dispose() {
+    _nameController.dispose();
+    _avatarController.dispose();
+    _ageController.dispose();
+    _roleController.dispose();
+    _systemPromptController.dispose();
+    _personalityController.dispose();
+    _hourlyLimitController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+
+    return Scaffold(
+      backgroundColor: cs.surface,
+      appBar: AppBar(
+        backgroundColor: cs.surface,
+        surfaceTintColor: Colors.transparent,
+        elevation: 0,
+        title: Text(_isEditing ? '编辑角色' : '创建 AI 角色', style: TextStyle(fontWeight: FontWeight.w600, fontSize: 18, color: cs.onSurface)),
+        actions: [
+          TextButton.icon(
+            onPressed: _isSaving ? null : _save,
+            icon: Icon(_isEditing ? Icons.check_rounded : Icons.add_circle_rounded, color: cs.primary),
+            label: Text(_isEditing ? '更新' : '创建', style: TextStyle(color: cs.primary, fontWeight: FontWeight.w600)),
+          ),
+        ],
+      ),
+      body: Form(
+        key: _formKey,
+        child: ListView(
+          padding: const EdgeInsets.all(20),
+          children: [
+            _SectionHeader(title: '角色信息', icon: Icons.person_outline_rounded, cs: cs),
+            const SizedBox(height: 12),
+            _Card(
+              cs: cs,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _nameController,
+                        decoration: _inputDecoration('名字 *', 'AI 的名字', Icons.badge_outlined, cs),
+                        validator: (v) => v?.isEmpty ?? true ? '请输入名字' : null,
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    _buildAvatarPreview(cs),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                Row(
+                  children: [
+                    Expanded(
+                      child: TextFormField(
+                        controller: _ageController,
+                        decoration: _inputDecoration('年龄', '25', Icons.cake_outlined, cs),
+                        keyboardType: TextInputType.number,
+                        validator: (v) {
+                          if (v?.isEmpty ?? true) return null;
+                          final age = int.tryParse(v!);
+                          if (age == null || age < 1 || age > 150) return '1-150';
+                          return null;
+                        },
+                      ),
+                    ),
+                    const SizedBox(width: 14),
+                    Expanded(
+                      child: TextFormField(
+                        controller: _roleController,
+                        decoration: _inputDecoration('角色 *', '游戏达人 / 心理咨询师', Icons.work_outline_rounded, cs),
+                        validator: (v) => v?.isEmpty ?? true ? '请输入角色' : null,
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                TextFormField(
+                  controller: _personalityController,
+                  decoration: _inputDecoration('性格标签', '话痨, 温柔, 毒舌, 理性...', Icons.psychology_outlined, cs),
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 24),
+            _SectionHeader(title: 'AI 配置', icon: Icons.smart_toy_outlined, cs: cs),
+            const SizedBox(height: 12),
+            _Card(
+              cs: cs,
+              children: [
+                Row(
+                  children: [
+                    Expanded(
+                      child: Consumer(
+                        builder: (context, ref, child) {
+                          final configs = ref.watch(apiConfigsProvider);
+
+                          return DropdownButtonFormField<String>(
+                            value: _selectedApiConfigId.isNotEmpty ? _selectedApiConfigId : null,
+                            decoration: _inputDecoration('API 配置 *', '先在设置中创建 API 配置', Icons.settings_remote_outlined, cs),
+                            items: [
+                              if (configs.isEmpty)
+                                const DropdownMenuItem(value: '', child: Text('暂无配置，请先在设置中创建', style: TextStyle(fontSize: 13))),
+                              ...configs.map((c) => DropdownMenuItem(
+                                value: c.id,
+                                child: Row(
+                                  children: [
+                                    Icon(Icons.circle, size: 8, color: _providerColor(c.provider)),
+                                    const SizedBox(width: 8),
+                                    Expanded(child: Text(c.name, overflow: TextOverflow.ellipsis)),
+                                    Text(c.provider, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+                                  ],
+                                ),
+                              )),
+                            ],
+                            onChanged: configs.isEmpty ? null : (v) {
+                              if (v != null && v.isNotEmpty) {
+                                setState(() {
+                                  _selectedApiConfigId = v;
+                                });
+                              }
+                            },
+                            validator: (v) => v == null || v.isEmpty ? '请选择 API 配置' : null,
+                          );
+                        },
+                      ),
+                    ),
+                    IconButton(
+                      icon: Icon(Icons.add_circle_outline_rounded, color: cs.primary, size: 24),
+                      onPressed: () async {
+                        await Navigator.of(context).push(
+                          MaterialPageRoute(builder: (_) => const ApiConfigFormPage()),
+                        );
+                        setState(() {});
+                      },
+                      tooltip: '新建配置',
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 14),
+                TextFormField(
+                  controller: _hourlyLimitController,
+                  decoration: _inputDecoration('每小时回复上限', '默认 5 次/小时', Icons.speed_rounded, cs),
+                  keyboardType: TextInputType.number,
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 24),
+            _SectionHeader(title: '行为设定', icon: Icons.tune_rounded, cs: cs),
+            const SizedBox(height: 12),
+            _Card(
+              cs: cs,
+              children: [
+                TextFormField(
+                  controller: _systemPromptController,
+                  decoration: _inputDecoration('System Prompt', '定义 AI 的行为、风格和知识领域...', Icons.chat_bubble_outline_rounded, cs),
+                  maxLines: 8,
+                ),
+              ],
+            ),
+
+            const SizedBox(height: 32),
+            SizedBox(
+              width: double.infinity,
+              height: 52,
+              child: FilledButton.icon(
+                onPressed: _isSaving ? null : _save,
+                icon: Icon(_isEditing ? Icons.check_rounded : Icons.add_rounded, size: 20),
+                label: Text(_isEditing ? '更新角色' : '创建角色', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
+                style: FilledButton.styleFrom(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
+              ),
+            ),
+            const SizedBox(height: 32),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Color _providerColor(String provider) {
+    switch (provider) {
+      case 'deepseek': return const Color(0xFF1565C0);
+      case 'qwen': return const Color(0xFF7C3AED);
+      case 'zhipu': return const Color(0xFF0891B2);
+      case 'moonshot': return const Color(0xFF7C3AED);
+      case 'baidu': return const Color(0xFF4F46E5);
+      case 'custom': return const Color(0xFFD97706);
+      default: return const Color(0xFF2563EB);
+    }
+  }
+
+  InputDecoration _inputDecoration(String label, String? hint, IconData icon, ColorScheme cs) {
+    return InputDecoration(
+      labelText: label,
+      hintText: hint,
+      prefixIcon: Icon(icon, size: 18),
+      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.outlineVariant)),
+      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.outlineVariant)),
+      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.primary, width: 1.5)),
+      filled: true,
+      fillColor: cs.surfaceContainerHighest.withOpacity(0.4),
+      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+      labelStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
+      hintStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant.withOpacity(0.5)),
+    );
+  }
+
+  Widget _buildAvatarPreview(ColorScheme cs) {
+    final displayAvatar = _avatarController.text.isEmpty
+        ? (_nameController.text.isNotEmpty ? _nameController.text[0] : '?')
+        : _avatarController.text;
+    return Container(
+      width: 52,
+      height: 52,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: cs.primaryContainer,
+        border: Border.all(color: cs.primary.withOpacity(0.2), width: 1.5),
+      ),
+      child: Center(child: Text(displayAvatar, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: cs.onPrimaryContainer))),
+    );
+  }
+
+  Future<void> _save() async {
+    if (!_formKey.currentState!.validate() || _isSaving) return;
+    _isSaving = true;
+    setState(() {});
+
+    try {
+      final config = ref.read(apiConfigsProvider.notifier).getById(_selectedApiConfigId);
+      if (config == null) {
+        if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请选择 API 配置'), behavior: SnackBarBehavior.floating));
+        _isSaving = false;
+        setState(() {});
+        return;
+      }
+
+      final age = int.tryParse(_ageController.text) ?? 25;
+      final hourlyLimit = int.tryParse(_hourlyLimitController.text) ?? 5;
+      final personalityTags = _personalityController.text.split(',').map((t) => t.trim()).where((t) => t.isNotEmpty).toList();
+
+      final character = AICharacter(
+        id: _existingCharacterId,
+        name: _nameController.text.trim(),
+        avatar: _avatarController.text.trim().isEmpty ? _nameController.text.trim()[0] : _avatarController.text.trim(),
+        age: age,
+        role: _roleController.text.trim(),
+        personalityTags: personalityTags,
+        systemPrompt: _systemPromptController.text.trim(),
+        apiKey: config.apiKey,
+        apiProvider: config.provider,
+        modelName: config.modelName,
+        customBaseUrl: config.customBaseUrl,
+        hourlyReplyLimit: hourlyLimit,
+        apiConfigId: config.id,
+        createdAt: widget.character?.createdAt ?? DateTime.now(),
+      );
+
+      if (_isEditing) {
+        await ref.read(aiCharactersProvider.notifier).updateCharacter(character);
+      } else {
+        await ref.read(aiCharactersProvider.notifier).addCharacter(character);
+      }
+
+      if (mounted) {
+        Navigator.pop(context);
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(content: Text(_isEditing ? '角色已更新' : '角色已创建'), behavior: SnackBarBehavior.floating));
+      }
+    } catch (e) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(content: Text('保存失败: $e'), behavior: SnackBarBehavior.floating, backgroundColor: Colors.red),
+        );
+      }
+    } finally {
+      if (mounted) setState(() => _isSaving = false);
+    }
+  }
+}
+
+class _SectionHeader extends StatelessWidget {
+  final String title;
+  final IconData icon;
+  final ColorScheme cs;
+  const _SectionHeader({required this.title, required this.icon, required this.cs});
+
+  @override
+  Widget build(BuildContext context) {
+    return Row(
+      children: [
+        Icon(icon, size: 16, color: cs.primary),
+        const SizedBox(width: 8),
+        Text(title, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: cs.primary, letterSpacing: 0.8)),
+        const SizedBox(width: 12),
+        Expanded(child: Divider(color: cs.primary.withOpacity(0.15), thickness: 0.5)),
+      ],
+    );
+  }
+}
+
+class _Card extends StatelessWidget {
+  final ColorScheme cs;
+  final List<Widget> children;
+  const _Card({required this.cs, required this.children});
+
+  @override
+  Widget build(BuildContext context) {
+    return Card(
+      elevation: 0,
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
+      color: cs.surfaceContainerHighest.withOpacity(0.4),
+      child: Padding(padding: const EdgeInsets.all(16), child: Column(children: children)),
+    );
+  }
+}
