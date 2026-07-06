@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:math';
 
 import 'package:chat_group/core/models/ai_character.dart';
@@ -36,6 +37,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   int _consecutiveRound = 0;
   final int _maxAutoRounds = 3;
 
+  // @ 成员选择弹窗
+  OverlayEntry? _mentionOverlay;
+  bool _showMentionPopup = false;
+  List<AICharacter> _filteredMentionMembers = [];
+  final LayerLink _mentionLayerLink = LayerLink();
+
+  // AI 自主聊天
+  Timer? _autoChatTimer;
+  bool _isAutoChatEnabled = true;
+  int _autoChatRoundCount = 0;
+  final int _maxAutoChatRounds = 5;
+  final Random _autoChatRandom = Random();
+
+  // 待回应 @ 列表
+  final List<String> _pendingMentionedIds = [];
+
   @override
   void initState() {
     super.initState();
@@ -46,6 +63,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   void dispose() {
     _textController.dispose();
     _scrollController.dispose();
+    _autoChatTimer?.cancel();
+    _hideMentionOverlay();
     super.dispose();
   }
 
@@ -352,6 +371,61 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   Future<void> _delay() async {
     await Future.delayed(Duration(milliseconds: 800 + _random.nextInt(2000)));
+  }
+
+  void _hideMentionOverlay() {
+    _mentionOverlay?.remove();
+    _mentionOverlay = null;
+    _showMentionPopup = false;
+  }
+
+  /// 解析消息内容中的 @成员名，返回被 @ 的 AI ID 列表
+  List<String> _parseMentions(String content) {
+    final mentionedIds = <String>[];
+    // 匹配中文名 @某人
+    final chinesePattern = RegExp(r'@([一-鿿]{1,10})');
+    for (final match in chinesePattern.allMatches(content)) {
+      final name = match.group(1)!;
+      final found = _characters.isNotEmpty ? _characters.firstWhere((c) => c.name == name) : null;
+      if (found != null) {
+        mentionedIds.add(found.id);
+      }
+    }
+    // 处理英文字符名
+    final englishPattern = RegExp(r'@(\w+)');
+    for (final match in englishPattern.allMatches(content)) {
+      final name = match.group(1)!;
+      final found = _characters.isNotEmpty ? _characters.firstWhere((c) => c.name == name) : null;
+      if (found != null) {
+        mentionedIds.add(found.id);
+      }
+    }
+    return mentionedIds;
+  }
+
+  /// 选择回复者：优先选被 @ 且符合条件的角色
+  AICharacter? _selectReplyCharacter(List<String>? mentionedIds) {
+    final eligible = _characters.where(_isEligibleToReply).toList();
+    if (eligible.isEmpty) return null;
+
+    // 优先选被 @ 的角色
+    if (mentionedIds != null && mentionedIds.isNotEmpty) {
+      final priorityChars = eligible.where((c) => mentionedIds.contains(c.id)).toList();
+      if (priorityChars.isNotEmpty) {
+        return _shuffle(priorityChars).first;
+      }
+    }
+
+    // 其次选待回应队列中的角色
+    if (_pendingMentionedIds.isNotEmpty) {
+      final pendingEligible = eligible.where((c) => _pendingMentionedIds.contains(c.id)).toList();
+      if (pendingEligible.isNotEmpty) {
+        return _shuffle(pendingEligible).first;
+      }
+    }
+
+    // 最后随机选
+    return _shuffle(eligible).first;
   }
 
   void _scrollToBottom() {
