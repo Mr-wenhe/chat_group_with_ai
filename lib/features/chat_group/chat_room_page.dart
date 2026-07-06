@@ -386,19 +386,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final chinesePattern = RegExp(r'@([一-鿿]{1,10})');
     for (final match in chinesePattern.allMatches(content)) {
       final name = match.group(1)!;
-      final found = _characters.isNotEmpty ? _characters.firstWhere((c) => c.name == name) : null;
-      if (found != null) {
-        mentionedIds.add(found.id);
-      }
+      final found = _characters.firstWhere((c) => c.name == name, orElse: () => _characters.first);
+      mentionedIds.add(found.id);
     }
     // 处理英文字符名
     final englishPattern = RegExp(r'@(\w+)');
     for (final match in englishPattern.allMatches(content)) {
       final name = match.group(1)!;
-      final found = _characters.isNotEmpty ? _characters.firstWhere((c) => c.name == name) : null;
-      if (found != null) {
-        mentionedIds.add(found.id);
-      }
+      final found = _characters.firstWhere((c) => c.name == name, orElse: () => _characters.first);
+      mentionedIds.add(found.id);
     }
     return mentionedIds;
   }
