@@ -72,5 +72,31 @@ void main() {
         'B',
       );
     });
+
+    test('CRLF(\\r\\n) 换行被正确解析，残留 \\r 被剔除', () {
+      final p = SseParser();
+      final events =
+          p.ingest('data: {"choices":[{"delta":{"content":"Hi"}}]}\r\n');
+      expect(events.map((e) => e.delta), ['Hi']);
+      expect(p.doneEvent().content, 'Hi');
+    });
+
+    test('跨 3 个 chunk 的 JSON 被切断也能正确拼接', () {
+      final p = SseParser();
+      // JSON 被网络切成三段，跨越多个 chunk 边界
+      p.ingest('data: {"cho');
+      p.ingest('ices":[{"delta":{"con');
+      p.ingest('tent":"Yo"}}]}\n');
+      expect(p.doneEvent().content, 'Yo');
+    });
+
+    test('多 chunk 含 [DONE] 与注释行后仍能产出自完整内容', () {
+      final p = SseParser();
+      p.ingest(': keep-alive\n\n');
+      p.ingest('data: {"choices":[{"delta":{"content":"Hel');
+      p.ingest('lo"}}]}\n');
+      p.ingest('data: [DONE]\n');
+      expect(p.doneEvent().content, 'Hello');
+    });
   });
 }
