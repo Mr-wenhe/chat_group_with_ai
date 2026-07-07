@@ -37,6 +37,8 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
     final apiConfigs = ref.watch(apiConfigsProvider);
     final customConfigs =
         apiConfigs.where((c) => c.provider == 'custom').toList();
+    // 构建 id → ApiConfig 映射，供卡片按 apiConfigId 查找关联配置（Bug 4）
+    final configMap = {for (final c in apiConfigs) c.id: c};
 
     return Scaffold(
       backgroundColor: cs.surface,
@@ -87,9 +89,9 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                   const Spacer(),
                   TextButton.icon(
                     onPressed: () =>
-                        _batchChangeModel(context, ref, customConfigs.first),
+                        _batchChangeConfig(context, ref, customConfigs.first),
                     icon: const Icon(Icons.sync_alt_rounded, size: 14),
-                    label: const Text('统一模型', style: TextStyle(fontSize: 12)),
+                    label: const Text('统一配置', style: TextStyle(fontSize: 12)),
                     style: TextButton.styleFrom(foregroundColor: cs.primary),
                   ),
                 ],
@@ -112,9 +114,11 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                           character.isActive = !character.isActive;
                           character.save();
                         },
-                        // 点击模型标签可单独修改该角色的模型
-                        onModelChange: (currentModel) => _changeSingleModel(
-                            context, ref, character, currentModel),
+                        // 点击模型标签可单独切换该角色关联的 API 配置（Bug 2/4）
+                        onConfigChange: () =>
+                            _changeSingleConfig(context, ref, character),
+                        // 传入关联配置：优先显示配置名而非角色旧 provider 名（Bug 4）
+                        linkedConfig: configMap[character.apiConfigId],
                       );
                     },
                   ),
@@ -362,22 +366,27 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
     }
   }
 
-  /// 批量将全部角色的模型统一为指定名称。
-  Future<void> _batchChangeModel(
+  /// 批量将全部角色的 API 配置统一为指定配置：
+  /// 对齐 apiConfigId / apiKey / apiProvider / modelName / customBaseUrl。
+  Future<void> _batchChangeConfig(
       BuildContext context, WidgetRef ref, ApiConfig customConfig) async {
     final cs = Theme.of(context).colorScheme;
+    // 对话框允许修改模型名；留空则使用配置自身 modelName
     final result = await showDialog<String>(
       context: context,
       builder: (ctx) => AlertDialog(
-        title: const Text('统一更换所有角色模型'),
+        title: const Text('统一更换所有角色配置'),
         content: Column(
           mainAxisSize: MainAxisSize.min,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text('当前自定义模型: ${customConfig.modelName}',
+            Text('目标配置: ${customConfig.name}',
+                style: const TextStyle(fontWeight: FontWeight.w600)),
+            const SizedBox(height: 8),
+            Text('当前模型: ${customConfig.modelName}',
                 style: const TextStyle(fontFamily: 'monospace')),
             const SizedBox(height: 12),
-            Text('输入新的模型名称:',
+            Text('可修改模型名称（留空则使用配置本身模型名）:',
                 style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
             const SizedBox(height: 8),
             TextField(
@@ -403,69 +412,127 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
       ),
     );
 
-    if (result != null && result.isNotEmpty && context.mounted) {
+    if (result != null && context.mounted) {
       final chars = ref.read(aiCharactersProvider);
+      // 留空则回退使用配置本身的模型名
+      final newModelName =
+          result.isEmpty ? customConfig.modelName : result;
       for (final c in chars) {
-        c.modelName = result;
+        c.apiConfigId = customConfig.id;
+        c.apiKey = customConfig.apiKey;
+        c.apiProvider = customConfig.provider;
+        c.modelName = newModelName;
+        c.customBaseUrl = customConfig.customBaseUrl;
         c.save();
       }
       ref.invalidate(aiCharactersProvider);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('已将 ${chars.length} 个角色模型统一为 $result'),
+          content: Text(
+              '已将 ${chars.length} 个角色统一为「${customConfig.name}」配置',
+              style: TextStyle(color: cs.onPrimaryContainer)),
           behavior: SnackBarBehavior.floating,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          // 抬高底部边距，避免与右下角 FAB（创建角色）重叠（Bug 3）
+          margin: const EdgeInsets.only(bottom: 80, left: 16, right: 16),
+          backgroundColor: cs.primaryContainer,
+          duration: const Duration(seconds: 3),
         ));
       }
     }
   }
 
-  /// 单独修改某个角色的模型名称。
-  Future<void> _changeSingleModel(BuildContext context, WidgetRef ref,
-      AICharacter character, String currentModel) async {
+  /// 单独修改某个角色关联的 API 配置：弹窗下拉选择目标配置，
+  /// 选中后将该角色的全部 API 字段对齐到所选配置（Bug 2）。
+  Future<void> _changeSingleConfig(
+      BuildContext context, WidgetRef ref, AICharacter character) async {
     final cs = Theme.of(context).colorScheme;
-    final controller = TextEditingController(text: currentModel);
+    final apiConfigs = ref.read(apiConfigsProvider);
+    if (apiConfigs.isEmpty) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('暂无可用配置，请先在设置中创建'),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+      return;
+    }
+
+    // 当前已关联配置（若不存在于列表则默认选第一个），保证下拉 value 始终有效
+    final initialId = character.apiConfigId.isNotEmpty &&
+            apiConfigs.any((c) => c.id == character.apiConfigId)
+        ? character.apiConfigId
+        : apiConfigs.first.id;
+
+    String selectedId = initialId;
     final result = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: Text('修改「${character.name}」的模型'),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text('输入新的模型名称:',
-                style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
-            const SizedBox(height: 8),
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                hintText: '输入模型 ID',
-                isDense: true,
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          title: Text('修改「${character.name}」的配置'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text('选择要切换到的配置:',
+                  style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+              const SizedBox(height: 8),
+              DropdownButtonFormField<String>(
+                value: selectedId,
+                isExpanded: true,
+                decoration: const InputDecoration(
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                items: apiConfigs
+                    .map((c) => DropdownMenuItem(
+                          value: c.id,
+                          child: Text('${c.name} (${c.provider})',
+                              overflow: TextOverflow.ellipsis),
+                        ))
+                    .toList(),
+                onChanged: (v) {
+                  if (v != null) setDialogState(() => selectedId = v);
+                },
               ),
-              autofocus: true,
+            ],
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx),
+                child: const Text('取消')),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, selectedId),
+              child: const Text('保存'),
             ),
           ],
         ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
-            child: const Text('保存'),
-          ),
-        ],
       ),
     );
-    controller.dispose();
 
-    if (result != null && result.isNotEmpty && context.mounted) {
-      character.modelName = result;
+    if (result != null && context.mounted) {
+      // 从配置列表中安全查找目标配置（下拉项均来自该列表，必然存在）
+      final target = apiConfigs.where((c) => c.id == result).firstOrNull;
+      if (target == null) return;
+      character.apiConfigId = target.id;
+      character.apiKey = target.apiKey;
+      character.apiProvider = target.provider;
+      character.modelName = target.modelName;
+      character.customBaseUrl = target.customBaseUrl;
       character.save();
       ref.invalidate(aiCharactersProvider);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('已将「${character.name}」的模型改为 $result'),
+          content: Text('已将「${character.name}」切换为「${target.name}」配置',
+              style: TextStyle(color: cs.onPrimaryContainer)),
           behavior: SnackBarBehavior.floating,
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+          // 抬高底部边距，避免与右下角 FAB（创建角色）重叠（Bug 3）
+          margin: const EdgeInsets.only(bottom: 80, left: 16, right: 16),
+          backgroundColor: cs.primaryContainer,
+          duration: const Duration(seconds: 3),
         ));
       }
     }
@@ -478,7 +545,8 @@ class _CharacterCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onDelete;
   final VoidCallback onToggle;
-  final ValueChanged<String>? onModelChange;
+  final ApiConfig? linkedConfig;
+  final VoidCallback? onConfigChange;
 
   const _CharacterCard({
     required this.character,
@@ -486,13 +554,21 @@ class _CharacterCard extends StatelessWidget {
     required this.onTap,
     required this.onDelete,
     required this.onToggle,
-    this.onModelChange,
+    this.linkedConfig,
+    this.onConfigChange,
   });
 
   @override
   Widget build(BuildContext context) {
     final pColor = providerColor(character.apiProvider);
     final label = providerLabel(character.apiProvider);
+
+    // 优先使用关联配置的信息（Bug 4）：若角色已关联 ApiConfig，
+    // 标签与配色均以该配置为准，而非角色自身存储的旧 provider 名。
+    // 用局部变量承接，确保空安全的类型提升（final 字段在三元表达式中无法直接提升）。
+    final config = linkedConfig;
+    final displayColor = config != null ? providerColor(config.provider) : pColor;
+    final displayLabel = config != null ? config.name : label;
 
     return Dismissible(
       key: Key(character.id),
@@ -514,7 +590,7 @@ class _CharacterCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(18),
           side: BorderSide(
             color: character.isActive
-                ? pColor.withOpacity(0.35)
+                ? displayColor.withOpacity(0.35)
                 : cs.outlineVariant,
             width: character.isActive ? 1.5 : 1,
           ),
@@ -526,7 +602,7 @@ class _CharacterCard extends StatelessWidget {
             padding: const EdgeInsets.all(16),
             child: Row(
               children: [
-                _buildAvatar(pColor),
+                _buildAvatar(displayColor),
                 const SizedBox(width: 14),
                 Expanded(
                   child: Column(
@@ -544,13 +620,13 @@ class _CharacterCard extends StatelessWidget {
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
-                                color: pColor.withOpacity(0.12),
+                                color: displayColor.withOpacity(0.12),
                                 borderRadius: BorderRadius.circular(6)),
-                            child: Text(label,
+                            child: Text(displayLabel,
                                 style: TextStyle(
                                     fontSize: 11,
                                     fontWeight: FontWeight.w600,
-                                    color: pColor)),
+                                    color: displayColor)),
                           ),
                           if (!character.isActive) ...[
                             const SizedBox(width: 6),
@@ -599,10 +675,10 @@ class _CharacterCard extends StatelessWidget {
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
-                    // 显示当前模型名称，点击可单独修改
+                    // 显示当前模型名称，点击可单独切换该角色关联的 API 配置
                     if (character.modelName.isNotEmpty)
                       GestureDetector(
-                        onTap: () => onModelChange?.call(character.modelName),
+                        onTap: onConfigChange,
                         child: Container(
                           margin: const EdgeInsets.only(right: 4),
                           padding: const EdgeInsets.symmetric(

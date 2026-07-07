@@ -8,6 +8,10 @@ import 'providers/ai_character_providers.dart';
 import '../settings/providers/api_config_providers.dart';
 import '../settings/api_config_form_page.dart';
 
+/// 哨兵值：无可用配置时占位下拉项的 value，确保不与任何真实 config.id 冲突。
+/// （Hive 使用 UUID v4 生成 id，不可能是此字符串，故可安全作为唯一占位值。）
+const String _kEmptyConfigValue = '__NO_CONFIG__';
+
 class AICharacterFormPage extends ConsumerStatefulWidget {
   final AICharacter? character;
 
@@ -371,9 +375,20 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                           final configs = ref.watch(apiConfigsProvider);
 
                           return DropdownButtonFormField<String>(
-                            value: _selectedApiConfigId.isNotEmpty
-                                ? _selectedApiConfigId
-                                : null,
+                            // value 映射：
+                            // - 有真实选中值且该项仍在配置列表中 → 用选中的 id；
+                            // - 关联配置已被删除（id 不在列表）→ 回退为 null，避免 value 不在 items 中触发断言；
+                            // - 完全无配置 → 用哨兵值（仅作占位、不可选）；
+                            // - 有配置但未选择 → null。
+                            value: (configs.isNotEmpty &&
+                                    _selectedApiConfigId.isNotEmpty)
+                                ? (configs.any(
+                                        (c) => c.id == _selectedApiConfigId)
+                                    ? _selectedApiConfigId
+                                    : null)
+                                : (configs.isEmpty
+                                    ? _kEmptyConfigValue
+                                    : null),
                             decoration: appInputDecoration(
                                 'API 配置 *',
                                 '先在设置中创建 API 配置',
@@ -383,7 +398,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                             items: [
                               if (configs.isEmpty)
                                 const DropdownMenuItem(
-                                    value: '',
+                                    value: _kEmptyConfigValue,
+                                    enabled: false,
                                     child: Text('暂无配置，请先在设置中创建',
                                         style: TextStyle(fontSize: 13))),
                               ...configs.map((c) => DropdownMenuItem(
@@ -397,14 +413,20 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                             onChanged: configs.isEmpty
                                 ? null
                                 : (v) {
-                                    if (v != null && v.isNotEmpty) {
+                                    // 过滤掉哨兵值与空值，确保只接受真实配置 id
+                                    if (v != null &&
+                                        v != _kEmptyConfigValue &&
+                                        v.isNotEmpty) {
                                       setState(() {
                                         _selectedApiConfigId = v;
                                       });
                                     }
                                   },
-                            validator: (v) =>
-                                v == null || v.isEmpty ? '请选择 API 配置' : null,
+                            validator: (v) => (v == null ||
+                                    v == _kEmptyConfigValue ||
+                                    v.isEmpty)
+                                ? '请选择 API 配置'
+                                : null,
                           );
                         },
                       ),
