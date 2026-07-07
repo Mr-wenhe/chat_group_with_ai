@@ -11,7 +11,9 @@ import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/chat_api_service.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
@@ -28,6 +30,7 @@ class ChatRoomPage extends ConsumerStatefulWidget {
 class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   final _textController = TextEditingController();
   final _scrollController = ScrollController();
+  final _focusNode = FocusNode();
   final _chatApi = ChatApiService();
   final _random = Random();
 
@@ -45,6 +48,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   OverlayEntry? _mentionOverlay;
   bool _showMentionPopup = false;
   List<AICharacter> _filteredMentionMembers = [];
+  int _mentionSelectedIndex = 0; // 键盘上下选择的高亮项
   final LayerLink _mentionLayerLink = LayerLink();
 
   // AI 自主聊天
@@ -58,6 +62,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   final List<String> _pendingMentionedIds = [];
 
   bool _isInputEmpty = true;
+
+  // 是否存在已配置 API Key 的角色（决定 AI 能否回复/自动聊天）
+  bool _hasAnyApiConfig = false;
 
   // —— 流式输出（打字机）相关状态 ——
   Message? _streamingMessage; // 正在逐 token 渲染的内存态临时消息（不落库）
@@ -89,6 +96,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     }
     _textController.dispose();
     _scrollController.dispose();
+    _focusNode.dispose();
     _autoChatTimer?.cancel();
     _hideMentionOverlay();
     super.dispose();
@@ -112,6 +120,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         .where((c) => c.isActive)
         .toList();
 
+    // 检测是否有角色配置了 API Key（决定 AI 能否回复/自动聊天）
+    final hasApi = characters.any((c) {
+      final cfg = _resolveApiConfig(c);
+      return cfg != null && cfg.apiKey.isNotEmpty;
+    });
+
     final messages = db.messageBox.values
         .where((m) => m.groupId == widget.groupId)
         .toList()
@@ -130,12 +144,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       _characters = characters;
       _messages = messages;
       _groupMemory = memory;
+      _hasAnyApiConfig = hasApi;
       _isLoading = false;
     });
 
     _scrollToBottom();
 
-    if (_isAutoChatEnabled && _characters.isNotEmpty) {
+    if (_isAutoChatEnabled && _characters.isNotEmpty && hasApi) {
       Future.delayed(const Duration(seconds: 3), _startAutoChat);
     }
   }
@@ -164,7 +179,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
     final speakers = <AICharacter>[];
     for (final c in _characters) {
-      if (_isEligibleToReply(c) && _autoChatRandom.nextDouble() < 0.2) {
+      if (_isEligibleToReply(c) && _autoChatRandom.nextDouble() < 0.35) {
         speakers.add(c);
       }
     }
@@ -260,6 +275,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final character = _selectReplyCharacter(mentionedIds);
     if (character == null) {
       setState(() => _isAiReplying = false);
+      if (mounted && !isAutoChat) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text(_hasAnyApiConfig
+              ? '暂时没有可以回复的角色（可能已达回复上限）'
+              : '角色未配置 API Key，AI 无法回复。请到「设置」配置 API'),
+          behavior: SnackBarBehavior.floating,
+          action: _hasAnyApiConfig
+              ? null
+              : SnackBarAction(
+                  label: '去设置',
+                  onPressed: () =>
+                      Navigator.pushNamed(context, '/settings'),
+                ),
+        ));
+      }
       return;
     }
 
@@ -640,26 +670,32 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     _mentionOverlay = null;
     _showMentionPopup = false;
     _filteredMentionMembers = [];
+    _mentionSelectedIndex = 0;
   }
 
   void _showMentionOverlay(Offset globalPosition) {
     if (_showMentionPopup) return;
     _showMentionPopup = true;
+    _mentionSelectedIndex = 0;
 
     _mentionOverlay = OverlayEntry(
       builder: (context) {
         final cs = Theme.of(context).colorScheme;
-        return Positioned(
-          width: 220,
-          child: CompositedTransformFollower(
-            link: _mentionLayerLink,
-            showWhenUnlinked: false,
-            offset: const Offset(0, -8),
-            child: Material(
-              elevation: 6,
-              borderRadius: BorderRadius.circular(12),
-              color: cs.surfaceContainerHighest,
-              child: _buildMentionPopupContent(cs),
+        // TapRegion：点击弹窗外部（含输入框、消息区）即关闭，解决点击其他位置不消失的问题。
+        return TapRegion(
+          onTapOutside: (_) => _hideMentionOverlay(),
+          child: Positioned(
+            width: 300,
+            child: CompositedTransformFollower(
+              link: _mentionLayerLink,
+              showWhenUnlinked: false,
+              offset: const Offset(0, -10),
+              child: Material(
+                elevation: 8,
+                borderRadius: BorderRadius.circular(16),
+                color: cs.surfaceContainerHighest,
+                child: _buildMentionPopupContent(cs),
+              ),
             ),
           ),
         );
@@ -672,63 +708,140 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   Widget _buildMentionPopupContent(ColorScheme cs) {
     return Container(
-      constraints: const BoxConstraints(maxHeight: 200),
-      child: Builder(
-        builder: (ctx) {
-          if (_filteredMentionMembers.isEmpty) {
-            return const Padding(
-              padding: EdgeInsets.all(16),
-              child: Text('无匹配角色', style: TextStyle(fontSize: 14)),
-            );
-          }
-          return ListView.builder(
-            shrinkWrap: true,
-            itemCount: _filteredMentionMembers.length,
-            itemBuilder: (ctx2, i) {
-              final c = _filteredMentionMembers[i];
-              final pColor = _senderColor(c);
-              return InkWell(
-                onTap: () => _insertMention(c),
-                child: Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-                  child: Row(
+      constraints: const BoxConstraints(maxHeight: 264),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          // 标题栏
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 12, 16, 6),
+            child: Row(
+              children: [
+                Icon(Icons.alternate_email_rounded,
+                    size: 16, color: cs.onSurfaceVariant),
+                const SizedBox(width: 6),
+                Text('提到谁',
+                    style: TextStyle(
+                        fontSize: 13,
+                        fontWeight: FontWeight.w600,
+                        color: cs.onSurfaceVariant)),
+              ],
+            ),
+          ),
+          Divider(height: 1, color: cs.outlineVariant.withOpacity(0.4)),
+          Flexible(child: _buildMentionList(cs)),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildMentionList(ColorScheme cs) {
+    if (_filteredMentionMembers.isEmpty) {
+      return const Padding(
+        padding: EdgeInsets.all(20),
+        child: Center(
+            child: Text('无匹配角色', style: TextStyle(fontSize: 14))),
+      );
+    }
+    return ListView.builder(
+      shrinkWrap: true,
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      itemCount: _filteredMentionMembers.length,
+      itemBuilder: (ctx2, i) {
+        final c = _filteredMentionMembers[i];
+        final pColor = _senderColor(c);
+        final selected = i == _mentionSelectedIndex;
+        return InkWell(
+          onTap: () => _insertMention(c),
+          borderRadius: BorderRadius.circular(10),
+          child: Container(
+            margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+            padding:
+                const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            decoration: BoxDecoration(
+              color: selected ? cs.primary.withOpacity(0.14) : Colors.transparent,
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: Row(
+              children: [
+                Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    shape: BoxShape.circle,
+                    color: pColor.withOpacity(0.14),
+                    border: Border.all(
+                        color: pColor.withOpacity(0.3), width: 1.2),
+                  ),
+                  child: Center(
+                    child: Text(
+                      c.avatar.isNotEmpty ? c.avatar : c.name[0],
+                      style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w700,
+                          color: pColor),
+                    ),
+                  ),
+                ),
+                const SizedBox(width: 12),
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
-                      Container(
-                        width: 32,
-                        height: 32,
-                        decoration: BoxDecoration(
-                          shape: BoxShape.circle,
-                          color: pColor.withOpacity(0.12),
-                        ),
-                        child: Center(
-                          child: Text(
-                            c.avatar.isNotEmpty ? c.avatar : c.name[0],
-                            style: TextStyle(
-                                fontSize: 13,
-                                fontWeight: FontWeight.w600,
-                                color: pColor),
-                          ),
-                        ),
-                      ),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Text(c.name,
-                            style: const TextStyle(fontSize: 14),
-                            overflow: TextOverflow.ellipsis),
-                      ),
-                      Text(c.role,
+                      Text(c.name,
                           style: TextStyle(
-                              fontSize: 12, color: cs.onSurfaceVariant)),
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: cs.onSurface),
+                          overflow: TextOverflow.ellipsis),
+                      if (c.role.isNotEmpty)
+                        Text(c.role,
+                            style: TextStyle(
+                                fontSize: 12, color: cs.onSurfaceVariant),
+                            overflow: TextOverflow.ellipsis),
                     ],
                   ),
                 ),
-              );
-            },
-          );
-        },
-      ),
+              ],
+            ),
+          ),
+        );
+      },
     );
+  }
+
+  /// @ 弹窗打开时的键盘导航：↑↓ 选择、回车插入、Esc 关闭。
+  KeyEventResult _handleMentionKeyEvent(KeyEvent event) {
+    if (!_showMentionPopup) return KeyEventResult.ignored;
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+
+    final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.arrowDown) {
+      setState(() {
+        _mentionSelectedIndex = (_mentionSelectedIndex + 1)
+            .clamp(0, _filteredMentionMembers.length - 1);
+      });
+      _mentionOverlay?.markNeedsBuild();
+      return KeyEventResult.handled;
+    } else if (key == LogicalKeyboardKey.arrowUp) {
+      setState(() {
+        _mentionSelectedIndex = (_mentionSelectedIndex - 1)
+            .clamp(0, _filteredMentionMembers.length - 1);
+      });
+      _mentionOverlay?.markNeedsBuild();
+      return KeyEventResult.handled;
+    } else if (key == LogicalKeyboardKey.enter ||
+        key == LogicalKeyboardKey.numpadEnter) {
+      if (_filteredMentionMembers.isNotEmpty) {
+        _insertMention(_filteredMentionMembers[_mentionSelectedIndex]);
+      }
+      return KeyEventResult.handled;
+    } else if (key == LogicalKeyboardKey.escape) {
+      _hideMentionOverlay();
+      return KeyEventResult.handled;
+    }
+    return KeyEventResult.ignored;
   }
 
   void _insertMention(AICharacter character) {
@@ -753,6 +866,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     if (!_showMentionPopup) {
       if (text.contains('@')) {
         _filteredMentionMembers = List.from(_characters);
+        _mentionSelectedIndex = 0;
         _showMentionOverlay(Offset.zero);
         return;
       }
@@ -777,6 +891,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     _filteredMentionMembers = query.isEmpty
         ? List.from(_characters)
         : _characters.where((c) => c.name.contains(query)).toList();
+
+    // 列表变化后，高亮索引重置到首项并夹取到合法范围
+    if (_mentionSelectedIndex >= _filteredMentionMembers.length) {
+      _mentionSelectedIndex = 0;
+    }
 
     if (_mentionOverlay != null) {
       _mentionOverlay!.markNeedsBuild();
@@ -913,21 +1032,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             },
             tooltip: '导出本群对话',
           ),
-          IconButton(
-            icon: const Icon(Icons.group_rounded, size: 22),
-            onPressed: () {
-              showModalBottomSheet(
-                context: context,
-                backgroundColor: cs.surface,
-                builder: (ctx) => _buildMembersSheet(cs),
-              );
-            },
-            tooltip: '成员',
+          // 成员入口：头像堆叠 + 人数，比单一图标更易发现
+          GestureDetector(
+            onTap: () => _showMembersSheet(cs),
+            child: _buildMemberStackChip(cs),
           ),
+          const SizedBox(width: 8),
         ],
       ),
       body: Column(
         children: [
+          // 未配置 API Key 时给出醒目提示，避免「发了消息 AI 不回复」的困惑
+          if (!_hasAnyApiConfig) _buildApiWarningBanner(cs),
           Expanded(
             child: _messages.isEmpty
                 ? _buildEmptyState(cs)
@@ -937,6 +1053,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                     itemCount: _messages.length,
                     itemBuilder: (context, index) {
                       final message = _messages[index];
+                      // 日期分隔：首条或与上一条不在同一天时显示
+                      final showDate = index == 0 ||
+                          !_isSameDay(message.timestamp,
+                              _messages[index - 1].timestamp);
                       final sender = message.senderType == 'user'
                           ? null
                           : _characters.firstWhere(
@@ -957,12 +1077,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                             );
                       final isStreaming = _streamingMessage != null &&
                           _streamingMessage!.id == message.id;
-                      return _MessageBubble(
-                        message: message,
-                        sender: sender,
-                        characters: _characters,
-                        cs: cs,
-                        isStreaming: isStreaming,
+                      return Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          if (showDate) _buildDateDivider(cs, message.timestamp),
+                          _MessageBubble(
+                            message: message,
+                            sender: sender,
+                            characters: _characters,
+                            cs: cs,
+                            isStreaming: isStreaming,
+                          ),
+                        ],
                       );
                     },
                   ),
@@ -1002,157 +1128,450 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   Widget _buildEmptyState(ColorScheme cs) {
     return Center(
-      child: Column(
-        mainAxisAlignment: MainAxisAlignment.center,
-        children: [
-          Icon(Icons.chat_bubble_outline_rounded,
-              size: 64, color: cs.primary.withOpacity(0.3)),
-          const SizedBox(height: 24),
-          Text('开始对话吧',
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 32),
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Container(
+              width: 88,
+              height: 88,
+              decoration: const BoxDecoration(
+                shape: BoxShape.circle,
+                gradient: AppTheme.primaryGradient,
+              ),
+              child: const Icon(Icons.groups_rounded,
+                  size: 44, color: Colors.white),
+            ),
+            const SizedBox(height: 24),
+            Text('欢迎来到 ${_group?.name ?? '群聊'}',
+                style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                    color: cs.onSurface)),
+            const SizedBox(height: 8),
+            Text(
+              '这是一个 AI 群聊模拟器。\n发条消息，AI 角色会自动回复；\n用 @ 可以指定某个角色回应。',
+              textAlign: TextAlign.center,
               style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w600,
-                  color: cs.onSurface)),
-          const SizedBox(height: 8),
-          Text('输入消息，AI 角色会自动回复',
-              style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant)),
+                  fontSize: 14, height: 1.6, color: cs.onSurfaceVariant),
+            ),
+            const SizedBox(height: 20),
+            Wrap(
+              spacing: 8,
+              runSpacing: 8,
+              alignment: WrapAlignment.center,
+              children: [
+                _hintChip(cs, '说句「你好」试试'),
+                _hintChip(cs, '@角色名 提到谁'),
+                if (_characters.isNotEmpty)
+                  _hintChip(cs, '${_characters.length} 位 AI 在线'),
+              ],
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _hintChip(ColorScheme cs, String text) {
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(20),
+        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
+      ),
+      child: Text(text,
+          style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+    );
+  }
+
+  /// 未配置 API Key 时的醒目横幅
+  Widget _buildApiWarningBanner(ColorScheme cs) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: cs.errorContainer.withOpacity(0.5),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.error.withOpacity(0.4)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.warning_amber_rounded, size: 20, color: cs.error),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              '尚未配置 API Key，AI 不会回复或自动聊天',
+              style: TextStyle(fontSize: 13, color: cs.onSurface),
+            ),
+          ),
+          TextButton(
+            onPressed: () => Navigator.pushNamed(context, '/settings'),
+            style: TextButton.styleFrom(
+              visualDensity: VisualDensity.compact,
+              padding: EdgeInsets.zero,
+            ),
+            child: Text('去配置',
+                style: TextStyle(
+                    fontSize: 13, fontWeight: FontWeight.w600, color: cs.error)),
+          ),
         ],
       ),
     );
   }
 
-  Widget _buildMembersSheet(ColorScheme cs) {
+  Widget _buildDateDivider(ColorScheme cs, DateTime dt) {
+    final label = _dateLabel(dt);
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 12),
+      child: Center(
+        child: Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          decoration: BoxDecoration(
+            color: cs.surfaceContainerHighest,
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Text(label,
+              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+        ),
+      ),
+    );
+  }
+
+  static bool _isSameDay(DateTime a, DateTime b) =>
+      a.year == b.year && a.month == b.month && a.day == b.day;
+
+  static String _dateLabel(DateTime dt) {
+    final now = DateTime.now();
+    final today = DateTime(now.year, now.month, now.day);
+    final target = DateTime(dt.year, dt.month, dt.day);
+    final diff = today.difference(target).inDays;
+    if (diff == 0) return '今天';
+    if (diff == 1) return '昨天';
+    if (diff < 7) return '$diff 天前';
+    return '${dt.year}/${dt.month}/${dt.day}';
+  }
+
+  /// 成员头像堆叠 + 人数 chip（AppBar 入口）
+  Widget _buildMemberStackChip(ColorScheme cs) {
+    final shown = _characters.take(3).toList();
+    const overlap = 16.0;
+    final stackWidth = shown.isEmpty
+        ? 0.0
+        : 26.0 + (shown.length - 1) * overlap;
     return Container(
-      padding: const EdgeInsets.all(20),
+      padding: const EdgeInsets.only(left: 8, right: 10, top: 4, bottom: 4),
       decoration: BoxDecoration(
         color: cs.surfaceContainerHighest,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        borderRadius: BorderRadius.circular(20),
       ),
-      child: Column(
+      child: Row(
         mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('群聊成员',
-              style: TextStyle(
-                  fontSize: 18,
-                  fontWeight: FontWeight.w700,
-                  color: cs.onSurface)),
-          const SizedBox(height: 16),
-          ..._characters.map((c) {
-            final color = _senderColor(c);
-            return Padding(
-              padding: const EdgeInsets.only(bottom: 12),
-              child: Row(
+          if (shown.isNotEmpty)
+            SizedBox(
+              width: stackWidth,
+              height: 26,
+              child: Stack(
                 children: [
-                  Container(
-                    width: 40,
-                    height: 40,
-                    decoration: BoxDecoration(
-                      shape: BoxShape.circle,
-                      color: color.withOpacity(0.12),
-                      border: Border.all(
-                          color: color.withOpacity(0.25), width: 1.5),
+                  for (int i = 0; i < shown.length; i++)
+                    Positioned(
+                      left: i * overlap,
+                      child: _miniAvatar(shown[i], 26, cs),
                     ),
-                    child: Center(
-                        child: Text(c.avatar.isNotEmpty ? c.avatar : c.name[0],
-                            style: TextStyle(
-                                fontSize: 16,
-                                fontWeight: FontWeight.w600,
-                                color: color))),
-                  ),
-                  const SizedBox(width: 12),
-                  Expanded(
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(c.name,
-                            style: TextStyle(
-                                fontSize: 15,
-                                fontWeight: FontWeight.w600,
-                                color: cs.onSurface)),
-                        Text('${c.role} · ${c.age}岁',
-                            style: TextStyle(
-                                fontSize: 13, color: cs.onSurfaceVariant)),
-                      ],
-                    ),
-                  ),
                 ],
               ),
-            );
-          }),
+            ),
+          const SizedBox(width: 6),
+          Text('${_characters.length}',
+              style: TextStyle(
+                  fontSize: 13,
+                  fontWeight: FontWeight.w700,
+                  color: cs.onSurface)),
         ],
       ),
     );
+  }
+
+  Widget _miniAvatar(AICharacter c, double size, ColorScheme cs) {
+    final color = _senderColor(c);
+    return Container(
+      width: size,
+      height: size,
+      decoration: BoxDecoration(
+        shape: BoxShape.circle,
+        color: color,
+        border: Border.all(color: cs.surfaceContainerHighest, width: 2),
+      ),
+      child: Center(
+        child: Text(
+          c.avatar.isNotEmpty ? c.avatar : c.name[0],
+          style: TextStyle(
+              fontSize: size * 0.5,
+              fontWeight: FontWeight.w700,
+              color: Colors.white),
+        ),
+      ),
+    );
+  }
+
+  void _showMembersSheet(ColorScheme cs) {
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (ctx) => _buildMembersSheet(cs),
+    );
+  }
+
+  Widget _buildMembersSheet(ColorScheme cs) {
+    final ownerName = _group?.ownerName ?? '我';
+    return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.of(context).size.height * 0.7,
+      ),
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+      decoration: BoxDecoration(
+        color: cs.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      child: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                  color: cs.outlineVariant,
+                  borderRadius: BorderRadius.circular(2),
+                ),
+              ),
+            ),
+            Row(
+              children: [
+                Text('群成员',
+                    style: TextStyle(
+                        fontSize: 18,
+                        fontWeight: FontWeight.w700,
+                        color: cs.onSurface)),
+                const SizedBox(width: 8),
+                Text('${_characters.length + 1}',
+                    style: TextStyle(
+                        fontSize: 14, color: cs.onSurfaceVariant)),
+              ],
+            ),
+            const SizedBox(height: 16),
+            // 群主（真人用户）置顶
+            _buildMemberTile(
+              cs: cs,
+              avatarText: '我',
+              avatarColor: cs.primary,
+              name: ownerName,
+              subtitle: '群主',
+              isOwner: true,
+            ),
+            Divider(
+                height: 24,
+                color: cs.outlineVariant.withOpacity(0.4)),
+            ..._characters.map((c) {
+              final color = _senderColor(c);
+              return _buildMemberTile(
+                cs: cs,
+                avatarText: c.avatar.isNotEmpty ? c.avatar : c.name[0],
+                avatarColor: color,
+                name: c.name,
+                subtitle: '${c.role} · ${c.age}岁',
+              );
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildMemberTile({
+    required ColorScheme cs,
+    required String avatarText,
+    required Color avatarColor,
+    required String name,
+    required String subtitle,
+    bool isOwner = false,
+  }) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 14),
+      child: Row(
+        children: [
+          Container(
+            width: 44,
+            height: 44,
+            decoration: BoxDecoration(
+              shape: BoxShape.circle,
+              color: avatarColor.withOpacity(0.15),
+              border: Border.all(color: avatarColor.withOpacity(0.3), width: 1.5),
+            ),
+            child: Center(
+              child: Text(avatarText,
+                  style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w700,
+                      color: avatarColor)),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Flexible(
+                      child: Text(name,
+                          style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: cs.onSurface),
+                          overflow: TextOverflow.ellipsis),
+                    ),
+                    if (isOwner) ...[
+                      const SizedBox(width: 6),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                            horizontal: 6, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: cs.primary.withOpacity(0.16),
+                          borderRadius: BorderRadius.circular(4),
+                        ),
+                        child: Text('群主',
+                            style: TextStyle(
+                                fontSize: 10,
+                                fontWeight: FontWeight.w600,
+                                color: cs.primary)),
+                      ),
+                    ],
+                  ],
+                ),
+                const SizedBox(height: 2),
+                Text(subtitle,
+                    style: TextStyle(
+                        fontSize: 13, color: cs.onSurfaceVariant)),
+              ],
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  bool get _isDesktop =>
+      !kIsWeb &&
+      (defaultTargetPlatform == TargetPlatform.macOS ||
+          defaultTargetPlatform == TargetPlatform.windows ||
+          defaultTargetPlatform == TargetPlatform.linux);
+
+  /// 输入区键盘事件：@ 弹窗打开时走导航；桌面端回车发送、Shift+回车换行。
+  KeyEventResult _handleKeyEvent(KeyEvent event) {
+    if (event is! KeyDownEvent) return KeyEventResult.ignored;
+    // @ 弹窗键盘导航优先（↑↓ 选择、回车插入、Esc 关闭）
+    if (_showMentionPopup) return _handleMentionKeyEvent(event);
+    // 桌面端：Enter 发送、Shift+Enter 换行
+    if (_isDesktop) {
+      final key = event.logicalKey;
+      if (key == LogicalKeyboardKey.enter ||
+          key == LogicalKeyboardKey.numpadEnter) {
+        if (!HardwareKeyboard.instance.isShiftPressed) {
+          if (!_isInputEmpty && !_isAiReplying && !_isStreaming) {
+            _sendMessage();
+          }
+          return KeyEventResult.handled; // 阻止插入换行
+        }
+        // Shift+Enter：放行，让 TextField 插入换行
+      }
+    }
+    return KeyEventResult.ignored;
   }
 
   Widget _buildInputArea(ColorScheme cs) {
     return CompositedTransformTarget(
       link: _mentionLayerLink,
-      child: Container(
-        padding: EdgeInsets.only(
-            left: 16,
-            right: 16,
-            top: 12,
-            bottom: MediaQuery.of(context).padding.bottom + 12),
-        decoration: BoxDecoration(
-          color: cs.surface,
-          border: Border(
-              top: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
-          boxShadow: [
-            BoxShadow(
-                color: Colors.black.withOpacity(0.25),
-                blurRadius: 14,
-                offset: const Offset(0, -4))
-          ],
-        ),
-        child: Row(
-          children: [
-            Expanded(
-              child: ConstrainedBox(
-                constraints:
-                    const BoxConstraints(minHeight: 40, maxHeight: 120),
-                child: TextField(
-                  controller: _textController,
-                  decoration: InputDecoration(
-                    hintText: '输入消息，@ 提到角色...',
-                    border: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide(color: cs.outlineVariant)),
-                    enabledBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide(color: cs.outlineVariant)),
-                    focusedBorder: OutlineInputBorder(
-                        borderRadius: BorderRadius.circular(24),
-                        borderSide: BorderSide(color: cs.primary, width: 1.5)),
-                    filled: true,
-                    fillColor: cs.surfaceContainerHighest,
-                    contentPadding: const EdgeInsets.symmetric(
-                        horizontal: 20, vertical: 10),
-                    isDense: true,
+      child: KeyboardListener(
+        focusNode: _focusNode,
+        onKeyEvent: _handleKeyEvent,
+        child: Container(
+          padding: EdgeInsets.only(
+              left: 16,
+              right: 16,
+              top: 12,
+              bottom: MediaQuery.of(context).padding.bottom + 12),
+          decoration: BoxDecoration(
+            color: cs.surface,
+            border: Border(
+                top: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
+            boxShadow: [
+              BoxShadow(
+                  color: Colors.black.withOpacity(0.25),
+                  blurRadius: 14,
+                  offset: const Offset(0, -4))
+            ],
+          ),
+          child: Row(
+            crossAxisAlignment: CrossAxisAlignment.end,
+            children: [
+              Expanded(
+                child: ConstrainedBox(
+                  constraints:
+                      const BoxConstraints(minHeight: 40, maxHeight: 120),
+                  child: TextField(
+                    controller: _textController,
+                    focusNode: _focusNode,
+                    decoration: InputDecoration(
+                      hintText: '输入消息，回车换行，@ 提到角色...',
+                      border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: BorderSide(color: cs.outlineVariant)),
+                      enabledBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide: BorderSide(color: cs.outlineVariant)),
+                      focusedBorder: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(24),
+                          borderSide:
+                              BorderSide(color: cs.primary, width: 1.5)),
+                      filled: true,
+                      fillColor: cs.surfaceContainerHighest,
+                      contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 20, vertical: 10),
+                      isDense: true,
+                    ),
+                    // 多行：移动端回车=换行，靠发送按钮提交；桌面端回车=发送（见 _handleKeyEvent）
+                    keyboardType: TextInputType.multiline,
+                    textInputAction: TextInputAction.newline,
+                    maxLines: null,
+                    onChanged: _handleTextChanged,
                   ),
-                  maxLines: null,
-                  textInputAction: TextInputAction.send,
-                  onChanged: _handleTextChanged,
-                  onSubmitted: (_) => _sendMessage(),
                 ),
               ),
-            ),
-            const SizedBox(width: 8),
-            IconButton(
-              icon: Icon(_isStreaming ? Icons.stop_rounded : Icons.send_rounded,
-                  size: 22),
-              color: _isStreaming
-                  ? cs.error
-                  : ((_isAiReplying || _isInputEmpty)
-                      ? cs.onSurfaceVariant.withOpacity(0.4)
-                      : cs.primary),
-              // 流式生成中显示「停止生成」；否则仍是发送（受 _isAiReplying / 空输入门控）
-              onPressed: _isStreaming
-                  ? _stopStreaming
-                  : ((_isAiReplying || _isInputEmpty) ? null : _sendMessage),
-              tooltip: _isStreaming ? '停止生成' : '发送',
-            ),
-          ],
+              const SizedBox(width: 8),
+              IconButton(
+                icon: Icon(
+                    _isStreaming ? Icons.stop_rounded : Icons.send_rounded,
+                    size: 24),
+                color: _isStreaming
+                    ? cs.error
+                    : ((_isAiReplying || _isInputEmpty)
+                        ? cs.onSurfaceVariant.withOpacity(0.4)
+                        : cs.primary),
+                onPressed: _isStreaming
+                    ? _stopStreaming
+                    : ((_isAiReplying || _isInputEmpty) ? null : _sendMessage),
+                tooltip: _isStreaming ? '停止生成' : '发送',
+              ),
+            ],
+          ),
         ),
       ),
     );

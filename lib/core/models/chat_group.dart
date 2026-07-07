@@ -23,6 +23,10 @@ class ChatGroup extends HiveObject {
   @HiveField(5)
   final DateTime createdAt;
 
+  /// 群主名称（本应用为唯一的真人用户，默认「我」）。
+  @HiveField(6)
+  String ownerName;
+
   ChatGroup({
     String? id,
     required this.name,
@@ -30,6 +34,7 @@ class ChatGroup extends HiveObject {
     this.description = '',
     required this.aiCharacterIds,
     DateTime? createdAt,
+    this.ownerName = '我',
   })  : id = id ?? const Uuid().v4(),
         createdAt = createdAt ?? DateTime.now();
 }

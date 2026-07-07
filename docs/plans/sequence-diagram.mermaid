@@ -1,0 +1,53 @@
+%% ===== 关键流程 1：聊天室流式（打字机）回复 =====
+sequenceDiagram
+    autonumber
+    actor User
+    participant Room as ChatRoomPage
+    participant Svc as ChatApiService
+    participant LLM as LLM (SSE)
+    participant Parser as SseParser
+    participant DB as Hive(messageBox)
+
+    User->>Room: 发送消息 (_sendMessage)
+    Room->>Room: _runAiRound → _generateAiReply
+    Room->>Room: 创建内存态 Message(空内容, 不落库)
+    Room->>Room: setState(_streamingMessage = msg)
+    Room->>Svc: streamChatMessage(messages, config)
+    Svc->>LLM: POST /chat/completions (stream:true)
+    loop 每个 SSE 分块
+        LLM-->>Svc: 字节流 (ResponseBody.stream)
+        Svc->>Parser: ingest(行文本)
+        Parser-->>Svc: ChatStreamEvent(token, delta)
+        Svc-->>Room: yield token
+        Room->>Room: msg.content += delta; setState; 滚动到底
+    end
+    LLM-->>Svc: data:[DONE]
+    Svc-->>Room: ChatStreamEvent(done, fullContent)
+    Room->>Room: 解析 @提及 → mentionedAiIds
+    Room->>DB: put(最终 Message)  ← 仅完成时持久化一次
+    Room->>Room: _delay 后下一发言者 / 收尾
+
+%% ===== 关键流程 2：对话导出 / 分享 =====
+sequenceDiagram
+    autonumber
+    actor User
+    participant Set as SettingsPage / ChatRoomPage
+    participant Exp as ExportPage
+    participant Svc as ConversationExportService
+    participant PP as path_provider
+    participant SP as share_plus
+
+    User->>Set: 点击「导出对话」
+    Set->>Exp: 打开导出页（可选预选群组）
+    User->>Exp: 选择群组 + 格式(MD / JSON)
+    Exp->>Exp: 弹安全提示(对话不含 API Key，明文存本机)
+    User->>Exp: 确认导出
+    Exp->>Svc: toMarkdown / toJson(group, messages, charById)
+    Svc-->>Exp: String / Map
+    Exp->>Svc: saveToFile(content, fileName)
+    Svc->>PP: getApplicationDocumentsDirectory()
+    PP-->>Svc: dir
+    Svc->>Svc: 写文件 chat_group_exports/...
+    Exp->>Svc: share(file)  [可选]
+    Svc->>SP: Share.shareXFiles
+    Exp-->>User: 提示已保存路径 / 系统分享面板

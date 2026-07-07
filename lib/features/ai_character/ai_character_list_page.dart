@@ -546,6 +546,7 @@ class _CharacterCard extends StatelessWidget {
   final VoidCallback onDelete;
   final VoidCallback onToggle;
   final ApiConfig? linkedConfig;
+  final List<ApiConfig> availableConfigs;
   final VoidCallback? onConfigChange;
 
   const _CharacterCard({
@@ -555,6 +556,7 @@ class _CharacterCard extends StatelessWidget {
     required this.onDelete,
     required this.onToggle,
     this.linkedConfig,
+    this.availableConfigs = const [],
     this.onConfigChange,
   });
 

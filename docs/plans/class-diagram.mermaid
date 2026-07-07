@@ -1,0 +1,108 @@
+classDiagram
+    direction LR
+
+    class ChatStreamEventType {
+        <<enum>>
+        token
+        done
+        error
+    }
+
+    class ChatStreamEvent {
+        +ChatStreamEventType type
+        +String? delta
+        +String? content
+        +String? model
+        +String? message
+    }
+
+    class SseParser {
+        -String _buffer
+        -String _fullContent
+        +List~ChatStreamEvent~ ingest(String line)
+        +ChatStreamEvent doneEvent()
+        +void reset()
+    }
+
+    class ChatApiService {
+        -Dio _dio
+        +Future~Map~ sendChatMessage(...)
+        +Stream~ChatStreamEvent~ streamChatMessage(...)
+    }
+
+    class CharacterPreset {
+        +String name
+        +String avatar
+        +int age
+        +String role
+        +List~String~ personalityTags
+        +String systemPrompt
+        +String? suggestedProvider
+        +Map~String,String~ toFormFields()
+        +static List~CharacterPreset~ presets
+    }
+
+    class ConversationExportService {
+        +String toMarkdown(ChatGroup, List~Message~, Map~String,AICharacter~)
+        +Map~String,dynamic~ toJson(...)
+        +Future~File~ saveToFile(String, String)
+        +Future~void~ share(File)
+    }
+
+    class AICharacter {
+        +String name
+        +String avatar
+        +int age
+        +String role
+        +List~String~ personalityTags
+        +String systemPrompt
+        +String apiKey
+        +String apiProvider
+    }
+
+    class Message {
+        +String id
+        +String groupId
+        +String senderId
+        +String senderType
+        +String content
+        +DateTime timestamp
+    }
+
+    class ChatGroup {
+        +String id
+        +String name
+        +List~String~ aiCharacterIds
+    }
+
+    class ChatRoomPage {
+        -Message? _streamingMessage
+        -StreamSubscription? _streamSub
+        +_generateAiReply(...)
+        +_renderStreamingBubble()
+    }
+
+    class AICharacterFormPage {
+        +_applyPreset(CharacterPreset)
+    }
+
+    class ExportPage {
+        -String? _selectedGroupId
+        -bool _asMarkdown
+    }
+
+    class SettingsPage {
+        +_openExport()
+    }
+
+    ChatApiService ..> SseParser : 使用
+    ChatApiService ..> ChatStreamEvent : 产生
+    ChatStreamEventType <.. ChatStreamEvent : 引用
+    ChatRoomPage ..> ChatApiService : 调用 streamChatMessage
+    ChatRoomPage ..> Message : 内存态流式缓冲
+    AICharacterFormPage ..> CharacterPreset : 套用
+    ExportPage ..> ConversationExportService : 调用
+    SettingsPage ..> ExportPage : 跳转
+    ConversationExportService ..> ChatGroup : 读取
+    ConversationExportService ..> Message : 读取
+    ConversationExportService ..> AICharacter : 读取(仅展示字段)
