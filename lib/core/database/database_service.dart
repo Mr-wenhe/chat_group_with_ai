@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:flutter/material.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -14,6 +15,7 @@ class DatabaseService {
   static const String _chatGroupBox = 'chat_groups';
   static const String _messageBox = 'messages';
   static const String _groupMemoryBox = 'group_memories';
+  static const String _appSettingsBox = 'app_settings';
   final SecureStorageService _secureStorage = SecureStorageService();
 
   Future<void> init() async {
@@ -30,6 +32,7 @@ class DatabaseService {
     await _openBoxSafely<ChatGroup>(_chatGroupBox);
     await _openBoxSafely<Message>(_messageBox);
     await _openBoxSafely<GroupMemory>(_groupMemoryBox);
+    await _openBoxSafely<dynamic>(_appSettingsBox);
     await _migrateAndHydrateApiConfigKeys();
   }
 
@@ -140,4 +143,64 @@ class DatabaseService {
   Box<ChatGroup> get chatGroupBox => Hive.box<ChatGroup>(_chatGroupBox);
   Box<Message> get messageBox => Hive.box<Message>(_messageBox);
   Box<GroupMemory> get groupMemoryBox => Hive.box<GroupMemory>(_groupMemoryBox);
+  Box<dynamic> get appSettingsBox => Hive.box(_appSettingsBox);
+
+  static const String _themeModeKey = 'theme_mode';
+
+  ThemeMode get savedThemeMode {
+    final val = appSettingsBox.get(_themeModeKey);
+    if (val == 'light') return ThemeMode.light;
+    if (val == 'system') return ThemeMode.system;
+    return ThemeMode.dark;
+  }
+
+  Future<void> saveThemeMode(ThemeMode mode) async {
+    final val = switch (mode) {
+      ThemeMode.light => 'light',
+      ThemeMode.system => 'system',
+      _ => 'dark',
+    };
+    await appSettingsBox.put(_themeModeKey, val);
+  }
+
+  static const String _tokenUsageKey = 'token_usage';
+
+  Map<String, dynamic> getTokenUsage() {
+    final raw = appSettingsBox.get(_tokenUsageKey);
+    if (raw is Map) return Map<String, dynamic>.from(raw);
+    return {'totalInput': 0, 'totalOutput': 0, 'requestCount': 0, 'byCharacter': <String, Map<String, int>>{}};
+  }
+
+  Future<void> recordTokenUsage({
+    required String characterId,
+    required int inputTokens,
+    required int outputTokens,
+  }) async {
+    final usage = getTokenUsage();
+    usage['totalInput'] = (usage['totalInput'] ?? 0) + inputTokens;
+    usage['totalOutput'] = (usage['totalOutput'] ?? 0) + outputTokens;
+    usage['requestCount'] = (usage['requestCount'] ?? 0) + 1;
+    final byChar = Map<String, dynamic>.from(usage['byCharacter'] ?? {});
+    final entry = Map<String, int>.from(byChar[characterId] ?? {'input': 0, 'output': 0, 'count': 0});
+    entry['input'] = (entry['input'] ?? 0) + inputTokens;
+    entry['output'] = (entry['output'] ?? 0) + outputTokens;
+    entry['count'] = (entry['count'] ?? 0) + 1;
+    byChar[characterId] = entry;
+    usage['byCharacter'] = byChar;
+    await appSettingsBox.put(_tokenUsageKey, usage);
+  }
+
+  Future<void> clearTokenUsage() async {
+    await appSettingsBox.put(_tokenUsageKey, {
+      'totalInput': 0, 'totalOutput': 0, 'requestCount': 0, 'byCharacter': <String, Map<String, int>>{}
+    });
+  }
+
+  static const String _ttsEnabledKey = 'tts_enabled';
+
+  bool get isTtsEnabled => appSettingsBox.get(_ttsEnabledKey) ?? true;
+
+  Future<void> saveTtsEnabled(bool enabled) async {
+    await appSettingsBox.put(_ttsEnabledKey, enabled);
+  }
 }

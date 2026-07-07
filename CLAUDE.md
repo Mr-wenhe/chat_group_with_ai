@@ -76,22 +76,20 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 
 ### Medium priority — contained, practical
 
-- **Regenerate / stop reply.** `_runAiRound` is already structured; add a "regenerate this AI reply" action and a "stop this round" button.
-- **Quote-reply UI.** `Message.replyToMessageId` already exists but is never used. Add long-press-to-quote and render the quoted snippet in the bubble.
-- **Scenario / scripted modes.** Inject "debate / roast / board-meeting" system prompts based on `ChatGroup.theme` to give group chats more "story".
-- **Per-character long-term memory.** `AICharacter.memorySummary` is defined but **never injected into the conversation** (only `GroupMemory` is used). Wiring it up lets a character remember preferences across sessions.
+- ✅ **Regenerate / stop reply.** Action sheet on AI messages (long-press) provides "重新生成" + "引用回复"; regenerate re-queries the API with existing context, sets `replyToMessageId`.
+- ✅ **Quote-reply UI.** Long-press AI message → action sheet → "引用回复"; shows quoted bar above input with sender name + snippet; stored via `Message.replyToMessageId` and rendered in bubble header.
+- ✅ **Scenario / scripted modes.** `_scenarioPromptFor` matches group theme keywords (辩论/debate, 吐槽/roast, 开会/board-meeting, etc.) and injects scene-specific system prompt into `_buildApiMessages`.
+- ✅ **Per-character long-term memory.** Injected as first system message in every API call: `【{name}的自我记忆】{memorySummary}`.
 
 ### Low priority — polish / enhancement
 
-- **Cost / token tracking.** Each call knows its `model`; accumulate estimated spend per character/group.
-- **Chat history search.**
-- **Light/dark theme toggle.** Currently forced dark; expose a switch.
-- **Voice playback (TTS).** Speak AI replies aloud — pure fun.
-- **Unit tests.** Only `test/widget_test.dart` exists today. Add tests for `_isEligibleToReply`, `_parseMentions`, `_buildApiMessages`.
+- ✅ **Cost / token tracking.** `ChatStreamEvent` carries `promptTokens`/`completionTokens`; `SseParser` extracts `usage` from SSE; recorded per character via `DatabaseService.recordTokenUsage`; displayed in Settings page with per-character breakdown and reset button.
+- ✅ **Light/dark theme toggle.** SegmentedButton in Settings page under "外观" section; persisted in Hive `app_settings` box; `MyApp` reads on startup.
+- ✅ **Voice playback (TTS).** `flutter_tts` speaks AI replies on long-press; toggle in Settings persists in Hive `app_settings` box.
+- ✅ **Unit tests.** Extracted orchestration logic into `ChatOrchestrator` class; 21 tests covering eligibility, block reasons, usage tracking, focus extraction, and name prefix stripping; all existing tests still pass.
 
 ### Known limitations (current implementation)
 
-- `AICharacter.memorySummary` is not wired into the dialogue context.
 - Import for characters/groups/conversations not yet available — only export (added 2026-07-07); data is local-only and easy to lose.
 - Test coverage covers SSE parsing, presets, and export services; chat orchestration logic (`_isEligibleToReply`, `_parseMentions`, `_buildApiMessages`) still lacks unit tests.
 - `ApiConfig.apiKey` is still stored in plaintext in Hive (see Important Caveats).

@@ -33,24 +33,29 @@ class ChatStreamEvent {
   /// type == error 时有效：人类可读的错误信息。
   final String? message;
 
+  /// 估算的 prompt token 数量（用于消费统计）。
+  final int? promptTokens;
+
+  /// 估算的 completion token 数量（用于消费统计）。
+  final int? completionTokens;
+
   const ChatStreamEvent({
     required this.type,
     this.delta,
     this.content,
     this.model,
     this.message,
+    this.promptTokens,
+    this.completionTokens,
   });
 
-  /// 便捷工厂：构造一个 token 事件，[delta] 为本次增量文本。
   factory ChatStreamEvent.token(String delta) =>
       ChatStreamEvent(type: ChatStreamEventType.token, delta: delta);
 
-  /// 便捷工厂：构造一个 done 事件，[content] 为完整文本，[model] 可选。
-  factory ChatStreamEvent.done(String content, [String? model]) =>
+  factory ChatStreamEvent.done(String content, [String? model, int? promptTokens, int? completionTokens]) =>
       ChatStreamEvent(
-          type: ChatStreamEventType.done, content: content, model: model);
+          type: ChatStreamEventType.done, content: content, model: model, promptTokens: promptTokens, completionTokens: completionTokens);
 
-  /// 便捷工厂：构造一个 error 事件，[message] 为人类可读的错误描述。
   factory ChatStreamEvent.error(String message) =>
       ChatStreamEvent(type: ChatStreamEventType.error, message: message);
 

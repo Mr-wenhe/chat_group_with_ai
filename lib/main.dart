@@ -6,6 +6,7 @@ import 'features/ai_character/ai_character_list_page.dart';
 import 'features/chat_group/chat_group_list_page.dart';
 import 'features/chat_group/chat_room_page.dart';
 import 'features/settings/settings_page.dart';
+import 'providers/providers.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -21,11 +22,13 @@ class MyApp extends ConsumerWidget {
 
   @override
   Widget build(BuildContext context, WidgetRef ref) {
+    final db = ref.read(databaseServiceProvider);
+    final savedMode = db.savedThemeMode;
     return MaterialApp(
       title: 'AI 群聊模拟器',
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
-      themeMode: ThemeMode.dark,
+      themeMode: savedMode,
       routes: {
         '/': (_) => const AICharacterListPage(),
         '/groups': (_) => const ChatGroupListPage(),

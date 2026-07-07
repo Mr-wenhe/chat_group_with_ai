@@ -72,18 +72,17 @@ class ChatActivityPolicy {
   }) {
     final rng = random ?? Random();
     final topic = groupTheme.trim().isEmpty ? '这个话题' : groupTheme.trim();
-    final persona = role.trim().isEmpty ? '群友' : role.trim();
-    final addressed = userMessage != null && userMessage.trim().isNotEmpty;
-    final templates = addressed
+    final hasUserMsg = userMessage != null && userMessage.trim().isNotEmpty;
+    final templates = hasUserMsg
         ? [
-            '$characterName：我先接一下，$topic 里我最在意稳定性和响应速度，远程时突然掉线真的很影响节奏。',
-            '$characterName：从$persona的角度看，先把连接权限、网络状态和画质模式检查一遍，很多问题都出在这几处。',
-            '$characterName：我会先问一句：是在同一网络下慢，还是跨网远控慢？这俩排查方向不太一样。',
+            '说到$topic，我觉得可以先听听其他人的看法。',
+            '这个问题嘛，$topic 其实可以从好几个角度来看。',
+            '我接一下，$topic 这个话题挺有意思的，展开聊聊？',
           ]
         : [
-            '$characterName：我抛个话题，$topic 你们更看重连接速度、画质，还是安全权限？',
-            '$characterName：刚想到一个点，远控工具好不好用，很多时候不只看功能，还看关键时刻稳不稳。',
-            '$characterName：如果是日常使用，我觉得可以聊聊大家最常用的场景，办公、帮家里人修电脑，还是临时传文件？',
+            '说到$topic，大家最近有什么新想法吗？',
+            '在$topic 这个话题上，我有点不同的看法，想听听你们的。',
+            '最近$topic 有什么新鲜事吗？聊两句呗。',
           ];
     return templates[rng.nextInt(templates.length)];
   }

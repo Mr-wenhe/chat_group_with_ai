@@ -19,6 +19,18 @@ class SettingsPage extends ConsumerStatefulWidget {
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
   final _apiService = AiApiService();
+  ThemeMode _currentThemeMode = ThemeMode.dark;
+  bool _isTtsEnabled = true;
+  Map<String, dynamic> _tokenUsage = {};
+
+  @override
+  void initState() {
+    super.initState();
+    final db = ref.read(databaseServiceProvider);
+    _currentThemeMode = db.savedThemeMode;
+    _isTtsEnabled = db.isTtsEnabled;
+    _tokenUsage = db.getTokenUsage();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -148,6 +160,54 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   onDelete: () => _confirmDeleteConfig(context, c),
                   onTest: () => _testApiKey(context, c),
                 )),
+          const SizedBox(height: 28),
+          _SectionHeader(title: '外观', cs: cs),
+          const SizedBox(height: 12),
+          AppCard(
+            cs: cs,
+            margin: EdgeInsets.zero,
+            children: [
+              _SettingTile(
+                cs: cs,
+                icon: Icons.palette_outlined,
+                iconColor: cs.tertiary,
+                title: '外观',
+                subtitle: _themeLabel(_currentThemeMode),
+                onTap: () {},
+                trailing: SegmentedButton<ThemeMode>(
+                  segments: const [
+                    ButtonSegment(value: ThemeMode.light, label: Icon(Icons.light_mode_rounded, size: 18), tooltip: '浅色'),
+                    ButtonSegment(value: ThemeMode.system, label: Icon(Icons.brightness_auto_rounded, size: 18), tooltip: '跟随系统'),
+                    ButtonSegment(value: ThemeMode.dark, label: Icon(Icons.dark_mode_rounded, size: 18), tooltip: '深色'),
+                  ],
+                  selected: {_currentThemeMode},
+                  onSelectionChanged: (Set<ThemeMode> sel) {
+                    final mode = sel.first;
+                    setState(() => _currentThemeMode = mode);
+                    ref.read(databaseServiceProvider).saveThemeMode(mode);
+                  },
+                ),
+              ),
+              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              _SettingTile(
+                cs: cs,
+                icon: Icons.volume_up_outlined,
+                iconColor: cs.tertiary,
+                title: '语音朗读',
+                subtitle: _isTtsEnabled ? '已开启' : '已关闭',
+                onTap: () {},
+                trailing: Switch(
+                  value: _isTtsEnabled,
+                  onChanged: (v) {
+                    setState(() => _isTtsEnabled = v);
+                    ref.read(databaseServiceProvider).saveTtsEnabled(v);
+                  },
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 28),
+          _buildTokenSection(cs),
           const SizedBox(height: 28),
           _SectionHeader(title: '数据管理', cs: cs),
           const SizedBox(height: 12),
@@ -291,6 +351,128 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         ),
       );
     }
+  }
+
+  String _themeLabel(ThemeMode mode) {
+    switch (mode) {
+      case ThemeMode.light: return '浅色';
+      case ThemeMode.dark: return '深色';
+      case ThemeMode.system: return '跟随系统';
+    }
+  }
+
+  Widget _buildTokenSection(ColorScheme cs) {
+    final totalInput = _tokenUsage['totalInput'] ?? 0;
+    final totalOutput = _tokenUsage['totalOutput'] ?? 0;
+    final requestCount = _tokenUsage['requestCount'] ?? 0;
+    final byChar = _tokenUsage['byCharacter'] as Map<String, dynamic>? ?? {};
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _SectionHeader(title: 'Token 消耗', cs: cs),
+        const SizedBox(height: 12),
+        AppCard(
+          cs: cs,
+          margin: EdgeInsets.zero,
+          children: [
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  _statIcon(Icons.input_rounded, cs.primary),
+                  const SizedBox(width: 12),
+                  Expanded(child: _statLabel(totalInput)),
+                  _statValue(totalInput.toString(), cs),
+                ],
+              ),
+            ),
+            Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  _statIcon(Icons.output_rounded, cs.secondary),
+                  const SizedBox(width: 12),
+                  Expanded(child: _statLabel(totalOutput)),
+                  _statValue(totalOutput.toString(), cs),
+                ],
+              ),
+            ),
+            Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+            Padding(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+              child: Row(
+                children: [
+                  _statIcon(Icons.query_stats_rounded, cs.tertiary),
+                  const SizedBox(width: 12),
+                  Expanded(child: _statLabel(requestCount)),
+                  _statValue('$requestCount 次', cs),
+                ],
+              ),
+            ),
+            if (byChar.isNotEmpty) ...[
+              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
+                child: Text('各角色消耗', style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, fontWeight: FontWeight.w600)),
+              ),
+              ...byChar.entries.map((entry) {
+                final data = entry.value as Map<String, dynamic>;
+                final charIn = data['input'] ?? 0;
+                final charOut = data['output'] ?? 0;
+                return Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  child: Row(
+                    children: [
+                      Container(width: 8, height: 8, decoration: BoxDecoration(color: cs.primary, borderRadius: BorderRadius.circular(2))),
+                      const SizedBox(width: 10),
+                      Expanded(child: Text(entry.key, style: TextStyle(fontSize: 13, color: cs.onSurface))),
+                      Text('${(charIn + charOut).toStringAsFixed(0)}', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant, fontFamily: 'monospace')),
+                    ],
+                  ),
+                );
+              }),
+              const SizedBox(height: 4),
+            ],
+            const SizedBox(height: 4),
+            Padding(
+              padding: const EdgeInsets.only(right: 12, bottom: 4),
+              child: Align(
+                alignment: Alignment.centerRight,
+                child: TextButton.icon(
+                  onPressed: () async {
+                    final db = ref.read(databaseServiceProvider);
+                    await db.clearTokenUsage();
+                    setState(() => _tokenUsage = db.getTokenUsage());
+                    if (mounted) {
+                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Token 统计已清零'), behavior: SnackBarBehavior.floating));
+                    }
+                  },
+                  icon: Icon(Icons.refresh_rounded, size: 16, color: cs.error),
+                  label: Text('清零', style: TextStyle(color: cs.error, fontSize: 12)),
+                ),
+              ),
+            ),
+          ],
+        ),
+      ],
+    );
+  }
+
+  Widget _statIcon(IconData icon, Color color) {
+    return Container(width: 36, height: 36, decoration: BoxDecoration(color: color.withOpacity(0.14), borderRadius: BorderRadius.circular(10)), child: Icon(icon, size: 18, color: color));
+  }
+
+  Widget _statLabel(int value) {
+    return Column(crossAxisAlignment: CrossAxisAlignment.start, mainAxisSize: MainAxisSize.min, children: [
+      const Text('消耗', style: TextStyle(fontSize: 11, color: Color(0xFF97A0B2))),
+      Text(value.toString(), style: const TextStyle(fontSize: 13, fontWeight: FontWeight.w600, fontFamily: 'monospace')),
+    ]);
+  }
+
+  Widget _statValue(String text, ColorScheme cs) {
+    return Text(text, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: cs.onSurface, fontFamily: 'monospace'));
   }
 
   Future<void> _confirmClearData(BuildContext context) async {
@@ -486,6 +668,7 @@ class _SettingTile extends StatelessWidget {
   final String title;
   final String subtitle;
   final VoidCallback onTap;
+  final Widget? trailing;
 
   const _SettingTile({
     required this.cs,
@@ -494,6 +677,7 @@ class _SettingTile extends StatelessWidget {
     required this.title,
     required this.subtitle,
     required this.onTap,
+    this.trailing,
   });
 
   @override

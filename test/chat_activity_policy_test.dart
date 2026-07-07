@@ -87,7 +87,7 @@ void main() {
       random: Random(1),
     );
 
-    expect(fallback, contains('马小跳'));
+    expect(fallback, contains('远控软件--向日葵'));
     expect(fallback.trim(), isNotEmpty);
     expect(fallback, isNot(contains('卡')));
   });
