@@ -3,7 +3,6 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
-import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'providers/ai_character_providers.dart';
 import '../settings/providers/api_config_providers.dart';
@@ -375,6 +374,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                                 '先在设置中创建 API 配置',
                                 Icons.settings_remote_outlined,
                                 cs),
+                            isExpanded: true,
                             items: [
                               if (configs.isEmpty)
                                 const DropdownMenuItem(
@@ -383,22 +383,10 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                                         style: TextStyle(fontSize: 13))),
                               ...configs.map((c) => DropdownMenuItem(
                                     value: c.id,
-                                    child: Row(
-                                      children: [
-                                        Icon(Icons.circle,
-                                            size: 8,
-                                            color: providerColor(c.provider)),
-                                        const SizedBox(width: 8),
-                                        Flexible(
-                                            child: Text(c.name,
-                                                overflow:
-                                                    TextOverflow.ellipsis)),
-                                        Text(c.provider,
-                                            style: TextStyle(
-                                                fontSize: 11,
-                                                color: cs.onSurfaceVariant)),
-                                      ],
-                                    ),
+                                    child: Text(
+                                        '${c.name} (${c.provider})',
+                                        overflow: TextOverflow.ellipsis,
+                                        style: const TextStyle(fontSize: 14)),
                                   )),
                             ],
                             onChanged: configs.isEmpty
