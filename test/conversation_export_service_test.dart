@@ -78,6 +78,31 @@ void main() {
       expect(encoded.contains('apiConfigId'), isFalse);
     });
 
+    test('toMarkdown 与 toJson 均绝不泄露 apiKey/apiProvider/apiConfigId/apiConfig', () {
+      // 构造一个持有明文密钥的角色，验证导出内容任何层级都不含敏感字段。
+      final service = ConversationExportService();
+      final md = service.toMarkdown(chatGroup, messages, charById);
+      final json = service.toJson(chatGroup, messages, charById);
+      final jsonStr = jsonEncode(json);
+
+      // 明文密钥值绝不出现
+      expect(jsonStr.contains('sk-TOPSECRET'), isFalse,
+          reason: 'JSON 泄露明文 apiKey');
+      expect(md.contains('sk-TOPSECRET'), isFalse,
+          reason: 'Markdown 泄露明文 apiKey');
+
+      // 安全红线四项字段名绝不出现（设计文档硬性约定）
+      for (final bad in [
+        'apiKey',
+        'apiProvider',
+        'apiConfigId',
+        'apiConfig',
+      ]) {
+        expect(jsonStr.contains(bad), isFalse, reason: 'JSON 泄露字段: $bad');
+        expect(md.contains(bad), isFalse, reason: 'Markdown 泄露字段: $bad');
+      }
+    });
+
     test('saveToFile 写入文件并可回读，随后清理', () async {
       // 注：本例仅涉及 dart:io 文件操作，故用普通 test 而非 testWidgets，
       // 避免引入 Flutter Widget 绑定；同时注入系统临时目录来验证「落盘 + 回读」，

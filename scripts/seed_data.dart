@@ -1,3 +1,5 @@
+// 该脚本为独立 CLI 工具，使用 print 输出执行结果属合理用途。
+// ignore_for_file: avoid_print
 import 'dart:io';
 import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
