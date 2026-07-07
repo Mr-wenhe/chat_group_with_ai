@@ -25,6 +25,9 @@ dependencies:
   # 网络请求
   dio: ^5.4.0
 
+  # 系统分享面板（导出对话 -> 分享）
+  share_plus: ^10.0.0
+
   # JSON 序列化
   json_annotation: ^4.8.1
 
