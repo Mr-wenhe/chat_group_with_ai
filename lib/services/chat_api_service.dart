@@ -61,10 +61,16 @@ class ChatApiService {
         final data = response.data as Map<String, dynamic>;
         final reply = data['choices']?[0]?['message']?['content']?.toString() ??
             '(empty)';
+        final usage = data['usage'];
         return {
           'success': true,
           'message': reply,
           'model': data['model'] ?? modelName,
+          if (usage is Map<String, dynamic>) ...{
+            'promptTokens': usage['prompt_tokens'] as int? ?? 0,
+            'completionTokens': usage['completion_tokens'] as int? ?? 0,
+            'cachedTokens': _extractCachedTokens(usage),
+          }
         };
       } else {
         final err = response.data?.toString() ?? 'HTTP ${response.statusCode}';
@@ -139,6 +145,7 @@ class ChatApiService {
       'temperature': temperature,
       'max_tokens': 1024,
       'stream': true, // 开启 SSE 流式返回
+      'stream_options': {'include_usage': true},
     };
 
     final parser = SseParser();
@@ -218,5 +225,22 @@ class ChatApiService {
     } else {
       return '请求失败: ${e.message}';
     }
+  }
+
+  int _extractCachedTokens(Map<String, dynamic> usage) {
+    var total = 0;
+    final promptDetails = usage['prompt_tokens_details'];
+    if (promptDetails is Map) {
+      total += (promptDetails['cached_tokens'] as int? ?? 0);
+    }
+    final inputDetails = usage['input_tokens_details'];
+    if (inputDetails is Map) {
+      total += (inputDetails['cached_tokens'] as int? ?? 0);
+      total += (inputDetails['cache_read'] as int? ?? 0);
+    }
+    total += (usage['cached_tokens'] as int? ?? 0);
+    total += (usage['prompt_cache_hit_tokens'] as int? ?? 0);
+    total += (usage['cache_read_input_tokens'] as int? ?? 0);
+    return total;
   }
 }

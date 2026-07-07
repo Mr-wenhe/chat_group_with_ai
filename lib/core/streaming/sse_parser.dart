@@ -15,6 +15,7 @@ class SseParser {
   String _fullContent = '';
   int _promptTokens = 0;
   int _completionTokens = 0;
+  int _cachedTokens = 0;
 
   List<ChatStreamEvent> ingest(String chunk) {
     _buffer += chunk;
@@ -63,6 +64,7 @@ class SseParser {
       if (usage is Map<String, dynamic>) {
         _promptTokens += (usage['prompt_tokens'] as int? ?? 0);
         _completionTokens += (usage['completion_tokens'] as int? ?? 0);
+        _cachedTokens += _extractCachedTokens(usage);
       }
       final choices = json['choices'];
       if (choices is! List || choices.isEmpty) return null;
@@ -92,10 +94,11 @@ class SseParser {
   }
 
   ChatStreamEvent doneEvent() => ChatStreamEvent.done(
-      _fullContent, null, _promptTokens, _completionTokens);
+      _fullContent, null, _promptTokens, _completionTokens, _cachedTokens);
 
   int get promptTokens => _promptTokens;
   int get completionTokens => _completionTokens;
+  int get cachedTokens => _cachedTokens;
 
   /// 当前累计的完整内容长度（用于调试）。
   int get fullContentLength => _fullContent.length;
@@ -105,5 +108,23 @@ class SseParser {
     _fullContent = '';
     _promptTokens = 0;
     _completionTokens = 0;
+    _cachedTokens = 0;
+  }
+
+  int _extractCachedTokens(Map<String, dynamic> usage) {
+    var total = 0;
+    final promptDetails = usage['prompt_tokens_details'];
+    if (promptDetails is Map) {
+      total += (promptDetails['cached_tokens'] as int? ?? 0);
+    }
+    final inputDetails = usage['input_tokens_details'];
+    if (inputDetails is Map) {
+      total += (inputDetails['cached_tokens'] as int? ?? 0);
+      total += (inputDetails['cache_read'] as int? ?? 0);
+    }
+    total += (usage['cached_tokens'] as int? ?? 0);
+    total += (usage['prompt_cache_hit_tokens'] as int? ?? 0);
+    total += (usage['cache_read_input_tokens'] as int? ?? 0);
+    return total;
   }
 }

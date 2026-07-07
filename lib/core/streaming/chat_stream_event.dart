@@ -39,6 +39,9 @@ class ChatStreamEvent {
   /// 估算的 completion token 数量（用于消费统计）。
   final int? completionTokens;
 
+  /// 输入 token 中命中缓存的数量。部分供应商不返回该字段。
+  final int? cachedTokens;
+
   const ChatStreamEvent({
     required this.type,
     this.delta,
@@ -47,14 +50,24 @@ class ChatStreamEvent {
     this.message,
     this.promptTokens,
     this.completionTokens,
+    this.cachedTokens,
   });
 
   factory ChatStreamEvent.token(String delta) =>
       ChatStreamEvent(type: ChatStreamEventType.token, delta: delta);
 
-  factory ChatStreamEvent.done(String content, [String? model, int? promptTokens, int? completionTokens]) =>
+  factory ChatStreamEvent.done(String content,
+          [String? model,
+          int? promptTokens,
+          int? completionTokens,
+          int? cachedTokens]) =>
       ChatStreamEvent(
-          type: ChatStreamEventType.done, content: content, model: model, promptTokens: promptTokens, completionTokens: completionTokens);
+          type: ChatStreamEventType.done,
+          content: content,
+          model: model,
+          promptTokens: promptTokens,
+          completionTokens: completionTokens,
+          cachedTokens: cachedTokens);
 
   factory ChatStreamEvent.error(String message) =>
       ChatStreamEvent(type: ChatStreamEventType.error, message: message);

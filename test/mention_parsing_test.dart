@@ -54,4 +54,23 @@ void main() {
 
     expect(result, ['c1', 'c2']);
   });
+
+  test('parseMentionedCharacterIds expands @all to every character', () {
+    final result = parseMentionedCharacterIds('@all 大家都说说', characters);
+
+    expect(result, ['c1', 'c2', 'c3']);
+  });
+
+  test('parseMentionedCharacterIds supports Chinese all aliases', () {
+    final result = parseMentionedCharacterIds('@所有人 过来看一下', characters);
+
+    expect(result, ['c1', 'c2', 'c3']);
+  });
+
+  test('parseMentionedCharacterIds keeps order and de-duplicates after @all',
+      () {
+    final result = parseMentionedCharacterIds('@Alice @all @小胖', characters);
+
+    expect(result, ['c2', 'c1', 'c3']);
+  });
 }

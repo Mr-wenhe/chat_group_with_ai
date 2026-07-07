@@ -4,6 +4,11 @@ import 'package:chat_group/core/models/ai_character.dart';
 
 class ChatActivityPolicy {
   static const int defaultMaxReplyCount = 2;
+  static const int groupAddressedMaxReplyCount = 4;
+  static const int minReplyDelayMs = 1200;
+  static const int maxReplyDelayMs = 8500;
+  static const int replyDelayMsPerCharacter = 45;
+  static const int replyDelayJitterMs = 900;
 
   static List<AICharacter> selectUserReplyCharacters({
     required List<AICharacter> characters,
@@ -12,13 +17,19 @@ class ChatActivityPolicy {
     required bool Function(AICharacter character) isEligible,
     Random? random,
     int maxReplyCount = defaultMaxReplyCount,
+    bool isGroupAddressed = false,
   }) {
     final eligible = characters.where(isEligible).toList();
     if (eligible.isEmpty || maxReplyCount <= 0) return const [];
 
     final selected = <AICharacter>[];
+    final replyCap = isGroupAddressed
+        ? max(maxReplyCount, groupAddressedMaxReplyCount)
+        : maxReplyCount;
+    final effectiveMaxReplyCount =
+        min(eligible.length, max(replyCap, mentionedIds.length));
     void addById(String id) {
-      if (selected.length >= maxReplyCount) return;
+      if (selected.length >= effectiveMaxReplyCount) return;
       for (final character in eligible) {
         if (character.id == id && !selected.any((c) => c.id == id)) {
           selected.add(character);
@@ -34,7 +45,7 @@ class ChatActivityPolicy {
       addById(id);
     }
 
-    final desiredCount = min(maxReplyCount, eligible.length);
+    final desiredCount = effectiveMaxReplyCount;
     final remaining = _shuffled(
       eligible.where((c) => !selected.any((s) => s.id == c.id)).toList(),
       random ?? Random(),
@@ -85,6 +96,65 @@ class ChatActivityPolicy {
             '最近$topic 有什么新鲜事吗？聊两句呗。',
           ];
     return templates[rng.nextInt(templates.length)];
+  }
+
+  static Duration replyDelayForContent(String content, {Random? random}) {
+    final visibleCharacterCount = content.runes
+        .where((r) => String.fromCharCode(r).trim().isNotEmpty)
+        .length;
+    final calculatedDelay =
+        minReplyDelayMs + visibleCharacterCount * replyDelayMsPerCharacter;
+    final baseDelay = calculatedDelay.clamp(minReplyDelayMs, maxReplyDelayMs);
+    final jitter = random == null ? 0 : random.nextInt(replyDelayJitterMs + 1);
+    return Duration(milliseconds: min(maxReplyDelayMs, baseDelay + jitter));
+  }
+
+  static bool contentMentionsUser(String content, String ownerName) {
+    final tokens = <String>{'我'};
+    final trimmedOwnerName = ownerName.trim();
+    if (trimmedOwnerName.isNotEmpty) tokens.add(trimmedOwnerName);
+
+    final mentionPattern = RegExp(r'@([^@\s，。！？!?、；;：:,.]+)');
+    for (final match in mentionPattern.allMatches(content)) {
+      final token = match.group(1)?.trim();
+      if (token != null && tokens.contains(token)) return true;
+    }
+    return false;
+  }
+
+  static bool isGroupAddressedMessage(String content) {
+    final text = content.replaceAll(RegExp(r'\s+'), '').toLowerCase();
+    if (text.isEmpty) return false;
+
+    final mentionPattern = RegExp(r'@([^@\s，。！？!?、；;：:,.]+)');
+    if (RegExp(r'@(all|everyone|所有人|全部)').hasMatch(text)) return true;
+
+    final collectiveTokens = [
+      '大家',
+      '各位',
+      '你们',
+      '诸位',
+      '所有人',
+      '每个人',
+      '每位',
+      '全员',
+      '一起',
+      '都来',
+      '都说',
+      '都分享',
+    ];
+    if (collectiveTokens.any(text.contains)) return true;
+    if (mentionPattern.hasMatch(text)) return false;
+
+    final groupInvitationTokens = [
+      '分享一下',
+      '分享下',
+      '说说看',
+      '聊聊看',
+      '来聊聊',
+      '发表一下',
+    ];
+    return groupInvitationTokens.any(text.contains);
   }
 
   static List<T> _shuffled<T>(List<T> list, Random random) {

@@ -126,5 +126,16 @@ void main() {
       expect(events.first.type, ChatStreamEventType.error);
       expect(events.first.message, contains('Invalid API key'));
     });
+
+    test('usage 中的 cached token 会进入 done 事件', () {
+      final p = SseParser();
+      p.ingest(
+          'data: {"choices":[{"delta":{"content":"OK"}}],"usage":{"prompt_tokens":100,"completion_tokens":12,"prompt_tokens_details":{"cached_tokens":40}}}\n');
+
+      final done = p.doneEvent();
+      expect(done.promptTokens, 100);
+      expect(done.completionTokens, 12);
+      expect(done.cachedTokens, 40);
+    });
   });
 }

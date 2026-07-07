@@ -168,31 +168,59 @@ class DatabaseService {
   Map<String, dynamic> getTokenUsage() {
     final raw = appSettingsBox.get(_tokenUsageKey);
     if (raw is Map) return Map<String, dynamic>.from(raw);
-    return {'totalInput': 0, 'totalOutput': 0, 'requestCount': 0, 'byCharacter': <String, Map<String, int>>{}};
+    return {
+      'totalInput': 0,
+      'totalOutput': 0,
+      'totalCachedInput': 0,
+      'requestCount': 0,
+      'byCharacter': <String, Map<String, int>>{},
+      'byGroup': <String, Map<String, int>>{},
+    };
   }
 
   Future<void> recordTokenUsage({
     required String characterId,
+    String? groupId,
     required int inputTokens,
     required int outputTokens,
+    int cachedTokens = 0,
   }) async {
     final usage = getTokenUsage();
     usage['totalInput'] = (usage['totalInput'] ?? 0) + inputTokens;
     usage['totalOutput'] = (usage['totalOutput'] ?? 0) + outputTokens;
+    usage['totalCachedInput'] = (usage['totalCachedInput'] ?? 0) + cachedTokens;
     usage['requestCount'] = (usage['requestCount'] ?? 0) + 1;
     final byChar = Map<String, dynamic>.from(usage['byCharacter'] ?? {});
-    final entry = Map<String, int>.from(byChar[characterId] ?? {'input': 0, 'output': 0, 'count': 0});
+    final entry = Map<String, int>.from(byChar[characterId] ??
+        {'input': 0, 'output': 0, 'cached': 0, 'count': 0});
     entry['input'] = (entry['input'] ?? 0) + inputTokens;
     entry['output'] = (entry['output'] ?? 0) + outputTokens;
+    entry['cached'] = (entry['cached'] ?? 0) + cachedTokens;
     entry['count'] = (entry['count'] ?? 0) + 1;
     byChar[characterId] = entry;
     usage['byCharacter'] = byChar;
+    if (groupId != null && groupId.isNotEmpty) {
+      final byGroup = Map<String, dynamic>.from(usage['byGroup'] ?? {});
+      final groupEntry = Map<String, int>.from(byGroup[groupId] ??
+          {'input': 0, 'output': 0, 'cached': 0, 'count': 0});
+      groupEntry['input'] = (groupEntry['input'] ?? 0) + inputTokens;
+      groupEntry['output'] = (groupEntry['output'] ?? 0) + outputTokens;
+      groupEntry['cached'] = (groupEntry['cached'] ?? 0) + cachedTokens;
+      groupEntry['count'] = (groupEntry['count'] ?? 0) + 1;
+      byGroup[groupId] = groupEntry;
+      usage['byGroup'] = byGroup;
+    }
     await appSettingsBox.put(_tokenUsageKey, usage);
   }
 
   Future<void> clearTokenUsage() async {
     await appSettingsBox.put(_tokenUsageKey, {
-      'totalInput': 0, 'totalOutput': 0, 'requestCount': 0, 'byCharacter': <String, Map<String, int>>{}
+      'totalInput': 0,
+      'totalOutput': 0,
+      'totalCachedInput': 0,
+      'requestCount': 0,
+      'byCharacter': <String, Map<String, int>>{},
+      'byGroup': <String, Map<String, int>>{},
     });
   }
 
