@@ -73,7 +73,7 @@ class AICharacter extends HiveObject {
     required this.apiProvider,
     String? modelName,
     this.customBaseUrl = '',
-    this.hourlyReplyLimit = 5,
+    this.hourlyReplyLimit = 60,
     this.hourlyReplyCount = 0,
     this.lastReplyTimestamp,
     this.isActive = true,

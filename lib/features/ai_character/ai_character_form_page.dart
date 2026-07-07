@@ -54,7 +54,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     _personalityController = TextEditingController(
         text: c == null ? '' : c.personalityTags.join(', '));
     _hourlyLimitController =
-        TextEditingController(text: (c?.hourlyReplyLimit ?? 5).toString());
+        TextEditingController(text: (c?.hourlyReplyLimit ?? 60).toString());
 
     _selectedApiConfigId = c?.apiConfigId ?? '';
     _hasLegacyApiData = _selectedApiConfigId.isEmpty &&
@@ -422,7 +422,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                 TextFormField(
                   controller: _hourlyLimitController,
                   decoration: appInputDecoration(
-                      '每小时回复上限', '默认 5 次/小时', Icons.speed_rounded, cs),
+                      '每小时回复上限', '默认 60 次/小时', Icons.speed_rounded, cs),
                   keyboardType: TextInputType.number,
                 ),
               ],

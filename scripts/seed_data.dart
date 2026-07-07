@@ -248,7 +248,7 @@ AICharacter _char(String name, String avatar, int age, String role, List<String>
     modelName: config.modelName,
     customBaseUrl: config.customBaseUrl,
     apiConfigId: config.id,
-    hourlyReplyLimit: 3,
+    hourlyReplyLimit: 60,
     hourlyReplyCount: 0,
     isActive: true,
   );
