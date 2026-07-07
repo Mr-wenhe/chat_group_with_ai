@@ -5,6 +5,7 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
 import 'package:chat_group/features/settings/api_config_form_page.dart';
+import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/ai_providers/ai_api_service.dart';
 import 'package:flutter/material.dart';
@@ -40,13 +41,25 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               width: 32,
               height: 32,
               decoration: BoxDecoration(
-                gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: const [Color(0xFF8B5CF6), Color(0xFF6366F1), Color(0xFF3B82F6)]),
+                gradient: const LinearGradient(
+                    begin: Alignment.topLeft,
+                    end: Alignment.bottomRight,
+                    colors: [
+                      Color(0xFF8B5CF6),
+                      Color(0xFF6366F1),
+                      Color(0xFF3B82F6)
+                    ]),
                 borderRadius: BorderRadius.circular(9),
               ),
-              child: const Icon(Icons.settings_rounded, size: 18, color: Colors.white),
+              child: const Icon(Icons.settings_rounded,
+                  size: 18, color: Colors.white),
             ),
             const SizedBox(width: 12),
-            Text('设置', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 22, color: cs.onSurface)),
+            Text('设置',
+                style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 22,
+                    color: cs.onSurface)),
           ],
         ),
       ),
@@ -64,18 +77,32 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     width: 44,
                     height: 44,
                     decoration: BoxDecoration(
-                      gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: const [Color(0xFF8B5CF6), Color(0xFF6366F1), Color(0xFF3B82F6)]),
+                      gradient: const LinearGradient(
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
+                          colors: [
+                            Color(0xFF8B5CF6),
+                            Color(0xFF6366F1),
+                            Color(0xFF3B82F6)
+                          ]),
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    child: const Icon(Icons.smart_toy_rounded, size: 24, color: Colors.white),
+                    child: const Icon(Icons.smart_toy_rounded,
+                        size: 24, color: Colors.white),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('AI 群聊模拟器', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: cs.onSurface)),
-                        Text('v1.0.0 · 本地存储', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+                        Text('AI 群聊模拟器',
+                            style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: cs.onSurface)),
+                        Text('v1.0.0 · 本地存储',
+                            style: TextStyle(
+                                fontSize: 13, color: cs.onSurfaceVariant)),
                       ],
                     ),
                   ),
@@ -83,13 +110,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               ),
             ],
           ),
-
           const SizedBox(height: 28),
           _SectionHeader(title: 'API 配置', cs: cs),
           const SizedBox(height: 4),
-          Text('管理 API Key、Base URL 和模型，角色可复用配置', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+          Text('管理 API Key、Base URL 和模型，角色可复用配置',
+              style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
           const SizedBox(height: 12),
-
           if (apiConfigs.isEmpty)
             AppCard(
               cs: cs,
@@ -99,9 +125,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   child: Center(
                     child: Column(
                       children: [
-                        Icon(Icons.settings_remote_outlined, size: 40, color: cs.onSurfaceVariant.withOpacity(0.4)),
+                        Icon(Icons.settings_remote_outlined,
+                            size: 40,
+                            color: cs.onSurfaceVariant.withOpacity(0.4)),
                         const SizedBox(height: 12),
-                        Text('还没有 API 配置', style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant)),
+                        Text('还没有 API 配置',
+                            style: TextStyle(
+                                fontSize: 14, color: cs.onSurfaceVariant)),
                         const SizedBox(height: 12),
                         FilledButton.icon(
                           onPressed: () => _openConfigForm(context),
@@ -122,13 +152,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   onDelete: () => _confirmDeleteConfig(context, c),
                   onTest: () => _testApiKey(context, c),
                 )),
-
           const SizedBox(height: 28),
           _SectionHeader(title: 'API Key 测试', cs: cs),
           const SizedBox(height: 4),
-          Text('选择角色测试其 API 配置是否可用', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+          Text('选择角色测试其 API 配置是否可用',
+              style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
           const SizedBox(height: 12),
-
           if (characters.isEmpty)
             AppCard(
               cs: cs,
@@ -136,7 +165,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 Padding(
                   padding: const EdgeInsets.symmetric(vertical: 24),
                   child: Center(
-                    child: Text('还没有角色，请先创建', style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant)),
+                    child: Text('还没有角色，请先创建',
+                        style: TextStyle(
+                            fontSize: 14, color: cs.onSurfaceVariant)),
                   ),
                 ),
               ],
@@ -147,7 +178,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   cs: cs,
                   onTest: () => _testCharacterApi(context, c),
                 )),
-
           const SizedBox(height: 28),
           _SectionHeader(title: '数据管理', cs: cs),
           const SizedBox(height: 12),
@@ -155,6 +185,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             cs: cs,
             margin: EdgeInsets.zero,
             children: [
+              _SettingTile(
+                cs: cs,
+                icon: Icons.upload_rounded,
+                iconColor: cs.primary,
+                title: '导出对话',
+                subtitle: '将群聊导出为 Markdown / JSON 并分享',
+                onTap: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const ExportPage())),
+              ),
+              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.info_outline_rounded,
@@ -174,7 +214,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               ),
             ],
           ),
-
           const SizedBox(height: 32),
         ],
       ),
@@ -188,7 +227,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
   }
 
-  Future<void> _confirmDeleteConfig(BuildContext context, ApiConfig config) async {
+  Future<void> _confirmDeleteConfig(
+      BuildContext context, ApiConfig config) async {
     final cs = Theme.of(context).colorScheme;
     final confirm = await showDialog<bool>(
       context: context,
@@ -197,7 +237,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         title: Text('删除「${config.name}」？'),
         content: const Text('此操作不可撤销，使用该配置的角色将无法回复。'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: FilledButton.styleFrom(backgroundColor: cs.error),
@@ -211,7 +253,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       await ref.read(apiConfigsProvider.notifier).deleteConfig(config.id);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('「${config.name}」已删除'), behavior: SnackBarBehavior.floating),
+          SnackBar(
+              content: Text('「${config.name}」已删除'),
+              behavior: SnackBarBehavior.floating),
         );
       }
     }
@@ -227,7 +271,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
-        icon: const SizedBox(width: 28, height: 28, child: CircularProgressIndicator(strokeWidth: 2.5)),
+        icon: const SizedBox(
+            width: 28,
+            height: 28,
+            child: CircularProgressIndicator(strokeWidth: 2.5)),
         title: Text('正在测试 ${config.name}...'),
         content: const SizedBox(height: 4),
       ),
@@ -256,18 +303,21 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
-          icon: Icon(Icons.error_outline_rounded, color: Theme.of(context).colorScheme.error, size: 28),
+          icon: Icon(Icons.error_outline_rounded,
+              color: Theme.of(context).colorScheme.error, size: 28),
           title: Text('${config.name} 测试失败'),
           content: Text(result['message'] ?? '未知错误'),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
           ],
         ),
       );
     }
   }
 
-  Future<void> _testCharacterApi(BuildContext context, AICharacter character) async {
+  Future<void> _testCharacterApi(
+      BuildContext context, AICharacter character) async {
     final db = ref.read(databaseServiceProvider);
     final config = character.apiConfigId.isNotEmpty
         ? db.apiConfigBox.get(character.apiConfigId)
@@ -278,10 +328,14 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
-          icon: Icon(Icons.warning_amber_rounded, color: Theme.of(context).colorScheme.error, size: 28),
+          icon: Icon(Icons.warning_amber_rounded,
+              color: Theme.of(context).colorScheme.error, size: 28),
           title: Text('${character.name} 未配置 API'),
           content: const Text('该角色没有关联的 API 配置'),
-          actions: [TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('关闭'))],
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('关闭'))
+          ],
         ),
       );
       return;
@@ -296,7 +350,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
-        icon: const SizedBox(width: 28, height: 28, child: CircularProgressIndicator(strokeWidth: 2.5)),
+        icon: const SizedBox(
+            width: 28,
+            height: 28,
+            child: CircularProgressIndicator(strokeWidth: 2.5)),
         title: Text('正在测试 ${character.name} 的 API...'),
         content: const SizedBox(height: 4),
       ),
@@ -325,11 +382,13 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       showDialog(
         context: context,
         builder: (ctx) => AlertDialog(
-          icon: Icon(Icons.error_outline_rounded, color: Theme.of(context).colorScheme.error, size: 28),
+          icon: Icon(Icons.error_outline_rounded,
+              color: Theme.of(context).colorScheme.error, size: 28),
           title: Text('${character.name} API 测试失败'),
           content: Text(result['message'] ?? '未知错误'),
           actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
           ],
         ),
       );
@@ -345,7 +404,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         title: const Text('清除所有数据？'),
         content: const Text('此操作不可撤销，所有角色、群组、消息和 API 配置将被永久删除。'),
         actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+          TextButton(
+              onPressed: () => Navigator.pop(ctx, false),
+              child: const Text('取消')),
           FilledButton(
             onPressed: () => Navigator.pop(ctx, true),
             style: FilledButton.styleFrom(backgroundColor: cs.error),
@@ -366,7 +427,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       ref.invalidate(aiCharactersProvider);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(content: Text('所有数据已清除'), behavior: SnackBarBehavior.floating),
+          const SnackBar(
+              content: Text('所有数据已清除'), behavior: SnackBarBehavior.floating),
         );
       }
     }
@@ -382,7 +444,12 @@ class _SectionHeader extends StatelessWidget {
   Widget build(BuildContext context) {
     return Row(
       children: [
-        Text(title, style: TextStyle(fontSize: 13, fontWeight: FontWeight.w700, color: cs.primary, letterSpacing: 0.3)),
+        Text(title,
+            style: TextStyle(
+                fontSize: 13,
+                fontWeight: FontWeight.w700,
+                color: cs.primary,
+                letterSpacing: 0.3)),
         const SizedBox(width: 12),
         Expanded(child: Divider(color: cs.outlineVariant, thickness: 0.5)),
       ],
@@ -397,7 +464,12 @@ class _ApiConfigCard extends StatelessWidget {
   final VoidCallback onDelete;
   final VoidCallback onTest;
 
-  const _ApiConfigCard({required this.config, required this.cs, required this.onEdit, required this.onDelete, required this.onTest});
+  const _ApiConfigCard(
+      {required this.config,
+      required this.cs,
+      required this.onEdit,
+      required this.onDelete,
+      required this.onTest});
 
   @override
   Widget build(BuildContext context) {
@@ -421,20 +493,33 @@ class _ApiConfigCard extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Text(config.name, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: cs.onSurface)),
+                    Text(config.name,
+                        style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: cs.onSurface)),
                     const SizedBox(width: 8),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
                         color: pColor.withOpacity(0.12),
                         borderRadius: BorderRadius.circular(6),
                       ),
-                      child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: pColor)),
+                      child: Text(label,
+                          style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500,
+                              color: pColor)),
                     ),
                   ],
                 ),
                 const SizedBox(height: 3),
-                Text(maskedKey, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, fontFamily: 'monospace')),
+                Text(maskedKey,
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: cs.onSurfaceVariant,
+                        fontFamily: 'monospace')),
               ],
             ),
           ),
@@ -447,12 +532,14 @@ class _ApiConfigCard extends StatelessWidget {
                 tooltip: '测试',
               ),
               IconButton(
-                icon: Icon(Icons.edit_outlined, size: 18, color: cs.onSurfaceVariant),
+                icon: Icon(Icons.edit_outlined,
+                    size: 18, color: cs.onSurfaceVariant),
                 onPressed: onEdit,
                 tooltip: '编辑',
               ),
               IconButton(
-                icon: Icon(Icons.delete_outline_rounded, size: 18, color: cs.error),
+                icon: Icon(Icons.delete_outline_rounded,
+                    size: 18, color: cs.error),
                 onPressed: onDelete,
                 tooltip: '删除',
               ),
@@ -472,7 +559,10 @@ class _ApiConfigCard extends StatelessWidget {
         color: pColor.withOpacity(0.14),
         border: Border.all(color: pColor.withOpacity(0.3), width: 1.5),
       ),
-      child: Center(child: Text(config.name.isNotEmpty ? config.name[0] : '?', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: pColor))),
+      child: Center(
+          child: Text(config.name.isNotEmpty ? config.name[0] : '?',
+              style: TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w600, color: pColor))),
     );
   }
 }
@@ -482,7 +572,8 @@ class _ApiTestCard extends StatelessWidget {
   final ColorScheme cs;
   final VoidCallback onTest;
 
-  const _ApiTestCard({required this.character, required this.cs, required this.onTest});
+  const _ApiTestCard(
+      {required this.character, required this.cs, required this.onTest});
 
   @override
   Widget build(BuildContext context) {
@@ -503,27 +594,41 @@ class _ApiTestCard extends StatelessWidget {
               children: [
                 Row(
                   children: [
-                    Text(character.name, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: cs.onSurface)),
+                    Text(character.name,
+                        style: TextStyle(
+                            fontSize: 15,
+                            fontWeight: FontWeight.w600,
+                            color: cs.onSurface)),
                     const SizedBox(width: 8),
                     Container(
-                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      padding: const EdgeInsets.symmetric(
+                          horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
                         color: pColor.withOpacity(0.12),
                         borderRadius: BorderRadius.circular(6),
                       ),
-                      child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: pColor)),
+                      child: Text(label,
+                          style: TextStyle(
+                              fontSize: 11,
+                              fontWeight: FontWeight.w500,
+                              color: pColor)),
                     ),
                   ],
                 ),
                 const SizedBox(height: 3),
-                Text(character.apiProvider, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, fontFamily: 'monospace')),
+                Text(character.apiProvider,
+                    style: TextStyle(
+                        fontSize: 12,
+                        color: cs.onSurfaceVariant,
+                        fontFamily: 'monospace')),
               ],
             ),
           ),
           FilledButton.icon(
             onPressed: onTest,
             icon: const Icon(Icons.bolt_rounded, size: 16),
-            label: const Text('测试', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            label: const Text('测试',
+                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
             style: FilledButton.styleFrom(
               backgroundColor: cs.primary,
               padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
@@ -535,7 +640,9 @@ class _ApiTestCard extends StatelessWidget {
   }
 
   Widget _buildAvatar(Color pColor) {
-    final display = character.avatar.isNotEmpty ? character.avatar : (character.name.isNotEmpty ? character.name[0] : '?');
+    final display = character.avatar.isNotEmpty
+        ? character.avatar
+        : (character.name.isNotEmpty ? character.name[0] : '?');
     return Container(
       width: 40,
       height: 40,
@@ -544,7 +651,10 @@ class _ApiTestCard extends StatelessWidget {
         color: pColor.withOpacity(0.14),
         border: Border.all(color: pColor.withOpacity(0.3), width: 1.5),
       ),
-      child: Center(child: Text(display, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: pColor))),
+      child: Center(
+          child: Text(display,
+              style: TextStyle(
+                  fontSize: 16, fontWeight: FontWeight.w600, color: pColor))),
     );
   }
 }
@@ -581,12 +691,19 @@ class _SettingTile extends StatelessWidget {
               child: Column(
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
-                  Text(title, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w500, color: cs.onSurface)),
-                  Text(subtitle, style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+                  Text(title,
+                      style: TextStyle(
+                          fontSize: 15,
+                          fontWeight: FontWeight.w500,
+                          color: cs.onSurface)),
+                  Text(subtitle,
+                      style:
+                          TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
                 ],
               ),
             ),
-            Icon(Icons.chevron_right_rounded, size: 20, color: cs.onSurfaceVariant),
+            Icon(Icons.chevron_right_rounded,
+                size: 20, color: cs.onSurfaceVariant),
           ],
         ),
       ),
