@@ -62,6 +62,18 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         (c?.apiKey.isNotEmpty ?? false) &&
         (c?.apiProvider.isNotEmpty ?? false);
 
+    // 新建角色时默认选中讯飞星火(xfyun)配置，若无则选第一个可用配置
+    if (_selectedApiConfigId.isEmpty && _isEditing == false) {
+      final configs = ref.read(apiConfigsProvider);
+      final xfyunConfig =
+          configs.where((cfg) => cfg.provider == 'xfyun').firstOrNull;
+      if (xfyunConfig != null) {
+        _selectedApiConfigId = xfyunConfig.id;
+      } else if (configs.isNotEmpty) {
+        _selectedApiConfigId = configs.first.id;
+      }
+    }
+
     // 若从「预设快速创建」进入，直接用预设填充展示字段（仍要求后续选 ApiConfig）。
     if (widget.preset != null) _fillFromPreset(widget.preset!);
   }
@@ -377,7 +389,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                                             size: 8,
                                             color: providerColor(c.provider)),
                                         const SizedBox(width: 8),
-                                        Expanded(
+                                        Flexible(
                                             child: Text(c.name,
                                                 overflow:
                                                     TextOverflow.ellipsis)),

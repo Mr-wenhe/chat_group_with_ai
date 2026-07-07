@@ -57,3 +57,6 @@ app.*.map.json
 /android/app/profile
 /android/app/release
 data/*.lock
+
+# WorkBuddy workspace data
+.workbuddy/
