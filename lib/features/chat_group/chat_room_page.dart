@@ -7,6 +7,8 @@ import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/streaming/chat_stream_event.dart';
+import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:flutter/material.dart';
@@ -57,6 +59,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   bool _isInputEmpty = true;
 
+  // —— 流式输出（打字机）相关状态 ——
+  Message? _streamingMessage; // 正在逐 token 渲染的内存态临时消息（不落库）
+  StreamSubscription<ChatStreamEvent>? _streamSub; // 当前流的订阅，供「停止生成」取消
+  Completer<void>? _streamDone; // 标记本轮流式是否结束
+  bool _isStreaming = false; // 是否正在流式生成（控制「停止生成」按钮显隐）
+  bool _disposed = false; // dispose 守卫，避免异步回调在销毁后写状态
+
   @override
   void initState() {
     super.initState();
@@ -71,6 +80,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   @override
   void dispose() {
+    _disposed = true;
+    // 取消未完成的流式订阅，并唤醒可能因 await 挂起的 _generateAiReply。
+    _streamSub?.cancel();
+    _streamSub = null;
+    if (_streamDone != null && !_streamDone!.isCompleted) {
+      _streamDone!.complete();
+    }
     _textController.dispose();
     _scrollController.dispose();
     _autoChatTimer?.cancel();
@@ -83,7 +99,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final group = db.chatGroupBox.get(widget.groupId);
     if (group == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('群聊不存在'), behavior: SnackBarBehavior.floating));
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('群聊不存在'), behavior: SnackBarBehavior.floating));
         Navigator.pop(context);
       }
       return;
@@ -158,7 +175,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
     for (final speaker in speakers.take(2)) {
       if (!_isEligibleToReply(speaker)) continue;
-      await _generateAiReply(speaker, _messages.toList(), null, isAutoChat: true);
+      await _generateAiReply(speaker, _messages.toList(), null,
+          isAutoChat: true);
       await _delay();
     }
 
@@ -208,14 +226,20 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     _autoChatRoundCount = 0;
 
     if (_characters.isEmpty) {
-      if (mounted) messenger.showSnackBar(const SnackBar(content: Text('该群聊没有活跃的角色'), behavior: SnackBarBehavior.floating));
+      if (mounted) {
+        messenger.showSnackBar(const SnackBar(
+            content: Text('该群聊没有活跃的角色'), behavior: SnackBarBehavior.floating));
+      }
       return;
     }
 
     await _runAiRound(userMessage: text, mentionedIds: mentionedIds);
   }
 
-  Future<void> _runAiRound({String? userMessage, List<String>? mentionedIds, bool isAutoChat = false}) async {
+  Future<void> _runAiRound(
+      {String? userMessage,
+      List<String>? mentionedIds,
+      bool isAutoChat = false}) async {
     if (!isAutoChat && _consecutiveRound >= _maxAutoRounds) {
       setState(() => _isAiReplying = false);
       if (_pendingMentionedIds.isNotEmpty) {
@@ -229,7 +253,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       if (!isAutoChat) _consecutiveRound++;
     });
 
-    final recentMessages = _messages.length > 20 ? _messages.sublist(_messages.length - 20) : _messages.toList();
+    final recentMessages = _messages.length > 20
+        ? _messages.sublist(_messages.length - 20)
+        : _messages.toList();
 
     final character = _selectReplyCharacter(mentionedIds);
     if (character == null) {
@@ -239,18 +265,25 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
     final wasPendingReply = _pendingMentionedIds.contains(character.id);
 
-    await _generateAiReply(character, recentMessages, userMessage, isAutoChat: isAutoChat);
+    await _generateAiReply(character, recentMessages, userMessage,
+        isAutoChat: isAutoChat);
     await _delay();
 
     if (wasPendingReply) {
       _pendingMentionedIds.remove(character.id);
     }
 
-    if (mentionedIds != null && mentionedIds.isNotEmpty && !mentionedIds.contains(character.id) && _pendingMentionedIds.isNotEmpty) {
-      final notMentionedPending = _pendingMentionedIds.where((id) => !mentionedIds.contains(id)).toList();
+    if (mentionedIds != null &&
+        mentionedIds.isNotEmpty &&
+        !mentionedIds.contains(character.id) &&
+        _pendingMentionedIds.isNotEmpty) {
+      final notMentionedPending = _pendingMentionedIds
+          .where((id) => !mentionedIds.contains(id))
+          .toList();
       if (notMentionedPending.isNotEmpty) {
         final proxyId = notMentionedPending.first;
-        final proxyChar = _characters.firstWhere((c) => c.id == proxyId, orElse: () => _characters.first);
+        final proxyChar = _characters.firstWhere((c) => c.id == proxyId,
+            orElse: () => _characters.first);
         if (_isEligibleToReply(proxyChar)) {
           final targetName = proxyChar.name;
           await _appendMessage(Message(
@@ -273,7 +306,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     });
   }
 
-  Future<void> _generateAiReply(AICharacter character, List<Message> context, String? userMessage, {bool isAutoChat = false}) async {
+  Future<void> _generateAiReply(
+      AICharacter character, List<Message> context, String? userMessage,
+      {bool isAutoChat = false}) async {
     final config = _resolveApiConfig(character);
     if (config == null) {
       await _appendMessage(Message(
@@ -285,49 +320,138 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       return;
     }
 
-    final apiMessages = _buildApiMessages(character, context, userMessage, isAutoChat: isAutoChat);
-    final result = await _chatApi.sendChatMessage(
-      apiKey: config.apiKey,
-      provider: ApiProvider.values.firstWhere((p) => p.name == config.provider, orElse: () => ApiProvider.deepseek),
-      customBaseUrl: config.customBaseUrl,
-      model: config.modelName,
-      messages: apiMessages,
+    final apiMessages = _buildApiMessages(character, context, userMessage,
+        isAutoChat: isAutoChat);
+    final provider = ApiProvider.values.firstWhere(
+      (p) => p.name == config.provider,
+      orElse: () => ApiProvider.deepseek,
     );
 
-    if (!(result['success'] ?? true)) {
-      await _appendMessage(Message(
-        groupId: widget.groupId,
-        senderId: character.id,
-        senderType: 'ai',
-        content: '[${character.name} 回复失败: ${result['message']}]',
-      ));
-      return;
-    }
-
-    final reply = result['message']?.toString() ?? '';
-    if (reply.isEmpty) return;
-
-    final mentionPattern = RegExp(r'@([^\s]+)');
-    final mentionedIds = <String>[];
-    for (final match in mentionPattern.allMatches(reply)) {
-      final name = match.group(1);
-      final found = _characters.firstWhere((c) => c.name == name, orElse: () => _characters.first);
-      mentionedIds.add(found.id);
-    }
-
-    await _appendMessage(Message(
+    // —— 内存态临时消息：先以空内容入列用于增量渲染，整条完成后再落库一次 ——
+    final temp = Message(
       groupId: widget.groupId,
       senderId: character.id,
       senderType: 'ai',
-      content: reply,
-      isMention: mentionedIds.isNotEmpty,
-      mentionedAiIds: mentionedIds,
-    ));
+      content: '',
+    );
+    if (mounted) {
+      setState(() {
+        _streamingMessage = temp;
+        _messages = List.from(_messages)..add(temp);
+      });
+    }
+    _scrollToBottom();
+
+    // 订阅流式事件；用 Completer 协调「流结束」与「用户停止生成」两种收尾路径。
+    final done = Completer<void>();
+    String fullContent = '';
+    var failed = false;
+
+    final sub = _chatApi
+        .streamChatMessage(
+      apiKey: config.apiKey,
+      provider: provider,
+      customBaseUrl: config.customBaseUrl,
+      model: config.modelName,
+      messages: apiMessages,
+    )
+        .listen(
+      (e) {
+        if (_disposed) return;
+        switch (e.type) {
+          case ChatStreamEventType.token:
+            // 逐 token 累加内容并增量渲染
+            fullContent += e.delta ?? '';
+            temp.content = fullContent;
+            if (mounted) setState(() {});
+            _scrollToBottom();
+          case ChatStreamEventType.done:
+            // 以 done 携带的完整内容为准（若为空则保留累计值）
+            if ((e.content ?? '').isNotEmpty) fullContent = e.content!;
+            temp.content = fullContent;
+            if (mounted) setState(() {});
+          case ChatStreamEventType.error:
+            failed = true;
+            fullContent = '[${character.name} 回复失败: ${e.message}]';
+            temp.content = fullContent;
+            if (mounted) setState(() {});
+            if (!done.isCompleted) done.complete();
+        }
+      },
+      onError: (err) {
+        if (_disposed) return;
+        failed = true;
+        fullContent = '[${character.name} 回复失败: $err]';
+        temp.content = fullContent;
+        if (mounted) setState(() {});
+        if (!done.isCompleted) done.complete();
+      },
+      onDone: () {
+        if (!done.isCompleted) done.complete();
+      },
+      cancelOnError: false,
+    );
+
+    // 记录订阅与完成器，供「停止生成」取消。
+    _streamSub = sub;
+    _streamDone = done;
+    if (mounted) setState(() => _isStreaming = true);
+
+    // 等待流结束，或被用户点击「停止生成」取消。
+    await done.future;
+
+    // 收尾：清理订阅状态。
+    _streamSub = null;
+    _streamDone = null;
+    if (mounted) setState(() => _isStreaming = false);
+
+    // 空内容（非失败）直接丢弃临时消息，不落库。
+    if (!failed && fullContent.trim().isEmpty) {
+      if (mounted) {
+        setState(() {
+          _messages = _messages.where((m) => m.id != temp.id).toList();
+          _streamingMessage = null;
+        });
+      }
+      return;
+    }
+
+    // 解析 @ 提及 → mentionedAiIds（与原有逻辑一致）
+    final mentionPattern = RegExp(r'@([^\s]+)');
+    final mentionedIds = <String>[];
+    for (final match in mentionPattern.allMatches(fullContent)) {
+      final name = match.group(1);
+      if (name == null) continue;
+      final found = _characters.firstWhere((c) => c.name == name,
+          orElse: () => _characters.first);
+      mentionedIds.add(found.id);
+    }
+
+    // 持久化纪律：仅完成时 put 一次（包含失败占位消息）。
+    temp.content = fullContent;
+    temp.isMention = mentionedIds.isNotEmpty;
+    temp.mentionedAiIds = mentionedIds;
+    final db = ref.read(databaseServiceProvider);
+    await db.messageBox.put(temp.id, temp);
+    if (mounted) setState(() => _streamingMessage = null);
+  }
+
+  /// 停止当前流式生成：取消订阅并保留已生成的（部分）内容落库。
+  void _stopStreaming() {
+    if (!_isStreaming) return;
+    _streamSub?.cancel();
+    _streamSub = null;
+    // 唤醒 await done.future，让 _generateAiReply 收尾并把现有内容落库。
+    _streamDone?.complete();
+    if (mounted) setState(() => _isStreaming = false);
   }
 
   ApiConfig? _resolveApiConfig(AICharacter character) {
     if (character.apiConfigId.isNotEmpty) {
-      final config = ref.read(databaseServiceProvider).apiConfigBox.get(character.apiConfigId);
+      final config = ref
+          .read(databaseServiceProvider)
+          .apiConfigBox
+          .get(character.apiConfigId);
       if (config != null) return config;
     }
     if (character.apiKey.isNotEmpty && character.apiProvider.isNotEmpty) {
@@ -343,26 +467,39 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     return null;
   }
 
-  List<Map<String, dynamic>> _buildApiMessages(AICharacter character, List<Message> context, String? userMessage, {bool isAutoChat = false}) {
+  List<Map<String, dynamic>> _buildApiMessages(
+      AICharacter character, List<Message> context, String? userMessage,
+      {bool isAutoChat = false}) {
     final msgs = <Map<String, dynamic>>[];
 
     if (_groupMemory != null && _groupMemory!.topicSummary.isNotEmpty) {
-      msgs.add({'role': 'system', 'content': '【群聊记忆】${_groupMemory!.topicSummary}'});
+      msgs.add(
+          {'role': 'system', 'content': '【群聊记忆】${_groupMemory!.topicSummary}'});
     }
 
     if (isAutoChat) {
-      final otherCharacters = _characters.where((c) => c.id != character.id).toList();
+      final otherCharacters =
+          _characters.where((c) => c.id != character.id).toList();
       if (otherCharacters.isNotEmpty) {
-        final charInfo = otherCharacters.map((c) => '${c.name}(${c.role}, ${c.age}岁)').join('、');
-        msgs.add({'role': 'system', 'content': '现在群聊中正在自动对话。在场的其他角色：$charInfo。请自然地参与对话，可以回应其他人的发言。'});
+        final charInfo = otherCharacters
+            .map((c) => '${c.name}(${c.role}, ${c.age}岁)')
+            .join('、');
+        msgs.add({
+          'role': 'system',
+          'content': '现在群聊中正在自动对话。在场的其他角色：$charInfo。请自然地参与对话，可以回应其他人的发言。'
+        });
       }
     }
 
     msgs.add({'role': 'system', 'content': character.systemPrompt});
 
-    final otherCharacters = _characters.where((c) => c.id != character.id).toList();
+    final otherCharacters =
+        _characters.where((c) => c.id != character.id).toList();
     if (otherCharacters.isNotEmpty) {
-      final characterInfo = otherCharacters.map((c) => '${c.name}(${c.role}, ${c.age}岁, ${c.personalityTags.join('/')})').join('；');
+      final characterInfo = otherCharacters
+          .map((c) =>
+              '${c.name}(${c.role}, ${c.age}岁, ${c.personalityTags.join('/')})')
+          .join('；');
       msgs.add({'role': 'system', 'content': '群聊中的其他角色：$characterInfo'});
     }
 
@@ -383,8 +520,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     for (final m in historyMessages.take(15)) {
       final role = m.senderType == 'user' ? 'user' : 'assistant';
       if (m.isMention && m.mentionedAiIds.isNotEmpty) {
-        final mentionedNames = m.mentionedAiIds.map((id) => nameById[id] ?? id).toList();
-        msgs.add({'role': role, 'content': '${m.content} (提到: ${mentionedNames.join(', ')})'});
+        final mentionedNames =
+            m.mentionedAiIds.map((id) => nameById[id] ?? id).toList();
+        msgs.add({
+          'role': role,
+          'content': '${m.content} (提到: ${mentionedNames.join(', ')})'
+        });
       } else {
         msgs.add({'role': role, 'content': m.content});
       }
@@ -434,7 +575,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
     final result = await _chatApi.sendChatMessage(
       apiKey: config.apiKey,
-      provider: ApiProvider.values.firstWhere((p) => p.name == config.provider, orElse: () => ApiProvider.deepseek),
+      provider: ApiProvider.values.firstWhere((p) => p.name == config.provider,
+          orElse: () => ApiProvider.deepseek),
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
       messages: msgs,
@@ -457,7 +599,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final today = DateTime(now.year, now.month, now.day);
     final lastReplyDay = character.lastReplyTimestamp == null
         ? null
-        : DateTime(character.lastReplyTimestamp!.year, character.lastReplyTimestamp!.month, character.lastReplyTimestamp!.day);
+        : DateTime(
+            character.lastReplyTimestamp!.year,
+            character.lastReplyTimestamp!.month,
+            character.lastReplyTimestamp!.day);
 
     if (lastReplyDay == null || lastReplyDay != today) {
       character.hourlyReplyCount = 0;
@@ -545,7 +690,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
               return InkWell(
                 onTap: () => _insertMention(c),
                 child: Padding(
-                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
                   child: Row(
                     children: [
                       Container(
@@ -558,15 +704,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                         child: Center(
                           child: Text(
                             c.avatar.isNotEmpty ? c.avatar : c.name[0],
-                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: pColor),
+                            style: TextStyle(
+                                fontSize: 13,
+                                fontWeight: FontWeight.w600,
+                                color: pColor),
                           ),
                         ),
                       ),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: Text(c.name, style: TextStyle(fontSize: 14), overflow: TextOverflow.ellipsis),
+                        child: Text(c.name,
+                            style: const TextStyle(fontSize: 14),
+                            overflow: TextOverflow.ellipsis),
                       ),
-                      Text(c.role, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                      Text(c.role,
+                          style: TextStyle(
+                              fontSize: 12, color: cs.onSurfaceVariant)),
                     ],
                   ),
                 ),
@@ -585,10 +738,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     int atPos = text.lastIndexOf('@', cursorPos - 1);
     if (atPos < 0) atPos = 0;
 
-    final newText = '${text.substring(0, atPos)}@${character.name} ${text.substring(cursorPos)}';
+    final newText =
+        '${text.substring(0, atPos)}@${character.name} ${text.substring(cursorPos)}';
     _textController.value = TextEditingValue(
       text: newText,
-      selection: TextSelection.collapsed(offset: atPos + character.name.length + 2),
+      selection:
+          TextSelection.collapsed(offset: atPos + character.name.length + 2),
     );
 
     _hideMentionOverlay();
@@ -635,13 +790,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final chinesePattern = RegExp(r'@([一-鿿]{1,10})');
     for (final match in chinesePattern.allMatches(content)) {
       final name = match.group(1)!;
-      final found = _characters.firstWhere((c) => c.name == name, orElse: () => _characters.first);
+      final found = _characters.firstWhere((c) => c.name == name,
+          orElse: () => _characters.first);
       mentionedIds.add(found.id);
     }
     final englishPattern = RegExp(r'@(\w+)');
     for (final match in englishPattern.allMatches(content)) {
       final name = match.group(1)!;
-      final found = _characters.firstWhere((c) => c.name == name, orElse: () => _characters.first);
+      final found = _characters.firstWhere((c) => c.name == name,
+          orElse: () => _characters.first);
       mentionedIds.add(found.id);
     }
     return mentionedIds;
@@ -652,14 +809,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     if (eligible.isEmpty) return null;
 
     if (mentionedIds != null && mentionedIds.isNotEmpty) {
-      final priorityChars = eligible.where((c) => mentionedIds.contains(c.id)).toList();
+      final priorityChars =
+          eligible.where((c) => mentionedIds.contains(c.id)).toList();
       if (priorityChars.isNotEmpty) {
         return _shuffle(priorityChars).first;
       }
     }
 
     if (_pendingMentionedIds.isNotEmpty) {
-      final pendingEligible = eligible.where((c) => _pendingMentionedIds.contains(c.id)).toList();
+      final pendingEligible =
+          eligible.where((c) => _pendingMentionedIds.contains(c.id)).toList();
       if (pendingEligible.isNotEmpty) {
         return _shuffle(pendingEligible).first;
       }
@@ -682,7 +841,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   Color _senderColor(AICharacter sender) {
     final providerName = sender.apiConfigId.isNotEmpty
-        ? (ref.read(databaseServiceProvider).apiConfigBox.get(sender.apiConfigId)?.provider ?? sender.apiProvider)
+        ? (ref
+                .read(databaseServiceProvider)
+                .apiConfigBox
+                .get(sender.apiConfigId)
+                ?.provider ??
+            sender.apiProvider)
         : sender.apiProvider;
     return providerColor(providerName);
   }
@@ -710,7 +874,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           backgroundColor: cs.surface,
           surfaceTintColor: Colors.transparent,
           elevation: 0,
-          title: Text(_group?.name ?? '加载中...', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18, color: cs.onSurface)),
+          title: Text(_group?.name ?? '加载中...',
+              style: TextStyle(
+                  fontWeight: FontWeight.w700,
+                  fontSize: 18,
+                  color: cs.onSurface)),
         ),
         body: const Center(child: CircularProgressIndicator()),
       );
@@ -725,12 +893,26 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         title: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Text(_group?.name ?? '群聊', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 18, color: cs.onSurface)),
+            Text(_group?.name ?? '群聊',
+                style: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    fontSize: 18,
+                    color: cs.onSurface)),
             if (_groupMemory != null && _groupMemory!.topicSummary.isNotEmpty)
-              Text(_groupMemory!.topicSummary, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+              Text(_groupMemory!.topicSummary,
+                  style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
           ],
         ),
         actions: [
+          IconButton(
+            icon: const Icon(Icons.upload_rounded, size: 22),
+            onPressed: () {
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => ExportPage(initialGroupId: widget.groupId),
+              ));
+            },
+            tooltip: '导出本群对话',
+          ),
           IconButton(
             icon: const Icon(Icons.group_rounded, size: 22),
             onPressed: () {
@@ -755,14 +937,33 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                     itemCount: _messages.length,
                     itemBuilder: (context, index) {
                       final message = _messages[index];
-                      final sender = message.senderType == 'user' ? null : _characters.firstWhere(
-                        (c) => c.id == message.senderId,
-                        orElse: () => _characters.isNotEmpty ? _characters.first : AICharacter(
-                          name: '未知', avatar: '?', age: 0, role: '', personalityTags: const [],
-                          systemPrompt: '', apiKey: '', apiProvider: 'deepseek', apiConfigId: '',
-                        ),
+                      final sender = message.senderType == 'user'
+                          ? null
+                          : _characters.firstWhere(
+                              (c) => c.id == message.senderId,
+                              orElse: () => _characters.isNotEmpty
+                                  ? _characters.first
+                                  : AICharacter(
+                                      name: '未知',
+                                      avatar: '?',
+                                      age: 0,
+                                      role: '',
+                                      personalityTags: const [],
+                                      systemPrompt: '',
+                                      apiKey: '',
+                                      apiProvider: 'deepseek',
+                                      apiConfigId: '',
+                                    ),
+                            );
+                      final isStreaming = _streamingMessage != null &&
+                          _streamingMessage!.id == message.id;
+                      return _MessageBubble(
+                        message: message,
+                        sender: sender,
+                        characters: _characters,
+                        cs: cs,
+                        isStreaming: isStreaming,
                       );
-                      return _MessageBubble(message: message, sender: sender, characters: _characters, cs: cs);
                     },
                   ),
           ),
@@ -770,7 +971,28 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               alignment: Alignment.centerLeft,
-              child: Text('AI 正在回复...', style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+              child: Row(
+                children: [
+                  Text(
+                    _isStreaming ? 'AI 正在生成...' : 'AI 正在回复...',
+                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                  ),
+                  if (_isStreaming) ...[
+                    const SizedBox(width: 10),
+                    // 「停止生成」按钮：取消当前流订阅
+                    TextButton.icon(
+                      onPressed: _stopStreaming,
+                      icon: const Icon(Icons.stop_rounded, size: 16),
+                      label: const Text('停止生成'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: cs.error,
+                        visualDensity: VisualDensity.compact,
+                        padding: EdgeInsets.zero,
+                      ),
+                    ),
+                  ],
+                ],
+              ),
             ),
           _buildInputArea(cs),
         ],
@@ -783,11 +1005,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.chat_bubble_outline_rounded, size: 64, color: cs.primary.withOpacity(0.3)),
+          Icon(Icons.chat_bubble_outline_rounded,
+              size: 64, color: cs.primary.withOpacity(0.3)),
           const SizedBox(height: 24),
-          Text('开始对话吧', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: cs.onSurface)),
+          Text('开始对话吧',
+              style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w600,
+                  color: cs.onSurface)),
           const SizedBox(height: 8),
-          Text('输入消息，AI 角色会自动回复', style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant)),
+          Text('输入消息，AI 角色会自动回复',
+              style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant)),
         ],
       ),
     );
@@ -804,7 +1032,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text('群聊成员', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: cs.onSurface)),
+          Text('群聊成员',
+              style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: cs.onSurface)),
           const SizedBox(height: 16),
           ..._characters.map((c) {
             final color = _senderColor(c);
@@ -813,21 +1045,34 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
               child: Row(
                 children: [
                   Container(
-                    width: 40, height: 40,
+                    width: 40,
+                    height: 40,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
                       color: color.withOpacity(0.12),
-                      border: Border.all(color: color.withOpacity(0.25), width: 1.5),
+                      border: Border.all(
+                          color: color.withOpacity(0.25), width: 1.5),
                     ),
-                    child: Center(child: Text(c.avatar.isNotEmpty ? c.avatar : c.name[0], style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: color))),
+                    child: Center(
+                        child: Text(c.avatar.isNotEmpty ? c.avatar : c.name[0],
+                            style: TextStyle(
+                                fontSize: 16,
+                                fontWeight: FontWeight.w600,
+                                color: color))),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text(c.name, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: cs.onSurface)),
-                        Text('${c.role} · ${c.age}岁', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+                        Text(c.name,
+                            style: TextStyle(
+                                fontSize: 15,
+                                fontWeight: FontWeight.w600,
+                                color: cs.onSurface)),
+                        Text('${c.role} · ${c.age}岁',
+                            style: TextStyle(
+                                fontSize: 13, color: cs.onSurfaceVariant)),
                       ],
                     ),
                   ),
@@ -844,27 +1089,45 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     return CompositedTransformTarget(
       link: _mentionLayerLink,
       child: Container(
-        padding: EdgeInsets.only(left: 16, right: 16, top: 12, bottom: MediaQuery.of(context).padding.bottom + 12),
+        padding: EdgeInsets.only(
+            left: 16,
+            right: 16,
+            top: 12,
+            bottom: MediaQuery.of(context).padding.bottom + 12),
         decoration: BoxDecoration(
           color: cs.surface,
-          border: Border(top: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
-          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.25), blurRadius: 14, offset: const Offset(0, -4))],
+          border: Border(
+              top: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
+          boxShadow: [
+            BoxShadow(
+                color: Colors.black.withOpacity(0.25),
+                blurRadius: 14,
+                offset: const Offset(0, -4))
+          ],
         ),
         child: Row(
           children: [
             Expanded(
               child: ConstrainedBox(
-                constraints: const BoxConstraints(minHeight: 40, maxHeight: 120),
+                constraints:
+                    const BoxConstraints(minHeight: 40, maxHeight: 120),
                 child: TextField(
                   controller: _textController,
                   decoration: InputDecoration(
                     hintText: '输入消息，@ 提到角色...',
-                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.outlineVariant)),
-                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.outlineVariant)),
-                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.primary, width: 1.5)),
+                    border: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide(color: cs.outlineVariant)),
+                    enabledBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide(color: cs.outlineVariant)),
+                    focusedBorder: OutlineInputBorder(
+                        borderRadius: BorderRadius.circular(24),
+                        borderSide: BorderSide(color: cs.primary, width: 1.5)),
                     filled: true,
                     fillColor: cs.surfaceContainerHighest,
-                    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    contentPadding: const EdgeInsets.symmetric(
+                        horizontal: 20, vertical: 10),
                     isDense: true,
                   ),
                   maxLines: null,
@@ -876,9 +1139,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             ),
             const SizedBox(width: 8),
             IconButton(
-              icon: const Icon(Icons.send_rounded, size: 22),
-              color: (_isAiReplying || _isInputEmpty) ? cs.onSurfaceVariant.withOpacity(0.4) : cs.primary,
-              onPressed: (_isAiReplying || _isInputEmpty) ? null : _sendMessage,
+              icon: Icon(_isStreaming ? Icons.stop_rounded : Icons.send_rounded,
+                  size: 22),
+              color: _isStreaming
+                  ? cs.error
+                  : ((_isAiReplying || _isInputEmpty)
+                      ? cs.onSurfaceVariant.withOpacity(0.4)
+                      : cs.primary),
+              // 流式生成中显示「停止生成」；否则仍是发送（受 _isAiReplying / 空输入门控）
+              onPressed: _isStreaming
+                  ? _stopStreaming
+                  : ((_isAiReplying || _isInputEmpty) ? null : _sendMessage),
+              tooltip: _isStreaming ? '停止生成' : '发送',
             ),
           ],
         ),
@@ -892,8 +1164,15 @@ class _MessageBubble extends StatelessWidget {
   final AICharacter? sender;
   final List<AICharacter> characters;
   final ColorScheme cs;
+  final bool isStreaming;
 
-  const _MessageBubble({required this.message, this.sender, required this.characters, required this.cs});
+  const _MessageBubble({
+    required this.message,
+    this.sender,
+    required this.characters,
+    required this.cs,
+    this.isStreaming = false,
+  });
 
   @override
   Widget build(BuildContext context) {
@@ -902,44 +1181,65 @@ class _MessageBubble extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
       child: Row(
-        mainAxisAlignment: isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
+        mainAxisAlignment:
+            isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
           if (!isUser && sender != null) ...[
             CircleAvatar(
               radius: 20,
               backgroundColor: _senderColor(sender!).withOpacity(0.12),
-              child: Text(sender!.avatar.isNotEmpty ? sender!.avatar : sender!.name[0], style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _senderColor(sender!))),
+              child: Text(
+                  sender!.avatar.isNotEmpty ? sender!.avatar : sender!.name[0],
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: _senderColor(sender!))),
             ),
             const SizedBox(width: 8),
           ],
           Flexible(
             child: Column(
-              crossAxisAlignment: isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
+              crossAxisAlignment:
+                  isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
               children: [
                 if (!isUser && sender != null)
                   Padding(
                     padding: const EdgeInsets.only(left: 4, bottom: 4),
-                    child: Text(sender!.name, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant)),
+                    child: Text(sender!.name,
+                        style: TextStyle(
+                            fontSize: 12,
+                            fontWeight: FontWeight.w600,
+                            color: cs.onSurfaceVariant)),
                   ),
                 Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
+                  padding:
+                      const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                   decoration: BoxDecoration(
                     color: isUser ? null : cs.surfaceContainer,
                     gradient: isUser ? AppTheme.primaryGradient : null,
-                    border: isUser ? null : Border.all(color: cs.outlineVariant.withOpacity(0.6)),
+                    border: isUser
+                        ? null
+                        : Border.all(color: cs.outlineVariant.withOpacity(0.6)),
                     borderRadius: BorderRadius.circular(18).copyWith(
-                      bottomLeft: isUser ? const Radius.circular(18) : const Radius.circular(4),
-                      bottomRight: isUser ? const Radius.circular(4) : const Radius.circular(18),
+                      bottomLeft: isUser
+                          ? const Radius.circular(18)
+                          : const Radius.circular(4),
+                      bottomRight: isUser
+                          ? const Radius.circular(4)
+                          : const Radius.circular(18),
                     ),
                   ),
                   child: _buildContent(message, sender, isUser, cs),
                 ),
                 Padding(
-                  padding: EdgeInsets.only(top: 4, left: isUser ? 0 : 4, right: !isUser ? 0 : 4),
+                  padding: EdgeInsets.only(
+                      top: 4, left: isUser ? 0 : 4, right: !isUser ? 0 : 4),
                   child: Text(
                     _ChatRoomPageState._formatTime(message.timestamp),
-                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant.withOpacity(0.7)),
+                    style: TextStyle(
+                        fontSize: 11,
+                        color: cs.onSurfaceVariant.withOpacity(0.7)),
                   ),
                 ),
               ],
@@ -951,35 +1251,114 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
-  Widget _buildContent(Message message, AICharacter? sender, bool isUser, ColorScheme cs) {
+  Widget _buildContent(
+      Message message, AICharacter? sender, bool isUser, ColorScheme cs) {
     final textColor = isUser ? cs.onPrimary : cs.onSurface;
     final content = message.content.replaceAll('\\n', '\n');
 
-    if (message.isMention && message.mentionedAiIds.isNotEmpty && sender != null) {
+    Widget base;
+    if (message.isMention &&
+        message.mentionedAiIds.isNotEmpty &&
+        sender != null) {
       final mentionNames = message.mentionedAiIds.map((id) {
         return characters.firstWhere((c) => c.id == id, orElse: () {
-          return AICharacter(name: id, avatar: '?', age: 0, role: '', personalityTags: const [], systemPrompt: '', apiKey: '', apiProvider: 'deepseek', apiConfigId: '');
+          return AICharacter(
+              name: id,
+              avatar: '?',
+              age: 0,
+              role: '',
+              personalityTags: const [],
+              systemPrompt: '',
+              apiKey: '',
+              apiProvider: 'deepseek',
+              apiConfigId: '');
         }).name;
       }).toList();
-      return Column(
+      base = Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(content, style: TextStyle(fontSize: 15, color: textColor, height: 1.4)),
+          Text(content,
+              style: TextStyle(fontSize: 15, color: textColor, height: 1.4)),
           if (mentionNames.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 6),
               child: Wrap(
                 spacing: 4,
                 children: mentionNames.map((name) {
-                  return Chip(label: Text(name, style: const TextStyle(fontSize: 11)), visualDensity: VisualDensity.compact, padding: EdgeInsets.zero, materialTapTargetSize: MaterialTapTargetSize.shrinkWrap);
+                  return Chip(
+                      label: Text(name, style: const TextStyle(fontSize: 11)),
+                      visualDensity: VisualDensity.compact,
+                      padding: EdgeInsets.zero,
+                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap);
                 }).toList(),
               ),
             ),
         ],
       );
+    } else {
+      base = Text(content,
+          style: TextStyle(fontSize: 15, color: textColor, height: 1.4));
     }
-    return Text(content, style: TextStyle(fontSize: 15, color: textColor, height: 1.4));
+
+    // 正在流式生成时，在内容末尾追加一个闪烁光标，营造「打字机」观感。
+    if (isStreaming) {
+      return Row(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.end,
+        children: [
+          Flexible(child: base),
+          const SizedBox(width: 2),
+          _BlinkingCursor(color: textColor),
+        ],
+      );
+    }
+    return base;
   }
 
   Color _senderColor(AICharacter sender) => providerColor(sender.apiProvider);
+}
+
+/// 流式生成时显示在气泡末尾的闪烁光标（打字机效果）。
+///
+/// 自带 AnimationController 循环播放透明度，不依赖外部状态，自管理生命周期。
+class _BlinkingCursor extends StatefulWidget {
+  final Color color;
+
+  const _BlinkingCursor({required this.color});
+
+  @override
+  State<_BlinkingCursor> createState() => _BlinkingCursorState();
+}
+
+class _BlinkingCursorState extends State<_BlinkingCursor>
+    with SingleTickerProviderStateMixin {
+  late final AnimationController _controller;
+
+  @override
+  void initState() {
+    super.initState();
+    // 600ms 一个周期，reverse 实现呼吸式闪烁
+    _controller = AnimationController(
+      vsync: this,
+      duration: const Duration(milliseconds: 600),
+    )..repeat(reverse: true);
+  }
+
+  @override
+  void dispose() {
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return FadeTransition(
+      opacity: _controller,
+      child: Text(
+        '▌',
+        style: TextStyle(
+            fontSize: 15, fontWeight: FontWeight.w600, color: widget.color),
+      ),
+    );
+  }
 }
