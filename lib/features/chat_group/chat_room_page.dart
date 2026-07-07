@@ -45,7 +45,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   // AI 自主聊天
   Timer? _autoChatTimer;
-  bool _isAutoChatEnabled = true;
+  final bool _isAutoChatEnabled = true;
   int _autoChatRoundCount = 0;
   final int _maxAutoChatRounds = 5;
   final Random _autoChatRandom = Random();
@@ -107,6 +107,52 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     });
 
     _scrollToBottom();
+
+    if (_isAutoChatEnabled && _characters.isNotEmpty) {
+      Future.delayed(const Duration(seconds: 3), _startAutoChat);
+    }
+  }
+
+  void _startAutoChat() {
+    _autoChatTimer?.cancel();
+    _autoChatTimer = Timer.periodic(
+      Duration(seconds: 5 + _autoChatRandom.nextInt(4)),
+      (_) => _tryAutoChatRound(),
+    );
+  }
+
+  void _stopAutoChat() {
+    _autoChatTimer?.cancel();
+    _autoChatTimer = null;
+    _autoChatRoundCount = 0;
+  }
+
+  Future<void> _tryAutoChatRound() async {
+    if (_isAiReplying || _characters.isEmpty) return;
+    if (_autoChatRoundCount >= _maxAutoChatRounds) {
+      _stopAutoChat();
+      Future.delayed(const Duration(seconds: 10), _startAutoChat);
+      return;
+    }
+
+    final speakers = <AICharacter>[];
+    for (final c in _characters) {
+      if (_isEligibleToReply(c) && _autoChatRandom.nextDouble() < 0.2) {
+        speakers.add(c);
+      }
+    }
+
+    if (speakers.isEmpty) return;
+
+    setState(() => _autoChatRoundCount++);
+
+    for (final speaker in speakers.take(2)) {
+      if (!_isEligibleToReply(speaker)) continue;
+      await _generateAiReply(speaker, _messages.toList(), null, isAutoChat: true);
+      await _delay();
+    }
+
+    await _maybeUpdateMemory();
   }
 
   String _memoryPeriodKey(DateTime now) {
@@ -128,11 +174,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   Future<void> _sendMessage() async {
+    _hideMentionOverlay();
     final text = _textController.text.trim();
     if (text.isEmpty || _isAiReplying) return;
 
     _textController.clear();
     final messenger = ScaffoldMessenger.of(context);
+
+    final mentionedIds = _parseMentions(text);
+    for (final id in mentionedIds) {
+      if (!_pendingMentionedIds.contains(id)) {
+        _pendingMentionedIds.add(id);
+      }
+    }
 
     await _appendMessage(Message(
       groupId: widget.groupId,
@@ -141,50 +195,75 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       content: text,
     ));
 
+    _autoChatRoundCount = 0;
+
     if (_characters.isEmpty) {
       if (mounted) messenger.showSnackBar(const SnackBar(content: Text('该群聊没有活跃的角色'), behavior: SnackBarBehavior.floating));
       return;
     }
 
-    await _runAiRound(userMessage: text);
+    await _runAiRound(userMessage: text, mentionedIds: mentionedIds);
   }
 
-  Future<void> _runAiRound({String? userMessage}) async {
-    if (_consecutiveRound >= _maxAutoRounds) {
+  Future<void> _runAiRound({String? userMessage, List<String>? mentionedIds, bool isAutoChat = false}) async {
+    if (!isAutoChat && _consecutiveRound >= _maxAutoRounds) {
       setState(() => _isAiReplying = false);
+      if (_pendingMentionedIds.isNotEmpty) {
+        _pendingMentionedIds.clear();
+      }
       return;
     }
 
     setState(() {
       _isAiReplying = true;
-      _consecutiveRound++;
+      if (!isAutoChat) _consecutiveRound++;
     });
 
     final recentMessages = _messages.length > 20 ? _messages.sublist(_messages.length - 20) : _messages.toList();
-    final eligibleCharacters = _characters.where(_isEligibleToReply).toList();
-    if (eligibleCharacters.isEmpty) {
+
+    final character = _selectReplyCharacter(mentionedIds);
+    if (character == null) {
       setState(() => _isAiReplying = false);
       return;
     }
 
-    final aiCount = min(_random.nextInt(2) + 1, eligibleCharacters.length);
-    final selectedAiCharacters = _shuffle(eligibleCharacters).take(aiCount).toList();
+    final wasPendingReply = _pendingMentionedIds.contains(character.id);
 
-    for (final character in selectedAiCharacters) {
-      if (!_isEligibleToReply(character)) continue;
-      await _generateAiReply(character, recentMessages, userMessage);
-      await _delay();
+    await _generateAiReply(character, recentMessages, userMessage, isAutoChat: isAutoChat);
+    await _delay();
+
+    if (wasPendingReply) {
+      _pendingMentionedIds.remove(character.id);
+    }
+
+    if (mentionedIds != null && mentionedIds.isNotEmpty && !mentionedIds.contains(character.id) && _pendingMentionedIds.isNotEmpty) {
+      final notMentionedPending = _pendingMentionedIds.where((id) => !mentionedIds.contains(id)).toList();
+      if (notMentionedPending.isNotEmpty) {
+        final proxyId = notMentionedPending.first;
+        final proxyChar = _characters.firstWhere((c) => c.id == proxyId, orElse: () => _characters.first);
+        if (_isEligibleToReply(proxyChar)) {
+          final targetName = proxyChar.name;
+          await _appendMessage(Message(
+            groupId: widget.groupId,
+            senderId: proxyChar.id,
+            senderType: 'ai',
+            content: '$targetName 刚才没看到，我帮你@他一下 @$targetName',
+            isMention: true,
+            mentionedAiIds: [proxyId],
+          ));
+        }
+      }
     }
 
     await _maybeUpdateMemory();
 
     setState(() {
       _isAiReplying = false;
-      _consecutiveRound = 0;
+      if (!isAutoChat) _consecutiveRound = 0;
     });
   }
 
-  Future<void> _generateAiReply(AICharacter character, List<Message> context, String? userMessage) async {
+  Future<void> _generateAiReply(AICharacter character, List<Message> context, String? userMessage, {bool isAutoChat = false}) async {
     final config = _resolveApiConfig(character);
     if (config == null) {
       await _appendMessage(Message(
@@ -196,7 +275,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       return;
     }
 
-    final apiMessages = _buildApiMessages(character, context, userMessage);
+    final apiMessages = _buildApiMessages(character, context, userMessage, isAutoChat: isAutoChat);
     final result = await _chatApi.sendChatMessage(
       apiKey: config.apiKey,
       provider: ApiProvider.values.firstWhere((p) => p.name == config.provider, orElse: () => ApiProvider.deepseek),
@@ -240,14 +319,32 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     if (character.apiConfigId.isNotEmpty) {
       return ref.read(databaseServiceProvider).apiConfigBox.get(character.apiConfigId);
     }
+    if (character.apiKey.isNotEmpty && character.apiProvider.isNotEmpty) {
+      return ApiConfig(
+        id: 'legacy_${character.id}',
+        name: '${character.name} 原有配置',
+        provider: character.apiProvider,
+        modelName: character.modelName,
+        apiKey: character.apiKey,
+        customBaseUrl: character.customBaseUrl,
+      );
+    }
     return null;
   }
 
-  List<Map<String, dynamic>> _buildApiMessages(AICharacter character, List<Message> context, String? userMessage) {
+  List<Map<String, dynamic>> _buildApiMessages(AICharacter character, List<Message> context, String? userMessage, {bool isAutoChat = false}) {
     final msgs = <Map<String, dynamic>>[];
 
     if (_groupMemory != null && _groupMemory!.topicSummary.isNotEmpty) {
       msgs.add({'role': 'system', 'content': '【群聊记忆】${_groupMemory!.topicSummary}'});
+    }
+
+    if (isAutoChat) {
+      final otherCharacters = _characters.where((c) => c.id != character.id).toList();
+      if (otherCharacters.isNotEmpty) {
+        final charInfo = otherCharacters.map((c) => '${c.name}(${c.role}, ${c.age}岁)').join('、');
+        msgs.add({'role': 'system', 'content': '现在群聊中正在自动对话。在场的其他角色：$charInfo。请自然地参与对话，可以回应其他人的发言。'});
+      }
     }
 
     msgs.add({'role': 'system', 'content': character.systemPrompt});
@@ -260,18 +357,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
     final historyMessages = <Message>[];
     for (final m in context) {
-      if (m.senderType == 'user') {
+      if (isAutoChat) {
         historyMessages.add(m);
-      } else if (m.senderType == 'ai' && m.senderId == character.id) {
-        historyMessages.add(m);
+      } else {
+        if (m.senderType == 'user') {
+          historyMessages.add(m);
+        } else if (m.senderType == 'ai' && m.senderId == character.id) {
+          historyMessages.add(m);
+        }
       }
     }
 
-    for (final m in historyMessages.take(10)) {
+    final nameById = {for (final c in _characters) c.id: c.name};
+    for (final m in historyMessages.take(15)) {
       final role = m.senderType == 'user' ? 'user' : 'assistant';
       if (m.isMention && m.mentionedAiIds.isNotEmpty) {
         final mentionedNames = m.mentionedAiIds.map((id) {
-          return _characters.firstWhere((c) => c.id == id, orElse: () => _characters.first).name;
+          return nameById[id] ?? id;
         }).toList();
         msgs.add({'role': role, 'content': '${m.content} (提到: ${mentionedNames.join(', ')})'});
       } else {
@@ -377,19 +479,150 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     _mentionOverlay?.remove();
     _mentionOverlay = null;
     _showMentionPopup = false;
+    _filteredMentionMembers = [];
   }
 
-  /// 解析消息内容中的 @成员名，返回被 @ 的 AI ID 列表
+  void _showMentionOverlay(Offset globalPosition) {
+    if (_showMentionPopup) return;
+    _showMentionPopup = true;
+
+    _mentionOverlay = OverlayEntry(
+      builder: (context) {
+        final cs = Theme.of(context).colorScheme;
+        return Positioned(
+          width: 220,
+          child: CompositedTransformFollower(
+            link: _mentionLayerLink,
+            showWhenUnlinked: false,
+            offset: const Offset(0, -8),
+            child: Material(
+              elevation: 6,
+              borderRadius: BorderRadius.circular(12),
+              color: cs.surface,
+              child: _buildMentionPopupContent(cs),
+            ),
+          ),
+        );
+      },
+    );
+
+    final overlay = Overlay.of(context);
+    overlay.insert(_mentionOverlay!);
+  }
+
+  Widget _buildMentionPopupContent(ColorScheme cs) {
+    return Container(
+      constraints: const BoxConstraints(maxHeight: 200),
+      child: Builder(
+        builder: (ctx) {
+          if (_filteredMentionMembers.isEmpty) {
+            return Padding(
+              padding: const EdgeInsets.all(16),
+              child: Text('无匹配角色', style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant)),
+            );
+          }
+          return ListView.builder(
+            shrinkWrap: true,
+            itemCount: _filteredMentionMembers.length,
+            itemBuilder: (ctx2, i) {
+              final c = _filteredMentionMembers[i];
+              final pColor = _senderColor(c);
+              return InkWell(
+                onTap: () => _insertMention(c),
+                child: Padding(
+                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+                  child: Row(
+                    children: [
+                      Container(
+                        width: 32,
+                        height: 32,
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: pColor.withOpacity(0.12),
+                        ),
+                        child: Center(
+                          child: Text(
+                            c.avatar.isNotEmpty ? c.avatar : c.name[0],
+                            style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600, color: pColor),
+                          ),
+                        ),
+                      ),
+                      const SizedBox(width: 10),
+                      Expanded(
+                        child: Text(c.name, style: TextStyle(fontSize: 14, color: cs.onSurface), overflow: TextOverflow.ellipsis),
+                      ),
+                      Text(c.role, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                    ],
+                  ),
+                ),
+              );
+            },
+          );
+        },
+      ),
+    );
+  }
+
+  void _insertMention(AICharacter character) {
+    final text = _textController.text;
+    final cursorPos = _textController.selection.baseOffset;
+
+    int atPos = text.lastIndexOf('@', cursorPos - 1);
+    if (atPos < 0) atPos = 0;
+
+    final newText = '${text.substring(0, atPos)}@${character.name} ${text.substring(cursorPos)}';
+    _textController.value = TextEditingValue(
+      text: newText,
+      selection: TextSelection.collapsed(offset: atPos + character.name.length + 2),
+    );
+
+    _hideMentionOverlay();
+  }
+
+  void _handleTextChanged(String text) {
+    if (!_showMentionPopup) {
+      if (text.contains('@')) {
+        _filteredMentionMembers = List.from(_characters);
+        _showMentionOverlay(Offset.zero);
+        return;
+      }
+      return;
+    }
+
+    final cursorPos = _textController.selection.baseOffset;
+    final textBeforeCursor = text.substring(0, cursorPos);
+    final atIndex = textBeforeCursor.lastIndexOf('@');
+
+    if (atIndex < 0) {
+      _hideMentionOverlay();
+      return;
+    }
+
+    final query = textBeforeCursor.substring(atIndex + 1);
+    if (query.contains(' ')) {
+      _hideMentionOverlay();
+      return;
+    }
+
+    _filteredMentionMembers = query.isEmpty
+        ? List.from(_characters)
+        : _characters.where((c) => c.name.contains(query)).toList();
+
+    if (_mentionOverlay != null) {
+      _mentionOverlay!.markNeedsBuild();
+    }
+  }
+
   List<String> _parseMentions(String content) {
     final mentionedIds = <String>[];
-    // 匹配中文名 @某人
+    if (_characters.isEmpty) return mentionedIds;
+
     final chinesePattern = RegExp(r'@([一-鿿]{1,10})');
     for (final match in chinesePattern.allMatches(content)) {
       final name = match.group(1)!;
       final found = _characters.firstWhere((c) => c.name == name, orElse: () => _characters.first);
       mentionedIds.add(found.id);
     }
-    // 处理英文字符名
     final englishPattern = RegExp(r'@(\w+)');
     for (final match in englishPattern.allMatches(content)) {
       final name = match.group(1)!;
@@ -399,12 +632,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     return mentionedIds;
   }
 
-  /// 选择回复者：优先选被 @ 且符合条件的角色
   AICharacter? _selectReplyCharacter(List<String>? mentionedIds) {
     final eligible = _characters.where(_isEligibleToReply).toList();
     if (eligible.isEmpty) return null;
 
-    // 优先选被 @ 的角色
     if (mentionedIds != null && mentionedIds.isNotEmpty) {
       final priorityChars = eligible.where((c) => mentionedIds.contains(c.id)).toList();
       if (priorityChars.isNotEmpty) {
@@ -412,7 +643,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       }
     }
 
-    // 其次选待回应队列中的角色
     if (_pendingMentionedIds.isNotEmpty) {
       final pendingEligible = eligible.where((c) => _pendingMentionedIds.contains(c.id)).toList();
       if (pendingEligible.isNotEmpty) {
@@ -420,7 +650,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       }
     }
 
-    // 最后随机选
     return _shuffle(eligible).first;
   }
 
@@ -581,38 +810,42 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   Widget _buildInputArea(ColorScheme cs) {
-    return Container(
-      padding: EdgeInsets.only(left: 16, right: 16, top: 12, bottom: MediaQuery.of(context).padding.bottom + 12),
-      decoration: BoxDecoration(
-        color: cs.surface,
-        border: Border(top: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
-      ),
-      child: Row(
-        children: [
-          Expanded(
-            child: TextField(
-              controller: _textController,
-              decoration: InputDecoration(
-                hintText: '输入消息，@ 提到角色...',
-                border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.outlineVariant)),
-                enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.outlineVariant)),
-                focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.primary, width: 1.5)),
-                filled: true,
-                fillColor: cs.surfaceContainerHighest.withOpacity(0.4),
-                contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                isDense: true,
+    return CompositedTransformTarget(
+      link: _mentionLayerLink,
+      child: Container(
+        padding: EdgeInsets.only(left: 16, right: 16, top: 12, bottom: MediaQuery.of(context).padding.bottom + 12),
+        decoration: BoxDecoration(
+          color: cs.surface,
+          border: Border(top: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
+        ),
+        child: Row(
+          children: [
+            Expanded(
+              child: TextField(
+                controller: _textController,
+                decoration: InputDecoration(
+                  hintText: '输入消息，@ 提到角色...',
+                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.outlineVariant)),
+                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.outlineVariant)),
+                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.primary, width: 1.5)),
+                  filled: true,
+                  fillColor: cs.surfaceContainerHighest.withOpacity(0.4),
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                  isDense: true,
+                ),
+                maxLines: null,
+                textInputAction: TextInputAction.send,
+                onChanged: _handleTextChanged,
+                onSubmitted: (_) => _sendMessage(),
               ),
-              maxLines: null,
-              textInputAction: TextInputAction.send,
-              onSubmitted: (_) => _sendMessage(),
             ),
-          ),
-          const SizedBox(width: 8),
-          IconButton(
-            icon: Icon(Icons.send_rounded, size: 22, color: cs.primary),
-            onPressed: _isAiReplying ? null : _sendMessage,
-          ),
-        ],
+            const SizedBox(width: 8),
+            IconButton(
+              icon: Icon(Icons.send_rounded, size: 22, color: cs.primary),
+              onPressed: _isAiReplying ? null : _sendMessage,
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -677,7 +910,7 @@ class _MessageBubble extends StatelessWidget {
                       bottomRight: isUser ? const Radius.circular(4) : const Radius.circular(18),
                     ),
                   ),
-                  child: _buildContent(message, sender),
+                  child: _buildContent(message, sender, isUser),
                 ),
               ],
             ),
@@ -688,7 +921,9 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
-  Widget _buildContent(Message message, AICharacter? sender) {
+  Widget _buildContent(Message message, AICharacter? sender, bool isUser) {
+    final textColor = isUser ? cs.onPrimary : cs.onSurface;
+
     if (message.isMention && message.mentionedAiIds.isNotEmpty && sender != null) {
       final mentionNames = message.mentionedAiIds.map((id) {
         return characters.firstWhere((c) => c.id == id, orElse: () {
@@ -698,7 +933,7 @@ class _MessageBubble extends StatelessWidget {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(message.content, style: TextStyle(fontSize: 15, color: cs.onSurface, height: 1.4)),
+          Text(message.content, style: TextStyle(fontSize: 15, color: textColor, height: 1.4)),
           if (mentionNames.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 6),
@@ -712,7 +947,7 @@ class _MessageBubble extends StatelessWidget {
         ],
       );
     }
-    return Text(message.content, style: TextStyle(fontSize: 15, color: cs.onSurface, height: 1.4));
+    return Text(message.content, style: TextStyle(fontSize: 15, color: textColor, height: 1.4));
   }
 
   Color _senderColor(AICharacter sender) {

@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/api_config.dart';
 import 'providers/ai_character_providers.dart';
 import '../settings/providers/api_config_providers.dart';
 import '../settings/api_config_form_page.dart';
@@ -28,6 +29,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   String? _existingCharacterId;
   String _selectedApiConfigId = '';
   bool _isSaving = false;
+  bool _hasLegacyApiData = false;
 
   @override
   void initState() {
@@ -45,6 +47,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     _hourlyLimitController = TextEditingController(text: (c?.hourlyReplyLimit ?? 5).toString());
 
     _selectedApiConfigId = c?.apiConfigId ?? '';
+    _hasLegacyApiData = _selectedApiConfigId.isEmpty &&
+        (c?.apiKey.isNotEmpty ?? false) &&
+        (c?.apiProvider.isNotEmpty ?? false);
   }
 
   @override
@@ -141,6 +146,24 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
             _Card(
               cs: cs,
               children: [
+                if (_hasLegacyApiData)
+                  Container(
+                    padding: const EdgeInsets.all(10),
+                    margin: const EdgeInsets.only(bottom: 12),
+                    decoration: BoxDecoration(
+                      color: cs.tertiaryContainer.withOpacity(0.5),
+                      borderRadius: BorderRadius.circular(10),
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.info_outline_rounded, size: 18, color: cs.tertiary),
+                        const SizedBox(width: 8),
+                        Expanded(
+                          child: Text('该角色已有 API 配置，请选择下方配置以关联', style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+                        ),
+                      ],
+                    ),
+                  ),
                 Row(
                   children: [
                     Expanded(
@@ -281,7 +304,24 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     setState(() {});
 
     try {
-      final config = ref.read(apiConfigsProvider.notifier).getById(_selectedApiConfigId);
+      final c = widget.character;
+      ApiConfig? config;
+
+      if (_selectedApiConfigId.isNotEmpty) {
+        config = ref.read(apiConfigsProvider.notifier).getById(_selectedApiConfigId);
+      }
+
+      if (config == null && _hasLegacyApiData && c != null) {
+        config = ApiConfig(
+          id: 'legacy_${c.id}',
+          name: '${c.name} 原有配置',
+          provider: c.apiProvider,
+          modelName: c.modelName,
+          apiKey: c.apiKey,
+          customBaseUrl: c.customBaseUrl,
+        );
+      }
+
       if (config == null) {
         if (mounted) ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('请选择 API 配置'), behavior: SnackBarBehavior.floating));
         _isSaving = false;
