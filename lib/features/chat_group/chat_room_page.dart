@@ -53,9 +53,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   // 待回应 @ 列表
   final List<String> _pendingMentionedIds = [];
 
+  bool _isInputEmpty = true;
+
   @override
   void initState() {
     super.initState();
+    _textController.addListener(() {
+      final isEmpty = _textController.text.trim().isEmpty;
+      if (isEmpty != _isInputEmpty) {
+        setState(() => _isInputEmpty = isEmpty);
+      }
+    });
     _loadData();
   }
 
@@ -317,7 +325,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   ApiConfig? _resolveApiConfig(AICharacter character) {
     if (character.apiConfigId.isNotEmpty) {
-      return ref.read(databaseServiceProvider).apiConfigBox.get(character.apiConfigId);
+      final config = ref.read(databaseServiceProvider).apiConfigBox.get(character.apiConfigId);
+      if (config != null) return config;
     }
     if (character.apiKey.isNotEmpty && character.apiProvider.isNotEmpty) {
       return ApiConfig(
@@ -372,9 +381,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     for (final m in historyMessages.take(15)) {
       final role = m.senderType == 'user' ? 'user' : 'assistant';
       if (m.isMention && m.mentionedAiIds.isNotEmpty) {
-        final mentionedNames = m.mentionedAiIds.map((id) {
-          return nameById[id] ?? id;
-        }).toList();
+        final mentionedNames = m.mentionedAiIds.map((id) => nameById[id] ?? id).toList();
         msgs.add({'role': role, 'content': '${m.content} (提到: ${mentionedNames.join(', ')})'});
       } else {
         msgs.add({'role': role, 'content': m.content});
@@ -445,18 +452,24 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     if (config == null || config.apiKey.isEmpty) return false;
 
     final now = DateTime.now();
-    if (character.lastReplyTimestamp == null ||
-        character.lastReplyTimestamp!.year != now.year ||
-        character.lastReplyTimestamp!.day != now.day) {
+    final today = DateTime(now.year, now.month, now.day);
+    final lastReplyDay = character.lastReplyTimestamp == null
+        ? null
+        : DateTime(character.lastReplyTimestamp!.year, character.lastReplyTimestamp!.month, character.lastReplyTimestamp!.day);
+
+    if (lastReplyDay == null || lastReplyDay != today) {
       character.hourlyReplyCount = 0;
       character.lastReplyTimestamp = now;
       return true;
     }
-    if (character.lastReplyTimestamp!.difference(now).inHours >= 1) {
+
+    final diff = now.difference(character.lastReplyTimestamp!).inMinutes;
+    if (diff >= 60) {
       character.hourlyReplyCount = 0;
       character.lastReplyTimestamp = now;
       return true;
     }
+
     return character.hourlyReplyCount < character.hourlyReplyLimit;
   }
 
@@ -516,9 +529,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       child: Builder(
         builder: (ctx) {
           if (_filteredMentionMembers.isEmpty) {
-            return Padding(
-              padding: const EdgeInsets.all(16),
-              child: Text('无匹配角色', style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant)),
+            return const Padding(
+              padding: EdgeInsets.all(16),
+              child: Text('无匹配角色', style: TextStyle(fontSize: 14)),
             );
           }
           return ListView.builder(
@@ -549,7 +562,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                       ),
                       const SizedBox(width: 10),
                       Expanded(
-                        child: Text(c.name, style: TextStyle(fontSize: 14, color: cs.onSurface), overflow: TextOverflow.ellipsis),
+                        child: Text(c.name, style: TextStyle(fontSize: 14), overflow: TextOverflow.ellipsis),
                       ),
                       Text(c.role, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
                     ],
@@ -666,8 +679,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   Color _senderColor(AICharacter sender) {
-    final providerName = _resolveApiConfig(sender)?.provider ?? sender.apiProvider;
-    switch (providerName) {
+    final providerName = sender.apiConfigId.isNotEmpty
+        ? (ref.read(databaseServiceProvider).apiConfigBox.get(sender.apiConfigId)?.provider ?? sender.apiProvider)
+        : sender.apiProvider;
+    return _providerColor(providerName);
+  }
+
+  Color _providerColor(String provider) {
+    switch (provider) {
       case 'deepseek': return const Color(0xFF1565C0);
       case 'qwen': return const Color(0xFF7C3AED);
       case 'zhipu': return const Color(0xFF0891B2);
@@ -676,6 +695,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       case 'custom': return const Color(0xFFD97706);
       default: return const Color(0xFF2563EB);
     }
+  }
+
+  static String _formatTime(DateTime dt) {
+    final now = DateTime.now();
+    final diff = now.difference(dt);
+    if (diff.inMinutes < 1) return '刚刚';
+    if (diff.inMinutes < 60) return '${diff.inMinutes}分钟前';
+    if (diff.inHours < 24 && now.day == dt.day) {
+      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
+    }
+    if (diff.inDays < 7) return '${diff.inDays}天前';
+    return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 
   @override
@@ -734,7 +765,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                     itemCount: _messages.length,
                     itemBuilder: (context, index) {
                       final message = _messages[index];
-                      return _MessageBubble(message: message, characters: _characters, cs: cs);
+                      final sender = message.senderType == 'user' ? null : _characters.firstWhere(
+                        (c) => c.id == message.senderId,
+                        orElse: () => _characters.isNotEmpty ? _characters.first : AICharacter(
+                          name: '未知', avatar: '?', age: 0, role: '', personalityTags: const [],
+                          systemPrompt: '', apiKey: '', apiProvider: 'deepseek', apiConfigId: '',
+                        ),
+                      );
+                      return _MessageBubble(message: message, sender: sender, characters: _characters, cs: cs);
                     },
                   ),
           ),
@@ -775,20 +813,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           Text('群聊成员', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w700, color: cs.onSurface)),
           const SizedBox(height: 16),
           ..._characters.map((c) {
-            final providerColor = _senderColor(c);
+            final color = _senderColor(c);
             return Padding(
               padding: const EdgeInsets.only(bottom: 12),
               child: Row(
                 children: [
                   Container(
-                    width: 40,
-                    height: 40,
+                    width: 40, height: 40,
                     decoration: BoxDecoration(
                       shape: BoxShape.circle,
-                      color: providerColor.withOpacity(0.12),
-                      border: Border.all(color: providerColor.withOpacity(0.25), width: 1.5),
+                      color: color.withOpacity(0.12),
+                      border: Border.all(color: color.withOpacity(0.25), width: 1.5),
                     ),
-                    child: Center(child: Text(c.avatar.isNotEmpty ? c.avatar : c.name[0], style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: providerColor))),
+                    child: Center(child: Text(c.avatar.isNotEmpty ? c.avatar : c.name[0], style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: color))),
                   ),
                   const SizedBox(width: 12),
                   Expanded(
@@ -803,7 +840,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                 ],
               ),
             );
-          }),
+          }).toList(),
         ],
       ),
     );
@@ -821,28 +858,32 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         child: Row(
           children: [
             Expanded(
-              child: TextField(
-                controller: _textController,
-                decoration: InputDecoration(
-                  hintText: '输入消息，@ 提到角色...',
-                  border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.outlineVariant)),
-                  enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.outlineVariant)),
-                  focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.primary, width: 1.5)),
-                  filled: true,
-                  fillColor: cs.surfaceContainerHighest.withOpacity(0.4),
-                  contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
-                  isDense: true,
+              child: ConstrainedBox(
+                constraints: const BoxConstraints(minHeight: 40, maxHeight: 120),
+                child: TextField(
+                  controller: _textController,
+                  decoration: InputDecoration(
+                    hintText: '输入消息，@ 提到角色...',
+                    border: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.outlineVariant)),
+                    enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.outlineVariant)),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.primary, width: 1.5)),
+                    filled: true,
+                    fillColor: cs.surfaceContainerHighest.withOpacity(0.4),
+                    contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
+                    isDense: true,
+                  ),
+                  maxLines: null,
+                  textInputAction: TextInputAction.send,
+                  onChanged: _handleTextChanged,
+                  onSubmitted: (_) => _sendMessage(),
                 ),
-                maxLines: null,
-                textInputAction: TextInputAction.send,
-                onChanged: _handleTextChanged,
-                onSubmitted: (_) => _sendMessage(),
               ),
             ),
             const SizedBox(width: 8),
             IconButton(
-              icon: Icon(Icons.send_rounded, size: 22, color: cs.primary),
-              onPressed: _isAiReplying ? null : _sendMessage,
+              icon: Icon(Icons.send_rounded, size: 22),
+              color: (_isAiReplying || _isInputEmpty) ? cs.onSurfaceVariant.withOpacity(0.4) : cs.primary,
+              onPressed: (_isAiReplying || _isInputEmpty) ? null : _sendMessage,
             ),
           ],
         ),
@@ -853,30 +894,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
 class _MessageBubble extends StatelessWidget {
   final Message message;
+  final AICharacter? sender;
   final List<AICharacter> characters;
   final ColorScheme cs;
 
-  const _MessageBubble({required this.message, required this.characters, required this.cs});
+  const _MessageBubble({required this.message, this.sender, required this.characters, required this.cs});
 
   @override
   Widget build(BuildContext context) {
     final isUser = message.senderType == 'user';
-    final sender = isUser
-        ? null
-        : characters.firstWhere((c) => c.id == message.senderId, orElse: () {
-            final fallback = characters.isNotEmpty ? characters.first : AICharacter(
-              name: '未知',
-              avatar: '?',
-              age: 0,
-              role: '',
-              personalityTags: const [],
-              systemPrompt: '',
-              apiKey: '',
-              apiProvider: 'deepseek',
-              apiConfigId: '',
-            );
-            return fallback;
-          });
 
     return Padding(
       padding: const EdgeInsets.only(bottom: 16),
@@ -887,8 +913,8 @@ class _MessageBubble extends StatelessWidget {
           if (!isUser && sender != null) ...[
             CircleAvatar(
               radius: 20,
-              backgroundColor: _senderColor(sender).withOpacity(0.12),
-              child: Text(sender.avatar.isNotEmpty ? sender.avatar : sender.name[0], style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _senderColor(sender))),
+              backgroundColor: _senderColor(sender!).withOpacity(0.12),
+              child: Text(sender!.avatar.isNotEmpty ? sender!.avatar : sender!.name[0], style: TextStyle(fontSize: 14, fontWeight: FontWeight.w600, color: _senderColor(sender!))),
             ),
             const SizedBox(width: 8),
           ],
@@ -899,7 +925,7 @@ class _MessageBubble extends StatelessWidget {
                 if (!isUser && sender != null)
                   Padding(
                     padding: const EdgeInsets.only(left: 4, bottom: 4),
-                    child: Text(sender.name, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant)),
+                    child: Text(sender!.name, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w600, color: cs.onSurfaceVariant)),
                   ),
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
@@ -910,7 +936,14 @@ class _MessageBubble extends StatelessWidget {
                       bottomRight: isUser ? const Radius.circular(4) : const Radius.circular(18),
                     ),
                   ),
-                  child: _buildContent(message, sender, isUser),
+                  child: _buildContent(message, sender, isUser, cs),
+                ),
+                Padding(
+                  padding: EdgeInsets.only(top: 4, left: isUser ? 0 : 4, right: !isUser ? 0 : 4),
+                  child: Text(
+                    _ChatRoomPageState._formatTime(message.timestamp),
+                    style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant.withOpacity(0.7)),
+                  ),
                 ),
               ],
             ),
@@ -921,8 +954,9 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
-  Widget _buildContent(Message message, AICharacter? sender, bool isUser) {
+  Widget _buildContent(Message message, AICharacter? sender, bool isUser, ColorScheme cs) {
     final textColor = isUser ? cs.onPrimary : cs.onSurface;
+    final content = message.content.replaceAll('\\n', '\n');
 
     if (message.isMention && message.mentionedAiIds.isNotEmpty && sender != null) {
       final mentionNames = message.mentionedAiIds.map((id) {
@@ -933,7 +967,7 @@ class _MessageBubble extends StatelessWidget {
       return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(message.content, style: TextStyle(fontSize: 15, color: textColor, height: 1.4)),
+          Text(content, style: TextStyle(fontSize: 15, color: textColor, height: 1.4)),
           if (mentionNames.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 6),
@@ -947,12 +981,11 @@ class _MessageBubble extends StatelessWidget {
         ],
       );
     }
-    return Text(message.content, style: TextStyle(fontSize: 15, color: textColor, height: 1.4));
+    return Text(content, style: TextStyle(fontSize: 15, color: textColor, height: 1.4));
   }
 
   Color _senderColor(AICharacter sender) {
-    final providerName = sender.apiProvider;
-    switch (providerName) {
+    switch (sender.apiProvider) {
       case 'deepseek': return const Color(0xFF1565C0);
       case 'qwen': return const Color(0xFF7C3AED);
       case 'zhipu': return const Color(0xFF0891B2);

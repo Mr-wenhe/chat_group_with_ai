@@ -42,7 +42,7 @@ class ChatApiService {
           'model': modelName,
           'messages': messages,
           'temperature': temperature,
-          'max_tokens': 500,
+          'max_tokens': 1024,
         },
         options: Options(headers: headers, validateStatus: (s) => s != null && s < 500),
       );

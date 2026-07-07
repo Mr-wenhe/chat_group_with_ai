@@ -1,3 +1,6 @@
+import 'dart:io';
+import 'package:flutter/foundation.dart';
+import 'package:path_provider/path_provider.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
@@ -13,7 +16,8 @@ class DatabaseService {
   static const String _groupMemoryBox = 'group_memories';
 
   Future<void> init() async {
-    await Hive.initFlutter();
+    final dir = await _getDataDir();
+    await Hive.initFlutter(dir.path);
     Hive.registerAdapter(AICharacterAdapter());
     Hive.registerAdapter(ApiConfigAdapter());
     Hive.registerAdapter(ChatGroupAdapter());
@@ -27,10 +31,27 @@ class DatabaseService {
     await _openBoxSafely<GroupMemory>(_groupMemoryBox);
   }
 
+  Future<Directory> _getDataDir() async {
+    if (kDebugMode) {
+      final projectDir = Directory.current;
+      final dataDir = Directory('${projectDir.path}/data');
+      if (!await dataDir.exists()) {
+        await dataDir.create(recursive: true);
+      }
+      return dataDir;
+    }
+    final docs = await getApplicationDocumentsDirectory();
+    final dataDir = Directory('${docs.path}/data');
+    if (!await dataDir.exists()) {
+      await dataDir.create(recursive: true);
+    }
+    return dataDir;
+  }
+
   Future<void> _openBoxSafely<T>(String name) async {
     try {
       await Hive.openBox<T>(name);
-    } catch (_) {
+    } on FileSystemException catch (_) {
       await Hive.deleteBoxFromDisk(name);
       await Hive.openBox<T>(name);
     }
