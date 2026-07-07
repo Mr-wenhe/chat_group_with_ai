@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:flutter/foundation.dart';
 
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
@@ -156,13 +157,14 @@ class ChatApiService {
       );
 
       if (response.statusCode != 200) {
-        print('[SSE] HTTP ${response.statusCode} error=${_extractErrorText(response.data)}');
+        debugPrint(
+            '[SSE] HTTP ${response.statusCode} error=${_extractErrorText(response.data)}');
         yield ChatStreamEvent.error(
             'HTTP ${response.statusCode}: ${_extractErrorText(response.data)}');
         return;
       }
 
-      print('[SSE] HTTP 200, starting stream parse');
+      debugPrint('[SSE] HTTP 200, starting stream parse');
 
       // stream 模式下 response.data 为 ResponseBody，其 .stream 为 Stream<Uint8List>。
       // Uint8List 是 List<int> 的子类型，但 StreamTransformer 输入类型不协变，
@@ -175,13 +177,15 @@ class ChatApiService {
 
       // 逐行交给 SseParser，把产出的事件透传给调用方。
       await for (final line in stream) {
-        print('[SSE] line=$line');
-        for (final event in parser.ingest(line)) {
-          print('[SSE] event=$event');
+        debugPrint('[SSE] line=$line');
+        final event = parser.ingestLine(line);
+        if (event != null) {
+          debugPrint('[SSE] event=$event');
           yield event;
         }
       }
-      print('[SSE] stream ended, parser fullContentLen=${parser.fullContentLength}');
+      debugPrint(
+          '[SSE] stream ended, parser fullContentLen=${parser.fullContentLength}');
       // 流正常结束，返回累计的完整内容。
       yield parser.doneEvent();
     } on DioException catch (e) {

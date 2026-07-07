@@ -35,6 +35,8 @@ class SseParser {
     return events;
   }
 
+  ChatStreamEvent? ingestLine(String line) => _parseLine(line);
+
   ChatStreamEvent? _parseLine(String rawLine) {
     var line = rawLine;
     if (line.endsWith('\r')) line = line.substring(0, line.length - 1);
@@ -49,29 +51,39 @@ class SseParser {
 
     try {
       final json = jsonDecode(payload) as Map<String, dynamic>;
-      // 提取 usage 字段（通常出现在最后一个 chunk）
+      // Detect provider error responses that lack choices (e.g. {"error":{...}}).
+      if (json['error'] != null && json['choices'] == null) {
+        final errMsg = (json['error'] is Map)
+            ? (json['error'] as Map)['message']?.toString() ?? 'API 错误'
+            : json['error'].toString();
+        return ChatStreamEvent.error('API 返回错误: $errMsg');
+      }
+      // Extract usage fields (typically in the last chunk).
       final usage = json['usage'];
       if (usage is Map<String, dynamic>) {
         _promptTokens += (usage['prompt_tokens'] as int? ?? 0);
         _completionTokens += (usage['completion_tokens'] as int? ?? 0);
       }
-      // 有些 API 把 usage 放在 choices[0] 的 finish_reason 之后
       final choices = json['choices'];
-      if (choices is List && choices.isNotEmpty) {
-        final first = choices[0];
-        if (first is Map<String, dynamic>) {
-          final finishReason = first['finish_reason'];
-          if (finishReason != null && finishReason is String && finishReason == 'stop') {
-            // finish_reason 为 stop 时通常意味着生成了 completion_tokens
-          }
-        }
-      }
-      final firstChoice = choices is List && choices.isNotEmpty ? choices[0] : null;
+      if (choices is! List || choices.isEmpty) return null;
+      final firstChoice = choices[0];
       if (firstChoice is! Map<String, dynamic>) return null;
       final delta = firstChoice['delta'];
       if (delta is! Map<String, dynamic>) return null;
       final content = delta['content'];
-      if (content == null || content is! String || content.isEmpty) return null;
+      if (content == null || content is! String || content.isEmpty) {
+        if ((firstChoice['finish_reason'] ?? '').toString() == 'error') {
+          final nestedErr = firstChoice['error'];
+          final errMsg = (nestedErr is Map)
+              ? (nestedErr['message']?.toString() ??
+                  (json['error'] is Map
+                      ? (json['error'] as Map)['message']?.toString()
+                      : null))
+              : null;
+          return ChatStreamEvent.error(errMsg ?? '模型生成失败');
+        }
+        return null;
+      }
       _fullContent += content;
       return ChatStreamEvent.token(content);
     } catch (e) {

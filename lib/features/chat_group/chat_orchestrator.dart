@@ -52,12 +52,83 @@ class ChatOrchestrator {
 
   static String extractRecentFocus(List<Message> messages) {
     if (messages.isEmpty) return '';
-    final recent = messages.length > 3 ? messages.sublist(messages.length - 3) : messages;
+    final recent =
+        messages.length > 3 ? messages.sublist(messages.length - 3) : messages;
     final joined = recent.map((m) => m.content).join(' → ');
     if (joined.length > 200) {
       return '\n\n【当前对话焦点】最近大家在聊：${joined.substring(0, 200)}...';
     }
     return '\n\n【当前对话焦点】最近大家在聊：$joined';
+  }
+
+  static String recentDialogueTranscript({
+    required List<Message> messages,
+    required Map<String, String> senderNames,
+    int maxMessages = 14,
+    int maxChars = 1400,
+  }) {
+    if (messages.isEmpty) return '';
+    final recent = messages.length > maxMessages
+        ? messages.sublist(messages.length - maxMessages)
+        : messages;
+    final lines = recent.map((m) {
+      final speaker = m.senderType == 'user'
+          ? (senderNames[m.senderId] ?? '我')
+          : (senderNames[m.senderId] ?? '一位AI成员');
+      return '$speaker：${m.content.replaceAll(RegExp(r'\s+'), ' ').trim()}';
+    }).where((line) => line.trim().isNotEmpty);
+    final transcript = lines.join('\n');
+    if (transcript.length <= maxChars) return transcript;
+    return transcript.substring(transcript.length - maxChars);
+  }
+
+  static String buildPersonaGrowthContext({
+    required AICharacter character,
+    required String groupName,
+    required String groupTheme,
+    required String groupDescription,
+    required String groupMemory,
+  }) {
+    final tags = character.personalityTags.isEmpty
+        ? '暂无显式标签'
+        : character.personalityTags.join('、');
+    final desc =
+        groupDescription.trim().isEmpty ? '' : '\n群说明：$groupDescription';
+    final memory = groupMemory.trim().isEmpty ? '暂无稳定群体记忆' : groupMemory;
+    return '【人格成长规则】'
+        '\n你是 ${character.name}，年龄 ${character.age}，职业/身份是「${character.role}」。'
+        '\n初始性格标签：$tags。'
+        '\n你所在的群是「$groupName」，主题「$groupTheme」。$desc'
+        '\n群体记忆：$memory'
+        '\n请把职业知识、群氛围、初始设定和已经形成的记忆融合成稳定个性：'
+        '说话要有自己的偏好、关系感、情绪余温、表达习惯和边界感；'
+        '允许缓慢形成口头禅、立场、喜恶、对其他成员的亲疏和长期关注点。'
+        '不要突然换人格，不要机械复述设定，不要声称自己是AI模型。'
+        '每次回复都像一个真实群友：短中句为主，有时追问，有时接梗，有时沉默式收束。';
+  }
+
+  static String buildMemoryEvolutionPrompt({
+    required AICharacter character,
+    required String groupName,
+    required String groupTheme,
+    required String currentMemory,
+    required String recentTranscript,
+    required String latestReply,
+  }) {
+    final tags = character.personalityTags.isEmpty
+        ? '无'
+        : character.personalityTags.join('、');
+    return '你是角色长期记忆与人格成长记录员。'
+        '\n角色：${character.name}；职业/身份：${character.role}；初始标签：$tags；所在群：$groupName；群主题：$groupTheme。'
+        '\n\n已有角色记忆：${currentMemory.trim().isEmpty ? '暂无' : currentMemory.trim()}'
+        '\n\n最近群聊：\n$recentTranscript'
+        '\n\n${character.name}刚刚说：$latestReply'
+        '\n\n请输出更新后的「角色自我记忆」，要求：'
+        '\n1. 用第一人称或贴近角色内心的第三人称均可，但必须服务于后续扮演。'
+        '\n2. 保留稳定事实、偏好、关系、表达习惯、职业视角、在这个群里的立场。'
+        '\n3. 从最近对话中只吸收真正会改变角色的东西，不要编造未发生的经历。'
+        '\n4. 让变化是渐进的：可以新增一点口头禅、关注点、亲疏关系或小情绪。'
+        '\n5. 只输出记忆正文，控制在 500 字以内。';
   }
 
   static String stripNamePrefix(String content, String characterName) {

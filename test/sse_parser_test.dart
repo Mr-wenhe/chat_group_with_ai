@@ -37,6 +37,16 @@ void main() {
       expect(events, isEmpty);
     });
 
+    test('LineSplitter 输出的无换行 data 行可直接解析', () {
+      final p = SseParser();
+      final event =
+          p.ingestLine('data: {"choices":[{"delta":{"content":"真实回复"}}]}');
+      expect(event, isNotNull);
+      expect(event!.type, ChatStreamEventType.token);
+      expect(event.delta, '真实回复');
+      expect(p.doneEvent().content, '真实回复');
+    });
+
     test('注释行 / 空行 / 非 data 行被忽略，只保留有效 token', () {
       final p = SseParser();
       const chunk = ': keep-alive\n\n'
@@ -97,6 +107,24 @@ void main() {
       p.ingest('lo"}}]}\n');
       p.ingest('data: [DONE]\n');
       expect(p.doneEvent().content, 'Hello');
+    });
+
+    test('finish_reason=error 且空 delta 产出 error 事件', () {
+      final p = SseParser();
+      final events = p.ingest(
+          'data: {"choices":[{"delta":{},"finish_reason":"error","error":{"message":"content filter"}}]}\n');
+      expect(events, hasLength(1));
+      expect(events.first.type, ChatStreamEventType.error);
+      expect(events.first.message, contains('content filter'));
+    });
+
+    test('provider error JSON (error + null choices) 产出 error 事件', () {
+      final p = SseParser();
+      final events =
+          p.ingest('data: {"error":{"message":"Invalid API key"}}\n');
+      expect(events, hasLength(1));
+      expect(events.first.type, ChatStreamEventType.error);
+      expect(events.first.message, contains('Invalid API key'));
     });
   });
 }
