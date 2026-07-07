@@ -1,8 +1,6 @@
 import 'dart:math';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
-import 'package:chat_group/core/models/ai_character.dart';
-import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
 import 'package:chat_group/features/settings/api_config_form_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
@@ -26,7 +24,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final characters = ref.watch(aiCharactersProvider);
     final apiConfigs = ref.watch(apiConfigsProvider);
 
     return Scaffold(
@@ -153,32 +150,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   onTest: () => _testApiKey(context, c),
                 )),
           const SizedBox(height: 28),
-          _SectionHeader(title: 'API Key 测试', cs: cs),
-          const SizedBox(height: 4),
-          Text('选择角色测试其 API 配置是否可用',
-              style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
-          const SizedBox(height: 12),
-          if (characters.isEmpty)
-            AppCard(
-              cs: cs,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 24),
-                  child: Center(
-                    child: Text('还没有角色，请先创建',
-                        style: TextStyle(
-                            fontSize: 14, color: cs.onSurfaceVariant)),
-                  ),
-                ),
-              ],
-            )
-          else
-            ...characters.map((c) => _ApiTestCard(
-                  character: c,
-                  cs: cs,
-                  onTest: () => _testCharacterApi(context, c),
-                )),
-          const SizedBox(height: 28),
           _SectionHeader(title: '数据管理', cs: cs),
           const SizedBox(height: 12),
           AppCard(
@@ -262,21 +233,28 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   }
 
   Future<void> _testApiKey(BuildContext context, ApiConfig config) async {
+    final cs = Theme.of(context).colorScheme;
     final provider = ApiProvider.values.firstWhere(
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
     );
 
+    // 更美观的加载对话框：正常进度圈 + 文字布局，使用主题色
     showDialog(
       context: context,
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
-        icon: const SizedBox(
-            width: 28,
-            height: 28,
-            child: CircularProgressIndicator(strokeWidth: 2.5)),
-        title: Text('正在测试 ${config.name}...'),
-        content: const SizedBox(height: 4),
+        contentPadding:
+            const EdgeInsets.symmetric(vertical: 32, horizontal: 24),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            CircularProgressIndicator(strokeWidth: 3, color: cs.primary),
+            const SizedBox(height: 20),
+            Text('正在测试 ${config.name}...',
+                style: TextStyle(fontSize: 15, color: cs.onSurface)),
+          ],
+        ),
       ),
     );
 
@@ -316,85 +294,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     }
   }
 
-  Future<void> _testCharacterApi(
-      BuildContext context, AICharacter character) async {
-    final db = ref.read(databaseServiceProvider);
-    final config = character.apiConfigId.isNotEmpty
-        ? db.apiConfigBox.get(character.apiConfigId)
-        : null;
-
-    if (config == null) {
-      if (!context.mounted) return;
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          icon: Icon(Icons.warning_amber_rounded,
-              color: Theme.of(context).colorScheme.error, size: 28),
-          title: Text('${character.name} 未配置 API'),
-          content: const Text('该角色没有关联的 API 配置'),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx), child: const Text('关闭'))
-          ],
-        ),
-      );
-      return;
-    }
-
-    final provider = ApiProvider.values.firstWhere(
-      (p) => p.name == config.provider,
-      orElse: () => ApiProvider.deepseek,
-    );
-
-    showDialog(
-      context: context,
-      barrierDismissible: false,
-      builder: (ctx) => AlertDialog(
-        icon: const SizedBox(
-            width: 28,
-            height: 28,
-            child: CircularProgressIndicator(strokeWidth: 2.5)),
-        title: Text('正在测试 ${character.name} 的 API...'),
-        content: const SizedBox(height: 4),
-      ),
-    );
-
-    final result = await _apiService.testApiKey(
-      apiKey: config.apiKey,
-      provider: provider,
-      customBaseUrl: config.customBaseUrl,
-      model: config.modelName,
-    );
-
-    if (context.mounted) Navigator.of(context).pop();
-    if (!context.mounted) return;
-
-    final isSuccess = result['success'] == true;
-    if (isSuccess) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('${character.name} API 测试成功！${result['reply'] ?? ''}'),
-          backgroundColor: const Color(0xFF059669),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
-    } else {
-      showDialog(
-        context: context,
-        builder: (ctx) => AlertDialog(
-          icon: Icon(Icons.error_outline_rounded,
-              color: Theme.of(context).colorScheme.error, size: 28),
-          title: Text('${character.name} API 测试失败'),
-          content: Text(result['message'] ?? '未知错误'),
-          actions: [
-            TextButton(
-                onPressed: () => Navigator.pop(ctx), child: const Text('关闭')),
-          ],
-        ),
-      );
-    }
-  }
-
   Future<void> _confirmClearData(BuildContext context) async {
     final cs = Theme.of(context).colorScheme;
     final confirm = await showDialog<bool>(
@@ -424,7 +323,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       await db.messageBox.clear();
       await db.groupMemoryBox.clear();
       ref.invalidate(apiConfigsProvider);
-      ref.invalidate(aiCharactersProvider);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
           const SnackBar(
@@ -561,98 +459,6 @@ class _ApiConfigCard extends StatelessWidget {
       ),
       child: Center(
           child: Text(config.name.isNotEmpty ? config.name[0] : '?',
-              style: TextStyle(
-                  fontSize: 16, fontWeight: FontWeight.w600, color: pColor))),
-    );
-  }
-}
-
-class _ApiTestCard extends StatelessWidget {
-  final AICharacter character;
-  final ColorScheme cs;
-  final VoidCallback onTest;
-
-  const _ApiTestCard(
-      {required this.character, required this.cs, required this.onTest});
-
-  @override
-  Widget build(BuildContext context) {
-    final pColor = providerColor(character.apiProvider);
-    final label = providerLabel(character.apiProvider);
-
-    return Container(
-      margin: const EdgeInsets.only(bottom: 10),
-      padding: const EdgeInsets.all(14),
-      decoration: AppCard.decoration(cs),
-      child: Row(
-        children: [
-          _buildAvatar(pColor),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Text(character.name,
-                        style: TextStyle(
-                            fontSize: 15,
-                            fontWeight: FontWeight.w600,
-                            color: cs.onSurface)),
-                    const SizedBox(width: 8),
-                    Container(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 6, vertical: 2),
-                      decoration: BoxDecoration(
-                        color: pColor.withOpacity(0.12),
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                      child: Text(label,
-                          style: TextStyle(
-                              fontSize: 11,
-                              fontWeight: FontWeight.w500,
-                              color: pColor)),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 3),
-                Text(character.apiProvider,
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: cs.onSurfaceVariant,
-                        fontFamily: 'monospace')),
-              ],
-            ),
-          ),
-          FilledButton.icon(
-            onPressed: onTest,
-            icon: const Icon(Icons.bolt_rounded, size: 16),
-            label: const Text('测试',
-                style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-            style: FilledButton.styleFrom(
-              backgroundColor: cs.primary,
-              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAvatar(Color pColor) {
-    final display = character.avatar.isNotEmpty
-        ? character.avatar
-        : (character.name.isNotEmpty ? character.name[0] : '?');
-    return Container(
-      width: 40,
-      height: 40,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: pColor.withOpacity(0.14),
-        border: Border.all(color: pColor.withOpacity(0.3), width: 1.5),
-      ),
-      child: Center(
-          child: Text(display,
               style: TextStyle(
                   fontSize: 16, fontWeight: FontWeight.w600, color: pColor))),
     );

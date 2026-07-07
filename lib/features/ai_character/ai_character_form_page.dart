@@ -61,12 +61,17 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         (c?.apiKey.isNotEmpty ?? false) &&
         (c?.apiProvider.isNotEmpty ?? false);
 
-    // 新建角色时默认选中讯飞星火(xfyun)配置，若无则选第一个可用配置
+    // 新建角色时默认选中配置：自定义(custom)优先（全部默认使用自定义模型），
+    // 否则讯飞星火(xfyun)，再否则选第一个可用配置；完全没有配置则保持空置。
     if (_selectedApiConfigId.isEmpty && _isEditing == false) {
       final configs = ref.read(apiConfigsProvider);
+      final customConfig =
+          configs.where((cfg) => cfg.provider == 'custom').firstOrNull;
       final xfyunConfig =
           configs.where((cfg) => cfg.provider == 'xfyun').firstOrNull;
-      if (xfyunConfig != null) {
+      if (customConfig != null) {
+        _selectedApiConfigId = customConfig.id;
+      } else if (xfyunConfig != null) {
         _selectedApiConfigId = xfyunConfig.id;
       } else if (configs.isNotEmpty) {
         _selectedApiConfigId = configs.first.id;

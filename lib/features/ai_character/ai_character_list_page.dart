@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -8,14 +9,34 @@ import 'providers/ai_character_providers.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/features/settings/providers/api_config_providers.dart';
 
-class AICharacterListPage extends ConsumerWidget {
+class AICharacterListPage extends ConsumerStatefulWidget {
   const AICharacterListPage({super.key});
 
   @override
-  Widget build(BuildContext context, WidgetRef ref) {
+  ConsumerState<AICharacterListPage> createState() =>
+      _AICharacterListPageState();
+}
+
+class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
+  // 批量更换模型时复用的输入框控制器，需在 dispose 中释放
+  final TextEditingController _batchModelController = TextEditingController();
+
+  @override
+  void dispose() {
+    _batchModelController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final characters = ref.watch(aiCharactersProvider);
+    // 获取自定义类型的 API 配置，用于「统一模型」工具栏
+    final apiConfigs = ref.watch(apiConfigsProvider);
+    final customConfigs =
+        apiConfigs.where((c) => c.provider == 'custom').toList();
 
     return Scaffold(
       backgroundColor: cs.surface,
@@ -44,25 +65,62 @@ class AICharacterListPage extends ConsumerWidget {
           ],
         ),
       ),
-      body: characters.isEmpty
-          ? _buildEmptyState(cs)
-          : ListView.builder(
-              padding: const EdgeInsets.all(20),
-              itemCount: characters.length,
-              itemBuilder: (context, index) {
-                final character = characters[index];
-                return _CharacterCard(
-                  character: character,
-                  cs: cs,
-                  onTap: () => _editCharacter(context, character),
-                  onDelete: () => _confirmDelete(context, ref, character),
-                  onToggle: () {
-                    character.isActive = !character.isActive;
-                    character.save();
-                  },
-                );
-              },
+      body: Column(
+        children: [
+          // 仅当存在自定义类型配置时展示「统一模型」工具栏
+          if (customConfigs.isNotEmpty)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+              child: Row(
+                children: [
+                  Icon(Icons.model_training_outlined,
+                      size: 16, color: cs.primary),
+                  const SizedBox(width: 6),
+                  Text('自定义模型: ',
+                      style: TextStyle(
+                          fontSize: 12, color: cs.onSurfaceVariant)),
+                  ...customConfigs.map((c) => Text('${c.modelName}  ',
+                      style: TextStyle(
+                          fontSize: 12,
+                          fontFamily: 'monospace',
+                          color: cs.primary))),
+                  const Spacer(),
+                  TextButton.icon(
+                    onPressed: () =>
+                        _batchChangeModel(context, ref, customConfigs.first),
+                    icon: const Icon(Icons.sync_alt_rounded, size: 14),
+                    label: const Text('统一模型', style: TextStyle(fontSize: 12)),
+                    style: TextButton.styleFrom(foregroundColor: cs.primary),
+                  ),
+                ],
+              ),
             ),
+          Expanded(
+            child: characters.isEmpty
+                ? _buildEmptyState(cs)
+                : ListView.builder(
+                    padding: const EdgeInsets.all(20),
+                    itemCount: characters.length,
+                    itemBuilder: (context, index) {
+                      final character = characters[index];
+                      return _CharacterCard(
+                        character: character,
+                        cs: cs,
+                        onTap: () => _editCharacter(context, character),
+                        onDelete: () => _confirmDelete(context, ref, character),
+                        onToggle: () {
+                          character.isActive = !character.isActive;
+                          character.save();
+                        },
+                        // 点击模型标签可单独修改该角色的模型
+                        onModelChange: (currentModel) => _changeSingleModel(
+                            context, ref, character, currentModel),
+                      );
+                    },
+                  ),
+          ),
+        ],
+      ),
       floatingActionButton: AppFab(
         onPressed: () => _addCharacter(context),
         icon: Icons.add_rounded,
@@ -303,6 +361,115 @@ class AICharacterListPage extends ConsumerWidget {
           .deleteCharacter(character.id);
     }
   }
+
+  /// 批量将全部角色的模型统一为指定名称。
+  Future<void> _batchChangeModel(
+      BuildContext context, WidgetRef ref, ApiConfig customConfig) async {
+    final cs = Theme.of(context).colorScheme;
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('统一更换所有角色模型'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('当前自定义模型: ${customConfig.modelName}',
+                style: const TextStyle(fontFamily: 'monospace')),
+            const SizedBox(height: 12),
+            Text('输入新的模型名称:',
+                style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+            const SizedBox(height: 8),
+            TextField(
+              controller: _batchModelController..text = customConfig.modelName,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                hintText: '输入模型 ID',
+                isDense: true,
+              ),
+              autofocus: true,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+            onPressed: () =>
+                Navigator.pop(ctx, _batchModelController.text.trim()),
+            child: const Text('应用到全部'),
+          ),
+        ],
+      ),
+    );
+
+    if (result != null && result.isNotEmpty && context.mounted) {
+      final chars = ref.read(aiCharactersProvider);
+      for (final c in chars) {
+        c.modelName = result;
+        c.save();
+      }
+      ref.invalidate(aiCharactersProvider);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('已将 ${chars.length} 个角色模型统一为 $result'),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
+  }
+
+  /// 单独修改某个角色的模型名称。
+  Future<void> _changeSingleModel(BuildContext context, WidgetRef ref,
+      AICharacter character, String currentModel) async {
+    final cs = Theme.of(context).colorScheme;
+    final controller = TextEditingController(text: currentModel);
+    final result = await showDialog<String>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: Text('修改「${character.name}」的模型'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text('输入新的模型名称:',
+                style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+            const SizedBox(height: 8),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                hintText: '输入模型 ID',
+                isDense: true,
+              ),
+              autofocus: true,
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(
+              onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+          FilledButton(
+            onPressed: () => Navigator.pop(ctx, controller.text.trim()),
+            child: const Text('保存'),
+          ),
+        ],
+      ),
+    );
+    controller.dispose();
+
+    if (result != null && result.isNotEmpty && context.mounted) {
+      character.modelName = result;
+      character.save();
+      ref.invalidate(aiCharactersProvider);
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('已将「${character.name}」的模型改为 $result'),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
+  }
 }
 
 class _CharacterCard extends StatelessWidget {
@@ -311,6 +478,7 @@ class _CharacterCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onDelete;
   final VoidCallback onToggle;
+  final ValueChanged<String>? onModelChange;
 
   const _CharacterCard({
     required this.character,
@@ -318,6 +486,7 @@ class _CharacterCard extends StatelessWidget {
     required this.onTap,
     required this.onDelete,
     required this.onToggle,
+    this.onModelChange,
   });
 
   @override
@@ -430,6 +599,29 @@ class _CharacterCard extends StatelessWidget {
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    // 显示当前模型名称，点击可单独修改
+                    if (character.modelName.isNotEmpty)
+                      GestureDetector(
+                        onTap: () => onModelChange?.call(character.modelName),
+                        child: Container(
+                          margin: const EdgeInsets.only(right: 4),
+                          padding: const EdgeInsets.symmetric(
+                              horizontal: 8, vertical: 4),
+                          constraints: const BoxConstraints(maxWidth: 120),
+                          decoration: BoxDecoration(
+                            color: cs.surfaceContainerHighest,
+                            borderRadius: BorderRadius.circular(6),
+                          ),
+                          child: Text(
+                            character.modelName,
+                            style: TextStyle(
+                                fontSize: 11,
+                                fontFamily: 'monospace',
+                                color: cs.onSurfaceVariant),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ),
                     IconButton(
                       icon: Icon(
                           character.isActive
