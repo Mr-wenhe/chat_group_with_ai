@@ -17,7 +17,7 @@ Future<void> main() async {
   Hive.registerAdapter(MessageAdapter());
   Hive.registerAdapter(GroupMemoryAdapter());
 
-  final sandboxPath = '/tmp/sandbox_data';
+  const sandboxPath = '/tmp/sandbox_data';
   final projectPath = '${Directory.current.path}/data';
 
   final boxes = [

@@ -1,4 +1,3 @@
-import 'dart:math';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
@@ -317,11 +316,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
     if (confirm == true && context.mounted) {
       final db = ref.read(databaseServiceProvider);
-      await db.apiConfigBox.clear();
-      await db.aiCharacterBox.clear();
-      await db.chatGroupBox.clear();
-      await db.messageBox.clear();
-      await db.groupMemoryBox.clear();
+      await db.clearAllData();
       ref.invalidate(apiConfigsProvider);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
@@ -373,9 +368,8 @@ class _ApiConfigCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final pColor = providerColor(config.provider);
     final label = providerLabel(config.provider);
-    final maskedKey = config.apiKey.isNotEmpty
-        ? '${config.apiKey.substring(0, min(8, config.apiKey.length))}${'*' * max(4, config.apiKey.length - 8)}'
-        : '未设置';
+    final maskedKey =
+        config.apiKey.isNotEmpty ? 'API Key 已保存 ••••••••' : '未设置 API Key';
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -421,29 +415,49 @@ class _ApiConfigCard extends StatelessWidget {
               ],
             ),
           ),
-          Row(
-            mainAxisSize: MainAxisSize.min,
+          Wrap(
+            spacing: 4,
             children: [
-              IconButton(
-                icon: Icon(Icons.bolt_rounded, size: 18, color: cs.primary),
+              _actionButton(
+                icon: Icons.bolt_rounded,
+                label: '测试',
+                color: cs.primary,
                 onPressed: onTest,
-                tooltip: '测试',
               ),
-              IconButton(
-                icon: Icon(Icons.edit_outlined,
-                    size: 18, color: cs.onSurfaceVariant),
+              _actionButton(
+                icon: Icons.edit_outlined,
+                label: '编辑',
+                color: cs.onSurfaceVariant,
                 onPressed: onEdit,
-                tooltip: '编辑',
               ),
-              IconButton(
-                icon: Icon(Icons.delete_outline_rounded,
-                    size: 18, color: cs.error),
+              _actionButton(
+                icon: Icons.delete_outline_rounded,
+                label: '删除',
+                color: cs.error,
                 onPressed: onDelete,
-                tooltip: '删除',
               ),
             ],
           ),
         ],
+      ),
+    );
+  }
+
+  Widget _actionButton({
+    required IconData icon,
+    required String label,
+    required Color color,
+    required VoidCallback onPressed,
+  }) {
+    return TextButton.icon(
+      onPressed: onPressed,
+      icon: Icon(icon, size: 16),
+      label: Text(label),
+      style: TextButton.styleFrom(
+        foregroundColor: color,
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 8),
+        textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
       ),
     );
   }

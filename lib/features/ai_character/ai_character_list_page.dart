@@ -9,6 +9,7 @@ import 'providers/ai_character_providers.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
 
 class AICharacterListPage extends ConsumerStatefulWidget {
@@ -35,6 +36,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
     final characters = ref.watch(aiCharactersProvider);
     // 获取自定义类型的 API 配置，用于「统一模型」工具栏
     final apiConfigs = ref.watch(apiConfigsProvider);
+    final groups = ref.watch(chatGroupsProvider);
     final customConfigs =
         apiConfigs.where((c) => c.provider == 'custom').toList();
     // 构建 id → ApiConfig 映射，供卡片按 apiConfigId 查找关联配置（Bug 4）
@@ -69,6 +71,11 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
       ),
       body: Column(
         children: [
+          if (apiConfigs.isEmpty || characters.isEmpty || groups.isEmpty)
+            _buildSetupChecklist(context, cs,
+                hasConfig: apiConfigs.isNotEmpty,
+                hasCharacter: characters.isNotEmpty,
+                hasGroup: groups.isNotEmpty),
           // 仅当存在自定义类型配置时展示「统一模型」工具栏
           if (customConfigs.isNotEmpty)
             Padding(
@@ -79,8 +86,8 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                       size: 16, color: cs.primary),
                   const SizedBox(width: 6),
                   Text('自定义模型: ',
-                      style: TextStyle(
-                          fontSize: 12, color: cs.onSurfaceVariant)),
+                      style:
+                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
                   ...customConfigs.map((c) => Text('${c.modelName}  ',
                       style: TextStyle(
                           fontSize: 12,
@@ -131,6 +138,76 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
         label: '创建角色',
       ),
       bottomNavigationBar: AppBottomNav(currentIndex: 0, cs: cs),
+    );
+  }
+
+  Widget _buildSetupChecklist(
+    BuildContext context,
+    ColorScheme cs, {
+    required bool hasConfig,
+    required bool hasCharacter,
+    required bool hasGroup,
+  }) {
+    return Container(
+      margin: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+      padding: const EdgeInsets.all(14),
+      decoration: AppCard.decoration(cs),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Row(
+            children: [
+              Icon(Icons.route_rounded, size: 18, color: cs.primary),
+              const SizedBox(width: 8),
+              Text('开始使用',
+                  style: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w700,
+                      color: cs.onSurface)),
+            ],
+          ),
+          const SizedBox(height: 10),
+          _setupStep(cs, hasConfig, '创建 API 配置', () {
+            Navigator.pushNamed(context, '/settings');
+          }),
+          _setupStep(
+              cs, hasCharacter, '创建 AI 角色', () => _addCharacter(context)),
+          _setupStep(cs, hasGroup, '创建群聊并发送第一条消息', () {
+            Navigator.pushReplacementNamed(context, '/groups');
+          }),
+        ],
+      ),
+    );
+  }
+
+  Widget _setupStep(
+      ColorScheme cs, bool done, String label, VoidCallback onTap) {
+    return InkWell(
+      onTap: done ? null : onTap,
+      borderRadius: BorderRadius.circular(8),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 4),
+        child: Row(
+          children: [
+            Icon(
+                done
+                    ? Icons.check_circle_rounded
+                    : Icons.radio_button_unchecked,
+                size: 17,
+                color: done ? cs.primary : cs.onSurfaceVariant),
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(label,
+                  style: TextStyle(
+                      fontSize: 13,
+                      color: done ? cs.onSurfaceVariant : cs.onSurface)),
+            ),
+            if (!done)
+              Icon(Icons.chevron_right_rounded,
+                  size: 18, color: cs.onSurfaceVariant),
+          ],
+        ),
+      ),
     );
   }
 
@@ -415,8 +492,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
     if (result != null && context.mounted) {
       final chars = ref.read(aiCharactersProvider);
       // 留空则回退使用配置本身的模型名
-      final newModelName =
-          result.isEmpty ? customConfig.modelName : result;
+      final newModelName = result.isEmpty ? customConfig.modelName : result;
       for (final c in chars) {
         c.apiConfigId = customConfig.id;
         c.apiKey = customConfig.apiKey;
@@ -428,8 +504,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
       ref.invalidate(aiCharactersProvider);
       if (context.mounted) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(
-              '已将 ${chars.length} 个角色统一为「${customConfig.name}」配置',
+          content: Text('已将 ${chars.length} 个角色统一为「${customConfig.name}」配置',
               style: TextStyle(color: cs.onPrimaryContainer)),
           behavior: SnackBarBehavior.floating,
           shape:
@@ -500,8 +575,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
           ),
           actions: [
             TextButton(
-                onPressed: () => Navigator.pop(ctx),
-                child: const Text('取消')),
+                onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
             FilledButton(
               onPressed: () => Navigator.pop(ctx, selectedId),
               child: const Text('保存'),
@@ -546,7 +620,6 @@ class _CharacterCard extends StatelessWidget {
   final VoidCallback onDelete;
   final VoidCallback onToggle;
   final ApiConfig? linkedConfig;
-  final List<ApiConfig> availableConfigs;
   final VoidCallback? onConfigChange;
 
   const _CharacterCard({
@@ -556,7 +629,6 @@ class _CharacterCard extends StatelessWidget {
     required this.onDelete,
     required this.onToggle,
     this.linkedConfig,
-    this.availableConfigs = const [],
     this.onConfigChange,
   });
 
@@ -569,7 +641,8 @@ class _CharacterCard extends StatelessWidget {
     // 标签与配色均以该配置为准，而非角色自身存储的旧 provider 名。
     // 用局部变量承接，确保空安全的类型提升（final 字段在三元表达式中无法直接提升）。
     final config = linkedConfig;
-    final displayColor = config != null ? providerColor(config.provider) : pColor;
+    final displayColor =
+        config != null ? providerColor(config.provider) : pColor;
     final displayLabel = config != null ? config.name : label;
 
     return Dismissible(
@@ -700,15 +773,24 @@ class _CharacterCard extends StatelessWidget {
                           ),
                         ),
                       ),
-                    IconButton(
-                      icon: Icon(
-                          character.isActive
-                              ? Icons.pause_rounded
-                              : Icons.play_arrow_rounded,
-                          size: 20),
+                    TextButton.icon(
                       onPressed: onToggle,
-                      color: cs.onSurfaceVariant,
-                      tooltip: character.isActive ? '停用' : '启用',
+                      icon: Icon(
+                        character.isActive
+                            ? Icons.toggle_on_rounded
+                            : Icons.toggle_off_rounded,
+                        size: 20,
+                      ),
+                      label: Text(character.isActive ? '启用中' : '已停用'),
+                      style: TextButton.styleFrom(
+                        foregroundColor: character.isActive
+                            ? cs.primary
+                            : cs.onSurfaceVariant,
+                        visualDensity: VisualDensity.compact,
+                        padding: const EdgeInsets.symmetric(horizontal: 8),
+                        textStyle: const TextStyle(
+                            fontSize: 12, fontWeight: FontWeight.w600),
+                      ),
                     ),
                     IconButton(
                       icon: const Icon(Icons.delete_outline_rounded, size: 20),

@@ -8,6 +8,7 @@ import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
+import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/chat_api_service.dart';
@@ -17,6 +18,36 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
+import 'package:chat_group/core/database/database_service.dart';
+
+enum AutoChatStatus { idle, waiting, generating, paused, unavailable, error }
+
+enum ReplyBlockReason {
+  noApiConfig,
+  inactive,
+  hourlyLimit,
+  alreadyGenerating,
+  networkError,
+}
+
+List<String> parseMentionedCharacterIds(
+  String content,
+  List<AICharacter> characters,
+) {
+  final mentionedIds = <String>[];
+  if (characters.isEmpty || content.isEmpty) return mentionedIds;
+
+  final byName = {for (final c in characters) c.name: c.id};
+  final mentionPattern = RegExp(r'@([^@\s，。！？!?、；;：:,.]+)');
+  for (final match in mentionPattern.allMatches(content)) {
+    final name = match.group(1);
+    final id = name == null ? null : byName[name];
+    if (id != null && !mentionedIds.contains(id)) {
+      mentionedIds.add(id);
+    }
+  }
+  return mentionedIds;
+}
 
 class ChatRoomPage extends ConsumerStatefulWidget {
   final String groupId;
@@ -29,10 +60,12 @@ class ChatRoomPage extends ConsumerStatefulWidget {
 
 class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   final _textController = TextEditingController();
+  final _memberSearchController = TextEditingController();
   final _scrollController = ScrollController();
-  final _focusNode = FocusNode();
+  final _inputFocusNode = FocusNode();
   final _chatApi = ChatApiService();
   final _random = Random();
+  late final DatabaseService _db;
 
   ChatGroup? _group;
   List<AICharacter> _characters = [];
@@ -53,10 +86,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   // AI 自主聊天
   Timer? _autoChatTimer;
-  final bool _isAutoChatEnabled = true;
+  bool _isAutoChatEnabled = true;
   int _autoChatRoundCount = 0;
   final int _maxAutoChatRounds = 5;
   final Random _autoChatRandom = Random();
+  AutoChatStatus _autoChatStatus = AutoChatStatus.idle;
+  ReplyBlockReason? _lastReplyBlockReason;
 
   // 待回应 @ 列表
   final List<String> _pendingMentionedIds = [];
@@ -76,6 +111,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   @override
   void initState() {
     super.initState();
+    _db = ref.read(databaseServiceProvider);
     _textController.addListener(() {
       final isEmpty = _textController.text.trim().isEmpty;
       if (isEmpty != _isInputEmpty) {
@@ -95,16 +131,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       _streamDone!.complete();
     }
     _textController.dispose();
+    _memberSearchController.dispose();
     _scrollController.dispose();
-    _focusNode.dispose();
+    _inputFocusNode.dispose();
     _autoChatTimer?.cancel();
     _hideMentionOverlay();
     super.dispose();
   }
 
   Future<void> _loadData() async {
-    final db = ref.read(databaseServiceProvider);
-    final group = db.chatGroupBox.get(widget.groupId);
+    final group = _db.chatGroupBox.get(widget.groupId);
     if (group == null) {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
@@ -115,7 +151,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     }
 
     final characters = group.aiCharacterIds
-        .map((id) => db.aiCharacterBox.get(id))
+        .map((id) => _db.aiCharacterBox.get(id))
         .whereType<AICharacter>()
         .where((c) => c.isActive)
         .toList();
@@ -126,12 +162,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       return cfg != null && cfg.apiKey.isNotEmpty;
     });
 
-    final messages = db.messageBox.values
+    final messages = _db.messageBox.values
         .where((m) => m.groupId == widget.groupId)
         .toList()
       ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
 
-    final memoryBox = db.groupMemoryBox;
+    final memoryBox = _db.groupMemoryBox;
     final memoryKey = '${widget.groupId}_${_memoryPeriodKey(DateTime.now())}';
     var memory = memoryBox.get(memoryKey);
     if (memory == null) {
@@ -145,20 +181,26 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       _messages = messages;
       _groupMemory = memory;
       _hasAnyApiConfig = hasApi;
+      _autoChatStatus =
+          hasApi ? AutoChatStatus.waiting : AutoChatStatus.unavailable;
       _isLoading = false;
     });
 
     _scrollToBottom();
 
     if (_isAutoChatEnabled && _characters.isNotEmpty && hasApi) {
-      Future.delayed(const Duration(seconds: 3), _startAutoChat);
+      Future.delayed(const Duration(seconds: 3), () {
+        if (_canTouchUi) _startAutoChat();
+      });
     }
   }
 
   void _startAutoChat() {
+    if (!_canTouchUi || !_isAutoChatEnabled || !_hasAnyApiConfig) return;
     _autoChatTimer?.cancel();
+    setState(() => _autoChatStatus = AutoChatStatus.waiting);
     _autoChatTimer = Timer.periodic(
-      Duration(seconds: 5 + _autoChatRandom.nextInt(4)),
+      Duration(seconds: 3 + _autoChatRandom.nextInt(3)),
       (_) => _tryAutoChatRound(),
     );
   }
@@ -167,28 +209,50 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     _autoChatTimer?.cancel();
     _autoChatTimer = null;
     _autoChatRoundCount = 0;
+    if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.paused);
   }
 
   Future<void> _tryAutoChatRound() async {
-    if (_isAiReplying || _characters.isEmpty) return;
+    if (!_canTouchUi || !_isAutoChatEnabled || _characters.isEmpty) return;
+    if (_isAiReplying ||
+        _isStreaming ||
+        _textController.text.trim().isNotEmpty) {
+      if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.paused);
+      return;
+    }
     if (_autoChatRoundCount >= _maxAutoChatRounds) {
       _stopAutoChat();
-      Future.delayed(const Duration(seconds: 10), _startAutoChat);
+      Future.delayed(const Duration(seconds: 10), () {
+        if (_canTouchUi && _isAutoChatEnabled) _startAutoChat();
+      });
       return;
     }
 
-    final speakers = <AICharacter>[];
-    for (final c in _characters) {
-      if (_isEligibleToReply(c) && _autoChatRandom.nextDouble() < 0.35) {
-        speakers.add(c);
+    final speakers = ChatActivityPolicy.selectAutoChatSpeakers(
+      characters: _characters,
+      isEligible: _isEligibleToReply,
+      random: _autoChatRandom,
+    );
+
+    if (speakers.isEmpty) {
+      if (_canTouchUi) {
+        setState(() {
+          _autoChatStatus = AutoChatStatus.unavailable;
+          _lastReplyBlockReason = _eligibleCharacters.isEmpty
+              ? _firstBlockReason(_characters)
+              : null;
+        });
       }
+      return;
     }
 
-    if (speakers.isEmpty) return;
+    setState(() {
+      _autoChatRoundCount++;
+      _autoChatStatus = AutoChatStatus.generating;
+    });
 
-    setState(() => _autoChatRoundCount++);
-
-    for (final speaker in speakers.take(2)) {
+    for (final speaker in speakers) {
+      if (!_canTouchUi || !_isAutoChatEnabled) break;
       if (!_isEligibleToReply(speaker)) continue;
       await _generateAiReply(speaker, _messages.toList(), null,
           isAutoChat: true);
@@ -196,7 +260,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     }
 
     await _maybeUpdateMemory();
+    if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.waiting);
   }
+
+  bool get _canTouchUi => mounted && !_disposed;
 
   String _memoryPeriodKey(DateTime now) {
     final weekOfYear = _weekOfYear(now);
@@ -268,44 +335,46 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       if (!isAutoChat) _consecutiveRound++;
     });
 
-    final recentMessages = _messages.length > 20
-        ? _messages.sublist(_messages.length - 20)
-        : _messages.toList();
-
-    final character = _selectReplyCharacter(mentionedIds);
-    if (character == null) {
-      setState(() => _isAiReplying = false);
+    final charactersToReply = _selectReplyCharacters(mentionedIds);
+    if (charactersToReply.isEmpty) {
+      final blockReason = _firstBlockReason(_characters);
+      setState(() {
+        _isAiReplying = false;
+        _lastReplyBlockReason = blockReason;
+        _autoChatStatus = AutoChatStatus.unavailable;
+      });
       if (mounted && !isAutoChat) {
         ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(_hasAnyApiConfig
-              ? '暂时没有可以回复的角色（可能已达回复上限）'
-              : '角色未配置 API Key，AI 无法回复。请到「设置」配置 API'),
+          content: Text(_replyBlockText(blockReason)),
           behavior: SnackBarBehavior.floating,
-          action: _hasAnyApiConfig
-              ? null
-              : SnackBarAction(
+          action: blockReason == ReplyBlockReason.noApiConfig
+              ? SnackBarAction(
                   label: '去设置',
-                  onPressed: () =>
-                      Navigator.pushNamed(context, '/settings'),
-                ),
+                  onPressed: () => Navigator.pushNamed(context, '/settings'),
+                )
+              : null,
         ));
       }
       return;
     }
 
-    final wasPendingReply = _pendingMentionedIds.contains(character.id);
-
-    await _generateAiReply(character, recentMessages, userMessage,
-        isAutoChat: isAutoChat);
-    await _delay();
-
-    if (wasPendingReply) {
-      _pendingMentionedIds.remove(character.id);
+    final repliedIds = <String>[];
+    for (final character in charactersToReply) {
+      if (!_canTouchUi) return;
+      final wasPendingReply = _pendingMentionedIds.contains(character.id);
+      await _generateAiReply(
+          character, _recentMessagesForContext(), userMessage,
+          isAutoChat: isAutoChat);
+      repliedIds.add(character.id);
+      await _delay();
+      if (wasPendingReply) {
+        _pendingMentionedIds.remove(character.id);
+      }
     }
 
     if (mentionedIds != null &&
         mentionedIds.isNotEmpty &&
-        !mentionedIds.contains(character.id) &&
+        repliedIds.every((id) => !mentionedIds.contains(id)) &&
         _pendingMentionedIds.isNotEmpty) {
       final notMentionedPending = _pendingMentionedIds
           .where((id) => !mentionedIds.contains(id))
@@ -341,6 +410,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       {bool isAutoChat = false}) async {
     final config = _resolveApiConfig(character);
     if (config == null) {
+      if (_canTouchUi) {
+        setState(() {
+          _autoChatStatus = AutoChatStatus.unavailable;
+          _lastReplyBlockReason = ReplyBlockReason.noApiConfig;
+        });
+      }
       await _appendMessage(Message(
         groupId: widget.groupId,
         senderId: character.id,
@@ -387,33 +462,37 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     )
         .listen(
       (e) {
-        if (_disposed) return;
+        if (!_canTouchUi) return;
         switch (e.type) {
           case ChatStreamEventType.token:
             // 逐 token 累加内容并增量渲染
             fullContent += e.delta ?? '';
             temp.content = fullContent;
-            if (mounted) setState(() {});
+            if (_canTouchUi) setState(() {});
             _scrollToBottom();
           case ChatStreamEventType.done:
             // 以 done 携带的完整内容为准（若为空则保留累计值）
             if ((e.content ?? '').isNotEmpty) fullContent = e.content!;
             temp.content = fullContent;
-            if (mounted) setState(() {});
+            if (_canTouchUi) setState(() {});
           case ChatStreamEventType.error:
             failed = true;
+            _lastReplyBlockReason = ReplyBlockReason.networkError;
             fullContent = '[${character.name} 回复失败: ${e.message}]';
             temp.content = fullContent;
-            if (mounted) setState(() {});
+            if (_canTouchUi) {
+              setState(() => _autoChatStatus = AutoChatStatus.error);
+            }
             if (!done.isCompleted) done.complete();
         }
       },
       onError: (err) {
-        if (_disposed) return;
+        if (!_canTouchUi) return;
         failed = true;
+        _lastReplyBlockReason = ReplyBlockReason.networkError;
         fullContent = '[${character.name} 回复失败: $err]';
         temp.content = fullContent;
-        if (mounted) setState(() {});
+        if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.error);
         if (!done.isCompleted) done.complete();
       },
       onDone: () {
@@ -435,35 +514,30 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     _streamDone = null;
     if (mounted) setState(() => _isStreaming = false);
 
-    // 空内容（非失败）直接丢弃临时消息，不落库。
+    // 空内容也给出可见反馈，否则 @ 触发会像没有人理会。
     if (!failed && fullContent.trim().isEmpty) {
-      if (mounted) {
-        setState(() {
-          _messages = _messages.where((m) => m.id != temp.id).toList();
-          _streamingMessage = null;
-        });
-      }
-      return;
+      fullContent = ChatActivityPolicy.emptyReplyFallback(
+        characterName: character.name,
+        role: character.role,
+        groupTheme: _group?.theme ?? '',
+        userMessage: userMessage,
+        isAutoChat: isAutoChat,
+        random: _random,
+      );
+      temp.content = fullContent;
+      if (_canTouchUi) setState(() {});
     }
 
-    // 解析 @ 提及 → mentionedAiIds（与原有逻辑一致）
-    final mentionPattern = RegExp(r'@([^\s]+)');
-    final mentionedIds = <String>[];
-    for (final match in mentionPattern.allMatches(fullContent)) {
-      final name = match.group(1);
-      if (name == null) continue;
-      final found = _characters.firstWhere((c) => c.name == name,
-          orElse: () => _characters.first);
-      mentionedIds.add(found.id);
-    }
+    // 解析 @ 提及 → mentionedAiIds（未知名称忽略，避免误指向第一个成员）。
+    final mentionedIds = parseMentionedCharacterIds(fullContent, _characters);
 
     // 持久化纪律：仅完成时 put 一次（包含失败占位消息）。
     temp.content = fullContent;
     temp.isMention = mentionedIds.isNotEmpty;
     temp.mentionedAiIds = mentionedIds;
-    final db = ref.read(databaseServiceProvider);
-    await db.messageBox.put(temp.id, temp);
-    if (mounted) setState(() => _streamingMessage = null);
+    await _db.messageBox.put(temp.id, temp);
+    _recordReplyUsage(character);
+    if (_canTouchUi) setState(() => _streamingMessage = null);
   }
 
   /// 停止当前流式生成：取消订阅并保留已生成的（部分）内容落库。
@@ -472,16 +546,20 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     _streamSub?.cancel();
     _streamSub = null;
     // 唤醒 await done.future，让 _generateAiReply 收尾并把现有内容落库。
-    _streamDone?.complete();
-    if (mounted) setState(() => _isStreaming = false);
+    if (_streamDone != null && !_streamDone!.isCompleted) {
+      _streamDone!.complete();
+    }
+    if (_canTouchUi) {
+      setState(() {
+        _isStreaming = false;
+        _autoChatStatus = AutoChatStatus.paused;
+      });
+    }
   }
 
   ApiConfig? _resolveApiConfig(AICharacter character) {
     if (character.apiConfigId.isNotEmpty) {
-      final config = ref
-          .read(databaseServiceProvider)
-          .apiConfigBox
-          .get(character.apiConfigId);
+      final config = _db.apiConfigBox.get(character.apiConfigId);
       if (config != null) return config;
     }
     if (character.apiKey.isNotEmpty && character.apiProvider.isNotEmpty) {
@@ -507,6 +585,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           {'role': 'system', 'content': '【群聊记忆】${_groupMemory!.topicSummary}'});
     }
 
+    final groupName = _group?.name ?? '这个群';
+    final groupTheme = _group?.theme ?? '日常聊天';
+    msgs.add({
+      'role': 'system',
+      'content':
+          '你正在参加一个高活跃度群聊「$groupName」，主题是「$groupTheme」。回复要像真实聊天群：自然接话、简短、有个人观点，可以顺手回应上一位成员或点名邀请别人，但不要每次都长篇总结。'
+    });
+
     if (isAutoChat) {
       final otherCharacters =
           _characters.where((c) => c.id != character.id).toList();
@@ -516,7 +602,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             .join('、');
         msgs.add({
           'role': 'system',
-          'content': '现在群聊中正在自动对话。在场的其他角色：$charInfo。请自然地参与对话，可以回应其他人的发言。'
+          'content':
+              '现在群聊中正在自动对话。在场的其他角色：$charInfo。请主动抛话题、接上一条发言，或把话题递给某位成员，让群显得有人气。'
         });
       }
     }
@@ -533,21 +620,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       msgs.add({'role': 'system', 'content': '群聊中的其他角色：$characterInfo'});
     }
 
-    final historyMessages = <Message>[];
-    for (final m in context) {
-      if (isAutoChat) {
-        historyMessages.add(m);
-      } else {
-        if (m.senderType == 'user') {
-          historyMessages.add(m);
-        } else if (m.senderType == 'ai' && m.senderId == character.id) {
-          historyMessages.add(m);
-        }
-      }
-    }
+    final historyMessages = context.toList();
 
     final nameById = {for (final c in _characters) c.id: c.name};
-    for (final m in historyMessages.take(15)) {
+    final recentHistory = historyMessages.length > 15
+        ? historyMessages.sublist(historyMessages.length - 15)
+        : historyMessages;
+    for (final m in recentHistory) {
       final role = m.senderType == 'user' ? 'user' : 'assistant';
       if (m.isMention && m.mentionedAiIds.isNotEmpty) {
         final mentionedNames =
@@ -569,8 +648,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   Future<void> _appendMessage(Message message) async {
-    final db = ref.read(databaseServiceProvider);
-    await db.messageBox.put(message.id, message);
+    await _db.messageBox.put(message.id, message);
+    if (!_canTouchUi) return;
     setState(() {
       _messages = List.from(_messages)..add(message);
     });
@@ -620,11 +699,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   bool _isEligibleToReply(AICharacter character) {
-    if (!character.isActive) return false;
+    if (_blockReasonFor(character) != null) return false;
+    return true;
+  }
 
+  ReplyBlockReason? _blockReasonFor(AICharacter character) {
+    if (!character.isActive) return ReplyBlockReason.inactive;
     final config = _resolveApiConfig(character);
-    if (config == null || config.apiKey.isEmpty) return false;
-
+    if (config == null || config.apiKey.isEmpty) {
+      return ReplyBlockReason.noApiConfig;
+    }
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final lastReplyDay = character.lastReplyTimestamp == null
@@ -635,30 +719,54 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             character.lastReplyTimestamp!.day);
 
     if (lastReplyDay == null || lastReplyDay != today) {
-      character.hourlyReplyCount = 0;
-      character.lastReplyTimestamp = now;
-      return true;
+      return null;
     }
 
     final diff = now.difference(character.lastReplyTimestamp!).inMinutes;
     if (diff >= 60) {
-      character.hourlyReplyCount = 0;
-      character.lastReplyTimestamp = now;
-      return true;
+      return null;
     }
 
-    return character.hourlyReplyCount < character.hourlyReplyLimit;
+    return character.hourlyReplyCount < character.hourlyReplyLimit
+        ? null
+        : ReplyBlockReason.hourlyLimit;
   }
 
-  List<T> _shuffle<T>(List<T> list) {
-    final copy = List<T>.from(list);
-    for (var i = copy.length - 1; i > 0; i--) {
-      final j = _random.nextInt(i + 1);
-      final tmp = copy[i];
-      copy[i] = copy[j];
-      copy[j] = tmp;
+  List<AICharacter> get _eligibleCharacters =>
+      _characters.where(_isEligibleToReply).toList();
+
+  ReplyBlockReason? _firstBlockReason(List<AICharacter> characters) {
+    if (characters.isEmpty) return null;
+    final reasons =
+        characters.map(_blockReasonFor).whereType<ReplyBlockReason>().toList();
+    if (reasons.isEmpty) return null;
+    if (reasons.every((r) => r == ReplyBlockReason.noApiConfig)) {
+      return ReplyBlockReason.noApiConfig;
     }
-    return copy;
+    if (reasons.every((r) => r == ReplyBlockReason.inactive)) {
+      return ReplyBlockReason.inactive;
+    }
+    if (reasons.every((r) => r == ReplyBlockReason.hourlyLimit)) {
+      return ReplyBlockReason.hourlyLimit;
+    }
+    return reasons.first;
+  }
+
+  void _recordReplyUsage(AICharacter character) {
+    final now = DateTime.now();
+    final last = character.lastReplyTimestamp;
+    final sameDay = last != null &&
+        last.year == now.year &&
+        last.month == now.month &&
+        last.day == now.day;
+    final withinHour = last != null && now.difference(last).inMinutes < 60;
+    if (!sameDay || !withinHour) {
+      character.hourlyReplyCount = 1;
+    } else {
+      character.hourlyReplyCount += 1;
+    }
+    character.lastReplyTimestamp = now;
+    character.save();
   }
 
   Future<void> _delay() async {
@@ -682,10 +790,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       builder: (context) {
         final cs = Theme.of(context).colorScheme;
         // TapRegion：点击弹窗外部（含输入框、消息区）即关闭，解决点击其他位置不消失的问题。
-        return TapRegion(
-          onTapOutside: (_) => _hideMentionOverlay(),
-          child: Positioned(
-            width: 300,
+        return Positioned(
+          width: 300,
+          child: TapRegion(
+            onTapOutside: (_) => _hideMentionOverlay(),
             child: CompositedTransformFollower(
               link: _mentionLayerLink,
               showWhenUnlinked: false,
@@ -740,8 +848,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     if (_filteredMentionMembers.isEmpty) {
       return const Padding(
         padding: EdgeInsets.all(20),
-        child: Center(
-            child: Text('无匹配角色', style: TextStyle(fontSize: 14))),
+        child: Center(child: Text('无匹配角色', style: TextStyle(fontSize: 14))),
       );
     }
     return ListView.builder(
@@ -757,10 +864,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           borderRadius: BorderRadius.circular(10),
           child: Container(
             margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-            padding:
-                const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 10),
             decoration: BoxDecoration(
-              color: selected ? cs.primary.withOpacity(0.14) : Colors.transparent,
+              color:
+                  selected ? cs.primary.withOpacity(0.14) : Colors.transparent,
               borderRadius: BorderRadius.circular(10),
             ),
             child: Row(
@@ -771,8 +878,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: pColor.withOpacity(0.14),
-                    border: Border.all(
-                        color: pColor.withOpacity(0.3), width: 1.2),
+                    border:
+                        Border.all(color: pColor.withOpacity(0.3), width: 1.2),
                   ),
                   child: Center(
                     child: Text(
@@ -903,47 +1010,40 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   List<String> _parseMentions(String content) {
-    final mentionedIds = <String>[];
-    if (_characters.isEmpty) return mentionedIds;
-
-    final chinesePattern = RegExp(r'@([一-鿿]{1,10})');
-    for (final match in chinesePattern.allMatches(content)) {
-      final name = match.group(1)!;
-      final found = _characters.firstWhere((c) => c.name == name,
-          orElse: () => _characters.first);
-      mentionedIds.add(found.id);
-    }
-    final englishPattern = RegExp(r'@(\w+)');
-    for (final match in englishPattern.allMatches(content)) {
-      final name = match.group(1)!;
-      final found = _characters.firstWhere((c) => c.name == name,
-          orElse: () => _characters.first);
-      mentionedIds.add(found.id);
-    }
-    return mentionedIds;
+    return parseMentionedCharacterIds(content, _characters);
   }
 
-  AICharacter? _selectReplyCharacter(List<String>? mentionedIds) {
-    final eligible = _characters.where(_isEligibleToReply).toList();
-    if (eligible.isEmpty) return null;
+  List<AICharacter> _selectReplyCharacters(List<String>? mentionedIds) {
+    return ChatActivityPolicy.selectUserReplyCharacters(
+      characters: _characters,
+      mentionedIds: mentionedIds ?? const [],
+      pendingMentionedIds: _pendingMentionedIds,
+      isEligible: _isEligibleToReply,
+      random: _random,
+    );
+  }
 
-    if (mentionedIds != null && mentionedIds.isNotEmpty) {
-      final priorityChars =
-          eligible.where((c) => mentionedIds.contains(c.id)).toList();
-      if (priorityChars.isNotEmpty) {
-        return _shuffle(priorityChars).first;
-      }
+  List<Message> _recentMessagesForContext() {
+    return _messages.length > 20
+        ? _messages.sublist(_messages.length - 20)
+        : _messages.toList();
+  }
+
+  String _replyBlockText(ReplyBlockReason? reason) {
+    switch (reason) {
+      case ReplyBlockReason.noApiConfig:
+        return '角色未配置 API Key，AI 无法回复。请到「设置」配置 API';
+      case ReplyBlockReason.inactive:
+        return '当前群聊没有启用中的角色';
+      case ReplyBlockReason.hourlyLimit:
+        return '角色已达到本小时回复上限，稍后再试';
+      case ReplyBlockReason.alreadyGenerating:
+        return 'AI 正在生成中，请稍后再发';
+      case ReplyBlockReason.networkError:
+        return '网络请求失败，请检查 API 配置';
+      case null:
+        return '暂时没有可以回复的角色';
     }
-
-    if (_pendingMentionedIds.isNotEmpty) {
-      final pendingEligible =
-          eligible.where((c) => _pendingMentionedIds.contains(c.id)).toList();
-      if (pendingEligible.isNotEmpty) {
-        return _shuffle(pendingEligible).first;
-      }
-    }
-
-    return _shuffle(eligible).first;
   }
 
   void _scrollToBottom() {
@@ -960,14 +1060,61 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   Color _senderColor(AICharacter sender) {
     final providerName = sender.apiConfigId.isNotEmpty
-        ? (ref
-                .read(databaseServiceProvider)
-                .apiConfigBox
-                .get(sender.apiConfigId)
-                ?.provider ??
+        ? (_db.apiConfigBox.get(sender.apiConfigId)?.provider ??
             sender.apiProvider)
         : sender.apiProvider;
     return providerColor(providerName);
+  }
+
+  String get _autoChatStatusText {
+    if (!_isAutoChatEnabled) return '自动发言已关闭';
+    switch (_autoChatStatus) {
+      case AutoChatStatus.idle:
+        return '自动发言空闲';
+      case AutoChatStatus.waiting:
+        return '自动发言等待中';
+      case AutoChatStatus.generating:
+        return '自动发言生成中';
+      case AutoChatStatus.paused:
+        return _textController.text.trim().isNotEmpty
+            ? '你正在输入，自动发言暂停'
+            : '自动发言已暂停';
+      case AutoChatStatus.unavailable:
+        return _replyBlockText(_lastReplyBlockReason);
+      case AutoChatStatus.error:
+        return '自动发言异常，已暂停';
+    }
+  }
+
+  IconData get _autoChatStatusIcon {
+    if (!_isAutoChatEnabled) return Icons.voice_over_off_rounded;
+    switch (_autoChatStatus) {
+      case AutoChatStatus.generating:
+        return Icons.auto_awesome_rounded;
+      case AutoChatStatus.paused:
+        return Icons.pause_circle_outline_rounded;
+      case AutoChatStatus.unavailable:
+      case AutoChatStatus.error:
+        return Icons.info_outline_rounded;
+      case AutoChatStatus.idle:
+      case AutoChatStatus.waiting:
+        return Icons.forum_outlined;
+    }
+  }
+
+  void _toggleAutoChat(bool enabled) {
+    if (!_canTouchUi) return;
+    setState(() {
+      _isAutoChatEnabled = enabled;
+      _autoChatStatus =
+          enabled ? AutoChatStatus.waiting : AutoChatStatus.paused;
+    });
+    if (enabled) {
+      _startAutoChat();
+    } else {
+      _autoChatTimer?.cancel();
+      _autoChatTimer = null;
+    }
   }
 
   static String _formatTime(DateTime dt) {
@@ -1044,6 +1191,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         children: [
           // 未配置 API Key 时给出醒目提示，避免「发了消息 AI 不回复」的困惑
           if (!_hasAnyApiConfig) _buildApiWarningBanner(cs),
+          _buildAutoChatStatusBar(cs),
           Expanded(
             child: _messages.isEmpty
                 ? _buildEmptyState(cs)
@@ -1080,7 +1228,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                       return Column(
                         crossAxisAlignment: CrossAxisAlignment.start,
                         children: [
-                          if (showDate) _buildDateDivider(cs, message.timestamp),
+                          if (showDate)
+                            _buildDateDivider(cs, message.timestamp),
                           _MessageBubble(
                             message: message,
                             sender: sender,
@@ -1215,7 +1364,53 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             ),
             child: Text('去配置',
                 style: TextStyle(
-                    fontSize: 13, fontWeight: FontWeight.w600, color: cs.error)),
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: cs.error)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAutoChatStatusBar(ColorScheme cs) {
+    final enabled = _isAutoChatEnabled && _hasAnyApiConfig;
+    final statusColor = switch (_autoChatStatus) {
+      AutoChatStatus.generating => cs.primary,
+      AutoChatStatus.unavailable || AutoChatStatus.error => cs.error,
+      AutoChatStatus.paused => cs.onSurfaceVariant,
+      AutoChatStatus.idle || AutoChatStatus.waiting => cs.onSurfaceVariant,
+    };
+
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withOpacity(0.72),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
+      ),
+      child: Row(
+        children: [
+          Icon(_autoChatStatusIcon, size: 18, color: statusColor),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              _autoChatStatusText,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+            ),
+          ),
+          const SizedBox(width: 8),
+          Text(
+            '自动发言',
+            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+          ),
+          Switch.adaptive(
+            value: enabled,
+            onChanged: _hasAnyApiConfig ? _toggleAutoChat : null,
+            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
         ],
       ),
@@ -1258,9 +1453,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   Widget _buildMemberStackChip(ColorScheme cs) {
     final shown = _characters.take(3).toList();
     const overlap = 16.0;
-    final stackWidth = shown.isEmpty
-        ? 0.0
-        : 26.0 + (shown.length - 1) * overlap;
+    final stackWidth =
+        shown.isEmpty ? 0.0 : 26.0 + (shown.length - 1) * overlap;
     return Container(
       padding: const EdgeInsets.only(left: 8, right: 10, top: 4, bottom: 4),
       decoration: BoxDecoration(
@@ -1328,71 +1522,130 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   Widget _buildMembersSheet(ColorScheme cs) {
     final ownerName = _group?.ownerName ?? '我';
-    return Container(
-      constraints: BoxConstraints(
-        maxHeight: MediaQuery.of(context).size.height * 0.7,
-      ),
-      padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
-      decoration: BoxDecoration(
-        color: cs.surface,
-        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-      ),
-      child: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(
-                  color: cs.outlineVariant,
-                  borderRadius: BorderRadius.circular(2),
+    _memberSearchController.clear();
+    return StatefulBuilder(
+      builder: (context, setSheetState) {
+        final query = _memberSearchController.text.trim();
+        final filtered = query.isEmpty
+            ? _characters
+            : _characters
+                .where((c) =>
+                    c.name.contains(query) ||
+                    c.role.contains(query) ||
+                    c.personalityTags.any((tag) => tag.contains(query)))
+                .toList();
+        return Container(
+          constraints: BoxConstraints(
+            maxHeight: MediaQuery.of(context).size.height * 0.78,
+          ),
+          padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+          decoration: BoxDecoration(
+            color: cs.surface,
+            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+          ),
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
+                  decoration: BoxDecoration(
+                    color: cs.outlineVariant,
+                    borderRadius: BorderRadius.circular(2),
+                  ),
                 ),
               ),
-            ),
-            Row(
-              children: [
-                Text('群成员',
-                    style: TextStyle(
-                        fontSize: 18,
-                        fontWeight: FontWeight.w700,
-                        color: cs.onSurface)),
-                const SizedBox(width: 8),
-                Text('${_characters.length + 1}',
-                    style: TextStyle(
-                        fontSize: 14, color: cs.onSurfaceVariant)),
-              ],
-            ),
-            const SizedBox(height: 16),
-            // 群主（真人用户）置顶
-            _buildMemberTile(
-              cs: cs,
-              avatarText: '我',
-              avatarColor: cs.primary,
-              name: ownerName,
-              subtitle: '群主',
-              isOwner: true,
-            ),
-            Divider(
-                height: 24,
-                color: cs.outlineVariant.withOpacity(0.4)),
-            ..._characters.map((c) {
-              final color = _senderColor(c);
-              return _buildMemberTile(
-                cs: cs,
-                avatarText: c.avatar.isNotEmpty ? c.avatar : c.name[0],
-                avatarColor: color,
-                name: c.name,
-                subtitle: '${c.role} · ${c.age}岁',
-              );
-            }),
-          ],
-        ),
-      ),
+              Row(
+                children: [
+                  Text('群成员',
+                      style: TextStyle(
+                          fontSize: 18,
+                          fontWeight: FontWeight.w700,
+                          color: cs.onSurface)),
+                  const SizedBox(width: 8),
+                  Text('${_characters.length + 1}',
+                      style:
+                          TextStyle(fontSize: 14, color: cs.onSurfaceVariant)),
+                ],
+              ),
+              const SizedBox(height: 12),
+              TextField(
+                controller: _memberSearchController,
+                decoration: InputDecoration(
+                  hintText: '搜索名称、角色或标签',
+                  prefixIcon: Icon(Icons.search_rounded,
+                      size: 18, color: cs.onSurfaceVariant),
+                  isDense: true,
+                  filled: true,
+                  fillColor: cs.surfaceContainerHighest,
+                  border: OutlineInputBorder(
+                    borderRadius: BorderRadius.circular(12),
+                    borderSide: BorderSide(color: cs.outlineVariant),
+                  ),
+                ),
+                onChanged: (_) => setSheetState(() {}),
+              ),
+              const SizedBox(height: 16),
+              Expanded(
+                child: ListView(
+                  children: [
+                    _buildMemberTile(
+                      cs: cs,
+                      avatarText: '我',
+                      avatarColor: cs.primary,
+                      name: ownerName,
+                      subtitle: '群主',
+                      isOwner: true,
+                    ),
+                    Divider(
+                        height: 24, color: cs.outlineVariant.withOpacity(0.4)),
+                    if (filtered.isEmpty)
+                      Padding(
+                        padding: const EdgeInsets.symmetric(vertical: 24),
+                        child: Center(
+                          child: Text('未找到匹配成员',
+                              style: TextStyle(
+                                  fontSize: 14, color: cs.onSurfaceVariant)),
+                        ),
+                      )
+                    else
+                      ...filtered.map((c) {
+                        final color = _senderColor(c);
+                        return _buildMemberTile(
+                          cs: cs,
+                          avatarText:
+                              c.avatar.isNotEmpty ? c.avatar : c.name[0],
+                          avatarColor: color,
+                          name: c.name,
+                          subtitle: _memberStatusText(c),
+                        );
+                      }),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        );
+      },
     );
+  }
+
+  String _memberStatusText(AICharacter c) {
+    final blockReason = _blockReasonFor(c);
+    final base = '${c.role} · ${c.age}岁';
+    final usage = '${c.hourlyReplyCount}/${c.hourlyReplyLimit} 次/小时';
+    final status = switch (blockReason) {
+      null => '可回复',
+      ReplyBlockReason.noApiConfig => '未配置 API',
+      ReplyBlockReason.inactive => '已停用',
+      ReplyBlockReason.hourlyLimit => '达到上限',
+      ReplyBlockReason.alreadyGenerating => '生成中',
+      ReplyBlockReason.networkError => '网络异常',
+    };
+    return '$base · $status · $usage';
   }
 
   Widget _buildMemberTile({
@@ -1413,7 +1666,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             decoration: BoxDecoration(
               shape: BoxShape.circle,
               color: avatarColor.withOpacity(0.15),
-              border: Border.all(color: avatarColor.withOpacity(0.3), width: 1.5),
+              border:
+                  Border.all(color: avatarColor.withOpacity(0.3), width: 1.5),
             ),
             child: Center(
               child: Text(avatarText,
@@ -1458,8 +1712,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                 ),
                 const SizedBox(height: 2),
                 Text(subtitle,
-                    style: TextStyle(
-                        fontSize: 13, color: cs.onSurfaceVariant)),
+                    style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
               ],
             ),
           ),
@@ -1499,9 +1752,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   Widget _buildInputArea(ColorScheme cs) {
     return CompositedTransformTarget(
       link: _mentionLayerLink,
-      child: KeyboardListener(
-        focusNode: _focusNode,
-        onKeyEvent: _handleKeyEvent,
+      child: Focus(
+        onKeyEvent: (_, event) => _handleKeyEvent(event),
         child: Container(
           padding: EdgeInsets.only(
               left: 16,
@@ -1528,7 +1780,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                       const BoxConstraints(minHeight: 40, maxHeight: 120),
                   child: TextField(
                     controller: _textController,
-                    focusNode: _focusNode,
+                    focusNode: _inputFocusNode,
                     decoration: InputDecoration(
                       hintText: '输入消息，回车换行，@ 提到角色...',
                       border: OutlineInputBorder(

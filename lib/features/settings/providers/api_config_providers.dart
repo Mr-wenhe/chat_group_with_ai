@@ -20,17 +20,17 @@ class ApiConfigsNotifier extends StateNotifier<List<ApiConfig>> {
   }
 
   Future<void> addConfig(ApiConfig config) async {
-    await _db.apiConfigBox.put(config.id, config);
+    await _db.saveApiConfig(config);
     _loadConfigs();
   }
 
   Future<void> updateConfig(ApiConfig config) async {
-    await _db.apiConfigBox.put(config.id, config);
+    await _db.saveApiConfig(config);
     _loadConfigs();
   }
 
   Future<void> deleteConfig(String id) async {
-    await _db.apiConfigBox.delete(id);
+    await _db.deleteApiConfig(id);
     _loadConfigs();
   }
 
