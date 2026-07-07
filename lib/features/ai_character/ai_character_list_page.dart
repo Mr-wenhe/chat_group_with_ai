@@ -4,6 +4,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'ai_character_form_page.dart';
 import 'providers/ai_character_providers.dart';
+import 'package:chat_group/core/theme/app_theme.dart';
+import 'package:chat_group/core/theme/provider_style.dart';
+import 'package:chat_group/core/widgets/app_widgets.dart';
+
 class AICharacterListPage extends ConsumerWidget {
   const AICharacterListPage({super.key});
 
@@ -23,8 +27,11 @@ class AICharacterListPage extends ConsumerWidget {
             Container(
               width: 32,
               height: 32,
-              decoration: BoxDecoration(color: cs.primary, borderRadius: BorderRadius.circular(8)),
-              child: Icon(Icons.smart_toy_rounded, size: 18, color: cs.onPrimary),
+              decoration: BoxDecoration(
+                gradient: AppTheme.primaryGradient,
+                borderRadius: BorderRadius.circular(9),
+              ),
+              child: const Icon(Icons.smart_toy_rounded, size: 18, color: Colors.white),
             ),
             const SizedBox(width: 12),
             Text('AI 角色', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 22, color: cs.onSurface)),
@@ -50,52 +57,12 @@ class AICharacterListPage extends ConsumerWidget {
                 );
               },
             ),
-      floatingActionButton: FloatingActionButton.extended(
+      floatingActionButton: AppFab(
         onPressed: () => _addCharacter(context),
-        backgroundColor: cs.primary,
-        foregroundColor: cs.onPrimary,
-        icon: const Icon(Icons.add_rounded, size: 22),
-        label: const Text('创建角色', style: TextStyle(fontWeight: FontWeight.w600)),
+        icon: Icons.add_rounded,
+        label: '创建角色',
       ),
-      bottomNavigationBar: _buildBottomNav(context, 0),
-    );
-  }
-
-  Widget _buildBottomNav(BuildContext context, int currentIndex) {
-    final cs = Theme.of(context).colorScheme;
-    return NavigationBar(
-      selectedIndex: currentIndex,
-      onDestinationSelected: (i) {
-        if (i != currentIndex) {
-          if (i == 0) {
-            Navigator.of(context).pushReplacementNamed('/');
-          } else if (i == 1) {
-            Navigator.of(context).pushReplacementNamed('/groups');
-          } else {
-            Navigator.of(context).pushReplacementNamed('/settings');
-          }
-        }
-      },
-      backgroundColor: cs.surface,
-      indicatorColor: cs.primaryContainer,
-      labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-      destinations: const [
-        NavigationDestination(
-          icon: Icon(Icons.smart_toy_rounded, size: 22),
-          selectedIcon: Icon(Icons.smart_toy_rounded, size: 22),
-          label: '角色',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.group_outlined, size: 22),
-          selectedIcon: Icon(Icons.group_rounded, size: 22),
-          label: '群聊',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.settings_outlined, size: 22),
-          selectedIcon: Icon(Icons.settings_rounded, size: 22),
-          label: '设置',
-        ),
-      ],
+      bottomNavigationBar: AppBottomNav(currentIndex: 0, cs: cs),
     );
   }
 
@@ -104,7 +71,15 @@ class AICharacterListPage extends ConsumerWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.person_add_rounded, size: 64, color: cs.primary.withOpacity(0.3)),
+          Container(
+            width: 96,
+            height: 96,
+            decoration: BoxDecoration(
+              color: cs.primaryContainer.withOpacity(0.5),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(Icons.person_add_rounded, size: 44, color: cs.primary),
+          ),
           const SizedBox(height: 24),
           Text('还没有 AI 角色', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: cs.onSurface)),
           const SizedBox(height: 8),
@@ -162,7 +137,8 @@ class _CharacterCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final providerColor = _providerColor();
+    final pColor = providerColor(character.apiProvider);
+    final label = providerLabel(character.apiProvider);
 
     return Dismissible(
       key: Key(character.id),
@@ -171,28 +147,28 @@ class _CharacterCard extends StatelessWidget {
       background: Container(
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: 20),
-        decoration: BoxDecoration(color: cs.errorContainer, borderRadius: BorderRadius.circular(16)),
+        decoration: BoxDecoration(color: cs.errorContainer, borderRadius: BorderRadius.circular(18)),
         child: Icon(Icons.delete_outline_rounded, color: cs.error),
       ),
       child: Card(
         margin: const EdgeInsets.only(bottom: 12),
         elevation: 0,
+        color: character.isActive ? cs.surfaceContainer : cs.surfaceContainerLow,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(18),
           side: BorderSide(
-            color: character.isActive ? providerColor.withOpacity(0.3) : cs.outlineVariant,
+            color: character.isActive ? pColor.withOpacity(0.35) : cs.outlineVariant,
             width: character.isActive ? 1.5 : 1,
           ),
         ),
-        color: character.isActive ? cs.surface : cs.surfaceContainerHighest,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(18),
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: Row(
               children: [
-                _buildAvatar(providerColor),
+                _buildAvatar(pColor),
                 const SizedBox(width: 14),
                 Expanded(
                   child: Column(
@@ -204,14 +180,14 @@ class _CharacterCard extends StatelessWidget {
                           const SizedBox(width: 8),
                           Container(
                             padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                            decoration: BoxDecoration(color: providerColor.withOpacity(0.1), borderRadius: BorderRadius.circular(4)),
-                            child: Text(_providerLabel(), style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: providerColor)),
+                            decoration: BoxDecoration(color: pColor.withOpacity(0.12), borderRadius: BorderRadius.circular(6)),
+                            child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w600, color: pColor)),
                           ),
                           if (!character.isActive) ...[
                             const SizedBox(width: 6),
                             Container(
                               padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                              decoration: BoxDecoration(color: cs.surfaceContainerHighest, borderRadius: BorderRadius.circular(4)),
+                              decoration: BoxDecoration(color: cs.surfaceContainerHighest, borderRadius: BorderRadius.circular(6)),
                               child: Text('停用', style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
                             ),
                           ],
@@ -261,19 +237,19 @@ class _CharacterCard extends StatelessWidget {
     );
   }
 
-  Widget _buildAvatar(Color providerColor) {
+  Widget _buildAvatar(Color pColor) {
     final displayAvatar = character.avatar.isNotEmpty ? character.avatar : (character.name.isNotEmpty ? character.name[0] : '?');
     return Container(
       width: 48,
       height: 48,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: providerColor.withOpacity(0.12),
-        border: Border.all(color: providerColor.withOpacity(0.25), width: 1.5),
+        color: pColor.withOpacity(0.14),
+        border: Border.all(color: pColor.withOpacity(0.3), width: 1.5),
       ),
       child: Stack(
         children: [
-          Center(child: Text(displayAvatar, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: providerColor))),
+          Center(child: Text(displayAvatar, style: TextStyle(fontSize: 20, fontWeight: FontWeight.w600, color: pColor))),
           if (!character.isActive)
             const Positioned.fill(child: DecoratedBox(
               decoration: BoxDecoration(shape: BoxShape.circle, color: Colors.black26),
@@ -282,29 +258,5 @@ class _CharacterCard extends StatelessWidget {
         ],
       ),
     );
-  }
-
-  String _providerLabel() {
-    switch (character.apiProvider) {
-      case 'deepseek': return 'DeepSeek';
-      case 'qwen': return '通义千问';
-      case 'zhipu': return '智谱AI';
-      case 'moonshot': return 'Moonshot';
-      case 'baidu': return '百度文心';
-      case 'custom': return '自定义';
-      default: return character.apiProvider;
-    }
-  }
-
-  Color _providerColor() {
-    switch (character.apiProvider) {
-      case 'deepseek': return const Color(0xFF1565C0);
-      case 'qwen': return const Color(0xFF6A1B9A);
-      case 'zhipu': return const Color(0xFF0277BD);
-      case 'moonshot': return const Color(0xFF4527A0);
-      case 'baidu': return const Color(0xFF283593);
-      case 'custom': return const Color(0xFFE65100);
-      default: return const Color(0xFF2563EB);
-    }
   }
 }

@@ -4,6 +4,7 @@ enum ApiProvider {
   zhipu('智谱AI', 'https://open.bigmodel.cn/api/paas/v4'),
   moonshot('Moonshot', 'https://api.moonshot.cn/v1'),
   baidu('百度文心', 'https://qianfan.baidubce.com/v2'),
+  xfyun('讯飞星火', 'https://spark-api-open.xf-yun.com/v1'),
   custom('自定义', '');
 
   final String label;
@@ -31,6 +32,7 @@ enum ApiProvider {
       'ernie-speed-128k',
       'ernie-lite-8k',
     ],
+    'xfyun': ['spark-lite', 'spark-plus', 'spark-pro', 'spark-ultra'],
     'custom': [],
   };
 
@@ -40,6 +42,7 @@ enum ApiProvider {
     'zhipu': 'glm-4-plus',
     'moonshot': 'moonshot-v1-32k',
     'baidu': 'ernie-4.0-turbo-8k',
+    'xfyun': 'spark-lite',
   };
 
   static String getBaseUrl(String providerName) {

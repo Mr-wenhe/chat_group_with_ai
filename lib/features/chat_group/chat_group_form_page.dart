@@ -1,8 +1,9 @@
-import 'package:chat_group/core/models/chat_group.dart';
-import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
-import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:chat_group/core/models/chat_group.dart';
+import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
+import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 
 class ChatGroupFormPage extends ConsumerStatefulWidget {
   final ChatGroup? group;
@@ -76,35 +77,35 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            _SectionHeader(title: '群聊信息', icon: Icons.info_outline_rounded, cs: cs),
+            AppSectionHeader(title: '群聊信息', icon: Icons.info_outline_rounded, cs: cs),
             const SizedBox(height: 12),
-            _Card(
+            AppCard(
               cs: cs,
               children: [
                 TextFormField(
                   controller: _nameController,
-                  decoration: _inputDecoration('群聊名称 *', '给你的群聊起个名字', Icons.chat_bubble_outline_rounded, cs),
+                  decoration: appInputDecoration('群聊名称 *', '给你的群聊起个名字', Icons.chat_bubble_outline_rounded, cs),
                   validator: (v) => v?.isEmpty ?? true ? '请输入群聊名称' : null,
                 ),
                 const SizedBox(height: 14),
                 TextFormField(
                   controller: _themeController,
-                  decoration: _inputDecoration('主题 *', '例如：职场吐槽大会', Icons.palette_outlined, cs),
+                  decoration: appInputDecoration('主题 *', '例如：职场吐槽大会', Icons.palette_outlined, cs),
                   validator: (v) => v?.isEmpty ?? true ? '请输入群聊主题' : null,
                 ),
                 const SizedBox(height: 14),
                 TextFormField(
                   controller: _descriptionController,
-                  decoration: _inputDecoration('描述', '可选，描述群聊的背景设定', Icons.description_outlined, cs),
+                  decoration: appInputDecoration('描述', '可选，描述群聊的背景设定', Icons.description_outlined, cs),
                   maxLines: 3,
                 ),
               ],
             ),
 
             const SizedBox(height: 24),
-            _SectionHeader(title: '选择角色', icon: Icons.person_add_rounded, cs: cs),
+            AppSectionHeader(title: '选择角色', icon: Icons.person_add_rounded, cs: cs),
             const SizedBox(height: 12),
-            _Card(
+            AppCard(
               cs: cs,
               children: [
                 TextField(
@@ -114,8 +115,9 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
                     prefixIcon: Icon(Icons.search_rounded, size: 18, color: cs.onSurfaceVariant),
                     border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.outlineVariant)),
                     enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.outlineVariant)),
+                    focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.primary, width: 1.5)),
                     filled: true,
-                    fillColor: cs.surfaceContainerHighest.withOpacity(0.4),
+                    fillColor: cs.surfaceContainerHighest,
                     contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
                   ),
                   onChanged: (_) => setState(() {}),
@@ -156,36 +158,15 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
             ),
 
             const SizedBox(height: 32),
-            SizedBox(
-              width: double.infinity,
-              height: 52,
-              child: FilledButton.icon(
-                onPressed: _isSaving ? null : _save,
-                icon: Icon(_isEditing ? Icons.check_rounded : Icons.add_rounded, size: 20),
-                label: Text(_isEditing ? '更新群聊' : '创建群聊', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                style: FilledButton.styleFrom(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-              ),
+            AppPrimaryButton(
+              onPressed: _isSaving ? null : _save,
+              icon: _isEditing ? Icons.check_rounded : Icons.add_rounded,
+              label: _isEditing ? '更新群聊' : '创建群聊',
             ),
             const SizedBox(height: 32),
           ],
         ),
       ),
-    );
-  }
-
-  InputDecoration _inputDecoration(String label, String? hint, IconData icon, ColorScheme cs) {
-    return InputDecoration(
-      labelText: label,
-      hintText: hint,
-      prefixIcon: Icon(icon, size: 18),
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.outlineVariant)),
-      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.outlineVariant)),
-      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.primary, width: 1.5)),
-      filled: true,
-      fillColor: cs.surfaceContainerHighest.withOpacity(0.4),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      labelStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-      hintStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant.withOpacity(0.5)),
     );
   }
 
@@ -223,41 +204,5 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
     } finally {
       if (mounted) setState(() => _isSaving = false);
     }
-  }
-}
-
-class _SectionHeader extends StatelessWidget {
-  final String title;
-  final IconData icon;
-  final ColorScheme cs;
-  const _SectionHeader({required this.title, required this.icon, required this.cs});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: cs.primary),
-        const SizedBox(width: 8),
-        Text(title, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: cs.primary, letterSpacing: 0.8)),
-        const SizedBox(width: 12),
-        Expanded(child: Divider(color: cs.primary.withOpacity(0.15), thickness: 0.5)),
-      ],
-    );
-  }
-}
-
-class _Card extends StatelessWidget {
-  final ColorScheme cs;
-  final List<Widget> children;
-  const _Card({required this.cs, required this.children});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
-      color: cs.surfaceContainerHighest.withOpacity(0.4),
-      child: Padding(padding: const EdgeInsets.all(16), child: Column(children: children)),
-    );
   }
 }

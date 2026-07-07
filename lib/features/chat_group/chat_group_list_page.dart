@@ -4,6 +4,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import './providers/chat_group_providers.dart';
 import 'chat_group_form_page.dart';
+import 'package:chat_group/core/theme/app_theme.dart';
+import 'package:chat_group/core/widgets/app_widgets.dart';
 
 class ChatGroupListPage extends ConsumerWidget {
   const ChatGroupListPage({super.key});
@@ -24,8 +26,11 @@ class ChatGroupListPage extends ConsumerWidget {
             Container(
               width: 32,
               height: 32,
-              decoration: BoxDecoration(color: cs.primary, borderRadius: BorderRadius.circular(8)),
-              child: Icon(Icons.group_rounded, size: 18, color: cs.onPrimary),
+              decoration: BoxDecoration(
+                gradient: AppTheme.primaryGradient,
+                borderRadius: BorderRadius.circular(9),
+              ),
+              child: const Icon(Icons.group_rounded, size: 18, color: Colors.white),
             ),
             const SizedBox(width: 12),
             Text('群聊', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 22, color: cs.onSurface)),
@@ -48,50 +53,12 @@ class ChatGroupListPage extends ConsumerWidget {
                 );
               },
             ),
-      floatingActionButton: FloatingActionButton.extended(
+      floatingActionButton: AppFab(
         onPressed: () => _addGroup(context),
-        backgroundColor: cs.primary,
-        foregroundColor: cs.onPrimary,
-        icon: const Icon(Icons.add_rounded, size: 22),
-        label: const Text('创建群聊', style: TextStyle(fontWeight: FontWeight.w600)),
+        icon: Icons.add_rounded,
+        label: '创建群聊',
       ),
-      bottomNavigationBar: _buildBottomNav(context, 1),
-    );
-  }
-
-  Widget _buildBottomNav(BuildContext context, int currentIndex) {
-    final cs = Theme.of(context).colorScheme;
-    return NavigationBar(
-      selectedIndex: currentIndex,
-      onDestinationSelected: (i) {
-        if (i != currentIndex) {
-          if (i == 0) {
-            Navigator.of(context).pushReplacementNamed('/');
-          } else if (i == 2) {
-            Navigator.of(context).pushReplacementNamed('/settings');
-          }
-        }
-      },
-      backgroundColor: cs.surface,
-      indicatorColor: cs.primaryContainer,
-      labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-      destinations: const [
-        NavigationDestination(
-          icon: Icon(Icons.smart_toy_outlined, size: 22),
-          selectedIcon: Icon(Icons.smart_toy_rounded, size: 22),
-          label: '角色',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.group_rounded, size: 22),
-          selectedIcon: Icon(Icons.group_rounded, size: 22),
-          label: '群聊',
-        ),
-        NavigationDestination(
-          icon: Icon(Icons.settings_outlined, size: 22),
-          selectedIcon: Icon(Icons.settings_rounded, size: 22),
-          label: '设置',
-        ),
-      ],
+      bottomNavigationBar: AppBottomNav(currentIndex: 1, cs: cs),
     );
   }
 
@@ -100,7 +67,15 @@ class ChatGroupListPage extends ConsumerWidget {
       child: Column(
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
-          Icon(Icons.group_add_rounded, size: 64, color: cs.primary.withOpacity(0.3)),
+          Container(
+            width: 96,
+            height: 96,
+            decoration: BoxDecoration(
+              color: cs.primaryContainer.withOpacity(0.5),
+              shape: BoxShape.circle,
+            ),
+            child: Icon(Icons.group_add_rounded, size: 44, color: cs.primary),
+          ),
           const SizedBox(height: 24),
           Text('还没有群聊', style: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: cs.onSurface)),
           const SizedBox(height: 8),
@@ -169,20 +144,20 @@ class _GroupCard extends StatelessWidget {
       background: Container(
         alignment: Alignment.centerRight,
         padding: const EdgeInsets.only(right: 20),
-        decoration: BoxDecoration(color: cs.errorContainer, borderRadius: BorderRadius.circular(16)),
+        decoration: BoxDecoration(color: cs.errorContainer, borderRadius: BorderRadius.circular(18)),
         child: Icon(Icons.delete_outline_rounded, color: cs.error),
       ),
       child: Card(
         margin: const EdgeInsets.only(bottom: 12),
         elevation: 0,
+        color: cs.surfaceContainer,
         shape: RoundedRectangleBorder(
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(18),
           side: BorderSide(color: cs.outlineVariant, width: 1),
         ),
-        color: cs.surface,
         child: InkWell(
           onTap: onTap,
-          borderRadius: BorderRadius.circular(16),
+          borderRadius: BorderRadius.circular(18),
           child: Padding(
             padding: const EdgeInsets.all(16),
             child: Row(
@@ -191,10 +166,10 @@ class _GroupCard extends StatelessWidget {
                   width: 48,
                   height: 48,
                   decoration: BoxDecoration(
-                    color: cs.primaryContainer,
+                    gradient: AppTheme.primaryGradient,
                     borderRadius: BorderRadius.circular(14),
                   ),
-                  child: Icon(Icons.group_rounded, size: 24, color: cs.onPrimaryContainer),
+                  child: const Icon(Icons.group_rounded, size: 24, color: Colors.white),
                 ),
                 const SizedBox(width: 14),
                 Expanded(
@@ -219,9 +194,16 @@ class _GroupCard extends StatelessWidget {
                         ),
                       ],
                       const SizedBox(height: 6),
-                      Text(
-                        '${group.aiCharacterIds.length} 个角色',
-                        style: TextStyle(fontSize: 12, color: cs.primary, fontWeight: FontWeight.w500),
+                      Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+                        decoration: BoxDecoration(
+                          color: cs.primaryContainer,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: Text(
+                          '${group.aiCharacterIds.length} 个角色',
+                          style: TextStyle(fontSize: 12, color: cs.onPrimaryContainer, fontWeight: FontWeight.w500),
+                        ),
                       ),
                     ],
                   ),

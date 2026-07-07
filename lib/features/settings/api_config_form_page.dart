@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/widgets/app_widgets.dart';
 import './providers/api_config_providers.dart';
 
 class ApiConfigFormPage extends ConsumerStatefulWidget {
@@ -79,118 +80,86 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            _buildSectionHeader('API 配置', cs),
+            AppSectionHeader(title: 'API 配置', cs: cs),
             const SizedBox(height: 12),
-            _buildCard(cs, [
-              TextFormField(
-                controller: _nameController,
-                decoration: _inputDecoration('配置名称 *', '例如：我的 DeepSeek', Icons.bookmark_outline_rounded, cs),
-                validator: (v) => v?.isEmpty ?? true ? '请输入名称' : null,
-              ),
-              const SizedBox(height: 14),
-              DropdownButtonFormField<ApiProvider>(
-                value: _selectedProvider,
-                decoration: _inputDecoration('API 提供商 *', null, Icons.public_outlined, cs),
-                items: ApiProvider.values.map((p) {
-                  return DropdownMenuItem(value: p, child: Text(p.label));
-                }).toList(),
-                onChanged: (v) {
-                  if (v != null) {
-                    setState(() {
-                      _selectedProvider = v;
-                      if (v == ApiProvider.custom) {
-                        _selectedModel = '';
-                        _modelController.text = '';
-                      } else {
-                        _selectedModel = ApiProvider.defaultModels[v.name] ?? '';
-                        _modelController.text = _selectedModel;
-                      }
-                    });
-                  }
-                },
-              ),
-              const SizedBox(height: 14),
-              if (isCustom) ...[
+            AppCard(
+              cs: cs,
+              children: [
                 TextFormField(
-                  controller: _baseUrlController,
-                  decoration: _inputDecoration('Base URL *', 'https://your-api.com/v1', Icons.link_rounded, cs),
-                  validator: (v) => v?.isEmpty ?? true ? '请输入 Base URL' : null,
+                  controller: _nameController,
+                  decoration: appInputDecoration('配置名称 *', '例如：我的 DeepSeek', Icons.bookmark_outline_rounded, cs),
+                  validator: (v) => v?.isEmpty ?? true ? '请输入名称' : null,
                 ),
                 const SizedBox(height: 14),
-                TextFormField(
-                  controller: _modelController,
-                  decoration: _inputDecoration('模型名称 *', '输入模型 ID', Icons.model_training_outlined, cs),
-                  validator: (v) => v?.isEmpty ?? true ? '请输入模型名称' : null,
-                ),
-              ] else ...[
-                DropdownButtonFormField<String>(
-                  value: _selectedModel.isNotEmpty &&
-                          (ApiProvider.providerModels[_selectedProvider.name]?.contains(_selectedModel) ?? false)
-                      ? _selectedModel
-                      : null,
-                  decoration: _inputDecoration('模型 *', null, Icons.model_training_outlined, cs),
-                  items: (ApiProvider.providerModels[_selectedProvider.name] ?? []).map((model) {
-                    return DropdownMenuItem(value: model, child: Text(model, style: const TextStyle(fontFamily: 'monospace', fontSize: 13)));
+                DropdownButtonFormField<ApiProvider>(
+                  value: _selectedProvider,
+                  decoration: appInputDecoration('API 提供商 *', null, Icons.public_outlined, cs),
+                  items: ApiProvider.values.map((p) {
+                    return DropdownMenuItem(value: p, child: Text(p.label));
                   }).toList(),
                   onChanged: (v) {
-                    _selectedModel = v ?? '';
-                    _modelController.text = _selectedModel;
+                    if (v != null) {
+                      setState(() {
+                        _selectedProvider = v;
+                        if (v == ApiProvider.custom) {
+                          _selectedModel = '';
+                          _modelController.text = '';
+                        } else {
+                          _selectedModel = ApiProvider.defaultModels[v.name] ?? '';
+                          _modelController.text = _selectedModel;
+                        }
+                      });
+                    }
                   },
-                  validator: (v) => v == null ? '请选择模型' : null,
                 ),
                 const SizedBox(height: 14),
-              ],
-              TextFormField(
-                controller: _apiKeyController,
-                decoration: _inputDecoration('API Key *', '输入你的 API Key', Icons.key_outlined, cs).copyWith(
-                  suffixIcon: IconButton(
-                    icon: Icon(_obscureApiKey ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18),
-                    onPressed: () => setState(() => _obscureApiKey = !_obscureApiKey),
+                if (isCustom) ...[
+                  TextFormField(
+                    controller: _baseUrlController,
+                    decoration: appInputDecoration('Base URL *', 'https://your-api.com/v1', Icons.link_rounded, cs),
+                    validator: (v) => v?.isEmpty ?? true ? '请输入 Base URL' : null,
                   ),
+                  const SizedBox(height: 14),
+                  TextFormField(
+                    controller: _modelController,
+                    decoration: appInputDecoration('模型名称 *', '输入模型 ID', Icons.model_training_outlined, cs),
+                    validator: (v) => v?.isEmpty ?? true ? '请输入模型名称' : null,
+                  ),
+                ] else ...[
+                  DropdownButtonFormField<String>(
+                    value: _selectedModel.isNotEmpty &&
+                            (ApiProvider.providerModels[_selectedProvider.name]?.contains(_selectedModel) ?? false)
+                        ? _selectedModel
+                        : null,
+                    decoration: appInputDecoration('模型 *', null, Icons.model_training_outlined, cs),
+                    items: (ApiProvider.providerModels[_selectedProvider.name] ?? []).map((model) {
+                      return DropdownMenuItem(value: model, child: Text(model, style: const TextStyle(fontFamily: 'monospace', fontSize: 13)));
+                    }).toList(),
+                    onChanged: (v) {
+                      _selectedModel = v ?? '';
+                      _modelController.text = _selectedModel;
+                    },
+                    validator: (v) => v == null ? '请选择模型' : null,
+                  ),
+                  const SizedBox(height: 14),
+                ],
+                TextFormField(
+                  controller: _apiKeyController,
+                  decoration: appInputDecoration('API Key *', '输入你的 API Key', Icons.key_outlined, cs).copyWith(
+                    suffixIcon: IconButton(
+                      icon: Icon(_obscureApiKey ? Icons.visibility_off_outlined : Icons.visibility_outlined, size: 18),
+                      onPressed: () => setState(() => _obscureApiKey = !_obscureApiKey),
+                    ),
+                  ),
+                  obscureText: _obscureApiKey,
+                  validator: (v) => v?.isEmpty ?? true ? '请输入 API Key' : null,
                 ),
-                obscureText: _obscureApiKey,
-                validator: (v) => v?.isEmpty ?? true ? '请输入 API Key' : null,
-              ),
-            ]),
+              ],
+            ),
             const SizedBox(height: 32),
           ],
         ),
       ),
-    );
-  }
-
-  Widget _buildSectionHeader(String title, ColorScheme cs) {
-    return Row(
-      children: [
-        Text(title, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: cs.primary, letterSpacing: 0.8)),
-        const SizedBox(width: 12),
-        Expanded(child: Divider(color: cs.primary.withOpacity(0.15), thickness: 0.5)),
-      ],
-    );
-  }
-
-  Widget _buildCard(ColorScheme cs, List<Widget> children) {
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
-      color: cs.surfaceContainerHighest.withOpacity(0.4),
-      child: Padding(padding: const EdgeInsets.all(16), child: Column(children: children)),
-    );
-  }
-
-  InputDecoration _inputDecoration(String label, String? hint, IconData icon, ColorScheme cs) {
-    return InputDecoration(
-      labelText: label,
-      hintText: hint,
-      prefixIcon: Icon(icon, size: 18),
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.outlineVariant)),
-      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.outlineVariant)),
-      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.primary, width: 1.5)),
-      filled: true,
-      fillColor: cs.surfaceContainerHighest.withOpacity(0.4),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      labelStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-      hintStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant.withOpacity(0.5)),
     );
   }
 

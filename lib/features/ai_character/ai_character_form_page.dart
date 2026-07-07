@@ -2,6 +2,8 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
+import 'package:chat_group/core/theme/provider_style.dart';
+import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'providers/ai_character_providers.dart';
 import '../settings/providers/api_config_providers.dart';
 import '../settings/api_config_form_page.dart';
@@ -88,9 +90,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         child: ListView(
           padding: const EdgeInsets.all(20),
           children: [
-            _SectionHeader(title: '角色信息', icon: Icons.person_outline_rounded, cs: cs),
+            AppSectionHeader(title: '角色信息', icon: Icons.person_outline_rounded, cs: cs),
             const SizedBox(height: 12),
-            _Card(
+            AppCard(
               cs: cs,
               children: [
                 Row(
@@ -98,7 +100,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                     Expanded(
                       child: TextFormField(
                         controller: _nameController,
-                        decoration: _inputDecoration('名字 *', 'AI 的名字', Icons.badge_outlined, cs),
+                        decoration: appInputDecoration('名字 *', 'AI 的名字', Icons.badge_outlined, cs),
                         validator: (v) => v?.isEmpty ?? true ? '请输入名字' : null,
                       ),
                     ),
@@ -112,7 +114,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                     Expanded(
                       child: TextFormField(
                         controller: _ageController,
-                        decoration: _inputDecoration('年龄', '25', Icons.cake_outlined, cs),
+                        decoration: appInputDecoration('年龄', '25', Icons.cake_outlined, cs),
                         keyboardType: TextInputType.number,
                         validator: (v) {
                           if (v?.isEmpty ?? true) return null;
@@ -126,7 +128,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                     Expanded(
                       child: TextFormField(
                         controller: _roleController,
-                        decoration: _inputDecoration('角色 *', '游戏达人 / 心理咨询师', Icons.work_outline_rounded, cs),
+                        decoration: appInputDecoration('角色 *', '游戏达人 / 心理咨询师', Icons.work_outline_rounded, cs),
                         validator: (v) => v?.isEmpty ?? true ? '请输入角色' : null,
                       ),
                     ),
@@ -135,15 +137,15 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                 const SizedBox(height: 14),
                 TextFormField(
                   controller: _personalityController,
-                  decoration: _inputDecoration('性格标签', '话痨, 温柔, 毒舌, 理性...', Icons.psychology_outlined, cs),
+                  decoration: appInputDecoration('性格标签', '话痨, 温柔, 毒舌, 理性...', Icons.psychology_outlined, cs),
                 ),
               ],
             ),
 
             const SizedBox(height: 24),
-            _SectionHeader(title: 'AI 配置', icon: Icons.smart_toy_outlined, cs: cs),
+            AppSectionHeader(title: 'AI 配置', icon: Icons.smart_toy_outlined, cs: cs),
             const SizedBox(height: 12),
-            _Card(
+            AppCard(
               cs: cs,
               children: [
                 if (_hasLegacyApiData)
@@ -173,7 +175,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
 
                           return DropdownButtonFormField<String>(
                             value: _selectedApiConfigId.isNotEmpty ? _selectedApiConfigId : null,
-                            decoration: _inputDecoration('API 配置 *', '先在设置中创建 API 配置', Icons.settings_remote_outlined, cs),
+                            decoration: appInputDecoration('API 配置 *', '先在设置中创建 API 配置', Icons.settings_remote_outlined, cs),
                             items: [
                               if (configs.isEmpty)
                                 const DropdownMenuItem(value: '', child: Text('暂无配置，请先在设置中创建', style: TextStyle(fontSize: 13))),
@@ -181,7 +183,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                                 value: c.id,
                                 child: Row(
                                   children: [
-                                    Icon(Icons.circle, size: 8, color: _providerColor(c.provider)),
+                                    Icon(Icons.circle, size: 8, color: providerColor(c.provider)),
                                     const SizedBox(width: 8),
                                     Expanded(child: Text(c.name, overflow: TextOverflow.ellipsis)),
                                     Text(c.provider, style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
@@ -216,69 +218,36 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                 const SizedBox(height: 14),
                 TextFormField(
                   controller: _hourlyLimitController,
-                  decoration: _inputDecoration('每小时回复上限', '默认 5 次/小时', Icons.speed_rounded, cs),
+                  decoration: appInputDecoration('每小时回复上限', '默认 5 次/小时', Icons.speed_rounded, cs),
                   keyboardType: TextInputType.number,
                 ),
               ],
             ),
 
             const SizedBox(height: 24),
-            _SectionHeader(title: '行为设定', icon: Icons.tune_rounded, cs: cs),
+            AppSectionHeader(title: '行为设定', icon: Icons.tune_rounded, cs: cs),
             const SizedBox(height: 12),
-            _Card(
+            AppCard(
               cs: cs,
               children: [
                 TextFormField(
                   controller: _systemPromptController,
-                  decoration: _inputDecoration('System Prompt', '定义 AI 的行为、风格和知识领域...', Icons.chat_bubble_outline_rounded, cs),
+                  decoration: appInputDecoration('System Prompt', '定义 AI 的行为、风格和知识领域...', Icons.chat_bubble_outline_rounded, cs),
                   maxLines: 8,
                 ),
               ],
             ),
 
             const SizedBox(height: 32),
-            SizedBox(
-              width: double.infinity,
-              height: 52,
-              child: FilledButton.icon(
-                onPressed: _isSaving ? null : _save,
-                icon: Icon(_isEditing ? Icons.check_rounded : Icons.add_rounded, size: 20),
-                label: Text(_isEditing ? '更新角色' : '创建角色', style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600)),
-                style: FilledButton.styleFrom(shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12))),
-              ),
+            AppPrimaryButton(
+              onPressed: _isSaving ? null : _save,
+              icon: _isEditing ? Icons.check_rounded : Icons.add_rounded,
+              label: _isEditing ? '更新角色' : '创建角色',
             ),
             const SizedBox(height: 32),
           ],
         ),
       ),
-    );
-  }
-
-  Color _providerColor(String provider) {
-    switch (provider) {
-      case 'deepseek': return const Color(0xFF1565C0);
-      case 'qwen': return const Color(0xFF7C3AED);
-      case 'zhipu': return const Color(0xFF0891B2);
-      case 'moonshot': return const Color(0xFF7C3AED);
-      case 'baidu': return const Color(0xFF4F46E5);
-      case 'custom': return const Color(0xFFD97706);
-      default: return const Color(0xFF2563EB);
-    }
-  }
-
-  InputDecoration _inputDecoration(String label, String? hint, IconData icon, ColorScheme cs) {
-    return InputDecoration(
-      labelText: label,
-      hintText: hint,
-      prefixIcon: Icon(icon, size: 18),
-      border: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.outlineVariant)),
-      enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.outlineVariant)),
-      focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(12), borderSide: BorderSide(color: cs.primary, width: 1.5)),
-      filled: true,
-      fillColor: cs.surfaceContainerHighest.withOpacity(0.4),
-      contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      labelStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-      hintStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant.withOpacity(0.5)),
     );
   }
 
@@ -369,41 +338,5 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     } finally {
       if (mounted) setState(() => _isSaving = false);
     }
-  }
-}
-
-class _SectionHeader extends StatelessWidget {
-  final String title;
-  final IconData icon;
-  final ColorScheme cs;
-  const _SectionHeader({required this.title, required this.icon, required this.cs});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: [
-        Icon(icon, size: 16, color: cs.primary),
-        const SizedBox(width: 8),
-        Text(title, style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: cs.primary, letterSpacing: 0.8)),
-        const SizedBox(width: 12),
-        Expanded(child: Divider(color: cs.primary.withOpacity(0.15), thickness: 0.5)),
-      ],
-    );
-  }
-}
-
-class _Card extends StatelessWidget {
-  final ColorScheme cs;
-  final List<Widget> children;
-  const _Card({required this.cs, required this.children});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      elevation: 0,
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16), side: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
-      color: cs.surfaceContainerHighest.withOpacity(0.4),
-      child: Padding(padding: const EdgeInsets.all(16), child: Column(children: children)),
-    );
   }
 }

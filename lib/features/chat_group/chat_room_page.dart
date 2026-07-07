@@ -11,6 +11,8 @@ import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:chat_group/core/theme/app_theme.dart';
+import 'package:chat_group/core/theme/provider_style.dart';
 
 class ChatRoomPage extends ConsumerStatefulWidget {
   final String groupId;
@@ -511,7 +513,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             child: Material(
               elevation: 6,
               borderRadius: BorderRadius.circular(12),
-              color: cs.surface,
+              color: cs.surfaceContainerHighest,
               child: _buildMentionPopupContent(cs),
             ),
           ),
@@ -682,19 +684,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final providerName = sender.apiConfigId.isNotEmpty
         ? (ref.read(databaseServiceProvider).apiConfigBox.get(sender.apiConfigId)?.provider ?? sender.apiProvider)
         : sender.apiProvider;
-    return _providerColor(providerName);
-  }
-
-  Color _providerColor(String provider) {
-    switch (provider) {
-      case 'deepseek': return const Color(0xFF1565C0);
-      case 'qwen': return const Color(0xFF7C3AED);
-      case 'zhipu': return const Color(0xFF0891B2);
-      case 'moonshot': return const Color(0xFF7C3AED);
-      case 'baidu': return const Color(0xFF4F46E5);
-      case 'custom': return const Color(0xFFD97706);
-      default: return const Color(0xFF2563EB);
-    }
+    return providerColor(providerName);
   }
 
   static String _formatTime(DateTime dt) {
@@ -806,6 +796,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   Widget _buildMembersSheet(ColorScheme cs) {
     return Container(
       padding: const EdgeInsets.all(20),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+      ),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
@@ -840,7 +834,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                 ],
               ),
             );
-          }).toList(),
+          }),
         ],
       ),
     );
@@ -854,6 +848,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         decoration: BoxDecoration(
           color: cs.surface,
           border: Border(top: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
+          boxShadow: [BoxShadow(color: Colors.black.withOpacity(0.25), blurRadius: 14, offset: const Offset(0, -4))],
         ),
         child: Row(
           children: [
@@ -868,7 +863,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                     enabledBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.outlineVariant)),
                     focusedBorder: OutlineInputBorder(borderRadius: BorderRadius.circular(24), borderSide: BorderSide(color: cs.primary, width: 1.5)),
                     filled: true,
-                    fillColor: cs.surfaceContainerHighest.withOpacity(0.4),
+                    fillColor: cs.surfaceContainerHighest,
                     contentPadding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
                     isDense: true,
                   ),
@@ -881,7 +876,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             ),
             const SizedBox(width: 8),
             IconButton(
-              icon: Icon(Icons.send_rounded, size: 22),
+              icon: const Icon(Icons.send_rounded, size: 22),
               color: (_isAiReplying || _isInputEmpty) ? cs.onSurfaceVariant.withOpacity(0.4) : cs.primary,
               onPressed: (_isAiReplying || _isInputEmpty) ? null : _sendMessage,
             ),
@@ -930,7 +925,9 @@ class _MessageBubble extends StatelessWidget {
                 Container(
                   padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
                   decoration: BoxDecoration(
-                    color: isUser ? cs.primary : cs.surfaceContainerHighest.withOpacity(0.6),
+                    color: isUser ? null : cs.surfaceContainer,
+                    gradient: isUser ? AppTheme.primaryGradient : null,
+                    border: isUser ? null : Border.all(color: cs.outlineVariant.withOpacity(0.6)),
                     borderRadius: BorderRadius.circular(18).copyWith(
                       bottomLeft: isUser ? const Radius.circular(18) : const Radius.circular(4),
                       bottomRight: isUser ? const Radius.circular(4) : const Radius.circular(18),
@@ -984,15 +981,5 @@ class _MessageBubble extends StatelessWidget {
     return Text(content, style: TextStyle(fontSize: 15, color: textColor, height: 1.4));
   }
 
-  Color _senderColor(AICharacter sender) {
-    switch (sender.apiProvider) {
-      case 'deepseek': return const Color(0xFF1565C0);
-      case 'qwen': return const Color(0xFF7C3AED);
-      case 'zhipu': return const Color(0xFF0891B2);
-      case 'moonshot': return const Color(0xFF7C3AED);
-      case 'baidu': return const Color(0xFF4F46E5);
-      case 'custom': return const Color(0xFFD97706);
-      default: return const Color(0xFF2563EB);
-    }
-  }
+  Color _senderColor(AICharacter sender) => providerColor(sender.apiProvider);
 }

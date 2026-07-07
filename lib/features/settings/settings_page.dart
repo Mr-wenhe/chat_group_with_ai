@@ -9,6 +9,8 @@ import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/ai_providers/ai_api_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:chat_group/core/theme/provider_style.dart';
+import 'package:chat_group/core/widgets/app_widgets.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
@@ -32,14 +34,28 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         backgroundColor: cs.surface,
         surfaceTintColor: Colors.transparent,
         elevation: 0,
-        title: Text('设置', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 22, color: cs.onSurface)),
+        title: Row(
+          children: [
+            Container(
+              width: 32,
+              height: 32,
+              decoration: BoxDecoration(
+                gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: const [Color(0xFF8B5CF6), Color(0xFF6366F1), Color(0xFF3B82F6)]),
+                borderRadius: BorderRadius.circular(9),
+              ),
+              child: const Icon(Icons.settings_rounded, size: 18, color: Colors.white),
+            ),
+            const SizedBox(width: 12),
+            Text('设置', style: TextStyle(fontWeight: FontWeight.w700, fontSize: 22, color: cs.onSurface)),
+          ],
+        ),
       ),
       body: ListView(
-        padding: const EdgeInsets.fromLTRB(20, 20, 20, 88),
+        padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
         children: [
           _SectionHeader(title: '应用信息', cs: cs),
           const SizedBox(height: 12),
-          _Card(
+          AppCard(
             cs: cs,
             children: [
               Row(
@@ -48,10 +64,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     width: 44,
                     height: 44,
                     decoration: BoxDecoration(
-                      color: cs.primaryContainer,
+                      gradient: LinearGradient(begin: Alignment.topLeft, end: Alignment.bottomRight, colors: const [Color(0xFF8B5CF6), Color(0xFF6366F1), Color(0xFF3B82F6)]),
                       borderRadius: BorderRadius.circular(12),
                     ),
-                    child: Icon(Icons.smart_toy_rounded, size: 24, color: cs.primary),
+                    child: const Icon(Icons.smart_toy_rounded, size: 24, color: Colors.white),
                   ),
                   const SizedBox(width: 14),
                   Expanded(
@@ -75,7 +91,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           const SizedBox(height: 12),
 
           if (apiConfigs.isEmpty)
-            _Card(
+            AppCard(
               cs: cs,
               children: [
                 Padding(
@@ -114,7 +130,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           const SizedBox(height: 12),
 
           if (characters.isEmpty)
-            _Card(
+            AppCard(
               cs: cs,
               children: [
                 Padding(
@@ -135,8 +151,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           const SizedBox(height: 28),
           _SectionHeader(title: '数据管理', cs: cs),
           const SizedBox(height: 12),
-          _Card(
+          AppCard(
             cs: cs,
+            margin: EdgeInsets.zero,
             children: [
               _SettingTile(
                 cs: cs,
@@ -161,29 +178,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           const SizedBox(height: 32),
         ],
       ),
-      bottomNavigationBar: NavigationBar(
-        selectedIndex: 1,
-        onDestinationSelected: (i) {
-          if (i == 0) {
-            Navigator.of(context).pushReplacementNamed('/');
-          }
-        },
-        backgroundColor: cs.surface,
-        indicatorColor: cs.primaryContainer,
-        labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-        destinations: const [
-          NavigationDestination(
-            icon: Icon(Icons.smart_toy_outlined, size: 22),
-            selectedIcon: Icon(Icons.smart_toy_rounded, size: 22),
-            label: '角色',
-          ),
-          NavigationDestination(
-            icon: Icon(Icons.settings_rounded, size: 22),
-            selectedIcon: Icon(Icons.settings_rounded, size: 22),
-            label: '设置',
-          ),
-        ],
-      ),
+      bottomNavigationBar: AppBottomNav(currentIndex: 2, cs: cs),
     );
   }
 
@@ -395,25 +390,6 @@ class _SectionHeader extends StatelessWidget {
   }
 }
 
-class _Card extends StatelessWidget {
-  final ColorScheme cs;
-  final List<Widget> children;
-  const _Card({required this.cs, required this.children});
-
-  @override
-  Widget build(BuildContext context) {
-    return Card(
-      elevation: 0,
-      color: cs.surfaceContainerHighest.withOpacity(0.4),
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: cs.outlineVariant.withOpacity(0.5)),
-      ),
-      child: Padding(padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 4), child: Column(children: children)),
-    );
-  }
-}
-
 class _ApiConfigCard extends StatelessWidget {
   final ApiConfig config;
   final ColorScheme cs;
@@ -425,110 +401,79 @@ class _ApiConfigCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final providerColor = _providerColor(config.provider);
-    final label = _providerLabel(config.provider);
+    final pColor = providerColor(config.provider);
+    final label = providerLabel(config.provider);
     final maskedKey = config.apiKey.isNotEmpty
         ? '${config.apiKey.substring(0, min(8, config.apiKey.length))}${'*' * max(4, config.apiKey.length - 8)}'
         : '未设置';
 
-    return Card(
+    return Container(
       margin: const EdgeInsets.only(bottom: 10),
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(14),
-        side: BorderSide(color: cs.outlineVariant.withOpacity(0.4)),
-      ),
-      color: cs.surfaceContainerHighest.withOpacity(0.3),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Row(
-          children: [
-            _buildAvatar(providerColor),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Text(config.name, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: cs.onSurface)),
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: providerColor.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: providerColor)),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 3),
-                  Text(maskedKey, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, fontFamily: 'monospace')),
-                ],
-              ),
-            ),
-            Row(
-              mainAxisSize: MainAxisSize.min,
+      padding: const EdgeInsets.all(14),
+      decoration: AppCard.decoration(cs),
+      child: Row(
+        children: [
+          _buildAvatar(pColor),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
               children: [
-                IconButton(
-                  icon: Icon(Icons.bolt_rounded, size: 18, color: cs.primary),
-                  onPressed: onTest,
-                  tooltip: '测试',
+                Row(
+                  children: [
+                    Text(config.name, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: cs.onSurface)),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: pColor.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                      child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: pColor)),
+                    ),
+                  ],
                 ),
-                IconButton(
-                  icon: Icon(Icons.edit_outlined, size: 18, color: cs.onSurfaceVariant),
-                  onPressed: onEdit,
-                  tooltip: '编辑',
-                ),
-                IconButton(
-                  icon: Icon(Icons.delete_outline_rounded, size: 18, color: cs.error),
-                  onPressed: onDelete,
-                  tooltip: '删除',
-                ),
+                const SizedBox(height: 3),
+                Text(maskedKey, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, fontFamily: 'monospace')),
               ],
             ),
-          ],
-        ),
+          ),
+          Row(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              IconButton(
+                icon: Icon(Icons.bolt_rounded, size: 18, color: cs.primary),
+                onPressed: onTest,
+                tooltip: '测试',
+              ),
+              IconButton(
+                icon: Icon(Icons.edit_outlined, size: 18, color: cs.onSurfaceVariant),
+                onPressed: onEdit,
+                tooltip: '编辑',
+              ),
+              IconButton(
+                icon: Icon(Icons.delete_outline_rounded, size: 18, color: cs.error),
+                onPressed: onDelete,
+                tooltip: '删除',
+              ),
+            ],
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildAvatar(Color providerColor) {
+  Widget _buildAvatar(Color pColor) {
     return Container(
       width: 40,
       height: 40,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: providerColor.withOpacity(0.12),
-        border: Border.all(color: providerColor.withOpacity(0.25), width: 1.5),
+        color: pColor.withOpacity(0.14),
+        border: Border.all(color: pColor.withOpacity(0.3), width: 1.5),
       ),
-      child: Center(child: Text(config.name.isNotEmpty ? config.name[0] : '?', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: providerColor))),
+      child: Center(child: Text(config.name.isNotEmpty ? config.name[0] : '?', style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: pColor))),
     );
-  }
-
-  String _providerLabel(String provider) {
-    switch (provider) {
-      case 'deepseek': return 'DeepSeek';
-      case 'qwen': return '通义千问';
-      case 'zhipu': return '智谱AI';
-      case 'moonshot': return 'Moonshot';
-      case 'baidu': return '百度文心';
-      case 'custom': return '自定义';
-      default: return provider;
-    }
-  }
-
-  Color _providerColor(String provider) {
-    switch (provider) {
-      case 'deepseek': return const Color(0xFF1565C0);
-      case 'qwen': return const Color(0xFF7C3AED);
-      case 'zhipu': return const Color(0xFF0891B2);
-      case 'moonshot': return const Color(0xFF7C3AED);
-      case 'baidu': return const Color(0xFF4F46E5);
-      case 'custom': return const Color(0xFFD97706);
-      default: return cs.primary;
-    }
   }
 }
 
@@ -541,97 +486,66 @@ class _ApiTestCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final providerColor = _providerColor();
-    final label = _providerLabel();
+    final pColor = providerColor(character.apiProvider);
+    final label = providerLabel(character.apiProvider);
 
-    return Card(
+    return Container(
       margin: const EdgeInsets.only(bottom: 10),
-      elevation: 0,
-      shape: RoundedRectangleBorder(
-        borderRadius: BorderRadius.circular(14),
-        side: BorderSide(color: cs.outlineVariant.withOpacity(0.4)),
-      ),
-      color: cs.surfaceContainerHighest.withOpacity(0.3),
-      child: Padding(
-        padding: const EdgeInsets.all(14),
-        child: Row(
-          children: [
-            _buildAvatar(providerColor),
-            const SizedBox(width: 12),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Row(
-                    children: [
-                      Text(character.name, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: cs.onSurface)),
-                      const SizedBox(width: 8),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: providerColor.withOpacity(0.1),
-                          borderRadius: BorderRadius.circular(6),
-                        ),
-                        child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: providerColor)),
+      padding: const EdgeInsets.all(14),
+      decoration: AppCard.decoration(cs),
+      child: Row(
+        children: [
+          _buildAvatar(pColor),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    Text(character.name, style: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: cs.onSurface)),
+                    const SizedBox(width: 8),
+                    Container(
+                      padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
+                      decoration: BoxDecoration(
+                        color: pColor.withOpacity(0.12),
+                        borderRadius: BorderRadius.circular(6),
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 3),
-                  Text(character.apiProvider, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, fontFamily: 'monospace')),
-                ],
-              ),
+                      child: Text(label, style: TextStyle(fontSize: 11, fontWeight: FontWeight.w500, color: pColor)),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 3),
+                Text(character.apiProvider, style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant, fontFamily: 'monospace')),
+              ],
             ),
-            FilledButton.icon(
-              onPressed: onTest,
-              icon: const Icon(Icons.bolt_rounded, size: 16),
-              label: const Text('测试', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
-              style: FilledButton.styleFrom(
-                backgroundColor: cs.primary,
-                padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
-              ),
+          ),
+          FilledButton.icon(
+            onPressed: onTest,
+            icon: const Icon(Icons.bolt_rounded, size: 16),
+            label: const Text('测试', style: TextStyle(fontSize: 13, fontWeight: FontWeight.w600)),
+            style: FilledButton.styleFrom(
+              backgroundColor: cs.primary,
+              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 8),
             ),
-          ],
-        ),
+          ),
+        ],
       ),
     );
   }
 
-  Widget _buildAvatar(Color providerColor) {
+  Widget _buildAvatar(Color pColor) {
     final display = character.avatar.isNotEmpty ? character.avatar : (character.name.isNotEmpty ? character.name[0] : '?');
     return Container(
       width: 40,
       height: 40,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: providerColor.withOpacity(0.12),
-        border: Border.all(color: providerColor.withOpacity(0.25), width: 1.5),
+        color: pColor.withOpacity(0.14),
+        border: Border.all(color: pColor.withOpacity(0.3), width: 1.5),
       ),
-      child: Center(child: Text(display, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: providerColor))),
+      child: Center(child: Text(display, style: TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: pColor))),
     );
-  }
-
-  String _providerLabel() {
-    switch (character.apiProvider) {
-      case 'deepseek': return 'DeepSeek';
-      case 'qwen': return '通义千问';
-      case 'zhipu': return '智谱AI';
-      case 'moonshot': return 'Moonshot';
-      case 'baidu': return '百度文心';
-      case 'custom': return '自定义';
-      default: return character.apiProvider;
-    }
-  }
-
-  Color _providerColor() {
-    switch (character.apiProvider) {
-      case 'deepseek': return const Color(0xFF1565C0);
-      case 'qwen': return const Color(0xFF7C3AED);
-      case 'zhipu': return const Color(0xFF0891B2);
-      case 'moonshot': return const Color(0xFF7C3AED);
-      case 'baidu': return const Color(0xFF4F46E5);
-      case 'custom': return const Color(0xFFD97706);
-      default: return cs.primary;
-    }
   }
 }
 
@@ -656,6 +570,7 @@ class _SettingTile extends StatelessWidget {
   Widget build(BuildContext context) {
     return InkWell(
       onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
       child: Padding(
         padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 14),
         child: Row(
