@@ -1,0 +1,1 @@
+enum DirectChatSource { direct, group }

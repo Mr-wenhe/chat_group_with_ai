@@ -23,6 +23,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 - `Message` — user or AI messages with mention and quote-reply support
 - `GroupMemory` — weekly-summarized topic memory per group, auto-updated after each AI round
 - `CharacterMemory` / `RelationshipState` — layered per-character group memory and directional relationship state
+- Direct chat sessions reuse `Message.groupId` with stable conversation keys `dm:{characterId}`. Lightweight inbox state (`readAt`, source, last proactive timestamp) is stored in Hive `app_settings`, not new Hive model classes.
 
 ### Flow
 
@@ -31,6 +32,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 3. Each reply calls `ChatApiService.streamChatMessage` when streaming is enabled, or `sendChatMessage` for non-streaming calls, using the character's `ApiConfig`.
 4. After each round, if there are ≥8 messages, a summary is generated and stored as `GroupMemory` (keyed by year_week).
 5. Each character has hourly reply limits tracked on the model itself.
+6. Direct chats appear in `DirectChatListPage` (`/direct-chats`). App foreground proactive contact is coordinated by `DirectChatForegroundWatcher` + `DirectChatProactiveService`: stale existing DMs are preferred, but active group members can also start first-time DMs from recent group context. Fully offline AI generation still requires either pre-generated local notifications or a future server push service.
 
 ### Tech Stack
 
@@ -56,7 +58,9 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 |-------|------|---------|
 | `/` | `AICharacterListPage` | Manage AI characters |
 | `/groups` | `ChatGroupListPage` | Manage groups |
+| `/direct-chats` | `DirectChatListPage` | Private chat inbox, unread reminders, manual proactive check |
 | `/chat/{groupId}` | `ChatRoomPage` | Active group conversation |
+| `/dm/{characterId}` | `ChatRoomPage` | One-on-one private chat using `dm:{characterId}` as message groupId |
 | `/settings` | `SettingsPage` | API configs, data management |
 
 ### Important Caveats
@@ -66,6 +70,7 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 - Release builds read/write Hive under the user's app support directory and create fresh empty `*.hive` files there on first launch.
 - The `custom` provider requires a manual `baseUrl` input; all others have hardcoded base URLs in `ApiProvider`.
 - Local `data/*.hive` files are intentionally versioned as development-only data.
+- Foreground proactive DMs may call configured LLM APIs while the app is running. Keep cooldowns conservative and never trigger background/offline network generation without an explicit notification/push design.
 
 ## Extensible Features (Roadmap)
 
@@ -91,9 +96,11 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 - ✅ **Light/dark theme toggle.** SegmentedButton in Settings page under "外观" section; persisted in Hive `app_settings` box; `MyApp` reads on startup.
 - ✅ **Voice playback (TTS).** `flutter_tts` speaks AI replies on long-press; toggle in Settings persists in Hive `app_settings` box.
 - ✅ **Unit tests.** Extracted orchestration logic into `ChatOrchestrator` and related policy/prompt services; tests cover eligibility, block reasons, usage tracking, focus extraction, name prefix stripping, mention behavior, and humanized memory/prompt logic.
+- ✅ **Private chat inbox + foreground proactive contact.** `/direct-chats` lists private histories with unread counts; private chats use `dm:{characterId}`; foreground watcher can create proactive DMs from stale private chats or recent group context.
 - **Cost estimation.** Token usage exists, but provider/model-specific price calculation is not implemented.
 - **Chat history search.**
 - **Import / restore flow.** Export exists, but importing characters/groups/conversations is not yet available.
+- **Offline proactive contact.** Fully closed-app AI generation needs pre-generated local notifications or a server-side push service; current implementation is foreground/local only.
 
 ### Known limitations (current implementation)
 

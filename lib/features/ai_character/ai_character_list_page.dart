@@ -1,6 +1,8 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
+import 'package:chat_group/features/direct_chat/pinned_ordering.dart';
+import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -33,7 +35,13 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final db = ref.read(databaseServiceProvider);
     final characters = ref.watch(aiCharactersProvider);
+    final pinnedIds = db.pinnedCharacterIds();
+    final orderedCharacters = PinnedOrdering.sortCharacters(
+      characters,
+      pinnedIds: pinnedIds,
+    );
     // 获取自定义类型的 API 配置，用于「统一模型」工具栏
     final apiConfigs = ref.watch(apiConfigsProvider);
     final groups = ref.watch(chatGroupsProvider);
@@ -109,14 +117,16 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                 ? _buildEmptyState(cs)
                 : ListView.builder(
                     padding: const EdgeInsets.all(20),
-                    itemCount: characters.length,
+                    itemCount: orderedCharacters.length,
                     itemBuilder: (context, index) {
-                      final character = characters[index];
+                      final character = orderedCharacters[index];
                       return _CharacterCard(
                         character: character,
                         cs: cs,
+                        isPinned: pinnedIds.contains(character.id),
                         onTap: () => _editCharacter(context, character),
                         onDelete: () => _confirmDelete(context, ref, character),
+                        onTogglePin: () => _togglePinnedCharacter(character.id),
                         onToggle: () {
                           character.isActive = !character.isActive;
                           character.save();
@@ -415,8 +425,17 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
         builder: (context) => AICharacterFormPage(character: character)));
   }
 
-  void _openDirectChat(BuildContext context, AICharacter character) {
-    Navigator.of(context).pushNamed('/dm/${character.id}');
+  Future<void> _openDirectChat(
+    BuildContext context,
+    AICharacter character,
+  ) async {
+    await Navigator.of(context).pushNamed('/dm/${character.id}');
+    if (mounted) setState(() {});
+  }
+
+  Future<void> _togglePinnedCharacter(String characterId) async {
+    await ref.read(databaseServiceProvider).togglePinnedCharacter(characterId);
+    if (mounted) setState(() {});
   }
 
   Future<void> _confirmDelete(
@@ -621,8 +640,10 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
 class _CharacterCard extends StatelessWidget {
   final AICharacter character;
   final ColorScheme cs;
+  final bool isPinned;
   final VoidCallback onTap;
   final VoidCallback onDelete;
+  final VoidCallback onTogglePin;
   final VoidCallback onToggle;
   final VoidCallback onDirectChat;
   final ApiConfig? linkedConfig;
@@ -631,8 +652,10 @@ class _CharacterCard extends StatelessWidget {
   const _CharacterCard({
     required this.character,
     required this.cs,
+    required this.isPinned,
     required this.onTap,
     required this.onDelete,
+    required this.onTogglePin,
     required this.onToggle,
     required this.onDirectChat,
     this.linkedConfig,
@@ -757,6 +780,17 @@ class _CharacterCard extends StatelessWidget {
                 Row(
                   mainAxisSize: MainAxisSize.min,
                   children: [
+                    IconButton(
+                      onPressed: onTogglePin,
+                      icon: Icon(
+                        isPinned
+                            ? Icons.push_pin_rounded
+                            : Icons.push_pin_outlined,
+                        size: 20,
+                      ),
+                      color: isPinned ? cs.primary : cs.onSurfaceVariant,
+                      tooltip: isPinned ? '取消置顶' : '置顶',
+                    ),
                     // 显示当前模型名称，点击可单独切换该角色关联的 API 配置
                     if (character.modelName.isNotEmpty)
                       GestureDetector(

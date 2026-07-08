@@ -1,6 +1,10 @@
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:chat_group/core/theme/app_theme.dart';
+import 'package:chat_group/features/chat_group/group_chat_inbox.dart';
+import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
+import 'package:chat_group/providers/providers.dart';
 
 /// 通用卡片装饰：细描边 + 柔和投影（暗色高级感）。
 class AppCard extends StatelessWidget {
@@ -24,7 +28,9 @@ class AppCard extends StatelessWidget {
       color: cs.surfaceContainer,
       borderRadius: BorderRadius.circular(18),
       border: Border.all(
-        color: isDark ? Colors.white.withOpacity(0.06) : Colors.black.withOpacity(0.05),
+        color: isDark
+            ? Colors.white.withOpacity(0.06)
+            : Colors.black.withOpacity(0.05),
       ),
       boxShadow: [
         BoxShadow(
@@ -56,7 +62,8 @@ class AppSectionHeader extends StatelessWidget {
   final IconData? icon;
   final ColorScheme cs;
 
-  const AppSectionHeader({super.key, required this.title, this.icon, required this.cs});
+  const AppSectionHeader(
+      {super.key, required this.title, this.icon, required this.cs});
 
   @override
   Widget build(BuildContext context) {
@@ -68,17 +75,24 @@ class AppSectionHeader extends StatelessWidget {
         ],
         Text(
           title,
-          style: TextStyle(fontSize: 12, fontWeight: FontWeight.w700, color: cs.primary, letterSpacing: 0.8),
+          style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w700,
+              color: cs.primary,
+              letterSpacing: 0.8),
         ),
         const SizedBox(width: 12),
-        Expanded(child: Divider(color: cs.primary.withOpacity(0.15), thickness: 0.5)),
+        Expanded(
+            child:
+                Divider(color: cs.primary.withOpacity(0.15), thickness: 0.5)),
       ],
     );
   }
 }
 
 /// 统一的输入框装饰。
-InputDecoration appInputDecoration(String label, String? hint, IconData icon, ColorScheme cs) {
+InputDecoration appInputDecoration(
+    String label, String? hint, IconData icon, ColorScheme cs) {
   final isDark = cs.brightness == Brightness.dark;
   return InputDecoration(
     labelText: label,
@@ -97,23 +111,41 @@ InputDecoration appInputDecoration(String label, String? hint, IconData icon, Co
       borderSide: BorderSide(color: cs.primary, width: 1.5),
     ),
     filled: true,
-    fillColor: isDark ? cs.surfaceContainerHighest.withOpacity(0.6) : cs.surfaceContainerLowest,
+    fillColor: isDark
+        ? cs.surfaceContainerHighest.withOpacity(0.6)
+        : cs.surfaceContainerLowest,
     contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
     labelStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-    hintStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant.withOpacity(0.5)),
+    hintStyle:
+        TextStyle(fontSize: 13, color: cs.onSurfaceVariant.withOpacity(0.5)),
   );
 }
 
-/// 浮动胶囊底栏：角色 / 群聊 / 设置 三个 Tab。
-class AppBottomNav extends StatelessWidget {
+/// 浮动胶囊底栏：角色 / 群聊 / 私聊 / 设置。
+class AppBottomNav extends ConsumerWidget {
   final int currentIndex;
   final ColorScheme cs;
 
   const AppBottomNav({super.key, required this.currentIndex, required this.cs});
 
   @override
-  Widget build(BuildContext context) {
+  Widget build(BuildContext context, WidgetRef ref) {
     final isDark = cs.brightness == Brightness.dark;
+    final db = ref.watch(databaseServiceProvider);
+    final directSummaries = DirectChatInbox.buildSummaries(
+      characters: db.aiCharacterBox.values.toList(),
+      messages: db.messageBox.values.toList(),
+      readAtByConversation: db.directChatReadAtByConversation(),
+      sourceByConversation: db.directChatSourceByConversation(),
+    );
+    final directUnread = DirectChatInbox.totalUnread(directSummaries);
+    final groupSummaries = GroupChatInbox.buildSummaries(
+      groups: db.chatGroupBox.values.toList(),
+      messages: db.messageBox.values.toList(),
+      readAtByGroup: db.groupChatReadAtByGroup(),
+      pinnedIds: db.pinnedGroupIds(),
+    );
+    final groupUnread = GroupChatInbox.totalUnread(groupSummaries);
     return Padding(
       padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 14),
       child: Container(
@@ -121,7 +153,9 @@ class AppBottomNav extends StatelessWidget {
           color: isDark ? cs.surfaceContainerHighest : cs.surfaceContainer,
           borderRadius: BorderRadius.circular(24),
           border: Border.all(
-            color: isDark ? Colors.white.withOpacity(0.06) : Colors.black.withOpacity(0.05),
+            color: isDark
+                ? Colors.white.withOpacity(0.06)
+                : Colors.black.withOpacity(0.05),
           ),
           boxShadow: [
             BoxShadow(
@@ -144,22 +178,29 @@ class AppBottomNav extends StatelessWidget {
               Navigator.of(context).pushReplacementNamed('/');
             } else if (i == 1) {
               Navigator.of(context).pushReplacementNamed('/groups');
+            } else if (i == 2) {
+              Navigator.of(context).pushReplacementNamed('/direct-chats');
             } else {
               Navigator.of(context).pushReplacementNamed('/settings');
             }
           },
-          destinations: const [
-            NavigationDestination(
+          destinations: [
+            const NavigationDestination(
               icon: Icon(Icons.smart_toy_outlined, size: 22),
               selectedIcon: Icon(Icons.smart_toy_rounded, size: 22),
               label: '角色',
             ),
             NavigationDestination(
-              icon: Icon(Icons.group_outlined, size: 22),
-              selectedIcon: Icon(Icons.group_rounded, size: 22),
+              icon: _badgeIcon(Icons.group_outlined, groupUnread),
+              selectedIcon: _badgeIcon(Icons.group_rounded, groupUnread),
               label: '群聊',
             ),
             NavigationDestination(
+              icon: _badgeIcon(Icons.chat_bubble_outline_rounded, directUnread),
+              selectedIcon: _badgeIcon(Icons.chat_bubble_rounded, directUnread),
+              label: '私聊',
+            ),
+            const NavigationDestination(
               icon: Icon(Icons.settings_outlined, size: 22),
               selectedIcon: Icon(Icons.settings_rounded, size: 22),
               label: '设置',
@@ -167,6 +208,15 @@ class AppBottomNav extends StatelessWidget {
           ],
         ),
       ),
+    );
+  }
+
+  Widget _badgeIcon(IconData icon, int count) {
+    final base = Icon(icon, size: 22);
+    if (count <= 0) return base;
+    return Badge(
+      label: Text(count > 99 ? '99+' : '$count'),
+      child: base,
     );
   }
 }
@@ -177,7 +227,11 @@ class AppFab extends StatelessWidget {
   final IconData icon;
   final String label;
 
-  const AppFab({super.key, required this.onPressed, required this.icon, required this.label});
+  const AppFab(
+      {super.key,
+      required this.onPressed,
+      required this.icon,
+      required this.label});
 
   @override
   Widget build(BuildContext context) {
@@ -206,7 +260,11 @@ class AppFab extends StatelessWidget {
               children: [
                 Icon(icon, size: 22, color: Colors.white),
                 const SizedBox(width: 8),
-                Text(label, style: const TextStyle(fontWeight: FontWeight.w600, color: Colors.white, fontSize: 15)),
+                Text(label,
+                    style: const TextStyle(
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white,
+                        fontSize: 15)),
               ],
             ),
           ),
@@ -261,7 +319,11 @@ class AppPrimaryButton extends StatelessWidget {
               children: [
                 Icon(icon, size: 20, color: Colors.white),
                 const SizedBox(width: 8),
-                Text(label, style: const TextStyle(fontSize: 16, fontWeight: FontWeight.w600, color: Colors.white)),
+                Text(label,
+                    style: const TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.white)),
               ],
             ),
           ),

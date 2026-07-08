@@ -11,6 +11,7 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/character_memory.dart';
+import 'package:chat_group/core/models/direct_chat_source.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
@@ -159,6 +160,12 @@ class DatabaseService {
     await characterMemoryBox.clear();
     await relationshipStateBox.clear();
     await appSettingsBox.delete(_messageIdsByGroupKey);
+    await appSettingsBox.delete(_directChatReadAtKey);
+    await appSettingsBox.delete(_directChatSourceKey);
+    await appSettingsBox.delete(_directChatLastProactiveAtKey);
+    await appSettingsBox.delete(_groupChatReadAtKey);
+    await appSettingsBox.delete(_pinnedCharacterIdsKey);
+    await appSettingsBox.delete(_pinnedGroupIdsKey);
     _tokenUsageCache = _emptyTokenUsage();
     _messageIdsCache = null;
     _tokenUsageFlushTimer?.cancel();
@@ -218,7 +225,8 @@ class DatabaseService {
   Map<String, dynamic> _messageIdsByGroup() {
     if (_messageIdsCache != null) return _messageIdsCache!;
     final raw = appSettingsBox.get(_messageIdsByGroupKey);
-    final map = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    final map =
+        raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
     _messageIdsCache = map;
     return map;
   }
@@ -237,6 +245,130 @@ class DatabaseService {
     byGroup[groupId] = ids;
     _messageIdsCache = Map<String, dynamic>.from(byGroup);
     await appSettingsBox.put(_messageIdsByGroupKey, _messageIdsCache);
+  }
+
+  static const String _directChatReadAtKey = 'direct_chat_read_at';
+  static const String _directChatSourceKey = 'direct_chat_source';
+  static const String _directChatLastProactiveAtKey =
+      'direct_chat_last_proactive_at';
+  static const String _groupChatReadAtKey = 'group_chat_read_at';
+  static const String _pinnedCharacterIdsKey = 'pinned_character_ids';
+  static const String _pinnedGroupIdsKey = 'pinned_group_ids';
+
+  Map<String, DateTime> directChatReadAtByConversation() {
+    return _dateTimeMapFromSettings(_directChatReadAtKey);
+  }
+
+  Future<void> markDirectChatRead(
+    String conversationId, {
+    DateTime? readAt,
+  }) async {
+    final map = Map<String, String>.from(
+      appSettingsBox.get(_directChatReadAtKey) is Map
+          ? Map<String, dynamic>.from(appSettingsBox.get(_directChatReadAtKey))
+              .map((key, value) => MapEntry(key, value.toString()))
+          : const <String, String>{},
+    );
+    map[conversationId] = (readAt ?? DateTime.now()).toIso8601String();
+    await appSettingsBox.put(_directChatReadAtKey, map);
+  }
+
+  Map<String, DateTime> groupChatReadAtByGroup() {
+    return _dateTimeMapFromSettings(_groupChatReadAtKey);
+  }
+
+  Future<void> markGroupChatRead(
+    String groupId, {
+    DateTime? readAt,
+  }) async {
+    final map = Map<String, String>.from(
+      appSettingsBox.get(_groupChatReadAtKey) is Map
+          ? Map<String, dynamic>.from(appSettingsBox.get(_groupChatReadAtKey))
+              .map((key, value) => MapEntry(key, value.toString()))
+          : const <String, String>{},
+    );
+    map[groupId] = (readAt ?? DateTime.now()).toIso8601String();
+    await appSettingsBox.put(_groupChatReadAtKey, map);
+  }
+
+  Map<String, DirectChatSource> directChatSourceByConversation() {
+    final raw = appSettingsBox.get(_directChatSourceKey);
+    final map =
+        raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    return map.map((key, value) {
+      final source = value == DirectChatSource.group.name
+          ? DirectChatSource.group
+          : DirectChatSource.direct;
+      return MapEntry(key, source);
+    });
+  }
+
+  Future<void> saveDirectChatSource(
+    String conversationId,
+    DirectChatSource source,
+  ) async {
+    final raw = appSettingsBox.get(_directChatSourceKey);
+    final map =
+        raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    map[conversationId] = source.name;
+    await appSettingsBox.put(_directChatSourceKey, map);
+  }
+
+  Map<String, DateTime> directChatLastProactiveAtByCharacter() {
+    return _dateTimeMapFromSettings(_directChatLastProactiveAtKey);
+  }
+
+  Future<void> saveDirectChatLastProactiveAt(
+    String characterId,
+    DateTime timestamp,
+  ) async {
+    final raw = appSettingsBox.get(_directChatLastProactiveAtKey);
+    final map =
+        raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    map[characterId] = timestamp.toIso8601String();
+    await appSettingsBox.put(_directChatLastProactiveAtKey, map);
+  }
+
+  Map<String, DateTime> _dateTimeMapFromSettings(String key) {
+    final raw = appSettingsBox.get(key);
+    final map =
+        raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    return map.map((entryKey, value) {
+      return MapEntry(
+        entryKey,
+        DateTime.tryParse(value.toString()) ??
+            DateTime.fromMillisecondsSinceEpoch(0),
+      );
+    });
+  }
+
+  Set<String> pinnedCharacterIds() =>
+      _stringSetFromSettings(_pinnedCharacterIdsKey);
+
+  Future<void> togglePinnedCharacter(String id) async {
+    await _toggleStringSetValue(_pinnedCharacterIdsKey, id);
+  }
+
+  Set<String> pinnedGroupIds() => _stringSetFromSettings(_pinnedGroupIdsKey);
+
+  Future<void> togglePinnedGroup(String id) async {
+    await _toggleStringSetValue(_pinnedGroupIdsKey, id);
+  }
+
+  Set<String> _stringSetFromSettings(String key) {
+    final raw = appSettingsBox.get(key);
+    if (raw is! List) return <String>{};
+    return raw.whereType<String>().toSet();
+  }
+
+  Future<void> _toggleStringSetValue(String key, String value) async {
+    final values = _stringSetFromSettings(key);
+    if (values.contains(value)) {
+      values.remove(value);
+    } else {
+      values.add(value);
+    }
+    await appSettingsBox.put(key, values.toList()..sort());
   }
 
   static const String _themeModeKey = 'theme_mode';

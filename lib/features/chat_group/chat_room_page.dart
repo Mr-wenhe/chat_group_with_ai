@@ -254,7 +254,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     });
 
     final messages = await _db.messagesForGroup(widget.groupId);
-    await _db.markDirectChatRead(widget.groupId);
+    await _db.markGroupChatRead(
+      widget.groupId,
+      readAt: _readThrough(messages),
+    );
 
     final memoryBox = _db.groupMemoryBox;
     final now = DateTime.now();
@@ -327,6 +330,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final hasApi =
         character.isActive && config != null && config.apiKey.isNotEmpty;
     final messages = await _db.messagesForGroup(widget.groupId);
+    await _db.markDirectChatRead(
+      widget.groupId,
+      readAt: _readThrough(messages),
+    );
     final characterMemories = _db.characterMemoryBox.values
         .where((m) => m.groupId == widget.groupId)
         .toList();
@@ -474,6 +481,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   bool get _canTouchUi => mounted && !_disposed;
 
+  DateTime _readThrough(List<Message> messages) {
+    if (messages.isEmpty) return DateTime.now();
+    final latest = messages
+        .map((message) => message.timestamp)
+        .reduce((a, b) => a.isAfter(b) ? a : b);
+    final readAt = latest.add(const Duration(milliseconds: 1));
+    final now = DateTime.now();
+    return readAt.isAfter(now) ? readAt : now;
+  }
+
   String _memoryPeriodKey(DateTime now) {
     return ChatOrchestrator.memoryPeriodKey(now);
   }
@@ -502,7 +519,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     ));
     if (_isDirectChat) {
       await _db.saveDirectChatSource(widget.groupId, DirectChatSource.direct);
-      await _db.markDirectChatRead(widget.groupId);
+      await _db.markDirectChatRead(
+        widget.groupId,
+        readAt: _readThrough(_messages),
+      );
     }
     _cancelQuote();
 

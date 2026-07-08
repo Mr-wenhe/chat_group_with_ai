@@ -5,6 +5,8 @@ import 'core/theme/app_theme.dart';
 import 'features/ai_character/ai_character_list_page.dart';
 import 'features/chat_group/chat_group_list_page.dart';
 import 'features/chat_group/chat_room_page.dart';
+import 'features/direct_chat/direct_chat_foreground_watcher.dart';
+import 'features/direct_chat/direct_chat_list_page.dart';
 import 'features/direct_chat/direct_chat_session.dart';
 import 'features/settings/settings_page.dart';
 import 'providers/providers.dart';
@@ -18,6 +20,9 @@ void main() async {
   runApp(const ProviderScope(child: MyApp()));
 }
 
+final scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();
+final navigatorKey = GlobalKey<NavigatorState>();
+
 class MyApp extends ConsumerWidget {
   const MyApp({super.key});
 
@@ -30,9 +35,20 @@ class MyApp extends ConsumerWidget {
       theme: AppTheme.lightTheme,
       darkTheme: AppTheme.darkTheme,
       themeMode: savedMode,
+      navigatorKey: navigatorKey,
+      scaffoldMessengerKey: scaffoldMessengerKey,
+      builder: (context, child) {
+        return DirectChatForegroundWatcher(
+          db: db,
+          scaffoldMessengerKey: scaffoldMessengerKey,
+          navigatorKey: navigatorKey,
+          child: child ?? const SizedBox.shrink(),
+        );
+      },
       routes: {
         '/': (_) => const AICharacterListPage(),
         '/groups': (_) => const ChatGroupListPage(),
+        '/direct-chats': (_) => const DirectChatListPage(),
         '/settings': (_) => const SettingsPage(),
       },
       onGenerateRoute: (settings) {

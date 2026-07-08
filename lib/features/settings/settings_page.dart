@@ -256,7 +256,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           const SizedBox(height: 32),
         ],
       ),
-      bottomNavigationBar: AppBottomNav(currentIndex: 2, cs: cs),
+      bottomNavigationBar: AppBottomNav(currentIndex: 3, cs: cs),
     );
   }
 

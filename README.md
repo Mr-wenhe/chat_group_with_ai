@@ -36,6 +36,7 @@
 - **对话导出与分享**：将整组对话导出为 Markdown 或 JSON（**不含任何 API Key / 密钥配置**），保存至本机并可通过系统分享面板发送。
 - **引用回复 / 重新生成**：长按消息可引用回复；AI 消息支持重新生成，并保留原消息作为引用上下文。
 - **人性化聊天引擎**：基于提及、近期发言、角色兴趣、关系状态和分层记忆选择回复意图，让角色更像在群里自然接话。
+- **群聊 / 私聊收件箱与主动联系**：群聊和私聊列表都会显示未读数，群聊额外标出 `@我` 提醒；角色、群聊和对应私聊可置顶。App 前台运行时，私聊过的 AI 或群聊里的角色可按冷却规则主动发起私聊，并通过红点、未读数和浮层提示提醒。
 - **主题、语音与用量统计**：设置页支持亮/暗/跟随系统、AI 回复朗读开关，以及按角色/群组累计 token 用量。
 
 ---
@@ -230,7 +231,8 @@ lib/
 │   └── theme/                     # 亮/暗主题与厂商配色
 ├── features/
 │   ├── ai_character/              # 角色列表页、表单页及 providers
-│   ├── chat_group/               # 群组列表、聊天室页及 providers
+│   ├── chat_group/               # 群组列表、群聊未读汇总、聊天室页及 providers
+│   ├── direct_chat/              # 私聊收件箱、私聊会话键、置顶排序、主动联系策略/服务
 │   └── settings/                  # 设置页、API 配置表单页
 ├── services/
 │   ├── chat_api_service.dart      # 统一的 LLM 调用封装
@@ -245,8 +247,10 @@ lib/
 | 路由 | 页面 | 用途 |
 |------|------|------|
 | `/` | `AICharacterListPage` | 管理 AI 角色 |
-| `/groups` | `ChatGroupListPage` | 管理群组 |
+| `/groups` | `ChatGroupListPage` | 管理群组、群聊未读与置顶 |
+| `/direct-chats` | `DirectChatListPage` | 私聊收件箱、未读提醒、置顶与手动检查主动私聊 |
 | `/chat/{groupId}` | `ChatRoomPage` | 群组对话 |
+| `/dm/{characterId}` | `ChatRoomPage` | 一对一私聊，会话键为 `dm:{characterId}` |
 | `/settings` | `SettingsPage` | API 配置与数据管理 |
 
 ---
