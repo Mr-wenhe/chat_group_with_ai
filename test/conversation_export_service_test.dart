@@ -103,6 +103,55 @@ void main() {
       }
     });
 
+    test('exports do not include humanized intent debug fields', () {
+      final group = ChatGroup(
+        id: 'g1',
+        name: '灵感群',
+        description: '',
+        theme: '日常创作',
+        aiCharacterIds: const ['c1'],
+      );
+      final character = AICharacter(
+        id: 'c1',
+        name: '阿月',
+        avatar: 'A',
+        age: 24,
+        role: '插画师',
+        personalityTags: const ['敏感'],
+        systemPrompt: 'secret system prompt',
+        apiKey: 'secret-key',
+        apiProvider: 'deepseek',
+      );
+      final localMessages = [
+        Message(
+          groupId: 'g1',
+          senderId: 'c1',
+          senderType: 'ai',
+          content: '这配色有点太满了。',
+        ),
+      ];
+
+      final json = ConversationExportService().toJson(
+        group,
+        localMessages,
+        {'c1': character},
+      );
+      final markdown = ConversationExportService().toMarkdown(
+        group,
+        localMessages,
+        {'c1': character},
+      );
+      final jsonText = jsonEncode(json);
+
+      expect(jsonText, isNot(contains('ReplyIntent')));
+      expect(jsonText, isNot(contains('reason')));
+      expect(jsonText, isNot(contains('secret-key')));
+      expect(jsonText, isNot(contains('secret system prompt')));
+      expect(markdown, isNot(contains('ReplyIntent')));
+      expect(markdown, isNot(contains('secret-key')));
+      expect(markdown, isNot(contains('secret system prompt')));
+    });
+
     test('saveToFile 写入文件并可回读，随后清理', () async {
       // 注：本例仅涉及 dart:io 文件操作，故用普通 test 而非 testWidgets，
       // 避免引入 Flutter Widget 绑定；同时注入系统临时目录来验证「落盘 + 回读」，
