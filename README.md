@@ -360,7 +360,7 @@ refactor: 抽离 ChatApiService 超时配置
 | 工作流 | 文件 | 触发时机 | 作用 |
 |--------|------|----------|------|
 | **CI** | `.github/workflows/ci.yml` | 推送 / PR 到 `main` | 自动执行 `代码生成 → flutter analyze → flutter test`，作为合并前质量门禁 |
-| **Release** | `.github/workflows/release.yml` | 推送 `v*` tag，或手动在 Actions 页面触发 | 分平台构建 **Android / iOS / macOS / Web / Windows**，并聚合为 GitHub Release 附件 |
+| **Release** | `.github/workflows/release.yml` | 推送 `v*` tag，或手动在 Actions 页面触发 | 分平台构建 **Android / iOS / macOS / Web / Windows**，并聚合为 GitHub Release 附件；同时按 Conventional Commits **自动生成 changelog** 作为 Release 说明 |
 
 > 前置条件：本机需能跑通 `flutter doctor`（各目标平台工具链齐全）。仓库已启用全部 5 个平台；其中 `windows/` 目录为本次发布准备时通过 `flutter create --platforms=windows .` 生成并提交。
 
@@ -447,8 +447,16 @@ git push origin v1.1.0
 或**手动触发**（无需 push tag）：
 
 1. 打开仓库 **Actions → Release → Run workflow**；
-2. 填写 `version`（如 `1.1.0`）、勾选要构建的平台、`ios_export_method` 默认 `app-store`；
-3. 点击 **Run workflow**。工作流会自动创建对应 tag 并生成 Release。
+2. 填写 `version`（**留空则按 Conventional Commits 自动累加**，见下方约定）、勾选要构建的平台、`ios_export_method` 默认 `app-store`；
+3. 点击 **Run workflow**。工作流会自动创建对应 tag、生成 changelog 并创建 Release。
+
+> 🤖 **自动版本号 + Changelog**
+> - `scripts/generate_changelog.py` 解析提交历史中的 Conventional Commits，自动决定下一个版本号：
+>   - 含 `feat!` / `fix!` / `BREAKING CHANGE` → 主版本 +1（`x.0.0`）
+>   - 含 `feat:` → 次版本 +1（`x.y.0`）
+>   - 其余（含 `fix:` / `perf:` 等）→ 修订号 +1（`x.y.z+1`）
+> - 每次发布会自动把本次区间内的提交按类型（Features / Bug Fixes / …）生成 Release 说明；并幂等更新仓库根目录 `CHANGELOG.md`（手动触发时还会回写提交到 `main`）。
+> - 本地也可直接运行：`python3 scripts/generate_changelog.py --force-version 1.1.0 --changelog-out CHANGELOG.md`。
 
 构建完成后，所有产物（APK / AAB / IPA / macOS.zip / Web / Windows.zip）会出现在仓库 **Releases** 页面对应版本的附件中。
 
@@ -457,7 +465,8 @@ git push origin v1.1.0
 ### 4. 版本号约定
 
 - `pubspec.yaml` 中 `version: 主版本.次版本.修订号+构建号`，如 `1.1.0+5`。
-- 自动发布时，工作流会用「输入/ tag 版本号 + GitHub 运行序号」自动写入 `pubspec.yaml`，无需手动改。
+- **推荐提交信息遵循 [Conventional Commits](https://www.conventionalcommits.org) 规范**（`feat:` / `fix:` / `docs:` / `chore:` …），以便自动累加版本号与生成 changelog。
+- 自动发布时，工作流会用「输入/ tag 版本号 + GitHub 运行序号」自动写入 `pubspec.yaml`，无需手动改；手动触发且 `version` 留空时，由提交历史自动推导。
 - tag 命名统一为 `v` 前缀（如 `v1.1.0`），与 Release 标题一致。
 
 ---
