@@ -439,11 +439,33 @@ jobs:
     permissions:
       contents: write
     steps:
-      - name: 下载全部产物
+      # v4 必须按 name 逐个显式下载：不指定 name 的多产物下载会静默下载空目录，
+      # 导致 Release 产物为空（continue-on-error 掩盖了失败）。逐一下载可在缺产物时立即报错。
+      - name: 下载 Android 产物
         uses: actions/download-artifact@v4
         with:
-          path: artifacts
-        continue-on-error: true
+          name: android
+          path: artifacts/android
+      - name: 下载 Web 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: web
+          path: artifacts/web
+      - name: 下载 Windows 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: windows
+          path: artifacts/windows
+      - name: 下载 macOS 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: macos
+          path: artifacts/macos
+      - name: 下载 iOS 产物
+        uses: actions/download-artifact@v4
+        with:
+          name: ios
+          path: artifacts/ios
 
       - name: 拉取代码（含完整历史，用于生成 changelog）
         uses: actions/checkout@v4
