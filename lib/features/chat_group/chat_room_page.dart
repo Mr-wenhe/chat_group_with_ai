@@ -1727,6 +1727,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       selection: TextSelection.collapsed(offset: atPos + mentionText.length),
     );
 
+    // Overlay dismissal can steal focus; restore it immediately.
+    _inputFocusNode.requestFocus();
     _hideMentionOverlay();
   }
 
