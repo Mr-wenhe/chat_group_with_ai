@@ -364,6 +364,8 @@ refactor: 抽离 ChatApiService 超时配置
 
 > 前置条件：本机需能跑通 `flutter doctor`（各目标平台工具链齐全）。仓库已启用全部 5 个平台；其中 `windows/` 目录为本次发布准备时通过 `flutter create --platforms=windows .` 生成并提交。
 
+> **Flutter 版本对齐**：CI 与 Release 工作流已显式钉到 **Flutter 3.24.0 stable**，与你本地自定义 fork（`3.24.0-1.0.pre.538`，同周期、同套旧主题 API）保持代码级一致。因此**同一份代码在你本地和 CI 都能编译**，无需切换你本地的 Flutter 通道。`pubspec.yaml` 的 SDK 约束也已放宽到 `>=3.5.0 <4.0.0` 以同时兼容两端。
+
 ---
 
 ### 1. 配置签名 Secrets（可选，但生产发布必需）

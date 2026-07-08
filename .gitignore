@@ -7,6 +7,8 @@
 .pub-cache/
 .pub/
 /build/
+# 不纳入版本控制：CI 在各自 Dart SDK 上重新解析，避免 _macros 等 SDK 版本错配
+pubspec.lock
 
 data/*.lock
 
