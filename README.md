@@ -353,6 +353,115 @@ refactor: 抽离 ChatApiService 超时配置
 
 ---
 
+## 发布指南 (Release)
+
+本项目已内置两套 GitHub Actions：
+
+| 工作流 | 文件 | 触发时机 | 作用 |
+|--------|------|----------|------|
+| **CI** | `.github/workflows/ci.yml` | 推送 / PR 到 `main` | 自动执行 `代码生成 → flutter analyze → flutter test`，作为合并前质量门禁 |
+| **Release** | `.github/workflows/release.yml` | 推送 `v*` tag，或手动在 Actions 页面触发 | 分平台构建 **Android / iOS / macOS / Web / Windows**，并聚合为 GitHub Release 附件 |
+
+> 前置条件：本机需能跑通 `flutter doctor`（各目标平台工具链齐全）。仓库已启用全部 5 个平台；其中 `windows/` 目录为本次发布准备时通过 `flutter create --platforms=windows .` 生成并提交。
+
+---
+
+### 1. 配置签名 Secrets（可选，但生产发布必需）
+
+GitHub 仓库 → **Settings → Secrets and variables → Actions → New repository secret**，按需添加。未配置时仍可构建「未签名」包用于本地调试。
+
+#### Android（发布到应用商店 / 安装 APK 必需）
+
+| Secret 名称 | 说明 |
+|-------------|------|
+| `ANDROID_KEYSTORE_BASE64` | 签名密钥库 `keystore.jks` 的 Base64（见下方生成命令） |
+| `ANDROID_KEY_ALIAS` | 密钥别名 |
+| `ANDROID_KEY_PASSWORD` | 密钥密码 |
+| `ANDROID_STORE_PASSWORD` | 密钥库密码 |
+
+生成密钥库（仅首次）：
+
+```bash
+keytool -genkey -v -keystore upload-keystore.jks -keyalg RSA -keysize 2048 -validity 10000 -alias upload
+# 转为 Base64 填入 Secret（macOS / Linux）
+base64 -i upload-keystore.jks
+# Windows (PowerShell)
+[Convert]::ToBase64String([IO.File]::ReadAllBytes("upload-keystore.jks"))
+```
+
+#### iOS / macOS（App Store / TestFlight / 可分发 .app 必需）
+
+| Secret 名称 | 说明 |
+|-------------|------|
+| `APPLE_CERTIFICATE_BASE64` | 从钥匙串导出的分发证书（`.p12`）的 Base64 |
+| `APPLE_CERTIFICATE_PASSWORD` | `.p12` 导出密码 |
+| `APPLE_PROVISIONING_PROFILE_BASE64` | `.mobileprovision` 描述文件的 Base64 |
+| `APPLE_TEAM_ID` | Apple Developer 团队 ID |
+| `APPLE_SIGN_IDENTITY` | 签名身份，如 `Developer ID Application: Your Name (TEAMID)` |
+
+> 未配置上述 Secrets 时：iOS 会回退构建「未签名 .app」（仅可在模拟器 / 越狱设备使用）；macOS 构建未签名的 `.app`（本机可用，但跨设备会触发 Gatekeeper 拦截）。
+
+---
+
+### 2. 手动本地发布（不依赖 CI）
+
+适合「我就想在自家机器上打个包」的场景：
+
+```bash
+# 1) 修改 pubspec.yaml 的 version（如 1.0.0+1 → 1.1.0+2），提交
+# 2) 各平台构建命令与产物位置：
+
+# Android：APK + AAB
+flutter build apk --release            # 产物：build/app/outputs/flutter-apk/app-release.apk
+flutter build appbundle --release      # 产物：build/app/outputs/bundle/release/app-release.aab
+
+# iOS（需 macOS + Xcode 签名）
+flutter build ipa --release             # 产物：build/ios/ipa/*.ipa
+
+# macOS（需 macOS）
+flutter build macos --release           # 产物：build/macos/Build/Products/Release/*.app
+
+# Web
+flutter build web --release             # 产物：build/web/（直接部署到任意静态托管）
+
+# Windows（需 Windows + Visual Studio）
+flutter build windows --release         # 产物：build/windows/x64/runner/Release/
+```
+
+---
+
+### 3. 自动发布（推荐流程）
+
+只需打一个 `v*` tag 推送到 GitHub，Release 工作流会自动构建全部平台并生成 Release：
+
+```bash
+# 1) 先提交版本号改动（pubspec.yaml version）
+git add pubspec.yaml && git commit -m "chore: 发布 v1.1.0"
+git push
+
+# 2) 打 tag 并推送 —— 自动触发 release.yml
+git tag v1.1.0
+git push origin v1.1.0
+```
+
+或**手动触发**（无需 push tag）：
+
+1. 打开仓库 **Actions → Release → Run workflow**；
+2. 填写 `version`（如 `1.1.0`）、勾选要构建的平台、`ios_export_method` 默认 `app-store`；
+3. 点击 **Run workflow**。工作流会自动创建对应 tag 并生成 Release。
+
+构建完成后，所有产物（APK / AAB / IPA / macOS.zip / Web / Windows.zip）会出现在仓库 **Releases** 页面对应版本的附件中。
+
+---
+
+### 4. 版本号约定
+
+- `pubspec.yaml` 中 `version: 主版本.次版本.修订号+构建号`，如 `1.1.0+5`。
+- 自动发布时，工作流会用「输入/ tag 版本号 + GitHub 运行序号」自动写入 `pubspec.yaml`，无需手动改。
+- tag 命名统一为 `v` 前缀（如 `v1.1.0`），与 Release 标题一致。
+
+---
+
 ## 许可证
 
 本项目当前仅供学习与个人使用，`publish_to: 'none'`，未发布到 pub.dev。如需商用或二次分发，请先联系作者确认授权方式。

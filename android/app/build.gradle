@@ -6,6 +6,13 @@ plugins {
 }
 
 android {
+    // 读取 key.properties（仅当文件存在时启用 release 签名；CI 通过 secrets 注入该文件）
+    def keystorePropertiesFile = rootProject.file('key.properties')
+    def keystoreProperties = new Properties()
+    if (keystorePropertiesFile.exists()) {
+        keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
+    }
+
     namespace = "com.example.chat_group"
     compileSdk = flutter.compileSdkVersion
     ndkVersion = flutter.ndkVersion
@@ -30,11 +37,26 @@ android {
         versionName = flutter.versionName
     }
 
+    // 仅当 key.properties 存在时才定义 release 签名配置，避免缺失文件导致构建失败
+    signingConfigs {
+        if (keystorePropertiesFile.exists()) {
+            release {
+                keyAlias keystoreProperties['keyAlias']
+                keyPassword keystoreProperties['keyPassword']
+                storeFile file(keystoreProperties['storeFile'])
+                storePassword keystoreProperties['storePassword']
+            }
+        }
+    }
+
     buildTypes {
         release {
-            // TODO: Add your own signing config for the release build.
-            // Signing with the debug keys for now, so `flutter run --release` works.
-            signingConfig = signingConfigs.debug
+            if (keystorePropertiesFile.exists()) {
+                signingConfig = signingConfigs.release
+            } else {
+                // 未配置签名时回退到 debug 密钥，保证本地 `flutter run --release` 可用
+                signingConfig = signingConfigs.debug
+            }
         }
     }
 }

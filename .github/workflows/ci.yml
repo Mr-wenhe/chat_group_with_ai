@@ -1,0 +1,45 @@
+name: CI
+
+# 持续集成：在每次向 main 推送或发起 PR 时，自动执行 代码生成 -> 静态分析 -> 单元测试
+# 目的：在合并前快速拦截编译错误、Lint 违规与测试回归，提供轻量质量门禁。
+# 注：CI 仅做 analyze + test；多平台构建与发布由 release.yml 负责，避免每次 PR 都跑重型构建。
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+# 同一分支的多次推送只保留最新一次运行，节省资源
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  analyze-and-test:
+    name: Analyze & Test
+    runs-on: ubuntu-latest
+    steps:
+      - name: 拉取代码
+        uses: actions/checkout@v4
+
+      - name: 配置 Flutter (stable)
+        uses: subosito/flutter-action@v2
+        with:
+          channel: "stable"
+          cache: true
+
+      - name: 安装依赖
+        run: flutter pub get
+
+      - name: 生成代码 (Hive 适配器 / Riverpod provider / JSON 序列化)
+        # 项目所有 *.g.dart 均为自动生成，analyze 与 test 依赖它们，必须先生成
+        run: dart run build_runner build --delete-conflicting-outputs
+
+      - name: 静态分析 (flutter analyze)
+        # 默认仅 errors 会令步骤失败（warnings/info 不阻断）。
+        # 如需更严格，可改为：flutter analyze --fatal-warnings --fatal-infos
+        run: flutter analyze
+
+      - name: 单元测试
+        run: flutter test
