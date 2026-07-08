@@ -19,6 +19,7 @@ import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart'
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
 import 'package:chat_group/features/chat_group/scene_behavior.dart';
+import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -253,6 +254,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     });
 
     final messages = await _db.messagesForGroup(widget.groupId);
+    await _db.markDirectChatRead(widget.groupId);
 
     final memoryBox = _db.groupMemoryBox;
     final now = DateTime.now();
@@ -261,8 +263,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     if (memory == null) {
       final legacyKey =
           '${widget.groupId}_${ChatOrchestrator.legacyMemoryPeriodKey(now)}';
-      memory = memoryBox.get(legacyKey);
-      if (memory != null) {
+      final legacyMemory = memoryBox.get(legacyKey);
+      if (legacyMemory != null) {
+        memory = GroupMemory(
+          groupId: legacyMemory.groupId,
+          topicSummary: legacyMemory.topicSummary,
+          lastSummaryAt: legacyMemory.lastSummaryAt,
+        );
         await memoryBox.put(memoryKey, memory);
       }
     }
@@ -493,6 +500,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       content: text,
       replyToMessageId: _quotedMessage?.id,
     ));
+    if (_isDirectChat) {
+      await _db.saveDirectChatSource(widget.groupId, DirectChatSource.direct);
+      await _db.markDirectChatRead(widget.groupId);
+    }
     _cancelQuote();
 
     _autoChatRoundCount = 0;
