@@ -108,7 +108,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                                 fontSize: 16,
                                 fontWeight: FontWeight.w600,
                                 color: cs.onSurface)),
-                        Text('v1.0.0 · 本地存储',
+                        Text('v1.1.0 · 本地存储',
                             style: TextStyle(
                                 fontSize: 13, color: cs.onSurfaceVariant)),
                       ],
@@ -119,7 +119,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             ],
           ),
           const SizedBox(height: 28),
-          _SectionHeader(title: 'API 配置', cs: cs),
+          _SectionHeader(
+            title: 'API 配置',
+            cs: cs,
+            action: _buildAddConfigButton(cs),
+          ),
           const SizedBox(height: 4),
           Text('管理 API Key、Base URL 和模型，角色可复用配置',
               style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
@@ -263,6 +267,20 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   void _openConfigForm(BuildContext context, [ApiConfig? config]) {
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => ApiConfigFormPage(config: config)),
+    );
+  }
+
+  /// 分区标题栏的「新增」按钮：无论是否已存在配置，都可随时创建新的 API Key。
+  Widget _buildAddConfigButton(ColorScheme cs) {
+    return FilledButton.icon(
+      onPressed: () => _openConfigForm(context),
+      icon: const Icon(Icons.add_rounded, size: 16),
+      label: const Text('新增'),
+      style: FilledButton.styleFrom(
+        visualDensity: VisualDensity.compact,
+        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
+        textStyle: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+      ),
     );
   }
 
@@ -648,7 +666,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 class _SectionHeader extends StatelessWidget {
   final String title;
   final ColorScheme cs;
-  const _SectionHeader({required this.title, required this.cs});
+  final Widget? action;
+  const _SectionHeader(
+      {required this.title, required this.cs, this.action});
 
   @override
   Widget build(BuildContext context) {
@@ -662,6 +682,10 @@ class _SectionHeader extends StatelessWidget {
                 letterSpacing: 0.3)),
         const SizedBox(width: 12),
         Expanded(child: Divider(color: cs.outlineVariant, thickness: 0.5)),
+        if (action != null) ...[
+          const SizedBox(width: 10),
+          action!,
+        ],
       ],
     );
   }
