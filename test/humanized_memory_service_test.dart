@@ -76,5 +76,25 @@ void main() {
       expect(memory.relationshipNotes, isEmpty);
       expect(memory.personaGrowth, ['我记得自己在这个群里慢慢开始敢开玩笑。']);
     });
+
+    test('RelationshipState clamps relationship score ranges', () {
+      final relation = RelationshipState(
+        groupId: 'group-1',
+        sourceCharacterId: 'char-a',
+        targetId: 'user',
+        targetType: RelationshipTargetType.user,
+        affinity: 300,
+        trust: -300,
+        friction: 300,
+        familiarity: 300,
+      );
+
+      relation.clampScores();
+
+      expect(relation.affinity, 100);
+      expect(relation.trust, -100);
+      expect(relation.friction, 100);
+      expect(relation.familiarity, 100);
+    });
   });
 }
