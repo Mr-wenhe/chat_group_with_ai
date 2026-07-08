@@ -6,13 +6,18 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/chat_group.dart';
+import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
+import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
+import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
+import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/chat_api_service.dart';
@@ -91,6 +96,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   List<AICharacter> _allGroupCharacters = []; // 全部群成员（含停用），供 @ 弹窗使用
   List<Message> _messages = [];
   GroupMemory? _groupMemory;
+  List<CharacterMemory> _characterMemories = [];
+  List<RelationshipState> _relationshipStates = [];
+  final Map<String, ReplyIntent> _pendingReplyIntents = {};
+  int _autoChatMemoryTick = 0;
 
   bool _isLoading = true;
   bool _isAiReplying = false;
@@ -236,12 +245,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       await memoryBox.put(memoryKey, memory);
     }
 
+    final characterMemories = _db.characterMemoryBox.values
+        .where((m) => m.groupId == widget.groupId)
+        .toList();
+    final relationshipStates = _db.relationshipStateBox.values
+        .where((r) => r.groupId == widget.groupId)
+        .toList();
+
     setState(() {
       _group = group;
       _characters = characters;
       _allGroupCharacters = allGroupCharacters;
       _messages = messages;
       _groupMemory = memory;
+      _characterMemories = characterMemories;
+      _relationshipStates = relationshipStates;
       _hasAnyApiConfig = hasApi;
       _autoChatStatus =
           hasApi ? AutoChatStatus.waiting : AutoChatStatus.unavailable;
@@ -293,11 +311,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       return;
     }
 
-    final speakers = ChatActivityPolicy.selectAutoChatSpeakers(
+    final autoIntents = HumanizedChatOrchestrator.selectReplyIntents(
       characters: _characters,
+      recentMessages: _messages.toList(),
+      groupId: widget.groupId,
+      userMessage: null,
+      mentionedIds: const [],
+      memories: _characterMemories,
+      relationships: _relationshipStates,
       isEligible: _isEligibleToReply,
       random: _autoChatRandom,
+      isAutoChat: true,
     );
+    final speakers = _charactersForIntents(autoIntents);
+    _pendingReplyIntents
+      ..clear()
+      ..addEntries(
+          autoIntents.map((intent) => MapEntry(intent.speakerId, intent)));
 
     if (speakers.isEmpty) {
       if (_canTouchUi) {
@@ -326,11 +356,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           _messages.toList(),
           null,
           isAutoChat: true,
+          intent: _pendingReplyIntents[speaker.id],
         );
         await _delay(replyContent);
       }
 
-      await _maybeUpdateMemory();
+      _autoChatMemoryTick++;
+      if (_autoChatMemoryTick >= 3) {
+        _autoChatMemoryTick = 0;
+        await _maybeUpdateMemory();
+      }
     } finally {
       if (_canTouchUi) {
         setState(() {
@@ -429,8 +464,31 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       if (!isAutoChat) _consecutiveRound++;
     });
 
-    final charactersToReply = _selectReplyCharacters(mentionedIds, userMessage);
+    final replyIntents = HumanizedChatOrchestrator.selectReplyIntents(
+      characters: _characters,
+      recentMessages: _recentMessagesForContext(),
+      groupId: widget.groupId,
+      userMessage: userMessage,
+      mentionedIds: mentionedIds ?? const [],
+      memories: _characterMemories,
+      relationships: _relationshipStates,
+      isEligible: _isEligibleToReply,
+      random: _random,
+      isAutoChat: isAutoChat,
+    );
+    final charactersToReply = _charactersForIntents(replyIntents);
+    _pendingReplyIntents
+      ..clear()
+      ..addEntries(
+          replyIntents.map((intent) => MapEntry(intent.speakerId, intent)));
     if (charactersToReply.isEmpty) {
+      if (_characters.any(_isEligibleToReply)) {
+        setState(() {
+          _isAiReplying = false;
+          if (!isAutoChat) _consecutiveRound = 0;
+        });
+        return;
+      }
       final blockReason = _firstBlockReason(_characters);
       setState(() {
         _isAiReplying = false;
@@ -457,8 +515,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       if (!_canTouchUi) return;
       final wasPendingReply = _pendingMentionedIds.contains(character.id);
       final replyContent = await _generateAiReply(
-          character, _recentMessagesForContext(), userMessage,
-          isAutoChat: isAutoChat);
+        character,
+        _recentMessagesForContext(),
+        userMessage,
+        isAutoChat: isAutoChat,
+        intent: _pendingReplyIntents[character.id],
+      );
       repliedIds.add(character.id);
       await _delay(replyContent);
       if (wasPendingReply) {
@@ -508,7 +570,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   Future<String> _generateAiReply(
       AICharacter character, List<Message> context, String? userMessage,
-      {bool isAutoChat = false}) async {
+      {bool isAutoChat = false, ReplyIntent? intent}) async {
     final config = _resolveApiConfig(character);
     if (config == null) {
       if (_canTouchUi) {
@@ -526,8 +588,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       return '[${character.name} 未配置 API]';
     }
 
-    final apiMessages = _buildApiMessages(character, context, userMessage,
-        isAutoChat: isAutoChat);
+    final apiMessages = _buildApiMessages(
+      character,
+      context,
+      userMessage,
+      isAutoChat: isAutoChat,
+      intent: intent,
+    );
     final provider = ApiProvider.values.firstWhere(
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
@@ -674,6 +741,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         cachedTokens: cachedTokens ?? 0,
       );
     }
+    if (!failed && intent != null) {
+      await _persistRelationshipForIntent(
+        character: character,
+        intent: intent,
+        userMessage: userMessage,
+      );
+    }
     if (!failed && fullContent.trim().isNotEmpty) {
       await _maybeEvolveCharacterMemory(character, fullContent);
     }
@@ -695,6 +769,31 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         _isStreaming = false;
         _autoChatStatus = AutoChatStatus.paused;
       });
+    }
+  }
+
+  Future<void> _persistRelationshipForIntent({
+    required AICharacter character,
+    required ReplyIntent intent,
+    required String? userMessage,
+  }) async {
+    final targetId = intent.targetId ?? (userMessage != null ? 'user' : null);
+    if (targetId == null || targetId.isEmpty) return;
+    final targetType = targetId == 'user'
+        ? RelationshipTargetType.user
+        : RelationshipTargetType.ai;
+    _relationshipStates = HumanizedMemoryService.applyLocalRelationshipRules(
+      relationships: _relationshipStates,
+      groupId: widget.groupId,
+      speakerId: character.id,
+      targetId: targetId,
+      targetType: targetType,
+      actionName: intent.action.name,
+      friendlyTone: !intent.toneHint.contains('带刺') &&
+          !intent.toneHint.contains('冷淡'),
+    );
+    for (final relation in _relationshipStates) {
+      await _db.relationshipStateBox.put(relation.id, relation);
     }
   }
 
@@ -726,7 +825,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   List<Map<String, dynamic>> _buildApiMessages(
       AICharacter character, List<Message> context, String? userMessage,
-      {bool isAutoChat = false}) {
+      {bool isAutoChat = false, ReplyIntent? intent}) {
     final msgs = <Map<String, dynamic>>[];
 
     // ── 1. 群聊记忆摘要 ───────────────────────────────────────────────
@@ -740,6 +839,29 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       msgs.add({
         'role': 'system',
         'content': '【${character.name}的自我记忆】${character.memorySummary}'
+      });
+    }
+
+    if (intent != null) {
+      final memory = HumanizedMemoryService.memoryForCharacter(
+        groupId: widget.groupId,
+        character: character,
+        existing: _characterMemories,
+      );
+      msgs.add({
+        'role': 'system',
+        'content': HumanizedPromptBuilder.buildIntentContext(
+          character: character,
+          groupName: _group?.name ?? '这个群',
+          groupTheme: _group?.theme ?? '日常聊天',
+          ownerName: (_group?.ownerName.trim().isNotEmpty ?? false)
+              ? _group!.ownerName.trim()
+              : '我',
+          intent: intent,
+          memory: memory,
+          relationships: _relationshipStates,
+          charactersById: {for (final c in _characters) c.id: c},
+        ),
       });
     }
 
@@ -1072,8 +1194,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
       messages: [
-        {'role': 'system', 'content': '你只负责压缩和更新角色记忆，输出可直接保存的正文。'},
-        {'role': 'user', 'content': prompt},
+        {
+          'role': 'system',
+          'content': '你只负责更新角色长期记忆。必须输出严格 JSON，不要 Markdown，不要解释。',
+        },
+        {
+          'role': 'user',
+          'content': '$prompt\n\n输出 JSON 形状：'
+              '{"facts":["稳定事实"],"relationshipNotes":["关系或情绪变化"],'
+              '"personaGrowth":["表达习惯、偏好、雷点或长期执念"],"discard":["不保存内容"]}',
+        },
       ],
       temperature: 0.35,
     );
@@ -1082,9 +1212,36 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     if (!(result['success'] ?? false)) return;
     final updated = result['message']?.toString().trim() ?? '';
     if (updated.isEmpty) return;
+    await _mergeHumanizedMemory(character, updated);
     character.memorySummary = _compactMemoryText(updated);
     await character.save();
     if (_canTouchUi) setState(() {});
+  }
+
+  Future<void> _mergeHumanizedMemory(
+    AICharacter character,
+    String rawJson,
+  ) async {
+    final update = HumanizedMemoryService.parseLayeredMemoryJson(rawJson);
+    if (update.facts.isEmpty &&
+        update.relationshipNotes.isEmpty &&
+        update.personaGrowth.isEmpty) {
+      return;
+    }
+
+    final memory = HumanizedMemoryService.memoryForCharacter(
+      groupId: widget.groupId,
+      character: character,
+      existing: _characterMemories,
+    );
+    HumanizedMemoryService.mergeLayeredMemory(memory, update);
+    await _db.characterMemoryBox.put(memory.id, memory);
+    final index = _characterMemories.indexWhere((m) => m.id == memory.id);
+    if (index == -1) {
+      _characterMemories = [..._characterMemories, memory];
+    } else {
+      _characterMemories = [..._characterMemories]..[index] = memory;
+    }
   }
 
   Map<String, String> _senderNameMap() {
@@ -1601,17 +1758,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     return parseMentionedCharacterIds(content, _characters);
   }
 
-  List<AICharacter> _selectReplyCharacters(
-      List<String>? mentionedIds, String? userMessage) {
-    return ChatActivityPolicy.selectUserReplyCharacters(
-      characters: _characters,
-      mentionedIds: mentionedIds ?? const [],
-      pendingMentionedIds: _pendingMentionedIds,
-      isEligible: _isEligibleToReply,
-      random: _random,
-      isGroupAddressed: userMessage != null &&
-          ChatActivityPolicy.isGroupAddressedMessage(userMessage),
-    );
+  List<AICharacter> _charactersForIntents(List<ReplyIntent> intents) {
+    final byId = {for (final c in _characters) c.id: c};
+    return intents
+        .map((intent) => byId[intent.speakerId])
+        .whereType<AICharacter>()
+        .toList();
   }
 
   List<Message> _recentMessagesForContext() {
