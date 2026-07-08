@@ -127,6 +127,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   final int _maxAutoChatRounds = 4;
   static const Duration _autoChatInitialDelay = Duration(seconds: 8);
   static const Duration _autoChatBurstPause = Duration(seconds: 35);
+  static const Duration _streamUiFlushInterval = Duration(milliseconds: 80);
+  static const Duration _searchDebounceDuration = Duration(milliseconds: 250);
   static const int _autoChatMinIntervalSeconds = 12;
   static const int _autoChatIntervalJitterSeconds = 9;
   final Random _autoChatRandom = Random();
@@ -152,6 +154,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   List<Message> _searchResults = [];
   int? _searchFocusIndex;
   bool _isShiftPressed = false;
+  Timer? _searchDebounceTimer;
 
   // 是否存在已配置 API Key 的角色（决定 AI 能否回复/自动聊天）
   bool _hasAnyApiConfig = false;
@@ -162,6 +165,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   Completer<void>? _streamDone; // 标记本轮流式是否结束
   bool _isStreaming = false; // 是否正在流式生成（控制「停止生成」按钮显隐）
   bool _disposed = false; // dispose 守卫，避免异步回调在销毁后写状态
+  Timer? _streamUiFlushTimer;
+  final Map<String, GlobalKey> _messageKeys = {};
 
   // —— @我 提醒 ——
   final List<String> _pendingUserMentionMessageIds = [];
@@ -187,6 +192,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     // 取消未完成的流式订阅，并唤醒可能因 await 挂起的 _generateAiReply。
     _streamSub?.cancel();
     _streamSub = null;
+    _streamUiFlushTimer?.cancel();
+    _searchDebounceTimer?.cancel();
     if (_streamDone != null && !_streamDone!.isCompleted) {
       _streamDone!.complete();
     }
@@ -232,14 +239,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       return cfg != null && cfg.apiKey.isNotEmpty;
     });
 
-    final messages = _db.messageBox.values
-        .where((m) => m.groupId == widget.groupId)
-        .toList()
-      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    final messages = await _db.messagesForGroup(widget.groupId);
 
     final memoryBox = _db.groupMemoryBox;
-    final memoryKey = '${widget.groupId}_${_memoryPeriodKey(DateTime.now())}';
+    final now = DateTime.now();
+    final memoryKey = '${widget.groupId}_${_memoryPeriodKey(now)}';
     var memory = memoryBox.get(memoryKey);
+    if (memory == null) {
+      final legacyKey = '${widget.groupId}_${ChatOrchestrator.legacyMemoryPeriodKey(now)}';
+      memory = memoryBox.get(legacyKey);
+      if (memory != null) {
+        await memoryBox.put(memoryKey, memory);
+      }
+    }
     if (memory == null) {
       memory = GroupMemory(groupId: widget.groupId, topicSummary: '');
       await memoryBox.put(memoryKey, memory);
@@ -377,7 +389,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       }
     }
 
-    if (_pendingUserMessages.isNotEmpty) {
+    // 处理排队中的用户消息：当前回合结束后自动触发下一轮 AI 回复。
+    if (_pendingUserMessages.isNotEmpty && _canTouchUi) {
       final next = _pendingUserMessages.removeAt(0);
       await _runAiRound(
           userMessage: next.text, mentionedIds: next.mentionedIds);
@@ -387,21 +400,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   bool get _canTouchUi => mounted && !_disposed;
 
   String _memoryPeriodKey(DateTime now) {
-    final weekOfYear = _weekOfYear(now);
-    return '${now.year}_W$weekOfYear';
-  }
-
-  int _weekOfYear(DateTime date) {
-    final dayOfYear = _dayOfYear(date);
-    final firstDay = DateTime(date.year, 1, 1);
-    final firstDayOfWeek = firstDay.weekday;
-    final offset = firstDayOfWeek <= DateTime.thursday ? 1 : 0;
-    return ((dayOfYear + firstDayOfWeek - 1 - 4) / 7).floor() + offset;
-  }
-
-  int _dayOfYear(DateTime date) {
-    final start = DateTime(date.year, 1, 1);
-    return date.difference(start).inDays + 1;
+    return ChatOrchestrator.memoryPeriodKey(now);
   }
 
   Future<void> _sendMessage() async {
@@ -555,13 +554,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
     await _maybeUpdateMemory();
 
+    // widget 可能在 _maybeUpdateMemory 的 await 期间被 dispose，
+    // 恢复后必须重新检查 _canTouchUi 才能调用 setState。
+    if (!_canTouchUi) return;
+
     setState(() {
       _isAiReplying = false;
       if (!isAutoChat) _consecutiveRound = 0;
     });
 
     // 处理排队中的用户消息：当前回合结束后自动触发下一轮 AI 回复。
-    if (_pendingUserMessages.isNotEmpty) {
+    if (_pendingUserMessages.isNotEmpty && _canTouchUi) {
       final next = _pendingUserMessages.removeAt(0);
       await _runAiRound(
           userMessage: next.text, mentionedIds: next.mentionedIds);
@@ -647,13 +650,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           case ChatStreamEventType.token:
             fullContent += e.delta ?? '';
             temp.content = fullContent;
-            if (_canTouchUi) setState(() {});
-            _scrollToBottom();
+            _scheduleStreamingUiFlush();
             break;
           case ChatStreamEventType.done:
             if ((e.content ?? '').isNotEmpty) fullContent = e.content!;
             temp.content = fullContent;
-            if (_canTouchUi) setState(() {});
+            _flushStreamingUi();
             if (e.promptTokens != null) promptTokens = e.promptTokens;
             if (e.completionTokens != null) {
               completionTokens = e.completionTokens;
@@ -669,6 +671,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             if (_canTouchUi) {
               setState(() => _autoChatStatus = AutoChatStatus.error);
             }
+            _flushStreamingUi();
             if (!done.isCompleted) done.complete();
         }
       },
@@ -679,6 +682,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         fullContent = '[${character.name} 回复失败: $err]';
         temp.content = fullContent;
         if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.error);
+        _flushStreamingUi();
         if (!done.isCompleted) done.complete();
       },
       onDone: () {
@@ -716,7 +720,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         random: _random,
       );
       temp.content = fullContent;
-      if (_canTouchUi) setState(() {});
+      _flushStreamingUi();
     }
 
     // 解析 @ 提及 → mentionedAiIds（未知名称忽略，避免误指向第一个成员）。
@@ -730,6 +734,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     temp.isMention = mentionedIds.isNotEmpty;
     temp.mentionedAiIds = mentionedIds;
     await _db.messageBox.put(temp.id, temp);
+    await _db.addMessageToGroupIndex(temp);
     _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     if (promptTokens != null && completionTokens != null) {
@@ -758,6 +763,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   /// 停止当前流式生成：取消订阅并保留已生成的（部分）内容落库。
   void _stopStreaming() {
     if (!_isStreaming) return;
+    _flushStreamingUi();
     _streamSub?.cancel();
     _streamSub = null;
     // 唤醒 await done.future，让 _generateAiReply 收尾并把现有内容落库。
@@ -1050,6 +1056,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   Future<void> _appendMessage(Message message) async {
     await _db.messageBox.put(message.id, message);
+    await _db.addMessageToGroupIndex(message);
     if (!_canTouchUi) return;
     setState(() {
       _messages = List.from(_messages)..add(message);
@@ -1098,7 +1105,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   Future<void> _maybeUpdateMemory() async {
-    if (_messages.length < 8) return;
+    final now = DateTime.now();
+    if (!ChatOrchestrator.shouldUpdateGroupMemory(
+      messageCount: _messages.length,
+      hasExistingSummary: _groupMemory?.topicSummary.trim().isNotEmpty ?? false,
+      lastSummaryAt: _groupMemory?.lastSummaryAt,
+      now: now,
+    )) {
+      return;
+    }
+
+    // Mark before async work to prevent concurrent summary generation.
+    if (_groupMemory != null) {
+      _groupMemory!.lastSummaryAt = now;
+      await _groupMemory!.save();
+    }
 
     final topicHint = ChatOrchestrator.recentDialogueTranscript(
       messages: _messages,
@@ -1213,7 +1234,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final updated = result['message']?.toString().trim() ?? '';
     if (updated.isEmpty) return;
     await _mergeHumanizedMemory(character, updated);
-    character.memorySummary = _compactMemoryText(updated);
+    final parsed = HumanizedMemoryService.parseLayeredMemoryJson(updated);
+    character.memorySummary = _memorySummaryFromParsed(parsed);
     await character.save();
     if (_canTouchUi) setState(() {});
   }
@@ -1252,11 +1274,20 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     };
   }
 
-  String _compactMemoryText(String text) {
-    final cleaned =
-        text.replaceAll(RegExp(r'^(更新后的)?角色自我记忆[:：]\s*'), '').trim();
-    if (cleaned.length <= 900) return cleaned;
-    return cleaned.substring(0, 900);
+  String _memorySummaryFromParsed(LayeredMemoryUpdate parsed) {
+    final parts = <String>[];
+    if (parsed.facts.isNotEmpty) {
+      parts.add('【事实】${parsed.facts.take(4).join('；')}');
+    }
+    if (parsed.relationshipNotes.isNotEmpty) {
+      parts.add('【关系】${parsed.relationshipNotes.take(3).join('；')}');
+    }
+    if (parsed.personaGrowth.isNotEmpty) {
+      parts.add('【成长】${parsed.personaGrowth.take(3).join('；')}');
+    }
+    final text = parts.join('\n');
+    if (text.length <= 900) return text;
+    return text.substring(0, 900);
   }
 
   bool _isEligibleToReply(AICharacter character) {
@@ -1789,14 +1820,44 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     }
   }
 
-  void _scrollToBottom() {
+  void _scheduleStreamingUiFlush() {
+    if (_streamUiFlushTimer?.isActive ?? false) return;
+    _streamUiFlushTimer = Timer(_streamUiFlushInterval, () {
+      _streamUiFlushTimer = null;
+      _flushStreamingUi();
+    });
+  }
+
+  void _flushStreamingUi({bool forceScroll = false}) {
+    _streamUiFlushTimer?.cancel();
+    _streamUiFlushTimer = null;
+    if (!_canTouchUi) return;
+    final shouldScroll = forceScroll || _isNearBottom();
+    setState(() {});
+    if (shouldScroll) {
+      _scrollToBottom(animated: false);
+    }
+  }
+
+  bool _isNearBottom({double threshold = 160}) {
+    if (!_scrollController.hasClients) return true;
+    final position = _scrollController.position;
+    return position.maxScrollExtent - position.pixels <= threshold;
+  }
+
+  void _scrollToBottom({bool animated = true}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
-        _scrollController.animateTo(
-          _scrollController.position.maxScrollExtent,
-          duration: const Duration(milliseconds: 250),
-          curve: Curves.easeOut,
-        );
+        final target = _scrollController.position.maxScrollExtent;
+        if (animated) {
+          _scrollController.animateTo(
+            target,
+            duration: const Duration(milliseconds: 250),
+            curve: Curves.easeOut,
+          );
+        } else {
+          _scrollController.jumpTo(target);
+        }
       }
     });
   }
@@ -1879,6 +1940,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   void _exitSearch() {
+    _searchDebounceTimer?.cancel();
     setState(() {
       _isSearching = false;
       _searchController.clear();
@@ -1889,9 +1951,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   void _performSearch(String query) {
     if (query.trim().isEmpty) {
+      _searchDebounceTimer?.cancel();
       setState(() => _searchResults = []);
       return;
     }
+    _searchDebounceTimer?.cancel();
+    _searchDebounceTimer = Timer(_searchDebounceDuration, () {
+      _applySearch(query);
+    });
+  }
+
+  void _applySearch(String query) {
+    if (!_canTouchUi) return;
     final q = query.toLowerCase();
     setState(() {
       _searchResults =
@@ -1907,13 +1978,35 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   void _scrollToMessageIndex(int index) {
     if (index < 0 || index >= _messages.length) return;
     if (!_scrollController.hasClients) return;
-    const itemHeight = 80.0;
-    final targetOffset = index * itemHeight;
-    _scrollController.animateTo(
-      targetOffset.clamp(0.0, _scrollController.position.maxScrollExtent),
-      duration: const Duration(milliseconds: 300),
-      curve: Curves.easeInOut,
+    final key = _messageKeys[_messages[index].id];
+    final keyContext = key?.currentContext;
+    if (keyContext != null) {
+      Scrollable.ensureVisible(
+        keyContext,
+        duration: const Duration(milliseconds: 300),
+        curve: Curves.easeInOut,
+        alignment: 0.2,
+      );
+      return;
+    }
+    // Item not rendered yet: jump close, then refine once item is built.
+    final estimatedOffset = index * 80.0;
+    _scrollController.jumpTo(
+      estimatedOffset.clamp(0.0, _scrollController.position.maxScrollExtent),
     );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final k = _messageKeys[_messages[index].id];
+      final ctx = k?.currentContext;
+      if (ctx != null) {
+        Scrollable.ensureVisible(
+          ctx,
+          duration: const Duration(milliseconds: 250),
+          curve: Curves.easeInOut,
+          alignment: 0.2,
+        );
+      }
+    });
   }
 
   void _searchPrev() {
@@ -2131,13 +2224,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         case ChatStreamEventType.token:
           fullContent += e.delta ?? '';
           temp.content = fullContent;
-          if (_canTouchUi) setState(() {});
-          _scrollToBottom();
+          _scheduleStreamingUiFlush();
           break;
         case ChatStreamEventType.done:
           if ((e.content ?? '').isNotEmpty) fullContent = e.content!;
           temp.content = fullContent;
-          if (_canTouchUi) setState(() {});
+          _flushStreamingUi();
           if (e.promptTokens != null) promptTokens = e.promptTokens;
           if (e.completionTokens != null) completionTokens = e.completionTokens;
           if (e.cachedTokens != null) cachedTokens = e.cachedTokens;
@@ -2147,7 +2239,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           failed = true;
           fullContent = '[${character.name} 重新生成失败: ${e.message}]';
           temp.content = fullContent;
-          if (_canTouchUi) setState(() {});
+          _flushStreamingUi();
           if (!done.isCompleted) done.complete();
       }
     }, onError: (err) {
@@ -2155,7 +2247,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       failed = true;
       fullContent = '[${character.name} 重新生成失败: $err]';
       temp.content = fullContent;
-      if (_canTouchUi) setState(() {});
+      _flushStreamingUi();
       if (!done.isCompleted) done.complete();
     }, onDone: () {
       if (!done.isCompleted) done.complete();
@@ -2179,7 +2271,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           isAutoChat: false,
           random: _random);
       temp.content = fullContent;
-      if (_canTouchUi) setState(() {});
+      _flushStreamingUi();
     }
 
     final mentionedIds = parseMentionedCharacterIds(fullContent, _characters);
@@ -2189,6 +2281,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     temp.mentionedAiIds = mentionedIds;
     temp.replyToMessageId = original.id;
     await _db.messageBox.put(temp.id, temp);
+    await _db.addMessageToGroupIndex(temp);
     _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     if (promptTokens != null && completionTokens != null) {
@@ -2226,19 +2319,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   String _senderNameById(String id) {
     final c = _characters.firstWhere((c) => c.id == id,
-        orElse: () => _characters.isNotEmpty
-            ? _characters.first
-            : AICharacter(
-                name: '未知',
-                avatar: '?',
-                age: 0,
-                role: '',
-                personalityTags: const [],
-                systemPrompt: '',
-                apiKey: '',
-                apiProvider: 'deepseek',
-                apiConfigId: ''));
+        orElse: () => _unknownCharacter());
     return c.name;
+  }
+
+  AICharacter _unknownCharacter() {
+    return AICharacter(
+      name: '未知',
+      avatar: '?',
+      age: 0,
+      role: '',
+      personalityTags: const [],
+      systemPrompt: '',
+      apiKey: '',
+      apiProvider: 'deepseek',
+      apiConfigId: '',
+    );
   }
 
   Widget _buildSearchBar(ColorScheme cs) {
@@ -2292,6 +2388,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final messagesById = {for (final message in _messages) message.id: message};
+    final charactersById = {
+      for (final character in _characters) character.id: character
+    };
+    _messageKeys.removeWhere((id, _) => !messagesById.containsKey(id));
 
     if (_isLoading) {
       return Scaffold(
@@ -2392,66 +2493,52 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                     itemCount: _messages.length,
                     itemBuilder: (context, index) {
                       final message = _messages[index];
+                      final messageKey =
+                          _messageKeys.putIfAbsent(message.id, GlobalKey.new);
                       // 日期分隔：首条或与上一条不在同一天时显示
                       final showDate = index == 0 ||
                           !_isSameDay(message.timestamp,
                               _messages[index - 1].timestamp);
                       final sender = message.senderType == 'user'
                           ? null
-                          : _characters.firstWhere(
-                              (c) => c.id == message.senderId,
-                              orElse: () => _characters.isNotEmpty
-                                  ? _characters.first
-                                  : AICharacter(
-                                      name: '未知',
-                                      avatar: '?',
-                                      age: 0,
-                                      role: '',
-                                      personalityTags: const [],
-                                      systemPrompt: '',
-                                      apiKey: '',
-                                      apiProvider: 'deepseek',
-                                      apiConfigId: '',
-                                    ),
-                            );
+                          : charactersById[message.senderId] ?? _unknownCharacter();
                       final isStreaming = _streamingMessage != null &&
                           _streamingMessage!.id == message.id;
                       final isRegenerating =
                           _isRegenerating && _regenerateMessageId == message.id;
                       final isAiBubble =
                           message.senderType == 'ai' && sender != null;
-                      return Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          if (showDate)
-                            _buildDateDivider(cs, message.timestamp),
-                          _MessageBubble(
-                            message: message,
-                            sender: sender,
-                            characters: _characters,
-                            cs: cs,
-                            isStreaming: isStreaming,
-                            isRegenerating: isRegenerating,
-                            isHighlightedMention:
-                                _highlightedMentionMessageId == message.id,
-                            onLongPress: isAiBubble
-                                ? () => _showMessageActionSheet(message, sender)
-                                : null,
-                            senderColor: (c) => _senderColor(c),
-                            quotedMessage: message.replyToMessageId != null
-                                ? _messages.firstWhere(
-                                    (m) => m.id == message.replyToMessageId,
-                                    orElse: () => message)
-                                : null,
-                            quotedSenderName: message.replyToMessageId != null
-                                ? _senderNameById(_messages
-                                    .firstWhere(
-                                        (m) => m.id == message.replyToMessageId,
-                                        orElse: () => message)
-                                    .senderId)
-                                : null,
-                          ),
-                        ],
+                      final quotedMessage = message.replyToMessageId == null
+                          ? null
+                          : messagesById[message.replyToMessageId];
+                      return KeyedSubtree(
+                        key: messageKey,
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (showDate)
+                              _buildDateDivider(cs, message.timestamp),
+                            _MessageBubble(
+                              message: message,
+                              sender: sender,
+                              characters: _characters,
+                              cs: cs,
+                              isStreaming: isStreaming,
+                              isRegenerating: isRegenerating,
+                              isHighlightedMention:
+                                  _highlightedMentionMessageId == message.id,
+                              onLongPress: isAiBubble
+                                  ? () =>
+                                      _showMessageActionSheet(message, sender)
+                                  : null,
+                              senderColor: (c) => _senderColor(c),
+                              quotedMessage: quotedMessage,
+                              quotedSenderName: quotedMessage == null
+                                  ? null
+                                  : _senderNameById(quotedMessage.senderId),
+                            ),
+                          ],
+                        ),
                       );
                     },
                   ),

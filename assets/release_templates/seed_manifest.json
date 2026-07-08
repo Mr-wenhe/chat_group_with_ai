@@ -1,0 +1,13 @@
+{
+  "template": "empty_release_hive_boxes",
+  "files": [
+    "ai_characters.hive",
+    "api_configs.hive",
+    "app_settings.hive",
+    "character_memories.hive",
+    "chat_groups.hive",
+    "group_memories.hive",
+    "messages.hive",
+    "relationship_states.hive"
+  ]
+}

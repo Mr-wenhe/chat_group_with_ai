@@ -18,16 +18,17 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 ### Key Data Model
 
 - `ApiConfig` — shared API key/URL/model config (1:many with characters)
-- `AICharacter` — persona with system prompt, avatar, reply rate limits
-- `ChatGroup` — a group of characters with a theme; messages belong to a group
-- `Message` — user or AI messages with mention support
+- `AICharacter` — persona with system prompt, avatar, reply rate limits, and compact memory summary
+- `ChatGroup` — a group of characters with a theme and owner name; messages belong to a group
+- `Message` — user or AI messages with mention and quote-reply support
 - `GroupMemory` — weekly-summarized topic memory per group, auto-updated after each AI round
+- `CharacterMemory` / `RelationshipState` — layered per-character group memory and directional relationship state
 
 ### Flow
 
 1. User creates AI characters and groups them into `ChatGroup`s.
 2. In `ChatRoomPage`, user sends a message → triggers `_runAiRound` which randomly picks 1-2 eligible AI characters to reply in sequence (max 3 auto rounds). In addition, ~3s after entering a room the app starts an **idle auto-chat loop** (`_startAutoChat`): every 5-9s it randomly triggers 0-2 eligible characters to speak; a single burst runs at most 5 rounds, then pauses 10s and resumes.
-3. Each reply calls `ChatApiService.sendChatMessage` with the character's `ApiConfig`.
+3. Each reply calls `ChatApiService.streamChatMessage` when streaming is enabled, or `sendChatMessage` for non-streaming calls, using the character's `ApiConfig`.
 4. After each round, if there are ≥8 messages, a summary is generated and stored as `GroupMemory` (keyed by year_week).
 5. Each character has hourly reply limits tracked on the model itself.
 
@@ -61,8 +62,10 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 ### Important Caveats
 
 - `AICharacter` tracks hourly reply counts via `lastReplyTimestamp` and `hourlyReplyCount` directly on the model — these are mutated in `_isEligibleToReply` without re-saving to DB each time, only the limit check is enforced during a round.
-- `ApiConfig` stores `apiKey` in plaintext in Hive; no encryption layer is applied.
+- Non-release runs read Hive directly from the repository `data/` directory, including API keys stored inside `api_configs.hive`.
+- Release builds read/write Hive under the user's app support directory and create fresh empty `*.hive` files there on first launch.
 - The `custom` provider requires a manual `baseUrl` input; all others have hardcoded base URLs in `ApiProvider`.
+- Local `data/*.hive` files are intentionally versioned as development-only data.
 
 ## Extensible Features (Roadmap)
 
@@ -73,8 +76,9 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 - ✅ **Streaming / typewriter replies.** `ChatApiService.streamChatMessage` reads SSE and `ChatRoomPage` renders tokens incrementally with a blinking cursor + "停止生成" button.
 - ✅ **Character persona presets / template library.** 10 built-in presets in `CharacterPreset.presets`; one-tap apply from the form dialog and a FAB on the list page (still requires choosing an ApiConfig).
 - ✅ **Conversation export / share.** `ConversationExportService` exports Markdown/JSON to `chat_group_exports/` and shares via `share_plus`; entries on Settings page and chat-room AppBar. Export only reads display fields — never apiKey/apiProvider/apiConfigId.
+- ✅ **Humanized chat engine.** Intent selection uses mentions, recent speakers, relationship state, topic fit, and character memory.
 
-### Medium priority — contained, practical
+### Medium priority — implemented
 
 - ✅ **Regenerate / stop reply.** Action sheet on AI messages (long-press) provides "重新生成" + "引用回复"; regenerate re-queries the API with existing context, sets `replyToMessageId`.
 - ✅ **Quote-reply UI.** Long-press AI message → action sheet → "引用回复"; shows quoted bar above input with sender name + snippet; stored via `Message.replyToMessageId` and rendered in bubble header.
@@ -83,13 +87,16 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 
 ### Low priority — polish / enhancement
 
-- ✅ **Cost / token tracking.** `ChatStreamEvent` carries `promptTokens`/`completionTokens`; `SseParser` extracts `usage` from SSE; recorded per character via `DatabaseService.recordTokenUsage`; displayed in Settings page with per-character breakdown and reset button.
+- ✅ **Token tracking.** `ChatStreamEvent` carries `promptTokens`/`completionTokens`; `SseParser` extracts `usage` from SSE; recorded per character via `DatabaseService.recordTokenUsage`; displayed in Settings page with per-character breakdown and reset button.
 - ✅ **Light/dark theme toggle.** SegmentedButton in Settings page under "外观" section; persisted in Hive `app_settings` box; `MyApp` reads on startup.
 - ✅ **Voice playback (TTS).** `flutter_tts` speaks AI replies on long-press; toggle in Settings persists in Hive `app_settings` box.
-- ✅ **Unit tests.** Extracted orchestration logic into `ChatOrchestrator` class; 21 tests covering eligibility, block reasons, usage tracking, focus extraction, and name prefix stripping; all existing tests still pass.
+- ✅ **Unit tests.** Extracted orchestration logic into `ChatOrchestrator` and related policy/prompt services; tests cover eligibility, block reasons, usage tracking, focus extraction, name prefix stripping, mention behavior, and humanized memory/prompt logic.
+- **Cost estimation.** Token usage exists, but provider/model-specific price calculation is not implemented.
+- **Chat history search.**
+- **Import / restore flow.** Export exists, but importing characters/groups/conversations is not yet available.
 
 ### Known limitations (current implementation)
 
 - Import for characters/groups/conversations not yet available — only export (added 2026-07-07); data is local-only and easy to lose.
-- Test coverage covers SSE parsing, presets, and export services; chat orchestration logic (`_isEligibleToReply`, `_parseMentions`, `_buildApiMessages`) still lacks unit tests.
-- `ApiConfig.apiKey` is still stored in plaintext in Hive (see Important Caveats).
+- Test coverage covers SSE parsing, presets, export safety, mention parsing, activity policy, chat orchestration, and humanized memory/prompt logic. UI-heavy chat room behavior still relies mostly on extracted logic tests.
+- Versioned `data/*.hive` may contain live API keys and chat data, so repository access should be treated as sensitive.

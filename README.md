@@ -34,6 +34,9 @@
 - **流式输出（打字机）**：AI 回复逐字实时渲染，生成过程中可随时点击「停止生成」中断。
 - **角色人设预设库**：内置 10 套人设模板（毒舌评委 / 杠精 / 好奇宝宝 / 鼓励师 / 冷静分析师 / 戏精 / 老干部 / 治愈邻家 / 硬核极客 / 毒舌御姐），一键套用到角色表单，快速创建。
 - **对话导出与分享**：将整组对话导出为 Markdown 或 JSON（**不含任何 API Key / 密钥配置**），保存至本机并可通过系统分享面板发送。
+- **引用回复 / 重新生成**：长按消息可引用回复；AI 消息支持重新生成，并保留原消息作为引用上下文。
+- **人性化聊天引擎**：基于提及、近期发言、角色兴趣、关系状态和分层记忆选择回复意图，让角色更像在群里自然接话。
+- **主题、语音与用量统计**：设置页支持亮/暗/跟随系统、AI 回复朗读开关，以及按角色/群组累计 token 用量。
 
 ---
 
@@ -43,7 +46,7 @@
 |------|------|
 | 框架 | Flutter 3.6+ / Dart 3.6 |
 | 状态管理 | Riverpod（基于注解、代码生成） |
-| 本地存储 | Hive（类型安全适配器）+ flutter_secure_storage |
+| 本地存储 | Hive（类型安全适配器，开发态读仓库 `data/`，release 在用户目录创建全新数据） |
 | 网络请求 | Dio |
 | JSON 序列化 | json_annotation / json_serializable |
 | UI 组件 | Material Design（默认深色主题）、flutter_slidable |
@@ -235,6 +238,8 @@ lib/
 └── providers/providers.dart       # 顶层 provider 统一再导出
 ```
 
+更多维护视角的模块地图见 [`docs/PROJECT_MAP.md`](docs/PROJECT_MAP.md)。
+
 ### 路由
 
 | 路由 | 页面 | 用途 |
@@ -258,16 +263,17 @@ GroupMemory (按 群组 + 年周 归档)
 ```
 
 - `ApiConfig`：共享的密钥/URL/模型配置，与角色一对多。
-- `AICharacter`：带有 system prompt、头像、每小时回复上限的角色。
-- `ChatGroup`：包含一组角色与主题，消息归属某个群组。
-- `Message`：用户或 AI 消息，支持 @ 提及。
+- `AICharacter`：带有 system prompt、头像、每小时回复上限和自我记忆摘要的角色。
+- `ChatGroup`：包含一组角色、主题与群主名，消息归属某个群组。
+- `Message`：用户或 AI 消息，支持 @ 提及与引用回复。
 - `GroupMemory`：每周话题摘要，每轮 AI 对话后自动更新（≥8 条消息时）。
+- `CharacterMemory` / `RelationshipState`：按群组保存角色分层记忆，以及 AI 对用户或其他 AI 的关系状态。
 
 ### AI 对话流程
 
 1. 用户创建角色并将它们分组到 `ChatGroup`。
 2. 在 `ChatRoomPage` 发送消息 → 触发 `_runAiRound`，随机挑选 1~2 个符合条件（未超回复上限）的角色依次回复（最多 3 轮自动对话）。
-3. 每次回复调用 `ChatApiService.sendChatMessage`，使用角色对应的 `ApiConfig`。
+3. 每次回复优先调用 `ChatApiService.streamChatMessage` 进行流式输出；非流式场景调用 `sendChatMessage`，均使用角色对应的 `ApiConfig`。
 4. 每轮结束后，若群内消息 ≥8 条，生成摘要并存入 `GroupMemory`。
 5. 每个角色在模型上维护每小时回复计数（`lastReplyTimestamp` / `hourlyReplyCount`）。
 
@@ -339,10 +345,11 @@ refactor: 抽离 ChatApiService 超时配置
 
 ## 安全与隐私
 
-- ⚠️ **`ApiConfig.apiKey` 目前以明文存储在 Hive 本地数据库中，未做加密层**。请勿在公共/越狱设备上使用，并妥善保管导出文件。
+- 开发态会直接读取仓库根目录下的 `data/*.hive`，其中可以包含完整的 `ApiConfig.apiKey`；release 包不会打入这份真实数据，而是在用户目录创建并读取自己全新的 Hive 数据文件。
 - 导出的对话文件为明文文本，保存在本机 `ApplicationDocumentsDirectory/chat_group_exports/` 下；导出内容**仅含展示性字段（角色名 / 头像 / 年龄 / 职业 / 性格标签 + 消息内容），绝不含有 API Key / 密钥配置**。但仍请注意本机文件安全，避免对话内容泄露。
 - `custom` 厂商需手动填写 `baseUrl`，其余厂商的 baseUrl 在 `ApiProvider` 中硬编码。
-- 所有数据均为本地存储，不会上传到任何第三方服务器（除你配置的 LLM 厂商接口本身）。
+- 所有应用数据均为本地存储，不会上传到任何第三方服务器（除你配置的 LLM 厂商接口本身）。
+- 仓库中的 `data/*.hive` 仅用于开发态直接读取；release 只打包空模板清单 `assets/release_templates/seed_manifest.json`，首次启动会据此生成空的本地 Hive 文件。
 
 ---
 

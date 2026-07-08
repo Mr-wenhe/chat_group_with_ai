@@ -1,6 +1,12 @@
 import 'dart:io';
+import 'dart:convert';
+import 'dart:async';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:hive_flutter/hive_flutter.dart';
+import 'package:path_provider/path_provider.dart';
+import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/chat_group.dart';
@@ -8,7 +14,6 @@ import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
-import 'package:chat_group/core/storage/secure_storage_service.dart';
 
 class DatabaseService {
   static const String _aiCharacterBox = 'ai_characters';
@@ -19,10 +24,29 @@ class DatabaseService {
   static const String _characterMemoryBox = 'character_memories';
   static const String _relationshipStateBox = 'relationship_states';
   static const String _appSettingsBox = 'app_settings';
-  final SecureStorageService _secureStorage = SecureStorageService();
+  static const String _releaseTemplateManifestAsset =
+      'assets/release_templates/seed_manifest.json';
+  static const List<String> _releaseHiveFiles = [
+    'ai_characters.hive',
+    'api_configs.hive',
+    'app_settings.hive',
+    'character_memories.hive',
+    'chat_groups.hive',
+    'group_memories.hive',
+    'messages.hive',
+    'relationship_states.hive',
+  ];
+
+  Directory? _dataDir;
+  Timer? _tokenUsageFlushTimer;
+  Map<String, dynamic>? _tokenUsageCache;
+  Map<String, dynamic>? _messageIdsCache;
+  static const Duration _tokenUsageFlushDelay = Duration(seconds: 2);
 
   Future<void> init() async {
     final dir = await _getDataDir();
+    _dataDir = dir;
+    debugPrint('[DB] Hive data dir: ${dir.path} (mode: $_storageModeLabel)');
     await Hive.initFlutter(dir.path);
     Hive.registerAdapter(AICharacterAdapter());
     Hive.registerAdapter(ApiConfigAdapter());
@@ -42,86 +66,91 @@ class DatabaseService {
     await _openBoxSafely<CharacterMemory>(_characterMemoryBox);
     await _openBoxSafely<RelationshipState>(_relationshipStateBox);
     await _openBoxSafely<dynamic>(_appSettingsBox);
-    await _migrateAndHydrateApiConfigKeys();
+    await _hydrateApiKeysFromSecureStorage();
+  }
+
+  Future<void> _hydrateApiKeysFromSecureStorage() async {
+    if (apiConfigBox.isEmpty) return;
+    final secureStorage = SecureStorageService();
+    bool anyChanged = false;
+    for (final config in apiConfigBox.values) {
+      if (config.apiKey.isNotEmpty) continue;
+      final key = await secureStorage.getApiConfigKey(config.id);
+      if (key != null && key.isNotEmpty) {
+        config.apiKey = key;
+        await apiConfigBox.put(config.id, config);
+        anyChanged = true;
+      }
+    }
+    if (anyChanged) {
+      debugPrint('[DB] Hydrated API keys from secure storage');
+    }
   }
 
   Future<Directory> _getDataDir() async {
-    // 始终使用项目根目录下的 data/，不再使用沙盒。
-    // 动态查找项目根（含 pubspec.yaml 的目录），不依赖固定的 parent 层数。
-    final exe = Platform.resolvedExecutable;
-    var dir = Directory(exe);
-    for (var i = 0; i < 20; i++) {
-      if (await File('${dir.path}/pubspec.yaml').exists()) break;
-      final parent = dir.parent;
-      if (parent.path == dir.path) break; // 已到根目录
-      dir = parent;
-    }
-    final projectData = Directory('${dir.path}/data');
-    if (!await projectData.exists()) {
-      await projectData.create(recursive: true);
-    }
-    return projectData;
+    final supportDir = await getApplicationSupportDirectory();
+    final userDataDir = Directory('${supportDir.path}/data');
+    await _ensureDir(userDataDir);
+    await _seedReleaseDataIfNeeded(userDataDir);
+    return userDataDir;
   }
 
   Future<void> _openBoxSafely<T>(String name) async {
     try {
       await Hive.openBox<T>(name);
     } on FileSystemException catch (_) {
-      await Hive.deleteBoxFromDisk(name);
+      try {
+        await Hive.deleteBoxFromDisk(name);
+      } on FileSystemException catch (_) {
+        // Cleanup failed; try opening anyway.
+      }
       await Hive.openBox<T>(name);
     }
   }
 
-  Future<void> _migrateAndHydrateApiConfigKeys() async {
-    for (final config in apiConfigBox.values) {
-      final plainTextKey = config.apiKey;
-      if (plainTextKey.isNotEmpty) {
-        final saved =
-            await _secureStorage.saveApiConfigKey(config.id, plainTextKey);
-        if (!saved) continue;
-        config.apiKey = '';
-        await apiConfigBox.put(config.id, config);
-        config.apiKey = plainTextKey;
-        continue;
-      }
-
-      final storedKey = await _secureStorage.getApiConfigKey(config.id);
-      if (storedKey != null && storedKey.isNotEmpty) {
-        config.apiKey = storedKey;
-      }
+  Future<void> _ensureDir(Directory dir) async {
+    if (!await dir.exists()) {
+      await dir.create(recursive: true);
     }
+  }
+
+  Future<void> _seedReleaseDataIfNeeded(Directory userDataDir) async {
+    final fileNames = await _loadReleaseTemplateFileNames();
+    for (final fileName in fileNames) {
+      final target = File('${userDataDir.path}/$fileName');
+      if (await target.exists()) continue;
+      await target.create(recursive: true);
+      debugPrint('[DB] Created empty release hive template: ${target.path}');
+    }
+  }
+
+  Future<List<String>> _loadReleaseTemplateFileNames() async {
+    try {
+      final raw = await rootBundle.loadString(_releaseTemplateManifestAsset);
+      final decoded = jsonDecode(raw);
+      final files = decoded is Map<String, dynamic> ? decoded['files'] : null;
+      if (files is List) {
+        return files.whereType<String>().toList();
+      }
+    } on FlutterError catch (e) {
+      debugPrint(
+          '[DB] Missing release template manifest $_releaseTemplateManifestAsset: $e');
+    } on FormatException catch (e) {
+      debugPrint(
+          '[DB] Invalid release template manifest $_releaseTemplateManifestAsset: $e');
+    }
+    return _releaseHiveFiles;
   }
 
   Future<void> saveApiConfig(ApiConfig config) async {
-    final apiKey = config.apiKey;
-    final savedSecurely = apiKey.isNotEmpty
-        ? await _secureStorage.saveApiConfigKey(config.id, apiKey)
-        : false;
-    final storedConfig = ApiConfig(
-      id: config.id,
-      name: config.name,
-      provider: config.provider,
-      modelName: config.modelName,
-      apiKey: savedSecurely ? '' : apiKey,
-      customBaseUrl: config.customBaseUrl,
-      createdAt: config.createdAt,
-    );
-    await apiConfigBox.put(storedConfig.id, storedConfig);
-    final runtimeConfig = apiConfigBox.get(storedConfig.id);
-    if (runtimeConfig != null) {
-      runtimeConfig.apiKey = apiKey;
-    }
+    await apiConfigBox.put(config.id, config);
   }
 
   Future<void> deleteApiConfig(String id) async {
-    await _secureStorage.deleteApiConfigKey(id);
     await apiConfigBox.delete(id);
   }
 
   Future<void> clearAllData() async {
-    for (final config in apiConfigBox.values) {
-      await _secureStorage.deleteApiConfigKey(config.id);
-    }
     await apiConfigBox.clear();
     await aiCharacterBox.clear();
     await chatGroupBox.clear();
@@ -129,6 +158,10 @@ class DatabaseService {
     await groupMemoryBox.clear();
     await characterMemoryBox.clear();
     await relationshipStateBox.clear();
+    await appSettingsBox.delete(_messageIdsByGroupKey);
+    _tokenUsageCache = _emptyTokenUsage();
+    _messageIdsCache = null;
+    _tokenUsageFlushTimer?.cancel();
   }
 
   Box<AICharacter> get aiCharacterBox => Hive.box<AICharacter>(_aiCharacterBox);
@@ -141,6 +174,70 @@ class DatabaseService {
   Box<RelationshipState> get relationshipStateBox =>
       Hive.box<RelationshipState>(_relationshipStateBox);
   Box<dynamic> get appSettingsBox => Hive.box(_appSettingsBox);
+  String? get dataDirPath => _dataDir?.path;
+  String get _storageModeLabel =>
+      kReleaseMode ? 'release-user-dir' : 'project-data';
+
+  static const String _messageIdsByGroupKey = 'message_ids_by_group';
+
+  Future<List<Message>> messagesForGroup(String groupId) async {
+    final indexedIds = _messageIdsForGroup(groupId);
+    if (indexedIds != null) {
+      final indexedMessages = indexedIds
+          .map((id) => messageBox.get(id))
+          .whereType<Message>()
+          .where((m) => m.groupId == groupId)
+          .toList();
+      if (indexedMessages.length == indexedIds.length) {
+        indexedMessages.sort((a, b) => a.timestamp.compareTo(b.timestamp));
+        return indexedMessages;
+      }
+    }
+
+    final messages = messageBox.values
+        .where((m) => m.groupId == groupId)
+        .toList()
+      ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
+    await _saveMessageIdsForGroup(
+      groupId,
+      messages.map((message) => message.id).toList(),
+    );
+    return messages;
+  }
+
+  Future<void> addMessageToGroupIndex(Message message) async {
+    final byGroup = _messageIdsByGroup();
+    final ids = List<String>.from(byGroup[message.groupId] ?? const <String>[]);
+    if (ids.contains(message.id)) return;
+    ids.add(message.id);
+    byGroup[message.groupId] = ids;
+    _messageIdsCache = Map<String, dynamic>.from(byGroup);
+    await appSettingsBox.put(_messageIdsByGroupKey, _messageIdsCache);
+  }
+
+  Map<String, dynamic> _messageIdsByGroup() {
+    if (_messageIdsCache != null) return _messageIdsCache!;
+    final raw = appSettingsBox.get(_messageIdsByGroupKey);
+    final map = raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+    _messageIdsCache = map;
+    return map;
+  }
+
+  List<String>? _messageIdsForGroup(String groupId) {
+    final ids = _messageIdsByGroup()[groupId];
+    if (ids is! List) return null;
+    return ids.whereType<String>().toList();
+  }
+
+  Future<void> _saveMessageIdsForGroup(
+    String groupId,
+    List<String> ids,
+  ) async {
+    final byGroup = _messageIdsByGroup();
+    byGroup[groupId] = ids;
+    _messageIdsCache = Map<String, dynamic>.from(byGroup);
+    await appSettingsBox.put(_messageIdsByGroupKey, _messageIdsCache);
+  }
 
   static const String _themeModeKey = 'theme_mode';
 
@@ -163,8 +260,20 @@ class DatabaseService {
   static const String _tokenUsageKey = 'token_usage';
 
   Map<String, dynamic> getTokenUsage() {
+    if (_tokenUsageCache != null) {
+      return Map<String, dynamic>.from(_tokenUsageCache!);
+    }
     final raw = appSettingsBox.get(_tokenUsageKey);
     if (raw is Map) return Map<String, dynamic>.from(raw);
+    return _emptyTokenUsage();
+  }
+
+  Map<String, dynamic> _mutableTokenUsage() {
+    _tokenUsageCache ??= getTokenUsage();
+    return _tokenUsageCache!;
+  }
+
+  Map<String, dynamic> _emptyTokenUsage() {
     return {
       'totalInput': 0,
       'totalOutput': 0,
@@ -182,7 +291,7 @@ class DatabaseService {
     required int outputTokens,
     int cachedTokens = 0,
   }) async {
-    final usage = getTokenUsage();
+    final usage = _mutableTokenUsage();
     usage['totalInput'] = (usage['totalInput'] ?? 0) + inputTokens;
     usage['totalOutput'] = (usage['totalOutput'] ?? 0) + outputTokens;
     usage['totalCachedInput'] = (usage['totalCachedInput'] ?? 0) + cachedTokens;
@@ -207,18 +316,25 @@ class DatabaseService {
       byGroup[groupId] = groupEntry;
       usage['byGroup'] = byGroup;
     }
-    await appSettingsBox.put(_tokenUsageKey, usage);
+    _scheduleTokenUsageFlush();
   }
 
   Future<void> clearTokenUsage() async {
-    await appSettingsBox.put(_tokenUsageKey, {
-      'totalInput': 0,
-      'totalOutput': 0,
-      'totalCachedInput': 0,
-      'requestCount': 0,
-      'byCharacter': <String, Map<String, int>>{},
-      'byGroup': <String, Map<String, int>>{},
-    });
+    _tokenUsageFlushTimer?.cancel();
+    _tokenUsageCache = _emptyTokenUsage();
+    await appSettingsBox.put(_tokenUsageKey, _tokenUsageCache);
+  }
+
+  void _scheduleTokenUsageFlush() {
+    _tokenUsageFlushTimer?.cancel();
+    _tokenUsageFlushTimer =
+        Timer(_tokenUsageFlushDelay, () => _flushTokenUsage());
+  }
+
+  Future<void> _flushTokenUsage() async {
+    final usage = _tokenUsageCache;
+    if (usage == null) return;
+    await appSettingsBox.put(_tokenUsageKey, Map<String, dynamic>.from(usage));
   }
 
   static const String _ttsEnabledKey = 'tts_enabled';

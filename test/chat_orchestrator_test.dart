@@ -348,6 +348,65 @@ void main() {
     });
   });
 
+  group('ChatOrchestrator group memory scheduling', () {
+    test('uses ISO week keys around year boundaries', () {
+      expect(
+        ChatOrchestrator.memoryPeriodKey(DateTime(2026, 1, 1)),
+        '2026_W01',
+      );
+      expect(
+        ChatOrchestrator.memoryPeriodKey(DateTime(2027, 1, 1)),
+        '2026_W53',
+      );
+    });
+
+    test('does not update before enough messages', () {
+      expect(
+        ChatOrchestrator.shouldUpdateGroupMemory(
+          messageCount: 7,
+          hasExistingSummary: false,
+        ),
+        false,
+      );
+    });
+
+    test('updates immediately when enough messages have no summary yet', () {
+      expect(
+        ChatOrchestrator.shouldUpdateGroupMemory(
+          messageCount: 8,
+          hasExistingSummary: false,
+          lastSummaryAt: DateTime(2026, 7, 8, 12),
+          now: DateTime(2026, 7, 8, 12, 1),
+        ),
+        true,
+      );
+    });
+
+    test('throttles existing summaries inside the interval', () {
+      expect(
+        ChatOrchestrator.shouldUpdateGroupMemory(
+          messageCount: 12,
+          hasExistingSummary: true,
+          lastSummaryAt: DateTime(2026, 7, 8, 12),
+          now: DateTime(2026, 7, 8, 12, 5),
+        ),
+        false,
+      );
+    });
+
+    test('allows existing summaries after the interval', () {
+      expect(
+        ChatOrchestrator.shouldUpdateGroupMemory(
+          messageCount: 12,
+          hasExistingSummary: true,
+          lastSummaryAt: DateTime(2026, 7, 8, 12),
+          now: DateTime(2026, 7, 8, 12, 11),
+        ),
+        true,
+      );
+    });
+  });
+
   group('ChatOrchestrator persona growth prompts', () {
     test('persona context combines role, group, tags, and memory', () {
       final c = AICharacter(

@@ -4,6 +4,9 @@ import 'package:chat_group/core/models/message.dart';
 /// Pure orchestration helpers for chat room logic.
 /// Extracted from _ChatRoomPageState so they can be unit-tested without Flutter.
 class ChatOrchestrator {
+  static const Duration defaultGroupMemoryUpdateInterval =
+      Duration(minutes: 10);
+
   static bool isEligibleToReply(AICharacter character) {
     if (!character.isActive) return false;
     if (character.apiKey.isEmpty) return false;
@@ -80,6 +83,49 @@ class ChatOrchestrator {
     final transcript = lines.join('\n');
     if (transcript.length <= maxChars) return transcript;
     return transcript.substring(transcript.length - maxChars);
+  }
+
+  static String memoryPeriodKey(DateTime date) {
+    final weekYear = _isoWeekYear(date);
+    final week = _isoWeekNumber(date);
+    return '${weekYear}_W${week.toString().padLeft(2, '0')}';
+  }
+
+  /// Legacy key format (before ISO week adoption): no zero-padding, custom week-of-year.
+  static String legacyMemoryPeriodKey(DateTime date) {
+    final firstDay = DateTime(date.year, 1, 1);
+    final dayOfYear = date.difference(firstDay).inDays + 1;
+    final firstDayOfWeek = firstDay.weekday;
+    final offset = firstDayOfWeek <= DateTime.thursday ? 1 : 0;
+    final week = ((dayOfYear + firstDayOfWeek - 1 - 4) / 7).floor() + offset;
+    return '${date.year}_W$week';
+  }
+
+  static bool shouldUpdateGroupMemory({
+    required int messageCount,
+    required bool hasExistingSummary,
+    DateTime? lastSummaryAt,
+    DateTime? now,
+    int minMessages = 8,
+    Duration minInterval = defaultGroupMemoryUpdateInterval,
+  }) {
+    if (messageCount < minMessages) return false;
+    if (!hasExistingSummary) return true;
+    if (lastSummaryAt == null) return true;
+    return (now ?? DateTime.now()).difference(lastSummaryAt) >= minInterval;
+  }
+
+  static int _isoWeekYear(DateTime date) {
+    final thursday = date.add(Duration(days: DateTime.thursday - date.weekday));
+    return thursday.year;
+  }
+
+  static int _isoWeekNumber(DateTime date) {
+    final thursday = date.add(Duration(days: DateTime.thursday - date.weekday));
+    final firstThursday = DateTime(_isoWeekYear(date), 1, 4);
+    final firstWeekThursday = firstThursday
+        .add(Duration(days: DateTime.thursday - firstThursday.weekday));
+    return thursday.difference(firstWeekThursday).inDays ~/ 7 + 1;
   }
 
   static String buildPersonaGrowthContext({
