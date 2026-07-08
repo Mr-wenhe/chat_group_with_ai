@@ -378,8 +378,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final totalOutput = _tokenUsage['totalOutput'] ?? 0;
     final totalCachedInput = _tokenUsage['totalCachedInput'] ?? 0;
     final requestCount = _tokenUsage['requestCount'] ?? 0;
-    final byChar = _tokenUsage['byCharacter'] as Map<String, dynamic>? ?? {};
-    final byGroup = _tokenUsage['byGroup'] as Map<String, dynamic>? ?? {};
+    final byChar = _tokenUsage['byCharacter'] is Map
+        ? Map<String, dynamic>.from(_tokenUsage['byCharacter'] as Map)
+        : <String, dynamic>{};
+    final byGroup = _tokenUsage['byGroup'] is Map
+        ? Map<String, dynamic>.from(_tokenUsage['byGroup'] as Map)
+        : <String, dynamic>{};
     final db = ref.read(databaseServiceProvider);
 
     return Column(
@@ -507,7 +511,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                         fontWeight: FontWeight.w600)),
               ),
               ...byChar.entries.map((entry) {
-                final data = entry.value as Map<String, dynamic>;
+                final data = entry.value is Map
+                    ? Map<String, dynamic>.from(entry.value as Map)
+                    : <String, dynamic>{};
                 final charIn = data['input'] ?? 0;
                 final charOut = data['output'] ?? 0;
                 return Padding(
