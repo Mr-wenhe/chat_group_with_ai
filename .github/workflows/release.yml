@@ -206,12 +206,12 @@ jobs:
     name: Build Windows
     needs: prepare
     if: ${{ github.event.inputs.build_windows == true || github.event_name == 'push' }}
-    runs-on: windows-latest
-    env:
-      # windows-latest 现仅预装 VS2022，旧版 VS2019 已被移除。
-      # Flutter 3.24 的 CMake 默认会去探测 "Visual Studio 16 2019"，
-      # 找不到实例即报错退出；显式指定生成器可绕过探测直接命中 VS2022。
-      CMAKE_GENERATOR: "Visual Studio 17 2022"
+    # 必须用 windows-2022：该镜像同时预装 VS2019 与 VS2022。
+    # Flutter 3.24 的 Windows 构建硬编码使用 "Visual Studio 16 2019" CMake 生成器
+    # （内部显式传 -G，CMAKE_GENERATOR 环境变量无法覆盖），而 windows-latest
+    # 现指向 Server 2025 镜像、仅含 VS2022，会报 "could not find any instance of
+    # Visual Studio"。windows-2022 上的 VS2019 实例正好满足 Flutter 3.24 的需求。
+    runs-on: windows-2022
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
