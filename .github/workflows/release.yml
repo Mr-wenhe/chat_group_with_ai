@@ -171,6 +171,8 @@ jobs:
         with:
           channel: "stable"
           cache: true
+      - name: 确保 web 平台已配置（幂等）
+        run: flutter create . --platforms web
       - run: flutter pub get
       - name: 写入版本号到 pubspec.yaml
         shell: bash
