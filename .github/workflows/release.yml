@@ -207,6 +207,11 @@ jobs:
     needs: prepare
     if: ${{ github.event.inputs.build_windows == true || github.event_name == 'push' }}
     runs-on: windows-latest
+    env:
+      # windows-latest 现仅预装 VS2022，旧版 VS2019 已被移除。
+      # Flutter 3.24 的 CMake 默认会去探测 "Visual Studio 16 2019"，
+      # 找不到实例即报错退出；显式指定生成器可绕过探测直接命中 VS2022。
+      CMAKE_GENERATOR: "Visual Studio 17 2022"
     steps:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
