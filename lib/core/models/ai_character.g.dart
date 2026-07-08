@@ -34,7 +34,7 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
       lastReplyTimestamp: fields[14] as DateTime?,
       isActive: fields[15] as bool,
       createdAt: fields[16] as DateTime?,
-      apiConfigId: fields[17] as String? ?? '',
+      apiConfigId: fields[17] as String?,
     );
   }
 

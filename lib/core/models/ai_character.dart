@@ -78,8 +78,9 @@ class AICharacter extends HiveObject {
     this.lastReplyTimestamp,
     this.isActive = true,
     DateTime? createdAt,
-    this.apiConfigId = '',
+    String? apiConfigId,
   })  : id = id ?? const Uuid().v4(),
         modelName = modelName ?? ApiProvider.defaultModels[apiProvider] ?? '',
-        createdAt = createdAt ?? DateTime.now();
+        createdAt = createdAt ?? DateTime.now(),
+        apiConfigId = apiConfigId ?? '';
 }

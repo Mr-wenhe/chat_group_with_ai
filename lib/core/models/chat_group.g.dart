@@ -23,7 +23,7 @@ class ChatGroupAdapter extends TypeAdapter<ChatGroup> {
       description: fields[3] as String,
       aiCharacterIds: (fields[4] as List).cast<String>(),
       createdAt: fields[5] as DateTime?,
-      ownerName: fields[6] as String? ?? '我',
+      ownerName: fields[6] as String?,
     );
   }
 

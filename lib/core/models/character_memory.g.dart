@@ -1,49 +1,52 @@
 // GENERATED CODE - DO NOT MODIFY BY HAND
 
-part of 'api_config.dart';
+part of 'character_memory.dart';
 
 // **************************************************************************
 // TypeAdapterGenerator
 // **************************************************************************
 
-class ApiConfigAdapter extends TypeAdapter<ApiConfig> {
+class CharacterMemoryAdapter extends TypeAdapter<CharacterMemory> {
   @override
-  final int typeId = 4;
+  final int typeId = 5;
 
   @override
-  ApiConfig read(BinaryReader reader) {
+  CharacterMemory read(BinaryReader reader) {
     final numOfFields = reader.readByte();
     final fields = <int, dynamic>{
       for (int i = 0; i < numOfFields; i++) reader.readByte(): reader.read(),
     };
-    return ApiConfig(
+    return CharacterMemory(
       id: fields[0] as String?,
-      name: fields[1] as String,
-      provider: fields[2] as String,
-      modelName: fields[3] as String?,
-      apiKey: fields[4] as String,
-      customBaseUrl: fields[5] as String,
-      createdAt: fields[6] as DateTime?,
+      groupId: fields[1] as String,
+      characterId: fields[2] as String,
+      facts: (fields[3] as List?)?.cast<String>(),
+      relationshipNotes: (fields[4] as List?)?.cast<String>(),
+      personaGrowth: (fields[5] as List?)?.cast<String>(),
+      lastUpdatedAt: fields[6] as DateTime?,
+      createdAt: fields[7] as DateTime?,
     );
   }
 
   @override
-  void write(BinaryWriter writer, ApiConfig obj) {
+  void write(BinaryWriter writer, CharacterMemory obj) {
     writer
-      ..writeByte(7)
+      ..writeByte(8)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
-      ..write(obj.name)
+      ..write(obj.groupId)
       ..writeByte(2)
-      ..write(obj.provider)
+      ..write(obj.characterId)
       ..writeByte(3)
-      ..write(obj.modelName)
+      ..write(obj.facts)
       ..writeByte(4)
-      ..write(obj.apiKey)
+      ..write(obj.relationshipNotes)
       ..writeByte(5)
-      ..write(obj.customBaseUrl)
+      ..write(obj.personaGrowth)
       ..writeByte(6)
+      ..write(obj.lastUpdatedAt)
+      ..writeByte(7)
       ..write(obj.createdAt);
   }
 
@@ -53,7 +56,7 @@ class ApiConfigAdapter extends TypeAdapter<ApiConfig> {
   @override
   bool operator ==(Object other) =>
       identical(this, other) ||
-      other is ApiConfigAdapter &&
+      other is CharacterMemoryAdapter &&
           runtimeType == other.runtimeType &&
           typeId == other.typeId;
 }

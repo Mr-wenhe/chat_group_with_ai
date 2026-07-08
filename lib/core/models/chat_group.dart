@@ -34,7 +34,8 @@ class ChatGroup extends HiveObject {
     this.description = '',
     required this.aiCharacterIds,
     DateTime? createdAt,
-    this.ownerName = '我',
+    String? ownerName,
   })  : id = id ?? const Uuid().v4(),
-        createdAt = createdAt ?? DateTime.now();
+        createdAt = createdAt ?? DateTime.now(),
+        ownerName = ownerName ?? '我';
 }
