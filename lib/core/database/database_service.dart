@@ -47,10 +47,16 @@ class DatabaseService {
 
   Future<Directory> _getDataDir() async {
     // 始终使用项目根目录下的 data/，不再使用沙盒。
+    // 动态查找项目根（含 pubspec.yaml 的目录），不依赖固定的 parent 层数。
     final exe = Platform.resolvedExecutable;
-    final possibleProject =
-        Directory(exe).parent.parent.parent.parent.parent.parent;
-    final projectData = Directory('${possibleProject.path}/data');
+    var dir = Directory(exe);
+    for (var i = 0; i < 20; i++) {
+      if (await File('${dir.path}/pubspec.yaml').exists()) break;
+      final parent = dir.parent;
+      if (parent.path == dir.path) break; // 已到根目录
+      dir = parent;
+    }
+    final projectData = Directory('${dir.path}/data');
     if (!await projectData.exists()) {
       await projectData.create(recursive: true);
     }
