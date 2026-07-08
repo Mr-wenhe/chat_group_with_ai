@@ -1,0 +1,96 @@
+import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/character_memory.dart';
+import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
+import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
+import 'package:flutter_test/flutter_test.dart';
+
+void main() {
+  group('HumanizedPromptBuilder', () {
+    test('builds concrete humanized context without debug reason', () {
+      final character = AICharacter(
+        id: 'a',
+        name: '阿月',
+        avatar: 'A',
+        age: 24,
+        role: '插画师',
+        personalityTags: ['敏感', '会接梗'],
+        systemPrompt: '说话轻一点',
+        apiKey: 'k',
+        apiProvider: 'deepseek',
+      );
+      final target = AICharacter(
+        id: 'b',
+        name: '小林',
+        avatar: 'B',
+        age: 27,
+        role: '程序员',
+        personalityTags: ['较真'],
+        systemPrompt: '说话直接',
+        apiKey: 'k',
+        apiProvider: 'deepseek',
+      );
+      final memory = CharacterMemory(
+        groupId: 'group-1',
+        characterId: 'a',
+        facts: ['用户最近在准备一个海报'],
+        relationshipNotes: ['我觉得小林说话有点冲，但观点有用'],
+        personaGrowth: ['我最近习惯先开个小玩笑再认真说'],
+      );
+      final relation = RelationshipState(
+        groupId: 'group-1',
+        sourceCharacterId: 'a',
+        targetId: 'b',
+        targetType: RelationshipTargetType.ai,
+        friction: 70,
+        affinity: -10,
+        notes: '互相不太服',
+        recentMood: RelationshipMood.annoyed,
+      );
+      const intent = ReplyIntent(
+        speakerId: 'a',
+        action: ReplyAction.challenge,
+        targetId: 'b',
+        lengthHint: ReplyLengthHint.oneLiner,
+        toneHint: '带刺、别太客气',
+        reason: 'relationship-friction,debug-only',
+      );
+
+      final content = HumanizedPromptBuilder.buildIntentContext(
+        character: character,
+        groupName: '灵感群',
+        groupTheme: '日常创作',
+        ownerName: '老冯',
+        intent: intent,
+        memory: memory,
+        relationships: [relation],
+        charactersById: {'a': character, 'b': target},
+      );
+
+      expect(content, contains('你是阿月'));
+      expect(content, contains('用户最近在准备一个海报'));
+      expect(content, contains('我觉得小林说话有点冲'));
+      expect(content, contains('互相不太服'));
+      expect(content, contains('本轮动作：challenge'));
+      expect(content, contains('一句话'));
+      expect(content, contains('不要说自己是 AI'));
+      expect(content, isNot(contains('debug-only')));
+      expect(content, isNot(contains('relationship-friction')));
+    });
+
+    test('length hints are explicit', () {
+      expect(
+        HumanizedPromptBuilder.lengthInstruction(ReplyLengthHint.oneLiner),
+        contains('25 个字'),
+      );
+      expect(
+        HumanizedPromptBuilder.lengthInstruction(ReplyLengthHint.short),
+        contains('1-2 句'),
+      );
+      expect(
+        HumanizedPromptBuilder.lengthInstruction(ReplyLengthHint.normal),
+        contains('2-4 句'),
+      );
+    });
+  });
+}
