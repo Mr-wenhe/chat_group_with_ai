@@ -78,7 +78,8 @@ void main() {
       expect(encoded.contains('apiConfigId'), isFalse);
     });
 
-    test('toMarkdown 与 toJson 均绝不泄露 apiKey/apiProvider/apiConfigId/apiConfig', () {
+    test('toMarkdown 与 toJson 均绝不泄露 apiKey/apiProvider/apiConfigId/apiConfig',
+        () {
       // 构造一个持有明文密钥的角色，验证导出内容任何层级都不含敏感字段。
       final service = ConversationExportService();
       final md = service.toMarkdown(chatGroup, messages, charById);

@@ -138,7 +138,8 @@ class HumanizedMemoryService {
     return result.take(maxLayerEntries).toList();
   }
 
-  static List<String> _mergeLayer(List<String> existing, List<String> incoming) {
+  static List<String> _mergeLayer(
+      List<String> existing, List<String> incoming) {
     final result = <String>[];
     for (final text in [...existing, ...incoming]) {
       final clipped = _clip(text.trim());

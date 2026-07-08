@@ -789,8 +789,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       targetId: targetId,
       targetType: targetType,
       actionName: intent.action.name,
-      friendlyTone: !intent.toneHint.contains('带刺') &&
-          !intent.toneHint.contains('冷淡'),
+      friendlyTone:
+          !intent.toneHint.contains('带刺') && !intent.toneHint.contains('冷淡'),
     );
     for (final relation in _relationshipStates) {
       await _db.relationshipStateBox.put(relation.id, relation);

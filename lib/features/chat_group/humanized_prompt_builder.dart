@@ -35,7 +35,8 @@ class HumanizedPromptBuilder {
         '你的关系记忆：${_limit(memory.relationshipNotes, 4)}',
       if (memory.personaGrowth.isNotEmpty)
         '你最近形成的表达习惯：${_limit(memory.personaGrowth, 4)}',
-      if (relevantRelations.isNotEmpty) '你和相关成员的关系：${relevantRelations.join('；')}',
+      if (relevantRelations.isNotEmpty)
+        '你和相关成员的关系：${relevantRelations.join('；')}',
       '本轮动作：${intent.action.name}，主要对象：$targetName。',
       '本轮语气：${intent.toneHint}。',
       lengthInstruction(intent.lengthHint),
