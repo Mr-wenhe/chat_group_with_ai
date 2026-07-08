@@ -40,6 +40,7 @@ void main() {
           ),
         ],
         groupId: 'group-1',
+        groupTheme: '日常聊天',
         userMessage: '@小林 你怎么看？',
         mentionedIds: ['b'],
         memories: const [],
@@ -78,6 +79,7 @@ void main() {
           ),
         ],
         groupId: 'group-1',
+        groupTheme: '日常聊天',
         userMessage: null,
         mentionedIds: const [],
         memories: const [],
@@ -117,6 +119,7 @@ void main() {
           ),
         ],
         groupId: 'group-1',
+        groupTheme: '日常聊天',
         userMessage: null,
         mentionedIds: const [],
         memories: const [],
@@ -153,6 +156,7 @@ void main() {
           ),
         ],
         groupId: 'group-1',
+        groupTheme: '日常聊天',
         userMessage: '还有谁想说？',
         mentionedIds: const [],
         memories: const [],
@@ -185,6 +189,7 @@ void main() {
           ),
         ],
         groupId: 'group-1',
+        groupTheme: '日常聊天',
         userMessage: '这个海报配色怎么调？',
         mentionedIds: const [],
         memories: [memory],
@@ -196,6 +201,72 @@ void main() {
       expect(intents, isNotEmpty);
       expect(intents.first.speakerId, 'a');
       expect(intents.first.reason, contains('topic-interest'));
+    });
+
+    test('dating scene actively targets another character', () {
+      final alice = character('a', '阿月', '插画师');
+      final bob = character('b', '小林', '程序员');
+
+      final intents = HumanizedChatOrchestrator.selectReplyIntents(
+        characters: [alice, bob],
+        recentMessages: [
+          Message(
+            groupId: 'group-1',
+            senderId: 'b',
+            senderType: 'ai',
+            content: '我周末一般会去爬山。',
+          ),
+        ],
+        groupId: 'group-1',
+        groupTheme: '相亲群',
+        userMessage: null,
+        mentionedIds: const [],
+        memories: const [],
+        relationships: const [],
+        isEligible: (c) => c.id == 'a',
+        random: Random(6),
+        isAutoChat: true,
+      );
+
+      expect(intents, hasLength(1));
+      expect(intents.first.speakerId, 'a');
+      expect(intents.first.targetId, 'b');
+      expect(
+        [ReplyAction.askBack, ReplyAction.callOut],
+        contains(intents.first.action),
+      );
+      expect(intents.first.reason, contains('dating-approach'));
+    });
+
+    test('meeting scene also targets a member with scene-specific reason', () {
+      final pm = character('a', '阿月', '产品经理');
+      final engineer = character('b', '小林', '程序员');
+
+      final intents = HumanizedChatOrchestrator.selectReplyIntents(
+        characters: [pm, engineer],
+        recentMessages: [
+          Message(
+            groupId: 'group-1',
+            senderId: 'b',
+            senderType: 'ai',
+            content: '接口今天可能联调不完。',
+          ),
+        ],
+        groupId: 'group-1',
+        groupTheme: '项目会议',
+        userMessage: null,
+        mentionedIds: const [],
+        memories: const [],
+        relationships: const [],
+        isEligible: (c) => c.id == 'a',
+        random: Random(7),
+        isAutoChat: true,
+      );
+
+      expect(intents, hasLength(1));
+      expect(intents.first.targetId, 'b');
+      expect(intents.first.reason, contains('meeting-handoff'));
+      expect(intents.first.toneHint, contains('会议现场感'));
     });
   });
 }

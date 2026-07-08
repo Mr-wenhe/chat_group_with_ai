@@ -18,6 +18,8 @@ import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
+import 'package:chat_group/features/chat_group/scene_behavior.dart';
+import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/chat_api_service.dart';
@@ -210,7 +212,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     super.dispose();
   }
 
+  bool get _isDirectChat =>
+      DirectChatSession.isDirectConversationId(widget.groupId);
+
+  String? get _directCharacterId =>
+      DirectChatSession.characterIdFrom(widget.groupId);
+
   Future<void> _loadData() async {
+    if (_isDirectChat) {
+      await _loadDirectChatData();
+      return;
+    }
+
     final group = _db.chatGroupBox.get(widget.groupId);
     if (group == null) {
       if (mounted) {
@@ -246,7 +259,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final memoryKey = '${widget.groupId}_${_memoryPeriodKey(now)}';
     var memory = memoryBox.get(memoryKey);
     if (memory == null) {
-      final legacyKey = '${widget.groupId}_${ChatOrchestrator.legacyMemoryPeriodKey(now)}';
+      final legacyKey =
+          '${widget.groupId}_${ChatOrchestrator.legacyMemoryPeriodKey(now)}';
       memory = memoryBox.get(legacyKey);
       if (memory != null) {
         await memoryBox.put(memoryKey, memory);
@@ -287,7 +301,59 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     }
   }
 
+  Future<void> _loadDirectChatData() async {
+    final characterId = _directCharacterId;
+    final character =
+        characterId == null ? null : _db.aiCharacterBox.get(characterId);
+    if (character == null) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('私聊角色不存在'), behavior: SnackBarBehavior.floating));
+        Navigator.pop(context);
+      }
+      return;
+    }
+
+    final activeCharacters =
+        character.isActive ? <AICharacter>[character] : <AICharacter>[];
+    final config = _resolveApiConfig(character);
+    final hasApi =
+        character.isActive && config != null && config.apiKey.isNotEmpty;
+    final messages = await _db.messagesForGroup(widget.groupId);
+    final characterMemories = _db.characterMemoryBox.values
+        .where((m) => m.groupId == widget.groupId)
+        .toList();
+    final relationshipStates = _db.relationshipStateBox.values
+        .where((r) => r.groupId == widget.groupId)
+        .toList();
+
+    setState(() {
+      _group = ChatGroup(
+        id: widget.groupId,
+        name: '与 ${character.name} 私聊',
+        theme: '一对一私聊',
+        description: '${character.role} · ${character.age}岁',
+        aiCharacterIds: [character.id],
+      );
+      _characters = activeCharacters;
+      _allGroupCharacters = [character];
+      _messages = messages;
+      _groupMemory = null;
+      _characterMemories = characterMemories;
+      _relationshipStates = relationshipStates;
+      _hasAnyApiConfig = hasApi;
+      _isAutoChatEnabled = false;
+      _autoChatStatus =
+          hasApi ? AutoChatStatus.paused : AutoChatStatus.unavailable;
+      _lastReplyBlockReason = hasApi ? null : _blockReasonFor(character);
+      _isLoading = false;
+    });
+
+    _scrollToBottom();
+  }
+
   void _startAutoChat() {
+    if (_isDirectChat) return;
     if (!_canTouchUi || !_isAutoChatEnabled || !_hasAnyApiConfig) return;
     _autoChatTimer?.cancel();
     setState(() => _autoChatStatus = AutoChatStatus.waiting);
@@ -308,6 +374,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   Future<void> _tryAutoChatRound() async {
+    if (_isDirectChat) return;
     if (!_canTouchUi || !_isAutoChatEnabled || _characters.isEmpty) return;
     if (_isAiReplying ||
         _isStreaming ||
@@ -327,6 +394,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       characters: _characters,
       recentMessages: _messages.toList(),
       groupId: widget.groupId,
+      groupTheme: _group?.theme ?? '日常聊天',
       userMessage: null,
       mentionedIds: const [],
       memories: _characterMemories,
@@ -431,8 +499,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
     if (_characters.isEmpty) {
       if (mounted) {
-        messenger.showSnackBar(const SnackBar(
-            content: Text('该群聊没有活跃的角色'), behavior: SnackBarBehavior.floating));
+        messenger.showSnackBar(SnackBar(
+            content: Text(_isDirectChat ? '该角色当前不可回复' : '该群聊没有活跃的角色'),
+            behavior: SnackBarBehavior.floating));
       }
       return;
     }
@@ -463,23 +532,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       if (!isAutoChat) _consecutiveRound++;
     });
 
-    final replyIntents = HumanizedChatOrchestrator.selectReplyIntents(
-      characters: _characters,
-      recentMessages: _recentMessagesForContext(),
-      groupId: widget.groupId,
-      userMessage: userMessage,
-      mentionedIds: mentionedIds ?? const [],
-      memories: _characterMemories,
-      relationships: _relationshipStates,
-      isEligible: _isEligibleToReply,
-      random: _random,
-      isAutoChat: isAutoChat,
-    );
-    final charactersToReply = _charactersForIntents(replyIntents);
-    _pendingReplyIntents
-      ..clear()
-      ..addEntries(
-          replyIntents.map((intent) => MapEntry(intent.speakerId, intent)));
+    final charactersToReply = _isDirectChat
+        ? _directReplyCharacters()
+        : _charactersForIntents(_selectGroupReplyIntents(
+            userMessage: userMessage,
+            mentionedIds: mentionedIds,
+            isAutoChat: isAutoChat,
+          ));
     if (charactersToReply.isEmpty) {
       if (_characters.any(_isEligibleToReply)) {
         setState(() {
@@ -491,6 +550,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       final blockReason = _firstBlockReason(_characters);
       setState(() {
         _isAiReplying = false;
+        if (!isAutoChat) _consecutiveRound = 0;
         _lastReplyBlockReason = blockReason;
         _autoChatStatus = AutoChatStatus.unavailable;
       });
@@ -527,7 +587,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       }
     }
 
-    if (mentionedIds != null &&
+    if (!_isDirectChat &&
+        mentionedIds != null &&
         mentionedIds.isNotEmpty &&
         repliedIds.every((id) => !mentionedIds.contains(id)) &&
         _pendingMentionedIds.isNotEmpty) {
@@ -724,7 +785,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     }
 
     // 解析 @ 提及 → mentionedAiIds（未知名称忽略，避免误指向第一个成员）。
-    final mentionedIds = parseMentionedCharacterIds(fullContent, _characters);
+    final mentionedIds = _isDirectChat
+        ? const <String>[]
+        : parseMentionedCharacterIds(fullContent, _characters);
 
     // 移除 LLM 可能附带的名字前缀（UI 已独立显示角色名）。
     fullContent = _stripNamePrefix(fullContent, character.name);
@@ -832,6 +895,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   List<Map<String, dynamic>> _buildApiMessages(
       AICharacter character, List<Message> context, String? userMessage,
       {bool isAutoChat = false, ReplyIntent? intent}) {
+    if (_isDirectChat) {
+      return _buildDirectApiMessages(character, context, userMessage);
+    }
+
     final msgs = <Map<String, dynamic>>[];
 
     // ── 1. 群聊记忆摘要 ───────────────────────────────────────────────
@@ -882,7 +949,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final ownerMention = ownerName == '我' ? '@我' : '@$ownerName';
     final isGroupAddressed = userMessage != null &&
         ChatActivityPolicy.isGroupAddressedMessage(userMessage);
-    final scenarioPrompt = _scenarioPromptFor(groupTheme);
+    final scene = SceneBehavior.resolve(groupTheme);
+    final scenarioPrompt = scene.scenarioPrompt;
     final recentContext = _extractRecentFocus(context);
     final nameById = {for (final c in _characters) c.id: c.name};
     final personaContext = ChatOrchestrator.buildPersonaGrowthContext(
@@ -903,6 +971,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           '$recentContext'
     });
 
+    if (!scene.isGeneral) {
+      final otherCharacters =
+          _characters.where((c) => c.id != character.id).toList();
+      final candidates = otherCharacters.isEmpty
+          ? '暂无其他 AI 角色'
+          : otherCharacters
+              .map((c) =>
+                  '${c.name}，${c.age}岁，${c.role}，${c.personalityTags.join('/')} ')
+              .join('；');
+      final sceneContext = scene.roomContextPrompt(candidates);
+      if (sceneContext.isNotEmpty) {
+        msgs.add({'role': 'system', 'content': sceneContext});
+      }
+    }
+
     if (isGroupAddressed) {
       msgs.add({
         'role': 'system',
@@ -914,7 +997,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     }
 
     // ── 3.5 最后一条用户消息强调 ──────────────────────────────────
-    if (context.isNotEmpty) {
+    if (context.isNotEmpty && !isAutoChat) {
       final lastUserMsg = context.lastWhere((m) => m.senderType == 'user',
           orElse: () => context.first);
       if (lastUserMsg.senderType == 'user') {
@@ -928,6 +1011,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
               '【当前任务】$speakerName 刚说："$truncated" —— 请作为 ${character.name} 针对这条消息做出自然回应。'
         });
       }
+    } else if (context.isNotEmpty && isAutoChat) {
+      final last = context.last;
+      final speakerName = last.senderType == 'user'
+          ? ownerName
+          : nameById[last.senderId] ?? '一位群友';
+      final truncated = last.content.length > 100
+          ? '${last.content.substring(0, 100)}...'
+          : last.content;
+      msgs.add({
+        'role': 'system',
+        'content': '【当前任务】$speakerName 刚说："$truncated" —— '
+            '请作为 ${character.name} 自然接住这条群聊，可以回应、追问、转给某位成员，或轻轻换个相关话题。'
+      });
     }
 
     // ── 4. 自动聊天提示（仅 auto-chat 模式） ────────────────────────
@@ -990,35 +1086,64 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     return msgs;
   }
 
-  /// 根据群聊主题匹配场景模板，返回额外的系统提示词片段。
-  /// 不匹配任何模板时返回空字符串。
-  String _scenarioPromptFor(String groupTheme) {
-    final t = groupTheme.toLowerCase();
-    if (t.contains('辩论') || t.contains('debate')) {
-      return '\n\n【场景模式：辩论】你正在参与一场正式辩论。立场鲜明、逻辑清晰、使用论据支撑观点，反驳对方论点但不人身攻击。每轮发言控制在 3 句话以内。';
+  List<Map<String, dynamic>> _buildDirectApiMessages(
+    AICharacter character,
+    List<Message> context,
+    String? userMessage,
+  ) {
+    final msgs = <Map<String, dynamic>>[];
+    if (character.memorySummary.isNotEmpty) {
+      msgs.add({
+        'role': 'system',
+        'content': '【${character.name}的自我记忆】${character.memorySummary}'
+      });
     }
-    if (t.contains('吐槽') || t.contains('调侃') || t.contains('roast')) {
-      return '\n\n【场景模式：吐槽大会】你正在参加吐槽大会。用犀利幽默的方式吐槽在场话题或人物，玩笑适度不过分，语气轻松有梗。';
+
+    final memory = HumanizedMemoryService.memoryForCharacter(
+      groupId: widget.groupId,
+      character: character,
+      existing: _characterMemories,
+    );
+    if (memory.facts.isNotEmpty ||
+        memory.relationshipNotes.isNotEmpty ||
+        memory.personaGrowth.isNotEmpty) {
+      msgs.add({
+        'role': 'system',
+        'content': [
+          if (memory.facts.isNotEmpty)
+            '记得的事实：${memory.facts.take(4).join('；')}',
+          if (memory.relationshipNotes.isNotEmpty)
+            '关系记忆：${memory.relationshipNotes.take(4).join('；')}',
+          if (memory.personaGrowth.isNotEmpty)
+            '表达习惯：${memory.personaGrowth.take(4).join('；')}',
+        ].join('\n'),
+      });
     }
-    if (t.contains('开会') ||
-        t.contains('会议') ||
-        t.contains('board') ||
-        t.contains('meeting')) {
-      return '\n\n【场景模式：会议讨论】你正在参加一场正式会议。发言简洁有条理，可以提问、补充意见、总结要点，避免闲聊。';
+
+    msgs.add({
+      'role': 'system',
+      'content': DirectChatSession.buildPromptContext(
+        character: character,
+        ownerName: _ownerMentionName,
+      ),
+    });
+    msgs.add({'role': 'system', 'content': character.systemPrompt});
+
+    final recentHistory =
+        context.length > 20 ? context.sublist(context.length - 20) : context;
+    for (final message in recentHistory) {
+      if (message.senderType == 'user') {
+        msgs.add({'role': 'user', 'content': message.content});
+      } else if (message.senderId == character.id) {
+        msgs.add({'role': 'assistant', 'content': message.content});
+      }
     }
-    if (t.contains('采访') || t.contains('访谈') || t.contains('interview')) {
-      return '\n\n【场景模式：采访】你正在接受采访。回答问题详细有深度，可以分享经历和见解，偶尔反问记者以增加互动。';
+
+    if (userMessage != null && recentHistory.isEmpty) {
+      msgs.add({'role': 'user', 'content': userMessage});
     }
-    if (t.contains('相亲') || t.contains('dating') || t.contains('交友')) {
-      return '\n\n【场景模式：相亲交友】你正在参加相亲/交友活动。展示个人魅力，真诚友好，互相了解兴趣爱好，避免过于冒进。';
-    }
-    if (t.contains('职场') ||
-        t.contains('办公') ||
-        t.contains('工作') ||
-        t.contains('office')) {
-      return '\n\n【场景模式：职场办公】你正在职场环境中交流。语气专业但友好，可以讨论工作进展、协调任务、分享职场经验。';
-    }
-    return '';
+
+    return msgs;
   }
 
   /// 从最近的消息中提取对话焦点，帮助 AI 理解"现在在聊什么"。
@@ -1105,6 +1230,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   Future<void> _maybeUpdateMemory() async {
+    if (_isDirectChat) return;
     final now = DateTime.now();
     if (!ChatOrchestrator.shouldUpdateGroupMemory(
       messageCount: _messages.length,
@@ -1742,6 +1868,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   void _handleTextChanged(String text) {
+    if (_isDirectChat) return;
     if (!_showMentionPopup) {
       final cursorPos = _textController.selection.baseOffset;
       if (_isInMentionQuery(text, cursorPos)) {
@@ -1788,6 +1915,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   List<String> _parseMentions(String content) {
+    if (_isDirectChat) return const [];
     return parseMentionedCharacterIds(content, _characters);
   }
 
@@ -1797,6 +1925,40 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         .map((intent) => byId[intent.speakerId])
         .whereType<AICharacter>()
         .toList();
+  }
+
+  List<AICharacter> _directReplyCharacters() {
+    _pendingReplyIntents.clear();
+    return DirectChatSession.selectReplyCharacters(
+      characters: _allGroupCharacters,
+      directCharacterId: _directCharacterId ?? '',
+      isEligible: _isEligibleToReply,
+    );
+  }
+
+  List<ReplyIntent> _selectGroupReplyIntents({
+    required String? userMessage,
+    required List<String>? mentionedIds,
+    required bool isAutoChat,
+  }) {
+    final replyIntents = HumanizedChatOrchestrator.selectReplyIntents(
+      characters: _characters,
+      recentMessages: _recentMessagesForContext(),
+      groupId: widget.groupId,
+      groupTheme: _group?.theme ?? '日常聊天',
+      userMessage: userMessage,
+      mentionedIds: mentionedIds ?? const [],
+      memories: _characterMemories,
+      relationships: _relationshipStates,
+      isEligible: _isEligibleToReply,
+      random: _random,
+      isAutoChat: isAutoChat,
+    );
+    _pendingReplyIntents
+      ..clear()
+      ..addEntries(
+          replyIntents.map((intent) => MapEntry(intent.speakerId, intent)));
+    return replyIntents;
   }
 
   List<Message> _recentMessagesForContext() {
@@ -1810,7 +1972,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       case ReplyBlockReason.noApiConfig:
         return '角色未配置 API Key，AI 无法回复。请到「设置」配置 API';
       case ReplyBlockReason.inactive:
-        return '当前群聊没有启用中的角色';
+        return _isDirectChat ? '该角色已停用，无法回复' : '当前群聊没有启用中的角色';
       case ReplyBlockReason.hourlyLimit:
         return '角色已达到本小时回复上限，稍后再试';
       case ReplyBlockReason.alreadyGenerating:
@@ -2276,7 +2438,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       _flushStreamingUi();
     }
 
-    final mentionedIds = parseMentionedCharacterIds(fullContent, _characters);
+    final mentionedIds = _isDirectChat
+        ? const <String>[]
+        : parseMentionedCharacterIds(fullContent, _characters);
     fullContent = _stripNamePrefix(fullContent, character.name);
     temp.content = fullContent;
     temp.isMention = mentionedIds.isNotEmpty;
@@ -2320,7 +2484,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   String _senderNameById(String id) {
-    final c = _characters.firstWhere((c) => c.id == id,
+    if (id == 'user') return _ownerMentionName;
+    final c = _allGroupCharacters.firstWhere((c) => c.id == id,
         orElse: () => _unknownCharacter());
     return c.name;
   }
@@ -2392,6 +2557,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final cs = Theme.of(context).colorScheme;
     final messagesById = {for (final message in _messages) message.id: message};
     final charactersById = {
+      for (final character in _allGroupCharacters) character.id: character,
       for (final character in _characters) character.id: character
     };
     _messageKeys.removeWhere((id, _) => !messagesById.containsKey(id));
@@ -2429,7 +2595,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                           fontWeight: FontWeight.w700,
                           fontSize: 18,
                           color: cs.onSurface)),
-                  if (_groupMemory != null &&
+                  if (!_isDirectChat &&
+                      _groupMemory != null &&
                       _groupMemory!.topicSummary.isNotEmpty)
                     Text(_groupMemory!.topicSummary,
                         style: TextStyle(
@@ -2462,20 +2629,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                   onPressed: _enterSearch,
                   tooltip: '搜索消息',
                 ),
-                IconButton(
-                  icon: const Icon(Icons.upload_rounded, size: 22),
-                  onPressed: () {
-                    Navigator.of(context).push(MaterialPageRoute(
-                      builder: (_) =>
-                          ExportPage(initialGroupId: widget.groupId),
-                    ));
-                  },
-                  tooltip: '导出本群对话',
-                ),
-                GestureDetector(
-                  onTap: () => _showMembersSheet(cs),
-                  child: _buildMemberStackChip(cs),
-                ),
+                if (!_isDirectChat)
+                  IconButton(
+                    icon: const Icon(Icons.upload_rounded, size: 22),
+                    onPressed: () {
+                      Navigator.of(context).push(MaterialPageRoute(
+                        builder: (_) =>
+                            ExportPage(initialGroupId: widget.groupId),
+                      ));
+                    },
+                    tooltip: '导出本群对话',
+                  ),
+                if (!_isDirectChat)
+                  GestureDetector(
+                    onTap: () => _showMembersSheet(cs),
+                    child: _buildMemberStackChip(cs),
+                  ),
                 const SizedBox(width: 8),
               ],
       ),
@@ -2483,7 +2652,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         children: [
           // 未配置 API Key 时给出醒目提示，避免「发了消息 AI 不回复」的困惑
           if (!_hasAnyApiConfig) _buildApiWarningBanner(cs),
-          _buildAutoChatStatusBar(cs),
+          if (!_isDirectChat) _buildAutoChatStatusBar(cs),
           if (_pendingUserMentionMessageIds.isNotEmpty)
             _buildUserMentionBanner(cs),
           Expanded(
@@ -2503,7 +2672,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                               _messages[index - 1].timestamp);
                       final sender = message.senderType == 'user'
                           ? null
-                          : charactersById[message.senderId] ?? _unknownCharacter();
+                          : charactersById[message.senderId] ??
+                              _unknownCharacter();
                       final isStreaming = _streamingMessage != null &&
                           _streamingMessage!.id == message.id;
                       final isRegenerating =
@@ -2523,7 +2693,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                             _MessageBubble(
                               message: message,
                               sender: sender,
-                              characters: _characters,
+                              characters: _allGroupCharacters,
                               cs: cs,
                               isStreaming: isStreaming,
                               isRegenerating: isRegenerating,
@@ -2592,18 +2762,27 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                 shape: BoxShape.circle,
                 gradient: AppTheme.primaryGradient,
               ),
-              child: const Icon(Icons.groups_rounded,
-                  size: 44, color: Colors.white),
+              child: Icon(
+                  _isDirectChat
+                      ? Icons.chat_bubble_rounded
+                      : Icons.groups_rounded,
+                  size: 44,
+                  color: Colors.white),
             ),
             const SizedBox(height: 24),
-            Text('欢迎来到 ${_group?.name ?? '群聊'}',
+            Text(
+                _isDirectChat
+                    ? (_group?.name ?? '私聊')
+                    : '欢迎来到 ${_group?.name ?? '群聊'}',
                 style: TextStyle(
                     fontSize: 20,
                     fontWeight: FontWeight.w700,
                     color: cs.onSurface)),
             const SizedBox(height: 8),
             Text(
-              '这是一个 AI 群聊模拟器。\n发条消息，AI 角色会自动回复；\n用 @ 可以指定某个角色回应。',
+              _isDirectChat
+                  ? '发条消息，和这个角色单独聊聊。\n对话会保存在本地。'
+                  : '这是一个 AI 群聊模拟器。\n发条消息，AI 角色会自动回复；\n用 @ 可以指定某个角色回应。',
               textAlign: TextAlign.center,
               style: TextStyle(
                   fontSize: 14, height: 1.6, color: cs.onSurfaceVariant),
@@ -2615,9 +2794,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
               alignment: WrapAlignment.center,
               children: [
                 _hintChip(cs, '说句「你好」试试'),
-                _hintChip(cs, '@角色名 提到谁'),
-                if (_characters.isNotEmpty)
+                if (!_isDirectChat) _hintChip(cs, '@角色名 提到谁'),
+                if (!_isDirectChat && _characters.isNotEmpty)
                   _hintChip(cs, '${_characters.length} 位 AI 在线'),
+                if (_isDirectChat && _allGroupCharacters.isNotEmpty)
+                  _hintChip(cs, _allGroupCharacters.first.role),
               ],
             ),
           ],
@@ -2655,7 +2836,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           const SizedBox(width: 10),
           Expanded(
             child: Text(
-              '尚未配置 API Key，AI 不会回复或自动聊天',
+              _isDirectChat
+                  ? _replyBlockText(_lastReplyBlockReason)
+                  : '尚未配置 API Key，AI 不会回复或自动聊天',
               style: TextStyle(fontSize: 13, color: cs.onSurface),
             ),
           ),
@@ -2977,6 +3160,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                           avatarColor: color,
                           name: c.name,
                           subtitle: _memberStatusText(c),
+                          onDirectChat: () =>
+                              _openDirectChatFromSheet(context, c),
                         );
                       }),
                   ],
@@ -3011,6 +3196,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     required String name,
     required String subtitle,
     bool isOwner = false,
+    VoidCallback? onDirectChat,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
@@ -3072,9 +3258,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
               ],
             ),
           ),
+          if (onDirectChat != null)
+            IconButton(
+              onPressed: onDirectChat,
+              icon: const Icon(Icons.chat_bubble_outline_rounded, size: 20),
+              color: cs.primary,
+              tooltip: '私聊',
+            ),
         ],
       ),
     );
+  }
+
+  void _openDirectChatFromSheet(BuildContext sheetContext, AICharacter c) {
+    Navigator.of(sheetContext).pop();
+    if (!mounted) return;
+    Navigator.of(context).pushNamed('/dm/${c.id}');
   }
 
   bool get _isDesktop =>
@@ -3157,9 +3356,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                       decoration: InputDecoration(
                         hintText: _quotedMessage != null
                             ? '回复 ${_senderNameById(_quotedMessage!.senderId)}...'
-                            : (_isDesktop
-                                ? '输入消息，回车发送，Shift+回车换行，@ 提到角色…'
-                                : '输入消息，@ 提到角色…'),
+                            : (_isDirectChat
+                                ? '输入私聊消息…'
+                                : _isDesktop
+                                    ? '输入消息，回车发送，Shift+回车换行，@ 提到角色…'
+                                    : '输入消息，@ 提到角色…'),
                         suffixIcon: _quotedMessage != null
                             ? IconButton(
                                 icon: Icon(Icons.close_rounded,

@@ -126,6 +126,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                             _changeSingleConfig(context, ref, character),
                         // 传入关联配置：优先显示配置名而非角色旧 provider 名（Bug 4）
                         linkedConfig: configMap[character.apiConfigId],
+                        onDirectChat: () => _openDirectChat(context, character),
                       );
                     },
                   ),
@@ -414,6 +415,10 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
         builder: (context) => AICharacterFormPage(character: character)));
   }
 
+  void _openDirectChat(BuildContext context, AICharacter character) {
+    Navigator.of(context).pushNamed('/dm/${character.id}');
+  }
+
   Future<void> _confirmDelete(
       BuildContext context, WidgetRef ref, AICharacter character) async {
     final confirm = await showDialog<bool>(
@@ -619,6 +624,7 @@ class _CharacterCard extends StatelessWidget {
   final VoidCallback onTap;
   final VoidCallback onDelete;
   final VoidCallback onToggle;
+  final VoidCallback onDirectChat;
   final ApiConfig? linkedConfig;
   final VoidCallback? onConfigChange;
 
@@ -628,6 +634,7 @@ class _CharacterCard extends StatelessWidget {
     required this.onTap,
     required this.onDelete,
     required this.onToggle,
+    required this.onDirectChat,
     this.linkedConfig,
     this.onConfigChange,
   });
@@ -773,6 +780,13 @@ class _CharacterCard extends StatelessWidget {
                           ),
                         ),
                       ),
+                    IconButton(
+                      onPressed: onDirectChat,
+                      icon: const Icon(Icons.chat_bubble_outline_rounded,
+                          size: 20),
+                      color: cs.primary,
+                      tooltip: '私聊',
+                    ),
                     TextButton.icon(
                       onPressed: onToggle,
                       icon: Icon(

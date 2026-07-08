@@ -4,6 +4,7 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/features/chat_group/scene_behavior.dart';
 
 enum ReplyAction {
   answer,
@@ -52,6 +53,7 @@ class HumanizedChatOrchestrator {
     required List<AICharacter> characters,
     required List<Message> recentMessages,
     required String groupId,
+    required String groupTheme,
     required String? userMessage,
     required List<String> mentionedIds,
     required List<CharacterMemory> memories,
@@ -67,8 +69,10 @@ class HumanizedChatOrchestrator {
     for (final character in eligible) {
       final intent = _intentForCharacter(
         character: character,
+        allCharacters: characters,
         recentMessages: recentMessages,
         groupId: groupId,
+        groupTheme: groupTheme,
         userMessage: userMessage,
         mentionedIds: mentionedIds,
         memories: memories,
@@ -87,8 +91,10 @@ class HumanizedChatOrchestrator {
 
   static _ScoredIntent? _intentForCharacter({
     required AICharacter character,
+    required List<AICharacter> allCharacters,
     required List<Message> recentMessages,
     required String groupId,
+    required String groupTheme,
     required String? userMessage,
     required List<String> mentionedIds,
     required List<CharacterMemory> memories,
@@ -102,6 +108,7 @@ class HumanizedChatOrchestrator {
     ReplyLengthHint length = ReplyLengthHint.short;
     var tone = '自然、口语、像群友';
     String? targetId;
+    final scene = SceneBehavior.resolve(groupTheme);
 
     if (mentionedIds.contains(character.id)) {
       score += 100;
@@ -144,6 +151,32 @@ class HumanizedChatOrchestrator {
             reasons.add('mood-cooldown');
           }
         }
+      }
+    }
+
+    if (scene.activelyTargetsMembers && mentionedIds.isEmpty) {
+      final sceneTarget = _sceneTargetFor(
+        character: character,
+        allCharacters: allCharacters,
+        recentMessages: recentMessages,
+        relationships: relationships,
+        groupId: groupId,
+        random: random,
+      );
+      if (sceneTarget != null) {
+        targetId = sceneTarget;
+        score +=
+            isAutoChat ? scene.autoTargetScore : scene.userRoundTargetScore;
+        action = scene.chooseTargetAction(random);
+        length = scene.targetLength;
+        tone = scene.targetTone;
+        reasons.add(scene.targetReason);
+      } else if (isAutoChat) {
+        score += scene.autoTargetScore ~/ 2;
+        action = scene.fallbackAction;
+        length = ReplyLengthHint.short;
+        tone = scene.fallbackTone;
+        reasons.add(scene.fallbackReason);
       }
     }
 
@@ -190,6 +223,39 @@ class HumanizedChatOrchestrator {
       ),
       score,
     );
+  }
+
+  static String? _sceneTargetFor({
+    required AICharacter character,
+    required List<AICharacter> allCharacters,
+    required List<Message> recentMessages,
+    required List<RelationshipState> relationships,
+    required String groupId,
+    required Random random,
+  }) {
+    for (final message in recentMessages.reversed.take(6)) {
+      if (message.senderType == 'ai' && message.senderId != character.id) {
+        return message.senderId;
+      }
+    }
+
+    final related = relationships
+        .where((r) =>
+            r.groupId == groupId &&
+            r.sourceCharacterId == character.id &&
+            r.targetType == RelationshipTargetType.ai &&
+            r.targetId != character.id)
+        .toList()
+      ..sort((a, b) => (b.affinity + b.familiarity + b.trust)
+          .compareTo(a.affinity + a.familiarity + a.trust));
+    if (related.isNotEmpty && random.nextDouble() < 0.74) {
+      return related.first.targetId;
+    }
+
+    final candidates =
+        allCharacters.where((c) => c.id != character.id).toList();
+    if (candidates.isEmpty) return null;
+    return candidates[random.nextInt(candidates.length)].id;
   }
 
   static RelationshipState? _relationToward(

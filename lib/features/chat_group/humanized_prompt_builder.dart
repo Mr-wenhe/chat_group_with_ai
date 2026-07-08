@@ -2,6 +2,7 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
+import 'package:chat_group/features/chat_group/scene_behavior.dart';
 
 class HumanizedPromptBuilder {
   static String buildIntentContext({
@@ -23,6 +24,7 @@ class HumanizedPromptBuilder {
     final targetName = intent.targetId == null
         ? '当前话题'
         : charactersById[intent.targetId!]?.name ?? ownerName;
+    final scene = SceneBehavior.resolve(groupTheme);
 
     return [
       '【真人化发言上下文】',
@@ -40,6 +42,7 @@ class HumanizedPromptBuilder {
       '本轮动作：${intent.action.name}，主要对象：$targetName。',
       '本轮语气：${intent.toneHint}。',
       lengthInstruction(intent.lengthHint),
+      ...scene.intentInstructions(targetName, intent.targetId != null),
       '你是在群里自然接话，不是在写完整答案。',
       '不要总结全局，不要说自己是 AI，不要替别人发言，不要固定格式，不要带自己的名字前缀。',
     ].join('\n');

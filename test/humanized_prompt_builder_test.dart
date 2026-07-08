@@ -92,5 +92,55 @@ void main() {
         contains('2-4 句'),
       );
     });
+
+    test('dating context discourages resume-like professional replies', () {
+      final alice = AICharacter(
+        id: 'a',
+        name: '阿月',
+        avatar: 'A',
+        age: 24,
+        role: '插画师',
+        personalityTags: ['敏感'],
+        systemPrompt: '自然一点',
+        apiKey: 'k',
+        apiProvider: 'deepseek',
+      );
+      final bob = AICharacter(
+        id: 'b',
+        name: '小林',
+        avatar: 'B',
+        age: 27,
+        role: '程序员',
+        personalityTags: ['慢热'],
+        systemPrompt: '自然一点',
+        apiKey: 'k',
+        apiProvider: 'deepseek',
+      );
+      const intent = ReplyIntent(
+        speakerId: 'a',
+        action: ReplyAction.askBack,
+        targetId: 'b',
+        lengthHint: ReplyLengthHint.short,
+        toneHint: '相亲局真人感',
+        reason: 'dating-approach',
+      );
+
+      final content = HumanizedPromptBuilder.buildIntentContext(
+        character: alice,
+        groupName: '相亲群',
+        groupTheme: '相亲交友',
+        ownerName: '老冯',
+        intent: intent,
+        memory: CharacterMemory(groupId: 'group-1', characterId: 'a'),
+        relationships: const [],
+        charactersById: {'a': alice, 'b': bob},
+      );
+
+      expect(content, contains('相亲/交友场景规则'));
+      expect(content, contains('优先对 小林 说话'));
+      expect(content, contains('不要排队报简历'));
+      expect(content, contains('少用职业术语'));
+      expect(content, contains('不要每次都先介绍自己'));
+    });
   });
 }

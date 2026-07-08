@@ -5,6 +5,7 @@ import 'core/theme/app_theme.dart';
 import 'features/ai_character/ai_character_list_page.dart';
 import 'features/chat_group/chat_group_list_page.dart';
 import 'features/chat_group/chat_room_page.dart';
+import 'features/direct_chat/direct_chat_session.dart';
 import 'features/settings/settings_page.dart';
 import 'providers/providers.dart';
 
@@ -37,7 +38,15 @@ class MyApp extends ConsumerWidget {
       onGenerateRoute: (settings) {
         if (settings.name?.startsWith('/chat/') ?? false) {
           final groupId = settings.name!.replaceFirst('/chat/', '');
-          return MaterialPageRoute(builder: (_) => ChatRoomPage(groupId: groupId));
+          return MaterialPageRoute(
+              builder: (_) => ChatRoomPage(groupId: groupId));
+        }
+        if (settings.name?.startsWith('/dm/') ?? false) {
+          final characterId = settings.name!.replaceFirst('/dm/', '');
+          final conversationId =
+              DirectChatSession.conversationIdFor(characterId);
+          return MaterialPageRoute(
+              builder: (_) => ChatRoomPage(groupId: conversationId));
         }
         return null;
       },
