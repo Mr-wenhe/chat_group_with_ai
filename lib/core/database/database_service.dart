@@ -1,6 +1,5 @@
 import 'dart:io';
 import 'package:flutter/material.dart';
-import 'package:path_provider/path_provider.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
@@ -47,39 +46,15 @@ class DatabaseService {
   }
 
   Future<Directory> _getDataDir() async {
-    // Use project-local data/ if it has hive files (git-managed)
+    // 始终使用项目根目录下的 data/，不再使用沙盒。
     final exe = Platform.resolvedExecutable;
-    // On macOS debug: .../build/macos/Build/Products/Debug/chat_group.app/Contents/MacOS/chat_group
-    // Project root is 6 levels up
     final possibleProject =
         Directory(exe).parent.parent.parent.parent.parent.parent;
     final projectData = Directory('${possibleProject.path}/data');
-    if (await projectData.exists() &&
-        await File('${projectData.path}/ai_characters.hive').exists()) {
-      // Sync project data to app documents for this run
-      final docs = await getApplicationDocumentsDirectory();
-      final appData = Directory('${docs.path}/data');
-      if (!await appData.exists()) {
-        await appData.create(recursive: true);
-      }
-      final files = await projectData.list().toList();
-      for (final f in files) {
-        if (f is File &&
-            !await File('${appData.path}/${f.uri.pathSegments.last}')
-                .exists()) {
-          await f.copy('${appData.path}/${f.uri.pathSegments.last}');
-        }
-      }
-      return appData;
+    if (!await projectData.exists()) {
+      await projectData.create(recursive: true);
     }
-
-    // Fallback
-    final docs = await getApplicationDocumentsDirectory();
-    final dataDir = Directory('${docs.path}/data');
-    if (!await dataDir.exists()) {
-      await dataDir.create(recursive: true);
-    }
-    return dataDir;
+    return projectData;
   }
 
   Future<void> _openBoxSafely<T>(String name) async {
