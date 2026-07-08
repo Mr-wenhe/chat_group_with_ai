@@ -156,11 +156,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   final TextEditingController _searchController = TextEditingController();
   List<Message> _searchResults = [];
   int? _searchFocusIndex;
-  bool _isShiftPressed = false;
-  Timer? _searchDebounceTimer;
-
   // 是否存在已配置 API Key 的角色（决定 AI 能否回复/自动聊天）
   bool _hasAnyApiConfig = false;
+  Timer? _searchDebounceTimer;
 
   // —— 流式输出（打字机）相关状态 ——
   Message? _streamingMessage; // 正在逐 token 渲染的内存态临时消息（不落库）
@@ -3315,14 +3313,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   /// 输入区键盘事件：@ 弹窗打开时走导航；桌面端回车发送、Shift+回车换行。
   KeyEventResult _handleKeyEvent(KeyEvent event) {
-    final isShiftKey = event.logicalKey == LogicalKeyboardKey.shiftLeft ||
-        event.logicalKey == LogicalKeyboardKey.shiftRight;
-    if (isShiftKey) {
-      if (event is KeyDownEvent) {
-        _isShiftPressed = true;
-      } else if (event is KeyUpEvent) {
-        _isShiftPressed = false;
-      }
+    if (event is KeyDownEvent &&
+        (event.logicalKey == LogicalKeyboardKey.shiftLeft ||
+            event.logicalKey == LogicalKeyboardKey.shiftRight)) {
       return KeyEventResult.ignored;
     }
 
@@ -3334,7 +3327,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       final key = event.logicalKey;
       if (key == LogicalKeyboardKey.enter ||
           key == LogicalKeyboardKey.numpadEnter) {
-        if (!_isShiftPressed) {
+        final isShiftPressed = HardwareKeyboard.instance.isShiftPressed;
+        if (!isShiftPressed) {
           if (!_isInputEmpty) {
             _sendMessage();
           }
@@ -3349,9 +3343,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   Widget _buildInputArea(ColorScheme cs) {
     return Focus(
       onKeyEvent: (_, event) => _handleKeyEvent(event),
-      onFocusChange: (hasFocus) {
-        if (!hasFocus) _isShiftPressed = false;
-      },
       child: Column(
         mainAxisSize: MainAxisSize.min,
         children: [
