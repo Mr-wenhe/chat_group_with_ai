@@ -295,7 +295,14 @@ jobs:
           echo "DEVELOPMENT_TEAM=$TEAM" >> "$GITHUB_ENV"
 
       - name: 构建 macOS
-        run: flutter build macos --release
+        env:
+          # 未签名构建仍需 Development Team 占位，否则 Xcode 报错
+          DEVELOPMENT_TEAM: "0000000000"
+        run: |
+          cd macos
+          sed -i '' 's/DEVELOPMENT_TEAM = "";/DEVELOPMENT_TEAM = "0000000000";/g' Runner.xcodeproj/project.pbxproj
+          cd ..
+          flutter build macos --release
 
       - name: 对 .app 进行签名（可选）
         if: env.HAS_APPLE_SIGNING == 'true'
@@ -380,7 +387,15 @@ jobs:
 
       - name: 构建 .app（未签名回退）
         if: env.HAS_APPLE_SIGNING != 'true'
-        run: flutter build ios --release --no-codesign
+        env:
+          # 未签名构建仍需一个 Development Team 占位，否则 Xcode 报错。
+          # 占位 ID 仅用于本地/CI 未签名包，不可用于实际上架。
+          DEVELOPMENT_TEAM: "0000000000"
+        run: |
+          cd ios
+          sed -i '' 's/DEVELOPMENT_TEAM = "";/DEVELOPMENT_TEAM = "0000000000";/g' Runner.xcodeproj/project.pbxproj
+          cd ..
+          flutter build ios --release --no-codesign
 
       - name: 打包产物
         id: package
