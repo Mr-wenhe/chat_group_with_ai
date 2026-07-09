@@ -240,6 +240,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     _pendingAttachments.clear();
     // 已提交的流式请求继续在后台收尾并落库；只停止 UI flush。
+    _streamSub?.cancel();
+    _streamSub = null;
     _streamUiFlushTimer?.cancel();
     _searchDebounceTimer?.cancel();
     _textController.dispose();
