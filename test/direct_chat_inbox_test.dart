@@ -84,6 +84,32 @@ void main() {
       expect(summaries.single.source, DirectChatSource.group);
       expect(summaries.single.hasUnread, isTrue);
     });
+
+    test('unread count is cleared when read time passes latest message', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final conversationId = DirectChatSession.conversationIdFor('alice');
+      final lastMessageAt = DateTime(2026, 7, 8, 10);
+
+      final summaries = DirectChatInbox.buildSummaries(
+        characters: [alice],
+        messages: [
+          Message(
+            groupId: conversationId,
+            senderId: 'alice',
+            senderType: 'ai',
+            content: '点进会话后应该清掉',
+            timestamp: lastMessageAt,
+          ),
+        ],
+        readAtByConversation: {
+          conversationId: lastMessageAt.add(const Duration(milliseconds: 1)),
+        },
+        sourceByConversation: const {},
+      );
+
+      expect(summaries.single.unreadCount, 0);
+      expect(summaries.single.hasUnread, isFalse);
+    });
   });
 }
 

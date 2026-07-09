@@ -93,6 +93,26 @@ void main() {
       );
     });
 
+    test('owner mention instruction allows occasional @me or owner mention',
+        () {
+      expect(
+        HumanizedPromptBuilder.ownerMentionInstruction(''),
+        allOf(
+          contains('真人用户/群主叫「我」'),
+          contains('用「@我」'),
+          contains('但不要每条都@'),
+        ),
+      );
+      expect(
+        HumanizedPromptBuilder.ownerMentionInstruction('风野'),
+        allOf(
+          contains('真人用户/群主叫「风野」'),
+          contains('用「@风野」'),
+          contains('但不要每条都@'),
+        ),
+      );
+    });
+
     test('dating context discourages resume-like professional replies', () {
       final alice = AICharacter(
         id: 'a',

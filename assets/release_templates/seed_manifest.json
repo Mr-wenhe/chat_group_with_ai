@@ -6,6 +6,8 @@
     "app_settings.hive",
     "character_memories.hive",
     "chat_groups.hive",
+    "character_skills.hive",
+    "agent_tasks.hive",
     "group_memories.hive",
     "messages.hive",
     "relationship_states.hive"

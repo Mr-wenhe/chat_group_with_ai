@@ -1,6 +1,8 @@
 import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
 
+import 'package:chat_group/core/models/media_attachment.dart';
+
 part 'message.g.dart';
 
 @HiveType(typeId: 2)
@@ -32,6 +34,10 @@ class Message extends HiveObject {
   @HiveField(8)
   List<String> mentionedAiIds;
 
+  /// 媒体附件（图片 / 视频）。旧消息为 null，渲染时按空处理，保持向后兼容。
+  @HiveField(9)
+  List<MediaAttachment>? media;
+
   Message({
     String? id,
     required this.groupId,
@@ -42,6 +48,7 @@ class Message extends HiveObject {
     this.replyToMessageId,
     this.isMention = false,
     List<String>? mentionedAiIds,
+    this.media,
   })  : id = id ?? const Uuid().v4(),
         timestamp = timestamp ?? DateTime.now(),
         mentionedAiIds = mentionedAiIds ?? [];

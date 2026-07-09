@@ -73,6 +73,55 @@ void main() {
       expect(summaries.map((s) => s.group.id), ['a', 'b']);
       expect(summaries.first.isPinned, isTrue);
     });
+
+    test('unread count is cleared when read time passes latest message', () {
+      final group = _group(id: 'g1', name: '脑暴群');
+      final lastMessageAt = DateTime(2026, 7, 8, 10);
+
+      final summaries = GroupChatInbox.buildSummaries(
+        groups: [group],
+        messages: [
+          Message(
+            groupId: 'g1',
+            senderId: 'ai_1',
+            senderType: 'ai',
+            content: '@我 点进去之后应该清掉',
+            timestamp: lastMessageAt,
+          ),
+        ],
+        readAtByGroup: {
+          'g1': lastMessageAt.add(const Duration(milliseconds: 1)),
+        },
+        pinnedIds: const {},
+      );
+
+      expect(summaries.single.unreadCount, 0);
+      expect(summaries.single.mentionCount, 0);
+      expect(summaries.single.hasUnread, isFalse);
+    });
+
+    test('ignores direct chat conversations when building group summaries', () {
+      final group = _group(id: 'g1', name: '脑暴群');
+      final now = DateTime(2026, 7, 8, 10);
+
+      final summaries = GroupChatInbox.buildSummaries(
+        groups: [group],
+        messages: [
+          Message(
+            groupId: 'dm:ai_1',
+            senderId: 'ai_1',
+            senderType: 'ai',
+            content: '私聊消息不应该进群未读',
+            timestamp: now,
+          ),
+        ],
+        readAtByGroup: const {},
+        pinnedIds: const {},
+      );
+
+      expect(summaries.single.lastMessage, isNull);
+      expect(summaries.single.unreadCount, 0);
+    });
   });
 }
 

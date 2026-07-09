@@ -3,7 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
+import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/features/agentic/character_skill_resolver.dart';
+import 'package:chat_group/features/agentic/skill_download_service.dart';
+import 'package:chat_group/features/agentic/widgets/character_skill_editor.dart';
 import 'providers/ai_character_providers.dart';
 import '../settings/providers/api_config_providers.dart';
 import '../settings/api_config_form_page.dart';
@@ -40,6 +44,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   String _selectedApiConfigId = '';
   bool _isSaving = false;
   bool _hasLegacyApiData = false;
+  bool _agenticEnabled = true;
+  List<ToolPermission> _toolPermissions = const [];
 
   @override
   void initState() {
@@ -61,6 +67,11 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         TextEditingController(text: (c?.hourlyReplyLimit ?? 60).toString());
 
     _selectedApiConfigId = c?.apiConfigId ?? '';
+    _agenticEnabled = c?.agenticEnabled ?? true;
+    _toolPermissions = List<ToolPermission>.from(
+      c?.toolPermissions ??
+          CharacterSkillResolver.defaultsFor(_draftCharacter()).permissions,
+    );
     _hasLegacyApiData = _selectedApiConfigId.isEmpty &&
         (c?.apiKey.isNotEmpty ?? false) &&
         (c?.apiProvider.isNotEmpty ?? false);
@@ -84,6 +95,11 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
 
     // 若从「预设快速创建」进入，直接用预设填充展示字段（仍要求后续选 ApiConfig）。
     if (widget.preset != null) _fillFromPreset(widget.preset!);
+    if (!_isEditing && widget.preset == null) {
+      final bundle = CharacterSkillResolver.defaultsFor(_draftCharacter());
+      _agenticEnabled = true;
+      _toolPermissions = bundle.permissions;
+    }
   }
 
   /// 用预设填充表单控制器（仅展示字段，绝不写入 API Key / 配置）。
@@ -94,6 +110,11 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     _roleController.text = p.role;
     _personalityController.text = p.personalityTags.join(', ');
     _systemPromptController.text = p.systemPrompt;
+    if (!_isEditing) {
+      final bundle = CharacterSkillResolver.defaultsFor(_draftCharacter());
+      _agenticEnabled = bundle.permissions.isNotEmpty;
+      _toolPermissions = bundle.permissions;
+    }
   }
 
   /// 从「从预设套用」弹窗选择后套用：只填展示字段，密钥仍由用户选 ApiConfig 决定。
@@ -294,6 +315,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                         controller: _nameController,
                         decoration: appInputDecoration(
                             '名字 *', 'AI 的名字', Icons.badge_outlined, cs),
+                        onChanged: (_) => setState(() {}),
                         validator: (v) => v?.isEmpty ?? true ? '请输入名字' : null,
                       ),
                     ),
@@ -326,6 +348,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                         controller: _roleController,
                         decoration: appInputDecoration('角色 *', '游戏达人 / 心理咨询师',
                             Icons.work_outline_rounded, cs),
+                        onChanged: (_) => setState(() {}),
                         validator: (v) => v?.isEmpty ?? true ? '请输入角色' : null,
                       ),
                     ),
@@ -336,6 +359,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                   controller: _personalityController,
                   decoration: appInputDecoration('性格标签', '话痨, 温柔, 毒舌, 理性...',
                       Icons.psychology_outlined, cs),
+                  onChanged: (_) => setState(() {}),
                 ),
               ],
             ),
@@ -386,9 +410,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                                         (c) => c.id == _selectedApiConfigId)
                                     ? _selectedApiConfigId
                                     : null)
-                                : (configs.isEmpty
-                                    ? _kEmptyConfigValue
-                                    : null),
+                                : (configs.isEmpty ? _kEmptyConfigValue : null),
                             decoration: appInputDecoration(
                                 'API 配置 *',
                                 '先在设置中创建 API 配置',
@@ -404,8 +426,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                                         style: TextStyle(fontSize: 13))),
                               ...configs.map((c) => DropdownMenuItem(
                                     value: c.id,
-                                    child: Text(
-                                        '${c.name} (${c.provider})',
+                                    child: Text('${c.name} (${c.provider})',
                                         overflow: TextOverflow.ellipsis,
                                         style: const TextStyle(fontSize: 14)),
                                   )),
@@ -468,6 +489,48 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                       Icons.chat_bubble_outline_rounded,
                       cs),
                   maxLines: 8,
+                  onChanged: (_) => setState(() {}),
+                ),
+              ],
+            ),
+            const SizedBox(height: 24),
+            AppSectionHeader(
+                title: '行动能力', icon: Icons.construction_rounded, cs: cs),
+            const SizedBox(height: 12),
+            AppCard(
+              cs: cs,
+              children: [
+                CharacterSkillEditor(
+                  enabled: _agenticEnabled,
+                  onEnabledChanged: (value) {
+                    setState(() {
+                      _agenticEnabled = value;
+                      if (value && _toolPermissions.isEmpty) {
+                        _toolPermissions = CharacterSkillResolver.defaultsFor(
+                          _draftCharacter(),
+                        ).permissions;
+                      }
+                    });
+                  },
+                  inferredSkills:
+                      CharacterSkillResolver.defaultsFor(_draftCharacter())
+                          .skills,
+                  recommendedTemplates:
+                      SkillDownloadService.recommendedTemplatesFor(
+                    _draftCharacter(),
+                  ),
+                  selectedPermissions: _toolPermissions,
+                  onPermissionToggle: (permission) {
+                    setState(() {
+                      final next = List<ToolPermission>.from(_toolPermissions);
+                      if (next.contains(permission)) {
+                        next.remove(permission);
+                      } else {
+                        next.add(permission);
+                      }
+                      _toolPermissions = next;
+                    });
+                  },
                 ),
               ],
             ),
@@ -565,6 +628,10 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         customBaseUrl: config.customBaseUrl,
         hourlyReplyLimit: hourlyLimit,
         apiConfigId: config.id,
+        agenticEnabled: _agenticEnabled,
+        skillIds: widget.character?.skillIds,
+        toolPermissions:
+            _agenticEnabled ? _normalizedToolPermissions() : const [],
         createdAt: widget.character?.createdAt ?? DateTime.now(),
       );
 
@@ -594,5 +661,30 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     } finally {
       if (mounted) setState(() => _isSaving = false);
     }
+  }
+
+  AICharacter _draftCharacter() {
+    final tags = _personalityController.text
+        .split(',')
+        .map((t) => t.trim())
+        .where((t) => t.isNotEmpty)
+        .toList();
+    return AICharacter(
+      id: _existingCharacterId,
+      name: _nameController.text.trim().isEmpty
+          ? '未命名角色'
+          : _nameController.text.trim(),
+      avatar: _avatarController.text.trim(),
+      age: int.tryParse(_ageController.text) ?? 25,
+      role: _roleController.text.trim(),
+      personalityTags: tags,
+      systemPrompt: _systemPromptController.text.trim(),
+      apiKey: '',
+      apiProvider: 'deepseek',
+    );
+  }
+
+  List<ToolPermission> _normalizedToolPermissions() {
+    return List<ToolPermission>.from(_toolPermissions);
   }
 }

@@ -1,5 +1,6 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/features/agentic/agentic_task_classifier.dart';
 
 /// Pure orchestration helpers for chat room logic.
 /// Extracted from _ChatRoomPageState so they can be unit-tested without Flutter.
@@ -51,6 +52,14 @@ class ChatOrchestrator {
       character.hourlyReplyCount += 1;
     }
     character.lastReplyTimestamp = now;
+  }
+
+  static bool shouldUseAgenticRuntime({
+    required AICharacter character,
+    required String message,
+  }) {
+    return character.agenticEnabled &&
+        AgenticTaskClassifier.requiresAgenticWork(message);
   }
 
   static String extractRecentFocus(List<Message> messages) {

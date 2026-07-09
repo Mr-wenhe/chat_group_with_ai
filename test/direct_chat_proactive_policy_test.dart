@@ -72,6 +72,70 @@ void main() {
       expect(candidate?.source, DirectChatSource.group);
     });
 
+    test('allows an idle group character to proactively start a direct chat',
+        () {
+      final bob = _character(id: 'bob', name: '阿哲');
+      final now = DateTime(2026, 7, 8, 12);
+
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: const [],
+        groupCharacters: [bob],
+        recentGroupMessages: const [],
+        lastProactiveAtByCharacter: const {},
+        now: now,
+      );
+
+      expect(candidate?.character.id, 'bob');
+      expect(candidate?.source, DirectChatSource.group);
+      expect(candidate?.reason, '主动找你聊聊');
+    });
+
+    test('does not proactively start direct chat with unread pending', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final now = DateTime(2026, 7, 8, 12);
+
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: [
+          DirectChatSummary(
+            conversationId: DirectChatSession.conversationIdFor('alice'),
+            character: alice,
+            lastMessage: Message(
+              groupId: DirectChatSession.conversationIdFor('alice'),
+              senderId: 'alice',
+              senderType: 'ai',
+              content: '先看这条',
+              timestamp: now.subtract(const Duration(minutes: 10)),
+            ),
+            unreadCount: 1,
+            source: DirectChatSource.group,
+          ),
+        ],
+        groupCharacters: [alice],
+        recentGroupMessages: const [],
+        lastProactiveAtByCharacter: const {},
+        now: now,
+      );
+
+      expect(candidate, isNull);
+    });
+
+    test('does not proactively start idle direct chat inside cooldown', () {
+      final bob = _character(id: 'bob', name: '阿哲');
+      final now = DateTime(2026, 7, 8, 12);
+
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: const [],
+        groupCharacters: [bob],
+        recentGroupMessages: const [],
+        lastProactiveAtByCharacter: {
+          'bob': now.subtract(const Duration(minutes: 30)),
+        },
+        now: now,
+      );
+
+      expect(candidate, isNull);
+    });
+
     test('does not select candidates inside proactive cooldown', () {
       final alice = _character(id: 'alice', name: '小夏');
       final now = DateTime(2026, 7, 8, 12);

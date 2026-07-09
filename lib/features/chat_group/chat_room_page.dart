@@ -1,4 +1,6 @@
 import 'dart:async';
+import 'dart:convert';
+import 'dart:io';
 import 'dart:math';
 
 import 'package:chat_group/core/database/database_service.dart';
@@ -7,28 +9,47 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/character_memory.dart';
+import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/group_memory.dart';
+import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
+import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
+import 'package:chat_group/features/agentic/agent_runtime.dart';
+import 'package:chat_group/features/agentic/character_skill_resolver.dart';
+import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
+import 'package:chat_group/features/agentic/skill_download_service.dart';
+import 'package:chat_group/features/agentic/tool_request.dart';
+import 'package:chat_group/features/agentic/tools/browser_context_tool.dart';
+import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart';
+import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
+import 'package:chat_group/features/chat_group/multimodal_content.dart';
 import 'package:chat_group/features/chat_group/scene_behavior.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/chat_api_service.dart';
+import 'package:chewie/chewie.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_tts/flutter_tts.dart';
+import 'package:image_picker/image_picker.dart';
+import 'package:open_filex/open_filex.dart';
+import 'package:pasteboard/pasteboard.dart';
+import 'package:video_player/video_player.dart';
 
 enum AutoChatStatus { idle, waiting, generating, paused, unavailable, error }
 
@@ -102,6 +123,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   List<CharacterMemory> _characterMemories = [];
   List<RelationshipState> _relationshipStates = [];
   final Map<String, ReplyIntent> _pendingReplyIntents = {};
+  _PendingAgentToolApproval? _pendingAgentApproval;
   int _autoChatMemoryTick = 0;
 
   bool _isLoading = true;
@@ -142,6 +164,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   final List<String> _pendingMentionedIds = [];
 
   bool _isInputEmpty = true;
+
+  /// 是否允许发送：文案非空 或 有待发送附件。
+  bool get _canSend => !_isInputEmpty || _pendingAttachments.isNotEmpty;
+
+  // —— 待发送附件（图片多选 / 视频单选），发送后清空 ——
+  final List<MediaAttachment> _pendingAttachments = [];
+  final ImagePicker _imagePicker = ImagePicker();
+  bool _isPastingAttachments = false;
 
   // —— 引用回复（quote-reply）——
   Message? _quotedMessage;
@@ -190,6 +220,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   @override
   void dispose() {
     _disposed = true;
+    for (final attachment in List<MediaAttachment>.from(_pendingAttachments)) {
+      unawaited(_deletePendingAttachmentFile(attachment));
+    }
+    _pendingAttachments.clear();
     // 取消未完成的流式订阅，并唤醒可能因 await 挂起的 _generateAiReply。
     _streamSub?.cancel();
     _streamSub = null;
@@ -496,7 +530,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   Future<void> _sendMessage() async {
     _hideMentionOverlay();
     final text = _textController.text.trim();
-    if (text.isEmpty) return;
+    final hasAttachments = _pendingAttachments.isNotEmpty;
+    // 放宽发送条件：文案非空 或 有附件均可发送。
+    if (text.isEmpty && !hasAttachments) return;
 
     _textController.clear();
     final messenger = ScaffoldMessenger.of(context);
@@ -508,13 +544,27 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       }
     }
 
-    await _appendMessage(Message(
+    // 审批词（「批准」「取消」等）不应作为普通用户消息落库。
+    if (await _handlePendingAgentApproval(text)) {
+      // 发送后清空待发送附件（即使审批消息本身不展示）。
+      if (hasAttachments && mounted) {
+        setState(() => _pendingAttachments.clear());
+      }
+      return;
+    }
+
+    // 构造带媒体附件的用户消息（媒体为不可变快照，避免后续清空影响已落库消息）。
+    final userMessage = Message(
       groupId: widget.groupId,
       senderId: 'user',
       senderType: 'user',
       content: text,
       replyToMessageId: _quotedMessage?.id,
-    ));
+      media: hasAttachments
+          ? List<MediaAttachment>.from(_pendingAttachments)
+          : null,
+    );
+    await _appendMessage(userMessage);
     if (_isDirectChat) {
       await _db.saveDirectChatSource(widget.groupId, DirectChatSource.direct);
       await _db.markDirectChatRead(
@@ -523,6 +573,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       );
     }
     _cancelQuote();
+
+    // 发送后清空待发送附件。
+    if (hasAttachments && mounted) {
+      setState(() => _pendingAttachments.clear());
+    }
 
     _autoChatRoundCount = 0;
 
@@ -541,13 +596,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       return;
     }
 
-    await _runAiRound(userMessage: text, mentionedIds: mentionedIds);
+    await _runAiRound(
+        userMessage: text,
+        mentionedIds: mentionedIds,
+        currentUserMessage: userMessage);
   }
 
   Future<void> _runAiRound(
       {String? userMessage,
       List<String>? mentionedIds,
-      bool isAutoChat = false}) async {
+      bool isAutoChat = false,
+      Message? currentUserMessage}) async {
     if (!isAutoChat && _consecutiveRound >= _maxAutoRounds) {
       setState(() => _isAiReplying = false);
       if (_pendingMentionedIds.isNotEmpty) {
@@ -608,6 +667,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         userMessage,
         isAutoChat: isAutoChat,
         intent: _pendingReplyIntents[character.id],
+        currentUserMessage: currentUserMessage,
       );
       repliedIds.add(character.id);
       await _delay(replyContent);
@@ -663,7 +723,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   Future<String> _generateAiReply(
       AICharacter character, List<Message> context, String? userMessage,
-      {bool isAutoChat = false, ReplyIntent? intent}) async {
+      {bool isAutoChat = false,
+      ReplyIntent? intent,
+      Message? currentUserMessage}) async {
     final config = _resolveApiConfig(character);
     if (config == null) {
       if (_canTouchUi) {
@@ -681,23 +743,44 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       return '[${character.name} 未配置 API]';
     }
 
+    final provider = ApiProvider.values.firstWhere(
+      (p) => p.name == config.provider,
+      orElse: () => ApiProvider.deepseek,
+    );
+
+    if (!isAutoChat &&
+        userMessage != null &&
+        ChatOrchestrator.shouldUseAgenticRuntime(
+          character: character,
+          message: userMessage,
+        )) {
+      return _generateAgenticReply(
+        character: character,
+        config: config,
+        provider: provider,
+        userMessage: userMessage,
+        media: currentUserMessage?.media,
+      );
+    }
+
     final apiMessages = _buildApiMessages(
       character,
       context,
       userMessage,
       isAutoChat: isAutoChat,
       intent: intent,
-    );
-    final provider = ApiProvider.values.firstWhere(
-      (p) => p.name == config.provider,
-      orElse: () => ApiProvider.deepseek,
+      supportsVision: provider.supportsVision,
+      currentUserMessage: currentUserMessage,
     );
     debugPrint(
         '[AI Reply] ${character.name} apiMessages count=${apiMessages.length}');
     for (var i = 0; i < apiMessages.length; i++) {
       final m = apiMessages[i];
-      final preview = (m['content'] as String?)
-          ?.substring(0, (m['content'] as String?)?.length.clamp(0, 60) ?? 0);
+      // content 可能是 String（纯文本）或 List（多模态 parts），统一安全打印。
+      final content = m['content'];
+      final preview = content is String
+          ? content.substring(0, content.length.clamp(0, 60))
+          : '[${content.runtimeType}]';
       debugPrint('[AI Reply]   [$i] role=${m['role']} content=$preview');
     }
 
@@ -852,6 +935,356 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     return fullContent;
   }
 
+  Future<String> _generateAgenticReply({
+    required AICharacter character,
+    required ApiConfig config,
+    required ApiProvider provider,
+    required String userMessage,
+    List<MediaAttachment>? media,
+  }) async {
+    final runtime = _agentRuntimeFor(
+      character: character,
+      config: config,
+      provider: provider,
+    );
+
+    final mediaEnhancedRequest = media == null || media.isEmpty
+        ? userMessage
+        : '$userMessage${AgentPromptBuilder.mediaHint(media)}';
+
+    final result = await runtime.run(
+      character: character,
+      skills: _agenticSkillsFor(character),
+      userRequest: mediaEnhancedRequest,
+    );
+    if (result.status == AgentRuntimeStatus.waitingForApproval &&
+        result.pendingToolRequest != null) {
+      _pendingAgentApproval = _PendingAgentToolApproval(
+        character: character,
+        config: config,
+        provider: provider,
+        userRequest: userMessage,
+        request: result.pendingToolRequest!,
+      );
+      // 审批中：返回提示文案但不消耗 reply slot（不记录 usage/mention/memory）。
+      return _stripNamePrefix(result.message, character.name);
+    }
+    if (result.status != AgentRuntimeStatus.completed) {
+      // failed / permissionMissing：不消费 reply slot， caller 会继续正常流程。
+      return '';
+    }
+    final content = _stripNamePrefix(result.message, character.name);
+    final attachments = await _attachmentsForAgentToolResult(
+      character: character,
+      result: result,
+    );
+    final message = Message(
+      groupId: widget.groupId,
+      senderId: character.id,
+      senderType: 'ai',
+      content: content,
+      media: attachments.isEmpty ? null : attachments,
+    );
+    await _appendMessage(message);
+    _recordReplyUsage(character);
+    _registerUserMentionIfNeeded(message);
+    if (content.trim().isNotEmpty) {
+      await _maybeEvolveCharacterMemory(character, content);
+    }
+    return content;
+  }
+
+  Future<List<MediaAttachment>> _attachmentsForAgentToolResult({
+    required AICharacter character,
+    required AgentRuntimeResult result,
+  }) async {
+    final request = result.pendingToolRequest;
+    if (result.status != AgentRuntimeStatus.completed ||
+        request == null ||
+        request.tool != AgentToolName.workspacePatch) {
+      return const [];
+    }
+    final paths = _pathsFromPatch(request.args['patch'] as String? ?? '');
+    if (paths.isEmpty) return const [];
+
+    final attachments = <MediaAttachment>[];
+    final bridge = LocalAgentBridgeClient(baseUrl: 'http://127.0.0.1:8765');
+    final workspaceTool = WorkspaceFileTool(bridge);
+    for (final path in paths.take(6)) {
+      try {
+        final local = File(path).absolute;
+        if (await local.exists()) {
+          attachments.add(await _db.copyToAiCharacterDir(
+            source: local,
+            characterId: character.id,
+            characterName: character.name,
+            type: _attachmentTypeForPath(path),
+          ));
+          continue;
+        }
+
+        final read = await workspaceTool.read(path);
+        final content = read['content'];
+        if (content is String) {
+          attachments.add(await _db.writeBytesToAiCharacterDir(
+            bytes: utf8.encode(content),
+            fileName: _fileNameFromPath(path),
+            characterId: character.id,
+            characterName: character.name,
+            type: _attachmentTypeForPath(path),
+          ));
+        }
+      } catch (e) {
+        debugPrint('[AI文件] 复制 $path 失败：$e');
+      }
+    }
+    return attachments;
+  }
+
+  List<String> _pathsFromPatch(String patch) {
+    final paths = <String>[];
+    void addPath(String raw) {
+      final path = raw.trim();
+      if (path.isEmpty || path == '/dev/null') return;
+      final normalized = path.startsWith('b/') ? path.substring(2) : path;
+      if (!WorkspacePathGuard.isSafeRelativePath(normalized)) return;
+      if (!paths.contains(normalized)) paths.add(normalized);
+    }
+
+    for (final line in const LineSplitter().convert(patch)) {
+      final plus = RegExp(r'^\+\+\+\s+(.+)$').firstMatch(line);
+      if (plus != null) {
+        addPath(plus.group(1) ?? '');
+        continue;
+      }
+      final diff = RegExp(r'^diff --git\s+a/(.+?)\s+b/(.+)$').firstMatch(line);
+      if (diff != null) {
+        addPath(diff.group(2) ?? '');
+      }
+    }
+    return paths;
+  }
+
+  AgentRuntime _agentRuntimeFor({
+    required AICharacter character,
+    required ApiConfig config,
+    required ApiProvider provider,
+  }) {
+    final bridge = LocalAgentBridgeClient(baseUrl: 'http://127.0.0.1:8765');
+    return AgentRuntime(
+      complete: (messages) => _chatApi.sendChatMessage(
+        apiKey: config.apiKey,
+        provider: provider,
+        customBaseUrl: config.customBaseUrl,
+        model: config.modelName,
+        messages: messages,
+      ),
+      workspaceFileTool: WorkspaceFileTool(bridge),
+      browserContextTool: BrowserContextTool(bridge),
+      skillCreateHandler: (args) => _saveGeneratedSkillFromArgs(
+        character: character,
+        args: args,
+      ),
+      skillDownloadHandler: (args) => _downloadExpertSkillFromArgs(
+        character: character,
+        args: args,
+      ),
+    );
+  }
+
+  Future<bool> _handlePendingAgentApproval(String text) async {
+    final pending = _pendingAgentApproval;
+    if (pending == null) return false;
+    if (_isAgentRejection(text)) {
+      _pendingAgentApproval = null;
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: pending.character.id,
+        senderType: 'ai',
+        content: '${pending.character.name} 已取消这次工具操作。',
+      ));
+      return true;
+    }
+    if (!_isAgentApproval(text)) {
+      // 非审批/非拒绝输入：清除过期审批状态，让新消息走正常 AI 回复流程。
+      _pendingAgentApproval = null;
+      return false;
+    }
+
+    _pendingAgentApproval = null;
+    if (_canTouchUi) setState(() => _isAiReplying = true);
+    try {
+      final runtime = _agentRuntimeFor(
+        character: pending.character,
+        config: pending.config,
+        provider: pending.provider,
+      );
+      final result = await runtime.executeApprovedTool(
+        character: pending.character,
+        request: pending.request,
+        userRequest: pending.userRequest,
+      );
+      final content = _stripNamePrefix(
+        result.message.trim().isEmpty
+            ? '[${pending.character.name} 工具执行完成，但没有返回内容]'
+            : result.message.trim(),
+        pending.character.name,
+      );
+      final attachments = await _attachmentsForAgentToolResult(
+        character: pending.character,
+        result: result,
+      );
+      final message = Message(
+        groupId: widget.groupId,
+        senderId: pending.character.id,
+        senderType: 'ai',
+        content: content,
+        media: attachments.isEmpty ? null : attachments,
+      );
+      await _appendMessage(message);
+      _recordReplyUsage(pending.character);
+      _registerUserMentionIfNeeded(message);
+      if (result.status == AgentRuntimeStatus.completed &&
+          content.trim().isNotEmpty) {
+        await _maybeEvolveCharacterMemory(pending.character, content);
+      }
+      return true;
+    } finally {
+      if (_canTouchUi) setState(() => _isAiReplying = false);
+    }
+  }
+
+  bool _isAgentApproval(String text) {
+    final normalized = text.trim().toLowerCase();
+    return normalized == '批准' ||
+        normalized == '同意' ||
+        normalized == '执行' ||
+        normalized == '继续' ||
+        normalized == 'approve' ||
+        normalized == 'yes';
+  }
+
+  bool _isAgentRejection(String text) {
+    final normalized = text.trim().toLowerCase();
+    return normalized == '取消' ||
+        normalized == '拒绝' ||
+        normalized == '不要' ||
+        normalized == 'cancel' ||
+        normalized == 'no';
+  }
+
+  Future<Map<String, dynamic>> _saveGeneratedSkillFromArgs({
+    required AICharacter character,
+    required Map<String, dynamic> args,
+  }) async {
+    final instructionsRaw = args['instructions'];
+    if (instructionsRaw is! List) {
+      return {'ok': false, 'error': 'instructions_missing'};
+    }
+    final permissionNames = (args['permissions'] is List
+            ? args['permissions'] as List
+            : args['requiredPermissions'] is List
+                ? args['requiredPermissions'] as List
+                : const [])
+        .whereType<String>()
+        .toSet();
+    final permissions = ToolPermission.values
+        .where((permission) => permissionNames.contains(permission.name))
+        .toList();
+    final skill = CharacterSkill(
+      characterId: character.id,
+      name: args['name'] as String? ?? 'Generated Skill',
+      domain: args['domain'] as String? ?? 'general',
+      description: args['description'] as String? ?? '',
+      instructions: instructionsRaw.whereType<String>().toList(),
+      requiredPermissions: permissions,
+    );
+    await _db.characterSkillBox.put(skill.id, skill);
+    if (!character.skillIds.contains(skill.id)) {
+      character.skillIds = [...character.skillIds, skill.id];
+      await _db.aiCharacterBox.put(character.id, character);
+    }
+    return {
+      'ok': true,
+      'skillId': skill.id,
+      'name': skill.name,
+      'permissions': permissions.map((p) => p.name).toList(),
+    };
+  }
+
+  Future<Map<String, dynamic>> _downloadExpertSkillFromArgs({
+    required AICharacter character,
+    required Map<String, dynamic> args,
+  }) async {
+    final templateId = args['templateId'] as String? ??
+        args['id'] as String? ??
+        _recommendedTemplateIdFor(character, args['domain'] as String?);
+    if (templateId == null) {
+      return {'ok': false, 'error': 'template_not_found'};
+    }
+    final template = ExpertSkillCatalog.findById(templateId);
+    if (template == null) {
+      return {
+        'ok': false,
+        'error': 'template_not_found',
+        'templateId': templateId
+      };
+    }
+    final existing = _db.characterSkillBox.values.where(
+      (skill) =>
+          skill.characterId == character.id &&
+          skill.name == template.name &&
+          skill.domain == template.domain,
+    );
+    final skill = existing.isNotEmpty
+        ? existing.first
+        : template.instantiateFor(character.id);
+    if (existing.isEmpty) {
+      await _db.characterSkillBox.put(skill.id, skill);
+    }
+    final permissionSet = <ToolPermission>{
+      ...character.toolPermissions,
+      ...template.requiredPermissions,
+    };
+    final skillIds = <String>{...character.skillIds, skill.id};
+    character
+      ..skillIds = skillIds.toList()
+      ..toolPermissions = permissionSet.toList()
+      ..agenticEnabled = true;
+    await _db.aiCharacterBox.put(character.id, character);
+    return {
+      'ok': true,
+      'skillId': skill.id,
+      'templateId': template.id,
+      'name': skill.name,
+      'permissions': permissionSet.map((p) => p.name).toList(),
+    };
+  }
+
+  String? _recommendedTemplateIdFor(AICharacter character, String? domain) {
+    final templates = SkillDownloadService.recommendedTemplatesFor(character);
+    if (domain != null && domain.trim().isNotEmpty) {
+      for (final template in templates) {
+        if (template.domain == domain) return template.id;
+      }
+    }
+    return templates.isEmpty ? null : templates.first.id;
+  }
+
+  List<CharacterSkill> _agenticSkillsFor(AICharacter character) {
+    final defaults = CharacterSkillResolver.defaultsFor(character).skills;
+    final saved = _db.characterSkillBox.values.where(
+      (skill) =>
+          skill.characterId == character.id ||
+          character.skillIds.contains(skill.id),
+    );
+    final byName = <String, CharacterSkill>{};
+    for (final skill in [...defaults, ...saved]) {
+      byName['${skill.domain}:${skill.name}'] = skill;
+    }
+    return byName.values.toList();
+  }
+
   /// 停止当前流式生成：取消订阅并保留已生成的（部分）内容落库。
   void _stopStreaming() {
     if (!_isStreaming) return;
@@ -923,9 +1356,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   List<Map<String, dynamic>> _buildApiMessages(
       AICharacter character, List<Message> context, String? userMessage,
-      {bool isAutoChat = false, ReplyIntent? intent}) {
+      {bool isAutoChat = false,
+      ReplyIntent? intent,
+      bool supportsVision = false,
+      Message? currentUserMessage}) {
     if (_isDirectChat) {
-      return _buildDirectApiMessages(character, context, userMessage);
+      return _buildDirectApiMessages(character, context, userMessage,
+          supportsVision: supportsVision,
+          currentUserMessage: currentUserMessage);
     }
 
     final msgs = <Map<String, dynamic>>[];
@@ -975,7 +1413,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     final ownerName = (_group?.ownerName.trim().isNotEmpty ?? false)
         ? _group!.ownerName.trim()
         : '我';
-    final ownerMention = ownerName == '我' ? '@我' : '@$ownerName';
     final isGroupAddressed = userMessage != null &&
         ChatActivityPolicy.isGroupAddressedMessage(userMessage);
     final scene = SceneBehavior.resolve(groupTheme);
@@ -994,7 +1431,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       'content': '$personaContext\n\n'
           '你正在参加一个高活跃度群聊「$groupName」，主题是「$groupTheme」。'
           '回复要像真实聊天群：自然接话、简短、有个人观点，可以顺手回应上一位成员或点名邀请别人，但不要每次都长篇总结。'
-          '这个群里的真人用户/群主叫「$ownerName」；你可以偶尔自然地用「$ownerMention」向真人用户追问、邀请补充或回应他的观点，但不要每条都@。'
+          '${HumanizedPromptBuilder.ownerMentionInstruction(ownerName)}'
           '重要：你的回复不要带自己的名字前缀（如「张三：」或「【张三】：」），直接说内容即可，头像和名字由界面自动显示。'
           '$scenarioPrompt'
           '$recentContext'
@@ -1092,8 +1529,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         : historyMessages;
     for (final m in recentHistory) {
       if (m.senderType == 'user') {
-        // 真人用户消息 → user 角色。
-        msgs.add({'role': 'user', 'content': m.content});
+        // 真人用户消息 → user 角色；含媒体时按多模态策略生成 content。
+        msgs.add({
+          'role': 'user',
+          'content': buildUserMessageContent(m, supportsVision: supportsVision),
+        });
       } else if (m.senderId == character.id) {
         // 当前角色自己的消息 → assistant 角色（LLM 看到自己的历史发言）。
         msgs.add({'role': 'assistant', 'content': m.content});
@@ -1109,7 +1549,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
     // ── 8. 当前用户消息（仅当历史为空时） ──────────────────────────
     if (userMessage != null && historyMessages.isEmpty) {
-      msgs.add({'role': 'user', 'content': userMessage});
+      // 历史为空时当前用户消息尚未进入 context，需直接基于其构建 content。
+      final content = currentUserMessage != null
+          ? buildUserMessageContent(currentUserMessage,
+              supportsVision: supportsVision)
+          : userMessage;
+      msgs.add({'role': 'user', 'content': content});
     }
 
     return msgs;
@@ -1118,8 +1563,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   List<Map<String, dynamic>> _buildDirectApiMessages(
     AICharacter character,
     List<Message> context,
-    String? userMessage,
-  ) {
+    String? userMessage, {
+    bool supportsVision = false,
+    Message? currentUserMessage,
+  }) {
     final msgs = <Map<String, dynamic>>[];
     if (character.memorySummary.isNotEmpty) {
       msgs.add({
@@ -1162,14 +1609,24 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         context.length > 20 ? context.sublist(context.length - 20) : context;
     for (final message in recentHistory) {
       if (message.senderType == 'user') {
-        msgs.add({'role': 'user', 'content': message.content});
+        // 含媒体时按多模态策略生成 content。
+        msgs.add({
+          'role': 'user',
+          'content':
+              buildUserMessageContent(message, supportsVision: supportsVision),
+        });
       } else if (message.senderId == character.id) {
         msgs.add({'role': 'assistant', 'content': message.content});
       }
     }
 
     if (userMessage != null && recentHistory.isEmpty) {
-      msgs.add({'role': 'user', 'content': userMessage});
+      // 历史为空时当前用户消息尚未进入 context，直接基于其构建 content。
+      final content = currentUserMessage != null
+          ? buildUserMessageContent(currentUserMessage,
+              supportsVision: supportsVision)
+          : userMessage;
+      msgs.add({'role': 'user', 'content': content});
     }
 
     return msgs;
@@ -2378,10 +2835,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         ? msgsBefore.sublist(msgsBefore.length - 20)
         : msgsBefore;
 
-    final apiMessages = _buildApiMessages(character, _regenerateContext, null);
     final provider = ApiProvider.values.firstWhere(
         (p) => p.name == config.provider,
         orElse: () => ApiProvider.deepseek);
+    final apiMessages = _buildApiMessages(character, _regenerateContext, null,
+        supportsVision: provider.supportsVision);
 
     final temp = Message(
         groupId: widget.groupId,
@@ -3322,14 +3780,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
     // @ 弹窗键盘导航优先（↑↓ 选择、回车插入、Esc 关闭）
     if (_showMentionPopup) return _handleMentionKeyEvent(event);
+    final key = event.logicalKey;
+    final isPasteShortcut = key == LogicalKeyboardKey.keyV &&
+        (HardwareKeyboard.instance.isMetaPressed ||
+            HardwareKeyboard.instance.isControlPressed);
+    if (isPasteShortcut) {
+      unawaited(_pasteClipboardAttachments());
+      return KeyEventResult.ignored;
+    }
     // 桌面端：Enter 发送、Shift+Enter 换行
     if (_isDesktop) {
-      final key = event.logicalKey;
       if (key == LogicalKeyboardKey.enter ||
           key == LogicalKeyboardKey.numpadEnter) {
         final isShiftPressed = HardwareKeyboard.instance.isShiftPressed;
         if (!isShiftPressed) {
-          if (!_isInputEmpty) {
+          if (_canSend) {
             _sendMessage();
           }
           return KeyEventResult.handled; // 阻止插入换行
@@ -3347,6 +3812,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         mainAxisSize: MainAxisSize.min,
         children: [
           if (_quotedMessage != null) _buildQuoteBar(cs),
+          // 待发送附件预览（图片缩略 / 视频占位，可单独移除）。
+          if (_pendingAttachments.isNotEmpty) _buildAttachmentPreviewRow(cs),
           Container(
             padding: EdgeInsets.only(
                 left: 16,
@@ -3367,6 +3834,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             child: Row(
               crossAxisAlignment: CrossAxisAlignment.end,
               children: [
+                // 附件按钮：图片多选 / 视频单选。
+                IconButton(
+                  icon: const Icon(Icons.attach_file_rounded, size: 24),
+                  color: cs.onSurfaceVariant,
+                  onPressed: _showAttachmentMenu,
+                  tooltip: '添加附件',
+                ),
                 Expanded(
                   child: ConstrainedBox(
                     constraints:
@@ -3411,6 +3885,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                       textInputAction: TextInputAction.newline,
                       maxLines: null,
                       onChanged: _handleTextChanged,
+                      // 桌面右键 / 移动端长按均弹出自适应菜单：剪切 / 复制 / 粘贴 / 全选。
+                      contextMenuBuilder: (context, editableTextState) {
+                        return AdaptiveTextSelectionToolbar.buttonItems(
+                          anchors: editableTextState.contextMenuAnchors,
+                          buttonItems: editableTextState.contextMenuButtonItems,
+                        );
+                      },
                     ),
                   ),
                 ),
@@ -3426,10 +3907,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
                 ],
                 IconButton(
                   icon: const Icon(Icons.send_rounded, size: 24),
-                  color: _isInputEmpty
-                      ? cs.onSurfaceVariant.withOpacity(0.4)
-                      : cs.primary,
-                  onPressed: _isInputEmpty ? null : _sendMessage,
+                  color: _canSend
+                      ? cs.primary
+                      : cs.onSurfaceVariant.withOpacity(0.4),
+                  onPressed: _canSend ? _sendMessage : null,
                   tooltip: '发送',
                 ),
               ],
@@ -3438,6 +3919,353 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         ],
       ),
     );
+  }
+
+  /// 弹出附件选择底部菜单：图片（多选）/ 视频（单选）/ 文件（多选）。
+  void _showAttachmentMenu() {
+    final cs = Theme.of(context).colorScheme;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
+        decoration: BoxDecoration(
+          color: cs.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
+                decoration: BoxDecoration(
+                    color: cs.outlineVariant,
+                    borderRadius: BorderRadius.circular(2)),
+              ),
+            ),
+            Text('发送附件',
+                style: TextStyle(
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                    color: cs.onSurfaceVariant)),
+            const SizedBox(height: 14),
+            _sheetBtn(ctx, cs, Icons.image_rounded, '图片（可多选）', () {
+              Navigator.pop(ctx);
+              _pickImages();
+            }),
+            const SizedBox(height: 8),
+            _sheetBtn(ctx, cs, Icons.videocam_rounded, '视频（单选）', () {
+              Navigator.pop(ctx);
+              _pickVideo();
+            }),
+            const SizedBox(height: 8),
+            _sheetBtn(ctx, cs, Icons.insert_drive_file_rounded, '文件（可多选）', () {
+              Navigator.pop(ctx);
+              _pickFiles();
+            }),
+            const SizedBox(height: 8),
+            _sheetBtn(ctx, cs, Icons.content_paste_rounded, '粘贴截图或文件', () {
+              Navigator.pop(ctx);
+              _pasteClipboardAttachments(showEmptyHint: true);
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  /// 从相册多选图片，复制到媒体目录并加入待发送列表。
+  Future<void> _pickImages() async {
+    try {
+      final currentImageCount =
+          _pendingAttachments.where((att) => att.type == 'image').length;
+      final remainingSlots = defaultMaxVisionImages - currentImageCount;
+      if (remainingSlots <= 0) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('一次最多发送 4 张图片'),
+              behavior: SnackBarBehavior.floating));
+        }
+        return;
+      }
+
+      final files = await _imagePicker.pickMultiImage(
+        maxWidth: 1600,
+        maxHeight: 1600,
+        imageQuality: 85,
+      );
+      if (files.isEmpty) return;
+      final selectedFiles = files.take(remainingSlots).toList();
+      if (files.length > selectedFiles.length && mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('已限制为一次最多 4 张图片'),
+            behavior: SnackBarBehavior.floating));
+      }
+      for (final file in selectedFiles) {
+        final att = await _db.copyToMedia(File(file.path), 'image');
+        if (mounted) setState(() => _pendingAttachments.add(att));
+      }
+    } catch (e) {
+      debugPrint('[附件] 选择图片失败：$e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('选择图片失败：$e'), behavior: SnackBarBehavior.floating));
+      }
+    }
+  }
+
+  /// 从相册选择单个视频，复制到媒体目录并加入待发送列表。
+  Future<void> _pickVideo() async {
+    try {
+      final file = await _imagePicker.pickVideo(source: ImageSource.gallery);
+      if (file == null) return;
+      final att = await _db.copyToMedia(File(file.path), 'video');
+      if (mounted) setState(() => _pendingAttachments.add(att));
+    } catch (e) {
+      debugPrint('[附件] 选择视频失败：$e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('选择视频失败：$e'), behavior: SnackBarBehavior.floating));
+      }
+    }
+  }
+
+  Future<void> _pickFiles() async {
+    try {
+      final result = await FilePicker.pickFiles(
+        allowMultiple: true,
+        type: FileType.any,
+        withData: false,
+      );
+      if (result == null || result.files.isEmpty) return;
+      var added = 0;
+      for (final picked in result.files) {
+        final path = picked.path;
+        if (path == null || path.trim().isEmpty) continue;
+        final source = File(path);
+        if (!await source.exists()) continue;
+        final att = await _db.copyToMedia(
+          source,
+          _attachmentTypeForPath(path),
+          fileName: picked.name,
+        );
+        if (mounted) setState(() => _pendingAttachments.add(att));
+        added++;
+      }
+      if (mounted && added == 0) {
+        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+            content: Text('没有可读取的文件'), behavior: SnackBarBehavior.floating));
+      }
+    } catch (e) {
+      debugPrint('[附件] 选择文件失败：$e');
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('选择文件失败：$e'), behavior: SnackBarBehavior.floating));
+      }
+    }
+  }
+
+  Future<void> _pasteClipboardAttachments({bool showEmptyHint = false}) async {
+    if (_isPastingAttachments) return;
+    _isPastingAttachments = true;
+    try {
+      final attachments = <MediaAttachment>[];
+
+      try {
+        final files = await Pasteboard.files();
+        for (final path in files) {
+          if (path.trim().isEmpty || path.startsWith('content://')) continue;
+          final source = File(path);
+          if (!await source.exists()) continue;
+          attachments.add(await _db.copyToMedia(
+            source,
+            _attachmentTypeForPath(path),
+          ));
+        }
+      } catch (e) {
+        debugPrint('[附件] 剪贴板文件读取失败：$e');
+      }
+
+      if (attachments.isEmpty) {
+        try {
+          final image = await Pasteboard.image;
+          if (image != null && image.isNotEmpty) {
+            attachments.add(await _db.copyBytesToMedia(
+              Uint8List.fromList(image),
+              'image',
+              fileName:
+                  'clipboard_${DateTime.now().millisecondsSinceEpoch}.png',
+              mimeType: 'image/png',
+            ));
+          }
+        } catch (e) {
+          debugPrint('[附件] 剪贴板图片读取失败：$e');
+        }
+      }
+
+      if (!mounted) return;
+      if (attachments.isEmpty) {
+        if (showEmptyHint) {
+          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+              content: Text('剪贴板里没有可粘贴的文件或截图'),
+              behavior: SnackBarBehavior.floating));
+        }
+        return;
+      }
+      setState(() => _pendingAttachments.addAll(attachments));
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('已粘贴 ${attachments.length} 个附件'),
+          behavior: SnackBarBehavior.floating));
+    } catch (e) {
+      debugPrint('[附件] 粘贴失败：$e');
+      if (mounted && showEmptyHint) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('粘贴失败：$e'), behavior: SnackBarBehavior.floating));
+      }
+    } finally {
+      _isPastingAttachments = false;
+    }
+  }
+
+  String _attachmentTypeForPath(String path) {
+    final ext = _extensionOfPath(path);
+    const imageExts = {
+      'jpg',
+      'jpeg',
+      'png',
+      'gif',
+      'webp',
+      'heic',
+      'bmp',
+    };
+    const videoExts = {
+      'mp4',
+      'mov',
+      'avi',
+      'mkv',
+      'webm',
+      'm4v',
+    };
+    if (imageExts.contains(ext)) return 'image';
+    if (videoExts.contains(ext)) return 'video';
+    return 'file';
+  }
+
+  String _extensionOfPath(String path) {
+    final name = path.split(RegExp(r'[/\\]')).last;
+    final dot = name.lastIndexOf('.');
+    if (dot < 0 || dot == name.length - 1) return '';
+    return name.substring(dot + 1).toLowerCase();
+  }
+
+  /// 待发送附件预览行：图片缩略 / 视频占位，每项可单独移除。
+  Widget _buildAttachmentPreviewRow(ColorScheme cs) {
+    return Container(
+      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
+      child: Wrap(
+        spacing: 8,
+        runSpacing: 8,
+        children: _pendingAttachments.map((att) {
+          final child = _buildPendingAttachmentThumb(att, cs);
+          return Stack(
+            clipBehavior: Clip.none,
+            children: [
+              child,
+              Positioned(
+                top: -6,
+                right: -6,
+                child: InkWell(
+                  onTap: () => _removeAttachment(att),
+                  borderRadius: BorderRadius.circular(12),
+                  child: Container(
+                    decoration: BoxDecoration(
+                      color: cs.surface,
+                      shape: BoxShape.circle,
+                      border: Border.all(color: cs.outlineVariant),
+                    ),
+                    child: Icon(Icons.cancel,
+                        size: 18, color: cs.onSurfaceVariant),
+                  ),
+                ),
+              ),
+            ],
+          );
+        }).toList(),
+      ),
+    );
+  }
+
+  Widget _buildPendingAttachmentThumb(MediaAttachment att, ColorScheme cs) {
+    if (att.type == 'image') {
+      return ClipRRect(
+        borderRadius: BorderRadius.circular(8),
+        child: Image.file(File(att.localPath),
+            width: 56, height: 56, fit: BoxFit.cover),
+      );
+    }
+    final icon = att.type == 'video'
+        ? Icons.play_circle_outline_rounded
+        : _fileIconFor(att);
+    return Container(
+      width: att.type == 'file' ? 150 : 56,
+      height: 56,
+      padding: const EdgeInsets.symmetric(horizontal: 8),
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(8),
+        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
+      ),
+      child: Row(
+        mainAxisAlignment: att.type == 'file'
+            ? MainAxisAlignment.start
+            : MainAxisAlignment.center,
+        children: [
+          Icon(icon, size: 28, color: cs.onSurfaceVariant),
+          if (att.type == 'file') ...[
+            const SizedBox(width: 8),
+            Expanded(
+              child: Text(
+                att.fileName ?? _fileNameFromPath(att.localPath),
+                maxLines: 2,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+              ),
+            ),
+          ],
+        ],
+      ),
+    );
+  }
+
+  /// 从待发送列表移除某附件。
+  void _removeAttachment(MediaAttachment att) {
+    if (!mounted) return;
+    final removed = _pendingAttachments
+        .where((a) => a.id == att.id)
+        .toList(growable: false);
+    setState(() => _pendingAttachments.removeWhere((a) => a.id == att.id));
+    for (final attachment in removed) {
+      unawaited(_deletePendingAttachmentFile(attachment));
+    }
+  }
+
+  Future<void> _deletePendingAttachmentFile(MediaAttachment attachment) async {
+    final dataDir = _db.dataDirPath;
+    if (dataDir == null) return;
+    final mediaRoot =
+        '${Directory(dataDir).absolute.path}${Platform.pathSeparator}media';
+    final file = File(attachment.localPath).absolute;
+    if (!file.path.startsWith('$mediaRoot${Platform.pathSeparator}')) return;
+    try {
+      if (await file.exists()) {
+        await file.delete();
+      }
+    } catch (e) {
+      debugPrint('[附件] 清理未发送文件失败：$e');
+    }
   }
 
   Widget _buildQuoteBar(ColorScheme cs) {
@@ -3489,7 +4317,54 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 }
 
+IconData _fileIconFor(MediaAttachment att) {
+  final ext = _extensionOfPath(att.fileName ?? att.localPath);
+  return switch (ext) {
+    'pdf' => Icons.picture_as_pdf_rounded,
+    'zip' || 'rar' || '7z' => Icons.folder_zip_rounded,
+    'doc' || 'docx' => Icons.description_rounded,
+    'xls' || 'xlsx' || 'csv' => Icons.table_chart_rounded,
+    'ppt' || 'pptx' => Icons.slideshow_rounded,
+    'txt' ||
+    'md' ||
+    'json' ||
+    'yaml' ||
+    'yml' ||
+    'dart' =>
+      Icons.article_rounded,
+    _ => Icons.insert_drive_file_rounded,
+  };
+}
+
+String _fileNameFromPath(String path) {
+  final segments = path.split(RegExp(r'[/\\]'));
+  return segments.isEmpty ? path : segments.last;
+}
+
+String _extensionOfPath(String path) {
+  final name = path.split(RegExp(r'[/\\]')).last;
+  final dot = name.lastIndexOf('.');
+  if (dot < 0 || dot == name.length - 1) return '';
+  return name.substring(dot + 1).toLowerCase();
+}
+
 /// 用户在 AI 回复期间发的消息，排队等当前回合结束后再触发 AI 回复。
+class _PendingAgentToolApproval {
+  final AICharacter character;
+  final ApiConfig config;
+  final ApiProvider provider;
+  final String userRequest;
+  final ToolRequest request;
+
+  const _PendingAgentToolApproval({
+    required this.character,
+    required this.config,
+    required this.provider,
+    required this.userRequest,
+    required this.request,
+  });
+}
+
 class _PendingUserMessage {
   final String text;
   final List<String> mentionedIds;
@@ -3617,7 +4492,16 @@ class _MessageBubble extends StatelessWidget {
                             : const Radius.circular(18),
                       ),
                     ),
-                    child: _buildContent(message, sender, isUser, cs),
+                    child: Column(
+                      crossAxisAlignment: isUser
+                          ? CrossAxisAlignment.end
+                          : CrossAxisAlignment.start,
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        _buildMediaContent(context, message, cs, isUser),
+                        _buildContent(message, sender, isUser, cs),
+                      ],
+                    ),
                   ),
                   Padding(
                     padding: EdgeInsets.only(
@@ -3673,6 +4557,187 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
+  /// 气泡内的媒体渲染：图片网格 + 视频播放器，纵向排在文案上方。
+  Widget _buildMediaContent(
+      BuildContext context, Message message, ColorScheme cs, bool isUser) {
+    final media = message.media ?? [];
+    if (media.isEmpty) return const SizedBox.shrink();
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 8),
+      child: Wrap(
+        spacing: 6,
+        runSpacing: 6,
+        alignment: isUser ? WrapAlignment.end : WrapAlignment.start,
+        children: media.map((att) {
+          if (att.type == 'image') {
+            return _buildImageThumb(context, att, cs);
+          }
+          if (att.type == 'video') {
+            return _VideoBubble(localPath: att.localPath, isUser: isUser);
+          }
+          return _buildFileAttachment(context, att, cs, isUser);
+        }).toList(),
+      ),
+    );
+  }
+
+  /// 图片缩略图，点击进入全屏预览（InteractiveViewer 可缩放/拖拽）。
+  Widget _buildImageThumb(
+      BuildContext context, MediaAttachment att, ColorScheme cs) {
+    return GestureDetector(
+      onTap: () => _openImageFullscreen(context, att.localPath),
+      child: ClipRRect(
+        borderRadius: BorderRadius.circular(10),
+        child: Image.file(
+          File(att.localPath),
+          width: 140,
+          height: 140,
+          fit: BoxFit.cover,
+        ),
+      ),
+    );
+  }
+
+  /// 全屏预览图片：黑色背景 + InteractiveViewer 支持双指缩放。
+  void _openImageFullscreen(BuildContext context, String path) {
+    showDialog(
+      context: context,
+      builder: (_) => Dialog(
+        backgroundColor: Colors.black,
+        insetPadding: const EdgeInsets.all(0),
+        child: Stack(
+          children: [
+            InteractiveViewer(
+              child: Image.file(File(path)),
+            ),
+            Positioned(
+              top: 16,
+              right: 16,
+              child: IconButton(
+                icon: const Icon(Icons.close_rounded, color: Colors.white),
+                onPressed: () => Navigator.of(context).pop(),
+                tooltip: '关闭',
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildFileAttachment(
+    BuildContext context,
+    MediaAttachment att,
+    ColorScheme cs,
+    bool isUser,
+  ) {
+    final textColor = isUser ? cs.onPrimary : cs.onSurface;
+    final subtleColor =
+        isUser ? cs.onPrimary.withOpacity(0.75) : cs.onSurfaceVariant;
+    final borderColor =
+        isUser ? cs.onPrimary.withOpacity(0.25) : cs.outlineVariant;
+    final fillColor =
+        isUser ? cs.onPrimary.withOpacity(0.08) : cs.surfaceContainerHighest;
+    return InkWell(
+      onTap: () => _openAttachment(context, att),
+      borderRadius: BorderRadius.circular(8),
+      child: Container(
+        width: 240,
+        padding: const EdgeInsets.all(10),
+        decoration: BoxDecoration(
+          color: fillColor,
+          borderRadius: BorderRadius.circular(8),
+          border: Border.all(color: borderColor),
+        ),
+        child: Row(
+          children: [
+            Icon(_fileIconFor(att), size: 30, color: subtleColor),
+            const SizedBox(width: 10),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                mainAxisSize: MainAxisSize.min,
+                children: [
+                  Text(
+                    att.fileName ?? _fileNameFromPath(att.localPath),
+                    maxLines: 2,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(
+                      fontSize: 13,
+                      fontWeight: FontWeight.w600,
+                      color: textColor,
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    _formatAttachmentSize(att.fileSize),
+                    maxLines: 1,
+                    overflow: TextOverflow.ellipsis,
+                    style: TextStyle(fontSize: 11, color: subtleColor),
+                  ),
+                ],
+              ),
+            ),
+            const SizedBox(width: 8),
+            Icon(Icons.open_in_new_rounded, size: 18, color: subtleColor),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _openAttachment(
+      BuildContext context, MediaAttachment att) async {
+    try {
+      final result = await OpenFilex.open(att.localPath, type: att.mimeType);
+      if (result.type.name != 'done' && context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('打开失败：${result.message}'),
+            behavior: SnackBarBehavior.floating));
+      }
+    } catch (e) {
+      if (context.mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+            content: Text('打开失败：$e'), behavior: SnackBarBehavior.floating));
+      }
+    }
+  }
+
+  IconData _fileIconFor(MediaAttachment att) {
+    final ext = _extensionOfPath(att.fileName ?? att.localPath);
+    return switch (ext) {
+      'pdf' => Icons.picture_as_pdf_rounded,
+      'zip' || 'rar' || '7z' => Icons.folder_zip_rounded,
+      'doc' || 'docx' => Icons.description_rounded,
+      'xls' || 'xlsx' || 'csv' => Icons.table_chart_rounded,
+      'ppt' || 'pptx' => Icons.slideshow_rounded,
+      'txt' ||
+      'md' ||
+      'json' ||
+      'yaml' ||
+      'yml' ||
+      'dart' =>
+        Icons.article_rounded,
+      _ => Icons.insert_drive_file_rounded,
+    };
+  }
+
+  String _fileNameFromPath(String path) {
+    final segments = path.split(RegExp(r'[/\\]'));
+    return segments.isEmpty ? path : segments.last;
+  }
+
+  String _formatAttachmentSize(int? bytes) {
+    if (bytes == null) return '文件';
+    if (bytes < 1024) return '$bytes B';
+    final kb = bytes / 1024;
+    if (kb < 1024) return '${kb.toStringAsFixed(kb < 10 ? 1 : 0)} KB';
+    final mb = kb / 1024;
+    if (mb < 1024) return '${mb.toStringAsFixed(mb < 10 ? 1 : 0)} MB';
+    final gb = mb / 1024;
+    return '${gb.toStringAsFixed(gb < 10 ? 1 : 0)} GB';
+  }
+
   Widget _buildContent(
       Message message, AICharacter? sender, bool isUser, ColorScheme cs) {
     final textColor = isUser ? cs.onPrimary : cs.onSurface;
@@ -3699,7 +4764,7 @@ class _MessageBubble extends StatelessWidget {
       base = Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          Text(content,
+          SelectableText(content,
               style: TextStyle(fontSize: 15, color: textColor, height: 1.4)),
           if (mentionNames.isNotEmpty)
             Padding(
@@ -3718,7 +4783,7 @@ class _MessageBubble extends StatelessWidget {
         ],
       );
     } else {
-      base = Text(content,
+      base = SelectableText(content,
           style: TextStyle(fontSize: 15, color: textColor, height: 1.4));
     }
 
@@ -3735,6 +4800,70 @@ class _MessageBubble extends StatelessWidget {
       );
     }
     return base;
+  }
+}
+
+/// 气泡内视频播放器：使用 chewie 渲染带控制条的播放器。
+///
+/// 负责 [VideoPlayerController] 与 [ChewieController] 的完整生命周期，
+/// 在 [dispose] 中释放，避免资源泄漏。视频初始化完成后才展示控制条，
+/// 初始化期间显示占位 loading。
+class _VideoBubble extends StatefulWidget {
+  final String localPath;
+  final bool isUser;
+
+  const _VideoBubble({required this.localPath, required this.isUser});
+
+  @override
+  State<_VideoBubble> createState() => _VideoBubbleState();
+}
+
+class _VideoBubbleState extends State<_VideoBubble> {
+  late final VideoPlayerController _controller;
+  ChewieController? _chewieController;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller = VideoPlayerController.file(File(widget.localPath));
+    _controller.initialize().then((_) {
+      if (!mounted) return;
+      // 初始化成功后再构造 ChewieController，保证 aspectRatio 可用。
+      _chewieController = ChewieController(
+        videoPlayerController: _controller,
+        autoPlay: false,
+        looping: false,
+        aspectRatio: _controller.value.aspectRatio,
+        placeholder: const Center(child: CircularProgressIndicator()),
+      );
+      setState(() {});
+    }).catchError((e) {
+      debugPrint('[视频] 初始化失败：$e');
+    });
+  }
+
+  @override
+  void dispose() {
+    _chewieController?.dispose();
+    _controller.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final ratio = _chewieController?.aspectRatio ?? 1.0;
+    return ConstrainedBox(
+      constraints: const BoxConstraints(maxWidth: 240, maxHeight: 320),
+      child: AspectRatio(
+        aspectRatio: ratio,
+        child: _chewieController != null
+            ? Chewie(controller: _chewieController!)
+            : Container(
+                color: Colors.black.withOpacity(0.08),
+                child: const Center(child: CircularProgressIndicator()),
+              ),
+      ),
+    );
   }
 }
 
