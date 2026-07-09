@@ -2786,7 +2786,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   void _insertMentionText(String mentionText) {
     final text = _textController.text;
-    final cursorPos = _textController.selection.baseOffset;
+    int cursorPos = _textController.selection.baseOffset;
+    if (cursorPos < 0) cursorPos = text.length;
 
     final searchEnd = cursorPos > 0 ? cursorPos - 1 : 0;
     int atPos = text.lastIndexOf('@', searchEnd);
@@ -2806,6 +2807,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 判断光标是否处于「@后跟非空格字符」的输入状态（即应显示 @ 弹窗）。
   bool _isInMentionQuery(String text, int cursorPos) {
+    if (cursorPos <= 0) return false;
     final textBeforeCursor = text.substring(0, cursorPos);
     final atIndex = textBeforeCursor.lastIndexOf('@');
     if (atIndex < 0) return false;
@@ -2827,6 +2829,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     final cursorPos = _textController.selection.baseOffset;
+    if (cursorPos <= 0) {
+      _hideMentionOverlay();
+      return;
+    }
     final textBeforeCursor = text.substring(0, cursorPos);
     final atIndex = textBeforeCursor.lastIndexOf('@');
 
