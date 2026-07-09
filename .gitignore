@@ -56,3 +56,9 @@ devtools_options.yaml
 dl.txt
 docs/plans/
 docs/superpowers/plans/
+
+# Local workspace / build artifacts
+star.html
+test.html
+release_artifacts/
+

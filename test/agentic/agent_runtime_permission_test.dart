@@ -194,7 +194,7 @@ void main() {
       request: const ToolRequest(
         tool: AgentToolName.workspacePatch,
         reason: '写入文件',
-        args: {'patch': 'diff --git a/a.md b/a.md\n--- a/a.md\n+++ b/a.md'},
+        args: {'path': 'a.md', 'content': 'new content for a.md'},
       ),
       userRequest: '生成文件并测试',
     );
@@ -225,7 +225,7 @@ void main() {
             'success': true,
             'message': '''
 ```agent_tool
-{"tool":"workspace.patch","reason":"写入生成的 Markdown","args":{"patch":"diff --git a/docs/ai_work_test.md b/docs/ai_work_test.md\\n--- a/docs/ai_work_test.md\\n+++ b/docs/ai_work_test.md\\n@@\\n-old\\n+hello from tool test\\n"}}
+{"tool":"workspace.patch","reason":"写入生成的 Markdown","args":{"path":"docs/ai_work_test.md","content":"hello from tool test\\n"}}
 ```
 ''',
           };
@@ -302,11 +302,15 @@ void main() {
 
     expect(result.status, AgentRuntimeStatus.waitingForApproval);
     expect(result.pendingToolRequest?.tool, AgentToolName.workspacePatch);
+    // 本地文件规划器现直接产出 (path, content) 交给 /workspace/write 端点，
+    // 不再生成 git diff（new-file diff 在目标已存在时会被 git apply --check 拒掉）。
     expect(
-      result.pendingToolRequest?.args['patch'],
+      result.pendingToolRequest?.args['path'],
+      'docs/agentic_live_test.md',
+    );
+    expect(
+      result.pendingToolRequest?.args['content'],
       allOf(
-        contains('diff --git a/docs/agentic_live_test.md'),
-        contains('@@ -0,0 +1,'),
         contains('```dart'),
         contains("print('hello from 代码大神')"),
       ),
@@ -378,6 +382,14 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
 
   @override
   Future<Map<String, dynamic>> applyPatch(String patch) async {
+    return patchResult;
+  }
+
+  // 桥接改为 /workspace/write 端点（path + content），不再走 git diff 的
+  // applyPatch。这里复用 patchResult 作为写操作的回包，保持测试聚焦在
+  // 权限/审批流转而非真实落盘。
+  @override
+  Future<Map<String, dynamic>> write(String path, String content) async {
     return patchResult;
   }
 
