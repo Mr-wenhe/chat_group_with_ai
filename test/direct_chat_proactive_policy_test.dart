@@ -72,22 +72,29 @@ void main() {
       expect(candidate?.source, DirectChatSource.group);
     });
 
-    test('allows an idle group character to proactively start a direct chat',
+    test('allows proactive DM from group context when user was recently active',
         () {
       final bob = _character(id: 'bob', name: '阿哲');
       final now = DateTime(2026, 7, 8, 12);
+      final recentMessage = Message(
+        groupId: 'g1',
+        senderId: 'user',
+        senderType: 'user',
+        content: '在群里说句话',
+        timestamp: now.subtract(const Duration(minutes: 5)),
+      );
 
       final candidate = DirectChatProactivePolicy.selectCandidate(
         directSummaries: const [],
         groupCharacters: [bob],
-        recentGroupMessages: const [],
+        recentGroupMessages: [recentMessage],
         lastProactiveAtByCharacter: const {},
         now: now,
       );
 
       expect(candidate?.character.id, 'bob');
       expect(candidate?.source, DirectChatSource.group);
-      expect(candidate?.reason, '主动找你聊聊');
+      expect(candidate?.reason, '从群聊话题延伸');
     });
 
     test('does not proactively start direct chat with unread pending', () {
