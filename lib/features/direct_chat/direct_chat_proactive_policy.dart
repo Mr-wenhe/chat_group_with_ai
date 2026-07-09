@@ -51,14 +51,15 @@ class DirectChatProactivePolicy {
       );
     }
 
+    final existingDirectIds =
+        directSummaries.map((summary) => summary.character.id).toSet();
+
     final hasRecentUserGroupMessage = recentGroupMessages.any((message) {
       return message.senderType == 'user' &&
           now.difference(message.timestamp) <= recentGroupWindow;
     });
     if (!hasRecentUserGroupMessage) return null;
 
-    final existingDirectIds =
-        directSummaries.map((summary) => summary.character.id).toSet();
     final groupCandidate = groupCharacters.where((character) {
       if (existingDirectIds.contains(character.id)) return false;
       return _canProactivelySpeak(character, lastProactiveAtByCharacter, now);

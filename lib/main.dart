@@ -17,7 +17,12 @@ void main() async {
   final db = DatabaseService();
   await db.init();
 
-  runApp(const ProviderScope(child: MyApp()));
+  runApp(
+    ProviderScope(
+      overrides: [databaseServiceProvider.overrideWithValue(db)],
+      child: const MyApp(),
+    ),
+  );
 }
 
 final scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();

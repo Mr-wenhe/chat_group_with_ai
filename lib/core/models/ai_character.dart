@@ -1,6 +1,7 @@
 import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
 import 'api_provider.dart';
+import 'tool_permission.dart';
 
 part 'ai_character.g.dart';
 
@@ -60,6 +61,18 @@ class AICharacter extends HiveObject {
   @HiveField(17)
   String apiConfigId;
 
+  @HiveField(18, defaultValue: true)
+  bool agenticEnabled;
+
+  @HiveField(19, defaultValue: [])
+  List<String> skillIds;
+
+  @HiveField(20, defaultValue: [
+    ToolPermission.skillCreate,
+    ToolPermission.skillDownload,
+  ])
+  List<ToolPermission> toolPermissions;
+
   AICharacter({
     String? id,
     required this.name,
@@ -79,8 +92,14 @@ class AICharacter extends HiveObject {
     this.isActive = true,
     DateTime? createdAt,
     String? apiConfigId,
+    this.agenticEnabled = true,
+    List<String>? skillIds,
+    List<ToolPermission>? toolPermissions,
   })  : id = id ?? const Uuid().v4(),
         modelName = modelName ?? ApiProvider.defaultModels[apiProvider] ?? '',
         createdAt = createdAt ?? DateTime.now(),
-        apiConfigId = apiConfigId ?? '';
+        apiConfigId = apiConfigId ?? '',
+        skillIds = skillIds ?? const [],
+        toolPermissions = toolPermissions ??
+            const [ToolPermission.skillCreate, ToolPermission.skillDownload];
 }

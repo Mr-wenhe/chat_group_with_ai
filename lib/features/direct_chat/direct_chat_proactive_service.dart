@@ -44,6 +44,9 @@ class DirectChatProactiveService {
       readAtByConversation: db.directChatReadAtByConversation(),
       sourceByConversation: db.directChatSourceByConversation(),
     );
+    final candidateSummaries = summaries
+        .where((summary) => _canGenerateProactiveMessage(summary.character))
+        .toList();
 
     final recentGroupMessages = allMessages
         .where((message) =>
@@ -60,12 +63,14 @@ class DirectChatProactiveService {
         .expand((group) => group.aiCharacterIds)
         .toSet();
     final groupCharacters = characters
-        .where((character) => groupCharacterIds.contains(character.id))
+        .where((character) =>
+            groupCharacterIds.contains(character.id) &&
+            _canGenerateProactiveMessage(character))
         .toList()
       ..shuffle(random);
 
     final candidate = DirectChatProactivePolicy.selectCandidate(
-      directSummaries: summaries,
+      directSummaries: candidateSummaries,
       groupCharacters: groupCharacters,
       recentGroupMessages: recentGroupMessages.take(20).toList(),
       lastProactiveAtByCharacter: db.directChatLastProactiveAtByCharacter(),
@@ -142,6 +147,11 @@ class DirectChatProactiveService {
       );
     }
     return null;
+  }
+
+  bool _canGenerateProactiveMessage(AICharacter character) {
+    final config = _resolveApiConfig(character);
+    return config != null && config.apiKey.isNotEmpty;
   }
 
   List<Map<String, dynamic>> _buildMessages({

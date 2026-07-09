@@ -1,3 +1,5 @@
+import 'dart:io';
+
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
@@ -5,6 +7,7 @@ import 'package:chat_group/features/settings/api_config_form_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/ai_providers/ai_api_service.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
@@ -22,6 +25,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   ThemeMode _currentThemeMode = ThemeMode.dark;
   bool _isTtsEnabled = true;
   Map<String, dynamic> _tokenUsage = {};
+  String _aiProcessingDirPath = '';
 
   @override
   void initState() {
@@ -30,6 +34,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _currentThemeMode = db.savedThemeMode;
     _isTtsEnabled = db.isTtsEnabled;
     _tokenUsage = db.getTokenUsage();
+    _loadAiProcessingDirPath();
+  }
+
+  Future<void> _loadAiProcessingDirPath() async {
+    final path =
+        await ref.read(databaseServiceProvider).effectiveAiProcessingDirPath();
+    if (mounted) {
+      setState(() => _aiProcessingDirPath = path);
+    }
   }
 
   @override
@@ -216,6 +229,34 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     ref.read(databaseServiceProvider).saveTtsEnabled(v);
                   },
                 ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 28),
+          _SectionHeader(title: 'AI 文件处理', cs: cs),
+          const SizedBox(height: 12),
+          AppCard(
+            cs: cs,
+            margin: EdgeInsets.zero,
+            children: [
+              _SettingTile(
+                cs: cs,
+                icon: Icons.folder_open_rounded,
+                iconColor: cs.secondary,
+                title: '处理结果目录',
+                subtitle: _aiProcessingDirPath.isEmpty
+                    ? '正在读取目录...'
+                    : _compactPath(_aiProcessingDirPath),
+                onTap: _chooseAiProcessingDir,
+              ),
+              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              _SettingTile(
+                cs: cs,
+                icon: Icons.restore_rounded,
+                iconColor: cs.secondary,
+                title: '恢复默认目录',
+                subtitle: '默认保存在应用数据目录的 ai_files 中',
+                onTap: _resetAiProcessingDir,
               ),
             ],
           ),
@@ -589,6 +630,52 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
   }
 
+  Future<void> _chooseAiProcessingDir() async {
+    try {
+      final selected = await FilePicker.getDirectoryPath(
+        dialogTitle: '选择 AI 处理文件目录',
+        initialDirectory:
+            _aiProcessingDirPath.isNotEmpty ? _aiProcessingDirPath : null,
+      );
+      if (selected == null || selected.trim().isEmpty) return;
+      final dir = Directory(selected).absolute;
+      if (!await dir.exists()) {
+        await dir.create(recursive: true);
+      }
+      final db = ref.read(databaseServiceProvider);
+      await db.saveAiProcessingDirPath(dir.path);
+      final path = await db.effectiveAiProcessingDirPath();
+      if (!mounted) return;
+      setState(() => _aiProcessingDirPath = path);
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+          content: Text('AI 处理目录已更新'), behavior: SnackBarBehavior.floating));
+    } catch (e) {
+      if (!mounted) return;
+      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
+          content: Text('选择目录失败：$e'), behavior: SnackBarBehavior.floating));
+    }
+  }
+
+  Future<void> _resetAiProcessingDir() async {
+    final db = ref.read(databaseServiceProvider);
+    await db.resetAiProcessingDirPath();
+    final path = await db.effectiveAiProcessingDirPath();
+    if (!mounted) return;
+    setState(() => _aiProcessingDirPath = path);
+    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
+        content: Text('已恢复默认 AI 处理目录'), behavior: SnackBarBehavior.floating));
+  }
+
+  String _compactPath(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final home = Platform.environment['HOME'];
+    if (home != null && home.isNotEmpty && normalized.startsWith(home)) {
+      return normalized.replaceFirst(home, '~');
+    }
+    if (normalized.length <= 58) return normalized;
+    return '...${normalized.substring(normalized.length - 55)}';
+  }
+
   Widget _statIcon(IconData icon, Color color) {
     return Container(
         width: 36,
@@ -667,8 +754,7 @@ class _SectionHeader extends StatelessWidget {
   final String title;
   final ColorScheme cs;
   final Widget? action;
-  const _SectionHeader(
-      {required this.title, required this.cs, this.action});
+  const _SectionHeader({required this.title, required this.cs, this.action});
 
   @override
   Widget build(BuildContext context) {
@@ -865,8 +951,11 @@ class _SettingTile extends StatelessWidget {
                 ],
               ),
             ),
-            Icon(Icons.chevron_right_rounded,
-                size: 20, color: cs.onSurfaceVariant),
+            if (trailing != null)
+              trailing!
+            else
+              Icon(Icons.chevron_right_rounded,
+                  size: 20, color: cs.onSurfaceVariant),
           ],
         ),
       ),

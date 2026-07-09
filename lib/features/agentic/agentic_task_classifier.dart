@@ -1,0 +1,35 @@
+class AgenticTaskClassifier {
+  static const _agenticPatterns = [
+    '修改文件',
+    '修改 ',
+    '改一下',
+    '写代码',
+    'review',
+    '代码审查',
+    '修复',
+    'bug',
+    '运行测试',
+    'flutter analyze',
+    'flutter test',
+    '当前浏览器',
+    '浏览器页面',
+    '网页内容',
+    '选中的网页',
+    '生成skill',
+    '生成 skill',
+    '创建skill',
+    '创建 skill',
+    '下载skill',
+    '下载 skill',
+    '安装skill',
+    '安装 skill',
+    '专家skill',
+    '专家 skill',
+    '工作流',
+  ];
+
+  static bool requiresAgenticWork(String message) {
+    final lower = message.toLowerCase();
+    return _agenticPatterns.any(lower.contains);
+  }
+}

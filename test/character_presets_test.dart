@@ -3,8 +3,10 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('CharacterPreset', () {
-    test('预设数量为 10', () {
-      expect(CharacterPreset.presets.length, 10);
+    test('包含基础人设与可执行能力预设', () {
+      expect(CharacterPreset.presets.length, greaterThanOrEqualTo(14));
+      final names = CharacterPreset.presets.map((p) => p.name);
+      expect(names, containsAll(['代码大神', 'Bug 修复师', '产品参谋', '网页研究员']));
     });
 
     test('每个预设的关键字段均非空且年龄合法', () {

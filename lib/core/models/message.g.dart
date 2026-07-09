@@ -26,13 +26,14 @@ class MessageAdapter extends TypeAdapter<Message> {
       replyToMessageId: fields[6] as String?,
       isMention: fields[7] as bool,
       mentionedAiIds: (fields[8] as List?)?.cast<String>(),
+      media: (fields[9] as List?)?.cast<MediaAttachment>(),
     );
   }
 
   @override
   void write(BinaryWriter writer, Message obj) {
     writer
-      ..writeByte(9)
+      ..writeByte(10)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -50,7 +51,9 @@ class MessageAdapter extends TypeAdapter<Message> {
       ..writeByte(7)
       ..write(obj.isMention)
       ..writeByte(8)
-      ..write(obj.mentionedAiIds);
+      ..write(obj.mentionedAiIds)
+      ..writeByte(9)
+      ..write(obj.media);
   }
 
   @override

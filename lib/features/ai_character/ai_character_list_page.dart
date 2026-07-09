@@ -1,6 +1,7 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
+import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/direct_chat/pinned_ordering.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
@@ -674,6 +675,9 @@ class _CharacterCard extends StatelessWidget {
     final displayColor =
         config != null ? providerColor(config.provider) : pColor;
     final displayLabel = config != null ? config.name : label;
+    final inferredSkillCount =
+        CharacterSkillResolver.defaultsFor(character).skills.length;
+    final skillCount = inferredSkillCount + character.skillIds.length;
 
     return Dismissible(
       key: Key(character.id),
@@ -745,6 +749,21 @@ class _CharacterCard extends StatelessWidget {
                                   style: TextStyle(
                                       fontSize: 11,
                                       color: cs.onSurfaceVariant)),
+                            ),
+                          ],
+                          if (character.agenticEnabled) ...[
+                            const SizedBox(width: 6),
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 6, vertical: 2),
+                              decoration: BoxDecoration(
+                                  color: cs.tertiaryContainer,
+                                  borderRadius: BorderRadius.circular(6)),
+                              child: Text('行动 $skillCount',
+                                  style: TextStyle(
+                                      fontSize: 11,
+                                      fontWeight: FontWeight.w600,
+                                      color: cs.onTertiaryContainer)),
                             ),
                           ],
                         ],

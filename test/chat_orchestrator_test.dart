@@ -465,4 +465,48 @@ void main() {
       expect(prompt, contains('渐进'));
     });
   });
+
+  group('ChatOrchestrator agentic routing', () {
+    test('agentic classifier only routes enabled characters', () {
+      final character = AICharacter(
+        name: '代码大神',
+        avatar: 'C',
+        age: 30,
+        role: '工程师',
+        personalityTags: const ['代码'],
+        systemPrompt: 'review 代码',
+        apiKey: 'k',
+        apiProvider: 'deepseek',
+      )..agenticEnabled = true;
+
+      expect(
+        ChatOrchestrator.shouldUseAgenticRuntime(
+          character: character,
+          message: '帮我 review lib/main.dart',
+        ),
+        isTrue,
+      );
+    });
+
+    test('normal chat stays normal when agentic disabled', () {
+      final character = AICharacter(
+        name: '代码大神',
+        avatar: 'C',
+        age: 30,
+        role: '工程师',
+        personalityTags: const ['代码'],
+        systemPrompt: 'review 代码',
+        apiKey: 'k',
+        apiProvider: 'deepseek',
+      )..agenticEnabled = false;
+
+      expect(
+        ChatOrchestrator.shouldUseAgenticRuntime(
+          character: character,
+          message: '帮我 review lib/main.dart',
+        ),
+        isFalse,
+      );
+    });
+  });
 }

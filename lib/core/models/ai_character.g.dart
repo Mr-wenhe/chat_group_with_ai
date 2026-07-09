@@ -35,13 +35,18 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
       isActive: fields[15] as bool,
       createdAt: fields[16] as DateTime?,
       apiConfigId: fields[17] as String?,
+      agenticEnabled: fields[18] == null ? false : fields[18] as bool,
+      skillIds: fields[19] == null ? [] : (fields[19] as List?)?.cast<String>(),
+      toolPermissions: fields[20] == null
+          ? [ToolPermission.skillCreate, ToolPermission.skillDownload]
+          : (fields[20] as List?)?.cast<ToolPermission>(),
     );
   }
 
   @override
   void write(BinaryWriter writer, AICharacter obj) {
     writer
-      ..writeByte(18)
+      ..writeByte(21)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -77,7 +82,13 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
       ..writeByte(16)
       ..write(obj.createdAt)
       ..writeByte(17)
-      ..write(obj.apiConfigId);
+      ..write(obj.apiConfigId)
+      ..writeByte(18)
+      ..write(obj.agenticEnabled)
+      ..writeByte(19)
+      ..write(obj.skillIds)
+      ..writeByte(20)
+      ..write(obj.toolPermissions);
   }
 
   @override

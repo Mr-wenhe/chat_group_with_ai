@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/features/chat_group/group_chat_proactive_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
 import 'package:flutter/material.dart';
 
@@ -61,17 +62,39 @@ class _DirectChatForegroundWatcherState
     }
     _checking = true;
     try {
-      final result = await DirectChatProactiveService(db: widget.db)
+      final directResult = await DirectChatProactiveService(db: widget.db)
           .tryCreateProactiveMessage();
-      if (result != null) {
+      if (directResult != null) {
         widget.scaffoldMessengerKey.currentState?.showSnackBar(
           SnackBar(
-            content: Text('${result.character.name} 主动发来一条私聊'),
+            content: Text('${directResult.character.name} 主动发来一条私聊'),
             behavior: SnackBarBehavior.floating,
             action: SnackBarAction(
               label: '去看看',
               onPressed: () {
                 widget.navigatorKey.currentState?.pushNamed('/direct-chats');
+              },
+            ),
+          ),
+        );
+        if (mounted) setState(() {});
+        return;
+      }
+
+      final groupResult = await GroupChatProactiveService(db: widget.db)
+          .tryCreateProactiveMessage();
+      if (groupResult != null) {
+        widget.scaffoldMessengerKey.currentState?.showSnackBar(
+          SnackBar(
+            content: Text(
+              '${groupResult.character.name} 在「${groupResult.group.name}」里发言了',
+            ),
+            behavior: SnackBarBehavior.floating,
+            action: SnackBarAction(
+              label: '去看看',
+              onPressed: () {
+                widget.navigatorKey.currentState
+                    ?.pushNamed('/chat/${groupResult.group.id}');
               },
             ),
           ),

@@ -56,6 +56,13 @@ class HumanizedPromptBuilder {
     };
   }
 
+  static String ownerMentionInstruction(String ownerName) {
+    final normalizedOwner = ownerName.trim().isEmpty ? '我' : ownerName.trim();
+    final ownerMention = normalizedOwner == '我' ? '@我' : '@$normalizedOwner';
+    return '这个群里的真人用户/群主叫「$normalizedOwner」；'
+        '你可以偶尔自然地用「$ownerMention」向真人用户追问、邀请补充或回应他的观点，但不要每条都@。';
+  }
+
   static String _limit(List<String> values, int count) {
     return values.take(count).join('；');
   }

@@ -48,3 +48,11 @@ migrate_working_dir/
 .history
 .svn/
 .swiftpm/
+
+# Local workspace artifacts (not part of the app)
+LESSONS_LEARNED.md
+bin/
+devtools_options.yaml
+dl.txt
+docs/plans/
+docs/superpowers/plans/
