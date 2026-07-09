@@ -53,13 +53,17 @@ dependencies:
   # 这是 Flutter 3.27+ 才引入的 API，与本项目 fork（3.24.0-1.0.pre.538）不兼容。
   # 故锁定在 8.x（最后一个兼容 Flutter 3.24 的大版本）。
   file_picker: '>=8.0.0 <9.0.0'
+  desktop_drop: ^0.7.1
   open_filex: ^4.7.0
 
 # ===== 依赖覆盖：强制降级使用 android.flutter 属性（3.27+ API）的传递依赖 =====
 # 这些包在 9.x+ 版本更新了 Android build.gradle 使用 android.flutter.compileSdkVersion，
 # 但本项目 fork（3.24.0-1.0.pre.538）/ CI（3.24.0）不支持该属性。
 dependency_overrides:
+  # package_info_plus 9.x+ 的 Android build.gradle 使用 android.flutter 属性（3.27+ API）
   package_info_plus: '>=8.0.0 <9.0.0'
+  # wakelock_plus 1.4.0+ 同上，锁定到 1.3.x（要求 package_info_plus <9.0.0，与上方兼容）
+  wakelock_plus: '>=1.0.0 <1.4.0'
 
 dev_dependencies:
   flutter_test:
