@@ -632,7 +632,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   Future<void> _chooseAiProcessingDir() async {
     try {
-      final selected = await FilePicker.getDirectoryPath(
+      final selected = await FilePicker.platform.getDirectoryPath(
         dialogTitle: '选择 AI 处理文件目录',
         initialDirectory:
             _aiProcessingDirPath.isNotEmpty ? _aiProcessingDirPath : null,

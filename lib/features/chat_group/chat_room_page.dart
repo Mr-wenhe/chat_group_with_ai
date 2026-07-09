@@ -4035,7 +4035,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   Future<void> _pickFiles() async {
     try {
-      final result = await FilePicker.pickFiles(
+      final result = await FilePicker.platform.pickFiles(
         allowMultiple: true,
         type: FileType.any,
         withData: false,
