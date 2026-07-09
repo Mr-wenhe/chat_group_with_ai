@@ -1145,7 +1145,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (paths.isEmpty) return const [];
 
     final attachments = <MediaAttachment>[];
-    final bridge = LocalAgentBridgeClient(baseUrl: 'http://127.0.0.1:8765');
+    final bridge = LocalAgentBridgeClient();
     final workspaceTool = WorkspaceFileTool(bridge);
     for (final path in paths.take(6)) {
       try {
@@ -1207,7 +1207,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required ApiConfig config,
     required ApiProvider provider,
   }) {
-    final bridge = LocalAgentBridgeClient(baseUrl: 'http://127.0.0.1:8765');
+    final bridge = LocalAgentBridgeClient();
     return AgentRuntime(
       complete: (messages) => _chatApi.sendChatMessage(
         apiKey: config.apiKey,

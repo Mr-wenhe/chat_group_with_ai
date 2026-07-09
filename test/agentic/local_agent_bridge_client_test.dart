@@ -10,7 +10,7 @@ void main() {
   });
 
   test('client accepts localhost bridge urls', () {
-    final client = LocalAgentBridgeClient(baseUrl: 'http://127.0.0.1:8765');
-    expect(client.baseUrl, 'http://127.0.0.1:8765');
+    final client = LocalAgentBridgeClient();
+    expect(client.baseUrl, 'http://127.0.0.1:54263');
   });
 }

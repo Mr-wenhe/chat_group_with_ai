@@ -365,7 +365,7 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
     this.patchResult = const {},
     this.commandResult = const {},
     this.throwOnRead = false,
-  }) : super(LocalAgentBridgeClient(baseUrl: 'http://127.0.0.1:8765'));
+  }) : super(LocalAgentBridgeClient());
 
   @override
   Future<Map<String, dynamic>> read(String path) async {
