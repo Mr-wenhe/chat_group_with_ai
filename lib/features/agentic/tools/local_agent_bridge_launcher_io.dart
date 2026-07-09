@@ -9,6 +9,19 @@
 //     旧方案会静默跳过；进程内启动则开箱即用，App 启动即自动监听端口。
 //   - 端口生命周期与 App 一致：App 进程销毁时端口随进程自动释放，无需回收子进程。
 //
+// 沙盒（App Sandbox）：
+//   - 项目走 GitHub Release 分发（非 App Store），已将 macOS 沙盒关闭
+//     （Debug/Release 的 app-sandbox 均为 false，Release 额外保留 network.server）。
+//   - 关闭沙盒后，App 进程内的 Directory.current 恢复为真实工作目录，
+//     bind(127.0.0.1:54263) 不再被沙盒拦截，release 运行时可正常启动桥接服务。
+//
+// 工作区（workspace）默认定位：
+//   - 关闭沙盒后，缺省 workspace 不再使用被沙盒重定向的容器目录，
+//     而是从当前进程工作目录向上逐级查找**最近的含 .git 的 git 仓库根目录**，
+//     以确保 apply-patch（内部执行 `git apply`）在真实 git 仓库中可用；
+//     若到文件系统根仍未找到 .git，则回退到当前进程工作目录。
+//   - 见 [_resolveDefaultWorkspace] 与 [start]。
+//
 // 仍然仅桌面端（macOS / Windows / Linux）生效；Web / 移动端通过条件导出
 // 使用 _web stub，不引入本文件（及 dart:io），保证 Web 编译安全。
 
@@ -29,14 +42,15 @@ class LocalAgentBridgeLauncher {
 
   /// 在 App 进程内启动本地桥接服务（幂等：已运行则直接返回）。
   ///
-  /// [workspace] 为目标工作区绝对路径；缺省时使用当前进程工作目录。
-  /// 注意：release 桌面版缺省时 workspace 即 App 运行目录（cwd），
-  /// 如需指向用户项目目录可后续增强。
+  /// [workspace] 为目标工作区绝对路径；缺省时自动定位到**最近的 git 仓库根目录**
+  /// （见 [_resolveDefaultWorkspace]），以使 apply-patch 内部的 git apply 在真实仓库中可用。
   Future<void> start({String? workspace}) async {
     // 仅桌面端自动启动；非桌面端（含 Web/移动端）保持现有手动提示行为。
     if (!_isDesktop) return;
 
-    final ws = workspace ?? Directory.current.path;
+    // 缺省 workspace：关闭沙盒后定位到当前进程工作目录向上最近的 git 仓库根目录，
+    // 保证 apply-patch 的 git apply 可在真实仓库中生效。
+    final ws = workspace ?? _resolveDefaultWorkspace();
 
     try {
       // 进程内直接 bind 端口启动，无需外部 dart 子进程或源码文件。
@@ -53,6 +67,30 @@ class LocalAgentBridgeLauncher {
       debugPrint('[桥接] 启动本地 agent 桥接服务失败：$e');
       _server = null;
     }
+  }
+
+  /// 解析默认工作区目录：从当前进程工作目录向上逐级查找最近的含 `.git` 的 git 仓库根目录。
+  ///
+  /// 关闭沙盒后 [Directory.current] 已是真实工作目录，但为了让桥接的 apply-patch
+  /// （内部执行 `git apply`）可用，workspace 必须是一个 git 仓库目录。
+  ///
+  /// 查找逻辑：
+  ///   - 从 `Directory.current.absolute` 开始；
+  ///   - 当前目录存在 `.git` 子目录则直接返回该目录（即 git 仓库根）；
+  ///   - 否则继续向父目录查找，直到文件系统根（父目录与自身相同时停止）；
+  ///   - 若到根仍未找到 `.git`，回退到 `Directory.current.path`。
+  String _resolveDefaultWorkspace() {
+    var dir = Directory.current.absolute;
+    while (true) {
+      // 找到最近的含 .git 的目录，即 git 仓库根，作为默认 workspace。
+      if (Directory('${dir.path}/.git').existsSync()) return dir.path;
+      final parent = dir.parent;
+      // 父目录与当前目录相同，说明已到达文件系统根，停止查找。
+      if (parent.path == dir.path) break;
+      dir = parent;
+    }
+    // 回退：未在任何祖先目录找到 .git，使用当前进程工作目录。
+    return Directory.current.path;
   }
 
   /// 停止进程内桥接服务（幂等：未运行则直接返回）。

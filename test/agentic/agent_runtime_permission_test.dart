@@ -335,8 +335,9 @@ void main() {
     );
 
     expect(result.status, AgentRuntimeStatus.failed);
-    expect(result.message, contains('本地工具桥接服务未启动'));
-    expect(result.message, contains('dart run bin/local_agent_bridge.dart'));
+    // 关沙盒后桥接由桌面端 App 进程内自动启动，错误提示已改为桌面端自动启动说明。
+    expect(result.message, contains('本地工具桥接服务未连接'));
+    expect(result.message, contains('进程内自动启动并监听 54263'));
   });
 }
 

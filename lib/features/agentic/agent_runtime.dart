@@ -389,9 +389,8 @@ class AgentRuntime {
         text.contains('DioException') ||
         text.contains('Failed host lookup');
     if (looksLikeBridgeDown) {
-      return '[${character.name} 工具执行失败: 本地工具桥接服务未启动或不可连接。'
-          '请在项目目录运行 dart run bin/local_agent_bridge.dart --workspace=/你的工作区绝对路径，'
-          '然后再批准/重试这次工具任务。原始错误: $text]';
+      return '[${character.name} 工具执行失败: 本地工具桥接服务未连接（桌面端应由 App 在进程内自动启动并监听 54263）。'
+          '若仍失败，请检查 54263 端口是否被其他进程占用，或重启 App 后重试。原始错误: $text]';
     }
     return '[${character.name} 工具执行失败: $text]';
   }
