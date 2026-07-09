@@ -192,11 +192,13 @@ jobs:
       - run: dart run build_runner build --delete-conflicting-outputs
       - name: 构建 Web
         run: flutter build web --release
+      - name: 打包 Web 产物为 zip
+        run: cd build && zip -r ../chat_group-web.zip web && cd ..
       - name: 上传产物
         uses: actions/upload-artifact@v4
         with:
           name: web
-          path: build/web
+          path: chat_group-web.zip
           if-no-files-found: error
 
   # ============================================================
