@@ -32,15 +32,35 @@ class DirectChatGroupCandidate {
 class DirectChatProactivePolicy {
   static const Duration directChatStaleAfter = Duration(hours: 6);
   static const Duration proactiveCooldown = Duration(hours: 2);
+  static const Duration unreadFollowUpDelay = Duration(minutes: 8);
+  static const Duration handoffFollowUpDelay = Duration(seconds: 20);
   static const Duration recentGroupWindow = Duration(hours: 1);
+  static const int maxUnreadBurstMessages = 3;
 
   static DirectChatProactiveCandidate? selectCandidate({
     required List<DirectChatSummary> directSummaries,
     required List<DirectChatGroupCandidate> groupCandidates,
     required Map<String, DateTime> lastProactiveAtByCharacter,
     required DateTime now,
+    String? preferredConversationId,
   }) {
+    final preferredCandidate = _preferredDirectCandidate(
+      directSummaries,
+      lastProactiveAtByCharacter,
+      now,
+      preferredConversationId,
+    );
+    if (preferredCandidate != null) return preferredCandidate;
+
     final staleDirectCandidates = directSummaries.where((summary) {
+      if (!summary.hasUserMessage) return false;
+      if (summary.hasUnread) {
+        return _canContinueUnreadBurst(
+          summary,
+          lastProactiveAtByCharacter,
+          now,
+        );
+      }
       if (!_canProactivelySpeak(
         summary.character,
         lastProactiveAtByCharacter,
@@ -48,8 +68,6 @@ class DirectChatProactivePolicy {
       )) {
         return false;
       }
-      if (summary.hasUnread) return false;
-      if (!summary.hasUserMessage) return false;
       return now.difference(summary.lastMessage.timestamp) >=
           directChatStaleAfter;
     }).toList();
@@ -101,5 +119,51 @@ class DirectChatProactivePolicy {
     final lastAt = lastProactiveAtByCharacter[character.id];
     if (lastAt == null) return true;
     return now.difference(lastAt) >= proactiveCooldown;
+  }
+
+  static DirectChatProactiveCandidate? _preferredDirectCandidate(
+    List<DirectChatSummary> summaries,
+    Map<String, DateTime> lastProactiveAtByCharacter,
+    DateTime now,
+    String? preferredConversationId,
+  ) {
+    if (preferredConversationId == null) return null;
+    final summary = summaries
+        .where((item) => item.conversationId == preferredConversationId)
+        .firstOrNull;
+    if (summary == null) return null;
+    if (!summary.hasUserMessage || !summary.character.isActive) return null;
+    if (summary.unreadCount >= maxUnreadBurstMessages) return null;
+
+    final lastAt = lastProactiveAtByCharacter[summary.character.id];
+    if (lastAt != null && now.difference(lastAt) < handoffFollowUpDelay) {
+      return null;
+    }
+    if (summary.lastMessage.senderType == 'ai' &&
+        now.difference(summary.lastMessage.timestamp) < handoffFollowUpDelay) {
+      return null;
+    }
+
+    return DirectChatProactiveCandidate(
+      character: summary.character,
+      source: DirectChatSource.direct,
+      reason: '用户离开后继续私聊',
+    );
+  }
+
+  static bool _canContinueUnreadBurst(
+    DirectChatSummary summary,
+    Map<String, DateTime> lastProactiveAtByCharacter,
+    DateTime now,
+  ) {
+    if (!summary.character.isActive) return false;
+    if (summary.unreadCount >= maxUnreadBurstMessages) return false;
+    if (summary.lastMessage.senderType != 'ai') return false;
+    if (now.difference(summary.lastMessage.timestamp) < unreadFollowUpDelay) {
+      return false;
+    }
+    final lastAt = lastProactiveAtByCharacter[summary.character.id];
+    if (lastAt == null) return true;
+    return now.difference(lastAt) >= unreadFollowUpDelay;
   }
 }

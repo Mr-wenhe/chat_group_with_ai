@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/services/ai_providers/ai_api_service.dart';
 import './providers/api_config_providers.dart';
 
@@ -238,13 +239,12 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     if (!mounted) return;
     setState(() => _isTesting = false);
     final success = result['success'] == true;
-    ScaffoldMessenger.of(context).showSnackBar(
-      SnackBar(
-        content:
-            Text(success ? '连接测试成功' : '连接测试失败: ${result['message'] ?? '未知错误'}'),
-        behavior: SnackBarBehavior.floating,
-        backgroundColor: success ? const Color(0xFF059669) : Colors.red,
-      ),
+    AppToast.show(
+      context,
+      success ? '连接测试成功' : '连接测试失败: ${result['message'] ?? '未知错误'}',
+      icon: success
+          ? Icons.check_circle_outline_rounded
+          : Icons.error_outline_rounded,
     );
   }
 
@@ -273,21 +273,13 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
       }
 
       if (mounted) {
+        AppToast.show(context, widget.config == null ? '配置已创建' : '配置已更新',
+            icon: Icons.check_circle_outline_rounded);
         Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text(widget.config == null ? '配置已创建' : '配置已更新'),
-              behavior: SnackBarBehavior.floating),
-        );
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('保存失败: $e'),
-              behavior: SnackBarBehavior.floating,
-              backgroundColor: Colors.red),
-        );
+        AppToast.show(context, '保存失败: $e', icon: Icons.error_outline_rounded);
       }
     } finally {
       if (mounted) setState(() => _isSaving = false);

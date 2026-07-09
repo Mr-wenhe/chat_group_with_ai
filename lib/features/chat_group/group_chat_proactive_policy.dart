@@ -16,8 +16,9 @@ class GroupChatProactiveCandidate {
 }
 
 class GroupChatProactivePolicy {
-  static const Duration proactiveCooldown = Duration(minutes: 45);
-  static const Duration recentAiQuietPeriod = Duration(minutes: 20);
+  static const Duration proactiveCooldown = Duration(minutes: 2);
+  static const Duration recentAiQuietPeriod = Duration(seconds: 45);
+  static const int maxUnreadBurstMessages = 5;
 
   static GroupChatProactiveCandidate? selectCandidate({
     required List<ChatGroup> groups,
@@ -27,27 +28,44 @@ class GroupChatProactivePolicy {
     required Map<String, DateTime> lastProactiveAtByGroup,
     required DateTime now,
     String? activeGroupId,
+    String? preferredGroupId,
   }) {
-    for (final group in groups) {
+    final orderedGroups = groups.toList();
+    if (preferredGroupId != null) {
+      orderedGroups.sort((a, b) {
+        if (a.id == preferredGroupId) return -1;
+        if (b.id == preferredGroupId) return 1;
+        return 0;
+      });
+    }
+
+    for (final group in orderedGroups) {
       if (group.id == activeGroupId) continue;
+      final isPreferred = group.id == preferredGroupId;
       final groupMessages = messages
           .where((message) =>
               message.groupId == group.id &&
               !DirectChatSession.isDirectConversationId(message.groupId))
           .toList()
         ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
-      if (_hasUnreadAiMessage(group.id, groupMessages, readAtByGroup)) {
+      if (_unreadAiCount(group.id, groupMessages, readAtByGroup) >=
+          maxUnreadBurstMessages) {
         continue;
       }
       final lastProactiveAt = lastProactiveAtByGroup[group.id];
+      final cooldown =
+          isPreferred ? _handoffCooldownFor(group) : _cooldownFor(group);
       if (lastProactiveAt != null &&
-          now.difference(lastProactiveAt) < proactiveCooldown) {
+          now.difference(lastProactiveAt) < cooldown) {
         continue;
       }
       if (groupMessages.isNotEmpty) {
         final last = groupMessages.last;
+        final quietPeriod = isPreferred
+            ? _handoffQuietPeriodFor(group)
+            : _quietPeriodFor(group);
         if (last.senderType == 'ai' &&
-            now.difference(last.timestamp) < recentAiQuietPeriod) {
+            now.difference(last.timestamp) < quietPeriod) {
           continue;
         }
       }
@@ -57,23 +75,53 @@ class GroupChatProactivePolicy {
       return GroupChatProactiveCandidate(
         group: group,
         character: character,
-        reason: groupMessages.isEmpty ? '群聊破冰' : '延续群聊话题',
+        reason: isPreferred
+            ? '用户离开后继续推进群聊'
+            : groupMessages.isEmpty
+                ? '群聊破冰'
+                : '延续群聊话题',
       );
     }
     return null;
   }
 
-  static bool _hasUnreadAiMessage(
+  static int _unreadAiCount(
     String groupId,
     List<Message> messages,
     Map<String, DateTime> readAtByGroup,
   ) {
     final readAt = readAtByGroup[groupId];
-    return messages.any((message) {
+    return messages.where((message) {
       if (message.senderType != 'ai') return false;
       if (readAt == null) return true;
       return message.timestamp.isAfter(readAt);
-    });
+    }).length;
+  }
+
+  static Duration _cooldownFor(ChatGroup group) {
+    final seconds = (group.replyIntervalSeconds * 4).clamp(
+      proactiveCooldown.inSeconds,
+      600,
+    );
+    return Duration(seconds: seconds);
+  }
+
+  static Duration _quietPeriodFor(ChatGroup group) {
+    final seconds = group.replyIntervalSeconds.clamp(
+      recentAiQuietPeriod.inSeconds,
+      300,
+    );
+    return Duration(seconds: seconds);
+  }
+
+  static Duration _handoffCooldownFor(ChatGroup group) {
+    final seconds = (group.replyIntervalSeconds * 2).clamp(12, 120);
+    return Duration(seconds: seconds);
+  }
+
+  static Duration _handoffQuietPeriodFor(ChatGroup group) {
+    final seconds = group.replyIntervalSeconds.clamp(5, 60);
+    return Duration(seconds: seconds);
   }
 
   static AICharacter? _speakerFor(

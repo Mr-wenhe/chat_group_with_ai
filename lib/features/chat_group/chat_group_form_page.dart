@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
 import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 
@@ -250,8 +251,7 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
   Future<void> _save() async {
     if (!_formKey.currentState!.validate() || _isSaving) return;
     if (_selectedCharacterIds.isEmpty) {
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('请至少选择一个角色'), behavior: SnackBarBehavior.floating));
+      AppToast.show(context, '请至少选择一个角色', icon: Icons.info_outline_rounded);
       return;
     }
     _isSaving = true;
@@ -277,17 +277,13 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
       }
 
       if (mounted) {
+        AppToast.show(context, _isEditing ? '群聊已更新' : '群聊已创建',
+            icon: Icons.check_circle_outline_rounded);
         Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(_isEditing ? '群聊已更新' : '群聊已创建'),
-            behavior: SnackBarBehavior.floating));
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('保存失败: $e'),
-            behavior: SnackBarBehavior.floating,
-            backgroundColor: Colors.red));
+        AppToast.show(context, '保存失败: $e', icon: Icons.error_outline_rounded);
       }
     } finally {
       if (mounted) setState(() => _isSaving = false);

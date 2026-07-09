@@ -4,6 +4,7 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
+import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:flutter/material.dart';
 
@@ -30,21 +31,27 @@ class _DirectChatForegroundWatcherState
     extends State<DirectChatForegroundWatcher> with WidgetsBindingObserver {
   static const Duration _initialDelay = Duration(seconds: 25);
   static const Duration _interval = Duration(seconds: 95);
+  static const Duration _handoffDelay = Duration(seconds: 8);
 
   Timer? _timer;
+  StreamSubscription<String>? _presenceSub;
   bool _checking = false;
+  String? _preferredConversationId;
   AppLifecycleState _lifecycleState = AppLifecycleState.resumed;
 
   @override
   void initState() {
     super.initState();
     WidgetsBinding.instance.addObserver(this);
+    _presenceSub = ConversationPresenceService.instance.leftConversationStream
+        .listen(_scheduleHandoffCheck);
     _timer = Timer(_initialDelay, _tick);
   }
 
   @override
   void dispose() {
     WidgetsBinding.instance.removeObserver(this);
+    _presenceSub?.cancel();
     _timer?.cancel();
     super.dispose();
   }
@@ -66,8 +73,16 @@ class _DirectChatForegroundWatcherState
     try {
       final activeConversationId =
           ConversationPresenceService.instance.activeConversationId;
+      final preferredConversationId = _preferredConversationId ??
+          ConversationPresenceService.instance
+              .consumeRecentlyLeftConversationId();
+      _preferredConversationId = null;
       final directResult = await DirectChatProactiveService(db: widget.db)
-          .tryCreateProactiveMessage();
+          .tryCreateProactiveMessage(
+        preferredConversationId: _isDirectConversation(preferredConversationId)
+            ? preferredConversationId
+            : null,
+      );
       if (directResult != null) {
         final conversationId = 'dm:${directResult.character.id}';
         if (activeConversationId == conversationId) {
@@ -93,7 +108,12 @@ class _DirectChatForegroundWatcherState
       }
 
       final groupResult = await GroupChatProactiveService(db: widget.db)
-          .tryCreateProactiveMessage(activeGroupId: activeConversationId);
+          .tryCreateProactiveMessage(
+        activeGroupId: activeConversationId,
+        preferredGroupId: _isDirectConversation(preferredConversationId)
+            ? null
+            : preferredConversationId,
+      );
       if (groupResult != null) {
         if (activeConversationId == groupResult.group.id) {
           await widget.db.markGroupChatRead(
@@ -124,6 +144,18 @@ class _DirectChatForegroundWatcherState
   void _scheduleNext() {
     _timer?.cancel();
     _timer = Timer(_interval, _tick);
+  }
+
+  void _scheduleHandoffCheck(String conversationId) {
+    _preferredConversationId = conversationId;
+    if (_lifecycleState != AppLifecycleState.resumed) return;
+    _timer?.cancel();
+    _timer = Timer(_handoffDelay, _tick);
+  }
+
+  bool _isDirectConversation(String? conversationId) {
+    return conversationId != null &&
+        DirectChatSession.isDirectConversationId(conversationId);
   }
 
   @override

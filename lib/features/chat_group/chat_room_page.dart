@@ -20,6 +20,7 @@ import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
+import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
 import 'package:chat_group/features/agentic/agentic_task_classifier.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
@@ -47,8 +48,10 @@ import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
+import 'package:chat_group/services/ai_attachment_service.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
+import 'package:chat_group/services/web_search_service.dart';
 import 'package:chewie/chewie.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
@@ -123,6 +126,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   final _scrollController = ScrollController();
   final _inputFocusNode = FocusNode();
   final _chatApi = ChatApiService();
+  final _webSearch = WebSearchService();
+  late final AiAttachmentService _aiAttachments;
   final _random = Random();
   final FlutterTts _flutterTts = FlutterTts();
   late final DatabaseService _db;
@@ -225,6 +230,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     WidgetsBinding.instance.addObserver(this);
     ConversationPresenceService.instance.enter(widget.groupId);
     _db = ref.read(databaseServiceProvider);
+    _aiAttachments = AiAttachmentService(db: _db);
     _textController.addListener(() {
       final isEmpty = _textController.text.trim().isEmpty;
       if (isEmpty != _isInputEmpty) {
@@ -289,8 +295,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final group = _db.chatGroupBox.get(widget.groupId);
     if (group == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('群聊不存在'), behavior: SnackBarBehavior.floating));
+        AppToast.show(context, '群聊不存在', icon: Icons.error_outline_rounded);
         Navigator.pop(context);
       }
       return;
@@ -387,8 +392,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         characterId == null ? null : _db.aiCharacterBox.get(characterId);
     if (character == null) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('私聊角色不存在'), behavior: SnackBarBehavior.floating));
+        AppToast.show(context, '私聊角色不存在', icon: Icons.error_outline_rounded);
         Navigator.pop(context);
       }
       return;
@@ -624,8 +628,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (text.isEmpty && !hasAttachments) return;
 
     _textController.clear();
-    final messenger = ScaffoldMessenger.of(context);
-
     final mentionedIds = _parseMentions(text);
     for (final id in mentionedIds) {
       if (!_pendingMentionedIds.contains(id)) {
@@ -672,9 +674,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     if (_characters.isEmpty) {
       if (mounted) {
-        messenger.showSnackBar(SnackBar(
-            content: Text(_isDirectChat ? '该角色当前不可回复' : '该群聊没有活跃的角色'),
-            behavior: SnackBarBehavior.floating));
+        AppToast.show(context, _isDirectChat ? '该角色当前不可回复' : '该群聊没有活跃的角色',
+            icon: Icons.info_outline_rounded);
       }
       return;
     }
@@ -933,16 +934,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         _autoChatStatus = AutoChatStatus.unavailable;
       });
       if (mounted && !isAutoChat) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text(_replyBlockText(blockReason)),
-          behavior: SnackBarBehavior.floating,
-          action: blockReason == ReplyBlockReason.noApiConfig
-              ? SnackBarAction(
-                  label: '去设置',
-                  onPressed: () => Navigator.pushNamed(context, '/settings'),
-                )
+        AppToast.show(
+          context,
+          _replyBlockText(blockReason),
+          icon: Icons.info_outline_rounded,
+          actionLabel:
+              blockReason == ReplyBlockReason.noApiConfig ? '去设置' : null,
+          onTap: blockReason == ReplyBlockReason.noApiConfig
+              ? () => Navigator.pushNamed(context, '/settings')
               : null,
-        ));
+        );
       }
       return;
     }
@@ -1069,14 +1070,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       );
     }
 
-    final apiMessages = _buildApiMessages(
-      character,
-      context,
-      userMessage,
-      isAutoChat: isAutoChat,
-      intent: intent,
-      supportsVision: provider.supportsVision,
-      currentUserMessage: currentUserMessage,
+    final webSearch = await _webSearch.searchIfNeeded(userMessage);
+    final apiMessages = _withWebSearchContext(
+      _buildApiMessages(
+        character,
+        context,
+        userMessage,
+        isAutoChat: isAutoChat,
+        intent: intent,
+        supportsVision: provider.supportsVision,
+        currentUserMessage: currentUserMessage,
+      ),
+      webSearch,
     );
     debugPrint(
         '[AI Reply] ${character.name} apiMessages count=${apiMessages.length}');
@@ -1222,11 +1227,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     // 移除 LLM 可能附带的名字前缀（UI 已独立显示角色名）。
     fullContent = _stripNamePrefix(fullContent, character.name);
+    final generatedAttachments = failed
+        ? const <MediaAttachment>[]
+        : await _aiAttachments.createRequestedAttachments(
+            character: character,
+            userMessage: userMessage,
+            replyContent: fullContent,
+          );
 
     // 持久化纪律：仅完成时 put 一次（包含失败占位消息）。
     temp.content = fullContent;
     temp.isMention = mentionedIds.isNotEmpty;
     temp.mentionedAiIds = mentionedIds;
+    temp.media = generatedAttachments.isEmpty ? null : generatedAttachments;
+    if (_canTouchUi && generatedAttachments.isNotEmpty) {
+      _flushStreamingUi();
+    }
     await _db.messageBox.put(temp.id, temp);
     await _db.addMessageToGroupIndex(temp);
     await _markCurrentConversationRead(throughMessage: temp);
@@ -1278,6 +1294,25 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
     }
     return null;
+  }
+
+  List<Map<String, dynamic>> _withWebSearchContext(
+    List<Map<String, dynamic>> messages,
+    WebSearchSnapshot? snapshot,
+  ) {
+    if (snapshot == null) return messages;
+    final next = List<Map<String, dynamic>>.from(messages);
+    final insertAt = next.indexWhere((message) => message['role'] != 'system');
+    final contextMessage = {
+      'role': 'system',
+      'content': snapshot.toPromptContext(),
+    };
+    if (insertAt <= 0) {
+      next.insert(0, contextMessage);
+    } else {
+      next.insert(insertAt, contextMessage);
+    }
+    return next;
   }
 
   Future<String> _generateAgenticReply({
@@ -1871,6 +1906,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           '当前真实时间：${DateTime.now().toLocal().toIso8601String()}。'
           '如果用户询问时间、日期、今天/明天/昨天，必须以这个真实时间为准。'
           '如果用户问到你不知道或可能过期的信息，必须明确说不确定，并建议或请求联网搜索；不要编造事实、价格、新闻、人物职位或链接。'
+          '如果用户要求你贴图、发图或发送附件，可以在文字中自然说明“我附上了”，应用会把本轮产物作为图片或文件附件显示。'
           '如果正在执行协作任务，开发完成后要明确 @ 测试/验收角色，测试发现问题要 @ 开发角色并列出 BUG。'
           '重要：你的回复不要带自己的名字前缀（如「张三：」或「【张三】：」），直接说内容即可，头像和名字由界面自动显示。'
           '$scenarioPrompt'
@@ -1900,6 +1936,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             '如果你的角色没有特别新增观点，可以自然地短附和，比如“是的”“对”“+1”“我也这么想”，但尽量带一点你的角色语气。'
             '不要替其他人总结，也不要写成大段正式回答。'
       });
+    }
+
+    final collaborationPrompt = _collaborationPromptFor(
+      userMessage: userMessage,
+      currentCharacter: character,
+    );
+    if (collaborationPrompt.isNotEmpty) {
+      msgs.add({'role': 'system', 'content': collaborationPrompt});
     }
 
     // ── 3.5 最后一条用户消息强调 ──────────────────────────────────
@@ -2000,6 +2044,66 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return msgs;
   }
 
+  String _collaborationPromptFor({
+    required String? userMessage,
+    required AICharacter currentCharacter,
+  }) {
+    if (userMessage == null || userMessage.trim().isEmpty) return '';
+    final mentioned = parseMentionedCharacterIds(userMessage, _characters);
+    if (mentioned.length < 2) return '';
+    final lower = userMessage.toLowerCase();
+    final looksLikeProjectTask = lower.contains('开发') ||
+        lower.contains('项目') ||
+        lower.contains('测试') ||
+        lower.contains('验收') ||
+        lower.contains('bug') ||
+        lower.contains('修复') ||
+        lower.contains('代码') ||
+        lower.contains('实现') ||
+        lower.contains('build') ||
+        lower.contains('test');
+    if (!looksLikeProjectTask) return '';
+
+    final mentionedCharacters = <AICharacter>[];
+    for (final id in mentioned) {
+      for (final character in _characters) {
+        if (character.id == id) {
+          mentionedCharacters.add(character);
+          break;
+        }
+      }
+    }
+    if (mentionedCharacters.length < 2) return '';
+
+    AICharacter? verifier;
+    for (final character in mentionedCharacters) {
+      final text = '${character.name} ${character.role} '
+              '${character.personalityTags.join(' ')}'
+          .toLowerCase();
+      if (text.contains('测试') ||
+          text.contains('qa') ||
+          text.contains('验收') ||
+          text.contains('质量')) {
+        verifier = character;
+        break;
+      }
+    }
+    verifier ??= mentionedCharacters.last;
+    final executor = mentionedCharacters
+        .firstWhere((character) => character.id != verifier!.id);
+
+    final currentRole = currentCharacter.id == executor.id
+        ? '你是本次任务的开发/执行者。先给出实现计划或交付内容；完成后必须 @${verifier.name} 请他验收。'
+        : currentCharacter.id == verifier.id
+            ? '你是本次任务的测试/验收者。等待开发者交付后进行验收；发现问题要明确 @${executor.name} 并列出 BUG 和复现/修改建议。'
+            : '你不是主责角色，只在被点名时补充，不要抢主责。';
+
+    return '【AI 协作任务】用户一次 @ 了多位 AI 做一个项目/任务。'
+        '分工：${executor.name}=开发/执行，${verifier.name}=测试/验收。'
+        '$currentRole'
+        '不要替对方完成职责；用 @ 推动下一棒。';
+  }
+
   List<Map<String, dynamic>> _buildDirectApiMessages(
     AICharacter character,
     List<Message> context,
@@ -2047,6 +2151,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       'role': 'system',
       'content': '当前真实时间：${DateTime.now().toLocal().toIso8601String()}。'
           '涉及当前事实、新闻、价格、职位、规则或你不知道的内容时，不要编造；请说明不确定，并建议联网搜索或让用户授权搜索。'
+          '如果用户要求你贴图、发图或发送附件，可以自然说明“我附上了”，应用会把本轮产物作为图片或文件附件显示。'
           '私聊主动找用户时最多连续三条，之后等待用户回复。',
     });
     msgs.add({'role': 'system', 'content': character.systemPrompt});
@@ -3427,6 +3532,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       messages: apiMessages,
     )
         .listen((e) {
+      if (!mounted) return;
       if (!_canTouchUi) return;
       switch (e.type) {
         case ChatStreamEventType.token:
@@ -4696,9 +4802,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       final remainingSlots = defaultMaxVisionImages - currentImageCount;
       if (remainingSlots <= 0) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('一次最多发送 4 张图片'),
-              behavior: SnackBarBehavior.floating));
+          AppToast.show(context, '一次最多发送 4 张图片',
+              icon: Icons.info_outline_rounded);
         }
         return;
       }
@@ -4711,9 +4816,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (files.isEmpty) return;
       final selectedFiles = files.take(remainingSlots).toList();
       if (files.length > selectedFiles.length && mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('已限制为一次最多 4 张图片'),
-            behavior: SnackBarBehavior.floating));
+        AppToast.show(context, '已限制为一次最多 4 张图片',
+            icon: Icons.info_outline_rounded);
       }
       for (final file in selectedFiles) {
         final att = await _db.copyToMedia(File(file.path), 'image');
@@ -4722,8 +4826,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     } catch (e) {
       debugPrint('[附件] 选择图片失败：$e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('选择图片失败：$e'), behavior: SnackBarBehavior.floating));
+        AppToast.show(context, '选择图片失败：$e', icon: Icons.error_outline_rounded);
       }
     }
   }
@@ -4738,8 +4841,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     } catch (e) {
       debugPrint('[附件] 选择视频失败：$e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('选择视频失败：$e'), behavior: SnackBarBehavior.floating));
+        AppToast.show(context, '选择视频失败：$e', icon: Icons.error_outline_rounded);
       }
     }
   }
@@ -4767,21 +4869,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         added++;
       }
       if (mounted && added == 0) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-            content: Text('没有可读取的文件'), behavior: SnackBarBehavior.floating));
+        AppToast.show(context, '没有可读取的文件', icon: Icons.info_outline_rounded);
       }
     } catch (e) {
       debugPrint('[附件] 选择文件失败：$e');
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('选择文件失败：$e'), behavior: SnackBarBehavior.floating));
+        AppToast.show(context, '选择文件失败：$e', icon: Icons.error_outline_rounded);
       }
     }
   }
 
   Future<void> _handleDroppedFiles(List<dynamic> files) async {
     if (files.isEmpty) return;
-    final messenger = ScaffoldMessenger.of(context);
     var addedFiles = 0;
     final droppedDirectories = <String>[];
     try {
@@ -4809,6 +4908,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (droppedDirectories.isNotEmpty) {
         _insertTextAtCursor(droppedDirectories.join('\n'));
       }
+      if (!mounted) return;
       if (!_canTouchUi) return;
       final parts = <String>[
         if (addedFiles > 0) '$addedFiles 个文件',
@@ -4816,18 +4916,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           '${droppedDirectories.length} 个文件夹路径',
       ];
       if (parts.isNotEmpty) {
-        messenger.showSnackBar(SnackBar(
-          content: Text('已添加 ${parts.join('、')}'),
-          behavior: SnackBarBehavior.floating,
-        ));
+        AppToast.show(context, '已添加 ${parts.join('、')}',
+            icon: Icons.attach_file_rounded);
       }
     } catch (e) {
       debugPrint('[附件] 拖放失败：$e');
-      if (_canTouchUi) {
-        messenger.showSnackBar(SnackBar(
-          content: Text('拖放失败：$e'),
-          behavior: SnackBarBehavior.floating,
-        ));
+      if (_canTouchUi && mounted) {
+        AppToast.show(context, '拖放失败：$e', icon: Icons.error_outline_rounded);
       }
     }
   }
@@ -4888,21 +4983,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (!mounted) return;
       if (attachments.isEmpty) {
         if (showEmptyHint) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('剪贴板里没有可粘贴的文件或截图'),
-              behavior: SnackBarBehavior.floating));
+          AppToast.show(context, '剪贴板里没有可粘贴的文件或截图',
+              icon: Icons.info_outline_rounded);
         }
         return;
       }
       setState(() => _pendingAttachments.addAll(attachments));
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('已粘贴 ${attachments.length} 个附件'),
-          behavior: SnackBarBehavior.floating));
+      AppToast.show(context, '已粘贴 ${attachments.length} 个附件',
+          icon: Icons.content_paste_rounded);
     } catch (e) {
       debugPrint('[附件] 粘贴失败：$e');
       if (mounted && showEmptyHint) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('粘贴失败：$e'), behavior: SnackBarBehavior.floating));
+        AppToast.show(context, '粘贴失败：$e', icon: Icons.error_outline_rounded);
       }
     } finally {
       _isPastingAttachments = false;
@@ -5485,14 +5577,12 @@ class _MessageBubble extends StatelessWidget {
     try {
       final result = await OpenFilex.open(att.localPath, type: att.mimeType);
       if (result.type.name != 'done' && context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('打开失败：${result.message}'),
-            behavior: SnackBarBehavior.floating));
+        AppToast.show(context, '打开失败：${result.message}',
+            icon: Icons.error_outline_rounded);
       }
     } catch (e) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text('打开失败：$e'), behavior: SnackBarBehavior.floating));
+        AppToast.show(context, '打开失败：$e', icon: Icons.error_outline_rounded);
       }
     }
   }

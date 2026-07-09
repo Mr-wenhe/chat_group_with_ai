@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/conversation_export_service.dart';
@@ -221,11 +222,13 @@ class _ExportPageState extends ConsumerState<ExportPage> {
       final file = await service.saveToFile(content, fileName);
 
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('已保存到：${file.path}'),
-          behavior: SnackBarBehavior.floating,
-          action: SnackBarAction(label: '分享', onPressed: () => _share(file)),
-        ));
+        AppToast.show(
+          context,
+          '已保存到：${file.path}',
+          icon: Icons.download_done_rounded,
+          actionLabel: '分享',
+          onTap: () => _share(file),
+        );
       }
     } catch (e) {
       if (mounted) _snack('导出失败: $e');
@@ -270,8 +273,7 @@ class _ExportPageState extends ConsumerState<ExportPage> {
 
   void _snack(String msg) {
     if (!mounted) return;
-    ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(content: Text(msg), behavior: SnackBarBehavior.floating));
+    AppToast.show(context, msg, icon: Icons.info_outline_rounded);
   }
 
   /// 文件名时间戳：`YYYYMMDD_HHMM`。

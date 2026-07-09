@@ -25,7 +25,7 @@ void main() {
       expect(candidate?.reason, '群聊破冰');
     });
 
-    test('skips groups that already have unread ai messages', () {
+    test('continues groups with unread ai messages below burst limit', () {
       final alice = _character(id: 'alice', name: '小夏');
       final group = _group(id: 'g1', characterIds: ['alice']);
       final now = DateTime(2026, 7, 9, 10);
@@ -47,6 +47,34 @@ void main() {
         now: now,
       );
 
+      expect(candidate?.group.id, 'g1');
+    });
+
+    test('skips groups that reached unread burst limit', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final group = _group(id: 'g1', characterIds: ['alice']);
+      final now = DateTime(2026, 7, 9, 10);
+
+      final messages = List.generate(
+        GroupChatProactivePolicy.maxUnreadBurstMessages,
+        (index) => Message(
+          groupId: 'g1',
+          senderId: 'alice',
+          senderType: 'ai',
+          content: '未读 $index',
+          timestamp: now.subtract(Duration(minutes: 10 - index)),
+        ),
+      );
+
+      final candidate = GroupChatProactivePolicy.selectCandidate(
+        groups: [group],
+        charactersById: {'alice': alice},
+        messages: messages,
+        readAtByGroup: const {},
+        lastProactiveAtByGroup: const {},
+        now: now,
+      );
+
       expect(candidate, isNull);
     });
 
@@ -61,9 +89,58 @@ void main() {
         messages: const [],
         readAtByGroup: const {},
         lastProactiveAtByGroup: {
-          'g1': now.subtract(const Duration(minutes: 20)),
+          'g1': now.subtract(const Duration(minutes: 1)),
         },
         now: now,
+      );
+
+      expect(candidate, isNull);
+    });
+
+    test('prioritizes the group the user just left for handoff', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final bob = _character(id: 'bob', name: '阿哲');
+      final preferred = _group(id: 'g1', characterIds: ['alice']);
+      final other = _group(id: 'g2', characterIds: ['bob']);
+      final now = DateTime(2026, 7, 9, 10);
+
+      final candidate = GroupChatProactivePolicy.selectCandidate(
+        groups: [other, preferred],
+        charactersById: {'alice': alice, 'bob': bob},
+        messages: const [],
+        readAtByGroup: const {},
+        lastProactiveAtByGroup: const {},
+        now: now,
+        preferredGroupId: 'g1',
+      );
+
+      expect(candidate?.group.id, 'g1');
+      expect(candidate?.reason, '用户离开后继续推进群聊');
+    });
+
+    test('preferred handoff still respects unread burst limit', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final group = _group(id: 'g1', characterIds: ['alice']);
+      final now = DateTime(2026, 7, 9, 10);
+      final messages = List.generate(
+        GroupChatProactivePolicy.maxUnreadBurstMessages,
+        (index) => Message(
+          groupId: 'g1',
+          senderId: 'alice',
+          senderType: 'ai',
+          content: '未读 $index',
+          timestamp: now.subtract(Duration(minutes: 10 - index)),
+        ),
+      );
+
+      final candidate = GroupChatProactivePolicy.selectCandidate(
+        groups: [group],
+        charactersById: {'alice': alice},
+        messages: messages,
+        readAtByGroup: const {},
+        lastProactiveAtByGroup: const {},
+        now: now,
+        preferredGroupId: 'g1',
       );
 
       expect(candidate, isNull);

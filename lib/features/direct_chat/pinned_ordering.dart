@@ -10,6 +10,8 @@ class PinnedOrdering {
     sorted.sort((a, b) {
       final pinCompare = _comparePinned(a.id, b.id, pinnedIds);
       if (pinCompare != 0) return pinCompare;
+      final nameCompare = a.name.compareTo(b.name);
+      if (nameCompare != 0) return nameCompare;
       return a.createdAt.compareTo(b.createdAt);
     });
     return sorted;

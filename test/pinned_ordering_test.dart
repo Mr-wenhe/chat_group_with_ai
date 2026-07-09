@@ -18,6 +18,20 @@ void main() {
       expect(sorted.map((c) => c.id), ['cici', 'alice', 'bob']);
     });
 
+    test('sorts characters by name within pinned and normal groups', () {
+      final zed = _character(id: 'zed', name: 'Zed');
+      final alpha = _character(id: 'alpha', name: 'Alpha');
+      final beta = _character(id: 'beta', name: 'Beta');
+      final amber = _character(id: 'amber', name: 'Amber');
+
+      final sorted = PinnedOrdering.sortCharacters(
+        [zed, alpha, beta, amber],
+        pinnedIds: {'zed', 'amber'},
+      );
+
+      expect(sorted.map((c) => c.id), ['amber', 'zed', 'alpha', 'beta']);
+    });
+
     test('sorts pinned groups before normal groups', () {
       final a = _group(id: 'a', name: 'A');
       final b = _group(id: 'b', name: 'B');

@@ -35,6 +35,7 @@ class GroupChatProactiveService {
 
   Future<GroupChatProactiveResult?> tryCreateProactiveMessage({
     String? activeGroupId,
+    String? preferredGroupId,
   }) async {
     final now = DateTime.now();
     final characters =
@@ -53,6 +54,7 @@ class GroupChatProactiveService {
       lastProactiveAtByGroup: db.groupChatLastProactiveAtByGroup(),
       now: now,
       activeGroupId: activeGroupId,
+      preferredGroupId: preferredGroupId,
     );
     if (candidate == null) return null;
 

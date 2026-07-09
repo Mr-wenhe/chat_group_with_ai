@@ -12,6 +12,7 @@ import 'providers/ai_character_providers.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
 
@@ -572,17 +573,9 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
       }
       ref.invalidate(aiCharactersProvider);
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('已将 ${chars.length} 个角色统一为「${customConfig.name}」配置',
-              style: TextStyle(color: cs.onPrimaryContainer)),
-          behavior: SnackBarBehavior.floating,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          // 抬高底部边距，避免与右下角 FAB（创建角色）重叠（Bug 3）
-          margin: const EdgeInsets.only(bottom: 80, left: 16, right: 16),
-          backgroundColor: cs.primaryContainer,
-          duration: const Duration(seconds: 3),
-        ));
+        AppToast.show(
+            context, '已将 ${chars.length} 个角色统一为「${customConfig.name}」配置',
+            icon: Icons.sync_alt_rounded);
       }
     }
   }
@@ -595,10 +588,8 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
     final apiConfigs = ref.read(apiConfigsProvider);
     if (apiConfigs.isEmpty) {
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('暂无可用配置，请先在设置中创建'),
-          behavior: SnackBarBehavior.floating,
-        ));
+        AppToast.show(context, '暂无可用配置，请先在设置中创建',
+            icon: Icons.info_outline_rounded);
       }
       return;
     }
@@ -666,17 +657,8 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
       character.save();
       ref.invalidate(aiCharactersProvider);
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('已将「${character.name}」切换为「${target.name}」配置',
-              style: TextStyle(color: cs.onPrimaryContainer)),
-          behavior: SnackBarBehavior.floating,
-          shape:
-              RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
-          // 抬高底部边距，避免与右下角 FAB（创建角色）重叠（Bug 3）
-          margin: const EdgeInsets.only(bottom: 80, left: 16, right: 16),
-          backgroundColor: cs.primaryContainer,
-          duration: const Duration(seconds: 3),
-        ));
+        AppToast.show(context, '已将「${character.name}」切换为「${target.name}」配置',
+            icon: Icons.tune_rounded);
       }
     }
   }

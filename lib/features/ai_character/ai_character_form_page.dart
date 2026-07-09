@@ -5,6 +5,7 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:chat_group/features/agentic/skill_download_service.dart';
@@ -611,9 +612,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
 
       if (config == null) {
         if (mounted) {
-          ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-              content: Text('请选择 API 配置'),
-              behavior: SnackBarBehavior.floating));
+          AppToast.show(context, '请选择 API 配置',
+              icon: Icons.info_outline_rounded);
         }
         _isSaving = false;
         setState(() {});
@@ -660,19 +660,13 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       }
 
       if (mounted) {
+        AppToast.show(context, _isEditing ? '角色已更新' : '角色已创建',
+            icon: Icons.check_circle_outline_rounded);
         Navigator.pop(context);
-        ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-            content: Text(_isEditing ? '角色已更新' : '角色已创建'),
-            behavior: SnackBarBehavior.floating));
       }
     } catch (e) {
       if (mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('保存失败: $e'),
-              behavior: SnackBarBehavior.floating,
-              backgroundColor: Colors.red),
-        );
+        AppToast.show(context, '保存失败: $e', icon: Icons.error_outline_rounded);
       }
     } finally {
       if (mounted) setState(() => _isSaving = false);

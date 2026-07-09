@@ -34,7 +34,9 @@ class DirectChatProactiveService {
   })  : chatApi = chatApi ?? ChatApiService(),
         random = random ?? Random();
 
-  Future<DirectChatProactiveResult?> tryCreateProactiveMessage() async {
+  Future<DirectChatProactiveResult?> tryCreateProactiveMessage({
+    String? preferredConversationId,
+  }) async {
     final now = DateTime.now();
     final characters = db.aiCharacterBox.values.toList();
     final charactersById = {
@@ -86,6 +88,7 @@ class DirectChatProactiveService {
       groupCandidates: groupCandidates,
       lastProactiveAtByCharacter: db.directChatLastProactiveAtByCharacter(),
       now: now,
+      preferredConversationId: preferredConversationId,
     );
     if (candidate == null) return null;
 

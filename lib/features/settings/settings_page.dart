@@ -13,6 +13,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/top_toast.dart';
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
@@ -355,11 +356,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (confirm == true && context.mounted) {
       await ref.read(apiConfigsProvider.notifier).deleteConfig(config.id);
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(
-              content: Text('「${config.name}」已删除'),
-              behavior: SnackBarBehavior.floating),
-        );
+        AppToast.show(context, '「${config.name}」已删除',
+            icon: Icons.delete_outline_rounded);
       }
     }
   }
@@ -402,13 +400,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
     final isSuccess = result['success'] == true;
     if (isSuccess) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        SnackBar(
-          content: Text('${config.name} 测试成功！${result['reply'] ?? ''}'),
-          backgroundColor: const Color(0xFF059669),
-          behavior: SnackBarBehavior.floating,
-        ),
-      );
+      AppToast.show(context, '${config.name} 测试成功！${result['reply'] ?? ''}',
+          icon: Icons.check_circle_outline_rounded);
     } else {
       showDialog(
         context: context,
@@ -620,9 +613,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     await db.clearTokenUsage();
                     setState(() => _tokenUsage = db.getTokenUsage());
                     if (mounted) {
-                      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-                          content: Text('Token 统计已清零'),
-                          behavior: SnackBarBehavior.floating));
+                      AppToast.show(context, 'Token 统计已清零',
+                          icon: Icons.refresh_rounded);
                     }
                   },
                   icon: Icon(Icons.refresh_rounded, size: 16, color: cs.error),
@@ -654,12 +646,10 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       final path = await db.effectiveAiProcessingDirPath();
       if (!mounted) return;
       setState(() => _aiProcessingDirPath = path);
-      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('AI 工作根目录已更新'), behavior: SnackBarBehavior.floating));
+      AppToast.show(context, 'AI 工作根目录已更新', icon: Icons.folder_open_rounded);
     } catch (e) {
       if (!mounted) return;
-      ScaffoldMessenger.of(context).showSnackBar(SnackBar(
-          content: Text('选择目录失败：$e'), behavior: SnackBarBehavior.floating));
+      AppToast.show(context, '选择目录失败：$e', icon: Icons.error_outline_rounded);
     }
   }
 
@@ -669,8 +659,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     final path = await db.effectiveAiProcessingDirPath();
     if (!mounted) return;
     setState(() => _aiProcessingDirPath = path);
-    ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('已恢复默认 AI 工作根目录'), behavior: SnackBarBehavior.floating));
+    AppToast.show(context, '已恢复默认 AI 工作根目录', icon: Icons.restore_rounded);
   }
 
   String _compactPath(String path) {
@@ -748,10 +737,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       await db.clearAllData();
       ref.invalidate(apiConfigsProvider);
       if (context.mounted) {
-        ScaffoldMessenger.of(context).showSnackBar(
-          const SnackBar(
-              content: Text('所有数据已清除'), behavior: SnackBarBehavior.floating),
-        );
+        AppToast.show(context, '所有数据已清除',
+            icon: Icons.cleaning_services_rounded);
       }
     }
   }

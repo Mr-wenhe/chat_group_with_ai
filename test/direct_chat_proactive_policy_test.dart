@@ -89,7 +89,7 @@ void main() {
       expect(candidate?.reason, '从群聊话题延伸');
     });
 
-    test('does not proactively start direct chat with unread pending', () {
+    test('continues unread direct chat below burst limit after delay', () {
       final alice = _character(id: 'alice', name: '小夏');
       final now = DateTime(2026, 7, 8, 12);
 
@@ -103,7 +103,10 @@ void main() {
               senderId: 'alice',
               senderType: 'ai',
               content: '先看这条',
-              timestamp: now.subtract(const Duration(minutes: 10)),
+              timestamp: now.subtract(
+                DirectChatProactivePolicy.unreadFollowUpDelay +
+                    const Duration(minutes: 1),
+              ),
             ),
             unreadCount: 1,
             source: DirectChatSource.group,
@@ -120,6 +123,109 @@ void main() {
         ],
         lastProactiveAtByCharacter: const {},
         now: now,
+      );
+
+      expect(candidate?.character.id, 'alice');
+      expect(candidate?.source, DirectChatSource.direct);
+    });
+
+    test('does not continue unread direct chat at burst limit', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final now = DateTime(2026, 7, 8, 12);
+
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: [
+          DirectChatSummary(
+            conversationId: DirectChatSession.conversationIdFor('alice'),
+            character: alice,
+            lastMessage: Message(
+              groupId: DirectChatSession.conversationIdFor('alice'),
+              senderId: 'alice',
+              senderType: 'ai',
+              content: '第三条了',
+              timestamp: now.subtract(const Duration(minutes: 30)),
+            ),
+            unreadCount: DirectChatProactivePolicy.maxUnreadBurstMessages,
+            source: DirectChatSource.group,
+            hasUserMessage: true,
+            lastUserMessageAt: now.subtract(const Duration(hours: 2)),
+          ),
+        ],
+        groupCandidates: const [],
+        lastProactiveAtByCharacter: const {},
+        now: now,
+      );
+
+      expect(candidate, isNull);
+    });
+
+    test('prioritizes the direct chat the user just left for handoff', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final bob = _character(id: 'bob', name: '阿哲');
+      final now = DateTime(2026, 7, 8, 12);
+      final aliceConversationId = DirectChatSession.conversationIdFor('alice');
+
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: [
+          DirectChatSummary(
+            conversationId: aliceConversationId,
+            character: alice,
+            lastMessage: Message(
+              groupId: aliceConversationId,
+              senderId: 'user',
+              senderType: 'user',
+              content: '你继续说',
+              timestamp: now.subtract(const Duration(seconds: 5)),
+            ),
+            unreadCount: 0,
+            source: DirectChatSource.direct,
+            hasUserMessage: true,
+            lastUserMessageAt: now.subtract(const Duration(seconds: 5)),
+          ),
+        ],
+        groupCandidates: [
+          _groupCandidate(
+            character: bob,
+            groupId: 'group_1',
+            at: now.subtract(const Duration(minutes: 10)),
+          ),
+        ],
+        lastProactiveAtByCharacter: const {},
+        now: now,
+        preferredConversationId: aliceConversationId,
+      );
+
+      expect(candidate?.character.id, 'alice');
+      expect(candidate?.reason, '用户离开后继续私聊');
+    });
+
+    test('preferred direct handoff still respects unread burst limit', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final now = DateTime(2026, 7, 8, 12);
+      final aliceConversationId = DirectChatSession.conversationIdFor('alice');
+
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: [
+          DirectChatSummary(
+            conversationId: aliceConversationId,
+            character: alice,
+            lastMessage: Message(
+              groupId: aliceConversationId,
+              senderId: 'alice',
+              senderType: 'ai',
+              content: '第三条了',
+              timestamp: now.subtract(const Duration(minutes: 1)),
+            ),
+            unreadCount: DirectChatProactivePolicy.maxUnreadBurstMessages,
+            source: DirectChatSource.direct,
+            hasUserMessage: true,
+            lastUserMessageAt: now.subtract(const Duration(minutes: 10)),
+          ),
+        ],
+        groupCandidates: const [],
+        lastProactiveAtByCharacter: const {},
+        now: now,
+        preferredConversationId: aliceConversationId,
       );
 
       expect(candidate, isNull);
