@@ -19,6 +19,7 @@ import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
+import 'package:chat_group/features/agentic/agentic_task_classifier.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
@@ -39,7 +40,9 @@ import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/chat_api_service.dart';
+import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:chewie/chewie.dart';
+import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -105,7 +108,8 @@ class ChatRoomPage extends ConsumerStatefulWidget {
   ConsumerState<ChatRoomPage> createState() => _ChatRoomPageState();
 }
 
-class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
+class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
+    with WidgetsBindingObserver {
   final _textController = TextEditingController();
   final _memberSearchController = TextEditingController();
   final _scrollController = ScrollController();
@@ -172,6 +176,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   final List<MediaAttachment> _pendingAttachments = [];
   final ImagePicker _imagePicker = ImagePicker();
   bool _isPastingAttachments = false;
+  bool _isDraggingFiles = false;
 
   // —— 引用回复（quote-reply）——
   Message? _quotedMessage;
@@ -207,6 +212,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addObserver(this);
+    ConversationPresenceService.instance.enter(widget.groupId);
     _db = ref.read(databaseServiceProvider);
     _textController.addListener(() {
       final isEmpty = _textController.text.trim().isEmpty;
@@ -218,20 +225,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   @override
+  void didChangeDependencies() {
+    super.didChangeDependencies();
+    ConversationPresenceService.instance.enter(widget.groupId);
+  }
+
+  @override
   void dispose() {
     _disposed = true;
+    ConversationPresenceService.instance.leave(widget.groupId);
+    WidgetsBinding.instance.removeObserver(this);
     for (final attachment in List<MediaAttachment>.from(_pendingAttachments)) {
       unawaited(_deletePendingAttachmentFile(attachment));
     }
     _pendingAttachments.clear();
-    // 取消未完成的流式订阅，并唤醒可能因 await 挂起的 _generateAiReply。
-    _streamSub?.cancel();
-    _streamSub = null;
+    // 已提交的流式请求继续在后台收尾并落库；只停止 UI flush。
     _streamUiFlushTimer?.cancel();
     _searchDebounceTimer?.cancel();
-    if (_streamDone != null && !_streamDone!.isCompleted) {
-      _streamDone!.complete();
-    }
     _textController.dispose();
     _memberSearchController.dispose();
     _scrollController.dispose();
@@ -243,6 +253,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     _mentionSearchController.dispose();
     _ttsStop();
     super.dispose();
+  }
+
+  @override
+  void didChangeAppLifecycleState(AppLifecycleState state) {
+    if (state == AppLifecycleState.resumed) {
+      ConversationPresenceService.instance.enter(widget.groupId);
+      unawaited(_markCurrentConversationRead());
+    }
   }
 
   bool get _isDirectChat =>
@@ -523,6 +541,26 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     return readAt.isAfter(now) ? readAt : now;
   }
 
+  Future<void> _markCurrentConversationRead({Message? throughMessage}) async {
+    if (_isDirectChat) {
+      await _db.markDirectChatRead(
+        widget.groupId,
+        readAt: throughMessage == null
+            ? _readThrough(_messages)
+            : _readThrough([throughMessage]),
+      );
+      _clearActiveUserMentionBanner();
+      return;
+    }
+    await _db.markGroupChatRead(
+      widget.groupId,
+      readAt: throughMessage == null
+          ? _readThrough(_messages)
+          : _readThrough([throughMessage]),
+    );
+    _clearActiveUserMentionBanner();
+  }
+
   String _memoryPeriodKey(DateTime now) {
     return ChatOrchestrator.memoryPeriodKey(now);
   }
@@ -620,13 +658,24 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
       if (!isAutoChat) _consecutiveRound++;
     });
 
-    final charactersToReply = _isDirectChat
+    var charactersToReply = _isDirectChat
         ? _directReplyCharacters()
         : _charactersForIntents(_selectGroupReplyIntents(
             userMessage: userMessage,
             mentionedIds: mentionedIds,
             isAutoChat: isAutoChat,
           ));
+    final isExplicitAgenticTask = !isAutoChat &&
+        userMessage != null &&
+        AgenticTaskClassifier.requiresAgenticWork(userMessage);
+    if (!_isDirectChat &&
+        isExplicitAgenticTask &&
+        mentionedIds != null &&
+        mentionedIds.isNotEmpty) {
+      charactersToReply = charactersToReply
+          .where((character) => mentionedIds.contains(character.id))
+          .toList();
+    }
     if (charactersToReply.isEmpty) {
       if (_characters.any(_isEligibleToReply)) {
         setState(() {
@@ -661,14 +710,31 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     for (final character in charactersToReply) {
       if (!_canTouchUi) return;
       final wasPendingReply = _pendingMentionedIds.contains(character.id);
-      final replyContent = await _generateAiReply(
-        character,
-        _recentMessagesForContext(),
-        userMessage,
-        isAutoChat: isAutoChat,
-        intent: _pendingReplyIntents[character.id],
-        currentUserMessage: currentUserMessage,
-      );
+      late final String replyContent;
+      try {
+        replyContent = await _generateAiReply(
+          character,
+          _recentMessagesForContext(),
+          userMessage,
+          isAutoChat: isAutoChat,
+          intent: _pendingReplyIntents[character.id],
+          currentUserMessage: currentUserMessage,
+        );
+      } catch (e) {
+        replyContent = '[${character.name} 回复失败: $e]';
+        await _appendMessage(Message(
+          groupId: widget.groupId,
+          senderId: character.id,
+          senderType: 'ai',
+          content: replyContent,
+        ));
+        if (_canTouchUi) {
+          setState(() {
+            _autoChatStatus = AutoChatStatus.error;
+            _lastReplyBlockReason = ReplyBlockReason.networkError;
+          });
+        }
+      }
       repliedIds.add(character.id);
       await _delay(replyContent);
       if (wasPendingReply) {
@@ -750,10 +816,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
     if (!isAutoChat &&
         userMessage != null &&
-        ChatOrchestrator.shouldUseAgenticRuntime(
-          character: character,
-          message: userMessage,
-        )) {
+        AgenticTaskClassifier.requiresAgenticWork(userMessage)) {
       return _generateAgenticReply(
         character: character,
         config: config,
@@ -818,17 +881,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         .listen(
       (e) {
         debugPrint('[AI Stream] ${character.name} event=${e.type}');
-        if (!_canTouchUi) return;
         switch (e.type) {
           case ChatStreamEventType.token:
             fullContent += e.delta ?? '';
             temp.content = fullContent;
-            _scheduleStreamingUiFlush();
+            if (_canTouchUi) _scheduleStreamingUiFlush();
             break;
           case ChatStreamEventType.done:
             if ((e.content ?? '').isNotEmpty) fullContent = e.content!;
             temp.content = fullContent;
-            _flushStreamingUi();
+            if (_canTouchUi) _flushStreamingUi();
             if (e.promptTokens != null) promptTokens = e.promptTokens;
             if (e.completionTokens != null) {
               completionTokens = e.completionTokens;
@@ -844,18 +906,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             if (_canTouchUi) {
               setState(() => _autoChatStatus = AutoChatStatus.error);
             }
-            _flushStreamingUi();
+            if (_canTouchUi) _flushStreamingUi();
             if (!done.isCompleted) done.complete();
         }
       },
       onError: (err) {
-        if (!_canTouchUi) return;
         failed = true;
         _lastReplyBlockReason = ReplyBlockReason.networkError;
         fullContent = '[${character.name} 回复失败: $err]';
         temp.content = fullContent;
         if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.error);
-        _flushStreamingUi();
+        if (_canTouchUi) _flushStreamingUi();
         if (!done.isCompleted) done.complete();
       },
       onDone: () {
@@ -910,6 +971,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     temp.mentionedAiIds = mentionedIds;
     await _db.messageBox.put(temp.id, temp);
     await _db.addMessageToGroupIndex(temp);
+    await _markCurrentConversationRead(throughMessage: temp);
     _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     if (promptTokens != null && completionTokens != null) {
@@ -942,6 +1004,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     required String userMessage,
     List<MediaAttachment>? media,
   }) async {
+    await _ensureAgenticTaskPermissions(character, userMessage);
     final runtime = _agentRuntimeFor(
       character: character,
       config: config,
@@ -965,13 +1028,28 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         provider: provider,
         userRequest: userMessage,
         request: result.pendingToolRequest!,
+        priorExecutedRequests: result.executedToolRequests,
       );
+      final content = _stripNamePrefix(result.message, character.name);
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: character.id,
+        senderType: 'ai',
+        content: content,
+      ));
       // 审批中：返回提示文案但不消耗 reply slot（不记录 usage/mention/memory）。
-      return _stripNamePrefix(result.message, character.name);
+      return content;
     }
     if (result.status != AgentRuntimeStatus.completed) {
-      // failed / permissionMissing：不消费 reply slot， caller 会继续正常流程。
-      return '';
+      final content = _stripNamePrefix(result.message, character.name);
+      final message = Message(
+        groupId: widget.groupId,
+        senderId: character.id,
+        senderType: 'ai',
+        content: content,
+      );
+      await _appendMessage(message);
+      return content;
     }
     final content = _stripNamePrefix(result.message, character.name);
     final attachments = await _attachmentsForAgentToolResult(
@@ -994,17 +1072,76 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     return content;
   }
 
+  Future<void> _ensureAgenticTaskPermissions(
+    AICharacter character,
+    String userMessage,
+  ) async {
+    if (!AgenticTaskClassifier.requiresAgenticWork(userMessage)) return;
+    final permissionSet = <ToolPermission>{
+      ...character.toolPermissions,
+      ...CharacterSkillResolver.defaultsFor(character).permissions,
+      ToolPermission.skillCreate,
+      ToolPermission.skillDownload,
+    };
+    final lower = userMessage.toLowerCase();
+    final needsWorkspace = lower.contains('文件') ||
+        lower.contains('file') ||
+        lower.contains('路径') ||
+        lower.contains('path') ||
+        lower.contains('md') ||
+        lower.contains('markdown') ||
+        lower.contains('文档') ||
+        lower.contains('代码') ||
+        lower.contains('code') ||
+        lower.contains('review') ||
+        lower.contains('修复') ||
+        lower.contains('bug');
+    if (needsWorkspace) {
+      permissionSet.add(ToolPermission.workspaceRead);
+      permissionSet.add(ToolPermission.workspacePatch);
+    }
+    final needsCommand = lower.contains('运行') ||
+        lower.contains('测试') ||
+        lower.contains('flutter test') ||
+        lower.contains('flutter analyze') ||
+        lower.contains('命令') ||
+        lower.contains('command');
+    if (needsCommand) {
+      permissionSet.add(ToolPermission.commandRun);
+    }
+    final next = permissionSet.toList();
+    next.sort((a, b) => a.index.compareTo(b.index));
+    final current = character.toolPermissions.map((p) => p.name).toSet();
+    final changed =
+        next.any((permission) => !current.contains(permission.name));
+    if (!changed && character.agenticEnabled) return;
+    character
+      ..agenticEnabled = true
+      ..toolPermissions = next;
+    await _db.aiCharacterBox.put(character.id, character);
+  }
+
   Future<List<MediaAttachment>> _attachmentsForAgentToolResult({
     required AICharacter character,
     required AgentRuntimeResult result,
   }) async {
     final request = result.pendingToolRequest;
-    if (result.status != AgentRuntimeStatus.completed ||
-        request == null ||
-        request.tool != AgentToolName.workspacePatch) {
+    final patchRequests = <ToolRequest>[
+      ...result.executedToolRequests
+          .where((request) => request.tool == AgentToolName.workspacePatch),
+      if (request != null && request.tool == AgentToolName.workspacePatch)
+        request,
+    ];
+    if (patchRequests.isEmpty) {
       return const [];
     }
-    final paths = _pathsFromPatch(request.args['patch'] as String? ?? '');
+    final paths = <String>[];
+    for (final request in patchRequests) {
+      for (final path
+          in _pathsFromPatch(request.args['patch'] as String? ?? '')) {
+        if (!paths.contains(path)) paths.add(path);
+      }
+    }
     if (paths.isEmpty) return const [];
 
     final attachments = <MediaAttachment>[];
@@ -1123,7 +1260,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
         character: pending.character,
         request: pending.request,
         userRequest: pending.userRequest,
+        priorExecutedRequests: pending.priorExecutedRequests,
       );
+      if (result.status == AgentRuntimeStatus.waitingForApproval &&
+          result.pendingToolRequest != null) {
+        _pendingAgentApproval = _PendingAgentToolApproval(
+          character: pending.character,
+          config: pending.config,
+          provider: pending.provider,
+          userRequest: pending.userRequest,
+          request: result.pendingToolRequest!,
+          priorExecutedRequests: result.executedToolRequests,
+        );
+      }
       final content = _stripNamePrefix(
         result.message.trim().isEmpty
             ? '[${pending.character.name} 工具执行完成，但没有返回内容]'
@@ -1668,6 +1817,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   Future<void> _appendMessage(Message message) async {
     await _db.messageBox.put(message.id, message);
     await _db.addMessageToGroupIndex(message);
+    if (message.senderType == 'ai') {
+      await _markCurrentConversationRead(throughMessage: message);
+    }
     if (!_canTouchUi) return;
     setState(() {
       _messages = List.from(_messages)..add(message);
@@ -1682,6 +1834,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
 
   void _registerUserMentionIfNeeded(Message message) {
     if (!_canTouchUi || message.senderType != 'ai') return;
+    if (ConversationPresenceService.instance.isActive(widget.groupId)) return;
     if (!ChatActivityPolicy.contentMentionsUser(
       message.content,
       _ownerMentionName,
@@ -1690,6 +1843,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     }
     if (_pendingUserMentionMessageIds.contains(message.id)) return;
     setState(() => _pendingUserMentionMessageIds.add(message.id));
+  }
+
+  void _clearActiveUserMentionBanner() {
+    if (!_canTouchUi || _pendingUserMentionMessageIds.isEmpty) return;
+    setState(() => _pendingUserMentionMessageIds.clear());
   }
 
   void _clearUserMentions() {
@@ -3140,7 +3298,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
           // 未配置 API Key 时给出醒目提示，避免「发了消息 AI 不回复」的困惑
           if (!_hasAnyApiConfig) _buildApiWarningBanner(cs),
           if (!_isDirectChat) _buildAutoChatStatusBar(cs),
-          if (_pendingUserMentionMessageIds.isNotEmpty)
+          if (_pendingUserMentionMessageIds.isNotEmpty &&
+              !ConversationPresenceService.instance.isActive(widget.groupId))
             _buildUserMentionBanner(cs),
           Expanded(
             child: _messages.isEmpty
@@ -3781,13 +3940,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
     // @ 弹窗键盘导航优先（↑↓ 选择、回车插入、Esc 关闭）
     if (_showMentionPopup) return _handleMentionKeyEvent(event);
     final key = event.logicalKey;
-    final isPasteShortcut = key == LogicalKeyboardKey.keyV &&
-        (HardwareKeyboard.instance.isMetaPressed ||
-            HardwareKeyboard.instance.isControlPressed);
-    if (isPasteShortcut) {
-      unawaited(_pasteClipboardAttachments());
-      return KeyEventResult.ignored;
-    }
     // 桌面端：Enter 发送、Shift+Enter 换行
     if (_isDesktop) {
       if (key == LogicalKeyboardKey.enter ||
@@ -3806,117 +3958,143 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
   }
 
   Widget _buildInputArea(ColorScheme cs) {
-    return Focus(
-      onKeyEvent: (_, event) => _handleKeyEvent(event),
-      child: Column(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (_quotedMessage != null) _buildQuoteBar(cs),
-          // 待发送附件预览（图片缩略 / 视频占位，可单独移除）。
-          if (_pendingAttachments.isNotEmpty) _buildAttachmentPreviewRow(cs),
-          Container(
-            padding: EdgeInsets.only(
-                left: 16,
-                right: 16,
-                top: 12,
-                bottom: MediaQuery.of(context).padding.bottom + 12),
-            decoration: BoxDecoration(
-              color: cs.surface,
-              border: Border(
-                  top: BorderSide(color: cs.outlineVariant.withOpacity(0.5))),
-              boxShadow: [
-                BoxShadow(
-                    color: Colors.black.withOpacity(0.25),
-                    blurRadius: 14,
-                    offset: const Offset(0, -4))
-              ],
-            ),
-            child: Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: [
-                // 附件按钮：图片多选 / 视频单选。
-                IconButton(
-                  icon: const Icon(Icons.attach_file_rounded, size: 24),
-                  color: cs.onSurfaceVariant,
-                  onPressed: _showAttachmentMenu,
-                  tooltip: '添加附件',
+    return DropTarget(
+      onDragEntered: (_) {
+        if (_canTouchUi) setState(() => _isDraggingFiles = true);
+      },
+      onDragExited: (_) {
+        if (_canTouchUi) setState(() => _isDraggingFiles = false);
+      },
+      onDragDone: (detail) {
+        if (_canTouchUi) setState(() => _isDraggingFiles = false);
+        unawaited(_handleDroppedFiles(detail.files));
+      },
+      child: Focus(
+        onKeyEvent: (_, event) => _handleKeyEvent(event),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (_quotedMessage != null) _buildQuoteBar(cs),
+            // 待发送附件预览（图片缩略 / 视频占位，可单独移除）。
+            if (_pendingAttachments.isNotEmpty) _buildAttachmentPreviewRow(cs),
+            Container(
+              padding: EdgeInsets.only(
+                  left: 16,
+                  right: 16,
+                  top: 12,
+                  bottom: MediaQuery.of(context).padding.bottom + 12),
+              decoration: BoxDecoration(
+                color: cs.surface,
+                border: Border(
+                  top: BorderSide(
+                    color: _isDraggingFiles
+                        ? cs.primary
+                        : cs.outlineVariant.withOpacity(0.5),
+                    width: _isDraggingFiles ? 2 : 1,
+                  ),
                 ),
-                Expanded(
-                  child: ConstrainedBox(
-                    constraints:
-                        const BoxConstraints(minHeight: 40, maxHeight: 120),
-                    child: TextField(
-                      key: _inputFieldKey,
-                      controller: _textController,
-                      focusNode: _inputFocusNode,
-                      decoration: InputDecoration(
-                        hintText: _quotedMessage != null
-                            ? '回复 ${_senderNameById(_quotedMessage!.senderId)}...'
-                            : (_isDirectChat
-                                ? '输入私聊消息…'
-                                : _isDesktop
-                                    ? '输入消息，回车发送，Shift+回车换行，@ 提到角色…'
-                                    : '输入消息，@ 提到角色…'),
-                        suffixIcon: _quotedMessage != null
-                            ? IconButton(
-                                icon: Icon(Icons.close_rounded,
-                                    size: 18, color: cs.onSurfaceVariant),
-                                onPressed: _cancelQuote,
-                                tooltip: '取消引用',
-                              )
-                            : null,
-                        border: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(24),
-                            borderSide: BorderSide(color: cs.outlineVariant)),
-                        enabledBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(24),
-                            borderSide: BorderSide(color: cs.outlineVariant)),
-                        focusedBorder: OutlineInputBorder(
-                            borderRadius: BorderRadius.circular(24),
-                            borderSide:
-                                BorderSide(color: cs.primary, width: 1.5)),
-                        filled: true,
-                        fillColor: cs.surfaceContainerHighest,
-                        contentPadding: const EdgeInsets.symmetric(
-                            horizontal: 20, vertical: 10),
-                        isDense: true,
+                boxShadow: [
+                  BoxShadow(
+                      color: Colors.black.withOpacity(0.25),
+                      blurRadius: 14,
+                      offset: const Offset(0, -4))
+                ],
+              ),
+              child: Row(
+                crossAxisAlignment: CrossAxisAlignment.end,
+                children: [
+                  // 附件按钮：图片多选 / 视频单选。
+                  IconButton(
+                    icon: const Icon(Icons.attach_file_rounded, size: 24),
+                    color: cs.onSurfaceVariant,
+                    onPressed: _showAttachmentMenu,
+                    tooltip: '添加附件',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.content_paste_rounded, size: 22),
+                    color: cs.onSurfaceVariant,
+                    onPressed: () =>
+                        _pasteClipboardAttachments(showEmptyHint: true),
+                    tooltip: '粘贴截图或文件',
+                  ),
+                  Expanded(
+                    child: ConstrainedBox(
+                      constraints:
+                          const BoxConstraints(minHeight: 72, maxHeight: 180),
+                      child: TextField(
+                        key: _inputFieldKey,
+                        controller: _textController,
+                        focusNode: _inputFocusNode,
+                        decoration: InputDecoration(
+                          hintText: _quotedMessage != null
+                              ? '回复 ${_senderNameById(_quotedMessage!.senderId)}...'
+                              : (_isDirectChat
+                                  ? '输入私聊消息…'
+                                  : _isDesktop
+                                      ? '输入消息，回车发送，Shift+回车换行，@ 提到角色…'
+                                      : '输入消息，@ 提到角色…'),
+                          suffixIcon: _quotedMessage != null
+                              ? IconButton(
+                                  icon: Icon(Icons.close_rounded,
+                                      size: 18, color: cs.onSurfaceVariant),
+                                  onPressed: _cancelQuote,
+                                  tooltip: '取消引用',
+                                )
+                              : null,
+                          border: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide(color: cs.outlineVariant)),
+                          enabledBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide: BorderSide(color: cs.outlineVariant)),
+                          focusedBorder: OutlineInputBorder(
+                              borderRadius: BorderRadius.circular(24),
+                              borderSide:
+                                  BorderSide(color: cs.primary, width: 1.5)),
+                          filled: true,
+                          fillColor: cs.surfaceContainerHighest,
+                          contentPadding: const EdgeInsets.symmetric(
+                              horizontal: 20, vertical: 16),
+                          isDense: true,
+                        ),
+                        keyboardType: TextInputType.multiline,
+                        textInputAction: TextInputAction.newline,
+                        maxLines: null,
+                        onChanged: _handleTextChanged,
+                        // 桌面右键 / 移动端长按均弹出自适应菜单：剪切 / 复制 / 粘贴 / 全选。
+                        contextMenuBuilder: (context, editableTextState) {
+                          return AdaptiveTextSelectionToolbar.buttonItems(
+                            anchors: editableTextState.contextMenuAnchors,
+                            buttonItems:
+                                editableTextState.contextMenuButtonItems,
+                          );
+                        },
                       ),
-                      keyboardType: TextInputType.multiline,
-                      textInputAction: TextInputAction.newline,
-                      maxLines: null,
-                      onChanged: _handleTextChanged,
-                      // 桌面右键 / 移动端长按均弹出自适应菜单：剪切 / 复制 / 粘贴 / 全选。
-                      contextMenuBuilder: (context, editableTextState) {
-                        return AdaptiveTextSelectionToolbar.buttonItems(
-                          anchors: editableTextState.contextMenuAnchors,
-                          buttonItems: editableTextState.contextMenuButtonItems,
-                        );
-                      },
                     ),
                   ),
-                ),
-                const SizedBox(width: 8),
-                if (_isStreaming) ...[
+                  const SizedBox(width: 8),
+                  if (_isStreaming) ...[
+                    IconButton(
+                      icon: const Icon(Icons.stop_rounded, size: 24),
+                      color: cs.error,
+                      onPressed: _stopStreaming,
+                      tooltip: '停止生成',
+                    ),
+                    const SizedBox(width: 4),
+                  ],
                   IconButton(
-                    icon: const Icon(Icons.stop_rounded, size: 24),
-                    color: cs.error,
-                    onPressed: _stopStreaming,
-                    tooltip: '停止生成',
+                    icon: const Icon(Icons.send_rounded, size: 24),
+                    color: _canSend
+                        ? cs.primary
+                        : cs.onSurfaceVariant.withOpacity(0.4),
+                    onPressed: _canSend ? _sendMessage : null,
+                    tooltip: '发送',
                   ),
-                  const SizedBox(width: 4),
                 ],
-                IconButton(
-                  icon: const Icon(Icons.send_rounded, size: 24),
-                  color: _canSend
-                      ? cs.primary
-                      : cs.onSurfaceVariant.withOpacity(0.4),
-                  onPressed: _canSend ? _sendMessage : null,
-                  tooltip: '发送',
-                ),
-              ],
+              ),
             ),
-          ),
-        ],
+          ],
+        ),
       ),
     );
   }
@@ -4066,6 +4244,74 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage> {
             content: Text('选择文件失败：$e'), behavior: SnackBarBehavior.floating));
       }
     }
+  }
+
+  Future<void> _handleDroppedFiles(List<dynamic> files) async {
+    if (files.isEmpty) return;
+    final messenger = ScaffoldMessenger.of(context);
+    var addedFiles = 0;
+    final droppedDirectories = <String>[];
+    try {
+      for (final dropped in files) {
+        final path = (dropped.path as String?)?.trim() ?? '';
+        if (path.isEmpty) continue;
+        final directory = Directory(path);
+        if (await directory.exists()) {
+          droppedDirectories.add(directory.absolute.path);
+          continue;
+        }
+        final source = File(path);
+        if (!await source.exists()) continue;
+        final att = await _db.copyToMedia(
+          source,
+          _attachmentTypeForPath(path),
+          fileName: _fileNameFromPath(path),
+        );
+        addedFiles++;
+        if (_canTouchUi) {
+          setState(() => _pendingAttachments.add(att));
+        }
+      }
+
+      if (droppedDirectories.isNotEmpty) {
+        _insertTextAtCursor(droppedDirectories.join('\n'));
+      }
+      if (!_canTouchUi) return;
+      final parts = <String>[
+        if (addedFiles > 0) '$addedFiles 个文件',
+        if (droppedDirectories.isNotEmpty)
+          '${droppedDirectories.length} 个文件夹路径',
+      ];
+      if (parts.isNotEmpty) {
+        messenger.showSnackBar(SnackBar(
+          content: Text('已添加 ${parts.join('、')}'),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    } catch (e) {
+      debugPrint('[附件] 拖放失败：$e');
+      if (_canTouchUi) {
+        messenger.showSnackBar(SnackBar(
+          content: Text('拖放失败：$e'),
+          behavior: SnackBarBehavior.floating,
+        ));
+      }
+    }
+  }
+
+  void _insertTextAtCursor(String text) {
+    if (text.trim().isEmpty) return;
+    final current = _textController.text;
+    final selection = _textController.selection;
+    final insertion = current.trim().isEmpty ? text : '\n$text';
+    final start = selection.start < 0 ? current.length : selection.start;
+    final end = selection.end < 0 ? current.length : selection.end;
+    final next = current.replaceRange(start, end, insertion);
+    final cursor = start + insertion.length;
+    _textController.value = TextEditingValue(
+      text: next,
+      selection: TextSelection.collapsed(offset: cursor),
+    );
   }
 
   Future<void> _pasteClipboardAttachments({bool showEmptyHint = false}) async {
@@ -4355,6 +4601,7 @@ class _PendingAgentToolApproval {
   final ApiProvider provider;
   final String userRequest;
   final ToolRequest request;
+  final List<ToolRequest> priorExecutedRequests;
 
   const _PendingAgentToolApproval({
     required this.character,
@@ -4362,6 +4609,7 @@ class _PendingAgentToolApproval {
     required this.provider,
     required this.userRequest,
     required this.request,
+    this.priorExecutedRequests = const [],
   });
 }
 

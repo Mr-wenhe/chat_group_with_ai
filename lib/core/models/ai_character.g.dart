@@ -35,7 +35,7 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
       isActive: fields[15] as bool,
       createdAt: fields[16] as DateTime?,
       apiConfigId: fields[17] as String?,
-      agenticEnabled: fields[18] == null ? false : fields[18] as bool,
+      agenticEnabled: fields[18] == null ? true : fields[18] as bool,
       skillIds: fields[19] == null ? [] : (fields[19] as List?)?.cast<String>(),
       toolPermissions: fields[20] == null
           ? [ToolPermission.skillCreate, ToolPermission.skillDownload]

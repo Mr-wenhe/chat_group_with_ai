@@ -30,14 +30,11 @@ void main() {
 
       final candidate = DirectChatProactivePolicy.selectCandidate(
         directSummaries: summaries,
-        groupCharacters: [bob],
-        recentGroupMessages: [
-          Message(
+        groupCandidates: [
+          _groupCandidate(
+            character: bob,
             groupId: 'group_1',
-            senderId: 'user',
-            senderType: 'user',
-            content: '群里刚聊完产品',
-            timestamp: now.subtract(const Duration(minutes: 20)),
+            at: now.subtract(const Duration(minutes: 20)),
           ),
         ],
         lastProactiveAtByCharacter: const {},
@@ -54,14 +51,11 @@ void main() {
 
       final candidate = DirectChatProactivePolicy.selectCandidate(
         directSummaries: const [],
-        groupCharacters: [bob],
-        recentGroupMessages: [
-          Message(
+        groupCandidates: [
+          _groupCandidate(
+            character: bob,
             groupId: 'group_1',
-            senderId: 'user',
-            senderType: 'user',
-            content: '这个话题谁懂？',
-            timestamp: now.subtract(const Duration(minutes: 10)),
+            at: now.subtract(const Duration(minutes: 10)),
           ),
         ],
         lastProactiveAtByCharacter: const {},
@@ -70,24 +64,22 @@ void main() {
 
       expect(candidate?.character.id, 'bob');
       expect(candidate?.source, DirectChatSource.group);
+      expect(candidate?.sourceGroupId, 'group_1');
     });
 
     test('allows proactive DM from group context when user was recently active',
         () {
       final bob = _character(id: 'bob', name: '阿哲');
       final now = DateTime(2026, 7, 8, 12);
-      final recentMessage = Message(
-        groupId: 'g1',
-        senderId: 'user',
-        senderType: 'user',
-        content: '在群里说句话',
-        timestamp: now.subtract(const Duration(minutes: 5)),
-      );
-
       final candidate = DirectChatProactivePolicy.selectCandidate(
         directSummaries: const [],
-        groupCharacters: [bob],
-        recentGroupMessages: [recentMessage],
+        groupCandidates: [
+          _groupCandidate(
+            character: bob,
+            groupId: 'g1',
+            at: now.subtract(const Duration(minutes: 5)),
+          ),
+        ],
         lastProactiveAtByCharacter: const {},
         now: now,
       );
@@ -115,10 +107,17 @@ void main() {
             ),
             unreadCount: 1,
             source: DirectChatSource.group,
+            hasUserMessage: true,
+            lastUserMessageAt: now.subtract(const Duration(hours: 2)),
           ),
         ],
-        groupCharacters: [alice],
-        recentGroupMessages: const [],
+        groupCandidates: [
+          _groupCandidate(
+            character: alice,
+            groupId: 'g1',
+            at: now.subtract(const Duration(minutes: 5)),
+          ),
+        ],
         lastProactiveAtByCharacter: const {},
         now: now,
       );
@@ -132,8 +131,13 @@ void main() {
 
       final candidate = DirectChatProactivePolicy.selectCandidate(
         directSummaries: const [],
-        groupCharacters: [bob],
-        recentGroupMessages: const [],
+        groupCandidates: [
+          _groupCandidate(
+            character: bob,
+            groupId: 'g1',
+            at: now.subtract(const Duration(minutes: 10)),
+          ),
+        ],
         lastProactiveAtByCharacter: {
           'bob': now.subtract(const Duration(minutes: 30)),
         },
@@ -161,13 +165,91 @@ void main() {
             ),
             unreadCount: 0,
             source: DirectChatSource.direct,
+            hasUserMessage: true,
+            lastUserMessageAt: now.subtract(const Duration(hours: 8)),
           ),
         ],
-        groupCharacters: const [],
-        recentGroupMessages: const [],
+        groupCandidates: const [],
         lastProactiveAtByCharacter: {
           'alice': now.subtract(const Duration(minutes: 20)),
         },
+        now: now,
+      );
+
+      expect(candidate, isNull);
+    });
+
+    test('does not continue a direct chat where user never spoke', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final now = DateTime(2026, 7, 8, 12);
+
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: [
+          DirectChatSummary(
+            conversationId: DirectChatSession.conversationIdFor('alice'),
+            character: alice,
+            lastMessage: Message(
+              groupId: DirectChatSession.conversationIdFor('alice'),
+              senderId: 'alice',
+              senderType: 'ai',
+              content: '我先来打个招呼',
+              timestamp: now.subtract(const Duration(hours: 8)),
+            ),
+            unreadCount: 0,
+            source: DirectChatSource.group,
+          ),
+        ],
+        groupCandidates: const [],
+        lastProactiveAtByCharacter: const {},
+        now: now,
+      );
+
+      expect(candidate, isNull);
+    });
+
+    test(
+        'uses only group candidates from groups where user was recently active',
+        () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final bob = _character(id: 'bob', name: '阿哲');
+      final now = DateTime(2026, 7, 8, 12);
+
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: const [],
+        groupCandidates: [
+          _groupCandidate(
+            character: alice,
+            groupId: 'old_group',
+            at: now.subtract(const Duration(hours: 2)),
+          ),
+          _groupCandidate(
+            character: bob,
+            groupId: 'fresh_group',
+            at: now.subtract(const Duration(minutes: 10)),
+          ),
+        ],
+        lastProactiveAtByCharacter: const {},
+        now: now,
+      );
+
+      expect(candidate?.character.id, 'bob');
+      expect(candidate?.sourceGroupId, 'fresh_group');
+    });
+
+    test('does not extend from group context older than one hour', () {
+      final bob = _character(id: 'bob', name: '阿哲');
+      final now = DateTime(2026, 7, 8, 12);
+
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: const [],
+        groupCandidates: [
+          _groupCandidate(
+            character: bob,
+            groupId: 'g1',
+            at: now.subtract(const Duration(hours: 1, minutes: 1)),
+          ),
+        ],
+        lastProactiveAtByCharacter: const {},
         now: now,
       );
 
@@ -188,5 +270,17 @@ AICharacter _character({required String id, required String name}) {
     apiKey: 'key',
     apiProvider: 'deepseek',
     apiConfigId: '',
+  );
+}
+
+DirectChatGroupCandidate _groupCandidate({
+  required AICharacter character,
+  required String groupId,
+  required DateTime at,
+}) {
+  return DirectChatGroupCandidate(
+    character: character,
+    groupId: groupId,
+    lastUserMessageAt: at,
   );
 }

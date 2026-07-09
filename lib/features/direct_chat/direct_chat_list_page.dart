@@ -8,6 +8,7 @@ import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
 import 'package:chat_group/providers/providers.dart';
+import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -47,6 +48,8 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
       messages: _db.messageBox.values.toList(),
       readAtByConversation: _db.directChatReadAtByConversation(),
       sourceByConversation: _db.directChatSourceByConversation(),
+      activeConversationId:
+          ConversationPresenceService.instance.activeConversationId,
     );
     final pinnedIds = _db.pinnedCharacterIds();
     final originalIndex = <String, int>{

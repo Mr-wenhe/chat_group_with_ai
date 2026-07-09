@@ -5,6 +5,7 @@ import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/features/chat_group/group_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/providers/providers.dart';
+import 'package:chat_group/services/conversation_presence_service.dart';
 
 /// 通用卡片装饰：细描边 + 柔和投影（暗色高级感）。
 class AppCard extends StatelessWidget {
@@ -132,11 +133,14 @@ class AppBottomNav extends ConsumerWidget {
   Widget build(BuildContext context, WidgetRef ref) {
     final isDark = cs.brightness == Brightness.dark;
     final db = ref.watch(databaseServiceProvider);
+    final activeConversationId =
+        ConversationPresenceService.instance.activeConversationId;
     final directSummaries = DirectChatInbox.buildSummaries(
       characters: db.aiCharacterBox.values.toList(),
       messages: db.messageBox.values.toList(),
       readAtByConversation: db.directChatReadAtByConversation(),
       sourceByConversation: db.directChatSourceByConversation(),
+      activeConversationId: activeConversationId,
     );
     final directUnread = DirectChatInbox.totalUnread(directSummaries);
     final groupSummaries = GroupChatInbox.buildSummaries(
@@ -144,6 +148,7 @@ class AppBottomNav extends ConsumerWidget {
       messages: db.messageBox.values.toList(),
       readAtByGroup: db.groupChatReadAtByGroup(),
       pinnedIds: db.pinnedGroupIds(),
+      activeGroupId: activeConversationId,
     );
     final groupUnread = GroupChatInbox.totalUnread(groupSummaries);
     return Padding(

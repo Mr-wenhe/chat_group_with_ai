@@ -33,7 +33,9 @@ class GroupChatProactiveService {
   })  : chatApi = chatApi ?? ChatApiService(),
         random = random ?? Random();
 
-  Future<GroupChatProactiveResult?> tryCreateProactiveMessage() async {
+  Future<GroupChatProactiveResult?> tryCreateProactiveMessage({
+    String? activeGroupId,
+  }) async {
     final now = DateTime.now();
     final characters =
         db.aiCharacterBox.values.where(_canGenerateProactiveMessage).toList();
@@ -50,6 +52,7 @@ class GroupChatProactiveService {
       readAtByGroup: db.groupChatReadAtByGroup(),
       lastProactiveAtByGroup: db.groupChatLastProactiveAtByGroup(),
       now: now,
+      activeGroupId: activeGroupId,
     );
     if (candidate == null) return null;
 

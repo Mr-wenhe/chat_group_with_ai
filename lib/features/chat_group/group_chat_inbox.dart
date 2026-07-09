@@ -28,6 +28,7 @@ class GroupChatInbox {
     required List<Message> messages,
     required Map<String, DateTime> readAtByGroup,
     required Set<String> pinnedIds,
+    String? activeGroupId,
   }) {
     final messagesByGroup = <String, List<Message>>{};
     for (final message in messages) {
@@ -43,6 +44,7 @@ class GroupChatInbox {
         ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
       final readAt = readAtByGroup[group.id];
       final unreadMessages = sortedMessages.where((message) {
+        if (group.id == activeGroupId) return false;
         if (message.senderType != 'ai') return false;
         if (readAt == null) return true;
         return message.timestamp.isAfter(readAt);
