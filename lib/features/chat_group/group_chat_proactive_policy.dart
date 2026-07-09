@@ -26,8 +26,10 @@ class GroupChatProactivePolicy {
     required Map<String, DateTime> readAtByGroup,
     required Map<String, DateTime> lastProactiveAtByGroup,
     required DateTime now,
+    String? activeGroupId,
   }) {
     for (final group in groups) {
+      if (group.id == activeGroupId) continue;
       final groupMessages = messages
           .where((message) =>
               message.groupId == group.id &&

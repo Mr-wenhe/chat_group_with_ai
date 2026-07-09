@@ -100,6 +100,31 @@ void main() {
       expect(summaries.single.hasUnread, isFalse);
     });
 
+    test('active group does not count unread ai messages or mentions', () {
+      final group = _group(id: 'g1', name: '脑暴群');
+      final now = DateTime(2026, 7, 8, 10);
+
+      final summaries = GroupChatInbox.buildSummaries(
+        groups: [group],
+        messages: [
+          Message(
+            groupId: 'g1',
+            senderId: 'ai_1',
+            senderType: 'ai',
+            content: '@我 当前群聊正在打开',
+            timestamp: now,
+          ),
+        ],
+        readAtByGroup: const {},
+        pinnedIds: const {},
+        activeGroupId: 'g1',
+      );
+
+      expect(summaries.single.unreadCount, 0);
+      expect(summaries.single.mentionCount, 0);
+      expect(summaries.single.hasUnread, isFalse);
+    });
+
     test('ignores direct chat conversations when building group summaries', () {
       final group = _group(id: 'g1', name: '脑暴群');
       final now = DateTime(2026, 7, 8, 10);

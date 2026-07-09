@@ -1,16 +1,31 @@
 import 'package:chat_group/core/models/ai_character.dart';
-import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 
 class DirectChatProactiveCandidate {
   final AICharacter character;
   final DirectChatSource source;
   final String reason;
+  final String? sourceGroupId;
+  final DateTime? sourceUserMessageAt;
 
   const DirectChatProactiveCandidate({
     required this.character,
     required this.source,
     required this.reason,
+    this.sourceGroupId,
+    this.sourceUserMessageAt,
+  });
+}
+
+class DirectChatGroupCandidate {
+  final AICharacter character;
+  final String groupId;
+  final DateTime lastUserMessageAt;
+
+  const DirectChatGroupCandidate({
+    required this.character,
+    required this.groupId,
+    required this.lastUserMessageAt,
   });
 }
 
@@ -21,8 +36,7 @@ class DirectChatProactivePolicy {
 
   static DirectChatProactiveCandidate? selectCandidate({
     required List<DirectChatSummary> directSummaries,
-    required List<AICharacter> groupCharacters,
-    required List<Message> recentGroupMessages,
+    required List<DirectChatGroupCandidate> groupCandidates,
     required Map<String, DateTime> lastProactiveAtByCharacter,
     required DateTime now,
   }) {
@@ -35,7 +49,7 @@ class DirectChatProactivePolicy {
         return false;
       }
       if (summary.hasUnread) return false;
-      if (summary.lastMessage.senderType != 'user') return false;
+      if (!summary.hasUserMessage) return false;
       return now.difference(summary.lastMessage.timestamp) >=
           directChatStaleAfter;
     }).toList();
@@ -54,22 +68,27 @@ class DirectChatProactivePolicy {
     final existingDirectIds =
         directSummaries.map((summary) => summary.character.id).toSet();
 
-    final hasRecentUserGroupMessage = recentGroupMessages.any((message) {
-      return message.senderType == 'user' &&
-          now.difference(message.timestamp) <= recentGroupWindow;
-    });
-    if (!hasRecentUserGroupMessage) return null;
+    final eligibleGroupCandidates = groupCandidates.where((candidate) {
+      if (existingDirectIds.contains(candidate.character.id)) return false;
+      if (now.difference(candidate.lastUserMessageAt) > recentGroupWindow) {
+        return false;
+      }
+      return _canProactivelySpeak(
+        candidate.character,
+        lastProactiveAtByCharacter,
+        now,
+      );
+    }).toList()
+      ..sort((a, b) => b.lastUserMessageAt.compareTo(a.lastUserMessageAt));
 
-    final groupCandidate = groupCharacters.where((character) {
-      if (existingDirectIds.contains(character.id)) return false;
-      return _canProactivelySpeak(character, lastProactiveAtByCharacter, now);
-    }).firstOrNull;
-
-    if (groupCandidate == null) return null;
+    if (eligibleGroupCandidates.isEmpty) return null;
+    final groupCandidate = eligibleGroupCandidates.first;
     return DirectChatProactiveCandidate(
-      character: groupCandidate,
+      character: groupCandidate.character,
       source: DirectChatSource.group,
       reason: '从群聊话题延伸',
+      sourceGroupId: groupCandidate.groupId,
+      sourceUserMessageAt: groupCandidate.lastUserMessageAt,
     );
   }
 

@@ -10,6 +10,7 @@ import 'chat_group_form_page.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/providers/providers.dart';
+import 'package:chat_group/services/conversation_presence_service.dart';
 
 class ChatGroupListPage extends ConsumerStatefulWidget {
   const ChatGroupListPage({super.key});
@@ -36,6 +37,7 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
       messages: _db.messageBox.values.toList(),
       readAtByGroup: _db.groupChatReadAtByGroup(),
       pinnedIds: _db.pinnedGroupIds(),
+      activeGroupId: ConversationPresenceService.instance.activeConversationId,
     );
     final unreadCount = GroupChatInbox.totalUnread(summaries);
 

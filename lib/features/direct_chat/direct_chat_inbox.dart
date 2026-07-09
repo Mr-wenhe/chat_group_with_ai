@@ -11,6 +11,8 @@ class DirectChatSummary {
   final Message lastMessage;
   final int unreadCount;
   final DirectChatSource source;
+  final bool hasUserMessage;
+  final DateTime? lastUserMessageAt;
 
   const DirectChatSummary({
     required this.conversationId,
@@ -18,6 +20,8 @@ class DirectChatSummary {
     required this.lastMessage,
     required this.unreadCount,
     required this.source,
+    this.hasUserMessage = false,
+    this.lastUserMessageAt,
   });
 
   bool get hasUnread => unreadCount > 0;
@@ -29,6 +33,7 @@ class DirectChatInbox {
     required List<Message> messages,
     required Map<String, DateTime> readAtByConversation,
     required Map<String, DirectChatSource> sourceByConversation,
+    String? activeConversationId,
   }) {
     final charactersById = {
       for (final character in characters) character.id: character
@@ -58,7 +63,13 @@ class DirectChatInbox {
           characterId == null ? null : charactersById[characterId];
       if (character == null) continue;
       final readAt = readAtByConversation[entry.key];
+      final userMessages = conversationMessages
+          .where((message) => message.senderType == 'user')
+          .toList();
+      final lastUserMessageAt =
+          userMessages.isEmpty ? null : userMessages.last.timestamp;
       final unreadCount = conversationMessages.where((message) {
+        if (entry.key == activeConversationId) return false;
         if (message.senderType != 'ai') return false;
         if (readAt == null) return true;
         return message.timestamp.isAfter(readAt);
@@ -69,6 +80,8 @@ class DirectChatInbox {
         lastMessage: conversationMessages.last,
         unreadCount: unreadCount,
         source: sourceByConversation[entry.key] ?? DirectChatSource.direct,
+        hasUserMessage: userMessages.isNotEmpty,
+        lastUserMessageAt: lastUserMessageAt,
       ));
     }
 

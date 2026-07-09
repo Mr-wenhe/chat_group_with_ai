@@ -83,6 +83,34 @@ void main() {
       expect(summaries.single.unreadCount, 1);
       expect(summaries.single.source, DirectChatSource.group);
       expect(summaries.single.hasUnread, isTrue);
+      expect(summaries.single.hasUserMessage, isTrue);
+      expect(summaries.single.lastUserMessageAt,
+          readAt.add(const Duration(minutes: 1)));
+    });
+
+    test('active direct conversation does not count unread messages', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final conversationId = DirectChatSession.conversationIdFor('alice');
+      final now = DateTime(2026, 7, 8, 10);
+
+      final summaries = DirectChatInbox.buildSummaries(
+        characters: [alice],
+        messages: [
+          Message(
+            groupId: conversationId,
+            senderId: 'alice',
+            senderType: 'ai',
+            content: '当前私聊正在打开',
+            timestamp: now,
+          ),
+        ],
+        readAtByConversation: const {},
+        sourceByConversation: const {},
+        activeConversationId: conversationId,
+      );
+
+      expect(summaries.single.unreadCount, 0);
+      expect(summaries.single.hasUnread, isFalse);
     });
 
     test('unread count is cleared when read time passes latest message', () {

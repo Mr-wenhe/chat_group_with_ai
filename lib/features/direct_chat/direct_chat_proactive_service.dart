@@ -37,6 +37,9 @@ class DirectChatProactiveService {
   Future<DirectChatProactiveResult?> tryCreateProactiveMessage() async {
     final now = DateTime.now();
     final characters = db.aiCharacterBox.values.toList();
+    final charactersById = {
+      for (final character in characters) character.id: character
+    };
     final allMessages = db.messageBox.values.toList();
     final summaries = DirectChatInbox.buildSummaries(
       characters: characters,
@@ -53,26 +56,34 @@ class DirectChatProactiveService {
             !DirectChatSession.isDirectConversationId(message.groupId))
         .toList()
       ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
-    final recentGroupIds = recentGroupMessages
-        .where((message) => message.senderType == 'user')
-        .take(20)
-        .map((message) => message.groupId)
-        .toSet();
-    final groupCharacterIds = db.chatGroupBox.values
-        .where((group) => recentGroupIds.contains(group.id))
-        .expand((group) => group.aiCharacterIds)
-        .toSet();
-    final groupCharacters = characters
-        .where((character) =>
-            groupCharacterIds.contains(character.id) &&
-            _canGenerateProactiveMessage(character))
-        .toList()
-      ..shuffle(random);
+    final latestUserMessageAtByGroup = <String, DateTime>{};
+    for (final message in recentGroupMessages) {
+      if (message.senderType != 'user') continue;
+      latestUserMessageAtByGroup.putIfAbsent(message.groupId, () {
+        return message.timestamp;
+      });
+    }
+    final groupCandidates = <DirectChatGroupCandidate>[];
+    for (final group in db.chatGroupBox.values) {
+      final lastUserMessageAt = latestUserMessageAtByGroup[group.id];
+      if (lastUserMessageAt == null) continue;
+      for (final characterId in group.aiCharacterIds) {
+        final character = charactersById[characterId];
+        if (character == null || !_canGenerateProactiveMessage(character)) {
+          continue;
+        }
+        groupCandidates.add(DirectChatGroupCandidate(
+          character: character,
+          groupId: group.id,
+          lastUserMessageAt: lastUserMessageAt,
+        ));
+      }
+    }
+    groupCandidates.shuffle(random);
 
     final candidate = DirectChatProactivePolicy.selectCandidate(
       directSummaries: candidateSummaries,
-      groupCharacters: groupCharacters,
-      recentGroupMessages: recentGroupMessages.take(20).toList(),
+      groupCandidates: groupCandidates,
       lastProactiveAtByCharacter: db.directChatLastProactiveAtByCharacter(),
       now: now,
     );
@@ -90,6 +101,12 @@ class DirectChatProactiveService {
     final context = directMessages.length > 12
         ? directMessages.sublist(directMessages.length - 12)
         : directMessages;
+    final sourceGroupContext = candidate.sourceGroupId == null
+        ? recentGroupMessages.take(8).toList()
+        : recentGroupMessages
+            .where((message) => message.groupId == candidate.sourceGroupId)
+            .take(8)
+            .toList();
 
     final result = await chatApi.sendChatMessage(
       apiKey: config.apiKey,
@@ -104,7 +121,7 @@ class DirectChatProactiveService {
         source: candidate.source,
         reason: candidate.reason,
         directContext: context,
-        groupContext: recentGroupMessages.take(8).toList(),
+        groupContext: sourceGroupContext,
       ),
       temperature: 0.8,
     );

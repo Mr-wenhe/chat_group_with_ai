@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
+import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:flutter/material.dart';
 
 class DirectChatForegroundWatcher extends StatefulWidget {
@@ -62,9 +63,21 @@ class _DirectChatForegroundWatcherState
     }
     _checking = true;
     try {
+      final activeConversationId =
+          ConversationPresenceService.instance.activeConversationId;
       final directResult = await DirectChatProactiveService(db: widget.db)
           .tryCreateProactiveMessage();
       if (directResult != null) {
+        final conversationId = 'dm:${directResult.character.id}';
+        if (activeConversationId == conversationId) {
+          await widget.db.markDirectChatRead(
+            conversationId,
+            readAt: directResult.message.timestamp
+                .add(const Duration(milliseconds: 1)),
+          );
+          if (mounted) setState(() {});
+          return;
+        }
         widget.scaffoldMessengerKey.currentState?.showSnackBar(
           SnackBar(
             content: Text('${directResult.character.name} 主动发来一条私聊'),
@@ -82,8 +95,17 @@ class _DirectChatForegroundWatcherState
       }
 
       final groupResult = await GroupChatProactiveService(db: widget.db)
-          .tryCreateProactiveMessage();
+          .tryCreateProactiveMessage(activeGroupId: activeConversationId);
       if (groupResult != null) {
+        if (activeConversationId == groupResult.group.id) {
+          await widget.db.markGroupChatRead(
+            groupResult.group.id,
+            readAt: groupResult.message.timestamp
+                .add(const Duration(milliseconds: 1)),
+          );
+          if (mounted) setState(() {});
+          return;
+        }
         widget.scaffoldMessengerKey.currentState?.showSnackBar(
           SnackBar(
             content: Text(
