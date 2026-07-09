@@ -5,6 +5,8 @@ import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/top_toast.dart';
+import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -69,27 +71,22 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
   Future<void> _checkProactiveNow() async {
     if (_isCheckingProactive) return;
     setState(() => _isCheckingProactive = true);
-    final messenger = ScaffoldMessenger.of(context);
     final result =
         await DirectChatProactiveService(db: _db).tryCreateProactiveMessage();
     if (!mounted) return;
     setState(() => _isCheckingProactive = false);
     _loadSummaries();
     if (result == null) {
-      messenger.showSnackBar(const SnackBar(
-        content: Text('暂时没有角色主动来聊'),
-        behavior: SnackBarBehavior.floating,
-      ));
+      AppToast.show(context, '暂时没有角色主动来聊', icon: Icons.info_outline_rounded);
       return;
     }
-    messenger.showSnackBar(SnackBar(
-      content: Text('${result.character.name} 主动发来一条私聊'),
-      behavior: SnackBarBehavior.floating,
-      action: SnackBarAction(
-        label: '查看',
-        onPressed: () => _openDirectChatByCharacterId(result.character.id),
-      ),
-    ));
+    AppToast.show(
+      context,
+      '${result.character.name} 主动发来一条私聊',
+      icon: Icons.mark_chat_unread_rounded,
+      actionLabel: '查看',
+      onTap: () => _openDirectChatByCharacterId(result.character.id),
+    );
   }
 
   Future<void> _openDirectChat(DirectChatSummary summary) async {
@@ -114,6 +111,13 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final unreadCount = DirectChatInbox.totalUnread(_summaries);
+    DirectChatSummary? firstUnreadSummary;
+    for (final summary in _summaries) {
+      if (summary.hasUnread) {
+        firstUnreadSummary = summary;
+        break;
+      }
+    }
 
     return Scaffold(
       backgroundColor: cs.surface,
@@ -141,7 +145,14 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
                     color: cs.onSurface)),
             if (unreadCount > 0) ...[
               const SizedBox(width: 8),
-              Badge(label: Text('$unreadCount')),
+              InkWell(
+                onTap: () {
+                  final target = firstUnreadSummary;
+                  if (target != null) _openDirectChat(target);
+                },
+                borderRadius: BorderRadius.circular(12),
+                child: Badge(label: Text('$unreadCount')),
+              ),
             ],
           ],
         ),
@@ -179,6 +190,12 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
                   onTap: () => _openDirectChat(summary),
                   onTogglePin: () =>
                       _togglePinnedCharacter(summary.character.id),
+                  onOpenCharacter: () => Navigator.of(context).push(
+                    MaterialPageRoute(
+                      builder: (_) =>
+                          AICharacterFormPage(character: summary.character),
+                    ),
+                  ),
                 );
               },
             ),
@@ -234,6 +251,7 @@ class _DirectChatCard extends StatelessWidget {
   final bool isPinned;
   final VoidCallback onTap;
   final VoidCallback onTogglePin;
+  final VoidCallback onOpenCharacter;
 
   const _DirectChatCard({
     required this.summary,
@@ -241,6 +259,7 @@ class _DirectChatCard extends StatelessWidget {
     required this.isPinned,
     required this.onTap,
     required this.onTogglePin,
+    required this.onOpenCharacter,
   });
 
   @override
@@ -270,16 +289,20 @@ class _DirectChatCard extends StatelessWidget {
           padding: const EdgeInsets.all(16),
           child: Row(
             children: [
-              CircleAvatar(
-                radius: 24,
-                backgroundColor: color.withOpacity(0.14),
-                child: Text(
-                  character.avatar.isNotEmpty
-                      ? character.avatar
-                      : character.name.substring(0, 1),
-                  style: TextStyle(
-                    fontWeight: FontWeight.w700,
-                    color: color,
+              InkWell(
+                onTap: onOpenCharacter,
+                borderRadius: BorderRadius.circular(24),
+                child: CircleAvatar(
+                  radius: 24,
+                  backgroundColor: color.withOpacity(0.14),
+                  child: Text(
+                    character.avatar.isNotEmpty
+                        ? character.avatar
+                        : character.name.substring(0, 1),
+                    style: TextStyle(
+                      fontWeight: FontWeight.w700,
+                      color: color,
+                    ),
                   ),
                 ),
               ),

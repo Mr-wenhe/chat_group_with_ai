@@ -24,13 +24,15 @@ class ChatGroupAdapter extends TypeAdapter<ChatGroup> {
       aiCharacterIds: (fields[4] as List).cast<String>(),
       createdAt: fields[5] as DateTime?,
       ownerName: fields[6] as String?,
+      announcement: fields[7] as String?,
+      replyIntervalSeconds: fields[8] as int?,
     );
   }
 
   @override
   void write(BinaryWriter writer, ChatGroup obj) {
     writer
-      ..writeByte(7)
+      ..writeByte(9)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -44,7 +46,11 @@ class ChatGroupAdapter extends TypeAdapter<ChatGroup> {
       ..writeByte(5)
       ..write(obj.createdAt)
       ..writeByte(6)
-      ..write(obj.ownerName);
+      ..write(obj.ownerName)
+      ..writeByte(7)
+      ..write(obj.announcement)
+      ..writeByte(8)
+      ..write(obj.replyIntervalSeconds);
   }
 
   @override

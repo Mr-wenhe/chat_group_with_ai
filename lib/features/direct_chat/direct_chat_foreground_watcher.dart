@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
@@ -78,17 +79,14 @@ class _DirectChatForegroundWatcherState
           if (mounted) setState(() {});
           return;
         }
-        widget.scaffoldMessengerKey.currentState?.showSnackBar(
-          SnackBar(
-            content: Text('${directResult.character.name} 主动发来一条私聊'),
-            behavior: SnackBarBehavior.floating,
-            action: SnackBarAction(
-              label: '去看看',
-              onPressed: () {
-                widget.navigatorKey.currentState?.pushNamed('/direct-chats');
-              },
-            ),
-          ),
+        if (!mounted) return;
+        AppToast.show(
+          context,
+          '${directResult.character.name} 主动发来一条私聊',
+          icon: Icons.mark_chat_unread_rounded,
+          actionLabel: '去看看',
+          onTap: () =>
+              widget.navigatorKey.currentState?.pushNamed('/direct-chats'),
         );
         if (mounted) setState(() {});
         return;
@@ -106,20 +104,14 @@ class _DirectChatForegroundWatcherState
           if (mounted) setState(() {});
           return;
         }
-        widget.scaffoldMessengerKey.currentState?.showSnackBar(
-          SnackBar(
-            content: Text(
-              '${groupResult.character.name} 在「${groupResult.group.name}」里发言了',
-            ),
-            behavior: SnackBarBehavior.floating,
-            action: SnackBarAction(
-              label: '去看看',
-              onPressed: () {
-                widget.navigatorKey.currentState
-                    ?.pushNamed('/chat/${groupResult.group.id}');
-              },
-            ),
-          ),
+        if (!mounted) return;
+        AppToast.show(
+          context,
+          '${groupResult.character.name} 在「${groupResult.group.name}」里发言了',
+          icon: Icons.groups_rounded,
+          actionLabel: '去看看',
+          onTap: () => widget.navigatorKey.currentState
+              ?.pushNamed('/chat/${groupResult.group.id}'),
         );
         if (mounted) setState(() {});
       }

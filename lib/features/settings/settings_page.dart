@@ -7,6 +7,7 @@ import 'package:chat_group/features/settings/api_config_form_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/ai_providers/ai_api_service.dart';
+import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -22,7 +23,7 @@ class SettingsPage extends ConsumerStatefulWidget {
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
   final _apiService = AiApiService();
-  ThemeMode _currentThemeMode = ThemeMode.dark;
+  AppSkinMode _currentSkinMode = AppSkinMode.dark;
   bool _isTtsEnabled = true;
   Map<String, dynamic> _tokenUsage = {};
   String _aiProcessingDirPath = '';
@@ -31,7 +32,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   void initState() {
     super.initState();
     final db = ref.read(databaseServiceProvider);
-    _currentThemeMode = db.savedThemeMode;
+    _currentSkinMode = db.savedAppSkinMode;
     _isTtsEnabled = db.isTtsEnabled;
     _tokenUsage = db.getTokenUsage();
     _loadAiProcessingDirPath();
@@ -189,28 +190,32 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 icon: Icons.palette_outlined,
                 iconColor: cs.tertiary,
                 title: '外观',
-                subtitle: _themeLabel(_currentThemeMode),
+                subtitle: _skinLabel(_currentSkinMode),
                 onTap: () {},
-                trailing: SegmentedButton<ThemeMode>(
+                trailing: SegmentedButton<AppSkinMode>(
                   segments: const [
                     ButtonSegment(
-                        value: ThemeMode.light,
+                        value: AppSkinMode.light,
                         label: Icon(Icons.light_mode_rounded, size: 18),
                         tooltip: '浅色'),
                     ButtonSegment(
-                        value: ThemeMode.system,
+                        value: AppSkinMode.system,
                         label: Icon(Icons.brightness_auto_rounded, size: 18),
                         tooltip: '跟随系统'),
                     ButtonSegment(
-                        value: ThemeMode.dark,
+                        value: AppSkinMode.dark,
                         label: Icon(Icons.dark_mode_rounded, size: 18),
                         tooltip: '深色'),
+                    ButtonSegment(
+                        value: AppSkinMode.golden,
+                        label: Icon(Icons.workspace_premium_rounded, size: 18),
+                        tooltip: '黄金'),
                   ],
-                  selected: {_currentThemeMode},
-                  onSelectionChanged: (Set<ThemeMode> sel) {
+                  selected: {_currentSkinMode},
+                  onSelectionChanged: (Set<AppSkinMode> sel) {
                     final mode = sel.first;
-                    setState(() => _currentThemeMode = mode);
-                    ref.read(databaseServiceProvider).saveThemeMode(mode);
+                    setState(() => _currentSkinMode = mode);
+                    ref.read(appSkinModeProvider.notifier).setSkin(mode);
                   },
                 ),
               ),
@@ -421,14 +426,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     }
   }
 
-  String _themeLabel(ThemeMode mode) {
+  String _skinLabel(AppSkinMode mode) {
     switch (mode) {
-      case ThemeMode.light:
+      case AppSkinMode.light:
         return '浅色';
-      case ThemeMode.dark:
+      case AppSkinMode.dark:
         return '深色';
-      case ThemeMode.system:
+      case AppSkinMode.system:
         return '跟随系统';
+      case AppSkinMode.golden:
+        return '黄金';
     }
   }
 

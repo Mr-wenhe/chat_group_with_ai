@@ -1,5 +1,7 @@
 import 'package:flutter/material.dart';
 
+enum AppSkinMode { light, system, dark, golden }
+
 /// 全局设计系统：暗色高级感（Linear / Arc 风格）。
 ///
 /// 设计令牌（Design Tokens）：
@@ -70,6 +72,33 @@ class AppTheme {
     shadow: const Color(0xFF000000),
   );
 
+  static final ColorScheme golden = ColorScheme.fromSeed(
+    seedColor: const Color(0xFFD4A017),
+    brightness: Brightness.dark,
+  ).copyWith(
+    surface: const Color(0xFF11100B),
+    surfaceContainerLowest: const Color(0xFF090805),
+    surfaceContainerLow: const Color(0xFF18150D),
+    surfaceContainer: const Color(0xFF211C10),
+    surfaceContainerHighest: const Color(0xFF2D2514),
+    onSurface: const Color(0xFFFFF7E2),
+    onSurfaceVariant: const Color(0xFFD8C79B),
+    outline: const Color(0xFF5F4B21),
+    outlineVariant: const Color(0xFF463817),
+    primary: const Color(0xFFFFC857),
+    onPrimary: const Color(0xFF231700),
+    primaryContainer: const Color(0xFF4D3710),
+    onPrimaryContainer: const Color(0xFFFFE3A0),
+    secondary: const Color(0xFFE4B13A),
+    onSecondary: const Color(0xFF241700),
+    tertiary: const Color(0xFFFF8F5A),
+    error: const Color(0xFFFF8A80),
+    errorContainer: const Color(0xFF4A1E18),
+    onError: const Color(0xFF2A0500),
+    onErrorContainer: const Color(0xFFFFD4CD),
+    shadow: const Color(0xFF000000),
+  );
+
   static ThemeData _base(ColorScheme cs, Brightness brightness) {
     final isDark = brightness == Brightness.dark;
     return ThemeData(
@@ -96,11 +125,14 @@ class AppTheme {
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(18),
           side: BorderSide(
-            color: isDark ? Colors.white.withOpacity(0.06) : Colors.black.withOpacity(0.05),
+            color: isDark
+                ? Colors.white.withOpacity(0.06)
+                : Colors.black.withOpacity(0.05),
           ),
         ),
       ),
-      dividerTheme: DividerThemeData(color: cs.outlineVariant, thickness: 0.5, space: 1),
+      dividerTheme:
+          DividerThemeData(color: cs.outlineVariant, thickness: 0.5, space: 1),
       snackBarTheme: SnackBarThemeData(
         behavior: SnackBarBehavior.floating,
         backgroundColor: cs.surfaceContainerHighest,
@@ -114,7 +146,9 @@ class AppTheme {
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(20),
           side: BorderSide(
-            color: isDark ? Colors.white.withOpacity(0.06) : Colors.black.withOpacity(0.05),
+            color: isDark
+                ? Colors.white.withOpacity(0.06)
+                : Colors.black.withOpacity(0.05),
           ),
         ),
       ),
@@ -122,7 +156,8 @@ class AppTheme {
         style: FilledButton.styleFrom(
           backgroundColor: cs.primary,
           foregroundColor: cs.onPrimary,
-          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
+          shape:
+              RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
           padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
         ),
       ),
@@ -131,7 +166,9 @@ class AppTheme {
       ),
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
-        fillColor: isDark ? cs.surfaceContainerHighest.withOpacity(0.6) : cs.surfaceContainerLowest,
+        fillColor: isDark
+            ? cs.surfaceContainerHighest.withOpacity(0.6)
+            : cs.surfaceContainerLowest,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
           borderSide: BorderSide(color: cs.outlineVariant),
@@ -144,20 +181,40 @@ class AppTheme {
           borderRadius: BorderRadius.circular(12),
           borderSide: BorderSide(color: cs.primary, width: 1.5),
         ),
-        contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
+        contentPadding:
+            const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         labelStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-        hintStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant.withOpacity(0.5)),
+        hintStyle: TextStyle(
+            fontSize: 13, color: cs.onSurfaceVariant.withOpacity(0.5)),
       ),
       textTheme: TextTheme(
-        titleLarge: TextStyle(fontSize: 22, fontWeight: FontWeight.w700, color: cs.onSurface, letterSpacing: -0.5),
-        titleMedium: TextStyle(fontSize: 18, fontWeight: FontWeight.w600, color: cs.onSurface, letterSpacing: -0.3),
+        titleLarge: TextStyle(
+            fontSize: 22,
+            fontWeight: FontWeight.w700,
+            color: cs.onSurface,
+            letterSpacing: -0.5),
+        titleMedium: TextStyle(
+            fontSize: 18,
+            fontWeight: FontWeight.w600,
+            color: cs.onSurface,
+            letterSpacing: -0.3),
         bodyLarge: TextStyle(fontSize: 15, height: 1.5, color: cs.onSurface),
         bodyMedium: TextStyle(fontSize: 14, height: 1.45, color: cs.onSurface),
-        labelLarge: TextStyle(fontSize: 15, fontWeight: FontWeight.w600, color: cs.onSurface),
+        labelLarge: TextStyle(
+            fontSize: 15, fontWeight: FontWeight.w600, color: cs.onSurface),
       ),
     );
   }
 
   static final ThemeData darkTheme = _base(dark, Brightness.dark);
   static final ThemeData lightTheme = _base(light, Brightness.light);
+  static final ThemeData goldenTheme = _base(golden, Brightness.dark);
+
+  static ThemeMode materialThemeModeFor(AppSkinMode skin) {
+    return switch (skin) {
+      AppSkinMode.light => ThemeMode.light,
+      AppSkinMode.system => ThemeMode.system,
+      AppSkinMode.dark || AppSkinMode.golden => ThemeMode.dark,
+    };
+  }
 }

@@ -26,10 +26,12 @@ class AICharacterListPage extends ConsumerStatefulWidget {
 class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
   // 批量更换模型时复用的输入框控制器，需在 dispose 中释放
   final TextEditingController _batchModelController = TextEditingController();
+  final TextEditingController _searchController = TextEditingController();
 
   @override
   void dispose() {
     _batchModelController.dispose();
+    _searchController.dispose();
     super.dispose();
   }
 
@@ -38,9 +40,18 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
     final cs = Theme.of(context).colorScheme;
     final db = ref.read(databaseServiceProvider);
     final characters = ref.watch(aiCharactersProvider);
+    final query = _searchController.text.trim().toLowerCase();
+    final filteredCharacters = query.isEmpty
+        ? characters
+        : characters.where((c) {
+            final haystack =
+                '${c.name} ${c.role} ${c.personalityTags.join(' ')}'
+                    .toLowerCase();
+            return haystack.contains(query);
+          }).toList();
     final pinnedIds = db.pinnedCharacterIds();
     final orderedCharacters = PinnedOrdering.sortCharacters(
-      characters,
+      filteredCharacters,
       pinnedIds: pinnedIds,
     );
     // 获取自定义类型的 API 配置，用于「统一模型」工具栏
@@ -113,34 +124,67 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                 ],
               ),
             ),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(20, 8, 20, 4),
+            child: TextField(
+              controller: _searchController,
+              decoration: appInputDecoration(
+                '搜索角色',
+                '按名字、角色或标签搜索',
+                Icons.search_rounded,
+                cs,
+              ).copyWith(
+                suffixIcon: _searchController.text.isEmpty
+                    ? null
+                    : IconButton(
+                        icon: const Icon(Icons.close_rounded, size: 18),
+                        tooltip: '清空搜索',
+                        onPressed: () {
+                          _searchController.clear();
+                          setState(() {});
+                        },
+                      ),
+              ),
+              onChanged: (_) => setState(() {}),
+            ),
+          ),
           Expanded(
             child: characters.isEmpty
                 ? _buildEmptyState(cs)
-                : ListView.builder(
-                    padding: const EdgeInsets.all(20),
-                    itemCount: orderedCharacters.length,
-                    itemBuilder: (context, index) {
-                      final character = orderedCharacters[index];
-                      return _CharacterCard(
-                        character: character,
-                        cs: cs,
-                        isPinned: pinnedIds.contains(character.id),
-                        onTap: () => _editCharacter(context, character),
-                        onDelete: () => _confirmDelete(context, ref, character),
-                        onTogglePin: () => _togglePinnedCharacter(character.id),
-                        onToggle: () {
-                          character.isActive = !character.isActive;
-                          character.save();
+                : orderedCharacters.isEmpty
+                    ? Center(
+                        child: Text('未找到匹配角色',
+                            style: TextStyle(
+                                fontSize: 14, color: cs.onSurfaceVariant)),
+                      )
+                    : ListView.builder(
+                        padding: const EdgeInsets.all(20),
+                        itemCount: orderedCharacters.length,
+                        itemBuilder: (context, index) {
+                          final character = orderedCharacters[index];
+                          return _CharacterCard(
+                            character: character,
+                            cs: cs,
+                            isPinned: pinnedIds.contains(character.id),
+                            onTap: () => _editCharacter(context, character),
+                            onDelete: () =>
+                                _confirmDelete(context, ref, character),
+                            onTogglePin: () =>
+                                _togglePinnedCharacter(character.id),
+                            onToggle: () {
+                              character.isActive = !character.isActive;
+                              character.save();
+                            },
+                            // 点击模型标签可单独切换该角色关联的 API 配置（Bug 2/4）
+                            onConfigChange: () =>
+                                _changeSingleConfig(context, ref, character),
+                            // 传入关联配置：优先显示配置名而非角色旧 provider 名（Bug 4）
+                            linkedConfig: configMap[character.apiConfigId],
+                            onDirectChat: () =>
+                                _openDirectChat(context, character),
+                          );
                         },
-                        // 点击模型标签可单独切换该角色关联的 API 配置（Bug 2/4）
-                        onConfigChange: () =>
-                            _changeSingleConfig(context, ref, character),
-                        // 传入关联配置：优先显示配置名而非角色旧 provider 名（Bug 4）
-                        linkedConfig: configMap[character.apiConfigId],
-                        onDirectChat: () => _openDirectChat(context, character),
-                      );
-                    },
-                  ),
+                      ),
           ),
         ],
       ),

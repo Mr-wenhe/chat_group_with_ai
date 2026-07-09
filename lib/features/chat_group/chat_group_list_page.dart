@@ -40,6 +40,13 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
       activeGroupId: ConversationPresenceService.instance.activeConversationId,
     );
     final unreadCount = GroupChatInbox.totalUnread(summaries);
+    GroupChatSummary? firstUnreadSummary;
+    for (final summary in summaries) {
+      if (summary.hasUnread) {
+        firstUnreadSummary = summary;
+        break;
+      }
+    }
 
     return Scaffold(
       backgroundColor: cs.surface,
@@ -67,7 +74,14 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
                     color: cs.onSurface)),
             if (unreadCount > 0) ...[
               const SizedBox(width: 8),
-              Badge(label: Text('$unreadCount')),
+              InkWell(
+                onTap: () {
+                  final target = firstUnreadSummary;
+                  if (target != null) _openChat(target);
+                },
+                borderRadius: BorderRadius.circular(12),
+                child: Badge(label: Text('$unreadCount')),
+              ),
             ],
           ],
         ),

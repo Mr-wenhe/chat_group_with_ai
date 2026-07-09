@@ -58,12 +58,13 @@ class MyApp extends ConsumerWidget {
   @override
   Widget build(BuildContext context, WidgetRef ref) {
     final db = ref.read(databaseServiceProvider);
-    final savedMode = db.savedThemeMode;
+    final skin = ref.watch(appSkinModeProvider);
+    final isGolden = skin == AppSkinMode.golden;
     return MaterialApp(
       title: 'AI 群聊模拟器',
-      theme: AppTheme.lightTheme,
-      darkTheme: AppTheme.darkTheme,
-      themeMode: savedMode,
+      theme: isGolden ? AppTheme.goldenTheme : AppTheme.lightTheme,
+      darkTheme: isGolden ? AppTheme.goldenTheme : AppTheme.darkTheme,
+      themeMode: AppTheme.materialThemeModeFor(skin),
       navigatorKey: navigatorKey,
       scaffoldMessengerKey: scaffoldMessengerKey,
       builder: (context, child) {

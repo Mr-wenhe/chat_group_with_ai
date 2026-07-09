@@ -31,10 +31,12 @@ import 'package:chat_group/features/agentic/tools/browser_context_tool.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_launcher.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
+import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
 import 'package:chat_group/features/autonomous/autonomous_conversation_config_service.dart';
 import 'package:chat_group/features/autonomous/autonomous_task_service.dart';
 import 'package:chat_group/features/autonomous/autonomous_trigger_detector.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
+import 'package:chat_group/features/chat_group/chat_group_form_page.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
@@ -248,8 +250,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     _pendingAttachments.clear();
     // 已提交的流式请求继续在后台收尾并落库；只停止 UI flush。
-    _streamSub?.cancel();
-    _streamSub = null;
+    // 不取消已发出的流式请求；离开页面后仍让它在后台收尾并落库。
     _streamUiFlushTimer?.cancel();
     _searchDebounceTimer?.cancel();
     _textController.dispose();
@@ -299,13 +300,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         .map((id) => _db.aiCharacterBox.get(id))
         .whereType<AICharacter>()
         .where((c) => c.isActive)
-        .toList();
+        .toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
 
     // 全部群成员（含停用），供 @ 弹窗和成员列表使用。
     final allGroupCharacters = group.aiCharacterIds
         .map((id) => _db.aiCharacterBox.get(id))
         .whereType<AICharacter>()
-        .toList();
+        .toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
 
     // 检测是否有角色配置了 API Key（决定 AI 能否回复/自动聊天）
     final hasApi = characters.any((c) {
@@ -363,6 +366,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _relationshipStates = relationshipStates;
       _autonomousConfig = autonomousConfig;
       _hasAnyApiConfig = hasApi;
+      _isAutoChatEnabled = true;
       _autoChatStatus =
           hasApi ? AutoChatStatus.waiting : AutoChatStatus.unavailable;
       _isLoading = false;
@@ -428,28 +432,40 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _relationshipStates = relationshipStates;
       _autonomousConfig = autonomousConfig;
       _hasAnyApiConfig = hasApi;
-      _isAutoChatEnabled = false;
+      _isAutoChatEnabled = true;
       _autoChatStatus =
-          hasApi ? AutoChatStatus.paused : AutoChatStatus.unavailable;
+          hasApi ? AutoChatStatus.waiting : AutoChatStatus.unavailable;
       _lastReplyBlockReason = hasApi ? null : _blockReasonFor(character);
       _isLoading = false;
     });
 
     _scrollToBottom();
+
+    if (_isAutoChatEnabled && activeCharacters.isNotEmpty && hasApi) {
+      Future.delayed(const Duration(seconds: 18), () {
+        if (_canTouchUi) _startAutoChat();
+      });
+    }
   }
 
   void _startAutoChat() {
-    if (_isDirectChat) return;
     if (!_canTouchUi || !_isAutoChatEnabled || !_hasAnyApiConfig) return;
     _autoChatTimer?.cancel();
     setState(() => _autoChatStatus = AutoChatStatus.waiting);
     _autoChatTimer = Timer.periodic(
       Duration(
-        seconds: _autoChatMinIntervalSeconds +
+        seconds: _autoChatBaseIntervalSeconds +
             _autoChatRandom.nextInt(_autoChatIntervalJitterSeconds),
       ),
       (_) => _tryAutoChatRound(),
     );
+  }
+
+  int get _autoChatBaseIntervalSeconds {
+    if (_isDirectChat) return 45;
+    final configured =
+        _group?.replyIntervalSeconds ?? _autoChatMinIntervalSeconds;
+    return configured.clamp(5, 60);
   }
 
   void _stopAutoChat() {
@@ -460,11 +476,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   Future<void> _tryAutoChatRound() async {
-    if (_isDirectChat) return;
     if (!_canTouchUi || !_isAutoChatEnabled || _characters.isEmpty) return;
     if (_isAiReplying ||
         _isStreaming ||
         _textController.text.trim().isNotEmpty) {
+      if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.paused);
+      return;
+    }
+    if (_isDirectChat && _directAiMessagesSinceLastUser() >= 3) {
       if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.paused);
       return;
     }
@@ -490,12 +509,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       isAutoChat: true,
     );
     final speakers = _charactersForIntents(autoIntents);
+    final lastAiSenderId = _lastAiSenderId;
+    final speakersToUse = speakers.length <= 1
+        ? speakers
+        : speakers.where((c) => c.id != lastAiSenderId).toList();
     _pendingReplyIntents
       ..clear()
       ..addEntries(
           autoIntents.map((intent) => MapEntry(intent.speakerId, intent)));
 
-    if (speakers.isEmpty) {
+    if (speakersToUse.isEmpty) {
       if (_canTouchUi) {
         setState(() {
           _autoChatStatus = AutoChatStatus.unavailable;
@@ -514,8 +537,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
 
     try {
-      for (final speaker in speakers) {
-        if (!_canTouchUi || !_isAutoChatEnabled) break;
+      for (final speaker in speakersToUse) {
+        if (!_isAutoChatEnabled) break;
         if (!_isEligibleToReply(speaker)) continue;
         final replyContent = await _generateAiReply(
           speaker,
@@ -926,7 +949,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     final repliedIds = <String>[];
     for (final character in charactersToReply) {
-      if (!_canTouchUi) return;
       final wasPendingReply = _pendingMentionedIds.contains(character.id);
       late final String replyContent;
       try {
@@ -954,7 +976,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         }
       }
       repliedIds.add(character.id);
-      await _delay(replyContent);
+      await _delay(
+        replyContent,
+        fast: mentionedIds?.contains(character.id) ?? false,
+      );
       if (wasPendingReply) {
         _pendingMentionedIds.remove(character.id);
       }
@@ -1175,6 +1200,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _flushStreamingUi();
     }
 
+    if (failed) {
+      final retryContent = await _retryFailedReply(
+        character: character,
+        config: config,
+        provider: provider,
+        apiMessages: apiMessages,
+      );
+      if (retryContent != null && retryContent.trim().isNotEmpty) {
+        failed = false;
+        fullContent = retryContent.trim();
+        temp.content = fullContent;
+        if (_canTouchUi) _flushStreamingUi();
+      }
+    }
+
     // 解析 @ 提及 → mentionedAiIds（未知名称忽略，避免误指向第一个成员）。
     final mentionedIds = _isDirectChat
         ? const <String>[]
@@ -1213,6 +1253,31 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     if (_canTouchUi) setState(() => _streamingMessage = null);
     return fullContent;
+  }
+
+  Future<String?> _retryFailedReply({
+    required AICharacter character,
+    required ApiConfig config,
+    required ApiProvider provider,
+    required List<Map<String, dynamic>> apiMessages,
+  }) async {
+    for (var attempt = 0; attempt < 2; attempt++) {
+      await Future.delayed(Duration(milliseconds: 450 + attempt * 650));
+      final result = await _chatApi.sendChatMessage(
+        apiKey: config.apiKey,
+        provider: provider,
+        customBaseUrl: config.customBaseUrl,
+        model: config.modelName,
+        messages: apiMessages,
+        temperature: 0.75,
+      );
+      await _recordTokenUsageFromResult(character, result);
+      if (result['success'] == true) {
+        final content = result['message']?.toString().trim() ?? '';
+        if (content.isNotEmpty) return content;
+      }
+    }
+    return null;
   }
 
   Future<String> _generateAgenticReply({
@@ -1778,6 +1843,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final groupName = _group?.name ?? '这个群';
     final groupTheme = _group?.theme ?? '日常聊天';
     final groupDescription = _group?.description ?? '';
+    final announcement = _group?.announcement.trim() ?? '';
     final groupMemory = _groupMemory?.topicSummary ?? '';
     final ownerName = (_group?.ownerName.trim().isNotEmpty ?? false)
         ? _group!.ownerName.trim()
@@ -1799,8 +1865,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       'role': 'system',
       'content': '$personaContext\n\n'
           '你正在参加一个高活跃度群聊「$groupName」，主题是「$groupTheme」。'
+          '${announcement.isEmpty ? '' : '群公告：$announcement。'}'
           '回复要像真实聊天群：自然接话、简短、有个人观点，可以顺手回应上一位成员或点名邀请别人，但不要每次都长篇总结。'
           '${HumanizedPromptBuilder.ownerMentionInstruction(ownerName)}'
+          '当前真实时间：${DateTime.now().toLocal().toIso8601String()}。'
+          '如果用户询问时间、日期、今天/明天/昨天，必须以这个真实时间为准。'
+          '如果用户问到你不知道或可能过期的信息，必须明确说不确定，并建议或请求联网搜索；不要编造事实、价格、新闻、人物职位或链接。'
+          '如果正在执行协作任务，开发完成后要明确 @ 测试/验收角色，测试发现问题要 @ 开发角色并列出 BUG。'
           '重要：你的回复不要带自己的名字前缀（如「张三：」或「【张三】：」），直接说内容即可，头像和名字由界面自动显示。'
           '$scenarioPrompt'
           '$recentContext'
@@ -1971,6 +2042,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         character: character,
         ownerName: _ownerMentionName,
       ),
+    });
+    msgs.add({
+      'role': 'system',
+      'content': '当前真实时间：${DateTime.now().toLocal().toIso8601String()}。'
+          '涉及当前事实、新闻、价格、职位、规则或你不知道的内容时，不要编造；请说明不确定，并建议联网搜索或让用户授权搜索。'
+          '私聊主动找用户时最多连续三条，之后等待用户回复。',
     });
     msgs.add({'role': 'system', 'content': character.systemPrompt});
 
@@ -2365,7 +2442,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
-  Future<void> _delay([String content = '']) async {
+  Future<void> _delay(String content, {bool fast = false}) async {
+    if (fast) {
+      await Future.delayed(const Duration(milliseconds: 180));
+      return;
+    }
     await Future.delayed(ChatActivityPolicy.replyDelayForContent(
       content,
       random: _random,
@@ -2805,7 +2886,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required List<String>? mentionedIds,
     required bool isAutoChat,
   }) {
-    final replyIntents = HumanizedChatOrchestrator.selectReplyIntents(
+    var replyIntents = HumanizedChatOrchestrator.selectReplyIntents(
       characters: _characters,
       recentMessages: _recentMessagesForContext(),
       groupId: widget.groupId,
@@ -2818,6 +2899,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       random: _random,
       isAutoChat: isAutoChat,
     );
+    final lastAiSenderId = _lastAiSenderId;
+    if (lastAiSenderId != null &&
+        (mentionedIds == null || mentionedIds.isEmpty)) {
+      final filtered = replyIntents
+          .where((intent) => intent.speakerId != lastAiSenderId)
+          .toList();
+      if (filtered.isNotEmpty) replyIntents = filtered;
+    }
     _pendingReplyIntents
       ..clear()
       ..addEntries(
@@ -2829,6 +2918,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return _messages.length > 20
         ? _messages.sublist(_messages.length - 20)
         : _messages.toList();
+  }
+
+  String? get _lastAiSenderId {
+    for (final message in _messages.reversed) {
+      if (message.senderType == 'ai') return message.senderId;
+      if (message.senderType == 'user') return null;
+    }
+    return null;
+  }
+
+  int _directAiMessagesSinceLastUser() {
+    var count = 0;
+    for (final message in _messages.reversed) {
+      if (message.senderType == 'user') break;
+      if (message.senderType == 'ai') count++;
+    }
+    return count;
   }
 
   String _replyBlockText(ReplyBlockReason? reason) {
@@ -3207,6 +3313,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               Navigator.pop(ctx);
               _quoteMessage(message);
             }),
+            const SizedBox(height: 8),
+            _sheetBtn(ctx, cs, Icons.alternate_email_rounded, '@${sender.name}',
+                () {
+              Navigator.pop(ctx);
+              _insertMention(sender);
+            }),
             if (_isTtsEnabled) ...[
               const SizedBox(height: 8),
               _sheetBtn(
@@ -3577,6 +3689,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         children: [
           // 未配置 API Key 时给出醒目提示，避免「发了消息 AI 不回复」的困惑
           if (!_hasAnyApiConfig) _buildApiWarningBanner(cs),
+          if (!_isDirectChat &&
+              (_group?.announcement.trim().isNotEmpty ?? false))
+            _buildAnnouncementBanner(cs),
           _buildAutonomousStatusBar(cs),
           if (!_isDirectChat) _buildAutoChatStatusBar(cs),
           if (_pendingUserMentionMessageIds.isNotEmpty &&
@@ -3631,6 +3746,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                                       _showMessageActionSheet(message, sender)
                                   : null,
                               senderColor: (c) => _senderColor(c),
+                              onSenderTap: sender == null
+                                  ? null
+                                  : () => _openCharacterSettings(sender),
+                              onMentionSender: sender == null
+                                  ? null
+                                  : () => _insertMention(sender),
                               quotedMessage: quotedMessage,
                               quotedSenderName: quotedMessage == null
                                   ? null
@@ -3780,6 +3901,45 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                     fontSize: 13,
                     fontWeight: FontWeight.w600,
                     color: cs.error)),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildAnnouncementBanner(ColorScheme cs) {
+    final announcement = _group?.announcement.trim() ?? '';
+    if (announcement.isEmpty) return const SizedBox.shrink();
+    return Container(
+      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
+      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+      decoration: BoxDecoration(
+        color: cs.secondaryContainer.withOpacity(0.32),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.secondary.withOpacity(0.28)),
+      ),
+      child: Row(
+        children: [
+          Icon(Icons.campaign_rounded, size: 18, color: cs.secondary),
+          const SizedBox(width: 8),
+          Expanded(
+            child: Text(
+              announcement,
+              maxLines: 2,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 12, color: cs.onSurface),
+            ),
+          ),
+          IconButton(
+            onPressed: () {
+              Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => ChatGroupFormPage(group: _group),
+              ));
+            },
+            icon: const Icon(Icons.edit_rounded, size: 16),
+            tooltip: '编辑公告',
+            visualDensity: VisualDensity.compact,
+            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
           ),
         ],
       ),
@@ -4087,6 +4247,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                           avatarColor: color,
                           name: c.name,
                           subtitle: _memberStatusText(c),
+                          onOpenSettings: () {
+                            Navigator.of(context).pop();
+                            _openCharacterSettings(c);
+                          },
                           onDirectChat: () =>
                               _openDirectChatFromSheet(context, c),
                         );
@@ -4123,27 +4287,32 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required String name,
     required String subtitle,
     bool isOwner = false,
+    VoidCallback? onOpenSettings,
     VoidCallback? onDirectChat,
   }) {
     return Padding(
       padding: const EdgeInsets.only(bottom: 14),
       child: Row(
         children: [
-          Container(
-            width: 44,
-            height: 44,
-            decoration: BoxDecoration(
-              shape: BoxShape.circle,
-              color: avatarColor.withOpacity(0.15),
-              border:
-                  Border.all(color: avatarColor.withOpacity(0.3), width: 1.5),
-            ),
-            child: Center(
-              child: Text(avatarText,
-                  style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.w700,
-                      color: avatarColor)),
+          InkWell(
+            onTap: onOpenSettings,
+            borderRadius: BorderRadius.circular(22),
+            child: Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: avatarColor.withOpacity(0.15),
+                border:
+                    Border.all(color: avatarColor.withOpacity(0.3), width: 1.5),
+              ),
+              child: Center(
+                child: Text(avatarText,
+                    style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w700,
+                        color: avatarColor)),
+              ),
             ),
           ),
           const SizedBox(width: 12),
@@ -4203,6 +4372,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     Navigator.of(context).pushNamed('/dm/${c.id}');
   }
 
+  void _openCharacterSettings(AICharacter character) {
+    Navigator.of(context).push(
+      MaterialPageRoute(
+          builder: (_) => AICharacterFormPage(character: character)),
+    );
+  }
+
   bool get _isDesktop =>
       !kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.macOS ||
@@ -4221,6 +4397,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     // @ 弹窗键盘导航优先（↑↓ 选择、回车插入、Esc 关闭）
     if (_showMentionPopup) return _handleMentionKeyEvent(event);
     final key = event.logicalKey;
+    if (key == LogicalKeyboardKey.keyV &&
+        (HardwareKeyboard.instance.isControlPressed ||
+            HardwareKeyboard.instance.isMetaPressed)) {
+      unawaited(_pasteClipboardAttachments(showEmptyHint: false));
+      return KeyEventResult.ignored;
+    }
     // 桌面端：Enter 发送、Shift+Enter 换行
     if (_isDesktop) {
       if (key == LogicalKeyboardKey.enter ||
@@ -4297,6 +4479,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                     onPressed: () =>
                         _pasteClipboardAttachments(showEmptyHint: true),
                     tooltip: '粘贴截图或文件',
+                  ),
+                  IconButton(
+                    icon: const Icon(Icons.add_reaction_outlined, size: 22),
+                    color: cs.onSurfaceVariant,
+                    onPressed: _showEmojiPanel,
+                    tooltip: '插入表情',
                   ),
                   Expanded(
                     child: ConstrainedBox(
@@ -4431,6 +4619,63 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               _pasteClipboardAttachments(showEmptyHint: true);
             }),
           ],
+        ),
+      ),
+    );
+  }
+
+  void _showEmojiPanel() {
+    const emojis = [
+      '😀',
+      '😂',
+      '🥹',
+      '😍',
+      '😎',
+      '🤔',
+      '👍',
+      '👏',
+      '🙏',
+      '🔥',
+      '✨',
+      '🎉',
+      '💡',
+      '✅',
+      '🧪',
+      '🚀',
+    ];
+    final cs = Theme.of(context).colorScheme;
+    showModalBottomSheet(
+      context: context,
+      backgroundColor: Colors.transparent,
+      builder: (ctx) => Container(
+        padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
+        decoration: BoxDecoration(
+          color: cs.surface,
+          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: Wrap(
+          spacing: 10,
+          runSpacing: 10,
+          children: emojis.map((emoji) {
+            return InkWell(
+              onTap: () {
+                Navigator.pop(ctx);
+                _insertTextAtCursor(emoji, inline: true);
+              },
+              borderRadius: BorderRadius.circular(12),
+              child: Container(
+                width: 44,
+                height: 44,
+                alignment: Alignment.center,
+                decoration: BoxDecoration(
+                  color: cs.surfaceContainerHighest,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
+                ),
+                child: Text(emoji, style: const TextStyle(fontSize: 24)),
+              ),
+            );
+          }).toList(),
         ),
       ),
     );
@@ -4580,11 +4825,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
-  void _insertTextAtCursor(String text) {
+  void _insertTextAtCursor(String text, {bool inline = false}) {
     if (text.trim().isEmpty) return;
     final current = _textController.text;
     final selection = _textController.selection;
-    final insertion = current.trim().isEmpty ? text : '\n$text';
+    final insertion = inline || current.trim().isEmpty ? text : '\n$text';
     final start = selection.start < 0 ? current.length : selection.start;
     final end = selection.end < 0 ? current.length : selection.end;
     final next = current.replaceRange(start, end, insertion);
@@ -4910,6 +5155,8 @@ class _MessageBubble extends StatelessWidget {
   final bool isRegenerating;
   final bool isHighlightedMention;
   final VoidCallback? onLongPress;
+  final VoidCallback? onSenderTap;
+  final VoidCallback? onMentionSender;
   final Color Function(AICharacter) senderColor;
   final Message? quotedMessage;
   final String? quotedSenderName;
@@ -4923,6 +5170,8 @@ class _MessageBubble extends StatelessWidget {
     this.isRegenerating = false,
     this.isHighlightedMention = false,
     this.onLongPress,
+    this.onSenderTap,
+    this.onMentionSender,
     required this.senderColor,
     this.quotedMessage,
     this.quotedSenderName,
@@ -4942,17 +5191,21 @@ class _MessageBubble extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             if (!isUser && sender != null) ...[
-              CircleAvatar(
-                radius: 20,
-                backgroundColor: senderColor(sender!).withOpacity(0.12),
-                child: Text(
-                    sender!.avatar.isNotEmpty
-                        ? sender!.avatar
-                        : sender!.name[0],
-                    style: TextStyle(
-                        fontSize: 14,
-                        fontWeight: FontWeight.w600,
-                        color: senderColor(sender!))),
+              InkWell(
+                onTap: onSenderTap,
+                borderRadius: BorderRadius.circular(20),
+                child: CircleAvatar(
+                  radius: 20,
+                  backgroundColor: senderColor(sender!).withOpacity(0.12),
+                  child: Text(
+                      sender!.avatar.isNotEmpty
+                          ? sender!.avatar
+                          : sender!.name[0],
+                      style: TextStyle(
+                          fontSize: 14,
+                          fontWeight: FontWeight.w600,
+                          color: senderColor(sender!))),
+                ),
               ),
               const SizedBox(width: 8),
             ],
@@ -4966,11 +5219,16 @@ class _MessageBubble extends StatelessWidget {
                       padding: const EdgeInsets.only(left: 4, bottom: 4),
                       child: Row(
                         children: [
-                          Text(sender!.name,
-                              style: TextStyle(
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w600,
-                                  color: cs.onSurfaceVariant)),
+                          GestureDetector(
+                            onTap: onSenderTap,
+                            onSecondaryTap: onMentionSender,
+                            onLongPress: onMentionSender,
+                            child: Text(sender!.name,
+                                style: TextStyle(
+                                    fontSize: 12,
+                                    fontWeight: FontWeight.w600,
+                                    color: cs.onSurfaceVariant)),
+                          ),
                           if (isRegenerating)
                             Padding(
                               padding: const EdgeInsets.only(left: 8),

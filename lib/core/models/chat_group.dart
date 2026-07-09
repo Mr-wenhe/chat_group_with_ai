@@ -27,6 +27,14 @@ class ChatGroup extends HiveObject {
   @HiveField(6)
   String ownerName;
 
+  /// 群公告，会展示在群聊顶部并注入 AI 上下文。
+  @HiveField(7)
+  String announcement;
+
+  /// 自动聊天基础间隔（秒）。页面会在此基础上增加少量随机抖动。
+  @HiveField(8)
+  int replyIntervalSeconds;
+
   ChatGroup({
     String? id,
     required this.name,
@@ -35,7 +43,11 @@ class ChatGroup extends HiveObject {
     required this.aiCharacterIds,
     DateTime? createdAt,
     String? ownerName,
+    String? announcement,
+    int? replyIntervalSeconds,
   })  : id = id ?? const Uuid().v4(),
         createdAt = createdAt ?? DateTime.now(),
-        ownerName = ownerName ?? '我';
+        ownerName = ownerName ?? '我',
+        announcement = announcement ?? '',
+        replyIntervalSeconds = replyIntervalSeconds ?? 12;
 }

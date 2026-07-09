@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
+import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/agent_task.dart';
@@ -718,6 +719,7 @@ class DatabaseService {
   }
 
   static const String _themeModeKey = 'theme_mode';
+  static const String appSkinModeKey = 'app_skin_mode';
 
   ThemeMode get savedThemeMode {
     final val = appSettingsBox.get(_themeModeKey);
@@ -733,6 +735,32 @@ class DatabaseService {
       _ => 'dark',
     };
     await appSettingsBox.put(_themeModeKey, val);
+  }
+
+  AppSkinMode get savedAppSkinMode {
+    final skin = appSettingsBox.get(appSkinModeKey);
+    if (skin == 'golden') return AppSkinMode.golden;
+    if (skin == 'light') return AppSkinMode.light;
+    if (skin == 'system') return AppSkinMode.system;
+    if (skin == 'dark') return AppSkinMode.dark;
+    return switch (savedThemeMode) {
+      ThemeMode.light => AppSkinMode.light,
+      ThemeMode.system => AppSkinMode.system,
+      ThemeMode.dark => AppSkinMode.dark,
+    };
+  }
+
+  Future<void> saveAppSkinMode(AppSkinMode mode) async {
+    final val = switch (mode) {
+      AppSkinMode.light => 'light',
+      AppSkinMode.system => 'system',
+      AppSkinMode.dark => 'dark',
+      AppSkinMode.golden => 'golden',
+    };
+    await appSettingsBox.put(appSkinModeKey, val);
+    if (mode != AppSkinMode.golden) {
+      await saveThemeMode(AppTheme.materialThemeModeFor(mode));
+    }
   }
 
   static const String _tokenUsageKey = 'token_usage';

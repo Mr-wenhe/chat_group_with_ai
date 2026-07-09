@@ -16,7 +16,8 @@ class AICharactersNotifier extends StateNotifier<List<AICharacter>> {
   }
 
   void _loadCharacters() {
-    state = _db.aiCharacterBox.values.toList();
+    state = _db.aiCharacterBox.values.toList()
+      ..sort((a, b) => a.name.compareTo(b.name));
   }
 
   Future<void> addCharacter(AICharacter character) async {
