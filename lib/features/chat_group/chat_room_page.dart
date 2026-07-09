@@ -533,6 +533,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   bool get _canTouchUi => mounted && !_disposed;
 
+  @override
+  void setState(VoidCallback fn) {
+    if (!_canTouchUi) return;
+    super.setState(fn);
+  }
+
   DateTime _readThrough(List<Message> messages) {
     if (messages.isEmpty) return DateTime.now();
     final latest = messages
