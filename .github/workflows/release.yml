@@ -439,6 +439,14 @@ jobs:
     permissions:
       contents: write
     steps:
+      # 必须在下载产物【之前】先 checkout 代码（含完整历史，用于生成 changelog）。
+      # 注意：actions/checkout 默认 clean:true 会清掉工作区未跟踪文件；若放在下载
+      # 之后执行，会把刚下载的 artifacts/ 整个删掉，导致 Release 无附件（v1.1.0 的坑）。
+      - name: 拉取代码（含完整历史，用于生成 changelog）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
       # v4 必须按 name 逐个显式下载：不指定 name 的多产物下载会静默下载空目录，
       # 导致 Release 产物为空（continue-on-error 掩盖了失败）。逐一下载可在缺产物时立即报错。
       - name: 下载 Android 产物
@@ -466,11 +474,6 @@ jobs:
         with:
           name: ios
           path: artifacts/ios
-
-      - name: 拉取代码（含完整历史，用于生成 changelog）
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
 
       - name: 生成 Release 说明（基于 Conventional Commits）
         env:
