@@ -71,13 +71,17 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 - The `custom` provider requires a manual `baseUrl` input; all others have hardcoded base URLs in `ApiProvider`.
 - Local `data/*.hive` files are intentionally versioned as development-only data.
 - Foreground proactive DMs may call configured LLM APIs while the app is running. Keep cooldowns conservative and never trigger background/offline network generation without an explicit notification/push design.
+- **Dependency overrides 策略**：本项目使用 Flutter 3.24 fork，不支持 `android.flutter` 属性（3.27+ API）。以下包的新版会触发 Android 构建失败，已通过 `dependency_overrides` 锁定：`file_picker`（≥8.0.0 <9.0.0）、`package_info_plus`（≥8.0.0 <9.0.0）、`wakelock_plus`（≥1.0.0 <1.4.0）。新增依赖前需验证 Android build.gradle 是否使用了 `android.flutter`。
 
 ## Extensible Features (Roadmap)
 
 > Ideas derived from analyzing the current codebase, ordered by fun/value vs. effort. Pick a few per iteration.
 
-### High priority — implemented (2026-07-07, branch `feat/chat-enhancements`)
+### High priority — implemented
 
+- ✅ **Agentic character skills (v1.3.2).** Characters can execute multi-step tool tasks via `AgentRuntime` — local file generation, skill creation/download, workspace/browser tools, with 6-step max + 45s timeout guard. Triggered by natural-language requests containing keywords like "生成文件/创建文件/写文档/代码审查".
+- ✅ **Media attachments (v1.3.2).** Chat input bar has an attachment button; supports images and documents via `file_picker`. Desktop drag-and-drop via `desktop_drop`.
+- ✅ **Presence-aware proactive notifications (v1.3.2).** `ConversationPresenceService` tracks active conversation; suppresses notifications and auto-marks-read when user is viewing the target conversation.
 - ✅ **Streaming / typewriter replies.** `ChatApiService.streamChatMessage` reads SSE and `ChatRoomPage` renders tokens incrementally with a blinking cursor + "停止生成" button.
 - ✅ **Character persona presets / template library.** 10 built-in presets in `CharacterPreset.presets`; one-tap apply from the form dialog and a FAB on the list page (still requires choosing an ApiConfig).
 - ✅ **Conversation export / share.** `ConversationExportService` exports Markdown/JSON to `chat_group_exports/` and shares via `share_plus`; entries on Settings page and chat-room AppBar. Export only reads display fields — never apiKey/apiProvider/apiConfigId.
