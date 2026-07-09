@@ -2788,7 +2788,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final text = _textController.text;
     final cursorPos = _textController.selection.baseOffset;
 
-    int atPos = text.lastIndexOf('@', cursorPos - 1);
+    final searchEnd = cursorPos > 0 ? cursorPos - 1 : 0;
+    int atPos = text.lastIndexOf('@', searchEnd);
     if (atPos < 0) atPos = 0;
 
     final newText =
