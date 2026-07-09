@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:dio/dio.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
@@ -42,6 +43,27 @@ class AgentRuntimeResult {
     this.toolResult,
     this.executedToolRequests = const [],
   });
+}
+
+/// 桥接调用错误的分类，用于决定提示文案。
+class BridgeErrorKind {
+  /// 是否连接级错误（根本连不上桥接服务）。
+  final bool isConnection;
+
+  /// 若为非空，表示桥接服务返回的 HTTP 状态码（4xx/5xx）。
+  final int? statusCode;
+
+  const BridgeErrorKind.connection()
+      : isConnection = true,
+        statusCode = null;
+
+  const BridgeErrorKind.http(int code)
+      : isConnection = false,
+        statusCode = code;
+
+  const BridgeErrorKind.other()
+      : isConnection = false,
+        statusCode = null;
 }
 
 class AgentRuntime {
@@ -179,7 +201,7 @@ class AgentRuntime {
         status: AgentRuntimeStatus.failed,
         pendingToolRequest: request,
         executedToolRequests: executedRequests,
-        message: _toolFailureMessage(character, e),
+        message: toolFailureMessage(character, e),
       );
     }
     final nextExecutedRequests = [...executedRequests, request];
@@ -382,15 +404,47 @@ class AgentRuntime {
     };
   }
 
-  String _toolFailureMessage(AICharacter character, Object error) {
+  /// 连接级错误的文本兜底关键词（非 Dio 异常时按文本判断）。
+  static final List<String> _connectionErrorKeywords = [
+    'Connection refused',
+    'SocketException',
+    'Failed host lookup',
+  ];
+
+  /// 将桥接调用异常分类，区分「连接级错误」与「HTTP 状态码错误」。
+  ///
+  /// - [BridgeErrorKind.connection]：根本连不上桥接服务（无 HTTP 响应体），
+  ///   例如 Connection refused / SocketException / DNS 失败。
+  /// - [BridgeErrorKind.http]：服务器已响应但返回 4xx/5xx，例如 404
+  ///   （路径不存在，通常是 App 内嵌桥接版本与客户端不一致）。
+  /// - [BridgeErrorKind.other]：非桥接相关异常，原样输出。
+  static BridgeErrorKind classifyBridgeError(Object error) {
+    if (error is DioException) {
+      final statusCode = error.response?.statusCode;
+      if (statusCode != null) return BridgeErrorKind.http(statusCode);
+      // 无响应体：真正连不上（connectionError / sendTimeout 等）。
+      return const BridgeErrorKind.connection();
+    }
     final text = error.toString();
-    final looksLikeBridgeDown = text.contains('Connection refused') ||
-        text.contains('SocketException') ||
-        text.contains('DioException') ||
-        text.contains('Failed host lookup');
-    if (looksLikeBridgeDown) {
+    if (_connectionErrorKeywords.any((k) => text.contains(k))) {
+      return const BridgeErrorKind.connection();
+    }
+    return const BridgeErrorKind.other();
+  }
+
+  String toolFailureMessage(AICharacter character, Object error) {
+    final text = error.toString();
+    final kind = classifyBridgeError(error);
+    if (kind.isConnection) {
       return '[${character.name} 工具执行失败: 本地工具桥接服务未连接（桌面端应由 App 在进程内自动启动并监听 54263）。'
           '若仍失败，请检查 54263 端口是否被其他进程占用，或重启 App 后重试。原始错误: $text]';
+    }
+    if (kind.statusCode != null) {
+      if (kind.statusCode == 404) {
+        return '[${character.name} 工具执行失败: 本地桥接服务返回 404（请求路径在服务端不存在）。'
+            '通常是 App 内嵌桥接版本与客户端不一致，请完全退出并重启 App 后重试。原始错误: $text]';
+      }
+      return '[${character.name} 工具执行失败: 本地桥接服务返回 ${kind.statusCode}。原始错误: $text]';
     }
     return '[${character.name} 工具执行失败: $text]';
   }
