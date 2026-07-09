@@ -216,15 +216,39 @@ Future<Map<String, dynamic>> _readJson(HttpRequest request) async {
   throw const FormatException('Expected JSON object');
 }
 
+String _normalizeWorkspacePath(Directory workspace, String path) {
+  final trimmed = path.trim();
+  if (trimmed.isEmpty) return trimmed;
+  final isAbs = trimmed.startsWith('/') ||
+      trimmed.startsWith('\\') ||
+      RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(trimmed);
+  if (!isAbs) return trimmed; // 已是相对路径
+  final wsPath = workspace.absolute.path;
+  if (trimmed == wsPath ||
+      trimmed.startsWith('$wsPath/') ||
+      trimmed.startsWith('$wsPath\\')) {
+    final rel = trimmed.substring(wsPath.length).replaceAll('\\', '/');
+    return rel.startsWith('/') ? rel.substring(1) : rel;
+  }
+  final segments = trimmed
+      .split(RegExp(r'[/\\]+'))
+      .where((s) => s.isNotEmpty)
+      .toList();
+  return segments.isEmpty ? '' : segments.last;
+}
+
 File _resolveWorkspaceFile(Directory workspace, String relativePath) {
-  _rejectUnsafeRelativePath(relativePath);
-  final file = File('${workspace.path}/$relativePath').absolute;
+  final normalized = _normalizeWorkspacePath(workspace, relativePath);
+  _rejectUnsafeRelativePath(normalized);
+  final file = File('${workspace.path}/$normalized').absolute;
   _ensureInsideWorkspace(workspace, file.path);
   return file;
 }
 
 Directory _resolveWorkspaceDir(Directory workspace, String relativePath) {
-  final normalized = relativePath == '.' ? '' : relativePath;
+  final normalized = relativePath == '.'
+      ? ''
+      : _normalizeWorkspacePath(workspace, relativePath);
   if (normalized.isNotEmpty) _rejectUnsafeRelativePath(normalized);
   final dir = Directory('${workspace.path}/$normalized').absolute;
   _ensureInsideWorkspace(workspace, dir.path);

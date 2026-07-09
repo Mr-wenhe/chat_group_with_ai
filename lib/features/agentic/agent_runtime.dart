@@ -105,9 +105,11 @@ class AgentRuntime {
       RegExp(r'```agent_tool\s*[\s\S]*?\s*```'),
       '',
     );
-    // 移除 <tool_call agent_tool ... </agent_tool> XML 块（含标签本身）
+    // 移除 <tool_call ... </tool_call> / </agent_tool> XML 块（含标签本身）。
+    // 兼容两种开标签写法：<tool_call agent_tool ...> 与 <tool_call> 包裹 JSON。
+    // 注：模型实际闭合标签为 </tool_call>，但也防御性兼容 </agent_tool> 变体。
     cleaned = cleaned.replaceAll(
-      RegExp(r'<tool_call\s+agent_tool\s*[\s\S]*?\s*</agent_tool>'),
+      RegExp(r'<tool_call\s*[\s\S]*?\s*(?:</agent_tool>|</tool_call>)'),
       '',
     );
     cleaned = cleaned.trim();
@@ -117,6 +119,38 @@ class AgentRuntime {
       return '$name 似乎遇到了技术问题，已为你隐藏内部工具协议。';
     }
     return cleaned;
+  }
+
+  /// 把「文件内容预览」块追加到最终消息文本中。
+  ///
+  /// 仅在写文件工具（workspace.patch）执行成功、且已成功读回文件内容时生效：
+  /// 从 [toolResult] 读取 [readbackContent]（由 [_executeWorkspacePatch] 写入）。
+  /// 其它工具的结果不含该字段，会直接返回原文本，行为保持不变。
+  ///
+  /// - 内容超过 [maxPreviewChars]（默认 2000）字符则截断，并提示查看完整文件。
+  /// - 若没有读回内容（读回失败已降级），原样返回 [message]，不暴露任何异常。
+  static String _appendFilePreview(
+    String message,
+    Map<String, dynamic> toolResult,
+  ) {
+    if (toolResult['ok'] != true) return message;
+    final content = toolResult['readbackContent'] as String?;
+    if (content == null || content.isEmpty) return message;
+    final path = toolResult['path'] as String? ?? '';
+    const maxPreviewChars = 2000;
+    final buffer = StringBuffer();
+    buffer.writeln();
+    buffer.writeln('--- 文件内容预览 ---');
+    if (content.length > maxPreviewChars) {
+      buffer.write(content.substring(0, maxPreviewChars));
+      buffer.writeln();
+      buffer.writeln('…（内容较长，已截断显示前 $maxPreviewChars 字符；'
+          '完整文件请查看 `$path`）');
+    } else {
+      buffer.write(content);
+    }
+    buffer.writeln('--- 预览结束 ---');
+    return '$message$buffer';
   }
 
   Future<AgentRuntimeResult> run({
@@ -331,15 +365,18 @@ class AgentRuntime {
     }
 
     // 防御性过滤：多轮工具调用收尾时，同样需清理可能泄露的工具协议标记。
+    final sanitized = _sanitizeToolProtocolLeak(
+      content,
+      characterName: character.name,
+    );
+    // 写文件成功后，把刚写入的文件内容预览追加到最终消息（读回失败已降级）。
+    final finalMessage = _appendFilePreview(sanitized, toolResult);
     return AgentRuntimeResult(
       status: AgentRuntimeStatus.completed,
       pendingToolRequest: request,
       toolResult: toolResult,
       executedToolRequests: executedRequests,
-      message: _sanitizeToolProtocolLeak(
-        content,
-        characterName: character.name,
-      ),
+      message: finalMessage,
     );
   }
 
@@ -401,9 +438,7 @@ class AgentRuntime {
           path: request.args['path'] as String? ?? '.'),
       AgentToolName.workspaceRead =>
         await _workspaceFileTool.read(request.args['path'] as String? ?? ''),
-      AgentToolName.workspacePatch => await _workspaceFileTool.write(
-          request.args['path'] as String? ?? '',
-          request.args['content'] as String? ?? ''),
+      AgentToolName.workspacePatch => await _executeWorkspacePatch(request),
       AgentToolName.commandRun => await _workspaceFileTool
           .runCommand(request.args['command'] as String? ?? ''),
       AgentToolName.browserContext => _browserSnapshotToJson(
@@ -412,6 +447,35 @@ class AgentRuntime {
       AgentToolName.skillCreate => await _skillCreateHandler(request.args),
       AgentToolName.skillDownload => await _skillDownloadHandler(request.args),
     };
+  }
+
+  /// 执行 workspace.patch（写文件）：先调用桥接服务 `/workspace/write` 落盘，
+  /// 成功后再同步读回刚写入的文件全文，附加到返回结果里（key: [readbackContent]），
+  /// 供最终消息展示给用户。
+  ///
+  /// 写成功但读回失败时降级处理：仅返回写结果、不附加预览，也不把异常暴露给用户
+  /// —— 写文件这一核心动作已成功，不应因读回失败而被判定为整次工具执行失败。
+  Future<Map<String, dynamic>> _executeWorkspacePatch(ToolRequest request) async {
+    final rawPath = request.args['path'] as String? ?? '';
+    final path = WorkspacePathGuard.normalizeToRelative(rawPath);
+    if (path.isEmpty) {
+      return {'ok': false, 'error': 'empty_path', 'message': '缺少有效的文件路径'};
+    }
+    final writeResult = await _workspaceFileTool.write(
+      path,
+      request.args['content'] as String? ?? '',
+    );
+    if (writeResult['ok'] != true) return writeResult;
+    try {
+      final readResult = await _workspaceFileTool.read(path);
+      final content = readResult['content'] as String?;
+      if (content == null) return writeResult;
+      final enriched = Map<String, dynamic>.from(writeResult);
+      enriched['readbackContent'] = content;
+      return enriched;
+    } catch (_) {
+      return writeResult;
+    }
   }
 
   WorkspaceFileTool get _workspaceFileTool {
@@ -514,20 +578,107 @@ class AgentRuntime {
         lower.contains('write');
     if (!wantsFile) return null;
 
+    // 优先走原有精确路径匹配（用户明确给出 star.html 等具体文件名）。
     final path = _extractWorkspaceFilePath(userRequest);
-    if (path == null) return null;
+    // Bug 1 修复：关键词命中但用户只说“一个 html 文件/这个文件”等、
+    // 未给出具体文件名时，根据类型提示词模糊推断一个合理的相对文件名，
+    // 使工具请求仍能被创建（否则直接短路返回 null，永远走不到工具执行）。
+    final inferredPath = path ?? _inferWorkspaceFilePath(userRequest);
+    if (inferredPath == null) return null;
     final content = _localGeneratedFileContent(
       character: character,
       userRequest: userRequest,
-      path: path,
+      path: inferredPath,
     );
     return ToolRequest(
       tool: AgentToolName.workspacePatch,
-      reason: '根据用户给出的明确路径生成文件 $path',
+      reason: path != null
+          ? '根据用户给出的明确路径生成文件 $inferredPath'
+          : '用户未指定具体文件名，已根据请求内容推断为 $inferredPath 并生成文件',
       // 方案 A：直接把 (path, content) 交给桥接服务的 /workspace/write 端点写文件，
       // 不再生成 git diff（new-file diff 在目标已存在时会被 git apply --check 拒掉）。
-      args: {'path': path, 'content': content},
+      args: {'path': inferredPath, 'content': content},
     );
+  }
+
+  /// 模糊推断文件名：当关键词命中但用户未给出具体文件名时，
+  /// 从消息中提取文件类型提示词（如“html 文件”“一个 md”“json 文件”），
+  /// 并结合内容语义生成一个安全的相对文件名（如 `star_scene.html`、`report.md`）。
+  ///
+  /// 返回 null 表示未识别出任何文件生成意图（不应触发工具请求）。
+  String? _inferWorkspaceFilePath(String text) {
+    const supported = r'html|html5|md|markdown|dart|txt|text|json|yaml|yml|svg|css|js|ts|py|c|cpp|cc|h|hpp';
+    // 先匹配「(一个?) (ext) 文件」或「(ext)文件」「一个(ext)」这类明确类型提示。
+    final typeHint = RegExp(
+      r'(?:一个?)?\s*(' + supported + r')\s*文件',
+      caseSensitive: false,
+    ).firstMatch(text);
+    String? ext;
+    if (typeHint != null) {
+      ext = _normalizeExt(typeHint.group(1)!);
+    } else {
+      // 兜底：消息里单独出现“一个 html / 生成一个 dart”等扩展名词（无“文件”二字）。
+      final bare = RegExp(
+        r'(?:一个?)?\s*(html|html5|md|markdown|dart|txt|json|yaml|yml|svg|css|js|ts|py)\b',
+        caseSensitive: false,
+      ).firstMatch(text);
+      ext = bare == null ? null : _normalizeExt(bare.group(1)!);
+    }
+    if (ext == null) return null;
+
+    final lower = text.toLowerCase();
+    String name;
+    if (ext == 'html' || ext == 'svg' || ext == 'css') {
+      // 画面 / 场景 / 视觉类 → 用内容关键词命名。
+      if (lower.contains('湖') ||
+          lower.contains('划船') ||
+          lower.contains('星空') ||
+          lower.contains('月亮') ||
+          lower.contains('场景') ||
+          lower.contains('画面') ||
+          lower.contains('star') ||
+          lower.contains('night') ||
+          lower.contains('scene')) {
+        name = 'star_scene';
+      } else {
+        name = 'page';
+      }
+    } else if (ext == 'md' || ext == 'markdown') {
+      if (lower.contains('报告') ||
+          lower.contains('总结') ||
+          lower.contains('验收') ||
+          lower.contains('readme') ||
+          lower.contains('report')) {
+        name = 'report';
+      } else {
+        name = 'note';
+      }
+    } else if (ext == 'dart') {
+      if (lower.contains('代码') ||
+          lower.contains('脚本') ||
+          lower.contains('程序') ||
+          lower.contains('app') ||
+          lower.contains('snippet')) {
+        name = 'main';
+      } else {
+        name = 'snippet';
+      }
+    } else {
+      // 其余类型（json / yaml / txt / 源码等）统一兜底命名。
+      name = 'output';
+    }
+    final fileName = '$name.$ext';
+    // 再次走安全校验，避免拼出不安全路径（理论上不会发生，双保险）。
+    return WorkspacePathGuard.isSafeRelativePath(fileName) ? fileName : null;
+  }
+
+  /// 把模型/用户可能写出的扩展名变体归一化为安全的小写扩展名。
+  String _normalizeExt(String raw) {
+    final e = raw.toLowerCase();
+    if (e == 'html5') return 'html';
+    if (e == 'markdown') return 'md';
+    if (e == 'text') return 'txt';
+    return e;
   }
 
   String? _extractWorkspaceFilePath(String text) {
@@ -711,13 +862,15 @@ void main() {
     if (request.tool != AgentToolName.workspacePatch) return null;
     final ok = toolResult['ok'] == true || toolResult['exitCode'] == 0;
     if (!ok) return null;
+    final summary = '${character.name} 已通过 workspace.patch 写入文件。'
+        '工具返回 exitCode=${toolResult['exitCode'] ?? 0}，请查看附件或工作区文件确认内容。';
+    // 写文件成功后，把刚写入的文件内容预览追加到兜底消息（读回失败已降级）。
     return AgentRuntimeResult(
       status: AgentRuntimeStatus.completed,
       pendingToolRequest: request,
       toolResult: toolResult,
       executedToolRequests: executedRequests,
-      message: '${character.name} 已通过 workspace.patch 写入文件。'
-          '工具返回 exitCode=${toolResult['exitCode'] ?? 0}，请查看附件或工作区文件确认内容。',
+      message: _appendFilePreview(summary, toolResult),
     );
   }
 }

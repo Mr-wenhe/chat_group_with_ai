@@ -167,7 +167,8 @@ void main() {
     expect(escaped.existsSync(), isFalse);
   });
 
-  test('/workspace/write rejects absolute path with 400 unsafe_path', () async {
+  test('/workspace/write normalizes absolute path to basename and writes it',
+      () async {
     final server = await _startTestServer(workspace);
     addTearDown(() async {
       try {
@@ -175,13 +176,28 @@ void main() {
       } catch (_) {}
     });
 
+    // 修复前：绝对路径（如模型从对话上下文复制的 /Users/.../star.html）会被
+    // _rejectUnsafeRelativePath 直接以 400 unsafe_path 拒绝，导致文件永远写不出来。
+    // 修复后：服务端将绝对路径归一化为 basename（take last segment），落到工作区
+    // 根目录写入，而不是抛错中断写文件。
+    // 使用一个可以确定不存在的绝对路径，便于验证「未被写到绝对目标位置」。
+    final absolutePath = '/nonexistent_bridge_dir_xyz/sample.txt';
     final res = await _postJson(server.port, '/workspace/write', {
-      'path': '/etc/passwd',
+      'path': absolutePath,
       'content': 'x',
     });
 
-    expect(res.statusCode, 400);
-    expect(res.body['error'], 'unsafe_path');
+    expect(res.statusCode, 200);
+    expect(res.body['ok'], isTrue);
+
+    // 文件以 basename 写入工作区根目录。
+    final written = File('${workspace.path}/sample.txt');
+    expect(written.existsSync(), isTrue);
+    expect(await written.readAsString(), 'x');
+
+    // 越界绝对路径未被真正写入到目标绝对位置（防御：仍落在工作区内）。
+    final escaped = File(absolutePath);
+    expect(escaped.existsSync(), isFalse);
   });
 
   test('WorkspaceFileTool.write round-trips through the bridge client', () async {
