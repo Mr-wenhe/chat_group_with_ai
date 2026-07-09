@@ -1,6 +1,4 @@
 import 'package:chat_group/core/models/ai_character.dart';
-import 'package:chat_group/core/models/character_skill.dart';
-import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -64,6 +62,15 @@ void main() {
       expect(result.message, isNot(contains('agent_tool')));
     });
 
+    test('含 XML 工具标记（</agent_tool> 变体）同样被整块移除', () async {
+      final result = await runWith(
+        '请稍候。<tool_call agent_tool {"tool":"unknown.tool"} </agent_tool>好的。',
+      );
+      expect(result.status, AgentRuntimeStatus.completed);
+      expect(result.message, '请稍候。好的。');
+      expect(result.message, isNot(contains('<tool_call')));
+    });
+
     test('纯工具标记无正常文本 → 兜底文案含角色名', () async {
       final result = await runWith(
         '```agent_tool {"tool":"unknown.tool","args":{}} ```',
@@ -80,6 +87,16 @@ void main() {
       final result = await runWith(
         '<tool_call agent_tool {"tool":"workspace.list","reason":"列出工作区","args":{}} </tool_call>',
       );
+      expect(result.message, isNot(contains('<tool_call')));
+    });
+
+    test('Bug 3：无 inline agent_tool 的 tool_call 变体也会被清理', () async {
+      // 开标签内不含 agent_tool 的畸形/未知工具标记，应同样被整块移除。
+      final result = await runWith(
+        '稍等。<tool_call {"tool":"unknown.tool","args":{}} </tool_call>完成。',
+      );
+      expect(result.status, AgentRuntimeStatus.completed);
+      expect(result.message, '稍等。完成。');
       expect(result.message, isNot(contains('<tool_call')));
     });
   });

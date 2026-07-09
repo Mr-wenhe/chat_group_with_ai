@@ -103,7 +103,55 @@ class LocalAgentBridgeLauncher {
       if (parent.path == dir.path) break;
       dir = parent;
     }
-    // 回退：未在任何祖先目录找到 .git，使用当前进程工作目录。
+
+    // Bug 2 修复：release 桌面构建（如 LaunchPad 启动、Finder 双击 .app）
+    // 下 Directory.current 可能是 '/' 或 App 包内路径，向上找不到 .git，
+    // 旧逻辑会回退到该目录（实际是 App Support 下的 Hive 数据目录），
+    // 导致文件被写到数据库目录而非用户项目目录。
+    // 这里在回退前，额外探测一组常见项目目录候选，优先使用其中包含 .git 的目录。
+    final candidates = <String>[];
+
+    // 1) 显式环境变量优先。
+    final envWorkspace = Platform.environment['WORKSPACE'];
+    if (envWorkspace != null && envWorkspace.trim().isNotEmpty) {
+      candidates.add(envWorkspace.trim());
+    }
+    final envProjectRoot = Platform.environment['PROJECT_ROOT'];
+    if (envProjectRoot != null && envProjectRoot.trim().isNotEmpty) {
+      candidates.add(envProjectRoot.trim());
+    }
+
+    // 2) 用户 Home 下的常见开发目录。
+    final home =
+        Platform.environment['HOME'] ?? Platform.environment['USERPROFILE'];
+    if (home != null && home.trim().isNotEmpty) {
+      const subDirs = ['Developer', 'Projects', 'code', 'work', 'Documents'];
+      for (final sub in subDirs) {
+        candidates.add('$home/$sub');
+      }
+    }
+
+    // 第一遍：优先寻找候选目录（或其祖先）中含 .git 的 git 仓库根目录。
+    for (final c in candidates) {
+      final candidateDir = Directory(c);
+      if (!candidateDir.existsSync()) continue;
+      var probe = candidateDir.absolute;
+      while (true) {
+        if (Directory('${probe.path}/.git').existsSync()) return probe.path;
+        final parent = probe.parent;
+        if (parent.path == probe.path) break;
+        probe = parent;
+      }
+    }
+
+    // 第二遍：候选里都没 .git 时，返回第一个真实存在的候选目录
+    // （优先于 cwd，更贴近用户项目目录）。
+    for (final c in candidates) {
+      final candidateDir = Directory(c);
+      if (candidateDir.existsSync()) return candidateDir.absolute.path;
+    }
+
+    // 回退：所有探测都失败，保持原有行为，使用当前进程工作目录。
     return Directory.current.path;
   }
 

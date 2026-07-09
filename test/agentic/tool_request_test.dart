@@ -70,6 +70,18 @@ void main() {
     expect(parsed.args, isEmpty);
   });
 
+  // 防御性：部分模型用 </agent_tool> 作为闭合标签（与 </tool_call> 并存）。
+  // 两种闭合都应被识别，否则该格式仍会被泄露。
+  test('parses XML tool_call with </agent_tool> closing variant', () {
+    final parsed = ToolRequest.tryParse(
+      '<tool_call agent_tool {"tool":"workspace.list","reason":"r","args":{}} </agent_tool>',
+    );
+
+    expect(parsed, isNotNull);
+    expect(parsed!.tool, AgentToolName.workspaceList);
+    expect(parsed.args, isEmpty);
+  });
+
   test('returns null for stray closing tool tag without opener', () {
     expect(
       ToolRequest.tryParse('这是正常文本。</agent_tool>'),
@@ -82,5 +94,56 @@ void main() {
       ToolRequest.tryParse('今天天气真好，我们聊点别的吧。'),
       isNull,
     );
+  });
+
+  // Bug 3 修复：兼容 <tool_call {"tool":...}} </tool_call> 变体
+  // （开标签后**没有字面 `>`**，JSON 直接跟在 <tool_call 后面）。
+  // 这是 QA 回归中抓到的真实模型输出，必须用此格式卡住回归。
+  test('parses tool_call directly followed by json (no closing `>` in opener)',
+      () {
+    final parsed = ToolRequest.tryParse(
+      '<tool_call {"tool":"workspace.list","args":{"nested":{"a":1}}} </tool_call>',
+    );
+
+    expect(parsed, isNotNull);
+    expect(parsed!.tool, AgentToolName.workspaceList);
+    expect(parsed.args['nested'], isA<Map>());
+  });
+
+  // 同上变体，含嵌套 JSON 的真实工具请求（qa_real_tool_request_check.dart 复现用例）。
+  // 注意：用合法工具名 workspace.list；若用非法名（如 "x"）会被 fromWire 拒掉、返回 null。
+  test('parses tool_call with nested json and no `>` in opener', () {
+    final parsed = ToolRequest.tryParse(
+      '<tool_call {"tool":"workspace.list","args":{"a":{"b":1}}} </tool_call>',
+    );
+
+    expect(parsed, isNotNull);
+    expect(parsed!.args['a'], isA<Map>());
+  });
+
+  // 兼容性：<tool_call> 带字面 `>`（JSON 放在标签体内、独占一行）仍可解析。
+  test('parses tool_call wrapper with `>` opener and json on its own line',
+      () {
+    final parsed = ToolRequest.tryParse(
+      '稍等，我来生成文件。\n'
+      '<tool_call>\n'
+      '{"tool":"workspace.patch","reason":"生成 HTML","args":{"path":"star.html","content":"<html></html>"}}\n'
+      '</tool_call>',
+    );
+
+    expect(parsed, isNotNull);
+    expect(parsed!.tool, AgentToolName.workspacePatch);
+    expect(parsed.args['path'], 'star.html');
+  });
+
+  // Bug 3 修复：JSON 前后夹带说明文字时仍能提取出合法工具请求。
+  test('parses tool_call with surrounding prose around json', () {
+    final parsed = ToolRequest.tryParse(
+      '<tool_call agent_tool 请执行 {"tool":"workspace.read","reason":"r","args":{"path":"lib/main.dart"}} 完毕 </tool_call>',
+    );
+
+    expect(parsed, isNotNull);
+    expect(parsed!.tool, AgentToolName.workspaceRead);
+    expect(parsed.args['path'], 'lib/main.dart');
   });
 }

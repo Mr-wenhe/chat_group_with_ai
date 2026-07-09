@@ -62,3 +62,6 @@ star.html
 test.html
 release_artifacts/
 
+
+# QA verification scripts
+scripts/
