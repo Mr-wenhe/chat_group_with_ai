@@ -1,5 +1,4 @@
 import 'dart:async';
-import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -86,6 +85,40 @@ class AgentRuntime {
     this.enableLocalFilePlanner = true,
   });
 
+  /// 清洗可能泄露到聊天文本中的内部工具调用协议标记。
+  ///
+  /// 当模型输出的工具请求既未被 [ToolRequest.tryParse] 识别（如残缺、
+  /// 畸形的标签），又混在普通文本中时，这些内部协议标记不应暴露给最终
+  /// 用户。本方法会整块移除以下两类协议标记（含标签本身）：
+  ///   - ```agent_tool ... ``` 围栏块
+  ///   - <tool_call agent_tool ... </agent_tool> XML 块
+  /// 仅保留模型附带的正常文本。
+  ///
+  /// 若清洗后无任何有效文本，返回一个友好的兜底提示，避免向用户展示
+  /// 空白气泡或裸协议。
+  static String _sanitizeToolProtocolLeak(
+    String text, {
+    String? characterName,
+  }) {
+    // 移除 ```agent_tool ... ``` 围栏块（含围栏本身）
+    var cleaned = text.replaceAll(
+      RegExp(r'```agent_tool\s*[\s\S]*?\s*```'),
+      '',
+    );
+    // 移除 <tool_call agent_tool ... </agent_tool> XML 块（含标签本身）
+    cleaned = cleaned.replaceAll(
+      RegExp(r'<tool_call\s+agent_tool\s*[\s\S]*?\s*</agent_tool>'),
+      '',
+    );
+    cleaned = cleaned.trim();
+    if (cleaned.isEmpty) {
+      final name =
+          characterName?.isNotEmpty == true ? characterName! : '助手';
+      return '$name 似乎遇到了技术问题，已为你隐藏内部工具协议。';
+    }
+    return cleaned;
+  }
+
   Future<AgentRuntimeResult> run({
     required AICharacter character,
     required List<CharacterSkill> skills,
@@ -140,9 +173,15 @@ class AgentRuntime {
     final content = first['message']?.toString() ?? '';
     final request = ToolRequest.tryParse(content);
     if (request == null) {
+      // 防御性过滤：即使 tryParse 兼容两种格式，若模型输出的是残缺/畸形
+      // 的工具标记（而非合法请求或正常文本），也要清理后再展示，避免泄露
+      // 内部协议标签到聊天 UI。
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.completed,
-        message: content,
+        message: _sanitizeToolProtocolLeak(
+          content,
+          characterName: character.name,
+        ),
       );
     }
 
@@ -291,12 +330,16 @@ class AgentRuntime {
       );
     }
 
+    // 防御性过滤：多轮工具调用收尾时，同样需清理可能泄露的工具协议标记。
     return AgentRuntimeResult(
       status: AgentRuntimeStatus.completed,
       pendingToolRequest: request,
       toolResult: toolResult,
       executedToolRequests: executedRequests,
-      message: content,
+      message: _sanitizeToolProtocolLeak(
+        content,
+        characterName: character.name,
+      ),
     );
   }
 
@@ -358,8 +401,9 @@ class AgentRuntime {
           path: request.args['path'] as String? ?? '.'),
       AgentToolName.workspaceRead =>
         await _workspaceFileTool.read(request.args['path'] as String? ?? ''),
-      AgentToolName.workspacePatch => await _workspaceFileTool
-          .applyPatch(request.args['patch'] as String? ?? ''),
+      AgentToolName.workspacePatch => await _workspaceFileTool.write(
+          request.args['path'] as String? ?? '',
+          request.args['content'] as String? ?? ''),
       AgentToolName.commandRun => await _workspaceFileTool
           .runCommand(request.args['command'] as String? ?? ''),
       AgentToolName.browserContext => _browserSnapshotToJson(
@@ -480,7 +524,9 @@ class AgentRuntime {
     return ToolRequest(
       tool: AgentToolName.workspacePatch,
       reason: '根据用户给出的明确路径生成文件 $path',
-      args: {'patch': _newFilePatch(path, content)},
+      // 方案 A：直接把 (path, content) 交给桥接服务的 /workspace/write 端点写文件，
+      // 不再生成 git diff（new-file diff 在目标已存在时会被 git apply --check 拒掉）。
+      args: {'path': path, 'content': content},
     );
   }
 
@@ -646,21 +692,6 @@ void main() {
 - 如果你能在工作区看到这个文件，说明 AI 角色没有停在“正在做”，而是走了本地工具生成内容。
 - 写入动作需要用户批准后才会执行。
 ''';
-  }
-
-  String _newFilePatch(String path, String content) {
-    final normalized = content.endsWith('\n') ? content : '$content\n';
-    final lines = const LineSplitter().convert(normalized);
-    final buffer = StringBuffer()
-      ..writeln('diff --git a/$path b/$path')
-      ..writeln('new file mode 100644')
-      ..writeln('--- /dev/null')
-      ..writeln('+++ b/$path')
-      ..writeln('@@ -0,0 +1,${lines.length} @@');
-    for (final line in lines) {
-      buffer.writeln('+$line');
-    }
-    return buffer.toString();
   }
 
   String _jsonString(String value) {

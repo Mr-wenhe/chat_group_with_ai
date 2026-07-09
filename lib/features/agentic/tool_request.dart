@@ -32,9 +32,18 @@ class ToolRequest {
   });
 
   static ToolRequest? tryParse(String content) {
-    final match = RegExp(
+    // 原有：```agent_tool ... ``` 围栏格式（prompt 推荐格式）
+    var match = RegExp(
       r'```agent_tool\s*([\s\S]*?)\s*```',
     ).firstMatch(content);
+
+    // 新增 fallback：<tool_call agent_tool ... </agent_tool> XML 格式
+    // 部分非原生 function-calling 模型会“自选”这种标签格式输出工具请求，
+    // 若不兼容会导致工具请求既不被执行、又被原样泄露到聊天 UI。
+    match ??= RegExp(
+      r'<tool_call\s+agent_tool\s*([\s\S]*?)\s*</agent_tool>',
+    ).firstMatch(content);
+
     if (match == null) return null;
 
     try {

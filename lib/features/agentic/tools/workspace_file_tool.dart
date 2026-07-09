@@ -35,6 +35,18 @@ class WorkspaceFileTool {
     return bridge.postJson('/workspace/apply-patch', {'patch': patch});
   }
 
+  /// 直接写文件（方案 A）。
+  ///
+  /// 把 [content] 写入工作区相对路径 [path]：已存在则覆盖，不存在则创建。
+  /// [content] 允许为空（写入空文件）。路径需为安全的相对路径，否则抛
+  /// [ArgumentError]。实际写盘由桥接服务端的 `/workspace/write` 端点完成。
+  Future<Map<String, dynamic>> write(String path, String content) {
+    if (!WorkspacePathGuard.isSafeRelativePath(path)) {
+      throw ArgumentError('Unsafe workspace path: $path');
+    }
+    return bridge.postJson('/workspace/write', {'path': path, 'content': content});
+  }
+
   Future<Map<String, dynamic>> runCommand(String command) {
     if (command.trim().isEmpty) {
       throw ArgumentError('Command cannot be empty.');

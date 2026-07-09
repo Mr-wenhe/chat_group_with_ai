@@ -9,6 +9,8 @@ class CharacterSkillEditor extends StatelessWidget {
   final ValueChanged<bool> onEnabledChanged;
   final List<CharacterSkill> inferredSkills;
   final List<ExpertSkillTemplate> recommendedTemplates;
+  final Set<String> selectedTemplateIds;
+  final ValueChanged<String>? onTemplateToggle;
   final List<ToolPermission> selectedPermissions;
   final ValueChanged<ToolPermission> onPermissionToggle;
 
@@ -18,6 +20,8 @@ class CharacterSkillEditor extends StatelessWidget {
     required this.onEnabledChanged,
     required this.inferredSkills,
     required this.recommendedTemplates,
+    this.selectedTemplateIds = const {},
+    this.onTemplateToggle,
     required this.selectedPermissions,
     required this.onPermissionToggle,
   });
@@ -65,9 +69,16 @@ class CharacterSkillEditor extends StatelessWidget {
               spacing: 8,
               runSpacing: 8,
               children: recommendedTemplates.map((template) {
-                return Chip(
+                final selected = selectedTemplateIds.contains(template.id);
+                return InputChip(
                   label: Text(template.name),
                   avatar: const Icon(Icons.download_rounded, size: 16),
+                  selected: selected,
+                  showCheckmark: true,
+                  onSelected: onTemplateToggle == null
+                      ? null
+                      : (value) => onTemplateToggle!.call(template.id),
+                  tooltip: selected ? '已安装：点按移除' : '点按安装到该角色',
                 );
               }).toList(),
             ),

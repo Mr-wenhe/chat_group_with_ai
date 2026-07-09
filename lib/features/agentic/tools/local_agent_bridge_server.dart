@@ -125,6 +125,41 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
     return;
   }
 
+  // 直接写文件端点（方案 A）。
+  //
+  // 语义：把「生成/覆盖文件」从脆弱的 `git apply` 路径中剥离出来，
+  // 直接以 [{path}, {content}] 写盘。已存在文件会被覆盖（符合「覆盖写」需求），
+  // 不存在则创建。沿用 [_resolveWorkspaceFile] 的安全校验（含 WorkspacePathGuard
+  // 与 workspace 边界校验），不破坏原有 /workspace/apply-patch 端点。
+  // content 允许为空（写入空文件），路径为空或不安全则返回 400。
+  if (request.uri.path == '/workspace/write') {
+    final body = await _readJson(request);
+    final path = body['path'] as String? ?? '';
+    final content = body['content'] as String? ?? '';
+    if (path.trim().isEmpty) {
+      await _json(request, {'error': 'empty_path'}, statusCode: 400);
+      return;
+    }
+    File file;
+    try {
+      file = _resolveWorkspaceFile(workspace, path);
+    } on ArgumentError catch (e) {
+      await _json(
+        request,
+        {'error': 'unsafe_path', 'message': e.toString()},
+        statusCode: 400,
+      );
+      return;
+    }
+    await file.writeAsString(content);
+    await _json(request, {
+      'ok': true,
+      'path': path,
+      'bytes': content.length,
+    });
+    return;
+  }
+
   if (request.uri.path == '/command/run') {
     final body = await _readJson(request);
     final command = (body['command'] as String? ?? '').trim();

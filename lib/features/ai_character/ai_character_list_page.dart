@@ -1,7 +1,7 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
-import 'package:chat_group/features/agentic/character_skill_resolver.dart';
+import 'package:chat_group/features/ai_character/action_skill_count.dart';
 import 'package:chat_group/features/direct_chat/pinned_ordering.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
@@ -719,9 +719,7 @@ class _CharacterCard extends StatelessWidget {
     final displayColor =
         config != null ? providerColor(config.provider) : pColor;
     final displayLabel = config != null ? config.name : label;
-    final inferredSkillCount =
-        CharacterSkillResolver.defaultsFor(character).skills.length;
-    final skillCount = inferredSkillCount + character.skillIds.length;
+    final skillCount = actionSkillCountFor(character);
 
     return Dismissible(
       key: Key(character.id),

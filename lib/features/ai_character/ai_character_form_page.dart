@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/character_presets.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
+import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:chat_group/features/agentic/skill_download_service.dart';
 import 'package:chat_group/features/agentic/widgets/character_skill_editor.dart';
 import 'providers/ai_character_providers.dart';
@@ -46,6 +47,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   bool _hasLegacyApiData = false;
   bool _agenticEnabled = true;
   List<ToolPermission> _toolPermissions = const [];
+  Set<String> _selectedSkillTemplateIds = const {};
 
   @override
   void initState() {
@@ -68,6 +70,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
 
     _selectedApiConfigId = c?.apiConfigId ?? '';
     _agenticEnabled = c?.agenticEnabled ?? true;
+    _selectedSkillTemplateIds =
+        Set<String>.from(c?.skillIds ?? const <String>[]);
     _toolPermissions = List<ToolPermission>.from(
       c?.toolPermissions ??
           CharacterSkillResolver.defaultsFor(_draftCharacter()).permissions,
@@ -519,6 +523,18 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                       SkillDownloadService.recommendedTemplatesFor(
                     _draftCharacter(),
                   ),
+                  selectedTemplateIds: _selectedSkillTemplateIds,
+                  onTemplateToggle: (id) {
+                    setState(() {
+                      final next = Set<String>.from(_selectedSkillTemplateIds);
+                      if (next.contains(id)) {
+                        next.remove(id);
+                      } else {
+                        next.add(id);
+                      }
+                      _selectedSkillTemplateIds = next;
+                    });
+                  },
                   selectedPermissions: _toolPermissions,
                   onPermissionToggle: (permission) {
                     setState(() {
@@ -629,7 +645,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         hourlyReplyLimit: hourlyLimit,
         apiConfigId: config.id,
         agenticEnabled: _agenticEnabled,
-        skillIds: widget.character?.skillIds,
+        skillIds: _mergedSkillIds(),
         toolPermissions:
             _agenticEnabled ? _normalizedToolPermissions() : const [],
         createdAt: widget.character?.createdAt ?? DateTime.now(),
@@ -686,5 +702,17 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
 
   List<ToolPermission> _normalizedToolPermissions() {
     return List<ToolPermission>.from(_toolPermissions);
+  }
+
+  /// 合并保存时的技能 id：保留已有「非模板类」已安装技能（如聊天里下载的其它技能），
+  /// 再加上本页勾选的推荐专家模板 id。模板 id 与聊天下载时实例化写入的 id 一致，
+  /// 因此重复勾选不会重复计数。
+  List<String> _mergedSkillIds() {
+    final allTemplateIds =
+        ExpertSkillCatalog.templates.map((t) => t.id).toSet();
+    final preserved = (widget.character?.skillIds ?? const <String>[])
+        .where((id) => !allTemplateIds.contains(id))
+        .toList();
+    return <String>{...preserved, ..._selectedSkillTemplateIds}.toList();
   }
 }

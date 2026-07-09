@@ -24,6 +24,7 @@ class ExpertSkillTemplate {
 
   CharacterSkill instantiateFor(String characterId) {
     return CharacterSkill(
+      id: id,
       characterId: characterId,
       name: name,
       domain: domain,
