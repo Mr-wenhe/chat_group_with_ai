@@ -233,7 +233,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             ],
           ),
           const SizedBox(height: 28),
-          _SectionHeader(title: 'AI 文件处理', cs: cs),
+          _SectionHeader(title: 'AI 工作根目录', cs: cs),
           const SizedBox(height: 12),
           AppCard(
             cs: cs,
@@ -243,7 +243,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 cs: cs,
                 icon: Icons.folder_open_rounded,
                 iconColor: cs.secondary,
-                title: '处理结果目录',
+                title: '工作根目录',
                 subtitle: _aiProcessingDirPath.isEmpty
                     ? '正在读取目录...'
                     : _compactPath(_aiProcessingDirPath),
@@ -255,7 +255,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 icon: Icons.restore_rounded,
                 iconColor: cs.secondary,
                 title: '恢复默认目录',
-                subtitle: '默认保存在应用数据目录的 ai_files 中',
+                subtitle: '默认作为 AI 工具服务 workspace，保存在应用数据目录的 ai_files 中',
                 onTap: _resetAiProcessingDir,
               ),
             ],
@@ -633,7 +633,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   Future<void> _chooseAiProcessingDir() async {
     try {
       final selected = await FilePicker.platform.getDirectoryPath(
-        dialogTitle: '选择 AI 处理文件目录',
+        dialogTitle: '选择 AI 工作根目录',
         initialDirectory:
             _aiProcessingDirPath.isNotEmpty ? _aiProcessingDirPath : null,
       );
@@ -648,7 +648,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       if (!mounted) return;
       setState(() => _aiProcessingDirPath = path);
       ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-          content: Text('AI 处理目录已更新'), behavior: SnackBarBehavior.floating));
+          content: Text('AI 工作根目录已更新'), behavior: SnackBarBehavior.floating));
     } catch (e) {
       if (!mounted) return;
       ScaffoldMessenger.of(context).showSnackBar(SnackBar(
@@ -663,7 +663,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     if (!mounted) return;
     setState(() => _aiProcessingDirPath = path);
     ScaffoldMessenger.of(context).showSnackBar(const SnackBar(
-        content: Text('已恢复默认 AI 处理目录'), behavior: SnackBarBehavior.floating));
+        content: Text('已恢复默认 AI 工作根目录'), behavior: SnackBarBehavior.floating));
   }
 
   String _compactPath(String path) {

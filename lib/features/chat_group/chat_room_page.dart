@@ -7,6 +7,8 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/autonomous_conversation_config.dart';
+import 'package:chat_group/core/models/autonomous_task.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/character_skill.dart';
@@ -27,7 +29,11 @@ import 'package:chat_group/features/agentic/skill_download_service.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/agentic/tools/browser_context_tool.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart';
+import 'package:chat_group/features/agentic/tools/local_agent_bridge_launcher.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
+import 'package:chat_group/features/autonomous/autonomous_conversation_config_service.dart';
+import 'package:chat_group/features/autonomous/autonomous_task_service.dart';
+import 'package:chat_group/features/autonomous/autonomous_trigger_detector.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
@@ -126,6 +132,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   GroupMemory? _groupMemory;
   List<CharacterMemory> _characterMemories = [];
   List<RelationshipState> _relationshipStates = [];
+  AutonomousConversationConfig? _autonomousConfig;
+  bool _isAutonomousRunning = false;
   final Map<String, ReplyIntent> _pendingReplyIntents = {};
   _PendingAgentToolApproval? _pendingAgentApproval;
   int _autoChatMemoryTick = 0;
@@ -339,6 +347,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final relationshipStates = _db.relationshipStateBox.values
         .where((r) => r.groupId == widget.groupId)
         .toList();
+    final autonomousConfig =
+        await AutonomousConversationConfigService(db: _db).loadOrCreate(
+      conversationId: widget.groupId,
+      isDirectChat: false,
+    );
 
     setState(() {
       _group = group;
@@ -348,6 +361,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _groupMemory = memory;
       _characterMemories = characterMemories;
       _relationshipStates = relationshipStates;
+      _autonomousConfig = autonomousConfig;
       _hasAnyApiConfig = hasApi;
       _autoChatStatus =
           hasApi ? AutoChatStatus.waiting : AutoChatStatus.unavailable;
@@ -392,6 +406,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final relationshipStates = _db.relationshipStateBox.values
         .where((r) => r.groupId == widget.groupId)
         .toList();
+    final autonomousConfig =
+        await AutonomousConversationConfigService(db: _db).loadOrCreate(
+      conversationId: widget.groupId,
+      isDirectChat: true,
+    );
 
     setState(() {
       _group = ChatGroup(
@@ -407,6 +426,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _groupMemory = null;
       _characterMemories = characterMemories;
       _relationshipStates = relationshipStates;
+      _autonomousConfig = autonomousConfig;
       _hasAnyApiConfig = hasApi;
       _isAutoChatEnabled = false;
       _autoChatStatus =
@@ -642,10 +662,200 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return;
     }
 
+    if (await _maybeRunAutonomousTask(text)) {
+      return;
+    }
+
     await _runAiRound(
         userMessage: text,
         mentionedIds: mentionedIds,
         currentUserMessage: userMessage);
+  }
+
+  Future<bool> _maybeRunAutonomousTask(String userGoal) async {
+    final config = _autonomousConfig;
+    if (config == null || !config.enabled || _isAutonomousRunning) {
+      return false;
+    }
+    const detector = AutonomousTriggerDetector();
+    var trigger = detector.detect(
+      text: userGoal,
+      autonomyEnabled: config.enabled,
+      sourceAuthorized: config.sourceWriteAuthorized,
+    );
+    if (trigger.kind == AutonomousTriggerKind.needsProjectAuthorization) {
+      final authorized = await _authorizeAutonomousProject();
+      if (!authorized) {
+        await _appendMessage(Message(
+          groupId: widget.groupId,
+          senderId: 'system',
+          senderType: 'ai',
+          content: '自治任务需要先授权一个目标项目目录；已取消本次真实执行。',
+        ));
+        return true;
+      }
+      final updated = _autonomousConfig;
+      trigger = detector.detect(
+        text: userGoal,
+        autonomyEnabled: updated?.enabled ?? false,
+        sourceAuthorized: updated?.sourceWriteAuthorized ?? false,
+      );
+    }
+    if (!trigger.shouldStart) return false;
+
+    final task = await AutonomousTaskService(db: _db).maybeCreateTask(
+      conversationId: widget.groupId,
+      isDirectChat: _isDirectChat,
+      userGoal: userGoal,
+      characters: _allGroupCharacters,
+    );
+    if (task == null) return false;
+    await _executeAutonomousTask(task);
+    return true;
+  }
+
+  Future<bool> _authorizeAutonomousProject() async {
+    final selectedPath = await showDialog<String?>(
+      context: context,
+      builder: (ctx) {
+        final cs = Theme.of(ctx).colorScheme;
+        return AlertDialog(
+          title: const Text('授权自治项目目录'),
+          content: Text(
+            '本次任务可能直接创建或修改源码文件。你可以选择一个项目目录，或先使用 AI 工作根目录作为目标。',
+            style: TextStyle(color: cs.onSurfaceVariant),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              onPressed: () async {
+                final defaultPath = await _db.effectiveAiProcessingDirPath();
+                if (ctx.mounted) Navigator.pop(ctx, defaultPath);
+              },
+              child: const Text('使用工作根目录'),
+            ),
+            FilledButton(
+              onPressed: () async {
+                final path = await FilePicker.platform.getDirectoryPath();
+                if (!ctx.mounted) return;
+                Navigator.pop(ctx, path);
+              },
+              child: const Text('选择目录'),
+            ),
+          ],
+        );
+      },
+    );
+    if (selectedPath != null && selectedPath.trim().isNotEmpty) {
+      await _saveAutonomousProjectPath(selectedPath);
+      return true;
+    }
+    return false;
+  }
+
+  Future<void> _saveAutonomousProjectPath(String path) async {
+    final service = AutonomousConversationConfigService(db: _db);
+    final config = await service.authorizeProject(
+      conversationId: widget.groupId,
+      isDirectChat: _isDirectChat,
+      projectPath: path,
+    );
+    await LocalAgentBridgeLauncher().restart(workspace: path);
+    if (_canTouchUi) {
+      setState(() => _autonomousConfig = config);
+    }
+  }
+
+  Future<void> _executeAutonomousTask(AutonomousTask task) async {
+    final service = AutonomousTaskService(db: _db);
+    final executorId = task.executorCharacterId ??
+        (_characters.isNotEmpty ? _characters.first.id : null);
+    final executorIndex = executorId == null
+        ? -1
+        : _allGroupCharacters.indexWhere((c) => c.id == executorId);
+    final executor =
+        executorIndex < 0 ? null : _allGroupCharacters[executorIndex];
+    if (executor == null) return;
+    final config = _resolveApiConfig(executor);
+    if (config == null) {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: executor.id,
+        senderType: 'ai',
+        content: '[${executor.name} 未配置 API，无法执行自治任务]',
+      ));
+      return;
+    }
+    final provider = ApiProvider.values.firstWhere(
+      (p) => p.name == config.provider,
+      orElse: () => ApiProvider.deepseek,
+    );
+
+    setState(() => _isAutonomousRunning = true);
+    try {
+      final workspace = task.targetProjectPath?.trim().isNotEmpty == true
+          ? task.targetProjectPath!
+          : task.workDirPath;
+      await LocalAgentBridgeLauncher().restart(workspace: workspace);
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: executor.id,
+        senderType: 'ai',
+        content: '自治任务已启动：${task.userGoal}\n工作目录：${task.workDirPath}',
+      ));
+      await service.recordStep(
+        task: task,
+        characterId: executor.id,
+        role: 'executor',
+        action: 'start',
+        inputSummary: task.userGoal,
+        outputSummary: 'workspace=$workspace',
+      );
+      final request = _autonomousExecutionRequest(task);
+      final result = await _generateAgenticReply(
+        character: executor,
+        config: config,
+        provider: provider,
+        userMessage: request,
+        autoApproveTools: true,
+      );
+      await service.recordStep(
+        task: task,
+        characterId: executor.id,
+        role: 'executor',
+        action: 'execute',
+        toolName: 'agent_runtime',
+        inputSummary: request,
+        outputSummary: result,
+      );
+      await service.completeTask(task, '自治执行完成。\n\n$result');
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: executor.id,
+        senderType: 'ai',
+        content:
+            '产品确认：本轮自治任务已完成并写入验收报告。\n${task.workDirPath}/acceptance_report.md',
+      ));
+    } finally {
+      if (_canTouchUi) setState(() => _isAutonomousRunning = false);
+    }
+  }
+
+  String _autonomousExecutionRequest(AutonomousTask task) {
+    final goal = task.userGoal;
+    if (RegExp(r'\.(cpp|cc|c|hpp|h)\b', caseSensitive: false).hasMatch(goal)) {
+      return goal;
+    }
+    if (goal.toLowerCase().contains('c++') ||
+        goal.toLowerCase().contains('cpp') ||
+        goal.contains('CPU') ||
+        goal.contains('内存')) {
+      return '$goal\n请在 artifacts/system_resource_monitor.cpp 创建完整 C++ 源码文件。';
+    }
+    return goal;
   }
 
   Future<void> _runAiRound(
@@ -1011,6 +1221,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required ApiProvider provider,
     required String userMessage,
     List<MediaAttachment>? media,
+    bool autoApproveTools = false,
   }) async {
     await _ensureAgenticTaskPermissions(character, userMessage);
     final runtime = _agentRuntimeFor(
@@ -1027,6 +1238,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       character: character,
       skills: _agenticSkillsFor(character),
       userRequest: mediaEnhancedRequest,
+      autoApproveWriteTools: autoApproveTools,
     );
     if (result.status == AgentRuntimeStatus.waitingForApproval &&
         result.pendingToolRequest != null) {
@@ -2737,6 +2949,66 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  Future<void> _toggleAutonomousExecution(bool enabled) async {
+    final service = AutonomousConversationConfigService(db: _db);
+    final config = await service.setEnabled(
+      conversationId: widget.groupId,
+      isDirectChat: _isDirectChat,
+      enabled: enabled,
+    );
+    if (enabled) {
+      await service.grantFullPermissions(_allGroupCharacters.map((c) => c.id));
+    }
+    if (_canTouchUi) {
+      setState(() => _autonomousConfig = config);
+    }
+  }
+
+  Widget _buildAutonomousStatusBar(ColorScheme cs) {
+    final config = _autonomousConfig;
+    final enabled = config?.enabled ?? false;
+    final project = config?.authorizedProjectPath;
+    return Container(
+      margin: const EdgeInsets.fromLTRB(14, 8, 14, 0),
+      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
+      decoration: BoxDecoration(
+        color: enabled
+            ? cs.primaryContainer.withOpacity(0.45)
+            : cs.surfaceContainerHighest.withOpacity(0.75),
+        borderRadius: BorderRadius.circular(12),
+        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
+      ),
+      child: Row(
+        children: [
+          Icon(
+            enabled ? Icons.engineering_rounded : Icons.engineering_outlined,
+            size: 18,
+            color: enabled ? cs.primary : cs.onSurfaceVariant,
+          ),
+          const SizedBox(width: 10),
+          Expanded(
+            child: Text(
+              enabled
+                  ? '自治执行已开启${project == null ? '' : ' · 已授权项目'}'
+                  : '自治执行已关闭',
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(
+                color: enabled ? cs.onPrimaryContainer : cs.onSurfaceVariant,
+                fontSize: 13,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          Switch(
+            value: enabled,
+            onChanged: (value) => _toggleAutonomousExecution(value),
+          ),
+        ],
+      ),
+    );
+  }
+
   static String _formatTime(DateTime dt) {
     final now = DateTime.now();
     final diff = now.difference(dt);
@@ -3305,6 +3577,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         children: [
           // 未配置 API Key 时给出醒目提示，避免「发了消息 AI 不回复」的困惑
           if (!_hasAnyApiConfig) _buildApiWarningBanner(cs),
+          _buildAutonomousStatusBar(cs),
           if (!_isDirectChat) _buildAutoChatStatusBar(cs),
           if (_pendingUserMentionMessageIds.isNotEmpty &&
               !ConversationPresenceService.instance.isActive(widget.groupId))

@@ -12,10 +12,13 @@ import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/models/autonomous_conversation_config.dart';
+import 'package:chat_group/core/models/autonomous_task.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/direct_chat_source.dart';
+import 'package:chat_group/core/models/evidence_memory.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/group_memory.dart';
@@ -33,6 +36,11 @@ class DatabaseService {
   static const String _appSettingsBox = 'app_settings';
   static const String agentSkillBoxName = 'character_skills';
   static const String agentTaskBoxName = 'agent_tasks';
+  static const String autonomousConversationConfigBoxName =
+      'autonomous_conversation_configs';
+  static const String autonomousTaskBoxName = 'autonomous_tasks';
+  static const String autonomousTaskStepBoxName = 'autonomous_task_steps';
+  static const String evidenceMemoryBoxName = 'evidence_memories';
   static const String _releaseTemplateManifestAsset =
       'assets/release_templates/seed_manifest.json';
   static const List<String> _releaseHiveFiles = [
@@ -43,6 +51,10 @@ class DatabaseService {
     'chat_groups.hive',
     'character_skills.hive',
     'agent_tasks.hive',
+    'autonomous_conversation_configs.hive',
+    'autonomous_tasks.hive',
+    'autonomous_task_steps.hive',
+    'evidence_memories.hive',
     'group_memories.hive',
     'messages.hive',
     'relationship_states.hive',
@@ -73,6 +85,13 @@ class DatabaseService {
     Hive.registerAdapter(CharacterSkillAdapter());
     Hive.registerAdapter(AgentTaskStatusAdapter());
     Hive.registerAdapter(AgentTaskAdapter());
+    Hive.registerAdapter(AutonomousTaskStatusAdapter());
+    Hive.registerAdapter(AutonomousTaskPhaseAdapter());
+    Hive.registerAdapter(AutonomousConversationConfigAdapter());
+    Hive.registerAdapter(AutonomousTaskAdapter());
+    Hive.registerAdapter(AutonomousTaskStepAdapter());
+    Hive.registerAdapter(EvidenceMemoryTypeAdapter());
+    Hive.registerAdapter(EvidenceMemoryAdapter());
 
     await _openBoxSafely<AICharacter>(_aiCharacterBox);
     await _openBoxSafely<ApiConfig>(_apiConfigBox);
@@ -83,6 +102,11 @@ class DatabaseService {
     await _openBoxSafely<RelationshipState>(_relationshipStateBox);
     await _openBoxSafely<CharacterSkill>(agentSkillBoxName);
     await _openBoxSafely<AgentTask>(agentTaskBoxName);
+    await _openBoxSafely<AutonomousConversationConfig>(
+        autonomousConversationConfigBoxName);
+    await _openBoxSafely<AutonomousTask>(autonomousTaskBoxName);
+    await _openBoxSafely<AutonomousTaskStep>(autonomousTaskStepBoxName);
+    await _openBoxSafely<EvidenceMemory>(evidenceMemoryBoxName);
     await _openBoxSafely<dynamic>(_appSettingsBox);
     await _hydrateApiKeysFromSecureStorage();
   }
@@ -178,6 +202,10 @@ class DatabaseService {
     await relationshipStateBox.clear();
     await characterSkillBox.clear();
     await agentTaskBox.clear();
+    await autonomousConversationConfigBox.clear();
+    await autonomousTaskBox.clear();
+    await autonomousTaskStepBox.clear();
+    await evidenceMemoryBox.clear();
     await appSettingsBox.delete(_messageIdsByGroupKey);
     await appSettingsBox.delete(_directChatReadAtKey);
     await appSettingsBox.delete(_directChatSourceKey);
@@ -204,6 +232,15 @@ class DatabaseService {
   Box<CharacterSkill> get characterSkillBox =>
       Hive.box<CharacterSkill>(agentSkillBoxName);
   Box<AgentTask> get agentTaskBox => Hive.box<AgentTask>(agentTaskBoxName);
+  Box<AutonomousConversationConfig> get autonomousConversationConfigBox =>
+      Hive.box<AutonomousConversationConfig>(
+          autonomousConversationConfigBoxName);
+  Box<AutonomousTask> get autonomousTaskBox =>
+      Hive.box<AutonomousTask>(autonomousTaskBoxName);
+  Box<AutonomousTaskStep> get autonomousTaskStepBox =>
+      Hive.box<AutonomousTaskStep>(autonomousTaskStepBoxName);
+  Box<EvidenceMemory> get evidenceMemoryBox =>
+      Hive.box<EvidenceMemory>(evidenceMemoryBoxName);
   Box<dynamic> get appSettingsBox => Hive.box(_appSettingsBox);
   String? get dataDirPath => _dataDir?.path;
 

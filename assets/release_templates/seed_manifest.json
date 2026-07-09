@@ -8,6 +8,10 @@
     "chat_groups.hive",
     "character_skills.hive",
     "agent_tasks.hive",
+    "autonomous_conversation_configs.hive",
+    "autonomous_tasks.hive",
+    "autonomous_task_steps.hive",
+    "evidence_memories.hive",
     "group_memories.hive",
     "messages.hive",
     "relationship_states.hive"

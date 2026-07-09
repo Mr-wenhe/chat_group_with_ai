@@ -34,13 +34,14 @@ import 'package:chat_group/features/agentic/tools/local_agent_bridge_server.dart
 
 class LocalAgentBridgeLauncher {
   /// 当前进程内持有的桥接服务器；为 null 表示未运行。
-  HttpServer? _server;
+  static HttpServer? _server;
+  static String? _workspacePath;
 
   /// 是否在桌面端（自动启动仅在桌面端生效）。
   bool get _isDesktop =>
       !kIsWeb && (Platform.isMacOS || Platform.isWindows || Platform.isLinux);
 
-  /// 在 App 进程内启动本地桥接服务（幂等：已运行则直接返回）。
+  /// 在 App 进程内启动本地桥接服务（幂等：同 workspace 已运行则直接返回）。
   ///
   /// [workspace] 为目标工作区绝对路径；缺省时自动定位到**最近的 git 仓库根目录**
   /// （见 [_resolveDefaultWorkspace]），以使 apply-patch 内部的 git apply 在真实仓库中可用。
@@ -51,6 +52,12 @@ class LocalAgentBridgeLauncher {
     // 缺省 workspace：关闭沙盒后定位到当前进程工作目录向上最近的 git 仓库根目录，
     // 保证 apply-patch 的 git apply 可在真实仓库中生效。
     final ws = workspace ?? _resolveDefaultWorkspace();
+    if (_server != null && _workspacePath == Directory(ws).absolute.path) {
+      return;
+    }
+    if (_server != null) {
+      await stop();
+    }
 
     try {
       // 进程内直接 bind 端口启动，无需外部 dart 子进程或源码文件。
@@ -58,15 +65,22 @@ class LocalAgentBridgeLauncher {
         workspace: Directory(ws),
         port: kLocalAgentBridgePort,
       );
+      _workspacePath = Directory(ws).absolute.path;
       debugPrint(
-        '[桥接] 本地 agent 桥接服务已启动：http://127.0.0.1:$kLocalAgentBridgePort',
+        '[桥接] 本地 agent 桥接服务已启动：http://127.0.0.1:$kLocalAgentBridgePort workspace=$_workspacePath',
       );
     } catch (e) {
       // 启动失败不应 crash App，仅打印提示；旧方案依赖的 bin 脚本在 release 下
       // 本就不存在，此处改为进程内启动后，失败通常是端口被占用等偶发情况。
       debugPrint('[桥接] 启动本地 agent 桥接服务失败：$e');
       _server = null;
+      _workspacePath = null;
     }
+  }
+
+  Future<void> restart({required String workspace}) async {
+    await stop();
+    await start(workspace: workspace);
   }
 
   /// 解析默认工作区目录：从当前进程工作目录向上逐级查找最近的含 `.git` 的 git 仓库根目录。
@@ -98,6 +112,7 @@ class LocalAgentBridgeLauncher {
     final server = _server;
     if (server == null) return;
     _server = null;
+    _workspacePath = null;
     try {
       // force: true 立即关闭监听并断开已建立的连接。
       await server.close(force: true);

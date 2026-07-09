@@ -1,6 +1,7 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/features/autonomous/evidence_memory_prompt.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/scene_behavior.dart';
 
@@ -28,6 +29,7 @@ class HumanizedPromptBuilder {
 
     return [
       '【真人化发言上下文】',
+      EvidenceMemoryPrompt.factDiscipline,
       '你是${character.name}，${character.age}岁，身份是${character.role}。',
       '你正在「$groupName」里聊天，群主题是「$groupTheme」，真人用户/群主叫「$ownerName」。',
       if (character.personalityTags.isNotEmpty)

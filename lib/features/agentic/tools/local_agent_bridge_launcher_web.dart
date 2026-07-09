@@ -11,6 +11,8 @@ class LocalAgentBridgeLauncher {
   /// 停止：Web / 移动端无子进程可关闭，空操作。
   Future<void> stop() async {}
 
+  Future<void> restart({required String workspace}) async {}
+
   /// Web / 移动端始终视为未运行。
   bool get isRunning => false;
 }

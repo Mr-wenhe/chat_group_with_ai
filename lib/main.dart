@@ -22,7 +22,8 @@ void main() async {
   // start() 在桌面端进程内直接 bind 54263 启动 HttpServer（立即返回），
   // 因此 await 不会明显阻塞首屏；App 退出时由生命周期观察者关闭。
   final bridgeLauncher = LocalAgentBridgeLauncher();
-  await bridgeLauncher.start();
+  await bridgeLauncher.start(
+      workspace: await db.effectiveAiProcessingDirPath());
   WidgetsBinding.instance.addObserver(_BridgeLifecycleObserver(bridgeLauncher));
 
   runApp(

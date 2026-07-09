@@ -1,5 +1,6 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/features/autonomous/evidence_memory_prompt.dart';
 import 'package:chat_group/features/agentic/agentic_task_classifier.dart';
 
 /// Pure orchestration helpers for chat room logic.
@@ -150,7 +151,8 @@ class ChatOrchestrator {
     final desc =
         groupDescription.trim().isEmpty ? '' : '\n群说明：$groupDescription';
     final memory = groupMemory.trim().isEmpty ? '暂无稳定群体记忆' : groupMemory;
-    return '【人格成长规则】'
+    return '${EvidenceMemoryPrompt.factDiscipline}\n'
+        '【人格成长规则】'
         '\n你是 ${character.name}，年龄 ${character.age}，职业/身份是「${character.role}」。'
         '\n初始性格标签：$tags。'
         '\n你所在的群是「$groupName」，主题「$groupTheme」。$desc'
@@ -173,7 +175,8 @@ class ChatOrchestrator {
     final tags = character.personalityTags.isEmpty
         ? '无'
         : character.personalityTags.join('、');
-    return '你是角色长期记忆与人格成长记录员。'
+    return '${EvidenceMemoryPrompt.factDiscipline}\n'
+        '你是角色长期记忆与人格成长记录员。'
         '\n角色：${character.name}；职业/身份：${character.role}；初始标签：$tags；所在群：$groupName；群主题：$groupTheme。'
         '\n\n已有角色记忆：${currentMemory.trim().isEmpty ? '暂无' : currentMemory.trim()}'
         '\n\n最近群聊：\n$recentTranscript'
