@@ -1,19 +1,32 @@
 name: Release
 
-# 多平台发布工作流
+# 混合发布工作流（Hybrid Release）
 # ----------------------------------------------------------------------------
-# 触发方式：
-#   1) 推送 tag（形如 v1.2.3）自动发布全部已勾选平台；
-#   2) 在 Actions 页面手动触发（workflow_dispatch），可指定版本号与要构建的平台。
+# 设计原则：Windows 只能在 CI（Windows Runner）上交叉编译，其余 4 个平台开发者
+# 本机即可构建。因此：
 #
-# 产物：Android(APK+AAB) / iOS(IPA) / macOS(.app) / Web(静态站) / Windows(压缩包)
-#       最终聚合为一个 GitHub Release 附件。
+#   • CI（本工作流）：仅构建 **Windows**，并负责「创建 GitHub Release（若不存在）
+#                      + 上传 Windows 产物」。Release 一旦创建，本地脚本会把其余
+#                      4 个平台产物追加上传到【同一个 Release】。
+#   • 本地（scripts/publish_local.sh）：构建 **Web / macOS / iOS / Android**，
+#                     并以「幂等」方式创建 Release（若 CI 尚未建）+ 上传这 4 个产物。
+#
+# 无论本地脚本与 CI 哪个先跑，都不会冲突：双方都采用
+#   「if ! gh release view <tag>; then gh release create ...; fi」 + 「gh release upload --clobber」
+# 的写法，先到者建 Release，后到者只追加。
+#
+# 触发方式：
+#   1) 推送 tag（形如 v1.2.3）自动发布 Windows；
+#   2) 在 Actions 页面手动触发（workflow_dispatch），指定版本号。
+#
+# 产物：最终聚合成一个 GitHub Release 附件，含
+#        Windows（CI 构建）+ Web / macOS / iOS / Android（本地构建上传）。
 #
 # 签名（均为「可选」）：
 #   - Android：设置 ANDROID_KEYSTORE_BASE64 等 secrets 后自动签名；
 #               未设置则构建未签名包（仅可用于本地调试安装）。
-#   - iOS / macOS：设置 APPLE_CERTIFICATE_BASE64 / APPLE_PROVISIONING_PROFILE_BASE64
-#                   等 secrets 后自动签名；未设置则 iOS 回退为「未签名 .app」。
+#   - iOS / macOS：本仓库走 GitHub Release 分发（非 App Store），本地构建时
+#                   若本机有开发者证书会自动签名，否则产出未签名 .app。
 #   详见 README「发布指南」章节中 Secrets 配置说明。
 # ----------------------------------------------------------------------------
 
@@ -27,30 +40,6 @@ on:
         description: "发布版本号（不含 v 前缀，例如 1.1.0）。留空则按 Conventional Commits 自动累加"
         required: false
         default: ""
-      build_android:
-        description: "构建 Android"
-        type: boolean
-        default: true
-      build_ios:
-        description: "构建 iOS"
-        type: boolean
-        default: true
-      build_macos:
-        description: "构建 macOS"
-        type: boolean
-        default: true
-      build_windows:
-        description: "构建 Windows"
-        type: boolean
-        default: true
-      build_web:
-        description: "构建 Web"
-        type: boolean
-        default: true
-      ios_export_method:
-        description: "iOS 导出方式（app-store / ad-hoc / development）"
-        required: false
-        default: "app-store"
 
 # 同一时间只允许一个发布流程，避免产物互相覆盖
 concurrency:
@@ -59,7 +48,7 @@ concurrency:
 
 jobs:
   # ============================================================
-  # 准备阶段：解析版本号与构建号，供所有构建任务复用
+  # 准备阶段：解析版本号与构建号，供 Windows 构建任务复用
   # ============================================================
   prepare:
     name: 解析版本
@@ -96,126 +85,38 @@ jobs:
           echo "📦 Release version: $RAW_VERSION+$BUILD_NUMBER  (tag: v$RAW_VERSION)"
 
   # ============================================================
-  # Android：在 Ubuntu 上构建 APK 与 AAB（Play Store 用）
-  # ============================================================
-  android:
-    name: Build Android
-    needs: prepare
-    if: ${{ github.event.inputs.build_android == true || github.event_name == 'push' }}
-    runs-on: ubuntu-latest
-    env:
-      HAS_ANDROID_KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 != '' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.24.0"
-          channel: "stable"
-          cache: true
-      - run: flutter pub get
-      - name: 写入版本号到 pubspec.yaml
-        shell: bash
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
-        run: |
-          python3 - <<'PY'
-          import re, os
-          p = "pubspec.yaml"
-          s = open(p, encoding="utf-8").read()
-          s = re.sub(r'^version: .*', f'version: {os.environ["VERSION"]}+{os.environ["BUILD_NUMBER"]}', s, flags=re.M)
-          open(p, "w", encoding="utf-8").write(s)
-          PY
-      - run: dart run build_runner build --delete-conflicting-outputs
-
-      - name: 还原 Android 签名配置（可选）
-        if: ${{ env.HAS_ANDROID_KEYSTORE == 'true' }}
-        env:
-          KEYSTORE: ${{ secrets.ANDROID_KEYSTORE_BASE64 }}
-          STORE_PWD: ${{ secrets.ANDROID_STORE_PASSWORD }}
-          KEY_PWD: ${{ secrets.ANDROID_KEY_PASSWORD }}
-          ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-        run: |
-          echo "$KEYSTORE" | base64 -d > android/app/keystore.jks
-          cat > android/key.properties <<EOF
-          storeFile=keystore.jks
-          storePassword=$STORE_PWD
-          keyPassword=$KEY_PWD
-          keyAlias=$ALIAS
-          EOF
-
-      - name: 构建 APK 与 AAB
-        run: |
-          flutter build apk --release
-          flutter build appbundle --release
-
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: android
-          path: |
-            build/app/outputs/flutter-apk/app-release.apk
-            build/app/outputs/bundle/release/app-release.aab
-          if-no-files-found: error
-
-  # ============================================================
-  # Web：构建静态站点
-  # ============================================================
-  web:
-    name: Build Web
-    needs: prepare
-    if: ${{ github.event.inputs.build_web == true || github.event_name == 'push' }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.24.0"
-          channel: "stable"
-          cache: true
-      - name: 确保 web 平台已配置（幂等）
-        run: flutter create . --platforms web
-      - run: flutter pub get
-      - name: 写入版本号到 pubspec.yaml
-        shell: bash
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
-        run: |
-          python3 - <<'PY'
-          import re, os
-          p = "pubspec.yaml"
-          s = open(p, encoding="utf-8").read()
-          s = re.sub(r'^version: .*', f'version: {os.environ["VERSION"]}+{os.environ["BUILD_NUMBER"]}', s, flags=re.M)
-          open(p, "w", encoding="utf-8").write(s)
-          PY
-      - run: dart run build_runner build --delete-conflicting-outputs
-      - name: 构建 Web
-        run: flutter build web --release
-      - name: 打包 Web 产物为 zip
-        run: cd build && zip -r ../chat_group-web.zip web && cd ..
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: web
-          path: chat_group-web.zip
-          if-no-files-found: error
-
-  # ============================================================
-  # Windows：在 Windows Runner 上构建桌面应用
+  # Windows：在 Windows Runner 上构建桌面应用，并创建/追加 Release
   # ============================================================
   windows:
-    name: Build Windows
+    name: Build Windows (CI 发布)
     needs: prepare
-    if: ${{ github.event.inputs.build_windows == true || github.event_name == 'push' }}
     # 必须用 windows-2022：该镜像同时预装 VS2019 与 VS2022。
     # Flutter 3.24 的 Windows 构建硬编码使用 "Visual Studio 16 2019" CMake 生成器
     # （内部显式传 -G，CMAKE_GENERATOR 环境变量无法覆盖），而 windows-latest
     # 现指向 Server 2025 镜像、仅含 VS2022，会报 "could not find any instance of
     # Visual Studio"。windows-2022 上的 VS2019 实例正好满足 Flutter 3.24 的需求。
     runs-on: windows-2022
+    # 创建 / 上传 Release 需要写权限
+    permissions:
+      contents: write
     steps:
       - uses: actions/checkout@v4
+        with:
+          # --generate-notes 需要完整提交历史来对比上一个 Release
+          fetch-depth: 0
+
+      # 手动触发时，先创建并推送 tag（CI 才能把产物挂到该 tag 上）
+      - name: （手动触发）创建并推送 tag
+        if: ${{ github.event_name == 'workflow_dispatch' }}
+        shell: bash
+        env:
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git tag "$TAG"
+          git push origin "$TAG"
+
       - uses: subosito/flutter-action@v2
         with:
           flutter-version: "3.24.0"
@@ -241,285 +142,23 @@ jobs:
         run: flutter build windows --release
       - name: 打包 Release 目录
         shell: pwsh
-        run: Compress-Archive -Path "build\windows\x64\runner\Release\*" -DestinationPath "chat_group-windows.zip"
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: windows
-          path: chat_group-windows.zip
-          if-no-files-found: error
-
-  # ============================================================
-  # macOS：在 macOS Runner 上构建并（可选）签名
-  # ============================================================
-  macos:
-    name: Build macOS
-    needs: prepare
-    if: ${{ github.event.inputs.build_macos == true || github.event_name == 'push' }}
-    runs-on: macos-latest
-    env:
-      HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE_BASE64 != '' && secrets.APPLE_PROVISIONING_PROFILE_BASE64 != '' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.24.0"
-          channel: "stable"
-          cache: true
-      - name: 确保 CocoaPods 可用
-        run: |
-          if ! command -v pod >/dev/null 2>&1; then
-            brew install cocoapods
-          fi
-      - run: flutter config --enable-macos-desktop
-      - run: flutter pub get
-      - name: 写入版本号到 pubspec.yaml
+        run: Compress-Archive -Path "build\windows\x64\runner\Release\*" -DestinationPath "chat_group-windows-v${{ needs.prepare.outputs.version }}.zip"
+      - name: 创建 Release（若不存在）并上传 Windows 产物
         shell: bash
         env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
-        run: |
-          python3 - <<'PY'
-          import re, os
-          p = "pubspec.yaml"
-          s = open(p, encoding="utf-8").read()
-          s = re.sub(r'^version: .*', f'version: {os.environ["VERSION"]}+{os.environ["BUILD_NUMBER"]}', s, flags=re.M)
-          open(p, "w", encoding="utf-8").write(s)
-          PY
-      - run: dart run build_runner build --delete-conflicting-outputs
-
-      - name: 导入 Apple 签名证书与描述文件（可选）
-        if: env.HAS_APPLE_SIGNING == 'true'
-        env:
-          CERT: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-          CERT_PWD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
-          TEAM: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          echo "$CERT" | base64 -d > cert.p12
-          security create-keychain -p "temp" build.keychain
-          security set-keychain-settings -lut 21600 build.keychain
-          security unlock-keychain -p "temp" build.keychain
-          security import cert.p12 -k build.keychain -P "$CERT_PWD" -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/xcodebuild -f pkcs12
-          security list-keychains -d user -s build.keychain login.keychain
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "temp" build.keychain
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          echo "$PROFILE" | base64 -d > "$HOME/Library/MobileDevice/Provisioning Profiles/profile.mobileprovision"
-          echo "DEVELOPMENT_TEAM=$TEAM" >> "$GITHUB_ENV"
-
-      - name: 构建 macOS
-        env:
-          # 未签名构建仍需 Development Team 占位，否则 Xcode 报错
-          DEVELOPMENT_TEAM: "0000000000"
-        run: |
-          cd macos
-          sed -i '' 's/DEVELOPMENT_TEAM = "";/DEVELOPMENT_TEAM = "0000000000";/g' Runner.xcodeproj/project.pbxproj
-          cd ..
-          flutter build macos --release
-
-      - name: 对 .app 进行签名（可选）
-        if: env.HAS_APPLE_SIGNING == 'true'
-        env:
-          SIGN_ID: ${{ secrets.APPLE_SIGN_IDENTITY }}
-        run: |
-          APP=$(find build/macos/Build/Products/Release -maxdepth 1 -name "*.app" | head -n1)
-          codesign --force --options runtime --timestamp --sign "$SIGN_ID" "$APP"
-
-      - name: 打包 .app
-        run: |
-          APP=$(find build/macos/Build/Products/Release -maxdepth 1 -name "*.app" | head -n1)
-          ditto -c -k --sequesterRsrc --keepParent "$APP" chat_group-macos.zip
-
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: macos
-          path: chat_group-macos.zip
-          if-no-files-found: error
-
-  # ============================================================
-  # iOS：在 macOS Runner 上构建 IPA（需签名才能产出可分发 IPA）
-  # ============================================================
-  ios:
-    name: Build iOS
-    needs: prepare
-    if: ${{ github.event.inputs.build_ios == true || github.event_name == 'push' }}
-    runs-on: macos-latest
-    env:
-      HAS_APPLE_SIGNING: ${{ secrets.APPLE_CERTIFICATE_BASE64 != '' && secrets.APPLE_PROVISIONING_PROFILE_BASE64 != '' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: subosito/flutter-action@v2
-        with:
-          flutter-version: "3.24.0"
-          channel: "stable"
-          cache: true
-      - name: 确保 CocoaPods 可用
-        run: |
-          if ! command -v pod >/dev/null 2>&1; then
-            brew install cocoapods
-          fi
-      - run: flutter config --enable-ios
-      - run: flutter pub get
-      - name: 写入版本号到 pubspec.yaml
-        shell: bash
-        env:
-          VERSION: ${{ needs.prepare.outputs.version }}
-          BUILD_NUMBER: ${{ needs.prepare.outputs.build_number }}
-        run: |
-          python3 - <<'PY'
-          import re, os
-          p = "pubspec.yaml"
-          s = open(p, encoding="utf-8").read()
-          s = re.sub(r'^version: .*', f'version: {os.environ["VERSION"]}+{os.environ["BUILD_NUMBER"]}', s, flags=re.M)
-          open(p, "w", encoding="utf-8").write(s)
-          PY
-      - run: dart run build_runner build --delete-conflicting-outputs
-
-      - name: 导入 Apple 签名证书与描述文件（可选）
-        if: env.HAS_APPLE_SIGNING == 'true'
-        env:
-          CERT: ${{ secrets.APPLE_CERTIFICATE_BASE64 }}
-          CERT_PWD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          PROFILE: ${{ secrets.APPLE_PROVISIONING_PROFILE_BASE64 }}
-          TEAM: ${{ secrets.APPLE_TEAM_ID }}
-        run: |
-          echo "$CERT" | base64 -d > cert.p12
-          security create-keychain -p "temp" build.keychain
-          security set-keychain-settings -lut 21600 build.keychain
-          security unlock-keychain -p "temp" build.keychain
-          security import cert.p12 -k build.keychain -P "$CERT_PWD" -T /usr/bin/codesign -T /usr/bin/security -T /usr/bin/xcodebuild -f pkcs12
-          security list-keychains -d user -s build.keychain login.keychain
-          security set-key-partition-list -S apple-tool:,apple:,codesign: -s -k "temp" build.keychain
-          mkdir -p "$HOME/Library/MobileDevice/Provisioning Profiles"
-          echo "$PROFILE" | base64 -d > "$HOME/Library/MobileDevice/Provisioning Profiles/profile.mobileprovision"
-          echo "DEVELOPMENT_TEAM=$TEAM" >> "$GITHUB_ENV"
-
-      - name: 构建 IPA（签名）
-        if: env.HAS_APPLE_SIGNING == 'true'
-        run: flutter build ipa --release --export-method ${{ github.event.inputs.ios_export_method }}
-
-      - name: 构建 .app（未签名回退）
-        if: env.HAS_APPLE_SIGNING != 'true'
-        env:
-          # 未签名构建仍需一个 Development Team 占位，否则 Xcode 报错。
-          # 占位 ID 仅用于本地/CI 未签名包，不可用于实际上架。
-          DEVELOPMENT_TEAM: "0000000000"
-        run: |
-          cd ios
-          sed -i '' 's/DEVELOPMENT_TEAM = "";/DEVELOPMENT_TEAM = "0000000000";/g' Runner.xcodeproj/project.pbxproj
-          cd ..
-          flutter build ios --release --no-codesign
-
-      - name: 打包产物
-        id: package
-        run: |
-          if [ -d build/ios/ipa ]; then
-            mv build/ios/ipa/*.ipa "chat_group-ios.ipa"
-            echo "file=chat_group-ios.ipa" >> "$GITHUB_OUTPUT"
-          else
-            APP=$(find build/ios/iphoneos -maxdepth 1 -name "*.app" | head -n1)
-            ditto -c -k --sequesterRsrc --keepParent "$APP" "chat_group-ios-app.zip"
-            echo "file=chat_group-ios-app.zip" >> "$GITHUB_OUTPUT"
-          fi
-
-      - name: 上传产物
-        uses: actions/upload-artifact@v4
-        with:
-          name: ios
-          path: ${{ steps.package.outputs.file }}
-          if-no-files-found: error
-
-  # ============================================================
-  # 发布：聚合所有产物，创建 GitHub Release
-  # ============================================================
-  publish:
-    name: 创建 GitHub Release
-    needs: [prepare, android, web, windows, macos, ios]
-    if: ${{ needs.prepare.result == 'success' }}
-    runs-on: ubuntu-latest
-    permissions:
-      contents: write
-    steps:
-      # 必须在下载产物【之前】先 checkout 代码（含完整历史，用于生成 changelog）。
-      # 注意：actions/checkout 默认 clean:true 会清掉工作区未跟踪文件；若放在下载
-      # 之后执行，会把刚下载的 artifacts/ 整个删掉，导致 Release 无附件（v1.1.0 的坑）。
-      - name: 拉取代码（含完整历史，用于生成 changelog）
-        uses: actions/checkout@v4
-        with:
-          fetch-depth: 0
-
-      # v4 必须按 name 逐个显式下载：不指定 name 的多产物下载会静默下载空目录，
-      # 导致 Release 产物为空（continue-on-error 掩盖了失败）。逐一下载可在缺产物时立即报错。
-      - name: 下载 Android 产物
-        uses: actions/download-artifact@v4
-        with:
-          name: android
-          path: artifacts/android
-      - name: 下载 Web 产物
-        uses: actions/download-artifact@v4
-        with:
-          name: web
-          path: artifacts/web
-      - name: 下载 Windows 产物
-        uses: actions/download-artifact@v4
-        with:
-          name: windows
-          path: artifacts/windows
-      - name: 下载 macOS 产物
-        uses: actions/download-artifact@v4
-        with:
-          name: macos
-          path: artifacts/macos
-      - name: 下载 iOS 产物
-        uses: actions/download-artifact@v4
-        with:
-          name: ios
-          path: artifacts/ios
-
-      - name: 生成 Release 说明（基于 Conventional Commits）
-        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
           set -euo pipefail
-          PREV_TAG=$(git tag --sort=-v:refname | grep -v "^$TAG$" | head -n1 || true)
-          python3 scripts/generate_changelog.py \
-            --since "${PREV_TAG:-}" \
-            --force-version "${TAG#v}" \
-            --section-out section.md \
-            --changelog-out CHANGELOG.md
-          echo "📝 Release notes 已生成（统计区间: ${PREV_TAG:-全量历史}）"
-
-      - name: （仅手动触发）创建并推送 tag
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        env:
-          TAG: ${{ needs.prepare.outputs.tag }}
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "github-actions[bot]@users.noreply.github.com"
-          git tag "$TAG"
-          git push origin "$TAG"
-
-      - name: 创建 Release 并上传产物
-        uses: softprops/action-gh-release@v2
-        with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          name: Release ${{ needs.prepare.outputs.tag }}
-          body_path: section.md
-          files: artifacts/**/*
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: 回写 CHANGELOG.md 到仓库（仅手动触发，幂等）
-        if: ${{ github.event_name == 'workflow_dispatch' }}
-        continue-on-error: true
-        run: |
-          if git diff --quiet CHANGELOG.md; then
-            echo "CHANGELOG.md 无变化，跳过提交"
+          # 幂等：若本地脚本已先建好 Release，这里只追加 Windows 产物
+          if ! gh release view "$TAG" >/dev/null 2>&1; then
+            gh release create "$TAG" \
+              --title "Release $TAG" \
+              --generate-notes \
+              --verify-tag
+            echo "✅ 已创建 Release $TAG"
           else
-            git config user.name "github-actions[bot]"
-            git config user.email "github-actions[bot]@users.noreply.github.com"
-            git add CHANGELOG.md
-            git commit -m "docs: 更新 CHANGELOG (${{ needs.prepare.outputs.tag }})"
-            git push origin HEAD:main
+            echo "ℹ️ Release $TAG 已存在，直接追加 Windows 产物"
           fi
+          gh release upload "$TAG" "chat_group-windows-v${{ needs.prepare.outputs.version }}.zip" --clobber
+          echo "🪟 Windows 产物已上传"

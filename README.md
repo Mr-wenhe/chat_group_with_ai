@@ -364,7 +364,7 @@ refactor: 抽离 ChatApiService 超时配置
 | 工作流 | 文件 | 触发时机 | 作用 |
 |--------|------|----------|------|
 | **CI** | `.github/workflows/ci.yml` | 推送 / PR 到 `main` | 自动执行 `代码生成 → flutter analyze → flutter test`，作为合并前质量门禁 |
-| **Release** | `.github/workflows/release.yml` | 推送 `v*` tag，或手动在 Actions 页面触发 | 分平台构建 **Android / iOS / macOS / Web / Windows**，并聚合为 GitHub Release 附件；同时按 Conventional Commits **自动生成 changelog** 作为 Release 说明 |
+| **Release** | `.github/workflows/release.yml` | 推送 `v*` tag，或手动在 Actions 页面触发 | **仅由 CI 构建 Windows** 并创建 / 追加到 GitHub Release；**Web / macOS / iOS / Android 由开发者本机通过 `scripts/publish_local.sh` 构建并上传到同一 Release**（详见下方「混合发布」） |
 
 > 前置条件：本机需能跑通 `flutter doctor`（各目标平台工具链齐全）。仓库已启用全部 5 个平台；其中 `windows/` 目录为本次发布准备时通过 `flutter create --platforms=windows .` 生成并提交。
 
@@ -409,36 +409,46 @@ base64 -i upload-keystore.jks
 
 ---
 
-### 2. 手动本地发布（不依赖 CI）
+### 2. 混合发布流程（当前推荐）
 
-适合「我就想在自家机器上打个包」的场景：
+> **为什么是混合的？** Windows 只能在 Windows Runner 上交叉编译，而 Web / macOS / iOS / Android 你本机就能编。所以：
+> - **CI（`release.yml`）**：只构建 **Windows**，并负责「创建 GitHub Release（若不存在）+ 上传 Windows 产物」。
+> - **本地（`scripts/publish_local.sh`）**：构建 **Web / macOS / iOS / Android**，并以「幂等」方式创建 Release（若 CI 尚未建）+ 上传这 4 个产物到【同一个 Release】。
+>
+> 双方都采用 `if ! gh release view <tag>; then gh release create ...; fi` + `gh release upload --clobber`，**谁先跑都行**，后到者只追加，不会冲突。
+
+**一步发布（4 个本地平台）：**
 
 ```bash
-# 1) 修改 pubspec.yaml 的 version（如 1.0.0+1 → 1.1.0+2），提交
-# 2) 各平台构建命令与产物位置：
+# 1) 提交版本号改动（pubspec.yaml version），推送
+git add pubspec.yaml && git commit -m "chore: 发布 v1.3.8" && git push
 
-# Android：APK + AAB
-flutter build apk --release            # 产物：build/app/outputs/flutter-apk/app-release.apk
-flutter build appbundle --release      # 产物：build/app/outputs/bundle/release/app-release.aab
+# 2) 打 tag 并推送 —— 自动触发 CI 构建 Windows
+git tag v1.3.8 && git push origin v1.3.8
 
-# iOS（需 macOS + Xcode 签名）
-flutter build ipa --release             # 产物：build/ios/ipa/*.ipa
-
-# macOS（需 macOS）
-flutter build macos --release           # 产物：build/macos/Build/Products/Release/*.app
-
-# Web
-flutter build web --release             # 产物：build/web/（直接部署到任意静态托管）
-
-# Windows（需 Windows + Visual Studio）
-flutter build windows --release         # 产物：build/windows/x64/runner/Release/
+# 3) 本机构建并上传 Web / macOS / iOS / Android 到同一 Release
+#    （scripts/publish_local.sh 已随仓库提供，clone 后可直接使用，无需自行创建）
+./scripts/publish_local.sh 1.3.8
 ```
+
+脚本会自动：备份并临时写入版本号 → 构建 4 个平台并打包到 `release_artifacts/` → 创建（若不存在）/ 追加产物到 `v1.3.8` Release。**构建结束后会还原 `pubspec.yaml`**，不会污染你的工作区。
+
+> 若你只想手动调某一个平台，也可直接跑对应命令（产物需自行用 `gh release upload vX.Y.Z <文件> --clobber` 上传）：
+>
+> ```bash
+> flutter build apk --release            # build/app/outputs/flutter-apk/app-release.apk
+> flutter build appbundle --release      # build/app/outputs/bundle/release/app-release.aab
+> flutter build ios --release --no-codesign   # build/ios/Release-iphoneos/*.app（未签名）
+> flutter build macos --release          # build/macos/Build/Products/Release/*.app
+> flutter build web --release            # build/web/
+> # Windows 只能在 Windows 上编：flutter build windows --release → build/windows/x64/runner/Release/
+> ```
 
 ---
 
 ### 3. 自动发布（推荐流程）
 
-只需打一个 `v*` tag 推送到 GitHub，Release 工作流会自动构建全部平台并生成 Release：
+只需打一个 `v*` tag 推送到 GitHub，**CI 会自动构建 Windows 并创建 / 追加到 Release**；其余 4 个平台按上文「混合发布流程」用本地脚本发布即可（两步合一就是第 2 节的那段命令）。
 
 ```bash
 # 1) 先提交版本号改动（pubspec.yaml version）
@@ -450,11 +460,12 @@ git tag v1.1.0
 git push origin v1.1.0
 ```
 
-或**手动触发**（无需 push tag）：
+或**手动触发**（无需 push tag，CI 仅构建 Windows）：
 
 1. 打开仓库 **Actions → Release → Run workflow**；
-2. 填写 `version`（**留空则按 Conventional Commits 自动累加**，见下方约定）、勾选要构建的平台、`ios_export_method` 默认 `app-store`；
-3. 点击 **Run workflow**。工作流会自动创建对应 tag、生成 changelog 并创建 Release。
+2. 填写 `version`（**留空则按 Conventional Commits 自动累加**，见下方约定）；
+3. 点击 **Run workflow**。工作流会创建对应 tag、构建 Windows 并创建 Release；
+4. 随后在本机运行 `./scripts/publish_local.sh <版本号>` 上传其余 4 个平台。
 
 > 🤖 **自动版本号 + Changelog**
 > - `scripts/generate_changelog.py` 解析提交历史中的 Conventional Commits，自动决定下一个版本号：
@@ -464,7 +475,7 @@ git push origin v1.1.0
 > - 每次发布会自动把本次区间内的提交按类型（Features / Bug Fixes / …）生成 Release 说明；并幂等更新仓库根目录 `CHANGELOG.md`（手动触发时还会回写提交到 `main`）。
 > - 本地也可直接运行：`python3 scripts/generate_changelog.py --force-version 1.1.0 --changelog-out CHANGELOG.md`。
 
-构建完成后，所有产物（APK / AAB / IPA / macOS.zip / Web / Windows.zip）会出现在仓库 **Releases** 页面对应版本的附件中。
+发布完成后，**同一版本的附件**会同时包含：Windows（CI 构建）+ Web / macOS / iOS / Android（本地脚本上传），全部出现在仓库 **Releases** 页面对应版本下。
 
 ---
 
