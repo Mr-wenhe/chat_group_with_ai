@@ -58,9 +58,18 @@ docs/plans/
 docs/superpowers/plans/
 
 # Local workspace / build artifacts
+agentic_output/
 star.html
 test.html
 release_artifacts/
+
+# Agentic 运行时在本地生成的产物（角色/任务生成的 HTML、脚本、文档等），不应入库
+meteor_shower.html
+run_checks.sh
+star_scene.html
+technical_documentation.md
+# 角色专属生成目录：形如 {角色名}_{uuid}/
+范晓萌_63491e71-732e-4c70-a6ac-461893bb17a0/
 
 
 # QA verification scripts

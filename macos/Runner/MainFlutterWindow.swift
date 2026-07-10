@@ -11,5 +11,12 @@ class MainFlutterWindow: NSWindow {
     RegisterGeneratedPlugins(registry: flutterViewController)
 
     super.awakeFromNib()
+
+    self.sharingType = .readOnly
+    self.collectionBehavior.insert(.moveToActiveSpace)
+    self.center()
+    self.makeKeyAndOrderFront(nil)
+    self.orderFrontRegardless()
+    NSApp.activate(ignoringOtherApps: true)
   }
 }

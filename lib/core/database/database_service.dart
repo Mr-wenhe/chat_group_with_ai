@@ -265,11 +265,56 @@ class DatabaseService {
     if (base == null) {
       throw StateError('DatabaseService 尚未初始化，无法访问 AI 处理目录');
     }
-    final dir = Directory('${base.path}/ai_files');
+    final dir =
+        _debugProjectAgentOutputDir() ?? Directory('${base.path}/ai_files');
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
     return dir;
+  }
+
+  Directory? _debugProjectAgentOutputDir() {
+    if (kReleaseMode) return null;
+    Directory? findGitRoot(Directory start) {
+      var dir = start.absolute;
+      while (true) {
+        if (Directory('${dir.path}/.git').existsSync()) return dir;
+        final parent = dir.parent;
+        if (parent.path == dir.path) break;
+        dir = parent;
+      }
+      return null;
+    }
+
+    final cwdRoot = findGitRoot(Directory.current);
+    if (cwdRoot != null) {
+      return Directory('${cwdRoot.path}/agentic_output');
+    }
+
+    final executable = File(Platform.resolvedExecutable);
+    final executableRoot = findGitRoot(executable.parent);
+    if (executableRoot != null) {
+      return Directory('${executableRoot.path}/agentic_output');
+    }
+
+    final script = Platform.script;
+    if (script.isScheme('file')) {
+      final scriptRoot = findGitRoot(File.fromUri(script).parent);
+      if (scriptRoot != null) {
+        return Directory('${scriptRoot.path}/agentic_output');
+      }
+    }
+
+    var dir = Directory.current.absolute;
+    while (true) {
+      if (Directory('${dir.path}/.git').existsSync()) {
+        return Directory('${dir.path}/agentic_output');
+      }
+      final parent = dir.parent;
+      if (parent.path == dir.path) break;
+      dir = parent;
+    }
+    return null;
   }
 
   Future<Directory> get aiProcessingDir async {

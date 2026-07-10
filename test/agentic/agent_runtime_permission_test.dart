@@ -154,6 +154,7 @@ void main() {
       },
       workspaceFileTool: _FakeWorkspaceFileTool(
         readResult: {'path': 'README.md', 'content': 'old'},
+        allowReadBeforeWrite: true,
       ),
     );
 
@@ -225,7 +226,7 @@ void main() {
             'success': true,
             'message': '''
 ```agent_tool
-{"tool":"workspace.patch","reason":"写入生成的 Markdown","args":{"path":"docs/ai_work_test.md","content":"hello from tool test\\n"}}
+{"tool":"workspace.patch","reason":"写入生成的 Markdown","args":{"path":"docs/ai_work_test_new.md","content":"hello from tool test\\n"}}
 ```
 ''',
           };
@@ -246,6 +247,7 @@ void main() {
         readResult: {'path': 'docs/ai_work_test.md', 'content': 'old'},
         patchResult: {'ok': true, 'exitCode': 0},
         commandResult: {'ok': true, 'exitCode': 0, 'stdout': ''},
+        allowReadBeforeWrite: true,
       ),
     );
 
@@ -338,8 +340,69 @@ void main() {
     expect(result.pendingToolRequest?.tool, AgentToolName.workspacePatch);
     expect(
       result.pendingToolRequest?.args['path'],
-      'star_scene.html',
+      'meteor_shower.html',
     );
+  });
+
+  test('local planner can auto-approve and write meteor shower html', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'meteor_shower.html', 'bytes': 42},
+      readResult: {
+        'path': 'meteor_shower.html',
+        'content': '<!doctype html><title>流星雨划过夜空</title>',
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => {
+        'success': true,
+        'message': 'meteor_shower.html 已生成并贴回聊天。',
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(toolPermissions: const [
+        ToolPermission.workspacePatch,
+      ]),
+      skills: [_skill()],
+      userRequest: '帮我生成一个流星雨划过夜空的动态效果html',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'meteor_shower.html');
+    expect(fakeTool.lastWriteContent, contains('流星雨划过夜空'));
+    expect(fakeTool.lastWriteContent, contains('@keyframes shoot'));
+    expect(result.message, contains('文件内容预览'));
+    expect(result.message, contains('流星雨划过夜空'));
+  });
+
+  test('local planner handles 实现 + 使用html wording from private chat', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'meteor_shower.html', 'bytes': 42},
+      readResult: {
+        'path': 'meteor_shower.html',
+        'content': '<!doctype html><title>流星雨划过夜空</title>',
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => {'success': true, 'message': '文件已生成。'},
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(toolPermissions: const [
+        ToolPermission.workspacePatch,
+      ]),
+      skills: [_skill()],
+      userRequest: '那你帮我实现一个 流星雨的特效给我 使用html',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'meteor_shower.html');
+    expect(fakeTool.lastWriteContent, contains('流星雨划过夜空'));
+    expect(result.message, isNot(contains('<tool_call')));
   });
 
   test('local planner keeps backward-compatible exact path matching', () async {
@@ -403,6 +466,131 @@ void main() {
       result.pendingToolRequest?.args['path'],
       'report.md',
     );
+  });
+
+  test('local planner infers technical_documentation.md for project docs',
+      () async {
+    final runtime = AgentRuntime(
+      complete: (_) async => {'success': true, 'message': '不应调用模型'},
+    );
+
+    final result = await runtime.run(
+      character: _character(toolPermissions: const [
+        ToolPermission.workspacePatch,
+      ]),
+      skills: [_skill()],
+      userRequest: '根据这个项目写一份简单的技术文档，以MD格式输出到工程目录下',
+    );
+
+    expect(result.status, AgentRuntimeStatus.waitingForApproval);
+    expect(
+      result.pendingToolRequest?.args['path'],
+      'technical_documentation.md',
+    );
+    expect(
+      result.pendingToolRequest?.args['content'],
+      allOf(
+        contains('AI Group Chat Simulator 技术文档'),
+        contains('AgentRuntime'),
+        contains('Hive'),
+      ),
+    );
+  });
+
+  test('local planner renames inferred file when target exists', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      existingFiles: const {
+        'technical_documentation.md': 'existing doc',
+      },
+      patchResult: {
+        'ok': true,
+        'path': 'technical_documentation_2.md',
+        'bytes': 128,
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => {'success': true, 'message': '文档已生成。'},
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(toolPermissions: const [
+        ToolPermission.workspacePatch,
+      ]),
+      skills: [_skill()],
+      userRequest: '根据这个项目写一份简单的技术文档，以MD格式输出到工程目录下',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'technical_documentation_2.md');
+    expect(fakeTool.lastWriteContent, contains('AI Group Chat Simulator 技术文档'));
+  });
+
+  test('local planner escapes character name in generated html and markdown',
+      () async {
+    final runtime = AgentRuntime(
+      complete: (_) async => {'success': true, 'message': '不应调用模型'},
+    );
+    final character = _character(
+      name: '<script>alert(1)</script> & me',
+      toolPermissions: const [ToolPermission.workspacePatch],
+    );
+
+    final htmlResult = await runtime.run(
+      character: character,
+      skills: [_skill()],
+      userRequest: '帮我生成一个流星雨特效 html',
+    );
+    final htmlContent =
+        htmlResult.pendingToolRequest?.args['content'] as String? ?? '';
+
+    expect(htmlContent, contains('&lt;script&gt;alert(1)&lt;'));
+    expect(htmlContent, contains('&amp; me'));
+    expect(htmlContent, isNot(contains('<script>alert(1)</script>')));
+
+    final mdResult = await runtime.run(
+      character: character,
+      skills: [_skill()],
+      userRequest: '根据这个项目写一份简单的技术文档，以MD格式输出到工程目录下',
+    );
+    final mdContent =
+        mdResult.pendingToolRequest?.args['content'] as String? ?? '';
+
+    expect(mdContent, contains('&lt;script&gt;alert(1)&lt;/script&gt;'));
+    expect(mdContent, contains('&amp; me'));
+    expect(mdContent, isNot(contains('<script>alert(1)</script>')));
+  });
+
+  test('local planner can auto-approve and write project check script',
+      () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'run_checks.sh', 'bytes': 160},
+      readResult: {
+        'path': 'run_checks.sh',
+        'content': '#!/usr/bin/env bash\nflutter analyze\nflutter test\n',
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => {'success': true, 'message': '脚本已生成。'},
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(toolPermissions: const [
+        ToolPermission.workspacePatch,
+      ]),
+      skills: [_skill()],
+      userRequest: '帮我写一个检查项目的脚本',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'run_checks.sh');
+    expect(fakeTool.lastWriteContent, contains('#!/usr/bin/env bash'));
+    expect(fakeTool.lastWriteContent, contains('flutter analyze'));
+    expect(fakeTool.lastWriteContent, contains('flutter test'));
+    expect(result.message, contains('文件内容预览'));
   });
 
   test('runtime explains when local bridge is unavailable', () async {
@@ -508,6 +696,41 @@ void main() {
     expect(result.message, isNot(contains('should-not-appear')));
   });
 
+  test('workspace.patch refuses to overwrite existing files', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      existingFiles: const {'technical_documentation.md': 'existing doc'},
+      patchResult: {
+        'ok': true,
+        'path': 'technical_documentation.md',
+        'bytes': 12,
+      },
+    );
+    final runtime = AgentRuntime(
+      enableLocalFilePlanner: false,
+      complete: (_) async => {'success': true, 'message': '不应调用模型'},
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.executeApprovedTool(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      request: const ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '写入技术文档',
+        args: {
+          'path': 'technical_documentation.md',
+          'content': '# new doc',
+        },
+      ),
+      userRequest: '写一份技术文档',
+    );
+
+    expect(result.status, AgentRuntimeStatus.failed);
+    expect(result.message, contains('已拒绝覆盖'));
+    expect(fakeTool.lastWritePath, isNull);
+  });
+
   test('non-write tools (workspace.list) do not append file preview', () async {
     // 回归保护：workspace.list / read / command.run 等非写工具的结果不含
     // readbackContent，最终消息应原样返回，不拼接预览块。
@@ -570,9 +793,12 @@ void main() {
   });
 }
 
-AICharacter _character({required List<ToolPermission> toolPermissions}) {
+AICharacter _character({
+  String name = '代码大神',
+  required List<ToolPermission> toolPermissions,
+}) {
   return AICharacter(
-    name: '代码大神',
+    name: name,
     avatar: '💻',
     age: 30,
     role: '工程师',
@@ -589,14 +815,20 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
   final Map<String, dynamic> patchResult;
   final Map<String, dynamic> commandResult;
   final Map<String, dynamic> listResult;
+  final Map<String, String> existingFiles;
   final bool throwOnRead;
+  final bool allowReadBeforeWrite;
+  String? lastWritePath;
+  String? lastWriteContent;
 
   _FakeWorkspaceFileTool({
     this.readResult = const {},
     this.patchResult = const {},
     this.commandResult = const {},
     this.listResult = const {},
+    this.existingFiles = const {},
     this.throwOnRead = false,
+    this.allowReadBeforeWrite = false,
   }) : super(LocalAgentBridgeClient());
 
   @override
@@ -604,7 +836,17 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
     if (throwOnRead) {
       throw Exception('SocketException: Connection refused');
     }
-    return readResult;
+    if (existingFiles.containsKey(path)) {
+      return {'path': path, 'content': existingFiles[path]};
+    }
+    if (lastWritePath == path) {
+      if (readResult.isNotEmpty) return readResult;
+      return {'path': path, 'content': lastWriteContent ?? ''};
+    }
+    if (allowReadBeforeWrite && readResult['path'] == path) {
+      return readResult;
+    }
+    return const {};
   }
 
   @override
@@ -617,6 +859,8 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
   // 权限/审批流转而非真实落盘。
   @override
   Future<Map<String, dynamic>> write(String path, String content) async {
+    lastWritePath = path;
+    lastWriteContent = content;
     return patchResult;
   }
 

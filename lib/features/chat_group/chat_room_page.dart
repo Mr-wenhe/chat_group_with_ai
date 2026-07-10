@@ -37,6 +37,7 @@ import 'package:chat_group/features/autonomous/autonomous_conversation_config_se
 import 'package:chat_group/features/autonomous/autonomous_task_service.dart';
 import 'package:chat_group/features/autonomous/autonomous_trigger_detector.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
+import 'package:chat_group/features/chat_group/direct_file_task_policy.dart';
 import 'package:chat_group/features/chat_group/chat_group_form_page.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
@@ -1067,6 +1068,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         provider: provider,
         userMessage: userMessage,
         media: currentUserMessage?.media,
+        autoApproveTools: shouldAutoApproveDirectFileTask(
+          isDirectChat: _isDirectChat,
+          userMessage: userMessage,
+        ),
       );
     }
 
@@ -1456,11 +1461,26 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return const [];
     }
     final paths = <String>[];
+    void addPath(String raw) {
+      final path = WorkspacePathGuard.normalizeToRelative(raw);
+      if (!WorkspacePathGuard.isSafeRelativePath(path)) return;
+      if (!paths.contains(path)) paths.add(path);
+    }
+
     for (final request in patchRequests) {
-      for (final path
-          in _pathsFromPatch(request.args['patch'] as String? ?? '')) {
-        if (!paths.contains(path)) paths.add(path);
+      final directPath = request.args['path'];
+      if (directPath is String) {
+        addPath(directPath);
       }
+      for (final path in _pathsFromPatch(
+        request.args['patch'] as String? ?? '',
+      )) {
+        addPath(path);
+      }
+    }
+    final resultPath = result.toolResult?['path'];
+    if (resultPath is String) {
+      addPath(resultPath);
     }
     if (paths.isEmpty) return const [];
 

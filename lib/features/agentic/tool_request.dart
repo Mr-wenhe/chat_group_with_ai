@@ -69,12 +69,19 @@ class ToolRequest {
       rawJson = match?.group(1);
     }
 
-    if (rawJson == null) return null;
+    if (rawJson == null) {
+      final xmlish = _decodeFunctionCallParameters(content);
+      if (xmlish != null) return xmlish;
+      return null;
+    }
 
     // 兼容格式变体：JSON 可能包裹在空白/前后噪声文本中，
     // 先整体解析，失败再提取第一个 {...} 块，提升对残缺格式的容忍度。
     final decoded = _decodeJsonObject(rawJson);
-    if (decoded == null) return null;
+    if (decoded == null) {
+      return _decodeFunctionCallParameters(rawJson) ??
+          _decodeFunctionCallParameters(content);
+    }
 
     final tool = AgentToolName.fromWire(decoded['tool'] as String? ?? '');
     final args = decoded['args'];
@@ -84,6 +91,54 @@ class ToolRequest {
       reason: decoded['reason'] as String? ?? '',
       args: args,
     );
+  }
+
+  /// 兼容部分模型输出的非 JSON 工具协议：
+  ///
+  /// ```text
+  /// <tool_call>
+  /// <function_calls>
+  /// <parameter name="path">foo.html</parameter>
+  /// <parameter name="content"><!DOCTYPE html>...</parameter>
+  /// ```
+  ///
+  /// 这类内容没有 `tool` 字段，但 path + content 语义明确等价于写文件。
+  static ToolRequest? _decodeFunctionCallParameters(String raw) {
+    final hasToolEnvelope = RegExp(
+      r'<(?:function_calls|tool_call)\b',
+      caseSensitive: false,
+    ).hasMatch(raw);
+    if (!hasToolEnvelope) {
+      return null;
+    }
+    final params = <String, String>{};
+    final pattern = RegExp(
+      r'''<parameter\s+name=["']([^"']+)["']\s*>([\s\S]*?)</parameter>''',
+      caseSensitive: false,
+    );
+    for (final match in pattern.allMatches(raw)) {
+      final name = match.group(1)?.trim();
+      final value = match.group(2);
+      if (name == null || name.isEmpty || value == null) continue;
+      params[name] = _decodeXmlEntities(value.trim());
+    }
+    final path = params['path'];
+    final content = params['content'];
+    if (path == null || path.trim().isEmpty || content == null) return null;
+    return ToolRequest(
+      tool: AgentToolName.workspacePatch,
+      reason: '模型请求写入文件 $path',
+      args: {'path': path, 'content': content},
+    );
+  }
+
+  static String _decodeXmlEntities(String value) {
+    return value
+        .replaceAll('&lt;', '<')
+        .replaceAll('&gt;', '>')
+        .replaceAll('&quot;', '"')
+        .replaceAll('&apos;', "'")
+        .replaceAll('&amp;', '&');
   }
 
   /// 从工具调用原始文本中解析出 JSON 对象。

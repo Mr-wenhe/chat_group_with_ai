@@ -9,6 +9,11 @@ void main() {
     );
     expect(AgenticTaskClassifier.requiresAgenticWork('review 这段代码'), isTrue);
     expect(AgenticTaskClassifier.requiresAgenticWork('修复这个 bug'), isTrue);
+    expect(
+      AgenticTaskClassifier.requiresAgenticWork('那你帮我实现一个 流星雨的特效给我 使用html'),
+      isTrue,
+    );
+    expect(AgenticTaskClassifier.requiresAgenticWork('帮我写一个检查项目的脚本'), isTrue);
   });
 
   test('detects browser context requests as agentic', () {

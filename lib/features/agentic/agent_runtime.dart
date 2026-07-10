@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:dio/dio.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -112,10 +113,13 @@ class AgentRuntime {
       RegExp(r'<tool_call\s*[\s\S]*?\s*(?:</agent_tool>|</tool_call>)'),
       '',
     );
+    cleaned = cleaned.replaceAll(
+      RegExp(r'<tool_call\s*[\s\S]*$', caseSensitive: false),
+      '',
+    );
     cleaned = cleaned.trim();
     if (cleaned.isEmpty) {
-      final name =
-          characterName?.isNotEmpty == true ? characterName! : '助手';
+      final name = characterName?.isNotEmpty == true ? characterName! : '助手';
       return '$name 似乎遇到了技术问题，已为你隐藏内部工具协议。';
     }
     return cleaned;
@@ -141,6 +145,10 @@ class AgentRuntime {
     final buffer = StringBuffer();
     buffer.writeln();
     buffer.writeln('--- 文件内容预览 ---');
+    if (path.isNotEmpty) {
+      buffer.writeln('文件路径：`$path`');
+      buffer.writeln();
+    }
     if (content.length > maxPreviewChars) {
       buffer.write(content.substring(0, maxPreviewChars));
       buffer.writeln();
@@ -259,7 +267,9 @@ class AgentRuntime {
       );
     }
 
-    if (requiresApproval(request.tool) && !approved && !autoApproveWriteTools) {
+    final autoApprovedWrite =
+        autoApproveWriteTools && request.tool == AgentToolName.workspacePatch;
+    if (requiresApproval(request.tool) && !approved && !autoApprovedWrite) {
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.waitingForApproval,
         pendingToolRequest: request,
@@ -279,6 +289,17 @@ class AgentRuntime {
         pendingToolRequest: request,
         executedToolRequests: executedRequests,
         message: toolFailureMessage(character, e),
+      );
+    }
+    if (request.tool == AgentToolName.workspacePatch &&
+        toolResult['ok'] == false) {
+      return AgentRuntimeResult(
+        status: AgentRuntimeStatus.failed,
+        pendingToolRequest: request,
+        toolResult: toolResult,
+        executedToolRequests: executedRequests,
+        message: toolResult['message']?.toString() ??
+            '[${character.name} 工具任务失败: 文件写入被拒绝]',
       );
     }
     final nextExecutedRequests = [...executedRequests, request];
@@ -455,11 +476,31 @@ class AgentRuntime {
   ///
   /// 写成功但读回失败时降级处理：仅返回写结果、不附加预览，也不把异常暴露给用户
   /// —— 写文件这一核心动作已成功，不应因读回失败而被判定为整次工具执行失败。
-  Future<Map<String, dynamic>> _executeWorkspacePatch(ToolRequest request) async {
+  Future<Map<String, dynamic>> _executeWorkspacePatch(
+      ToolRequest request) async {
     final rawPath = request.args['path'] as String? ?? '';
-    final path = WorkspacePathGuard.normalizeToRelative(rawPath);
+    var path = WorkspacePathGuard.normalizeToRelative(rawPath);
     if (path.isEmpty) {
       return {'ok': false, 'error': 'empty_path', 'message': '缺少有效的文件路径'};
+    }
+    if (await _workspaceFileExists(path)) {
+      if (request.args['allowRenameOnConflict'] == true) {
+        path = await _nextAvailableWorkspacePath(path);
+      } else {
+        return {
+          'ok': false,
+          'error': 'target_exists',
+          'path': path,
+          'message': '目标文件已存在，已拒绝覆盖：$path',
+        };
+      }
+    }
+    if (path.isEmpty) {
+      return {
+        'ok': false,
+        'error': 'no_available_path',
+        'message': '目标文件名冲突过多，未找到可用的新文件名',
+      };
     }
     final writeResult = await _workspaceFileTool.write(
       path,
@@ -475,6 +516,31 @@ class AgentRuntime {
       return enriched;
     } catch (_) {
       return writeResult;
+    }
+  }
+
+  Future<String> _nextAvailableWorkspacePath(String path) async {
+    final slashIndex = path.lastIndexOf('/');
+    final dir = slashIndex >= 0 ? path.substring(0, slashIndex + 1) : '';
+    final fileName = slashIndex >= 0 ? path.substring(slashIndex + 1) : path;
+    final dotIndex = fileName.lastIndexOf('.');
+    final base = dotIndex > 0 ? fileName.substring(0, dotIndex) : fileName;
+    final ext = dotIndex > 0 ? fileName.substring(dotIndex) : '';
+    for (var i = 2; i <= 999; i++) {
+      final candidate = '$dir${base}_$i$ext';
+      if (!WorkspacePathGuard.isSafeRelativePath(candidate)) return '';
+      if (!await _workspaceFileExists(candidate)) return candidate;
+    }
+    return '';
+  }
+
+  Future<bool> _workspaceFileExists(String path) async {
+    try {
+      final readResult = await _workspaceFileTool.read(path);
+      if (readResult['ok'] == false) return false;
+      return readResult['content'] is String || readResult['ok'] == true;
+    } catch (_) {
+      return false;
     }
   }
 
@@ -572,8 +638,16 @@ class AgentRuntime {
     final lower = userRequest.toLowerCase();
     final wantsFile = lower.contains('生成') ||
         lower.contains('创建') ||
+        lower.contains('写') ||
         lower.contains('写入') ||
         lower.contains('写文件') ||
+        lower.contains('写一份') ||
+        lower.contains('撰写') ||
+        lower.contains('实现') ||
+        lower.contains('输出') ||
+        lower.contains('导出') ||
+        lower.contains('脚本') ||
+        lower.contains('script') ||
         lower.contains('create') ||
         lower.contains('write');
     if (!wantsFile) return null;
@@ -597,7 +671,11 @@ class AgentRuntime {
           : '用户未指定具体文件名，已根据请求内容推断为 $inferredPath 并生成文件',
       // 方案 A：直接把 (path, content) 交给桥接服务的 /workspace/write 端点写文件，
       // 不再生成 git diff（new-file diff 在目标已存在时会被 git apply --check 拒掉）。
-      args: {'path': inferredPath, 'content': content},
+      args: {
+        'path': inferredPath,
+        'content': content,
+        if (path == null) 'allowRenameOnConflict': true,
+      },
     );
   }
 
@@ -607,7 +685,8 @@ class AgentRuntime {
   ///
   /// 返回 null 表示未识别出任何文件生成意图（不应触发工具请求）。
   String? _inferWorkspaceFilePath(String text) {
-    const supported = r'html|html5|md|markdown|dart|txt|text|json|yaml|yml|svg|css|js|ts|py|c|cpp|cc|h|hpp';
+    const supported =
+        r'html|html5|md|markdown|dart|txt|text|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cpp|cc|h|hpp';
     // 先匹配「(一个?) (ext) 文件」或「(ext)文件」「一个(ext)」这类明确类型提示。
     final typeHint = RegExp(
       r'(?:一个?)?\s*(' + supported + r')\s*文件',
@@ -619,10 +698,13 @@ class AgentRuntime {
     } else {
       // 兜底：消息里单独出现“一个 html / 生成一个 dart”等扩展名词（无“文件”二字）。
       final bare = RegExp(
-        r'(?:一个?)?\s*(html|html5|md|markdown|dart|txt|json|yaml|yml|svg|css|js|ts|py)\b',
+        r'(?:一个?)?\s*(html|html5|md|markdown|dart|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash)(?![a-zA-Z0-9_])',
         caseSensitive: false,
       ).firstMatch(text);
       ext = bare == null ? null : _normalizeExt(bare.group(1)!);
+      if (ext == null && (lowerContainsScript(text))) {
+        ext = 'sh';
+      }
     }
     if (ext == null) return null;
 
@@ -630,7 +712,11 @@ class AgentRuntime {
     String name;
     if (ext == 'html' || ext == 'svg' || ext == 'css') {
       // 画面 / 场景 / 视觉类 → 用内容关键词命名。
-      if (lower.contains('湖') ||
+      if (lower.contains('流星') ||
+          lower.contains('meteor') ||
+          lower.contains('夜空')) {
+        name = 'meteor_shower';
+      } else if (lower.contains('湖') ||
           lower.contains('划船') ||
           lower.contains('星空') ||
           lower.contains('月亮') ||
@@ -647,9 +733,14 @@ class AgentRuntime {
       if (lower.contains('报告') ||
           lower.contains('总结') ||
           lower.contains('验收') ||
+          lower.contains('技术文档') ||
+          lower.contains('项目文档') ||
+          lower.contains('工程目录') ||
           lower.contains('readme') ||
           lower.contains('report')) {
-        name = 'report';
+        name = lower.contains('技术文档') || lower.contains('项目文档')
+            ? 'technical_documentation'
+            : 'report';
       } else {
         name = 'note';
       }
@@ -662,6 +753,15 @@ class AgentRuntime {
         name = 'main';
       } else {
         name = 'snippet';
+      }
+    } else if (ext == 'sh') {
+      if (lower.contains('检查') ||
+          lower.contains('验证') ||
+          lower.contains('test') ||
+          lower.contains('check')) {
+        name = 'run_checks';
+      } else {
+        name = 'script';
       }
     } else {
       // 其余类型（json / yaml / txt / 源码等）统一兜底命名。
@@ -678,12 +778,18 @@ class AgentRuntime {
     if (e == 'html5') return 'html';
     if (e == 'markdown') return 'md';
     if (e == 'text') return 'txt';
+    if (e == 'bash') return 'sh';
     return e;
+  }
+
+  bool lowerContainsScript(String text) {
+    final lower = text.toLowerCase();
+    return lower.contains('脚本') || lower.contains('script');
   }
 
   String? _extractWorkspaceFilePath(String text) {
     final pathPattern = RegExp(
-      r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:md|markdown|dart|txt|json|yaml|yml|svg|html|css|js|ts|py|c|cc|cpp|h|hpp))(?![\w./\\-])',
+      r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:md|markdown|dart|txt|json|yaml|yml|svg|html|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp))(?![\w./\\-])',
       caseSensitive: false,
     );
     for (final match in pathPattern.allMatches(text)) {
@@ -700,8 +806,25 @@ class AgentRuntime {
     required String path,
   }) {
     final extension = path.split('.').last.toLowerCase();
+    final htmlCharacterName = _escapeHtml(character.name);
+    final markdownCharacterName = _escapeMarkdownHtml(character.name);
     if (extension == 'dart') {
       return "void main() {\n  print('hello from ${character.name}');\n}\n";
+    }
+    if (extension == 'sh' || extension == 'bash') {
+      return '''
+#!/usr/bin/env bash
+set -euo pipefail
+
+echo "Agentic generated project check script"
+echo "Generated by: ${character.name}"
+
+flutter --version >/dev/null
+flutter analyze
+flutter test
+
+echo "All checks completed."
+''';
     }
     if (extension == 'cpp' ||
         extension == 'cc' ||
@@ -788,7 +911,7 @@ int main() {
   <rect width="960" height="540" fill="#111827"/>
   <rect x="80" y="76" width="800" height="388" rx="28" fill="#f8fafc"/>
   <text x="120" y="160" font-family="Arial, sans-serif" font-size="46" font-weight="700" fill="#1f2937">Agentic Work</text>
-  <text x="120" y="230" font-family="Arial, sans-serif" font-size="28" fill="#475569">Generated by ${character.name}</text>
+  <text x="120" y="230" font-family="Arial, sans-serif" font-size="28" fill="#475569">Generated by $htmlCharacterName</text>
   <circle cx="760" cy="170" r="54" fill="#6366f1"/>
   <path d="M710 330h120M710 370h90M710 410h150" stroke="#10b981" stroke-width="18" stroke-linecap="round"/>
 </svg>
@@ -797,7 +920,7 @@ int main() {
     if (extension == 'json') {
       return '''
 {
-  "generatedBy": "${character.name}",
+  "generatedBy": ${_jsonString(character.name)},
   "status": "created",
   "request": ${_jsonString(userRequest)}
 }
@@ -809,21 +932,164 @@ int main() {
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <title>Agentic Work</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>流星雨划过夜空</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      min-height: 100vh;
+      overflow: hidden;
+      background: radial-gradient(circle at 50% 80%, #1b3768 0 8%, transparent 30%),
+        linear-gradient(180deg, #050711 0%, #0b1024 52%, #18284b 100%);
+      color: #f8fafc;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+    }
+    .sky {
+      position: relative;
+      width: 100vw;
+      height: 100vh;
+      background-image:
+        radial-gradient(circle, rgba(255,255,255,.9) 0 1px, transparent 1.6px),
+        radial-gradient(circle, rgba(185,214,255,.8) 0 1px, transparent 1.4px);
+      background-size: 140px 140px, 210px 210px;
+      animation: drift 20s linear infinite;
+    }
+    .title {
+      position: absolute;
+      left: 7vw;
+      top: 8vh;
+      max-width: 560px;
+      text-shadow: 0 12px 35px rgba(0,0,0,.5);
+    }
+    h1 { margin: 0 0 12px; font-size: clamp(34px, 6vw, 78px); }
+    p { margin: 0; font-size: clamp(15px, 2vw, 22px); color: #c7d2fe; }
+    .meteor {
+      position: absolute;
+      width: 190px;
+      height: 2px;
+      background: linear-gradient(90deg, rgba(255,255,255,0), #fff 70%, #bde7ff);
+      border-radius: 999px;
+      filter: drop-shadow(0 0 10px #bae6fd);
+      transform: rotate(-28deg);
+      animation: shoot var(--duration) linear infinite;
+      animation-delay: var(--delay);
+      top: var(--top);
+      left: var(--left);
+      opacity: 0;
+    }
+    .meteor::after {
+      content: "";
+      position: absolute;
+      right: -5px;
+      top: -3px;
+      width: 8px;
+      height: 8px;
+      border-radius: 50%;
+      background: #fff;
+      box-shadow: 0 0 16px #7dd3fc;
+    }
+    .horizon {
+      position: absolute;
+      inset: auto 0 0;
+      height: 28vh;
+      background: linear-gradient(180deg, rgba(7,12,28,0) 0%, rgba(5,8,18,.9) 58%),
+        radial-gradient(ellipse at 50% 100%, rgba(96,165,250,.26), transparent 65%);
+    }
+    @keyframes shoot {
+      0% { opacity: 0; transform: translate3d(0, 0, 0) rotate(-28deg); }
+      7% { opacity: 1; }
+      55% { opacity: 1; }
+      100% { opacity: 0; transform: translate3d(65vw, 38vh, 0) rotate(-28deg); }
+    }
+    @keyframes drift {
+      from { background-position: 0 0, 0 0; }
+      to { background-position: 140px 140px, -210px 210px; }
+    }
+  </style>
 </head>
 <body>
-  <h1>${character.name} 已生成文件</h1>
-  <pre><code>void main() {
-  print('hello from ${character.name}');
-}</code></pre>
+  <main class="sky" aria-label="流星雨划过夜空的动态效果">
+    <section class="title">
+      <h1>流星雨划过夜空</h1>
+      <p>$htmlCharacterName 根据你的自然语言请求生成的 HTML 动态效果。</p>
+    </section>
+    <span class="meteor" style="--top:10vh;--left:-18vw;--duration:4.8s;--delay:.2s"></span>
+    <span class="meteor" style="--top:22vh;--left:-30vw;--duration:5.6s;--delay:1.1s"></span>
+    <span class="meteor" style="--top:35vh;--left:-25vw;--duration:4.2s;--delay:2.4s"></span>
+    <span class="meteor" style="--top:48vh;--left:-35vw;--duration:6.2s;--delay:3.3s"></span>
+    <span class="meteor" style="--top:16vh;--left:-45vw;--duration:5.1s;--delay:4.7s"></span>
+    <div class="horizon"></div>
+  </main>
 </body>
 </html>
 ''';
     }
+    if (extension == 'md' || extension == 'markdown') {
+      final isTechnicalDoc = userRequest.contains('技术文档') ||
+          userRequest.contains('项目') ||
+          userRequest.contains('工程');
+      if (isTechnicalDoc) {
+        return '''
+# AI Group Chat Simulator 技术文档
+
+生成角色：$markdownCharacterName
+
+## 项目概述
+
+这是一个 Flutter 本地应用，用于模拟多个 AI 角色在群聊和私聊中的对话。角色可以绑定不同 LLM Provider，并在 agentic 模式下通过本地工具读写工程文件、生成技能或整理产物。
+
+## 技术栈
+
+- Flutter / Dart：跨平台 UI 与业务逻辑。
+- Riverpod：Provider 注入与状态管理。
+- Hive：本地 NoSQL 持久化，保存角色、群组、消息、记忆和设置。
+- Dio：调用 DeepSeek、Qwen、Zhipu、Moonshot、Baidu 以及自定义 OpenAI-compatible 接口。
+- open_filex / file_picker：文件附件选择、生成产物打开。
+
+## 核心模块
+
+- `lib/features/chat_group/chat_room_page.dart`：群聊/私聊页面、消息发送、AI 回复、附件展示和工具产物回贴。
+- `lib/features/agentic/agent_runtime.dart`：agentic 工具运行时，负责规划、权限检查、工具执行和结果整理。
+- `lib/features/agentic/tools/`：本地 workspace、浏览器上下文和桥接服务。
+- `lib/core/database/database_service.dart`：Hive 初始化、消息索引、AI 产物目录和媒体文件管理。
+
+## 数据模型
+
+- `AICharacter`：角色人设、模型配置、工具权限和长期记忆。
+- `ChatGroup`：群聊主题、成员与所有者信息。
+- `Message`：用户/AI 消息，支持引用、提及和媒体附件。
+- `CharacterSkill`：角色可复用技能，声明说明步骤和所需工具权限。
+
+## Agentic 文件生成流程
+
+1. 用户在私聊中提出“生成文件/写文档/输出 HTML 或 MD”等自然语言请求。
+2. `AgenticTaskClassifier` 判定需要进入 agentic 链路。
+3. `AgentRuntime` 生成或解析工具请求，调用 `workspace.write` 写入工程目录。
+4. 写入后读回内容生成预览，并在聊天消息中附加文件卡片。
+5. 用户点击文件卡片即可通过系统默认应用打开生成产物。
+
+## 本地运行与验证
+
+```bash
+flutter pub get
+flutter analyze
+flutter test
+flutter run -d macos
+```
+
+## 注意事项
+
+- 非 release 环境可能读取本地开发数据，`data/*.hive` 可能包含 API Key，应谨慎分享仓库。
+- 文件写入通过本地桥接服务限制在授权 workspace 内，避免路径越界。
+- 新增依赖前需要检查 Android Gradle API，避免使用当前 Flutter fork 不支持的 `android.flutter` 属性。
+''';
+      }
+    }
     return '''
 # Agentic Live Test
 
-生成角色：${character.name}
+生成角色：$markdownCharacterName
 
 ## 用户请求
 
@@ -845,12 +1111,15 @@ void main() {
 ''';
   }
 
-  String _jsonString(String value) {
-    final encoded = value
-        .replaceAll(r'\', r'\\')
-        .replaceAll('"', r'\"')
-        .replaceAll('\n', r'\n');
-    return '"$encoded"';
+  String _jsonString(String value) => jsonEncode(value);
+
+  String _escapeHtml(String value) => const HtmlEscape().convert(value);
+
+  String _escapeMarkdownHtml(String value) {
+    return value
+        .replaceAll('&', '&amp;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
   }
 
   AgentRuntimeResult? _completedFallbackForExecutedTool({

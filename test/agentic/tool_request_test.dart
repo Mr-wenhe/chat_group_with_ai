@@ -122,8 +122,7 @@ void main() {
   });
 
   // 兼容性：<tool_call> 带字面 `>`（JSON 放在标签体内、独占一行）仍可解析。
-  test('parses tool_call wrapper with `>` opener and json on its own line',
-      () {
+  test('parses tool_call wrapper with `>` opener and json on its own line', () {
     final parsed = ToolRequest.tryParse(
       '稍等，我来生成文件。\n'
       '<tool_call>\n'
@@ -145,5 +144,35 @@ void main() {
     expect(parsed, isNotNull);
     expect(parsed!.tool, AgentToolName.workspaceRead);
     expect(parsed.args['path'], 'lib/main.dart');
+  });
+
+  test('parses function_calls parameter format as workspace patch', () {
+    final parsed = ToolRequest.tryParse('''
+<tool_call>
+<function_calls>
+<parameter name="path">/Users/me/data/ai_files/task_1/meteor_rain.html</parameter>
+<parameter name="content">&lt;!DOCTYPE html&gt;
+<html lang="zh-CN">
+<head><title>流星雨</title></head>
+</html></parameter>
+</function_calls>
+</tool_call>
+''');
+
+    expect(parsed, isNotNull);
+    expect(parsed!.tool, AgentToolName.workspacePatch);
+    expect(parsed.args['path'], endsWith('meteor_rain.html'));
+    expect(parsed.args['content'], contains('<!DOCTYPE html>'));
+    expect(parsed.args['content'], contains('流星雨'));
+  });
+
+  test('ignores parameter tags outside tool envelopes', () {
+    final parsed = ToolRequest.tryParse('''
+这是普通协议说明，不是工具调用：
+<parameter name="path">technical_documentation.md</parameter>
+<parameter name="content">hello</parameter>
+''');
+
+    expect(parsed, isNull);
   });
 }
