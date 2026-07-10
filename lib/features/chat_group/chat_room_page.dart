@@ -5483,15 +5483,8 @@ class _MessageBubble extends StatelessWidget {
                           ? null
                           : isHighlightedMention
                               ? cs.primaryContainer.withOpacity(0.56)
-                              : cs.surfaceContainer,
+                              : Colors.transparent,
                       gradient: isUser ? AppTheme.primaryGradient : null,
-                      border: isUser
-                          ? null
-                          : Border.all(
-                              color: isHighlightedMention
-                                  ? cs.primary.withOpacity(0.84)
-                                  : cs.outlineVariant.withOpacity(0.6),
-                              width: isHighlightedMention ? 1.6 : 1),
                       boxShadow: isHighlightedMention
                           ? [
                               BoxShadow(
@@ -5652,8 +5645,6 @@ class _MessageBubble extends StatelessWidget {
     final textColor = isUser ? cs.onPrimary : cs.onSurface;
     final subtleColor =
         isUser ? cs.onPrimary.withOpacity(0.75) : cs.onSurfaceVariant;
-    final borderColor =
-        isUser ? cs.onPrimary.withOpacity(0.25) : cs.outlineVariant;
     final fillColor =
         isUser ? cs.onPrimary.withOpacity(0.08) : cs.surfaceContainerHighest;
     return InkWell(
@@ -5665,7 +5656,6 @@ class _MessageBubble extends StatelessWidget {
         decoration: BoxDecoration(
           color: fillColor,
           borderRadius: BorderRadius.circular(8),
-          border: Border.all(color: borderColor),
         ),
         child: Row(
           children: [
