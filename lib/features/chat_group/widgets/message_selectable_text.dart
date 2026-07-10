@@ -5,9 +5,13 @@ import 'package:flutter/material.dart';
 
 /// 聊天气泡里的可选择文本。
 ///
-/// 桌面端双击会选中整条消息，右键打开消息操作；触屏端继续支持长按。
-/// 使用只读 [TextField] 是为了能可靠地以编程方式设置完整选区，同时保留
-/// Flutter 原生的复制/全选工具栏，行为在 macOS 与 Windows 上一致。
+/// 使用只读 [SelectableText] 而非 [TextField]：避免 macOS 桌面端给聚焦的
+/// [TextField] 绘制系统级聚焦光环（表现为一圈金色「虚框」）。[SelectableText]
+/// 天然不画聚焦框，同时仍支持拖选 / 双击选词 / 右键复制菜单 / 触屏长按。
+///
+/// 右键 / 长按的「消息操作菜单」由外层 [_MessageBubble] 的 [GestureDetector]
+/// 处理；本控件额外透传 [onSecondaryTap] / [onLongPress]，用 [Listener]（原始
+/// 指针监听，不参与手势竞技场）承接，避免与 [SelectableText] 的选择手势冲突。
 class MessageSelectableText extends StatefulWidget {
   const MessageSelectableText({
     super.key,
@@ -28,50 +32,12 @@ class MessageSelectableText extends StatefulWidget {
 }
 
 class _MessageSelectableTextState extends State<MessageSelectableText> {
-  late final TextEditingController _controller =
-      TextEditingController(text: widget.content);
-  DateTime? _lastPrimaryTapAt;
   Timer? _longPressTimer;
-  Timer? _selectAllTimer;
-
-  @override
-  void didUpdateWidget(covariant MessageSelectableText oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.content == widget.content) return;
-    final selection = _controller.selection;
-    _controller.value = TextEditingValue(
-      text: widget.content,
-      selection: selection.isValid && selection.end <= widget.content.length
-          ? selection
-          : TextSelection.collapsed(offset: widget.content.length),
-    );
-  }
 
   @override
   void dispose() {
     _longPressTimer?.cancel();
-    _selectAllTimer?.cancel();
-    _controller.dispose();
     super.dispose();
-  }
-
-  void _handlePrimaryTap() {
-    final now = DateTime.now();
-    final previous = _lastPrimaryTapAt;
-    _lastPrimaryTapAt = now;
-    if (previous == null ||
-        now.difference(previous) > const Duration(milliseconds: 500)) {
-      return;
-    }
-    _selectAllTimer?.cancel();
-    _selectAllTimer = Timer(const Duration(milliseconds: 20), () {
-      if (!mounted) return;
-      _controller.selection = TextSelection(
-        baseOffset: 0,
-        extentOffset: _controller.text.length,
-      );
-    });
-    _lastPrimaryTapAt = null;
   }
 
   void _handlePointerDown(PointerDownEvent event) {
@@ -80,21 +46,18 @@ class _MessageSelectableTextState extends State<MessageSelectableText> {
       return;
     }
     if (event.buttons & kPrimaryMouseButton != 0) {
-      _handlePrimaryTap();
+      // 仅触屏 / 手写笔走长按计时；鼠标左键交给 SelectableText 处理选区。
+      if (event.kind != PointerDeviceKind.touch &&
+          event.kind != PointerDeviceKind.stylus &&
+          event.kind != PointerDeviceKind.invertedStylus) {
+        return;
+      }
+      _longPressTimer?.cancel();
+      _longPressTimer = Timer(kLongPressTimeout, widget.onLongPress ?? () {});
     }
-    if (event.kind != PointerDeviceKind.touch &&
-        event.kind != PointerDeviceKind.stylus &&
-        event.kind != PointerDeviceKind.invertedStylus) {
-      return;
-    }
-    _longPressTimer?.cancel();
-    _longPressTimer = Timer(kLongPressTimeout, widget.onLongPress ?? () {});
   }
 
-  void _cancelLongPress(PointerEvent _) {
-    _longPressTimer?.cancel();
-    _longPressTimer = null;
-  }
+  void _cancelLongPress(PointerEvent _) => _longPressTimer?.cancel();
 
   @override
   Widget build(BuildContext context) {
@@ -103,14 +66,9 @@ class _MessageSelectableTextState extends State<MessageSelectableText> {
       onPointerDown: _handlePointerDown,
       onPointerUp: _cancelLongPress,
       onPointerCancel: _cancelLongPress,
-      child: TextField(
-        controller: _controller,
-        readOnly: true,
-        showCursor: false,
-        maxLines: null,
-        enableInteractiveSelection: true,
+      child: SelectableText(
+        widget.content,
         style: widget.style,
-        decoration: const InputDecoration.collapsed(hintText: ''),
         contextMenuBuilder: (context, editableTextState) {
           return AdaptiveTextSelectionToolbar.buttonItems(
             anchors: editableTextState.contextMenuAnchors,

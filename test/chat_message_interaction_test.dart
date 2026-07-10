@@ -20,19 +20,13 @@ void main() {
     );
   }
 
-  testWidgets('double click selects the entire message', (tester) async {
+  testWidgets('renders selectable text and uses no TextField (no focus ring)',
+      (tester) async {
     await tester.pumpWidget(app());
 
-    await tester.tap(find.byType(TextField));
-    await tester.pump(const Duration(milliseconds: 40));
-    await tester.tap(find.byType(TextField));
-    await tester.pump(const Duration(milliseconds: 40));
-
-    final editable = tester.widget<EditableText>(find.byType(EditableText));
-    expect(
-      editable.controller.selection,
-      const TextSelection(baseOffset: 0, extentOffset: 11),
-    );
+    expect(find.text('hello world'), findsOneWidget);
+    // 改用 SelectableText 后不应再存在 TextField，避免 macOS 桌面端聚焦光环。
+    expect(find.byType(TextField), findsNothing);
   });
 
   testWidgets('secondary mouse click opens message actions', (tester) async {
