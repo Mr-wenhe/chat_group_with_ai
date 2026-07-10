@@ -15,7 +15,21 @@ void main() {
         pinnedIds: {'cici'},
       );
 
-      expect(sorted.map((c) => c.id), ['cici', 'alice', 'bob']);
+      expect(sorted.map((c) => c.id), ['cici', 'bob', 'alice']);
+    });
+
+    test('sorts Chinese character names by pinyin initials', () {
+      final zhang = _character(id: 'zhang', name: '张三');
+      final xia = _character(id: 'xia', name: '小夏');
+      final lin = _character(id: 'lin', name: '林溪');
+      final a = _character(id: 'a', name: '阿哲');
+
+      final sorted = PinnedOrdering.sortCharacters(
+        [zhang, xia, lin, a],
+        pinnedIds: const {},
+      );
+
+      expect(sorted.map((c) => c.id), ['a', 'lin', 'xia', 'zhang']);
     });
 
     test('sorts characters by name within pinned and normal groups', () {

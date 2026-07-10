@@ -36,4 +36,12 @@ class DirectChatSession {
         '请自然回应对方当前消息，像真实私信一样有来有回。'
         '不要替别人发言，不要说自己是 AI，不要带自己的名字前缀。';
   }
+
+  static String persistentMemoryPrompt(AICharacter character) {
+    final memory = character.memorySummary.trim();
+    if (memory.isEmpty) return '';
+    return '【跨聊天长期记忆】\n'
+        '以下是你在其他私聊或群聊中已经了解的用户信息，'
+        '请自然延续，不要宣称在读取记忆：\n$memory';
+  }
 }

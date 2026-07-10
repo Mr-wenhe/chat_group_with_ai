@@ -21,7 +21,7 @@ import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
-import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
+import 'package:chat_group/features/agentic/agent_attachment_context.dart';
 import 'package:chat_group/features/agentic/agentic_task_classifier.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
@@ -45,6 +45,8 @@ import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
 import 'package:chat_group/features/chat_group/multimodal_content.dart';
 import 'package:chat_group/features/chat_group/scene_behavior.dart';
+import 'package:chat_group/features/chat_group/widgets/message_selectable_text.dart';
+import 'package:chat_group/features/chat_group/widgets/compact_conversation_controls.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/settings/export_page.dart';
@@ -52,6 +54,7 @@ import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/ai_attachment_service.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
+import 'package:chat_group/services/message_speech_service.dart';
 import 'package:chat_group/services/web_search_service.dart';
 import 'package:chewie/chewie.dart';
 import 'package:desktop_drop/desktop_drop.dart';
@@ -60,7 +63,6 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
-import 'package:flutter_tts/flutter_tts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:open_filex/open_filex.dart';
 import 'package:pasteboard/pasteboard.dart';
@@ -120,6 +122,57 @@ class ChatRoomPage extends ConsumerStatefulWidget {
   ConsumerState<ChatRoomPage> createState() => _ChatRoomPageState();
 }
 
+/// 群聊中显式 agentic 任务的选角收敛（Bug B-b2）。
+///
+/// 仅当非私聊且 [isExplicitAgenticTask] 为 true 时介入：
+/// - 用户 @ 了具体角色（[mentionedIds] 非空）→ 只由第一个可用的被 @
+///   角色执行；
+/// - 未 @ 限定时 → 只保留第一个可回复角色。
+/// 这样文件/工具任务不会被多角色同时执行，从根源避免重复答案和重复产物。
+/// 其余情况（私聊 / 非显式 agentic 任务）原样返回 [candidates]。
+///
+/// 抽成纯函数仅为可单测；逻辑与 [_runAiRound] 内联实现完全一致。
+List<AICharacter> selectAgenticCharactersForRound({
+  required bool isDirectChat,
+  required bool isExplicitAgenticTask,
+  required List<AICharacter> candidates,
+  required List<String>? mentionedIds,
+}) {
+  if (isDirectChat || !isExplicitAgenticTask) return candidates;
+  if (mentionedIds != null && mentionedIds.isNotEmpty) {
+    for (final mentionedId in mentionedIds) {
+      final character =
+          candidates.where((item) => item.id == mentionedId).firstOrNull;
+      if (character != null) return [character];
+    }
+    return const [];
+  }
+  final single = candidates.isNotEmpty ? candidates.first : null;
+  return single == null ? const [] : [single];
+}
+
+/// Detects exact/whitespace-only duplicate AI answers within the current user
+/// exchange. The scan stops at the previous user message, so a natural short
+/// phrase used again much later is not incorrectly suppressed.
+bool isDuplicateAiReply(
+  String content,
+  List<Message> recentMessages, {
+  String? excludeMessageId,
+}) {
+  String normalize(String value) =>
+      value.replaceAll(RegExp(r'\s+'), '').trim().toLowerCase();
+
+  final candidate = normalize(content);
+  if (candidate.isEmpty) return false;
+  for (final message in recentMessages.reversed) {
+    if (message.id == excludeMessageId) continue;
+    if (message.senderType == 'user') break;
+    if (message.senderType != 'ai') continue;
+    if (normalize(message.content) == candidate) return true;
+  }
+  return false;
+}
+
 class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     with WidgetsBindingObserver {
   final _textController = TextEditingController();
@@ -130,7 +183,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   final _webSearch = WebSearchService();
   late final AiAttachmentService _aiAttachments;
   final _random = Random();
-  final FlutterTts _flutterTts = FlutterTts();
+  late final MessageSpeechService _speech;
   late final DatabaseService _db;
 
   ChatGroup? _group;
@@ -183,6 +236,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   // 待回应 @ 列表
   final List<String> _pendingMentionedIds = [];
 
+  // 并发兜底：记录当前正在执行 agentic 任务的角色 id，防止同一角色在同一轮内
+  // 被重复触发（极端情况下的重入会产生重复消息 / 重复文件）。
+  final Set<String> _agenticRunningCharacterIds = {};
+
   bool _isInputEmpty = true;
 
   /// 是否允许发送：文案非空 或 有待发送附件。
@@ -232,6 +289,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     ConversationPresenceService.instance.enter(widget.groupId);
     _db = ref.read(databaseServiceProvider);
     _aiAttachments = AiAttachmentService(db: _db);
+    _speech = MessageSpeechService(
+      engine: FlutterTtsSpeechEngine(),
+      onStateChanged: _handleSpeechState,
+    );
     _textController.addListener(() {
       final isEmpty = _textController.text.trim().isEmpty;
       if (isEmpty != _isInputEmpty) {
@@ -269,7 +330,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _mentionHighlightTimer?.cancel();
     _hideMentionOverlay();
     _mentionSearchController.dispose();
-    _ttsStop();
+    unawaited(_speech.dispose());
     super.dispose();
   }
 
@@ -513,7 +574,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       random: _autoChatRandom,
       isAutoChat: true,
     );
-    final speakers = _charactersForIntents(autoIntents);
+    var speakers = _charactersForIntents(autoIntents)
+        .where((c) => !_agenticRunningCharacterIds.contains(c.id))
+        .toList();
     final lastAiSenderId = _lastAiSenderId;
     final speakersToUse = speakers.length <= 1
         ? speakers
@@ -857,13 +920,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         outputSummary: result,
       );
       await service.completeTask(task, '自治执行完成。\n\n$result');
-      await _appendMessage(Message(
-        groupId: widget.groupId,
-        senderId: executor.id,
-        senderType: 'ai',
-        content:
-            '产品确认：本轮自治任务已完成并写入验收报告。\n${task.workDirPath}/acceptance_report.md',
-      ));
     } finally {
       if (_canTouchUi) setState(() => _isAutonomousRunning = false);
     }
@@ -911,14 +967,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final isExplicitAgenticTask = !isAutoChat &&
         userMessage != null &&
         AgenticTaskClassifier.requiresAgenticWork(userMessage);
-    if (!_isDirectChat &&
-        isExplicitAgenticTask &&
-        mentionedIds != null &&
-        mentionedIds.isNotEmpty) {
-      charactersToReply = charactersToReply
-          .where((character) => mentionedIds.contains(character.id))
-          .toList();
-    }
+    // Bug B-b2：群聊中显式 agentic 任务（如"生成个人主页"）的选角收敛，
+    // 抽成纯函数以便单测（逻辑不变）。
+    charactersToReply = selectAgenticCharactersForRound(
+      isDirectChat: _isDirectChat,
+      isExplicitAgenticTask: isExplicitAgenticTask,
+      candidates: charactersToReply,
+      mentionedIds: mentionedIds,
+    );
     if (charactersToReply.isEmpty) {
       if (_characters.any(_isEligibleToReply)) {
         setState(() {
@@ -1037,6 +1093,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       {bool isAutoChat = false,
       ReplyIntent? intent,
       Message? currentUserMessage}) async {
+    // 并发兜底：同一角色正在执行 agentic 任务时，auto-chat / 其他并发路径
+    // 不得触发同一角色的普通 LLM 回复，否则会出现「agentic 兜底文案 + 普通
+    // LLM 泄漏代码」两条消息的 Bug（auto-chat 传 userMessage=null 会绕过 agentic
+    // 分支直接走流式路径，而 _agenticRunningCharacterIds 此前仅在 _generateAgenticReply
+    // 入口检查，覆盖不到这里）。
+    if (_agenticRunningCharacterIds.contains(character.id)) {
+      return '';
+    }
+
     final config = _resolveApiConfig(character);
     if (config == null) {
       if (_canTouchUi) {
@@ -1232,6 +1297,36 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     // 移除 LLM 可能附带的名字前缀（UI 已独立显示角色名）。
     fullContent = _stripNamePrefix(fullContent, character.name);
+    // 防御：非 agentic 路径下 LLM 可能自发输出 tool_call 协议标签文本
+    // （尤其使用过 agentic 能力的角色，system prompt 里可能残留工具说明）。
+    // 在落库与返回前清洗之，避免协议泄漏被当作普通聊天贴出来。
+    fullContent = _sanitizeNonAgenticReply(fullContent);
+    if (!failed &&
+        isDuplicateAiReply(
+          fullContent,
+          _messages,
+          excludeMessageId: temp.id,
+        )) {
+      debugPrint('[AI Reply] suppressed duplicate from ${character.name}');
+      _recordReplyUsage(character);
+      if (promptTokens != null && completionTokens != null) {
+        await _db.recordTokenUsage(
+          characterId: character.id,
+          groupId: widget.groupId,
+          inputTokens: promptTokens!,
+          outputTokens: completionTokens!,
+          cachedTokens: cachedTokens ?? 0,
+        );
+      }
+      if (_canTouchUi) {
+        setState(() {
+          _messages = List.from(_messages)
+            ..removeWhere((message) => message.id == temp.id);
+          _streamingMessage = null;
+        });
+      }
+      return '';
+    }
     final generatedAttachments = failed
         ? const <MediaAttachment>[]
         : await _aiAttachments.createRequestedAttachments(
@@ -1274,6 +1369,41 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     if (_canTouchUi) setState(() => _streamingMessage = null);
     return fullContent;
+  }
+
+  /// 清洗非 agentic 路径回复中的 tool_call 协议泄漏。
+  ///
+  /// 该路径走的是普通 LLM 聊天，不应出现任何 <tool_call>/<agent_tool> 协议标签。
+  /// 但 LLM（尤其是使用过 agentic 能力的角色，其 system prompt 可能残留工具说明）
+  /// 可能在普通回复里自发吐出这类标签文本。这里只处理**明显**的协议泄漏与超大代码块，
+  /// 不影响正常聊天内容。比 agent_runtime.dart 的 _guardFinalMessage 更保守。
+  static String _sanitizeNonAgenticReply(String text) {
+    var result = text;
+    // 移除 tool_call 标签及内部全部内容（非贪婪，跨行）。
+    result = result.replaceAll(
+        RegExp(
+          r'<tool_call[^>]*>[\s\S]*?</tool_call\s*>',
+          dotAll: true,
+        ),
+        '');
+    // 移除 agent_tool 标签及内部全部内容（非贪婪，跨行）。
+    result = result.replaceAll(
+        RegExp(
+          r'<agent_tool[^>]*>[\s\S]*?</agent_tool\s*>',
+          dotAll: true,
+        ),
+        '');
+    // 移除可能残留的孤立标签（开/闭标签，含多余空白）。
+    result = result.replaceAll(
+        RegExp(r'</?\s*(tool_call|agent_tool|function|parameter)[^>]*>'), '');
+    // 若剩余文本以超大代码块为主（单个 ``` 块超过 500 字符），替换为提示，
+    // 避免把大段疑似生成代码当普通聊天贴出。
+    final codeBlockMatch = RegExp(r'```[\s\S]{500,}```').firstMatch(result);
+    if (codeBlockMatch != null) {
+      result =
+          result.replaceAll(codeBlockMatch.group(0)!, '📎 [代码内容已省略，请查看附件]');
+    }
+    return result.trim();
   }
 
   Future<String?> _retryFailedReply({
@@ -1328,73 +1458,102 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     List<MediaAttachment>? media,
     bool autoApproveTools = false,
   }) async {
-    await _ensureAgenticTaskPermissions(character, userMessage);
-    final runtime = _agentRuntimeFor(
-      character: character,
-      config: config,
-      provider: provider,
-    );
-
-    final mediaEnhancedRequest = media == null || media.isEmpty
-        ? userMessage
-        : '$userMessage${AgentPromptBuilder.mediaHint(media)}';
-
-    final result = await runtime.run(
-      character: character,
-      skills: _agenticSkillsFor(character),
-      userRequest: mediaEnhancedRequest,
-      autoApproveWriteTools: autoApproveTools,
-    );
-    if (result.status == AgentRuntimeStatus.waitingForApproval &&
-        result.pendingToolRequest != null) {
-      _pendingAgentApproval = _PendingAgentToolApproval(
+    // 并发兜底：同一角色已在执行 agentic 任务时，跳过本次重复调用，
+    // 避免重入导致重复文件生成 / 重复消息。该角色的本轮任务由首次调用负责。
+    if (_agenticRunningCharacterIds.contains(character.id)) {
+      return '';
+    }
+    _agenticRunningCharacterIds.add(character.id);
+    try {
+      await _ensureAgenticTaskPermissions(character, userMessage);
+      final runtime = _agentRuntimeFor(
         character: character,
         config: config,
         provider: provider,
-        userRequest: userMessage,
-        request: result.pendingToolRequest!,
-        priorExecutedRequests: result.executedToolRequests,
       );
+
+      final mediaEnhancedRequest =
+          await AgentAttachmentContext.enhanceCurrentRequest(
+        userRequest: userMessage,
+        media: media,
+      );
+      final conversationHistory = await _agenticHistory(userMessage);
+
+      final result = await runtime.run(
+        character: character,
+        skills: _agenticSkillsFor(character),
+        userRequest: mediaEnhancedRequest,
+        // 仅由调用方针对明确的私聊文件任务开启自动批准，避免普通私聊中的
+        // 模型误判直接获得工作区写权限。
+        autoApproveWriteTools: autoApproveTools,
+        conversationHistory: conversationHistory,
+      );
+      if (result.status == AgentRuntimeStatus.waitingForApproval &&
+          result.pendingToolRequest != null) {
+        _pendingAgentApproval = _PendingAgentToolApproval(
+          character: character,
+          config: config,
+          provider: provider,
+          userRequest: mediaEnhancedRequest,
+          request: result.pendingToolRequest!,
+          priorExecutedRequests: result.executedToolRequests,
+          conversationHistory: conversationHistory,
+        );
+        // 用弹层（AlertDialog）代替文字输入审批：用户点“批准/拒绝”即触发执行，
+        // 不再需要手动打字“批准”。无 UI 环境（如后台任务）才回退到文字提示。
+        final decision = await _showAgentApprovalDialog(
+          result.pendingToolRequest!,
+          character,
+        );
+        if (decision == true) {
+          await _handlePendingAgentApproval('批准');
+        } else if (decision == false) {
+          await _handlePendingAgentApproval('拒绝');
+        } else {
+          final content = _stripNamePrefix(result.message, character.name);
+          await _appendMessage(Message(
+            groupId: widget.groupId,
+            senderId: character.id,
+            senderType: 'ai',
+            content: content,
+          ));
+        }
+        // 审批流程已通过上述分支追加消息，这里返回占位文案即可。
+        return result.message;
+      }
+      if (result.status != AgentRuntimeStatus.completed) {
+        final content = _stripNamePrefix(result.message, character.name);
+        final message = Message(
+          groupId: widget.groupId,
+          senderId: character.id,
+          senderType: 'ai',
+          content: content,
+        );
+        await _appendMessage(message);
+        return content;
+      }
       final content = _stripNamePrefix(result.message, character.name);
-      await _appendMessage(Message(
-        groupId: widget.groupId,
-        senderId: character.id,
-        senderType: 'ai',
-        content: content,
-      ));
-      // 审批中：返回提示文案但不消耗 reply slot（不记录 usage/mention/memory）。
-      return content;
-    }
-    if (result.status != AgentRuntimeStatus.completed) {
-      final content = _stripNamePrefix(result.message, character.name);
+      final attachments = await _attachmentsForAgentToolResult(
+        character: character,
+        result: result,
+      );
       final message = Message(
         groupId: widget.groupId,
         senderId: character.id,
         senderType: 'ai',
         content: content,
+        media: attachments.isEmpty ? null : attachments,
       );
       await _appendMessage(message);
+      _recordReplyUsage(character);
+      _registerUserMentionIfNeeded(message);
+      if (content.trim().isNotEmpty) {
+        await _maybeEvolveCharacterMemory(character, content);
+      }
       return content;
+    } finally {
+      _agenticRunningCharacterIds.remove(character.id);
     }
-    final content = _stripNamePrefix(result.message, character.name);
-    final attachments = await _attachmentsForAgentToolResult(
-      character: character,
-      result: result,
-    );
-    final message = Message(
-      groupId: widget.groupId,
-      senderId: character.id,
-      senderType: 'ai',
-      content: content,
-      media: attachments.isEmpty ? null : attachments,
-    );
-    await _appendMessage(message);
-    _recordReplyUsage(character);
-    _registerUserMentionIfNeeded(message);
-    if (content.trim().isNotEmpty) {
-      await _maybeEvolveCharacterMemory(character, content);
-    }
-    return content;
   }
 
   Future<void> _ensureAgenticTaskPermissions(
@@ -1489,17 +1648,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final workspaceTool = WorkspaceFileTool(bridge);
     for (final path in paths.take(6)) {
       try {
-        final local = File(path).absolute;
-        if (await local.exists()) {
-          attachments.add(await _db.copyToAiCharacterDir(
-            source: local,
-            characterId: character.id,
-            characterName: character.name,
-            type: _attachmentTypeForPath(path),
-          ));
-          continue;
-        }
-
+        // Always read through the active bridge. Resolving [path] against the
+        // app process cwd can attach a same-named file from the old workspace
+        // immediately after the user switches project directories.
         final read = await workspaceTool.read(path);
         final content = read['content'];
         if (content is String) {
@@ -1549,12 +1700,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }) {
     final bridge = LocalAgentBridgeClient();
     return AgentRuntime(
-      complete: (messages) => _chatApi.sendChatMessage(
+      complete: (messages) => _chatApi.sendChatMessageStreamed(
         apiKey: config.apiKey,
         provider: provider,
         customBaseUrl: config.customBaseUrl,
         model: config.modelName,
         messages: messages,
+        maxTokens: 4096,
+        receiveTimeout: const Duration(seconds: 60),
       ),
       workspaceFileTool: WorkspaceFileTool(bridge),
       browserContextTool: BrowserContextTool(bridge),
@@ -1566,6 +1719,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         character: character,
         args: args,
       ),
+      // 关闭本地快速规划器：它原本会绕过 LLM 直接写死一个空壳模板，
+      // 导致用户“生成个人主页”却只得到 <p>内容由AI生成</p>。关闭后由 LLM
+      // 通过 planning prompt 生成真实文件内容（args.content 放完整内容）。
+      enableLocalFilePlanner: false,
     );
   }
 
@@ -1601,6 +1758,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         request: pending.request,
         userRequest: pending.userRequest,
         priorExecutedRequests: pending.priorExecutedRequests,
+        conversationHistory: pending.conversationHistory,
       );
       if (result.status == AgentRuntimeStatus.waitingForApproval &&
           result.pendingToolRequest != null) {
@@ -1611,7 +1769,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           userRequest: pending.userRequest,
           request: result.pendingToolRequest!,
           priorExecutedRequests: result.executedToolRequests,
+          conversationHistory: pending.conversationHistory,
         );
+        final nextDecision = await _showAgentApprovalDialog(
+          result.pendingToolRequest!,
+          pending.character,
+        );
+        if (nextDecision != null) {
+          return _handlePendingAgentApproval(
+            nextDecision ? '批准' : '拒绝',
+          );
+        }
       }
       final content = _stripNamePrefix(
         result.message.trim().isEmpty
@@ -1641,6 +1809,40 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     } finally {
       if (_canTouchUi) setState(() => _isAiReplying = false);
     }
+  }
+
+  /// 以弹层（AlertDialog）形式请求用户批准/拒绝工具调用，替代原来的“打字批准”。
+  ///
+  /// 返回 `true`=批准，`false`=拒绝，`null`=无法弹层（无 UI / 未挂载）。
+  /// 调用方据此调用 [_handlePendingAgentApproval] 推进流程。
+  Future<bool?> _showAgentApprovalDialog(
+    ToolRequest request,
+    AICharacter character,
+  ) async {
+    if (!_canTouchUi || !mounted) return null;
+    final decision = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (ctx) => AlertDialog(
+        title: Text('${character.name} 请求使用工具'),
+        content: SingleChildScrollView(
+          child: Text(
+            '工具：${request.tool.wireName}\n\n原因：${request.reason}',
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(ctx).pop(false),
+            child: const Text('拒绝'),
+          ),
+          ElevatedButton(
+            onPressed: () => Navigator.of(ctx).pop(true),
+            child: const Text('批准'),
+          ),
+        ],
+      ),
+    );
+    return decision;
   }
 
   bool _isAgentApproval(String text) {
@@ -2378,7 +2580,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     AICharacter character,
     String latestReply,
   ) async {
-    if (_messages.length < 6) return;
+    if (!ChatOrchestrator.shouldEvolveCharacterMemory(
+      messageCount: _messages.length,
+      hasUserMessage: _messages.any((message) => message.senderType == 'user'),
+    )) {
+      return;
+    }
 
     final config = _resolveApiConfig(character);
     if (config == null || config.apiKey.isEmpty) return;
@@ -2427,7 +2634,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (updated.isEmpty) return;
     await _mergeHumanizedMemory(character, updated);
     final parsed = HumanizedMemoryService.parseLayeredMemoryJson(updated);
-    character.memorySummary = _memorySummaryFromParsed(parsed);
+    character.memorySummary = HumanizedMemoryService.mergeGlobalSummary(
+      existing: character.memorySummary,
+      update: parsed,
+    );
     await character.save();
     if (_canTouchUi) setState(() {});
   }
@@ -2464,22 +2674,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       for (final c in _allGroupCharacters) c.id: c.name,
       for (final c in _characters) c.id: c.name,
     };
-  }
-
-  String _memorySummaryFromParsed(LayeredMemoryUpdate parsed) {
-    final parts = <String>[];
-    if (parsed.facts.isNotEmpty) {
-      parts.add('【事实】${parsed.facts.take(4).join('；')}');
-    }
-    if (parsed.relationshipNotes.isNotEmpty) {
-      parts.add('【关系】${parsed.relationshipNotes.take(3).join('；')}');
-    }
-    if (parsed.personaGrowth.isNotEmpty) {
-      parts.add('【成长】${parsed.personaGrowth.take(3).join('；')}');
-    }
-    final text = parts.join('\n');
-    if (text.length <= 900) return text;
-    return text.substring(0, 900);
   }
 
   bool _isEligibleToReply(AICharacter character) {
@@ -2550,7 +2744,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       character.hourlyReplyCount += 1;
     }
     character.lastReplyTimestamp = now;
-    character.save();
+    _db.aiCharacterBox.put(character.id, character);
   }
 
   Future<void> _recordTokenUsageFromResult(
@@ -3052,6 +3246,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         : _messages.toList();
   }
 
+  /// 把最近的对话记录转换成 LLM 消息格式，供 AgentRuntime 调用时携带上下文，
+  /// 修复“追问时 AI 失忆”的问题。
+  ///
+  /// - 取最近 12 条，排除当前请求对应的用户消息（已在 userRequest 中，避免重复）。
+  /// - user 消息 → role 'user'，ai 消息 → role 'assistant'。
+  /// - 附件会保留文件名、跨平台本地路径；安全的小型文本文件还会内联内容。
+  Future<List<Map<String, dynamic>>> _agenticHistory(String userMessage) {
+    return AgentAttachmentContext.buildHistory(
+      messages: _recentMessagesForContext(),
+      currentUserRequest: userMessage,
+    );
+  }
+
   String? get _lastAiSenderId {
     for (final message in _messages.reversed) {
       if (message.senderType == 'ai') return message.senderId;
@@ -3156,22 +3363,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
-  IconData get _autoChatStatusIcon {
-    if (!_isAutoChatEnabled) return Icons.voice_over_off_rounded;
-    switch (_autoChatStatus) {
-      case AutoChatStatus.generating:
-        return Icons.auto_awesome_rounded;
-      case AutoChatStatus.paused:
-        return Icons.pause_circle_outline_rounded;
-      case AutoChatStatus.unavailable:
-      case AutoChatStatus.error:
-        return Icons.info_outline_rounded;
-      case AutoChatStatus.idle:
-      case AutoChatStatus.waiting:
-        return Icons.forum_outlined;
-    }
-  }
-
   void _toggleAutoChat(bool enabled) {
     if (!_canTouchUi) return;
     setState(() {
@@ -3202,48 +3393,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
-  Widget _buildAutonomousStatusBar(ColorScheme cs) {
+  Widget _buildConversationControls(ColorScheme cs) {
     final config = _autonomousConfig;
-    final enabled = config?.enabled ?? false;
+    final autonomousEnabled = config?.enabled ?? false;
     final project = config?.authorizedProjectPath;
-    return Container(
-      margin: const EdgeInsets.fromLTRB(14, 8, 14, 0),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: enabled
-            ? cs.primaryContainer.withOpacity(0.45)
-            : cs.surfaceContainerHighest.withOpacity(0.75),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
-      ),
-      child: Row(
-        children: [
-          Icon(
-            enabled ? Icons.engineering_rounded : Icons.engineering_outlined,
-            size: 18,
-            color: enabled ? cs.primary : cs.onSurfaceVariant,
-          ),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              enabled
-                  ? '自治执行已开启${project == null ? '' : ' · 已授权项目'}'
-                  : '自治执行已关闭',
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(
-                color: enabled ? cs.onPrimaryContainer : cs.onSurfaceVariant,
-                fontSize: 13,
-                fontWeight: FontWeight.w600,
-              ),
-            ),
-          ),
-          Switch(
-            value: enabled,
-            onChanged: (value) => _toggleAutonomousExecution(value),
-          ),
-        ],
-      ),
+    return CompactConversationControls(
+      showAutoChat: !_isDirectChat,
+      autoChatEnabled: _isAutoChatEnabled && _hasAnyApiConfig,
+      autonomousEnabled: autonomousEnabled,
+      autoChatAvailable: _hasAnyApiConfig,
+      autoChatTooltip: _autoChatStatusText,
+      autonomousTooltip: autonomousEnabled
+          ? '自治执行已开启${project == null ? '' : ' · 已授权项目'}'
+          : '自治执行已关闭',
+      onAutoChatChanged: _toggleAutoChat,
+      onAutonomousChanged: _toggleAutonomousExecution,
     );
   }
 
@@ -3368,42 +3532,32 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   bool get _isTtsEnabled => _db.isTtsEnabled;
 
-  Future<void> _ttsSpeak(Message message) async {
-    if (_isSpeaking) {
-      _ttsStop();
-      return;
-    }
-    final text = message.content;
-    if (text.trim().isEmpty) return;
+  void _handleSpeechState(SpeechPlaybackState state) {
+    if (!_canTouchUi) return;
     setState(() {
-      _isSpeaking = true;
-      _speakingMessageId = message.id;
+      _isSpeaking = state.isSpeaking;
+      _speakingMessageId = state.messageId;
     });
-    try {
-      await _flutterTts.setLanguage('zh-CN');
-      await _flutterTts.setPitch(1.0);
-      await _flutterTts.setSpeechRate(0.5);
-      await _flutterTts.speak(text);
-    } catch (e) {
-      debugPrint('TTS error: $e');
-    }
-    if (mounted) {
-      setState(() {
-        _isSpeaking = false;
-        _speakingMessageId = null;
-      });
+    final error = state.error;
+    if (error != null && error.isNotEmpty) {
+      AppToast.show(
+        context,
+        error,
+        icon: Icons.volume_off_rounded,
+      );
     }
   }
 
-  void _ttsStop() async {
-    await _flutterTts.stop();
-    if (mounted) {
-      setState(() {
-        _isSpeaking = false;
-        _speakingMessageId = null;
-      });
+  Future<void> _ttsSpeak(Message message) async {
+    if (_isSpeaking) {
+      await _speech.stop();
     }
+    final text = message.content;
+    if (text.trim().isEmpty) return;
+    await _speech.speak(messageId: message.id, text: text);
   }
+
+  Future<void> _ttsStop() => _speech.stop();
 
   void _showMessageActionSheet(Message message, AICharacter? sender) {
     if (message.senderType != 'ai' || sender == null) return;
@@ -3825,8 +3979,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           if (!_isDirectChat &&
               (_group?.announcement.trim().isNotEmpty ?? false))
             _buildAnnouncementBanner(cs),
-          _buildAutonomousStatusBar(cs),
-          if (!_isDirectChat) _buildAutoChatStatusBar(cs),
+          _buildConversationControls(cs),
           if (_pendingUserMentionMessageIds.isNotEmpty &&
               !ConversationPresenceService.instance.isActive(widget.groupId))
             _buildUserMentionBanner(cs),
@@ -4073,50 +4226,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             tooltip: '编辑公告',
             visualDensity: VisualDensity.compact,
             constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAutoChatStatusBar(ColorScheme cs) {
-    final enabled = _isAutoChatEnabled && _hasAnyApiConfig;
-    final statusColor = switch (_autoChatStatus) {
-      AutoChatStatus.generating => cs.primary,
-      AutoChatStatus.unavailable || AutoChatStatus.error => cs.error,
-      AutoChatStatus.paused => cs.onSurfaceVariant,
-      AutoChatStatus.idle || AutoChatStatus.waiting => cs.onSurfaceVariant,
-    };
-
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest.withOpacity(0.72),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
-      ),
-      child: Row(
-        children: [
-          Icon(_autoChatStatusIcon, size: 18, color: statusColor),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              _autoChatStatusText,
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-            ),
-          ),
-          const SizedBox(width: 8),
-          Text(
-            '自动发言',
-            style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-          ),
-          Switch.adaptive(
-            value: enabled,
-            onChanged: _hasAnyApiConfig ? _toggleAutoChat : null,
-            materialTapTargetSize: MaterialTapTargetSize.shrinkWrap,
           ),
         ],
       ),
@@ -5247,6 +5356,7 @@ class _PendingAgentToolApproval {
   final String userRequest;
   final ToolRequest request;
   final List<ToolRequest> priorExecutedRequests;
+  final List<Map<String, dynamic>> conversationHistory;
 
   const _PendingAgentToolApproval({
     required this.character,
@@ -5255,6 +5365,7 @@ class _PendingAgentToolApproval {
     required this.userRequest,
     required this.request,
     this.priorExecutedRequests = const [],
+    this.conversationHistory = const [],
   });
 }
 
@@ -5302,6 +5413,7 @@ class _MessageBubble extends StatelessWidget {
 
     return GestureDetector(
       onLongPress: onLongPress,
+      onSecondaryTap: onLongPress,
       child: Padding(
         padding: const EdgeInsets.only(bottom: 16),
         child: Row(
@@ -5668,8 +5780,10 @@ class _MessageBubble extends StatelessWidget {
       base = Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SelectableText(content,
-              style: TextStyle(fontSize: 15, color: textColor, height: 1.4)),
+          MessageSelectableText(
+            content: content,
+            style: TextStyle(fontSize: 15, color: textColor, height: 1.4),
+          ),
           if (mentionNames.isNotEmpty)
             Padding(
               padding: const EdgeInsets.only(top: 6),
@@ -5687,8 +5801,10 @@ class _MessageBubble extends StatelessWidget {
         ],
       );
     } else {
-      base = SelectableText(content,
-          style: TextStyle(fontSize: 15, color: textColor, height: 1.4));
+      base = MessageSelectableText(
+        content: content,
+        style: TextStyle(fontSize: 15, color: textColor, height: 1.4),
+      );
     }
 
     // 正在流式生成时，在内容末尾追加一个闪烁光标，营造「打字机」观感。

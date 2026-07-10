@@ -1,31 +1,12 @@
 class AgenticTaskClassifier {
-  static const _agenticPatterns = [
-    '修改文件',
-    '修改 ',
-    '改一下',
+  static const _alwaysAgenticPatterns = [
     '写代码',
-    '脚本',
-    'script',
-    '实现',
-    '特效',
-    'html',
-    '网页',
     'review',
     '代码审查',
     '修复',
     'bug',
-    '生成文件',
-    '创建文件',
-    '写文件',
-    '文件',
-    '文件夹',
-    '路径',
-    '写md',
-    '写 md',
-    'markdown',
-    '文档',
-    '写文档',
     '运行测试',
+    '运行命令',
     'flutter analyze',
     'flutter test',
     '当前浏览器',
@@ -42,11 +23,34 @@ class AgenticTaskClassifier {
     '安装 skill',
     '专家skill',
     '专家 skill',
-    '工作流',
   ];
+
+  static final _createOrEditIntent = RegExp(
+    r'(生成|创建|写|制作|做一个|做个|帮我做|给我做|实现|开发|输出|导出|'
+    r'修改|改一下|改写|编辑|整理|转换|create|write|build|make|generate|edit)',
+    caseSensitive: false,
+  );
+
+  static final _artifactIntent = RegExp(
+    r'(代码|脚本|script|特效|html?|网页|主页|个人页|介绍页|页面|网站|落地页|'
+    r'landing|app|应用|小程序|小游戏|文件|文件夹|路径|markdown|\bmd\b|文档|'
+    r'报告|简历|工作流|dart|flutter|json|ya?ml|css|javascript|\bjs\b|'
+    r'python|\bpy\b)',
+    caseSensitive: false,
+  );
+
+  static final _explicitFilePath = RegExp(
+    r'(?<![\w./\\-])[\w][\w./\\-]*\.(?:html?|md|markdown|dart|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp)(?![\w./\\-])',
+    caseSensitive: false,
+  );
 
   static bool requiresAgenticWork(String message) {
     final lower = message.toLowerCase();
-    return _agenticPatterns.any(lower.contains);
+    if (_alwaysAgenticPatterns.any(lower.contains)) return true;
+
+    final hasAction = _createOrEditIntent.hasMatch(lower);
+    if (!hasAction) return false;
+    return _artifactIntent.hasMatch(lower) ||
+        _explicitFilePath.hasMatch(message);
   }
 }

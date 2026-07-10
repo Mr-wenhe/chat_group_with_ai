@@ -44,40 +44,43 @@ void main() {
       expect(result.message, '这是正常的聊天回复。');
     });
 
-    test('含 XML 工具标记（未知工具）的文本被整块移除，仅留正常文本', () async {
+    test('含 XML 工具标记（未知工具）无法解析时返回简洁兜底而非泄漏原始文本',
+        () async {
       final result = await runWith(
         '请稍候。<tool_call agent_tool {"tool":"unknown.tool"} </tool_call>好的。',
       );
       expect(result.status, AgentRuntimeStatus.completed);
-      expect(result.message, '请稍候。好的。');
+      // 含工具调用痕迹但无法解析为合法请求：返回简洁兜底，不再把原始规划文本泄漏。
       expect(result.message, isNot(contains('<tool_call')));
+      expect(result.message, contains('未能解析'));
     });
 
-    test('含 fence 工具标记（未知工具）的文本被整块移除，仅留正常文本', () async {
+    test('含 fence 工具标记（未知工具）无法解析时返回简洁兜底', () async {
       final result = await runWith(
         '请稍候。```agent_tool {"tool":"unknown.tool"} ```好的。',
       );
       expect(result.status, AgentRuntimeStatus.completed);
-      expect(result.message, '请稍候。好的。');
       expect(result.message, isNot(contains('agent_tool')));
+      expect(result.message, contains('未能解析'));
     });
 
-    test('含 XML 工具标记（</agent_tool> 变体）同样被整块移除', () async {
+    test('含 XML 工具标记（</agent_tool> 变体）无法解析时返回简洁兜底', () async {
       final result = await runWith(
         '请稍候。<tool_call agent_tool {"tool":"unknown.tool"} </agent_tool>好的。',
       );
       expect(result.status, AgentRuntimeStatus.completed);
-      expect(result.message, '请稍候。好的。');
       expect(result.message, isNot(contains('<tool_call')));
+      expect(result.message, contains('未能解析'));
     });
 
-    test('纯工具标记无正常文本 → 兜底文案含角色名', () async {
+    test('纯工具标记无正常文本且无法解析 → 兜底文案含角色名', () async {
       final result = await runWith(
         '```agent_tool {"tool":"unknown.tool","args":{}} ```',
       );
       expect(result.status, AgentRuntimeStatus.completed);
+      // 纯工具标记无法解析：返回兜底且含角色名，绝不含裸协议。
       expect(result.message, contains('范晓萌'));
-      expect(result.message, contains('已为你隐藏内部工具协议'));
+      expect(result.message, contains('未能解析'));
       expect(result.message, isNot(contains('agent_tool')));
     });
 
@@ -90,14 +93,15 @@ void main() {
       expect(result.message, isNot(contains('<tool_call')));
     });
 
-    test('Bug 3：无 inline agent_tool 的 tool_call 变体也会被清理', () async {
-      // 开标签内不含 agent_tool 的畸形/未知工具标记，应同样被整块移除。
+    test('Bug 3：无 inline agent_tool 的 tool_call 变体无法解析时返回兜底', () async {
+      // 开标签内不含 agent_tool 的畸形/未知工具标记，含工具调用痕迹但无法解析，
+      // 应返回简洁兜底而非泄露原始文本。
       final result = await runWith(
         '稍等。<tool_call {"tool":"unknown.tool","args":{}} </tool_call>完成。',
       );
       expect(result.status, AgentRuntimeStatus.completed);
-      expect(result.message, '稍等。完成。');
       expect(result.message, isNot(contains('<tool_call')));
+      expect(result.message, contains('未能解析'));
     });
   });
 }

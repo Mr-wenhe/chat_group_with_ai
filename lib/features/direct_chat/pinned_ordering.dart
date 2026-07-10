@@ -1,5 +1,6 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/chat_group.dart';
+import 'package:lpinyin/lpinyin.dart';
 
 class PinnedOrdering {
   static List<AICharacter> sortCharacters(
@@ -10,7 +11,9 @@ class PinnedOrdering {
     sorted.sort((a, b) {
       final pinCompare = _comparePinned(a.id, b.id, pinnedIds);
       if (pinCompare != 0) return pinCompare;
-      final nameCompare = a.name.compareTo(b.name);
+      final nameCompare = _characterSortKey(a.name).compareTo(
+        _characterSortKey(b.name),
+      );
       if (nameCompare != 0) return nameCompare;
       return a.createdAt.compareTo(b.createdAt);
     });
@@ -35,5 +38,19 @@ class PinnedOrdering {
     final bPinned = pinnedIds.contains(bId);
     if (aPinned == bPinned) return 0;
     return aPinned ? -1 : 1;
+  }
+
+  static String _characterSortKey(String name) {
+    final normalized = name.trim().toLowerCase();
+    if (normalized.isEmpty) return normalized;
+    try {
+      return PinyinHelper.getPinyinE(
+        normalized,
+        separator: '',
+        format: PinyinFormat.WITHOUT_TONE,
+      ).toLowerCase();
+    } on PinyinException {
+      return normalized;
+    }
   }
 }

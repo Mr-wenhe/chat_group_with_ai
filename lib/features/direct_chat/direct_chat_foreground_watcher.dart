@@ -4,6 +4,7 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
+import 'package:chat_group/features/direct_chat/direct_chat_proactive_policy.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:flutter/material.dart';
@@ -29,10 +30,6 @@ class DirectChatForegroundWatcher extends StatefulWidget {
 
 class _DirectChatForegroundWatcherState
     extends State<DirectChatForegroundWatcher> with WidgetsBindingObserver {
-  static const Duration _initialDelay = Duration(seconds: 25);
-  static const Duration _interval = Duration(seconds: 95);
-  static const Duration _handoffDelay = Duration(seconds: 8);
-
   Timer? _timer;
   StreamSubscription<String>? _presenceSub;
   bool _checking = false;
@@ -45,7 +42,7 @@ class _DirectChatForegroundWatcherState
     WidgetsBinding.instance.addObserver(this);
     _presenceSub = ConversationPresenceService.instance.leftConversationStream
         .listen(_scheduleHandoffCheck);
-    _timer = Timer(_initialDelay, _tick);
+    _timer = Timer(ProactiveContactSchedule.initialDelay, _tick);
   }
 
   @override
@@ -143,14 +140,14 @@ class _DirectChatForegroundWatcherState
 
   void _scheduleNext() {
     _timer?.cancel();
-    _timer = Timer(_interval, _tick);
+    _timer = Timer(ProactiveContactSchedule.interval, _tick);
   }
 
   void _scheduleHandoffCheck(String conversationId) {
     _preferredConversationId = conversationId;
     if (_lifecycleState != AppLifecycleState.resumed) return;
     _timer?.cancel();
-    _timer = Timer(_handoffDelay, _tick);
+    _timer = Timer(ProactiveContactSchedule.handoffDelay, _tick);
   }
 
   bool _isDirectConversation(String? conversationId) {

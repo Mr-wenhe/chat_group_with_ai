@@ -45,6 +45,8 @@ dependencies:
   # 工具
   uuid: ^4.3.3
   intl: ^0.19.0
+  # 纯 Dart 中文拼音转换；不含 Android/iOS 原生 Gradle 配置，兼容桌面与当前 Flutter fork。
+  lpinyin: ^2.0.3
 
   # TTS 语音合成
   flutter_tts: ^3.8.5

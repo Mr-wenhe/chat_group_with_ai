@@ -11,3 +11,25 @@ const int kLocalAgentBridgePort = 54263;
 /// 本地桥接服务默认基础地址（loopback + 统一端口）。
 const String kLocalAgentBridgeDefaultBaseUrl =
     'http://127.0.0.1:$kLocalAgentBridgePort';
+
+/// Runtime endpoint of the bridge owned by this app process.
+///
+/// If the well-known port is occupied by a stale/older bridge, the launcher
+/// binds an available loopback port and updates this value. New clients then
+/// connect to the correct workspace instead of talking to the stale process.
+class LocalAgentBridgeEndpoint {
+  static String _baseUrl = kLocalAgentBridgeDefaultBaseUrl;
+
+  static String get currentBaseUrl => _baseUrl;
+
+  static void usePort(int port) {
+    if (port < 1 || port > 65535) {
+      throw ArgumentError.value(port, 'port', 'Invalid TCP port');
+    }
+    _baseUrl = 'http://127.0.0.1:$port';
+  }
+
+  static void reset() {
+    _baseUrl = kLocalAgentBridgeDefaultBaseUrl;
+  }
+}

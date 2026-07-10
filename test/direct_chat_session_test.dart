@@ -39,7 +39,7 @@ void main() {
       expect(selected, isEmpty);
     });
 
-    test('builds one-on-one prompt context without group-chat framing', () {
+  test('builds one-on-one prompt context without group-chat framing', () {
       final character = _character(id: 'target', name: '小夏');
 
       final prompt = DirectChatSession.buildPromptContext(
@@ -53,6 +53,17 @@ void main() {
       expect(prompt, isNot(contains('群聊')));
       expect(prompt, isNot(contains('群友')));
     });
+  });
+
+  test('builds persistent memory context for proactive and direct chats', () {
+    final target = _character(id: 'target', name: '林溪')
+      ..memorySummary = '【事实】用户住在上海；用户养猫';
+
+    final prompt = DirectChatSession.persistentMemoryPrompt(target);
+
+    expect(prompt, contains('跨聊天长期记忆'));
+    expect(prompt, contains('用户住在上海'));
+    expect(prompt, contains('用户养猫'));
   });
 }
 

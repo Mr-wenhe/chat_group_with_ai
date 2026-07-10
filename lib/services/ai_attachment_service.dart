@@ -6,23 +6,181 @@ import 'dart:typed_data';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
+import 'package:dio/dio.dart';
 
 class AiAttachmentIntent {
   final bool wantsImage;
   final bool wantsFile;
+  final bool wantsNetworkImage;
 
   const AiAttachmentIntent({
     required this.wantsImage,
     required this.wantsFile,
+    this.wantsNetworkImage = false,
   });
 
   bool get hasAny => wantsImage || wantsFile;
 }
 
+class RemoteImagePayload {
+  final List<int> bytes;
+  final String extension;
+  final String title;
+  final String sourceUrl;
+  final String attribution;
+
+  const RemoteImagePayload({
+    required this.bytes,
+    required this.extension,
+    required this.title,
+    required this.sourceUrl,
+    required this.attribution,
+  });
+}
+
+abstract interface class RemoteImageFetcher {
+  Future<RemoteImagePayload?> fetch(String query);
+}
+
+/// Downloads a reasonably sized preview from Wikimedia Commons.
+///
+/// Commons exposes a public MediaWiki API and does not require an API key.
+/// A source note is saved alongside every downloaded image so licensing and
+/// attribution information are not lost.
+class WikimediaCommonsImageFetcher implements RemoteImageFetcher {
+  WikimediaCommonsImageFetcher({Dio? dio}) : _dio = dio ?? Dio();
+
+  static const _endpoint = 'https://commons.wikimedia.org/w/api.php';
+  static const _maxImageBytes = 8 * 1024 * 1024;
+  final Dio _dio;
+
+  @override
+  Future<RemoteImagePayload?> fetch(String query) async {
+    final normalized = query.trim();
+    if (normalized.isEmpty) return null;
+    try {
+      final response = await _dio.get<Map<String, dynamic>>(
+        _endpoint,
+        queryParameters: {
+          'action': 'query',
+          'format': 'json',
+          'generator': 'search',
+          'gsrsearch': normalized,
+          'gsrnamespace': 6,
+          'gsrlimit': 8,
+          'prop': 'imageinfo',
+          'iiprop': 'url|mime|size|extmetadata',
+          'iiurlwidth': 1280,
+          'iiextmetadatafilter': 'Artist|Credit|LicenseShortName|UsageTerms',
+        },
+        options: Options(
+          sendTimeout: const Duration(seconds: 12),
+          receiveTimeout: const Duration(seconds: 20),
+          headers: const {
+            'User-Agent': 'AIGroupChat/1.0 (desktop image attachment)'
+          },
+        ),
+      );
+      final page = _firstUsablePage(response.data);
+      if (page == null) return null;
+      final info = (page['imageinfo'] as List).first as Map;
+      final imageUrl = (info['thumburl'] ?? info['url'])?.toString() ?? '';
+      final descriptionUrl = info['descriptionurl']?.toString() ?? '';
+      final mime = (info['thumbmime'] ?? info['mime'])?.toString() ?? '';
+      if (!imageUrl.startsWith('https://') || !mime.startsWith('image/')) {
+        return null;
+      }
+
+      final download = await _dio.get<List<int>>(
+        imageUrl,
+        options: Options(
+          responseType: ResponseType.bytes,
+          sendTimeout: const Duration(seconds: 12),
+          receiveTimeout: const Duration(seconds: 30),
+          headers: const {
+            'User-Agent': 'AIGroupChat/1.0 (desktop image attachment)'
+          },
+        ),
+      );
+      final bytes = download.data;
+      if (bytes == null || bytes.isEmpty || bytes.length > _maxImageBytes) {
+        return null;
+      }
+      return RemoteImagePayload(
+        bytes: bytes,
+        extension: _extensionForMime(mime),
+        title: page['title']?.toString().replaceFirst('File:', '') ??
+            'Wikimedia image',
+        sourceUrl: descriptionUrl.isNotEmpty ? descriptionUrl : imageUrl,
+        attribution: _attribution(info['extmetadata']),
+      );
+    } on DioException {
+      return null;
+    } on FormatException {
+      return null;
+    } catch (_) {
+      // A malformed third-party API response must never fail the AI message.
+      return null;
+    }
+  }
+
+  static Map<String, dynamic>? _firstUsablePage(Map<String, dynamic>? data) {
+    final query = data?['query'];
+    if (query is! Map) return null;
+    final pages = query['pages'];
+    if (pages is! Map) return null;
+    for (final value in pages.values) {
+      if (value is! Map) continue;
+      final rawInfo = value['imageinfo'];
+      if (rawInfo is! List || rawInfo.isEmpty || rawInfo.first is! Map) {
+        continue;
+      }
+      final info = rawInfo.first as Map;
+      final mime = (info['thumbmime'] ?? info['mime'])?.toString() ?? '';
+      final url = (info['thumburl'] ?? info['url'])?.toString() ?? '';
+      if (mime.startsWith('image/') && url.startsWith('https://')) {
+        return Map<String, dynamic>.from(value);
+      }
+    }
+    return null;
+  }
+
+  static String _extensionForMime(String mime) {
+    if (mime.contains('png')) return 'png';
+    if (mime.contains('webp')) return 'webp';
+    if (mime.contains('gif')) return 'gif';
+    return 'jpg';
+  }
+
+  static String _attribution(dynamic metadata) {
+    if (metadata is! Map) return 'See the Wikimedia Commons source page';
+    String value(String key) {
+      final entry = metadata[key];
+      if (entry is Map) return entry['value']?.toString().trim() ?? '';
+      return '';
+    }
+
+    final parts = [
+      value('Artist'),
+      value('Credit'),
+      value('LicenseShortName'),
+      value('UsageTerms'),
+    ].where((item) => item.isNotEmpty).toSet().toList();
+    return parts.isEmpty
+        ? 'See the Wikimedia Commons source page'
+        : parts.join(' / ');
+  }
+}
+
 class AiAttachmentService {
-  const AiAttachmentService({required this.db});
+  AiAttachmentService({
+    required this.db,
+    RemoteImageFetcher? remoteImageFetcher,
+  }) : remoteImageFetcher =
+            remoteImageFetcher ?? WikimediaCommonsImageFetcher();
 
   final DatabaseService db;
+  final RemoteImageFetcher remoteImageFetcher;
 
   AiAttachmentIntent detectIntent(String? userMessage) {
     final text = userMessage?.trim().toLowerCase() ?? '';
@@ -51,7 +209,25 @@ class AiAttachmentService {
       'file',
       'attachment',
     ]);
-    return AiAttachmentIntent(wantsImage: wantsImage, wantsFile: wantsFile);
+    final wantsNetworkImage = wantsImage &&
+        _containsAny(text, const [
+          '联网',
+          '网上',
+          '网络',
+          '搜索图片',
+          '找图',
+          '找一张',
+          '拉取',
+          'search image',
+          'find image',
+          'from web',
+          'download image',
+        ]);
+    return AiAttachmentIntent(
+      wantsImage: wantsImage,
+      wantsFile: wantsFile,
+      wantsNetworkImage: wantsNetworkImage,
+    );
   }
 
   Future<List<MediaAttachment>> createRequestedAttachments({
@@ -64,16 +240,42 @@ class AiAttachmentService {
 
     final attachments = <MediaAttachment>[];
     if (intent.wantsImage) {
-      final bytes = PngStickerGenerator.generate(
-        seedText: '${character.id}|$userMessage|$replyContent',
-      );
-      attachments.add(await db.writeBytesToAiCharacterDir(
-        bytes: bytes,
-        fileName: 'ai_sticker_${DateTime.now().millisecondsSinceEpoch}.png',
-        characterId: character.id,
-        characterName: character.name,
-        type: 'image',
-      ));
+      final remote = intent.wantsNetworkImage
+          ? await remoteImageFetcher
+              .fetch(_networkImageQuery(userMessage ?? ''))
+          : null;
+      if (remote != null) {
+        final stamp = DateTime.now().millisecondsSinceEpoch;
+        attachments.add(await db.writeBytesToAiCharacterDir(
+          bytes: remote.bytes,
+          fileName:
+              'commons_${_safeFileStem(remote.title)}_$stamp.${remote.extension}',
+          characterId: character.id,
+          characterName: character.name,
+          type: 'image',
+        ));
+        final sourceNote = '# 图片来源\n\n'
+            '- 标题：${remote.title}\n'
+            '- 来源：${remote.sourceUrl}\n'
+            '- 作者/授权：${remote.attribution}\n';
+        attachments.add(await db.writeBytesToAiCharacterDir(
+          bytes: utf8.encode(sourceNote),
+          fileName: 'commons_source_$stamp.md',
+          characterId: character.id,
+          characterName: character.name,
+        ));
+      } else {
+        final bytes = PngStickerGenerator.generate(
+          seedText: '${character.id}|$userMessage|$replyContent',
+        );
+        attachments.add(await db.writeBytesToAiCharacterDir(
+          bytes: bytes,
+          fileName: 'ai_sticker_${DateTime.now().millisecondsSinceEpoch}.png',
+          characterId: character.id,
+          characterName: character.name,
+          type: 'image',
+        ));
+      }
     }
     if (intent.wantsFile) {
       final markdown = _markdownAttachment(
@@ -94,6 +296,41 @@ class AiAttachmentService {
 
   bool _containsAny(String text, List<String> tokens) {
     return tokens.any(text.contains);
+  }
+
+  String _networkImageQuery(String text) {
+    var query = text.trim();
+    for (final token in const [
+      '请',
+      '帮我',
+      '给我',
+      '联网',
+      '从网上',
+      '网上',
+      '搜索',
+      '找一张',
+      '找',
+      '拉取',
+      '发一张',
+      '发',
+      '图片',
+      '配图',
+      '图',
+    ]) {
+      query = query.replaceAll(token, ' ');
+    }
+    query = query.replaceAll(RegExp(r'\s+'), ' ').trim();
+    return query.isEmpty ? text.trim() : query;
+  }
+
+  String _safeFileStem(String value) {
+    final safe = value
+        .replaceAll(RegExp(r'[\\/:*?"<>|\x00-\x1F]'), '_')
+        .replaceAll(RegExp(r'\s+'), '_')
+        .replaceAll(RegExp(r'_+'), '_')
+        .replaceAll(RegExp(r'^[._ ]+|[._ ]+$'), '');
+    if (safe.isEmpty) return 'image';
+    return safe.length > 64 ? safe.substring(0, 64) : safe;
   }
 
   String _markdownAttachment({

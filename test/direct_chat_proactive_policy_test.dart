@@ -361,6 +361,47 @@ void main() {
 
       expect(candidate, isNull);
     });
+
+    test('allows an active character to initiate a first friendly greeting',
+        () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final now = DateTime(2026, 7, 8, 12);
+
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: const [],
+        groupCandidates: const [],
+        idleCharacters: [alice],
+        lastProactiveAtByCharacter: const {},
+        now: now,
+      );
+
+      expect(candidate?.character.id, 'alice');
+      expect(candidate?.reason, '主动问候');
+    });
+
+    test('idle greeting still respects the proactive cooldown', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final now = DateTime(2026, 7, 8, 12);
+
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: const [],
+        groupCandidates: const [],
+        idleCharacters: [alice],
+        lastProactiveAtByCharacter: {
+          'alice': now.subtract(const Duration(minutes: 10)),
+        },
+        now: now,
+      );
+
+      expect(candidate, isNull);
+    });
+
+    test('foreground schedule checks soon enough to feel proactive', () {
+      expect(ProactiveContactSchedule.initialDelay,
+          lessThanOrEqualTo(const Duration(seconds: 10)));
+      expect(ProactiveContactSchedule.interval,
+          lessThanOrEqualTo(const Duration(seconds: 60)));
+    });
   });
 }
 

@@ -36,6 +36,9 @@ class LocalAgentBridgeLauncher {
   /// 当前进程内持有的桥接服务器；为 null 表示未运行。
   static HttpServer? _server;
   static String? _workspacePath;
+  final int preferredPort;
+
+  LocalAgentBridgeLauncher({this.preferredPort = kLocalAgentBridgePort});
 
   /// 是否在桌面端（自动启动仅在桌面端生效）。
   bool get _isDesktop =>
@@ -52,7 +55,11 @@ class LocalAgentBridgeLauncher {
     // 缺省 workspace：关闭沙盒后定位到当前进程工作目录向上最近的 git 仓库根目录，
     // 保证 apply-patch 的 git apply 可在真实仓库中生效。
     final ws = workspace ?? _resolveDefaultWorkspace();
-    if (_server != null && _workspacePath == Directory(ws).absolute.path) {
+    final workspaceDir = Directory(ws).absolute;
+    if (!await workspaceDir.exists()) {
+      throw ArgumentError('Workspace does not exist: ${workspaceDir.path}');
+    }
+    if (_server != null && _samePath(_workspacePath, workspaceDir.path)) {
       return;
     }
     if (_server != null) {
@@ -61,13 +68,22 @@ class LocalAgentBridgeLauncher {
 
     try {
       // 进程内直接 bind 端口启动，无需外部 dart 子进程或源码文件。
-      _server = await startBridgeServer(
-        workspace: Directory(ws),
-        port: kLocalAgentBridgePort,
-      );
-      _workspacePath = Directory(ws).absolute.path;
+      try {
+        _server = await startBridgeServer(
+          workspace: workspaceDir,
+          port: preferredPort,
+        );
+      } on SocketException {
+        if (preferredPort == 0) rethrow;
+        // A stale bridge can retain the fixed port after an app update. Bind a
+        // fresh loopback port and publish it to new in-process clients.
+        _server = await startBridgeServer(workspace: workspaceDir, port: 0);
+      }
+      _workspacePath = workspaceDir.path;
+      LocalAgentBridgeEndpoint.usePort(_server!.port);
       debugPrint(
-        '[桥接] 本地 agent 桥接服务已启动：http://127.0.0.1:$kLocalAgentBridgePort workspace=$_workspacePath',
+        '[桥接] 本地 agent 桥接服务已启动：'
+        'http://127.0.0.1:${_server!.port} workspace=$_workspacePath',
       );
     } catch (e) {
       // 启动失败不应 crash App，仅打印提示；旧方案依赖的 bin 脚本在 release 下
@@ -75,6 +91,8 @@ class LocalAgentBridgeLauncher {
       debugPrint('[桥接] 启动本地 agent 桥接服务失败：$e');
       _server = null;
       _workspacePath = null;
+      LocalAgentBridgeEndpoint.reset();
+      rethrow;
     }
   }
 
@@ -161,6 +179,7 @@ class LocalAgentBridgeLauncher {
     if (server == null) return;
     _server = null;
     _workspacePath = null;
+    LocalAgentBridgeEndpoint.reset();
     try {
       // force: true 立即关闭监听并断开已建立的连接。
       await server.close(force: true);
@@ -171,4 +190,11 @@ class LocalAgentBridgeLauncher {
 
   /// 当前桥接服务是否正在运行。
   bool get isRunning => _server != null;
+
+  bool _samePath(String? left, String right) {
+    if (left == null) return false;
+    final a = left.replaceAll('\\', '/');
+    final b = right.replaceAll('\\', '/');
+    return Platform.isWindows ? a.toLowerCase() == b.toLowerCase() : a == b;
+  }
 }

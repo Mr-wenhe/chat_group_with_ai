@@ -92,6 +92,9 @@ void main() {
     test('404 文案含「404」且不含「未连接」', () {
       final error = DioException(
         requestOptions: RequestOptions(path: '/x'),
+        message:
+            'This exception was thrown because RequestOptions.validateStatus rejected the response. '
+            'Read more about status codes at developer.mozilla.org.',
         response: Response(
           requestOptions: RequestOptions(path: '/x'),
           statusCode: 404,
@@ -100,6 +103,9 @@ void main() {
       final msg = messageFor(error);
       expect(msg, contains('404'));
       expect(msg, isNot(contains('未连接')));
+      expect(msg, isNot(contains('RequestOptions.validateStatus')));
+      expect(msg, isNot(contains('Read more about status codes')));
+      expect(msg.length, lessThan(260));
     });
   });
 }

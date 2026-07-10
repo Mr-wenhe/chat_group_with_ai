@@ -127,6 +127,56 @@ class HumanizedMemoryService {
     memory.lastUpdatedAt = DateTime.now();
   }
 
+  /// 合并跨会话的角色长期记忆。
+  ///
+  /// [AICharacter.memorySummary] 是所有群聊和私聊都会注入的全局摘要，因此新一轮
+  /// 记忆不能覆盖旧内容。这里解析现有分层文本、去重合并新内容并重新限制长度。
+  static String mergeGlobalSummary({
+    required String existing,
+    required LayeredMemoryUpdate update,
+    int maxChars = 900,
+  }) {
+    final current = _parseGlobalSummary(existing);
+    final facts = _mergeLayer(current.facts, update.facts);
+    final relationships =
+        _mergeLayer(current.relationshipNotes, update.relationshipNotes);
+    final growth = _mergeLayer(current.personaGrowth, update.personaGrowth);
+    final parts = <String>[
+      if (facts.isNotEmpty) '【事实】${facts.take(6).join('；')}',
+      if (relationships.isNotEmpty) '【关系】${relationships.take(5).join('；')}',
+      if (growth.isNotEmpty) '【成长】${growth.take(5).join('；')}',
+    ];
+    final value = parts.join('\n');
+    return value.length <= maxChars ? value : value.substring(0, maxChars);
+  }
+
+  static LayeredMemoryUpdate _parseGlobalSummary(String raw) {
+    final text = raw.trim();
+    if (text.isEmpty) return const LayeredMemoryUpdate();
+    List<String> layer(String label) {
+      final match = RegExp('【$label】([^\\n]*)').firstMatch(text);
+      if (match == null) return const [];
+      return match
+          .group(1)!
+          .split('；')
+          .map((value) => value.trim())
+          .where((value) => value.isNotEmpty)
+          .toList();
+    }
+
+    final facts = layer('事实');
+    final relationships = layer('关系');
+    final growth = layer('成长');
+    if (facts.isEmpty && relationships.isEmpty && growth.isEmpty) {
+      return LayeredMemoryUpdate(personaGrowth: [_clip(text)]);
+    }
+    return LayeredMemoryUpdate(
+      facts: facts,
+      relationshipNotes: relationships,
+      personaGrowth: growth,
+    );
+  }
+
   static List<String> _readLayer(Object? raw) {
     if (raw is! List) return const [];
     final result = <String>[];

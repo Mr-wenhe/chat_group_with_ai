@@ -5,6 +5,8 @@
 // 保持现有“手动启动本地桥接服务”的提示行为不变。
 
 class LocalAgentBridgeLauncher {
+  LocalAgentBridgeLauncher({int? preferredPort});
+
   /// 启动：Web / 移动端不真正启动本地服务，空操作。
   Future<void> start({String? workspace}) async {}
 

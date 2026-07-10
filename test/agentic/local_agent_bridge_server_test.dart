@@ -12,7 +12,6 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart';
-import 'package:chat_group/features/agentic/tools/local_agent_bridge_config.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_server.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -146,7 +145,8 @@ void main() {
     expect(res.body['error'], 'empty_path');
   });
 
-  test('/workspace/write rejects path traversal with 400 unsafe_path', () async {
+  test('/workspace/write rejects path traversal with 400 unsafe_path',
+      () async {
     final server = await _startTestServer(workspace);
     addTearDown(() async {
       try {
@@ -181,7 +181,7 @@ void main() {
     // 修复后：服务端将绝对路径归一化为 basename（take last segment），落到工作区
     // 根目录写入，而不是抛错中断写文件。
     // 使用一个可以确定不存在的绝对路径，便于验证「未被写到绝对目标位置」。
-    final absolutePath = '/nonexistent_bridge_dir_xyz/sample.txt';
+    const absolutePath = '/nonexistent_bridge_dir_xyz/sample.txt';
     final res = await _postJson(server.port, '/workspace/write', {
       'path': absolutePath,
       'content': 'x',
@@ -200,7 +200,8 @@ void main() {
     expect(escaped.existsSync(), isFalse);
   });
 
-  test('WorkspaceFileTool.write round-trips through the bridge client', () async {
+  test('WorkspaceFileTool.write round-trips through the bridge client',
+      () async {
     final server = await _startTestServer(workspace);
     addTearDown(() async {
       try {
@@ -220,6 +221,26 @@ void main() {
     final file = File('${workspace.path}/via_client.md');
     expect(file.existsSync(), isTrue);
     expect(await file.readAsString(), content);
+  });
+
+  test('/workspace/list returns portable relative paths for nested folders',
+      () async {
+    final nested = await Directory('${workspace.path}/nested/folder').create(
+      recursive: true,
+    );
+    await File('${nested.path}/item.txt').writeAsString('ok');
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+
+    final result = await _postJson(
+      server.port,
+      '/workspace/list',
+      {'path': r'nested\folder'},
+    );
+
+    expect(result.statusCode, 200);
+    final entries = result.body['entries'] as List;
+    expect(entries.single['path'], 'nested/folder/item.txt');
   });
 
   test('WorkspaceFileTool.write throws ArgumentError on unsafe path', () async {

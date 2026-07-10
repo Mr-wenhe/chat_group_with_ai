@@ -6,15 +6,15 @@ class LocalAgentBridgeClient {
   late final Dio _dio;
 
   LocalAgentBridgeClient({
-    this.baseUrl = kLocalAgentBridgeDefaultBaseUrl,
+    String? baseUrl,
     Dio? dio,
-  }) {
-    final uri = Uri.parse(baseUrl);
+  }) : baseUrl = baseUrl ?? LocalAgentBridgeEndpoint.currentBaseUrl {
+    final uri = Uri.parse(this.baseUrl);
     final local = uri.host == '127.0.0.1' || uri.host == 'localhost';
     if (!local || (uri.scheme != 'http' && uri.scheme != 'https')) {
       throw ArgumentError('Local agent bridge must use localhost.');
     }
-    _dio = dio ?? Dio(BaseOptions(baseUrl: baseUrl));
+    _dio = dio ?? Dio(BaseOptions(baseUrl: this.baseUrl));
   }
 
   Future<Map<String, dynamic>> getHealth() async {

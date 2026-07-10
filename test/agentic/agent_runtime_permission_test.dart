@@ -8,6 +8,204 @@ import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('default runtime lets the model generate requested file content',
+      () async {
+    var completionCalls = 0;
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {
+        'path': 'page.html',
+        'content': '<!doctype html><title>文和先生</title>',
+      },
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 42},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async {
+        completionCalls++;
+        if (completionCalls == 1) {
+          return {
+            'success': true,
+            'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"生成完整个人主页","args":{"path":"page.html","content":"<!doctype html><html><head><title>文和先生</title></head><body><h1>灵魂收集者</h1><p>亡灵服务 · 鬼魂街大佬</p><nav>音乐 · 菜单</nav></body></html>"}}
+```
+''',
+          };
+        }
+        return {'success': true, 'message': '完整个人主页已生成。'};
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '帮我写一个 HTML 个人主页，姓名文和先生，职业灵魂收集者，包含音乐和菜单',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(completionCalls, 1);
+    expect(fakeTool.lastWriteContent, contains('文和先生'));
+    expect(fakeTool.lastWriteContent, contains('灵魂收集者'));
+    expect(fakeTool.lastWriteContent, contains('音乐 · 菜单'));
+    expect(fakeTool.lastWriteContent, isNot(contains('内容由 AI 根据用户请求生成')));
+  });
+
+  test('raw HTML from planner is recovered into a file instead of chat text',
+      () async {
+    var completionCalls = 0;
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {
+        'path': 'page.html',
+        'content': '<!doctype html><html><body>完整主页</body></html>',
+      },
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 53},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async {
+        completionCalls++;
+        if (completionCalls == 1) {
+          return {
+            'success': true,
+            'message': '''```html
+<!doctype html>
+<html lang="zh-CN"><body><h1>文和先生</h1><p>灵魂收集者</p></body></html>
+```''',
+          };
+        }
+        return {'success': true, 'message': '个人主页已经写入文件。'};
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '帮我写一个 HTML 个人介绍页',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'page.html');
+    expect(fakeTool.lastWriteContent, contains('<h1>文和先生</h1>'));
+    expect(result.message, isNot(contains('<!doctype html>')));
+    expect(result.message, isNot(contains('<h1>')));
+  });
+
+  test('file intent reprompts narration and still writes a real file',
+      () async {
+    var completionCalls = 0;
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {'path': 'page.html', 'content': '<html>完整主页</html>'},
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 22},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async {
+        completionCalls++;
+        if (completionCalls == 1) {
+          return {'success': true, 'message': '好的，我马上帮你制作这个个人主页。'};
+        }
+        if (completionCalls == 2) {
+          return {
+            'success': true,
+            'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"生成主页","args":{"path":"page.html","content":"<html><body><h1>文和先生</h1></body></html>"}}
+```
+''',
+          };
+        }
+        return {'success': true, 'message': '个人主页已生成。'};
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '帮我写一个 HTML 个人主页',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(completionCalls, 2);
+    expect(fakeTool.lastWritePath, 'page.html');
+    expect(fakeTool.lastWriteContent, contains('文和先生'));
+    expect(result.message, isNot(contains('我马上帮你制作')));
+  });
+
+  test('planning retries once after a transient 503 response', () async {
+    var completionCalls = 0;
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {'path': 'page.html', 'content': '<html>重试成功</html>'},
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 20},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async {
+        completionCalls++;
+        if (completionCalls == 1) {
+          return {
+            'success': false,
+            'message': 'HTTP 503: upstream unavailable'
+          };
+        }
+        if (completionCalls == 2) {
+          return {
+            'success': true,
+            'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"生成主页","args":{"path":"page.html","content":"<html><body>重试成功</body></html>"}}
+```
+''',
+          };
+        }
+        return {'success': true, 'message': '主页已生成。'};
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '帮我写一个 HTML 个人主页',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(completionCalls, 2);
+    expect(fakeTool.lastWriteContent, contains('重试成功'));
+    expect(result.message, isNot(contains('503')));
+  });
+
+  test('planning does not retry a receive timeout and release is immediate',
+      () async {
+    var completionCalls = 0;
+    final runtime = AgentRuntime(
+      complete: (_) async {
+        completionCalls++;
+        return {'success': false, 'message': '连接超时'};
+      },
+    );
+
+    final result = await runtime.run(
+      character: _character(toolPermissions: const []),
+      skills: [_skill()],
+      userRequest: '帮我写一个 HTML 个人主页',
+    );
+
+    expect(result.status, AgentRuntimeStatus.failed);
+    expect(completionCalls, 1);
+    expect(result.message, contains('连接超时'));
+  });
+
   test('runtime returns normal content when no tool request is present',
       () async {
     final runtime = AgentRuntime(
@@ -172,6 +370,64 @@ void main() {
     expect(result.message, contains('workspace.patch'));
   });
 
+  test('runtime preserves conversation history across chained tools', () async {
+    var calls = 0;
+    final receivedMessages = <List<Map<String, dynamic>>>[];
+    final runtime = AgentRuntime(
+      enableLocalFilePlanner: false,
+      complete: (messages) async {
+        receivedMessages.add(messages);
+        calls++;
+        if (calls == 1) {
+          return {
+            'success': true,
+            'message': '''
+```agent_tool
+{"tool":"workspace.read","reason":"读取上下文","args":{"path":"notes.md"}}
+```
+''',
+          };
+        }
+        if (calls == 2) {
+          return {
+            'success': true,
+            'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"生成新文件","args":{"path":"result.md","content":"done"}}
+```
+''',
+          };
+        }
+        return {'success': true, 'message': '完成'};
+      },
+      workspaceFileTool: _FakeWorkspaceFileTool(
+        readResult: {'path': 'notes.md', 'content': 'context'},
+        patchResult: {'ok': true, 'exitCode': 0},
+        allowReadBeforeWrite: true,
+      ),
+    );
+    const history = [
+      {'role': 'user', 'content': '历史上下文标记'},
+    ];
+
+    final result = await runtime.run(
+      character: _character(toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ]),
+      skills: [_skill()],
+      userRequest: '继续处理',
+      autoApproveWriteTools: true,
+      conversationHistory: history,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(receivedMessages, hasLength(2));
+    for (final messages in receivedMessages) {
+      expect(messages, containsAll(history));
+    }
+  });
+
   test('approved tool continues until the next write-like approval', () async {
     final runtime = AgentRuntime(
       complete: (_) async => {
@@ -291,6 +547,7 @@ void main() {
   test('local file planner requests patch approval for explicit file creation',
       () async {
     final runtime = AgentRuntime(
+      enableLocalFilePlanner: true,
       complete: (_) async => {'success': true, 'message': '不应调用模型'},
     );
 
@@ -313,8 +570,8 @@ void main() {
     expect(
       result.pendingToolRequest?.args['content'],
       allOf(
-        contains('```dart'),
-        contains("print('hello from 代码大神')"),
+        contains('# Agentic Live Test'),
+        contains('## 用户请求'),
       ),
     );
   });
@@ -324,6 +581,7 @@ void main() {
     // Bug 1 修复验收：用户说“帮我生成一个html文件”但没给具体文件名时，
     // 本地文件规划器应能推断出 .html 文件名并创建 patch 工具请求。
     final runtime = AgentRuntime(
+      enableLocalFilePlanner: true,
       complete: (_) async => {'success': true, 'message': '不应调用模型'},
     );
 
@@ -353,6 +611,7 @@ void main() {
       },
     );
     final runtime = AgentRuntime(
+      enableLocalFilePlanner: true,
       complete: (_) async => {
         'success': true,
         'message': 'meteor_shower.html 已生成并贴回聊天。',
@@ -371,10 +630,12 @@ void main() {
 
     expect(result.status, AgentRuntimeStatus.completed);
     expect(fakeTool.lastWritePath, 'meteor_shower.html');
-    expect(fakeTool.lastWriteContent, contains('流星雨划过夜空'));
-    expect(fakeTool.lastWriteContent, contains('@keyframes shoot'));
-    expect(result.message, contains('文件内容预览'));
-    expect(result.message, contains('流星雨划过夜空'));
+    // 本地快速路径生成的是通用 HTML 骨架（不含具体视觉内容），不再硬编码流星雨。
+    expect(fakeTool.lastWriteContent, contains('<!doctype html>'));
+    expect(fakeTool.lastWriteContent, contains('<title>页面</title>'));
+    // 消息中应包含简洁的文件确认行（不含大段内容预览）。
+    expect(result.message, contains('✅ 文件已生成'));
+    expect(result.message, contains('meteor_shower.html'));
   });
 
   test('local planner handles 实现 + 使用html wording from private chat', () async {
@@ -386,6 +647,7 @@ void main() {
       },
     );
     final runtime = AgentRuntime(
+      enableLocalFilePlanner: true,
       complete: (_) async => {'success': true, 'message': '文件已生成。'},
       workspaceFileTool: fakeTool,
     );
@@ -401,13 +663,15 @@ void main() {
 
     expect(result.status, AgentRuntimeStatus.completed);
     expect(fakeTool.lastWritePath, 'meteor_shower.html');
-    expect(fakeTool.lastWriteContent, contains('流星雨划过夜空'));
+    // HTML 模板是通用骨架（不含具体特效内容），不再硬编码流星雨。
+    expect(fakeTool.lastWriteContent, contains('<!doctype html>'));
     expect(result.message, isNot(contains('<tool_call')));
   });
 
   test('local planner keeps backward-compatible exact path matching', () async {
     // 用户明确给出 star.html 时，仍走原有精确匹配路径，而非模糊推断。
     final runtime = AgentRuntime(
+      enableLocalFilePlanner: true,
       complete: (_) async => {'success': true, 'message': '不应调用模型'},
     );
 
@@ -429,6 +693,7 @@ void main() {
   test('local planner does not misfire for non-file intents', () async {
     // 用户只是聊天/问代码，没有生成文件意图时，不应触发工具请求。
     final runtime = AgentRuntime(
+      enableLocalFilePlanner: true,
       complete: (_) async => {
         'success': true,
         'message': '好的，我们来看看这段代码。',
@@ -450,6 +715,7 @@ void main() {
 
   test('local planner infers report.md for 报告-like md intent', () async {
     final runtime = AgentRuntime(
+      enableLocalFilePlanner: true,
       complete: (_) async => {'success': true, 'message': '不应调用模型'},
     );
 
@@ -471,6 +737,7 @@ void main() {
   test('local planner infers technical_documentation.md for project docs',
       () async {
     final runtime = AgentRuntime(
+      enableLocalFilePlanner: true,
       complete: (_) async => {'success': true, 'message': '不应调用模型'},
     );
 
@@ -497,18 +764,22 @@ void main() {
     );
   });
 
-  test('local planner renames inferred file when target exists', () async {
+  test('local planner auto-renames inferred file when target exists', () async {
+    // 行为变更：推断文件名已存在时自动改名（不再拒绝/不再静默产生 _2 副本），
+    // 改为带序号递增改名（technical_documentation.md → technical_documentation_1.md 等），
+    // 确保写入成功且用户能收到文件附件。
     final fakeTool = _FakeWorkspaceFileTool(
       existingFiles: const {
         'technical_documentation.md': 'existing doc',
       },
       patchResult: {
         'ok': true,
-        'path': 'technical_documentation_2.md',
+        'path': 'technical_documentation_1.md',
         'bytes': 128,
       },
     );
     final runtime = AgentRuntime(
+      enableLocalFilePlanner: true,
       complete: (_) async => {'success': true, 'message': '文档已生成。'},
       workspaceFileTool: fakeTool,
     );
@@ -522,14 +793,19 @@ void main() {
       autoApproveWriteTools: true,
     );
 
+    // 自动改名后写入成功，流程走完。
     expect(result.status, AgentRuntimeStatus.completed);
-    expect(fakeTool.lastWritePath, 'technical_documentation_2.md');
-    expect(fakeTool.lastWriteContent, contains('AI Group Chat Simulator 技术文档'));
+    expect(fakeTool.lastWritePath, isNotNull);
+    expect(fakeTool.lastWritePath, isNot(equals('technical_documentation.md')));
+    // 不含拒绝/错误文本。
+    expect(result.message, isNot(contains('已拒绝')));
+    expect(result.message, isNot(contains('已存在')));
   });
 
   test('local planner escapes character name in generated html and markdown',
       () async {
     final runtime = AgentRuntime(
+      enableLocalFilePlanner: true,
       complete: (_) async => {'success': true, 'message': '不应调用模型'},
     );
     final character = _character(
@@ -545,9 +821,10 @@ void main() {
     final htmlContent =
         htmlResult.pendingToolRequest?.args['content'] as String? ?? '';
 
-    expect(htmlContent, contains('&lt;script&gt;alert(1)&lt;'));
-    expect(htmlContent, contains('&amp; me'));
-    expect(htmlContent, isNot(contains('<script>alert(1)</script>')));
+    // 模板不再包含角色名称（彻底消除 XSS 风险，无需转义）。
+    expect(htmlContent, isNot(contains('script')));
+    expect(htmlContent, contains('<!doctype html>'));
+    expect(htmlContent, contains('<title>页面</title>'));
 
     final mdResult = await runtime.run(
       character: character,
@@ -557,9 +834,9 @@ void main() {
     final mdContent =
         mdResult.pendingToolRequest?.args['content'] as String? ?? '';
 
-    expect(mdContent, contains('&lt;script&gt;alert(1)&lt;/script&gt;'));
-    expect(mdContent, contains('&amp; me'));
-    expect(mdContent, isNot(contains('<script>alert(1)</script>')));
+    // Markdown 模板同样不含角色名称。
+    expect(mdContent, isNot(contains('script')));
+    expect(mdContent, contains('#'));
   });
 
   test('local planner can auto-approve and write project check script',
@@ -572,6 +849,7 @@ void main() {
       },
     );
     final runtime = AgentRuntime(
+      enableLocalFilePlanner: true,
       complete: (_) async => {'success': true, 'message': '脚本已生成。'},
       workspaceFileTool: fakeTool,
     );
@@ -590,7 +868,9 @@ void main() {
     expect(fakeTool.lastWriteContent, contains('#!/usr/bin/env bash'));
     expect(fakeTool.lastWriteContent, contains('flutter analyze'));
     expect(fakeTool.lastWriteContent, contains('flutter test'));
-    expect(result.message, contains('文件内容预览'));
+    // Shell 模板不再含 "Generated by" 签名。
+    expect(fakeTool.lastWriteContent, isNot(contains('Generated by')));
+    expect(result.message, contains('✅ 文件已生成'));
   });
 
   test('runtime explains when local bridge is unavailable', () async {
@@ -620,9 +900,10 @@ void main() {
     expect(result.message, contains('进程内自动启动并监听 54263'));
   });
 
-  test('workspace.patch appends read-back file preview on success', () async {
-    // 增量验收：写文件成功且读回内容后，最终消息应拼上「文件内容预览」块，
-    // 而非仅输出"已生成 xxx 文件"的摘要。
+  test('workspace.patch appends concise file confirmation on success',
+      () async {
+    // 验收：写文件成功且读回内容后，最终消息只追加一行简洁确认信息，
+    // 不再将文件正文注入聊天文本（避免截断和阅读体验差的问题）。
     final runtime = AgentRuntime(
       enableLocalFilePlanner: false,
       complete: (_) async => {'success': true, 'message': '文件已生成完成。'},
@@ -651,13 +932,14 @@ void main() {
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
-    expect(result.message, contains('文件已生成完成'));
-    // 关键断言：写后回读预览真的生效。
-    expect(result.message, contains('文件内容预览'));
-    expect(result.message, contains('hello from preview'));
-    expect(result.message, contains('预览结束'));
-    // 短内容不应进入截断分支。
-    expect(result.message, isNot(contains('已截断显示前')));
+    expect(result.message, contains('已生成文件'));
+    // 关键断言：消息中包含简洁确认行（含文件名和大小），不含文件正文。
+    expect(result.message, contains('✅ 文件已生成'));
+    expect(result.message, contains('star.html'));
+    // 文件内容不应出现在消息中。
+    expect(result.message, isNot(contains('hello from preview')));
+    expect(result.message, isNot(contains('文件内容预览')));
+    expect(result.message, isNot(contains('预览结束')));
   });
 
   test('workspace.patch degrades gracefully when readback fails', () async {
@@ -688,7 +970,7 @@ void main() {
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
-    expect(result.message, contains('文件已写入'));
+    expect(result.message, contains('已生成文件'));
     // 降级成功：无预览块、无异常泄露、无被读回失败而暴露的内容。
     expect(result.message, isNot(contains('文件内容预览')));
     expect(result.message, isNot(contains('Exception')));
@@ -696,18 +978,22 @@ void main() {
     expect(result.message, isNot(contains('should-not-appear')));
   });
 
-  test('workspace.patch refuses to overwrite existing files', () async {
+  test('workspace.patch auto-renames when target file already exists',
+      () async {
+    // 行为变更（修复"拒绝覆盖"导致工具失败→LLM 回退到代码泄漏路径）：
+    // 文件冲突时自动改名（如 technical_documentation.md → technical_documentation_1.md），
+    // 不再返回 target_exists 错误。确保写入成功且使用了新文件名。
     final fakeTool = _FakeWorkspaceFileTool(
       existingFiles: const {'technical_documentation.md': 'existing doc'},
       patchResult: {
         'ok': true,
-        'path': 'technical_documentation.md',
+        'path': 'technical_documentation_1.md',
         'bytes': 12,
       },
     );
     final runtime = AgentRuntime(
       enableLocalFilePlanner: false,
-      complete: (_) async => {'success': true, 'message': '不应调用模型'},
+      complete: (_) async => {'success': true, 'message': '文件已生成，请查看附件。'},
       workspaceFileTool: fakeTool,
     );
 
@@ -726,9 +1012,14 @@ void main() {
       userRequest: '写一份技术文档',
     );
 
-    expect(result.status, AgentRuntimeStatus.failed);
-    expect(result.message, contains('已拒绝覆盖'));
-    expect(fakeTool.lastWritePath, isNull);
+    // 工具执行成功（自动改名后写入新路径），走完了完整流程。
+    expect(result.status, AgentRuntimeStatus.completed);
+    // 确认实际写入了文件（路径是改名后的新名，不是原始的冲突路径）。
+    expect(fakeTool.lastWritePath, isNotNull);
+    expect(fakeTool.lastWritePath, isNot(equals('technical_documentation.md')));
+    // 消息不含「拒绝覆盖」错误文本。
+    expect(result.message, isNot(contains('已拒绝覆盖')));
+    expect(result.message, isNot(contains('目标文件已存在')));
   });
 
   test('non-write tools (workspace.list) do not append file preview', () async {
@@ -759,9 +1050,9 @@ void main() {
     expect(result.message, isNot(contains('文件内容预览')));
   });
 
-  test('file preview truncates content longer than 2000 chars', () async {
-    // 验收 _appendFilePreview 的截断分支：>2000 字符时只显示前 2000 并提示
-    // 查看完整文件，且完整内容不应全部出现在消息中。
+  test('file confirmation is concise regardless of content size', () async {
+    // 验收：无论文件多大，消息中只追加一行简洁确认（含文件名和 KB 大小），
+    // 不注入文件正文，不存在截断逻辑。
     final longContent = 'x' * 2500;
     final runtime = AgentRuntime(
       enableLocalFilePlanner: false,
@@ -785,11 +1076,272 @@ void main() {
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
-    expect(result.message, contains('文件内容预览'));
-    expect(result.message, contains('已截断显示前 2000 字符'));
+    // 只有一行简洁确认，不含任何文件正文。
+    expect(result.message, contains('✅ 文件已生成'));
     expect(result.message, contains('big.txt'));
-    // 完整 2500 字符内容不应被完整拼入（超过 2000 的部分已被截断）。
-    expect(result.message, isNot(contains('x' * 2500)));
+    // 2500 字符的 'x' 不应出现在消息中（无论多少都不注入）。
+    expect(result.message, isNot(contains('xxx')));
+    expect(result.message, isNot(contains('文件内容预览')));
+    expect(result.message, isNot(contains('已截断')));
+  });
+
+  test('runtime guards leaked file content in final message (Bug A)', () async {
+    // 复现：模型在第二次 LLM（整理结果）阶段把生成的 HTML 全文贴进回复。
+    // 修复后该全文应被收敛为简洁确认，绝不出现在可见消息中。
+    var calls = 0;
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {
+        'path': 'page.html',
+        'content': '<!doctype html><title>页面</title>'
+      },
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 50},
+    );
+    final runtime = AgentRuntime(
+      enableLocalFilePlanner: false,
+      complete: (_) async {
+        calls++;
+        if (calls == 1) {
+          return {
+            'success': true,
+            'message':
+                '```agent_tool\n{"tool":"workspace.patch","reason":"生成主页","args":{"path":"page.html","content":"<!doctype html><title>页面</title>"}}\n```',
+          };
+        }
+        // 第二次 LLM：模型把文件全文贴进回复（Bug A 复现）。
+        return {
+          'success': true,
+          'message':
+              '已生成文件：\n<!doctype html>\n<html lang="zh-CN">\n<head><title>页面</title></head>\n<body><h1>你好</h1></body>\n</html>',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character:
+          _character(toolPermissions: const [ToolPermission.workspacePatch]),
+      skills: [_skill()],
+      userRequest: '生成个人主页',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    // 不应泄漏文件全文（HTML 标签 / 正文）。
+    expect(result.message, isNot(contains('<!doctype html>')));
+    expect(result.message, isNot(contains('<h1>你好</h1>')));
+    // 仍包含简洁确认（来自 _appendFilePreview）。
+    expect(result.message, contains('文件已生成'));
+  });
+
+  test(
+      'runtime returns concise fallback for unparseable planning trace (Bug B-b1)',
+      () async {
+    // 复现：规划阶段输出"我直接现在就为你写入文件" + 残缺工具标记，
+    // tryParse 失败。修复后绝不把这段规划 narration 当作用户可见消息返回。
+    final runtime = AgentRuntime(
+      enableLocalFilePlanner: false,
+      complete: (_) async => {
+        'success': true,
+        'message':
+            '我直接现在就为你写入文件：\n<tool_call agent_tool>\nbroken not valid json\n</tool_call>',
+      },
+    );
+
+    final result = await runtime.run(
+      character:
+          _character(toolPermissions: const [ToolPermission.workspacePatch]),
+      skills: [_skill()],
+      userRequest: '生成个人主页',
+    );
+
+    // 两次解析都失败时不得构造 content 为空的写入请求；明确提示重试，
+    // 避免生成一个空文件却显示成功附件。
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(result.pendingToolRequest, isNull);
+    expect(result.message, contains('未能生成可写入的完整文件内容'));
+    // 不应把原始规划文本泄漏为可见消息。
+    expect(result.message, isNot(contains('我直接现在就为你写入文件')));
+  });
+
+  test('runtime loosely parses <function=tool> trace and requests approval',
+      () async {
+    // 宽松兜底：模型用 <function=workspace.patch> 变体（未被 tryParse 识别），
+    // 修复后应能提取并执行，而非退化成失败提示。
+    final runtime = AgentRuntime(
+      enableLocalFilePlanner: false,
+      complete: (_) async => {
+        'success': true,
+        'message':
+            '<function=workspace.patch>\n{"tool":"workspace.patch","reason":"生成主页","args":{"path":"page.html","content":"<html>hi</html>"}}\n</function>',
+      },
+    );
+
+    final result = await runtime.run(
+      character:
+          _character(toolPermissions: const [ToolPermission.workspacePatch]),
+      skills: [_skill()],
+      userRequest: '生成个人主页',
+    );
+
+    expect(result.status, AgentRuntimeStatus.waitingForApproval);
+    expect(result.pendingToolRequest?.tool, AgentToolName.workspacePatch);
+    expect(result.pendingToolRequest?.args['path'], 'page.html');
+  });
+
+  test('simple file write skips the redundant final model summary', () async {
+    // 文件写入已经成功时直接完成，避免第二次模型调用再次卡住。
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {
+        'path': 'page.html',
+        'content': '<!doctype html><title>页面</title>'
+      },
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 50},
+    );
+    var calls = 0;
+    final runtime = AgentRuntime(
+      enableLocalFilePlanner: false,
+      complete: (_) async {
+        calls++;
+        if (calls == 1) {
+          return {
+            'success': true,
+            'message':
+                '```agent_tool\n{"tool":"workspace.patch","reason":"生成主页","args":{"path":"page.html","content":"<!doctype html><title>页面</title>"}}\n```',
+          };
+        }
+        // 正常 1-2 句总结，无代码/HTML 泄漏。
+        return {
+          'success': true,
+          'message': '已为你生成个人主页，请查收附件，有需要可继续让我调整。',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character:
+          _character(toolPermissions: const [ToolPermission.workspacePatch]),
+      skills: [_skill()],
+      userRequest: '生成个人主页',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(calls, 1);
+    expect(result.message, contains('已生成文件'));
+    expect(result.message, isNot(contains('已为你生成个人主页')));
+  });
+
+  test('simple file write does not ask the model to repeat short code',
+      () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {'path': 'page.html', 'content': 'x'},
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 1},
+    );
+    var calls = 0;
+    final runtime = AgentRuntime(
+      enableLocalFilePlanner: false,
+      complete: (_) async {
+        calls++;
+        if (calls == 1) {
+          return {
+            'success': true,
+            'message':
+                '```agent_tool\n{"tool":"workspace.patch","reason":"生成主页","args":{"path":"page.html","content":"x"}}\n```',
+          };
+        }
+        return {
+          'success': true,
+          'message': '这是生成的函数：\n```dart\nvoid f() { print(1); }\n```',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character:
+          _character(toolPermissions: const [ToolPermission.workspacePatch]),
+      skills: [_skill()],
+      userRequest: '生成个人主页',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(calls, 1);
+    expect(result.message, contains('已生成文件'));
+    expect(result.message, isNot(contains('void f()')));
+  });
+
+  test('Bug A: 长代码围栏（>80 字符）在 final 文本中被护栏收敛', () async {
+    // 反向锁定：即便文件已写入，final 文本里贴出的长代码块也应被收敛为确认语，
+    // 绝不把大段代码泄漏到聊天 UI。
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {'path': 'page.html', 'content': 'x'},
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 1},
+    );
+    final longCode = '```dart\n'
+        '${List.filled(20, "  final x = 1;").join("\n")}\n'
+        '```';
+    var calls = 0;
+    final runtime = AgentRuntime(
+      enableLocalFilePlanner: false,
+      complete: (_) async {
+        calls++;
+        if (calls == 1) {
+          return {
+            'success': true,
+            'message':
+                '```agent_tool\n{"tool":"workspace.patch","reason":"生成主页","args":{"path":"page.html","content":"x"}}\n```',
+          };
+        }
+        return {
+          'success': true,
+          'message': '生成完成：\n$longCode',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character:
+          _character(toolPermissions: const [ToolPermission.workspacePatch]),
+      skills: [_skill()],
+      userRequest: '生成个人主页',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    // 大段代码不应出现在可见消息中。
+    expect(result.message, isNot(contains('final x')));
+    // 仍包含简洁确认（来自护栏或 _appendFilePreview）。
+    expect(result.message, contains('文件已生成'));
+  });
+
+  test('Bug B-b1: 含 workspace.patch 痕迹的规划 narration 被收敛为兜底（非空）', () async {
+    // 用另一种工具痕迹关键字（workspace.patch）复现：规划阶段输出"我直接现在
+    // 就为你写入文件" + 残缺内容，tryParse 失败。修复后绝不把规划 narration 当
+    // 作可见消息返回，而是返回非空兜底文案。
+    final runtime = AgentRuntime(
+      enableLocalFilePlanner: false,
+      complete: (_) async => {
+        'success': true,
+        'message': '我直接现在就为你写入文件：workspace.patch 路径 page.html\n一些无法解析的内容',
+      },
+    );
+
+    final result = await runtime.run(
+      character:
+          _character(toolPermissions: const [ToolPermission.workspacePatch]),
+      skills: [_skill()],
+      userRequest: '生成个人主页',
+    );
+
+    // 两次解析都失败时不得构造空文件请求，返回明确、非空的重试提示。
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(result.pendingToolRequest, isNull);
+    expect(result.message, contains('未能生成可写入的完整文件内容'));
+    // 不应把原始规划 narration 泄漏为可见消息。
+    expect(result.message, isNot(contains('我直接现在就为你写入文件')));
   });
 }
 

@@ -95,6 +95,45 @@ class ChatOrchestrator {
     return transcript.substring(transcript.length - maxChars);
   }
 
+  static List<Map<String, dynamic>> agenticConversationHistory({
+    required List<Message> messages,
+    required String currentUserRequest,
+    int maxMessages = 12,
+  }) {
+    if (messages.isEmpty) return const [];
+    final source = List<Message>.from(messages);
+    final normalizedRequest = currentUserRequest.trim();
+    var removedCurrentRequest = false;
+    for (var i = source.length - 1; i >= 0; i--) {
+      final message = source[i];
+      if (message.senderType == 'user' &&
+          message.content.trim() == normalizedRequest) {
+        source.removeAt(i);
+        removedCurrentRequest = true;
+        break;
+      }
+    }
+    if (!removedCurrentRequest &&
+        source.isNotEmpty &&
+        source.last.senderType == 'user') {
+      source.removeLast();
+    }
+    final trimmed = source.length > maxMessages
+        ? source.sublist(source.length - maxMessages)
+        : source;
+    final out = <Map<String, dynamic>>[];
+    for (final message in trimmed) {
+      final content = message.content.trim();
+      if (content.isEmpty) continue;
+      if (message.senderType == 'user') {
+        out.add({'role': 'user', 'content': content});
+      } else if (message.senderType == 'ai') {
+        out.add({'role': 'assistant', 'content': content});
+      }
+    }
+    return out;
+  }
+
   static String memoryPeriodKey(DateTime date) {
     final weekYear = _isoWeekYear(date);
     final week = _isoWeekNumber(date);
@@ -123,6 +162,13 @@ class ChatOrchestrator {
     if (!hasExistingSummary) return true;
     if (lastSummaryAt == null) return true;
     return (now ?? DateTime.now()).difference(lastSummaryAt) >= minInterval;
+  }
+
+  static bool shouldEvolveCharacterMemory({
+    required int messageCount,
+    required bool hasUserMessage,
+  }) {
+    return messageCount >= 2 && hasUserMessage;
   }
 
   static int _isoWeekYear(DateTime date) {

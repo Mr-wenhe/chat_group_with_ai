@@ -2,13 +2,23 @@ import 'package:chat_group/features/chat_group/direct_file_task_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('allows direct chat file generation request', () {
+  test('direct chat file generation still requires explicit approval', () {
     expect(
       shouldAutoApproveDirectFileTask(
         isDirectChat: true,
         userMessage: '帮我生成一个流星雨特效 html',
       ),
-      isTrue,
+      isFalse,
+    );
+  });
+
+  test('direct personal page generation still requires explicit approval', () {
+    expect(
+      shouldAutoApproveDirectFileTask(
+        isDirectChat: true,
+        userMessage: '你帮我写一个酷炫的个人介绍页，要有音乐和菜单',
+      ),
+      isFalse,
     );
   });
 

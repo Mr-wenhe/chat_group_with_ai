@@ -8,10 +8,14 @@ import 'package:chat_group/core/streaming/sse_parser.dart';
 import 'package:dio/dio.dart';
 
 class ChatApiService {
-  final Dio _dio = Dio(BaseOptions(
-    connectTimeout: const Duration(seconds: 15),
-    receiveTimeout: const Duration(seconds: 30),
-  ));
+  final Dio _dio;
+
+  ChatApiService({Dio? dio})
+      : _dio = dio ??
+            Dio(BaseOptions(
+              connectTimeout: const Duration(seconds: 15),
+              receiveTimeout: const Duration(seconds: 30),
+            ));
 
   /// 非流式请求：整段等待后返回结果，供「记忆摘要」等一次性调用复用。
   ///
@@ -23,6 +27,8 @@ class ChatApiService {
     required String model,
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration? receiveTimeout,
   }) async {
     final baseUrl = provider == ApiProvider.custom
         ? (customBaseUrl ?? '').replaceAll(RegExp(r'/*$'), '')
@@ -51,10 +57,13 @@ class ChatApiService {
           'model': modelName,
           'messages': messages,
           'temperature': temperature,
-          'max_tokens': 1024,
+          'max_tokens': maxTokens,
         },
         options: Options(
-            headers: headers, validateStatus: (s) => s != null && s < 500),
+          headers: headers,
+          receiveTimeout: receiveTimeout,
+          validateStatus: (s) => s != null && s < 500,
+        ),
       );
 
       if (response.statusCode == 200) {
@@ -100,6 +109,66 @@ class ChatApiService {
     }
   }
 
+  /// 以 SSE 接收完整回复并汇总成与 [sendChatMessage] 相同的结果结构。
+  ///
+  /// Agent 文件任务可能生成数千 token；使用流式通道可以在模型持续输出时保持连接
+  /// 活跃，避免非流式请求必须等整包完成而触发 receiveTimeout。
+  Future<Map<String, dynamic>> sendChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+  }) async {
+    String content = '';
+    int? promptTokens;
+    int? completionTokens;
+    int? cachedTokens;
+    try {
+      await for (final event in streamChatMessage(
+        apiKey: apiKey,
+        provider: provider,
+        customBaseUrl: customBaseUrl,
+        model: model,
+        messages: messages,
+        temperature: temperature,
+        maxTokens: maxTokens,
+        receiveTimeout: receiveTimeout,
+      )) {
+        switch (event.type) {
+          case ChatStreamEventType.token:
+            content += event.delta ?? '';
+            break;
+          case ChatStreamEventType.done:
+            if ((event.content ?? '').isNotEmpty) content = event.content!;
+            promptTokens = event.promptTokens;
+            completionTokens = event.completionTokens;
+            cachedTokens = event.cachedTokens;
+            break;
+          case ChatStreamEventType.error:
+            return {'success': false, 'message': event.message ?? '流式请求失败'};
+        }
+      }
+    } on DioException catch (e) {
+      return {'success': false, 'message': _dioErrorMessage(e)};
+    } catch (e) {
+      return {'success': false, 'message': '流式请求失败: $e'};
+    }
+    if (content.trim().isEmpty) {
+      return {'success': false, 'message': '模型返回了空内容'};
+    }
+    return {
+      'success': true,
+      'message': content,
+      if (promptTokens != null) 'promptTokens': promptTokens,
+      if (completionTokens != null) 'completionTokens': completionTokens,
+      if (cachedTokens != null) 'cachedTokens': cachedTokens,
+    };
+  }
+
   /// 流式请求：以 `Stream<ChatStreamEvent>` 逐 token 产出回复（打字机效果）。
   ///
   /// 与 [sendChatMessage] 共用 URL / 模型解析逻辑；请求级使用
@@ -115,6 +184,8 @@ class ChatApiService {
     required String model,
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
   }) async* {
     // 与 sendChatMessage 保持一致的 URL / 模型解析
     final baseUrl = provider == ApiProvider.custom
@@ -143,7 +214,7 @@ class ChatApiService {
       'model': modelName,
       'messages': messages,
       'temperature': temperature,
-      'max_tokens': 1024,
+      'max_tokens': maxTokens,
       'stream': true, // 开启 SSE 流式返回
       'stream_options': {'include_usage': true},
     };
@@ -159,7 +230,7 @@ class ChatApiService {
           responseType: ResponseType.stream,
           // 4xx 不抛异常，交由我们产出 error 事件；>=500 仍抛 DioException。
           validateStatus: (s) => s != null && s < 500,
-          receiveTimeout: const Duration(seconds: 120),
+          receiveTimeout: receiveTimeout,
         ),
       );
 
@@ -185,6 +256,10 @@ class ChatApiService {
       // 逐行交给 SseParser，把产出的事件透传给调用方。
       await for (final line in stream) {
         debugPrint('[SSE] line=$line');
+        if (RegExp(r'^data:\s*\[DONE\]\s*$').hasMatch(line.trim())) {
+          yield parser.doneEvent();
+          return;
+        }
         final event = parser.ingestLine(line);
         if (event != null) {
           debugPrint('[SSE] event=$event');

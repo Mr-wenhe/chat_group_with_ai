@@ -226,7 +226,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 icon: Icons.volume_up_outlined,
                 iconColor: cs.tertiary,
                 title: '语音朗读',
-                subtitle: _isTtsEnabled ? '已开启' : '已关闭',
+                subtitle: _isTtsEnabled
+                    ? '已开启 · 右键或长按 AI 消息后选择“朗读”，使用系统语音'
+                    : '已关闭 · 开启后可从消息操作菜单朗读 AI 回复',
                 onTap: () {},
                 trailing: Switch(
                   value: _isTtsEnabled,

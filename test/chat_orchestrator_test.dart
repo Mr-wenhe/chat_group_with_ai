@@ -348,6 +348,89 @@ void main() {
     });
   });
 
+  group('ChatOrchestrator.agenticConversationHistory', () {
+    test('removes only the current user request and preserves prior context',
+        () {
+      final history = ChatOrchestrator.agenticConversationHistory(
+        messages: [
+          Message(
+            groupId: 'g',
+            senderId: 'user',
+            senderType: 'user',
+            content: 'A',
+          ),
+          Message(
+            groupId: 'g',
+            senderId: 'c1',
+            senderType: 'ai',
+            content: 'B',
+          ),
+          Message(
+            groupId: 'g',
+            senderId: 'user',
+            senderType: 'user',
+            content: 'C',
+          ),
+        ],
+        currentUserRequest: 'C',
+      );
+
+      expect(history, [
+        {'role': 'user', 'content': 'A'},
+        {'role': 'assistant', 'content': 'B'},
+      ]);
+    });
+
+    test('keeps earlier rapid user messages when current request is later', () {
+      final history = ChatOrchestrator.agenticConversationHistory(
+        messages: [
+          Message(
+            groupId: 'g',
+            senderId: 'user',
+            senderType: 'user',
+            content: 'A',
+          ),
+          Message(
+            groupId: 'g',
+            senderId: 'user',
+            senderType: 'user',
+            content: 'B',
+          ),
+        ],
+        currentUserRequest: 'B',
+      );
+
+      expect(history, [
+        {'role': 'user', 'content': 'A'},
+      ]);
+    });
+
+    test('falls back to removing the latest user message when request differs',
+        () {
+      final history = ChatOrchestrator.agenticConversationHistory(
+        messages: [
+          Message(
+            groupId: 'g',
+            senderId: 'user',
+            senderType: 'user',
+            content: 'A',
+          ),
+          Message(
+            groupId: 'g',
+            senderId: 'user',
+            senderType: 'user',
+            content: 'B with attachment marker stripped',
+          ),
+        ],
+        currentUserRequest: 'B',
+      );
+
+      expect(history, [
+        {'role': 'user', 'content': 'A'},
+      ]);
+    });
+  });
+
   group('ChatOrchestrator group memory scheduling', () {
     test('uses ISO week keys around year boundaries', () {
       expect(
@@ -403,6 +486,28 @@ void main() {
           now: DateTime(2026, 7, 8, 12, 11),
         ),
         true,
+      );
+    });
+  });
+
+  group('ChatOrchestrator character memory scheduling', () {
+    test('learns memory after the first user and ai exchange', () {
+      expect(
+        ChatOrchestrator.shouldEvolveCharacterMemory(
+          messageCount: 2,
+          hasUserMessage: true,
+        ),
+        isTrue,
+      );
+    });
+
+    test('does not learn from an ai-only empty conversation', () {
+      expect(
+        ChatOrchestrator.shouldEvolveCharacterMemory(
+          messageCount: 3,
+          hasUserMessage: false,
+        ),
+        isFalse,
       );
     });
   });

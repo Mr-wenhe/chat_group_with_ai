@@ -188,5 +188,21 @@ void main() {
       expect(memory.relationshipNotes.last, '新关系');
       expect(memory.personaGrowth.last, '新成长');
     });
+
+    test('global summary merges new facts instead of replacing prior chats', () {
+      final merged = HumanizedMemoryService.mergeGlobalSummary(
+        existing: '【事实】用户住在上海；用户养了一只猫\n【关系】我们聊过搬家',
+        update: const LayeredMemoryUpdate(
+          facts: ['用户喜欢手冲咖啡'],
+          personaGrowth: ['以后会主动问咖啡豆'],
+        ),
+      );
+
+      expect(merged, contains('用户住在上海'));
+      expect(merged, contains('用户养了一只猫'));
+      expect(merged, contains('用户喜欢手冲咖啡'));
+      expect(merged, contains('我们聊过搬家'));
+      expect(merged, contains('以后会主动问咖啡豆'));
+    });
   });
 }

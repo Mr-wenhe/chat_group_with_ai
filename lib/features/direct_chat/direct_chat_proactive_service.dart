@@ -86,6 +86,8 @@ class DirectChatProactiveService {
     final candidate = DirectChatProactivePolicy.selectCandidate(
       directSummaries: candidateSummaries,
       groupCandidates: groupCandidates,
+      idleCharacters:
+          characters.where(_canGenerateProactiveMessage).toList(growable: false),
       lastProactiveAtByCharacter: db.directChatLastProactiveAtByCharacter(),
       now: now,
       preferredConversationId: preferredConversationId,
@@ -194,7 +196,12 @@ class DirectChatProactiveService {
     }
     final sourceText = source == DirectChatSource.group
         ? '你是从刚才群聊话题自然延伸过来私聊。'
-        : '你是延续之前的私聊来主动联系。';
+        : directContext.isEmpty
+            ? '你自然想到用户，决定第一次主动私聊问候。'
+            : '你是延续之前的私聊来主动联系。';
+
+    final persistentMemory =
+        DirectChatSession.persistentMemoryPrompt(character);
 
     return [
       {
@@ -205,6 +212,8 @@ class DirectChatProactiveService {
         ),
       },
       {'role': 'system', 'content': character.systemPrompt},
+      if (persistentMemory.isNotEmpty)
+        {'role': 'system', 'content': persistentMemory},
       {
         'role': 'system',
         'content': '这次由你主动发起私聊。$sourceText'

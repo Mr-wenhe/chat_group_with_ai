@@ -116,12 +116,15 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
       workspace,
       stdinText: patch,
     );
-    await _json(request, {
-      'ok': apply.exitCode == 0,
-      'stdout': apply.stdout,
-      'stderr': apply.stderr,
-      'exitCode': apply.exitCode,
-    }, statusCode: apply.exitCode == 0 ? 200 : 400);
+    await _json(
+        request,
+        {
+          'ok': apply.exitCode == 0,
+          'stdout': apply.stdout,
+          'stderr': apply.stderr,
+          'exitCode': apply.exitCode,
+        },
+        statusCode: apply.exitCode == 0 ? 200 : 400);
     return;
   }
 
@@ -151,6 +154,7 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
       );
       return;
     }
+    await file.parent.create(recursive: true);
     await file.writeAsString(content);
     await _json(request, {
       'ok': true,
@@ -169,11 +173,14 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
       return;
     }
     final result = await _runProcess(args.first, args.sublist(1), workspace);
-    await _json(request, {
-      'stdout': result.stdout,
-      'stderr': result.stderr,
-      'exitCode': result.exitCode,
-    }, statusCode: result.exitCode == 0 ? 200 : 400);
+    await _json(
+        request,
+        {
+          'stdout': result.stdout,
+          'stderr': result.stderr,
+          'exitCode': result.exitCode,
+        },
+        statusCode: result.exitCode == 0 ? 200 : 400);
     return;
   }
 
@@ -222,18 +229,19 @@ String _normalizeWorkspacePath(Directory workspace, String path) {
   final isAbs = trimmed.startsWith('/') ||
       trimmed.startsWith('\\') ||
       RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(trimmed);
-  if (!isAbs) return trimmed; // 已是相对路径
-  final wsPath = workspace.absolute.path;
-  if (trimmed == wsPath ||
-      trimmed.startsWith('$wsPath/') ||
-      trimmed.startsWith('$wsPath\\')) {
-    final rel = trimmed.substring(wsPath.length).replaceAll('\\', '/');
+  final normalized = trimmed.replaceAll('\\', '/');
+  if (!isAbs) return normalized; // 已是相对路径
+  final wsPath = workspace.absolute.path.replaceAll('\\', '/');
+  final comparablePath =
+      Platform.isWindows ? normalized.toLowerCase() : normalized;
+  final comparableWorkspace =
+      Platform.isWindows ? wsPath.toLowerCase() : wsPath;
+  if (comparablePath == comparableWorkspace ||
+      comparablePath.startsWith('$comparableWorkspace/')) {
+    final rel = normalized.substring(wsPath.length);
     return rel.startsWith('/') ? rel.substring(1) : rel;
   }
-  final segments = trimmed
-      .split(RegExp(r'[/\\]+'))
-      .where((s) => s.isNotEmpty)
-      .toList();
+  final segments = normalized.split('/').where((s) => s.isNotEmpty).toList();
   return segments.isEmpty ? '' : segments.last;
 }
 
@@ -265,8 +273,14 @@ void _rejectUnsafeRelativePath(String path) {
 }
 
 void _ensureInsideWorkspace(Directory workspace, String path) {
-  final workspacePath = workspace.absolute.path;
-  if (path != workspacePath && !path.startsWith('$workspacePath/')) {
+  var workspacePath = workspace.absolute.path.replaceAll('\\', '/');
+  var candidatePath = path.replaceAll('\\', '/');
+  if (Platform.isWindows) {
+    workspacePath = workspacePath.toLowerCase();
+    candidatePath = candidatePath.toLowerCase();
+  }
+  if (candidatePath != workspacePath &&
+      !candidatePath.startsWith('$workspacePath/')) {
     throw ArgumentError('Path escapes workspace: $path');
   }
 }
@@ -331,8 +345,15 @@ String _fileNameOf(String path) {
 }
 
 String _relativeToWorkspace(Directory workspace, String path) {
-  final prefix = '${workspace.absolute.path}/';
-  return path.startsWith(prefix) ? path.substring(prefix.length) : path;
+  final root = workspace.absolute.path.replaceAll('\\', '/');
+  final candidate = path.replaceAll('\\', '/');
+  final comparableRoot = Platform.isWindows ? root.toLowerCase() : root;
+  final comparableCandidate =
+      Platform.isWindows ? candidate.toLowerCase() : candidate;
+  final prefix = '$comparableRoot/';
+  return comparableCandidate.startsWith(prefix)
+      ? candidate.substring(root.length + 1)
+      : candidate;
 }
 
 class _ProcessResultText {

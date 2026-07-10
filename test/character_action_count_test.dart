@@ -1,5 +1,4 @@
 import 'package:chat_group/core/models/ai_character.dart';
-import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
@@ -68,23 +67,23 @@ void main() {
   group('编辑页：推荐专家 Skill 现在可点按安装', () {
     testWidgets('点按推荐 Skill 触发 onTemplateToggle 并高亮选中', (tester) async {
       final templates = [
-        ExpertSkillTemplate(
+        const ExpertSkillTemplate(
           id: 'tpl.a',
           name: '专家A',
           domain: 'x',
           description: 'd',
-          keywords: const [],
-          instructions: const [],
-          requiredPermissions: const [],
+          keywords: [],
+          instructions: [],
+          requiredPermissions: [],
         ),
-        ExpertSkillTemplate(
+        const ExpertSkillTemplate(
           id: 'tpl.b',
           name: '专家B',
           domain: 'x',
           description: 'd',
-          keywords: const [],
-          instructions: const [],
-          requiredPermissions: const [],
+          keywords: [],
+          instructions: [],
+          requiredPermissions: [],
         ),
       ];
 

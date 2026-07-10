@@ -112,13 +112,16 @@ class ToolRequest {
       return null;
     }
     final params = <String, String>{};
+    // 兼容两种参数写法：
+    //   - <parameter name="path">...</parameter>（标准 XML 属性）
+    //   - <parameter=path>...</parameter>（部分模型输出的等号简写）
     final pattern = RegExp(
-      r'''<parameter\s+name=["']([^"']+)["']\s*>([\s\S]*?)</parameter>''',
+      r'''<parameter(?:\s+name=["']([^"']+)["']|\s*=\s*([^>\s]+))\s*>([\s\S]*?)</parameter>''',
       caseSensitive: false,
     );
     for (final match in pattern.allMatches(raw)) {
-      final name = match.group(1)?.trim();
-      final value = match.group(2);
+      final name = (match.group(1) ?? match.group(2))?.trim();
+      final value = match.group(3);
       if (name == null || name.isEmpty || value == null) continue;
       params[name] = _decodeXmlEntities(value.trim());
     }

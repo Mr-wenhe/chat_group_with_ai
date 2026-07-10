@@ -68,7 +68,7 @@ class BridgeErrorKind {
 
 class AgentRuntime {
   static const int maxToolSteps = 6;
-  static const Duration completionTimeout = Duration(seconds: 45);
+  static const Duration completionTimeout = Duration(seconds: 70);
 
   final AgentCompletion complete;
   final WorkspaceFileTool? workspaceFileTool;
@@ -83,7 +83,7 @@ class AgentRuntime {
     this.browserContextTool,
     this.skillCreateHandler,
     this.skillDownloadHandler,
-    this.enableLocalFilePlanner = true,
+    this.enableLocalFilePlanner = false,
   });
 
   /// 清洗可能泄露到聊天文本中的内部工具调用协议标记。
@@ -101,20 +101,37 @@ class AgentRuntime {
     String text, {
     String? characterName,
   }) {
-    // 移除 ```agent_tool ... ``` 围栏块（含围栏本身）
-    var cleaned = text.replaceAll(
+    var cleaned = text;
+    // 1. 移除 ```agent_tool ... ``` 围栏块（含围栏本身）
+    cleaned = cleaned.replaceAll(
       RegExp(r'```agent_tool\s*[\s\S]*?\s*```'),
       '',
     );
-    // 移除 <tool_call ... </tool_call> / </agent_tool> XML 块（含标签本身）。
-    // 兼容两种开标签写法：<tool_call agent_tool ...> 与 <tool_call> 包裹 JSON。
-    // 注：模型实际闭合标签为 </tool_call>，但也防御性兼容 </agent_tool> 变体。
+    // 2. 移除 <tool_call ... </tool_call> / </agent_tool> 完整 XML 块（含标签本身）。
     cleaned = cleaned.replaceAll(
-      RegExp(r'<tool_call\s*[\s\S]*?\s*(?:</agent_tool>|</tool_call>)'),
+      RegExp(r'<tool_call\s*[\s\S]*?\s*(?:</agent_tool>|</tool_call>)',
+          caseSensitive: false),
+      '',
+    );
+    // 3. 移除任何残留在文本中部/尾部的 <tool_call ...（无闭合标签）整段——
+    //    直到字符串结束（兼容模型把 tool_call 块放在回复末尾的情形）。
+    cleaned = cleaned.replaceAll(
+      RegExp(r'<tool_call\b[\s\S]*$', caseSensitive: false),
+      '',
+    );
+    // 4. 移除畸形工具协议的孤立片段：<function=...> / <parameter=...> 单行，
+    //    以及 <function ...>...</function>、<parameter ...>...</parameter> 配对片段。
+    //    这些常出现在模型“自选”的 <tool_call\n<function=workspace.patch> 变体中，
+    //    若不被清理会直接把内部协议泄漏到聊天 UI。
+    cleaned = cleaned.replaceAll(
+      RegExp(r'^\s*<(?:function|parameter)\b[^\n]*$',
+          caseSensitive: false, multiLine: true),
       '',
     );
     cleaned = cleaned.replaceAll(
-      RegExp(r'<tool_call\s*[\s\S]*$', caseSensitive: false),
+      RegExp(
+          r'<(?:function|parameter)\b[^>]*>[\s\S]*?</(?:function|parameter)>',
+          caseSensitive: false),
       '',
     );
     cleaned = cleaned.trim();
@@ -125,40 +142,318 @@ class AgentRuntime {
     return cleaned;
   }
 
-  /// 把「文件内容预览」块追加到最终消息文本中。
+  /// 写文件成功后追加一行简洁确认信息到最终消息文本。
   ///
   /// 仅在写文件工具（workspace.patch）执行成功、且已成功读回文件内容时生效：
-  /// 从 [toolResult] 读取 [readbackContent]（由 [_executeWorkspacePatch] 写入）。
-  /// 其它工具的结果不含该字段，会直接返回原文本，行为保持不变。
+  /// 从 [toolResult] 读取文件路径和大小信息。
+  /// 不再注入文件正文到聊天消息——文件已通过 MediaAttachment（文件卡片）
+  /// 展示给用户，在文本中重复大段内容只会导致消息被截断且难以阅读。
   ///
-  /// - 内容超过 [maxPreviewChars]（默认 2000）字符则截断，并提示查看完整文件。
-  /// - 若没有读回内容（读回失败已降级），原样返回 [message]，不暴露任何异常。
+  /// 若没有路径信息（读回失败已降级），原样返回 [message]，不暴露任何异常。
   static String _appendFilePreview(
     String message,
     Map<String, dynamic> toolResult,
   ) {
     if (toolResult['ok'] != true) return message;
     final content = toolResult['readbackContent'] as String?;
+    // 没有读回内容时不追加任何信息（降级静默）。
     if (content == null || content.isEmpty) return message;
     final path = toolResult['path'] as String? ?? '';
-    const maxPreviewChars = 2000;
-    final buffer = StringBuffer();
-    buffer.writeln();
-    buffer.writeln('--- 文件内容预览 ---');
-    if (path.isNotEmpty) {
-      buffer.writeln('文件路径：`$path`');
-      buffer.writeln();
+    final sizeKB = (content.length / 1024).toStringAsFixed(1);
+    return '$message\n\n✅ 文件已生成：`$path`（$sizeKB KB）— 点击附件查看完整内容';
+  }
+
+  /// 响应护栏：拦截 LLM 在 final 文本中贴出的「裸代码 / 文件全文」泄漏（Bug A）。
+  ///
+  /// 尽管 [AgentPromptBuilder.buildToolResultPrompt] 已明确要求模型不要把文件
+  /// 内容贴进回复，但部分模型仍会照做。文件已通过 [MediaAttachment]（附件卡片）
+  /// 展示，正文只需简洁确认即可。
+  ///
+  /// 仅当 [text] 看起来像「大段代码 / 文件全文」时才把用户可见正文替换为简洁确认语；
+  /// 普通的 1-2 句自然语言总结原样返回，绝不误杀。
+  static String _guardFinalMessage(String text, {bool fileWritten = false}) {
+    if (!_looksLikeFileContentLeak(text)) return text;
+    return fileWritten ? '文件已生成，请查看附件。' : '结果已生成，请查看附件。';
+  }
+
+  /// 判断 [text] 是否像「大段代码 / 文件全文」泄漏（任一特征命中即视为需要收敛）：
+  ///   - 代码围栏 ``` … ``` 包裹了较长内容（> 80 字符）；
+  ///   - 未闭合的代码围栏（LLM 输出被截断或未完成，如 ```html … 无尾部 ```）；
+  ///   - 文本含 `<!doctype`（任意位置，不区分大小写），或同时出现 `<html …>` 与
+  ///     `</html>` 配对标签（整段 HTML 文档）；
+  ///   - 出现 `import 'package:` / `void main(` 等源码特征；
+  ///   - 连续多行（≥3 行）以 ≥2 空格或 tab 开头且含代码符号（疑似整段代码）；
+  ///   - 高密度 HTML 标签（出现 ≥3 个不同的 HTML 标签如 div/body/style/script）。
+  static bool _looksLikeFileContentLeak(String text) {
+    final trimmed = text.trim();
+    if (trimmed.isEmpty) return false;
+
+    // 1. 闭合的代码围栏且内部段较长。
+    final fenceMatch = RegExp(r'```[\s\S]*?```').firstMatch(trimmed);
+    if (fenceMatch != null) {
+      final innerLength =
+          fenceMatch.group(0)!.replaceAll(RegExp(r'```'), '').trim().length;
+      if (innerLength > 80) return true;
     }
-    if (content.length > maxPreviewChars) {
-      buffer.write(content.substring(0, maxPreviewChars));
-      buffer.writeln();
-      buffer.writeln('…（内容较长，已截断显示前 $maxPreviewChars 字符；'
-          '完整文件请查看 `$path`）');
-    } else {
-      buffer.write(content);
+
+    // 1b. 未闭合的代码围栏——LLM 经常输出 ```html 然后贴大段代码但忘了闭合，
+    //     或输出被截断。检测「有开无闭」且开标签后内容够长即视为泄漏。
+    final unclosedFence = RegExp(r'```\w*\n([\s\S]*)').firstMatch(trimmed);
+    if (unclosedFence != null && !trimmed.contains('```')) {
+      // 有开 `` 但没有对应的闭 ```
+      if (unclosedFence.group(1)!.trim().length > 60) return true;
     }
-    buffer.writeln('--- 预览结束 ---');
-    return '$message$buffer';
+    // 更宽松：文本以 ``` 开头（或含 ``` 后无配对闭合）且总长度较大
+    final openFences = RegExp(r'```').allMatches(trimmed).length;
+    if (openFences >= 1 && openFences % 2 == 1 && trimmed.length > 200) {
+      // 奇数个 ``` 围栏标记 = 存在未闭合块，且文本足够长
+      return true;
+    }
+
+    // 2. HTML 文档特征。
+    if (RegExp(r'<!doctype', caseSensitive: false).hasMatch(trimmed)) {
+      return true;
+    }
+    if (RegExp(r'<html\b', caseSensitive: false).hasMatch(trimmed) &&
+        RegExp(r'</html>', caseSensitive: false).hasMatch(trimmed)) {
+      return true;
+    }
+    if (RegExp(r'^(<!doctype|<html)\b', caseSensitive: false)
+        .hasMatch(trimmed)) {
+      return true;
+    }
+    // 2b. 高密度 HTML 标签——出现多个不同 HTML 标签名说明是整段 HTML 被贴进回复。
+    final htmlTags = <String>{
+      for (final m in RegExp(
+              r'<(div|body|head|style|script|section|nav|footer|main|article|header|span|p|h[1-6]|ul|ol|li|table|tr|td|th|form|input|button|a|img)\b')
+          .allMatches(trimmed))
+        m.group(1)!
+    };
+    if (htmlTags.length >= 4) return true; // 4+ 个不同 HTML 标签 → 几乎肯定是文件全文
+
+    // 3. Dart / 源码特征关键词。
+    if (RegExp(r"import\s+'package:|void\s+main\s*\(").hasMatch(trimmed)) {
+      return true;
+    }
+
+    // 4. 连续多行缩进代码。
+    if (_hasMultiLineIndentedCode(trimmed)) return true;
+
+    return false;
+  }
+
+  /// 检测 [text] 中是否存在 ≥3 行以 ≥2 空格或 tab 开头、且含常见代码符号的缩进块，
+  /// 用于识别「整段代码被贴进回复」的情形（自然语言总结几乎不会命中）。
+  static bool _hasMultiLineIndentedCode(String text) {
+    var indentedCodeLines = 0;
+    final codeSymbol = RegExp(r'[{}();=<>]');
+    for (final line in text.split('\n')) {
+      final isIndented =
+          RegExp(r'^\s{2,}|\t').hasMatch(line) && line.trim().isNotEmpty;
+      if (isIndented && codeSymbol.hasMatch(line)) {
+        indentedCodeLines++;
+        if (indentedCodeLines >= 3) return true;
+      }
+    }
+    return false;
+  }
+
+  /// 检测规划文本是否含有「工具调用痕迹」——即便 [ToolRequest.tryParse] 无法将其
+  /// 解析为合法请求，也能据此判断模型"想调工具"而不是在普通聊天（Bug B-b1）。
+  static bool _containsToolCallTrace(String text) {
+    return RegExp(
+      r'agent_tool|tool_call|workspace\.(patch|read|list)|'
+      r'command\.run|browser\.context|skill\.(create|download)|'
+      r'<function|<parameter',
+      caseSensitive: false,
+    ).hasMatch(text);
+  }
+
+  /// 有些模型理解了文件任务，却忽略工具协议，直接返回 ```html ...``` 或裸 HTML。
+  /// 此时把模型已经生成好的完整内容恢复成 workspace.patch 请求，避免正文泄漏到
+  /// 聊天气泡，也避免再次调用模型造成内容丢失。
+  static ToolRequest? _recoverGeneratedFileRequest(
+    String userRequest,
+    String modelOutput,
+  ) {
+    final path = _inferGeneratedFilePath(userRequest);
+    if (path == null) return null;
+    final content = _extractGeneratedFileContent(modelOutput);
+    if (content == null || content.trim().isEmpty) return null;
+    return ToolRequest(
+      tool: AgentToolName.workspacePatch,
+      reason: '模型已生成文件内容，自动恢复为文件写入请求',
+      args: {'path': path, 'content': content},
+    );
+  }
+
+  static String? _inferGeneratedFilePath(String request) {
+    final lower = request.toLowerCase();
+    final hasCreateIntent = RegExp(
+      r'(生成|创建|写|制作|做一个|做个|实现|开发|输出|导出|修改|改写|'
+      r'create|write|build|make|generate)',
+      caseSensitive: false,
+    ).hasMatch(lower);
+    if (!hasCreateIntent) return null;
+
+    final explicit = RegExp(
+      r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:html?|md|markdown|dart|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp))(?![\w./\\-])',
+      caseSensitive: false,
+    ).firstMatch(request);
+    final explicitPath = explicit?.group(1)?.replaceAll('\\', '/');
+    if (explicitPath != null &&
+        WorkspacePathGuard.isSafeRelativePath(explicitPath)) {
+      return explicitPath;
+    }
+
+    if (RegExp(r'(html?|主页|个人页|介绍页|页面|网页|网站|落地页|landing)').hasMatch(lower)) {
+      return 'page.html';
+    }
+    if (RegExp(r'(markdown|\bmd\b|文档|报告|简历)').hasMatch(lower)) {
+      return 'report.md';
+    }
+    if (RegExp(r'(dart|flutter|应用|app|程序)').hasMatch(lower)) {
+      return 'main.dart';
+    }
+    if (RegExp(r'(python|\bpy\b)').hasMatch(lower)) return 'script.py';
+    if (RegExp(r'(javascript|\bjs\b)').hasMatch(lower)) return 'app.js';
+    return null;
+  }
+
+  static String? _extractGeneratedFileContent(String output) {
+    final fenced = RegExp(
+      r'```(?:html?|md|markdown|dart|txt|json|ya?ml|svg|css|js|ts|python|py|sh|bash|c|cc|cpp)?\s*\n([\s\S]*?)\n?```',
+      caseSensitive: false,
+    ).firstMatch(output);
+    if (fenced != null) return fenced.group(1)?.trim();
+
+    final htmlStart = RegExp(r'<!doctype\s+html|<html\b', caseSensitive: false)
+        .firstMatch(output)
+        ?.start;
+    if (htmlStart != null) {
+      final tail = output.substring(htmlStart);
+      final htmlEnds =
+          RegExp(r'</html\s*>', caseSensitive: false).allMatches(tail).toList();
+      final htmlEnd = htmlEnds.isEmpty ? null : htmlEnds.last;
+      if (htmlEnd != null) return tail.substring(0, htmlEnd.end).trim();
+      return tail.trim();
+    }
+    return null;
+  }
+
+  /// 更宽松的工具请求提取（[ToolRequest.tryParse] 失败后的兜底）：
+  /// 仅在文本确实含有工具调用痕迹时调用，尝试识别几种常见变形让真正的工具调用
+  /// 尽可能执行；若仍无法构造合法请求则返回 null，由调用方退化为简洁提示。
+  static ToolRequest? _looseParseToolRequest(String content) {
+    // 变形 1：<function=toolName> ... </function>，体内是 JSON 或 path/content 键值。
+    final fnMatch = RegExp(
+      r'<function\s*=\s*([\w.\-]+)\s*>([\s\S]*?)</function>',
+      caseSensitive: false,
+    ).firstMatch(content);
+    if (fnMatch != null) {
+      final toolName = fnMatch.group(1)!;
+      final tool = AgentToolName.fromWire(toolName);
+      final body = fnMatch.group(2)!;
+      if (tool != null) {
+        final args = _extractArgsFromText(body);
+        if (args != null) {
+          return ToolRequest(
+            tool: tool,
+            reason: args['reason'] as String? ?? '模型请求执行 $toolName',
+            args: args,
+          );
+        }
+      }
+    }
+    // 变形 2：文本出现 workspace.patch/write 且带 path/content 键值（无外层 wrapper）。
+    if (content.contains('workspace.patch') ||
+        content.contains('workspace.write')) {
+      final args = _extractArgsFromText(content);
+      if (args != null && args['path'] is String && args['content'] is String) {
+        return ToolRequest(
+          tool: AgentToolName.workspacePatch,
+          reason: args['reason'] as String? ?? '模型请求写入文件',
+          args: args,
+        );
+      }
+    }
+    return null;
+  }
+
+  /// 从文本中尽量提取工具参数（优先解析 JSON，退化到正则抓 path/content）。
+  static Map<String, dynamic>? _extractArgsFromText(String text) {
+    final balanced = _firstBalancedJsonObject(text);
+    if (balanced is Map<String, dynamic>) {
+      final args = balanced['args'];
+      if (args is Map<String, dynamic>) return args;
+      // 退化：JSON 顶层直接是 path/content（无 args 包裹）。
+      if (balanced['path'] is String) return balanced;
+    }
+    final path = _firstJsonString(text, 'path');
+    final contentVal = _firstJsonString(text, 'content');
+    if (path != null && contentVal != null) {
+      final reason = _firstJsonString(text, 'reason');
+      return {
+        'path': path,
+        'content': contentVal,
+        if (reason != null) 'reason': reason,
+      };
+    }
+    return null;
+  }
+
+  /// 找到文本中第一个「括号配平」的 {...} 子串并 jsonDecode，失败返回 null。
+  static Map<String, dynamic>? _firstBalancedJsonObject(String text) {
+    final start = text.indexOf('{');
+    if (start < 0) return null;
+    var depth = 0;
+    var inString = false;
+    var escape = false;
+    for (var i = start; i < text.length; i++) {
+      final ch = text[i];
+      if (inString) {
+        if (escape) {
+          escape = false;
+        } else if (ch == '\\') {
+          escape = true;
+        } else if (ch == '"') {
+          inString = false;
+        }
+        continue;
+      }
+      if (ch == '"') {
+        inString = true;
+      } else if (ch == '{') {
+        depth++;
+      } else if (ch == '}') {
+        depth--;
+        if (depth == 0) {
+          final candidate = text.substring(start, i + 1);
+          try {
+            final decoded = jsonDecode(candidate);
+            if (decoded is Map<String, dynamic>) return decoded;
+          } on FormatException {
+            // 非合法 JSON，停止扫描。
+          }
+          break;
+        }
+      }
+    }
+    return null;
+  }
+
+  /// 用正则抓出形如 "key": "value" 的 JSON 字符串值（兼容基本转义）。
+  static String? _firstJsonString(String text, String key) {
+    final match = RegExp(
+      r'"$key"\s*:\s*"((?:[^"\\]|\\.)*)"',
+    ).firstMatch(text);
+    if (match == null) return null;
+    final raw = match.group(1)!;
+    return raw
+        .replaceAll('\\"', '"')
+        .replaceAll('\\\\', '\\')
+        .replaceAll('\\n', '\n')
+        .replaceAll('\\t', '\t');
   }
 
   Future<AgentRuntimeResult> run({
@@ -167,6 +462,7 @@ class AgentRuntime {
     required String userRequest,
     bool approved = false,
     bool autoApproveWriteTools = false,
+    List<Map<String, dynamic>>? conversationHistory,
   }) async {
     final localRequest = enableLocalFilePlanner
         ? _localFileGenerationRequest(character, userRequest)
@@ -180,6 +476,7 @@ class AgentRuntime {
         autoApproveWriteTools: autoApproveWriteTools,
         remainingSteps: maxToolSteps,
         executedRequests: const [],
+        conversationHistory: conversationHistory,
       );
     }
 
@@ -190,9 +487,11 @@ class AgentRuntime {
     );
     late final Map<String, dynamic> first;
     try {
-      first = await complete([
+      first = await _completePlanningWithRetry([
         {'role': 'system', 'content': prompt},
-      ]).timeout(completionTimeout);
+        // 追加对话历史，使 LLM 在规划工具时拥有上下文（修复追问失忆）。
+        ...?conversationHistory,
+      ]);
     } on TimeoutException {
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
@@ -214,28 +513,193 @@ class AgentRuntime {
 
     final content = first['message']?.toString() ?? '';
     final request = ToolRequest.tryParse(content);
-    if (request == null) {
-      // 防御性过滤：即使 tryParse 兼容两种格式，若模型输出的是残缺/畸形
-      // 的工具标记（而非合法请求或正常文本），也要清理后再展示，避免泄露
-      // 内部协议标签到聊天 UI。
-      return AgentRuntimeResult(
-        status: AgentRuntimeStatus.completed,
-        message: _sanitizeToolProtocolLeak(
-          content,
-          characterName: character.name,
-        ),
+    if (request != null) {
+      return _handleToolRequest(
+        character: character,
+        request: request,
+        userRequest: userRequest,
+        approved: approved,
+        autoApproveWriteTools: autoApproveWriteTools,
+        remainingSteps: maxToolSteps,
+        executedRequests: const [],
+        conversationHistory: conversationHistory,
       );
     }
 
-    return _handleToolRequest(
-      character: character,
-      request: request,
-      userRequest: userRequest,
-      approved: approved,
-      autoApproveWriteTools: autoApproveWriteTools,
-      remainingSteps: maxToolSteps,
-      executedRequests: const [],
+    final recoveredFileRequest =
+        _recoverGeneratedFileRequest(userRequest, content);
+    if (recoveredFileRequest != null) {
+      return _handleToolRequest(
+        character: character,
+        request: recoveredFileRequest,
+        userRequest: userRequest,
+        approved: approved,
+        autoApproveWriteTools: autoApproveWriteTools,
+        remainingSteps: maxToolSteps,
+        executedRequests: const [],
+        conversationHistory: conversationHistory,
+      );
+    }
+
+    // 规划阶段未解析出合法工具请求。这种情况下绝不把模型的「原始规划文本」
+    // （如「我直接现在就为你写入文件…」）原样当作用户可见消息返回——那会
+    // 泄漏内部意图并产生多余的「第一条」消息（Bug B-b1）。
+    final hasExplicitFileIntent = _inferGeneratedFilePath(userRequest) != null;
+    if (_containsToolCallTrace(content) || hasExplicitFileIntent) {
+      // 文本含有工具调用痕迹但 tryParse 解析失败：尝试用更宽松的方式兜底提取
+      // 工具请求并执行；提取失败才退化为简洁提示，绝不泄露原始规划文本。
+      final looseRequest = _looseParseToolRequest(content);
+      if (looseRequest != null) {
+        return _handleToolRequest(
+          character: character,
+          request: looseRequest,
+          userRequest: userRequest,
+          approved: approved,
+          autoApproveWriteTools: autoApproveWriteTools,
+          remainingSteps: maxToolSteps,
+          executedRequests: const [],
+          conversationHistory: conversationHistory,
+        );
+      }
+
+      // 宽松解析也失败：模型有工具意图但输出格式不对。
+      // 尝试 re-prompt（给模型一次机会纠正格式）。
+      final repromptResult = await _repromptForToolFormat(
+        characterName: character.name,
+        skills: skills,
+        userRequest: userRequest,
+        originalResponse: content,
+        conversationHistory: conversationHistory,
+      );
+      if (repromptResult != null) {
+        return _handleToolRequest(
+          character: character,
+          request: repromptResult,
+          userRequest: userRequest,
+          approved: approved,
+          autoApproveWriteTools: autoApproveWriteTools,
+          remainingSteps: maxToolSteps,
+          executedRequests: const [],
+          conversationHistory: conversationHistory,
+        );
+      }
+
+      // re-prompt 也失败时绝不创建 content 为空的文件。空文件既丢失用户需求，
+      // 又会产生一个看似成功的附件；这里明确失败并允许用户重试。
+      return AgentRuntimeResult(
+        status: AgentRuntimeStatus.completed,
+        message: hasExplicitFileIntent
+            ? '${character.name} 未能生成可写入的完整文件内容，请重试。'
+            : '${character.name} 已收到请求，但未能解析出可执行的工具指令。',
+      );
+    }
+
+    // 没有任何工具意图：模型是在正常文本回复（而非要调工具），清洗后原样返回。
+    return AgentRuntimeResult(
+      status: AgentRuntimeStatus.completed,
+      message: _sanitizeToolProtocolLeak(
+        content,
+        characterName: character.name,
+      ),
     );
+  }
+
+  Future<Map<String, dynamic>> _completePlanningWithRetry(
+    List<Map<String, dynamic>> messages,
+  ) async {
+    Map<String, dynamic>? lastResult;
+    for (var attempt = 0; attempt < 2; attempt++) {
+      try {
+        final result = await complete(messages).timeout(completionTimeout);
+        lastResult = result;
+        if (result['success'] == true ||
+            !_isTransientCompletionFailure(result)) {
+          return result;
+        }
+      } on TimeoutException {
+        if (attempt == 1) rethrow;
+      }
+    }
+    return lastResult ?? {'success': false, 'message': '连接超时'};
+  }
+
+  static bool _isTransientCompletionFailure(Map<String, dynamic> result) {
+    final message = result['message']?.toString().toLowerCase() ?? '';
+    return message.contains('网络连接失败') ||
+        message.contains('connection reset') ||
+        message.contains('http 429') ||
+        message.contains('http 502') ||
+        message.contains('http 503') ||
+        message.contains('http 504');
+  }
+
+  /// 当模型第一次输出含有工具调用意图但格式无法解析时，用更严格的简短提示
+  /// 重新要求模型**只**输出标准格式的工具请求块。
+  ///
+  /// 中文模型经常不遵循 prompt 中的 ```agent_tool 格式规范（第一次输出自然语言描述），
+  /// 但第二次收到"只输出工具请求块"的极简指令后通常能正确输出可解析的 JSON。
+  ///
+  /// 返回解析出的 [ToolRequest]（成功），或 null（re-prompt 也失败/超时/异常）。
+  Future<ToolRequest?> _repromptForToolFormat({
+    required String characterName,
+    required List<CharacterSkill> skills,
+    required String userRequest,
+    required String originalResponse,
+    List<Map<String, dynamic>>? conversationHistory,
+  }) async {
+    final toolNames = {
+      for (final s in skills) s.name,
+      'workspace.list',
+      'workspace.read',
+      'workspace.patch',
+      'command.run',
+      'browser.context',
+      'skill.create',
+      'skill.download',
+    }.join('、');
+
+    // 极简 re-prompt：明确告诉模型上次输出格式不对、这次必须只输出 JSON 块。
+    final repromptPrompt = '''
+【重要】你之前的回复没有被识别为有效的工具请求。
+
+用户请求：$userRequest
+
+你之前说了：$originalResponse
+
+现在请**只**输出一个工具请求块，不要任何其他文字：
+
+```agent_tool
+{"tool":"工具名","reason":"原因","args":{...}}
+```
+
+可用工具名：$toolNames
+
+注意：
+- 如果是生成文件，用 workspace.patch，把完整内容放 args.content
+- 文件名要合理（如 page.html / report.md / main.dart）
+- **绝对不要**在代码块外写任何解释、问候或规划文本
+- 只输出上面这一个 ```agent_tool ... ``` 块，不多不少
+''';
+
+    try {
+      final retry = await complete([
+        {'role': 'system', 'content': repromptPrompt},
+        ...?conversationHistory,
+      ]).timeout(const Duration(seconds: 30));
+
+      if (retry['success'] != true) return null;
+
+      final retryContent = retry['message']?.toString() ?? '';
+      final request = ToolRequest.tryParse(retryContent);
+      if (request != null) return request;
+
+      // tryParse 失败再试 looseParse
+      return _looseParseToolRequest(retryContent);
+    } on TimeoutException {
+      return null;
+    } catch (_) {
+      return null;
+    }
   }
 
   Future<AgentRuntimeResult> _handleToolRequest({
@@ -246,6 +710,7 @@ class AgentRuntime {
     required bool autoApproveWriteTools,
     required int remainingSteps,
     required List<ToolRequest> executedRequests,
+    List<Map<String, dynamic>>? conversationHistory,
   }) async {
     if (remainingSteps <= 0) {
       return AgentRuntimeResult(
@@ -291,17 +756,12 @@ class AgentRuntime {
         message: toolFailureMessage(character, e),
       );
     }
-    if (request.tool == AgentToolName.workspacePatch &&
-        toolResult['ok'] == false) {
-      return AgentRuntimeResult(
-        status: AgentRuntimeStatus.failed,
-        pendingToolRequest: request,
-        toolResult: toolResult,
-        executedToolRequests: executedRequests,
-        message: toolResult['message']?.toString() ??
-            '[${character.name} 工具任务失败: 文件写入被拒绝]',
-      );
-    }
+    // workspace.patch 执行结果：即使失败（如文件冲突已自动改名重试、或桥接服务报错）
+    // 也继续走 _continueAfterToolResult 让 LLM 整理结果——因为：
+    //   a) 失败信息需要友好地呈现给用户（而非原始错误码）
+    //   b) _continueAfterToolResult 内的 _guardFinalMessage 会拦截 LLM 可能泄漏的代码
+    //   c) 若在此处短路返回 failed，调用方会直接把错误文本当消息展示且无护栏保护
+    // 注意：重复写文件的防护由 _continueAfterToolResult 内的第二层防御负责。
     final nextExecutedRequests = [...executedRequests, request];
     return _continueAfterToolResult(
       character: character,
@@ -311,6 +771,7 @@ class AgentRuntime {
       remainingSteps: remainingSteps - 1,
       executedRequests: nextExecutedRequests,
       autoApproveWriteTools: autoApproveWriteTools,
+      conversationHistory: conversationHistory,
     );
   }
 
@@ -322,7 +783,20 @@ class AgentRuntime {
     required int remainingSteps,
     required List<ToolRequest> executedRequests,
     required bool autoApproveWriteTools,
+    List<Map<String, dynamic>>? conversationHistory,
   }) async {
+    if (request.tool == AgentToolName.workspacePatch &&
+        toolResult['ok'] == true &&
+        !_requiresPostWriteTool(userRequest)) {
+      final completed = _completedFallbackForExecutedTool(
+        character: character,
+        request: request,
+        toolResult: toolResult,
+        executedRequests: executedRequests,
+      );
+      if (completed != null) return completed;
+    }
+
     final finalPrompt = AgentPromptBuilder.buildToolResultPrompt(
       characterName: character.name,
       userRequest: userRequest,
@@ -333,6 +807,8 @@ class AgentRuntime {
     try {
       finalResponse = await complete([
         {'role': 'system', 'content': finalPrompt},
+        // 追加对话历史，使 LLM 在整理结果时拥有上下文（修复追问失忆）。
+        ...?conversationHistory,
       ]).timeout(completionTimeout);
     } on TimeoutException {
       final fallback = _completedFallbackForExecutedTool(
@@ -374,6 +850,27 @@ class AgentRuntime {
         '${character.name} 已完成工具调用，但整理结果失败。';
     final nextRequest = ToolRequest.tryParse(content);
     if (nextRequest != null) {
+      // 第二层防御：已成功写入过文件后，禁止 LLM 再发起写文件请求。
+      // 原因：即使第一层防御（_handleToolResult 中 workspace.patch 成功后直接 fallback）
+      // 已覆盖大部分场景，但某些代码路径可能绕过它到达此处。
+      // 若放行，LLM 会生成 page.html + page_2.html 等重复文件。
+      final alreadyWroteFile = executedRequests.any(
+        (r) => r.tool == AgentToolName.workspacePatch,
+      );
+      if (nextRequest.tool == AgentToolName.workspacePatch &&
+          alreadyWroteFile) {
+        // 静默吞掉重复写文件请求，视为已完成。
+        return AgentRuntimeResult(
+          status: AgentRuntimeStatus.completed,
+          pendingToolRequest: request,
+          toolResult: toolResult,
+          executedToolRequests: executedRequests,
+          message: _appendFilePreview(
+            '${character.name} 已完成文件生成。',
+            toolResult,
+          ),
+        );
+      }
       return _handleToolRequest(
         character: character,
         request: nextRequest,
@@ -382,6 +879,7 @@ class AgentRuntime {
         autoApproveWriteTools: autoApproveWriteTools,
         remainingSteps: remainingSteps,
         executedRequests: executedRequests,
+        conversationHistory: conversationHistory,
       );
     }
 
@@ -390,8 +888,20 @@ class AgentRuntime {
       content,
       characterName: character.name,
     );
-    // 写文件成功后，把刚写入的文件内容预览追加到最终消息（读回失败已降级）。
-    final finalMessage = _appendFilePreview(sanitized, toolResult);
+    // 响应护栏（Bug A）：无论工具执行成功与否，都要拦截 LLM 在 final 文本中贴出的
+    // 「裸代码 / 文件全文」。即使 workspace.patch 失败了（如文件冲突），LLM 的最终回复
+    // 仍可能把完整 HTML/代码贴出来——必须收敛。
+    //
+    // 判定依据：只要本次请求是文件生成类工具（workspace.patch），且 final 文本看起来
+    // 含大段代码/文件全文，就替换为简洁确认语。
+    final isFileGenerationAttempt =
+        request.tool == AgentToolName.workspacePatch;
+    final guarded = _guardFinalMessage(
+      sanitized,
+      fileWritten: isFileGenerationAttempt && toolResult['ok'] == true,
+    );
+    // 写文件成功后，把「文件已生成」简洁确认信息追加到最终消息（内容不回写文本）。
+    final finalMessage = _appendFilePreview(guarded, toolResult);
     return AgentRuntimeResult(
       status: AgentRuntimeStatus.completed,
       pendingToolRequest: request,
@@ -401,11 +911,21 @@ class AgentRuntime {
     );
   }
 
+  static bool _requiresPostWriteTool(String userRequest) {
+    final lower = userRequest.toLowerCase();
+    return RegExp(
+      r'(运行|执行|测试|验证|检查|构建|编译|flutter\s+(?:test|analyze|build)|'
+      r'\btest\b|\banalyze\b|\bbuild\b|command\.run|terminal)',
+      caseSensitive: false,
+    ).hasMatch(lower);
+  }
+
   Future<AgentRuntimeResult> executeApprovedTool({
     required AICharacter character,
     required ToolRequest request,
     required String userRequest,
     List<ToolRequest> priorExecutedRequests = const [],
+    List<Map<String, dynamic>>? conversationHistory,
   }) async {
     final permission = permissionForTool(request.tool);
     if (!character.toolPermissions.contains(permission)) {
@@ -426,6 +946,7 @@ class AgentRuntime {
       autoApproveWriteTools: false,
       remainingSteps: maxToolSteps,
       executedRequests: priorExecutedRequests,
+      conversationHistory: conversationHistory,
     );
   }
 
@@ -471,8 +992,9 @@ class AgentRuntime {
   }
 
   /// 执行 workspace.patch（写文件）：先调用桥接服务 `/workspace/write` 落盘，
-  /// 成功后再同步读回刚写入的文件全文，附加到返回结果里（key: [readbackContent]），
-  /// 供最终消息展示给用户。
+  /// 成功后再同步读回刚写入的文件全文，附加到返回结果里（key: [readbackContent]）。
+  /// 读回内容仅用于生成「文件已生成」确认信息中的文件大小估算，**不会**回写进
+  /// 聊天消息文本（文件另以 MediaAttachment 文件卡片完整展示）。
   ///
   /// 写成功但读回失败时降级处理：仅返回写结果、不附加预览，也不把异常暴露给用户
   /// —— 写文件这一核心动作已成功，不应因读回失败而被判定为整次工具执行失败。
@@ -483,17 +1005,12 @@ class AgentRuntime {
     if (path.isEmpty) {
       return {'ok': false, 'error': 'empty_path', 'message': '缺少有效的文件路径'};
     }
+    // 文件已存在时自动改用递增后缀，避免：
+    //   a) 静默覆盖导致用户丢失之前的内容
+    //   b) 直接拒绝导致工具执行失败、LLM 回退到代码泄漏路径
+    // 改名格式：page.html → page_2.html
     if (await _workspaceFileExists(path)) {
-      if (request.args['allowRenameOnConflict'] == true) {
-        path = await _nextAvailableWorkspacePath(path);
-      } else {
-        return {
-          'ok': false,
-          'error': 'target_exists',
-          'path': path,
-          'message': '目标文件已存在，已拒绝覆盖：$path',
-        };
-      }
+      path = await _nextAvailableWorkspacePath(path);
     }
     if (path.isEmpty) {
       return {
@@ -615,20 +1132,22 @@ class AgentRuntime {
   }
 
   String toolFailureMessage(AICharacter character, Object error) {
-    final text = error.toString();
     final kind = classifyBridgeError(error);
     if (kind.isConnection) {
       return '[${character.name} 工具执行失败: 本地工具桥接服务未连接（桌面端应由 App 在进程内自动启动并监听 54263）。'
-          '若仍失败，请检查 54263 端口是否被其他进程占用，或重启 App 后重试。原始错误: $text]';
+          '请检查 54263 端口是否被其他进程占用，或重启 App 后重试。]';
     }
     if (kind.statusCode != null) {
       if (kind.statusCode == 404) {
         return '[${character.name} 工具执行失败: 本地桥接服务返回 404（请求路径在服务端不存在）。'
-            '通常是 App 内嵌桥接版本与客户端不一致，请完全退出并重启 App 后重试。原始错误: $text]';
+            '客户端已尝试旧版兼容写入；若仍失败，请完全退出并重启 App 后重试。]';
       }
-      return '[${character.name} 工具执行失败: 本地桥接服务返回 ${kind.statusCode}。原始错误: $text]';
+      return '[${character.name} 工具执行失败: 本地桥接服务返回 ${kind.statusCode}，请检查工具参数后重试。]';
     }
-    return '[${character.name} 工具执行失败: $text]';
+    final firstLine = error.toString().split('\n').first.trim();
+    final concise =
+        firstLine.length <= 160 ? firstLine : '${firstLine.substring(0, 160)}…';
+    return '[${character.name} 工具执行失败: $concise]';
   }
 
   ToolRequest? _localFileGenerationRequest(
@@ -669,12 +1188,11 @@ class AgentRuntime {
       reason: path != null
           ? '根据用户给出的明确路径生成文件 $inferredPath'
           : '用户未指定具体文件名，已根据请求内容推断为 $inferredPath 并生成文件',
-      // 方案 A：直接把 (path, content) 交给桥接服务的 /workspace/write 端点写文件，
-      // 不再生成 git diff（new-file diff 在目标已存在时会被 git apply --check 拒掉）。
+      // 直接把 (path, content) 交给桥接服务的 /workspace/write 端点写文件；
+      // 冲突策略由 _executeWorkspacePatch 统一处理（保留旧文件并使用递增后缀）。
       args: {
         'path': inferredPath,
         'content': content,
-        if (path == null) 'allowRenameOnConflict': true,
       },
     );
   }
@@ -806,8 +1324,6 @@ class AgentRuntime {
     required String path,
   }) {
     final extension = path.split('.').last.toLowerCase();
-    final htmlCharacterName = _escapeHtml(character.name);
-    final markdownCharacterName = _escapeMarkdownHtml(character.name);
     if (extension == 'dart') {
       return "void main() {\n  print('hello from ${character.name}');\n}\n";
     }
@@ -817,7 +1333,6 @@ class AgentRuntime {
 set -euo pipefail
 
 echo "Agentic generated project check script"
-echo "Generated by: ${character.name}"
 
 flutter --version >/dev/null
 flutter analyze
@@ -911,7 +1426,6 @@ int main() {
   <rect width="960" height="540" fill="#111827"/>
   <rect x="80" y="76" width="800" height="388" rx="28" fill="#f8fafc"/>
   <text x="120" y="160" font-family="Arial, sans-serif" font-size="46" font-weight="700" fill="#1f2937">Agentic Work</text>
-  <text x="120" y="230" font-family="Arial, sans-serif" font-size="28" fill="#475569">Generated by $htmlCharacterName</text>
   <circle cx="760" cy="170" r="54" fill="#6366f1"/>
   <path d="M710 330h120M710 370h90M710 410h150" stroke="#10b981" stroke-width="18" stroke-linecap="round"/>
 </svg>
@@ -920,107 +1434,34 @@ int main() {
     if (extension == 'json') {
       return '''
 {
-  "generatedBy": ${_jsonString(character.name)},
   "status": "created",
   "request": ${_jsonString(userRequest)}
 }
 ''';
     }
     if (extension == 'html') {
+      // 通用 HTML5 骨架模板（不含具体视觉内容）。
+      // 本地快速路径仅创建一个合法的空壳文件，具体内容由后续 LLM 整理
+      // 结果时通过角色口吻描述；不再硬编码"流星雨"等与用户请求无关的内容，
+      // 也不注入 AI 角色签名或水印。
       return '''
 <!doctype html>
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>流星雨划过夜空</title>
+  <title>页面</title>
   <style>
-    * { box-sizing: border-box; }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
     body {
-      margin: 0;
-      min-height: 100vh;
-      overflow: hidden;
-      background: radial-gradient(circle at 50% 80%, #1b3768 0 8%, transparent 30%),
-        linear-gradient(180deg, #050711 0%, #0b1024 52%, #18284b 100%);
-      color: #f8fafc;
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
-    }
-    .sky {
-      position: relative;
-      width: 100vw;
-      height: 100vh;
-      background-image:
-        radial-gradient(circle, rgba(255,255,255,.9) 0 1px, transparent 1.6px),
-        radial-gradient(circle, rgba(185,214,255,.8) 0 1px, transparent 1.4px);
-      background-size: 140px 140px, 210px 210px;
-      animation: drift 20s linear infinite;
-    }
-    .title {
-      position: absolute;
-      left: 7vw;
-      top: 8vh;
-      max-width: 560px;
-      text-shadow: 0 12px 35px rgba(0,0,0,.5);
-    }
-    h1 { margin: 0 0 12px; font-size: clamp(34px, 6vw, 78px); }
-    p { margin: 0; font-size: clamp(15px, 2vw, 22px); color: #c7d2fe; }
-    .meteor {
-      position: absolute;
-      width: 190px;
-      height: 2px;
-      background: linear-gradient(90deg, rgba(255,255,255,0), #fff 70%, #bde7ff);
-      border-radius: 999px;
-      filter: drop-shadow(0 0 10px #bae6fd);
-      transform: rotate(-28deg);
-      animation: shoot var(--duration) linear infinite;
-      animation-delay: var(--delay);
-      top: var(--top);
-      left: var(--left);
-      opacity: 0;
-    }
-    .meteor::after {
-      content: "";
-      position: absolute;
-      right: -5px;
-      top: -3px;
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: #fff;
-      box-shadow: 0 0 16px #7dd3fc;
-    }
-    .horizon {
-      position: absolute;
-      inset: auto 0 0;
-      height: 28vh;
-      background: linear-gradient(180deg, rgba(7,12,28,0) 0%, rgba(5,8,18,.9) 58%),
-        radial-gradient(ellipse at 50% 100%, rgba(96,165,250,.26), transparent 65%);
-    }
-    @keyframes shoot {
-      0% { opacity: 0; transform: translate3d(0, 0, 0) rotate(-28deg); }
-      7% { opacity: 1; }
-      55% { opacity: 1; }
-      100% { opacity: 0; transform: translate3d(65vw, 38vh, 0) rotate(-28deg); }
-    }
-    @keyframes drift {
-      from { background-position: 0 0, 0 0; }
-      to { background-position: 140px 140px, -210px 210px; }
+      padding: 20px;
+      line-height: 1.6;
     }
   </style>
 </head>
 <body>
-  <main class="sky" aria-label="流星雨划过夜空的动态效果">
-    <section class="title">
-      <h1>流星雨划过夜空</h1>
-      <p>$htmlCharacterName 根据你的自然语言请求生成的 HTML 动态效果。</p>
-    </section>
-    <span class="meteor" style="--top:10vh;--left:-18vw;--duration:4.8s;--delay:.2s"></span>
-    <span class="meteor" style="--top:22vh;--left:-30vw;--duration:5.6s;--delay:1.1s"></span>
-    <span class="meteor" style="--top:35vh;--left:-25vw;--duration:4.2s;--delay:2.4s"></span>
-    <span class="meteor" style="--top:48vh;--left:-35vw;--duration:6.2s;--delay:3.3s"></span>
-    <span class="meteor" style="--top:16vh;--left:-45vw;--duration:5.1s;--delay:4.7s"></span>
-    <div class="horizon"></div>
-  </main>
+  <p><!-- 内容由 AI 根据用户请求生成 --></p>
 </body>
 </html>
 ''';
@@ -1032,8 +1473,6 @@ int main() {
       if (isTechnicalDoc) {
         return '''
 # AI Group Chat Simulator 技术文档
-
-生成角色：$markdownCharacterName
 
 ## 项目概述
 
@@ -1089,38 +1528,19 @@ flutter run -d macos
     return '''
 # Agentic Live Test
 
-生成角色：$markdownCharacterName
-
 ## 用户请求
 
 $userRequest
 
-## Dart hello 程序
-
-```dart
-void main() {
-  print('hello from ${character.name}');
-}
-```
-
 ## 验证说明
 
 - 本文件通过 `workspace.patch` 写入到 `$path`。
-- 如果你能在工作区看到这个文件，说明 AI 角色没有停在“正在做”，而是走了本地工具生成内容。
+- 如果你能在工作区看到这个文件，说明文件已成功生成。
 - 写入动作需要用户批准后才会执行。
 ''';
   }
 
   String _jsonString(String value) => jsonEncode(value);
-
-  String _escapeHtml(String value) => const HtmlEscape().convert(value);
-
-  String _escapeMarkdownHtml(String value) {
-    return value
-        .replaceAll('&', '&amp;')
-        .replaceAll('<', '&lt;')
-        .replaceAll('>', '&gt;');
-  }
 
   AgentRuntimeResult? _completedFallbackForExecutedTool({
     required AICharacter character,
@@ -1131,9 +1551,11 @@ void main() {
     if (request.tool != AgentToolName.workspacePatch) return null;
     final ok = toolResult['ok'] == true || toolResult['exitCode'] == 0;
     if (!ok) return null;
-    final summary = '${character.name} 已通过 workspace.patch 写入文件。'
-        '工具返回 exitCode=${toolResult['exitCode'] ?? 0}，请查看附件或工作区文件确认内容。';
-    // 写文件成功后，把刚写入的文件内容预览追加到兜底消息（读回失败已降级）。
+    final path = toolResult['path'] as String?;
+    final summary = path == null || path.isEmpty
+        ? '${character.name} 已生成文件，请查看附件。'
+        : '${character.name} 已生成文件 `$path`，请查看附件。';
+    // 写文件成功后，把「文件已生成」简洁确认信息追加到兜底消息（内容不回写文本）。
     return AgentRuntimeResult(
       status: AgentRuntimeStatus.completed,
       pendingToolRequest: request,

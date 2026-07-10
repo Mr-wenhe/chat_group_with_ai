@@ -29,6 +29,16 @@ class DirectChatGroupCandidate {
   });
 }
 
+/// Foreground polling cadence shared by the watcher and policy tests.
+///
+/// Keeping these values in the platform-neutral policy layer makes the same
+/// proactive behavior available on Windows, macOS, Linux and mobile.
+class ProactiveContactSchedule {
+  static const Duration initialDelay = Duration(seconds: 8);
+  static const Duration interval = Duration(seconds: 45);
+  static const Duration handoffDelay = Duration(seconds: 8);
+}
+
 class DirectChatProactivePolicy {
   static const Duration directChatStaleAfter = Duration(hours: 6);
   static const Duration proactiveCooldown = Duration(hours: 2);
@@ -40,6 +50,7 @@ class DirectChatProactivePolicy {
   static DirectChatProactiveCandidate? selectCandidate({
     required List<DirectChatSummary> directSummaries,
     required List<DirectChatGroupCandidate> groupCandidates,
+    List<AICharacter> idleCharacters = const [],
     required Map<String, DateTime> lastProactiveAtByCharacter,
     required DateTime now,
     String? preferredConversationId,
@@ -99,15 +110,36 @@ class DirectChatProactivePolicy {
     }).toList()
       ..sort((a, b) => b.lastUserMessageAt.compareTo(a.lastUserMessageAt));
 
-    if (eligibleGroupCandidates.isEmpty) return null;
-    final groupCandidate = eligibleGroupCandidates.first;
-    return DirectChatProactiveCandidate(
-      character: groupCandidate.character,
-      source: DirectChatSource.group,
-      reason: '从群聊话题延伸',
-      sourceGroupId: groupCandidate.groupId,
-      sourceUserMessageAt: groupCandidate.lastUserMessageAt,
-    );
+    if (eligibleGroupCandidates.isNotEmpty) {
+      final groupCandidate = eligibleGroupCandidates.first;
+      return DirectChatProactiveCandidate(
+        character: groupCandidate.character,
+        source: DirectChatSource.group,
+        reason: '从群聊话题延伸',
+        sourceGroupId: groupCandidate.groupId,
+        sourceUserMessageAt: groupCandidate.lastUserMessageAt,
+      );
+    }
+
+    // A character without any previous DM/group history may still initiate a
+    // first conversation. Once that happens it appears in directSummaries and
+    // is governed by the regular stale/unread policies above.
+    for (final character in idleCharacters) {
+      if (existingDirectIds.contains(character.id)) continue;
+      if (!_canProactivelySpeak(
+        character,
+        lastProactiveAtByCharacter,
+        now,
+      )) {
+        continue;
+      }
+      return DirectChatProactiveCandidate(
+        character: character,
+        source: DirectChatSource.direct,
+        reason: '主动问候',
+      );
+    }
+    return null;
   }
 
   static bool _canProactivelySpeak(
