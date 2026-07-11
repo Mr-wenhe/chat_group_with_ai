@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
@@ -183,6 +185,73 @@ void main() {
     expect(completionCalls, 2);
     expect(fakeTool.lastWriteContent, contains('重试成功'));
     expect(result.message, isNot(contains('503')));
+  });
+
+  test('planning timeout falls back to deterministic C++ file generation',
+      () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {
+        'ok': true,
+        'path': 'system_resource_monitor.cpp',
+        'bytes': 256,
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => throw TimeoutException('planning stalled'),
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '帮我写个 C++ 程序，作用是获取当前系统的信息，然后生成文件贴给我',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'system_resource_monitor.cpp');
+    expect(fakeTool.lastWriteContent, contains('#include <sys/sysctl.h>'));
+    expect(result.message, isNot(contains('工具任务失败')));
+  });
+
+  test('fallback recovers unclosed fenced source into a file', () async {
+    var calls = 0;
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'main.cpp', 'bytes': 64},
+      readResult: {
+        'path': 'main.cpp',
+        'content': '#include <iostream>\nint main() { return 0; }\n',
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async {
+        calls++;
+        if (calls == 1) {
+          return {'success': true, 'message': '我来生成这个文件。'};
+        }
+        return {
+          'success': true,
+          'message': '```cpp\n#include <iostream>\nint main() { return 0; }\n',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '帮我生成一个 C++ 程序文件',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'main.cpp');
+    expect(fakeTool.lastWriteContent, contains('int main()'));
+    expect(result.message, isNot(contains('#include <iostream>')));
   });
 
   test('planning does not retry a receive timeout and release is immediate',

@@ -1637,17 +1637,55 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         addPath(path);
       }
     }
-    final resultPath = result.toolResult?['path'];
-    if (resultPath is String) {
-      addPath(resultPath);
+    final rawResultPath = result.toolResult?['path'];
+    if (rawResultPath is String) {
+      addPath(rawResultPath);
     }
     if (paths.isEmpty) return const [];
 
     final attachments = <MediaAttachment>[];
     final bridge = LocalAgentBridgeClient();
     final workspaceTool = WorkspaceFileTool(bridge);
+    final resultOk =
+        result.toolResult?['ok'] == true || result.toolResult?['exitCode'] == 0;
+    final normalizedResultPath = result.toolResult?['path'] is String
+        ? WorkspacePathGuard.normalizeToRelative(
+            result.toolResult!['path'] as String,
+          )
+        : null;
+    final lastPatchWithContent = patchRequests.reversed.firstWhere(
+      (request) => request.args['content'] is String,
+      orElse: () => patchRequests.last,
+    );
     for (final path in paths.take(6)) {
       try {
+        final readback = resultOk && path == normalizedResultPath
+            ? result.toolResult!['readbackContent']
+            : null;
+        if (readback is String && readback.isNotEmpty) {
+          attachments.add(await _db.writeBytesToAiCharacterDir(
+            bytes: utf8.encode(readback),
+            fileName: _fileNameFromPath(path),
+            characterId: character.id,
+            characterName: character.name,
+            type: _attachmentTypeForPath(path),
+          ));
+          continue;
+        }
+        final generatedContent = resultOk &&
+                (path == normalizedResultPath || normalizedResultPath == null)
+            ? lastPatchWithContent.args['content']
+            : null;
+        if (generatedContent is String && generatedContent.isNotEmpty) {
+          attachments.add(await _db.writeBytesToAiCharacterDir(
+            bytes: utf8.encode(generatedContent),
+            fileName: _fileNameFromPath(path),
+            characterId: character.id,
+            characterName: character.name,
+            type: _attachmentTypeForPath(path),
+          ));
+          continue;
+        }
         // Always read through the active bridge. Resolving [path] against the
         // app process cwd can attach a same-named file from the old workspace
         // immediately after the user switches project directories.
@@ -1706,8 +1744,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         customBaseUrl: config.customBaseUrl,
         model: config.modelName,
         messages: messages,
-        maxTokens: 4096,
-        receiveTimeout: const Duration(seconds: 60),
+        maxTokens: 8192,
+        receiveTimeout: const Duration(seconds: 120),
       ),
       workspaceFileTool: WorkspaceFileTool(bridge),
       browserContextTool: BrowserContextTool(bridge),

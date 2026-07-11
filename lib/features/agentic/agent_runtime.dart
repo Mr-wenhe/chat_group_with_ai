@@ -68,7 +68,7 @@ class BridgeErrorKind {
 
 class AgentRuntime {
   static const int maxToolSteps = 6;
-  static const Duration completionTimeout = Duration(seconds: 70);
+  static const Duration completionTimeout = Duration(seconds: 120);
 
   final AgentCompletion complete;
   final WorkspaceFileTool? workspaceFileTool;
@@ -312,6 +312,12 @@ class AgentRuntime {
     if (RegExp(r'(markdown|\bmd\b|文档|报告|简历)').hasMatch(lower)) {
       return 'report.md';
     }
+    if (RegExp(r'(c\+\+|cpp|\bcxx\b|c/c\+\+|c语言|c 语言)').hasMatch(lower)) {
+      if (RegExp(r'(系统信息|系统的?信息|cpu|内存|memory|system)').hasMatch(lower)) {
+        return 'system_resource_monitor.cpp';
+      }
+      return 'main.cpp';
+    }
     if (RegExp(r'(dart|flutter|应用|app|程序)').hasMatch(lower)) {
       return 'main.dart';
     }
@@ -339,6 +345,99 @@ class AgentRuntime {
       return tail.trim();
     }
     return null;
+  }
+
+  static String? _extractGeneratedFileContentForPath(
+    String output,
+    String path,
+  ) {
+    final parsed = _extractGeneratedFileContent(output);
+    if (parsed != null && parsed.trim().isNotEmpty) return parsed;
+
+    final unclosedFence = RegExp(
+      r'```(?:html?|md|markdown|dart|txt|json|ya?ml|svg|css|js|ts|python|py|sh|bash|c|cc|cpp)?\s*\n([\s\S]*)$',
+      caseSensitive: false,
+    ).firstMatch(output.trim());
+    if (unclosedFence != null) {
+      final content = unclosedFence.group(1)?.trim();
+      if (content != null && content.isNotEmpty) return content;
+    }
+
+    final content = output.trim();
+    if (content.isEmpty || _looksLikeNarrationInsteadOfFile(content)) {
+      return null;
+    }
+
+    final ext = path.split('.').last.toLowerCase();
+    if (ext == 'md' || ext == 'markdown' || ext == 'txt') return content;
+    if (ext == 'html' || ext == 'htm') {
+      return RegExp(r'^(<!doctype|<html)\b', caseSensitive: false)
+              .hasMatch(content)
+          ? content
+          : null;
+    }
+    if (ext == 'svg') {
+      return RegExp(r'^<svg\b', caseSensitive: false).hasMatch(content)
+          ? content
+          : null;
+    }
+    if (ext == 'json') {
+      return content.startsWith('{') || content.startsWith('[')
+          ? content
+          : null;
+    }
+    if (ext == 'yaml' || ext == 'yml') {
+      return RegExp(r'^[\w.-]+\s*:', multiLine: true).hasMatch(content)
+          ? content
+          : null;
+    }
+    if (const {'c', 'cc', 'cpp', 'h', 'hpp'}.contains(ext)) {
+      return RegExp(
+                  r'(#include\s*[<"]|int\s+main\s*\(|class\s+\w+|namespace\s+\w+)')
+              .hasMatch(content)
+          ? content
+          : null;
+    }
+    if (ext == 'dart') {
+      return RegExp(r"(import\s+'package:|void\s+main\s*\(|class\s+\w+)")
+              .hasMatch(content)
+          ? content
+          : null;
+    }
+    if (ext == 'js' || ext == 'ts') {
+      return RegExp(
+                  r'(function\s+\w+|const\s+\w+\s*=|let\s+\w+\s*=|document\.)')
+              .hasMatch(content)
+          ? content
+          : null;
+    }
+    if (ext == 'py') {
+      return RegExp(r'(def\s+\w+\s*\(|import\s+\w+|if\s+__name__)')
+              .hasMatch(content)
+          ? content
+          : null;
+    }
+    if (ext == 'sh' || ext == 'bash') {
+      return content.startsWith('#!') || content.contains('\nset -')
+          ? content
+          : null;
+    }
+    if (ext == 'css') {
+      return RegExp(r'[\w.#:-]+\s*\{[\s\S]*\}').hasMatch(content)
+          ? content
+          : null;
+    }
+    return null;
+  }
+
+  static bool _looksLikeNarrationInsteadOfFile(String content) {
+    final lower = content.toLowerCase();
+    if (RegExp(r'^(好的|抱歉|对不起|以下是|这是|我已经|我可以|无法|不能)').hasMatch(content)) {
+      return true;
+    }
+    return lower.contains('复制保存为') ||
+        lower.contains('save as') ||
+        lower.contains('```');
   }
 
   /// 更宽松的工具请求提取（[ToolRequest.tryParse] 失败后的兜底）：
@@ -493,6 +592,23 @@ class AgentRuntime {
         ...?conversationHistory,
       ]);
     } on TimeoutException {
+      final fallbackRequest = await _fallbackFileRequestAfterPlanningFailure(
+        character: character,
+        userRequest: userRequest,
+        conversationHistory: conversationHistory,
+      );
+      if (fallbackRequest != null) {
+        return _handleToolRequest(
+          character: character,
+          request: fallbackRequest,
+          userRequest: userRequest,
+          approved: approved,
+          autoApproveWriteTools: autoApproveWriteTools,
+          remainingSteps: maxToolSteps,
+          executedRequests: const [],
+          conversationHistory: conversationHistory,
+        );
+      }
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
         message:
@@ -505,6 +621,20 @@ class AgentRuntime {
       );
     }
     if (first['success'] != true) {
+      final localRequest =
+          _safeLocalFallbackFileRequest(character, userRequest);
+      if (localRequest != null) {
+        return _handleToolRequest(
+          character: character,
+          request: localRequest,
+          userRequest: userRequest,
+          approved: approved,
+          autoApproveWriteTools: autoApproveWriteTools,
+          remainingSteps: maxToolSteps,
+          executedRequests: const [],
+          conversationHistory: conversationHistory,
+        );
+      }
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
         message: '[${character.name} 工具任务失败: ${first['message'] ?? '未知错误'}]',
@@ -584,6 +714,24 @@ class AgentRuntime {
         );
       }
 
+      final fallbackRequest = await _fallbackFileRequestAfterPlanningFailure(
+        character: character,
+        userRequest: userRequest,
+        conversationHistory: conversationHistory,
+      );
+      if (fallbackRequest != null) {
+        return _handleToolRequest(
+          character: character,
+          request: fallbackRequest,
+          userRequest: userRequest,
+          approved: approved,
+          autoApproveWriteTools: autoApproveWriteTools,
+          remainingSteps: maxToolSteps,
+          executedRequests: const [],
+          conversationHistory: conversationHistory,
+        );
+      }
+
       // re-prompt 也失败时绝不创建 content 为空的文件。空文件既丢失用户需求，
       // 又会产生一个看似成功的附件；这里明确失败并允许用户重试。
       return AgentRuntimeResult(
@@ -617,10 +765,90 @@ class AgentRuntime {
           return result;
         }
       } on TimeoutException {
-        if (attempt == 1) rethrow;
+        rethrow;
       }
     }
     return lastResult ?? {'success': false, 'message': '连接超时'};
+  }
+
+  Future<ToolRequest?> _fallbackFileRequestAfterPlanningFailure({
+    required AICharacter character,
+    required String userRequest,
+    List<Map<String, dynamic>>? conversationHistory,
+  }) async {
+    if (!_canGenerateNewFileDirectly(userRequest)) return null;
+    final path = _inferGeneratedFilePath(userRequest);
+    if (path == null) return null;
+
+    final modelRequest = await _generateFileContentRequest(
+      character: character,
+      userRequest: userRequest,
+      path: path,
+      conversationHistory: conversationHistory,
+    );
+    if (modelRequest != null) return modelRequest;
+
+    final localRequest = _safeLocalFallbackFileRequest(character, userRequest);
+    if (localRequest != null) return localRequest;
+    return null;
+  }
+
+  static bool _canGenerateNewFileDirectly(String userRequest) {
+    final lower = userRequest.toLowerCase();
+    if (RegExp(
+      r'(修改|改一下|改写|编辑|修复|review|代码审查|读取|读一下|检查|运行|测试|'
+      r'浏览器|网页内容|选中|analyze|build|test)',
+      caseSensitive: false,
+    ).hasMatch(lower)) {
+      return false;
+    }
+    return _inferGeneratedFilePath(userRequest) != null;
+  }
+
+  Future<ToolRequest?> _generateFileContentRequest({
+    required AICharacter character,
+    required String userRequest,
+    required String path,
+    List<Map<String, dynamic>>? conversationHistory,
+  }) async {
+    final prompt = '''
+你是${character.name}。用户要你生成一个文件。
+
+文件路径：$path
+用户请求：$userRequest
+
+请直接输出这个文件的完整内容。
+规则：
+- 不要输出 ``` 代码围栏。
+- 不要解释，不要说“复制保存为文件”，不要贴任何聊天寒暄。
+- 不要添加作者签名、水印、generated by、AI 身份标识。
+- 输出必须从文件第一行开始，到文件最后一行结束。
+''';
+
+    try {
+      final result = await complete([
+        {'role': 'system', 'content': prompt},
+        ...?conversationHistory,
+      ]).timeout(completionTimeout);
+      if (result['success'] != true) return null;
+      final output = result['message']?.toString() ?? '';
+      final parsed =
+          ToolRequest.tryParse(output) ?? _looseParseToolRequest(output);
+      if (parsed != null && parsed.tool == AgentToolName.workspacePatch) {
+        return parsed;
+      }
+      final content = _extractGeneratedFileContentForPath(output, path);
+      if (content == null || content.trim().isEmpty) return null;
+      return ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '模型未返回工具计划，已直接生成 $path 的完整内容并恢复为文件写入请求',
+        args: {'path': path, 'content': content},
+      );
+    } on TimeoutException {
+      return null;
+    } catch (_) {
+      return null;
+    }
   }
 
   static bool _isTransientCompletionFailure(Map<String, dynamic> result) {
@@ -1197,6 +1425,26 @@ class AgentRuntime {
     );
   }
 
+  ToolRequest? _safeLocalFallbackFileRequest(
+    AICharacter character,
+    String userRequest,
+  ) {
+    final request = _localFileGenerationRequest(character, userRequest);
+    if (request == null) return null;
+    final path = request.args['path'] as String? ?? '';
+    final ext = path.split('.').last.toLowerCase();
+    // HTML/SVG/CSS are highly subjective visual artifacts. The old local
+    // template produced an empty shell, which is worse than an honest retry.
+    // Keep deterministic fallbacks only for code/scripts/technical markdown.
+    if (const {'html', 'htm', 'svg', 'css'}.contains(ext)) return null;
+    if ((ext == 'md' || ext == 'markdown') &&
+        !RegExp(r'(技术文档|项目|工程|报告|总结|readme)', caseSensitive: false)
+            .hasMatch(userRequest)) {
+      return null;
+    }
+    return request;
+  }
+
   /// 模糊推断文件名：当关键词命中但用户未给出具体文件名时，
   /// 从消息中提取文件类型提示词（如“html 文件”“一个 md”“json 文件”），
   /// 并结合内容语义生成一个安全的相对文件名（如 `star_scene.html`、`report.md`）。
@@ -1222,6 +1470,11 @@ class AgentRuntime {
       ext = bare == null ? null : _normalizeExt(bare.group(1)!);
       if (ext == null && (lowerContainsScript(text))) {
         ext = 'sh';
+      }
+      if (ext == null &&
+          RegExp(r'(c\+\+|cpp|\bcxx\b|c/c\+\+|c语言|c 语言)')
+              .hasMatch(text.toLowerCase())) {
+        ext = 'cpp';
       }
     }
     if (ext == null) return null;
@@ -1280,6 +1533,16 @@ class AgentRuntime {
         name = 'run_checks';
       } else {
         name = 'script';
+      }
+    } else if (const {'c', 'cc', 'cpp', 'h', 'hpp'}.contains(ext)) {
+      if (lower.contains('系统信息') ||
+          lower.contains('系统的信息') ||
+          lower.contains('cpu') ||
+          lower.contains('内存') ||
+          lower.contains('memory')) {
+        name = 'system_resource_monitor';
+      } else {
+        name = 'main';
       }
     } else {
       // 其余类型（json / yaml / txt / 源码等）统一兜底命名。
