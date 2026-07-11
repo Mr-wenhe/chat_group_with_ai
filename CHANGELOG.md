@@ -4,6 +4,15 @@ All notable changes are documented here, following [Conventional Commits](https:
 
 ---
 
+## v1.4.0 - 2026-07-11
+
+### 🚀 Features / 新功能
+- (`agentic`) implement skill system, retry, context window, and task persistence
+- (`agentic`) enhance tool execution robustness, file content leak guards, and attachment delivery
+
+### 🐛 Bug Fixes / 修复
+- (`agentic`) harden bridge and file validation
+
 ## v1.0.0 - 2026-07-08
 
 ### 🚀 Features / 新功能
