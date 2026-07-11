@@ -26,13 +26,19 @@ class AgentTaskAdapter extends TypeAdapter<AgentTask> {
       plan: fields[6] as String,
       resultSummary: fields[7] as String,
       createdAt: fields[8] as DateTime?,
+      currentStep: fields[9] == null ? 0 : fields[9] as int,
+      completedOperations:
+          fields[10] == null ? [] : (fields[10] as List?)?.cast<String>(),
+      pendingToolRequestJson: fields[11] == null ? '' : fields[11] as String,
+      updatedAt: fields[12] as DateTime?,
+      lastError: fields[13] == null ? '' : fields[13] as String,
     );
   }
 
   @override
   void write(BinaryWriter writer, AgentTask obj) {
     writer
-      ..writeByte(9)
+      ..writeByte(14)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -50,7 +56,17 @@ class AgentTaskAdapter extends TypeAdapter<AgentTask> {
       ..writeByte(7)
       ..write(obj.resultSummary)
       ..writeByte(8)
-      ..write(obj.createdAt);
+      ..write(obj.createdAt)
+      ..writeByte(9)
+      ..write(obj.currentStep)
+      ..writeByte(10)
+      ..write(obj.completedOperations)
+      ..writeByte(11)
+      ..write(obj.pendingToolRequestJson)
+      ..writeByte(12)
+      ..write(obj.updatedAt)
+      ..writeByte(13)
+      ..write(obj.lastError);
   }
 
   @override
@@ -83,6 +99,8 @@ class AgentTaskStatusAdapter extends TypeAdapter<AgentTaskStatus> {
         return AgentTaskStatus.failed;
       case 5:
         return AgentTaskStatus.cancelled;
+      case 6:
+        return AgentTaskStatus.partiallyCompleted;
       default:
         return AgentTaskStatus.planning;
     }
@@ -108,6 +126,9 @@ class AgentTaskStatusAdapter extends TypeAdapter<AgentTaskStatus> {
         break;
       case AgentTaskStatus.cancelled:
         writer.writeByte(5);
+        break;
+      case AgentTaskStatus.partiallyCompleted:
+        writer.writeByte(6);
         break;
     }
   }

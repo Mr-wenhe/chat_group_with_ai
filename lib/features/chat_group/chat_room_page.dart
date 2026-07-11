@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/autonomous_conversation_config.dart';
@@ -24,7 +25,9 @@ import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/agentic/agent_attachment_context.dart';
 import 'package:chat_group/features/agentic/agentic_task_classifier.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
+import 'package:chat_group/features/agentic/agent_task_recovery_dialog.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
+import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:chat_group/features/agentic/skill_download_service.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -440,6 +443,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
 
     _scrollToBottom();
+    _scheduleAgentTaskRecovery();
 
     if (_isAutoChatEnabled && _characters.isNotEmpty && hasApi) {
       Future.delayed(_autoChatInitialDelay, () {
@@ -506,12 +510,89 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
 
     _scrollToBottom();
+    _scheduleAgentTaskRecovery();
 
     if (_isAutoChatEnabled && activeCharacters.isNotEmpty && hasApi) {
       Future.delayed(const Duration(seconds: 18), () {
         if (_canTouchUi) _startAutoChat();
       });
     }
+  }
+
+  void _scheduleAgentTaskRecovery() {
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (_canTouchUi) unawaited(_offerAgentTaskRecovery());
+    });
+  }
+
+  Future<void> _offerAgentTaskRecovery() async {
+    final tasks = _db.agentTaskBox.values
+        .where((task) => task.groupId == widget.groupId && task.canResume)
+        .toList()
+      ..sort((a, b) =>
+          (b.updatedAt ?? b.createdAt).compareTo(a.updatedAt ?? a.createdAt));
+    if (tasks.isEmpty || !_canTouchUi) return;
+    final task = tasks.first;
+    final continueTask = await showDialog<bool>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => AgentTaskRecoveryDialog(
+        task: task,
+        onAbandon: () => Navigator.pop(dialogContext, false),
+        onContinue: () => Navigator.pop(dialogContext, true),
+      ),
+    );
+    if (continueTask == true) {
+      await _resumeAgentTask(task);
+    } else {
+      task
+        ..status = AgentTaskStatus.cancelled
+        ..updatedAt = DateTime.now();
+      await _db.agentTaskBox.put(task.id, task);
+    }
+  }
+
+  Future<void> _resumeAgentTask(AgentTask task) async {
+    final character = _db.aiCharacterBox.get(task.characterId);
+    if (character == null) return;
+    final config = _resolveApiConfig(character);
+    if (config == null) return;
+    final provider = ApiProvider.values.firstWhere(
+      (value) => value.name == config.provider,
+      orElse: () => ApiProvider.deepseek,
+    );
+    final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
+    if (pending != null) {
+      _pendingAgentApproval = _PendingAgentToolApproval(
+        character: character,
+        config: config,
+        provider: provider,
+        userRequest: task.userRequest,
+        request: pending,
+        priorExecutedRequests: _restoredExecutedRequests(task),
+        task: task,
+      );
+      final approved = await _showAgentApprovalDialog(pending, character);
+      if (approved != null) {
+        await _handlePendingAgentApproval(approved ? '批准' : '拒绝');
+      }
+      return;
+    }
+    await _generateAgenticReply(
+      character: character,
+      config: config,
+      provider: provider,
+      userMessage: task.userRequest,
+      context: _recentMessagesForContext(),
+      resumeTask: task,
+    );
+  }
+
+  List<ToolRequest> _restoredExecutedRequests(AgentTask task) {
+    return task.completedOperations
+        .map(ToolRequest.fromJsonString)
+        .whereType<ToolRequest>()
+        .toList();
   }
 
   void _startAutoChat() {
@@ -881,7 +962,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
     );
-
     setState(() => _isAutonomousRunning = true);
     try {
       final workspace = task.targetProjectPath?.trim().isNotEmpty == true
@@ -1123,6 +1203,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
     );
+    final effectiveContext = await _compactContextIfNeeded(
+      character: character,
+      config: config,
+      provider: provider,
+      fallbackContext: context,
+    );
 
     if (!isAutoChat &&
         userMessage != null &&
@@ -1137,6 +1223,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           isDirectChat: _isDirectChat,
           userMessage: userMessage,
         ),
+        context: effectiveContext,
       );
     }
 
@@ -1144,7 +1231,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final apiMessages = _withWebSearchContext(
       _buildApiMessages(
         character,
-        context,
+        effectiveContext,
         userMessage,
         isAutoChat: isAutoChat,
         intent: intent,
@@ -1412,21 +1499,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required ApiProvider provider,
     required List<Map<String, dynamic>> apiMessages,
   }) async {
-    for (var attempt = 0; attempt < 2; attempt++) {
-      await Future.delayed(Duration(milliseconds: 450 + attempt * 650));
-      final result = await _chatApi.sendChatMessage(
-        apiKey: config.apiKey,
-        provider: provider,
-        customBaseUrl: config.customBaseUrl,
-        model: config.modelName,
-        messages: apiMessages,
-        temperature: 0.75,
-      );
-      await _recordTokenUsageFromResult(character, result);
-      if (result['success'] == true) {
-        final content = result['message']?.toString().trim() ?? '';
-        if (content.isNotEmpty) return content;
-      }
+    final result = await _chatApi.sendChatMessageStreamed(
+      apiKey: config.apiKey,
+      provider: provider,
+      customBaseUrl: config.customBaseUrl,
+      model: config.modelName,
+      messages: apiMessages,
+      temperature: 0.75,
+    );
+    await _recordTokenUsageFromResult(character, result);
+    if (result['success'] == true) {
+      final content = result['message']?.toString().trim() ?? '';
+      if (content.isNotEmpty) return content;
     }
     return null;
   }
@@ -1457,6 +1541,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required String userMessage,
     List<MediaAttachment>? media,
     bool autoApproveTools = false,
+    List<Message>? context,
+    AgentTask? resumeTask,
   }) async {
     // 并发兜底：同一角色已在执行 agentic 任务时，跳过本次重复调用，
     // 避免重入导致重复文件生成 / 重复消息。该角色的本轮任务由首次调用负责。
@@ -1466,10 +1552,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _agenticRunningCharacterIds.add(character.id);
     try {
       await _ensureAgenticTaskPermissions(character, userMessage);
+      final task = resumeTask ??
+          AgentTask(
+            groupId: widget.groupId,
+            characterId: character.id,
+            userRequest: userMessage,
+            requestedPermissions: character.toolPermissions,
+          );
+      task
+        ..status = AgentTaskStatus.planning
+        ..updatedAt = DateTime.now();
+      await _db.agentTaskBox.put(task.id, task);
       final runtime = _agentRuntimeFor(
         character: character,
         config: config,
         provider: provider,
+        task: task,
       );
 
       final mediaEnhancedRequest =
@@ -1477,16 +1575,38 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         userRequest: userMessage,
         media: media,
       );
-      final conversationHistory = await _agenticHistory(userMessage);
+      final conversationHistory = await _agenticHistory(
+        userMessage,
+        messages: context,
+      );
+      final restoredRequests = resumeTask == null
+          ? const <ToolRequest>[]
+          : _restoredExecutedRequests(resumeTask);
+      if (restoredRequests.isNotEmpty) {
+        conversationHistory.insert(0, {
+          'role': 'system',
+          'content': '这是从检查点恢复的任务。以下工具操作已经完成，'
+              '不要重复执行：${restoredRequests.map((request) => request.toJsonString()).join('；')}',
+        });
+      }
+      final skillResolution =
+          CharacterSkillResolver.resolveFor(character, userMessage);
 
       final result = await runtime.run(
         character: character,
-        skills: _agenticSkillsFor(character),
+        skills: _agenticSkillsFor(
+          character,
+          userMessage,
+          resolution: skillResolution,
+        ),
         userRequest: mediaEnhancedRequest,
         // 仅由调用方针对明确的私聊文件任务开启自动批准，避免普通私聊中的
         // 模型误判直接获得工作区写权限。
         autoApproveWriteTools: autoApproveTools,
         conversationHistory: conversationHistory,
+        priorExecutedRequests: restoredRequests,
+        forceSkillCreation: skillResolution.needsSkillCreation &&
+            !_savedSkillMatchesRequest(character, userMessage),
       );
       if (result.status == AgentRuntimeStatus.waitingForApproval &&
           result.pendingToolRequest != null) {
@@ -1498,6 +1618,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           request: result.pendingToolRequest!,
           priorExecutedRequests: result.executedToolRequests,
           conversationHistory: conversationHistory,
+          task: task,
         );
         // 用弹层（AlertDialog）代替文字输入审批：用户点“批准/拒绝”即触发执行，
         // 不再需要手动打字“批准”。无 UI 环境（如后台任务）才回退到文字提示。
@@ -1510,6 +1631,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         } else if (decision == false) {
           await _handlePendingAgentApproval('拒绝');
         } else {
+          // 用户关闭了审批对话框且未做决定：将任务标记为取消，避免残留
+          // waitingForApproval 状态导致后续恢复时弹出过期的审批弹窗。
+          task
+            ..status = AgentTaskStatus.cancelled
+            ..lastError = '用户关闭了工具审批对话框，未做出决定。'
+            ..updatedAt = DateTime.now();
+          await _db.agentTaskBox.put(task.id, task);
           final content = _stripNamePrefix(result.message, character.name);
           await _appendMessage(Message(
             groupId: widget.groupId,
@@ -1521,8 +1649,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         // 审批流程已通过上述分支追加消息，这里返回占位文案即可。
         return result.message;
       }
+      await _finishAgentTask(task, result);
       if (result.status != AgentRuntimeStatus.completed) {
-        final content = _stripNamePrefix(result.message, character.name);
+        final rawContent = result.executedToolRequests.isEmpty
+            ? result.message
+            : _partialCompletionReport(result);
+        final content = _stripNamePrefix(rawContent, character.name);
         final message = Message(
           groupId: widget.groupId,
           senderId: character.id,
@@ -1530,6 +1662,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           content: content,
         );
         await _appendMessage(message);
+        if (result.executedToolRequests.isNotEmpty) {
+          _scheduleAgentTaskRecovery();
+        }
         return content;
       }
       final content = _stripNamePrefix(result.message, character.name);
@@ -1563,7 +1698,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (!AgenticTaskClassifier.requiresAgenticWork(userMessage)) return;
     final permissionSet = <ToolPermission>{
       ...character.toolPermissions,
-      ...CharacterSkillResolver.defaultsFor(character).permissions,
+      ...CharacterSkillResolver.resolveFor(character, userMessage).permissions,
       ToolPermission.skillCreate,
       ToolPermission.skillDownload,
     };
@@ -1588,6 +1723,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         lower.contains('测试') ||
         lower.contains('flutter test') ||
         lower.contains('flutter analyze') ||
+        lower.contains('dart') ||
+        lower.contains('flutter') ||
         lower.contains('命令') ||
         lower.contains('command');
     if (needsCommand) {
@@ -1735,6 +1872,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required AICharacter character,
     required ApiConfig config,
     required ApiProvider provider,
+    required AgentTask task,
   }) {
     final bridge = LocalAgentBridgeClient();
     return AgentRuntime(
@@ -1761,7 +1899,95 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       // 导致用户“生成个人主页”却只得到 <p>内容由AI生成</p>。关闭后由 LLM
       // 通过 planning prompt 生成真实文件内容（args.content 放完整内容）。
       enableLocalFilePlanner: false,
+      // ChatApiService 负责带降温和非流式降级的重试；Runtime 不再嵌套。
+      completionMaxRetries: 0,
+      onProgress: (progress) => _persistAgentProgress(task, progress),
+      contextWindowManager: ContextWindowManager(
+        maxRetries: 0,
+        complete: (contextMessages) => _chatApi.sendChatMessage(
+          apiKey: config.apiKey,
+          provider: provider,
+          customBaseUrl: config.customBaseUrl,
+          model: config.modelName,
+          messages: contextMessages,
+          temperature: 0.3,
+          maxTokens: 2048,
+        ),
+      ),
+      contextIsDirectChat: _isDirectChat,
+      onContextSummary: _persistAgentContextSummary,
     );
+  }
+
+  Future<void> _persistAgentContextSummary(
+    AICharacter character,
+    ContextSummary summary,
+  ) async {
+    final memory = HumanizedMemoryService.memoryForCharacter(
+      groupId: widget.groupId,
+      character: character,
+      existing: _characterMemories,
+    );
+    final manager = ContextWindowManager(
+      complete: (_) async => const {'success': true, 'message': '{}'},
+    );
+    await manager.persistToCharacterMemory(
+      character: character,
+      memory: memory,
+      summary: summary,
+      saveCharacter: (value) => _db.aiCharacterBox.put(value.id, value),
+      saveMemory: _saveCompactedCharacterMemory,
+    );
+  }
+
+  Future<void> _persistAgentProgress(
+    AgentTask task,
+    AgentRuntimeProgress progress,
+  ) async {
+    task.markProgress(
+      step: progress.executedRequests.length,
+      operations: progress.executedRequests
+          .map((request) => request.toJsonString())
+          .toList(),
+      pendingToolJson: progress.pendingRequest?.toJsonString() ?? '',
+    );
+    await _db.agentTaskBox.put(task.id, task);
+  }
+
+  Future<void> _finishAgentTask(
+    AgentTask task,
+    AgentRuntimeResult result,
+  ) async {
+    task
+      ..resultSummary = result.message
+      ..updatedAt = DateTime.now()
+      ..pendingToolRequestJson =
+          result.pendingToolRequest?.toJsonString() ?? '';
+    if (result.status == AgentRuntimeStatus.completed) {
+      task
+        ..status = AgentTaskStatus.completed
+        ..lastError = '';
+    } else if (result.executedToolRequests.isNotEmpty) {
+      task.markPartiallyCompleted(result.message);
+    } else {
+      task
+        ..status = AgentTaskStatus.failed
+        ..lastError = result.message;
+    }
+    await _db.agentTaskBox.put(task.id, task);
+  }
+
+  String _partialCompletionReport(AgentRuntimeResult result) {
+    final operations = result.executedToolRequests.map((request) {
+      final path = request.args['path']?.toString();
+      return path == null || path.isEmpty
+          ? request.tool.wireName
+          : '${request.tool.wireName}：$path';
+    }).join('；');
+    return '任务部分完成，已完成的工具操作和文件均已保留。\n'
+        '已完成：$operations\n'
+        '中断原因：${result.message}\n'
+        '你可以选择“继续执行”从检查点恢复，或“放弃”结束任务。';
   }
 
   Future<bool> _handlePendingAgentApproval(String text) async {
@@ -1769,6 +1995,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (pending == null) return false;
     if (_isAgentRejection(text)) {
       _pendingAgentApproval = null;
+      pending.task
+        ..status = AgentTaskStatus.cancelled
+        ..updatedAt = DateTime.now();
+      await _db.agentTaskBox.put(pending.task.id, pending.task);
       await _appendMessage(Message(
         groupId: widget.groupId,
         senderId: pending.character.id,
@@ -1790,6 +2020,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         character: pending.character,
         config: pending.config,
         provider: pending.provider,
+        task: pending.task,
       );
       final result = await runtime.executeApprovedTool(
         character: pending.character,
@@ -1808,6 +2039,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           request: result.pendingToolRequest!,
           priorExecutedRequests: result.executedToolRequests,
           conversationHistory: pending.conversationHistory,
+          task: pending.task,
         );
         final nextDecision = await _showAgentApprovalDialog(
           result.pendingToolRequest!,
@@ -1819,6 +2051,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           );
         }
       }
+      await _finishAgentTask(pending.task, result);
       final content = _stripNamePrefix(
         result.message.trim().isEmpty
             ? '[${pending.character.name} 工具执行完成，但没有返回内容]'
@@ -2000,8 +2233,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return templates.isEmpty ? null : templates.first.id;
   }
 
-  List<CharacterSkill> _agenticSkillsFor(AICharacter character) {
-    final defaults = CharacterSkillResolver.defaultsFor(character).skills;
+  List<CharacterSkill> _agenticSkillsFor(
+      AICharacter character, String userRequest,
+      {CharacterSkillBundle? resolution}) {
+    final defaults = (resolution ??
+            CharacterSkillResolver.resolveFor(character, userRequest))
+        .skills;
     final saved = _db.characterSkillBox.values.where(
       (skill) =>
           skill.characterId == character.id ||
@@ -2012,6 +2249,28 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       byName['${skill.domain}:${skill.name}'] = skill;
     }
     return byName.values.toList();
+  }
+
+  bool _savedSkillMatchesRequest(
+    AICharacter character,
+    String userRequest,
+  ) {
+    final request = userRequest.toLowerCase().trim();
+    final saved = _db.characterSkillBox.values.where(
+      (skill) =>
+          skill.characterId == character.id ||
+          character.skillIds.contains(skill.id),
+    );
+    for (final skill in saved) {
+      if (skill.description.toLowerCase().contains(request)) return true;
+      final capability = '${skill.name} ${skill.domain}'.toLowerCase();
+      final tokens = RegExp(r'[a-z0-9_+#.-]{2,}|[\u4e00-\u9fff]{2,8}')
+          .allMatches(capability)
+          .map((match) => match.group(0)!)
+          .where((token) => token != 'general' && token != 'custom');
+      if (tokens.any(request.contains)) return true;
+    }
+    return false;
   }
 
   /// 停止当前流式生成：取消订阅并保留已生成的（部分）内容落库。
@@ -3284,15 +3543,99 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         : _messages.toList();
   }
 
+  Future<List<Message>> _compactContextIfNeeded({
+    required AICharacter character,
+    required ApiConfig config,
+    required ApiProvider provider,
+    required List<Message> fallbackContext,
+  }) async {
+    final checkpointKey =
+        'context_compressed_through:${widget.groupId}:${character.id}';
+    final checkpoint = _db.appSettingsBox.get(checkpointKey) as String?;
+    final pending = _messagesAfterCheckpoint(checkpoint);
+    final apiHistory = pending
+        .map((message) => <String, dynamic>{
+              'role': message.senderType == 'user' ? 'user' : 'assistant',
+              'content': message.content,
+            })
+        .toList();
+    final manager = ContextWindowManager(
+      maxRetries: 0,
+      complete: (messages) => _chatApi.sendChatMessage(
+        apiKey: config.apiKey,
+        provider: provider,
+        customBaseUrl: config.customBaseUrl,
+        model: config.modelName,
+        messages: messages,
+        temperature: 0.3,
+        maxTokens: 2048,
+      ),
+    );
+    if (!manager.shouldSummarize(apiHistory)) return fallbackContext;
+
+    try {
+      final summary = await manager.summarize(
+        apiHistory,
+        isDirectChat: _isDirectChat,
+      );
+      final memory = HumanizedMemoryService.memoryForCharacter(
+        groupId: widget.groupId,
+        character: character,
+        existing: _characterMemories,
+      );
+      await manager.persistToCharacterMemory(
+        character: character,
+        memory: memory,
+        summary: summary,
+        saveCharacter: (value) => _db.aiCharacterBox.put(value.id, value),
+        saveMemory: _saveCompactedCharacterMemory,
+      );
+      if (pending.isNotEmpty) {
+        await _db.appSettingsBox.put(checkpointKey, pending.last.id);
+      }
+      return _lastUserOnly(fallbackContext);
+    } catch (error) {
+      debugPrint('[Context] 上下文压缩失败，保留原上下文：$error');
+      return fallbackContext;
+    }
+  }
+
+  List<Message> _messagesAfterCheckpoint(String? checkpoint) {
+    if (checkpoint == null || checkpoint.isEmpty) return _messages.toList();
+    final index = _messages.indexWhere((message) => message.id == checkpoint);
+    if (index < 0 || index + 1 >= _messages.length) return const [];
+    return _messages.sublist(index + 1);
+  }
+
+  Future<void> _saveCompactedCharacterMemory(CharacterMemory memory) async {
+    await _db.characterMemoryBox.put(memory.id, memory);
+    final index = _characterMemories.indexWhere((item) => item.id == memory.id);
+    if (index < 0) {
+      _characterMemories = [..._characterMemories, memory];
+    } else {
+      _characterMemories = [..._characterMemories]..[index] = memory;
+    }
+  }
+
+  List<Message> _lastUserOnly(List<Message> messages) {
+    for (final message in messages.reversed) {
+      if (message.senderType == 'user') return [message];
+    }
+    return const [];
+  }
+
   /// 把最近的对话记录转换成 LLM 消息格式，供 AgentRuntime 调用时携带上下文，
   /// 修复“追问时 AI 失忆”的问题。
   ///
   /// - 取最近 12 条，排除当前请求对应的用户消息（已在 userRequest 中，避免重复）。
   /// - user 消息 → role 'user'，ai 消息 → role 'assistant'。
   /// - 附件会保留文件名、跨平台本地路径；安全的小型文本文件还会内联内容。
-  Future<List<Map<String, dynamic>>> _agenticHistory(String userMessage) {
+  Future<List<Map<String, dynamic>>> _agenticHistory(
+    String userMessage, {
+    List<Message>? messages,
+  }) {
     return AgentAttachmentContext.buildHistory(
-      messages: _recentMessagesForContext(),
+      messages: messages ?? _recentMessagesForContext(),
       currentUserRequest: userMessage,
     );
   }
@@ -3787,6 +4130,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _streamSub = null;
     _streamDone = null;
     if (mounted) setState(() => _isStreaming = false);
+
+    if (failed) {
+      final retryContent = await _retryFailedReply(
+        character: character,
+        config: config,
+        provider: provider,
+        apiMessages: apiMessages,
+      );
+      if (retryContent != null && retryContent.trim().isNotEmpty) {
+        failed = false;
+        fullContent = retryContent.trim();
+        temp.content = fullContent;
+        if (_canTouchUi) _flushStreamingUi();
+      }
+    }
 
     if (!failed && fullContent.trim().isEmpty) {
       fullContent = ChatActivityPolicy.emptyReplyFallback(
@@ -5395,6 +5753,7 @@ class _PendingAgentToolApproval {
   final ToolRequest request;
   final List<ToolRequest> priorExecutedRequests;
   final List<Map<String, dynamic>> conversationHistory;
+  final AgentTask task;
 
   const _PendingAgentToolApproval({
     required this.character,
@@ -5404,6 +5763,7 @@ class _PendingAgentToolApproval {
     required this.request,
     this.priorExecutedRequests = const [],
     this.conversationHistory = const [],
+    required this.task,
   });
 }
 

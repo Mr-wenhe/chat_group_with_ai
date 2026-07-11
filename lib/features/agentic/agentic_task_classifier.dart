@@ -23,11 +23,18 @@ class AgenticTaskClassifier {
     '安装 skill',
     '专家skill',
     '专家 skill',
+    '审核这份',
+    '审查这份',
+    '任务计划',
+    '实施计划',
+    '进度保存',
+    '进度文件',
   ];
 
   static final _createOrEditIntent = RegExp(
     r'(生成|创建|写|制作|做一个|做个|帮我做|给我做|实现|开发|输出|导出|'
-    r'修改|改一下|改写|编辑|整理|转换|create|write|build|make|generate|edit)',
+    r'修改|改一下|改写|编辑|整理|转换|撰写|审核|审查|保存|'
+    r'create|write|build|make|generate|edit|audit)',
     caseSensitive: false,
   );
 

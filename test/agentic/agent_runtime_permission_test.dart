@@ -4,12 +4,46 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
+import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('resumed runtime preserves completed operations at next checkpoint',
+      () async {
+    const completed = ToolRequest(
+      tool: AgentToolName.workspaceRead,
+      reason: '已读取需求',
+      args: {'path': 'requirements.md'},
+    );
+    final runtime = AgentRuntime(
+      enableLocalFilePlanner: false,
+      complete: (_) async => {
+        'success': true,
+        'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"继续生成页面","args":{"path":"page.html","content":"<html></html>"}}
+```
+''',
+      },
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '继续完成页面',
+      priorExecutedRequests: [completed],
+    );
+
+    expect(result.status, AgentRuntimeStatus.waitingForApproval);
+    expect(result.executedToolRequests, contains(completed));
+    expect(result.pendingToolRequest?.tool, AgentToolName.workspacePatch);
+  });
+
   test('default runtime lets the model generate requested file content',
       () async {
     var completionCalls = 0;
@@ -142,6 +176,35 @@ void main() {
     expect(result.message, isNot(contains('我马上帮你制作')));
   });
 
+  test('tool format correction is attempted up to three times', () async {
+    var calls = 0;
+    final runtime = AgentRuntime(
+      complete: (_) async {
+        calls++;
+        if (calls < 4) {
+          return {'success': true, 'message': 'workspace.patch 格式仍不正确'};
+        }
+        return {
+          'success': true,
+          'message':
+              '```agent_tool\n{"tool":"workspace.patch","reason":"生成页面","args":{"path":"page.html","content":"<html></html>"}}\n```',
+        };
+      },
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '生成 page.html',
+    );
+
+    expect(calls, 4);
+    expect(result.status, AgentRuntimeStatus.waitingForApproval);
+    expect(result.pendingToolRequest?.tool, AgentToolName.workspacePatch);
+  });
+
   test('planning retries once after a transient 503 response', () async {
     var completionCalls = 0;
     final fakeTool = _FakeWorkspaceFileTool(
@@ -199,6 +262,7 @@ void main() {
     final runtime = AgentRuntime(
       complete: (_) async => throw TimeoutException('planning stalled'),
       workspaceFileTool: fakeTool,
+      retrySleep: (_) async {},
     );
 
     final result = await runtime.run(
@@ -254,7 +318,7 @@ void main() {
     expect(result.message, isNot(contains('#include <iostream>')));
   });
 
-  test('planning does not retry a receive timeout and release is immediate',
+  test('planning retries a receive timeout five times before failing',
       () async {
     var completionCalls = 0;
     final runtime = AgentRuntime(
@@ -262,6 +326,7 @@ void main() {
         completionCalls++;
         return {'success': false, 'message': '连接超时'};
       },
+      retrySleep: (_) async {},
     );
 
     final result = await runtime.run(
@@ -271,7 +336,7 @@ void main() {
     );
 
     expect(result.status, AgentRuntimeStatus.failed);
-    expect(completionCalls, 1);
+    expect(completionCalls, 6);
     expect(result.message, contains('连接超时'));
   });
 
@@ -337,6 +402,37 @@ void main() {
     expect(result.pendingToolRequest, isNotNull);
   });
 
+  test('runtime emits durable progress after every completed tool step',
+      () async {
+    final progress = <AgentRuntimeProgress>[];
+    final runtime = AgentRuntime(
+      complete: (_) async => {
+        'success': true,
+        'message':
+            '```agent_tool\n{"tool":"workspace.patch","reason":"写文件","args":{"path":"page.html","content":"<html></html>"}}\n```',
+      },
+      workspaceFileTool: _FakeWorkspaceFileTool(
+        patchResult: const {'ok': true, 'path': 'page.html'},
+      ),
+      onProgress: (value) async => progress.add(value),
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '生成页面',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(progress, isNotEmpty);
+    expect(progress.last.stage, AgentRuntimeProgressStage.toolCompleted);
+    expect(progress.last.executedRequests.single.tool,
+        AgentToolName.workspacePatch);
+  });
+
   test('runtime executes approved skill create tool', () async {
     var toolCalled = false;
     final runtime = AgentRuntime(
@@ -365,6 +461,32 @@ void main() {
     expect(toolCalled, isTrue);
     expect(result.status, AgentRuntimeStatus.completed);
     expect(result.message, '技能已保存');
+  });
+
+  test('runtime proactively requests skill.create when no skill matches',
+      () async {
+    var completionCalls = 0;
+    final runtime = AgentRuntime(
+      complete: (_) async {
+        completionCalls++;
+        return {'success': true, 'message': '不应先调用模型'};
+      },
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.skillCreate],
+      ),
+      skills: [_skill()],
+      userRequest: '建立门店咖啡杯测流程',
+      forceSkillCreation: true,
+    );
+
+    expect(completionCalls, 0);
+    expect(result.status, AgentRuntimeStatus.waitingForApproval);
+    expect(result.pendingToolRequest?.tool, AgentToolName.skillCreate);
+    expect(result.pendingToolRequest?.args['instructions'], isA<List>());
+    expect(result.pendingToolRequest?.args['description'], contains('咖啡杯测'));
   });
 
   test('runtime executes approved skill download tool', () async {
@@ -495,6 +617,97 @@ void main() {
     for (final messages in receivedMessages) {
       expect(messages, containsAll(history));
     }
+  });
+
+  test(
+      'runtime compacts oversized intermediate tool context and reports summary',
+      () async {
+    var calls = 0;
+    final summaries = <ContextSummary>[];
+    final secondCallMessages = <Map<String, dynamic>>[];
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        calls++;
+        if (calls == 1) {
+          return {
+            'success': true,
+            'message':
+                '```agent_tool\n{"tool":"workspace.read","reason":"读取大文件","args":{"path":"large.txt"}}\n```',
+          };
+        }
+        secondCallMessages.addAll(messages);
+        return {'success': true, 'message': '已完成分析'};
+      },
+      workspaceFileTool: _FakeWorkspaceFileTool(
+        allowReadBeforeWrite: true,
+        readResult: {'content': 'x' * 1000},
+      ),
+      contextWindowManager: ContextWindowManager(
+        thresholdTokens: 1,
+        retrySleep: (_) async {},
+        complete: (_) async => {
+          'success': true,
+          'message':
+              '{"summary":"工具读取了大文件","facts":["large.txt 已读取"],"relationshipNotes":[],"personaGrowth":[]}',
+        },
+      ),
+      onContextSummary: (_, summary) async => summaries.add(summary),
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspaceRead],
+      ),
+      skills: [_skill()],
+      userRequest: '分析 large.txt',
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(summaries.single.summary, '工具读取了大文件');
+    expect(
+      secondCallMessages.first['content'],
+      contains('已压缩的长期上下文'),
+    );
+  });
+
+  test('runtime keeps original tool context when compaction fails', () async {
+    var calls = 0;
+    final runtime = AgentRuntime(
+      complete: (_) async {
+        calls++;
+        if (calls == 1) {
+          return {
+            'success': true,
+            'message':
+                '```agent_tool\n{"tool":"workspace.read","reason":"读取","args":{"path":"large.txt"}}\n```',
+          };
+        }
+        return {'success': true, 'message': '仍然完成'};
+      },
+      workspaceFileTool: _FakeWorkspaceFileTool(
+        allowReadBeforeWrite: true,
+        readResult: {'content': 'x' * 1000},
+      ),
+      contextWindowManager: ContextWindowManager(
+        thresholdTokens: 1,
+        maxRetries: 0,
+        complete: (_) async => {
+          'success': false,
+          'message': 'HTTP 400: context unsupported',
+        },
+      ),
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspaceRead],
+      ),
+      skills: [_skill()],
+      userRequest: '分析 large.txt',
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(result.message, '仍然完成');
   });
 
   test('approved tool continues until the next write-like approval', () async {
@@ -1005,6 +1218,7 @@ void main() {
     // 关键断言：消息中包含简洁确认行（含文件名和大小），不含文件正文。
     expect(result.message, contains('✅ 文件已生成'));
     expect(result.message, contains('star.html'));
+    expect(result.message, contains('HTML 验证通过'));
     // 文件内容不应出现在消息中。
     expect(result.message, isNot(contains('hello from preview')));
     expect(result.message, isNot(contains('文件内容预览')));

@@ -2,6 +2,21 @@ import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('tool request JSON round-trips for persisted task recovery', () {
+    const original = ToolRequest(
+      tool: AgentToolName.workspacePatch,
+      reason: '写入文件',
+      args: {'path': 'page.html', 'content': '<html></html>'},
+    );
+
+    final restored = ToolRequest.fromJsonString(original.toJsonString());
+
+    expect(restored, isNotNull);
+    expect(restored!.tool, AgentToolName.workspacePatch);
+    expect(restored.reason, '写入文件');
+    expect(restored.args['path'], 'page.html');
+  });
+
   test('parses fenced tool request json', () {
     final parsed = ToolRequest.tryParse('''
 我需要读文件。

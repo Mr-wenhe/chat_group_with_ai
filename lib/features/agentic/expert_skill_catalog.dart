@@ -38,11 +38,97 @@ class ExpertSkillTemplate {
 class ExpertSkillCatalog {
   static const List<ExpertSkillTemplate> templates = [
     ExpertSkillTemplate(
+      id: 'meta.create-skills',
+      name: 'Create Skills',
+      domain: 'meta',
+      description: '把新的专业流程设计成可复用、可验证并具备最小权限的角色技能。',
+      keywords: [
+        '创建技能',
+        '生成技能',
+        '新技能',
+        'create skill',
+        'skill.create',
+        '可复用技能',
+      ],
+      instructions: [
+        '先提炼技能要解决的用户意图、适用边界和可观察产出。',
+        '检查已安装技能和内置模板，避免创建重复能力。',
+        '把工作流拆成明确步骤，并只申请完成步骤所需的最小工具权限。',
+        '调用 skill.create 创建技能，随后用一个代表性请求验证技能可匹配和执行。',
+      ],
+      requiredPermissions: [
+        ToolPermission.skillCreate,
+        ToolPermission.skillDownload,
+      ],
+    ),
+    ExpertSkillTemplate(
+      id: 'general.superpowers',
+      name: 'Superpowers Workflow',
+      domain: 'general',
+      description: '用澄清、根因分析、测试驱动和完成前验证处理复杂工程任务。',
+      keywords: [
+        '测试驱动',
+        '根因分析',
+        '系统化调试',
+        '复杂任务',
+        '质量门禁',
+        'superpowers',
+        'tdd',
+      ],
+      instructions: [
+        '执行前核对目标、约束、现有实现和可复现证据。',
+        '对缺失行为先写最小失败测试，确认失败原因与需求一致。',
+        '实施能让测试通过的最小修改，避免捎带无关重构。',
+        '运行目标测试、回归测试和静态分析，用新鲜输出证明完成状态。',
+      ],
+      requiredPermissions: [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+        ToolPermission.commandRun,
+      ],
+    ),
+    ExpertSkillTemplate(
+      id: 'planning.planning-with-files',
+      name: 'Planning With Files',
+      domain: 'planning',
+      description: '把复杂任务的计划、证据和进度持久化到文件，支持跨轮次恢复执行。',
+      keywords: [
+        '计划文件',
+        '进度文件',
+        '计划和进度',
+        '写进文件',
+        '写入文件',
+        '保存到文件',
+        'planning with files',
+        '实施计划',
+      ],
+      instructions: [
+        '读取任务相关文件，确认目标、约束和已有状态。',
+        '建立包含阶段、验收证据和未解决问题的计划文件。',
+        '每完成一个可验证步骤就更新进度和关键发现，保留恢复所需上下文。',
+        '结束前对照计划逐项验证，并记录实际命令输出和剩余风险。',
+      ],
+      requiredPermissions: [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+        ToolPermission.commandRun,
+      ],
+    ),
+    ExpertSkillTemplate(
       id: 'coding.flutter-reviewer',
       name: 'Flutter Code Expert',
       domain: 'coding',
       description: '像资深 Flutter 工程师一样读代码、review、修 bug 和验证。',
-      keywords: ['代码', 'code', 'flutter', 'dart', 'review', 'debug', 'bug', '工程师'],
+      keywords: [
+        '代码',
+        'code',
+        'flutter',
+        'dart',
+        'review',
+        'debug',
+        'bug',
+        '工程师'
+      ],
       instructions: [
         '先确认用户要改的目标、错误现象或 review 范围。',
         '读取最小相关文件，必要时列出依赖链。',
@@ -147,12 +233,14 @@ class ExpertSkillCatalog {
 
   static List<ExpertSkillTemplate> recommendForText(String text) {
     final lower = text.toLowerCase();
-    final matched = templates
-        .where((template) =>
-            template.id != 'general.workbuddy-expert-builder' &&
-            template.keywords.any((keyword) =>
-                keyword.isNotEmpty && lower.contains(keyword.toLowerCase())))
-        .toList();
+    final matched = templates.where((template) {
+      if (template.id == 'general.workbuddy-expert-builder') return false;
+      return template.keywords.any(
+        (keyword) =>
+            keyword.isNotEmpty && lower.contains(keyword.toLowerCase()),
+      );
+    }).toList()
+      ..sort((a, b) => _matchScore(b, lower).compareTo(_matchScore(a, lower)));
     if (matched.isEmpty) {
       return [
         templates.firstWhere(
@@ -161,6 +249,13 @@ class ExpertSkillCatalog {
       ];
     }
     return matched;
+  }
+
+  static int _matchScore(ExpertSkillTemplate template, String lower) {
+    return template.keywords
+        .where((keyword) =>
+            keyword.isNotEmpty && lower.contains(keyword.toLowerCase()))
+        .fold<int>(0, (score, keyword) => score + keyword.length);
   }
 
   static ExpertSkillTemplate? findById(String id) {

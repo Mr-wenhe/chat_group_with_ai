@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -43,5 +44,24 @@ void main() {
 
     expect(skill.isGlobal, isFalse);
     expect(skill.requiredPermissions, contains(ToolPermission.workspacePatch));
+  });
+
+  test('agent task persists resumable progress and partial completion', () {
+    final task = AgentTask(
+      id: 'task-1',
+      groupId: 'dm:c1',
+      characterId: 'c1',
+      userRequest: '生成报告',
+      currentStep: 2,
+      completedOperations: const ['workspace.read:README.md'],
+      pendingToolRequestJson: '{"tool":"workspace.patch"}',
+    );
+
+    expect(task.canResume, isTrue);
+    expect(task.currentStep, 2);
+    task.markPartiallyCompleted('HTTP 503');
+    expect(task.status, AgentTaskStatus.partiallyCompleted);
+    expect(task.lastError, 'HTTP 503');
+    expect(task.canResume, isTrue);
   });
 }

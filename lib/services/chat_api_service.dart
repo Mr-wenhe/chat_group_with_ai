@@ -3,15 +3,18 @@ import 'dart:convert';
 import 'package:flutter/foundation.dart';
 
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/retry_handler.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/streaming/sse_parser.dart';
 import 'package:dio/dio.dart';
 
 class ChatApiService {
   final Dio _dio;
+  final RetrySleep _retrySleep;
 
-  ChatApiService({Dio? dio})
-      : _dio = dio ??
+  ChatApiService({Dio? dio, RetrySleep? retrySleep})
+      : _retrySleep = retrySleep ?? Future<void>.delayed,
+        _dio = dio ??
             Dio(BaseOptions(
               connectTimeout: const Duration(seconds: 15),
               receiveTimeout: const Duration(seconds: 30),
@@ -28,6 +31,35 @@ class ChatApiService {
     required List<Map<String, dynamic>> messages,
     double temperature = 0.85,
     int maxTokens = 1024,
+    Duration? receiveTimeout,
+    int maxRetries = RetryHandler.defaultMaxRetries,
+  }) async {
+    final result = await RetryHandler.executeWithRetry<Map<String, dynamic>>(
+      operation: (attempt) => _sendChatMessageOnce(
+        apiKey: apiKey,
+        provider: provider,
+        customBaseUrl: customBaseUrl,
+        model: model,
+        messages: messages,
+        temperature: attempt.temperatureFor(temperature),
+        maxTokens: maxTokens,
+        receiveTimeout: receiveTimeout,
+      ),
+      shouldRetryResult: RetryHandler.isTransientResult,
+      sleep: _retrySleep,
+      maxRetries: maxRetries,
+    );
+    return _friendlyRetryFailure(result, maxRetries);
+  }
+
+  Future<Map<String, dynamic>> _sendChatMessageOnce({
+    required String apiKey,
+    required ApiProvider provider,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required double temperature,
+    required int maxTokens,
     Duration? receiveTimeout,
   }) async {
     final baseUrl = provider == ApiProvider.custom
@@ -85,6 +117,7 @@ class ChatApiService {
         final err = response.data?.toString() ?? 'HTTP ${response.statusCode}';
         return {
           'success': false,
+          'statusCode': response.statusCode,
           'message': 'HTTP ${response.statusCode}: $err'
         };
       }
@@ -99,6 +132,7 @@ class ChatApiService {
         final err = e.response!.data?.toString() ?? e.message;
         return {
           'success': false,
+          'statusCode': e.response!.statusCode,
           'message': 'HTTP ${e.response!.statusCode}: $err'
         };
       } else {
@@ -122,6 +156,66 @@ class ChatApiService {
     double temperature = 0.85,
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = RetryHandler.defaultMaxRetries,
+  }) async {
+    final result = await RetryHandler.executeWithRetry<Map<String, dynamic>>(
+      operation: (attempt) {
+        final nextTemperature = attempt.temperatureFor(temperature);
+        if (!attempt.useStreaming) {
+          return _sendChatMessageOnce(
+            apiKey: apiKey,
+            provider: provider,
+            customBaseUrl: customBaseUrl,
+            model: model,
+            messages: messages,
+            temperature: nextTemperature,
+            maxTokens: maxTokens,
+            receiveTimeout: receiveTimeout,
+          );
+        }
+        return _collectStreamedOnce(
+          apiKey: apiKey,
+          provider: provider,
+          customBaseUrl: customBaseUrl,
+          model: model,
+          messages: messages,
+          temperature: nextTemperature,
+          maxTokens: maxTokens,
+          receiveTimeout: receiveTimeout,
+        );
+      },
+      shouldRetryResult: RetryHandler.isTransientResult,
+      sleep: _retrySleep,
+      maxRetries: maxRetries,
+    );
+    return _friendlyRetryFailure(result, maxRetries);
+  }
+
+  Map<String, dynamic> _friendlyRetryFailure(
+    Map<String, dynamic> result,
+    int maxRetries,
+  ) {
+    if (maxRetries <= 0 || !RetryHandler.isTransientResult(result)) {
+      return result;
+    }
+    final reason = result['message']?.toString() ?? '未知瞬态错误';
+    return {
+      ...result,
+      'message': '请求已重试 $maxRetries 次仍失败。原因：$reason。'
+          '请检查网络和 API 配置、确认服务额度，或稍后再试。',
+      'retryExhausted': true,
+    };
+  }
+
+  Future<Map<String, dynamic>> _collectStreamedOnce({
+    required String apiKey,
+    required ApiProvider provider,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required double temperature,
+    required int maxTokens,
+    required Duration receiveTimeout,
   }) async {
     String content = '';
     int? promptTokens;

@@ -68,10 +68,16 @@ class DatabaseService {
   static const Duration _tokenUsageFlushDelay = Duration(seconds: 2);
 
   Future<void> init() async {
-    final dir = await _getDataDir();
-    _dataDir = dir;
-    debugPrint('[DB] Hive data dir: ${dir.path} (mode: $_storageModeLabel)');
-    await Hive.initFlutter(dir.path);
+    if (kIsWeb) {
+      // Web 端由 Hive 使用 IndexedDB，不存在应用支持目录。
+      await Hive.initFlutter();
+      debugPrint('[DB] Hive storage: IndexedDB (mode: web)');
+    } else {
+      final dir = await _getDataDir();
+      _dataDir = dir;
+      debugPrint('[DB] Hive data dir: ${dir.path} (mode: $_storageModeLabel)');
+      await Hive.initFlutter(dir.path);
+    }
     Hive.registerAdapter(AICharacterAdapter());
     Hive.registerAdapter(ApiConfigAdapter());
     Hive.registerAdapter(ChatGroupAdapter());

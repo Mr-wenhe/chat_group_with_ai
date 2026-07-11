@@ -21,6 +21,12 @@ void main() {
     expect(AgenticTaskClassifier.requiresAgenticWork('总结我选中的网页内容'), isTrue);
   });
 
+  test('detects document, audit and planning file workflows as agentic', () {
+    expect(AgenticTaskClassifier.requiresAgenticWork('帮我撰写一份需求文档'), isTrue);
+    expect(AgenticTaskClassifier.requiresAgenticWork('审核这份技术方案'), isTrue);
+    expect(AgenticTaskClassifier.requiresAgenticWork('把任务计划和进度保存到文件'), isTrue);
+  });
+
   test('keeps ordinary chat non-agentic', () {
     expect(AgenticTaskClassifier.requiresAgenticWork('今天心情一般，陪我聊聊'), isFalse);
   });

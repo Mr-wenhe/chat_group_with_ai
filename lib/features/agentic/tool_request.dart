@@ -31,6 +31,31 @@ class ToolRequest {
     required this.args,
   });
 
+  Map<String, dynamic> toJson() => {
+        'tool': tool.wireName,
+        'reason': reason,
+        'args': args,
+      };
+
+  String toJsonString() => jsonEncode(toJson());
+
+  static ToolRequest? fromJsonString(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map<String, dynamic>) return null;
+      final tool = AgentToolName.fromWire(decoded['tool']?.toString() ?? '');
+      final args = decoded['args'];
+      if (tool == null || args is! Map<String, dynamic>) return null;
+      return ToolRequest(
+        tool: tool,
+        reason: decoded['reason']?.toString() ?? '',
+        args: args,
+      );
+    } on FormatException {
+      return null;
+    }
+  }
+
   static ToolRequest? tryParse(String content) {
     // 原有：```agent_tool ... ``` 围栏格式（prompt 推荐格式）
     var match = RegExp(

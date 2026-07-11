@@ -1,19 +1,59 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:chat_group/features/agentic/skill_download_service.dart';
 
 class CharacterSkillBundle {
   final List<CharacterSkill> skills;
   final List<ToolPermission> permissions;
+  final bool needsSkillCreation;
+  final String skillCreationHint;
 
   const CharacterSkillBundle({
     required this.skills,
     required this.permissions,
+    this.needsSkillCreation = false,
+    this.skillCreationHint = '',
   });
 }
 
 class CharacterSkillResolver {
+  /// 同时考虑角色职业和当前用户意图，补充本轮最相关的内置技能。
+  static CharacterSkillBundle resolveFor(
+    AICharacter character,
+    String userRequest,
+  ) {
+    final defaults = defaultsFor(character);
+    // 本轮是否缺技能必须只看用户意图；角色文本中的泛词（如“研究咖啡”）
+    // 不能把杯测流程误判成浏览器研究。职业默认能力已由 defaultsFor 注入。
+    final recommended = ExpertSkillCatalog.recommendForText(userRequest);
+    final onlyBuilder = recommended.length == 1 &&
+        recommended.first.id == 'general.workbuddy-expert-builder';
+    final skills = <CharacterSkill>[...defaults.skills];
+    final permissions = <ToolPermission>{...defaults.permissions};
+
+    if (!onlyBuilder) {
+      for (final template in recommended.take(3)) {
+        if (skills.any((skill) => skill.id == template.id)) continue;
+        skills.add(template.instantiateFor(character.id));
+        permissions.addAll(template.requiredPermissions);
+      }
+    } else {
+      permissions.add(ToolPermission.skillCreate);
+    }
+    _addIntentPermissions(permissions, userRequest);
+
+    return CharacterSkillBundle(
+      skills: skills,
+      permissions: permissions.toList(),
+      needsSkillCreation: onlyBuilder,
+      skillCreationHint: onlyBuilder
+          ? '没有匹配「${_clipRequest(userRequest)}」的内置技能，建议先调用 skill.create 创建可复用技能。'
+          : '',
+    );
+  }
+
   static CharacterSkillBundle defaultsFor(AICharacter character) {
     final text = [
       character.name,
@@ -73,7 +113,9 @@ class CharacterSkillResolver {
     }
 
     final recommendedTemplates =
-        SkillDownloadService.recommendedTemplatesFor(character).take(3).toList();
+        SkillDownloadService.recommendedTemplatesFor(character)
+            .take(3)
+            .toList();
     if (recommendedTemplates.isNotEmpty) {
       skills.add(_downloadableTemplateSkill(
         character.id,
@@ -102,6 +144,33 @@ class CharacterSkillResolver {
 
   static bool _containsAny(String text, List<String> needles) =>
       needles.any(text.contains);
+
+  static String _clipRequest(String text) {
+    final compact = text.trim().replaceAll(RegExp(r'\s+'), ' ');
+    return compact.length <= 48 ? compact : '${compact.substring(0, 48)}…';
+  }
+
+  static void _addIntentPermissions(
+    Set<ToolPermission> permissions,
+    String userRequest,
+  ) {
+    final lower = userRequest.toLowerCase();
+    final needsWorkspace = RegExp(
+      r'(文件|路径|文档|代码|脚本|页面|网页|网站|主页|落地页|应用|小程序|'
+      r'html?|markdown|\bmd\b|dart|flutter|json|ya?ml|css|javascript|'
+      r'\bjs\b|python|\bpy\b|review|修复|bug)',
+      caseSensitive: false,
+    ).hasMatch(lower);
+    if (needsWorkspace) {
+      permissions.add(ToolPermission.workspaceRead);
+      permissions.add(ToolPermission.workspacePatch);
+    }
+    final needsCommand = RegExp(
+      r'(运行|测试|验证|构建|编译|命令|command|\btest\b|\banalyze\b|\bbuild\b|dart|flutter)',
+      caseSensitive: false,
+    ).hasMatch(lower);
+    if (needsCommand) permissions.add(ToolPermission.commandRun);
+  }
 
   static List<CharacterSkill> _codingSkills(String characterId) => [
         CharacterSkill(

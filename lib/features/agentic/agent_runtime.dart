@@ -5,7 +5,10 @@ import 'package:dio/dio.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/core/retry_handler.dart';
 import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
+import 'package:chat_group/features/agentic/context_window_manager.dart';
+import 'package:chat_group/features/agentic/file_validator.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/agentic/tools/browser_context_tool.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
@@ -20,6 +23,28 @@ typedef SkillCreateHandler = Future<Map<String, dynamic>> Function(
 
 typedef SkillDownloadHandler = Future<Map<String, dynamic>> Function(
   Map<String, dynamic> args,
+);
+
+enum AgentRuntimeProgressStage { waitingForApproval, toolCompleted }
+
+class AgentRuntimeProgress {
+  final AgentRuntimeProgressStage stage;
+  final List<ToolRequest> executedRequests;
+  final ToolRequest? pendingRequest;
+
+  const AgentRuntimeProgress({
+    required this.stage,
+    required this.executedRequests,
+    this.pendingRequest,
+  });
+}
+
+typedef AgentProgressHandler = Future<void> Function(
+  AgentRuntimeProgress progress,
+);
+typedef AgentContextSummaryHandler = Future<void> Function(
+  AICharacter character,
+  ContextSummary summary,
 );
 
 enum AgentRuntimeStatus {
@@ -76,6 +101,12 @@ class AgentRuntime {
   final SkillCreateHandler? skillCreateHandler;
   final SkillDownloadHandler? skillDownloadHandler;
   final bool enableLocalFilePlanner;
+  final RetrySleep retrySleep;
+  final int completionMaxRetries;
+  final AgentProgressHandler? onProgress;
+  final ContextWindowManager? contextWindowManager;
+  final AgentContextSummaryHandler? onContextSummary;
+  final bool contextIsDirectChat;
 
   const AgentRuntime({
     required this.complete,
@@ -84,6 +115,12 @@ class AgentRuntime {
     this.skillCreateHandler,
     this.skillDownloadHandler,
     this.enableLocalFilePlanner = false,
+    this.retrySleep = Future<void>.delayed,
+    this.completionMaxRetries = RetryHandler.defaultMaxRetries,
+    this.onProgress,
+    this.contextWindowManager,
+    this.onContextSummary,
+    this.contextIsDirectChat = false,
   });
 
   /// 清洗可能泄露到聊天文本中的内部工具调用协议标记。
@@ -160,7 +197,11 @@ class AgentRuntime {
     if (content == null || content.isEmpty) return message;
     final path = toolResult['path'] as String? ?? '';
     final sizeKB = (content.length / 1024).toStringAsFixed(1);
-    return '$message\n\n✅ 文件已生成：`$path`（$sizeKB KB）— 点击附件查看完整内容';
+    final validation = toolResult['validation'];
+    final validationMessage =
+        validation is Map ? validation['message']?.toString().trim() ?? '' : '';
+    return '$message\n\n✅ 文件已生成：`$path`（$sizeKB KB）— 点击附件查看完整内容'
+        '${validationMessage.isEmpty ? '' : '\n🔎 $validationMessage'}';
   }
 
   /// 响应护栏：拦截 LLM 在 final 文本中贴出的「裸代码 / 文件全文」泄漏（Bug A）。
@@ -562,7 +603,21 @@ class AgentRuntime {
     bool approved = false,
     bool autoApproveWriteTools = false,
     List<Map<String, dynamic>>? conversationHistory,
+    bool forceSkillCreation = false,
+    List<ToolRequest> priorExecutedRequests = const [],
   }) async {
+    if (forceSkillCreation) {
+      return _handleToolRequest(
+        character: character,
+        request: _skillCreationRequest(character, userRequest),
+        userRequest: userRequest,
+        approved: approved,
+        autoApproveWriteTools: autoApproveWriteTools,
+        remainingSteps: maxToolSteps,
+        executedRequests: priorExecutedRequests,
+        conversationHistory: conversationHistory,
+      );
+    }
     final localRequest = enableLocalFilePlanner
         ? _localFileGenerationRequest(character, userRequest)
         : null;
@@ -574,7 +629,7 @@ class AgentRuntime {
         approved: approved,
         autoApproveWriteTools: autoApproveWriteTools,
         remainingSteps: maxToolSteps,
-        executedRequests: const [],
+        executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
       );
     }
@@ -586,7 +641,7 @@ class AgentRuntime {
     );
     late final Map<String, dynamic> first;
     try {
-      first = await _completePlanningWithRetry([
+      first = await _completePlanningWithRetry(character, [
         {'role': 'system', 'content': prompt},
         // 追加对话历史，使 LLM 在规划工具时拥有上下文（修复追问失忆）。
         ...?conversationHistory,
@@ -605,7 +660,7 @@ class AgentRuntime {
           approved: approved,
           autoApproveWriteTools: autoApproveWriteTools,
           remainingSteps: maxToolSteps,
-          executedRequests: const [],
+          executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
         );
       }
@@ -631,7 +686,7 @@ class AgentRuntime {
           approved: approved,
           autoApproveWriteTools: autoApproveWriteTools,
           remainingSteps: maxToolSteps,
-          executedRequests: const [],
+          executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
         );
       }
@@ -651,7 +706,7 @@ class AgentRuntime {
         approved: approved,
         autoApproveWriteTools: autoApproveWriteTools,
         remainingSteps: maxToolSteps,
-        executedRequests: const [],
+        executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
       );
     }
@@ -666,7 +721,7 @@ class AgentRuntime {
         approved: approved,
         autoApproveWriteTools: autoApproveWriteTools,
         remainingSteps: maxToolSteps,
-        executedRequests: const [],
+        executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
       );
     }
@@ -687,7 +742,7 @@ class AgentRuntime {
           approved: approved,
           autoApproveWriteTools: autoApproveWriteTools,
           remainingSteps: maxToolSteps,
-          executedRequests: const [],
+          executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
         );
       }
@@ -695,7 +750,7 @@ class AgentRuntime {
       // 宽松解析也失败：模型有工具意图但输出格式不对。
       // 尝试 re-prompt（给模型一次机会纠正格式）。
       final repromptResult = await _repromptForToolFormat(
-        characterName: character.name,
+        character: character,
         skills: skills,
         userRequest: userRequest,
         originalResponse: content,
@@ -709,7 +764,7 @@ class AgentRuntime {
           approved: approved,
           autoApproveWriteTools: autoApproveWriteTools,
           remainingSteps: maxToolSteps,
-          executedRequests: const [],
+          executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
         );
       }
@@ -727,7 +782,7 @@ class AgentRuntime {
           approved: approved,
           autoApproveWriteTools: autoApproveWriteTools,
           remainingSteps: maxToolSteps,
-          executedRequests: const [],
+          executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
         );
       }
@@ -752,23 +807,81 @@ class AgentRuntime {
     );
   }
 
+  ToolRequest _skillCreationRequest(
+    AICharacter character,
+    String userRequest,
+  ) {
+    final compact = userRequest.trim().replaceAll(RegExp(r'\s+'), ' ');
+    final shortName =
+        compact.length <= 20 ? compact : '${compact.substring(0, 20)}…';
+    final permissions = character.toolPermissions
+        .where((permission) =>
+            permission != ToolPermission.skillCreate &&
+            permission != ToolPermission.skillDownload)
+        .map((permission) => permission.name)
+        .toList();
+    return ToolRequest(
+      tool: AgentToolName.skillCreate,
+      reason: '没有已安装或内置技能匹配当前意图，先创建可复用技能',
+      args: {
+        'name': '$shortName 工作流',
+        'domain': 'custom',
+        'description': '为请求“$compact”创建的角色专业技能。',
+        'instructions': const [
+          '确认目标、输入、约束和可观察的完成标准。',
+          '读取或收集完成任务所需的最小上下文。',
+          '按顺序执行任务步骤，并保留关键决策与产物。',
+          '验证结果，说明证据、风险和后续可复用方式。',
+        ],
+        'permissions': permissions,
+      },
+    );
+  }
+
   Future<Map<String, dynamic>> _completePlanningWithRetry(
+    AICharacter character,
+    List<Map<String, dynamic>> messages,
+  ) =>
+      _completeWithRetry(
+        character,
+        messages,
+        allowContextCompaction: false,
+      );
+
+  Future<Map<String, dynamic>> _completeWithRetry(
+    AICharacter character,
+    List<Map<String, dynamic>> messages, {
+    Duration timeout = completionTimeout,
+    bool allowContextCompaction = true,
+  }) async {
+    final prepared = allowContextCompaction
+        ? await _prepareCompletionMessages(character, messages)
+        : messages;
+    return RetryHandler.executeWithRetry<Map<String, dynamic>>(
+      operation: (_) => complete(prepared).timeout(timeout),
+      shouldRetryResult: RetryHandler.isTransientResult,
+      sleep: retrySleep,
+      maxRetries: completionMaxRetries,
+    );
+  }
+
+  Future<List<Map<String, dynamic>>> _prepareCompletionMessages(
+    AICharacter character,
     List<Map<String, dynamic>> messages,
   ) async {
-    Map<String, dynamic>? lastResult;
-    for (var attempt = 0; attempt < 2; attempt++) {
-      try {
-        final result = await complete(messages).timeout(completionTimeout);
-        lastResult = result;
-        if (result['success'] == true ||
-            !_isTransientCompletionFailure(result)) {
-          return result;
-        }
-      } on TimeoutException {
-        rethrow;
-      }
+    final manager = contextWindowManager;
+    if (manager == null || !manager.shouldSummarize(messages)) return messages;
+    try {
+      final summary = await manager.summarize(
+        messages,
+        isDirectChat: contextIsDirectChat,
+      );
+      final handler = onContextSummary;
+      if (handler != null) await handler(character, summary);
+      return manager.compact(messages, summary);
+    } catch (_) {
+      return messages;
     }
-    return lastResult ?? {'success': false, 'message': '连接超时'};
   }
 
   Future<ToolRequest?> _fallbackFileRequestAfterPlanningFailure({
@@ -826,10 +939,10 @@ class AgentRuntime {
 ''';
 
     try {
-      final result = await complete([
+      final result = await _completeWithRetry(character, [
         {'role': 'system', 'content': prompt},
         ...?conversationHistory,
-      ]).timeout(completionTimeout);
+      ]);
       if (result['success'] != true) return null;
       final output = result['message']?.toString() ?? '';
       final parsed =
@@ -851,16 +964,6 @@ class AgentRuntime {
     }
   }
 
-  static bool _isTransientCompletionFailure(Map<String, dynamic> result) {
-    final message = result['message']?.toString().toLowerCase() ?? '';
-    return message.contains('网络连接失败') ||
-        message.contains('connection reset') ||
-        message.contains('http 429') ||
-        message.contains('http 502') ||
-        message.contains('http 503') ||
-        message.contains('http 504');
-  }
-
   /// 当模型第一次输出含有工具调用意图但格式无法解析时，用更严格的简短提示
   /// 重新要求模型**只**输出标准格式的工具请求块。
   ///
@@ -869,7 +972,7 @@ class AgentRuntime {
   ///
   /// 返回解析出的 [ToolRequest]（成功），或 null（re-prompt 也失败/超时/异常）。
   Future<ToolRequest?> _repromptForToolFormat({
-    required String characterName,
+    required AICharacter character,
     required List<CharacterSkill> skills,
     required String userRequest,
     required String originalResponse,
@@ -909,25 +1012,27 @@ class AgentRuntime {
 - 只输出上面这一个 ```agent_tool ... ``` 块，不多不少
 ''';
 
-    try {
-      final retry = await complete([
-        {'role': 'system', 'content': repromptPrompt},
-        ...?conversationHistory,
-      ]).timeout(const Duration(seconds: 30));
-
-      if (retry['success'] != true) return null;
-
-      final retryContent = retry['message']?.toString() ?? '';
-      final request = ToolRequest.tryParse(retryContent);
-      if (request != null) return request;
-
-      // tryParse 失败再试 looseParse
-      return _looseParseToolRequest(retryContent);
-    } on TimeoutException {
-      return null;
-    } catch (_) {
-      return null;
+    for (var correction = 0; correction < 3; correction++) {
+      try {
+        final retry = await _completeWithRetry(
+            character,
+            [
+              {'role': 'system', 'content': repromptPrompt},
+              ...?conversationHistory,
+            ],
+            timeout: const Duration(seconds: 30));
+        if (retry['success'] != true) return null;
+        final retryContent = retry['message']?.toString() ?? '';
+        final request = ToolRequest.tryParse(retryContent) ??
+            _looseParseToolRequest(retryContent);
+        if (request != null) return request;
+      } on TimeoutException {
+        return null;
+      } catch (_) {
+        return null;
+      }
     }
+    return null;
   }
 
   Future<AgentRuntimeResult> _handleToolRequest({
@@ -963,6 +1068,11 @@ class AgentRuntime {
     final autoApprovedWrite =
         autoApproveWriteTools && request.tool == AgentToolName.workspacePatch;
     if (requiresApproval(request.tool) && !approved && !autoApprovedWrite) {
+      await _reportProgress(AgentRuntimeProgress(
+        stage: AgentRuntimeProgressStage.waitingForApproval,
+        executedRequests: executedRequests,
+        pendingRequest: request,
+      ));
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.waitingForApproval,
         pendingToolRequest: request,
@@ -975,7 +1085,7 @@ class AgentRuntime {
 
     late final Map<String, dynamic> toolResult;
     try {
-      toolResult = await _execute(request);
+      toolResult = await _execute(request, character);
     } catch (e) {
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
@@ -991,6 +1101,10 @@ class AgentRuntime {
     //   c) 若在此处短路返回 failed，调用方会直接把错误文本当消息展示且无护栏保护
     // 注意：重复写文件的防护由 _continueAfterToolResult 内的第二层防御负责。
     final nextExecutedRequests = [...executedRequests, request];
+    await _reportProgress(AgentRuntimeProgress(
+      stage: AgentRuntimeProgressStage.toolCompleted,
+      executedRequests: nextExecutedRequests,
+    ));
     return _continueAfterToolResult(
       character: character,
       request: request,
@@ -1001,6 +1115,16 @@ class AgentRuntime {
       autoApproveWriteTools: autoApproveWriteTools,
       conversationHistory: conversationHistory,
     );
+  }
+
+  Future<void> _reportProgress(AgentRuntimeProgress progress) async {
+    final handler = onProgress;
+    if (handler == null) return;
+    try {
+      await handler(progress);
+    } catch (_) {
+      // 检查点失败不能抹掉已经完成的本地工具结果。
+    }
   }
 
   Future<AgentRuntimeResult> _continueAfterToolResult({
@@ -1033,11 +1157,11 @@ class AgentRuntime {
     );
     late final Map<String, dynamic> finalResponse;
     try {
-      finalResponse = await complete([
+      finalResponse = await _completeWithRetry(character, [
         {'role': 'system', 'content': finalPrompt},
         // 追加对话历史，使 LLM 在整理结果时拥有上下文（修复追问失忆）。
         ...?conversationHistory,
-      ]).timeout(completionTimeout);
+      ]);
     } on TimeoutException {
       final fallback = _completedFallbackForExecutedTool(
         character: character,
@@ -1202,13 +1326,20 @@ class AgentRuntime {
     };
   }
 
-  Future<Map<String, dynamic>> _execute(ToolRequest request) async {
+  Future<Map<String, dynamic>> _execute(
+    ToolRequest request,
+    AICharacter character,
+  ) async {
     return switch (request.tool) {
       AgentToolName.workspaceList => await _workspaceFileTool.list(
           path: request.args['path'] as String? ?? '.'),
       AgentToolName.workspaceRead =>
         await _workspaceFileTool.read(request.args['path'] as String? ?? ''),
-      AgentToolName.workspacePatch => await _executeWorkspacePatch(request),
+      AgentToolName.workspacePatch => await _executeWorkspacePatch(
+          request,
+          allowCommandValidation:
+              character.toolPermissions.contains(ToolPermission.commandRun),
+        ),
       AgentToolName.commandRun => await _workspaceFileTool
           .runCommand(request.args['command'] as String? ?? ''),
       AgentToolName.browserContext => _browserSnapshotToJson(
@@ -1227,7 +1358,9 @@ class AgentRuntime {
   /// 写成功但读回失败时降级处理：仅返回写结果、不附加预览，也不把异常暴露给用户
   /// —— 写文件这一核心动作已成功，不应因读回失败而被判定为整次工具执行失败。
   Future<Map<String, dynamic>> _executeWorkspacePatch(
-      ToolRequest request) async {
+    ToolRequest request, {
+    required bool allowCommandValidation,
+  }) async {
     final rawPath = request.args['path'] as String? ?? '';
     var path = WorkspacePathGuard.normalizeToRelative(rawPath);
     if (path.isEmpty) {
@@ -1258,6 +1391,13 @@ class AgentRuntime {
       if (content == null) return writeResult;
       final enriched = Map<String, dynamic>.from(writeResult);
       enriched['readbackContent'] = content;
+      final validation = await FileValidator.validate(
+        path,
+        content,
+        commandRunner:
+            allowCommandValidation ? _workspaceFileTool.runCommand : null,
+      );
+      enriched['validation'] = validation.toJson();
       return enriched;
     } catch (_) {
       return writeResult;

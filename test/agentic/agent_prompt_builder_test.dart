@@ -24,5 +24,7 @@ void main() {
     expect(prompt, contains('```agent_tool'));
     expect(prompt, contains('workspace.read'));
     expect(prompt, contains('Read files'));
+    expect(prompt, contains('没有任何已安装技能匹配'));
+    expect(prompt, contains('必须先调用 skill.create'));
   });
 }

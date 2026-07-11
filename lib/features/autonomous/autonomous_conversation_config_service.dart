@@ -4,6 +4,7 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/autonomous_conversation_config.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/autonomous/autonomous_directory_service.dart';
+import 'package:flutter/foundation.dart';
 
 class AutonomousConversationConfigService {
   final DatabaseService db;
@@ -19,6 +20,13 @@ class AutonomousConversationConfigService {
     required bool isDirectChat,
   }) async {
     final existing = db.autonomousConversationConfigBox.get(conversationId);
+    if (kIsWeb) {
+      return _loadOrCreateWebConfig(
+        existing: existing,
+        conversationId: conversationId,
+        isDirectChat: isDirectChat,
+      );
+    }
     final root = await db.aiProcessingDir;
     final workDir = await directories.conversationDir(
       root: root,
@@ -37,6 +45,26 @@ class AutonomousConversationConfigService {
       conversationId: conversationId,
       conversationType: isDirectChat ? 'direct' : 'group',
       workDirPath: workDir.path,
+    );
+    await db.autonomousConversationConfigBox.put(conversationId, config);
+    return config;
+  }
+
+  /// 浏览器没有本地文件系统；保留稳定的逻辑工作目录供 UI 和状态恢复使用。
+  Future<AutonomousConversationConfig> _loadOrCreateWebConfig({
+    required AutonomousConversationConfig? existing,
+    required String conversationId,
+    required bool isDirectChat,
+  }) async {
+    if (existing != null) return existing;
+    final folder = directories.conversationFolderName(
+      conversationId: conversationId,
+      isDirectChat: isDirectChat,
+    );
+    final config = AutonomousConversationConfig(
+      conversationId: conversationId,
+      conversationType: isDirectChat ? 'direct' : 'group',
+      workDirPath: 'browser://agentic_output/conversations/$folder',
     );
     await db.autonomousConversationConfigBox.put(conversationId, config);
     return config;
