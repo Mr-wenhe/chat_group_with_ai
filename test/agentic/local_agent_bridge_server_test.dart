@@ -25,16 +25,23 @@ Future<HttpServer> _startTestServer(Directory workspace) =>
 Future<({int statusCode, Map<String, dynamic> body})> _postJson(
   int port,
   String path,
-  Map<String, dynamic> body,
-) async {
+  Map<String, dynamic> body, {
+  String? origin,
+  Map<String, String>? responseHeaders,
+}) async {
   final client = HttpClient();
   final request = await client.openUrl(
     'POST',
     Uri.parse('http://127.0.0.1:$port$path'),
   );
   request.headers.contentType = ContentType.json;
+  if (origin != null) request.headers.set('origin', origin);
   request.write(jsonEncode(body));
   final response = await request.close();
+  if (responseHeaders != null) {
+    responseHeaders['access-control-allow-origin'] =
+        response.headers.value('access-control-allow-origin') ?? '';
+  }
   final raw = await utf8.decoder.bind(response).join();
   client.close(force: true);
   final decoded = raw.trim().isEmpty
@@ -76,6 +83,40 @@ void main() {
     final decoded = jsonDecode(body) as Map<String, dynamic>;
     expect(decoded['ok'], isTrue);
     expect(decoded['workspace'], isNotEmpty);
+  });
+
+  test('bridge allows loopback browser origin and echoes it in CORS', () async {
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+    final headers = <String, String>{};
+
+    final result = await _postJson(
+      server.port,
+      '/workspace/write',
+      {'path': 'from-web.txt', 'content': 'ok'},
+      origin: 'http://localhost:54321',
+      responseHeaders: headers,
+    );
+
+    expect(result.statusCode, 200);
+    expect(headers['access-control-allow-origin'], 'http://localhost:54321');
+    expect(await File('${workspace.path}/from-web.txt').readAsString(), 'ok');
+  });
+
+  test('bridge rejects remote browser origin before writing a file', () async {
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+
+    final result = await _postJson(
+      server.port,
+      '/workspace/write',
+      {'path': 'blocked.txt', 'content': 'must not be written'},
+      origin: 'https://evil.example',
+    );
+
+    expect(result.statusCode, 403);
+    expect(result.body['error'], 'origin_not_allowed');
+    expect(File('${workspace.path}/blocked.txt').existsSync(), isFalse);
   });
 
   test('/workspace/write creates a new file and returns ok', () async {
@@ -198,6 +239,41 @@ void main() {
     // 越界绝对路径未被真正写入到目标绝对位置（防御：仍落在工作区内）。
     final escaped = File(absolutePath);
     expect(escaped.existsSync(), isFalse);
+  });
+
+  test('/command/run allows flutter analyze for one safe Dart file', () async {
+    await File('${workspace.path}/sample.dart').writeAsString(
+      'void main() {}\n',
+    );
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+
+    final result = await _postJson(
+      server.port,
+      '/command/run',
+      {'command': 'flutter analyze sample.dart'},
+    );
+
+    expect(result.statusCode, 200);
+    expect(result.body['exitCode'], 0);
+    expect(result.body['stdout'], contains('No issues found'));
+  });
+
+  test('/command/run rejects Dart analyze command injection', () async {
+    await File('${workspace.path}/sample.dart').writeAsString(
+      'void main() {}\n',
+    );
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+
+    final result = await _postJson(
+      server.port,
+      '/command/run',
+      {'command': 'flutter analyze sample.dart; touch pwned.txt'},
+    );
+
+    expect(result.statusCode, 403);
+    expect(File('${workspace.path}/pwned.txt').existsSync(), isFalse);
   });
 
   test('WorkspaceFileTool.write round-trips through the bridge client',

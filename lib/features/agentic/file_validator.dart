@@ -82,7 +82,13 @@ class FileValidator {
         stack.add(tag);
         continue;
       }
-      if (stack.isEmpty || stack.last != tag) {
+      if (stack.isEmpty) {
+        return FileValidationResult(
+          isValid: false,
+          message: 'HTML 验证失败：存在多余的结束标签 </$tag>。',
+        );
+      }
+      if (stack.last != tag) {
         return FileValidationResult(
           isValid: false,
           message: 'HTML 验证失败：标签 <${stack.last}> 未闭合，'

@@ -18,6 +18,16 @@ void main() {
     expect(invalid.message, contains('div'));
   });
 
+  test('HTML 出现多余结束标签时返回失败而不是抛异常', () async {
+    final result = await FileValidator.validate(
+      'broken.html',
+      '<!doctype html><br></div>',
+    );
+
+    expect(result.isValid, isFalse);
+    expect(result.message, contains('多余的结束标签 </div>'));
+  });
+
   test('Markdown 标题不能跨级', () async {
     final result = await FileValidator.validate(
       'report.md',

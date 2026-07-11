@@ -42,8 +42,17 @@ Future<HttpServer> startBridgeServer({
 }
 
 Future<void> _route(HttpRequest request, Directory workspace) async {
+  final origin = request.headers.value('origin');
+  if (origin != null && !_isAllowedBrowserOrigin(origin)) {
+    request.response.statusCode = HttpStatus.forbidden;
+    request.response.headers.contentType = ContentType.json;
+    request.response.write(jsonEncode({'error': 'origin_not_allowed'}));
+    await request.response.close();
+    return;
+  }
+
   if (request.method == 'OPTIONS') {
-    _writeCors(request.response);
+    _writeCors(request);
     await request.response.close();
     return;
   }
@@ -297,7 +306,30 @@ List<String>? _allowedCommand(String command) {
       '--delete-conflicting-outputs',
     ],
   };
-  return allowed[command];
+  final exact = allowed[command];
+  if (exact != null) return exact;
+
+  const analyzePrefix = 'flutter analyze ';
+  if (!command.startsWith(analyzePrefix)) return null;
+  final path = _decodeCommandPath(command.substring(analyzePrefix.length));
+  if (path == null || !path.toLowerCase().endsWith('.dart')) return null;
+  try {
+    _rejectUnsafeRelativePath(path);
+  } on ArgumentError {
+    return null;
+  }
+  return ['flutter', 'analyze', path];
+}
+
+String? _decodeCommandPath(String raw) {
+  var path = raw.trim();
+  if (path.startsWith("'") || path.endsWith("'")) {
+    if (!(path.startsWith("'") && path.endsWith("'"))) return null;
+    path = path.substring(1, path.length - 1).replaceAll(r"'\''", "'");
+  }
+  if (path.isEmpty || path.startsWith('-')) return null;
+  if (RegExp(r'''[;&|`$<>\r\n]''').hasMatch(path)) return null;
+  return path;
 }
 
 Future<_ProcessResultText> _runProcess(
@@ -328,15 +360,29 @@ Future<void> _json(
 }) async {
   request.response.statusCode = statusCode;
   request.response.headers.contentType = ContentType.json;
-  _writeCors(request.response);
+  _writeCors(request);
   request.response.write(jsonEncode(body));
   await request.response.close();
 }
 
-void _writeCors(HttpResponse response) {
-  response.headers.set('access-control-allow-origin', '*');
-  response.headers.set('access-control-allow-methods', 'GET, POST, OPTIONS');
-  response.headers.set('access-control-allow-headers', 'content-type');
+void _writeCors(HttpRequest request) {
+  final origin = request.headers.value('origin');
+  if (origin == null || origin.isEmpty) return;
+  request.response.headers.set('access-control-allow-origin', origin);
+  request.response.headers.set('vary', 'origin');
+  request.response.headers
+      .set('access-control-allow-methods', 'GET, POST, OPTIONS');
+  request.response.headers.set('access-control-allow-headers', 'content-type');
+}
+
+bool _isAllowedBrowserOrigin(String origin) {
+  final uri = Uri.tryParse(origin);
+  if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
+    return false;
+  }
+  return uri.host == 'localhost' ||
+      uri.host == '127.0.0.1' ||
+      uri.host == '::1';
 }
 
 String _fileNameOf(String path) {
