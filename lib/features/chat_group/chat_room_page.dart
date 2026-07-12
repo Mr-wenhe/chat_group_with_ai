@@ -5,6 +5,7 @@ import 'dart:math';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
@@ -20,7 +21,6 @@ import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
-import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/agentic/agent_attachment_context.dart';
 import 'package:chat_group/features/agentic/agentic_task_classifier.dart';
@@ -40,16 +40,20 @@ import 'package:chat_group/features/autonomous/autonomous_conversation_config_se
 import 'package:chat_group/features/autonomous/autonomous_task_service.dart';
 import 'package:chat_group/features/autonomous/autonomous_trigger_detector.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
+import 'package:chat_group/features/chat_group/attachment_opener.dart';
 import 'package:chat_group/features/chat_group/direct_file_task_policy.dart';
+import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/chat_group_form_page.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
 import 'package:chat_group/features/chat_group/multimodal_content.dart';
+import 'package:chat_group/features/chat_group/picked_attachment_payload.dart';
 import 'package:chat_group/features/chat_group/scene_behavior.dart';
 import 'package:chat_group/features/chat_group/widgets/message_selectable_text.dart';
 import 'package:chat_group/features/chat_group/widgets/compact_conversation_controls.dart';
+import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/settings/export_page.dart';
@@ -3717,11 +3721,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   Color _senderColor(AICharacter sender) {
-    final providerName = sender.apiConfigId.isNotEmpty
-        ? (_db.apiConfigBox.get(sender.apiConfigId)?.provider ??
-            sender.apiProvider)
-        : sender.apiProvider;
-    return providerColor(providerName);
+    const palette = [
+      Color(0xFF576B95),
+      Color(0xFF2F7D65),
+      Color(0xFF9A5B31),
+      Color(0xFF7A5C99),
+      Color(0xFF3F6F8F),
+      Color(0xFF8B5D6B),
+      Color(0xFF5F7548),
+    ];
+    final hash = sender.id.codeUnits.fold<int>(0, (sum, unit) => sum + unit);
+    return palette[hash % palette.length];
   }
 
   String get _autoChatStatusText {
@@ -3790,18 +3800,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       onAutoChatChanged: _toggleAutoChat,
       onAutonomousChanged: _toggleAutonomousExecution,
     );
-  }
-
-  static String _formatTime(DateTime dt) {
-    final now = DateTime.now();
-    final diff = now.difference(dt);
-    if (diff.inMinutes < 1) return '刚刚';
-    if (diff.inMinutes < 60) return '${diff.inMinutes}分钟前';
-    if (diff.inHours < 24 && now.day == dt.day) {
-      return '${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
-    }
-    if (diff.inDays < 7) return '${diff.inDays}天前';
-    return '${dt.month}/${dt.day} ${dt.hour.toString().padLeft(2, '0')}:${dt.minute.toString().padLeft(2, '0')}';
   }
 
   void _enterSearch() {
@@ -4284,9 +4282,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     if (_isLoading) {
       return Scaffold(
-        backgroundColor: cs.surface,
+        backgroundColor: WeComChatTokens.chatBackground(context),
         appBar: AppBar(
-          backgroundColor: cs.surface,
+          backgroundColor: WeComChatTokens.chatBackground(context),
           surfaceTintColor: Colors.transparent,
           elevation: 0,
           title: Text(_group?.name ?? '加载中...',
@@ -4299,10 +4297,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       );
     }
 
+    final readUserMessageIds =
+        _isDirectChat ? directReadUserMessageIds(_messages) : const <String>{};
     return Scaffold(
-      backgroundColor: cs.surface,
+      backgroundColor: WeComChatTokens.chatBackground(context),
       appBar: AppBar(
-        backgroundColor: cs.surface,
+        backgroundColor: WeComChatTokens.chatBackground(context),
         surfaceTintColor: Colors.transparent,
         elevation: 0,
         title: _isSearching
@@ -4384,16 +4384,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                 ? _buildEmptyState(cs)
                 : ListView.builder(
                     controller: _scrollController,
-                    padding: const EdgeInsets.all(16),
+                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
                     itemCount: _messages.length,
                     itemBuilder: (context, index) {
                       final message = _messages[index];
                       final messageKey =
                           _messageKeys.putIfAbsent(message.id, GlobalKey.new);
-                      // 日期分隔：首条或与上一条不在同一天时显示
-                      final showDate = index == 0 ||
-                          !_isSameDay(message.timestamp,
-                              _messages[index - 1].timestamp);
+                      // 企业微信按时间段插入时间胶囊：首条、跨日或间隔五分钟。
+                      final showDate = shouldShowWeComTimeDivider(
+                        message.timestamp,
+                        index == 0 ? null : _messages[index - 1].timestamp,
+                      );
                       final sender = message.senderType == 'user'
                           ? null
                           : charactersById[message.senderId] ??
@@ -4438,6 +4439,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                               quotedSenderName: quotedMessage == null
                                   ? null
                                   : _senderNameById(quotedMessage.senderId),
+                              ownerName: _ownerMentionName,
+                              readReceiptText:
+                                  _isDirectChat && message.senderType == 'user'
+                                      ? (readUserMessageIds.contains(message.id)
+                                          ? '已读'
+                                          : '未读')
+                                      : null,
                             ),
                           ],
                         ),
@@ -4684,33 +4692,32 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   Widget _buildDateDivider(ColorScheme cs, DateTime dt) {
     final label = _dateLabel(dt);
     return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 12),
+      padding: const EdgeInsets.symmetric(vertical: 10),
       child: Center(
         child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 4),
+          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
           decoration: BoxDecoration(
-            color: cs.surfaceContainerHighest,
-            borderRadius: BorderRadius.circular(12),
+            color: WeComChatTokens.timePill(context).withOpacity(0.92),
+            borderRadius: BorderRadius.circular(4),
           ),
           child: Text(label,
-              style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
+              style: const TextStyle(fontSize: 11, color: Colors.white)),
         ),
       ),
     );
   }
-
-  static bool _isSameDay(DateTime a, DateTime b) =>
-      a.year == b.year && a.month == b.month && a.day == b.day;
 
   static String _dateLabel(DateTime dt) {
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final target = DateTime(dt.year, dt.month, dt.day);
     final diff = today.difference(target).inDays;
-    if (diff == 0) return '今天';
-    if (diff == 1) return '昨天';
-    if (diff < 7) return '$diff 天前';
-    return '${dt.year}/${dt.month}/${dt.day}';
+    final minute = dt.minute.toString().padLeft(2, '0');
+    final time = '${dt.hour.toString().padLeft(2, '0')}:$minute';
+    if (diff == 0) return time;
+    if (diff == 1) return '昨天 $time';
+    if (diff < 7) return '$diff 天前 $time';
+    return '${dt.year}/${dt.month}/${dt.day} $time';
   }
 
   /// 成员头像堆叠 + 人数 chip（AppBar 入口）
@@ -5080,26 +5087,20 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             if (_pendingAttachments.isNotEmpty) _buildAttachmentPreviewRow(cs),
             Container(
               padding: EdgeInsets.only(
-                  left: 16,
-                  right: 16,
-                  top: 12,
-                  bottom: MediaQuery.of(context).padding.bottom + 12),
+                  left: 8,
+                  right: 8,
+                  top: 8,
+                  bottom: MediaQuery.of(context).padding.bottom + 8),
               decoration: BoxDecoration(
-                color: cs.surface,
+                color: WeComChatTokens.inputSurface(context),
                 border: Border(
                   top: BorderSide(
                     color: _isDraggingFiles
                         ? cs.primary
-                        : cs.outlineVariant.withOpacity(0.5),
+                        : WeComChatTokens.divider(context),
                     width: _isDraggingFiles ? 2 : 1,
                   ),
                 ),
-                boxShadow: [
-                  BoxShadow(
-                      color: Colors.black.withOpacity(0.25),
-                      blurRadius: 14,
-                      offset: const Offset(0, -4))
-                ],
               ),
               child: Row(
                 crossAxisAlignment: CrossAxisAlignment.end,
@@ -5127,7 +5128,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                   Expanded(
                     child: ConstrainedBox(
                       constraints:
-                          const BoxConstraints(minHeight: 72, maxHeight: 180),
+                          const BoxConstraints(minHeight: 44, maxHeight: 120),
                       child: TextField(
                         key: _inputFieldKey,
                         controller: _textController,
@@ -5149,19 +5150,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                                 )
                               : null,
                           border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(24),
-                              borderSide: BorderSide(color: cs.outlineVariant)),
+                              borderRadius: BorderRadius.circular(4),
+                              borderSide: BorderSide.none),
                           enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(24),
-                              borderSide: BorderSide(color: cs.outlineVariant)),
+                              borderRadius: BorderRadius.circular(4),
+                              borderSide: BorderSide.none),
                           focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(24),
-                              borderSide:
-                                  BorderSide(color: cs.primary, width: 1.5)),
+                              borderRadius: BorderRadius.circular(4),
+                              borderSide: BorderSide.none),
                           filled: true,
-                          fillColor: cs.surfaceContainerHighest,
+                          fillColor: WeComChatTokens.inputField(context),
                           contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 20, vertical: 16),
+                              horizontal: 12, vertical: 11),
                           isDense: true,
                         ),
                         keyboardType: TextInputType.multiline,
@@ -5190,10 +5190,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                     const SizedBox(width: 4),
                   ],
                   IconButton(
-                    icon: const Icon(Icons.send_rounded, size: 24),
-                    color: _canSend
-                        ? cs.primary
-                        : cs.onSurfaceVariant.withOpacity(0.4),
+                    icon: const Icon(Icons.send_rounded, size: 22),
+                    style: IconButton.styleFrom(
+                      backgroundColor: _canSend
+                          ? WeComChatTokens.lightSelfBubble
+                          : WeComChatTokens.divider(context),
+                      foregroundColor: _canSend
+                          ? WeComChatTokens.lightText
+                          : cs.onSurfaceVariant.withOpacity(0.5),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(4),
+                      ),
+                    ),
                     onPressed: _canSend ? _sendMessage : null,
                     tooltip: '发送',
                   ),
@@ -5345,7 +5353,29 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             icon: Icons.info_outline_rounded);
       }
       for (final file in selectedFiles) {
-        final att = await _db.copyToMedia(File(file.path), 'image');
+        late final MediaAttachment att;
+        if (kIsWeb) {
+          final bytes = await file.readAsBytes();
+          if (!_canAddWebAttachment(bytes.lengthInBytes)) {
+            if (mounted) {
+              AppToast.show(context, '${file.name} 加入后超过 Web 端单条消息 10 MB 限制',
+                  icon: Icons.info_outline_rounded);
+            }
+            continue;
+          }
+          att = await _db.copyBytesToMedia(
+            bytes,
+            'image',
+            fileName: file.name,
+            mimeType: file.mimeType,
+          );
+        } else {
+          att = await _db.copyToMedia(
+            File(file.path),
+            'image',
+            fileName: file.name,
+          );
+        }
         if (mounted) setState(() => _pendingAttachments.add(att));
       }
     } catch (e) {
@@ -5361,7 +5391,29 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     try {
       final file = await _imagePicker.pickVideo(source: ImageSource.gallery);
       if (file == null) return;
-      final att = await _db.copyToMedia(File(file.path), 'video');
+      late final MediaAttachment att;
+      if (kIsWeb) {
+        final bytes = await file.readAsBytes();
+        if (!_canAddWebAttachment(bytes.lengthInBytes)) {
+          if (mounted) {
+            AppToast.show(context, '${file.name} 加入后超过 Web 端单条消息 10 MB 限制',
+                icon: Icons.info_outline_rounded);
+          }
+          return;
+        }
+        att = await _db.copyBytesToMedia(
+          bytes,
+          'video',
+          fileName: file.name,
+          mimeType: file.mimeType,
+        );
+      } else {
+        att = await _db.copyToMedia(
+          File(file.path),
+          'video',
+          fileName: file.name,
+        );
+      }
       if (mounted) setState(() => _pendingAttachments.add(att));
     } catch (e) {
       debugPrint('[附件] 选择视频失败：$e');
@@ -5376,20 +5428,39 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       final result = await FilePicker.platform.pickFiles(
         allowMultiple: true,
         type: FileType.any,
-        withData: false,
+        withData: kIsWeb,
       );
       if (result == null || result.files.isEmpty) return;
       var added = 0;
       for (final picked in result.files) {
-        final path = picked.path;
-        if (path == null || path.trim().isEmpty) continue;
-        final source = File(path);
-        if (!await source.exists()) continue;
-        final att = await _db.copyToMedia(
-          source,
-          _attachmentTypeForPath(path),
-          fileName: picked.name,
-        );
+        final payload = resolvePickedAttachmentPayload(picked, isWeb: kIsWeb);
+        if (payload == null) continue;
+        late final MediaAttachment att;
+        if (payload is PickedAttachmentBytes) {
+          if (!_canAddWebAttachment(payload.bytes.lengthInBytes)) {
+            if (mounted) {
+              AppToast.show(
+                  context, '${payload.fileName} 加入后超过 Web 端单条消息 10 MB 限制',
+                  icon: Icons.info_outline_rounded);
+            }
+            continue;
+          }
+          att = await _db.copyBytesToMedia(
+            payload.bytes,
+            _attachmentTypeForPath(payload.fileName),
+            fileName: payload.fileName,
+          );
+        } else if (payload is PickedAttachmentPath) {
+          final source = File(payload.path);
+          if (!await source.exists()) continue;
+          att = await _db.copyToMedia(
+            source,
+            _attachmentTypeForPath(payload.path),
+            fileName: payload.fileName,
+          );
+        } else {
+          continue;
+        }
         if (mounted) setState(() => _pendingAttachments.add(att));
         added++;
       }
@@ -5492,6 +5563,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         try {
           final image = await Pasteboard.image;
           if (image != null && image.isNotEmpty) {
+            if (!_canAddWebAttachment(image.length)) {
+              if (mounted) {
+                AppToast.show(context, '剪贴板图片加入后超过 Web 端单条消息 10 MB 限制',
+                    icon: Icons.info_outline_rounded);
+              }
+              return;
+            }
             attachments.add(await _db.copyBytesToMedia(
               Uint8List.fromList(image),
               'image',
@@ -5550,6 +5628,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return 'file';
   }
 
+  bool _canAddWebAttachment(int newBytes) {
+    if (!kIsWeb) return true;
+    final existingBytes = _pendingAttachments.fold<int>(
+      0,
+      (sum, attachment) => sum + (attachment.fileSize ?? 0),
+    );
+    return canAddWebAttachment(
+      existingBytes: existingBytes,
+      newBytes: newBytes,
+    );
+  }
+
   String _extensionOfPath(String path) {
     final name = path.split(RegExp(r'[/\\]')).last;
     final dot = name.lastIndexOf('.');
@@ -5571,19 +5661,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             children: [
               child,
               Positioned(
-                top: -6,
-                right: -6,
-                child: InkWell(
-                  onTap: () => _removeAttachment(att),
-                  borderRadius: BorderRadius.circular(12),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: cs.surface,
-                      shape: BoxShape.circle,
-                      border: Border.all(color: cs.outlineVariant),
-                    ),
-                    child: Icon(Icons.cancel,
-                        size: 18, color: cs.onSurfaceVariant),
+                top: -8,
+                right: -8,
+                child: IconButton(
+                  onPressed: () => _removeAttachment(att),
+                  tooltip: '移除附件',
+                  icon:
+                      Icon(Icons.cancel, size: 18, color: cs.onSurfaceVariant),
+                  style: IconButton.styleFrom(
+                    backgroundColor: cs.surface,
+                    side: BorderSide(color: cs.outlineVariant),
+                    minimumSize: const Size(32, 32),
+                    padding: const EdgeInsets.all(7),
                   ),
                 ),
               ),
@@ -5596,10 +5685,25 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   Widget _buildPendingAttachmentThumb(MediaAttachment att, ColorScheme cs) {
     if (att.type == 'image') {
+      final data = uiAttachmentDataUriCache.decode(att.localPath);
       return ClipRRect(
         borderRadius: BorderRadius.circular(8),
-        child: Image.file(File(att.localPath),
-            width: 56, height: 56, fit: BoxFit.cover),
+        child: data == null
+            ? Image.file(
+                File(att.localPath),
+                width: 56,
+                height: 56,
+                fit: BoxFit.cover,
+              )
+            : Image.memory(
+                data.bytes,
+                width: 56,
+                height: 56,
+                fit: BoxFit.cover,
+                cacheWidth: 112,
+                cacheHeight: 112,
+                gaplessPlayback: true,
+              ),
       );
     }
     final icon = att.type == 'video'
@@ -5788,6 +5892,8 @@ class _MessageBubble extends StatelessWidget {
   final Color Function(AICharacter) senderColor;
   final Message? quotedMessage;
   final String? quotedSenderName;
+  final String ownerName;
+  final String? readReceiptText;
 
   const _MessageBubble({
     required this.message,
@@ -5803,6 +5909,8 @@ class _MessageBubble extends StatelessWidget {
     required this.senderColor,
     this.quotedMessage,
     this.quotedSenderName,
+    required this.ownerName,
+    this.readReceiptText,
   });
 
   @override
@@ -5822,10 +5930,15 @@ class _MessageBubble extends StatelessWidget {
             if (!isUser && sender != null) ...[
               InkWell(
                 onTap: onSenderTap,
-                borderRadius: BorderRadius.circular(20),
-                child: CircleAvatar(
-                  radius: 20,
-                  backgroundColor: senderColor(sender!).withOpacity(0.12),
+                borderRadius: BorderRadius.circular(4),
+                child: Container(
+                  width: 40,
+                  height: 40,
+                  decoration: BoxDecoration(
+                    color: senderColor(sender!).withOpacity(0.14),
+                    borderRadius: BorderRadius.circular(4),
+                  ),
+                  alignment: Alignment.center,
                   child: Text(
                       sender!.avatar.isNotEmpty
                           ? sender!.avatar
@@ -5856,7 +5969,7 @@ class _MessageBubble extends StatelessWidget {
                                 style: TextStyle(
                                     fontSize: 12,
                                     fontWeight: FontWeight.w600,
-                                    color: cs.onSurfaceVariant)),
+                                    color: senderColor(sender!))),
                           ),
                           if (isRegenerating)
                             Padding(
@@ -5870,58 +5983,38 @@ class _MessageBubble extends StatelessWidget {
                         ],
                       ),
                     ),
-                  if (message.replyToMessageId != null)
-                    _buildQuotedRef(
-                        cs, quotedMessage ?? message, quotedSenderName),
-                  Container(
-                    padding: const EdgeInsets.symmetric(
-                        horizontal: 16, vertical: 10),
-                    decoration: BoxDecoration(
-                      color: isUser
-                          ? null
-                          : isHighlightedMention
-                              ? cs.primaryContainer.withOpacity(0.56)
-                              : Colors.transparent,
-                      gradient: isUser ? AppTheme.primaryGradient : null,
-                      boxShadow: isHighlightedMention
-                          ? [
-                              BoxShadow(
-                                color: cs.primary.withOpacity(0.18),
-                                blurRadius: 12,
-                                offset: const Offset(0, 4),
-                              ),
-                            ]
-                          : null,
-                      borderRadius: BorderRadius.circular(18).copyWith(
-                        bottomLeft: isUser
-                            ? const Radius.circular(18)
-                            : const Radius.circular(4),
-                        bottomRight: isUser
-                            ? const Radius.circular(4)
-                            : const Radius.circular(18),
-                      ),
-                    ),
+                  WeComBubbleSurface(
+                    isUser: isUser,
+                    isHighlighted: isHighlightedMention,
                     child: Column(
                       crossAxisAlignment: isUser
                           ? CrossAxisAlignment.end
                           : CrossAxisAlignment.start,
                       mainAxisSize: MainAxisSize.min,
                       children: [
+                        if (message.replyToMessageId != null)
+                          _buildQuotedRef(
+                            context,
+                            quotedMessage ?? message,
+                            quotedSenderName,
+                            isUser,
+                          ),
                         _buildMediaContent(context, message, cs, isUser),
-                        _buildContent(message, sender, isUser, cs),
+                        _buildContent(context, message),
                       ],
                     ),
                   ),
-                  Padding(
-                    padding: EdgeInsets.only(
-                        top: 4, left: isUser ? 0 : 4, right: !isUser ? 0 : 4),
-                    child: Text(
-                      _ChatRoomPageState._formatTime(message.timestamp),
-                      style: TextStyle(
-                          fontSize: 11,
-                          color: cs.onSurfaceVariant.withOpacity(0.7)),
+                  if (readReceiptText != null)
+                    Padding(
+                      padding: const EdgeInsets.only(top: 3, right: 2),
+                      child: Text(
+                        readReceiptText!,
+                        style: TextStyle(
+                          fontSize: 10,
+                          color: WeComChatTokens.nickname(context),
+                        ),
+                      ),
                     ),
-                  ),
                 ],
               ),
             ),
@@ -5932,34 +6025,48 @@ class _MessageBubble extends StatelessWidget {
     );
   }
 
-  Widget _buildQuotedRef(ColorScheme cs, Message? quoted, String? senderName) {
+  Widget _buildQuotedRef(
+    BuildContext context,
+    Message? quoted,
+    String? senderName,
+    bool isUser,
+  ) {
     if (quoted == null) return const SizedBox.shrink();
     final snippet = quoted.content.length > 50
         ? '${quoted.content.substring(0, 50)}...'
         : quoted.content;
     return Container(
-      margin: const EdgeInsets.only(bottom: 6),
-      padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
+      margin: const EdgeInsets.only(bottom: 7),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
       decoration: BoxDecoration(
-        color: cs.primaryContainer.withOpacity(0.35),
-        borderRadius: BorderRadius.circular(8),
+        color: isUser
+            ? WeComChatTokens.lightText.withOpacity(0.08)
+            : WeComChatTokens.lightChatBackground.withOpacity(0.8),
+        borderRadius: BorderRadius.circular(3),
       ),
       child: Row(
         children: [
-          Icon(Icons.format_quote_rounded, size: 12, color: cs.primary),
-          const SizedBox(width: 6),
+          Container(
+            width: 2,
+            height: 28,
+            color: WeComChatTokens.mention,
+          ),
+          const SizedBox(width: 7),
           if (senderName != null)
             Text(senderName,
-                style: TextStyle(
+                style: const TextStyle(
                     fontSize: 11,
                     fontWeight: FontWeight.w600,
-                    color: cs.primary)),
+                    color: WeComChatTokens.mention)),
           const SizedBox(width: 6),
           Expanded(
             child: Text(snippet,
                 maxLines: 1,
                 overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
+                style: TextStyle(
+                  fontSize: 12,
+                  color: WeComChatTokens.text(context).withOpacity(0.68),
+                )),
           ),
         ],
       ),
@@ -5993,22 +6100,31 @@ class _MessageBubble extends StatelessWidget {
   /// 图片缩略图，点击进入全屏预览（InteractiveViewer 可缩放/拖拽）。
   Widget _buildImageThumb(
       BuildContext context, MediaAttachment att, ColorScheme cs) {
+    final data = uiAttachmentDataUriCache.decode(att.localPath);
     return GestureDetector(
       onTap: () => _openImageFullscreen(context, att.localPath),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(10),
-        child: Image.file(
-          File(att.localPath),
-          width: 140,
-          height: 140,
-          fit: BoxFit.cover,
-        ),
+        child: data == null
+            ? Image.file(
+                File(att.localPath),
+                width: 140,
+                height: 140,
+                fit: BoxFit.cover,
+              )
+            : Image.memory(
+                data.bytes,
+                width: 140,
+                height: 140,
+                fit: BoxFit.cover,
+              ),
       ),
     );
   }
 
   /// 全屏预览图片：黑色背景 + InteractiveViewer 支持双指缩放。
   void _openImageFullscreen(BuildContext context, String path) {
+    final data = uiAttachmentDataUriCache.decode(path);
     showDialog(
       context: context,
       builder: (_) => Dialog(
@@ -6017,7 +6133,9 @@ class _MessageBubble extends StatelessWidget {
         child: Stack(
           children: [
             InteractiveViewer(
-              child: Image.file(File(path)),
+              child: data == null
+                  ? Image.file(File(path))
+                  : Image.memory(data.bytes),
             ),
             Positioned(
               top: 16,
@@ -6040,11 +6158,11 @@ class _MessageBubble extends StatelessWidget {
     ColorScheme cs,
     bool isUser,
   ) {
-    final textColor = isUser ? cs.onPrimary : cs.onSurface;
-    final subtleColor =
-        isUser ? cs.onPrimary.withOpacity(0.75) : cs.onSurfaceVariant;
-    final fillColor =
-        isUser ? cs.onPrimary.withOpacity(0.08) : cs.surfaceContainerHighest;
+    final textColor = WeComChatTokens.text(context);
+    final subtleColor = textColor.withOpacity(0.62);
+    final fillColor = isUser
+        ? WeComChatTokens.lightText.withOpacity(0.07)
+        : WeComChatTokens.chatBackground(context).withOpacity(0.7);
     return InkWell(
       onTap: () => _openAttachment(context, att),
       borderRadius: BorderRadius.circular(8),
@@ -6095,6 +6213,17 @@ class _MessageBubble extends StatelessWidget {
   Future<void> _openAttachment(
       BuildContext context, MediaAttachment att) async {
     try {
+      if (isAttachmentDataUri(att.localPath)) {
+        final opened = await openDataAttachment(
+          att.localPath,
+          att.fileName ?? _fileNameFromPath(att.localPath),
+        );
+        if (!opened && context.mounted) {
+          AppToast.show(context, '浏览器未能打开附件',
+              icon: Icons.error_outline_rounded);
+        }
+        return;
+      }
       final result = await OpenFilex.open(att.localPath, type: att.mimeType);
       if (result.type.name != 'done' && context.mounted) {
         AppToast.show(context, '打开失败：${result.message}',
@@ -6142,58 +6271,24 @@ class _MessageBubble extends StatelessWidget {
     return '${gb.toStringAsFixed(gb < 10 ? 1 : 0)} GB';
   }
 
-  Widget _buildContent(
-      Message message, AICharacter? sender, bool isUser, ColorScheme cs) {
-    final textColor = isUser ? cs.onPrimary : cs.onSurface;
+  Widget _buildContent(BuildContext context, Message message) {
+    final textColor = WeComChatTokens.text(context);
     final content = message.content.replaceAll('\\n', '\n');
+    final mentionNames = <String>{
+      ownerName,
+      ...characters.map((character) => character.name),
+    };
+    final textStyle = TextStyle(fontSize: 15, color: textColor, height: 1.45);
 
-    Widget base;
-    if (message.isMention &&
-        message.mentionedAiIds.isNotEmpty &&
-        sender != null) {
-      final mentionNames = message.mentionedAiIds.map((id) {
-        return characters.firstWhere((c) => c.id == id, orElse: () {
-          return AICharacter(
-              name: id,
-              avatar: '?',
-              age: 0,
-              role: '',
-              personalityTags: const [],
-              systemPrompt: '',
-              apiKey: '',
-              apiProvider: 'deepseek',
-              apiConfigId: '');
-        }).name;
-      }).toList();
-      base = Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: [
-          MessageSelectableText(
-            content: content,
-            style: TextStyle(fontSize: 15, color: textColor, height: 1.4),
-          ),
-          if (mentionNames.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.only(top: 6),
-              child: Wrap(
-                spacing: 4,
-                children: mentionNames.map((name) {
-                  return Chip(
-                      label: Text(name, style: const TextStyle(fontSize: 11)),
-                      visualDensity: VisualDensity.compact,
-                      padding: EdgeInsets.zero,
-                      materialTapTargetSize: MaterialTapTargetSize.shrinkWrap);
-                }).toList(),
-              ),
-            ),
-        ],
-      );
-    } else {
-      base = MessageSelectableText(
-        content: content,
-        style: TextStyle(fontSize: 15, color: textColor, height: 1.4),
-      );
-    }
+    final base = MessageSelectableText(
+      content: content,
+      style: textStyle,
+      spans: buildWeComMentionSpans(
+        content,
+        mentionNames: mentionNames,
+        baseStyle: textStyle,
+      ),
+    );
 
     // 正在流式生成时，在内容末尾追加一个闪烁光标，营造「打字机」观感。
     if (isStreaming) {
@@ -6233,7 +6328,9 @@ class _VideoBubbleState extends State<_VideoBubble> {
   @override
   void initState() {
     super.initState();
-    _controller = VideoPlayerController.file(File(widget.localPath));
+    _controller = !isAttachmentDataUri(widget.localPath)
+        ? VideoPlayerController.file(File(widget.localPath))
+        : VideoPlayerController.networkUrl(Uri.parse(widget.localPath));
     _controller.initialize().then((_) {
       if (!mounted) return;
       // 初始化成功后再构造 ChewieController，保证 aspectRatio 可用。

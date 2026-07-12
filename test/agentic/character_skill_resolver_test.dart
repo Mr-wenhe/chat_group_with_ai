@@ -117,4 +117,25 @@ void main() {
     expect(bundle.permissions, contains(ToolPermission.workspacePatch));
     expect(bundle.permissions, contains(ToolPermission.skillCreate));
   });
+
+  test('个人首页设计对所有角色自动补充文件写入权限', () {
+    final character = AICharacter(
+      name: '鬼魂街大佬',
+      avatar: '👻',
+      age: 30,
+      role: '灵魂收集者',
+      personalityTags: const ['神秘'],
+      systemPrompt: '用幽默又神秘的方式回答。',
+      apiKey: 'k',
+      apiProvider: 'deepseek',
+    );
+
+    final bundle = CharacterSkillResolver.resolveFor(
+      character,
+      '帮我设计一个鬼魂街大佬专属个人首页，要有万魂幡吸魂和桃心彩蛋特效',
+    );
+
+    expect(bundle.permissions, contains(ToolPermission.workspaceRead));
+    expect(bundle.permissions, contains(ToolPermission.workspacePatch));
+  });
 }

@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
+import 'package:chat_group/features/settings/ai_processing_directory_policy.dart';
 import 'package:chat_group/features/settings/api_config_form_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -10,6 +11,7 @@ import 'package:chat_group/services/ai_providers/ai_api_service.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
@@ -40,8 +42,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   }
 
   Future<void> _loadAiProcessingDirPath() async {
-    final path =
-        await ref.read(databaseServiceProvider).effectiveAiProcessingDirPath();
+    final db = ref.read(databaseServiceProvider);
+    final path = await resolveAiProcessingDirectoryLabel(
+      isWeb: kIsWeb,
+      nativePathLoader: db.effectiveAiProcessingDirPath,
+    );
     if (mounted) {
       setState(() => _aiProcessingDirPath = path);
     }
@@ -254,18 +259,22 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 title: '工作根目录',
                 subtitle: _aiProcessingDirPath.isEmpty
                     ? '正在读取目录...'
-                    : _compactPath(_aiProcessingDirPath),
-                onTap: _chooseAiProcessingDir,
+                    : kIsWeb
+                        ? _aiProcessingDirPath
+                        : _compactPath(_aiProcessingDirPath),
+                onTap: kIsWeb ? null : _chooseAiProcessingDir,
               ),
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
-              _SettingTile(
-                cs: cs,
-                icon: Icons.restore_rounded,
-                iconColor: cs.secondary,
-                title: '恢复默认目录',
-                subtitle: '默认作为 AI 工具服务 workspace，保存在应用数据目录的 ai_files 中',
-                onTap: _resetAiProcessingDir,
-              ),
+              if (!kIsWeb) ...[
+                Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+                _SettingTile(
+                  cs: cs,
+                  icon: Icons.restore_rounded,
+                  iconColor: cs.secondary,
+                  title: '恢复默认目录',
+                  subtitle: '默认作为 AI 工具服务 workspace，保存在应用数据目录的 ai_files 中',
+                  onTap: _resetAiProcessingDir,
+                ),
+              ],
             ],
           ),
           const SizedBox(height: 28),
@@ -908,7 +917,7 @@ class _SettingTile extends StatelessWidget {
   final Color iconColor;
   final String title;
   final String subtitle;
-  final VoidCallback onTap;
+  final VoidCallback? onTap;
   final Widget? trailing;
 
   const _SettingTile({
@@ -949,7 +958,7 @@ class _SettingTile extends StatelessWidget {
             ),
             if (trailing != null)
               trailing!
-            else
+            else if (onTap != null)
               Icon(Icons.chevron_right_rounded,
                   size: 20, color: cs.onSurfaceVariant),
           ],

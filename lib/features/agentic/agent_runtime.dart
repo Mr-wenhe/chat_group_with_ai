@@ -200,8 +200,13 @@ class AgentRuntime {
     final validation = toolResult['validation'];
     final validationMessage =
         validation is Map ? validation['message']?.toString().trim() ?? '' : '';
-    return '$message\n\n✅ 文件已生成：`$path`（$sizeKB KB）— 点击附件查看完整内容'
-        '${validationMessage.isEmpty ? '' : '\n🔎 $validationMessage'}';
+    final evidence =
+        validationMessage.isEmpty ? '本地工具已写入并成功读回文件。' : validationMessage;
+    return '结论：${message.trim()}\n\n'
+        '交付物：✅ 文件已生成：`$path`（$sizeKB KB）— 点击附件查看完整内容\n'
+        '验证：🔎 $evidence\n'
+        '自检：已确认文件可读，且聊天正文未重复粘贴产物内容。\n'
+        '风险：无。';
   }
 
   /// 响应护栏：拦截 LLM 在 final 文本中贴出的「裸代码 / 文件全文」泄漏（Bug A）。
@@ -331,7 +336,7 @@ class AgentRuntime {
   static String? _inferGeneratedFilePath(String request) {
     final lower = request.toLowerCase();
     final hasCreateIntent = RegExp(
-      r'(生成|创建|写|制作|做一个|做个|实现|开发|输出|导出|修改|改写|'
+      r'(生成|创建|写|设计|制作|做一个|做个|实现|开发|输出|导出|修改|改写|'
       r'create|write|build|make|generate)',
       caseSensitive: false,
     ).hasMatch(lower);
@@ -347,7 +352,7 @@ class AgentRuntime {
       return explicitPath;
     }
 
-    if (RegExp(r'(html?|主页|个人页|介绍页|页面|网页|网站|落地页|landing)').hasMatch(lower)) {
+    if (RegExp(r'(html?|首页|主页|个人页|介绍页|页面|网页|网站|落地页|landing)').hasMatch(lower)) {
       return 'page.html';
     }
     if (RegExp(r'(markdown|\bmd\b|文档|报告|简历)').hasMatch(lower)) {

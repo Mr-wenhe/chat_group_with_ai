@@ -132,6 +132,44 @@ void main() {
     expect(result.message, isNot(contains('<h1>')));
   });
 
+  test('鬼魂街个人首页裸 HTML 回复会被写成可交付文件', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {
+        'path': 'page.html',
+        'content': '<!doctype html><html><body><h1>鬼魂街大佬</h1></body></html>',
+      },
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 76},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => {
+        'success': true,
+        'message': '''
+这是完整的可直接运行的鬼魂街大佬专属个人首页代码，直接复制保存为 `.html` 文件打开即可体验：
+```html
+<!doctype html><html><body><h1>鬼魂街大佬</h1><div>万魂幡吸魂</div><button>桃心彩蛋</button></body></html>
+```
+''',
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '帮我设计一个鬼魂街大佬专属个人首页，要有万魂幡吸魂和桃心彩蛋特效',
+      autoApproveWriteTools: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'page.html');
+    expect(fakeTool.lastWriteContent, contains('万魂幡吸魂'));
+    expect(result.executedToolRequests, isNotEmpty);
+    expect(result.message, isNot(contains('直接复制保存')));
+    expect(result.message, contains('文件已生成'));
+  });
+
   test('file intent reprompts narration and still writes a real file',
       () async {
     var completionCalls = 0;
@@ -1219,6 +1257,11 @@ void main() {
     expect(result.message, contains('✅ 文件已生成'));
     expect(result.message, contains('star.html'));
     expect(result.message, contains('HTML 验证通过'));
+    expect(result.message, contains('结论'));
+    expect(result.message, contains('交付物'));
+    expect(result.message, contains('验证'));
+    expect(result.message, contains('自检'));
+    expect(result.message, contains('风险'));
     // 文件内容不应出现在消息中。
     expect(result.message, isNot(contains('hello from preview')));
     expect(result.message, isNot(contains('文件内容预览')));

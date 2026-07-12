@@ -17,18 +17,19 @@ class MessageSelectableText extends StatefulWidget {
     super.key,
     required this.content,
     required this.style,
+    this.spans,
     this.onSecondaryTap,
     this.onLongPress,
   });
 
   final String content;
   final TextStyle style;
+  final List<InlineSpan>? spans;
   final VoidCallback? onSecondaryTap;
   final VoidCallback? onLongPress;
 
   @override
-  State<MessageSelectableText> createState() =>
-      _MessageSelectableTextState();
+  State<MessageSelectableText> createState() => _MessageSelectableTextState();
 }
 
 class _MessageSelectableTextState extends State<MessageSelectableText> {
@@ -66,9 +67,12 @@ class _MessageSelectableTextState extends State<MessageSelectableText> {
       onPointerDown: _handlePointerDown,
       onPointerUp: _cancelLongPress,
       onPointerCancel: _cancelLongPress,
-      child: SelectableText(
-        widget.content,
-        style: widget.style,
+      child: SelectableText.rich(
+        TextSpan(
+          text: widget.spans == null ? widget.content : null,
+          children: widget.spans,
+          style: widget.style,
+        ),
         contextMenuBuilder: (context, editableTextState) {
           return AdaptiveTextSelectionToolbar.buttonItems(
             anchors: editableTextState.contextMenuAnchors,

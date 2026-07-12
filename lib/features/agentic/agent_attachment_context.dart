@@ -1,5 +1,7 @@
+import 'dart:convert';
 import 'dart:io';
 
+import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 
@@ -72,11 +74,14 @@ class AgentAttachmentContext {
     AgentAttachmentTextReader? readText,
   }) async {
     if (media.isEmpty) return '';
-    final reader = readText ?? (path) => File(path).readAsString();
+    final reader = readText ?? _readTextAttachment;
     final lines = <String>['【持续可用的附件上下文】'];
     for (final attachment in media.take(8)) {
       final name = attachment.fileName ?? _basename(attachment.localPath);
-      lines.add('- $name；类型=${attachment.type}；本地路径=${attachment.localPath}');
+      final location = !isAttachmentDataUri(attachment.localPath)
+          ? attachment.localPath
+          : '浏览器内存附件';
+      lines.add('- $name；类型=${attachment.type}；位置=$location');
       if (!_isTextAttachment(attachment) ||
           (attachment.fileSize ?? 0) > maxInlineFileBytes) {
         continue;
@@ -102,10 +107,36 @@ class AgentAttachmentContext {
         .last
         .toLowerCase();
     return const {
-      'txt', 'md', 'markdown', 'json', 'yaml', 'yml', 'csv', 'dart',
-      'html', 'css', 'js', 'ts', 'py', 'sh', 'c', 'cc', 'cpp', 'h', 'hpp',
-      'xml', 'toml', 'ini', 'log',
+      'txt',
+      'md',
+      'markdown',
+      'json',
+      'yaml',
+      'yml',
+      'csv',
+      'dart',
+      'html',
+      'css',
+      'js',
+      'ts',
+      'py',
+      'sh',
+      'c',
+      'cc',
+      'cpp',
+      'h',
+      'hpp',
+      'xml',
+      'toml',
+      'ini',
+      'log',
     }.contains(extension);
+  }
+
+  static Future<String> _readTextAttachment(String path) async {
+    final data = decodeAttachmentDataUri(path);
+    if (data != null) return utf8.decode(data.bytes, allowMalformed: true);
+    return File(path).readAsString();
   }
 
   static String _basename(String path) {

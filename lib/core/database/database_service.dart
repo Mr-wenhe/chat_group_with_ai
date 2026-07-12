@@ -11,6 +11,7 @@ import 'package:video_player/video_player.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/autonomous_conversation_config.dart';
@@ -394,6 +395,16 @@ class DatabaseService {
     required String fileName,
     String? mimeType,
   }) async {
+    final resolvedMimeType = mimeType ?? _guessMimeType(fileName, type);
+    if (kIsWeb) {
+      return MediaAttachment(
+        type: type,
+        localPath: encodeAttachmentDataUri(bytes, resolvedMimeType),
+        fileName: fileName,
+        fileSize: bytes.lengthInBytes,
+        mimeType: resolvedMimeType,
+      );
+    }
     final dir = await mediaDir;
     final ext = _extensionOf(fileName);
     final id = const Uuid().v4();
@@ -411,7 +422,7 @@ class DatabaseService {
       localPath: target.path,
       fileName: fileName,
       fileSize: bytes.lengthInBytes,
-      mimeType: mimeType ?? _guessMimeType(fileName, type),
+      mimeType: resolvedMimeType,
       durationMs: durationMs,
     );
   }

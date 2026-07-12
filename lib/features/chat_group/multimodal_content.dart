@@ -3,6 +3,7 @@ import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:chat_group/core/models/media_attachment.dart';
+import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/message.dart';
 
 /// 读文件字节的函数签名，便于在单测中注入假数据（不依赖真实文件）。
@@ -136,6 +137,8 @@ dynamic buildUserMessageContent(
 
 /// 默认实现：直接从本地文件同步读取字节。
 Uint8List _defaultFileReader(String path) {
+  final data = decodeAttachmentDataUri(path);
+  if (data != null) return data.bytes;
   return File(path).readAsBytesSync();
 }
 

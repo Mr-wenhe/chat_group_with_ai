@@ -156,7 +156,7 @@ class CharacterSkillResolver {
   ) {
     final lower = userRequest.toLowerCase();
     final needsWorkspace = RegExp(
-      r'(文件|路径|文档|代码|脚本|页面|网页|网站|主页|落地页|应用|小程序|'
+      r'(文件|路径|文档|代码|脚本|页面|网页|网站|首页|主页|落地页|应用|小程序|'
       r'html?|markdown|\bmd\b|dart|flutter|json|ya?ml|css|javascript|'
       r'\bjs\b|python|\bpy\b|review|修复|bug)',
       caseSensitive: false,

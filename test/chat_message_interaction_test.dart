@@ -1,4 +1,5 @@
 import 'package:chat_group/features/chat_group/widgets/message_selectable_text.dart';
+import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
 import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -50,5 +51,35 @@ void main() {
     await tester.pump();
 
     expect(invoked, isTrue);
+  });
+
+  testWidgets('renders selectable rich text for WeCom mention highlighting',
+      (tester) async {
+    const style = TextStyle(fontSize: 15, color: Colors.black);
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MessageSelectableText(
+            content: '请 @Alice 看一下',
+            style: style,
+            spans: buildWeComMentionSpans(
+              '请 @Alice 看一下',
+              mentionNames: const ['Alice'],
+              baseStyle: style,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final selectable =
+        tester.widget<SelectableText>(find.byType(SelectableText));
+    expect(selectable.textSpan?.toPlainText(), '请 @Alice 看一下');
+    final mention = selectable.textSpan!.children!
+        .cast<TextSpan>()
+        .where((span) => span.text == '@Alice')
+        .single;
+    expect(mention.style?.color, WeComChatTokens.mention);
+    expect(find.byType(TextField), findsNothing);
   });
 }

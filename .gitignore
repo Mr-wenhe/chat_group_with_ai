@@ -23,6 +23,7 @@ app.*.map.json
 
 # Local assistant / workspace data
 .claude/
+.playwright-cli/
 .workbuddy/
 migrate_working_dir/
 

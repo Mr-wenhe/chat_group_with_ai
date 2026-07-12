@@ -29,17 +29,19 @@ class AgenticTaskClassifier {
     '实施计划',
     '进度保存',
     '进度文件',
+    '总结文件',
+    '总结文档',
   ];
 
   static final _createOrEditIntent = RegExp(
-    r'(生成|创建|写|制作|做一个|做个|帮我做|给我做|实现|开发|输出|导出|'
-    r'修改|改一下|改写|编辑|整理|转换|撰写|审核|审查|保存|'
+    r'(生成|创建|写|设计|制作|做一个|做个|帮我做|给我做|实现|开发|输出|导出|'
+    r'修改|改一下|改写|编辑|整理|总结|转换|撰写|审核|审查|保存|'
     r'create|write|build|make|generate|edit|audit)',
     caseSensitive: false,
   );
 
   static final _artifactIntent = RegExp(
-    r'(代码|脚本|script|特效|html?|网页|主页|个人页|介绍页|页面|网站|落地页|'
+    r'(代码|脚本|script|特效|html?|网页|首页|主页|个人页|介绍页|页面|网站|落地页|'
     r'landing|app|应用|小程序|小游戏|文件|文件夹|路径|markdown|\bmd\b|文档|'
     r'报告|简历|工作流|dart|flutter|json|ya?ml|css|javascript|\bjs\b|'
     r'python|\bpy\b)',

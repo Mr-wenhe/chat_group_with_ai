@@ -25,6 +25,9 @@ void main() {
     expect(AgenticTaskClassifier.requiresAgenticWork('帮我撰写一份需求文档'), isTrue);
     expect(AgenticTaskClassifier.requiresAgenticWork('审核这份技术方案'), isTrue);
     expect(AgenticTaskClassifier.requiresAgenticWork('把任务计划和进度保存到文件'), isTrue);
+    expect(AgenticTaskClassifier.requiresAgenticWork('总结这份需求文档'), isTrue);
+    expect(
+        AgenticTaskClassifier.requiresAgenticWork('总结 docs/design.md'), isTrue);
   });
 
   test('keeps ordinary chat non-agentic', () {
@@ -78,6 +81,15 @@ void main() {
     );
   });
 
+  test('设计专属个人首页必须进入文件生成链路', () {
+    expect(
+      AgenticTaskClassifier.requiresAgenticWork(
+        '帮我设计一个鬼魂街大佬专属个人首页，要有万魂幡吸魂和桃心彩蛋特效',
+      ),
+      isTrue,
+    );
+  });
+
   test('does not over-match ordinary chat after keyword expansion', () {
     // 扩充后仍需保证普通闲聊不会被误判为 agentic 任务。
     expect(
@@ -106,6 +118,10 @@ void main() {
     );
     expect(
       AgenticTaskClassifier.requiresAgenticWork('这个文件是什么内容'),
+      isFalse,
+    );
+    expect(
+      AgenticTaskClassifier.requiresAgenticWork('总结这份电影讲了什么'),
       isFalse,
     );
   });
