@@ -180,6 +180,157 @@ bool isDuplicateAiReply(
   return false;
 }
 
+String agentProgressMessageContent({
+  required String characterName,
+  AgentRuntimeProgress? progress,
+}) {
+  if (progress == null) {
+    return '🧭 $characterName 正在规划任务，接下来会持续汇报执行进度…';
+  }
+  if (progress.stage == AgentRuntimeProgressStage.waitingForApproval) {
+    final tool = progress.pendingRequest?.tool.wireName ?? '工具操作';
+    final path = progress.pendingRequest?.args['path']?.toString();
+    return '⏳ $characterName 已完成规划，正在等待批准：$tool'
+        '${path == null || path.isEmpty ? '' : '（$path）'}';
+  }
+  final count = progress.executedRequests.length;
+  final latest =
+      progress.executedRequests.isEmpty ? null : progress.executedRequests.last;
+  final path = latest?.args['path']?.toString();
+  final operation = latest?.tool.wireName ?? '工具操作';
+  return '⚙️ $characterName 已完成第 $count 步：$operation'
+      '${path == null || path.isEmpty ? '' : '（$path）'}，正在校验结果…';
+}
+
+String? inferRecoverableFilePath(String request) {
+  final lower = request.toLowerCase();
+  final hasCreateIntent = RegExp(
+    r'(生成|创建|写|设计|制作|做一个|做个|实现|开发|输出|导出|修改|改写|'
+    r'create|write|build|make|generate)',
+    caseSensitive: false,
+  ).hasMatch(lower);
+  if (!hasCreateIntent) return null;
+
+  final explicit = RegExp(
+    r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:html?|md|markdown|dart|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp))(?![\w./\\-])',
+    caseSensitive: false,
+  ).firstMatch(request);
+  final explicitPath = explicit?.group(1)?.replaceAll('\\', '/');
+  if (explicitPath != null &&
+      WorkspacePathGuard.isSafeRelativePath(explicitPath)) {
+    return explicitPath;
+  }
+
+  if (RegExp(
+    r'(html?|首页|主页|个人页|介绍页|页面|网页|网站|落地页|landing)',
+    caseSensitive: false,
+  ).hasMatch(lower)) {
+    return 'page.html';
+  }
+  if (RegExp(r'(markdown|\bmd\b|文档|报告|简历)', caseSensitive: false)
+      .hasMatch(lower)) {
+    return 'report.md';
+  }
+  if (RegExp(r'(c\+\+|cpp|\bcxx\b|c/c\+\+|c语言|c 语言)', caseSensitive: false)
+      .hasMatch(lower)) {
+    return 'main.cpp';
+  }
+  if (RegExp(r'(dart|flutter|应用|app|程序)', caseSensitive: false)
+      .hasMatch(lower)) {
+    return 'main.dart';
+  }
+  if (RegExp(r'(python|\bpy\b)', caseSensitive: false).hasMatch(lower)) {
+    return 'script.py';
+  }
+  if (RegExp(r'(javascript|\bjs\b)', caseSensitive: false).hasMatch(lower)) {
+    return 'app.js';
+  }
+  return null;
+}
+
+String? extractRecoverableFileContent(String output, String path) {
+  final fenced = RegExp(
+    r'```(?:html?|md|markdown|dart|txt|json|ya?ml|svg|css|js|ts|python|py|sh|bash|c|cc|cpp)?\s*\n([\s\S]*?)\n?```',
+    caseSensitive: false,
+  ).firstMatch(output);
+  if (fenced != null) {
+    final content = fenced.group(1)?.trim();
+    if (content != null && content.isNotEmpty) return content;
+  }
+
+  final htmlStart = RegExp(r'<!doctype\s+html|<html\b', caseSensitive: false)
+      .firstMatch(output)
+      ?.start;
+  if (htmlStart != null) {
+    final tail = output.substring(htmlStart).trim();
+    if (tail.isNotEmpty) return tail;
+  }
+
+  final trimmed = output.trim();
+  if (trimmed.isEmpty) return null;
+  if (_looksLikeNarrationInsteadOfFile(trimmed)) return null;
+
+  final ext = path.split('.').last.toLowerCase();
+  if (ext == 'md' || ext == 'markdown' || ext == 'txt') return trimmed;
+  if (ext == 'html' || ext == 'htm') {
+    return RegExp(r'^(<!doctype|<html)\b', caseSensitive: false)
+            .hasMatch(trimmed)
+        ? trimmed
+        : null;
+  }
+  if (ext == 'svg') {
+    return RegExp(r'^<svg\b', caseSensitive: false).hasMatch(trimmed)
+        ? trimmed
+        : null;
+  }
+  if (ext == 'json') {
+    return trimmed.startsWith('{') || trimmed.startsWith('[') ? trimmed : null;
+  }
+  if (ext == 'dart') {
+    return RegExp(r"(import\s+'package:|void\s+main\s*\(|class\s+\w+)")
+            .hasMatch(trimmed)
+        ? trimmed
+        : null;
+  }
+  if (ext == 'js' || ext == 'ts') {
+    return RegExp(
+      r'(function\s+\w+|const\s+\w+\s*=|let\s+\w+\s*=|document\.)',
+    ).hasMatch(trimmed)
+        ? trimmed
+        : null;
+  }
+  if (const {'c', 'cc', 'cpp', 'h', 'hpp'}.contains(ext)) {
+    return RegExp(
+      r'(#include\s*[<"]|int\s+main\s*\(|class\s+\w+|namespace\s+\w+)',
+    ).hasMatch(trimmed)
+        ? trimmed
+        : null;
+  }
+  return null;
+}
+
+bool _looksLikeNarrationInsteadOfFile(String content) {
+  final lower = content.toLowerCase();
+  if (RegExp(r'^(好的|抱歉|对不起|以下是|这是|我已经|我可以|无法|不能)').hasMatch(content)) {
+    return true;
+  }
+  return lower.contains('复制保存为') ||
+      lower.contains('save as') ||
+      lower.contains('```');
+}
+
+class _RecoveredNonAgenticFile {
+  final String path;
+  final String content;
+  final MediaAttachment attachment;
+
+  const _RecoveredNonAgenticFile({
+    required this.path,
+    required this.content,
+    required this.attachment,
+  });
+}
+
 class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     with WidgetsBindingObserver {
   final _textController = TextEditingController();
@@ -1388,10 +1539,20 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     // 移除 LLM 可能附带的名字前缀（UI 已独立显示角色名）。
     fullContent = _stripNamePrefix(fullContent, character.name);
+    final rawNonAgenticContent = fullContent;
+    final recoveredFile = failed
+        ? null
+        : await _recoverFileFromNonAgenticReply(
+            character: character,
+            userMessage: userMessage,
+            replyContent: rawNonAgenticContent,
+          );
     // 防御：非 agentic 路径下 LLM 可能自发输出 tool_call 协议标签文本
     // （尤其使用过 agentic 能力的角色，system prompt 里可能残留工具说明）。
     // 在落库与返回前清洗之，避免协议泄漏被当作普通聊天贴出来。
-    fullContent = _sanitizeNonAgenticReply(fullContent);
+    fullContent = recoveredFile == null
+        ? _sanitizeNonAgenticReply(fullContent)
+        : '✅ 文件已生成：`${recoveredFile.path}` — 点击附件查看完整内容';
     if (!failed &&
         isDuplicateAiReply(
           fullContent,
@@ -1420,11 +1581,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     final generatedAttachments = failed
         ? const <MediaAttachment>[]
-        : await _aiAttachments.createRequestedAttachments(
-            character: character,
-            userMessage: userMessage,
-            replyContent: fullContent,
-          );
+        : [
+            if (recoveredFile != null) recoveredFile.attachment,
+            if (recoveredFile == null)
+              ...await _aiAttachments.createRequestedAttachments(
+                character: character,
+                userMessage: userMessage,
+                replyContent: fullContent,
+              ),
+          ];
 
     // 持久化纪律：仅完成时 put 一次（包含失败占位消息）。
     temp.content = fullContent;
@@ -1497,6 +1662,31 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return result.trim();
   }
 
+  Future<_RecoveredNonAgenticFile?> _recoverFileFromNonAgenticReply({
+    required AICharacter character,
+    required String? userMessage,
+    required String replyContent,
+  }) async {
+    final request = userMessage?.trim() ?? '';
+    if (request.isEmpty) return null;
+    final path = inferRecoverableFilePath(request);
+    if (path == null) return null;
+    final content = extractRecoverableFileContent(replyContent, path);
+    if (content == null || content.trim().isEmpty) return null;
+    final attachment = await _db.writeBytesToAiCharacterDir(
+      bytes: utf8.encode(content),
+      fileName: _fileNameFromPath(path),
+      characterId: character.id,
+      characterName: character.name,
+      type: _attachmentTypeForPath(path),
+    );
+    return _RecoveredNonAgenticFile(
+      path: path,
+      content: content,
+      attachment: attachment,
+    );
+  }
+
   Future<String?> _retryFailedReply({
     required AICharacter character,
     required ApiConfig config,
@@ -1567,6 +1757,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         ..status = AgentTaskStatus.planning
         ..updatedAt = DateTime.now();
       await _db.agentTaskBox.put(task.id, task);
+      await _upsertAgentProgressMessage(
+        task,
+        agentProgressMessageContent(characterName: character.name),
+      );
       final runtime = _agentRuntimeFor(
         character: character,
         config: config,
@@ -1956,6 +2150,34 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       pendingToolJson: progress.pendingRequest?.toJsonString() ?? '',
     );
     await _db.agentTaskBox.put(task.id, task);
+    final character = _db.aiCharacterBox.get(task.characterId);
+    await _upsertAgentProgressMessage(
+      task,
+      agentProgressMessageContent(
+        characterName: character?.name ?? 'AI',
+        progress: progress,
+      ),
+    );
+  }
+
+  Future<void> _upsertAgentProgressMessage(
+    AgentTask task,
+    String content,
+  ) async {
+    final id = 'agent-progress:${task.id}';
+    final existing = _db.messageBox.get(id);
+    if (existing != null) {
+      existing.content = content;
+      await _db.messageBox.put(id, existing);
+      return;
+    }
+    await _appendMessage(Message(
+      id: id,
+      groupId: task.groupId,
+      senderId: task.characterId,
+      senderType: 'ai',
+      content: content,
+    ));
   }
 
   Future<void> _finishAgentTask(

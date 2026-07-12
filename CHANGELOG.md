@@ -4,6 +4,15 @@ All notable changes are documented here, following [Conventional Commits](https:
 
 ---
 
+## v1.5.1 - 2026-07-12
+
+### 🚀 Features / 新功能
+- (`chat`) AI 回复支持「非 agentic 文件恢复」：当角色以纯文本请求生成文件（如"生成一个 html 文件作为附件"）时，从请求推断文件路径并从回复中提取代码块，自动落盘为附件
+- (`tool`) 新增 `tool/mock_openai_server.dart` 本地 Mock OpenAI 兼容服务，便于离线联调
+
+### 🧪 Tests
+- 补充 `non_agentic_file_recovery_test` 覆盖文件路径推断与内容提取
+
 ## v1.5.0 - 2026-07-12
 
 ### 🚀 Features / 新功能
