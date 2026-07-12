@@ -60,6 +60,7 @@ docs/superpowers/plans/
 
 # Local workspace / build artifacts
 agentic_output/
+output/
 star.html
 test.html
 release_artifacts/

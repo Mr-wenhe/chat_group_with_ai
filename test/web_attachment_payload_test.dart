@@ -59,6 +59,25 @@ void main() {
     expect(decoded.bytes, bytes);
   });
 
+  test('generated web file becomes a clickable in-memory attachment', () {
+    final bytes = Uint8List.fromList(
+      utf8.encode('<!doctype html><title>鬼魂街大佬</title>'),
+    );
+
+    final attachment = createDataUriAttachment(
+      bytes: bytes,
+      fileName: 'page.html',
+      mimeType: 'text/html',
+    );
+
+    expect(attachment.type, 'file');
+    expect(attachment.fileName, 'page.html');
+    expect(attachment.fileSize, bytes.length);
+    expect(attachment.mimeType, 'text/html');
+    expect(isAttachmentDataUri(attachment.localPath), isTrue);
+    expect(decodeAttachmentDataUri(attachment.localPath)!.bytes, bytes);
+  });
+
   test('UI data URI cache reuses decoded bytes for repeated builds', () {
     final uri = encodeAttachmentDataUri(
       Uint8List.fromList([5, 4, 3, 2, 1]),

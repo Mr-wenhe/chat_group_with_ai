@@ -527,6 +527,70 @@ void main() {
     expect(result.pendingToolRequest?.args['description'], contains('咖啡杯测'));
   });
 
+  test('创建技能后返回的裸 HTML 仍会继续转成文件写入', () async {
+    const request = '帮我设计一个鬼魂街大佬专属个人首页，要有万魂幡吸魂和桃心彩蛋特效';
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {
+        'path': 'page.html',
+        'content': '<!doctype html><html><body>万魂幡吸魂·桃心彩蛋</body></html>',
+      },
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 72},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => {
+        'success': true,
+        'message': '''
+这是完整的可直接运行代码，直接复制保存为 `.html` 文件：
+```html
+<!doctype html><html><body>万魂幡吸魂·桃心彩蛋</body></html>
+```
+''',
+      },
+      workspaceFileTool: fakeTool,
+      skillCreateHandler: (_) async => {
+        'ok': true,
+        'skillId': 'ghost-page-skill',
+        'name': '鬼魂街首页生成',
+      },
+    );
+    final character = _character(
+      name: '鬼魂街大佬',
+      toolPermissions: const [
+        ToolPermission.skillCreate,
+        ToolPermission.workspacePatch,
+      ],
+    );
+
+    final skillApproval = await runtime.run(
+      character: character,
+      skills: [_skill()],
+      userRequest: request,
+      forceSkillCreation: true,
+    );
+    expect(skillApproval.status, AgentRuntimeStatus.waitingForApproval);
+
+    final writeApproval = await runtime.executeApprovedTool(
+      character: character,
+      request: skillApproval.pendingToolRequest!,
+      userRequest: request,
+    );
+    expect(writeApproval.status, AgentRuntimeStatus.waitingForApproval);
+    expect(
+        writeApproval.pendingToolRequest?.tool, AgentToolName.workspacePatch);
+    expect(writeApproval.pendingToolRequest?.args['path'], 'page.html');
+
+    final completed = await runtime.executeApprovedTool(
+      character: character,
+      request: writeApproval.pendingToolRequest!,
+      userRequest: request,
+      priorExecutedRequests: writeApproval.executedToolRequests,
+    );
+    expect(completed.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'page.html');
+    expect(fakeTool.lastWriteContent, contains('万魂幡吸魂'));
+    expect(completed.message, contains('文件已生成'));
+  });
+
   test('runtime executes approved skill download tool', () async {
     var toolCalled = false;
     final runtime = AgentRuntime(

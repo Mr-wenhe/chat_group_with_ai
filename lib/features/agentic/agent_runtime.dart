@@ -1205,7 +1205,11 @@ class AgentRuntime {
 
     final content = finalResponse['message']?.toString() ??
         '${character.name} 已完成工具调用，但整理结果失败。';
-    final nextRequest = ToolRequest.tryParse(content);
+    // 多步骤任务（例如先 skill.create，再生成页面）也可能在后续回复里直接
+    // 吐出裸 HTML/代码。与首轮规划保持同一恢复策略，把现成内容继续转换为
+    // workspace.patch，不能只用“请查看附件”护栏吞掉正文却没有真正创建文件。
+    final nextRequest = ToolRequest.tryParse(content) ??
+        _recoverGeneratedFileRequest(userRequest, content);
     if (nextRequest != null) {
       // 第二层防御：已成功写入过文件后，禁止 LLM 再发起写文件请求。
       // 原因：即使第一层防御（_handleToolResult 中 workspace.patch 成功后直接 fallback）

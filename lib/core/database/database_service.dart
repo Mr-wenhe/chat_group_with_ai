@@ -464,6 +464,15 @@ class DatabaseService {
     required String characterName,
     String type = 'file',
   }) async {
+    final mimeType = _guessMimeType(fileName, type);
+    if (kIsWeb) {
+      return createDataUriAttachment(
+        bytes: bytes,
+        fileName: fileName,
+        mimeType: mimeType,
+        type: type,
+      );
+    }
     final root = await aiProcessingDir;
     final dirName = _safePathSegment(
       '${characterName.trim().isEmpty ? characterId : characterName}_$characterId',
@@ -481,7 +490,7 @@ class DatabaseService {
       localPath: target.path,
       fileName: fileName,
       fileSize: bytes.length,
-      mimeType: _guessMimeType(fileName, type),
+      mimeType: mimeType,
     );
   }
 

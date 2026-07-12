@@ -2,6 +2,8 @@ import 'dart:convert';
 import 'dart:collection';
 import 'dart:typed_data';
 
+import 'package:chat_group/core/models/media_attachment.dart';
+
 class AttachmentDataUri {
   const AttachmentDataUri({required this.mimeType, required this.bytes});
 
@@ -11,6 +13,22 @@ class AttachmentDataUri {
 
 String encodeAttachmentDataUri(Uint8List bytes, String mimeType) {
   return 'data:$mimeType;base64,${base64Encode(bytes)}';
+}
+
+MediaAttachment createDataUriAttachment({
+  required List<int> bytes,
+  required String fileName,
+  required String mimeType,
+  String type = 'file',
+}) {
+  final payload = bytes is Uint8List ? bytes : Uint8List.fromList(bytes);
+  return MediaAttachment(
+    type: type,
+    localPath: encodeAttachmentDataUri(payload, mimeType),
+    fileName: fileName,
+    fileSize: payload.lengthInBytes,
+    mimeType: mimeType,
+  );
 }
 
 bool isAttachmentDataUri(String value) {
