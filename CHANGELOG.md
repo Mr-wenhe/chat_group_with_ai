@@ -4,6 +4,12 @@ All notable changes are documented here, following [Conventional Commits](https:
 
 ---
 
+## v1.5.2 - 2026-07-12
+
+### 🧪 Tests
+- 新增 `agent_progress_message_test`：验证 agent 进度消息含「规划中」与「已完成第 N 步」信息
+- 新增 `full_agent_workflow_test`：5 个内置角色经本地 Mock Server（`tool/mock_openai_server.dart`，运行前需先 `dart run tool/mock_openai_server.dart` 启动）生成文件并带持久进度
+
 ## v1.5.1 - 2026-07-12
 
 ### 🚀 Features / 新功能
