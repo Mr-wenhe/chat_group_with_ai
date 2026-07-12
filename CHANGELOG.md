@@ -4,6 +4,19 @@ All notable changes are documented here, following [Conventional Commits](https:
 
 ---
 
+## v1.5.0 - 2026-07-12
+
+### 🚀 Features / 新功能
+- (`chat`) 聊天 UI 向企业微信对齐（气泡配色/布局、引用卡片、@提及高亮、输入栏），保留无描边边框的既有审美
+- (`agentic`) AI 角色工作模式贴近 WorkBuddy：先诊断→拆解→调工具→交付，并增强多步骤任务的交付落地
+
+### 🐛 Bug Fixes / 修复
+- (`web`) 附件在 web 端以 data URI 内联存储，补全此前丢失的 MIME 类型
+- (`agentic`) 收尾阶段对无法解析为 ToolRequest 的正文复用文件恢复，使生成内容真正落盘
+
+### 🧹 Chores
+- (`.gitignore`) 追加 `output/` 避免本地生成产物误提交
+
 ## v1.4.0 - 2026-07-11
 
 ### 🚀 Features / 新功能
