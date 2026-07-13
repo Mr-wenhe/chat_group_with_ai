@@ -1,6 +1,6 @@
 import 'package:chat_group/features/agentic/agent_runtime.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
-import 'package:chat_group/features/chat_group/chat_room_page.dart';
+import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

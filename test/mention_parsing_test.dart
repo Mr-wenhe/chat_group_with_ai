@@ -1,5 +1,5 @@
 import 'package:chat_group/core/models/ai_character.dart';
-import 'package:chat_group/features/chat_group/chat_room_page.dart';
+import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 AICharacter _character(String id, String name) {

@@ -4,16 +4,16 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:chat_group/core/database/database_service.dart';
-import 'package:chat_group/core/models/ai_character.dart';
-import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/autonomous_conversation_config.dart';
 import 'package:chat_group/core/models/autonomous_task.dart';
-import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/character_skill.dart';
+import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
@@ -23,9 +23,9 @@ import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/agentic/agent_attachment_context.dart';
-import 'package:chat_group/features/agentic/agentic_task_classifier.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
 import 'package:chat_group/features/agentic/agent_task_recovery_dialog.dart';
+import 'package:chat_group/features/agentic/agentic_task_classifier.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
@@ -40,21 +40,26 @@ import 'package:chat_group/features/autonomous/autonomous_conversation_config_se
 import 'package:chat_group/features/autonomous/autonomous_task_service.dart';
 import 'package:chat_group/features/autonomous/autonomous_trigger_detector.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
-import 'package:chat_group/features/chat_group/attachment_opener.dart';
-import 'package:chat_group/features/chat_group/direct_file_task_policy.dart';
-import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/chat_group_form_page.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
+import 'package:chat_group/features/chat_group/direct_file_task_policy.dart';
+import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
 import 'package:chat_group/features/chat_group/multimodal_content.dart';
 import 'package:chat_group/features/chat_group/picked_attachment_payload.dart';
 import 'package:chat_group/features/chat_group/scene_behavior.dart';
-import 'package:chat_group/features/chat_group/widgets/message_selectable_text.dart';
+import 'package:chat_group/features/chat_group/chat_room_utils.dart';
+import 'package:chat_group/features/chat_group/agentic_reply_utils.dart';
+import 'package:chat_group/features/chat_group/attachment_utils.dart';
+import 'package:chat_group/features/chat_group/models/chat_room_models.dart';
+import 'package:chat_group/features/chat_group/widgets/chat_message_bubble.dart';
+import 'package:chat_group/features/chat_group/widgets/hint_chip.dart';
+import 'package:chat_group/features/chat_group/widgets/sheet_button.dart';
 import 'package:chat_group/features/chat_group/widgets/compact_conversation_controls.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
-import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
+import 'package:chat_group/core/models/direct_chat_source.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -63,7 +68,6 @@ import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:chat_group/services/message_speech_service.dart';
 import 'package:chat_group/services/web_search_service.dart';
-import 'package:chewie/chewie.dart';
 import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
@@ -71,9 +75,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
-import 'package:open_filex/open_filex.dart';
 import 'package:pasteboard/pasteboard.dart';
-import 'package:video_player/video_player.dart';
 
 enum AutoChatStatus { idle, waiting, generating, paused, unavailable, error }
 
@@ -85,41 +87,6 @@ enum ReplyBlockReason {
   networkError,
 }
 
-List<String> parseMentionedCharacterIds(
-  String content,
-  List<AICharacter> characters,
-) {
-  final mentionedIds = <String>[];
-  if (characters.isEmpty || content.isEmpty) return mentionedIds;
-
-  final byName = {for (final c in characters) c.name: c.id};
-  final mentionPattern = RegExp(r'@([^@\s，。！？!?、；;：:,.]+)');
-  for (final match in mentionPattern.allMatches(content)) {
-    final name = match.group(1);
-    if (name != null && _isMentionAllToken(name)) {
-      for (final character in characters) {
-        if (!mentionedIds.contains(character.id)) {
-          mentionedIds.add(character.id);
-        }
-      }
-      continue;
-    }
-    final id = name == null ? null : byName[name];
-    if (id != null && !mentionedIds.contains(id)) {
-      mentionedIds.add(id);
-    }
-  }
-  return mentionedIds;
-}
-
-bool _isMentionAllToken(String token) {
-  final normalized = token.trim().toLowerCase();
-  return normalized == 'all' ||
-      normalized == 'everyone' ||
-      normalized == '所有人' ||
-      normalized == '全部';
-}
-
 class ChatRoomPage extends ConsumerStatefulWidget {
   final String groupId;
 
@@ -127,208 +94,6 @@ class ChatRoomPage extends ConsumerStatefulWidget {
 
   @override
   ConsumerState<ChatRoomPage> createState() => _ChatRoomPageState();
-}
-
-/// 群聊中显式 agentic 任务的选角收敛（Bug B-b2）。
-///
-/// 仅当非私聊且 [isExplicitAgenticTask] 为 true 时介入：
-/// - 用户 @ 了具体角色（[mentionedIds] 非空）→ 只由第一个可用的被 @
-///   角色执行；
-/// - 未 @ 限定时 → 只保留第一个可回复角色。
-/// 这样文件/工具任务不会被多角色同时执行，从根源避免重复答案和重复产物。
-/// 其余情况（私聊 / 非显式 agentic 任务）原样返回 [candidates]。
-///
-/// 抽成纯函数仅为可单测；逻辑与 [_runAiRound] 内联实现完全一致。
-List<AICharacter> selectAgenticCharactersForRound({
-  required bool isDirectChat,
-  required bool isExplicitAgenticTask,
-  required List<AICharacter> candidates,
-  required List<String>? mentionedIds,
-}) {
-  if (isDirectChat || !isExplicitAgenticTask) return candidates;
-  if (mentionedIds != null && mentionedIds.isNotEmpty) {
-    for (final mentionedId in mentionedIds) {
-      final character =
-          candidates.where((item) => item.id == mentionedId).firstOrNull;
-      if (character != null) return [character];
-    }
-    return const [];
-  }
-  final single = candidates.isNotEmpty ? candidates.first : null;
-  return single == null ? const [] : [single];
-}
-
-/// Detects exact/whitespace-only duplicate AI answers within the current user
-/// exchange. The scan stops at the previous user message, so a natural short
-/// phrase used again much later is not incorrectly suppressed.
-bool isDuplicateAiReply(
-  String content,
-  List<Message> recentMessages, {
-  String? excludeMessageId,
-}) {
-  String normalize(String value) =>
-      value.replaceAll(RegExp(r'\s+'), '').trim().toLowerCase();
-
-  final candidate = normalize(content);
-  if (candidate.isEmpty) return false;
-  for (final message in recentMessages.reversed) {
-    if (message.id == excludeMessageId) continue;
-    if (message.senderType == 'user') break;
-    if (message.senderType != 'ai') continue;
-    if (normalize(message.content) == candidate) return true;
-  }
-  return false;
-}
-
-String agentProgressMessageContent({
-  required String characterName,
-  AgentRuntimeProgress? progress,
-}) {
-  if (progress == null) {
-    return '🧭 $characterName 正在规划任务，接下来会持续汇报执行进度…';
-  }
-  if (progress.stage == AgentRuntimeProgressStage.waitingForApproval) {
-    final tool = progress.pendingRequest?.tool.wireName ?? '工具操作';
-    final path = progress.pendingRequest?.args['path']?.toString();
-    return '⏳ $characterName 已完成规划，正在等待批准：$tool'
-        '${path == null || path.isEmpty ? '' : '（$path）'}';
-  }
-  final count = progress.executedRequests.length;
-  final latest =
-      progress.executedRequests.isEmpty ? null : progress.executedRequests.last;
-  final path = latest?.args['path']?.toString();
-  final operation = latest?.tool.wireName ?? '工具操作';
-  return '⚙️ $characterName 已完成第 $count 步：$operation'
-      '${path == null || path.isEmpty ? '' : '（$path）'}，正在校验结果…';
-}
-
-String? inferRecoverableFilePath(String request) {
-  final lower = request.toLowerCase();
-  final hasCreateIntent = RegExp(
-    r'(生成|创建|写|设计|制作|做一个|做个|实现|开发|输出|导出|修改|改写|'
-    r'create|write|build|make|generate)',
-    caseSensitive: false,
-  ).hasMatch(lower);
-  if (!hasCreateIntent) return null;
-
-  final explicit = RegExp(
-    r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:html?|md|markdown|dart|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp))(?![\w./\\-])',
-    caseSensitive: false,
-  ).firstMatch(request);
-  final explicitPath = explicit?.group(1)?.replaceAll('\\', '/');
-  if (explicitPath != null &&
-      WorkspacePathGuard.isSafeRelativePath(explicitPath)) {
-    return explicitPath;
-  }
-
-  if (RegExp(
-    r'(html?|首页|主页|个人页|介绍页|页面|网页|网站|落地页|landing)',
-    caseSensitive: false,
-  ).hasMatch(lower)) {
-    return 'page.html';
-  }
-  if (RegExp(r'(markdown|\bmd\b|文档|报告|简历)', caseSensitive: false)
-      .hasMatch(lower)) {
-    return 'report.md';
-  }
-  if (RegExp(r'(c\+\+|cpp|\bcxx\b|c/c\+\+|c语言|c 语言)', caseSensitive: false)
-      .hasMatch(lower)) {
-    return 'main.cpp';
-  }
-  if (RegExp(r'(dart|flutter|应用|app|程序)', caseSensitive: false)
-      .hasMatch(lower)) {
-    return 'main.dart';
-  }
-  if (RegExp(r'(python|\bpy\b)', caseSensitive: false).hasMatch(lower)) {
-    return 'script.py';
-  }
-  if (RegExp(r'(javascript|\bjs\b)', caseSensitive: false).hasMatch(lower)) {
-    return 'app.js';
-  }
-  return null;
-}
-
-String? extractRecoverableFileContent(String output, String path) {
-  final fenced = RegExp(
-    r'```(?:html?|md|markdown|dart|txt|json|ya?ml|svg|css|js|ts|python|py|sh|bash|c|cc|cpp)?\s*\n([\s\S]*?)\n?```',
-    caseSensitive: false,
-  ).firstMatch(output);
-  if (fenced != null) {
-    final content = fenced.group(1)?.trim();
-    if (content != null && content.isNotEmpty) return content;
-  }
-
-  final htmlStart = RegExp(r'<!doctype\s+html|<html\b', caseSensitive: false)
-      .firstMatch(output)
-      ?.start;
-  if (htmlStart != null) {
-    final tail = output.substring(htmlStart).trim();
-    if (tail.isNotEmpty) return tail;
-  }
-
-  final trimmed = output.trim();
-  if (trimmed.isEmpty) return null;
-  if (_looksLikeNarrationInsteadOfFile(trimmed)) return null;
-
-  final ext = path.split('.').last.toLowerCase();
-  if (ext == 'md' || ext == 'markdown' || ext == 'txt') return trimmed;
-  if (ext == 'html' || ext == 'htm') {
-    return RegExp(r'^(<!doctype|<html)\b', caseSensitive: false)
-            .hasMatch(trimmed)
-        ? trimmed
-        : null;
-  }
-  if (ext == 'svg') {
-    return RegExp(r'^<svg\b', caseSensitive: false).hasMatch(trimmed)
-        ? trimmed
-        : null;
-  }
-  if (ext == 'json') {
-    return trimmed.startsWith('{') || trimmed.startsWith('[') ? trimmed : null;
-  }
-  if (ext == 'dart') {
-    return RegExp(r"(import\s+'package:|void\s+main\s*\(|class\s+\w+)")
-            .hasMatch(trimmed)
-        ? trimmed
-        : null;
-  }
-  if (ext == 'js' || ext == 'ts') {
-    return RegExp(
-      r'(function\s+\w+|const\s+\w+\s*=|let\s+\w+\s*=|document\.)',
-    ).hasMatch(trimmed)
-        ? trimmed
-        : null;
-  }
-  if (const {'c', 'cc', 'cpp', 'h', 'hpp'}.contains(ext)) {
-    return RegExp(
-      r'(#include\s*[<"]|int\s+main\s*\(|class\s+\w+|namespace\s+\w+)',
-    ).hasMatch(trimmed)
-        ? trimmed
-        : null;
-  }
-  return null;
-}
-
-bool _looksLikeNarrationInsteadOfFile(String content) {
-  final lower = content.toLowerCase();
-  if (RegExp(r'^(好的|抱歉|对不起|以下是|这是|我已经|我可以|无法|不能)').hasMatch(content)) {
-    return true;
-  }
-  return lower.contains('复制保存为') ||
-      lower.contains('save as') ||
-      lower.contains('```');
-}
-
-class _RecoveredNonAgenticFile {
-  final String path;
-  final String content;
-  final MediaAttachment attachment;
-
-  const _RecoveredNonAgenticFile({
-    required this.path,
-    required this.content,
-    required this.attachment,
-  });
 }
 
 class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
@@ -354,7 +119,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   AutonomousConversationConfig? _autonomousConfig;
   bool _isAutonomousRunning = false;
   final Map<String, ReplyIntent> _pendingReplyIntents = {};
-  _PendingAgentToolApproval? _pendingAgentApproval;
+  PendingAgentToolApproval? _pendingAgentApproval;
   int _autoChatMemoryTick = 0;
 
   bool _isLoading = true;
@@ -363,7 +128,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   final int _maxAutoRounds = 3;
 
   // 用户消息队列：AI 回复期间用户发的消息排队在此，回合结束后自动触发回复。
-  final List<dynamic> _pendingUserMessages = [];
+  final List<PendingUserMessage> _pendingUserMessages = [];
 
   // @ 成员选择弹窗
   OverlayEntry? _mentionOverlay;
@@ -718,7 +483,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
     final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
     if (pending != null) {
-      _pendingAgentApproval = _PendingAgentToolApproval(
+      _pendingAgentApproval = PendingAgentToolApproval(
         character: character,
         config: config,
         provider: provider,
@@ -982,7 +747,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     if (_isAiReplying) {
       // AI 正在回复中，排队等待当前回合结束后再处理。
-      _pendingUserMessages.add(_PendingUserMessage(text, mentionedIds));
+      _pendingUserMessages.add(PendingUserMessage(text, mentionedIds));
       return;
     }
 
@@ -1551,7 +1316,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     // （尤其使用过 agentic 能力的角色，system prompt 里可能残留工具说明）。
     // 在落库与返回前清洗之，避免协议泄漏被当作普通聊天贴出来。
     fullContent = recoveredFile == null
-        ? _sanitizeNonAgenticReply(fullContent)
+        ? sanitizeNonAgenticReply(fullContent)
         : '✅ 文件已生成：`${recoveredFile.path}` — 点击附件查看完整内容';
     if (!failed &&
         isDuplicateAiReply(
@@ -1627,42 +1392,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return fullContent;
   }
 
-  /// 清洗非 agentic 路径回复中的 tool_call 协议泄漏。
-  ///
-  /// 该路径走的是普通 LLM 聊天，不应出现任何 <tool_call>/<agent_tool> 协议标签。
-  /// 但 LLM（尤其是使用过 agentic 能力的角色，其 system prompt 可能残留工具说明）
-  /// 可能在普通回复里自发吐出这类标签文本。这里只处理**明显**的协议泄漏与超大代码块，
-  /// 不影响正常聊天内容。比 agent_runtime.dart 的 _guardFinalMessage 更保守。
-  static String _sanitizeNonAgenticReply(String text) {
-    var result = text;
-    // 移除 tool_call 标签及内部全部内容（非贪婪，跨行）。
-    result = result.replaceAll(
-        RegExp(
-          r'<tool_call[^>]*>[\s\S]*?</tool_call\s*>',
-          dotAll: true,
-        ),
-        '');
-    // 移除 agent_tool 标签及内部全部内容（非贪婪，跨行）。
-    result = result.replaceAll(
-        RegExp(
-          r'<agent_tool[^>]*>[\s\S]*?</agent_tool\s*>',
-          dotAll: true,
-        ),
-        '');
-    // 移除可能残留的孤立标签（开/闭标签，含多余空白）。
-    result = result.replaceAll(
-        RegExp(r'</?\s*(tool_call|agent_tool|function|parameter)[^>]*>'), '');
-    // 若剩余文本以超大代码块为主（单个 ``` 块超过 500 字符），替换为提示，
-    // 避免把大段疑似生成代码当普通聊天贴出。
-    final codeBlockMatch = RegExp(r'```[\s\S]{500,}```').firstMatch(result);
-    if (codeBlockMatch != null) {
-      result =
-          result.replaceAll(codeBlockMatch.group(0)!, '📎 [代码内容已省略，请查看附件]');
-    }
-    return result.trim();
-  }
 
-  Future<_RecoveredNonAgenticFile?> _recoverFileFromNonAgenticReply({
+  Future<RecoveredNonAgenticFile?> _recoverFileFromNonAgenticReply({
     required AICharacter character,
     required String? userMessage,
     required String replyContent,
@@ -1675,12 +1406,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (content == null || content.trim().isEmpty) return null;
     final attachment = await _db.writeBytesToAiCharacterDir(
       bytes: utf8.encode(content),
-      fileName: _fileNameFromPath(path),
+      fileName: fileNameFromPath(path),
       characterId: character.id,
       characterName: character.name,
       type: _attachmentTypeForPath(path),
     );
-    return _RecoveredNonAgenticFile(
+    return RecoveredNonAgenticFile(
       path: path,
       content: content,
       attachment: attachment,
@@ -1808,7 +1539,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       );
       if (result.status == AgentRuntimeStatus.waitingForApproval &&
           result.pendingToolRequest != null) {
-        _pendingAgentApproval = _PendingAgentToolApproval(
+        _pendingAgentApproval = PendingAgentToolApproval(
           character: character,
           config: config,
           provider: provider,
@@ -2000,7 +1731,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         if (readback is String && readback.isNotEmpty) {
           attachments.add(await _db.writeBytesToAiCharacterDir(
             bytes: utf8.encode(readback),
-            fileName: _fileNameFromPath(path),
+            fileName: fileNameFromPath(path),
             characterId: character.id,
             characterName: character.name,
             type: _attachmentTypeForPath(path),
@@ -2014,7 +1745,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         if (generatedContent is String && generatedContent.isNotEmpty) {
           attachments.add(await _db.writeBytesToAiCharacterDir(
             bytes: utf8.encode(generatedContent),
-            fileName: _fileNameFromPath(path),
+            fileName: fileNameFromPath(path),
             characterId: character.id,
             characterName: character.name,
             type: _attachmentTypeForPath(path),
@@ -2029,7 +1760,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         if (content is String) {
           attachments.add(await _db.writeBytesToAiCharacterDir(
             bytes: utf8.encode(content),
-            fileName: _fileNameFromPath(path),
+            fileName: fileNameFromPath(path),
             characterId: character.id,
             characterName: character.name,
             type: _attachmentTypeForPath(path),
@@ -2257,7 +1988,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       );
       if (result.status == AgentRuntimeStatus.waitingForApproval &&
           result.pendingToolRequest != null) {
-        _pendingAgentApproval = _PendingAgentToolApproval(
+        _pendingAgentApproval = PendingAgentToolApproval(
           character: pending.character,
           config: pending.config,
           provider: pending.provider,
@@ -4191,24 +3922,24 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                     fontWeight: FontWeight.w600,
                     color: cs.onSurfaceVariant)),
             const SizedBox(height: 14),
-            _sheetBtn(ctx, cs, Icons.refresh_rounded, '重新生成', () {
+            SheetButton(ctx, cs, Icons.refresh_rounded, '重新生成', () {
               Navigator.pop(ctx);
               _regenerateAiReply(message, sender);
             }),
             const SizedBox(height: 8),
-            _sheetBtn(ctx, cs, Icons.format_quote_rounded, '引用回复', () {
+            SheetButton(ctx, cs, Icons.format_quote_rounded, '引用回复', () {
               Navigator.pop(ctx);
               _quoteMessage(message);
             }),
             const SizedBox(height: 8),
-            _sheetBtn(ctx, cs, Icons.alternate_email_rounded, '@${sender.name}',
+            SheetButton(ctx, cs, Icons.alternate_email_rounded, '@${sender.name}',
                 () {
               Navigator.pop(ctx);
               _insertMention(sender);
             }),
             if (_isTtsEnabled) ...[
               const SizedBox(height: 8),
-              _sheetBtn(
+              SheetButton(
                   ctx,
                   cs,
                   _isSpeaking && _speakingMessageId == message.id
@@ -4231,27 +3962,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
-  Widget _sheetBtn(BuildContext ctx, ColorScheme cs, IconData icon,
-      String label, VoidCallback onTap) {
-    return InkWell(
-      onTap: onTap,
-      borderRadius: BorderRadius.circular(12),
-      child: Container(
-        padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 12),
-        decoration: BoxDecoration(
-          color: cs.surfaceContainerHighest,
-          borderRadius: BorderRadius.circular(12),
-        ),
-        child: Row(
-          children: [
-            Icon(icon, size: 20, color: cs.onSurface),
-            const SizedBox(width: 14),
-            Text(label, style: TextStyle(fontSize: 15, color: cs.onSurface)),
-          ],
-        ),
-      ),
-    );
-  }
 
   Future<void> _regenerateAiReply(
       Message original, AICharacter character) async {
@@ -4637,7 +4347,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                           children: [
                             if (showDate)
                               _buildDateDivider(cs, message.timestamp),
-                            _MessageBubble(
+                            ChatMessageBubble(
                               message: message,
                               sender: sender,
                               characters: _allGroupCharacters,
@@ -4753,12 +4463,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               runSpacing: 8,
               alignment: WrapAlignment.center,
               children: [
-                _hintChip(cs, '说句「你好」试试'),
-                if (!_isDirectChat) _hintChip(cs, '@角色名 提到谁'),
+                HintChip(text: '说句「你好」试试', cs: cs),
+                if (!_isDirectChat) HintChip(text: '@角色名 提到谁', cs: cs),
                 if (!_isDirectChat && _characters.isNotEmpty)
-                  _hintChip(cs, '${_characters.length} 位 AI 在线'),
+                  HintChip(text: '${_characters.length} 位 AI 在线', cs: cs),
                 if (_isDirectChat && _allGroupCharacters.isNotEmpty)
-                  _hintChip(cs, _allGroupCharacters.first.role),
+                  HintChip(text: _allGroupCharacters.first.role, cs: cs),
               ],
             ),
           ],
@@ -4767,18 +4477,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
-  Widget _hintChip(ColorScheme cs, String text) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(20),
-        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
-      ),
-      child: Text(text,
-          style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
-    );
-  }
+
 
   /// 未配置 API Key 时的醒目横幅
   Widget _buildApiWarningBanner(ColorScheme cs) {
@@ -5467,22 +5166,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                     fontWeight: FontWeight.w600,
                     color: cs.onSurfaceVariant)),
             const SizedBox(height: 14),
-            _sheetBtn(ctx, cs, Icons.image_rounded, '图片（可多选）', () {
+            SheetButton(ctx, cs, Icons.image_rounded, '图片（可多选）', () {
               Navigator.pop(ctx);
               _pickImages();
             }),
             const SizedBox(height: 8),
-            _sheetBtn(ctx, cs, Icons.videocam_rounded, '视频（单选）', () {
+            SheetButton(ctx, cs, Icons.videocam_rounded, '视频（单选）', () {
               Navigator.pop(ctx);
               _pickVideo();
             }),
             const SizedBox(height: 8),
-            _sheetBtn(ctx, cs, Icons.insert_drive_file_rounded, '文件（可多选）', () {
+            SheetButton(ctx, cs, Icons.insert_drive_file_rounded, '文件（可多选）', () {
               Navigator.pop(ctx);
               _pickFiles();
             }),
             const SizedBox(height: 8),
-            _sheetBtn(ctx, cs, Icons.content_paste_rounded, '粘贴截图或文件', () {
+            SheetButton(ctx, cs, Icons.content_paste_rounded, '粘贴截图或文件', () {
               Navigator.pop(ctx);
               _pasteClipboardAttachments(showEmptyHint: true);
             }),
@@ -5715,7 +5414,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         final att = await _db.copyToMedia(
           source,
           _attachmentTypeForPath(path),
-          fileName: _fileNameFromPath(path),
+          fileName: fileNameFromPath(path),
         );
         addedFiles++;
         if (_canTouchUi) {
@@ -5827,7 +5526,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   String _attachmentTypeForPath(String path) {
-    final ext = _extensionOfPath(path);
+    final ext = extensionOfPath(path);
     const imageExts = {
       'jpg',
       'jpeg',
@@ -5862,12 +5561,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
-  String _extensionOfPath(String path) {
-    final name = path.split(RegExp(r'[/\\]')).last;
-    final dot = name.lastIndexOf('.');
-    if (dot < 0 || dot == name.length - 1) return '';
-    return name.substring(dot + 1).toLowerCase();
-  }
 
   /// 待发送附件预览行：图片缩略 / 视频占位，每项可单独移除。
   Widget _buildAttachmentPreviewRow(ColorScheme cs) {
@@ -5930,7 +5623,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     final icon = att.type == 'video'
         ? Icons.play_circle_outline_rounded
-        : _fileIconFor(att);
+        : fileIconFor(att);
     return Container(
       width: att.type == 'file' ? 150 : 56,
       height: 56,
@@ -5950,7 +5643,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                att.fileName ?? _fileNameFromPath(att.localPath),
+                att.fileName ?? fileNameFromPath(att.localPath),
                 maxLines: 2,
                 overflow: TextOverflow.ellipsis,
                 style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
@@ -6034,606 +5727,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
           ),
         ],
-      ),
-    );
-  }
-}
-
-IconData _fileIconFor(MediaAttachment att) {
-  final ext = _extensionOfPath(att.fileName ?? att.localPath);
-  return switch (ext) {
-    'pdf' => Icons.picture_as_pdf_rounded,
-    'zip' || 'rar' || '7z' => Icons.folder_zip_rounded,
-    'doc' || 'docx' => Icons.description_rounded,
-    'xls' || 'xlsx' || 'csv' => Icons.table_chart_rounded,
-    'ppt' || 'pptx' => Icons.slideshow_rounded,
-    'txt' ||
-    'md' ||
-    'json' ||
-    'yaml' ||
-    'yml' ||
-    'dart' =>
-      Icons.article_rounded,
-    _ => Icons.insert_drive_file_rounded,
-  };
-}
-
-String _fileNameFromPath(String path) {
-  final segments = path.split(RegExp(r'[/\\]'));
-  return segments.isEmpty ? path : segments.last;
-}
-
-String _extensionOfPath(String path) {
-  final name = path.split(RegExp(r'[/\\]')).last;
-  final dot = name.lastIndexOf('.');
-  if (dot < 0 || dot == name.length - 1) return '';
-  return name.substring(dot + 1).toLowerCase();
-}
-
-/// 用户在 AI 回复期间发的消息，排队等当前回合结束后再触发 AI 回复。
-class _PendingAgentToolApproval {
-  final AICharacter character;
-  final ApiConfig config;
-  final ApiProvider provider;
-  final String userRequest;
-  final ToolRequest request;
-  final List<ToolRequest> priorExecutedRequests;
-  final List<Map<String, dynamic>> conversationHistory;
-  final AgentTask task;
-
-  const _PendingAgentToolApproval({
-    required this.character,
-    required this.config,
-    required this.provider,
-    required this.userRequest,
-    required this.request,
-    this.priorExecutedRequests = const [],
-    this.conversationHistory = const [],
-    required this.task,
-  });
-}
-
-class _PendingUserMessage {
-  final String text;
-  final List<String> mentionedIds;
-
-  _PendingUserMessage(this.text, this.mentionedIds);
-}
-
-class _MessageBubble extends StatelessWidget {
-  final Message message;
-  final AICharacter? sender;
-  final List<AICharacter> characters;
-  final ColorScheme cs;
-  final bool isStreaming;
-  final bool isRegenerating;
-  final bool isHighlightedMention;
-  final VoidCallback? onLongPress;
-  final VoidCallback? onSenderTap;
-  final VoidCallback? onMentionSender;
-  final Color Function(AICharacter) senderColor;
-  final Message? quotedMessage;
-  final String? quotedSenderName;
-  final String ownerName;
-  final String? readReceiptText;
-
-  const _MessageBubble({
-    required this.message,
-    this.sender,
-    required this.characters,
-    required this.cs,
-    this.isStreaming = false,
-    this.isRegenerating = false,
-    this.isHighlightedMention = false,
-    this.onLongPress,
-    this.onSenderTap,
-    this.onMentionSender,
-    required this.senderColor,
-    this.quotedMessage,
-    this.quotedSenderName,
-    required this.ownerName,
-    this.readReceiptText,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final isUser = message.senderType == 'user';
-
-    return GestureDetector(
-      onLongPress: onLongPress,
-      onSecondaryTap: onLongPress,
-      child: Padding(
-        padding: const EdgeInsets.only(bottom: 16),
-        child: Row(
-          mainAxisAlignment:
-              isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            if (!isUser && sender != null) ...[
-              InkWell(
-                onTap: onSenderTap,
-                borderRadius: BorderRadius.circular(4),
-                child: Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: senderColor(sender!).withOpacity(0.14),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                      sender!.avatar.isNotEmpty
-                          ? sender!.avatar
-                          : sender!.name[0],
-                      style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: senderColor(sender!))),
-                ),
-              ),
-              const SizedBox(width: 8),
-            ],
-            Flexible(
-              child: Column(
-                crossAxisAlignment:
-                    isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
-                children: [
-                  if (!isUser && sender != null)
-                    Padding(
-                      padding: const EdgeInsets.only(left: 4, bottom: 4),
-                      child: Row(
-                        children: [
-                          GestureDetector(
-                            onTap: onSenderTap,
-                            onSecondaryTap: onMentionSender,
-                            onLongPress: onMentionSender,
-                            child: Text(sender!.name,
-                                style: TextStyle(
-                                    fontSize: 12,
-                                    fontWeight: FontWeight.w600,
-                                    color: senderColor(sender!))),
-                          ),
-                          if (isRegenerating)
-                            Padding(
-                              padding: const EdgeInsets.only(left: 8),
-                              child: SizedBox(
-                                  width: 12,
-                                  height: 12,
-                                  child: CircularProgressIndicator(
-                                      strokeWidth: 1.5, color: cs.primary)),
-                            ),
-                        ],
-                      ),
-                    ),
-                  WeComBubbleSurface(
-                    isUser: isUser,
-                    isHighlighted: isHighlightedMention,
-                    child: Column(
-                      crossAxisAlignment: isUser
-                          ? CrossAxisAlignment.end
-                          : CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        if (message.replyToMessageId != null)
-                          _buildQuotedRef(
-                            context,
-                            quotedMessage ?? message,
-                            quotedSenderName,
-                            isUser,
-                          ),
-                        _buildMediaContent(context, message, cs, isUser),
-                        _buildContent(context, message),
-                      ],
-                    ),
-                  ),
-                  if (readReceiptText != null)
-                    Padding(
-                      padding: const EdgeInsets.only(top: 3, right: 2),
-                      child: Text(
-                        readReceiptText!,
-                        style: TextStyle(
-                          fontSize: 10,
-                          color: WeComChatTokens.nickname(context),
-                        ),
-                      ),
-                    ),
-                ],
-              ),
-            ),
-            if (isUser) const SizedBox(width: 8),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildQuotedRef(
-    BuildContext context,
-    Message? quoted,
-    String? senderName,
-    bool isUser,
-  ) {
-    if (quoted == null) return const SizedBox.shrink();
-    final snippet = quoted.content.length > 50
-        ? '${quoted.content.substring(0, 50)}...'
-        : quoted.content;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 7),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-      decoration: BoxDecoration(
-        color: isUser
-            ? WeComChatTokens.lightText.withOpacity(0.08)
-            : WeComChatTokens.lightChatBackground.withOpacity(0.8),
-        borderRadius: BorderRadius.circular(3),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 2,
-            height: 28,
-            color: WeComChatTokens.mention,
-          ),
-          const SizedBox(width: 7),
-          if (senderName != null)
-            Text(senderName,
-                style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: WeComChatTokens.mention)),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(snippet,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: WeComChatTokens.text(context).withOpacity(0.68),
-                )),
-          ),
-        ],
-      ),
-    );
-  }
-
-  /// 气泡内的媒体渲染：图片网格 + 视频播放器，纵向排在文案上方。
-  Widget _buildMediaContent(
-      BuildContext context, Message message, ColorScheme cs, bool isUser) {
-    final media = message.media ?? [];
-    if (media.isEmpty) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Wrap(
-        spacing: 6,
-        runSpacing: 6,
-        alignment: isUser ? WrapAlignment.end : WrapAlignment.start,
-        children: media.map((att) {
-          if (att.type == 'image') {
-            return _buildImageThumb(context, att, cs);
-          }
-          if (att.type == 'video') {
-            return _VideoBubble(localPath: att.localPath, isUser: isUser);
-          }
-          return _buildFileAttachment(context, att, cs, isUser);
-        }).toList(),
-      ),
-    );
-  }
-
-  /// 图片缩略图，点击进入全屏预览（InteractiveViewer 可缩放/拖拽）。
-  Widget _buildImageThumb(
-      BuildContext context, MediaAttachment att, ColorScheme cs) {
-    final data = uiAttachmentDataUriCache.decode(att.localPath);
-    return GestureDetector(
-      onTap: () => _openImageFullscreen(context, att.localPath),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: data == null
-            ? Image.file(
-                File(att.localPath),
-                width: 140,
-                height: 140,
-                fit: BoxFit.cover,
-              )
-            : Image.memory(
-                data.bytes,
-                width: 140,
-                height: 140,
-                fit: BoxFit.cover,
-              ),
-      ),
-    );
-  }
-
-  /// 全屏预览图片：黑色背景 + InteractiveViewer 支持双指缩放。
-  void _openImageFullscreen(BuildContext context, String path) {
-    final data = uiAttachmentDataUriCache.decode(path);
-    showDialog(
-      context: context,
-      builder: (_) => Dialog(
-        backgroundColor: Colors.black,
-        insetPadding: const EdgeInsets.all(0),
-        child: Stack(
-          children: [
-            InteractiveViewer(
-              child: data == null
-                  ? Image.file(File(path))
-                  : Image.memory(data.bytes),
-            ),
-            Positioned(
-              top: 16,
-              right: 16,
-              child: IconButton(
-                icon: const Icon(Icons.close_rounded, color: Colors.white),
-                onPressed: () => Navigator.of(context).pop(),
-                tooltip: '关闭',
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFileAttachment(
-    BuildContext context,
-    MediaAttachment att,
-    ColorScheme cs,
-    bool isUser,
-  ) {
-    final textColor = WeComChatTokens.text(context);
-    final subtleColor = textColor.withOpacity(0.62);
-    final fillColor = isUser
-        ? WeComChatTokens.lightText.withOpacity(0.07)
-        : WeComChatTokens.chatBackground(context).withOpacity(0.7);
-    return InkWell(
-      onTap: () => _openAttachment(context, att),
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        width: 240,
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: fillColor,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          children: [
-            Icon(_fileIconFor(att), size: 30, color: subtleColor),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    att.fileName ?? _fileNameFromPath(att.localPath),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: textColor,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    _formatAttachmentSize(att.fileSize),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 11, color: subtleColor),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            Icon(Icons.open_in_new_rounded, size: 18, color: subtleColor),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _openAttachment(
-      BuildContext context, MediaAttachment att) async {
-    try {
-      if (isAttachmentDataUri(att.localPath)) {
-        final opened = await openDataAttachment(
-          att.localPath,
-          att.fileName ?? _fileNameFromPath(att.localPath),
-        );
-        if (!opened && context.mounted) {
-          AppToast.show(context, '浏览器未能打开附件',
-              icon: Icons.error_outline_rounded);
-        }
-        return;
-      }
-      final result = await OpenFilex.open(att.localPath, type: att.mimeType);
-      if (result.type.name != 'done' && context.mounted) {
-        AppToast.show(context, '打开失败：${result.message}',
-            icon: Icons.error_outline_rounded);
-      }
-    } catch (e) {
-      if (context.mounted) {
-        AppToast.show(context, '打开失败：$e', icon: Icons.error_outline_rounded);
-      }
-    }
-  }
-
-  IconData _fileIconFor(MediaAttachment att) {
-    final ext = _extensionOfPath(att.fileName ?? att.localPath);
-    return switch (ext) {
-      'pdf' => Icons.picture_as_pdf_rounded,
-      'zip' || 'rar' || '7z' => Icons.folder_zip_rounded,
-      'doc' || 'docx' => Icons.description_rounded,
-      'xls' || 'xlsx' || 'csv' => Icons.table_chart_rounded,
-      'ppt' || 'pptx' => Icons.slideshow_rounded,
-      'txt' ||
-      'md' ||
-      'json' ||
-      'yaml' ||
-      'yml' ||
-      'dart' =>
-        Icons.article_rounded,
-      _ => Icons.insert_drive_file_rounded,
-    };
-  }
-
-  String _fileNameFromPath(String path) {
-    final segments = path.split(RegExp(r'[/\\]'));
-    return segments.isEmpty ? path : segments.last;
-  }
-
-  String _formatAttachmentSize(int? bytes) {
-    if (bytes == null) return '文件';
-    if (bytes < 1024) return '$bytes B';
-    final kb = bytes / 1024;
-    if (kb < 1024) return '${kb.toStringAsFixed(kb < 10 ? 1 : 0)} KB';
-    final mb = kb / 1024;
-    if (mb < 1024) return '${mb.toStringAsFixed(mb < 10 ? 1 : 0)} MB';
-    final gb = mb / 1024;
-    return '${gb.toStringAsFixed(gb < 10 ? 1 : 0)} GB';
-  }
-
-  Widget _buildContent(BuildContext context, Message message) {
-    final textColor = WeComChatTokens.text(context);
-    final content = message.content.replaceAll('\\n', '\n');
-    final mentionNames = <String>{
-      ownerName,
-      ...characters.map((character) => character.name),
-    };
-    final textStyle = TextStyle(fontSize: 15, color: textColor, height: 1.45);
-
-    final base = MessageSelectableText(
-      content: content,
-      style: textStyle,
-      spans: buildWeComMentionSpans(
-        content,
-        mentionNames: mentionNames,
-        baseStyle: textStyle,
-      ),
-    );
-
-    // 正在流式生成时，在内容末尾追加一个闪烁光标，营造「打字机」观感。
-    if (isStreaming) {
-      return Row(
-        mainAxisSize: MainAxisSize.min,
-        crossAxisAlignment: CrossAxisAlignment.end,
-        children: [
-          Flexible(child: base),
-          const SizedBox(width: 2),
-          _BlinkingCursor(color: textColor),
-        ],
-      );
-    }
-    return base;
-  }
-}
-
-/// 气泡内视频播放器：使用 chewie 渲染带控制条的播放器。
-///
-/// 负责 [VideoPlayerController] 与 [ChewieController] 的完整生命周期，
-/// 在 [dispose] 中释放，避免资源泄漏。视频初始化完成后才展示控制条，
-/// 初始化期间显示占位 loading。
-class _VideoBubble extends StatefulWidget {
-  final String localPath;
-  final bool isUser;
-
-  const _VideoBubble({required this.localPath, required this.isUser});
-
-  @override
-  State<_VideoBubble> createState() => _VideoBubbleState();
-}
-
-class _VideoBubbleState extends State<_VideoBubble> {
-  late final VideoPlayerController _controller;
-  ChewieController? _chewieController;
-
-  @override
-  void initState() {
-    super.initState();
-    _controller = !isAttachmentDataUri(widget.localPath)
-        ? VideoPlayerController.file(File(widget.localPath))
-        : VideoPlayerController.networkUrl(Uri.parse(widget.localPath));
-    _controller.initialize().then((_) {
-      if (!mounted) return;
-      // 初始化成功后再构造 ChewieController，保证 aspectRatio 可用。
-      _chewieController = ChewieController(
-        videoPlayerController: _controller,
-        autoPlay: false,
-        looping: false,
-        aspectRatio: _controller.value.aspectRatio,
-        placeholder: const Center(child: CircularProgressIndicator()),
-      );
-      setState(() {});
-    }).catchError((e) {
-      debugPrint('[视频] 初始化失败：$e');
-    });
-  }
-
-  @override
-  void dispose() {
-    _chewieController?.dispose();
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final ratio = _chewieController?.aspectRatio ?? 1.0;
-    return ConstrainedBox(
-      constraints: const BoxConstraints(maxWidth: 240, maxHeight: 320),
-      child: AspectRatio(
-        aspectRatio: ratio,
-        child: _chewieController != null
-            ? Chewie(controller: _chewieController!)
-            : Container(
-                color: Colors.black.withOpacity(0.08),
-                child: const Center(child: CircularProgressIndicator()),
-              ),
-      ),
-    );
-  }
-}
-
-/// 流式生成时显示在气泡末尾的闪烁光标（打字机效果）。
-///
-/// 自带 AnimationController 循环播放透明度，不依赖外部状态，自管理生命周期。
-class _BlinkingCursor extends StatefulWidget {
-  final Color color;
-
-  const _BlinkingCursor({required this.color});
-
-  @override
-  State<_BlinkingCursor> createState() => _BlinkingCursorState();
-}
-
-class _BlinkingCursorState extends State<_BlinkingCursor>
-    with SingleTickerProviderStateMixin {
-  late final AnimationController _controller;
-
-  @override
-  void initState() {
-    super.initState();
-    // 600ms 一个周期，reverse 实现呼吸式闪烁
-    _controller = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 600),
-    )..repeat(reverse: true);
-  }
-
-  @override
-  void dispose() {
-    _controller.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    return FadeTransition(
-      opacity: _controller,
-      child: Text(
-        '▌',
-        style: TextStyle(
-            fontSize: 15, fontWeight: FontWeight.w600, color: widget.color),
       ),
     );
   }

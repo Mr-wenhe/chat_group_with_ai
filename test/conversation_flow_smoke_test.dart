@@ -2,7 +2,7 @@ import 'dart:math';
 
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
-import 'package:chat_group/features/chat_group/chat_room_page.dart';
+import 'package:chat_group/features/chat_group/agentic_reply_utils.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:flutter_test/flutter_test.dart';

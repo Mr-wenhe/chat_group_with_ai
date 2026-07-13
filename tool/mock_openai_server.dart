@@ -4,9 +4,13 @@ import 'dart:io';
 
 const _port = 18080;
 
-Future<void> main() async {
-  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, _port);
-  stdout.writeln('Mock OpenAI server: http://127.0.0.1:$_port/v1');
+Future<HttpServer> startMockOpenAiServer({int port = _port}) async {
+  final server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
+  stdout.writeln('Mock OpenAI server: http://127.0.0.1:${server.port}/v1');
+  return server;
+}
+
+Future<void> serveMockOpenAiRequests(HttpServer server) async {
   await for (final request in server) {
     if (request.method != 'POST' ||
         !request.uri.path.endsWith('/chat/completions')) {
@@ -72,6 +76,11 @@ Future<void> main() async {
     }
     await request.response.close();
   }
+}
+
+Future<void> main() async {
+  final server = await startMockOpenAiServer();
+  await serveMockOpenAiRequests(server);
 }
 
 String _reply(String prompt, String last) {

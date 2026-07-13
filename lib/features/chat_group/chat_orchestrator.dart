@@ -237,13 +237,17 @@ class ChatOrchestrator {
 
   static String stripNamePrefix(String content, String characterName) {
     final prefixes = [
+      '【$characterName】：',
       '$characterName：',
+      '$characterName: ',
       '$characterName:',
       '【$characterName】',
       '[$characterName]',
     ];
     for (final p in prefixes) {
-      if (content.startsWith(p)) return content.substring(p.length);
+      if (content.startsWith(p)) {
+        return content.substring(p.length).trimLeft();
+      }
     }
     return content;
   }

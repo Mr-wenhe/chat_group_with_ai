@@ -7,8 +7,9 @@ import 'package:chat_group/features/agentic/agent_runtime.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_launcher.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
-import 'package:chat_group/features/chat_group/chat_room_page.dart';
+import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 import 'package:chat_group/services/chat_api_service.dart';
+import '../../tool/mock_openai_server.dart' as mock_openai;
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -16,11 +17,19 @@ void main() {
       () async {
     final workspace = '${Directory.current.path}/agentic_output';
     await Directory(workspace).create(recursive: true);
+    final mockServer = await mock_openai.startMockOpenAiServer(port: 0);
+    final mockServerLoop = mock_openai.serveMockOpenAiRequests(mockServer);
+    addTearDown(() async {
+      await mockServer.close(force: true);
+      await mockServerLoop;
+    });
     final launcher = LocalAgentBridgeLauncher();
     await launcher.start(workspace: workspace);
     addTearDown(launcher.stop);
 
     final api = ChatApiService();
+    final mockBaseUrl =
+        'http://${mockServer.address.address}:${mockServer.port}/v1';
     final tasks =
         <({AICharacter character, String request, String file, String marker})>[
       (
@@ -74,7 +83,7 @@ void main() {
         complete: (messages) => api.sendChatMessageStreamed(
           apiKey: 'local-test-key',
           provider: ApiProvider.custom,
-          customBaseUrl: 'http://127.0.0.1:18080/v1',
+          customBaseUrl: mockBaseUrl,
           model: 'codex-local-test',
           messages: messages,
           maxRetries: 0,
