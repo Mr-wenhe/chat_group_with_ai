@@ -8,7 +8,6 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
-import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/autonomous_conversation_config.dart';
 import 'package:chat_group/core/models/autonomous_task.dart';
 import 'package:chat_group/core/models/character_memory.dart';
@@ -42,6 +41,8 @@ import 'package:chat_group/features/autonomous/autonomous_trigger_detector.dart'
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
 import 'package:chat_group/features/chat_group/chat_group_form_page.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
+import 'package:chat_group/features/chat_group/chat_room_loader.dart';
+import 'package:chat_group/features/chat_group/chat_room_repository.dart';
 import 'package:chat_group/features/chat_group/direct_file_task_policy.dart';
 import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
@@ -54,7 +55,12 @@ import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 import 'package:chat_group/features/chat_group/agentic_reply_utils.dart';
 import 'package:chat_group/features/chat_group/attachment_utils.dart';
 import 'package:chat_group/features/chat_group/models/chat_room_models.dart';
-import 'package:chat_group/features/chat_group/widgets/chat_message_bubble.dart';
+import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
+import 'package:chat_group/features/chat_group/widgets/chat_message_list.dart';
+import 'package:chat_group/features/chat_group/widgets/chat_room_composer.dart';
+import 'package:chat_group/features/chat_group/widgets/chat_room_banners.dart';
+import 'package:chat_group/features/chat_group/widgets/chat_room_app_bar.dart';
+import 'package:chat_group/features/chat_group/widgets/member_sheet.dart';
 import 'package:chat_group/features/chat_group/widgets/hint_chip.dart';
 import 'package:chat_group/features/chat_group/widgets/sheet_button.dart';
 import 'package:chat_group/features/chat_group/widgets/compact_conversation_controls.dart';
@@ -68,7 +74,6 @@ import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:chat_group/services/message_speech_service.dart';
 import 'package:chat_group/services/web_search_service.dart';
-import 'package:desktop_drop/desktop_drop.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -78,14 +83,6 @@ import 'package:image_picker/image_picker.dart';
 import 'package:pasteboard/pasteboard.dart';
 
 enum AutoChatStatus { idle, waiting, generating, paused, unavailable, error }
-
-enum ReplyBlockReason {
-  noApiConfig,
-  inactive,
-  hourlyLimit,
-  alreadyGenerating,
-  networkError,
-}
 
 class ChatRoomPage extends ConsumerStatefulWidget {
   final String groupId;
@@ -99,7 +96,6 @@ class ChatRoomPage extends ConsumerStatefulWidget {
 class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     with WidgetsBindingObserver {
   final _textController = TextEditingController();
-  final _memberSearchController = TextEditingController();
   final _scrollController = ScrollController();
   final _inputFocusNode = FocusNode();
   final _chatApi = ChatApiService();
@@ -108,6 +104,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   final _random = Random();
   late final MessageSpeechService _speech;
   late final DatabaseService _db;
+  late final ReplyEligibilityPolicy _replyEligibility;
+  late final ChatRoomRepository _repository;
+  late final ChatRoomLoader _loader;
 
   ChatGroup? _group;
   List<AICharacter> _characters = []; // 活跃角色（用于 AI 回复等逻辑）
@@ -198,7 +197,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   bool _isStreaming = false; // 是否正在流式生成（控制「停止生成」按钮显隐）
   bool _disposed = false; // dispose 守卫，避免异步回调在销毁后写状态
   Timer? _streamUiFlushTimer;
-  final Map<String, GlobalKey> _messageKeys = {};
+  final ChatMessageListController _messageListController =
+      ChatMessageListController();
 
   // —— @我 提醒 ——
   final List<String> _pendingUserMentionMessageIds = [];
@@ -211,6 +211,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     WidgetsBinding.instance.addObserver(this);
     ConversationPresenceService.instance.enter(widget.groupId);
     _db = ref.read(databaseServiceProvider);
+    _loader = ChatRoomLoader(db: _db, resolveApiConfig: _resolveApiConfig);
+    _replyEligibility = ReplyEligibilityPolicy(
+      resolveApiConfig: _resolveApiConfig,
+    );
+    _repository = ChatRoomRepository(
+      db: _db,
+      conversationId: widget.groupId,
+      isDirectChat: _isDirectChat,
+    );
     _aiAttachments = AiAttachmentService(db: _db);
     _speech = MessageSpeechService(
       engine: FlutterTtsSpeechEngine(),
@@ -245,7 +254,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _streamUiFlushTimer?.cancel();
     _searchDebounceTimer?.cancel();
     _textController.dispose();
-    _memberSearchController.dispose();
     _scrollController.dispose();
     _inputFocusNode.dispose();
     _searchController.dispose();
@@ -272,170 +280,48 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       DirectChatSession.characterIdFrom(widget.groupId);
 
   Future<void> _loadData() async {
-    if (_isDirectChat) {
-      await _loadDirectChatData();
-      return;
-    }
+    try {
+      final loaded = await _loader.load(widget.groupId);
+      if (!_canTouchUi) return;
 
-    final group = _db.chatGroupBox.get(widget.groupId);
-    if (group == null) {
-      if (mounted) {
-        AppToast.show(context, '群聊不存在', icon: Icons.error_outline_rounded);
-        Navigator.pop(context);
-      }
-      return;
-    }
-
-    final characters = group.aiCharacterIds
-        .map((id) => _db.aiCharacterBox.get(id))
-        .whereType<AICharacter>()
-        .where((c) => c.isActive)
-        .toList()
-      ..sort((a, b) => a.name.compareTo(b.name));
-
-    // 全部群成员（含停用），供 @ 弹窗和成员列表使用。
-    final allGroupCharacters = group.aiCharacterIds
-        .map((id) => _db.aiCharacterBox.get(id))
-        .whereType<AICharacter>()
-        .toList()
-      ..sort((a, b) => a.name.compareTo(b.name));
-
-    // 检测是否有角色配置了 API Key（决定 AI 能否回复/自动聊天）
-    final hasApi = characters.any((c) {
-      final cfg = _resolveApiConfig(c);
-      return cfg != null && cfg.apiKey.isNotEmpty;
-    });
-
-    final messages = await _db.messagesForGroup(widget.groupId);
-    await _db.markGroupChatRead(
-      widget.groupId,
-      readAt: _readThrough(messages),
-    );
-
-    final memoryBox = _db.groupMemoryBox;
-    final now = DateTime.now();
-    final memoryKey = '${widget.groupId}_${_memoryPeriodKey(now)}';
-    var memory = memoryBox.get(memoryKey);
-    if (memory == null) {
-      final legacyKey =
-          '${widget.groupId}_${ChatOrchestrator.legacyMemoryPeriodKey(now)}';
-      final legacyMemory = memoryBox.get(legacyKey);
-      if (legacyMemory != null) {
-        memory = GroupMemory(
-          groupId: legacyMemory.groupId,
-          topicSummary: legacyMemory.topicSummary,
-          lastSummaryAt: legacyMemory.lastSummaryAt,
-        );
-        await memoryBox.put(memoryKey, memory);
-      }
-    }
-    if (memory == null) {
-      memory = GroupMemory(groupId: widget.groupId, topicSummary: '');
-      await memoryBox.put(memoryKey, memory);
-    }
-
-    final characterMemories = _db.characterMemoryBox.values
-        .where((m) => m.groupId == widget.groupId)
-        .toList();
-    final relationshipStates = _db.relationshipStateBox.values
-        .where((r) => r.groupId == widget.groupId)
-        .toList();
-    final autonomousConfig =
-        await AutonomousConversationConfigService(db: _db).loadOrCreate(
-      conversationId: widget.groupId,
-      isDirectChat: false,
-    );
-
-    setState(() {
-      _group = group;
-      _characters = characters;
-      _allGroupCharacters = allGroupCharacters;
-      _messages = messages;
-      _groupMemory = memory;
-      _characterMemories = characterMemories;
-      _relationshipStates = relationshipStates;
-      _autonomousConfig = autonomousConfig;
-      _hasAnyApiConfig = hasApi;
-      _isAutoChatEnabled = true;
-      _autoChatStatus =
-          hasApi ? AutoChatStatus.waiting : AutoChatStatus.unavailable;
-      _isLoading = false;
-    });
-
-    _scrollToBottom();
-    _scheduleAgentTaskRecovery();
-
-    if (_isAutoChatEnabled && _characters.isNotEmpty && hasApi) {
-      Future.delayed(_autoChatInitialDelay, () {
-        if (_canTouchUi) _startAutoChat();
+      setState(() {
+        _group = loaded.displayGroup;
+        _characters = loaded.activeCharacters;
+        _allGroupCharacters = loaded.allCharacters;
+        _messages = loaded.messages;
+        _groupMemory = loaded.groupMemory;
+        _characterMemories = loaded.characterMemories;
+        _relationshipStates = loaded.relationships;
+        _autonomousConfig = loaded.autonomousConfig;
+        _hasAnyApiConfig = loaded.hasAnyApiConfig;
+        _isAutoChatEnabled = true;
+        _autoChatStatus = loaded.hasAnyApiConfig
+            ? AutoChatStatus.waiting
+            : AutoChatStatus.unavailable;
+        _lastReplyBlockReason = loaded.isDirectChat &&
+                loaded.allCharacters.isNotEmpty &&
+                !loaded.hasAnyApiConfig
+            ? _blockReasonFor(loaded.allCharacters.first)
+            : null;
+        _isLoading = false;
       });
-    }
-  }
 
-  Future<void> _loadDirectChatData() async {
-    final characterId = _directCharacterId;
-    final character =
-        characterId == null ? null : _db.aiCharacterBox.get(characterId);
-    if (character == null) {
-      if (mounted) {
-        AppToast.show(context, '私聊角色不存在', icon: Icons.error_outline_rounded);
-        Navigator.pop(context);
+      _scrollToBottom();
+      _scheduleAgentTaskRecovery();
+      if (_isAutoChatEnabled &&
+          loaded.activeCharacters.isNotEmpty &&
+          loaded.hasAnyApiConfig) {
+        final delay = loaded.isDirectChat
+            ? const Duration(seconds: 18)
+            : _autoChatInitialDelay;
+        Future.delayed(delay, () {
+          if (_canTouchUi) _startAutoChat();
+        });
       }
-      return;
-    }
-
-    final activeCharacters =
-        character.isActive ? <AICharacter>[character] : <AICharacter>[];
-    final config = _resolveApiConfig(character);
-    final hasApi =
-        character.isActive && config != null && config.apiKey.isNotEmpty;
-    final messages = await _db.messagesForGroup(widget.groupId);
-    await _db.markDirectChatRead(
-      widget.groupId,
-      readAt: _readThrough(messages),
-    );
-    final characterMemories = _db.characterMemoryBox.values
-        .where((m) => m.groupId == widget.groupId)
-        .toList();
-    final relationshipStates = _db.relationshipStateBox.values
-        .where((r) => r.groupId == widget.groupId)
-        .toList();
-    final autonomousConfig =
-        await AutonomousConversationConfigService(db: _db).loadOrCreate(
-      conversationId: widget.groupId,
-      isDirectChat: true,
-    );
-
-    setState(() {
-      _group = ChatGroup(
-        id: widget.groupId,
-        name: '与 ${character.name} 私聊',
-        theme: '一对一私聊',
-        description: '${character.role} · ${character.age}岁',
-        aiCharacterIds: [character.id],
-      );
-      _characters = activeCharacters;
-      _allGroupCharacters = [character];
-      _messages = messages;
-      _groupMemory = null;
-      _characterMemories = characterMemories;
-      _relationshipStates = relationshipStates;
-      _autonomousConfig = autonomousConfig;
-      _hasAnyApiConfig = hasApi;
-      _isAutoChatEnabled = true;
-      _autoChatStatus =
-          hasApi ? AutoChatStatus.waiting : AutoChatStatus.unavailable;
-      _lastReplyBlockReason = hasApi ? null : _blockReasonFor(character);
-      _isLoading = false;
-    });
-
-    _scrollToBottom();
-    _scheduleAgentTaskRecovery();
-
-    if (_isAutoChatEnabled && activeCharacters.isNotEmpty && hasApi) {
-      Future.delayed(const Duration(seconds: 18), () {
-        if (_canTouchUi) _startAutoChat();
-      });
+    } on ChatRoomLoadException catch (error) {
+      if (!mounted || _disposed) return;
+      AppToast.show(context, error.message, icon: Icons.error_outline_rounded);
+      Navigator.pop(context);
     }
   }
 
@@ -652,37 +538,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   DateTime _readThrough(List<Message> messages) {
-    if (messages.isEmpty) return DateTime.now();
-    final latest = messages
-        .map((message) => message.timestamp)
-        .reduce((a, b) => a.isAfter(b) ? a : b);
-    final readAt = latest.add(const Duration(milliseconds: 1));
-    final now = DateTime.now();
-    return readAt.isAfter(now) ? readAt : now;
+    return ChatRoomLoader.readThrough(
+      messages.map((message) => message.timestamp),
+    );
   }
 
   Future<void> _markCurrentConversationRead({Message? throughMessage}) async {
-    if (_isDirectChat) {
-      await _db.markDirectChatRead(
-        widget.groupId,
-        readAt: throughMessage == null
-            ? _readThrough(_messages)
-            : _readThrough([throughMessage]),
-      );
-      _clearActiveUserMentionBanner();
-      return;
-    }
-    await _db.markGroupChatRead(
-      widget.groupId,
-      readAt: throughMessage == null
+    await _repository.markRead(
+      throughMessage == null
           ? _readThrough(_messages)
           : _readThrough([throughMessage]),
     );
     _clearActiveUserMentionBanner();
-  }
-
-  String _memoryPeriodKey(DateTime now) {
-    return ChatOrchestrator.memoryPeriodKey(now);
   }
 
   Future<void> _sendMessage() async {
@@ -723,10 +590,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     await _appendMessage(userMessage);
     if (_isDirectChat) {
       await _db.saveDirectChatSource(widget.groupId, DirectChatSource.direct);
-      await _db.markDirectChatRead(
-        widget.groupId,
-        readAt: _readThrough(_messages),
-      );
+      await _repository.markRead(_readThrough(_messages));
     }
     _cancelQuote();
 
@@ -1161,16 +1025,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       webSearch,
     );
     debugPrint(
-        '[AI Reply] ${character.name} apiMessages count=${apiMessages.length}');
-    for (var i = 0; i < apiMessages.length; i++) {
-      final m = apiMessages[i];
-      // content 可能是 String（纯文本）或 List（多模态 parts），统一安全打印。
-      final content = m['content'];
-      final preview = content is String
-          ? content.substring(0, content.length.clamp(0, 60))
-          : '[${content.runtimeType}]';
-      debugPrint('[AI Reply]   [$i] role=${m['role']} content=$preview');
-    }
+      '[AI Reply] character=${character.id} messages=${apiMessages.length} '
+      'provider=${provider.name}',
+    );
 
     // —— 内存态临时消息：先以空内容入列用于增量渲染，整条完成后再落库一次 ——
     final temp = Message(
@@ -1327,9 +1184,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       debugPrint('[AI Reply] suppressed duplicate from ${character.name}');
       _recordReplyUsage(character);
       if (promptTokens != null && completionTokens != null) {
-        await _db.recordTokenUsage(
+        await _repository.recordTokenUsage(
           characterId: character.id,
-          groupId: widget.groupId,
           inputTokens: promptTokens!,
           outputTokens: completionTokens!,
           cachedTokens: cachedTokens ?? 0,
@@ -1364,15 +1220,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (_canTouchUi && generatedAttachments.isNotEmpty) {
       _flushStreamingUi();
     }
-    await _db.messageBox.put(temp.id, temp);
-    await _db.addMessageToGroupIndex(temp);
+    await _repository.persistNewMessage(temp);
     await _markCurrentConversationRead(throughMessage: temp);
     _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     if (promptTokens != null && completionTokens != null) {
-      _db.recordTokenUsage(
+      _repository.recordTokenUsage(
         characterId: character.id,
-        groupId: widget.groupId,
         inputTokens: promptTokens!,
         outputTokens: completionTokens!,
         cachedTokens: cachedTokens ?? 0,
@@ -1391,7 +1245,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (_canTouchUi) setState(() => _streamingMessage = null);
     return fullContent;
   }
-
 
   Future<RecoveredNonAgenticFile?> _recoverFileFromNonAgenticReply({
     required AICharacter character,
@@ -1899,7 +1752,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final existing = _db.messageBox.get(id);
     if (existing != null) {
       existing.content = content;
-      await _db.messageBox.put(id, existing);
+      await _repository.updateMessage(existing);
       return;
     }
     await _appendMessage(Message(
@@ -2276,17 +2129,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   ApiConfig? _resolveApiConfig(AICharacter character) {
     if (character.apiConfigId.isNotEmpty) {
       final config = _db.apiConfigBox.get(character.apiConfigId);
-      if (config != null) {
-        debugPrint(
-            '[DIAG] ${character.name}: config found via apiConfigId, apiKey_len=${config.apiKey.length}, provider=${config.provider}');
-        return config;
-      }
-      debugPrint(
-          '[DIAG] ${character.name}: apiConfigId=${character.apiConfigId} NOT found in box');
+      if (config != null) return config;
     }
     if (character.apiKey.isNotEmpty && character.apiProvider.isNotEmpty) {
-      debugPrint(
-          '[DIAG] ${character.name}: using legacy apiKey, len=${character.apiKey.length}, provider=${character.apiProvider}');
       return ApiConfig(
         id: 'legacy_${character.id}',
         name: '${character.name} 原有配置',
@@ -2662,39 +2507,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 从最近的消息中提取对话焦点，帮助 AI 理解"现在在聊什么"。
   /// 取最近 3 条消息的内容拼成一段焦点摘要，注入到 system prompt 中。
   String _extractRecentFocus(List<Message> messages) {
-    if (messages.isEmpty) return '';
-    final recent =
-        messages.length > 3 ? messages.sublist(messages.length - 3) : messages;
-    final snippets = recent.map((m) => m.content).toList();
-    final joined = snippets.join(' → ');
-    if (joined.length > 200) {
-      return '\n\n【当前对话焦点】最近大家在聊：${joined.substring(0, 200)}...';
-    }
-    return '\n\n【当前对话焦点】最近大家在聊：$joined';
+    return ChatOrchestrator.extractRecentFocus(messages);
   }
 
   /// 移除 LLM 回复中可能附带的名字前缀（如「张三：」「【张三】：」）。
   /// UI 已独立显示角色名，内容中不应重复。
   String _stripNamePrefix(String content, String characterName) {
-    var result = content;
-    final patterns = [
-      '【$characterName】：',
-      '$characterName：',
-      '$characterName: ',
-      '【$characterName】',
-    ];
-    for (final p in patterns) {
-      if (result.startsWith(p)) {
-        result = result.substring(p.length).trimLeft();
-        break;
-      }
-    }
-    return result;
+    return ChatOrchestrator.stripNamePrefix(content, characterName);
   }
 
   Future<void> _appendMessage(Message message) async {
-    await _db.messageBox.put(message.id, message);
-    await _db.addMessageToGroupIndex(message);
+    await _repository.persistNewMessage(message);
     if (message.senderType == 'ai') {
       await _markCurrentConversationRead(throughMessage: message);
     }
@@ -2931,74 +2754,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   bool _isEligibleToReply(AICharacter character) {
-    if (_blockReasonFor(character) != null) return false;
-    return true;
+    return _replyEligibility.isEligible(character);
   }
 
   ReplyBlockReason? _blockReasonFor(AICharacter character) {
-    if (!character.isActive) return ReplyBlockReason.inactive;
-    final config = _resolveApiConfig(character);
-    if (config == null || config.apiKey.isEmpty) {
-      return ReplyBlockReason.noApiConfig;
-    }
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final lastReplyDay = character.lastReplyTimestamp == null
-        ? null
-        : DateTime(
-            character.lastReplyTimestamp!.year,
-            character.lastReplyTimestamp!.month,
-            character.lastReplyTimestamp!.day);
-
-    if (lastReplyDay == null || lastReplyDay != today) {
-      return null;
-    }
-
-    final diff = now.difference(character.lastReplyTimestamp!).inMinutes;
-    if (diff >= 60) {
-      return null;
-    }
-
-    return character.hourlyReplyCount < character.hourlyReplyLimit
-        ? null
-        : ReplyBlockReason.hourlyLimit;
+    return _replyEligibility.blockReasonFor(character);
   }
 
   List<AICharacter> get _eligibleCharacters =>
       _characters.where(_isEligibleToReply).toList();
 
   ReplyBlockReason? _firstBlockReason(List<AICharacter> characters) {
-    if (characters.isEmpty) return null;
-    final reasons =
-        characters.map(_blockReasonFor).whereType<ReplyBlockReason>().toList();
-    if (reasons.isEmpty) return null;
-    if (reasons.every((r) => r == ReplyBlockReason.noApiConfig)) {
-      return ReplyBlockReason.noApiConfig;
-    }
-    if (reasons.every((r) => r == ReplyBlockReason.inactive)) {
-      return ReplyBlockReason.inactive;
-    }
-    if (reasons.every((r) => r == ReplyBlockReason.hourlyLimit)) {
-      return ReplyBlockReason.hourlyLimit;
-    }
-    return reasons.first;
+    return _replyEligibility.firstBlockReason(characters);
   }
 
   void _recordReplyUsage(AICharacter character) {
-    final now = DateTime.now();
-    final last = character.lastReplyTimestamp;
-    final sameDay = last != null &&
-        last.year == now.year &&
-        last.month == now.month &&
-        last.day == now.day;
-    final withinHour = last != null && now.difference(last).inMinutes < 60;
-    if (!sameDay || !withinHour) {
-      character.hourlyReplyCount = 1;
-    } else {
-      character.hourlyReplyCount += 1;
-    }
-    character.lastReplyTimestamp = now;
-    _db.aiCharacterBox.put(character.id, character);
+    _replyEligibility.recordReplyUsage(character);
+    _repository.persistReplyUsage(character);
   }
 
   Future<void> _recordTokenUsageFromResult(
@@ -3006,9 +2778,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final promptTokens = result['promptTokens'];
     final completionTokens = result['completionTokens'];
     if (promptTokens is! int || completionTokens is! int) return;
-    await _db.recordTokenUsage(
+    await _repository.recordTokenUsage(
       characterId: character.id,
-      groupId: widget.groupId,
       inputTokens: promptTokens,
       outputTokens: completionTokens,
       cachedTokens: result['cachedTokens'] is int ? result['cachedTokens'] : 0,
@@ -3800,8 +3571,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   void _scrollToMessageIndex(int index) {
     if (index < 0 || index >= _messages.length) return;
     if (!_scrollController.hasClients) return;
-    final key = _messageKeys[_messages[index].id];
-    final keyContext = key?.currentContext;
+    final keyContext = _messageListController.contextFor(_messages[index].id);
     if (keyContext != null) {
       Scrollable.ensureVisible(
         keyContext,
@@ -3818,8 +3588,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (!mounted) return;
-      final k = _messageKeys[_messages[index].id];
-      final ctx = k?.currentContext;
+      final ctx = _messageListController.contextFor(_messages[index].id);
       if (ctx != null) {
         Scrollable.ensureVisible(
           ctx,
@@ -3932,8 +3701,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               _quoteMessage(message);
             }),
             const SizedBox(height: 8),
-            SheetButton(ctx, cs, Icons.alternate_email_rounded, '@${sender.name}',
-                () {
+            SheetButton(
+                ctx, cs, Icons.alternate_email_rounded, '@${sender.name}', () {
               Navigator.pop(ctx);
               _insertMention(sender);
             }),
@@ -3961,7 +3730,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       ),
     );
   }
-
 
   Future<void> _regenerateAiReply(
       Message original, AICharacter character) async {
@@ -4096,14 +3864,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     temp.isMention = mentionedIds.isNotEmpty;
     temp.mentionedAiIds = mentionedIds;
     temp.replyToMessageId = original.id;
-    await _db.messageBox.put(temp.id, temp);
-    await _db.addMessageToGroupIndex(temp);
+    await _repository.persistNewMessage(temp);
     _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     if (promptTokens != null && completionTokens != null) {
-      _db.recordTokenUsage(
+      _repository.recordTokenUsage(
         characterId: character.id,
-        groupId: widget.groupId,
         inputTokens: promptTokens!,
         outputTokens: completionTokens!,
         cachedTokens: cachedTokens ?? 0,
@@ -4154,63 +3920,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
-  Widget _buildSearchBar(ColorScheme cs) {
-    return Row(
-      children: [
-        Expanded(
-          child: TextField(
-            controller: _searchController,
-            autofocus: true,
-            decoration: InputDecoration(
-              hintText: '搜索消息...',
-              hintStyle: TextStyle(color: cs.onSurfaceVariant.withOpacity(0.6)),
-              border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: cs.outlineVariant),
-              ),
-              enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: cs.outlineVariant),
-              ),
-              focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(color: cs.primary, width: 1.5),
-              ),
-              filled: true,
-              fillColor: cs.surfaceContainerHighest,
-              contentPadding:
-                  const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-              isDense: true,
-            ),
-            onChanged: _performSearch,
-          ),
-        ),
-        const SizedBox(width: 8),
-        Container(
-          padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
-          decoration: BoxDecoration(
-            color: cs.primaryContainer.withOpacity(0.5),
-            borderRadius: BorderRadius.circular(8),
-          ),
-          child: Text(
-            _searchResultLabel,
-            style: TextStyle(
-                fontSize: 12, color: cs.primary, fontWeight: FontWeight.w600),
-          ),
-        ),
-      ],
-    );
-  }
-
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final messagesById = {for (final message in _messages) message.id: message};
-    final charactersById = {
-      for (final character in _allGroupCharacters) character.id: character,
-      for (final character in _characters) character.id: character
-    };
-    _messageKeys.removeWhere((id, _) => !messagesById.containsKey(id));
 
     if (_isLoading) {
       return Scaffold(
@@ -4231,158 +3943,89 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     final readUserMessageIds =
         _isDirectChat ? directReadUserMessageIds(_messages) : const <String>{};
+    // #5 性能：消息/角色索引 Map 在父页预计算一次，避免在子组件每次 build 重建。
+    final messageIndex = {for (final message in _messages) message.id: message};
+    final characterIndex = {
+      for (final character in _allGroupCharacters) character.id: character,
+    };
     return Scaffold(
       backgroundColor: WeComChatTokens.chatBackground(context),
-      appBar: AppBar(
-        backgroundColor: WeComChatTokens.chatBackground(context),
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        title: _isSearching
-            ? _buildSearchBar(cs)
-            : Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(_group?.name ?? '群聊',
-                      style: TextStyle(
-                          fontWeight: FontWeight.w700,
-                          fontSize: 18,
-                          color: cs.onSurface)),
-                  if (!_isDirectChat &&
-                      _groupMemory != null &&
-                      _groupMemory!.topicSummary.isNotEmpty)
-                    Text(_groupMemory!.topicSummary,
-                        style: TextStyle(
-                            fontSize: 12, color: cs.onSurfaceVariant)),
-                ],
-              ),
-        actions: _isSearching
-            ? [
-                if (_searchResults.isNotEmpty) ...[
-                  TextButton.icon(
-                    onPressed: _searchPrev,
-                    icon: const Icon(Icons.arrow_upward_rounded, size: 18),
-                    label: Text(_searchResultLabel),
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.arrow_downward_rounded, size: 20),
-                    onPressed: _searchNext,
-                    tooltip: '下一个',
-                  ),
-                ],
-                IconButton(
-                  icon: const Icon(Icons.close_rounded, size: 22),
-                  onPressed: _exitSearch,
-                  tooltip: '关闭搜索',
-                ),
-              ]
-            : [
-                IconButton(
-                  icon: const Icon(Icons.search_rounded, size: 22),
-                  onPressed: _enterSearch,
-                  tooltip: '搜索消息',
-                ),
-                if (!_isDirectChat)
-                  IconButton(
-                    icon: const Icon(Icons.upload_rounded, size: 22),
-                    onPressed: () {
-                      Navigator.of(context).push(MaterialPageRoute(
-                        builder: (_) =>
-                            ExportPage(initialGroupId: widget.groupId),
-                      ));
-                    },
-                    tooltip: '导出本群对话',
-                  ),
-                if (!_isDirectChat)
-                  GestureDetector(
-                    onTap: () => _showMembersSheet(cs),
-                    child: _buildMemberStackChip(cs),
-                  ),
-                const SizedBox(width: 8),
-              ],
+      appBar: ChatRoomAppBar(
+        title: _group?.name ?? '群聊',
+        subtitle:
+            !_isDirectChat && (_groupMemory?.topicSummary.isNotEmpty ?? false)
+                ? _groupMemory!.topicSummary
+                : null,
+        isSearching: _isSearching,
+        searchController: _searchController,
+        hasSearchResults: _searchResults.isNotEmpty,
+        searchResultLabel: _searchResultLabel,
+        showGroupActions: !_isDirectChat,
+        memberChip: GestureDetector(
+          onTap: _showMembersSheet,
+          child: MemberStackChip(
+            characters: _characters,
+            senderColor: _senderColor,
+          ),
+        ),
+        onSearchChanged: _performSearch,
+        onEnterSearch: _enterSearch,
+        onPreviousResult: _searchPrev,
+        onNextResult: _searchNext,
+        onExitSearch: _exitSearch,
+        onExport: () => Navigator.of(context).push(MaterialPageRoute(
+          builder: (_) => ExportPage(initialGroupId: widget.groupId),
+        )),
       ),
       body: Column(
         children: [
           // 未配置 API Key 时给出醒目提示，避免「发了消息 AI 不回复」的困惑
-          if (!_hasAnyApiConfig) _buildApiWarningBanner(cs),
+          if (!_hasAnyApiConfig)
+            ApiWarningBanner(
+              message: _isDirectChat
+                  ? _replyBlockText(_lastReplyBlockReason)
+                  : '尚未配置 API Key，AI 不会回复或自动聊天',
+              onConfigure: () => Navigator.pushNamed(context, '/settings'),
+            ),
           if (!_isDirectChat &&
               (_group?.announcement.trim().isNotEmpty ?? false))
-            _buildAnnouncementBanner(cs),
+            AnnouncementBanner(
+              announcement: _group!.announcement.trim(),
+              onEdit: () => Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => ChatGroupFormPage(group: _group),
+              )),
+            ),
           _buildConversationControls(cs),
           if (_pendingUserMentionMessageIds.isNotEmpty &&
               !ConversationPresenceService.instance.isActive(widget.groupId))
-            _buildUserMentionBanner(cs),
+            UserMentionBanner(
+              count: _pendingUserMentionMessageIds.length,
+              onTap: _jumpToNextUserMention,
+              onClear: _clearUserMentions,
+            ),
           Expanded(
             child: _messages.isEmpty
                 ? _buildEmptyState(cs)
-                : ListView.builder(
-                    controller: _scrollController,
-                    padding: const EdgeInsets.fromLTRB(12, 8, 12, 16),
-                    itemCount: _messages.length,
-                    itemBuilder: (context, index) {
-                      final message = _messages[index];
-                      final messageKey =
-                          _messageKeys.putIfAbsent(message.id, GlobalKey.new);
-                      // 企业微信按时间段插入时间胶囊：首条、跨日或间隔五分钟。
-                      final showDate = shouldShowWeComTimeDivider(
-                        message.timestamp,
-                        index == 0 ? null : _messages[index - 1].timestamp,
-                      );
-                      final sender = message.senderType == 'user'
-                          ? null
-                          : charactersById[message.senderId] ??
-                              _unknownCharacter();
-                      final isStreaming = _streamingMessage != null &&
-                          _streamingMessage!.id == message.id;
-                      final isRegenerating =
-                          _isRegenerating && _regenerateMessageId == message.id;
-                      final isAiBubble =
-                          message.senderType == 'ai' && sender != null;
-                      final quotedMessage = message.replyToMessageId == null
-                          ? null
-                          : messagesById[message.replyToMessageId];
-                      return KeyedSubtree(
-                        key: messageKey,
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            if (showDate)
-                              _buildDateDivider(cs, message.timestamp),
-                            ChatMessageBubble(
-                              message: message,
-                              sender: sender,
-                              characters: _allGroupCharacters,
-                              cs: cs,
-                              isStreaming: isStreaming,
-                              isRegenerating: isRegenerating,
-                              isHighlightedMention:
-                                  _highlightedMentionMessageId == message.id,
-                              onLongPress: isAiBubble
-                                  ? () =>
-                                      _showMessageActionSheet(message, sender)
-                                  : null,
-                              senderColor: (c) => _senderColor(c),
-                              onSenderTap: sender == null
-                                  ? null
-                                  : () => _openCharacterSettings(sender),
-                              onMentionSender: sender == null
-                                  ? null
-                                  : () => _insertMention(sender),
-                              quotedMessage: quotedMessage,
-                              quotedSenderName: quotedMessage == null
-                                  ? null
-                                  : _senderNameById(quotedMessage.senderId),
-                              ownerName: _ownerMentionName,
-                              readReceiptText:
-                                  _isDirectChat && message.senderType == 'user'
-                                      ? (readUserMessageIds.contains(message.id)
-                                          ? '已读'
-                                          : '未读')
-                                      : null,
-                            ),
-                          ],
-                        ),
-                      );
-                    },
+                : ChatMessageList(
+                    messages: _messages,
+                    characters: _allGroupCharacters,
+                    messageIndex: messageIndex,
+                    characterIndex: characterIndex,
+                    scrollController: _scrollController,
+                    controller: _messageListController,
+                    streamingMessageId: _streamingMessage?.id,
+                    regeneratingMessageId:
+                        _isRegenerating ? _regenerateMessageId : null,
+                    highlightedMentionMessageId: _highlightedMentionMessageId,
+                    isDirectChat: _isDirectChat,
+                    readUserMessageIds: readUserMessageIds,
+                    ownerName: _ownerMentionName,
+                    unknownCharacter: _unknownCharacter(),
+                    senderColor: _senderColor,
+                    senderNameById: _senderNameById,
+                    onLongPress: _showMessageActionSheet,
+                    onSenderTap: _openCharacterSettings,
+                    onMentionSender: _insertMention,
                   ),
           ),
           if (_isAiReplying)
@@ -4412,7 +4055,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                 ],
               ),
             ),
-          _buildInputArea(cs),
+          _buildInputArea(),
         ],
       ),
     );
@@ -4477,357 +4120,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
-
-
-  /// 未配置 API Key 时的醒目横幅
-  Widget _buildApiWarningBanner(ColorScheme cs) {
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-      decoration: BoxDecoration(
-        color: cs.errorContainer.withOpacity(0.5),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cs.error.withOpacity(0.4)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.warning_amber_rounded, size: 20, color: cs.error),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              _isDirectChat
-                  ? _replyBlockText(_lastReplyBlockReason)
-                  : '尚未配置 API Key，AI 不会回复或自动聊天',
-              style: TextStyle(fontSize: 13, color: cs.onSurface),
-            ),
-          ),
-          TextButton(
-            onPressed: () => Navigator.pushNamed(context, '/settings'),
-            style: TextButton.styleFrom(
-              visualDensity: VisualDensity.compact,
-              padding: EdgeInsets.zero,
-            ),
-            child: Text('去配置',
-                style: TextStyle(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w600,
-                    color: cs.error)),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildAnnouncementBanner(ColorScheme cs) {
-    final announcement = _group?.announcement.trim() ?? '';
-    if (announcement.isEmpty) return const SizedBox.shrink();
-    return Container(
-      margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-      decoration: BoxDecoration(
-        color: cs.secondaryContainer.withOpacity(0.32),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: cs.secondary.withOpacity(0.28)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.campaign_rounded, size: 18, color: cs.secondary),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Text(
-              announcement,
-              maxLines: 2,
-              overflow: TextOverflow.ellipsis,
-              style: TextStyle(fontSize: 12, color: cs.onSurface),
-            ),
-          ),
-          IconButton(
-            onPressed: () {
-              Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) => ChatGroupFormPage(group: _group),
-              ));
-            },
-            icon: const Icon(Icons.edit_rounded, size: 16),
-            tooltip: '编辑公告',
-            visualDensity: VisualDensity.compact,
-            constraints: const BoxConstraints(minWidth: 32, minHeight: 32),
-          ),
-        ],
-      ),
-    );
-  }
-
-  Widget _buildUserMentionBanner(ColorScheme cs) {
-    final count = _pendingUserMentionMessageIds.length;
-    return Padding(
-      padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
-      child: Material(
-        color: cs.primaryContainer.withOpacity(0.72),
-        borderRadius: BorderRadius.circular(12),
-        child: InkWell(
-          onTap: _jumpToNextUserMention,
-          borderRadius: BorderRadius.circular(12),
-          child: Container(
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: cs.primary.withOpacity(0.32)),
-            ),
-            child: Row(
-              children: [
-                Icon(Icons.alternate_email_rounded,
-                    size: 18, color: cs.primary),
-                const SizedBox(width: 8),
-                Expanded(
-                  child: Text(
-                    count == 1 ? '有人 @ 你' : '$count 条 @ 你的消息',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w700,
-                      color: cs.onPrimaryContainer,
-                    ),
-                  ),
-                ),
-                Icon(Icons.keyboard_arrow_down_rounded,
-                    size: 20, color: cs.primary),
-                IconButton(
-                  onPressed: _clearUserMentions,
-                  icon: Icon(Icons.close_rounded,
-                      size: 16, color: cs.onPrimaryContainer),
-                  tooltip: '忽略提醒',
-                  visualDensity: VisualDensity.compact,
-                  padding: EdgeInsets.zero,
-                  constraints:
-                      const BoxConstraints(minWidth: 28, minHeight: 28),
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
-
-  Widget _buildDateDivider(ColorScheme cs, DateTime dt) {
-    final label = _dateLabel(dt);
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 10),
-      child: Center(
-        child: Container(
-          padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
-          decoration: BoxDecoration(
-            color: WeComChatTokens.timePill(context).withOpacity(0.92),
-            borderRadius: BorderRadius.circular(4),
-          ),
-          child: Text(label,
-              style: const TextStyle(fontSize: 11, color: Colors.white)),
-        ),
-      ),
-    );
-  }
-
-  static String _dateLabel(DateTime dt) {
-    final now = DateTime.now();
-    final today = DateTime(now.year, now.month, now.day);
-    final target = DateTime(dt.year, dt.month, dt.day);
-    final diff = today.difference(target).inDays;
-    final minute = dt.minute.toString().padLeft(2, '0');
-    final time = '${dt.hour.toString().padLeft(2, '0')}:$minute';
-    if (diff == 0) return time;
-    if (diff == 1) return '昨天 $time';
-    if (diff < 7) return '$diff 天前 $time';
-    return '${dt.year}/${dt.month}/${dt.day} $time';
-  }
-
-  /// 成员头像堆叠 + 人数 chip（AppBar 入口）
-  Widget _buildMemberStackChip(ColorScheme cs) {
-    final shown = _characters.take(3).toList();
-    const overlap = 16.0;
-    final stackWidth =
-        shown.isEmpty ? 0.0 : 26.0 + (shown.length - 1) * overlap;
-    return Container(
-      padding: const EdgeInsets.only(left: 8, right: 10, top: 4, bottom: 4),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(20),
-      ),
-      child: Row(
-        mainAxisSize: MainAxisSize.min,
-        children: [
-          if (shown.isNotEmpty)
-            SizedBox(
-              width: stackWidth,
-              height: 26,
-              child: Stack(
-                children: [
-                  for (int i = 0; i < shown.length; i++)
-                    Positioned(
-                      left: i * overlap,
-                      child: _miniAvatar(shown[i], 26, cs),
-                    ),
-                ],
-              ),
-            ),
-          const SizedBox(width: 6),
-          Text('${_characters.length}',
-              style: TextStyle(
-                  fontSize: 13,
-                  fontWeight: FontWeight.w700,
-                  color: cs.onSurface)),
-        ],
-      ),
-    );
-  }
-
-  Widget _miniAvatar(AICharacter c, double size, ColorScheme cs) {
-    final color = _senderColor(c);
-    return Container(
-      width: size,
-      height: size,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: color,
-        border: Border.all(color: cs.surfaceContainerHighest, width: 2),
-      ),
-      child: Center(
-        child: Text(
-          c.avatar.isNotEmpty ? c.avatar : c.name[0],
-          style: TextStyle(
-              fontSize: size * 0.5,
-              fontWeight: FontWeight.w700,
-              color: Colors.white),
-        ),
-      ),
-    );
-  }
-
-  void _showMembersSheet(ColorScheme cs) {
+  void _showMembersSheet() {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (ctx) => _buildMembersSheet(cs),
-    );
-  }
-
-  Widget _buildMembersSheet(ColorScheme cs) {
-    final ownerName = _group?.ownerName ?? '我';
-    _memberSearchController.clear();
-    return StatefulBuilder(
-      builder: (context, setSheetState) {
-        final query = _memberSearchController.text.trim();
-        final filtered = query.isEmpty
-            ? _characters
-            : _characters
-                .where((c) =>
-                    c.name.contains(query) ||
-                    c.role.contains(query) ||
-                    c.personalityTags.any((tag) => tag.contains(query)))
-                .toList();
-        return Container(
-          constraints: BoxConstraints(
-            maxHeight: MediaQuery.of(context).size.height * 0.78,
-          ),
-          padding: const EdgeInsets.fromLTRB(20, 12, 20, 28),
-          decoration: BoxDecoration(
-            color: cs.surface,
-            borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-          ),
-          child: Column(
-            mainAxisSize: MainAxisSize.min,
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 16),
-                  decoration: BoxDecoration(
-                    color: cs.outlineVariant,
-                    borderRadius: BorderRadius.circular(2),
-                  ),
-                ),
-              ),
-              Row(
-                children: [
-                  Text('群成员',
-                      style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.w700,
-                          color: cs.onSurface)),
-                  const SizedBox(width: 8),
-                  Text('${_characters.length + 1}',
-                      style:
-                          TextStyle(fontSize: 14, color: cs.onSurfaceVariant)),
-                ],
-              ),
-              const SizedBox(height: 12),
-              TextField(
-                controller: _memberSearchController,
-                decoration: InputDecoration(
-                  hintText: '搜索名称、角色或标签',
-                  prefixIcon: Icon(Icons.search_rounded,
-                      size: 18, color: cs.onSurfaceVariant),
-                  isDense: true,
-                  filled: true,
-                  fillColor: cs.surfaceContainerHighest,
-                  border: OutlineInputBorder(
-                    borderRadius: BorderRadius.circular(12),
-                    borderSide: BorderSide(color: cs.outlineVariant),
-                  ),
-                ),
-                onChanged: (_) => setSheetState(() {}),
-              ),
-              const SizedBox(height: 16),
-              Expanded(
-                child: ListView(
-                  children: [
-                    _buildMemberTile(
-                      cs: cs,
-                      avatarText: '我',
-                      avatarColor: cs.primary,
-                      name: ownerName,
-                      subtitle: '群主',
-                      isOwner: true,
-                    ),
-                    Divider(
-                        height: 24, color: cs.outlineVariant.withOpacity(0.4)),
-                    if (filtered.isEmpty)
-                      Padding(
-                        padding: const EdgeInsets.symmetric(vertical: 24),
-                        child: Center(
-                          child: Text('未找到匹配成员',
-                              style: TextStyle(
-                                  fontSize: 14, color: cs.onSurfaceVariant)),
-                        ),
-                      )
-                    else
-                      ...filtered.map((c) {
-                        final color = _senderColor(c);
-                        return _buildMemberTile(
-                          cs: cs,
-                          avatarText:
-                              c.avatar.isNotEmpty ? c.avatar : c.name[0],
-                          avatarColor: color,
-                          name: c.name,
-                          subtitle: _memberStatusText(c),
-                          onOpenSettings: () {
-                            Navigator.of(context).pop();
-                            _openCharacterSettings(c);
-                          },
-                          onDirectChat: () =>
-                              _openDirectChatFromSheet(context, c),
-                        );
-                      }),
-                  ],
-                ),
-              ),
-            ],
-          ),
-        );
-      },
+      builder: (_) => MemberSheet(
+        characters: _characters,
+        ownerName: _group?.ownerName ?? '我',
+        senderColor: _senderColor,
+        statusText: _memberStatusText,
+        onOpenSettings: _openCharacterSettings,
+        onDirectChat: (character) {
+          if (mounted) Navigator.of(context).pushNamed('/dm/${character.id}');
+        },
+      ),
     );
   }
 
@@ -4844,98 +4151,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       ReplyBlockReason.networkError => '网络异常',
     };
     return '$base · $status · $usage';
-  }
-
-  Widget _buildMemberTile({
-    required ColorScheme cs,
-    required String avatarText,
-    required Color avatarColor,
-    required String name,
-    required String subtitle,
-    bool isOwner = false,
-    VoidCallback? onOpenSettings,
-    VoidCallback? onDirectChat,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 14),
-      child: Row(
-        children: [
-          InkWell(
-            onTap: onOpenSettings,
-            borderRadius: BorderRadius.circular(22),
-            child: Container(
-              width: 44,
-              height: 44,
-              decoration: BoxDecoration(
-                shape: BoxShape.circle,
-                color: avatarColor.withOpacity(0.15),
-                border:
-                    Border.all(color: avatarColor.withOpacity(0.3), width: 1.5),
-              ),
-              child: Center(
-                child: Text(avatarText,
-                    style: TextStyle(
-                        fontSize: 16,
-                        fontWeight: FontWeight.w700,
-                        color: avatarColor)),
-              ),
-            ),
-          ),
-          const SizedBox(width: 12),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Row(
-                  children: [
-                    Flexible(
-                      child: Text(name,
-                          style: TextStyle(
-                              fontSize: 15,
-                              fontWeight: FontWeight.w600,
-                              color: cs.onSurface),
-                          overflow: TextOverflow.ellipsis),
-                    ),
-                    if (isOwner) ...[
-                      const SizedBox(width: 6),
-                      Container(
-                        padding: const EdgeInsets.symmetric(
-                            horizontal: 6, vertical: 2),
-                        decoration: BoxDecoration(
-                          color: cs.primary.withOpacity(0.16),
-                          borderRadius: BorderRadius.circular(4),
-                        ),
-                        child: Text('群主',
-                            style: TextStyle(
-                                fontSize: 10,
-                                fontWeight: FontWeight.w600,
-                                color: cs.primary)),
-                      ),
-                    ],
-                  ],
-                ),
-                const SizedBox(height: 2),
-                Text(subtitle,
-                    style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
-              ],
-            ),
-          ),
-          if (onDirectChat != null)
-            IconButton(
-              onPressed: onDirectChat,
-              icon: const Icon(Icons.chat_bubble_outline_rounded, size: 20),
-              color: cs.primary,
-              tooltip: '私聊',
-            ),
-        ],
-      ),
-    );
-  }
-
-  void _openDirectChatFromSheet(BuildContext sheetContext, AICharacter c) {
-    Navigator.of(sheetContext).pop();
-    if (!mounted) return;
-    Navigator.of(context).pushNamed('/dm/${c.id}');
   }
 
   void _openCharacterSettings(AICharacter character) {
@@ -4986,152 +4201,34 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return KeyEventResult.ignored;
   }
 
-  Widget _buildInputArea(ColorScheme cs) {
-    return DropTarget(
-      onDragEntered: (_) {
-        if (_canTouchUi) setState(() => _isDraggingFiles = true);
+  Widget _buildInputArea() {
+    return ChatRoomComposer(
+      textController: _textController,
+      focusNode: _inputFocusNode,
+      inputFieldKey: _inputFieldKey,
+      quotedMessage: _quotedMessage,
+      quotedSenderName: _quotedMessage == null
+          ? ''
+          : _senderNameById(_quotedMessage!.senderId),
+      attachments: _pendingAttachments,
+      isDraggingFiles: _isDraggingFiles,
+      isStreaming: _isStreaming,
+      canSend: _canSend,
+      isDirectChat: _isDirectChat,
+      isDesktop: _isDesktop,
+      onKeyEvent: _handleKeyEvent,
+      onTextChanged: _handleTextChanged,
+      onDragStateChanged: (dragging) {
+        if (_canTouchUi) setState(() => _isDraggingFiles = dragging);
       },
-      onDragExited: (_) {
-        if (_canTouchUi) setState(() => _isDraggingFiles = false);
-      },
-      onDragDone: (detail) {
-        if (_canTouchUi) setState(() => _isDraggingFiles = false);
-        unawaited(_handleDroppedFiles(detail.files));
-      },
-      child: Focus(
-        onKeyEvent: (_, event) => _handleKeyEvent(event),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            if (_quotedMessage != null) _buildQuoteBar(cs),
-            // 待发送附件预览（图片缩略 / 视频占位，可单独移除）。
-            if (_pendingAttachments.isNotEmpty) _buildAttachmentPreviewRow(cs),
-            Container(
-              padding: EdgeInsets.only(
-                  left: 8,
-                  right: 8,
-                  top: 8,
-                  bottom: MediaQuery.of(context).padding.bottom + 8),
-              decoration: BoxDecoration(
-                color: WeComChatTokens.inputSurface(context),
-                border: Border(
-                  top: BorderSide(
-                    color: _isDraggingFiles
-                        ? cs.primary
-                        : WeComChatTokens.divider(context),
-                    width: _isDraggingFiles ? 2 : 1,
-                  ),
-                ),
-              ),
-              child: Row(
-                crossAxisAlignment: CrossAxisAlignment.end,
-                children: [
-                  // 附件按钮：图片多选 / 视频单选。
-                  IconButton(
-                    icon: const Icon(Icons.attach_file_rounded, size: 24),
-                    color: cs.onSurfaceVariant,
-                    onPressed: _showAttachmentMenu,
-                    tooltip: '添加附件',
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.content_paste_rounded, size: 22),
-                    color: cs.onSurfaceVariant,
-                    onPressed: () =>
-                        _pasteClipboardAttachments(showEmptyHint: true),
-                    tooltip: '粘贴截图或文件',
-                  ),
-                  IconButton(
-                    icon: const Icon(Icons.add_reaction_outlined, size: 22),
-                    color: cs.onSurfaceVariant,
-                    onPressed: _showEmojiPanel,
-                    tooltip: '插入表情',
-                  ),
-                  Expanded(
-                    child: ConstrainedBox(
-                      constraints:
-                          const BoxConstraints(minHeight: 44, maxHeight: 120),
-                      child: TextField(
-                        key: _inputFieldKey,
-                        controller: _textController,
-                        focusNode: _inputFocusNode,
-                        decoration: InputDecoration(
-                          hintText: _quotedMessage != null
-                              ? '回复 ${_senderNameById(_quotedMessage!.senderId)}...'
-                              : (_isDirectChat
-                                  ? '输入私聊消息…'
-                                  : _isDesktop
-                                      ? '输入消息，回车发送，Shift+回车换行，@ 提到角色…'
-                                      : '输入消息，@ 提到角色…'),
-                          suffixIcon: _quotedMessage != null
-                              ? IconButton(
-                                  icon: Icon(Icons.close_rounded,
-                                      size: 18, color: cs.onSurfaceVariant),
-                                  onPressed: _cancelQuote,
-                                  tooltip: '取消引用',
-                                )
-                              : null,
-                          border: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(4),
-                              borderSide: BorderSide.none),
-                          enabledBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(4),
-                              borderSide: BorderSide.none),
-                          focusedBorder: OutlineInputBorder(
-                              borderRadius: BorderRadius.circular(4),
-                              borderSide: BorderSide.none),
-                          filled: true,
-                          fillColor: WeComChatTokens.inputField(context),
-                          contentPadding: const EdgeInsets.symmetric(
-                              horizontal: 12, vertical: 11),
-                          isDense: true,
-                        ),
-                        keyboardType: TextInputType.multiline,
-                        textInputAction: TextInputAction.newline,
-                        maxLines: null,
-                        onChanged: _handleTextChanged,
-                        // 桌面右键 / 移动端长按均弹出自适应菜单：剪切 / 复制 / 粘贴 / 全选。
-                        contextMenuBuilder: (context, editableTextState) {
-                          return AdaptiveTextSelectionToolbar.buttonItems(
-                            anchors: editableTextState.contextMenuAnchors,
-                            buttonItems:
-                                editableTextState.contextMenuButtonItems,
-                          );
-                        },
-                      ),
-                    ),
-                  ),
-                  const SizedBox(width: 8),
-                  if (_isStreaming) ...[
-                    IconButton(
-                      icon: const Icon(Icons.stop_rounded, size: 24),
-                      color: cs.error,
-                      onPressed: _stopStreaming,
-                      tooltip: '停止生成',
-                    ),
-                    const SizedBox(width: 4),
-                  ],
-                  IconButton(
-                    icon: const Icon(Icons.send_rounded, size: 22),
-                    style: IconButton.styleFrom(
-                      backgroundColor: _canSend
-                          ? WeComChatTokens.lightSelfBubble
-                          : WeComChatTokens.divider(context),
-                      foregroundColor: _canSend
-                          ? WeComChatTokens.lightText
-                          : cs.onSurfaceVariant.withOpacity(0.5),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                    ),
-                    onPressed: _canSend ? _sendMessage : null,
-                    tooltip: '发送',
-                  ),
-                ],
-              ),
-            ),
-          ],
-        ),
-      ),
+      onDroppedPaths: (paths) => unawaited(_handleDroppedFiles(paths)),
+      onShowAttachmentMenu: _showAttachmentMenu,
+      onPasteAttachments: () => _pasteClipboardAttachments(showEmptyHint: true),
+      onShowEmojiPanel: _showEmojiPanel,
+      onCancelQuote: _cancelQuote,
+      onRemoveAttachment: _removeAttachment,
+      onStopStreaming: _stopStreaming,
+      onSend: _sendMessage,
     );
   }
 
@@ -5176,7 +4273,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               _pickVideo();
             }),
             const SizedBox(height: 8),
-            SheetButton(ctx, cs, Icons.insert_drive_file_rounded, '文件（可多选）', () {
+            SheetButton(ctx, cs, Icons.insert_drive_file_rounded, '文件（可多选）',
+                () {
               Navigator.pop(ctx);
               _pickFiles();
             }),
@@ -5396,13 +4494,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
-  Future<void> _handleDroppedFiles(List<dynamic> files) async {
-    if (files.isEmpty) return;
+  Future<void> _handleDroppedFiles(Iterable<String> paths) async {
+    if (paths.isEmpty) return;
     var addedFiles = 0;
     final droppedDirectories = <String>[];
     try {
-      for (final dropped in files) {
-        final path = (dropped.path as String?)?.trim() ?? '';
+      for (final droppedPath in paths) {
+        final path = droppedPath.trim();
         if (path.isEmpty) continue;
         final directory = Directory(path);
         if (await directory.exists()) {
@@ -5561,100 +4659,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
-
-  /// 待发送附件预览行：图片缩略 / 视频占位，每项可单独移除。
-  Widget _buildAttachmentPreviewRow(ColorScheme cs) {
-    return Container(
-      padding: const EdgeInsets.fromLTRB(16, 8, 16, 0),
-      child: Wrap(
-        spacing: 8,
-        runSpacing: 8,
-        children: _pendingAttachments.map((att) {
-          final child = _buildPendingAttachmentThumb(att, cs);
-          return Stack(
-            clipBehavior: Clip.none,
-            children: [
-              child,
-              Positioned(
-                top: -8,
-                right: -8,
-                child: IconButton(
-                  onPressed: () => _removeAttachment(att),
-                  tooltip: '移除附件',
-                  icon:
-                      Icon(Icons.cancel, size: 18, color: cs.onSurfaceVariant),
-                  style: IconButton.styleFrom(
-                    backgroundColor: cs.surface,
-                    side: BorderSide(color: cs.outlineVariant),
-                    minimumSize: const Size(32, 32),
-                    padding: const EdgeInsets.all(7),
-                  ),
-                ),
-              ),
-            ],
-          );
-        }).toList(),
-      ),
-    );
-  }
-
-  Widget _buildPendingAttachmentThumb(MediaAttachment att, ColorScheme cs) {
-    if (att.type == 'image') {
-      final data = uiAttachmentDataUriCache.decode(att.localPath);
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: data == null
-            ? Image.file(
-                File(att.localPath),
-                width: 56,
-                height: 56,
-                fit: BoxFit.cover,
-              )
-            : Image.memory(
-                data.bytes,
-                width: 56,
-                height: 56,
-                fit: BoxFit.cover,
-                cacheWidth: 112,
-                cacheHeight: 112,
-                gaplessPlayback: true,
-              ),
-      );
-    }
-    final icon = att.type == 'video'
-        ? Icons.play_circle_outline_rounded
-        : fileIconFor(att);
-    return Container(
-      width: att.type == 'file' ? 150 : 56,
-      height: 56,
-      padding: const EdgeInsets.symmetric(horizontal: 8),
-      decoration: BoxDecoration(
-        color: cs.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(8),
-        border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
-      ),
-      child: Row(
-        mainAxisAlignment: att.type == 'file'
-            ? MainAxisAlignment.start
-            : MainAxisAlignment.center,
-        children: [
-          Icon(icon, size: 28, color: cs.onSurfaceVariant),
-          if (att.type == 'file') ...[
-            const SizedBox(width: 8),
-            Expanded(
-              child: Text(
-                att.fileName ?? fileNameFromPath(att.localPath),
-                maxLines: 2,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
-              ),
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
   /// 从待发送列表移除某附件。
   void _removeAttachment(MediaAttachment att) {
     if (!mounted) return;
@@ -5681,53 +4685,5 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     } catch (e) {
       debugPrint('[附件] 清理未发送文件失败：$e');
     }
-  }
-
-  Widget _buildQuoteBar(ColorScheme cs) {
-    final quoted = _quotedMessage!;
-    final senderName = _senderNameById(quoted.senderId);
-    final snippet = quoted.content.length > 60
-        ? '${quoted.content.substring(0, 60)}...'
-        : quoted.content;
-    return Container(
-      margin: const EdgeInsets.only(left: 16, right: 16, top: 8),
-      padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
-      decoration: BoxDecoration(
-        color: cs.primaryContainer.withOpacity(0.4),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: cs.primary.withOpacity(0.3)),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.format_quote_rounded, size: 14, color: cs.primary),
-          const SizedBox(width: 8),
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                Text(senderName,
-                    style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        color: cs.primary)),
-                Text(snippet,
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant)),
-              ],
-            ),
-          ),
-          IconButton(
-            icon:
-                Icon(Icons.close_rounded, size: 16, color: cs.onSurfaceVariant),
-            onPressed: _cancelQuote,
-            visualDensity: VisualDensity.compact,
-            padding: EdgeInsets.zero,
-            constraints: const BoxConstraints(minWidth: 28, minHeight: 28),
-          ),
-        ],
-      ),
-    );
   }
 }

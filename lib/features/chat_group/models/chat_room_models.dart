@@ -9,7 +9,13 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/models/autonomous_conversation_config.dart';
+import 'package:chat_group/core/models/character_memory.dart';
+import 'package:chat_group/core/models/chat_group.dart';
+import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
+import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 
 /// A user message queued during an AI reply round.
@@ -61,4 +67,44 @@ class RecoveredNonAgenticFile {
     required this.content,
     required this.attachment,
   });
+}
+
+/// Complete immutable result of loading either a group or direct conversation.
+class ChatRoomLoadContext {
+  final ChatGroup displayGroup;
+  final List<AICharacter> activeCharacters;
+  final List<AICharacter> allCharacters;
+  final List<Message> messages;
+  final List<CharacterMemory> characterMemories;
+  final List<RelationshipState> relationships;
+  final AutonomousConversationConfig autonomousConfig;
+  final GroupMemory? groupMemory;
+  final bool hasAnyApiConfig;
+  final bool isDirectChat;
+
+  const ChatRoomLoadContext({
+    required this.displayGroup,
+    required this.activeCharacters,
+    required this.allCharacters,
+    required this.messages,
+    required this.characterMemories,
+    required this.relationships,
+    required this.autonomousConfig,
+    required this.groupMemory,
+    required this.hasAnyApiConfig,
+    required this.isDirectChat,
+  });
+
+  static ChatGroup directDisplayGroup({
+    required String conversationId,
+    required AICharacter character,
+  }) {
+    return ChatGroup(
+      id: conversationId,
+      name: '与 ${character.name} 私聊',
+      theme: '一对一私聊',
+      description: '${character.role} · ${character.age}岁',
+      aiCharacterIds: [character.id],
+    );
+  }
 }
