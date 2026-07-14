@@ -1,0 +1,17 @@
+{
+  "version": "1.0",
+  "configurations": [
+    {
+      "name": "chat_group (macOS)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "macos"
+    },
+    {
+      "name": "chat_group (Chrome)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "chrome"
+    }
+  ]
+}

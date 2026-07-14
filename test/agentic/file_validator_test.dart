@@ -28,6 +28,25 @@ void main() {
     expect(result.message, contains('多余的结束标签 </div>'));
   });
 
+  test('HTML 校验忽略 script 内的小于比较但仍识别脚本截断', () async {
+    final valid = await FileValidator.validate(
+      'page.html',
+      '<!doctype html><html><body><script>'
+          'for (let i = 0; i < positions.length; i++) {}'
+          '</script></body></html>',
+    );
+    final truncated = await FileValidator.validate(
+      'broken.html',
+      '<!doctype html><html><body><script>'
+          'for (let i = 0; i < positions.length; i++) {',
+    );
+
+    expect(valid.isValid, isTrue);
+    expect(truncated.isValid, isFalse);
+    expect(truncated.message, contains('script'));
+    expect(truncated.message, isNot(contains('positions')));
+  });
+
   test('Markdown 标题不能跨级', () async {
     final result = await FileValidator.validate(
       'report.md',

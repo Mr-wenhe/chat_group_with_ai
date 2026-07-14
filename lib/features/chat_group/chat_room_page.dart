@@ -1371,11 +1371,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (patchRequests.isEmpty) {
       return const [];
     }
-    final paths = <String>[];
+    final requestedPaths = <String>[];
     void addPath(String raw) {
       final path = WorkspacePathGuard.normalizeToRelative(raw);
       if (!WorkspacePathGuard.isSafeRelativePath(path)) return;
-      if (!paths.contains(path)) paths.add(path);
+      if (!requestedPaths.contains(path)) requestedPaths.add(path);
     }
 
     for (final request in patchRequests) {
@@ -1389,15 +1389,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         addPath(path);
       }
     }
-    final rawResultPath = result.toolResult?['path'];
-    if (rawResultPath is String) {
-      addPath(rawResultPath);
-    }
-    if (paths.isEmpty) return const [];
-
-    final attachments = <MediaAttachment>[];
-    final bridge = LocalAgentBridgeClient();
-    final workspaceTool = WorkspaceFileTool(bridge);
     final resultOk =
         result.toolResult?['ok'] == true || result.toolResult?['exitCode'] == 0;
     final normalizedResultPath = result.toolResult?['path'] is String
@@ -1405,6 +1396,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             result.toolResult!['path'] as String,
           )
         : null;
+    final paths = resolveAgentArtifactPaths(
+      requestedPaths: requestedPaths,
+      actualResultPath: normalizedResultPath,
+      resultSucceeded: resultOk,
+    ).where(WorkspacePathGuard.isSafeRelativePath).toList();
+    if (paths.isEmpty) return const [];
+
+    final attachments = <MediaAttachment>[];
+    final bridge = LocalAgentBridgeClient();
+    final workspaceTool = WorkspaceFileTool(bridge);
     final lastPatchWithContent = patchRequests.reversed.firstWhere(
       (request) => request.args['content'] is String,
       orElse: () => patchRequests.last,
@@ -3617,7 +3618,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               }),
               const SizedBox(height: 8),
               SheetButton(
-                  ctx, cs, Icons.alternate_email_rounded, '@${sender.name}', () {
+                  ctx, cs, Icons.alternate_email_rounded, '@${sender.name}',
+                  () {
                 Navigator.pop(ctx);
                 _insertMention(sender);
               }),
@@ -3642,8 +3644,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               }),
               const SizedBox(height: 8),
             ],
-            SheetButton(ctx, cs, Icons.send_to_mobile_rounded, '推送到企业微信',
-                () {
+            SheetButton(ctx, cs, Icons.send_to_mobile_rounded, '推送到企业微信', () {
               Navigator.pop(ctx);
               _showWeComPushDialog(message.content);
             }),
@@ -3676,7 +3677,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                     ButtonSegment(value: 'group', label: Text('群')),
                   ],
                   selected: {targetType},
-                  onSelectionChanged: (sel) => setSt(() => targetType = sel.first),
+                  onSelectionChanged: (sel) =>
+                      setSt(() => targetType = sel.first),
                 ),
                 const SizedBox(height: 12),
                 if (targetType == 'user')
@@ -4634,10 +4636,34 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         }
       }
 
+      if (attachments.isEmpty) {
+        String? clipboardText;
+        try {
+          final data = await Clipboard.getData(Clipboard.kTextPlain);
+          clipboardText = clipboardTextFallback(data?.text);
+        } catch (e) {
+          debugPrint('[附件] 剪贴板文本读取失败：$e');
+        }
+
+        if (clipboardText != null) {
+          if (!mounted || !_canTouchUi) return;
+          setState(() {
+            _insertTextAtCursor(clipboardText!, inline: true);
+          });
+          _handleTextChanged(_textController.text);
+          _inputFocusNode.requestFocus();
+          if (showEmptyHint) {
+            AppToast.show(context, '已粘贴剪贴板文本',
+                icon: Icons.content_paste_rounded);
+          }
+          return;
+        }
+      }
+
       if (!mounted) return;
       if (attachments.isEmpty) {
         if (showEmptyHint) {
-          AppToast.show(context, '剪贴板里没有可粘贴的文件或截图',
+          AppToast.show(context, '剪贴板里没有可粘贴的文本、文件或截图',
               icon: Icons.info_outline_rounded);
         }
         return;

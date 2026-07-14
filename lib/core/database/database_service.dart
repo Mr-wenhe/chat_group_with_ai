@@ -25,6 +25,28 @@ import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 
+/// Indicates that an existing Hive box could not be opened safely.
+///
+/// This exception is intentionally surfaced to the app. A failed open can
+/// mean corruption, a lock conflict, or a permission problem; deleting the
+/// box would destroy the only copy of the user's data.
+class DatabaseOpenException implements Exception {
+  final String boxName;
+  final String? dataDirPath;
+  final Object cause;
+  final StackTrace stackTrace;
+
+  const DatabaseOpenException({
+    required this.boxName,
+    required this.dataDirPath,
+    required this.cause,
+    required this.stackTrace,
+  });
+
+  @override
+  String toString() => '无法打开数据库 box "$boxName"：$cause';
+}
+
 class DatabaseService {
   static const String _aiCharacterBox = 'ai_characters';
   static const String _apiConfigBox = 'api_configs';
@@ -126,16 +148,47 @@ class DatabaseService {
     return userDataDir;
   }
 
+  /// 安全地打开一个 box。
+  ///
+  /// 若打开时抛文件系统异常（常见于进程被强杀导致文件截断、
+  /// 或多进程并发访问同一目录造成锁冲突），旧实现会直接删除并重建
+  /// 整个 box —— 这正是数据"凭空消失"的根因。
+  /// 现改为：保留原文件，并将失败向上抛出交给界面处理。
+  ///
+  /// 这里可以创建一个只读副本供人工备份/排障，但绝不删除、清空或
+  /// 重建原 box。自动删除会让数据库损坏、锁冲突和权限错误都变成
+  /// 不可逆的数据丢失。
   Future<void> _openBoxSafely<T>(String name) async {
     try {
       await Hive.openBox<T>(name);
-    } on FileSystemException catch (_) {
-      try {
-        await Hive.deleteBoxFromDisk(name);
-      } on FileSystemException catch (_) {
-        // Cleanup failed; try opening anyway.
+      return;
+    } on Object catch (error, stackTrace) {
+      debugPrint('[DB] 打开 box "$name" 失败，保留原数据库文件：$error');
+
+      // 只做不影响原文件的副本，便于用户在界面提示后进行人工备份。
+      // 副本失败也不能改变“原文件不动、初始化失败”的安全策略。
+      final dir = _dataDir;
+      if (dir != null) {
+        final file = File('${dir.path}/$name.hive');
+        if (await file.exists()) {
+          final backup = File(
+            '${dir.path}/$name.corrupt_${DateTime.now().millisecondsSinceEpoch}.hive',
+          );
+          try {
+            await file.copy(backup.path);
+            debugPrint('[DB] 已保留疑似损坏的 box 副本：${backup.path}');
+          } on Object catch (copyError) {
+            debugPrint('[DB] 无法创建 box 副本 "$name"：$copyError');
+          }
+        }
       }
-      await Hive.openBox<T>(name);
+
+      throw DatabaseOpenException(
+        boxName: name,
+        dataDirPath: _dataDir?.path,
+        cause: error,
+        stackTrace: stackTrace,
+      );
     }
   }
 

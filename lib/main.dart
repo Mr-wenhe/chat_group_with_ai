@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/database/database_service.dart';
+import 'core/database/database_recovery_page.dart';
 import 'core/theme/app_theme.dart';
 import 'features/agentic/tools/local_agent_bridge_launcher.dart';
 import 'features/ai_character/ai_character_list_page.dart';
@@ -17,7 +18,17 @@ void main() async {
   WidgetsFlutterBinding.ensureInitialized();
 
   final db = DatabaseService();
-  await db.init();
+  try {
+    await db.init();
+  } catch (error, stackTrace) {
+    debugPrint('[DB] 初始化失败，进入数据库保护模式：$error');
+    debugPrint('$stackTrace');
+    runApp(DatabaseRecoveryApp(
+      error: error,
+      dataDirPath: db.dataDirPath,
+    ));
+    return;
+  }
 
   // 自动拉起本地 agent 桥接服务（仅桌面端真正生效，Web/移动端为 no-op）。
   // start() 在桌面端进程内直接 bind 54263 启动 HttpServer（立即返回），

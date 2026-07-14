@@ -13,6 +13,17 @@ class SecureStorageService {
   static const String _apiKeyPrefix = 'api_key_';
   static const String _apiConfigKeyPrefix = 'api_config_key_';
 
+  /// Raw operations are intentionally package-private to the storage layer.
+  /// NOTE: [CredentialRepository] 是计划中的统一 LLM API key 边界，目前尚未被
+  /// 业务代码接线（见其类上 TODO），实际读写仍由本类承接。迁移完成前请勿删除
+  /// 本类的 apiConfig / wecom 方法。
+  Future<void> writeRaw(String key, String value) =>
+      _storage.write(key: key, value: value);
+
+  Future<String?> readRaw(String key) => _storage.read(key: key);
+
+  Future<void> deleteRaw(String key) => _storage.delete(key: key);
+
   Future<void> saveApiKey(String characterId, String apiKey) async {
     await _storage.write(key: '$_apiKeyPrefix$characterId', value: apiKey);
   }
@@ -63,8 +74,7 @@ class SecureStorageService {
   static const String _wecomAppConfigKey = 'wecom_app_config';
 
   Future<void> saveWeComAppConfig(Map<String, String> config) async {
-    await _storage.write(
-        key: _wecomAppConfigKey, value: jsonEncode(config));
+    await _storage.write(key: _wecomAppConfigKey, value: jsonEncode(config));
   }
 
   Future<Map<String, String>?> getWeComAppConfig() async {

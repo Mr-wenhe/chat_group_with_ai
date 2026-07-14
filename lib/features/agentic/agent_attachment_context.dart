@@ -50,11 +50,15 @@ class AgentAttachmentContext {
     final trimmed = source.length > maxMessages
         ? source.sublist(source.length - maxMessages)
         : source;
+    final inlinePreviousAiArtifactBody =
+        _referencesPreviousArtifact(currentUserRequest);
     final result = <Map<String, dynamic>>[];
     for (final message in trimmed) {
       final attachmentContext = await _attachmentContext(
         message.media ?? const [],
         readText: readText,
+        includeTextContent:
+            message.senderType != 'ai' || inlinePreviousAiArtifactBody,
       );
       final content = [message.content.trim(), attachmentContext]
           .where((value) => value.isNotEmpty)
@@ -72,6 +76,7 @@ class AgentAttachmentContext {
   static Future<String> _attachmentContext(
     List<MediaAttachment> media, {
     AgentAttachmentTextReader? readText,
+    bool includeTextContent = true,
   }) async {
     if (media.isEmpty) return '';
     final reader = readText ?? _readTextAttachment;
@@ -82,7 +87,8 @@ class AgentAttachmentContext {
           ? attachment.localPath
           : '浏览器内存附件';
       lines.add('- $name；类型=${attachment.type}；位置=$location');
-      if (!_isTextAttachment(attachment) ||
+      if (!includeTextContent ||
+          !_isTextAttachment(attachment) ||
           (attachment.fileSize ?? 0) > maxInlineFileBytes) {
         continue;
       }
@@ -97,6 +103,13 @@ class AgentAttachmentContext {
       }
     }
     return lines.join('\n');
+  }
+
+  static bool _referencesPreviousArtifact(String request) {
+    return RegExp(
+      r'(继续|修改|调整|优化|完善|基于|沿用|刚才|上次|上一个|'
+      r'原来|原有|附件|这个(?:页面|文件|代码)|让它|把它)',
+    ).hasMatch(request);
   }
 
   static bool _isTextAttachment(MediaAttachment attachment) {

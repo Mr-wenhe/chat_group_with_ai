@@ -77,15 +77,34 @@ class FileValidator {
       'track',
       'wbr'
     };
+    var structuralContent = content;
+    for (final rawTag in const ['script', 'style']) {
+      structuralContent = structuralContent.replaceAllMapped(
+        RegExp(
+          '(<$rawTag\\b[^>]*>)[\\s\\S]*?(</$rawTag\\s*>)',
+          caseSensitive: false,
+        ),
+        (match) => '${match.group(1)}${match.group(2)}',
+      );
+    }
     final stack = <String>[];
+    String? rawTextTag;
     final tags = RegExp(r'<\s*(/?)\s*([a-zA-Z][\w:-]*)\b[^>]*>');
-    for (final match in tags.allMatches(content)) {
+    for (final match in tags.allMatches(structuralContent)) {
       final tag = match.group(2)!.toLowerCase();
       final isClosing = match.group(1) == '/';
       final raw = match.group(0)!;
+      if (rawTextTag != null) {
+        if (isClosing && tag == rawTextTag) {
+          stack.removeLast();
+          rawTextTag = null;
+        }
+        continue;
+      }
       if (voidTags.contains(tag) || raw.endsWith('/>')) continue;
       if (!isClosing) {
         stack.add(tag);
+        if (tag == 'script' || tag == 'style') rawTextTag = tag;
         continue;
       }
       if (stack.isEmpty) {

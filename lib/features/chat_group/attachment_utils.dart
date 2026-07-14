@@ -29,6 +29,35 @@ String extensionOfPath(String path) {
   return name.substring(dot + 1).toLowerCase();
 }
 
+/// Resolves the file paths shown as attachments for one completed agent tool
+/// result. [requestedPaths] are the paths requested by workspace.patch while
+/// [actualResultPath] is the authoritative path returned by the bridge (which
+/// may differ after automatic conflict renaming).
+List<String> resolveAgentArtifactPaths({
+  required Iterable<String> requestedPaths,
+  String? actualResultPath,
+  required bool resultSucceeded,
+}) {
+  if (!resultSucceeded) return const [];
+  if (actualResultPath != null && actualResultPath.isNotEmpty) {
+    return [actualResultPath];
+  }
+  final paths = <String>[];
+  for (final path in requestedPaths) {
+    if (path.isNotEmpty && !paths.contains(path)) paths.add(path);
+  }
+  return paths;
+}
+
+/// Returns clipboard text that is meaningful to paste into the composer.
+///
+/// The original value is preserved (rather than trimmed) so intentional
+/// whitespace inside a prompt is not changed.
+String? clipboardTextFallback(String? text) {
+  if (text == null || text.trim().isEmpty) return null;
+  return text;
+}
+
 // ---------------------------------------------------------------------------
 // File icon mapping
 // ---------------------------------------------------------------------------

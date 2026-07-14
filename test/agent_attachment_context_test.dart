@@ -70,6 +70,83 @@ void main() {
     expect(history.first['content'], contains('保留附件上下文'));
   });
 
+  test('fresh artifact request does not inline an older AI artifact body',
+      () async {
+    final messages = [
+      Message(
+        groupId: 'g',
+        senderId: 'assistant',
+        senderType: 'ai',
+        content: '已生成宇宙遨游页面。',
+        media: [
+          MediaAttachment(
+            id: 'old-page',
+            type: 'file',
+            localPath: '/tmp/page.html',
+            fileName: 'page.html',
+            fileSize: 12000,
+            mimeType: 'text/html',
+          ),
+        ],
+      ),
+      Message(
+        groupId: 'g',
+        senderId: 'user',
+        senderType: 'user',
+        content: '小薇，我现在要你再生成一份html文件，内容是从宇宙中看到地球。',
+      ),
+    ];
+
+    final history = await AgentAttachmentContext.buildHistory(
+      messages: messages,
+      currentUserRequest: '小薇，我现在要你再生成一份html文件，'
+          '内容是从宇宙中看到地球，并能拖动地球旋转。',
+      readText: (_) async =>
+          '<html><title>DEEP SPACE VOYAGER</title><body>old stars</body></html>',
+    );
+
+    expect(history, hasLength(1));
+    expect(history.single['content'], contains('page.html'));
+    expect(history.single['content'], isNot(contains('DEEP SPACE VOYAGER')));
+    expect(history.single['content'], isNot(contains('old stars')));
+  });
+
+  test('explicit revision request can still inline the previous AI artifact',
+      () async {
+    final messages = [
+      Message(
+        groupId: 'g',
+        senderId: 'assistant',
+        senderType: 'ai',
+        content: '已生成页面。',
+        media: [
+          MediaAttachment(
+            id: 'previous-page',
+            type: 'file',
+            localPath: '/tmp/page.html',
+            fileName: 'page.html',
+            fileSize: 128,
+            mimeType: 'text/html',
+          ),
+        ],
+      ),
+      Message(
+        groupId: 'g',
+        senderId: 'user',
+        senderType: 'user',
+        content: '继续修改刚才的附件，把地球改大一点。',
+      ),
+    ];
+
+    final history = await AgentAttachmentContext.buildHistory(
+      messages: messages,
+      currentUserRequest: '继续修改刚才的附件，把地球改大一点。',
+      readText: (_) async => '<html><body>previous earth</body></html>',
+    );
+
+    expect(history.single['content'], contains('previous earth'));
+  });
+
   test('binary files remain remembered by metadata without unsafe decoding',
       () async {
     var readCount = 0;

@@ -318,6 +318,99 @@ void main() {
     expect(result.message, isNot(contains('工具任务失败')));
   });
 
+  test('explicit rich HTML request skips tool planning and generates once',
+      () async {
+    var completionCalls = 0;
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 512},
+      readResult: {
+        'path': 'page.html',
+        'content': '<!doctype html><title>宇宙遐游</title><canvas></canvas>',
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        completionCalls++;
+        final systemPrompt = messages.first['content']?.toString() ?? '';
+        if (!systemPrompt.contains('用户要你生成一个文件')) {
+          throw TimeoutException('tool planning streamed a huge JSON payload');
+        }
+        return {
+          'success': true,
+          'message': '<!doctype html>\n'
+              '<html lang="zh-CN"><head><title>宇宙遐游</title></head>'
+              '<body><canvas id="space"></canvas></body></html>',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '前面聊天都无视掉，现在 我要你生成 我要你使用 前端最新的架构 '
+          '和 视觉冲击，去生成一个在 宇宙遨游的前端html页面',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(completionCalls, 1, reason: '明确的新建文件请求不应先让模型把全文塞进工具计划 JSON');
+    expect(fakeTool.lastWritePath, 'page.html');
+    expect(fakeTool.lastWriteContent, contains('<canvas id="space">'));
+  });
+
+  test('truncated rich HTML is continued before the file is written', () async {
+    var completionCalls = 0;
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 1024},
+      readResult: {
+        'path': 'page.html',
+        'content': '<!doctype html><html><body><script>'
+            'for (let i = 0; i < positions.length; i++) {}'
+            '</script></body></html>',
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        completionCalls++;
+        if (completionCalls == 1) {
+          return {
+            'success': true,
+            'message': '<!doctype html><html><body><script>'
+                'for (let i = 0; i < positions.length; i++) {',
+            'completionTokens': 8192,
+          };
+        }
+        expect(
+          messages.last['content'],
+          contains('从上一条末尾的下一个字符开始'),
+        );
+        return {
+          'success': true,
+          'message': '}}</script></body></html>',
+          'completionTokens': 16,
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '生成一个在宇宙遨游的前端 html 页面',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(completionCalls, 2);
+    expect(fakeTool.lastWriteContent, endsWith('</script></body></html>'));
+    expect(fakeTool.lastWriteContent, contains('positions.length'));
+  });
+
   test('fallback recovers unclosed fenced source into a file', () async {
     var calls = 0;
     final fakeTool = _FakeWorkspaceFileTool(
@@ -847,8 +940,9 @@ void main() {
 
       expect(result.status, AgentRuntimeStatus.completed, reason: path);
       // 二进制文档被优雅降级为 Markdown 文本，而不是伪造 PDF/DOCX 附件或 failed。
-      expect(fakeTool.lastWritePath,
-          path.replaceAll(RegExp(r'\.[^.]+$'), '.md'), reason: path);
+      expect(
+          fakeTool.lastWritePath, path.replaceAll(RegExp(r'\.[^.]+$'), '.md'),
+          reason: path);
       expect(result.message, contains('降级'), reason: path);
     }
   });

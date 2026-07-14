@@ -851,7 +851,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       builder: (ctx) => AlertDialog(
         icon: Icon(Icons.warning_amber_rounded, color: cs.error, size: 28),
         title: const Text('清除所有数据？'),
-        content: const Text('此操作不可撤销，所有角色、群组、消息和 API 配置将被永久删除。'),
+        content: const Text(
+          '此操作不可撤销，所有角色、群组、消息和 API 配置将被永久删除。\n\n请先备份数据库文件，再确认继续。',
+        ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
