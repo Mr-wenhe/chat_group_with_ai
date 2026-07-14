@@ -351,15 +351,45 @@ class AgentRuntime {
 
   static String? _inferGeneratedFilePath(String request) {
     final lower = request.toLowerCase();
-    final hasCreateIntent = RegExp(
+    final explicitCreateVerb = RegExp(
       r'(生成|创建|写|设计|制作|做一个|做个|实现|开发|输出|导出|修改|改写|'
       r'create|write|build|make|generate)',
       caseSensitive: false,
     ).hasMatch(lower);
+    // 没有显式创建动词时，把“我要一份… + 文件制品关键词”也视为生成意图
+    // （例如“我要一份工资报表excel文件”）。必须排除读取/查看/分析等请求，
+    // 否则会误把“读一下这个excel文件”当成要生成文件，造成回退写文件的回归。
+    final fileArtifactKeyword = RegExp(
+      r'(excel|xlsx?|word|pdf|html|页面|网页|表格|电子表格|文档|报告|简历|'
+      r'代码|脚本|文件|模版|模板|'
+      // 以下为补全的常见文件类型中英文关键词（doc/docx/ppt/csv/txt/json/sql 等）。
+      r'doc|docx|ppt|pptx|幻灯片|演示文稿|powerpoint|csv|文本|纯文本|txt|'
+      r'json|数据|配置|yaml|yml|sql|数据库|日志|log|ts|typescript|'
+      r'图片|照片|png|jpg|jpeg|压缩包|归档|zip)',
+      caseSensitive: false,
+    ).hasMatch(lower);
+    final readModifyVerb = RegExp(
+      r'(读|查看|看|打开|检查|分析|改一下|修改成|改成|更新|解析|预览|展示|'
+      r'analyze|read|open|check|view|preview)',
+      caseSensitive: false,
+    ).hasMatch(lower);
+    // “一份 / 一个文件” 等量词表明用户想要“一份全新的制品”，而非指代已有文件。
+    // 补充“来个”（口语“给我一个”）以覆盖“来个json配置”这类生成请求。
+    final wishNewFile = RegExp(
+      r'(一份|来一份|来个|来份|一份文件|一份excel|一份表格|一份文档|一份报告|'
+      r'一个文件|一个excel|一个文档|一个报告|一个页面|一个网页|'
+      r'做一份|写一份|生成一份|创建一份)',
+      caseSensitive: false,
+    ).hasMatch(lower);
+    final hasCreateIntent =
+        explicitCreateVerb || (fileArtifactKeyword && wishNewFile && !readModifyVerb);
     if (!hasCreateIntent) return null;
 
     final explicit = RegExp(
-      r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:html?|md|markdown|dart|java|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp|pdf|doc|docx))(?![\w./\\-])',
+      r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:html?|md|markdown|dart|java|txt|json|'
+      // 补全扩展名白名单：ppt/pptx/csv/sql/log/png/jpg/jpeg/zip。
+      r'yaml|yml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp|pdf|doc|docx|xlsx?|'
+      r'ppt|pptx|csv|sql|log|png|jpe?g|zip))(?![\w./\\-])',
       caseSensitive: false,
     ).firstMatch(request);
     final explicitPath = explicit?.group(1)?.replaceAll('\\', '/');
@@ -368,16 +398,51 @@ class AgentRuntime {
       return explicitPath;
     }
 
+    // PDF / 二进制文档：识别后走“直接生成文件”路径，由运行时把二进制 PDF
+    // 优雅降级为 .md 写出真实文件（用户拿到的是真实附件），而不是落入规划路径
+    // 让 LLM 用 skill.create 等非写入工具“空口声称已作为附件发送”（虚假附件 Bug 主因）。
     if (RegExp(r'(pdf|\.pdf\b)').hasMatch(lower)) return 'report.pdf';
-    if (RegExp(r'(docx?|word\s*文档|word文档)').hasMatch(lower)) {
+    // Word / 文档：doc/docx/word 文档统一导向 docx，且必须在 md 分支之前。
+    // 注意：仅匹配带 doc 前缀的“doc文档”这类词；裸“文档”（如“技术文档”）
+    // 不在此命中，留给 md 分支（report.md），以免回归“技术文档→report.md”
+    // 的既有行为（见 skill.create 回归测试）。
+    if (RegExp(r'(docx?|word\s*文档|word文档|doc\s*文档)').hasMatch(lower)) {
       return 'report.docx';
+    }
+    // PPT / 演示文稿：识别为 pptx 二进制，后续由运行时降级为 .md 真实写出。
+    if (RegExp(r'(ppt|pptx|幻灯片|演示文稿|课件|powerpoint)').hasMatch(lower)) {
+      return 'slides.pptx';
+    }
+    // CSV / 表格数据：必须放在 Excel 分支之前，因为“表格数据”含“表格”，
+    // 先匹配显式的 csv 关键词可避免被 excel 分支误判为 xlsx。
+    if (RegExp(r'(csv|表格数据)').hasMatch(lower)) return 'data.csv';
+    // 电子表格 / Excel：识别后应走“直接生成文件”路径，由运行时把二进制 .xlsx
+    // 优雅降级为 .md 写出真实文件（用户拿到的是真实附件），而不是落入规划路径
+    // 让 LLM 用 skill.create 等非写入工具“空口声称已作为附件发送”（虚假附件 Bug 主因）。
+    if (RegExp(r'(excel|xlsx?|\.xlsx?\b|电子表格|表格)').hasMatch(lower)) {
+      return 'report.xlsx';
     }
     if (RegExp(r'(html?|首页|主页|个人页|介绍页|页面|网页|网站|落地页|landing)').hasMatch(lower)) {
       return 'page.html';
     }
-    if (RegExp(r'(markdown|\bmd\b|文档|报告|简历)').hasMatch(lower)) {
+    // 纯文本：txt / 文本 / 纯文本 / 记事本。
+    if (RegExp(r'(txt|文本|纯文本|记事本)').hasMatch(lower)) return 'note.txt';
+    // Markdown：匹配 md / 文档 / 笔记 / 纪要 / 报告 / 简历。
+    // 「文档」在此匹配（裸"技术文档"等需走 md），doc/word 前缀的文档仍走 docx 分支。
+    if (RegExp(r'(markdown|\bmd\b|文档|报告|简历|笔记|纪要)').hasMatch(lower)) {
       return 'report.md';
     }
+    if (RegExp(r'(json|数据文件|json数据)').hasMatch(lower)) return 'data.json';
+    if (RegExp(r'(yaml|yml|配置)').hasMatch(lower)) return 'config.yaml';
+    if (RegExp(r'(sql|数据库脚本|建表)').hasMatch(lower)) return 'script.sql';
+    if (RegExp(r'(log|日志)').hasMatch(lower)) return 'app.log';
+    if (RegExp(r'(ts|typescript)').hasMatch(lower)) return 'app.ts';
+    // 图片二进制：png/jpg/jpeg 走降级为 .md 机制（与 doc/ppt 一致），不生成真实二进制。
+    if (RegExp(r'(png|jpg|jpeg|图片|照片|图像)').hasMatch(lower)) {
+      return 'image.png';
+    }
+    // 压缩包二进制：zip 走降级为 .md 机制。
+    if (RegExp(r'(zip|压缩包|归档)').hasMatch(lower)) return 'archive.zip';
     if (RegExp(r'(c\+\+|cpp|\bcxx\b|c/c\+\+)').hasMatch(lower)) {
       if (RegExp(r'(系统信息|系统的?信息|cpu|内存|memory|system)').hasMatch(lower)) {
         return 'system_resource_monitor.cpp';
@@ -438,6 +503,9 @@ class AgentRuntime {
 
     final ext = path.split('.').last.toLowerCase();
     if (ext == 'md' || ext == 'markdown' || ext == 'txt') return content;
+    // CSV / SQL / 日志均为纯文本，直接返回模型输出（与 txt 同逻辑），
+    // 避免“直接生成”路径因抽取不到内容而回落到规划路径。
+    if (ext == 'csv' || ext == 'sql' || ext == 'log') return content;
     if (ext == 'html' || ext == 'htm') {
       return RegExp(r'^(<!doctype|<html)\b', caseSensitive: false)
               .hasMatch(content)
@@ -641,6 +709,7 @@ class AgentRuntime {
     List<ToolRequest> priorExecutedRequests = const [],
     String workModeContext = '',
   }) async {
+    print('[RT] run userRequest=$userRequest canDirect=${_canGenerateNewFileDirectly(userRequest)} inferred=${_inferGeneratedFilePath(userRequest)}');
     if (shouldCancel?.call() == true) {
       return const AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
@@ -687,6 +756,7 @@ class AgentRuntime {
           throwOnFailure: true,
         );
         if (directFileRequest != null) {
+          print('[RT] directFileRequest != null ur=$userRequest path=${directFileRequest.args['path']}');
           return _handleToolRequest(
             character: character,
             request: directFileRequest,
@@ -737,6 +807,7 @@ class AgentRuntime {
       }
     }
 
+    print('[RT] fell through to normal planning for userRequest=$userRequest');
     final prompt = AgentPromptBuilder.buildToolPlanningPrompt(
       characterName: character.name,
       skills: skills,
@@ -1063,6 +1134,7 @@ class AgentRuntime {
       var output = result['message']?.toString() ?? '';
       final parsed =
           ToolRequest.tryParse(output) ?? _looseParseToolRequest(output);
+      print('[RT] _genContent ur=$userRequest parsed=$parsed tool=${parsed?.tool} outputHead=${output.substring(0, output.length > 80 ? 80 : output.length)}');
       if (parsed != null && parsed.tool == AgentToolName.workspacePatch) {
         return parsed;
       }
@@ -1240,6 +1312,7 @@ class AgentRuntime {
         message: '工作模式已关闭，任务已安全中止。',
       );
     }
+    print('[RT] ENTER _handleToolRequest tool=${request.tool} ur=$userRequest');
     if (remainingSteps <= 0) {
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
@@ -1278,6 +1351,7 @@ class AgentRuntime {
 
     late final Map<String, dynamic> toolResult;
     try {
+      print('[RT] _handleToolRequest tool=${request.tool} path=${request.args['path']}');
       toolResult = await _execute(request, character);
     } catch (e) {
       return AgentRuntimeResult(
@@ -1671,6 +1745,7 @@ class AgentRuntime {
     ToolRequest request, {
     required bool allowCommandValidation,
   }) async {
+    print('[RT] _executeWorkspacePatch ENTER path=${request.args['path']} toolType=${_workspaceFileTool.runtimeType}');
     final rawPath = request.args['path'] as String? ?? '';
     var path = WorkspacePathGuard.normalizeToRelative(rawPath);
     if (path.isEmpty) {
@@ -1713,6 +1788,7 @@ class AgentRuntime {
       path,
       request.args['content'] as String? ?? '',
     );
+    print('[RT] _executeWorkspacePatch wrote path=$path ok=${writeResult['ok']}');
     if (writeResult['ok'] != true) return writeResult;
     try {
       final readResult = await _workspaceFileTool.read(path);
@@ -1762,6 +1838,9 @@ class AgentRuntime {
       'ppt',
       'pptx',
       'zip',
+      'png',
+      'jpg',
+      'jpeg',
     }.contains(extension);
   }
 
@@ -1948,6 +2027,9 @@ class AgentRuntime {
       'ppt',
       'pptx',
       'zip',
+      'png',
+      'jpg',
+      'jpeg',
     }.contains(ext)) {
       return null;
     }
@@ -1966,7 +2048,7 @@ class AgentRuntime {
   /// 返回 null 表示未识别出任何文件生成意图（不应触发工具请求）。
   String? _inferWorkspaceFilePath(String text) {
     const supported =
-        r'html|html5|md|markdown|dart|java|txt|text|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cpp|cc|h|hpp|pdf|doc|docx';
+        r'html|html5|md|markdown|dart|java|txt|text|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cpp|cc|h|hpp|pdf|doc|docx|ppt|pptx|csv|sql|log|png|jpe?g|zip';
     // 先匹配「(一个?) (ext) 文件」或「(ext)文件」「一个(ext)」这类明确类型提示。
     final typeHint = RegExp(
       r'(?:一个?)?\s*(' + supported + r')\s*文件',
@@ -1978,7 +2060,7 @@ class AgentRuntime {
     } else {
       // 兜底：消息里单独出现“一个 html / 生成一个 dart”等扩展名词（无“文件”二字）。
       final bare = RegExp(
-        r'(?:一个?)?\s*(html|html5|md|markdown|dart|java|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash|pdf|doc|docx)(?![a-zA-Z0-9_])',
+        r'(?:一个?)?\s*(html|html5|md|markdown|dart|java|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash|pdf|doc|docx|ppt|pptx|csv|sql|log|png|jpe?g|zip)(?![a-zA-Z0-9_])',
         caseSensitive: false,
       ).firstMatch(text);
       ext = bare == null ? null : _normalizeExt(bare.group(1)!);

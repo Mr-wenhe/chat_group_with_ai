@@ -738,8 +738,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         conversationId: widget.groupId,
         isDirectChat: _isDirectChat,
       );
-      await LocalAgentBridgeLauncher().restart(
-        workspace: workspace.workDirPath,
+      await LocalAgentBridgeLauncher().registerWorkspace(
+        conversationId: widget.groupId,
+        workspacePath: workspace.workDirPath,
       );
       await _generateAgenticReply(
         character: executor,
@@ -1405,7 +1406,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     final attachments = <MediaAttachment>[];
     final bridge = LocalAgentBridgeClient();
-    final workspaceTool = WorkspaceFileTool(bridge);
+    final workspaceTool = WorkspaceFileTool(
+      bridge,
+      conversationId: widget.groupId,
+    );
     final lastPatchWithContent = patchRequests.reversed.firstWhere(
       (request) => request.args['content'] is String,
       orElse: () => patchRequests.last,
@@ -1504,7 +1508,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         receiveTimeout: AgentRuntime.completionTimeout,
         cancelToken: cancelToken,
       ),
-      workspaceFileTool: WorkspaceFileTool(bridge),
+      workspaceFileTool: WorkspaceFileTool(
+        bridge,
+        conversationId: widget.groupId,
+      ),
       browserContextTool: BrowserContextTool(bridge),
       skillCreateHandler: (args) => _saveGeneratedSkillFromArgs(
         character: character,
@@ -4216,7 +4223,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         (HardwareKeyboard.instance.isControlPressed ||
             HardwareKeyboard.instance.isMetaPressed)) {
       unawaited(_pasteClipboardAttachments(showEmptyHint: false));
-      return KeyEventResult.ignored;
+      // 阻止 Flutter 默认粘贴行为，避免手动插入与 TextField 原生粘贴重复。
+      return KeyEventResult.handled;
     }
     // 桌面端：Enter 发送、Shift+Enter 换行
     if (_isDesktop) {

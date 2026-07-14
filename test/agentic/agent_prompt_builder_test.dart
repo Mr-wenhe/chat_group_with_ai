@@ -52,4 +52,47 @@ void main() {
     expect(prompt, contains('自检'));
     expect(prompt, contains('未完成项或风险'));
   });
+
+  test('result prompt forbids claiming attachment for non-file-write tools', () {
+    // 虚假附件回归：skill.create 等非写入工具不会创建任何用户可见文件，
+    // 约束文案必须明确禁止模型声称“已作为附件发送”。
+    final prompt = AgentPromptBuilder.buildToolResultPrompt(
+      characterName: '工作助手',
+      userRequest: '生成一份工资报表 Excel 文件',
+      toolName: 'skill.create',
+      toolResult: const {'ok': true, 'skillId': 's1'},
+    );
+    expect(prompt, contains('附件真实性规则'));
+    expect(prompt, contains('已作为附件发送'));
+    expect(prompt, contains('已通过工作流生成文件'));
+    // 应点名 skill.create 并声明其不是文件写入工具、不可能产生附件。
+    expect(prompt, contains('skill.create'));
+    expect(prompt, contains('不是文件写入工具'));
+    expect(prompt, contains('不可能产生任何附件'));
+  });
+
+  test('result prompt only allows attachment claim for ok=true write tool',
+      () {
+    // 反向：workspace.patch 且 ok=true 是合法写文件，不应出现
+    // “当前工具 … 不是文件写入工具”这类禁止话术（否则会误伤正常交付）。
+    final prompt = AgentPromptBuilder.buildToolResultPrompt(
+      characterName: '工作助手',
+      userRequest: '生成 report.md',
+      toolName: 'workspace.patch',
+      toolResult: const {'ok': true, 'path': 'report.md'},
+    );
+    expect(prompt, isNot(contains('当前工具 `workspace.patch` 不是文件写入工具')));
+  });
+
+  test('result prompt forbids attachment claim when write tool not ok', () {
+    // workspace.patch 返回 ok≠true：明确禁止说“请查看附件”。
+    final prompt = AgentPromptBuilder.buildToolResultPrompt(
+      characterName: '工作助手',
+      userRequest: '生成 page.html',
+      toolName: 'workspace.patch',
+      toolResult: const {'ok': false, 'error': 'write_failed'},
+    );
+    expect(prompt, contains('不要'));
+    expect(prompt, contains('请查看附件'));
+  });
 }

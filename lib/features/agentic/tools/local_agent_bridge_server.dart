@@ -23,14 +23,38 @@ Map<String, dynamic>? _lastBrowserContext;
 /// 返回已绑定的 [HttpServer]，调用方负责在适当时机调用 [HttpServer.close] 释放端口
 /// （例如 App 退出时）。请求处理过程中的异常会被捕获并降级为 500 响应，
 /// 不会让整个服务因单条请求失败而中断。
-Future<HttpServer> startBridgeServer({
+/// 运行中的桥接服务句柄：封装 [HttpServer] 与按 conversationId 分区的
+/// workspace 映射。调用方通过 [registerWorkspace] 把「对话 id -> 工作目录」
+/// 注册进来；之后所有 /workspace/* 与 /command/run 请求都会按请求体里的
+/// `conversationId` 路由到对应目录。缺省 conversationId（空串）使用启动时
+/// 的默认 workspace，保证历史调用与测试无需改动即可工作。
+class RunningBridgeServer {
+  final HttpServer server;
+  final Map<String, Directory> _workspaces;
+
+  RunningBridgeServer(this.server, this._workspaces);
+
+  int get port => server.port;
+
+  /// 注册（或覆盖）某个对话的 workspace 目录。
+  void registerWorkspace(String conversationId, Directory dir) {
+    _workspaces[conversationId] = dir.absolute;
+  }
+
+  Future<void> close({bool force = false}) => server.close(force: force);
+}
+
+Future<RunningBridgeServer> startBridgeServer({
   required Directory workspace,
   int port = kLocalAgentBridgePort,
 }) async {
+  // 以默认空串 key 承载启动时的 workspace，保证未携带 conversationId 的
+  // 请求（如单工作区旧调用 / 测试）仍有正确的落盘目录。
+  final workspaces = <String, Directory>{'': workspace.absolute};
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
   server.listen((request) async {
     try {
-      await _route(request, workspace);
+      await _route(request, workspaces);
     } catch (e, st) {
       stderr.writeln('[bridge] $e\n$st');
       try {
@@ -38,10 +62,13 @@ Future<HttpServer> startBridgeServer({
       } catch (_) {}
     }
   });
-  return server;
+  return RunningBridgeServer(server, workspaces);
 }
 
-Future<void> _route(HttpRequest request, Directory workspace) async {
+Future<void> _route(
+  HttpRequest request,
+  Map<String, Directory> workspaces,
+) async {
   final origin = request.headers.value('origin');
   if (origin != null && !_isAllowedBrowserOrigin(origin)) {
     request.response.statusCode = HttpStatus.forbidden;
@@ -58,14 +85,20 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
   }
 
   if (request.uri.path == '/health') {
-    await _json(request, {'ok': true, 'workspace': workspace.path});
+    await _json(request, {
+      'ok': true,
+      'workspaces': workspaces.keys.toList(),
+    });
     return;
   }
 
+  // 其余路由都依赖 workspace：从请求体读取 conversationId 做分区路由。
+  final body = await _readJson(request);
+  final ws = _workspaceFor(workspaces, body['conversationId'] as String?);
+
   if (request.uri.path == '/workspace/list') {
-    final body = await _readJson(request);
     final relativePath = body['path'] as String? ?? '.';
-    final dir = _resolveWorkspaceDir(workspace, relativePath);
+    final dir = _resolveWorkspaceDir(ws, relativePath);
     if (!dir.existsSync()) {
       await _json(request, {'error': 'not_found'}, statusCode: 404);
       return;
@@ -74,7 +107,7 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
         .listSync()
         .map((e) => {
               'name': _fileNameOf(e.path),
-              'path': _relativeToWorkspace(workspace, e.path),
+              'path': _relativeToWorkspace(ws, e.path),
               'type': e is Directory ? 'directory' : 'file',
             })
         .toList()
@@ -84,9 +117,8 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
   }
 
   if (request.uri.path == '/workspace/read') {
-    final body = await _readJson(request);
     final path = body['path'] as String? ?? '';
-    final file = _resolveWorkspaceFile(workspace, path);
+    final file = _resolveWorkspaceFile(ws, path);
     if (!file.existsSync()) {
       await _json(request, {'error': 'not_found'}, statusCode: 404);
       return;
@@ -99,7 +131,6 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
   }
 
   if (request.uri.path == '/workspace/apply-patch') {
-    final body = await _readJson(request);
     final patch = body['patch'] as String? ?? '';
     if (patch.trim().isEmpty) {
       await _json(request, {'error': 'empty_patch'}, statusCode: 400);
@@ -108,7 +139,7 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
     final check = await _runProcess(
       'git',
       ['apply', '--check'],
-      workspace,
+      ws,
       stdinText: patch,
     );
     if (check.exitCode != 0) {
@@ -122,7 +153,7 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
     final apply = await _runProcess(
       'git',
       ['apply'],
-      workspace,
+      ws,
       stdinText: patch,
     );
     await _json(
@@ -145,7 +176,6 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
   // 与 workspace 边界校验），不破坏原有 /workspace/apply-patch 端点。
   // content 允许为空（写入空文件），路径为空或不安全则返回 400。
   if (request.uri.path == '/workspace/write') {
-    final body = await _readJson(request);
     final path = body['path'] as String? ?? '';
     final content = body['content'] as String? ?? '';
     if (path.trim().isEmpty) {
@@ -154,7 +184,7 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
     }
     File file;
     try {
-      file = _resolveWorkspaceFile(workspace, path);
+      file = _resolveWorkspaceFile(ws, path);
     } on ArgumentError catch (e) {
       await _json(
         request,
@@ -174,14 +204,13 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
   }
 
   if (request.uri.path == '/command/run') {
-    final body = await _readJson(request);
     final command = (body['command'] as String? ?? '').trim();
     final args = _allowedCommand(command);
     if (args == null) {
       await _json(request, {'error': 'command_not_allowed'}, statusCode: 403);
       return;
     }
-    final result = await _runProcess(args.first, args.sublist(1), workspace);
+    final result = await _runProcess(args.first, args.sublist(1), ws);
     await _json(
         request,
         {
@@ -194,7 +223,6 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
   }
 
   if (request.uri.path == '/browser/update') {
-    final body = await _readJson(request);
     _lastBrowserContext = {
       'url': body['url'] as String? ?? '',
       'title': body['title'] as String? ?? '',
@@ -222,6 +250,16 @@ Future<void> _route(HttpRequest request, Directory workspace) async {
   }
 
   await _json(request, {'error': 'not_found'}, statusCode: 404);
+}
+
+/// 按请求体里的 conversationId 选择对应 workspace 目录。
+///
+/// - 命中已注册 id 直接返回该目录；
+/// - 未携带 / 未命中时回退默认空串 workspace（启动时注册）；
+/// - 极端情况（默认也不存在）回落到任意第一个已注册目录，避免空指针。
+Directory _workspaceFor(Map<String, Directory> workspaces, String? conversationId) {
+  final id = (conversationId ?? '').trim();
+  return workspaces[id] ?? workspaces[''] ?? workspaces.values.first;
 }
 
 Future<Map<String, dynamic>> _readJson(HttpRequest request) async {

@@ -24,7 +24,7 @@ import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// 启动监听在临时端口（port:0）的桥接服务，与现有机房测试保持一致。
-Future<HttpServer> _startTestServer(Directory workspace) =>
+Future<RunningBridgeServer> _startTestServer(Directory workspace) =>
     startBridgeServer(workspace: workspace, port: 0);
 
 void main() {

@@ -824,6 +824,356 @@ void main() {
     expect(result.message, contains('降级'));
   });
 
+  test('请求生成 Excel 表格被识别为文件意图并降级为 Markdown 真实写入', () async {
+    // 回归：修复前 _inferGeneratedFilePath 不认识 excel，导致请求落入规划路径，
+    // LLM 可能用 skill.create 等非写入工具“空口声称已作为附件发送”（虚假附件）。
+    // 现在 excel 应被识别，走文件生成路径，二进制 xlsx 优雅降级为真实可写的 .md。
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'report.md', 'bytes': 20},
+    );
+    String? firstSystemPrompt;
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        firstSystemPrompt ??= messages.isNotEmpty ? messages.first['content'] as String? : null;
+        return {
+          'success': true,
+          'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"生成工资报表","args":{"path":"report.xlsx","content":"# 工资报表\\n\\n| 姓名 | 工资 |\\n| --- | --- |\\n| 张三 | 8000 |"}}
+```
+''',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '我要一份工资报表excel文件',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    // 请求应被识别为文件意图，从而进入“直接生成文件”路径（生成 prompt 会带上
+    // 推断出的文件名 report.xlsx），而不是落入规划路径让 LLM 自由发挥。
+    expect(firstSystemPrompt, contains('report.xlsx'));
+    // 真实落盘为降级后的 Markdown 文件，而非伪造附件或空口承诺。
+    expect(fakeTool.lastWritePath, 'report.md');
+    expect(result.message, contains('report.md'));
+    // 交付信息应明确标注已降级，而不是假装真的生成了 xlsx 二进制。
+    expect(result.message, contains('降级'));
+  });
+
+  test('请求生成 PPT 演示文稿被识别为文件意图并降级为 Markdown 真实写入',
+      () async {
+    // 补全 ppt/pptx 识别后，应被识别为文件意图走“直接生成”路径，
+    // 二进制 pptx 优雅降级为真实可写的 .md（与 Excel/PDF/DOCX 一致）。
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'slides.md', 'bytes': 20},
+    );
+    String? firstSystemPrompt;
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
+        return {
+          'success': true,
+          'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"生成演示文稿","args":{"path":"slides.pptx","content":"# 演示文稿\\n\\n幻灯片内容"}}
+```
+''',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '我要一份ppt演示文稿',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(firstSystemPrompt, contains('slides.pptx'));
+    // 实际落盘为降级后的 Markdown，而非伪造 pptx 二进制附件。
+    expect(fakeTool.lastWritePath, 'slides.md');
+    expect(result.message, contains('slides.md'));
+    expect(result.message, contains('降级'));
+  });
+
+  test('请求生成 CSV 表格数据被识别为 data.csv 文件意图', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'data.csv', 'bytes': 20},
+    );
+    String? firstSystemPrompt;
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
+        return {
+          'success': true,
+          'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"生成表格","args":{"path":"data.csv","content":"name,score\\nAlice,90"}}
+```
+''',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '生成csv表格数据',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    // csv 分支必须在 excel 之前，因此“表格数据”命中 csv 而非 xlsx。
+    expect(firstSystemPrompt, contains('data.csv'));
+    expect(fakeTool.lastWritePath, 'data.csv');
+    expect(result.message, contains('data.csv'));
+  });
+
+  test('请求生成 TXT 文本被识别为 note.txt 文件意图', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'note.txt', 'bytes': 12},
+    );
+    String? firstSystemPrompt;
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
+        return {
+          'success': true,
+          'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"生成文本","args":{"path":"note.txt","content":"一些纯文本内容"}}
+```
+''',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '写个txt文本',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(firstSystemPrompt, contains('note.txt'));
+    expect(fakeTool.lastWritePath, 'note.txt');
+    expect(result.message, contains('note.txt'));
+  });
+
+  test('请求生成 JSON 配置被识别为 data.json 文件意图', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'data.json', 'bytes': 24},
+    );
+    String? firstSystemPrompt;
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
+        return {
+          'success': true,
+          'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"生成配置","args":{"path":"data.json","content":"{\\"name\\":\\"demo\\"}"}}
+```
+''',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '来个json配置',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(firstSystemPrompt, contains('data.json'));
+    expect(fakeTool.lastWritePath, 'data.json');
+    expect(result.message, contains('data.json'));
+  });
+
+  test('请求生成 SQL 建表脚本被识别为 script.sql 文件意图', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'script.sql', 'bytes': 30},
+    );
+    String? firstSystemPrompt;
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
+        return {
+          'success': true,
+          'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"生成建表脚本","args":{"path":"script.sql","content":"CREATE TABLE t (id INT);"}}
+```
+''',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '创建sql建表脚本',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(firstSystemPrompt, contains('script.sql'));
+    expect(fakeTool.lastWritePath, 'script.sql');
+    expect(result.message, contains('script.sql'));
+  });
+
+  test('doc 文档请求被识别为 docx 而非 md', () async {
+    // 回归：doc/docx/文档 都应导向 docx 分支（在 md 之前）。docx 是二进制，
+    // 运行时降级为 .md 真实写入，而不是落入 md 分支或伪造 docx 附件。
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'report.md', 'bytes': 16},
+    );
+    String? firstSystemPrompt;
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
+        return {
+          'success': true,
+          'message': '''
+```agent_tool
+{"tool":"workspace.patch","reason":"生成文档","args":{"path":"report.docx","content":"# 文档\\n\\n正文"}}
+```
+''',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '我要一份doc文档',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    // 推断路径命中 docx 分支（doc文档 → report.docx），而不是被 md 分支抢走。
+    expect(firstSystemPrompt, contains('report.docx'));
+    // 实际落盘为降级后的 Markdown，而非伪造 docx 二进制。
+    expect(fakeTool.lastWritePath, 'report.md');
+    expect(result.message, contains('report.md'));
+    expect(result.message, contains('降级'));
+  });
+
+  test('写一份技术文档被识别为 report.md（文档关键词在 md 分支）', () async {
+    // 回归：docx 分支仅匹配带 doc/word 前缀的"文档"，裸"技术文档"应由
+    // md 分支（含「文档」关键词）承接为 report.md。
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'report.md', 'bytes': 20},
+    );
+    String? firstSystemPrompt;
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
+        // _generateFileContentRequest 期望模型直接返回文件内容文本，
+        // 而非工具请求 JSON。直接返回 Markdown 正文即可。
+        return {
+          'success': true,
+          'message': '# 技术文档\n\n这是一份技术文档的正文内容。\n',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '写一份技术文档',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(firstSystemPrompt, contains('report.md'));
+    expect(fakeTool.lastWritePath, 'report.md');
+    expect(fakeTool.lastWritePath, 'report.md');
+  });
+
+  test('展示一个表格不被误判为文件生成意图', () async {
+    // "展示"属于 readModifyVerb，且"一个表格"已从 wishNewFile 移除，
+    // 因此展示类请求不应进入文件生成路径。
+    String? firstSystemPrompt;
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
+        return {
+          'success': true,
+          'message': '这是一个表格示例：...',
+        };
+      },
+    );
+    final result = await runtime.run(
+      character: _character(toolPermissions: const []),
+      skills: [_skill()],
+      userRequest: '展示一个表格',
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(result.pendingToolRequest, isNull);
+    expect(firstSystemPrompt, isNot(contains('report.xlsx')));
+  });
+
+  test('读取意图（读一下 ppt 文件）不误判为文件生成', () async {
+    // 读取/查看类请求必须让 _inferGeneratedFilePath 返回 null，不能进入
+    // “直接生成”路径，否则会凭空声称已生成文件（虚假附件 Bug 同类风险）。
+    String? firstSystemPrompt;
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
+        return {
+          'success': true,
+          'message': '这是该 PPT 文件的内容概要，我并没有新建文件。',
+        };
+      },
+    );
+    final result = await runtime.run(
+      character: _character(toolPermissions: const []),
+      skills: [_skill()],
+      userRequest: '读一下这个ppt文件',
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(result.pendingToolRequest, isNull);
+    // 系统提示中不应出现 slides.pptx，说明 _inferGeneratedFilePath 返回了 null。
+    expect(firstSystemPrompt, isNot(contains('slides.pptx')));
+    expect(result.message, contains('内容概要'));
+  });
+
   test('skill.create 后 Markdown Java C++ 都必须继续为真实写入请求', () async {
     final cases = <({String request, String path, String content})>[
       (
@@ -2232,6 +2582,7 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
 
   @override
   Future<Map<String, dynamic>> applyPatch(String patch) async {
+    print('[FAKE] applyPatch called');
     return patchResult;
   }
 
@@ -2240,6 +2591,7 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
   // 权限/审批流转而非真实落盘。
   @override
   Future<Map<String, dynamic>> write(String path, String content) async {
+    print('[FAKE] write called path=$path');
     lastWritePath = path;
     lastWriteContent = content;
     return patchResult;

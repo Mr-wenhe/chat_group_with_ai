@@ -18,7 +18,7 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// 启动监听在临时端口（port:0 => 由系统分配空闲端口）的桥接服务，
 /// 避免与运行中的 App 已占用的 54263 端口冲突，使测试可独立运行。
-Future<HttpServer> _startTestServer(Directory workspace) =>
+Future<RunningBridgeServer> _startTestServer(Directory workspace) =>
     startBridgeServer(workspace: workspace, port: 0);
 
 /// 向桥接服务发起 JSON POST 请求，返回 (statusCode, 解码后的 body)。
@@ -82,7 +82,8 @@ void main() {
     expect(response.statusCode, 200);
     final decoded = jsonDecode(body) as Map<String, dynamic>;
     expect(decoded['ok'], isTrue);
-    expect(decoded['workspace'], isNotEmpty);
+    expect(decoded['workspaces'], isA<List>());
+    expect((decoded['workspaces'] as List).isEmpty, isFalse);
   });
 
   test('bridge allows loopback browser origin and echoes it in CORS', () async {

@@ -31,14 +31,28 @@ class WorkspacePathGuard {
 class WorkspaceFileTool {
   final LocalAgentBridgeClient bridge;
 
-  WorkspaceFileTool(this.bridge);
+  /// 当前工具实例归属的对话 id；发出的每个桥接请求都会带上它，
+  /// 使服务端能按 conversationId 路由到正确的 workspace 目录。
+  /// 留空（历史调用 / 测试）时服务端回退到默认 workspace。
+  final String conversationId;
+
+  WorkspaceFileTool(
+    this.bridge, {
+    this.conversationId = '',
+  });
+
+  /// 把 conversationId 并入请求体（空串时省略，保持旧接口兼容）。
+  Map<String, dynamic> _body(Map<String, dynamic> body) {
+    if (conversationId.isEmpty) return body;
+    return {...body, 'conversationId': conversationId};
+  }
 
   Future<Map<String, dynamic>> list({String path = '.'}) {
     final safe = WorkspacePathGuard.normalizeToRelative(path);
     if (path != '.' && !WorkspacePathGuard.isSafeRelativePath(safe)) {
       throw ArgumentError('Unsafe workspace path: $path');
     }
-    return bridge.postJson('/workspace/list', {'path': safe});
+    return bridge.postJson('/workspace/list', _body({'path': safe}));
   }
 
   Future<Map<String, dynamic>> read(String path) {
@@ -46,14 +60,15 @@ class WorkspaceFileTool {
     if (!WorkspacePathGuard.isSafeRelativePath(safe)) {
       throw ArgumentError('Unsafe workspace path: $path');
     }
-    return bridge.postJson('/workspace/read', {'path': safe});
+    return bridge.postJson('/workspace/read', _body({'path': safe}));
   }
 
   Future<Map<String, dynamic>> applyPatch(String patch) {
     if (patch.trim().isEmpty) {
       throw ArgumentError('Patch cannot be empty.');
     }
-    return bridge.postJson('/workspace/apply-patch', {'patch': patch});
+    return bridge
+        .postJson('/workspace/apply-patch', _body({'patch': patch}));
   }
 
   /// 直接写文件（方案 A）。
@@ -67,8 +82,10 @@ class WorkspaceFileTool {
       throw ArgumentError('Unsafe workspace path: $path');
     }
     try {
-      return await bridge
-          .postJson('/workspace/write', {'path': safe, 'content': content});
+      return await bridge.postJson(
+        '/workspace/write',
+        _body({'path': safe, 'content': content}),
+      );
     } on DioException catch (error) {
       if (error.response?.statusCode != 404) rethrow;
       return _writeThroughLegacyPatch(safe, content);
@@ -94,7 +111,7 @@ class WorkspaceFileTool {
       oldContent: oldContent,
       newContent: content,
     );
-    final result = await applyPatch(patch);
+    final result = await applyPatch(patch); // 已带 conversationId
     return {
       ...result,
       'ok': result['ok'] == true || result['exitCode'] == 0,

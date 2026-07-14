@@ -34,7 +34,7 @@ import 'package:chat_group/features/agentic/tools/local_agent_bridge_server.dart
 
 class LocalAgentBridgeLauncher {
   /// 当前进程内持有的桥接服务器；为 null 表示未运行。
-  static HttpServer? _server;
+  static RunningBridgeServer? _server;
   static String? _workspacePath;
   final int preferredPort;
 
@@ -48,6 +48,10 @@ class LocalAgentBridgeLauncher {
   ///
   /// [workspace] 为目标工作区绝对路径；缺省时自动定位到**最近的 git 仓库根目录**
   /// （见 [_resolveDefaultWorkspace]），以使 apply-patch 内部的 git apply 在真实仓库中可用。
+  ///
+  /// 注意：本方法只负责把桥接服务**首次拉起**并注册一个默认 workspace。
+  /// 后续的多对话隔离应由 [registerWorkspace] 完成，**不应**反复 stop/start
+  /// 服务——那正是旧实现在切换对话时产生端口竞态、导致 404 的根因。
   Future<void> start({String? workspace}) async {
     // 仅桌面端自动启动；非桌面端（含 Web/移动端）保持现有手动提示行为。
     if (!_isDesktop) return;
@@ -96,8 +100,29 @@ class LocalAgentBridgeLauncher {
     }
   }
 
-  Future<void> restart({required String workspace}) async {
-    await start(workspace: workspace);
+  /// 注册（或覆盖）某个对话的 workspace 目录到运行中的桥接服务。
+  ///
+  /// 与旧 [restart] 不同，本方法**不会** stop/start 整个 HTTP 服务：
+  /// 服务常驻后，仅向内部的 conversationId -> workspace 映射写入条目，
+  /// 之后该对话的 /workspace/* 与 /command/run 请求会按 conversationId 路由
+  /// 到正确的目录。这样多个对话可同时处于工作模式而互不干扰，且彻底消除了
+  /// 切换对话时的端口竞态（stop 旧服务 → start 新服务之间可能短暂不可用）。
+  ///
+  /// 若服务尚未启动（例如首次进入工作模式），则以该 workspace 作为默认目录
+  /// 拉起服务，再注册 conversationId，行为与旧 [restart] 的首启动一致。
+  Future<void> registerWorkspace({
+    required String conversationId,
+    required String workspacePath,
+  }) async {
+    if (!_isDesktop) return;
+    if (_server == null) {
+      await start(workspace: workspacePath);
+    }
+    _server?.registerWorkspace(conversationId, Directory(workspacePath).absolute);
+    debugPrint(
+      '[桥接] 已注册对话 workspace：conversationId=$conversationId '
+      'path=${Directory(workspacePath).absolute.path}',
+    );
   }
 
   /// 解析默认工作区目录：从当前进程工作目录向上逐级查找最近的含 `.git` 的 git 仓库根目录。
