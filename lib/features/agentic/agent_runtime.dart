@@ -1287,6 +1287,68 @@ class AgentRuntime {
       );
     }
 
+    final currentFileWriteSucceeded =
+        toolResult['ok'] == true || toolResult['exitCode'] == 0;
+    if (request.tool == AgentToolName.workspacePatch &&
+        !currentFileWriteSucceeded &&
+        // 用户明确拒绝（skipped）不算写失败：用户拒绝后任务应以非文件方式
+        // 继续完成剩余安全工作，而非被判为整体失败。
+        toolResult['skipped'] != true) {
+      final detail = toolResult['message']?.toString().trim().isNotEmpty == true
+          ? toolResult['message'].toString().trim()
+          : toolResult['error']?.toString().trim().isNotEmpty == true
+              ? toolResult['error'].toString().trim()
+              : '本地写入工具未返回成功状态';
+      return AgentRuntimeResult(
+        status: AgentRuntimeStatus.failed,
+        pendingToolRequest: request,
+        toolResult: toolResult,
+        executedToolRequests: executedRequests,
+        message: '${character.name} 未能生成文件：$detail。'
+            '工具写入未成功，因此没有可交付附件。',
+      );
+    }
+
+    // 生成文件的任务必须以真实 workspace.patch 作为完成门禁。
+    // 典型反例：skill.create 成功后，模型直接说“页面已生成，
+    // 请查看附件”，但实际从未写文件。此时尝试恢复出真实写入
+    // 请求；无法恢复时明确失败，绝不用口头承诺冒充交付。
+    final expectedFilePath = _inferGeneratedFilePath(userRequest);
+    final hasExecutedFileWrite = executedRequests.any(
+      (executed) => executed.tool == AgentToolName.workspacePatch,
+    );
+    if (expectedFilePath != null &&
+        !hasExecutedFileWrite &&
+        // 用户明确拒绝写文件后，不再强制恢复出真实写入请求，避免"拒绝后又被
+        // 强制再写一次"或与 skip 契约（拒绝后可继续完成安全剩余工作）冲突。
+        toolResult['skipped'] != true) {
+      final fallbackRequest = await _fallbackFileRequestAfterPlanningFailure(
+        character: character,
+        userRequest: userRequest,
+        conversationHistory: conversationHistory,
+      );
+      if (fallbackRequest != null) {
+        return _handleToolRequest(
+          character: character,
+          request: fallbackRequest,
+          userRequest: userRequest,
+          approved: false,
+          remainingSteps: remainingSteps,
+          executedRequests: executedRequests,
+          conversationHistory: conversationHistory,
+        );
+      }
+      return AgentRuntimeResult(
+        status: AgentRuntimeStatus.failed,
+        pendingToolRequest: request,
+        toolResult: toolResult,
+        executedToolRequests: executedRequests,
+        message: '${character.name} 未能写入用户要求的文件 '
+            '`$expectedFilePath`；当前只完成了 ${request.tool.wireName}，'
+            '因此没有可交付附件。请重试。',
+      );
+    }
+
     // 防御性过滤：多轮工具调用收尾时，同样需清理可能泄露的工具协议标记。
     final sanitized = _sanitizeToolProtocolLeak(
       content,

@@ -39,5 +39,9 @@ void main() {
       ExpertSkillCatalog.recommendForText('严格按测试驱动完成这个复杂任务').first.id,
       'general.superpowers',
     );
+    expect(
+      ExpertSkillCatalog.recommendForText('用前端最新架构生成有视觉冲击的 HTML 页面').first.id,
+      'frontend.interactive-artifact',
+    );
   });
 }

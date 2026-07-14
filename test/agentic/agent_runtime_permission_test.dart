@@ -591,6 +591,143 @@ void main() {
     expect(completed.message, contains('文件已生成'));
   });
 
+  test('创建技能后口头声称已交付不能跳过真实文件写入', () async {
+    const userRequest = '使用前端最新架构和视觉冲击，生成一个宇宙邀游 HTML 页面';
+    var completionCalls = 0;
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {
+        'path': 'page.html',
+        'content':
+            '<!doctype html><html><body><canvas id="space"></canvas></body></html>',
+      },
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 78},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async {
+        completionCalls++;
+        if (completionCalls == 1) {
+          return {
+            'success': true,
+            'message': '专属的“宇宙邀游”前端页面已生成完毕，请查看附件。',
+          };
+        }
+        return {
+          'success': true,
+          'message':
+              '<!doctype html><html><body><canvas id="space"></canvas></body></html>',
+        };
+      },
+      workspaceFileTool: fakeTool,
+      skillCreateHandler: (_) async => {
+        'ok': true,
+        'skillId': 'space-page-skill',
+        'name': '宇宙页面生成',
+      },
+    );
+    final character = _character(
+      toolPermissions: const [
+        ToolPermission.skillCreate,
+        ToolPermission.workspacePatch,
+      ],
+    );
+
+    final skillApproval = await runtime.run(
+      character: character,
+      skills: [_skill()],
+      userRequest: userRequest,
+      forceSkillCreation: true,
+    );
+    final writeApproval = await runtime.executeApprovedTool(
+      character: character,
+      request: skillApproval.pendingToolRequest!,
+      userRequest: userRequest,
+    );
+
+    expect(writeApproval.status, AgentRuntimeStatus.waitingForApproval);
+    expect(
+        writeApproval.pendingToolRequest?.tool, AgentToolName.workspacePatch);
+    expect(writeApproval.pendingToolRequest?.args['content'],
+        contains('canvas id="space"'));
+
+    final completed = await runtime.executeApprovedTool(
+      character: character,
+      request: writeApproval.pendingToolRequest!,
+      userRequest: userRequest,
+      priorExecutedRequests: writeApproval.executedToolRequests,
+    );
+
+    expect(completed.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'page.html');
+    expect(fakeTool.lastWriteContent, contains('canvas id="space"'));
+    expect(completed.message, contains('文件已生成'));
+  });
+
+  test('文件写入失败后口头声称已生成仍必须返回失败', () async {
+    final runtime = AgentRuntime(
+      complete: (_) async => {
+        'success': true,
+        'message': '页面已生成，请查看附件。',
+      },
+      workspaceFileTool: _FakeWorkspaceFileTool(
+        patchResult: const {
+          'ok': false,
+          'error': 'write_failed',
+          'message': '工作区不可写',
+        },
+      ),
+    );
+
+    final result = await runtime.executeApprovedTool(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      request: const ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '生成宇宙页面',
+        args: {
+          'path': 'space.html',
+          'content': '<!doctype html><html></html>',
+        },
+      ),
+      userRequest: '生成宇宙邀游 space.html',
+    );
+
+    expect(result.status, AgentRuntimeStatus.failed);
+    expect(result.message, contains('工作区不可写'));
+    expect(result.message, isNot(contains('请查看附件')));
+  });
+
+  test('用户拒绝 workspacePatch 不应被文件交付门禁误判为失败', () async {
+    // 用户请求含文件意图（使 _inferGeneratedFilePath 能推断出路径），
+    // 但用户在审批弹窗拒绝了写文件。skip 后任务应以非文件方式完成，
+    // 而非被新增的文件交付门禁误判为 AgentRuntimeStatus.failed，
+    // 也与 skipRejectedTool「拒绝后可继续完成安全剩余工作」的契约一致。
+    final runtime = AgentRuntime(
+      complete: (_) async =>
+          {'success': true, 'message': '已跳过文件写入，其余工作已完成。'},
+      workspaceFileTool: _FakeWorkspaceFileTool(),
+    );
+
+    final result = await runtime.skipRejectedTool(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      request: const ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '生成宇宙页面',
+        args: {
+          'path': 'space.html',
+          'content': '<!doctype html><html></html>',
+        },
+      ),
+      userRequest: '生成宇宙邀游 space.html',
+    );
+
+    expect(result.status, isNot(AgentRuntimeStatus.failed));
+    expect(result.message, isNot(contains('未能生成文件')));
+    expect(result.message, isNot(contains('未能写入')));
+  });
+
   test('runtime executes approved skill download tool', () async {
     var toolCalled = false;
     final runtime = AgentRuntime(
@@ -923,6 +1060,7 @@ void main() {
       character: character,
       request: needsPatchApproval.pendingToolRequest!,
       userRequest: '生成 docs/ai_work_test.md 并验证',
+      priorExecutedRequests: needsPatchApproval.executedToolRequests,
     );
     expect(needsCommandApproval.status, AgentRuntimeStatus.waitingForApproval);
     expect(
@@ -934,6 +1072,7 @@ void main() {
       character: character,
       request: needsCommandApproval.pendingToolRequest!,
       userRequest: '生成 docs/ai_work_test.md 并验证',
+      priorExecutedRequests: needsCommandApproval.executedToolRequests,
     );
     expect(completed.status, AgentRuntimeStatus.completed);
     expect(completed.message, contains('验证通过'));

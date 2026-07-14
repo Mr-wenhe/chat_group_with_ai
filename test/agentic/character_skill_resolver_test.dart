@@ -118,6 +118,47 @@ void main() {
     expect(bundle.permissions, contains(ToolPermission.skillCreate));
   });
 
+  test('前端 HTML 交付直接命中内置技能而不强制创建技能', () {
+    final character = AICharacter(
+      name: '通用助理',
+      avatar: '🤖',
+      age: 25,
+      role: '助理',
+      personalityTags: const [],
+      systemPrompt: '帮助用户完成任务。',
+      apiKey: 'k',
+      apiProvider: 'deepseek',
+    );
+
+    final bundle = CharacterSkillResolver.resolveFor(
+      character,
+      '使用前端最新架构和视觉冲击，生成宇宙邀游 HTML 页面',
+    );
+
+    expect(bundle.skills.map((skill) => skill.id),
+        contains('frontend.interactive-artifact'));
+    expect(bundle.needsSkillCreation, isFalse);
+    expect(bundle.permissions, contains(ToolPermission.workspacePatch));
+  });
+
+  test('附件追问会沿用对话上下文而不新建无关技能', () {
+    final character = AICharacter(
+      name: '通用助理',
+      avatar: '🤖',
+      age: 25,
+      role: '助理',
+      personalityTags: const [],
+      systemPrompt: '帮助用户完成任务。',
+      apiKey: 'k',
+      apiProvider: 'deepseek',
+    );
+
+    for (final followUp in const ['你卡了吗', '附件呢', '继续']) {
+      final bundle = CharacterSkillResolver.resolveFor(character, followUp);
+      expect(bundle.needsSkillCreation, isFalse, reason: followUp);
+    }
+  });
+
   test('个人首页设计对所有角色自动补充文件写入权限', () {
     final character = AICharacter(
       name: '鬼魂街大佬',

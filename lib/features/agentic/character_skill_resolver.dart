@@ -30,6 +30,8 @@ class CharacterSkillResolver {
     final recommended = ExpertSkillCatalog.recommendForText(userRequest);
     final onlyBuilder = recommended.length == 1 &&
         recommended.first.id == 'general.workbuddy-expert-builder';
+    final contextualFollowUp =
+        onlyBuilder && _isContextualFollowUp(userRequest);
     final skills = <CharacterSkill>[...defaults.skills];
     final permissions = <ToolPermission>{...defaults.permissions};
 
@@ -39,7 +41,7 @@ class CharacterSkillResolver {
         skills.add(template.instantiateFor(character.id));
         permissions.addAll(template.requiredPermissions);
       }
-    } else {
+    } else if (!contextualFollowUp) {
       permissions.add(ToolPermission.skillCreate);
     }
     _addIntentPermissions(permissions, userRequest);
@@ -47,8 +49,8 @@ class CharacterSkillResolver {
     return CharacterSkillBundle(
       skills: skills,
       permissions: permissions.toList(),
-      needsSkillCreation: onlyBuilder,
-      skillCreationHint: onlyBuilder
+      needsSkillCreation: onlyBuilder && !contextualFollowUp,
+      skillCreationHint: onlyBuilder && !contextualFollowUp
           ? '没有匹配「${_clipRequest(userRequest)}」的内置技能，建议先调用 skill.create 创建可复用技能。'
           : '',
     );
@@ -144,6 +146,19 @@ class CharacterSkillResolver {
 
   static bool _containsAny(String text, List<String> needles) =>
       needles.any(text.contains);
+
+  /// 这些短句依赖对话历史才有完整语义，不是一个新的专业任务。
+  /// 把它们交给 AgentRuntime 结合 conversationHistory 处理，避免
+  /// “附件呢”之类的追问反复触发 skill.create。
+  static bool _isContextualFollowUp(String text) {
+    final compact = text.trim().replaceAll(RegExp(r'\s+'), ' ');
+    if (compact.isEmpty || compact.length > 24) return false;
+    return RegExp(
+      r'^(?:你)?(?:卡了吗|卡住了吗|好了吗|完成了吗|做完了吗)$|'
+      r'^(?:附件|文件|结果|交付物)(?:呢|在哪|在哪里|怎么没有|呢？|呢\?)?$|'
+      r'^(?:继续|继续吧|接着做|然后呢|进度呢|怎么样了)$',
+    ).hasMatch(compact);
+  }
 
   static String _clipRequest(String text) {
     final compact = text.trim().replaceAll(RegExp(r'\s+'), ' ');
