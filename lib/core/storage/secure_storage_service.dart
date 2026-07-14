@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/services.dart';
 
@@ -55,5 +57,34 @@ class SecureStorageService {
 
   Future<String?> getDefaultProvider() async {
     return await _storage.read(key: 'default_provider');
+  }
+
+  /// 企业微信自建应用配置（corpid / corpsecret / agentid），以 JSON 存于密钥库。
+  static const String _wecomAppConfigKey = 'wecom_app_config';
+
+  Future<void> saveWeComAppConfig(Map<String, String> config) async {
+    await _storage.write(
+        key: _wecomAppConfigKey, value: jsonEncode(config));
+  }
+
+  Future<Map<String, String>?> getWeComAppConfig() async {
+    try {
+      final raw = await _storage.read(key: _wecomAppConfigKey);
+      if (raw == null) return null;
+      final decoded = jsonDecode(raw) as Map<String, dynamic>;
+      return decoded.map((k, v) => MapEntry(k, v.toString()));
+    } on PlatformException {
+      return null;
+    } catch (_) {
+      return null;
+    }
+  }
+
+  Future<void> deleteWeComAppConfig() async {
+    try {
+      await _storage.delete(key: _wecomAppConfigKey);
+    } on PlatformException {
+      // 同 deleteApiConfigKey：macOS debug 无 Keychain 权限时静默忽略。
+    }
   }
 }

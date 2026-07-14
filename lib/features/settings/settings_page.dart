@@ -16,6 +16,118 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
+import 'package:chat_group/core/storage/secure_storage_service.dart';
+
+class _WeComField extends StatelessWidget {
+  final ColorScheme cs;
+  final String label;
+  final TextEditingController controller;
+  final bool obscure;
+
+  const _WeComField({
+    required this.cs,
+    required this.label,
+    required this.controller,
+    this.obscure = false,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return TextField(
+      controller: controller,
+      obscureText: obscure,
+      decoration: InputDecoration(
+        labelText: label,
+        labelStyle: TextStyle(color: cs.onSurfaceVariant),
+        border: const OutlineInputBorder(),
+        isDense: true,
+      ),
+    );
+  }
+}
+
+class _WeComConfigCard extends ConsumerStatefulWidget {
+  const _WeComConfigCard();
+
+  @override
+  ConsumerState<_WeComConfigCard> createState() => _WeComConfigCardState();
+}
+
+class _WeComConfigCardState extends ConsumerState<_WeComConfigCard> {
+  final _corpIdCtl = TextEditingController();
+  final _corpSecretCtl = TextEditingController();
+  final _agentIdCtl = TextEditingController();
+
+  @override
+  void initState() {
+    super.initState();
+    _load();
+  }
+
+  Future<void> _load() async {
+    final cfg = await SecureStorageService().getWeComAppConfig();
+    if (cfg != null && mounted) {
+      _corpIdCtl.text = cfg['corpid'] ?? '';
+      _corpSecretCtl.text = cfg['corpsecret'] ?? '';
+      _agentIdCtl.text = cfg['agentid'] ?? '';
+    }
+  }
+
+  @override
+  void dispose() {
+    _corpIdCtl.dispose();
+    _corpSecretCtl.dispose();
+    _agentIdCtl.dispose();
+    super.dispose();
+  }
+
+  Future<void> _save() async {
+    final cfg = {
+      'corpid': _corpIdCtl.text.trim(),
+      'corpsecret': _corpSecretCtl.text.trim(),
+      'agentid': _agentIdCtl.text.trim(),
+    };
+    if (cfg['corpid']!.isEmpty ||
+        cfg['corpsecret']!.isEmpty ||
+        cfg['agentid']!.isEmpty) {
+      AppToast.show(context, '请填写完整的 corpid / corpsecret / agentid');
+      return;
+    }
+    await SecureStorageService().saveWeComAppConfig(cfg);
+    if (mounted) {
+      AppToast.show(context, '企业微信推送配置已保存', icon: Icons.check);
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final cs = Theme.of(context).colorScheme;
+    return AppCard(
+      cs: cs,
+      margin: EdgeInsets.zero,
+      children: [
+        _WeComField(cs: cs, label: 'Corp ID', controller: _corpIdCtl),
+        const SizedBox(height: 12),
+        _WeComField(
+            cs: cs,
+            label: 'Corp Secret',
+            controller: _corpSecretCtl,
+            obscure: true),
+        const SizedBox(height: 12),
+        _WeComField(cs: cs, label: 'Agent ID', controller: _agentIdCtl),
+        const SizedBox(height: 16),
+        Align(
+          alignment: Alignment.centerRight,
+          child: FilledButton.icon(
+            onPressed: _save,
+            icon: const Icon(Icons.save_outlined, size: 18),
+            label: const Text('保存配置'),
+          ),
+        ),
+      ],
+    );
+  }
+}
 
 class SettingsPage extends ConsumerStatefulWidget {
   const SettingsPage({super.key});
@@ -184,6 +296,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   onDelete: () => _confirmDeleteConfig(context, c),
                   onTest: () => _testApiKey(context, c),
                 )),
+          const SizedBox(height: 28),
+          _SectionHeader(
+            title: '企业微信推送',
+            cs: cs,
+          ),
+          const SizedBox(height: 4),
+          const Text('配置自建应用 corpid/corpsecret/agentid，即可在聊天页把消息推送给同事或群',
+              style: TextStyle(fontSize: 13, color: Color(0xFF888888))),
+          const SizedBox(height: 12),
+          const _WeComConfigCard(),
           const SizedBox(height: 28),
           _SectionHeader(title: '外观', cs: cs),
           const SizedBox(height: 12),

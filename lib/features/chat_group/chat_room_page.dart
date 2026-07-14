@@ -73,6 +73,7 @@ import 'package:chat_group/services/message_speech_service.dart';
 import 'package:chat_group/services/web_search_service.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:dio/dio.dart';
+import 'package:chat_group/services/wecom_push_service.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -3573,7 +3574,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   Future<void> _ttsStop() => _speech.stop();
 
   void _showMessageActionSheet(Message message, AICharacter? sender) {
-    if (message.senderType != 'ai' || sender == null) return;
     final cs = Theme.of(context).colorScheme;
     showModalBottomSheet(
       context: context,
@@ -3597,29 +3597,33 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                     borderRadius: BorderRadius.circular(2)),
               ),
             ),
-            Text('${sender.name} 的消息',
-                style: TextStyle(
-                    fontSize: 14,
-                    fontWeight: FontWeight.w600,
-                    color: cs.onSurfaceVariant)),
+            Text(
+              sender != null ? '${sender.name} 的消息' : '消息',
+              style: TextStyle(
+                  fontSize: 14,
+                  fontWeight: FontWeight.w600,
+                  color: cs.onSurfaceVariant),
+            ),
             const SizedBox(height: 14),
-            SheetButton(ctx, cs, Icons.refresh_rounded, '重新生成', () {
-              Navigator.pop(ctx);
-              _regenerateAiReply(message, sender);
-            }),
-            const SizedBox(height: 8),
-            SheetButton(ctx, cs, Icons.format_quote_rounded, '引用回复', () {
-              Navigator.pop(ctx);
-              _quoteMessage(message);
-            }),
-            const SizedBox(height: 8),
-            SheetButton(
-                ctx, cs, Icons.alternate_email_rounded, '@${sender.name}', () {
-              Navigator.pop(ctx);
-              _insertMention(sender);
-            }),
-            if (_isTtsEnabled) ...[
+            if (sender != null) ...[
+              SheetButton(ctx, cs, Icons.refresh_rounded, '重新生成', () {
+                Navigator.pop(ctx);
+                _regenerateAiReply(message, sender);
+              }),
               const SizedBox(height: 8),
+              SheetButton(ctx, cs, Icons.format_quote_rounded, '引用回复', () {
+                Navigator.pop(ctx);
+                _quoteMessage(message);
+              }),
+              const SizedBox(height: 8),
+              SheetButton(
+                  ctx, cs, Icons.alternate_email_rounded, '@${sender.name}', () {
+                Navigator.pop(ctx);
+                _insertMention(sender);
+              }),
+              const SizedBox(height: 8),
+            ],
+            if (_isTtsEnabled) ...[
               SheetButton(
                   ctx,
                   cs,
@@ -3636,7 +3640,122 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                   _ttsSpeak(message);
                 }
               }),
+              const SizedBox(height: 8),
             ],
+            SheetButton(ctx, cs, Icons.send_to_mobile_rounded, '推送到企业微信',
+                () {
+              Navigator.pop(ctx);
+              _showWeComPushDialog(message.content);
+            }),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _showWeComPushDialog(String defaultContent) {
+    final service = WeComPushService();
+    var targetType = 'user';
+    final userIdCtl = TextEditingController();
+    final webhookCtl = TextEditingController();
+    final contentCtl = TextEditingController(text: defaultContent);
+    var sending = false;
+    if (!mounted) return;
+    showDialog(
+      context: context,
+      builder: (dialogCtx) => StatefulBuilder(
+        builder: (ctx, setSt) => AlertDialog(
+          title: const Text('推送到企业微信'),
+          content: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                SegmentedButton<String>(
+                  segments: const [
+                    ButtonSegment(value: 'user', label: Text('同事')),
+                    ButtonSegment(value: 'group', label: Text('群')),
+                  ],
+                  selected: {targetType},
+                  onSelectionChanged: (sel) => setSt(() => targetType = sel.first),
+                ),
+                const SizedBox(height: 12),
+                if (targetType == 'user')
+                  TextField(
+                    controller: userIdCtl,
+                    decoration: const InputDecoration(
+                      labelText: '同事 UserID',
+                      hintText: '如 zhangsan',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  )
+                else
+                  TextField(
+                    controller: webhookCtl,
+                    decoration: const InputDecoration(
+                      labelText: '群机器人 Webhook Key',
+                      hintText: '粘贴群机器人的 key',
+                      border: OutlineInputBorder(),
+                      isDense: true,
+                    ),
+                  ),
+                const SizedBox(height: 12),
+                TextField(
+                  controller: contentCtl,
+                  maxLines: 4,
+                  decoration: const InputDecoration(
+                    labelText: '内容',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(ctx),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: sending
+                  ? null
+                  : () async {
+                      setSt(() => sending = true);
+                      final content = contentCtl.text.trim();
+                      final WeComPushResult res;
+                      if (targetType == 'user') {
+                        final uid = userIdCtl.text.trim();
+                        if (uid.isEmpty) {
+                          AppToast.show(context, '请填写同事 UserID');
+                          setSt(() => sending = false);
+                          return;
+                        }
+                        res = await service.sendToUser(uid, content);
+                      } else {
+                        final key = webhookCtl.text.trim();
+                        if (key.isEmpty) {
+                          AppToast.show(context, '请填写群 Webhook Key');
+                          setSt(() => sending = false);
+                          return;
+                        }
+                        res = await service.sendToGroup(key, content);
+                      }
+                      if (ctx.mounted) Navigator.pop(ctx);
+                      if (mounted) {
+                        AppToast.show(
+                          context,
+                          res.ok ? '已推送到企业微信' : res.detail,
+                          icon: res.ok ? Icons.check : Icons.error_outline,
+                        );
+                      }
+                    },
+              child: sending
+                  ? const SizedBox(
+                      width: 16,
+                      height: 16,
+                      child: CircularProgressIndicator(strokeWidth: 2))
+                  : const Text('发送'),
+            ),
           ],
         ),
       ),

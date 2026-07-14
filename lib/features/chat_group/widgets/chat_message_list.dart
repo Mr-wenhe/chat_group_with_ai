@@ -30,7 +30,7 @@ class ChatMessageList extends StatelessWidget {
   final AICharacter unknownCharacter;
   final Color Function(AICharacter character) senderColor;
   final String Function(String senderId) senderNameById;
-  final void Function(Message message, AICharacter sender) onLongPress;
+  final void Function(Message message, AICharacter? sender) onLongPress;
   final void Function(AICharacter sender) onSenderTap;
   final void Function(AICharacter sender) onMentionSender;
 
@@ -90,9 +90,7 @@ class ChatMessageList extends StatelessWidget {
                 isStreaming: streamingMessageId == message.id,
                 isRegenerating: regeneratingMessageId == message.id,
                 isHighlightedMention: highlightedMentionMessageId == message.id,
-                onLongPress: message.senderType == 'ai' && sender != null
-                    ? () => onLongPress(message, sender)
-                    : null,
+                onLongPress: () => onLongPress(message, sender),
                 senderColor: senderColor,
                 onSenderTap: sender == null ? null : () => onSenderTap(sender),
                 onMentionSender:
