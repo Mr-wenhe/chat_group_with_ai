@@ -48,6 +48,12 @@ class FileValidator {
     if (extension == 'dart') {
       return _validateDart(path, commandRunner);
     }
+    if (extension == 'java') {
+      return _validateJava(content);
+    }
+    if (const {'c', 'cc', 'cpp', 'h', 'hpp'}.contains(extension)) {
+      return _validateCFamily(content);
+    }
     return FileValidationResult(
       isValid: true,
       message: '文件验证通过：内容非空，大小 ${content.length} 字符。',
@@ -132,6 +138,43 @@ class FileValidator {
     return const FileValidationResult(
       isValid: true,
       message: 'Markdown 验证通过：标题层级合理。',
+    );
+  }
+
+  static FileValidationResult _validateJava(String content) {
+    final declaresType = RegExp(
+      r'\b(class|interface|enum|record)\s+[A-Za-z_$][\w$]*',
+    ).hasMatch(content);
+    if (!declaresType) {
+      return const FileValidationResult(
+        isValid: false,
+        message: 'Java 结构验证失败：未找到类、接口、枚举或 record 声明。',
+      );
+    }
+    return const FileValidationResult(
+      isValid: true,
+      message: 'Java 结构验证通过：已识别类型声明；未执行 javac 编译。',
+    );
+  }
+
+  static FileValidationResult _validateCFamily(String content) {
+    // 宽松识别 C/C++ 源码结构：include、类型声明（class/struct/union/enum/namespace），
+    // 或至少一个函数定义（返回类型 + 函数名 + 参数列表 + 左大括号）。
+    // 纯 C 库（仅函数实现、无 main/无 include）也能通过，避免误判无效。
+    final hasSourceStructure = RegExp(
+      r'(#\s*include\s*[<"]|'
+      r'\b(?:class|struct|union|enum|namespace)\s+\w+|'
+      r'\b[a-zA-Z_]\w*\s+[a-zA-Z_]\w*\s*\([^;]*\)\s*\{)',
+    ).hasMatch(content);
+    if (!hasSourceStructure) {
+      return const FileValidationResult(
+        isValid: false,
+        message: 'C/C++ 结构验证失败：未找到 include、类型声明或函数定义。',
+      );
+    }
+    return const FileValidationResult(
+      isValid: true,
+      message: 'C/C++ 结构验证通过：已识别源码结构；未执行编译器。',
     );
   }
 

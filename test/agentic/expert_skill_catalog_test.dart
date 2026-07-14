@@ -43,5 +43,13 @@ void main() {
       ExpertSkillCatalog.recommendForText('用前端最新架构生成有视觉冲击的 HTML 页面').first.id,
       'frontend.interactive-artifact',
     );
+    expect(
+      ExpertSkillCatalog.recommendForText('生成 Markdown 技术文档').first.id,
+      'document.markdown-artifact',
+    );
+    expect(
+      ExpertSkillCatalog.recommendForText('生成 Java 命令行程序').first.id,
+      'coding.flutter-reviewer',
+    );
   });
 }

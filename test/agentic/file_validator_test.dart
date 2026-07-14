@@ -61,4 +61,49 @@ void main() {
       isFalse,
     );
   });
+
+  test('Java 和 C++ 只验证源码结构，不虚构编译结果', () async {
+    final java = await FileValidator.validate(
+      'Main.java',
+      'public class Main { public static void main(String[] args) {} }',
+    );
+    final cpp = await FileValidator.validate(
+      'main.cpp',
+      '#include <iostream>\nint main() { return 0; }',
+    );
+
+    expect(java.isValid, isTrue);
+    expect(java.message, contains('Java'));
+    expect(java.message, isNot(contains('编译通过')));
+    expect(cpp.isValid, isTrue);
+    expect(cpp.message, contains('C/C++'));
+    expect(cpp.message, isNot(contains('编译通过')));
+  });
+
+  test('纯 C 函数库与头文件（无 main/无 include）也能通过结构验证', () async {
+    final libC = await FileValidator.validate(
+      'math_utils.c',
+      'int add(int a, int b) { return a + b; }\n'
+          'double average(double* arr, int n) {'
+          'double s = 0; for (int i = 0; i < n; i++) s += arr[i]; return s / n; }',
+    );
+    final header = await FileValidator.validate(
+      'point.h',
+      'typedef struct Point { double x; double y; } Point;',
+    );
+
+    expect(libC.isValid, isTrue);
+    expect(libC.message, contains('C/C++'));
+    expect(header.isValid, isTrue);
+  });
+
+  test('无函数定义/类型声明的 C/C++ 内容判定结构失败', () async {
+    final result = await FileValidator.validate(
+      'notes.c',
+      '// 仅注释，没有任何函数或类型定义\n/* no code here */',
+    );
+
+    expect(result.isValid, isFalse);
+    expect(result.message, contains('函数定义'));
+  });
 }

@@ -538,6 +538,12 @@ class DatabaseService {
       'csv': 'text/csv',
       'html': 'text/html',
       'dart': 'text/plain',
+      'java': 'text/x-java-source',
+      'c': 'text/x-c',
+      'cc': 'text/x-c++src',
+      'cpp': 'text/x-c++src',
+      'h': 'text/x-c',
+      'hpp': 'text/x-c++hdr',
       'yaml': 'text/yaml',
       'yml': 'text/yaml',
     };

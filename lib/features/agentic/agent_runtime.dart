@@ -211,10 +211,16 @@ class AgentRuntime {
         validation is Map ? validation['message']?.toString().trim() ?? '' : '';
     final evidence =
         validationMessage.isEmpty ? '本地工具已写入并成功读回文件。' : validationMessage;
+    final downgradedFrom = toolResult['downgradedFrom'] as String?;
+    final downgradeNote = downgradedFrom == null
+        ? ''
+        : '\n注意：⚠️ 原请求为二进制文档 `$downgradedFrom`，当前环境仅支持文本写入，'
+            '已自动降级为 Markdown 文本 `$path`。';
     return '结论：${message.trim()}\n\n'
         '交付物：✅ 文件已生成：`$path`（$sizeKB KB）— 点击附件查看完整内容\n'
         '验证：🔎 $evidence\n'
-        '自检：已确认文件可读，且聊天正文未重复粘贴产物内容。\n'
+        '自检：已确认文件可读，且聊天正文未重复粘贴产物内容。'
+        '$downgradeNote\n'
         '风险：无。';
   }
 
@@ -352,7 +358,7 @@ class AgentRuntime {
     if (!hasCreateIntent) return null;
 
     final explicit = RegExp(
-      r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:html?|md|markdown|dart|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp))(?![\w./\\-])',
+      r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:html?|md|markdown|dart|java|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp|pdf|doc|docx))(?![\w./\\-])',
       caseSensitive: false,
     ).firstMatch(request);
     final explicitPath = explicit?.group(1)?.replaceAll('\\', '/');
@@ -361,18 +367,24 @@ class AgentRuntime {
       return explicitPath;
     }
 
+    if (RegExp(r'(pdf|\.pdf\b)').hasMatch(lower)) return 'report.pdf';
+    if (RegExp(r'(docx?|word\s*文档|word文档)').hasMatch(lower)) {
+      return 'report.docx';
+    }
     if (RegExp(r'(html?|首页|主页|个人页|介绍页|页面|网页|网站|落地页|landing)').hasMatch(lower)) {
       return 'page.html';
     }
     if (RegExp(r'(markdown|\bmd\b|文档|报告|简历)').hasMatch(lower)) {
       return 'report.md';
     }
-    if (RegExp(r'(c\+\+|cpp|\bcxx\b|c/c\+\+|c语言|c 语言)').hasMatch(lower)) {
+    if (RegExp(r'(c\+\+|cpp|\bcxx\b|c/c\+\+)').hasMatch(lower)) {
       if (RegExp(r'(系统信息|系统的?信息|cpu|内存|memory|system)').hasMatch(lower)) {
         return 'system_resource_monitor.cpp';
       }
       return 'main.cpp';
     }
+    if (RegExp(r'(^|[^a-z])c\s*语言').hasMatch(lower)) return 'main.c';
+    if (RegExp(r'\bjava\b').hasMatch(lower)) return 'Main.java';
     if (RegExp(r'(dart|flutter|应用|app|程序)').hasMatch(lower)) {
       return 'main.dart';
     }
@@ -383,7 +395,7 @@ class AgentRuntime {
 
   static String? _extractGeneratedFileContent(String output) {
     final fenced = RegExp(
-      r'```(?:html?|md|markdown|dart|txt|json|ya?ml|svg|css|js|ts|python|py|sh|bash|c|cc|cpp)?\s*\n([\s\S]*?)\n?```',
+      r'```(?:html?|md|markdown|dart|java|txt|json|ya?ml|svg|css|js|ts|python|py|sh|bash|c|cc|cpp)?\s*\n([\s\S]*?)\n?```',
       caseSensitive: false,
     ).firstMatch(output);
     if (fenced != null) return fenced.group(1)?.trim();
@@ -410,7 +422,7 @@ class AgentRuntime {
     if (parsed != null && parsed.trim().isNotEmpty) return parsed;
 
     final unclosedFence = RegExp(
-      r'```(?:html?|md|markdown|dart|txt|json|ya?ml|svg|css|js|ts|python|py|sh|bash|c|cc|cpp)?\s*\n([\s\S]*)$',
+      r'```(?:html?|md|markdown|dart|java|txt|json|ya?ml|svg|css|js|ts|python|py|sh|bash|c|cc|cpp)?\s*\n([\s\S]*)$',
       caseSensitive: false,
     ).firstMatch(output.trim());
     if (unclosedFence != null) {
@@ -455,6 +467,14 @@ class AgentRuntime {
     }
     if (ext == 'dart') {
       return RegExp(r"(import\s+'package:|void\s+main\s*\(|class\s+\w+)")
+              .hasMatch(content)
+          ? content
+          : null;
+    }
+    if (ext == 'java') {
+      return RegExp(r'(public\s+(?:final\s+)?class\s+\w+|class\s+\w+|'
+                  r'interface\s+\w+|record\s+\w+|static\s+void\s+main\s*\(|'
+                  r'import\s+java\.)')
               .hasMatch(content)
           ? content
           : null;
@@ -1249,6 +1269,26 @@ class AgentRuntime {
 
     final content = finalResponse['message']?.toString() ??
         '${character.name} 已完成工具调用，但整理结果失败。';
+    final currentFileWriteSucceeded =
+        toolResult['ok'] == true || toolResult['exitCode'] == 0;
+    if (request.tool == AgentToolName.workspacePatch &&
+        !currentFileWriteSucceeded &&
+        // 用户明确拒绝（skipped）不算写失败。
+        toolResult['skipped'] != true) {
+      final detail = toolResult['message']?.toString().trim().isNotEmpty == true
+          ? toolResult['message'].toString().trim()
+          : toolResult['error']?.toString().trim().isNotEmpty == true
+              ? toolResult['error'].toString().trim()
+              : '本地写入工具未返回成功状态';
+      return AgentRuntimeResult(
+        status: AgentRuntimeStatus.failed,
+        pendingToolRequest: request,
+        toolResult: toolResult,
+        executedToolRequests: executedRequests,
+        message: '${character.name} 未能生成文件：$detail。'
+            '工具写入未成功，因此没有可交付附件。',
+      );
+    }
     // 多步骤任务（例如先 skill.create，再生成页面）也可能在后续回复里直接
     // 吐出裸 HTML/代码。与首轮规划保持同一恢复策略，把现成内容继续转换为
     // workspace.patch，不能只用“请查看附件”护栏吞掉正文却没有真正创建文件。
@@ -1284,28 +1324,6 @@ class AgentRuntime {
         remainingSteps: remainingSteps,
         executedRequests: executedRequests,
         conversationHistory: conversationHistory,
-      );
-    }
-
-    final currentFileWriteSucceeded =
-        toolResult['ok'] == true || toolResult['exitCode'] == 0;
-    if (request.tool == AgentToolName.workspacePatch &&
-        !currentFileWriteSucceeded &&
-        // 用户明确拒绝（skipped）不算写失败：用户拒绝后任务应以非文件方式
-        // 继续完成剩余安全工作，而非被判为整体失败。
-        toolResult['skipped'] != true) {
-      final detail = toolResult['message']?.toString().trim().isNotEmpty == true
-          ? toolResult['message'].toString().trim()
-          : toolResult['error']?.toString().trim().isNotEmpty == true
-              ? toolResult['error'].toString().trim()
-              : '本地写入工具未返回成功状态';
-      return AgentRuntimeResult(
-        status: AgentRuntimeStatus.failed,
-        pendingToolRequest: request,
-        toolResult: toolResult,
-        executedToolRequests: executedRequests,
-        message: '${character.name} 未能生成文件：$detail。'
-            '工具写入未成功，因此没有可交付附件。',
       );
     }
 
@@ -1508,6 +1526,25 @@ class AgentRuntime {
     if (path.isEmpty) {
       return {'ok': false, 'error': 'empty_path', 'message': '缺少有效的文件路径'};
     }
+    String? binaryDowngradedFrom;
+    if (_requiresBinaryArtifactWriter(path)) {
+      // 系统只能写文本文件，无法直接生成 PDF/Word 等二进制文档。
+      // 优雅降级：把二进制扩展名改写为 .md 继续落盘（内容以 Markdown 文本保存），
+      // 避免「用户要一份 PDF 报告」的任务整体 failed。改写后仍是一次成功的文本
+      // 写入，文件交付门禁得以正常通过，并会在交付信息里标注降级来源。
+      final mdPath = _rewriteBinaryPathToMarkdown(path);
+      if (mdPath == null) {
+        return {
+          'ok': false,
+          'error': 'binary_artifact_not_supported',
+          'message': '当前 workspace.patch 只能写入文本文件，'
+              '不能生成 PDF/Word 等二进制文档。'
+              '请改为 Markdown/HTML，或先配置专用的二进制导出工具',
+        };
+      }
+      binaryDowngradedFrom = path;
+      path = mdPath;
+    }
     // 文件已存在时自动改用递增后缀，避免：
     //   a) 静默覆盖导致用户丢失之前的内容
     //   b) 直接拒绝导致工具执行失败、LLM 回退到代码泄漏路径
@@ -1533,6 +1570,9 @@ class AgentRuntime {
       if (content == null) return writeResult;
       final enriched = Map<String, dynamic>.from(writeResult);
       enriched['readbackContent'] = content;
+      if (binaryDowngradedFrom != null) {
+        enriched['downgradedFrom'] = binaryDowngradedFrom;
+      }
       final validation = await FileValidator.validate(
         path,
         content,
@@ -1559,6 +1599,33 @@ class AgentRuntime {
       if (!await _workspaceFileExists(candidate)) return candidate;
     }
     return '';
+  }
+
+  static bool _requiresBinaryArtifactWriter(String path) {
+    final extension = path.split('.').last.toLowerCase();
+    return const {
+      'pdf',
+      'doc',
+      'docx',
+      'xls',
+      'xlsx',
+      'ppt',
+      'pptx',
+      'zip',
+    }.contains(extension);
+  }
+
+  /// 把二进制文档路径改写为等效的 Markdown 文本路径（优雅降级用）。
+  /// 例：`report.pdf` → `report.md`、`docs/summary.docx` → `docs/summary.md`。
+  /// 改写结果仍须是安全相对路径，否则返回 null（交由上层按不支持处理）。
+  static String? _rewriteBinaryPathToMarkdown(String path) {
+    final slashIndex = path.lastIndexOf('/');
+    final dir = slashIndex >= 0 ? path.substring(0, slashIndex + 1) : '';
+    final fileName = slashIndex >= 0 ? path.substring(slashIndex + 1) : path;
+    final dotIndex = fileName.lastIndexOf('.');
+    final base = dotIndex > 0 ? fileName.substring(0, dotIndex) : fileName;
+    final md = '$dir$base.md';
+    return WorkspacePathGuard.isSafeRelativePath(md) ? md : null;
   }
 
   Future<bool> _workspaceFileExists(String path) async {
@@ -1718,7 +1785,22 @@ class AgentRuntime {
     // HTML/SVG/CSS are highly subjective visual artifacts. The old local
     // template produced an empty shell, which is worse than an honest retry.
     // Keep deterministic fallbacks only for code/scripts/technical markdown.
-    if (const {'html', 'htm', 'svg', 'css'}.contains(ext)) return null;
+    if (const {
+      'html',
+      'htm',
+      'svg',
+      'css',
+      'pdf',
+      'doc',
+      'docx',
+      'xls',
+      'xlsx',
+      'ppt',
+      'pptx',
+      'zip',
+    }.contains(ext)) {
+      return null;
+    }
     if ((ext == 'md' || ext == 'markdown') &&
         !RegExp(r'(技术文档|项目|工程|报告|总结|readme)', caseSensitive: false)
             .hasMatch(userRequest)) {
@@ -1734,7 +1816,7 @@ class AgentRuntime {
   /// 返回 null 表示未识别出任何文件生成意图（不应触发工具请求）。
   String? _inferWorkspaceFilePath(String text) {
     const supported =
-        r'html|html5|md|markdown|dart|txt|text|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cpp|cc|h|hpp';
+        r'html|html5|md|markdown|dart|java|txt|text|json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cpp|cc|h|hpp|pdf|doc|docx';
     // 先匹配「(一个?) (ext) 文件」或「(ext)文件」「一个(ext)」这类明确类型提示。
     final typeHint = RegExp(
       r'(?:一个?)?\s*(' + supported + r')\s*文件',
@@ -1746,7 +1828,7 @@ class AgentRuntime {
     } else {
       // 兜底：消息里单独出现“一个 html / 生成一个 dart”等扩展名词（无“文件”二字）。
       final bare = RegExp(
-        r'(?:一个?)?\s*(html|html5|md|markdown|dart|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash)(?![a-zA-Z0-9_])',
+        r'(?:一个?)?\s*(html|html5|md|markdown|dart|java|txt|json|yaml|yml|svg|css|js|ts|py|sh|bash|pdf|doc|docx)(?![a-zA-Z0-9_])',
         caseSensitive: false,
       ).firstMatch(text);
       ext = bare == null ? null : _normalizeExt(bare.group(1)!);
@@ -1754,9 +1836,12 @@ class AgentRuntime {
         ext = 'sh';
       }
       if (ext == null &&
-          RegExp(r'(c\+\+|cpp|\bcxx\b|c/c\+\+|c语言|c 语言)')
-              .hasMatch(text.toLowerCase())) {
+          RegExp(r'(c\+\+|cpp|\bcxx\b|c/c\+\+)').hasMatch(text.toLowerCase())) {
         ext = 'cpp';
+      }
+      if (ext == null &&
+          RegExp(r'(^|[^a-z])c\s*语言').hasMatch(text.toLowerCase())) {
+        ext = 'c';
       }
     }
     if (ext == null) return null;
@@ -1807,6 +1892,8 @@ class AgentRuntime {
       } else {
         name = 'snippet';
       }
+    } else if (ext == 'java') {
+      name = 'Main';
     } else if (ext == 'sh') {
       if (lower.contains('检查') ||
           lower.contains('验证') ||
@@ -1852,7 +1939,7 @@ class AgentRuntime {
 
   String? _extractWorkspaceFilePath(String text) {
     final pathPattern = RegExp(
-      r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:md|markdown|dart|txt|json|yaml|yml|svg|html|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp))(?![\w./\\-])',
+      r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:md|markdown|dart|java|txt|json|yaml|yml|svg|html|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp|pdf|doc|docx))(?![\w./\\-])',
       caseSensitive: false,
     );
     for (final match in pathPattern.allMatches(text)) {
@@ -1871,6 +1958,15 @@ class AgentRuntime {
     final extension = path.split('.').last.toLowerCase();
     if (extension == 'dart') {
       return "void main() {\n  print('hello from ${character.name}');\n}\n";
+    }
+    if (extension == 'java') {
+      return '''
+public class Main {
+  public static void main(String[] args) {
+    System.out.println("Hello");
+  }
+}
+''';
     }
     if (extension == 'sh' || extension == 'bash') {
       return '''

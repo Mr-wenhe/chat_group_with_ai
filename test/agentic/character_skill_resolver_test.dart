@@ -159,6 +159,37 @@ void main() {
     }
   });
 
+  test('Markdown 文档和 Java C++ 代码直接命中内置交付技能', () {
+    final character = AICharacter(
+      name: '通用助理',
+      avatar: '🤖',
+      age: 25,
+      role: '助理',
+      personalityTags: const [],
+      systemPrompt: '帮助用户完成任务。',
+      apiKey: 'k',
+      apiProvider: 'deepseek',
+    );
+
+    final markdown = CharacterSkillResolver.resolveFor(
+      character,
+      '生成 Markdown 技术文档',
+    );
+    expect(markdown.skills.map((skill) => skill.id),
+        contains('document.markdown-artifact'));
+    expect(markdown.needsSkillCreation, isFalse);
+
+    for (final request in const ['生成 Java 程序', '生成 C++ 程序']) {
+      final coding = CharacterSkillResolver.resolveFor(character, request);
+      expect(coding.skills.map((skill) => skill.id),
+          contains('coding.flutter-reviewer'),
+          reason: request);
+      expect(coding.needsSkillCreation, isFalse, reason: request);
+      expect(coding.permissions, contains(ToolPermission.workspacePatch),
+          reason: request);
+    }
+  });
+
   test('个人首页设计对所有角色自动补充文件写入权限', () {
     final character = AICharacter(
       name: '鬼魂街大佬',

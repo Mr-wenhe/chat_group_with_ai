@@ -115,6 +115,7 @@ class AgentAttachmentContext {
       'yml',
       'csv',
       'dart',
+      'java',
       'html',
       'css',
       'js',

@@ -697,14 +697,209 @@ void main() {
     expect(result.message, isNot(contains('请查看附件')));
   });
 
+  test('请求生成 PDF 报告时二进制文档优雅降级为 Markdown 而非失败', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: {'ok': true, 'path': 'report.md', 'bytes': 12},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => {
+        'success': true,
+        'message': '报告已生成，请查看附件。',
+      },
+      workspaceFileTool: fakeTool,
+    );
+    final result = await runtime.executeApprovedTool(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      request: const ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '生成 PDF 报告',
+        args: {
+          'path': 'report.pdf',
+          'content': '# 月度报告\n\n一些内容。',
+        },
+      ),
+      userRequest: '帮我生成一份 PDF 格式的项目总结报告',
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    // 实际落盘为降级后的 Markdown 路径，而非原始二进制路径。
+    expect(fakeTool.lastWritePath, 'report.md');
+    expect(result.message, contains('report.md'));
+    // 交付信息应明确标注已降级，而不是假装真的生成了 PDF 二进制。
+    expect(result.message, contains('降级'));
+  });
+
+  test('skill.create 后 Markdown Java C++ 都必须继续为真实写入请求', () async {
+    final cases = <({String request, String path, String content})>[
+      (
+        request: '生成一份 Markdown 技术文档',
+        path: 'report.md',
+        content: '# 技术文档\n\n## 架构\n\n内容',
+      ),
+      (
+        request: '生成一个 Java 命令行程序',
+        path: 'Main.java',
+        content:
+            'public class Main { public static void main(String[] args) { System.out.println("ok"); } }',
+      ),
+      (
+        request: '生成一个 C++ 命令行程序',
+        path: 'main.cpp',
+        content:
+            '#include <iostream>\nint main() { std::cout << "ok"; return 0; }',
+      ),
+    ];
+
+    for (final testCase in cases) {
+      var completionCalls = 0;
+      final fakeTool = _FakeWorkspaceFileTool(
+        readResult: {
+          'path': testCase.path,
+          'content': testCase.content,
+        },
+        patchResult: {
+          'ok': true,
+          'path': testCase.path,
+          'bytes': testCase.content.length,
+        },
+      );
+      final runtime = AgentRuntime(
+        complete: (_) async {
+          completionCalls++;
+          return {
+            'success': true,
+            'message': completionCalls == 1 ? '已生成，请查看附件。' : testCase.content,
+          };
+        },
+        workspaceFileTool: fakeTool,
+        skillCreateHandler: (_) async => {
+          'ok': true,
+          'skillId': 'generated-skill',
+          'name': '产物生成',
+        },
+      );
+      final character = _character(
+        toolPermissions: const [
+          ToolPermission.skillCreate,
+          ToolPermission.workspacePatch,
+        ],
+      );
+
+      final skillApproval = await runtime.run(
+        character: character,
+        skills: [_skill()],
+        userRequest: testCase.request,
+        forceSkillCreation: true,
+      );
+      final writeApproval = await runtime.executeApprovedTool(
+        character: character,
+        request: skillApproval.pendingToolRequest!,
+        userRequest: testCase.request,
+      );
+
+      expect(writeApproval.status, AgentRuntimeStatus.waitingForApproval,
+          reason: testCase.request);
+      expect(
+          writeApproval.pendingToolRequest?.tool, AgentToolName.workspacePatch,
+          reason: testCase.request);
+      expect(writeApproval.pendingToolRequest?.args['path'], testCase.path,
+          reason: testCase.request);
+
+      final completed = await runtime.executeApprovedTool(
+        character: character,
+        request: writeApproval.pendingToolRequest!,
+        userRequest: testCase.request,
+        priorExecutedRequests: writeApproval.executedToolRequests,
+      );
+      expect(completed.status, AgentRuntimeStatus.completed,
+          reason: testCase.request);
+      expect(fakeTool.lastWriteContent, testCase.content,
+          reason: testCase.request);
+    }
+  });
+
+  test('PDF DOCX 二进制产物不得通过文本 patch 伪造附件', () async {
+    for (final path in const ['report.pdf', 'report.docx']) {
+      final fakeTool = _FakeWorkspaceFileTool(
+        patchResult: {'ok': true, 'path': path, 'bytes': 12},
+      );
+      final runtime = AgentRuntime(
+        complete: (_) async => {
+          'success': true,
+          'message': '文档已生成，请查看附件。',
+        },
+        workspaceFileTool: fakeTool,
+      );
+
+      final result = await runtime.executeApprovedTool(
+        character: _character(
+          toolPermissions: const [ToolPermission.workspacePatch],
+        ),
+        request: ToolRequest(
+          tool: AgentToolName.workspacePatch,
+          reason: '生成二进制文档',
+          args: {'path': path, 'content': '# fake binary'},
+        ),
+        userRequest: '生成 $path',
+      );
+
+      expect(result.status, AgentRuntimeStatus.completed, reason: path);
+      // 二进制文档被优雅降级为 Markdown 文本，而不是伪造 PDF/DOCX 附件或 failed。
+      expect(fakeTool.lastWritePath,
+          path.replaceAll(RegExp(r'\.[^.]+$'), '.md'), reason: path);
+      expect(result.message, contains('降级'), reason: path);
+    }
+  });
+
+  test('skill.create 后口头声称 PDF DOCX 完成也不得通过完成门禁', () async {
+    for (final format in const ['PDF', 'DOCX']) {
+      final runtime = AgentRuntime(
+        complete: (_) async => {
+          'success': true,
+          'message': '$format 文档已生成，请查看附件。',
+        },
+        workspaceFileTool: _FakeWorkspaceFileTool(),
+        skillCreateHandler: (_) async => {
+          'ok': true,
+          'skillId': 'binary-doc-skill',
+          'name': '$format 生成',
+        },
+      );
+      final character = _character(
+        toolPermissions: const [
+          ToolPermission.skillCreate,
+          ToolPermission.workspacePatch,
+        ],
+      );
+      final request = '生成一份 $format 项目报告';
+
+      final skillApproval = await runtime.run(
+        character: character,
+        skills: [_skill()],
+        userRequest: request,
+        forceSkillCreation: true,
+      );
+      final result = await runtime.executeApprovedTool(
+        character: character,
+        request: skillApproval.pendingToolRequest!,
+        userRequest: request,
+      );
+
+      expect(result.status, AgentRuntimeStatus.failed, reason: format);
+      expect(result.message, contains('没有可交付附件'), reason: format);
+      expect(result.message, isNot(contains('请查看附件')), reason: format);
+    }
+  });
+
   test('用户拒绝 workspacePatch 不应被文件交付门禁误判为失败', () async {
     // 用户请求含文件意图（使 _inferGeneratedFilePath 能推断出路径），
     // 但用户在审批弹窗拒绝了写文件。skip 后任务应以非文件方式完成，
     // 而非被新增的文件交付门禁误判为 AgentRuntimeStatus.failed，
     // 也与 skipRejectedTool「拒绝后可继续完成安全剩余工作」的契约一致。
     final runtime = AgentRuntime(
-      complete: (_) async =>
-          {'success': true, 'message': '已跳过文件写入，其余工作已完成。'},
+      complete: (_) async => {'success': true, 'message': '已跳过文件写入，其余工作已完成。'},
       workspaceFileTool: _FakeWorkspaceFileTool(),
     );
 
