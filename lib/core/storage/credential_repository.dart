@@ -76,26 +76,31 @@ class SecureStorageCredentialStore implements CredentialStore {
 /// Native builds use platform secure storage. Web deliberately returns an
 /// explicit unavailable result: browser storage is not represented as a
 /// Keychain-equivalent and must never become a silent fallback.
-/// TODO(migration): 本类目前是「计划中的统一 LLM API key 边界」，尚未被
-/// `ApiConfig` / `AICharacter` / `WeComPushService` 任一调用方接线——
-/// 实际读写仍由 [SecureStorageService] 承接。
 ///
-/// 关键约束：本类写入 key 前缀为 `credential.api-config.`，与
-/// [SecureStorageService] 现有 `api_config_key_` **不同**。若直接把
-/// `ApiConfig` 改为走本类，旧用户已存的密钥将因 key 不匹配而读不到（破坏性
-/// 迁移）。接线时须先做「先读新 key、缺失再回退旧 `api_config_key_`」的兼容
-/// 读取，并在写入稳定后再清理旧路径。完成迁移前请勿删除
-/// [SecureStorageService] 的对应方法。
+/// 过渡策略（migration）：本类目前尚未被任何业务调用方接线，实际读写仍由
+/// [SecureStorageService] 承接。为准备上线且不破坏旧用户，本类采用「新前缀 +
+/// 旧前缀双写 / 新前缀优先 + 旧前缀回退」策略：
+///   - 写入：同时写新前缀 `credential.api-config.{id}` 与旧前缀
+///     `api_config_key_{id}`（经 [SecureStorageService]），保证过渡期两套读取
+///     逻辑都能命中。
+///   - 读取：先读新前缀，缺失再回退旧 `api_config_key_{id}`。
+///
+/// 移除条件：待 [SecureStorageService] 的全部调用方迁移到本类、且线上存量用户
+/// 均已至少成功走一次双写（旧 key 已补齐）后，方可删除旧路径读写逻辑与本类
+/// 对 [SecureStorageService] 的依赖。完成迁移前请勿删除旧路径。
 class CredentialRepository {
   static const _keyPrefix = 'credential.api-config.';
 
   final CredentialStore _store;
+  final SecureStorageService _legacyStorage;
   final bool _secureStorageAvailable;
 
   CredentialRepository({
     CredentialStore? store,
+    SecureStorageService? legacyStorage,
     bool? secureStorageAvailable,
   })  : _store = store ?? SecureStorageCredentialStore(),
+        _legacyStorage = legacyStorage ?? SecureStorageService(),
         _secureStorageAvailable = secureStorageAvailable ?? !kIsWeb;
 
   String credentialIdFor(String configId) => '$_keyPrefix$configId';
@@ -108,7 +113,14 @@ class CredentialRepository {
       return const CredentialWriteResult.failed(CredentialFailure.systemError);
     }
     try {
+      // 过渡期双写：新前缀为主，旧 api_config_key_ 前缀为 best-effort 兼容副本。
+      // 旧前缀写入失败不阻断主流程（旧副本缺失不影响新前缀读取）。
       await _store.write(credentialIdFor(configId), secret);
+      try {
+        await _legacyStorage.saveApiConfigKey(configId, secret);
+      } on Object catch (e) {
+        debugPrint('[Credential] 旧前缀双写失败（已忽略）：$e');
+      }
       // Verify before a caller is allowed to remove any legacy copy.
       final stored = await _store.read(credentialIdFor(configId));
       if (stored != secret) {
@@ -129,10 +141,23 @@ class CredentialRepository {
     }
     if (configId.trim().isEmpty) return const CredentialReadResult.notFound();
     try {
-      final value = await _store.read(credentialIdFor(configId));
-      return value == null || value.isEmpty
-          ? const CredentialReadResult.notFound()
-          : CredentialReadResult.found(value);
+      // 先读新前缀。
+      final newValue = await _store.read(credentialIdFor(configId));
+      if (newValue != null && newValue.isNotEmpty) {
+        return CredentialReadResult.found(newValue);
+      }
+      // 新前缀缺失，回退读旧 api_config_key_ 前缀（兼容历史用户已存密钥）。
+      // 旧存储不可用（如测试 / 无 Keychain 环境）时按「未命中」处理，不翻转为失败。
+      String? legacyValue;
+      try {
+        legacyValue = await _legacyStorage.getApiConfigKey(configId);
+      } on Object catch (e) {
+        debugPrint('[Credential] 旧前缀回退读取失败（按未命中处理）：$e');
+      }
+      if (legacyValue != null && legacyValue.isNotEmpty) {
+        return CredentialReadResult.found(legacyValue);
+      }
+      return const CredentialReadResult.notFound();
     } on PlatformException catch (error) {
       return CredentialReadResult.failed(_mapPlatformFailure(error));
     } catch (_) {
@@ -146,7 +171,13 @@ class CredentialRepository {
     }
     if (configId.trim().isEmpty) return const CredentialWriteResult.success();
     try {
+      // 同时删除新、旧两套 key；旧 key 删除失败为 best-effort，不阻断主流程。
       await _store.delete(credentialIdFor(configId));
+      try {
+        await _legacyStorage.deleteApiConfigKey(configId);
+      } on Object catch (e) {
+        debugPrint('[Credential] 旧前缀删除失败（已忽略）：$e');
+      }
       return const CredentialWriteResult.success();
     } on PlatformException catch (error) {
       return CredentialWriteResult.failed(_mapPlatformFailure(error));

@@ -232,9 +232,20 @@ class DatabaseService {
 
   Future<void> deleteApiConfig(String id) async {
     await apiConfigBox.delete(id);
+    // 同步删除安全存储里的对应凭证，避免留下孤儿 key（删配置但 key 残留）。
+    try {
+      await SecureStorageService().deleteApiConfigKey(id);
+    } on Object catch (e) {
+      // 安全存储可能不可用（如 macOS debug 无 Keychain 权限），静默忽略，
+      // 不能让删除配置这一主流程崩溃。
+      debugPrint('[DB] 删除 API 配置凭证失败（已忽略）：$e');
+    }
   }
 
   Future<void> clearAllData() async {
+    // 先收集需要一并清理的安全存储凭证 key，避免清空 Hive 后丢失映射关系。
+    final apiConfigIds = apiConfigBox.keys.cast<String>().toList();
+
     await apiConfigBox.clear();
     await aiCharacterBox.clear();
     await chatGroupBox.clear();
@@ -254,9 +265,35 @@ class DatabaseService {
     await appSettingsBox.delete(_pinnedCharacterIdsKey);
     await appSettingsBox.delete(_pinnedGroupIdsKey);
     await appSettingsBox.delete(_aiProcessingDirKey);
+
+    // 清理安全存储中的凭证，防止「删库但 Keychain/EncryptedSharedPreferences
+    // 里 API key 残留」造成的隐私泄漏与孤儿 key。
+    await _clearSecureCredentials(apiConfigIds);
+
     _tokenUsageCache = _emptyTokenUsage();
     _messageIdsCache = null;
     _tokenUsageFlushTimer?.cancel();
+  }
+
+  /// 一并清理安全存储中的凭证，避免删库后凭证残留。
+  ///
+  /// [apiConfigIds] 为清空前从 Hive 收集到的 id，用于在删库前仍能映射到对应的
+  /// 安全存储 key。角色自身的 key 并不以 `api_key_{characterId}` 形式存于安全
+  /// 存储（key 在 ApiConfig 里，已随 [apiConfigIds] 清理），故无需再按角色维度
+  /// 删除。安全存储在某些平台（如 macOS debug 无 Keychain 权限）可能不可用，
+  /// 故整体用 try/catch 包裹，清库流程绝不因此崩溃。
+  Future<void> _clearSecureCredentials(
+    List<String> apiConfigIds,
+  ) async {
+    try {
+      final secureStorage = SecureStorageService();
+      for (final id in apiConfigIds) {
+        await secureStorage.deleteApiConfigKey(id);
+      }
+      await secureStorage.deleteWeComAppConfig();
+    } on Object catch (e) {
+      debugPrint('[DB] 清理安全存储凭证失败（已忽略）：$e');
+    }
   }
 
   Box<AICharacter> get aiCharacterBox => Hive.box<AICharacter>(_aiCharacterBox);

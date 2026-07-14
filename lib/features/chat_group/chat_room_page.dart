@@ -399,7 +399,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       await _presentPendingAgentApproval(approval);
       return;
     }
-    final cancelToken = _workModeSession.beginRun();
+    final workModeRun = _workModeSession.beginRun();
+    final cancelToken = workModeRun.token;
     try {
       await _generateAgenticReply(
         character: character,
@@ -410,9 +411,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         resumeTask: task,
         workMode: true,
         cancelToken: cancelToken,
+        workModeRun: workModeRun,
       );
     } finally {
-      _workModeSession.finishRun(cancelToken);
+      _workModeSession.finishRun(workModeRun);
     }
   }
 
@@ -732,7 +734,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       orElse: () => ApiProvider.deepseek,
     );
     if (_canTouchUi) setState(() => _isAiReplying = true);
-    final cancelToken = _workModeSession.beginRun();
+    final workModeRun = _workModeSession.beginRun();
+    final cancelToken = workModeRun.token;
     try {
       final workspace = await WorkModeWorkspaceService(db: _db).loadOrCreate(
         conversationId: widget.groupId,
@@ -751,9 +754,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         context: _recentMessagesForContext(),
         workMode: true,
         cancelToken: cancelToken,
+        workModeRun: workModeRun,
       );
     } finally {
-      _workModeSession.finishRun(cancelToken);
+      _workModeSession.finishRun(workModeRun);
       if (_canTouchUi) setState(() => _isAiReplying = false);
       if (_pendingUserMessages.isNotEmpty && _canTouchUi) {
         final next = _pendingUserMessages.removeAt(0);
@@ -869,9 +873,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           .toList();
       if (notMentionedPending.isNotEmpty) {
         final proxyId = notMentionedPending.first;
-        final proxyChar = _characters.firstWhere((c) => c.id == proxyId,
-            orElse: () => _characters.first);
-        if (_isEligibleToReply(proxyChar)) {
+        // 仅在 proxyId 真实对应一个角色时才播报提醒；兜底分支（proxyId 不属于
+        // 任何已知角色）不伪造 @，也避免把脏 id 留在集合里导致后续轮次重复播报。
+        final matched = _characters.where((c) => c.id == proxyId).toList();
+        if (matched.isNotEmpty && _isEligibleToReply(matched.first)) {
+          final proxyChar = matched.first;
           final targetName = proxyChar.name;
           await _appendMessage(Message(
             groupId: widget.groupId,
@@ -882,6 +888,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             mentionedAiIds: [proxyId],
           ));
         }
+        // 无论是否真正播报，都从待提醒集合中移除该 id，防止跨轮膨胀 / 重复刷屏。
+        _pendingMentionedIds.remove(proxyId);
       }
     }
 
@@ -1231,6 +1239,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     AgentTask? resumeTask,
     bool workMode = false,
     CancelToken? cancelToken,
+    WorkModeRunHandle? workModeRun,
   }) async {
     // 并发兜底：同一角色已在执行 agentic 任务时，跳过本次重复调用，
     // 避免重入导致重复文件生成 / 重复消息。该角色的本轮任务由首次调用负责。
@@ -1262,6 +1271,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         task: task,
         workMode: workMode,
         cancelToken: cancelToken,
+        workModeRun: workModeRun,
       );
 
       final mediaEnhancedRequest =
@@ -1495,6 +1505,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required AgentTask task,
     bool workMode = false,
     CancelToken? cancelToken,
+    WorkModeRunHandle? workModeRun,
   }) {
     final bridge = LocalAgentBridgeClient();
     return AgentRuntime(
@@ -1547,7 +1558,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           ? WorkModePolicy.requiresApproval
           : AgentRuntime.requiresApproval,
       grantedPermissions: workMode ? ToolPermission.values.toSet() : null,
-      shouldCancel: workMode ? () => _workModeSession.isStopRequested : null,
+      // per-run 停止状态：捕获本 run 的句柄，而非共享标志。新 run 的 beginRun
+      // 不会把旧 run 复活，旧 run 在自己的检查点读到的是自己的停止状态。
+      shouldCancel: workMode ? () => workModeRun?.isRequestedStop ?? false : null,
     );
   }
 
@@ -1679,7 +1692,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final action = WorkModeTaskLifecycle.actionForInput(text);
     if (action == WorkModeApprovalAction.reject) {
       _pendingAgentApproval = null;
-      final cancelToken = _workModeSession.beginRun();
+      final workModeRun = _workModeSession.beginRun();
+      final cancelToken = workModeRun.token;
       if (_canTouchUi) setState(() => _isAiReplying = true);
       try {
         final runtime = _agentRuntimeFor(
@@ -1689,6 +1703,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           task: pending.task,
           workMode: true,
           cancelToken: cancelToken,
+          workModeRun: workModeRun,
         );
         final result = await runtime.skipRejectedTool(
           character: pending.character,
@@ -1727,7 +1742,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         ));
         return true;
       } finally {
-        _workModeSession.finishRun(cancelToken);
+        _workModeSession.finishRun(workModeRun);
         if (_canTouchUi) setState(() => _isAiReplying = false);
       }
     }
@@ -1741,7 +1756,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     _pendingAgentApproval = null;
-    final cancelToken = _workModeSession.beginRun();
+    final workModeRun = _workModeSession.beginRun();
+    final cancelToken = workModeRun.token;
     if (_canTouchUi) setState(() => _isAiReplying = true);
     try {
       final runtime = _agentRuntimeFor(
@@ -1751,6 +1767,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         task: pending.task,
         workMode: true,
         cancelToken: cancelToken,
+        workModeRun: workModeRun,
       );
       final result = await runtime.executeApprovedTool(
         character: pending.character,
@@ -1800,7 +1817,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
       return true;
     } finally {
-      _workModeSession.finishRun(cancelToken);
+      _workModeSession.finishRun(workModeRun);
       if (_canTouchUi) setState(() => _isAiReplying = false);
     }
   }

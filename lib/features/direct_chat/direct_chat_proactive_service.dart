@@ -5,6 +5,7 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_policy.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
@@ -94,6 +95,16 @@ class DirectChatProactiveService {
     );
     if (candidate == null) return null;
 
+    // 统一每小时发言预算：主动 DM 与聊天内回复共用同一套额度判定与记用，
+    // 避免角色在房内已触顶 hourlyLimit 仍被前台轮询疯狂私聊。达到上限则跳过
+    // 本次主动 DM，绝不伪造发送。
+    final eligibility =
+        ReplyEligibilityPolicy(resolveApiConfig: _resolveApiConfig);
+    if (eligibility.blockReasonFor(candidate.character) ==
+        ReplyBlockReason.hourlyLimit) {
+      return null;
+    }
+
     final config = _resolveApiConfig(candidate.character);
     if (config == null || config.apiKey.isEmpty) return null;
 
@@ -145,6 +156,11 @@ class DirectChatProactiveService {
     await db.saveDirectChatSource(conversationId, candidate.source);
     await db.saveDirectChatLastProactiveAt(candidate.character.id, now);
     await _recordUsage(candidate.character, conversationId, result);
+    // 记用：与聊天走同一套每小时额度累计。先从盒里取最新对象再累加，
+    // 避免用方法入口的旧快照覆盖聊天室内已持久化的并发增量（lost-update）。
+    final latest = db.aiCharacterBox.get(candidate.character.id) ?? candidate.character;
+    eligibility.recordReplyUsage(latest);
+    await db.aiCharacterBox.put(latest.id, latest);
 
     return DirectChatProactiveResult(
       character: candidate.character,
