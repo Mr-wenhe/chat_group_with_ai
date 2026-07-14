@@ -67,6 +67,9 @@ class AgentTask extends HiveObject {
   @HiveField(13, defaultValue: '')
   String lastError;
 
+  @HiveField(14, defaultValue: false)
+  final bool workModeTask;
+
   AgentTask({
     String? id,
     required this.groupId,
@@ -82,6 +85,7 @@ class AgentTask extends HiveObject {
     this.pendingToolRequestJson = '',
     DateTime? updatedAt,
     this.lastError = '',
+    this.workModeTask = false,
   })  : id = id ?? const Uuid().v4(),
         requestedPermissions = requestedPermissions ?? const [],
         completedOperations = completedOperations ?? [],
@@ -91,6 +95,8 @@ class AgentTask extends HiveObject {
   bool get canResume =>
       status != AgentTaskStatus.completed &&
       status != AgentTaskStatus.cancelled;
+
+  bool get canResumeInWorkMode => workModeTask && canResume;
 
   /// 每个工具步骤完成后刷新可恢复检查点。
   void markProgress({

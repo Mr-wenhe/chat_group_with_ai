@@ -78,7 +78,7 @@ void main() {
       ),
       skills: [_skill()],
       userRequest: '帮我写一个 HTML 个人主页，姓名文和先生，职业灵魂收集者，包含音乐和菜单',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -122,7 +122,7 @@ void main() {
       ),
       skills: [_skill()],
       userRequest: '帮我写一个 HTML 个人介绍页',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -159,7 +159,7 @@ void main() {
       ),
       skills: [_skill()],
       userRequest: '帮我设计一个鬼魂街大佬专属个人首页，要有万魂幡吸魂和桃心彩蛋特效',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -204,7 +204,7 @@ void main() {
       ),
       skills: [_skill()],
       userRequest: '帮我写一个 HTML 个人主页',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -279,7 +279,7 @@ void main() {
       ),
       skills: [_skill()],
       userRequest: '帮我写一个 HTML 个人主页',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -309,7 +309,7 @@ void main() {
       ),
       skills: [_skill()],
       userRequest: '帮我写个 C++ 程序，作用是获取当前系统的信息，然后生成文件贴给我',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -347,7 +347,7 @@ void main() {
       ),
       skills: [_skill()],
       userRequest: '帮我生成一个 C++ 程序文件',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -461,7 +461,7 @@ void main() {
       ),
       skills: [_skill()],
       userRequest: '生成页面',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -710,11 +710,22 @@ void main() {
       ]),
       skills: [_skill()],
       userRequest: '继续处理',
-      autoApproveWriteTools: true,
+      approved: true,
       conversationHistory: history,
     );
 
-    expect(result.status, AgentRuntimeStatus.completed);
+    expect(result.status, AgentRuntimeStatus.waitingForApproval);
+    final approvedResult = await runtime.executeApprovedTool(
+      character: _character(toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ]),
+      request: result.pendingToolRequest!,
+      userRequest: '继续处理',
+      priorExecutedRequests: result.executedToolRequests,
+      conversationHistory: history,
+    );
+    expect(approvedResult.status, AgentRuntimeStatus.completed);
     expect(receivedMessages, hasLength(2));
     for (final messages in receivedMessages) {
       expect(messages, containsAll(history));
@@ -1009,7 +1020,7 @@ void main() {
       ]),
       skills: [_skill()],
       userRequest: '帮我生成一个流星雨划过夜空的动态效果html',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -1042,7 +1053,7 @@ void main() {
       ]),
       skills: [_skill()],
       userRequest: '那你帮我实现一个 流星雨的特效给我 使用html',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -1174,7 +1185,7 @@ void main() {
       ]),
       skills: [_skill()],
       userRequest: '根据这个项目写一份简单的技术文档，以MD格式输出到工程目录下',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     // 自动改名后写入成功，流程走完。
@@ -1244,7 +1255,7 @@ void main() {
       ]),
       skills: [_skill()],
       userRequest: '帮我写一个检查项目的脚本',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -1512,7 +1523,7 @@ void main() {
           _character(toolPermissions: const [ToolPermission.workspacePatch]),
       skills: [_skill()],
       userRequest: '生成个人主页',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -1613,7 +1624,7 @@ void main() {
           _character(toolPermissions: const [ToolPermission.workspacePatch]),
       skills: [_skill()],
       userRequest: '生成个人主页',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -1653,7 +1664,7 @@ void main() {
           _character(toolPermissions: const [ToolPermission.workspacePatch]),
       skills: [_skill()],
       userRequest: '生成个人主页',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);
@@ -1697,7 +1708,7 @@ void main() {
           _character(toolPermissions: const [ToolPermission.workspacePatch]),
       skills: [_skill()],
       userRequest: '生成个人主页',
-      autoApproveWriteTools: true,
+      approved: true,
     );
 
     expect(result.status, AgentRuntimeStatus.completed);

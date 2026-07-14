@@ -1,10 +1,14 @@
 import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
 
-part 'autonomous_conversation_config.g.dart';
+part 'work_mode_workspace.g.dart';
 
+/// Per-conversation sandbox used by explicit work mode.
+///
+/// It contains no authorization flags: every sensitive operation still needs
+/// a fresh, session-local approval at the tool boundary.
 @HiveType(typeId: 16)
-class AutonomousConversationConfig extends HiveObject {
+class WorkModeWorkspace extends HiveObject {
   @HiveField(0)
   final String id;
 
@@ -15,32 +19,16 @@ class AutonomousConversationConfig extends HiveObject {
   final String conversationType;
 
   @HiveField(3)
-  bool enabled;
-
-  @HiveField(4)
   String workDirPath;
 
-  @HiveField(5)
-  String? authorizedProjectPath;
-
-  @HiveField(6)
-  bool sourceWriteAuthorized;
-
-  @HiveField(7)
-  DateTime? authorizedAt;
-
-  @HiveField(8)
+  @HiveField(4)
   DateTime updatedAt;
 
-  AutonomousConversationConfig({
+  WorkModeWorkspace({
     String? id,
     required this.conversationId,
     required this.conversationType,
-    this.enabled = false,
     this.workDirPath = '',
-    this.authorizedProjectPath,
-    this.sourceWriteAuthorized = false,
-    this.authorizedAt,
     DateTime? updatedAt,
   })  : id = id ?? const Uuid().v4(),
         updatedAt = updatedAt ?? DateTime.now();

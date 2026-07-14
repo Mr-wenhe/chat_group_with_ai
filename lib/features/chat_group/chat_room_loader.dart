@@ -1,7 +1,6 @@
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/group_memory.dart';
-import 'package:chat_group/features/autonomous/autonomous_conversation_config_service.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/models/chat_room_models.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
@@ -83,11 +82,6 @@ class ChatRoomLoader {
       relationships: db.relationshipStateBox.values
           .where((item) => item.groupId == conversationId)
           .toList(growable: false),
-      autonomousConfig:
-          await AutonomousConversationConfigService(db: db).loadOrCreate(
-        conversationId: conversationId,
-        isDirectChat: false,
-      ),
       groupMemory: memory,
       hasAnyApiConfig: activeCharacters.any(_hasApiConfig),
       isDirectChat: false,
@@ -124,11 +118,6 @@ class ChatRoomLoader {
       relationships: db.relationshipStateBox.values
           .where((item) => item.groupId == conversationId)
           .toList(growable: false),
-      autonomousConfig:
-          await AutonomousConversationConfigService(db: db).loadOrCreate(
-        conversationId: conversationId,
-        isDirectChat: true,
-      ),
       groupMemory: null,
       hasAnyApiConfig: character.isActive && _hasApiConfig(character),
       isDirectChat: true,

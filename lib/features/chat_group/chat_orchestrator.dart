@@ -1,7 +1,6 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
-import 'package:chat_group/features/autonomous/evidence_memory_prompt.dart';
-import 'package:chat_group/features/agentic/agentic_task_classifier.dart';
+import 'package:chat_group/features/chat_group/fact_discipline_prompt.dart';
 
 /// Pure orchestration helpers for chat room logic.
 /// Extracted from _ChatRoomPageState so they can be unit-tested without Flutter.
@@ -53,14 +52,6 @@ class ChatOrchestrator {
       character.hourlyReplyCount += 1;
     }
     character.lastReplyTimestamp = now;
-  }
-
-  static bool shouldUseAgenticRuntime({
-    required AICharacter character,
-    required String message,
-  }) {
-    return character.agenticEnabled &&
-        AgenticTaskClassifier.requiresAgenticWork(message);
   }
 
   static String extractRecentFocus(List<Message> messages) {
@@ -197,7 +188,7 @@ class ChatOrchestrator {
     final desc =
         groupDescription.trim().isEmpty ? '' : '\n群说明：$groupDescription';
     final memory = groupMemory.trim().isEmpty ? '暂无稳定群体记忆' : groupMemory;
-    return '${EvidenceMemoryPrompt.factDiscipline}\n'
+    return '${FactDisciplinePrompt.rules}\n'
         '【人格成长规则】'
         '\n你是 ${character.name}，年龄 ${character.age}，职业/身份是「${character.role}」。'
         '\n初始性格标签：$tags。'
@@ -221,7 +212,7 @@ class ChatOrchestrator {
     final tags = character.personalityTags.isEmpty
         ? '无'
         : character.personalityTags.join('、');
-    return '${EvidenceMemoryPrompt.factDiscipline}\n'
+    return '${FactDisciplinePrompt.rules}\n'
         '你是角色长期记忆与人格成长记录员。'
         '\n角色：${character.name}；职业/身份：${character.role}；初始标签：$tags；所在群：$groupName；群主题：$groupTheme。'
         '\n\n已有角色记忆：${currentMemory.trim().isEmpty ? '暂无' : currentMemory.trim()}'

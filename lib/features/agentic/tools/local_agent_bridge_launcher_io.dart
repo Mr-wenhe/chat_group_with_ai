@@ -97,7 +97,6 @@ class LocalAgentBridgeLauncher {
   }
 
   Future<void> restart({required String workspace}) async {
-    await stop();
     await start(workspace: workspace);
   }
 

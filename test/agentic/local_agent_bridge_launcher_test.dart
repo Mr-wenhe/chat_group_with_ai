@@ -1,11 +1,27 @@
 import 'dart:io';
 
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart';
+import 'package:chat_group/features/agentic/tools/local_agent_bridge_config.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_launcher.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('restart is idempotent for the same workspace', () async {
+    final root = await Directory.systemTemp.createTemp('bridge_same_');
+    final launcher = LocalAgentBridgeLauncher(preferredPort: 0);
+    addTearDown(() async {
+      await launcher.stop();
+      await root.delete(recursive: true);
+    });
+
+    await launcher.restart(workspace: root.path);
+    final firstEndpoint = LocalAgentBridgeEndpoint.currentBaseUrl;
+    await launcher.restart(workspace: root.path);
+
+    expect(LocalAgentBridgeEndpoint.currentBaseUrl, firstEndpoint);
+  });
+
   test('restart switches unicode workspace without stale 400 responses',
       () async {
     final root = await Directory.systemTemp.createTemp('bridge_switch_');

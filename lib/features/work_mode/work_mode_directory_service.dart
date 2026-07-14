@@ -1,7 +1,7 @@
 import 'dart:io';
 
-class AutonomousDirectoryService {
-  const AutonomousDirectoryService();
+class WorkModeDirectoryService {
+  const WorkModeDirectoryService();
 
   String conversationFolderName({
     required String conversationId,
@@ -24,31 +24,7 @@ class AutonomousDirectoryService {
         isDirectChat: isDirectChat,
       )}',
     );
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
-    }
-    return dir;
-  }
-
-  Future<Directory> taskDir({
-    required Directory root,
-    required String conversationId,
-    required bool isDirectChat,
-    required String taskId,
-  }) async {
-    final conversation = await conversationDir(
-      root: root,
-      conversationId: conversationId,
-      isDirectChat: isDirectChat,
-    );
-    final dir = Directory('${conversation.path}/task_${_safeSegment(taskId)}');
-    if (!await dir.exists()) {
-      await dir.create(recursive: true);
-    }
-    final artifacts = Directory('${dir.path}/artifacts');
-    if (!await artifacts.exists()) {
-      await artifacts.create(recursive: true);
-    }
+    if (!await dir.exists()) await dir.create(recursive: true);
     return dir;
   }
 

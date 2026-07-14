@@ -6,18 +6,18 @@ void main() {
   testWidgets('group chat renders exactly two compact toggle buttons',
       (tester) async {
     var autoEnabled = false;
-    var autonomyEnabled = false;
+    var workModeEnabled = false;
     await tester.pumpWidget(MaterialApp(
       home: Scaffold(
         body: CompactConversationControls(
           showAutoChat: true,
           autoChatEnabled: false,
-          autonomousEnabled: false,
+          workModeEnabled: false,
           autoChatAvailable: true,
           autoChatTooltip: '自动发言已关闭',
-          autonomousTooltip: '自治执行已关闭',
+          workModeTooltip: '工作模式已关闭',
           onAutoChatChanged: (value) => autoEnabled = value,
-          onAutonomousChanged: (value) => autonomyEnabled = value,
+          onWorkModeChanged: (value) => workModeEnabled = value,
         ),
       ),
     ));
@@ -26,13 +26,13 @@ void main() {
     expect(find.byType(IconButton), findsNWidgets(2));
     expect(tester.getSize(find.byKey(const Key('auto-chat-toggle'))).width,
         lessThanOrEqualTo(40));
-    expect(tester.getSize(find.byKey(const Key('autonomy-toggle'))).width,
+    expect(tester.getSize(find.byKey(const Key('work-mode-toggle'))).width,
         lessThanOrEqualTo(40));
 
     await tester.tap(find.byKey(const Key('auto-chat-toggle')));
-    await tester.tap(find.byKey(const Key('autonomy-toggle')));
+    await tester.tap(find.byKey(const Key('work-mode-toggle')));
     expect(autoEnabled, isTrue);
-    expect(autonomyEnabled, isTrue);
+    expect(workModeEnabled, isTrue);
   });
 
   testWidgets('direct chat hides the auto-chat button', (tester) async {
@@ -41,17 +41,17 @@ void main() {
         body: CompactConversationControls(
           showAutoChat: false,
           autoChatEnabled: true,
-          autonomousEnabled: false,
+          workModeEnabled: false,
           autoChatAvailable: true,
           autoChatTooltip: '自动发言',
-          autonomousTooltip: '自治执行',
+          workModeTooltip: '工作模式',
           onAutoChatChanged: (_) {},
-          onAutonomousChanged: (_) {},
+          onWorkModeChanged: (_) {},
         ),
       ),
     ));
 
     expect(find.byKey(const Key('auto-chat-toggle')), findsNothing);
-    expect(find.byKey(const Key('autonomy-toggle')), findsOneWidget);
+    expect(find.byKey(const Key('work-mode-toggle')), findsOneWidget);
   });
 }

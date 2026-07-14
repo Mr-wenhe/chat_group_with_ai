@@ -10,6 +10,14 @@ class ChatActivityPolicy {
   static const int replyDelayMsPerCharacter = 45;
   static const int replyDelayJitterMs = 900;
 
+  static bool canStartAutoChat({
+    required bool workModeEnabled,
+    required bool autoChatEnabled,
+    required bool hasCharacters,
+    required bool hasApiConfig,
+  }) =>
+      !workModeEnabled && autoChatEnabled && hasCharacters && hasApiConfig;
+
   static List<AICharacter> selectUserReplyCharacters({
     required List<AICharacter> characters,
     required List<String> mentionedIds,

@@ -98,6 +98,18 @@ void main() {
     }
   });
 
+  test('work mode blocks auto chat even when auto chat is enabled', () {
+    expect(
+      ChatActivityPolicy.canStartAutoChat(
+        workModeEnabled: true,
+        autoChatEnabled: true,
+        hasCharacters: true,
+        hasApiConfig: true,
+      ),
+      isFalse,
+    );
+  });
+
   test('pending mentions are handled before casual follow-ups', () {
     final selected = ChatActivityPolicy.selectUserReplyCharacters(
       characters: characters,

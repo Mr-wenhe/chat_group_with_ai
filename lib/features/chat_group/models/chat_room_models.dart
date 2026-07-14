@@ -9,11 +9,9 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/agent_task.dart';
-import 'package:chat_group/core/models/autonomous_conversation_config.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/group_memory.dart';
-import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -25,8 +23,9 @@ import 'package:chat_group/features/agentic/tool_request.dart';
 class PendingUserMessage {
   final String text;
   final List<String> mentionedIds;
+  final Message? message;
 
-  PendingUserMessage(this.text, this.mentionedIds);
+  PendingUserMessage(this.text, this.mentionedIds, {this.message});
 }
 
 /// A pending agent tool approval awaiting user decision.
@@ -52,23 +51,6 @@ class PendingAgentToolApproval {
   });
 }
 
-/// A file recovered from a non-agentic LLM reply.
-///
-/// When the LLM produces file content in a plain chat reply (without going
-/// through the agentic runtime), this model captures the recovered path,
-/// content, and the resulting [MediaAttachment].
-class RecoveredNonAgenticFile {
-  final String path;
-  final String content;
-  final MediaAttachment attachment;
-
-  const RecoveredNonAgenticFile({
-    required this.path,
-    required this.content,
-    required this.attachment,
-  });
-}
-
 /// Complete immutable result of loading either a group or direct conversation.
 class ChatRoomLoadContext {
   final ChatGroup displayGroup;
@@ -77,7 +59,6 @@ class ChatRoomLoadContext {
   final List<Message> messages;
   final List<CharacterMemory> characterMemories;
   final List<RelationshipState> relationships;
-  final AutonomousConversationConfig autonomousConfig;
   final GroupMemory? groupMemory;
   final bool hasAnyApiConfig;
   final bool isDirectChat;
@@ -89,7 +70,6 @@ class ChatRoomLoadContext {
     required this.messages,
     required this.characterMemories,
     required this.relationships,
-    required this.autonomousConfig,
     required this.groupMemory,
     required this.hasAnyApiConfig,
     required this.isDirectChat,

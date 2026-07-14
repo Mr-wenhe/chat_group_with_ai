@@ -200,6 +200,41 @@ void main() {
     expect(captured.receiveTimeout, const Duration(seconds: 60));
   });
 
+  test('streamed agent completion forwards its cancellation token', () async {
+    late CancelToken? capturedToken;
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        capturedToken = options.cancelToken;
+        final sse = [
+          Uint8List.fromList(utf8.encode(
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+          )),
+          Uint8List.fromList(utf8.encode('data: [DONE]\n')),
+        ];
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 200,
+          data: ResponseBody(Stream.fromIterable(sse), 200),
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio);
+    final cancelToken = CancelToken();
+
+    final result = await service.sendChatMessageStreamed(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [],
+      cancelToken: cancelToken,
+    );
+
+    expect(result['success'], isTrue);
+    expect(capturedToken, same(cancelToken));
+  });
+
   test('streamed completion finishes on DONE without waiting for socket close',
       () async {
     final controller = StreamController<Uint8List>();
@@ -305,6 +340,7 @@ class _ThrowingStreamChatApiService extends ChatApiService {
     double temperature = 0.85,
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
+    CancelToken? cancelToken,
   }) {
     return Stream<ChatStreamEvent>.error(Exception('stream exploded'));
   }
@@ -326,6 +362,7 @@ class _AlwaysFailingStreamService extends ChatApiService {
     double temperature = 0.85,
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
+    CancelToken? cancelToken,
   }) async* {
     streamCalls++;
     yield ChatStreamEvent.error('HTTP 503: busy');

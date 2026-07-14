@@ -8,8 +8,6 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
-import 'package:chat_group/core/models/autonomous_conversation_config.dart';
-import 'package:chat_group/core/models/autonomous_task.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/chat_group.dart';
@@ -24,7 +22,6 @@ import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/agentic/agent_attachment_context.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
 import 'package:chat_group/features/agentic/agent_task_recovery_dialog.dart';
-import 'package:chat_group/features/agentic/agentic_task_classifier.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
@@ -35,15 +32,11 @@ import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_launcher.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
-import 'package:chat_group/features/autonomous/autonomous_conversation_config_service.dart';
-import 'package:chat_group/features/autonomous/autonomous_task_service.dart';
-import 'package:chat_group/features/autonomous/autonomous_trigger_detector.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
 import 'package:chat_group/features/chat_group/chat_group_form_page.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/chat_room_loader.dart';
 import 'package:chat_group/features/chat_group/chat_room_repository.dart';
-import 'package:chat_group/features/chat_group/direct_file_task_policy.dart';
 import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
@@ -67,14 +60,19 @@ import 'package:chat_group/features/chat_group/widgets/compact_conversation_cont
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
 import 'package:chat_group/core/models/direct_chat_source.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
+import 'package:chat_group/features/work_mode/work_mode_policy.dart';
+import 'package:chat_group/features/work_mode/work_mode_session.dart';
+import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
+import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
-import 'package:chat_group/services/ai_attachment_service.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:chat_group/services/message_speech_service.dart';
 import 'package:chat_group/services/web_search_service.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -100,7 +98,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   final _inputFocusNode = FocusNode();
   final _chatApi = ChatApiService();
   final _webSearch = WebSearchService();
-  late final AiAttachmentService _aiAttachments;
   final _random = Random();
   late final MessageSpeechService _speech;
   late final DatabaseService _db;
@@ -115,16 +112,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   GroupMemory? _groupMemory;
   List<CharacterMemory> _characterMemories = [];
   List<RelationshipState> _relationshipStates = [];
-  AutonomousConversationConfig? _autonomousConfig;
-  bool _isAutonomousRunning = false;
+  final WorkModeSession<PendingAgentToolApproval> _workModeSession =
+      WorkModeSession<PendingAgentToolApproval>();
   final Map<String, ReplyIntent> _pendingReplyIntents = {};
-  PendingAgentToolApproval? _pendingAgentApproval;
   int _autoChatMemoryTick = 0;
+
+  bool get _workModeEnabled => _workModeSession.enabled;
+  PendingAgentToolApproval? get _pendingAgentApproval =>
+      _workModeSession.pendingApproval;
+  set _pendingAgentApproval(PendingAgentToolApproval? value) =>
+      _workModeSession.pendingApproval = value;
 
   bool _isLoading = true;
   bool _isAiReplying = false;
   int _consecutiveRound = 0;
-  final int _maxAutoRounds = 3;
+
+  /// 用户发言后的普通群聊最多连续三轮，避免角色互相回复形成无限循环。
+  static const int _maxAutoRounds = 3;
 
   // 用户消息队列：AI 回复期间用户发的消息排队在此，回合结束后自动触发回复。
   final List<PendingUserMessage> _pendingUserMessages = [];
@@ -144,7 +148,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   Timer? _autoChatTimer;
   bool _isAutoChatEnabled = true;
   int _autoChatRoundCount = 0;
-  final int _maxAutoChatRounds = 4;
+  bool _isAutoChatRoundRunning = false;
+  bool _discardCurrentStream = false;
+
+  /// 一次空闲自动聊天 burst 的上限；达到后进入冷却，而不是持续灌水。
+  static const int _maxAutoChatRounds = 4;
   static const Duration _autoChatInitialDelay = Duration(seconds: 8);
   static const Duration _autoChatBurstPause = Duration(seconds: 35);
   static const Duration _streamUiFlushInterval = Duration(milliseconds: 80);
@@ -220,7 +228,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       conversationId: widget.groupId,
       isDirectChat: _isDirectChat,
     );
-    _aiAttachments = AiAttachmentService(db: _db);
     _speech = MessageSpeechService(
       engine: FlutterTtsSpeechEngine(),
       onStateChanged: _handleSpeechState,
@@ -249,8 +256,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       unawaited(_deletePendingAttachmentFile(attachment));
     }
     _pendingAttachments.clear();
-    // 已提交的流式请求继续在后台收尾并落库；只停止 UI flush。
-    // 不取消已发出的流式请求；离开页面后仍让它在后台收尾并落库。
+    _workModeSession.requestStop('页面已关闭');
+    unawaited(_streamSub?.cancel());
+    _streamSub = null;
+    if (_streamDone != null && !_streamDone!.isCompleted) {
+      _streamDone!.complete();
+    }
+    _streamDone = null;
     _streamUiFlushTimer?.cancel();
     _searchDebounceTimer?.cancel();
     _textController.dispose();
@@ -292,7 +304,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         _groupMemory = loaded.groupMemory;
         _characterMemories = loaded.characterMemories;
         _relationshipStates = loaded.relationships;
-        _autonomousConfig = loaded.autonomousConfig;
+        _workModeSession.setEnabled(
+          WorkModeConfigService(db: _db).isWorkMode(widget.groupId),
+        );
         _hasAnyApiConfig = loaded.hasAnyApiConfig;
         _isAutoChatEnabled = true;
         _autoChatStatus = loaded.hasAnyApiConfig
@@ -308,14 +322,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
       _scrollToBottom();
       _scheduleAgentTaskRecovery();
-      if (_isAutoChatEnabled &&
-          loaded.activeCharacters.isNotEmpty &&
-          loaded.hasAnyApiConfig) {
+      if (ChatActivityPolicy.canStartAutoChat(
+        workModeEnabled: _workModeEnabled,
+        autoChatEnabled: _isAutoChatEnabled,
+        hasCharacters: loaded.activeCharacters.isNotEmpty,
+        hasApiConfig: loaded.hasAnyApiConfig,
+      )) {
         final delay = loaded.isDirectChat
             ? const Duration(seconds: 18)
             : _autoChatInitialDelay;
         Future.delayed(delay, () {
-          if (_canTouchUi) _startAutoChat();
+          if (_canTouchUi && !_workModeEnabled) _startAutoChat();
         });
       }
     } on ChatRoomLoadException catch (error) {
@@ -332,8 +349,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   Future<void> _offerAgentTaskRecovery() async {
+    if (!_workModeEnabled) return;
     final tasks = _db.agentTaskBox.values
-        .where((task) => task.groupId == widget.groupId && task.canResume)
+        .where((task) =>
+            task.groupId == widget.groupId && task.canResumeInWorkMode)
         .toList()
       ..sort((a, b) =>
           (b.updatedAt ?? b.createdAt).compareTo(a.updatedAt ?? a.createdAt));
@@ -351,14 +370,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (continueTask == true) {
       await _resumeAgentTask(task);
     } else {
-      task
-        ..status = AgentTaskStatus.cancelled
-        ..updatedAt = DateTime.now();
-      await _db.agentTaskBox.put(task.id, task);
+      await _cancelAgentTask(task, reason: '用户放弃恢复任务。');
     }
   }
 
   Future<void> _resumeAgentTask(AgentTask task) async {
+    if (!_workModeEnabled || !task.workModeTask) return;
     final character = _db.aiCharacterBox.get(task.characterId);
     if (character == null) return;
     final config = _resolveApiConfig(character);
@@ -369,7 +386,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
     final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
     if (pending != null) {
-      _pendingAgentApproval = PendingAgentToolApproval(
+      final approval = PendingAgentToolApproval(
         character: character,
         config: config,
         provider: provider,
@@ -378,20 +395,24 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         priorExecutedRequests: _restoredExecutedRequests(task),
         task: task,
       );
-      final approved = await _showAgentApprovalDialog(pending, character);
-      if (approved != null) {
-        await _handlePendingAgentApproval(approved ? '批准' : '拒绝');
-      }
+      await _presentPendingAgentApproval(approval);
       return;
     }
-    await _generateAgenticReply(
-      character: character,
-      config: config,
-      provider: provider,
-      userMessage: task.userRequest,
-      context: _recentMessagesForContext(),
-      resumeTask: task,
-    );
+    final cancelToken = _workModeSession.beginRun();
+    try {
+      await _generateAgenticReply(
+        character: character,
+        config: config,
+        provider: provider,
+        userMessage: task.userRequest,
+        context: _recentMessagesForContext(),
+        resumeTask: task,
+        workMode: true,
+        cancelToken: cancelToken,
+      );
+    } finally {
+      _workModeSession.finishRun(cancelToken);
+    }
   }
 
   List<ToolRequest> _restoredExecutedRequests(AgentTask task) {
@@ -402,7 +423,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   void _startAutoChat() {
-    if (!_canTouchUi || !_isAutoChatEnabled || !_hasAnyApiConfig) return;
+    if (!ChatActivityPolicy.canStartAutoChat(
+      workModeEnabled: _workModeEnabled,
+      autoChatEnabled: _isAutoChatEnabled,
+      hasCharacters: _characters.isNotEmpty,
+      hasApiConfig: _hasAnyApiConfig,
+    )) {
+      return;
+    }
+    if (!_canTouchUi) return;
     _autoChatTimer?.cancel();
     setState(() => _autoChatStatus = AutoChatStatus.waiting);
     _autoChatTimer = Timer.periodic(
@@ -429,7 +458,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   Future<void> _tryAutoChatRound() async {
-    if (!_canTouchUi || !_isAutoChatEnabled || _characters.isEmpty) return;
+    if (!ChatActivityPolicy.canStartAutoChat(
+      workModeEnabled: _workModeEnabled,
+      autoChatEnabled: _isAutoChatEnabled,
+      hasCharacters: _characters.isNotEmpty,
+      hasApiConfig: _hasAnyApiConfig,
+    )) {
+      if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.paused);
+      return;
+    }
+    if (!_canTouchUi) return;
     if (_isAiReplying ||
         _isStreaming ||
         _textController.text.trim().isNotEmpty) {
@@ -443,7 +481,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (_autoChatRoundCount >= _maxAutoChatRounds) {
       _stopAutoChat();
       Future.delayed(_autoChatBurstPause, () {
-        if (_canTouchUi && _isAutoChatEnabled) _startAutoChat();
+        if (_canTouchUi && _isAutoChatEnabled && !_workModeEnabled) {
+          _startAutoChat();
+        }
       });
       return;
     }
@@ -487,13 +527,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     setState(() {
       _isAiReplying = true;
+      _isAutoChatRoundRunning = true;
       _autoChatRoundCount++;
       _autoChatStatus = AutoChatStatus.generating;
     });
 
     try {
       for (final speaker in speakersToUse) {
-        if (!_isAutoChatEnabled) break;
+        if (!_isAutoChatEnabled || _workModeEnabled) break;
         if (!_isEligibleToReply(speaker)) continue;
         final replyContent = await _generateAiReply(
           speaker,
@@ -502,19 +543,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           isAutoChat: true,
           intent: _pendingReplyIntents[speaker.id],
         );
+        if (_workModeEnabled) break;
         await _delay(replyContent);
       }
 
-      _autoChatMemoryTick++;
-      if (_autoChatMemoryTick >= 3) {
-        _autoChatMemoryTick = 0;
-        await _maybeUpdateMemory();
+      if (!_workModeEnabled) {
+        _autoChatMemoryTick++;
+        if (_autoChatMemoryTick >= 3) {
+          _autoChatMemoryTick = 0;
+          await _maybeUpdateMemory();
+        }
       }
     } finally {
       if (_canTouchUi) {
         setState(() {
           _isAiReplying = false;
-          _autoChatStatus = _isAutoChatEnabled
+          _isAutoChatRoundRunning = false;
+          _autoChatStatus = _isAutoChatEnabled && !_workModeEnabled
               ? AutoChatStatus.waiting
               : AutoChatStatus.paused;
         });
@@ -611,134 +656,73 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     if (_isAiReplying) {
       // AI 正在回复中，排队等待当前回合结束后再处理。
-      _pendingUserMessages.add(PendingUserMessage(text, mentionedIds));
+      _pendingUserMessages.add(PendingUserMessage(
+        text,
+        mentionedIds,
+        message: userMessage,
+      ));
       return;
     }
 
-    if (await _maybeRunAutonomousTask(text)) {
-      return;
-    }
+    await _dispatchUserRequest(
+      text: text,
+      mentionedIds: mentionedIds,
+      userMessage: userMessage,
+    );
+  }
 
-    await _runAiRound(
-        userMessage: text,
+  Future<void> _dispatchUserRequest({
+    required String text,
+    required List<String> mentionedIds,
+    Message? userMessage,
+  }) async {
+    if (_workModeEnabled) {
+      await _runWorkModeTask(
+        text: text,
         mentionedIds: mentionedIds,
-        currentUserMessage: userMessage);
-  }
-
-  Future<bool> _maybeRunAutonomousTask(String userGoal) async {
-    final config = _autonomousConfig;
-    if (config == null || !config.enabled || _isAutonomousRunning) {
-      return false;
-    }
-    const detector = AutonomousTriggerDetector();
-    var trigger = detector.detect(
-      text: userGoal,
-      autonomyEnabled: config.enabled,
-      sourceAuthorized: config.sourceWriteAuthorized,
-    );
-    if (trigger.kind == AutonomousTriggerKind.needsProjectAuthorization) {
-      final authorized = await _authorizeAutonomousProject();
-      if (!authorized) {
-        await _appendMessage(Message(
-          groupId: widget.groupId,
-          senderId: 'system',
-          senderType: 'ai',
-          content: '自治任务需要先授权一个目标项目目录；已取消本次真实执行。',
-        ));
-        return true;
-      }
-      final updated = _autonomousConfig;
-      trigger = detector.detect(
-        text: userGoal,
-        autonomyEnabled: updated?.enabled ?? false,
-        sourceAuthorized: updated?.sourceWriteAuthorized ?? false,
+        userMessage: userMessage,
       );
+      return;
     }
-    if (!trigger.shouldStart) return false;
-
-    final task = await AutonomousTaskService(db: _db).maybeCreateTask(
-      conversationId: widget.groupId,
-      isDirectChat: _isDirectChat,
-      userGoal: userGoal,
-      characters: _allGroupCharacters,
+    await _runAiRound(
+      userMessage: text,
+      mentionedIds: mentionedIds,
+      currentUserMessage: userMessage,
     );
-    if (task == null) return false;
-    await _executeAutonomousTask(task);
-    return true;
   }
 
-  Future<bool> _authorizeAutonomousProject() async {
-    final selectedPath = await showDialog<String?>(
-      context: context,
-      builder: (ctx) {
-        final cs = Theme.of(ctx).colorScheme;
-        return AlertDialog(
-          title: const Text('授权自治项目目录'),
-          content: Text(
-            '本次任务可能直接创建或修改源码文件。你可以选择一个项目目录，或先使用 AI 工作根目录作为目标。',
-            style: TextStyle(color: cs.onSurfaceVariant),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(ctx),
-              child: const Text('取消'),
-            ),
-            TextButton(
-              onPressed: () async {
-                final defaultPath = await _db.effectiveAiProcessingDirPath();
-                if (ctx.mounted) Navigator.pop(ctx, defaultPath);
-              },
-              child: const Text('使用工作根目录'),
-            ),
-            FilledButton(
-              onPressed: () async {
-                final path = await FilePicker.platform.getDirectoryPath();
-                if (!ctx.mounted) return;
-                Navigator.pop(ctx, path);
-              },
-              child: const Text('选择目录'),
-            ),
-          ],
-        );
-      },
+  Future<void> _runWorkModeTask({
+    required String text,
+    required List<String> mentionedIds,
+    Message? userMessage,
+  }) async {
+    final executor = WorkModePolicy.selectExecutor(
+      characters: _characters,
+      mentionedIds: mentionedIds,
     );
-    if (selectedPath != null && selectedPath.trim().isNotEmpty) {
-      await _saveAutonomousProjectPath(selectedPath);
-      return true;
+    if (executor == null) {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'ai',
+        content: '工作模式需要至少一个已启用 Agentic 的活跃角色。',
+      ));
+      return;
     }
-    return false;
-  }
-
-  Future<void> _saveAutonomousProjectPath(String path) async {
-    final service = AutonomousConversationConfigService(db: _db);
-    final config = await service.authorizeProject(
-      conversationId: widget.groupId,
-      isDirectChat: _isDirectChat,
-      projectPath: path,
-    );
-    await LocalAgentBridgeLauncher().restart(workspace: path);
-    if (_canTouchUi) {
-      setState(() => _autonomousConfig = config);
+    if (!WorkModePolicy.shouldRun(
+      enabled: _workModeEnabled,
+      character: executor,
+      userRequest: text,
+    )) {
+      return;
     }
-  }
-
-  Future<void> _executeAutonomousTask(AutonomousTask task) async {
-    final service = AutonomousTaskService(db: _db);
-    final executorId = task.executorCharacterId ??
-        (_characters.isNotEmpty ? _characters.first.id : null);
-    final executorIndex = executorId == null
-        ? -1
-        : _allGroupCharacters.indexWhere((c) => c.id == executorId);
-    final executor =
-        executorIndex < 0 ? null : _allGroupCharacters[executorIndex];
-    if (executor == null) return;
     final config = _resolveApiConfig(executor);
     if (config == null) {
       await _appendMessage(Message(
         groupId: widget.groupId,
         senderId: executor.id,
         senderType: 'ai',
-        content: '[${executor.name} 未配置 API，无法执行自治任务]',
+        content: '[${executor.name} 未配置 API，无法执行工作任务]',
       ));
       return;
     }
@@ -746,61 +730,38 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
     );
-    setState(() => _isAutonomousRunning = true);
+    if (_canTouchUi) setState(() => _isAiReplying = true);
+    final cancelToken = _workModeSession.beginRun();
     try {
-      final workspace = task.targetProjectPath?.trim().isNotEmpty == true
-          ? task.targetProjectPath!
-          : task.workDirPath;
-      await LocalAgentBridgeLauncher().restart(workspace: workspace);
-      await _appendMessage(Message(
-        groupId: widget.groupId,
-        senderId: executor.id,
-        senderType: 'ai',
-        content: '自治任务已启动：${task.userGoal}\n工作目录：${task.workDirPath}',
-      ));
-      await service.recordStep(
-        task: task,
-        characterId: executor.id,
-        role: 'executor',
-        action: 'start',
-        inputSummary: task.userGoal,
-        outputSummary: 'workspace=$workspace',
+      final workspace = await WorkModeWorkspaceService(db: _db).loadOrCreate(
+        conversationId: widget.groupId,
+        isDirectChat: _isDirectChat,
       );
-      final request = _autonomousExecutionRequest(task);
-      final result = await _generateAgenticReply(
+      await LocalAgentBridgeLauncher().restart(
+        workspace: workspace.workDirPath,
+      );
+      await _generateAgenticReply(
         character: executor,
         config: config,
         provider: provider,
-        userMessage: request,
-        autoApproveTools: true,
+        userMessage: text,
+        media: userMessage?.media,
+        context: _recentMessagesForContext(),
+        workMode: true,
+        cancelToken: cancelToken,
       );
-      await service.recordStep(
-        task: task,
-        characterId: executor.id,
-        role: 'executor',
-        action: 'execute',
-        toolName: 'agent_runtime',
-        inputSummary: request,
-        outputSummary: result,
-      );
-      await service.completeTask(task, '自治执行完成。\n\n$result');
     } finally {
-      if (_canTouchUi) setState(() => _isAutonomousRunning = false);
+      _workModeSession.finishRun(cancelToken);
+      if (_canTouchUi) setState(() => _isAiReplying = false);
+      if (_pendingUserMessages.isNotEmpty && _canTouchUi) {
+        final next = _pendingUserMessages.removeAt(0);
+        await _dispatchUserRequest(
+          text: next.text,
+          mentionedIds: next.mentionedIds,
+          userMessage: next.message,
+        );
+      }
     }
-  }
-
-  String _autonomousExecutionRequest(AutonomousTask task) {
-    final goal = task.userGoal;
-    if (RegExp(r'\.(cpp|cc|c|hpp|h)\b', caseSensitive: false).hasMatch(goal)) {
-      return goal;
-    }
-    if (goal.toLowerCase().contains('c++') ||
-        goal.toLowerCase().contains('cpp') ||
-        goal.contains('CPU') ||
-        goal.contains('内存')) {
-      return '$goal\n请在 artifacts/system_resource_monitor.cpp 创建完整 C++ 源码文件。';
-    }
-    return goal;
   }
 
   Future<void> _runAiRound(
@@ -828,17 +789,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             mentionedIds: mentionedIds,
             isAutoChat: isAutoChat,
           ));
-    final isExplicitAgenticTask = !isAutoChat &&
-        userMessage != null &&
-        AgenticTaskClassifier.requiresAgenticWork(userMessage);
-    // Bug B-b2：群聊中显式 agentic 任务（如"生成个人主页"）的选角收敛，
-    // 抽成纯函数以便单测（逻辑不变）。
-    charactersToReply = selectAgenticCharactersForRound(
-      isDirectChat: _isDirectChat,
-      isExplicitAgenticTask: isExplicitAgenticTask,
-      candidates: charactersToReply,
-      mentionedIds: mentionedIds,
-    );
     if (charactersToReply.isEmpty) {
       if (_characters.any(_isEligibleToReply)) {
         setState(() {
@@ -947,8 +897,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     // 处理排队中的用户消息：当前回合结束后自动触发下一轮 AI 回复。
     if (_pendingUserMessages.isNotEmpty && _canTouchUi) {
       final next = _pendingUserMessages.removeAt(0);
-      await _runAiRound(
-          userMessage: next.text, mentionedIds: next.mentionedIds);
+      await _dispatchUserRequest(
+        text: next.text,
+        mentionedIds: next.mentionedIds,
+        userMessage: next.message,
+      );
     }
   }
 
@@ -957,6 +910,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       {bool isAutoChat = false,
       ReplyIntent? intent,
       Message? currentUserMessage}) async {
+    if (isAutoChat && _workModeEnabled) return '';
     // 并发兜底：同一角色正在执行 agentic 任务时，auto-chat / 其他并发路径
     // 不得触发同一角色的普通 LLM 回复，否则会出现「agentic 兜底文案 + 普通
     // LLM 泄漏代码」两条消息的 Bug（auto-chat 传 userMessage=null 会绕过 agentic
@@ -994,23 +948,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       fallbackContext: context,
     );
 
-    if (!isAutoChat &&
-        userMessage != null &&
-        AgenticTaskClassifier.requiresAgenticWork(userMessage)) {
-      return _generateAgenticReply(
-        character: character,
-        config: config,
-        provider: provider,
-        userMessage: userMessage,
-        media: currentUserMessage?.media,
-        autoApproveTools: shouldAutoApproveDirectFileTask(
-          isDirectChat: _isDirectChat,
-          userMessage: userMessage,
-        ),
-        context: effectiveContext,
-      );
-    }
-
     final webSearch = await _webSearch.searchIfNeeded(userMessage);
     final apiMessages = _withWebSearchContext(
       _buildApiMessages(
@@ -1024,6 +961,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       ),
       webSearch,
     );
+    if (isAutoChat && _workModeEnabled) {
+      _discardCurrentStream = false;
+      return '';
+    }
     debugPrint(
       '[AI Reply] character=${character.id} messages=${apiMessages.length} '
       'provider=${provider.name}',
@@ -1114,6 +1055,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     // 等待流结束，或被用户点击「停止生成」取消。
     await done.future;
+    if (_disposed) return '';
+
+    if (_discardCurrentStream) {
+      _discardCurrentStream = false;
+      _streamSub = null;
+      _streamDone = null;
+      if (_canTouchUi) {
+        setState(() {
+          _isStreaming = false;
+          _streamingMessage = null;
+          _messages = List<Message>.from(_messages)
+            ..removeWhere((message) => message.id == temp.id);
+        });
+      }
+      return '';
+    }
 
     // 收尾：清理订阅状态。
     _streamSub = null;
@@ -1161,20 +1118,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     // 移除 LLM 可能附带的名字前缀（UI 已独立显示角色名）。
     fullContent = _stripNamePrefix(fullContent, character.name);
-    final rawNonAgenticContent = fullContent;
-    final recoveredFile = failed
-        ? null
-        : await _recoverFileFromNonAgenticReply(
-            character: character,
-            userMessage: userMessage,
-            replyContent: rawNonAgenticContent,
-          );
     // 防御：非 agentic 路径下 LLM 可能自发输出 tool_call 协议标签文本
     // （尤其使用过 agentic 能力的角色，system prompt 里可能残留工具说明）。
     // 在落库与返回前清洗之，避免协议泄漏被当作普通聊天贴出来。
-    fullContent = recoveredFile == null
-        ? sanitizeNonAgenticReply(fullContent)
-        : '✅ 文件已生成：`${recoveredFile.path}` — 点击附件查看完整内容';
+    fullContent = sanitizeNonAgenticReply(fullContent);
     if (!failed &&
         isDuplicateAiReply(
           fullContent,
@@ -1200,26 +1147,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
       return '';
     }
-    final generatedAttachments = failed
-        ? const <MediaAttachment>[]
-        : [
-            if (recoveredFile != null) recoveredFile.attachment,
-            if (recoveredFile == null)
-              ...await _aiAttachments.createRequestedAttachments(
-                character: character,
-                userMessage: userMessage,
-                replyContent: fullContent,
-              ),
-          ];
-
     // 持久化纪律：仅完成时 put 一次（包含失败占位消息）。
     temp.content = fullContent;
     temp.isMention = mentionedIds.isNotEmpty;
     temp.mentionedAiIds = mentionedIds;
-    temp.media = generatedAttachments.isEmpty ? null : generatedAttachments;
-    if (_canTouchUi && generatedAttachments.isNotEmpty) {
-      _flushStreamingUi();
-    }
+    temp.media = null;
     await _repository.persistNewMessage(temp);
     await _markCurrentConversationRead(throughMessage: temp);
     _recordReplyUsage(character);
@@ -1244,31 +1176,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     if (_canTouchUi) setState(() => _streamingMessage = null);
     return fullContent;
-  }
-
-  Future<RecoveredNonAgenticFile?> _recoverFileFromNonAgenticReply({
-    required AICharacter character,
-    required String? userMessage,
-    required String replyContent,
-  }) async {
-    final request = userMessage?.trim() ?? '';
-    if (request.isEmpty) return null;
-    final path = inferRecoverableFilePath(request);
-    if (path == null) return null;
-    final content = extractRecoverableFileContent(replyContent, path);
-    if (content == null || content.trim().isEmpty) return null;
-    final attachment = await _db.writeBytesToAiCharacterDir(
-      bytes: utf8.encode(content),
-      fileName: fileNameFromPath(path),
-      characterId: character.id,
-      characterName: character.name,
-      type: _attachmentTypeForPath(path),
-    );
-    return RecoveredNonAgenticFile(
-      path: path,
-      content: content,
-      attachment: attachment,
-    );
   }
 
   Future<String?> _retryFailedReply({
@@ -1318,9 +1225,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required ApiProvider provider,
     required String userMessage,
     List<MediaAttachment>? media,
-    bool autoApproveTools = false,
     List<Message>? context,
     AgentTask? resumeTask,
+    bool workMode = false,
+    CancelToken? cancelToken,
   }) async {
     // 并发兜底：同一角色已在执行 agentic 任务时，跳过本次重复调用，
     // 避免重入导致重复文件生成 / 重复消息。该角色的本轮任务由首次调用负责。
@@ -1329,13 +1237,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     _agenticRunningCharacterIds.add(character.id);
     try {
-      await _ensureAgenticTaskPermissions(character, userMessage);
       final task = resumeTask ??
           AgentTask(
             groupId: widget.groupId,
             characterId: character.id,
             userRequest: userMessage,
             requestedPermissions: character.toolPermissions,
+            workModeTask: workMode,
           );
       task
         ..status = AgentTaskStatus.planning
@@ -1350,6 +1258,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         config: config,
         provider: provider,
         task: task,
+        workMode: workMode,
+        cancelToken: cancelToken,
       );
 
       final mediaEnhancedRequest =
@@ -1382,17 +1292,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           resolution: skillResolution,
         ),
         userRequest: mediaEnhancedRequest,
-        // 仅由调用方针对明确的私聊文件任务开启自动批准，避免普通私聊中的
-        // 模型误判直接获得工作区写权限。
-        autoApproveWriteTools: autoApproveTools,
         conversationHistory: conversationHistory,
         priorExecutedRequests: restoredRequests,
         forceSkillCreation: skillResolution.needsSkillCreation &&
             !_savedSkillMatchesRequest(character, userMessage),
+        workModeContext:
+            workMode ? WorkModePolicy.planningContext(character) : '',
       );
       if (result.status == AgentRuntimeStatus.waitingForApproval &&
           result.pendingToolRequest != null) {
-        _pendingAgentApproval = PendingAgentToolApproval(
+        final approval = PendingAgentToolApproval(
           character: character,
           config: config,
           provider: provider,
@@ -1402,33 +1311,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           conversationHistory: conversationHistory,
           task: task,
         );
-        // 用弹层（AlertDialog）代替文字输入审批：用户点“批准/拒绝”即触发执行，
-        // 不再需要手动打字“批准”。无 UI 环境（如后台任务）才回退到文字提示。
-        final decision = await _showAgentApprovalDialog(
-          result.pendingToolRequest!,
-          character,
-        );
-        if (decision == true) {
-          await _handlePendingAgentApproval('批准');
-        } else if (decision == false) {
-          await _handlePendingAgentApproval('拒绝');
-        } else {
-          // 用户关闭了审批对话框且未做决定：将任务标记为取消，避免残留
-          // waitingForApproval 状态导致后续恢复时弹出过期的审批弹窗。
-          task
-            ..status = AgentTaskStatus.cancelled
-            ..lastError = '用户关闭了工具审批对话框，未做出决定。'
-            ..updatedAt = DateTime.now();
-          await _db.agentTaskBox.put(task.id, task);
-          final content = _stripNamePrefix(result.message, character.name);
-          await _appendMessage(Message(
-            groupId: widget.groupId,
-            senderId: character.id,
-            senderType: 'ai',
-            content: content,
-          ));
-        }
-        // 审批流程已通过上述分支追加消息，这里返回占位文案即可。
+        await _presentPendingAgentApproval(approval);
         return result.message;
       }
       await _finishAgentTask(task, result);
@@ -1471,57 +1354,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     } finally {
       _agenticRunningCharacterIds.remove(character.id);
     }
-  }
-
-  Future<void> _ensureAgenticTaskPermissions(
-    AICharacter character,
-    String userMessage,
-  ) async {
-    if (!AgenticTaskClassifier.requiresAgenticWork(userMessage)) return;
-    final permissionSet = <ToolPermission>{
-      ...character.toolPermissions,
-      ...CharacterSkillResolver.resolveFor(character, userMessage).permissions,
-      ToolPermission.skillCreate,
-      ToolPermission.skillDownload,
-    };
-    final lower = userMessage.toLowerCase();
-    final needsWorkspace = lower.contains('文件') ||
-        lower.contains('file') ||
-        lower.contains('路径') ||
-        lower.contains('path') ||
-        lower.contains('md') ||
-        lower.contains('markdown') ||
-        lower.contains('文档') ||
-        lower.contains('代码') ||
-        lower.contains('code') ||
-        lower.contains('review') ||
-        lower.contains('修复') ||
-        lower.contains('bug');
-    if (needsWorkspace) {
-      permissionSet.add(ToolPermission.workspaceRead);
-      permissionSet.add(ToolPermission.workspacePatch);
-    }
-    final needsCommand = lower.contains('运行') ||
-        lower.contains('测试') ||
-        lower.contains('flutter test') ||
-        lower.contains('flutter analyze') ||
-        lower.contains('dart') ||
-        lower.contains('flutter') ||
-        lower.contains('命令') ||
-        lower.contains('command');
-    if (needsCommand) {
-      permissionSet.add(ToolPermission.commandRun);
-    }
-    final next = permissionSet.toList();
-    next.sort((a, b) => a.index.compareTo(b.index));
-    final current = character.toolPermissions.map((p) => p.name).toSet();
-    final changed =
-        next.any((permission) => !current.contains(permission.name));
-    if (!changed && character.agenticEnabled) return;
-    character
-      ..agenticEnabled = true
-      ..toolPermissions = next;
-    await _db.aiCharacterBox.put(character.id, character);
   }
 
   Future<List<MediaAttachment>> _attachmentsForAgentToolResult({
@@ -1655,6 +1487,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required ApiConfig config,
     required ApiProvider provider,
     required AgentTask task,
+    bool workMode = false,
+    CancelToken? cancelToken,
   }) {
     final bridge = LocalAgentBridgeClient();
     return AgentRuntime(
@@ -1665,7 +1499,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         model: config.modelName,
         messages: messages,
         maxTokens: 8192,
-        receiveTimeout: const Duration(seconds: 120),
+        receiveTimeout: AgentRuntime.completionTimeout,
+        cancelToken: cancelToken,
       ),
       workspaceFileTool: WorkspaceFileTool(bridge),
       browserContextTool: BrowserContextTool(bridge),
@@ -1694,10 +1529,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           messages: contextMessages,
           temperature: 0.3,
           maxTokens: 2048,
+          cancelToken: cancelToken,
         ),
       ),
       contextIsDirectChat: _isDirectChat,
       onContextSummary: _persistAgentContextSummary,
+      approvalPolicy: workMode
+          ? WorkModePolicy.requiresApproval
+          : AgentRuntime.requiresApproval,
+      grantedPermissions: workMode ? ToolPermission.values.toSet() : null,
+      shouldCancel: workMode ? () => _workModeSession.isStopRequested : null,
     );
   }
 
@@ -1748,7 +1589,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     AgentTask task,
     String content,
   ) async {
-    final id = 'agent-progress:${task.id}';
+    final id = WorkModeTaskLifecycle.progressMessageId(task);
     final existing = _db.messageBox.get(id);
     if (existing != null) {
       existing.content = content;
@@ -1785,6 +1626,29 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         ..lastError = result.message;
     }
     await _db.agentTaskBox.put(task.id, task);
+    if (WorkModeTaskLifecycle.shouldRemoveProgress(task.status)) {
+      await _removeAgentProgressMessage(task);
+    }
+  }
+
+  Future<void> _removeAgentProgressMessage(AgentTask task) async {
+    final id = WorkModeTaskLifecycle.progressMessageId(task);
+    await _repository.deleteMessage(id);
+    if (_canTouchUi) {
+      setState(() {
+        _messages = List<Message>.from(_messages)
+          ..removeWhere((message) => message.id == id);
+      });
+    }
+  }
+
+  Future<void> _cancelAgentTask(
+    AgentTask task, {
+    required String reason,
+  }) async {
+    WorkModeTaskLifecycle.cancelTask(task, reason: reason);
+    await _db.agentTaskBox.put(task.id, task);
+    await _removeAgentProgressMessage(task);
   }
 
   String _partialCompletionReport(AgentRuntimeResult result) {
@@ -1803,27 +1667,72 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   Future<bool> _handlePendingAgentApproval(String text) async {
     final pending = _pendingAgentApproval;
     if (pending == null) return false;
-    if (_isAgentRejection(text)) {
+    final action = WorkModeTaskLifecycle.actionForInput(text);
+    if (action == WorkModeApprovalAction.reject) {
       _pendingAgentApproval = null;
-      pending.task
-        ..status = AgentTaskStatus.cancelled
-        ..updatedAt = DateTime.now();
-      await _db.agentTaskBox.put(pending.task.id, pending.task);
-      await _appendMessage(Message(
-        groupId: widget.groupId,
-        senderId: pending.character.id,
-        senderType: 'ai',
-        content: '${pending.character.name} 已取消这次工具操作。',
-      ));
-      return true;
+      final cancelToken = _workModeSession.beginRun();
+      if (_canTouchUi) setState(() => _isAiReplying = true);
+      try {
+        final runtime = _agentRuntimeFor(
+          character: pending.character,
+          config: pending.config,
+          provider: pending.provider,
+          task: pending.task,
+          workMode: true,
+          cancelToken: cancelToken,
+        );
+        final result = await runtime.skipRejectedTool(
+          character: pending.character,
+          request: pending.request,
+          userRequest: pending.userRequest,
+          priorExecutedRequests: pending.priorExecutedRequests,
+          conversationHistory: pending.conversationHistory,
+        );
+        if (result.status == AgentRuntimeStatus.waitingForApproval &&
+            result.pendingToolRequest != null) {
+          final nextApproval = PendingAgentToolApproval(
+            character: pending.character,
+            config: pending.config,
+            provider: pending.provider,
+            userRequest: pending.userRequest,
+            request: result.pendingToolRequest!,
+            priorExecutedRequests: result.executedToolRequests,
+            conversationHistory: pending.conversationHistory,
+            task: pending.task,
+          );
+          return _presentPendingAgentApproval(nextApproval);
+        }
+        await _finishAgentTask(pending.task, result);
+        final content =
+            _stripNamePrefix(result.message, pending.character.name);
+        final attachments = await _attachmentsForAgentToolResult(
+          character: pending.character,
+          result: result,
+        );
+        await _appendMessage(Message(
+          groupId: widget.groupId,
+          senderId: pending.character.id,
+          senderType: 'ai',
+          content: content,
+          media: attachments.isEmpty ? null : attachments,
+        ));
+        return true;
+      } finally {
+        _workModeSession.finishRun(cancelToken);
+        if (_canTouchUi) setState(() => _isAiReplying = false);
+      }
     }
-    if (!_isAgentApproval(text)) {
-      // 非审批/非拒绝输入：清除过期审批状态，让新消息走正常 AI 回复流程。
+    if (action == WorkModeApprovalAction.cancelPending) {
       _pendingAgentApproval = null;
+      await _cancelAgentTask(
+        pending.task,
+        reason: '用户发送了新的工作指令，旧审批任务已取消。',
+      );
       return false;
     }
 
     _pendingAgentApproval = null;
+    final cancelToken = _workModeSession.beginRun();
     if (_canTouchUi) setState(() => _isAiReplying = true);
     try {
       final runtime = _agentRuntimeFor(
@@ -1831,6 +1740,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         config: pending.config,
         provider: pending.provider,
         task: pending.task,
+        workMode: true,
+        cancelToken: cancelToken,
       );
       final result = await runtime.executeApprovedTool(
         character: pending.character,
@@ -1841,7 +1752,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       );
       if (result.status == AgentRuntimeStatus.waitingForApproval &&
           result.pendingToolRequest != null) {
-        _pendingAgentApproval = PendingAgentToolApproval(
+        final nextApproval = PendingAgentToolApproval(
           character: pending.character,
           config: pending.config,
           provider: pending.provider,
@@ -1851,15 +1762,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           conversationHistory: pending.conversationHistory,
           task: pending.task,
         );
-        final nextDecision = await _showAgentApprovalDialog(
-          result.pendingToolRequest!,
-          pending.character,
-        );
-        if (nextDecision != null) {
-          return _handlePendingAgentApproval(
-            nextDecision ? '批准' : '拒绝',
-          );
-        }
+        return _presentPendingAgentApproval(nextApproval);
       }
       await _finishAgentTask(pending.task, result);
       final content = _stripNamePrefix(
@@ -1888,14 +1791,40 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
       return true;
     } finally {
+      _workModeSession.finishRun(cancelToken);
       if (_canTouchUi) setState(() => _isAiReplying = false);
     }
   }
 
+  Future<bool> _presentPendingAgentApproval(
+    PendingAgentToolApproval approval,
+  ) async {
+    _pendingAgentApproval = approval;
+    final decision = await _showAgentApprovalDialog(
+      approval.request,
+      approval.character,
+    );
+    final action = WorkModeTaskLifecycle.actionForDialogDecision(decision);
+    if (action == WorkModeApprovalAction.cancelPending) {
+      if (identical(_pendingAgentApproval, approval)) {
+        _pendingAgentApproval = null;
+      }
+      await _cancelAgentTask(
+        approval.task,
+        reason: '用户关闭了工具审批对话框，任务已取消。',
+      );
+      return true;
+    }
+    return _handlePendingAgentApproval(
+      action == WorkModeApprovalAction.approve ? '批准' : '拒绝',
+    );
+  }
+
   /// 以弹层（AlertDialog）形式请求用户批准/拒绝工具调用，替代原来的“打字批准”。
   ///
-  /// 返回 `true`=批准，`false`=拒绝，`null`=无法弹层（无 UI / 未挂载）。
-  /// 调用方据此调用 [_handlePendingAgentApproval] 推进流程。
+  /// 返回 `true`=批准，`false`=拒绝，`null`=返回键关闭或无法弹层。
+  /// 所有入口都由 [_presentPendingAgentApproval] 将 null 统一转为任务取消，
+  /// 避免多步审批遗留 waitingForApproval 检查点。
   Future<bool?> _showAgentApprovalDialog(
     ToolRequest request,
     AICharacter character,
@@ -1908,7 +1837,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         title: Text('${character.name} 请求使用工具'),
         content: SingleChildScrollView(
           child: Text(
-            '工具：${request.tool.wireName}\n\n原因：${request.reason}',
+            '工具：${request.tool.wireName}\n'
+            '范围：${WorkModePolicy.approvalSummary(request)}\n\n'
+            '原因：${request.reason}',
           ),
         ),
         actions: [
@@ -1924,25 +1855,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       ),
     );
     return decision;
-  }
-
-  bool _isAgentApproval(String text) {
-    final normalized = text.trim().toLowerCase();
-    return normalized == '批准' ||
-        normalized == '同意' ||
-        normalized == '执行' ||
-        normalized == '继续' ||
-        normalized == 'approve' ||
-        normalized == 'yes';
-  }
-
-  bool _isAgentRejection(String text) {
-    final normalized = text.trim().toLowerCase();
-    return normalized == '取消' ||
-        normalized == '拒绝' ||
-        normalized == '不要' ||
-        normalized == 'cancel' ||
-        normalized == 'no';
   }
 
   Future<Map<String, dynamic>> _saveGeneratedSkillFromArgs({
@@ -2014,22 +1926,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (existing.isEmpty) {
       await _db.characterSkillBox.put(skill.id, skill);
     }
-    final permissionSet = <ToolPermission>{
-      ...character.toolPermissions,
-      ...template.requiredPermissions,
-    };
     final skillIds = <String>{...character.skillIds, skill.id};
-    character
-      ..skillIds = skillIds.toList()
-      ..toolPermissions = permissionSet.toList()
-      ..agenticEnabled = true;
+    character.skillIds = skillIds.toList();
     await _db.aiCharacterBox.put(character.id, character);
     return {
       'ok': true,
       'skillId': skill.id,
       'templateId': template.id,
       'name': skill.name,
-      'permissions': permissionSet.map((p) => p.name).toList(),
+      'permissions': template.requiredPermissions.map((p) => p.name).toList(),
     };
   }
 
@@ -2046,19 +1951,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   List<CharacterSkill> _agenticSkillsFor(
       AICharacter character, String userRequest,
       {CharacterSkillBundle? resolution}) {
-    final defaults = (resolution ??
-            CharacterSkillResolver.resolveFor(character, userRequest))
-        .skills;
     final saved = _db.characterSkillBox.values.where(
       (skill) =>
           skill.characterId == character.id ||
           character.skillIds.contains(skill.id),
     );
-    final byName = <String, CharacterSkill>{};
-    for (final skill in [...defaults, ...saved]) {
-      byName['${skill.domain}:${skill.name}'] = skill;
-    }
-    return byName.values.toList();
+    return WorkModePolicy.resolveSkills(
+      character: character,
+      userRequest: userRequest,
+      installedSkills: saved,
+      resolvedSkills: resolution?.skills,
+    );
   }
 
   bool _savedSkillMatchesRequest(
@@ -3459,6 +3362,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   String get _autoChatStatusText {
+    if (_workModeEnabled) return '工作模式中，自动发言已暂停';
     if (!_isAutoChatEnabled) return '自动发言已关闭';
     switch (_autoChatStatus) {
       case AutoChatStatus.idle:
@@ -3485,7 +3389,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _autoChatStatus =
           enabled ? AutoChatStatus.waiting : AutoChatStatus.paused;
     });
-    if (enabled) {
+    if (enabled && !_workModeEnabled) {
       _startAutoChat();
     } else {
       _autoChatTimer?.cancel();
@@ -3493,36 +3397,44 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
-  Future<void> _toggleAutonomousExecution(bool enabled) async {
-    final service = AutonomousConversationConfigService(db: _db);
-    final config = await service.setEnabled(
-      conversationId: widget.groupId,
-      isDirectChat: _isDirectChat,
-      enabled: enabled,
-    );
+  Future<void> _toggleWorkMode(bool enabled) async {
+    await WorkModeConfigService(db: _db).setWorkMode(widget.groupId, enabled);
+    _workModeSession.setEnabled(enabled);
     if (enabled) {
-      await service.grantFullPermissions(_allGroupCharacters.map((c) => c.id));
+      if (_isAutoChatRoundRunning) {
+        _discardCurrentStream = true;
+        _stopStreaming();
+      }
+      _stopAutoChat();
+    } else {
+      final pending = _workModeSession.takePendingApproval();
+      if (pending != null) {
+        await _cancelAgentTask(
+          pending.task,
+          reason: '工作模式已关闭，待审批任务已取消。',
+        );
+      }
     }
     if (_canTouchUi) {
-      setState(() => _autonomousConfig = config);
+      setState(() {});
+    }
+    if (enabled) {
+      _scheduleAgentTaskRecovery();
+    } else if (_isAutoChatEnabled) {
+      _startAutoChat();
     }
   }
 
   Widget _buildConversationControls(ColorScheme cs) {
-    final config = _autonomousConfig;
-    final autonomousEnabled = config?.enabled ?? false;
-    final project = config?.authorizedProjectPath;
     return CompactConversationControls(
       showAutoChat: !_isDirectChat,
       autoChatEnabled: _isAutoChatEnabled && _hasAnyApiConfig,
-      autonomousEnabled: autonomousEnabled,
+      workModeEnabled: _workModeEnabled,
       autoChatAvailable: _hasAnyApiConfig,
       autoChatTooltip: _autoChatStatusText,
-      autonomousTooltip: autonomousEnabled
-          ? '自治执行已开启${project == null ? '' : ' · 已授权项目'}'
-          : '自治执行已关闭',
+      workModeTooltip: _workModeEnabled ? '工作模式已开启 · 敏感操作需确认' : '工作模式已关闭',
       onAutoChatChanged: _toggleAutoChat,
-      onAutonomousChanged: _toggleAutonomousExecution,
+      onWorkModeChanged: _toggleWorkMode,
     );
   }
 
@@ -3825,6 +3737,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (mounted) setState(() => _isStreaming = true);
 
     await done.future;
+    if (_disposed) return;
     _streamSub = null;
     _streamDone = null;
     if (mounted) setState(() => _isStreaming = false);

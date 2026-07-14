@@ -79,7 +79,7 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 
 ### High priority — implemented
 
-- ✅ **Agentic character skills (v1.3.2).** Characters can execute multi-step tool tasks via `AgentRuntime` — local file generation, skill creation/download, workspace/browser tools, with 6-step max + 45s timeout guard. Triggered by natural-language requests containing keywords like "生成文件/创建文件/写文档/代码审查".
+- ✅ **Explicit work mode.** Per-conversation work mode routes every non-empty user instruction through `AgentRuntime` — local file generation, skill creation/download, workspace/browser tools, with a 12-step budget and 120s per-completion timeout. Normal and auto chat never enter the tool runtime; sensitive tools require explicit approval.
 - ✅ **Media attachments (v1.3.2).** Chat input bar has an attachment button; supports images and documents via `file_picker`. Desktop drag-and-drop via `desktop_drop`.
 - ✅ **Presence-aware proactive notifications (v1.3.2).** `ConversationPresenceService` tracks active conversation; suppresses notifications and auto-marks-read when user is viewing the target conversation.
 - ✅ **Streaming / typewriter replies.** `ChatApiService.streamChatMessage` reads SSE and `ChatRoomPage` renders tokens incrementally with a blinking cursor + "停止生成" button.

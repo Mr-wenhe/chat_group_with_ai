@@ -24,7 +24,7 @@ chat_group 是一个 **AI 群聊模拟器** Flutter 应用，工程根目录即�
 - 角色编入 **群（ChatGroup）**；消息归属群。
 - 用户可与单角色 **私聊（Direct Chat）**，用 `dm:{characterId}` 作为消息 groupId。
 - 每个角色绑定一个 **ApiConfig**（LLM provider：DeepSeek / 通义 / 智谱 / Kimi / 文心 / 自定义 OpenAI 兼容端点）。
-- 已有 **Agentic 角色技能（v1.3.2）**：角色通过 `AgentRuntime` 多步执行本地文件生成、技能创建/下载、工作区/浏览器工具，带 6 步上限 + 45s 超时保护；触发关键词如"生成文件/创建文件/写文档/代码审查"。
+- 已有 **显式工作模式**：按会话开启后，角色通过 `AgentRuntime` 多步执行本地文件生成、技能创建/下载、工作区/浏览器工具，带 12 步预算与单次 120s 超时；普通聊天和自动发言不进入工具链，敏感工具逐次审批。
 - 技术栈：Riverpod（注解式代码生成）+ Hive（本地 NoSQL）+ Dio（网络）+ json_serializable。
 
 **关键技术约束（改动前必须知道，否则必炸）**

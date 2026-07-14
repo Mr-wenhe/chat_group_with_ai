@@ -7,6 +7,7 @@ class AgentPromptBuilder {
     required List<CharacterSkill> skills,
     required String userRequest,
     List<MediaAttachment>? media,
+    String workModeContext = '',
   }) {
     final skillText = skills.map((s) {
       final steps = s.instructions.map((i) => '- $i').join('\n');
@@ -21,6 +22,8 @@ class AgentPromptBuilder {
 
 用户请求：
 $userRequest${mediaHint(media)}
+
+$workModeContext
 
 你的技能：
 $skillText

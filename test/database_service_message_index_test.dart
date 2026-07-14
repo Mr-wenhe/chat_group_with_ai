@@ -80,4 +80,26 @@ void main() {
       conversationId: ['dm1'],
     });
   });
+
+  test('deleteMessage removes a temporary message and its group index entry',
+      () async {
+    final db = DatabaseService();
+    final progress = Message(
+      id: 'agent-progress:task-1',
+      groupId: 'group_1',
+      senderId: 'worker',
+      senderType: 'ai',
+      content: '正在规划',
+    );
+    await db.messageBox.put(progress.id, progress);
+    await db.addMessageToGroupIndex(progress);
+
+    await db.deleteMessage(progress.id, groupId: progress.groupId);
+
+    expect(db.messageBox.containsKey(progress.id), isFalse);
+    expect(await db.messagesForGroup(progress.groupId), isEmpty);
+    expect(Hive.box<dynamic>('app_settings').get('message_ids_by_group'), {
+      progress.groupId: <String>[],
+    });
+  });
 }

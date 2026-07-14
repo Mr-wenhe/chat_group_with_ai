@@ -259,6 +259,7 @@ File _resolveWorkspaceFile(Directory workspace, String relativePath) {
   _rejectUnsafeRelativePath(normalized);
   final file = File('${workspace.path}/$normalized').absolute;
   _ensureInsideWorkspace(workspace, file.path);
+  _ensureResolvedInsideWorkspace(workspace, file.path);
   return file;
 }
 
@@ -269,6 +270,7 @@ Directory _resolveWorkspaceDir(Directory workspace, String relativePath) {
   if (normalized.isNotEmpty) _rejectUnsafeRelativePath(normalized);
   final dir = Directory('${workspace.path}/$normalized').absolute;
   _ensureInsideWorkspace(workspace, dir.path);
+  _ensureResolvedInsideWorkspace(workspace, dir.path);
   return dir;
 }
 
@@ -294,6 +296,22 @@ void _ensureInsideWorkspace(Directory workspace, String path) {
   }
 }
 
+/// Rejects paths whose nearest existing ancestor resolves through a symbolic
+/// link outside [workspace]. Lexical `..` checks alone cannot prevent that
+/// escape when a link inside the workspace points elsewhere.
+void _ensureResolvedInsideWorkspace(Directory workspace, String path) {
+  final resolvedWorkspace = workspace.resolveSymbolicLinksSync();
+  var probe = File(path).absolute.path;
+  while (FileSystemEntity.typeSync(probe, followLinks: false) ==
+      FileSystemEntityType.notFound) {
+    final parent = FileSystemEntity.parentOf(probe);
+    if (parent == probe) break;
+    probe = parent;
+  }
+  final resolvedProbe = File(probe).resolveSymbolicLinksSync();
+  _ensureInsideWorkspace(Directory(resolvedWorkspace), resolvedProbe);
+}
+
 List<String>? _allowedCommand(String command) {
   const allowed = {
     'flutter analyze': ['flutter', 'analyze'],
@@ -313,6 +331,7 @@ List<String>? _allowedCommand(String command) {
   if (!command.startsWith(analyzePrefix)) return null;
   final path = _decodeCommandPath(command.substring(analyzePrefix.length));
   if (path == null || !path.toLowerCase().endsWith('.dart')) return null;
+  if (RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(path)) return null;
   try {
     _rejectUnsafeRelativePath(path);
   } on ArgumentError {

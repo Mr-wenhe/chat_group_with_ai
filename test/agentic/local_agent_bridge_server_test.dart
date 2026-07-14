@@ -208,6 +208,26 @@ void main() {
     expect(escaped.existsSync(), isFalse);
   });
 
+  test('/workspace/write rejects a symlink that escapes the workspace',
+      () async {
+    final outside = await Directory.systemTemp.createTemp('bridge_outside_');
+    addTearDown(() async {
+      if (await outside.exists()) await outside.delete(recursive: true);
+    });
+    await Link('${workspace.path}/escape').create(outside.path);
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+
+    final result = await _postJson(server.port, '/workspace/write', {
+      'path': 'escape/secret.txt',
+      'content': 'must stay inside',
+    });
+
+    expect(result.statusCode, 400);
+    expect(result.body['error'], 'unsafe_path');
+    expect(File('${outside.path}/secret.txt').existsSync(), isFalse);
+  });
+
   test('/workspace/write normalizes absolute path to basename and writes it',
       () async {
     final server = await _startTestServer(workspace);
@@ -274,6 +294,20 @@ void main() {
 
     expect(result.statusCode, 403);
     expect(File('${workspace.path}/pwned.txt').existsSync(), isFalse);
+  });
+
+  test('/command/run rejects a Windows absolute analyze path', () async {
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+
+    final result = await _postJson(
+      server.port,
+      '/command/run',
+      {'command': r'flutter analyze C:\outside\secret.dart'},
+    );
+
+    expect(result.statusCode, 403);
+    expect(result.body['error'], 'command_not_allowed');
   });
 
   test('WorkspaceFileTool.write round-trips through the bridge client',

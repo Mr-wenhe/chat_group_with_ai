@@ -97,7 +97,7 @@ void main() {
         character: task.character,
         skills: const [],
         userRequest: task.request,
-        autoApproveWriteTools: true,
+        approved: true,
       );
 
       expect(result.status, AgentRuntimeStatus.completed,

@@ -2,29 +2,29 @@ import 'package:flutter/material.dart';
 
 /// 聊天页顶部的紧凑控制按钮。
 ///
-/// 群聊显示“自动发言”和“自治执行”两个 36×36 按钮；私聊只显示自治执行。
+/// 群聊显示“自动发言”和“工作模式”两个 36×36 按钮；私聊只显示工作模式。
 /// 状态说明放在 Tooltip 中，避免两条全宽状态栏挤占消息空间。
 class CompactConversationControls extends StatelessWidget {
   const CompactConversationControls({
     super.key,
     required this.showAutoChat,
     required this.autoChatEnabled,
-    required this.autonomousEnabled,
+    required this.workModeEnabled,
     required this.autoChatAvailable,
     required this.autoChatTooltip,
-    required this.autonomousTooltip,
+    required this.workModeTooltip,
     required this.onAutoChatChanged,
-    required this.onAutonomousChanged,
+    required this.onWorkModeChanged,
   });
 
   final bool showAutoChat;
   final bool autoChatEnabled;
-  final bool autonomousEnabled;
+  final bool workModeEnabled;
   final bool autoChatAvailable;
   final String autoChatTooltip;
-  final String autonomousTooltip;
+  final String workModeTooltip;
   final ValueChanged<bool> onAutoChatChanged;
-  final ValueChanged<bool> onAutonomousChanged;
+  final ValueChanged<bool> onWorkModeChanged;
 
   @override
   Widget build(BuildContext context) {
@@ -58,14 +58,14 @@ class CompactConversationControls extends StatelessWidget {
                   ),
                 if (showAutoChat) const SizedBox(width: 2),
                 _toggle(
-                  key: const Key('autonomy-toggle'),
-                  tooltip: autonomousTooltip,
-                  enabled: autonomousEnabled,
+                  key: const Key('work-mode-toggle'),
+                  tooltip: workModeTooltip,
+                  enabled: workModeEnabled,
                   available: true,
-                  icon: autonomousEnabled
-                      ? Icons.engineering_rounded
-                      : Icons.engineering_outlined,
-                  onPressed: () => onAutonomousChanged(!autonomousEnabled),
+                  icon: workModeEnabled
+                      ? Icons.work_rounded
+                      : Icons.work_outline_rounded,
+                  onPressed: () => onWorkModeChanged(!workModeEnabled),
                   cs: cs,
                 ),
               ],

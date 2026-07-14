@@ -32,13 +32,14 @@ class AgentTaskAdapter extends TypeAdapter<AgentTask> {
       pendingToolRequestJson: fields[11] == null ? '' : fields[11] as String,
       updatedAt: fields[12] as DateTime?,
       lastError: fields[13] == null ? '' : fields[13] as String,
+      workModeTask: fields[14] == null ? false : fields[14] as bool,
     );
   }
 
   @override
   void write(BinaryWriter writer, AgentTask obj) {
     writer
-      ..writeByte(14)
+      ..writeByte(15)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -66,7 +67,9 @@ class AgentTaskAdapter extends TypeAdapter<AgentTask> {
       ..writeByte(12)
       ..write(obj.updatedAt)
       ..writeByte(13)
-      ..write(obj.lastError);
+      ..write(obj.lastError)
+      ..writeByte(14)
+      ..write(obj.workModeTask);
   }
 
   @override

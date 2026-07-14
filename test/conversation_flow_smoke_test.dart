@@ -2,9 +2,9 @@ import 'dart:math';
 
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
-import 'package:chat_group/features/chat_group/agentic_reply_utils.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 AICharacter _character(String id, String name, String role) => AICharacter(
@@ -47,13 +47,11 @@ void main() {
     );
     expect(intents.map((item) => item.speakerId), contains('dev'));
 
-    final executor = selectAgenticCharactersForRound(
-      isDirectChat: false,
-      isExplicitAgenticTask: true,
-      candidates: [developer, tester],
+    final executor = WorkModePolicy.selectExecutor(
+      characters: [developer, tester],
       mentionedIds: user.mentionedAiIds,
     );
-    expect(executor.map((item) => item.id), ['dev']);
+    expect(executor?.id, 'dev');
   });
 
   test('私聊操作一次：只有目标角色回复且携带跨聊天记忆', () {

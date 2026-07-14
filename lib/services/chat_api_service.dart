@@ -33,6 +33,7 @@ class ChatApiService {
     int maxTokens = 1024,
     Duration? receiveTimeout,
     int maxRetries = RetryHandler.defaultMaxRetries,
+    CancelToken? cancelToken,
   }) async {
     final result = await RetryHandler.executeWithRetry<Map<String, dynamic>>(
       operation: (attempt) => _sendChatMessageOnce(
@@ -44,6 +45,7 @@ class ChatApiService {
         temperature: attempt.temperatureFor(temperature),
         maxTokens: maxTokens,
         receiveTimeout: receiveTimeout,
+        cancelToken: cancelToken,
       ),
       shouldRetryResult: RetryHandler.isTransientResult,
       sleep: _retrySleep,
@@ -61,6 +63,7 @@ class ChatApiService {
     required double temperature,
     required int maxTokens,
     Duration? receiveTimeout,
+    CancelToken? cancelToken,
   }) async {
     final baseUrl = provider == ApiProvider.custom
         ? (customBaseUrl ?? '').replaceAll(RegExp(r'/*$'), '')
@@ -96,6 +99,7 @@ class ChatApiService {
           receiveTimeout: receiveTimeout,
           validateStatus: (s) => s != null && s < 500,
         ),
+        cancelToken: cancelToken,
       );
 
       if (response.statusCode == 200) {
@@ -122,7 +126,9 @@ class ChatApiService {
         };
       }
     } on DioException catch (e) {
-      if (e.type == DioExceptionType.connectionTimeout ||
+      if (CancelToken.isCancel(e)) {
+        return {'success': false, 'message': '请求已取消'};
+      } else if (e.type == DioExceptionType.connectionTimeout ||
           e.type == DioExceptionType.sendTimeout ||
           e.type == DioExceptionType.receiveTimeout) {
         return {'success': false, 'message': '连接超时'};
@@ -157,6 +163,7 @@ class ChatApiService {
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
     int maxRetries = RetryHandler.defaultMaxRetries,
+    CancelToken? cancelToken,
   }) async {
     final result = await RetryHandler.executeWithRetry<Map<String, dynamic>>(
       operation: (attempt) {
@@ -171,6 +178,7 @@ class ChatApiService {
             temperature: nextTemperature,
             maxTokens: maxTokens,
             receiveTimeout: receiveTimeout,
+            cancelToken: cancelToken,
           );
         }
         return _collectStreamedOnce(
@@ -182,6 +190,7 @@ class ChatApiService {
           temperature: nextTemperature,
           maxTokens: maxTokens,
           receiveTimeout: receiveTimeout,
+          cancelToken: cancelToken,
         );
       },
       shouldRetryResult: RetryHandler.isTransientResult,
@@ -216,6 +225,7 @@ class ChatApiService {
     required double temperature,
     required int maxTokens,
     required Duration receiveTimeout,
+    CancelToken? cancelToken,
   }) async {
     String content = '';
     int? promptTokens;
@@ -231,6 +241,7 @@ class ChatApiService {
         temperature: temperature,
         maxTokens: maxTokens,
         receiveTimeout: receiveTimeout,
+        cancelToken: cancelToken,
       )) {
         switch (event.type) {
           case ChatStreamEventType.token:
@@ -280,6 +291,7 @@ class ChatApiService {
     double temperature = 0.85,
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
+    CancelToken? cancelToken,
   }) async* {
     // 与 sendChatMessage 保持一致的 URL / 模型解析
     final baseUrl = provider == ApiProvider.custom
@@ -326,6 +338,7 @@ class ChatApiService {
           validateStatus: (s) => s != null && s < 500,
           receiveTimeout: receiveTimeout,
         ),
+        cancelToken: cancelToken,
       );
 
       if (response.statusCode != 200) {
@@ -382,6 +395,7 @@ class ChatApiService {
 
   /// 把 DioException 转换为统一的人类可读错误信息。
   String _dioErrorMessage(DioException e) {
+    if (CancelToken.isCancel(e)) return '请求已取消';
     if (e.type == DioExceptionType.connectionTimeout ||
         e.type == DioExceptionType.sendTimeout ||
         e.type == DioExceptionType.receiveTimeout) {

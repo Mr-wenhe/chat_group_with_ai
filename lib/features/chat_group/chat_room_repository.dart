@@ -29,6 +29,10 @@ class ChatRoomRepository {
     return db.messageBox.put(message.id, message);
   }
 
+  Future<void> deleteMessage(String messageId) {
+    return db.deleteMessage(messageId, groupId: conversationId);
+  }
+
   Future<void> persistReplyUsage(AICharacter character) {
     return db.aiCharacterBox.put(character.id, character);
   }

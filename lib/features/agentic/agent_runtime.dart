@@ -46,6 +46,7 @@ typedef AgentContextSummaryHandler = Future<void> Function(
   AICharacter character,
   ContextSummary summary,
 );
+typedef AgentToolApprovalPolicy = bool Function(AgentToolName tool);
 
 enum AgentRuntimeStatus {
   completed,
@@ -92,7 +93,9 @@ class BridgeErrorKind {
 }
 
 class AgentRuntime {
-  static const int maxToolSteps = 6;
+  /// 12 步可容纳“读取 → 修改 → 验证”等逐次审批流水线，同时继续限制模型/工具
+  /// 循环。每次模型请求另有独立超时，因此这里是步骤预算，不是无限重试次数。
+  static const int maxToolSteps = 12;
   static const Duration completionTimeout = Duration(seconds: 120);
 
   final AgentCompletion complete;
@@ -107,6 +110,9 @@ class AgentRuntime {
   final ContextWindowManager? contextWindowManager;
   final AgentContextSummaryHandler? onContextSummary;
   final bool contextIsDirectChat;
+  final AgentToolApprovalPolicy approvalPolicy;
+  final Set<ToolPermission>? grantedPermissions;
+  final bool Function()? shouldCancel;
 
   const AgentRuntime({
     required this.complete,
@@ -121,6 +127,9 @@ class AgentRuntime {
     this.contextWindowManager,
     this.onContextSummary,
     this.contextIsDirectChat = false,
+    this.approvalPolicy = AgentRuntime.requiresApproval,
+    this.grantedPermissions,
+    this.shouldCancel,
   });
 
   /// 清洗可能泄露到聊天文本中的内部工具调用协议标记。
@@ -606,18 +615,23 @@ class AgentRuntime {
     required List<CharacterSkill> skills,
     required String userRequest,
     bool approved = false,
-    bool autoApproveWriteTools = false,
     List<Map<String, dynamic>>? conversationHistory,
     bool forceSkillCreation = false,
     List<ToolRequest> priorExecutedRequests = const [],
+    String workModeContext = '',
   }) async {
+    if (shouldCancel?.call() == true) {
+      return const AgentRuntimeResult(
+        status: AgentRuntimeStatus.failed,
+        message: '工作模式已关闭，任务已安全中止。',
+      );
+    }
     if (forceSkillCreation) {
       return _handleToolRequest(
         character: character,
         request: _skillCreationRequest(character, userRequest),
         userRequest: userRequest,
         approved: approved,
-        autoApproveWriteTools: autoApproveWriteTools,
         remainingSteps: maxToolSteps,
         executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
@@ -632,7 +646,6 @@ class AgentRuntime {
         request: localRequest,
         userRequest: userRequest,
         approved: approved,
-        autoApproveWriteTools: autoApproveWriteTools,
         remainingSteps: maxToolSteps,
         executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
@@ -643,6 +656,7 @@ class AgentRuntime {
       characterName: character.name,
       skills: skills,
       userRequest: userRequest,
+      workModeContext: workModeContext,
     );
     late final Map<String, dynamic> first;
     try {
@@ -663,7 +677,6 @@ class AgentRuntime {
           request: fallbackRequest,
           userRequest: userRequest,
           approved: approved,
-          autoApproveWriteTools: autoApproveWriteTools,
           remainingSteps: maxToolSteps,
           executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
@@ -680,6 +693,12 @@ class AgentRuntime {
         message: '[${character.name} 工具任务失败: $e]',
       );
     }
+    if (shouldCancel?.call() == true) {
+      return const AgentRuntimeResult(
+        status: AgentRuntimeStatus.failed,
+        message: '工作模式已关闭，任务已安全中止。',
+      );
+    }
     if (first['success'] != true) {
       final localRequest =
           _safeLocalFallbackFileRequest(character, userRequest);
@@ -689,7 +708,6 @@ class AgentRuntime {
           request: localRequest,
           userRequest: userRequest,
           approved: approved,
-          autoApproveWriteTools: autoApproveWriteTools,
           remainingSteps: maxToolSteps,
           executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
@@ -709,7 +727,6 @@ class AgentRuntime {
         request: request,
         userRequest: userRequest,
         approved: approved,
-        autoApproveWriteTools: autoApproveWriteTools,
         remainingSteps: maxToolSteps,
         executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
@@ -724,7 +741,6 @@ class AgentRuntime {
         request: recoveredFileRequest,
         userRequest: userRequest,
         approved: approved,
-        autoApproveWriteTools: autoApproveWriteTools,
         remainingSteps: maxToolSteps,
         executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
@@ -745,7 +761,6 @@ class AgentRuntime {
           request: looseRequest,
           userRequest: userRequest,
           approved: approved,
-          autoApproveWriteTools: autoApproveWriteTools,
           remainingSteps: maxToolSteps,
           executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
@@ -767,7 +782,6 @@ class AgentRuntime {
           request: repromptResult,
           userRequest: userRequest,
           approved: approved,
-          autoApproveWriteTools: autoApproveWriteTools,
           remainingSteps: maxToolSteps,
           executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
@@ -785,7 +799,6 @@ class AgentRuntime {
           request: fallbackRequest,
           userRequest: userRequest,
           approved: approved,
-          autoApproveWriteTools: autoApproveWriteTools,
           remainingSteps: maxToolSteps,
           executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
@@ -1045,11 +1058,18 @@ class AgentRuntime {
     required ToolRequest request,
     required String userRequest,
     required bool approved,
-    required bool autoApproveWriteTools,
     required int remainingSteps,
     required List<ToolRequest> executedRequests,
     List<Map<String, dynamic>>? conversationHistory,
   }) async {
+    if (shouldCancel?.call() == true) {
+      return AgentRuntimeResult(
+        status: AgentRuntimeStatus.failed,
+        pendingToolRequest: request,
+        executedToolRequests: executedRequests,
+        message: '工作模式已关闭，任务已安全中止。',
+      );
+    }
     if (remainingSteps <= 0) {
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
@@ -1060,7 +1080,7 @@ class AgentRuntime {
     }
 
     final permission = permissionForTool(request.tool);
-    if (!character.toolPermissions.contains(permission)) {
+    if (!_hasPermission(character, permission)) {
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.permissionMissing,
         pendingToolRequest: request,
@@ -1070,9 +1090,7 @@ class AgentRuntime {
       );
     }
 
-    final autoApprovedWrite =
-        autoApproveWriteTools && request.tool == AgentToolName.workspacePatch;
-    if (requiresApproval(request.tool) && !approved && !autoApprovedWrite) {
+    if (approvalPolicy(request.tool) && !approved) {
       await _reportProgress(AgentRuntimeProgress(
         stage: AgentRuntimeProgressStage.waitingForApproval,
         executedRequests: executedRequests,
@@ -1110,6 +1128,15 @@ class AgentRuntime {
       stage: AgentRuntimeProgressStage.toolCompleted,
       executedRequests: nextExecutedRequests,
     ));
+    if (shouldCancel?.call() == true) {
+      return AgentRuntimeResult(
+        status: AgentRuntimeStatus.failed,
+        pendingToolRequest: request,
+        toolResult: toolResult,
+        executedToolRequests: nextExecutedRequests,
+        message: '工作模式已关闭，任务已在当前工具完成后安全中止。',
+      );
+    }
     return _continueAfterToolResult(
       character: character,
       request: request,
@@ -1117,7 +1144,6 @@ class AgentRuntime {
       toolResult: toolResult,
       remainingSteps: remainingSteps - 1,
       executedRequests: nextExecutedRequests,
-      autoApproveWriteTools: autoApproveWriteTools,
       conversationHistory: conversationHistory,
     );
   }
@@ -1139,9 +1165,17 @@ class AgentRuntime {
     required Map<String, dynamic> toolResult,
     required int remainingSteps,
     required List<ToolRequest> executedRequests,
-    required bool autoApproveWriteTools,
     List<Map<String, dynamic>>? conversationHistory,
   }) async {
+    if (shouldCancel?.call() == true) {
+      return AgentRuntimeResult(
+        status: AgentRuntimeStatus.failed,
+        pendingToolRequest: request,
+        toolResult: toolResult,
+        executedToolRequests: executedRequests,
+        message: '工作模式已关闭，任务已安全中止。',
+      );
+    }
     if (request.tool == AgentToolName.workspacePatch &&
         toolResult['ok'] == true &&
         !_requiresPostWriteTool(userRequest)) {
@@ -1182,6 +1216,16 @@ class AgentRuntime {
         executedToolRequests: executedRequests,
         message:
             '[${character.name} 工具任务失败: 工具已返回结果，但模型在 ${completionTimeout.inSeconds} 秒内没有给出下一步或最终答复。请重试，或检查模型/网络配置。]',
+      );
+    }
+
+    if (shouldCancel?.call() == true) {
+      return AgentRuntimeResult(
+        status: AgentRuntimeStatus.failed,
+        pendingToolRequest: request,
+        toolResult: toolResult,
+        executedToolRequests: executedRequests,
+        message: '工作模式已关闭，任务已安全中止。',
       );
     }
 
@@ -1237,7 +1281,6 @@ class AgentRuntime {
         request: nextRequest,
         userRequest: userRequest,
         approved: false,
-        autoApproveWriteTools: autoApproveWriteTools,
         remainingSteps: remainingSteps,
         executedRequests: executedRequests,
         conversationHistory: conversationHistory,
@@ -1289,7 +1332,7 @@ class AgentRuntime {
     List<Map<String, dynamic>>? conversationHistory,
   }) async {
     final permission = permissionForTool(request.tool);
-    if (!character.toolPermissions.contains(permission)) {
+    if (!_hasPermission(character, permission)) {
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.permissionMissing,
         pendingToolRequest: request,
@@ -1304,12 +1347,36 @@ class AgentRuntime {
       request: request,
       userRequest: userRequest,
       approved: true,
-      autoApproveWriteTools: false,
       remainingSteps: maxToolSteps,
       executedRequests: priorExecutedRequests,
       conversationHistory: conversationHistory,
     );
   }
+
+  /// Continues planning after the user explicitly declines one sensitive
+  /// operation. The rejected request is not executed and does not count as a
+  /// completed operation, but the model receives a structured skip result so
+  /// it can finish any safe remaining work.
+  Future<AgentRuntimeResult> skipRejectedTool({
+    required AICharacter character,
+    required ToolRequest request,
+    required String userRequest,
+    List<ToolRequest> priorExecutedRequests = const [],
+    List<Map<String, dynamic>>? conversationHistory,
+  }) =>
+      _continueAfterToolResult(
+        character: character,
+        request: request,
+        userRequest: userRequest,
+        toolResult: {
+          'ok': false,
+          'skipped': true,
+          'reason': '用户拒绝了该敏感操作',
+        },
+        remainingSteps: maxToolSteps - 1,
+        executedRequests: priorExecutedRequests,
+        conversationHistory: conversationHistory,
+      );
 
   static ToolPermission permissionForTool(AgentToolName tool) {
     return switch (tool) {
@@ -1322,6 +1389,10 @@ class AgentRuntime {
       AgentToolName.skillDownload => ToolPermission.skillDownload,
     };
   }
+
+  bool _hasPermission(AICharacter character, ToolPermission permission) =>
+      grantedPermissions?.contains(permission) ??
+      character.toolPermissions.contains(permission);
 
   static bool requiresApproval(AgentToolName tool) {
     return switch (tool) {
@@ -1347,7 +1418,7 @@ class AgentRuntime {
       AgentToolName.workspacePatch => await _executeWorkspacePatch(
           request,
           allowCommandValidation:
-              character.toolPermissions.contains(ToolPermission.commandRun),
+              _hasPermission(character, ToolPermission.commandRun),
         ),
       AgentToolName.commandRun => await _workspaceFileTool
           .runCommand(request.args['command'] as String? ?? ''),
@@ -1915,7 +1986,7 @@ int main() {
 ## Agentic 文件生成流程
 
 1. 用户在私聊中提出“生成文件/写文档/输出 HTML 或 MD”等自然语言请求。
-2. `AgenticTaskClassifier` 判定需要进入 agentic 链路。
+2. 用户显式开启工作模式后进入工具链路。
 3. `AgentRuntime` 生成或解析工具请求，调用 `workspace.write` 写入工程目录。
 4. 写入后读回内容生成预览，并在聊天消息中附加文件卡片。
 5. 用户点击文件卡片即可通过系统默认应用打开生成产物。
