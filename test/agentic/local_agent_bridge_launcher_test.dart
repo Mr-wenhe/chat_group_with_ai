@@ -29,7 +29,8 @@ void main() {
     expect(launcher.isRunning, isTrue);
   });
 
-  test('registerWorkspace routes two conversations to separate workspaces '
+  test(
+      'registerWorkspace routes two conversations to separate workspaces '
       'without restarting the server', () async {
     final root = await Directory.systemTemp.createTemp('bridge_switch_');
     final first = await Directory('${root.path}/旧 工作区').create();
@@ -45,8 +46,7 @@ void main() {
       workspacePath: first.path,
     );
     final firstClient = LocalAgentBridgeClient();
-    expect((await firstClient.getHealth())['workspaces'],
-        containsAll(['', 'conv-a']));
+    expect((await firstClient.getHealth())['ok'], isTrue);
     await WorkspaceFileTool(firstClient, conversationId: 'conv-a')
         .write('before.txt', 'first');
 

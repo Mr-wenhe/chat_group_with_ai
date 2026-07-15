@@ -924,8 +924,9 @@ class _ApiConfigCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final pColor = providerColor(config.provider);
     final label = providerLabel(config.provider);
-    final maskedKey =
-        config.apiKey.isNotEmpty ? 'API Key 已保存 ••••••••' : '未设置 API Key';
+    final maskedKey = config.hasCredential || config.apiKey.isNotEmpty
+        ? 'API Key 已保存 ••••••••'
+        : '未设置 API Key';
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),

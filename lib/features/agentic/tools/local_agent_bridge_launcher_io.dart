@@ -26,7 +26,9 @@
 // 使用 _web stub，不引入本文件（及 dart:io），保证 Web 编译安全。
 
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
 
 import 'package:flutter/foundation.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_config.dart';
@@ -36,6 +38,7 @@ class LocalAgentBridgeLauncher {
   /// 当前进程内持有的桥接服务器；为 null 表示未运行。
   static RunningBridgeServer? _server;
   static String? _workspacePath;
+  static String? _sessionToken;
   final int preferredPort;
 
   LocalAgentBridgeLauncher({this.preferredPort = kLocalAgentBridgePort});
@@ -71,30 +74,32 @@ class LocalAgentBridgeLauncher {
     }
 
     try {
+      _sessionToken = _newSessionToken();
       // 进程内直接 bind 端口启动，无需外部 dart 子进程或源码文件。
       try {
         _server = await startBridgeServer(
           workspace: workspaceDir,
+          token: _sessionToken!,
           port: preferredPort,
         );
       } on SocketException {
         if (preferredPort == 0) rethrow;
         // A stale bridge can retain the fixed port after an app update. Bind a
         // fresh loopback port and publish it to new in-process clients.
-        _server = await startBridgeServer(workspace: workspaceDir, port: 0);
+        _server = await startBridgeServer(
+          workspace: workspaceDir,
+          token: _sessionToken!,
+          port: 0,
+        );
       }
       _workspacePath = workspaceDir.path;
-      LocalAgentBridgeEndpoint.usePort(_server!.port);
-      debugPrint(
-        '[桥接] 本地 agent 桥接服务已启动：'
-        'http://127.0.0.1:${_server!.port} workspace=$_workspacePath',
-      );
-    } catch (e) {
-      // 启动失败不应 crash App，仅打印提示；旧方案依赖的 bin 脚本在 release 下
+      LocalAgentBridgeEndpoint.useSession(_server!.port, _sessionToken!);
+    } catch (_) {
+      // 启动失败不应 crash App；旧方案依赖的 bin 脚本在 release 下
       // 本就不存在，此处改为进程内启动后，失败通常是端口被占用等偶发情况。
-      debugPrint('[桥接] 启动本地 agent 桥接服务失败：$e');
       _server = null;
       _workspacePath = null;
+      _sessionToken = null;
       LocalAgentBridgeEndpoint.reset();
       rethrow;
     }
@@ -118,11 +123,9 @@ class LocalAgentBridgeLauncher {
     if (_server == null) {
       await start(workspace: workspacePath);
     }
-    _server?.registerWorkspace(conversationId, Directory(workspacePath).absolute);
-    debugPrint(
-      '[桥接] 已注册对话 workspace：conversationId=$conversationId '
-      'path=${Directory(workspacePath).absolute.path}',
-    );
+    _server?.registerWorkspace(
+        conversationId, Directory(workspacePath).absolute);
+    if (kDebugMode) debugPrint('[桥接] 已注册对话工作区');
   }
 
   /// 解析默认工作区目录：从当前进程工作目录向上逐级查找最近的含 `.git` 的 git 仓库根目录。
@@ -203,6 +206,7 @@ class LocalAgentBridgeLauncher {
     if (server == null) return;
     _server = null;
     _workspacePath = null;
+    _sessionToken = null;
     LocalAgentBridgeEndpoint.reset();
     try {
       // force: true 立即关闭监听并断开已建立的连接。
@@ -214,6 +218,12 @@ class LocalAgentBridgeLauncher {
 
   /// 当前桥接服务是否正在运行。
   bool get isRunning => _server != null;
+
+  String _newSessionToken() {
+    final random = Random.secure();
+    return base64UrlEncode(List<int>.generate(32, (_) => random.nextInt(256)))
+        .replaceAll('=', '');
+  }
 
   bool _samePath(String? left, String right) {
     if (left == null) return false;

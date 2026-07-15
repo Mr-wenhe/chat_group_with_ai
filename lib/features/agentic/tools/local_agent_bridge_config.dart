@@ -19,8 +19,10 @@ const String kLocalAgentBridgeDefaultBaseUrl =
 /// connect to the correct workspace instead of talking to the stale process.
 class LocalAgentBridgeEndpoint {
   static String _baseUrl = kLocalAgentBridgeDefaultBaseUrl;
+  static String? _token;
 
   static String get currentBaseUrl => _baseUrl;
+  static String? get currentToken => _token;
 
   static void usePort(int port) {
     if (port < 1 || port > 65535) {
@@ -29,7 +31,16 @@ class LocalAgentBridgeEndpoint {
     _baseUrl = 'http://127.0.0.1:$port';
   }
 
+  static void useSession(int port, String token) {
+    if (token.length < 32) {
+      throw ArgumentError.value(token, 'token', 'Bridge token is too short');
+    }
+    usePort(port);
+    _token = token;
+  }
+
   static void reset() {
     _baseUrl = kLocalAgentBridgeDefaultBaseUrl;
+    _token = null;
   }
 }

@@ -9,6 +9,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
+import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/attachment_data_uri.dart';
@@ -85,11 +86,9 @@ class DatabaseService {
     if (kIsWeb) {
       // Web 端由 Hive 使用 IndexedDB，不存在应用支持目录。
       await Hive.initFlutter();
-      debugPrint('[DB] Hive storage: IndexedDB (mode: web)');
     } else {
       final dir = await _getDataDir();
       _dataDir = dir;
-      debugPrint('[DB] Hive data dir: ${dir.path} (mode: $_storageModeLabel)');
       await Hive.initFlutter(dir.path);
     }
     Hive.registerAdapter(AICharacterAdapter());
@@ -119,24 +118,52 @@ class DatabaseService {
     await _openBoxSafely<AgentTask>(agentTaskBoxName);
     await _openBoxSafely<WorkModeWorkspace>(workModeWorkspaceBoxName);
     await _openBoxSafely<dynamic>(_appSettingsBox);
-    await _hydrateApiKeysFromSecureStorage();
+    await _migrateApiConfigCredentials();
   }
 
-  Future<void> _hydrateApiKeysFromSecureStorage() async {
+  /// Never clears a legacy value until the new secure entry can be read back.
+  /// This updates individual records only; it never recreates or clears a box.
+  Future<void> _migrateApiConfigCredentials() async {
     if (apiConfigBox.isEmpty) return;
-    final secureStorage = SecureStorageService();
-    bool anyChanged = false;
+    final credentials = CredentialRepository();
+    // Web / 无安全存储平台：安全存储不可用，凭据真源只能留在 Hive 明文
+    // legacyApiKey。仅置 hasCredential 标记可用，绝不清理旧值、也不回退写入。
+    final webFallback = !credentials.secureStorageAvailable;
     for (final config in apiConfigBox.values) {
-      if (config.apiKey.isNotEmpty) continue;
-      final key = await secureStorage.getApiConfigKey(config.id);
-      if (key != null && key.isNotEmpty) {
-        config.apiKey = key;
+      if (webFallback) {
+        if (config.legacyApiKey.isNotEmpty && !config.hasCredential) {
+          config.hasCredential = true;
+          await apiConfigBox.put(config.id, config);
+        }
+        continue;
+      }
+      final existing = await credentials.read(config.id);
+      if (existing.isAvailable) {
+        if (config.legacyApiKey.isNotEmpty ||
+            !config.hasCredential ||
+            config.credentialId != credentials.credentialIdFor(config.id)) {
+          config.legacyApiKey = '';
+          config.hasCredential = true;
+          config.credentialId = credentials.credentialIdFor(config.id);
+          await apiConfigBox.put(config.id, config);
+        }
+        continue;
+      }
+      if (config.legacyApiKey.isNotEmpty) {
+        final saved = await credentials.save(config.id, config.legacyApiKey);
+        if (!saved.isSuccess) continue;
+        config.legacyApiKey = '';
+        config.hasCredential = true;
+        config.credentialId = credentials.credentialIdFor(config.id);
         await apiConfigBox.put(config.id, config);
-        anyChanged = true;
       }
     }
-    if (anyChanged) {
-      debugPrint('[DB] Hydrated API keys from secure storage');
+    for (final character in aiCharacterBox.values) {
+      final config = apiConfigBox.get(character.apiConfigId);
+      if (config?.hasCredential == true && character.apiKey.isNotEmpty) {
+        character.apiKey = '';
+        await aiCharacterBox.put(character.id, character);
+      }
     }
   }
 
@@ -163,8 +190,6 @@ class DatabaseService {
       await Hive.openBox<T>(name);
       return;
     } on Object catch (error, stackTrace) {
-      debugPrint('[DB] 打开 box "$name" 失败，保留原数据库文件：$error');
-
       // 只做不影响原文件的副本，便于用户在界面提示后进行人工备份。
       // 副本失败也不能改变“原文件不动、初始化失败”的安全策略。
       final dir = _dataDir;
@@ -176,9 +201,8 @@ class DatabaseService {
           );
           try {
             await file.copy(backup.path);
-            debugPrint('[DB] 已保留疑似损坏的 box 副本：${backup.path}');
-          } on Object catch (copyError) {
-            debugPrint('[DB] 无法创建 box 副本 "$name"：$copyError');
+          } on Object {
+            // 副本失败不影响原数据库文件和后续保护性报错。
           }
         }
       }
@@ -204,7 +228,6 @@ class DatabaseService {
       final target = File('${userDataDir.path}/$fileName');
       if (await target.exists()) continue;
       await target.create(recursive: true);
-      debugPrint('[DB] Created empty release hive template: ${target.path}');
     }
   }
 
@@ -216,29 +239,55 @@ class DatabaseService {
       if (files is List) {
         return files.whereType<String>().toList();
       }
-    } on FlutterError catch (e) {
-      debugPrint(
-          '[DB] Missing release template manifest $_releaseTemplateManifestAsset: $e');
-    } on FormatException catch (e) {
-      debugPrint(
-          '[DB] Invalid release template manifest $_releaseTemplateManifestAsset: $e');
+    } on FlutterError {
+      // Fall back to the built-in file list when the optional asset is absent.
+    } on FormatException {
+      // Fall back to the built-in file list when the manifest is invalid.
     }
     return _releaseHiveFiles;
   }
 
   Future<void> saveApiConfig(ApiConfig config) async {
+    final existing = apiConfigBox.get(config.id);
+    if (config.legacyApiKey.isNotEmpty) {
+      final credentials = CredentialRepository();
+      if (!credentials.secureStorageAvailable) {
+        // Web / 无安全存储平台：无法写入安全存储，保留 Hive 明文 legacyApiKey
+        // 作为真源，仅置 hasCredential 标记可用，不抛错、不清理旧值。
+        config.hasCredential = true;
+      } else {
+        final saved = await credentials.save(config.id, config.legacyApiKey);
+        if (!saved.isSuccess) {
+          throw StateError('凭据不可用，未保存配置');
+        }
+        config.legacyApiKey = '';
+        config.hasCredential = true;
+        config.credentialId = credentials.credentialIdFor(config.id);
+      }
+    } else if (existing?.hasCredential == true) {
+      // 编辑元数据时不要求重新输入密钥；保留已验证的安全存储映射。
+      config.hasCredential = true;
+      config.credentialId = existing!.credentialId;
+    }
     await apiConfigBox.put(config.id, config);
   }
 
   Future<void> deleteApiConfig(String id) async {
+    final credentials = CredentialRepository();
+    // 无安全存储平台（Web）：没有安全 key 可删，直接清 Hive 即可，不抛错。
+    if (credentials.secureStorageAvailable) {
+      final deleted = await credentials.delete(id);
+      if (!deleted.isSuccess) {
+        throw StateError('凭据不可用，未删除配置');
+      }
+    }
     await apiConfigBox.delete(id);
-    // 同步删除安全存储里的对应凭证，避免留下孤儿 key（删配置但 key 残留）。
-    try {
-      await SecureStorageService().deleteApiConfigKey(id);
-    } on Object catch (e) {
-      // 安全存储可能不可用（如 macOS debug 无 Keychain 权限），静默忽略，
-      // 不能让删除配置这一主流程崩溃。
-      debugPrint('[DB] 删除 API 配置凭证失败（已忽略）：$e');
+    for (final character in aiCharacterBox.values) {
+      if (character.apiConfigId == id) {
+        character.apiConfigId = '';
+        character.apiKey = '';
+        await aiCharacterBox.put(character.id, character);
+      }
     }
   }
 
@@ -285,14 +334,17 @@ class DatabaseService {
   Future<void> _clearSecureCredentials(
     List<String> apiConfigIds,
   ) async {
+    final credentials = CredentialRepository();
+    for (final id in apiConfigIds) {
+      // This is reached only from the user's explicit full-data reset. Each
+      // repository delete removes both the new and transitional key prefixes.
+      await credentials.delete(id);
+    }
+    CredentialRepository.clearCache();
     try {
-      final secureStorage = SecureStorageService();
-      for (final id in apiConfigIds) {
-        await secureStorage.deleteApiConfigKey(id);
-      }
-      await secureStorage.deleteWeComAppConfig();
-    } on Object catch (e) {
-      debugPrint('[DB] 清理安全存储凭证失败（已忽略）：$e');
+      await SecureStorageService().deleteWeComAppConfig();
+    } on Object {
+      // The explicit data-reset flow must not disclose platform error details.
     }
   }
 
@@ -562,8 +614,7 @@ class DatabaseService {
       controller = VideoPlayerController.file(file);
       await controller.initialize();
       return controller.value.duration.inMilliseconds;
-    } catch (e) {
-      debugPrint('[DB] 探测视频时长失败：$e');
+    } catch (_) {
       return null;
     } finally {
       await controller?.dispose();
@@ -639,9 +690,6 @@ class DatabaseService {
     };
     return fileMap[ext] ?? 'application/octet-stream';
   }
-
-  String get _storageModeLabel =>
-      kReleaseMode ? 'release-user-dir' : 'project-data';
 
   static const String _messageIdsByGroupKey = 'message_ids_by_group';
 

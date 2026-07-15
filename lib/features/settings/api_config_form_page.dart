@@ -35,7 +35,8 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     final c = widget.config;
     _nameController = TextEditingController(text: c?.name ?? '');
     _modelController = TextEditingController(text: c?.modelName ?? '');
-    _apiKeyController = TextEditingController(text: c?.apiKey ?? '');
+    // 密钥不会从持久化模型回填到编辑框；留空代表保留现有安全凭据。
+    _apiKeyController = TextEditingController();
     _baseUrlController = TextEditingController(text: c?.customBaseUrl ?? '');
     _selectedProvider = _parseProvider(c?.provider);
     _selectedModel =
@@ -180,7 +181,12 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                 TextFormField(
                   controller: _apiKeyController,
                   decoration: appInputDecoration(
-                          'API Key *', '输入你的 API Key', Icons.key_outlined, cs)
+                          widget.config == null
+                              ? 'API Key *'
+                              : 'API Key（留空保持当前值）',
+                          '输入新的 API Key',
+                          Icons.key_outlined,
+                          cs)
                       .copyWith(
                     suffixIcon: IconButton(
                       icon: Icon(
@@ -193,7 +199,12 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                     ),
                   ),
                   obscureText: _obscureApiKey,
-                  validator: (v) => v?.isEmpty ?? true ? '请输入 API Key' : null,
+                  validator: (v) {
+                    if (widget.config != null && (v?.trim().isEmpty ?? true)) {
+                      return null;
+                    }
+                    return v?.trim().isEmpty ?? true ? '请输入 API Key' : null;
+                  },
                 ),
               ],
             ),
@@ -226,12 +237,19 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
 
   Future<void> _testCurrentConfig() async {
     if (!_formKey.currentState!.validate() || _isTesting) return;
+    final apiKey = _apiKeyController.text.trim().isNotEmpty
+        ? _apiKeyController.text.trim()
+        : widget.config?.apiKey ?? '';
+    if (apiKey.isEmpty) {
+      AppToast.show(context, '请先输入 API Key', icon: Icons.key_outlined);
+      return;
+    }
     setState(() => _isTesting = true);
     final provider = _selectedProvider;
     final model =
         _selectedModel.isEmpty ? _modelController.text.trim() : _selectedModel;
     final result = await _apiService.testApiKey(
-      apiKey: _apiKeyController.text.trim(),
+      apiKey: apiKey,
       provider: provider,
       customBaseUrl: _baseUrlController.text.trim(),
       model: model,

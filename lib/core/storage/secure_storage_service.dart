@@ -13,10 +13,10 @@ class SecureStorageService {
   static const String _apiKeyPrefix = 'api_key_';
   static const String _apiConfigKeyPrefix = 'api_config_key_';
 
-  /// Raw operations are intentionally package-private to the storage layer.
-  /// NOTE: [CredentialRepository] 是计划中的统一 LLM API key 边界，目前尚未被
-  /// 业务代码接线（见其类上 TODO），实际读写仍由本类承接。迁移完成前请勿删除
-  /// 本类的 apiConfig / wecom 方法。
+  /// Raw operations are only used by [CredentialRepository].
+  ///
+  /// Legacy api-config helpers remain during the key-prefix transition; do
+  /// not use them from feature code.
   Future<void> writeRaw(String key, String value) =>
       _storage.write(key: key, value: value);
 

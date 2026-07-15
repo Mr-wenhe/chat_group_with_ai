@@ -17,6 +17,7 @@ import 'package:chat_group/features/agentic/tools/local_agent_bridge_config.dart
 
 /// 最近一次上报的浏览器上下文（由 /browser/update 写入，供 /browser/current-tab 读取）。
 Map<String, dynamic>? _lastBrowserContext;
+const int _maxRequestBytes = 1024 * 1024;
 
 /// 在给定工作区启动本地桥接 HTTP 服务并监听 [port]。
 ///
@@ -46,17 +47,20 @@ class RunningBridgeServer {
 
 Future<RunningBridgeServer> startBridgeServer({
   required Directory workspace,
+  required String token,
   int port = kLocalAgentBridgePort,
 }) async {
+  if (token.length < 32) {
+    throw ArgumentError.value(token, 'token', 'Bridge token is too short');
+  }
   // 以默认空串 key 承载启动时的 workspace，保证未携带 conversationId 的
   // 请求（如单工作区旧调用 / 测试）仍有正确的落盘目录。
   final workspaces = <String, Directory>{'': workspace.absolute};
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
   server.listen((request) async {
     try {
-      await _route(request, workspaces);
-    } catch (e, st) {
-      stderr.writeln('[bridge] $e\n$st');
+      await _route(request, workspaces, token);
+    } catch (_) {
       try {
         await _json(request, {'error': 'internal_error'}, statusCode: 500);
       } catch (_) {}
@@ -68,6 +72,7 @@ Future<RunningBridgeServer> startBridgeServer({
 Future<void> _route(
   HttpRequest request,
   Map<String, Directory> workspaces,
+  String token,
 ) async {
   final origin = request.headers.value('origin');
   if (origin != null && !_isAllowedBrowserOrigin(origin)) {
@@ -84,11 +89,29 @@ Future<void> _route(
     return;
   }
 
-  if (request.uri.path == '/health') {
+  final isHealth = request.uri.path == '/health';
+  if ((isHealth && request.method != 'GET') ||
+      (!isHealth && request.method != 'POST')) {
+    await _json(request, {'error': 'method_not_allowed'}, statusCode: 405);
+    return;
+  }
+  if (request.headers.value(HttpHeaders.authorizationHeader) !=
+      'Bearer $token') {
+    await _json(request, {'error': 'unauthorized'}, statusCode: 401);
+    return;
+  }
+
+  if (isHealth) {
     await _json(request, {
       'ok': true,
-      'workspaces': workspaces.keys.toList(),
+      'session': token.substring(0, 8),
     });
+    return;
+  }
+
+  if (request.headers.contentType?.mimeType != ContentType.json.mimeType ||
+      request.contentLength > _maxRequestBytes) {
+    await _json(request, {'error': 'invalid_request'}, statusCode: 413);
     return;
   }
 
@@ -257,7 +280,8 @@ Future<void> _route(
 /// - 命中已注册 id 直接返回该目录；
 /// - 未携带 / 未命中时回退默认空串 workspace（启动时注册）；
 /// - 极端情况（默认也不存在）回落到任意第一个已注册目录，避免空指针。
-Directory _workspaceFor(Map<String, Directory> workspaces, String? conversationId) {
+Directory _workspaceFor(
+    Map<String, Directory> workspaces, String? conversationId) {
   final id = (conversationId ?? '').trim();
   return workspaces[id] ?? workspaces[''] ?? workspaces.values.first;
 }

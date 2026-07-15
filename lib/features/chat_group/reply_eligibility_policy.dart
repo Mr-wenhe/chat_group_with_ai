@@ -26,7 +26,7 @@ class ReplyEligibilityPolicy {
   ReplyBlockReason? blockReasonFor(AICharacter character) {
     if (!character.isActive) return ReplyBlockReason.inactive;
     final config = resolveApiConfig(character);
-    if (config == null || config.apiKey.isEmpty) {
+    if (config == null || !config.hasCredential) {
       return ReplyBlockReason.noApiConfig;
     }
 

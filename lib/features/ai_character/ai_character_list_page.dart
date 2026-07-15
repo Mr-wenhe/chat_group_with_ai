@@ -514,7 +514,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
   }
 
   /// 批量将全部角色的 API 配置统一为指定配置：
-  /// 对齐 apiConfigId / apiKey / apiProvider / modelName / customBaseUrl。
+  /// 对齐公开配置元数据；API Key 仅由共享配置的凭据仓库持有。
   Future<void> _batchChangeConfig(
       BuildContext context, WidgetRef ref, ApiConfig customConfig) async {
     final cs = Theme.of(context).colorScheme;
@@ -565,7 +565,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
       final newModelName = result.isEmpty ? customConfig.modelName : result;
       for (final c in chars) {
         c.apiConfigId = customConfig.id;
-        c.apiKey = customConfig.apiKey;
+        c.apiKey = '';
         c.apiProvider = customConfig.provider;
         c.modelName = newModelName;
         c.customBaseUrl = customConfig.customBaseUrl;
@@ -650,7 +650,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
       final target = apiConfigs.where((c) => c.id == result).firstOrNull;
       if (target == null) return;
       character.apiConfigId = target.id;
-      character.apiKey = target.apiKey;
+      character.apiKey = '';
       character.apiProvider = target.provider;
       character.modelName = target.modelName;
       character.customBaseUrl = target.customBaseUrl;

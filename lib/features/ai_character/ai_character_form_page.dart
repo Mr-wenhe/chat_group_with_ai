@@ -591,23 +591,11 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     setState(() {});
 
     try {
-      final c = widget.character;
       ApiConfig? config;
 
       if (_selectedApiConfigId.isNotEmpty) {
         config =
             ref.read(apiConfigsProvider.notifier).getById(_selectedApiConfigId);
-      }
-
-      if (config == null && _hasLegacyApiData && c != null) {
-        config = ApiConfig(
-          id: 'legacy_${c.id}',
-          name: '${c.name} 原有配置',
-          provider: c.apiProvider,
-          modelName: c.modelName,
-          apiKey: c.apiKey,
-          customBaseUrl: c.customBaseUrl,
-        );
       }
 
       if (config == null) {
@@ -638,7 +626,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         role: _roleController.text.trim(),
         personalityTags: personalityTags,
         systemPrompt: _systemPromptController.text.trim(),
-        apiKey: config.apiKey,
+        apiKey: '',
         apiProvider: config.provider,
         modelName: config.modelName,
         customBaseUrl: config.customBaseUrl,

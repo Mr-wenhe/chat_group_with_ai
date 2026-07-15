@@ -18,8 +18,10 @@ import 'package:flutter_test/flutter_test.dart';
 
 /// 启动监听在临时端口（port:0 => 由系统分配空闲端口）的桥接服务，
 /// 避免与运行中的 App 已占用的 54263 端口冲突，使测试可独立运行。
+const _bridgeToken = 'test-session-token-which-is-long-enough-123456';
+
 Future<RunningBridgeServer> _startTestServer(Directory workspace) =>
-    startBridgeServer(workspace: workspace, port: 0);
+    startBridgeServer(workspace: workspace, token: _bridgeToken, port: 0);
 
 /// 向桥接服务发起 JSON POST 请求，返回 (statusCode, 解码后的 body)。
 Future<({int statusCode, Map<String, dynamic> body})> _postJson(
@@ -35,6 +37,7 @@ Future<({int statusCode, Map<String, dynamic> body})> _postJson(
     Uri.parse('http://127.0.0.1:$port$path'),
   );
   request.headers.contentType = ContentType.json;
+  request.headers.set(HttpHeaders.authorizationHeader, 'Bearer $_bridgeToken');
   if (origin != null) request.headers.set('origin', origin);
   request.write(jsonEncode(body));
   final response = await request.close();
@@ -75,6 +78,8 @@ void main() {
     final request = await client.getUrl(
       Uri.parse('http://127.0.0.1:${server.port}/health'),
     );
+    request.headers
+        .set(HttpHeaders.authorizationHeader, 'Bearer $_bridgeToken');
     final response = await request.close();
     final body = await utf8.decoder.bind(response).join();
     client.close(force: true);
@@ -82,8 +87,25 @@ void main() {
     expect(response.statusCode, 200);
     final decoded = jsonDecode(body) as Map<String, dynamic>;
     expect(decoded['ok'], isTrue);
-    expect(decoded['workspaces'], isA<List>());
-    expect((decoded['workspaces'] as List).isEmpty, isFalse);
+    expect(decoded['session'], _bridgeToken.substring(0, 8));
+    expect(body, isNot(contains(workspace.path)));
+  });
+
+  test('bridge rejects a request without the current session token', () async {
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+    final client = HttpClient();
+    final request = await client.openUrl(
+      'POST',
+      Uri.parse('http://127.0.0.1:${server.port}/workspace/write'),
+    );
+    request.headers.contentType = ContentType.json;
+    request.write(jsonEncode({'path': 'blocked.txt', 'content': 'no'}));
+    final response = await request.close();
+    client.close(force: true);
+
+    expect(response.statusCode, HttpStatus.unauthorized);
+    expect(File('${workspace.path}/blocked.txt').existsSync(), isFalse);
   });
 
   test('bridge allows loopback browser origin and echoes it in CORS', () async {
@@ -322,6 +344,7 @@ void main() {
 
     final client = LocalAgentBridgeClient(
       baseUrl: 'http://127.0.0.1:${server.port}',
+      token: _bridgeToken,
     );
     final tool = WorkspaceFileTool(client);
 

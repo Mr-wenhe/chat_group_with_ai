@@ -42,6 +42,7 @@ void main() {
     });
     final tool = WorkspaceFileTool(LocalAgentBridgeClient(
       baseUrl: 'http://127.0.0.1:${server.port}',
+      token: 'test-token',
     ));
 
     final result = await tool.write(
@@ -110,6 +111,7 @@ void main() {
     });
     final tool = WorkspaceFileTool(LocalAgentBridgeClient(
       baseUrl: 'http://127.0.0.1:${server.port}',
+      token: 'test-token',
     ));
 
     final result = await tool.write(

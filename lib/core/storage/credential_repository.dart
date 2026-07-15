@@ -77,8 +77,7 @@ class SecureStorageCredentialStore implements CredentialStore {
 /// explicit unavailable result: browser storage is not represented as a
 /// Keychain-equivalent and must never become a silent fallback.
 ///
-/// 过渡策略（migration）：本类目前尚未被任何业务调用方接线，实际读写仍由
-/// [SecureStorageService] 承接。为准备上线且不破坏旧用户，本类采用「新前缀 +
+/// 过渡策略（migration）：本类采用「新前缀 +
 /// 旧前缀双写 / 新前缀优先 + 旧前缀回退」策略：
 ///   - 写入：同时写新前缀 `credential.api-config.{id}` 与旧前缀
 ///     `api_config_key_{id}`（经 [SecureStorageService]），保证过渡期两套读取
@@ -90,6 +89,7 @@ class SecureStorageCredentialStore implements CredentialStore {
 /// 对 [SecureStorageService] 的依赖。完成迁移前请勿删除旧路径。
 class CredentialRepository {
   static const _keyPrefix = 'credential.api-config.';
+  static final _cache = <String, String>{};
 
   final CredentialStore _store;
   final SecureStorageService _legacyStorage;
@@ -105,6 +105,14 @@ class CredentialRepository {
 
   String credentialIdFor(String configId) => '$_keyPrefix$configId';
 
+  /// 当前平台是否存在可用的安全存储。Web 等无 Keychain/Keystore 环境为 false，
+  /// 调用方据此决定是否回退到 Hive 明文 legacyApiKey。
+  bool get secureStorageAvailable => _secureStorageAvailable;
+
+  static String? cached(String configId) => _cache[configId];
+
+  static void clearCache() => _cache.clear();
+
   Future<CredentialWriteResult> save(String configId, String secret) async {
     if (!_secureStorageAvailable) {
       return const CredentialWriteResult.failed(CredentialFailure.unavailable);
@@ -118,8 +126,8 @@ class CredentialRepository {
       await _store.write(credentialIdFor(configId), secret);
       try {
         await _legacyStorage.saveApiConfigKey(configId, secret);
-      } on Object catch (e) {
-        debugPrint('[Credential] 旧前缀双写失败（已忽略）：$e');
+      } on Object {
+        // 旧前缀仅用于过渡兼容；主凭据已写入新存储，不记录异常细节。
       }
       // Verify before a caller is allowed to remove any legacy copy.
       final stored = await _store.read(credentialIdFor(configId));
@@ -127,6 +135,7 @@ class CredentialRepository {
         return const CredentialWriteResult.failed(
             CredentialFailure.systemError);
       }
+      _cache[configId] = secret;
       return const CredentialWriteResult.success();
     } on PlatformException catch (error) {
       return CredentialWriteResult.failed(_mapPlatformFailure(error));
@@ -140,10 +149,15 @@ class CredentialRepository {
       return const CredentialReadResult.failed(CredentialFailure.unavailable);
     }
     if (configId.trim().isEmpty) return const CredentialReadResult.notFound();
+    final cached = _cache[configId];
+    if (cached != null && cached.isNotEmpty) {
+      return CredentialReadResult.found(cached);
+    }
     try {
       // 先读新前缀。
       final newValue = await _store.read(credentialIdFor(configId));
       if (newValue != null && newValue.isNotEmpty) {
+        _cache[configId] = newValue;
         return CredentialReadResult.found(newValue);
       }
       // 新前缀缺失，回退读旧 api_config_key_ 前缀（兼容历史用户已存密钥）。
@@ -151,10 +165,11 @@ class CredentialRepository {
       String? legacyValue;
       try {
         legacyValue = await _legacyStorage.getApiConfigKey(configId);
-      } on Object catch (e) {
-        debugPrint('[Credential] 旧前缀回退读取失败（按未命中处理）：$e');
+      } on Object {
+        // 回退存储不可用时按未命中处理，避免泄露平台异常细节。
       }
       if (legacyValue != null && legacyValue.isNotEmpty) {
+        _cache[configId] = legacyValue;
         return CredentialReadResult.found(legacyValue);
       }
       return const CredentialReadResult.notFound();
@@ -173,10 +188,11 @@ class CredentialRepository {
     try {
       // 同时删除新、旧两套 key；旧 key 删除失败为 best-effort，不阻断主流程。
       await _store.delete(credentialIdFor(configId));
+      _cache.remove(configId);
       try {
         await _legacyStorage.deleteApiConfigKey(configId);
-      } on Object catch (e) {
-        debugPrint('[Credential] 旧前缀删除失败（已忽略）：$e');
+      } on Object {
+        // 旧前缀删除是过渡期 best-effort，不记录异常细节。
       }
       return const CredentialWriteResult.success();
     } on PlatformException catch (error) {

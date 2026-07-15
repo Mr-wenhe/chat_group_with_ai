@@ -976,11 +976,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _discardCurrentStream = false;
       return '';
     }
-    debugPrint(
-      '[AI Reply] character=${character.id} messages=${apiMessages.length} '
-      'provider=${provider.name}',
-    );
-
     // —— 内存态临时消息：先以空内容入列用于增量渲染，整条完成后再落库一次 ——
     final temp = Message(
       groupId: widget.groupId,
@@ -1014,7 +1009,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     )
         .listen(
       (e) {
-        debugPrint('[AI Stream] ${character.name} event=${e.type}');
         switch (e.type) {
           case ChatStreamEventType.token:
             fullContent += e.delta ?? '';
@@ -1088,13 +1082,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _streamDone = null;
     if (mounted) setState(() => _isStreaming = false);
 
-    debugPrint(
-        '[AI Stream] ${character.name} DONE fullContent=${fullContent.isNotEmpty ? fullContent.substring(0, min(50, fullContent.length)) : '(empty)'} failed=$failed');
-
     // 空内容也给出可见反馈，否则 @ 触发会像没有人理会。
     if (!failed && fullContent.trim().isEmpty) {
-      debugPrint(
-          '[AI Stream] ${character.name} EMPTY content -> using fallback');
       fullContent = ChatActivityPolicy.emptyReplyFallback(
         characterName: character.name,
         role: character.role,
@@ -1139,7 +1128,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           _messages,
           excludeMessageId: temp.id,
         )) {
-      debugPrint('[AI Reply] suppressed duplicate from ${character.name}');
       _recordReplyUsage(character);
       if (promptTokens != null && completionTokens != null) {
         await _repository.recordTokenUsage(
@@ -1468,8 +1456,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             type: _attachmentTypeForPath(path),
           ));
         }
-      } catch (e) {
-        debugPrint('[AI文件] 复制 $path 失败：$e');
+      } catch (_) {
+        // A single generated file failing to copy must not expose its path.
       }
     }
     return attachments;
@@ -1561,7 +1549,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       grantedPermissions: workMode ? ToolPermission.values.toSet() : null,
       // per-run 停止状态：捕获本 run 的句柄，而非共享标志。新 run 的 beginRun
       // 不会把旧 run 复活，旧 run 在自己的检查点读到的是自己的停止状态。
-      shouldCancel: workMode ? () => workModeRun?.isRequestedStop ?? false : null,
+      shouldCancel:
+          workMode ? () => workModeRun?.isRequestedStop ?? false : null,
     );
   }
 
@@ -2112,17 +2101,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   ApiConfig? _resolveApiConfig(AICharacter character) {
     if (character.apiConfigId.isNotEmpty) {
       final config = _db.apiConfigBox.get(character.apiConfigId);
-      if (config != null) return config;
-    }
-    if (character.apiKey.isNotEmpty && character.apiProvider.isNotEmpty) {
-      return ApiConfig(
-        id: 'legacy_${character.id}',
-        name: '${character.name} 原有配置',
-        provider: character.apiProvider,
-        modelName: character.modelName,
-        apiKey: character.apiKey,
-        customBaseUrl: character.customBaseUrl,
-      );
+      if (config?.hasCredential == true) return config;
     }
     return null;
   }
@@ -3305,8 +3284,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         await _db.appSettingsBox.put(checkpointKey, pending.last.id);
       }
       return _lastUserOnly(fallbackContext);
-    } catch (error) {
-      debugPrint('[Context] 上下文压缩失败，保留原上下文：$error');
+    } catch (_) {
       return fallbackContext;
     }
   }
@@ -3487,6 +3465,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
       _stopAutoChat();
     } else {
+      await LocalAgentBridgeLauncher().stop();
       final pending = _workModeSession.takePendingApproval();
       if (pending != null) {
         await _cancelAgentTask(
@@ -3665,13 +3644,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
         ),
         child: Column(
-            mainAxisSize: MainAxisSize.min,
-            children: [
-              Center(
-                child: Container(
-                  width: 40,
-                  height: 4,
-                  margin: const EdgeInsets.only(bottom: 16),
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Center(
+              child: Container(
+                width: 40,
+                height: 4,
+                margin: const EdgeInsets.only(bottom: 16),
                 decoration: BoxDecoration(
                     color: cs.outlineVariant,
                     borderRadius: BorderRadius.circular(2)),
@@ -4512,8 +4491,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         }
         if (mounted) setState(() => _pendingAttachments.add(att));
       }
-    } catch (e) {
-      debugPrint('[附件] 选择图片失败：$e');
+    } catch (_) {
       if (mounted) {
         AppToast.show(context, '选择图片失败：$e', icon: Icons.error_outline_rounded);
       }
@@ -4549,8 +4527,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         );
       }
       if (mounted) setState(() => _pendingAttachments.add(att));
-    } catch (e) {
-      debugPrint('[附件] 选择视频失败：$e');
+    } catch (_) {
       if (mounted) {
         AppToast.show(context, '选择视频失败：$e', icon: Icons.error_outline_rounded);
       }
@@ -4601,8 +4578,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (mounted && added == 0) {
         AppToast.show(context, '没有可读取的文件', icon: Icons.info_outline_rounded);
       }
-    } catch (e) {
-      debugPrint('[附件] 选择文件失败：$e');
+    } catch (_) {
       if (mounted) {
         AppToast.show(context, '选择文件失败：$e', icon: Icons.error_outline_rounded);
       }
@@ -4649,8 +4625,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         AppToast.show(context, '已添加 ${parts.join('、')}',
             icon: Icons.attach_file_rounded);
       }
-    } catch (e) {
-      debugPrint('[附件] 拖放失败：$e');
+    } catch (_) {
       if (_canTouchUi && mounted) {
         AppToast.show(context, '拖放失败：$e', icon: Icons.error_outline_rounded);
       }
@@ -4689,9 +4664,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             _attachmentTypeForPath(path),
           ));
         }
-      } catch (e) {
-        debugPrint('[附件] 剪贴板文件读取失败：$e');
-      }
+      } catch (_) {}
 
       if (attachments.isEmpty) {
         try {
@@ -4712,9 +4685,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               mimeType: 'image/png',
             ));
           }
-        } catch (e) {
-          debugPrint('[附件] 剪贴板图片读取失败：$e');
-        }
+        } catch (_) {}
       }
 
       if (attachments.isEmpty) {
@@ -4722,9 +4693,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         try {
           final data = await Clipboard.getData(Clipboard.kTextPlain);
           clipboardText = clipboardTextFallback(data?.text);
-        } catch (e) {
-          debugPrint('[附件] 剪贴板文本读取失败：$e');
-        }
+        } catch (_) {}
 
         if (clipboardText != null) {
           if (!mounted || !_canTouchUi) return;
@@ -4752,8 +4721,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       setState(() => _pendingAttachments.addAll(attachments));
       AppToast.show(context, '已粘贴 ${attachments.length} 个附件',
           icon: Icons.content_paste_rounded);
-    } catch (e) {
-      debugPrint('[附件] 粘贴失败：$e');
+    } catch (_) {
       if (mounted && showEmptyHint) {
         AppToast.show(context, '粘贴失败：$e', icon: Icons.error_outline_rounded);
       }
@@ -4821,8 +4789,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (await file.exists()) {
         await file.delete();
       }
-    } catch (e) {
-      debugPrint('[附件] 清理未发送文件失败：$e');
-    }
+    } catch (_) {}
   }
 }

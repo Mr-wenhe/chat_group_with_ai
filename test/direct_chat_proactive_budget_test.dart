@@ -7,6 +7,7 @@ import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
 import 'package:chat_group/services/chat_api_service.dart';
@@ -39,6 +40,12 @@ class FakeChatApiService extends ChatApiService {
   }
 }
 
+class FakeApiCredentialResolver implements ApiCredentialResolver {
+  @override
+  Future<String?> resolve(ApiConfig config) async =>
+      config.id == 'cfg-1' ? 'sk-test' : null;
+}
+
 void main() {
   late Directory tempDir;
   late DatabaseService db;
@@ -47,7 +54,9 @@ void main() {
   setUp(() async {
     tempDir = await Directory.systemTemp.createTemp('proactive_hive_');
     Hive.init(tempDir.path);
-    if (!Hive.isAdapterRegistered(0)) Hive.registerAdapter(AICharacterAdapter());
+    if (!Hive.isAdapterRegistered(0)) {
+      Hive.registerAdapter(AICharacterAdapter());
+    }
     if (!Hive.isAdapterRegistered(4)) Hive.registerAdapter(ApiConfigAdapter());
     if (!Hive.isAdapterRegistered(1)) Hive.registerAdapter(ChatGroupAdapter());
     if (!Hive.isAdapterRegistered(2)) Hive.registerAdapter(MessageAdapter());
@@ -73,12 +82,14 @@ void main() {
     if (await tempDir.exists()) await tempDir.delete(recursive: true);
   });
 
-  AICharacter _seedCharacter({required bool atHourlyLimit}) {
+  AICharacter seedCharacter({required bool atHourlyLimit}) {
     final config = ApiConfig(
       id: 'cfg-1',
       name: 'cfg',
       provider: 'deepseek',
       apiKey: 'sk-test',
+      credentialId: 'credential.api-config.cfg-1',
+      hasCredential: true,
     );
     db.apiConfigBox.put(config.id, config);
     final character = AICharacter(
@@ -102,8 +113,12 @@ void main() {
   }
 
   test('达到每小时上限时跳过主动 DM（不调用模型、不伪造发送）', () async {
-    _seedCharacter(atHourlyLimit: true);
-    final service = DirectChatProactiveService(db: db, chatApi: chatApi);
+    seedCharacter(atHourlyLimit: true);
+    final service = DirectChatProactiveService(
+      db: db,
+      chatApi: chatApi,
+      credentialResolver: FakeApiCredentialResolver(),
+    );
 
     final result = await service.tryCreateProactiveMessage();
 
@@ -114,8 +129,12 @@ void main() {
   });
 
   test('未达上限时正常发送并记用（与聊天共用同一套每小时预算）', () async {
-    _seedCharacter(atHourlyLimit: false);
-    final service = DirectChatProactiveService(db: db, chatApi: chatApi);
+    seedCharacter(atHourlyLimit: false);
+    final service = DirectChatProactiveService(
+      db: db,
+      chatApi: chatApi,
+      credentialResolver: FakeApiCredentialResolver(),
+    );
 
     final result = await service.tryCreateProactiveMessage();
 
@@ -125,5 +144,32 @@ void main() {
     // 统一记用：发送后每小时计数 +1，并记录时间戳。
     expect(db.aiCharacterBox.get('char-1')!.hourlyReplyCount, 1);
     expect(db.aiCharacterBox.get('char-1')!.lastReplyTimestamp, isNotNull);
+  });
+
+  test('没有关联安全配置时，不回退使用角色遗留 Key', () async {
+    final character = AICharacter(
+      id: 'legacy-character',
+      name: '旧角色',
+      avatar: '',
+      age: 20,
+      role: '朋友',
+      personalityTags: const [],
+      systemPrompt: '你是旧角色',
+      apiKey: 'legacy-key-must-not-be-used',
+      apiProvider: 'deepseek',
+      apiConfigId: '',
+      isActive: true,
+    );
+    await db.aiCharacterBox.put(character.id, character);
+    final service = DirectChatProactiveService(
+      db: db,
+      chatApi: chatApi,
+      credentialResolver: FakeApiCredentialResolver(),
+    );
+
+    final result = await service.tryCreateProactiveMessage();
+
+    expect(result, isNull);
+    expect(chatApi.sendCount, 0);
   });
 }

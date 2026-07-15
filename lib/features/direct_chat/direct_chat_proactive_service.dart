@@ -5,6 +5,7 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_policy.dart';
@@ -27,13 +28,17 @@ class DirectChatProactiveService {
   final DatabaseService db;
   final ChatApiService chatApi;
   final Random random;
+  final ApiCredentialResolver credentialResolver;
 
   DirectChatProactiveService({
     required this.db,
     ChatApiService? chatApi,
     Random? random,
+    ApiCredentialResolver? credentialResolver,
   })  : chatApi = chatApi ?? ChatApiService(),
-        random = random ?? Random();
+        random = random ?? Random(),
+        credentialResolver =
+            credentialResolver ?? SecureApiCredentialResolver();
 
   Future<DirectChatProactiveResult?> tryCreateProactiveMessage({
     String? preferredConversationId,
@@ -87,8 +92,9 @@ class DirectChatProactiveService {
     final candidate = DirectChatProactivePolicy.selectCandidate(
       directSummaries: candidateSummaries,
       groupCandidates: groupCandidates,
-      idleCharacters:
-          characters.where(_canGenerateProactiveMessage).toList(growable: false),
+      idleCharacters: characters
+          .where(_canGenerateProactiveMessage)
+          .toList(growable: false),
       lastProactiveAtByCharacter: db.directChatLastProactiveAtByCharacter(),
       now: now,
       preferredConversationId: preferredConversationId,
@@ -106,7 +112,9 @@ class DirectChatProactiveService {
     }
 
     final config = _resolveApiConfig(candidate.character);
-    if (config == null || config.apiKey.isEmpty) return null;
+    if (config == null) return null;
+    final apiKey = await credentialResolver.resolve(config);
+    if (apiKey == null) return null;
 
     final conversationId =
         DirectChatSession.conversationIdFor(candidate.character.id);
@@ -125,7 +133,7 @@ class DirectChatProactiveService {
             .toList();
 
     final result = await chatApi.sendChatMessage(
-      apiKey: config.apiKey,
+      apiKey: apiKey,
       provider: ApiProvider.values.firstWhere(
         (provider) => provider.name == config.provider,
         orElse: () => ApiProvider.deepseek,
@@ -158,7 +166,8 @@ class DirectChatProactiveService {
     await _recordUsage(candidate.character, conversationId, result);
     // 记用：与聊天走同一套每小时额度累计。先从盒里取最新对象再累加，
     // 避免用方法入口的旧快照覆盖聊天室内已持久化的并发增量（lost-update）。
-    final latest = db.aiCharacterBox.get(candidate.character.id) ?? candidate.character;
+    final latest =
+        db.aiCharacterBox.get(candidate.character.id) ?? candidate.character;
     eligibility.recordReplyUsage(latest);
     await db.aiCharacterBox.put(latest.id, latest);
 
@@ -174,22 +183,12 @@ class DirectChatProactiveService {
       final config = db.apiConfigBox.get(character.apiConfigId);
       if (config != null) return config;
     }
-    if (character.apiKey.isNotEmpty && character.apiProvider.isNotEmpty) {
-      return ApiConfig(
-        id: 'legacy_${character.id}',
-        name: '${character.name} 原有配置',
-        provider: character.apiProvider,
-        modelName: character.modelName,
-        apiKey: character.apiKey,
-        customBaseUrl: character.customBaseUrl,
-      );
-    }
     return null;
   }
 
   bool _canGenerateProactiveMessage(AICharacter character) {
     final config = _resolveApiConfig(character);
-    return config != null && config.apiKey.isNotEmpty;
+    return config?.hasCredential == true;
   }
 
   List<Map<String, dynamic>> _buildMessages({

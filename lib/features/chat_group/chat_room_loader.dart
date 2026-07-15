@@ -126,7 +126,7 @@ class ChatRoomLoader {
 
   bool _hasApiConfig(AICharacter character) {
     final config = resolveApiConfig(character);
-    return config != null && config.apiKey.isNotEmpty;
+    return config?.hasCredential == true;
   }
 
   static DateTime readThrough(Iterable<DateTime> timestamps) {

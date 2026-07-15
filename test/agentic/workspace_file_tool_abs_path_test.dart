@@ -24,8 +24,10 @@ import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// 启动监听在临时端口（port:0）的桥接服务，与现有机房测试保持一致。
+const _bridgeToken = 'test-session-token-which-is-long-enough-123456';
+
 Future<RunningBridgeServer> _startTestServer(Directory workspace) =>
-    startBridgeServer(workspace: workspace, port: 0);
+    startBridgeServer(workspace: workspace, token: _bridgeToken, port: 0);
 
 void main() {
   late Directory workspace;
@@ -40,7 +42,8 @@ void main() {
     } catch (_) {}
   });
 
-  test('WorkspaceFileTool.write with absolute path writes basename to workspace '
+  test(
+      'WorkspaceFileTool.write with absolute path writes basename to workspace '
       'root and does NOT create the absolute path on disk', () async {
     final server = await _startTestServer(workspace);
     addTearDown(() async {
@@ -51,6 +54,7 @@ void main() {
 
     final client = LocalAgentBridgeClient(
       baseUrl: 'http://127.0.0.1:${server.port}',
+      token: _bridgeToken,
     );
     final tool = WorkspaceFileTool(client);
 
@@ -78,7 +82,8 @@ void main() {
         reason: 'absolute path must NOT be created on disk');
   });
 
-  test('WorkspaceFileTool.write preserves a relative subdir path (docs/report.md)',
+  test(
+      'WorkspaceFileTool.write preserves a relative subdir path (docs/report.md)',
       () async {
     final server = await _startTestServer(workspace);
     addTearDown(() async {
@@ -89,6 +94,7 @@ void main() {
 
     final client = LocalAgentBridgeClient(
       baseUrl: 'http://127.0.0.1:${server.port}',
+      token: _bridgeToken,
     );
     final tool = WorkspaceFileTool(client);
 

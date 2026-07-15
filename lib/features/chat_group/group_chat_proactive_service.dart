@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_policy.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 
@@ -25,13 +26,17 @@ class GroupChatProactiveService {
   final DatabaseService db;
   final ChatApiService chatApi;
   final Random random;
+  final ApiCredentialResolver credentialResolver;
 
   GroupChatProactiveService({
     required this.db,
     ChatApiService? chatApi,
     Random? random,
+    ApiCredentialResolver? credentialResolver,
   })  : chatApi = chatApi ?? ChatApiService(),
-        random = random ?? Random();
+        random = random ?? Random(),
+        credentialResolver =
+            credentialResolver ?? SecureApiCredentialResolver();
 
   Future<GroupChatProactiveResult?> tryCreateProactiveMessage({
     String? activeGroupId,
@@ -59,7 +64,9 @@ class GroupChatProactiveService {
     if (candidate == null) return null;
 
     final config = _resolveApiConfig(candidate.character);
-    if (config == null || config.apiKey.isEmpty) return null;
+    if (config == null) return null;
+    final apiKey = await credentialResolver.resolve(config);
+    if (apiKey == null) return null;
 
     final groupMessages = allMessages
         .where((message) => message.groupId == candidate.group.id)
@@ -70,7 +77,7 @@ class GroupChatProactiveService {
         : groupMessages;
 
     final result = await chatApi.sendChatMessage(
-      apiKey: config.apiKey,
+      apiKey: apiKey,
       provider: ApiProvider.values.firstWhere(
         (provider) => provider.name == config.provider,
         orElse: () => ApiProvider.deepseek,
@@ -113,22 +120,12 @@ class GroupChatProactiveService {
       final config = db.apiConfigBox.get(character.apiConfigId);
       if (config != null) return config;
     }
-    if (character.apiKey.isNotEmpty && character.apiProvider.isNotEmpty) {
-      return ApiConfig(
-        id: 'legacy_${character.id}',
-        name: '${character.name} 原有配置',
-        provider: character.apiProvider,
-        modelName: character.modelName,
-        apiKey: character.apiKey,
-        customBaseUrl: character.customBaseUrl,
-      );
-    }
     return null;
   }
 
   bool _canGenerateProactiveMessage(AICharacter character) {
     final config = _resolveApiConfig(character);
-    return config != null && config.apiKey.isNotEmpty;
+    return config?.hasCredential == true;
   }
 
   List<Map<String, dynamic>> _buildMessages({

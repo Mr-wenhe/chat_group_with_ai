@@ -35,6 +35,8 @@ void main() {
         name: 'shared',
         provider: 'deepseek',
         apiKey: apiKey,
+        credentialId: 'credential.api-config.shared-config',
+        hasCredential: apiKey.isNotEmpty,
       );
 
   test('uses resolved shared ApiConfig instead of legacy character key', () {

@@ -21,16 +21,17 @@ class ApiConfigAdapter extends TypeAdapter<ApiConfig> {
       name: fields[1] as String,
       provider: fields[2] as String,
       modelName: fields[3] as String?,
-      apiKey: fields[4] as String,
       customBaseUrl: fields[5] as String,
       createdAt: fields[6] as DateTime?,
-    );
+      credentialId: fields[7] == null ? '' : fields[7] as String,
+      hasCredential: fields[8] == null ? false : fields[8] as bool,
+    )..legacyApiKey = fields[4] as String;
   }
 
   @override
   void write(BinaryWriter writer, ApiConfig obj) {
     writer
-      ..writeByte(7)
+      ..writeByte(9)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -40,11 +41,15 @@ class ApiConfigAdapter extends TypeAdapter<ApiConfig> {
       ..writeByte(3)
       ..write(obj.modelName)
       ..writeByte(4)
-      ..write(obj.apiKey)
+      ..write(obj.legacyApiKey)
       ..writeByte(5)
       ..write(obj.customBaseUrl)
       ..writeByte(6)
-      ..write(obj.createdAt);
+      ..write(obj.createdAt)
+      ..writeByte(7)
+      ..write(obj.credentialId)
+      ..writeByte(8)
+      ..write(obj.hasCredential);
   }
 
   @override
