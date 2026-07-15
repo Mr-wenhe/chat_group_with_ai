@@ -1,0 +1,113 @@
+classDiagram
+    %% ===== 枚举 =====
+    class AgentRuntimeProgressStage {
+        <<enum>>
+        planning
+        thinking
+        readingFile
+        callingTool
+        writingFile
+        fileCreated
+        validating
+        waitingForApproval
+        toolCompleted
+        stepFailed
+        stepRejected
+    }
+    class AgentToolName {
+        <<enum>>
+        workspaceRead
+        workspaceList
+        workspacePatch
+        commandRun
+        browserContext
+        skillCreate
+        skillDownload
+    }
+
+    %% ===== 数据模型（P2 扩展） =====
+    class AgentRuntimeProgress {
+        +AgentRuntimeProgressStage stage
+        +List~ToolRequest~ executedRequests
+        +ToolRequest? pendingRequest
+        +String? currentStepLabel
+        +int? runStartedAtMs
+        +int? currentStepStartedAtMs
+        +AgentRuntimeProgress()
+    }
+
+    class ToolRequest {
+        +AgentToolName tool
+        +Map args
+        +String toJsonString()
+    }
+
+    %% ===== Runtime =====
+    class AgentRuntime {
+        -int? _runStartedAtMs
+        -AgentRuntimeProgressStage? _lastReportedStage
+        -String? _lastReportedLabel
+        +static bool requiresApproval(AgentToolName tool)
+        +Future~AgentRuntimeResult~ run(...)
+        -Future~void~ _reportProgress(AgentRuntimeProgress progress)
+    }
+
+    %% ===== 共享协议层 =====
+    class agent_progress_meta {
+        <<library>>
+        +String approvalTag
+        +String autoTag
+        +String formatElapsed(int seconds)
+        +String completedStepLabel(ToolRequest)
+        +String statusHeader(String, bool, bool)
+    }
+
+    class chat_room_utils {
+        <<library>>
+        +String agentProgressMessageContent(...)
+    }
+
+    %% ===== UI 层 =====
+    class ChatMessageList {
+        +List~Message~ messages
+        +Map~String,int~? progressStartTimes
+        +build()
+    }
+    class ChatMessageBubble {
+        +Message message
+        +int? runStartedAtMs
+        +_buildContent()
+    }
+    class ProgressLogBubble {
+        <<StatefulWidget>>
+        -bool _expanded
+        -Timer? _timer
+        +build()
+    }
+    class ChatRoomPage {
+        -Map~String,int~ _progressStartTimes
+        +_persistAgentProgress(AgentTask, AgentRuntimeProgress)
+        +_upsertAgentProgressMessage(AgentTask, String)
+    }
+
+    %% ===== 关系 =====
+    AgentRuntimeProgress "1" *-- "1" AgentRuntimeProgressStage : stage
+    AgentRuntimeProgress "1" o-- "0..*" ToolRequest : executedRequests
+    ToolRequest "1" *-- "1" AgentToolName : tool
+    AgentRuntime ..> AgentRuntimeProgress : augment(注入 runStartedAtMs/currentStepStartedAtMs)
+    AgentRuntime ..> AgentToolName : requiresApproval(tool)
+
+    ChatRoomPage "1" o-- "0..*" AgentRuntimeProgress : _lastAgentProgress
+    ChatRoomPage ..> AgentRuntimeProgress : _persistAgentProgress 读取 runStartedAtMs
+    ChatRoomPage ..> ChatMessageList : 传入 _progressStartTimes
+
+    chat_room_utils ..> AgentRuntimeProgress : 读取 executedRequests
+    chat_room_utils ..> AgentRuntime : requiresApproval(req.tool)
+    chat_room_utils ..> agent_progress_meta : completedStepLabel / 前缀
+    agent_progress_meta ..> ToolRequest : completedStepLabel(request)
+
+    ChatMessageList "1" o-- "0..*" ChatMessageBubble : itemBuilder 构造
+    ChatMessageList ..> ChatRoomPage : 消费 progressStartTimes
+    ChatMessageBubble ..> ProgressLogBubble : 进度消息改为构建
+    ProgressLogBubble ..> agent_progress_meta : formatElapsed / 前缀判定
+    ProgressLogBubble ..> ChatMessageList : runStartedAtMs 来自查表

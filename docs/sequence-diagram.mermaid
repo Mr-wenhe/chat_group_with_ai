@@ -1,0 +1,38 @@
+sequenceDiagram
+    autonumber
+    participant RT as AgentRuntime
+    participant Page as ChatRoomPage
+    participant DB as Message(Hive)
+    participant List as ChatMessageList
+    participant Bubble as ProgressLogBubble
+
+    Note over RT: run() 起点捕获 _runStartedAtMs = now()
+
+    loop 每个阶段（planning/thinking/readingFile/writingFile/...）
+        RT->>RT: _reportProgress(AgentRuntimeProgress)
+        alt stage 或 currentStepLabel 变化（非 sameAsLast）
+            RT->>RT: augment → runStartedAtMs=_runStartedAtMs, currentStepStartedAtMs=now
+            RT->>Page: onProgress(progress)
+            Page->>Page: _progressStartTimes[task.id] ??= progress.runStartedAtMs
+            Page->>DB: _upsertAgentProgressMessage(task, agentProgressMessageContent(...))
+            Note over Page,DB: ✅ 行尾追加 requiresApproval ? "需批准" : "自动"
+            DB-->>List: Message.content 变化触发 ListView 重建
+        else sameAsLast（去抖）
+            RT-->>RT: return 跳过（不重写气泡）
+        end
+    end
+
+    List->>List: itemBuilder(message)
+    List->>List: taskId = message.id 去 "agent-progress:" 前缀
+    List->>Bubble: runStartedAtMs = _progressStartTimes[taskId]
+    Bubble->>Bubble: initState → Timer.periodic(1s) setState
+    Bubble->>Bubble: 头部渲染 "🧭 X · 工作模式 ｜ 执行中 ⏱ formatElapsed(s)"
+
+    Note over Bubble: 用户点折叠按钮 ▾/▸
+    Bubble->>Bubble: 切换 _expanded（本地状态，ValueKey(message.id) 稳定）
+
+    alt 末行仍以 ⏳ 开头（进行中）
+        Bubble->>Bubble: 持续每秒刷新 ⏱；展开态 ⏳ 行尾 BlinkingCursor
+    else 末行为 ✅（终态 _finishAgentTask finalResult）
+        Bubble->>Bubble: cancel Timer，⏱ 冻结
+    end
