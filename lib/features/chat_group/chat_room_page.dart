@@ -11,6 +11,7 @@ import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/chat_group.dart';
+import 'package:chat_group/core/models/direct_chat_source.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
@@ -32,48 +33,47 @@ import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_launcher.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
+import 'package:chat_group/features/chat_group/agentic_reply_utils.dart';
+import 'package:chat_group/features/chat_group/attachment_utils.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
 import 'package:chat_group/features/chat_group/chat_group_form_page.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/chat_room_loader.dart';
 import 'package:chat_group/features/chat_group/chat_room_repository.dart';
+import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
+import 'package:chat_group/features/chat_group/models/chat_room_models.dart';
 import 'package:chat_group/features/chat_group/multimodal_content.dart';
 import 'package:chat_group/features/chat_group/picked_attachment_payload.dart';
-import 'package:chat_group/features/chat_group/scene_behavior.dart';
-import 'package:chat_group/features/chat_group/chat_room_utils.dart';
-import 'package:chat_group/features/chat_group/agentic_reply_utils.dart';
-import 'package:chat_group/features/chat_group/attachment_utils.dart';
-import 'package:chat_group/features/chat_group/models/chat_room_models.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
+import 'package:chat_group/features/chat_group/scene_behavior.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_message_list.dart';
-import 'package:chat_group/features/chat_group/widgets/chat_room_composer.dart';
-import 'package:chat_group/features/chat_group/widgets/chat_room_banners.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_room_app_bar.dart';
-import 'package:chat_group/features/chat_group/widgets/member_sheet.dart';
-import 'package:chat_group/features/chat_group/widgets/hint_chip.dart';
-import 'package:chat_group/features/chat_group/widgets/sheet_button.dart';
+import 'package:chat_group/features/chat_group/widgets/chat_room_banners.dart';
+import 'package:chat_group/features/chat_group/widgets/chat_room_composer.dart';
 import 'package:chat_group/features/chat_group/widgets/compact_conversation_controls.dart';
+import 'package:chat_group/features/chat_group/widgets/hint_chip.dart';
+import 'package:chat_group/features/chat_group/widgets/member_sheet.dart';
+import 'package:chat_group/features/chat_group/widgets/sheet_button.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
-import 'package:chat_group/core/models/direct_chat_source.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_mode_session.dart';
 import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
-import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:chat_group/services/message_speech_service.dart';
 import 'package:chat_group/services/web_search_service.dart';
-import 'package:file_picker/file_picker.dart';
-import 'package:dio/dio.dart';
 import 'package:chat_group/services/wecom_push_service.dart';
+import 'package:dio/dio.dart';
+import 'package:file_picker/file_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -3648,17 +3648,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
+      isScrollControlled: true,
       builder: (ctx) => Container(
         padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
         decoration: BoxDecoration(
           color: cs.surface,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
         ),
-        child: SafeArea(
-          top: false,
-          left: false,
-          right: false,
-          child: Column(
+        child: Column(
             mainAxisSize: MainAxisSize.min,
             children: [
               Center(
@@ -3722,7 +3719,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               _showWeComPushDialog(message.content);
             }),
           ],
-        ),
         ),
       ),
     );
