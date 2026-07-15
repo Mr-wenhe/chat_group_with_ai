@@ -405,7 +405,15 @@ class AgentRuntime {
     );
   }
 
-  static String? _inferGeneratedFilePath(String request) {
+  /// 推断用户请求中隐含的文件路径（如"生成一个 HTML 页面"→ `page.html`）。
+  ///
+  /// 优先从请求文本本身提取显式文件名/扩展名；其次匹配文件类型关键词；
+  /// 最后回退到 [conversationHistory] 中最近一次 `workspace.patch` 的路径，
+  /// 以覆盖"修改上次生成的文件"这类无显式文件名的请求。
+  static String? _inferGeneratedFilePath(
+    String request, [
+    List<Map<String, dynamic>>? conversationHistory,
+  ]) {
     final lower = request.toLowerCase();
     final explicitCreateVerb = RegExp(
       r'(生成|创建|写|设计|制作|做一个|做个|实现|开发|输出|导出|修改|改写|'
@@ -512,6 +520,25 @@ class AgentRuntime {
     }
     if (RegExp(r'(python|\bpy\b)').hasMatch(lower)) return 'script.py';
     if (RegExp(r'(javascript|\bjs\b)').hasMatch(lower)) return 'app.js';
+
+    // 回退：从对话历史中查找最近一次 workspace.patch 写入的路径。
+    // 覆盖"把背景改成红色"这类没有显式文件名、但 LLM 已拿到历史上下文的修改请求。
+    if (conversationHistory != null) {
+      for (final msg in conversationHistory.reversed) {
+        final content = msg['content']?.toString() ?? '';
+        // 匹配 assistant 消息中的 agent_tool workspace.patch 块。
+        final toolMatch = RegExp(
+          r'"tool"\s*:\s*"workspace\.patch"',
+        ).firstMatch(content);
+        if (toolMatch != null) {
+          final pathMatch = RegExp(
+            r'"path"\s*:\s*"([^"]+)"',
+          ).firstMatch(content);
+          if (pathMatch != null) return pathMatch.group(1)!.replaceAll('\\', '/');
+        }
+      }
+    }
+
     return null;
   }
 
@@ -765,7 +792,7 @@ class AgentRuntime {
     List<ToolRequest> priorExecutedRequests = const [],
     String workModeContext = '',
   }) async {
-    print('[RT] run userRequest=$userRequest canDirect=${_canGenerateNewFileDirectly(userRequest)} inferred=${_inferGeneratedFilePath(userRequest)}');
+    print('[RT] run userRequest=$userRequest canDirect=${_canGenerateNewFileDirectly(userRequest)} inferred=${_inferGeneratedFilePath(userRequest, conversationHistory)}');
     if (shouldCancel?.call() == true) {
       return const AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
@@ -809,12 +836,12 @@ class AgentRuntime {
     // 先生成一份“包含完整文件内容的工具计划 JSON”。对大型 HTML 来说，
     // JSON 转义会放大输出并在 120 秒总时限处被截断。直接请求文件正文，
     // 然后由运行时本地包装成 workspace.patch，可以避免冗余规划与误报超时。
-    if (_canGenerateNewFileDirectly(userRequest)) {
+    if (_canGenerateNewFileDirectly(userRequest, conversationHistory)) {
       try {
         final directFileRequest = await _generateFileContentRequest(
           character: character,
           userRequest: userRequest,
-          path: _inferGeneratedFilePath(userRequest)!,
+          path: _inferGeneratedFilePath(userRequest, conversationHistory)!,
           conversationHistory: conversationHistory,
           executedRequests: priorExecutedRequests,
           throwOnFailure: true,
@@ -977,7 +1004,8 @@ class AgentRuntime {
     // 规划阶段未解析出合法工具请求。这种情况下绝不把模型的「原始规划文本」
     // （如「我直接现在就为你写入文件…」）原样当作用户可见消息返回——那会
     // 泄漏内部意图并产生多余的「第一条」消息（Bug B-b1）。
-    final hasExplicitFileIntent = _inferGeneratedFilePath(userRequest) != null;
+    final hasExplicitFileIntent =
+        _inferGeneratedFilePath(userRequest, conversationHistory) != null;
     if (_containsToolCallTrace(content) || hasExplicitFileIntent) {
       // 文本含有工具调用痕迹但 tryParse 解析失败：尝试用更宽松的方式兜底提取
       // 工具请求并执行；提取失败才退化为简洁提示，绝不泄露原始规划文本。
@@ -1142,8 +1170,8 @@ class AgentRuntime {
     List<Map<String, dynamic>>? conversationHistory,
     List<ToolRequest> executedRequests = const [],
   }) async {
-    if (!_canGenerateNewFileDirectly(userRequest)) return null;
-    final path = _inferGeneratedFilePath(userRequest);
+    if (!_canGenerateNewFileDirectly(userRequest, conversationHistory)) return null;
+    final path = _inferGeneratedFilePath(userRequest, conversationHistory);
     if (path == null) return null;
 
     final modelRequest = await _generateFileContentRequest(
@@ -1160,16 +1188,25 @@ class AgentRuntime {
     return null;
   }
 
-  static bool _canGenerateNewFileDirectly(String userRequest) {
+  /// 判断用户请求是否可以直接推断出文件路径并走"直接生成文件"路径
+  ///（跳过 LLM 规划，直接让模型输出完整文件内容）。
+  ///
+  /// "读取/查看/分析"类动词仍然排除：这些请求是要读取现有内容而非生成新内容。
+  /// "修改"类动词不再排除——如果对话历史包含 workspace.patch 路径，LLM 已能看到
+  /// 原文件内容，可以直接生成修改后的完整内容（覆盖"把背景改成红色"这类场景）。
+  static bool _canGenerateNewFileDirectly(
+    String userRequest, [
+    List<Map<String, dynamic>>? conversationHistory,
+  ]) {
     final lower = userRequest.toLowerCase();
     if (RegExp(
-      r'(修改|改一下|改写|编辑|修复|review|代码审查|读取|读一下|检查|运行|测试|'
-      r'浏览器|网页内容|选中|analyze|build|test)',
+      r'(读取|读一下|检查|分析|查看|看|打开|'
+      r'analyze|read|open|check|view|preview)',
       caseSensitive: false,
     ).hasMatch(lower)) {
       return false;
     }
-    return _inferGeneratedFilePath(userRequest) != null;
+    return _inferGeneratedFilePath(userRequest, conversationHistory) != null;
   }
 
   Future<ToolRequest?> _generateFileContentRequest({
@@ -1343,6 +1380,10 @@ class AgentRuntime {
     }.join('、');
 
     // 极简 re-prompt：明确告诉模型上次输出格式不对、这次必须只输出 JSON 块。
+    final originalFilePath = _inferGeneratedFilePath(userRequest, conversationHistory);
+    final pathHint = originalFilePath != null
+        ? '注意：用户要求修改的文件是 `$originalFilePath`，不要创建新文件，直接对已有文件发起 workspace.patch 写入修改后的完整内容。\n'
+        : '';
     final repromptPrompt = '''
 【重要】你之前的回复没有被识别为有效的工具请求。
 
@@ -1350,7 +1391,7 @@ class AgentRuntime {
 
 你之前说了：$originalResponse
 
-现在请**只**输出一个工具请求块，不要任何其他文字：
+$pathHint现在请**只**输出一个工具请求块，不要任何其他文字：
 
 ```agent_tool
 {"tool":"工具名","reason":"原因","args":{...}}
@@ -1359,8 +1400,7 @@ class AgentRuntime {
 可用工具名：$toolNames
 
 注意：
-- 如果是生成文件，用 workspace.patch，把完整内容放 args.content
-- 文件名要合理（如 page.html / report.md / main.dart）
+- 如果是修改已有文件，用 workspace.patch，args.path 用已有文件路径，args.content 放修改后的**完整**文件内容
 - **绝对不要**在代码块外写任何解释、问候或规划文本
 - 只输出上面这一个 ```agent_tool ... ``` 块，不多不少
 ''';

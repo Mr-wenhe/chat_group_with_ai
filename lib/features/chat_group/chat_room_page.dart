@@ -1629,6 +1629,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (existing != null) {
       existing.content = content;
       await _repository.updateMessage(existing);
+      if (_canTouchUi) {
+        setState(() {
+          final idx = _messages.indexWhere((m) => m.id == id);
+          if (idx >= 0) {
+            _messages[idx] = existing;
+          }
+        });
+      }
       return;
     }
     await _appendMessage(Message(
