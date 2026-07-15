@@ -2202,6 +2202,122 @@ void main() {
     expect(result.message, isNot(contains('目标文件已存在')));
   });
 
+  test('修复上一个附件时原地覆盖并写入修复内容', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      existingFiles: const {'page_6.html': '<html>无法点击</html>'},
+      patchResult: const {
+        'ok': true,
+        'path': 'page_6.html',
+        'bytes': 31,
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => const {
+        'success': true,
+        'message':
+            '<!doctype html><html><body><button>可点击</button></body></html>',
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '无法行动，界面无法点击，你帮我修复它\n\n'
+          '【持续可用的附件上下文】\n'
+          '- problem.png；类型=image；位置=/tmp/problem.png',
+      conversationHistory: const [
+        {
+          'role': 'assistant',
+          'content': '已生成页面。\n\n【持续可用的附件上下文】\n'
+              '- page_6.html；类型=file；位置=/tmp/page_6.html\n'
+              '【page_6.html 内容】\n<html>无法点击</html>',
+        },
+        {
+          'role': 'user',
+          'content': '无法点击\n\n【持续可用的附件上下文】\n'
+              '- problem.png；类型=image；位置=/tmp/problem.png',
+        },
+      ],
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'page_6.html');
+    expect(fakeTool.lastWriteContent, contains('可点击'));
+  });
+
+  test('旧产物存在时阅读和泛化新建请求不应覆盖旧文件', () async {
+    const history = [
+      {
+        'role': 'assistant',
+        'content': '已生成页面。\n\n【持续可用的附件上下文】\n'
+            '- page_6.html；类型=file；位置=/tmp/page_6.html',
+      },
+    ];
+    for (final request in ['看一下附件', '优化一下', '基于刚才聊的，帮我写个新东西']) {
+      final fakeTool = _FakeWorkspaceFileTool(
+        existingFiles: const {'page_6.html': '<html>原内容</html>'},
+      );
+      final runtime = AgentRuntime(
+        complete: (_) async => const {'success': true, 'message': '收到。'},
+        workspaceFileTool: fakeTool,
+      );
+
+      final result = await runtime.run(
+        character: _character(
+          toolPermissions: const [ToolPermission.workspacePatch],
+        ),
+        skills: [_skill()],
+        userRequest: request,
+        conversationHistory: history,
+        approved: true,
+      );
+
+      expect(result.status, AgentRuntimeStatus.completed);
+      expect(fakeTool.lastWritePath, isNull, reason: request);
+    }
+  });
+
+  test('正常 workspace.patch 修订请求也原地覆盖旧附件', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      existingFiles: const {'page_6.html': '<html>无法点击</html>'},
+      patchResult: const {'ok': true, 'path': 'page_6.html', 'bytes': 31},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => const {
+        'success': true,
+        'message': '```agent_tool\n'
+            '{"tool":"workspace.patch","reason":"修复页面",'
+            '"args":{"path":"page_6.html",'
+            '"content":"<html><button>可点击</button></html>"}}\n```',
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '无法行动，界面无法点击，你帮我修复它',
+      conversationHistory: const [
+        {
+          'role': 'assistant',
+          'content': '已生成页面。\n\n【持续可用的附件上下文】\n'
+              '- page_6.html；类型=file；位置=/tmp/page_6.html',
+        },
+      ],
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'page_6.html');
+    expect(fakeTool.lastWriteContent, contains('可点击'));
+  });
+
   test('non-write tools (workspace.list) do not append file preview', () async {
     // 回归保护：workspace.list / read / command.run 等非写工具的结果不含
     // readbackContent，最终消息应原样返回，不拼接预览块。

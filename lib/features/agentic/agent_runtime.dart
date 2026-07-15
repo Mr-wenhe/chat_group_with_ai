@@ -405,16 +405,45 @@ class AgentRuntime {
     );
   }
 
+  static String _requestBody(String request) =>
+      request.split('\n\n【持续可用的附件上下文】').first;
+
   /// 推断用户请求中隐含的文件路径（如"生成一个 HTML 页面"→ `page.html`）。
   ///
   /// 优先从请求文本本身提取显式文件名/扩展名；其次匹配文件类型关键词；
-  /// 最后回退到 [conversationHistory] 中最近一次 `workspace.patch` 的路径，
+  /// 最后回退到 [conversationHistory] 中最近一个附件或 `workspace.patch` 路径，
   /// 以覆盖"修改上次生成的文件"这类无显式文件名的请求。
   static String? _inferGeneratedFilePath(
     String request, [
     List<Map<String, dynamic>>? conversationHistory,
   ]) {
-    final lower = request.toLowerCase();
+    final requestText = _requestBody(request);
+    final lower = requestText.toLowerCase();
+    String? previousArtifactPath;
+    if (conversationHistory != null) {
+      for (final message in conversationHistory.reversed) {
+        // 用户后续上传的截图不是待修改产物；历史回退只考虑 AI/工具输出。
+        if (message['role'] == 'user') continue;
+        final content = message['content']?.toString() ?? '';
+        final attachment = RegExp(
+          r'^\s*-\s+([^\s；;\r\n]+\.(?:html?|md|markdown|dart|java|txt|'
+          r'json|yaml|yml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp|pdf|'
+          r'doc|docx|xlsx?|pptx?|csv|sql|log|png|jpe?g|zip))'
+          r'(?=\s*(?:[；;]|$))',
+          caseSensitive: false,
+          multiLine: true,
+        ).firstMatch(content);
+        final toolPath = RegExp(
+          r'"tool"\s*:\s*"workspace\.patch"[\s\S]*?"path"\s*:\s*"([^"]+)"',
+        ).firstMatch(content);
+        final path =
+            (attachment?.group(1) ?? toolPath?.group(1))?.replaceAll('\\', '/');
+        if (path != null && WorkspacePathGuard.isSafeRelativePath(path)) {
+          previousArtifactPath = path;
+          break;
+        }
+      }
+    }
     final explicitCreateVerb = RegExp(
       r'(生成|创建|写|设计|制作|做一个|做个|实现|开发|输出|导出|修改|改写|'
       r'create|write|build|make|generate)',
@@ -445,8 +474,9 @@ class AgentRuntime {
       r'做一份|写一份|生成一份|创建一份)',
       caseSensitive: false,
     ).hasMatch(lower);
-    final hasCreateIntent =
-        explicitCreateVerb || (fileArtifactKeyword && wishNewFile && !readModifyVerb);
+    final hasCreateIntent = explicitCreateVerb ||
+        (fileArtifactKeyword && wishNewFile && !readModifyVerb) ||
+        (_isArtifactRevisionRequest(lower) && previousArtifactPath != null);
     if (!hasCreateIntent) return null;
 
     final explicit = RegExp(
@@ -455,7 +485,7 @@ class AgentRuntime {
       r'yaml|yml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp|pdf|doc|docx|xlsx?|'
       r'ppt|pptx|csv|sql|log|png|jpe?g|zip))(?![\w./\\-])',
       caseSensitive: false,
-    ).firstMatch(request);
+    ).firstMatch(requestText);
     final explicitPath = explicit?.group(1)?.replaceAll('\\', '/');
     if (explicitPath != null &&
         WorkspacePathGuard.isSafeRelativePath(explicitPath)) {
@@ -521,25 +551,37 @@ class AgentRuntime {
     if (RegExp(r'(python|\bpy\b)').hasMatch(lower)) return 'script.py';
     if (RegExp(r'(javascript|\bjs\b)').hasMatch(lower)) return 'app.js';
 
-    // 回退：从对话历史中查找最近一次 workspace.patch 写入的路径。
-    // 覆盖"把背景改成红色"这类没有显式文件名、但 LLM 已拿到历史上下文的修改请求。
-    if (conversationHistory != null) {
-      for (final msg in conversationHistory.reversed) {
-        final content = msg['content']?.toString() ?? '';
-        // 匹配 assistant 消息中的 agent_tool workspace.patch 块。
-        final toolMatch = RegExp(
-          r'"tool"\s*:\s*"workspace\.patch"',
-        ).firstMatch(content);
-        if (toolMatch != null) {
-          final pathMatch = RegExp(
-            r'"path"\s*:\s*"([^"]+)"',
-          ).firstMatch(content);
-          if (pathMatch != null) return pathMatch.group(1)!.replaceAll('\\', '/');
-        }
-      }
-    }
+    return _isArtifactRevisionRequest(lower) ? previousArtifactPath : null;
+  }
 
-    return null;
+  static bool _isArtifactRevisionRequest(String request) {
+    final body = _requestBody(request).toLowerCase();
+    final editVerb = RegExp(
+      r'(修改|修复|改写|改成|调整|优化|完善|fix|revise|update)',
+      caseSensitive: false,
+    ).hasMatch(body);
+    final artifactReference = RegExp(
+      r'(它|这个(?:页面|文件|代码)|该(?:页面|文件|代码)|附件|上一个|上次|'
+      r'刚才|之前|现有|当前)',
+      caseSensitive: false,
+    ).hasMatch(body);
+    return editVerb && artifactReference;
+  }
+
+  static ToolRequest _normalizeRevisionPatch(
+    ToolRequest request,
+    String userRequest,
+  ) {
+    if (request.tool != AgentToolName.workspacePatch ||
+        !_isArtifactRevisionRequest(userRequest) ||
+        request.args['overwrite'] == true) {
+      return request;
+    }
+    return ToolRequest(
+      tool: request.tool,
+      reason: request.reason,
+      args: {...request.args, 'overwrite': true},
+    );
   }
 
   static String? _extractGeneratedFileContent(String output) {
@@ -792,7 +834,6 @@ class AgentRuntime {
     List<ToolRequest> priorExecutedRequests = const [],
     String workModeContext = '',
   }) async {
-    print('[RT] run userRequest=$userRequest canDirect=${_canGenerateNewFileDirectly(userRequest)} inferred=${_inferGeneratedFilePath(userRequest, conversationHistory)}');
     if (shouldCancel?.call() == true) {
       return const AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
@@ -847,7 +888,6 @@ class AgentRuntime {
           throwOnFailure: true,
         );
         if (directFileRequest != null) {
-          print('[RT] directFileRequest != null ur=$userRequest path=${directFileRequest.args['path']}');
           return _handleToolRequest(
             character: character,
             request: directFileRequest,
@@ -898,7 +938,6 @@ class AgentRuntime {
       }
     }
 
-    print('[RT] fell through to normal planning for userRequest=$userRequest');
     final prompt = AgentPromptBuilder.buildToolPlanningPrompt(
       characterName: character.name,
       skills: skills,
@@ -1258,7 +1297,6 @@ class AgentRuntime {
       var output = result['message']?.toString() ?? '';
       final parsed =
           ToolRequest.tryParse(output) ?? _looseParseToolRequest(output);
-      print('[RT] _genContent ur=$userRequest parsed=$parsed tool=${parsed?.tool} outputHead=${output.substring(0, output.length > 80 ? 80 : output.length)}');
       if (parsed != null && parsed.tool == AgentToolName.workspacePatch) {
         return parsed;
       }
@@ -1445,7 +1483,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         message: '工作模式已关闭，任务已安全中止。',
       );
     }
-    print('[RT] ENTER _handleToolRequest tool=${request.tool} ur=$userRequest');
+    request = _normalizeRevisionPatch(request, userRequest);
     if (remainingSteps <= 0) {
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
@@ -1492,7 +1530,6 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         executedRequests: executedRequests,
         currentStepLabel: callingToolLabel(request.tool.wireName),
       ));
-      print('[RT] _handleToolRequest tool=${request.tool} path=${request.args['path']}');
       toolResult = await _execute(request, character, executedRequests: executedRequests);
     } catch (e) {
       // 工具执行抛错：上报「步骤失败」，reason 取异常首行（简短中文/英文）。
@@ -1942,7 +1979,6 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     required bool allowCommandValidation,
     List<ToolRequest> executedRequests = const [],
   }) async {
-    print('[RT] _executeWorkspacePatch ENTER path=${request.args['path']} toolType=${_workspaceFileTool.runtimeType}');
     final rawPath = request.args['path'] as String? ?? '';
     var path = WorkspacePathGuard.normalizeToRelative(rawPath);
     if (path.isEmpty) {
@@ -1967,11 +2003,11 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       binaryDowngradedFrom = path;
       path = mdPath;
     }
-    // 文件已存在时自动改用递增后缀，避免：
+    // 新建文件已存在时自动改用递增后缀；显式修复则原地覆盖。
     //   a) 静默覆盖导致用户丢失之前的内容
     //   b) 直接拒绝导致工具执行失败、LLM 回退到代码泄漏路径
     // 改名格式：page.html → page_2.html
-    if (await _workspaceFileExists(path)) {
+    if (request.args['overwrite'] != true && await _workspaceFileExists(path)) {
       path = await _nextAvailableWorkspacePath(path);
     }
     if (path.isEmpty) {
@@ -1991,7 +2027,6 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       path,
       request.args['content'] as String? ?? '',
     );
-    print('[RT] _executeWorkspacePatch wrote path=$path ok=${writeResult['ok']}');
     if (writeResult['ok'] != true) return writeResult;
     // 写成功后上报「已创建文件」。
     await _reportProgress(AgentRuntimeProgress(
