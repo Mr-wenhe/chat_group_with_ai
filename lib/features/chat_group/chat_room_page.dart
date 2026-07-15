@@ -1585,10 +1585,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 记录每个任务最后一次上报的进度，供 [_finishAgentTask] 生成终态 ✅ 摘要。
+  /// 仅运行时态，不写入 Hive。
+  final Map<String, AgentRuntimeProgress> _lastAgentProgress = {};
+
+  /// P2：内存 Map，key=task.id，value=runStartedAtMs（进度总耗时起点）；
+  /// 非持久化，不写入 Hive。供进度气泡实时耗时展示查表。
+  final Map<String, int> _progressStartTimes = {};
+
   Future<void> _persistAgentProgress(
     AgentTask task,
     AgentRuntimeProgress progress,
   ) async {
+    _lastAgentProgress[task.id] = progress;
+    // P2：仅首个非空值写入，天然幂等（后续 progress.runStartedAtMs 一致，不漂移）。
+    // 若上报未携带 runStartedAtMs，则回退到当前时刻，保证耗时可展示。
+    _progressStartTimes[task.id] ??=
+        progress.runStartedAtMs ?? DateTime.now().millisecondsSinceEpoch;
     task.markProgress(
       step: progress.executedRequests.length,
       operations: progress.executedRequests
@@ -1648,9 +1661,38 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         ..lastError = result.message;
     }
     await _db.agentTaskBox.put(task.id, task);
-    if (WorkModeTaskLifecycle.shouldRemoveProgress(task.status)) {
+    // 终态气泡处理：
+    // - 工作模式：仅 cancelled 删除；completed/failed/partiallyCompleted 保留，
+    //   并刷新为终态 ✅ 摘要（末行 ⏳→✅、去光标）。
+    // - 非工作模式：沿用旧行为，终态即删除，避免普通回复路径出现残留气泡。
+    final removeProgress = task.workModeTask
+        ? WorkModeTaskLifecycle.shouldRemoveProgress(task.status)
+        : task.isTerminal;
+    if (removeProgress) {
       await _removeAgentProgressMessage(task);
+    } else {
+      final lastProgress = _lastAgentProgress[task.id];
+      final character = _db.aiCharacterBox.get(task.characterId);
+      // 终态冻结耗时：基于 _progressStartTimes 记录的运行起点计算秒数，
+      // 烘焙进终态摘要首行（⏱ Ns），即使随后清理 map 也不丢失耗时展示。
+      final startMs = _progressStartTimes[task.id];
+      final elapsed = startMs == null
+          ? null
+          : ((DateTime.now().millisecondsSinceEpoch - startMs) / 1000).round();
+      await _upsertAgentProgressMessage(
+        task,
+        agentProgressMessageContent(
+          characterName: character?.name ?? 'AI',
+          progress: lastProgress,
+          finalResult: true,
+          elapsedSeconds: elapsed,
+        ),
+      );
     }
+    // 终态清理：移除内存表里的进度与耗时起点，避免随任务数无界增长。
+    // 终态内容已烘焙耗时，气泡不再依赖该表 live 计算，清理后展示不受影响。
+    _lastAgentProgress.remove(task.id);
+    _progressStartTimes.remove(task.id);
   }
 
   Future<void> _removeAgentProgressMessage(AgentTask task) async {
@@ -1671,6 +1713,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     WorkModeTaskLifecycle.cancelTask(task, reason: reason);
     await _db.agentTaskBox.put(task.id, task);
     await _removeAgentProgressMessage(task);
+    // 终态清理：cancelled 气泡已删，无需展示耗时，移除内存表条目避免无界增长。
+    _lastAgentProgress.remove(task.id);
+    _progressStartTimes.remove(task.id);
   }
 
   String _partialCompletionReport(AgentRuntimeResult result) {
@@ -4067,6 +4112,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                 : ChatMessageList(
                     messages: _messages,
                     characters: _allGroupCharacters,
+                    progressStartTimes: _progressStartTimes,
                     messageIndex: messageIndex,
                     characterIndex: characterIndex,
                     scrollController: _scrollController,

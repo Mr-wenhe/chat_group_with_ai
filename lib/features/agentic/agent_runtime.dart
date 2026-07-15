@@ -8,6 +8,7 @@ import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/retry_handler.dart';
 import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
 import 'package:chat_group/features/agentic/context_window_manager.dart';
+import 'package:chat_group/features/agentic/agent_progress_meta.dart';
 import 'package:chat_group/features/agentic/file_validator.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/agentic/tools/browser_context_tool.dart';
@@ -25,17 +26,63 @@ typedef SkillDownloadHandler = Future<Map<String, dynamic>> Function(
   Map<String, dynamic> args,
 );
 
-enum AgentRuntimeProgressStage { waitingForApproval, toolCompleted }
+enum AgentRuntimeProgressStage {
+  /// 工具待用户批准（既有）。
+  waitingForApproval,
+
+  /// 每步工具执行成功后的聚合上报（避免重复计数，既有）。
+  toolCompleted,
+
+  /// 规划中（run 进入分支前）。
+  planning,
+
+  /// 调用 LLM 思考 / 生成中。
+  thinking,
+
+  /// 读取文件。
+  readingFile,
+
+  /// 调用工具前（已获权限、非待批准）。
+  callingTool,
+
+  /// 写入文件（路径规范化后）。
+  writingFile,
+
+  /// 文件写入成功。
+  fileCreated,
+
+  /// 校验结果（读回内容后）。
+  validating,
+
+  /// 步骤失败（工具执行抛错）。
+  stepFailed,
+
+  /// 用户拒绝 / 取消。
+  stepRejected,
+}
 
 class AgentRuntimeProgress {
   final AgentRuntimeProgressStage stage;
   final List<ToolRequest> executedRequests;
   final ToolRequest? pendingRequest;
 
+  /// 当前进行中步骤的人类可读文案；为 null 时由 stage 兜底（stageLabelFallback）。
+  final String? currentStepLabel;
+
+  // —— P2 新增：运行时态、非持久化字段 ——
+  /// run() 启动时刻（ms 时间戳），整段任务仅捕获一次，构造时默认 null 以兼容旧调用。
+  final int? runStartedAtMs;
+
+  /// 当前步起点（ms 时间戳），stage/label 切步时重置；P2 仅注入不展示。
+  final int? currentStepStartedAtMs;
+
   const AgentRuntimeProgress({
     required this.stage,
     required this.executedRequests,
     this.pendingRequest,
+    this.currentStepLabel,
+    this.runStartedAtMs,
+    this.currentStepStartedAtMs,
   });
 }
 
@@ -115,7 +162,16 @@ class AgentRuntime {
   final Set<ToolPermission>? grantedPermissions;
   final bool Function()? shouldCancel;
 
-  const AgentRuntime({
+  /// 进度上报去抖状态：仅当 stage 或 currentStepLabel 变化时，才真正触发一次
+  /// 气泡重写，避免续写循环等高频 thinking 上报导致的视觉抖动。
+  AgentRuntimeProgressStage? _lastReportedStage;
+  String? _lastReportedLabel;
+
+  /// P2：run() 起点捕获的整段任务启动时刻（ms 时间戳），透传给进度上报；
+  /// 仅运行时态，不写入 Hive。
+  int? _runStartedAtMs;
+
+  AgentRuntime({
     required this.complete,
     this.workspaceFileTool,
     this.browserContextTool,
@@ -716,6 +772,13 @@ class AgentRuntime {
         message: '工作模式已关闭，任务已安全中止。',
       );
     }
+    // P2：捕获整段任务启动时刻，仅一次，后续进度上报通过 _reportProgress 透传。
+    _runStartedAtMs = DateTime.now().millisecondsSinceEpoch;
+    // 进入分支前先上报「规划中」，驱动进度气泡从首行开始生长。
+    await _reportProgress(AgentRuntimeProgress(
+      stage: AgentRuntimeProgressStage.planning,
+      executedRequests: priorExecutedRequests,
+    ));
     if (forceSkillCreation) {
       return _handleToolRequest(
         character: character,
@@ -753,6 +816,7 @@ class AgentRuntime {
           userRequest: userRequest,
           path: _inferGeneratedFilePath(userRequest)!,
           conversationHistory: conversationHistory,
+          executedRequests: priorExecutedRequests,
           throwOnFailure: true,
         );
         if (directFileRequest != null) {
@@ -814,6 +878,12 @@ class AgentRuntime {
       userRequest: userRequest,
       workModeContext: workModeContext,
     );
+    // 规划 LLM 调用前上报「思考中」，携带截至当前的完整已执行列表。
+    await _reportProgress(AgentRuntimeProgress(
+      stage: AgentRuntimeProgressStage.thinking,
+      executedRequests: priorExecutedRequests,
+      currentStepLabel: thinkingLabel('规划任务步骤'),
+    ));
     late final Map<String, dynamic> first;
     try {
       first = await _completePlanningWithRetry(character, [
@@ -826,6 +896,7 @@ class AgentRuntime {
         character: character,
         userRequest: userRequest,
         conversationHistory: conversationHistory,
+        executedRequests: priorExecutedRequests,
       );
       if (fallbackRequest != null) {
         return _handleToolRequest(
@@ -925,6 +996,12 @@ class AgentRuntime {
 
       // 宽松解析也失败：模型有工具意图但输出格式不对。
       // 尝试 re-prompt（给模型一次机会纠正格式）。
+      // re-prompt LLM 调用前上报「思考中（纠正格式）」。
+      await _reportProgress(AgentRuntimeProgress(
+        stage: AgentRuntimeProgressStage.thinking,
+        executedRequests: priorExecutedRequests,
+        currentStepLabel: thinkingLabel('纠正工具调用格式'),
+      ));
       final repromptResult = await _repromptForToolFormat(
         character: character,
         skills: skills,
@@ -948,6 +1025,7 @@ class AgentRuntime {
         character: character,
         userRequest: userRequest,
         conversationHistory: conversationHistory,
+        executedRequests: priorExecutedRequests,
       );
       if (fallbackRequest != null) {
         return _handleToolRequest(
@@ -1062,6 +1140,7 @@ class AgentRuntime {
     required AICharacter character,
     required String userRequest,
     List<Map<String, dynamic>>? conversationHistory,
+    List<ToolRequest> executedRequests = const [],
   }) async {
     if (!_canGenerateNewFileDirectly(userRequest)) return null;
     final path = _inferGeneratedFilePath(userRequest);
@@ -1072,6 +1151,7 @@ class AgentRuntime {
       userRequest: userRequest,
       path: path,
       conversationHistory: conversationHistory,
+      executedRequests: executedRequests,
     );
     if (modelRequest != null) return modelRequest;
 
@@ -1098,6 +1178,7 @@ class AgentRuntime {
     required String path,
     List<Map<String, dynamic>>? conversationHistory,
     bool throwOnFailure = false,
+    List<ToolRequest> executedRequests = const [],
   }) async {
     final prompt = '''
 你是${character.name}。用户要你生成一个文件。
@@ -1120,6 +1201,12 @@ class AgentRuntime {
         {'role': 'system', 'content': prompt},
         ...?conversationHistory,
       ];
+      // 首轮文件内容生成 LLM 调用前上报「思考中（生成文件内容）」。
+      await _reportProgress(AgentRuntimeProgress(
+        stage: AgentRuntimeProgressStage.thinking,
+        executedRequests: executedRequests,
+        currentStepLabel: thinkingLabel('生成文件内容：$path'),
+      ));
       var result = await _completeWithRetry(
         character,
         generationMessages,
@@ -1141,6 +1228,12 @@ class AgentRuntime {
       for (var continuation = 0;
           continuation < 2 && !_isGeneratedFileComplete(path, output);
           continuation++) {
+        // 续写轮次 LLM 调用前同样上报「思考中」；去抖层会忽略与首轮相同的上报。
+        await _reportProgress(AgentRuntimeProgress(
+          stage: AgentRuntimeProgressStage.thinking,
+          executedRequests: executedRequests,
+          currentStepLabel: thinkingLabel('生成文件内容：$path'),
+        ));
         result = await _completeWithRetry(
           character,
           [
@@ -1338,6 +1431,8 @@ class AgentRuntime {
         stage: AgentRuntimeProgressStage.waitingForApproval,
         executedRequests: executedRequests,
         pendingRequest: request,
+        currentStepLabel:
+            waitingApprovalLabel(request.tool.wireName, request.args['path']?.toString()),
       ));
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.waitingForApproval,
@@ -1351,9 +1446,21 @@ class AgentRuntime {
 
     late final Map<String, dynamic> toolResult;
     try {
+      // 权限通过且非待批准：调 _execute 前上报「调用工具中」。
+      await _reportProgress(AgentRuntimeProgress(
+        stage: AgentRuntimeProgressStage.callingTool,
+        executedRequests: executedRequests,
+        currentStepLabel: callingToolLabel(request.tool.wireName),
+      ));
       print('[RT] _handleToolRequest tool=${request.tool} path=${request.args['path']}');
-      toolResult = await _execute(request, character);
+      toolResult = await _execute(request, character, executedRequests: executedRequests);
     } catch (e) {
+      // 工具执行抛错：上报「步骤失败」，reason 取异常首行（简短中文/英文）。
+      await _reportProgress(AgentRuntimeProgress(
+        stage: AgentRuntimeProgressStage.stepFailed,
+        executedRequests: executedRequests,
+        currentStepLabel: stepFailedLabel(e.toString().split('\n').first),
+      ));
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
         pendingToolRequest: request,
@@ -1393,10 +1500,31 @@ class AgentRuntime {
   }
 
   Future<void> _reportProgress(AgentRuntimeProgress progress) async {
+    // 去抖：连续同 stage 且同 label 的上报只保留一次气泡重写，
+    // 避免生成文件续写循环等高频 thinking 上报引发的视觉抖动。
+    final sameAsLast = _lastReportedStage == progress.stage &&
+        _lastReportedLabel == progress.currentStepLabel;
+    _lastReportedStage = progress.stage;
+    _lastReportedLabel = progress.currentStepLabel;
+    if (sameAsLast) return;
+
+    // P2：仅在步切换（stage/label 变化）时，为本次上报注入时间戳，
+    // 不改动约 18 处 _reportProgress(...) 调用点，降低回归风险。
+    // runStartedAtMs 由实例字段统一透传（所有上报都携带），
+    // currentStepStartedAtMs 每次切步重置（P2 仅注入、不展示）。
+    final augmented = AgentRuntimeProgress(
+      stage: progress.stage,
+      executedRequests: progress.executedRequests,
+      pendingRequest: progress.pendingRequest,
+      currentStepLabel: progress.currentStepLabel,
+      runStartedAtMs: _runStartedAtMs,
+      currentStepStartedAtMs: DateTime.now().millisecondsSinceEpoch,
+    );
+
     final handler = onProgress;
     if (handler == null) return;
     try {
-      await handler(progress);
+      await handler(augmented);
     } catch (_) {
       // 检查点失败不能抹掉已经完成的本地工具结果。
     }
@@ -1420,6 +1548,14 @@ class AgentRuntime {
         message: '工作模式已关闭，任务已安全中止。',
       );
     }
+    // 用户拒绝（skipRejectedTool 注入 skipped:true）时上报「已取消」。
+    if (toolResult['skipped'] == true) {
+      await _reportProgress(AgentRuntimeProgress(
+        stage: AgentRuntimeProgressStage.stepRejected,
+        executedRequests: executedRequests,
+        currentStepLabel: stepRejectedLabel(request.tool.wireName),
+      ));
+    }
     if (request.tool == AgentToolName.workspacePatch &&
         toolResult['ok'] == true &&
         !_requiresPostWriteTool(userRequest)) {
@@ -1440,6 +1576,12 @@ class AgentRuntime {
     );
     late final Map<String, dynamic> finalResponse;
     try {
+      // 整理工具结果 LLM 调用前上报「思考中（整理工具结果）」。
+      await _reportProgress(AgentRuntimeProgress(
+        stage: AgentRuntimeProgressStage.thinking,
+        executedRequests: executedRequests,
+        currentStepLabel: thinkingLabel('整理工具结果'),
+      ));
       finalResponse = await _completeWithRetry(character, [
         {'role': 'system', 'content': finalPrompt},
         // 追加对话历史，使 LLM 在整理结果时拥有上下文（修复追问失忆）。
@@ -1568,6 +1710,7 @@ class AgentRuntime {
         character: character,
         userRequest: userRequest,
         conversationHistory: conversationHistory,
+        executedRequests: executedRequests,
       );
       if (fallbackRequest != null) {
         return _handleToolRequest(
@@ -1712,17 +1855,30 @@ class AgentRuntime {
 
   Future<Map<String, dynamic>> _execute(
     ToolRequest request,
-    AICharacter character,
-  ) async {
+    AICharacter character, {
+    List<ToolRequest> executedRequests = const [],
+  }) async {
     return switch (request.tool) {
       AgentToolName.workspaceList => await _workspaceFileTool.list(
           path: request.args['path'] as String? ?? '.'),
-      AgentToolName.workspaceRead =>
-        await _workspaceFileTool.read(request.args['path'] as String? ?? ''),
+      AgentToolName.workspaceRead => await () async {
+        // 读取文件分支：上报「读取文件中」。
+        await _reportProgress(AgentRuntimeProgress(
+          stage: AgentRuntimeProgressStage.readingFile,
+          executedRequests: executedRequests,
+          currentStepLabel: readingFileLabel(
+            request.args['path'] as String? ?? '',
+          ),
+        ));
+        return _workspaceFileTool.read(
+          request.args['path'] as String? ?? '',
+        );
+      }(),
       AgentToolName.workspacePatch => await _executeWorkspacePatch(
           request,
           allowCommandValidation:
               _hasPermission(character, ToolPermission.commandRun),
+          executedRequests: executedRequests,
         ),
       AgentToolName.commandRun => await _workspaceFileTool
           .runCommand(request.args['command'] as String? ?? ''),
@@ -1744,6 +1900,7 @@ class AgentRuntime {
   Future<Map<String, dynamic>> _executeWorkspacePatch(
     ToolRequest request, {
     required bool allowCommandValidation,
+    List<ToolRequest> executedRequests = const [],
   }) async {
     print('[RT] _executeWorkspacePatch ENTER path=${request.args['path']} toolType=${_workspaceFileTool.runtimeType}');
     final rawPath = request.args['path'] as String? ?? '';
@@ -1784,13 +1941,32 @@ class AgentRuntime {
         'message': '目标文件名冲突过多，未找到可用的新文件名',
       };
     }
+    // 路径规范化后、写之前上报「写入文件中」。
+    await _reportProgress(AgentRuntimeProgress(
+      stage: AgentRuntimeProgressStage.writingFile,
+      executedRequests: executedRequests,
+      currentStepLabel: writingFileLabel(path),
+    ));
     final writeResult = await _workspaceFileTool.write(
       path,
       request.args['content'] as String? ?? '',
     );
     print('[RT] _executeWorkspacePatch wrote path=$path ok=${writeResult['ok']}');
     if (writeResult['ok'] != true) return writeResult;
+    // 写成功后上报「已创建文件」。
+    await _reportProgress(AgentRuntimeProgress(
+      stage: AgentRuntimeProgressStage.fileCreated,
+      executedRequests: executedRequests,
+      currentStepLabel: fileCreatedLabel(path),
+    ));
     try {
+      // 读回刚写入的文件前，先上报「读取文件中」阶段，避免用户看到
+      // fileCreated → validating 的跳变。该 stage 与 fileCreated 不同，去抖不会吞掉。
+      await _reportProgress(AgentRuntimeProgress(
+        stage: AgentRuntimeProgressStage.readingFile,
+        executedRequests: executedRequests,
+        currentStepLabel: readingFileLabel(path),
+      ));
       final readResult = await _workspaceFileTool.read(path);
       final content = readResult['content'] as String?;
       if (content == null) return writeResult;
@@ -1799,6 +1975,12 @@ class AgentRuntime {
       if (binaryDowngradedFrom != null) {
         enriched['downgradedFrom'] = binaryDowngradedFrom;
       }
+      // 读回内容后、校验前上报「校验结果中」。
+      await _reportProgress(AgentRuntimeProgress(
+        stage: AgentRuntimeProgressStage.validating,
+        executedRequests: executedRequests,
+        currentStepLabel: validatingLabel(path),
+      ));
       final validation = await FileValidator.validate(
         path,
         content,

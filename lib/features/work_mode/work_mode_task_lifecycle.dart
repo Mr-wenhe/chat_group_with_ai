@@ -26,11 +26,12 @@ class WorkModeTaskLifecycle {
   static String progressMessageId(AgentTask task) =>
       'agent-progress:${task.id}';
 
+  /// 仅当用户取消（[AgentTaskStatus.cancelled]）时删除进度气泡。
+  ///
+  /// 其余终态（completed / failed / partiallyCompleted）保留气泡，
+  /// 由调用方刷新为「已完成摘要」（末行 ⏳→✅、去光标）。
   static bool shouldRemoveProgress(AgentTaskStatus status) =>
-      status == AgentTaskStatus.completed ||
-      status == AgentTaskStatus.failed ||
-      status == AgentTaskStatus.cancelled ||
-      status == AgentTaskStatus.partiallyCompleted;
+      status == AgentTaskStatus.cancelled;
 
   static void cancelTask(AgentTask task, {required String reason}) {
     task

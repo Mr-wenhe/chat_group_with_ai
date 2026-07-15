@@ -98,6 +98,14 @@ class AgentTask extends HiveObject {
 
   bool get canResumeInWorkMode => workModeTask && canResume;
 
+  /// 非持久化派生：任务是否已处于任一终态（成功 / 失败 / 取消 / 部分完成）。
+  /// 仅供 UI 生命周期判断，不写入 Hive。
+  bool get isTerminal =>
+      status == AgentTaskStatus.completed ||
+      status == AgentTaskStatus.failed ||
+      status == AgentTaskStatus.cancelled ||
+      status == AgentTaskStatus.partiallyCompleted;
+
   /// 每个工具步骤完成后刷新可恢复检查点。
   void markProgress({
     required int step,

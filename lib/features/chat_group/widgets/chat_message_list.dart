@@ -34,6 +34,10 @@ class ChatMessageList extends StatelessWidget {
   final void Function(AICharacter sender) onSenderTap;
   final void Function(AICharacter sender) onMentionSender;
 
+  /// P2：进度气泡总耗时起点查表，key=task.id，value=runStartedAtMs；
+  /// 为 null 时进度气泡不展示实时耗时。
+  final Map<String, int>? progressStartTimes;
+
   const ChatMessageList({
     super.key,
     required this.messages,
@@ -54,6 +58,7 @@ class ChatMessageList extends StatelessWidget {
     required this.onLongPress,
     required this.onSenderTap,
     required this.onMentionSender,
+    this.progressStartTimes,
   });
 
   @override
@@ -75,6 +80,15 @@ class ChatMessageList extends StatelessWidget {
           message.timestamp,
           index == 0 ? null : messages[index - 1].timestamp,
         );
+
+        // P2：进度消息解析 taskId（去 "agent-progress:" 前缀）查表得到
+        // runStartedAtMs，传入气泡以展示实时总耗时；非进度消息为 null。
+        final isProgressMessage = message.id.startsWith('agent-progress:');
+        final taskId = isProgressMessage
+            ? message.id.substring('agent-progress:'.length)
+            : message.id;
+        final startTimes = progressStartTimes;
+        final runStartedAtMs = startTimes == null ? null : startTimes[taskId];
 
         return KeyedSubtree(
           key: controller.keyFor(message.id),
@@ -103,6 +117,8 @@ class ChatMessageList extends StatelessWidget {
                 readReceiptText: isDirectChat && message.senderType == 'user'
                     ? (readUserMessageIds.contains(message.id) ? '已读' : '未读')
                     : null,
+                // P2：进度消息携带 runStartedAtMs，其它消息为 null（旧调用兼容）。
+                runStartedAtMs: runStartedAtMs,
               ),
             ],
           ),

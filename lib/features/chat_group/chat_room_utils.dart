@@ -6,6 +6,7 @@ library;
 
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/features/agentic/agent_progress_meta.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
 
 // ---------------------------------------------------------------------------
@@ -84,25 +85,57 @@ bool isDuplicateAiReply(
 // Agent progress message
 // ---------------------------------------------------------------------------
 
-/// Builds a human-readable progress message for an agentic task in progress.
+/// 构建 AI 角色任务执行进度文案。
+///
+/// - [progress] 为 null：保持旧兼容行为，输出单句「规划中」。
+/// - 工作模式：输出多行累积式步骤日志：
+///   首行头部（执行中 / 已完成 / 失败）→ 已完成行（✅，由 [AgentRuntimeProgress.executedRequests] 派生）
+///   → 当前行（⏳，由 stage + [AgentRuntimeProgress.currentStepLabel] 生成）。
+/// - [finalResult] 为 true：末行转为 ✅（去光标），作为终态摘要。
 String agentProgressMessageContent({
   required String characterName,
   AgentRuntimeProgress? progress,
+  bool finalResult = false,
+  int? elapsedSeconds,
 }) {
+  // 非工作模式 / 旧路径：单句「规划中」，行为保持不变。
   if (progress == null) {
     return '🧭 $characterName 正在规划任务，接下来会持续汇报执行进度…';
   }
-  if (progress.stage == AgentRuntimeProgressStage.waitingForApproval) {
-    final tool = progress.pendingRequest?.tool.wireName ?? '工具操作';
-    final path = progress.pendingRequest?.args['path']?.toString();
-    return '⏳ $characterName 已完成规划，正在等待批准：$tool'
-        '${path == null || path.isEmpty ? '' : '（$path）'}';
+
+  final stage = progress.stage;
+  final isToolCompleted = stage == AgentRuntimeProgressStage.toolCompleted;
+
+  // 终态且携带冻结耗时：在首行头部之后追加「⏱ {formatElapsed}」，
+  // 使已完成任务气泡保持展示冻结耗时（即便 _progressStartTimes 已清理、
+  // 进度气泡不再 live 计算耗时）。非终态路径不受影响（elapsedSeconds 默认 null）。
+  final elapsedSuffix = (finalResult && elapsedSeconds != null)
+      ? ' ⏱ ${formatElapsed(elapsedSeconds)}'
+      : '';
+
+  final lines = <String>[
+    statusHeader(
+      characterName,
+      isFinal: finalResult,
+      failed: stage == AgentRuntimeProgressStage.stepFailed,
+    ) +
+        elapsedSuffix,
+  ];
+
+  // ✅ 已完成步骤行：由 executedRequests 派生（进度消息不重复计数）。
+  for (final request in progress.executedRequests) {
+    // P2：依据工具类型追加批准态文案（需批准 / 自动）。
+    final needsApproval = AgentRuntime.requiresApproval(request.tool);
+    final tag = needsApproval ? approvalTag : autoTag;
+    lines.add('$stepPrefixDone ${completedStepLabel(request)}$tag');
   }
-  final count = progress.executedRequests.length;
-  final latest =
-      progress.executedRequests.isEmpty ? null : progress.executedRequests.last;
-  final path = latest?.args['path']?.toString();
-  final operation = latest?.tool.wireName ?? '工具操作';
-  return '⚙️ $characterName 已完成第 $count 步：$operation'
-      '${path == null || path.isEmpty ? '' : '（$path）'}，正在校验结果…';
+
+  // 当前行（⏳）：非聚合刷新（toolCompleted）时展示；finalResult 时转为 ✅ 去光标。
+  final label = progress.currentStepLabel ?? stageLabelFallback[stage] ?? '';
+  if (label.isNotEmpty && !isToolCompleted) {
+    final prefix = finalResult ? stepPrefixDone : stepPrefixActive;
+    lines.add('$prefix $label');
+  }
+
+  return lines.join('\n');
 }
