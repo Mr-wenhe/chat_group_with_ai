@@ -40,6 +40,7 @@ import 'package:chat_group/features/chat_group/chat_group_form_page.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/chat_room_loader.dart';
 import 'package:chat_group/features/chat_group/chat_room_repository.dart';
+import 'package:chat_group/features/chat_group/chat_scroll_utils.dart';
 import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
@@ -321,7 +322,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         _isLoading = false;
       });
 
-      _scrollToBottom();
+      scrollToBottomAfterInitialLayout(_scrollController);
       _scheduleAgentTaskRecovery();
       if (ChatActivityPolicy.canStartAutoChat(
         workModeEnabled: _workModeEnabled,
