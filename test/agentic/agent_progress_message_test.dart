@@ -11,22 +11,23 @@ void main() {
     );
   });
 
-  test('agent progress reports the completed tool and file path', () {
+  test('agent progress reports the completed tool and file path with a done row',
+      () {
     const request = ToolRequest(
       tool: AgentToolName.workspacePatch,
       reason: '生成分析脚本',
       args: {'path': 'sales_analysis.py', 'content': 'print(1)'},
     );
 
-    expect(
-      agentProgressMessageContent(
-        characterName: '陈思远',
-        progress: const AgentRuntimeProgress(
-          stage: AgentRuntimeProgressStage.toolCompleted,
-          executedRequests: [request],
-        ),
+    final content = agentProgressMessageContent(
+      characterName: '陈思远',
+      progress: const AgentRuntimeProgress(
+        stage: AgentRuntimeProgressStage.toolCompleted,
+        executedRequests: [request],
       ),
-      allOf(contains('已完成第 1 步'), contains('sales_analysis.py')),
     );
+    // 新多行格式：包含 ✅ 行与文件路径，不再使用旧的「已完成第 1 步」文案。
+    expect(content, contains('✅'));
+    expect(content, contains('sales_analysis.py'));
   });
 }

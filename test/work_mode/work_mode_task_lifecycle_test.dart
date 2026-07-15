@@ -43,24 +43,32 @@ void main() {
     expect(task.canResumeInWorkMode, isFalse);
   });
 
-  test('terminal tasks remove their temporary progress message', () {
-    expect(
-      WorkModeTaskLifecycle.shouldRemoveProgress(AgentTaskStatus.completed),
-      isTrue,
-    );
-    expect(
-      WorkModeTaskLifecycle.shouldRemoveProgress(AgentTaskStatus.failed),
-      isTrue,
-    );
+  test('only cancelled tasks remove their temporary progress message', () {
+    // 终态（completed / failed / partiallyCompleted）保留气泡，
+    // 由调用方刷新为「已完成摘要」；仅 cancelled 直接删除。
     expect(
       WorkModeTaskLifecycle.shouldRemoveProgress(AgentTaskStatus.cancelled),
       isTrue,
     );
     expect(
+      WorkModeTaskLifecycle.shouldRemoveProgress(AgentTaskStatus.completed),
+      isFalse,
+    );
+    expect(
+      WorkModeTaskLifecycle.shouldRemoveProgress(AgentTaskStatus.failed),
+      isFalse,
+    );
+    expect(
       WorkModeTaskLifecycle.shouldRemoveProgress(
         AgentTaskStatus.partiallyCompleted,
       ),
-      isTrue,
+      isFalse,
+    );
+    expect(
+      WorkModeTaskLifecycle.shouldRemoveProgress(
+        AgentTaskStatus.waitingForApproval,
+      ),
+      isFalse,
     );
   });
 }

@@ -3,6 +3,7 @@ import 'dart:async';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/features/agentic/agent_progress_meta.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
 import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -2521,6 +2522,130 @@ void main() {
     expect(result.message, contains('未能生成可写入的完整文件内容'));
     // 不应把原始规划 narration 泄漏为可见消息。
     expect(result.message, isNot(contains('我直接现在就为你写入文件')));
+  });
+
+  test('consecutive identical thinking reports are de-duplicated', () async {
+    // 验收：生成文件内容时，首轮与续写前各上报一次 thinking('生成文件内容：page.html')，
+    // 二者 stage + label 完全相同；_reportProgress 去抖后应只触发一次气泡重写。
+    var completionCalls = 0;
+    final progress = <AgentRuntimeProgress>[];
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {
+        'path': 'page.html',
+        'content': '<!doctype html><html><body><h1>宇宙</h1></body></html>',
+      },
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 64},
+    );
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        completionCalls++;
+        if (completionCalls == 1) {
+          // 不完整的 HTML（缺 </body></html>），触发续写循环。
+          return {
+            'success': true,
+            'message': '<!doctype html><html><body><h1>宇宙</h1>',
+          };
+        }
+        // 续写补全剩余内容。
+        return {
+          'success': true,
+          'message': '</body></html>',
+        };
+      },
+      workspaceFileTool: fakeTool,
+      onProgress: (value) async => progress.add(value),
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '生成一个宇宙遨游的 html 页面',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    final generationThinking = progress
+        .where((p) =>
+            p.stage == AgentRuntimeProgressStage.thinking &&
+            p.currentStepLabel == thinkingLabel('生成文件内容：page.html'))
+        .toList();
+    expect(generationThinking, hasLength(1),
+        reason: '连续同 stage 同 label 的 thinking 上报必须被去抖去重');
+  });
+
+  test('waitingForApproval progress label includes the target path', () async {
+    // 修复2（waitingForApproval 补 path）验收：运行时在等待批准阶段上报的
+    // currentStepLabel 必须带 path（request.args['path']），形如
+    // 「等待批准：workspace.patch（page.html）」。
+    final progress = <AgentRuntimeProgress>[];
+    final runtime = AgentRuntime(
+      complete: (_) async => {
+        'success': true,
+        'message':
+            '```agent_tool\n{"tool":"workspace.patch","reason":"写页面","args":{"path":"page.html","content":"<html></html>"}}\n```',
+      },
+      onProgress: (value) async => progress.add(value),
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: '生成 page.html',
+    );
+
+    expect(result.status, AgentRuntimeStatus.waitingForApproval);
+    final approval = progress.firstWhere(
+      (p) => p.stage == AgentRuntimeProgressStage.waitingForApproval,
+    );
+    expect(approval.currentStepLabel, '等待批准：workspace.patch（page.html）');
+  });
+
+  test('workspace.patch reports fileCreated -> readingFile -> validating in order',
+      () async {
+    // 修复3（读回补 readingFile）验收：写文件成功后上报顺序必须为
+    // fileCreated → readingFile（读回）→ validating（校验），不再跳变。
+    final progress = <AgentRuntimeProgress>[];
+    final fakeTool = _FakeWorkspaceFileTool(
+      readResult: {
+        'path': 'page.html',
+        'content': '<!doctype html><html></html>',
+      },
+      patchResult: {'ok': true, 'path': 'page.html', 'bytes': 32},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => {'success': true, 'message': '页面已生成。'},
+      workspaceFileTool: fakeTool,
+      onProgress: (value) async => progress.add(value),
+    );
+
+    final result = await runtime.executeApprovedTool(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      request: const ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '写页面',
+        args: {'path': 'page.html', 'content': '<!doctype html><html></html>'},
+      ),
+      userRequest: '生成 page.html',
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    final stages = progress.map((p) => p.stage).toList();
+    final idxFileCreated = stages.indexOf(AgentRuntimeProgressStage.fileCreated);
+    final idxReading = stages.indexOf(AgentRuntimeProgressStage.readingFile);
+    final idxValidating = stages.indexOf(AgentRuntimeProgressStage.validating);
+    expect(idxFileCreated, isNot(equals(-1)), reason: '应有 fileCreated 上报');
+    expect(idxReading, isNot(equals(-1)), reason: '应有 readback readingFile 上报');
+    expect(idxValidating, isNot(equals(-1)), reason: '应有 validating 上报');
+    expect(idxFileCreated, lessThan(idxReading),
+        reason: 'fileCreated 必须先于 readback readingFile');
+    expect(idxReading, lessThan(idxValidating),
+        reason: 'readback readingFile 必须先于 validating');
   });
 }
 
