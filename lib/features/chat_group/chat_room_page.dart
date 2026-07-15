@@ -3654,14 +3654,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           color: cs.surface,
           borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
         ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
+        child: SafeArea(
+          top: false,
+          left: false,
+          right: false,
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              Center(
+                child: Container(
+                  width: 40,
+                  height: 4,
+                  margin: const EdgeInsets.only(bottom: 16),
                 decoration: BoxDecoration(
                     color: cs.outlineVariant,
                     borderRadius: BorderRadius.circular(2)),
@@ -3718,6 +3722,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               _showWeComPushDialog(message.content);
             }),
           ],
+        ),
         ),
       ),
     );
