@@ -1,9 +1,9 @@
 #!/usr/bin/env bash
 # ============================================================================
-# publish_local.sh — 本地构建并发布「非 Windows」4 个平台
+# publish_local.sh — 本地构建并发布「非 Windows」3 个平台
 # ----------------------------------------------------------------------------
 # 混合发布模型（详见 README「发布指南」）：
-#   • 本脚本在开发者本机构建  Web / macOS / iOS / Android，并把这些产物
+#   • 本脚本在开发者本机构建  macOS / iOS / Android，并把这些产物
 #     上传到 GitHub Release。
 #   • Windows 由 CI（.github/workflows/release.yml）在推送 tag 后自动构建，
 #     并以「幂等」方式创建 / 追加到【同一个 Release】。
@@ -19,7 +19,6 @@
 #   ./scripts/publish_local.sh 1.3.8        # 或带 v 前缀：./scripts/publish_local.sh v1.3.8
 #
 # 产物命名（与 CI 的 Windows 产物风格一致）：
-#   release_artifacts/chat_group-web-vX.Y.Z.zip
 #   release_artifacts/chat_group-macos-vX.Y.Z.zip
 #   release_artifacts/chat_group-ios-app-vX.Y.Z.zip
 #   release_artifacts/chat_group-android-apk-vX.Y.Z.apk
@@ -95,11 +94,6 @@ build_one() {
   flutter build "$@" 2>&1 | tail -4
 }
 
-# ===== Web =====
-build_one "Web" web --release
-( cd build/web && zip -r -q "../../$ART_DIR/chat_group-web-v$VERSION.zip" . )
-ok "Web 已打包 → $ART_DIR/chat_group-web-v$VERSION.zip"
-
 # ===== macOS =====
 build_one "macOS" macos --release
 MAC_APP="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n1)"
@@ -131,13 +125,12 @@ else
 fi
 
 gh release upload "$TAG" \
-  "$ART_DIR/chat_group-web-v$VERSION.zip" \
   "$ART_DIR/chat_group-macos-v$VERSION.zip" \
   "$ART_DIR/chat_group-ios-app-v$VERSION.zip" \
   "$ART_DIR/chat_group-android-apk-v$VERSION.apk" \
   "$ART_DIR/chat_group-android-aab-v$VERSION.aab" \
   --clobber
-ok "4 个平台产物已上传到 $TAG"
+ok "3 个平台产物已上传到 $TAG"
 
 REPO_SLUG="$(gh repo view --json owner,name -q '.owner.login + "/" + .name' 2>/dev/null || echo "OWNER/REPO")"
 echo

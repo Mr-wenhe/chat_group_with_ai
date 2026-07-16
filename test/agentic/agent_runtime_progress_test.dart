@@ -1,6 +1,5 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
-import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 /// P2 数据模型 + 时间戳注入测试。

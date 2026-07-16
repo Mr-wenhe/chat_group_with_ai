@@ -10,6 +10,7 @@ import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
+import 'package:chat_group/core/storage/legacy_api_credential_migrator.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/attachment_data_uri.dart';
@@ -124,47 +125,12 @@ class DatabaseService {
   /// Never clears a legacy value until the new secure entry can be read back.
   /// This updates individual records only; it never recreates or clears a box.
   Future<void> _migrateApiConfigCredentials() async {
-    if (apiConfigBox.isEmpty) return;
-    final credentials = CredentialRepository();
-    // Web / 无安全存储平台：安全存储不可用，凭据真源只能留在 Hive 明文
-    // legacyApiKey。仅置 hasCredential 标记可用，绝不清理旧值、也不回退写入。
-    final webFallback = !credentials.secureStorageAvailable;
-    for (final config in apiConfigBox.values) {
-      if (webFallback) {
-        if (config.legacyApiKey.isNotEmpty && !config.hasCredential) {
-          config.hasCredential = true;
-          await apiConfigBox.put(config.id, config);
-        }
-        continue;
-      }
-      final existing = await credentials.read(config.id);
-      if (existing.isAvailable) {
-        if (config.legacyApiKey.isNotEmpty ||
-            !config.hasCredential ||
-            config.credentialId != credentials.credentialIdFor(config.id)) {
-          config.legacyApiKey = '';
-          config.hasCredential = true;
-          config.credentialId = credentials.credentialIdFor(config.id);
-          await apiConfigBox.put(config.id, config);
-        }
-        continue;
-      }
-      if (config.legacyApiKey.isNotEmpty) {
-        final saved = await credentials.save(config.id, config.legacyApiKey);
-        if (!saved.isSuccess) continue;
-        config.legacyApiKey = '';
-        config.hasCredential = true;
-        config.credentialId = credentials.credentialIdFor(config.id);
-        await apiConfigBox.put(config.id, config);
-      }
-    }
-    for (final character in aiCharacterBox.values) {
-      final config = apiConfigBox.get(character.apiConfigId);
-      if (config?.hasCredential == true && character.apiKey.isNotEmpty) {
-        character.apiKey = '';
-        await aiCharacterBox.put(character.id, character);
-      }
-    }
+    await LegacyApiCredentialMigrator(CredentialRepository()).migrate(
+      configs: apiConfigBox.values,
+      characters: aiCharacterBox.values,
+      saveConfig: (config) => apiConfigBox.put(config.id, config),
+      saveCharacter: (character) => aiCharacterBox.put(character.id, character),
+    );
   }
 
   Future<Directory> _getDataDir() async {
@@ -252,18 +218,15 @@ class DatabaseService {
     if (config.legacyApiKey.isNotEmpty) {
       final credentials = CredentialRepository();
       if (!credentials.secureStorageAvailable) {
-        // Web / 无安全存储平台：无法写入安全存储，保留 Hive 明文 legacyApiKey
-        // 作为真源，仅置 hasCredential 标记可用，不抛错、不清理旧值。
-        config.hasCredential = true;
-      } else {
-        final saved = await credentials.save(config.id, config.legacyApiKey);
-        if (!saved.isSuccess) {
-          throw StateError('凭据不可用，未保存配置');
-        }
-        config.legacyApiKey = '';
-        config.hasCredential = true;
-        config.credentialId = credentials.credentialIdFor(config.id);
+        throw StateError('当前平台没有可用的安全凭据存储，未保存配置');
       }
+      final saved = await credentials.save(config.id, config.legacyApiKey);
+      if (!saved.isSuccess) {
+        throw StateError('凭据不可用，未保存配置');
+      }
+      config.legacyApiKey = '';
+      config.hasCredential = true;
+      config.credentialId = credentials.credentialIdFor(config.id);
     } else if (existing?.hasCredential == true) {
       // 编辑元数据时不要求重新输入密钥；保留已验证的安全存储映射。
       config.hasCredential = true;

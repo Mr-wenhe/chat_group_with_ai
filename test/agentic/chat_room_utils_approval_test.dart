@@ -1,4 +1,3 @@
-import 'package:chat_group/features/agentic/agent_progress_meta.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/chat_group/chat_room_utils.dart';
@@ -52,7 +51,8 @@ void main() {
         progress: const AgentRuntimeProgress(
           stage: AgentRuntimeProgressStage.toolCompleted,
           executedRequests: [
-            ToolRequest(tool: AgentToolName.browserContext, reason: '抓', args: {}),
+            ToolRequest(
+                tool: AgentToolName.browserContext, reason: '抓', args: {}),
             ToolRequest(
               tool: AgentToolName.skillCreate,
               reason: '建',

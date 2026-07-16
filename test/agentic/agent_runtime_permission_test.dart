@@ -835,7 +835,8 @@ void main() {
     String? firstSystemPrompt;
     final runtime = AgentRuntime(
       complete: (messages) async {
-        firstSystemPrompt ??= messages.isNotEmpty ? messages.first['content'] as String? : null;
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
         return {
           'success': true,
           'message': '''
@@ -867,8 +868,7 @@ void main() {
     expect(result.message, contains('降级'));
   });
 
-  test('请求生成 PPT 演示文稿被识别为文件意图并降级为 Markdown 真实写入',
-      () async {
+  test('请求生成 PPT 演示文稿被识别为文件意图并降级为 Markdown 真实写入', () async {
     // 补全 ppt/pptx 识别后，应被识别为文件意图走“直接生成”路径，
     // 二进制 pptx 优雅降级为真实可写的 .md（与 Excel/PDF/DOCX 一致）。
     final fakeTool = _FakeWorkspaceFileTool(
@@ -2720,7 +2720,8 @@ void main() {
     expect(approval.currentStepLabel, '等待批准：workspace.patch（page.html）');
   });
 
-  test('workspace.patch reports fileCreated -> readingFile -> validating in order',
+  test(
+      'workspace.patch reports fileCreated -> readingFile -> validating in order',
       () async {
     // 修复3（读回补 readingFile）验收：写文件成功后上报顺序必须为
     // fileCreated → readingFile（读回）→ validating（校验），不再跳变。
@@ -2752,7 +2753,8 @@ void main() {
 
     expect(result.status, AgentRuntimeStatus.completed);
     final stages = progress.map((p) => p.stage).toList();
-    final idxFileCreated = stages.indexOf(AgentRuntimeProgressStage.fileCreated);
+    final idxFileCreated =
+        stages.indexOf(AgentRuntimeProgressStage.fileCreated);
     final idxReading = stages.indexOf(AgentRuntimeProgressStage.readingFile);
     final idxValidating = stages.indexOf(AgentRuntimeProgressStage.validating);
     expect(idxFileCreated, isNot(equals(-1)), reason: '应有 fileCreated 上报');
@@ -2823,7 +2825,6 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
 
   @override
   Future<Map<String, dynamic>> applyPatch(String patch) async {
-    print('[FAKE] applyPatch called');
     return patchResult;
   }
 
@@ -2832,7 +2833,6 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
   // 权限/审批流转而非真实落盘。
   @override
   Future<Map<String, dynamic>> write(String path, String content) async {
-    print('[FAKE] write called path=$path');
     lastWritePath = path;
     lastWriteContent = content;
     return patchResult;

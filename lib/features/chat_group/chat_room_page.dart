@@ -17,6 +17,7 @@ import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
@@ -99,6 +100,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   final _scrollController = ScrollController();
   final _inputFocusNode = FocusNode();
   final _chatApi = ChatApiService();
+  final _credentialResolver = SecureApiCredentialResolver();
   final _webSearch = WebSearchService();
   final _random = Random();
   late final MessageSpeechService _speech;
@@ -259,6 +261,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     _pendingAttachments.clear();
     _workModeSession.requestStop('页面已关闭');
+    unawaited(LocalAgentBridgeLauncher().stop());
     unawaited(_streamSub?.cancel());
     _streamSub = null;
     if (_streamDone != null && !_streamDone!.isCompleted) {
@@ -932,7 +935,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     final config = _resolveApiConfig(character);
-    if (config == null) {
+    final apiKey =
+        config == null ? null : await _credentialResolver.resolve(config);
+    if (config == null || apiKey == null) {
       if (_canTouchUi) {
         setState(() {
           _autoChatStatus = AutoChatStatus.unavailable;
@@ -1001,7 +1006,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     final sub = _chatApi
         .streamChatMessage(
-      apiKey: config.apiKey,
+      apiKey: apiKey,
       provider: provider,
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
@@ -1183,8 +1188,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required ApiProvider provider,
     required List<Map<String, dynamic>> apiMessages,
   }) async {
+    final apiKey = await _credentialResolver.resolve(config);
+    if (apiKey == null) return null;
     final result = await _chatApi.sendChatMessageStreamed(
-      apiKey: config.apiKey,
+      apiKey: apiKey,
       provider: provider,
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
@@ -1498,16 +1505,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }) {
     final bridge = LocalAgentBridgeClient();
     return AgentRuntime(
-      complete: (messages) => _chatApi.sendChatMessageStreamed(
-        apiKey: config.apiKey,
-        provider: provider,
-        customBaseUrl: config.customBaseUrl,
-        model: config.modelName,
-        messages: messages,
-        maxTokens: 8192,
-        receiveTimeout: AgentRuntime.completionTimeout,
-        cancelToken: cancelToken,
-      ),
+      complete: (messages) async {
+        final apiKey = await _credentialResolver.resolve(config);
+        if (apiKey == null) {
+          return const {'success': false, 'message': 'API 凭据不可用'};
+        }
+        return _chatApi.sendChatMessageStreamed(
+          apiKey: apiKey,
+          provider: provider,
+          customBaseUrl: config.customBaseUrl,
+          model: config.modelName,
+          messages: messages,
+          maxTokens: 8192,
+          receiveTimeout: AgentRuntime.completionTimeout,
+          cancelToken: cancelToken,
+        );
+      },
       workspaceFileTool: WorkspaceFileTool(
         bridge,
         conversationId: widget.groupId,
@@ -1530,16 +1543,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       onProgress: (progress) => _persistAgentProgress(task, progress),
       contextWindowManager: ContextWindowManager(
         maxRetries: 0,
-        complete: (contextMessages) => _chatApi.sendChatMessage(
-          apiKey: config.apiKey,
-          provider: provider,
-          customBaseUrl: config.customBaseUrl,
-          model: config.modelName,
-          messages: contextMessages,
-          temperature: 0.3,
-          maxTokens: 2048,
-          cancelToken: cancelToken,
-        ),
+        complete: (contextMessages) async {
+          final apiKey = await _credentialResolver.resolve(config);
+          if (apiKey == null) {
+            return const {'success': false, 'message': 'API 凭据不可用'};
+          }
+          return _chatApi.sendChatMessage(
+            apiKey: apiKey,
+            provider: provider,
+            customBaseUrl: config.customBaseUrl,
+            model: config.modelName,
+            messages: contextMessages,
+            temperature: 0.3,
+            maxTokens: 2048,
+            cancelToken: cancelToken,
+          );
+        },
       ),
       contextIsDirectChat: _isDirectChat,
       onContextSummary: _persistAgentContextSummary,
@@ -2582,6 +2601,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     final config = _resolveApiConfig(character);
     if (config == null) return '';
+    final apiKey = await _credentialResolver.resolve(config);
+    if (apiKey == null) return '';
 
     final msgs = [
       {
@@ -2599,7 +2620,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     ];
 
     final result = await _chatApi.sendChatMessage(
-      apiKey: config.apiKey,
+      apiKey: apiKey,
       provider: ApiProvider.values.firstWhere((p) => p.name == config.provider,
           orElse: () => ApiProvider.deepseek),
       customBaseUrl: config.customBaseUrl,
@@ -2627,7 +2648,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     final config = _resolveApiConfig(character);
-    if (config == null || config.apiKey.isEmpty) return;
+    if (config == null) return;
+    final apiKey = await _credentialResolver.resolve(config);
+    if (apiKey == null) return;
 
     final transcript = ChatOrchestrator.recentDialogueTranscript(
       messages: _messages,
@@ -2647,7 +2670,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
 
     final result = await _chatApi.sendChatMessage(
-      apiKey: config.apiKey,
+      apiKey: apiKey,
       provider: ApiProvider.values.firstWhere((p) => p.name == config.provider,
           orElse: () => ApiProvider.deepseek),
       customBaseUrl: config.customBaseUrl,
@@ -3251,15 +3274,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         .toList();
     final manager = ContextWindowManager(
       maxRetries: 0,
-      complete: (messages) => _chatApi.sendChatMessage(
-        apiKey: config.apiKey,
-        provider: provider,
-        customBaseUrl: config.customBaseUrl,
-        model: config.modelName,
-        messages: messages,
-        temperature: 0.3,
-        maxTokens: 2048,
-      ),
+      complete: (messages) async {
+        final apiKey = await _credentialResolver.resolve(config);
+        if (apiKey == null) {
+          return const {'success': false, 'message': 'API 凭据不可用'};
+        }
+        return _chatApi.sendChatMessage(
+          apiKey: apiKey,
+          provider: provider,
+          customBaseUrl: config.customBaseUrl,
+          model: config.modelName,
+          messages: messages,
+          temperature: 0.3,
+          maxTokens: 2048,
+        );
+      },
     );
     if (!manager.shouldSummarize(apiHistory)) return fallbackContext;
 
@@ -3831,7 +3860,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
 
     final config = _resolveApiConfig(character);
-    if (config == null) {
+    final apiKey =
+        config == null ? null : await _credentialResolver.resolve(config);
+    if (config == null || apiKey == null) {
       if (_canTouchUi) setState(() => _isRegenerating = false);
       return;
     }
@@ -3869,7 +3900,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     final sub = _chatApi
         .streamChatMessage(
-      apiKey: config.apiKey,
+      apiKey: apiKey,
       provider: provider,
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,

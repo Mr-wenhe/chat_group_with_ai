@@ -17,6 +17,7 @@ import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
+import 'package:chat_group/core/storage/api_credential_resolver.dart';
 
 class _WeComField extends StatelessWidget {
   final ColorScheme cs;
@@ -138,6 +139,7 @@ class SettingsPage extends ConsumerStatefulWidget {
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
   final _apiService = AiApiService();
+  final _credentialResolver = SecureApiCredentialResolver();
   AppSkinMode _currentSkinMode = AppSkinMode.dark;
   bool _isTtsEnabled = true;
   Map<String, dynamic> _tokenUsage = {};
@@ -501,6 +503,12 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
     );
+    final apiKey = await _credentialResolver.resolve(config);
+    if (!context.mounted) return;
+    if (apiKey == null) {
+      AppToast.show(context, 'API 凭据不可用', icon: Icons.key_off_rounded);
+      return;
+    }
 
     // 更美观的加载对话框：正常进度圈 + 文字布局，使用主题色
     showDialog(
@@ -522,7 +530,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     );
 
     final result = await _apiService.testApiKey(
-      apiKey: config.apiKey,
+      apiKey: apiKey,
       provider: provider,
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
@@ -924,9 +932,8 @@ class _ApiConfigCard extends StatelessWidget {
   Widget build(BuildContext context) {
     final pColor = providerColor(config.provider);
     final label = providerLabel(config.provider);
-    final maskedKey = config.hasCredential || config.apiKey.isNotEmpty
-        ? 'API Key 已保存 ••••••••'
-        : '未设置 API Key';
+    final maskedKey =
+        config.hasCredential ? 'API Key 已保存 ••••••••' : '未设置 API Key';
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),

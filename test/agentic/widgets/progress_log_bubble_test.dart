@@ -1,5 +1,4 @@
 import 'package:chat_group/core/models/message.dart';
-import 'package:chat_group/features/agentic/agent_progress_meta.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/chat_group/chat_room_utils.dart';
@@ -24,7 +23,8 @@ void main() {
   });
 
   /// 由 AgentRuntimeProgress 生成进度 content 并包裹为 Message。
-  Message _progressMessage(AgentRuntimeProgress progress, {bool finalResult = false}) {
+  Message progressMessage(AgentRuntimeProgress progress,
+      {bool finalResult = false}) {
     final content = agentProgressMessageContent(
       characterName: '小智',
       progress: progress,
@@ -40,7 +40,7 @@ void main() {
   }
 
   /// 读取头部含 ⏱ 的 Text 文案。
-  String _headerElapsedText(WidgetTester tester) {
+  String headerElapsedText(WidgetTester tester) {
     for (final widget in tester.widgetList<Text>(find.byType(Text))) {
       final data = widget.data;
       if (data != null && data.contains('⏱')) return data;
@@ -57,7 +57,7 @@ void main() {
   group('ProgressLogBubble', () {
     // 默认展开：渲染完整多行（含 ✅ 已完成行）。
     testWidgets('defaults to expanded, shows full step lines', (tester) async {
-      final message = _progressMessage(const AgentRuntimeProgress(
+      final message = progressMessage(const AgentRuntimeProgress(
         stage: AgentRuntimeProgressStage.thinking,
         executedRequests: [patchRequest],
         currentStepLabel: '正在校验结果：page.html',
@@ -76,7 +76,7 @@ void main() {
 
     // runStartedAtMs 非空时头部含 ⏱。
     testWidgets('shows ⏱ when runStartedAtMs is provided', (tester) async {
-      final message = _progressMessage(const AgentRuntimeProgress(
+      final message = progressMessage(const AgentRuntimeProgress(
         stage: AgentRuntimeProgressStage.thinking,
         executedRequests: [patchRequest],
         currentStepLabel: '正在校验结果：page.html',
@@ -91,14 +91,15 @@ void main() {
         ),
       ));
 
-      final header = _headerElapsedText(tester);
+      final header = headerElapsedText(tester);
       expect(header, contains('⏱'));
       expect(header, contains('2s'));
     });
 
     // 折叠后仅渲染单行摘要，含「已 N 步」，且多行明细消失。
-    testWidgets('collapsed shows single-line summary with 已 N 步', (tester) async {
-      final message = _progressMessage(const AgentRuntimeProgress(
+    testWidgets('collapsed shows single-line summary with 已 N 步',
+        (tester) async {
+      final message = progressMessage(const AgentRuntimeProgress(
         stage: AgentRuntimeProgressStage.thinking,
         executedRequests: [patchRequest],
         currentStepLabel: '正在校验结果：page.html',
@@ -123,14 +124,14 @@ void main() {
       expect(find.text('⏳ 正在校验结果：page.html'), findsNothing);
       expect(find.byIcon(Icons.expand_more), findsOneWidget);
       // 摘要含「已 1 步」且仍有 ⏱ 实时耗时。
-      final header = _headerElapsedText(tester);
+      final header = headerElapsedText(tester);
       expect(header, contains('⏱'));
       expect(header, contains('已 1 步'));
     });
 
     // 实时耗时跳动：推进时钟 + pump 触发 Timer，⏱ 数值变化。
     testWidgets('elapsed ticks every second via Timer', (tester) async {
-      final message = _progressMessage(const AgentRuntimeProgress(
+      final message = progressMessage(const AgentRuntimeProgress(
         stage: AgentRuntimeProgressStage.thinking,
         executedRequests: [patchRequest],
         currentStepLabel: '正在校验结果：page.html',
@@ -145,21 +146,21 @@ void main() {
         ),
       ));
 
-      final before = _headerElapsedText(tester);
+      final before = headerElapsedText(tester);
       expect(before, contains('2s'));
 
       // 推进 1 秒并触发 Timer.periodic 回调（fake 时钟）。
       fakeNow += 1000;
       await tester.pump(const Duration(seconds: 1));
 
-      final after = _headerElapsedText(tester);
+      final after = headerElapsedText(tester);
       expect(after, contains('3s'));
       expect(after, isNot(equals(before)));
     });
 
     // 终态（末行 ✅）不显示 ⏳，不启动 Timer；折叠摘要用「共 N 步」。
     testWidgets('final content has no ⏳ and uses 共 N 步', (tester) async {
-      final message = _progressMessage(
+      final message = progressMessage(
         const AgentRuntimeProgress(
           stage: AgentRuntimeProgressStage.thinking,
           executedRequests: [patchRequest],
@@ -182,7 +183,7 @@ void main() {
       expect(find.text('⏳ 正在校验结果：page.html'), findsNothing);
       // 展开态头部为「已完成」，✅ 已完成行可见，⏱ 展示冻结值。
       expect(find.textContaining('已完成'), findsWidgets);
-      final header = _headerElapsedText(tester);
+      final header = headerElapsedText(tester);
       expect(header, contains('⏱'));
       expect(header, contains('5s'));
       expect(find.text('✅ 已创建文件：page.html · 需批准'), findsOneWidget);
@@ -190,14 +191,15 @@ void main() {
       // 折叠后单行摘要用「共 2 步」（final 含 executedRequests 1 行 + 终态当前步 1 行）。
       await tester.tap(find.byIcon(Icons.expand_less));
       await tester.pump();
-      final collapsed = _headerElapsedText(tester);
+      final collapsed = headerElapsedText(tester);
       expect(collapsed, contains('共 2 步'));
       expect(find.text('✅ 已创建文件：page.html · 需批准'), findsNothing);
     });
 
     // runStartedAtMs 为 null：头部无 ⏱、不崩溃、不启动 Timer。
-    testWidgets('null runStartedAtMs shows no ⏱ and does not crash', (tester) async {
-      final message = _progressMessage(const AgentRuntimeProgress(
+    testWidgets('null runStartedAtMs shows no ⏱ and does not crash',
+        (tester) async {
+      final message = progressMessage(const AgentRuntimeProgress(
         stage: AgentRuntimeProgressStage.thinking,
         executedRequests: [patchRequest],
         currentStepLabel: '正在校验结果：page.html',
@@ -207,18 +209,19 @@ void main() {
         home: Scaffold(body: ProgressLogBubble(message: message)),
       ));
 
-      expect(_headerElapsedText(tester), isEmpty);
+      expect(headerElapsedText(tester), isEmpty);
       // 进行中仍有 BlinkingCursor（不依赖耗时的光标逻辑不变）。
       expect(find.byType(BlinkingCursor), findsOneWidget);
       // 推进时间不引发崩溃（无 Timer 刷新，但 build 幂等）。
       await tester.pump(const Duration(seconds: 1));
-      expect(_headerElapsedText(tester), isEmpty);
+      expect(headerElapsedText(tester), isEmpty);
     });
 
     // 修复1（终态清理）验收：终态 content 已把 ⏱ 烘焙进首行，且 runStartedAtMs
     // 变 null（_progressStartTimes 已清理）后，气泡仍正确显示冻结耗时——
     // 取自 content 而非 live 计算，既不丢失也不与 live 重复。
-    testWidgets('final content bakes frozen ⏱ shown when runStartedAtMs is null',
+    testWidgets(
+        'final content bakes frozen ⏱ shown when runStartedAtMs is null',
         (tester) async {
       // 构造：同 thinking 进度，但 finalResult + elapsedSeconds=42 → 首行烘焙 ⏱ 42s。
       final content = agentProgressMessageContent(
@@ -245,7 +248,7 @@ void main() {
       ));
 
       // 首行头部含烘焙的冻结耗时（来自 content，而非 live 计算）。
-      final header = _headerElapsedText(tester);
+      final header = headerElapsedText(tester);
       expect(header, contains('⏱ 42s'));
       expect(header, contains('已完成'));
       // 终态无进行中光标、未启动 live Timer。

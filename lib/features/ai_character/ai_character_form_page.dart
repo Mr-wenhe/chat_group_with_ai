@@ -45,7 +45,6 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   String? _existingCharacterId;
   String _selectedApiConfigId = '';
   bool _isSaving = false;
-  bool _hasLegacyApiData = false;
   bool _agenticEnabled = true;
   List<ToolPermission> _toolPermissions = const [];
   Set<String> _selectedSkillTemplateIds = const {};
@@ -77,9 +76,6 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       c?.toolPermissions ??
           CharacterSkillResolver.defaultsFor(_draftCharacter()).permissions,
     );
-    _hasLegacyApiData = _selectedApiConfigId.isEmpty &&
-        (c?.apiKey.isNotEmpty ?? false) &&
-        (c?.apiProvider.isNotEmpty ?? false);
 
     // 新建角色时默认选中配置：自定义(custom)优先（全部默认使用自定义模型），
     // 否则讯飞星火(xfyun)，再否则选第一个可用配置；完全没有配置则保持空置。
@@ -375,27 +371,6 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
             AppCard(
               cs: cs,
               children: [
-                if (_hasLegacyApiData)
-                  Container(
-                    padding: const EdgeInsets.all(10),
-                    margin: const EdgeInsets.only(bottom: 12),
-                    decoration: BoxDecoration(
-                      color: cs.tertiaryContainer.withOpacity(0.5),
-                      borderRadius: BorderRadius.circular(10),
-                    ),
-                    child: Row(
-                      children: [
-                        Icon(Icons.info_outline_rounded,
-                            size: 18, color: cs.tertiary),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: Text('该角色已有 API 配置，请选择下方配置以关联',
-                              style: TextStyle(
-                                  fontSize: 13, color: cs.onSurfaceVariant)),
-                        ),
-                      ],
-                    ),
-                  ),
                 Row(
                   children: [
                     Expanded(

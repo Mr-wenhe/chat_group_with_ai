@@ -34,8 +34,8 @@ class ApiConfig extends HiveObject {
   @HiveField(8, defaultValue: false)
   bool hasCredential;
 
-  /// Runtime-only: Hive serializes [legacyApiKey], never the cached secret.
-  String get apiKey => CredentialRepository.cached(id) ?? legacyApiKey;
+  /// Runtime-only compatibility accessor. It never exposes the legacy Hive key.
+  String get apiKey => CredentialRepository.cached(id) ?? '';
   set apiKey(String value) => legacyApiKey = value;
 
   ApiConfig({

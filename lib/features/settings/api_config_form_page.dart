@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/services/ai_providers/ai_api_service.dart';
@@ -19,6 +20,7 @@ class ApiConfigFormPage extends ConsumerStatefulWidget {
 class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   final _formKey = GlobalKey<FormState>();
   final _apiService = AiApiService();
+  final _credentialResolver = SecureApiCredentialResolver();
   late TextEditingController _nameController;
   late TextEditingController _modelController;
   late TextEditingController _apiKeyController;
@@ -237,10 +239,14 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
 
   Future<void> _testCurrentConfig() async {
     if (!_formKey.currentState!.validate() || _isTesting) return;
-    final apiKey = _apiKeyController.text.trim().isNotEmpty
-        ? _apiKeyController.text.trim()
-        : widget.config?.apiKey ?? '';
-    if (apiKey.isEmpty) {
+    final enteredApiKey = _apiKeyController.text.trim();
+    final apiKey = enteredApiKey.isNotEmpty
+        ? enteredApiKey
+        : widget.config == null
+            ? null
+            : await _credentialResolver.resolve(widget.config!);
+    if (!mounted) return;
+    if (apiKey == null || apiKey.isEmpty) {
       AppToast.show(context, '请先输入 API Key', icon: Icons.key_outlined);
       return;
     }
@@ -297,7 +303,10 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
       }
     } catch (e) {
       if (mounted) {
-        AppToast.show(context, '保存失败: $e', icon: Icons.error_outline_rounded);
+        // 避免把 StateError 的异常类型与内部文案直接暴露给最终用户
+        final message = e is StateError ? e.message : e.toString();
+        AppToast.show(context, '保存失败：$message',
+            icon: Icons.error_outline_rounded);
       }
     } finally {
       if (mounted) setState(() => _isSaving = false);

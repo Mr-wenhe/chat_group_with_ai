@@ -10,7 +10,7 @@ class ChatOrchestrator {
 
   static bool isEligibleToReply(AICharacter character) {
     if (!character.isActive) return false;
-    if (character.apiKey.isEmpty) return false;
+    if (character.apiConfigId.isEmpty) return false;
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final last = character.lastReplyTimestamp;
@@ -24,7 +24,7 @@ class ChatOrchestrator {
 
   static String? blockReasonFor(AICharacter character) {
     if (!character.isActive) return 'inactive';
-    if (character.apiKey.isEmpty) return 'noApiConfig';
+    if (character.apiConfigId.isEmpty) return 'noApiConfig';
     final now = DateTime.now();
     final today = DateTime(now.year, now.month, now.day);
     final last = character.lastReplyTimestamp;

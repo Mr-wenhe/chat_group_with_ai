@@ -20,7 +20,7 @@ void main() {
       expect(ChatOrchestrator.isEligibleToReply(c), false);
     });
 
-    test('character without apiKey is not eligible', () {
+    test('character without an ApiConfig is not eligible', () {
       final c = AICharacter(
         name: 'A',
         avatar: 'A',
@@ -35,7 +35,7 @@ void main() {
       expect(ChatOrchestrator.isEligibleToReply(c), false);
     });
 
-    test('character with apiKey and no previous reply is eligible', () {
+    test('character with an ApiConfig and no previous reply is eligible', () {
       final c = AICharacter(
         name: 'A',
         avatar: 'A',
@@ -45,7 +45,7 @@ void main() {
         systemPrompt: '',
         apiKey: 'k',
         apiProvider: 'deepseek',
-        apiConfigId: '',
+        apiConfigId: 'configured',
       );
       expect(ChatOrchestrator.isEligibleToReply(c), true);
     });
@@ -61,7 +61,7 @@ void main() {
         systemPrompt: '',
         apiKey: 'k',
         apiProvider: 'deepseek',
-        apiConfigId: '',
+        apiConfigId: 'configured',
         hourlyReplyCount: 5,
         hourlyReplyLimit: 10,
         lastReplyTimestamp: now,
@@ -80,7 +80,7 @@ void main() {
         systemPrompt: '',
         apiKey: 'k',
         apiProvider: 'deepseek',
-        apiConfigId: '',
+        apiConfigId: 'configured',
         hourlyReplyCount: 10,
         hourlyReplyLimit: 10,
         lastReplyTimestamp: now,
@@ -99,7 +99,7 @@ void main() {
         systemPrompt: '',
         apiKey: 'k',
         apiProvider: 'deepseek',
-        apiConfigId: '',
+        apiConfigId: 'configured',
         hourlyReplyCount: 10,
         hourlyReplyLimit: 10,
         lastReplyTimestamp: twoHoursAgo,
@@ -124,7 +124,7 @@ void main() {
       expect(ChatOrchestrator.blockReasonFor(c), 'inactive');
     });
 
-    test('no apiKey returns noApiConfig', () {
+    test('no ApiConfig returns noApiConfig', () {
       final c = AICharacter(
         name: 'A',
         avatar: 'A',
@@ -150,7 +150,7 @@ void main() {
         systemPrompt: '',
         apiKey: 'k',
         apiProvider: 'deepseek',
-        apiConfigId: '',
+        apiConfigId: 'configured',
         hourlyReplyCount: 10,
         hourlyReplyLimit: 10,
         lastReplyTimestamp: now,
@@ -169,7 +169,7 @@ void main() {
         systemPrompt: '',
         apiKey: 'k',
         apiProvider: 'deepseek',
-        apiConfigId: '',
+        apiConfigId: 'configured',
         hourlyReplyCount: 5,
         hourlyReplyLimit: 10,
         lastReplyTimestamp: now,

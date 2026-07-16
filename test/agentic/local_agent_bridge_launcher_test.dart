@@ -4,6 +4,7 @@ import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_config.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_launcher.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -73,5 +74,56 @@ void main() {
         await WorkspaceFileTool(firstClient, conversationId: 'conv-a')
             .read('before.txt');
     expect(readback['content'], 'first');
+  });
+
+  test('switching one conversation workspace invalidates the old token',
+      () async {
+    final root = await Directory.systemTemp.createTemp('bridge_rotate_');
+    final first = await Directory('${root.path}/first').create();
+    final second = await Directory('${root.path}/second').create();
+    final launcher = LocalAgentBridgeLauncher(preferredPort: 0);
+    addTearDown(() async {
+      await launcher.stop();
+      await root.delete(recursive: true);
+    });
+
+    await launcher.registerWorkspace(
+      conversationId: 'conv-a',
+      workspacePath: first.path,
+    );
+    final oldToken = LocalAgentBridgeEndpoint.currentToken!;
+    await launcher.registerWorkspace(
+      conversationId: 'conv-a',
+      workspacePath: second.path,
+    );
+
+    expect(LocalAgentBridgeEndpoint.currentToken, isNot(oldToken));
+    final staleClient = LocalAgentBridgeClient(
+      baseUrl: LocalAgentBridgeEndpoint.currentBaseUrl,
+      token: oldToken,
+    );
+    await expectLater(staleClient.getHealth(), throwsA(isA<DioException>()));
+  });
+
+  test('stop and restart invalidate the previous session token', () async {
+    final root = await Directory.systemTemp.createTemp('bridge_restart_');
+    final launcher = LocalAgentBridgeLauncher(preferredPort: 0);
+    addTearDown(() async {
+      await launcher.stop();
+      await root.delete(recursive: true);
+    });
+
+    await launcher.start(workspace: root.path);
+    final oldToken = LocalAgentBridgeEndpoint.currentToken!;
+    await launcher.stop();
+    expect(LocalAgentBridgeEndpoint.currentToken, isNull);
+
+    await launcher.start(workspace: root.path);
+    expect(LocalAgentBridgeEndpoint.currentToken, isNot(oldToken));
+    final staleClient = LocalAgentBridgeClient(
+      baseUrl: LocalAgentBridgeEndpoint.currentBaseUrl,
+      token: oldToken,
+    );
+    await expectLater(staleClient.getHealth(), throwsA(isA<DioException>()));
   });
 }

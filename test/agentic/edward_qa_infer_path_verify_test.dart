@@ -1,13 +1,10 @@
 // 独立回归验证（QA Edward）：直接驱动真实 AgentRuntime.run() 路径，
 // 验证 _inferGeneratedFilePath / _inferWorkspaceFilePath 等中英文类型识别补全。
 // 本文件与工程师既有测试相互独立，用于独立确认映射正确性，不依赖其断言。
-import 'dart:async';
-
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/agentic/agent_runtime.dart';
-import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -76,9 +73,8 @@ void main() {
     String? firstSystemPrompt;
     final runtime = AgentRuntime(
       complete: (messages) async {
-        firstSystemPrompt ??= messages.isNotEmpty
-            ? messages.first['content'] as String?
-            : null;
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
         return {
           'success': true,
           'message': '''
@@ -110,9 +106,8 @@ void main() {
     String? firstSystemPrompt;
     final runtime = AgentRuntime(
       complete: (messages) async {
-        firstSystemPrompt ??= messages.isNotEmpty
-            ? messages.first['content'] as String?
-            : null;
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
         return {
           'success': true,
           'message': '''
@@ -146,9 +141,8 @@ void main() {
     String? firstSystemPrompt;
     final runtime = AgentRuntime(
       complete: (messages) async {
-        firstSystemPrompt ??= messages.isNotEmpty
-            ? messages.first['content'] as String?
-            : null;
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
         return {
           'success': true,
           'message': '''
@@ -180,9 +174,8 @@ void main() {
     String? firstSystemPrompt;
     final runtime = AgentRuntime(
       complete: (messages) async {
-        firstSystemPrompt ??= messages.isNotEmpty
-            ? messages.first['content'] as String?
-            : null;
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
         return {
           'success': true,
           'message': '''
@@ -216,9 +209,8 @@ void main() {
     String? firstSystemPrompt;
     final runtime = AgentRuntime(
       complete: (messages) async {
-        firstSystemPrompt ??= messages.isNotEmpty
-            ? messages.first['content'] as String?
-            : null;
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
         return {
           'success': true,
           'message': '''
@@ -249,9 +241,8 @@ void main() {
     String? firstSystemPrompt;
     final runtime = AgentRuntime(
       complete: (messages) async {
-        firstSystemPrompt ??= messages.isNotEmpty
-            ? messages.first['content'] as String?
-            : null;
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
         return {
           'success': true,
           'message': '这是该 PPT 文件的内容概要，我并没有新建文件。',
@@ -276,9 +267,8 @@ void main() {
     String? firstSystemPrompt;
     final runtime = AgentRuntime(
       complete: (messages) async {
-        firstSystemPrompt ??= messages.isNotEmpty
-            ? messages.first['content'] as String?
-            : null;
+        firstSystemPrompt ??=
+            messages.isNotEmpty ? messages.first['content'] as String? : null;
         return {
           'success': true,
           'message': '''

@@ -100,12 +100,40 @@ void main() {
       Uri.parse('http://127.0.0.1:${server.port}/workspace/write'),
     );
     request.headers.contentType = ContentType.json;
-    request.write(jsonEncode({'path': 'blocked.txt', 'content': 'no'}));
+    request.write(jsonEncode({
+      'path': '${workspace.path}/blocked.txt',
+      'content': 'no',
+    }));
     final response = await request.close();
+    final body = await utf8.decoder.bind(response).join();
     client.close(force: true);
 
     expect(response.statusCode, HttpStatus.unauthorized);
+    expect(body, isNot(contains(workspace.path)));
     expect(File('${workspace.path}/blocked.txt').existsSync(), isFalse);
+  });
+
+  test('chunked request without contentLength still enforces body limit',
+      () async {
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+    final client = HttpClient();
+    final request = await client.openUrl(
+      'POST',
+      Uri.parse('http://127.0.0.1:${server.port}/workspace/write'),
+    );
+    request.headers.contentType = ContentType.json;
+    request.headers.chunkedTransferEncoding = true;
+    request.headers
+        .set(HttpHeaders.authorizationHeader, 'Bearer $_bridgeToken');
+    request.add(List<int>.filled(1024 * 1024 + 1, 65));
+
+    final response = await request.close();
+    final body = await utf8.decoder.bind(response).join();
+    client.close(force: true);
+
+    expect(response.statusCode, HttpStatus.requestEntityTooLarge);
+    expect(jsonDecode(body), {'error': 'invalid_request'});
   });
 
   test('bridge allows loopback browser origin and echoes it in CORS', () async {

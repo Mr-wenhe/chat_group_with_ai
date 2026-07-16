@@ -39,6 +39,7 @@ class LocalAgentBridgeLauncher {
   static RunningBridgeServer? _server;
   static String? _workspacePath;
   static String? _sessionToken;
+  static final Map<String, String> _registeredWorkspaces = {};
   final int preferredPort;
 
   LocalAgentBridgeLauncher({this.preferredPort = kLocalAgentBridgePort});
@@ -64,7 +65,7 @@ class LocalAgentBridgeLauncher {
     final ws = workspace ?? _resolveDefaultWorkspace();
     final workspaceDir = Directory(ws).absolute;
     if (!await workspaceDir.exists()) {
-      throw ArgumentError('Workspace does not exist: ${workspaceDir.path}');
+      throw ArgumentError('Workspace does not exist');
     }
     if (_server != null && _samePath(_workspacePath, workspaceDir.path)) {
       return;
@@ -120,12 +121,25 @@ class LocalAgentBridgeLauncher {
     required String workspacePath,
   }) async {
     if (!_isDesktop) return;
-    if (_server == null) {
-      await start(workspace: workspacePath);
+    final workspaceDir = Directory(workspacePath).absolute;
+    if (!await workspaceDir.exists()) {
+      throw ArgumentError('Workspace does not exist');
     }
-    _server?.registerWorkspace(
-        conversationId, Directory(workspacePath).absolute);
+    final previous = _registeredWorkspaces[conversationId];
+    if (previous != null && !_samePath(previous, workspaceDir.path)) {
+      await restart(workspace: workspaceDir.path);
+    }
+    if (_server == null) {
+      await start(workspace: workspaceDir.path);
+    }
+    _server?.registerWorkspace(conversationId, workspaceDir);
+    _registeredWorkspaces[conversationId] = workspaceDir.path;
     if (kDebugMode) debugPrint('[桥接] 已注册对话工作区');
+  }
+
+  Future<void> restart({required String workspace}) async {
+    await stop();
+    await start(workspace: workspace);
   }
 
   /// 解析默认工作区目录：从当前进程工作目录向上逐级查找最近的含 `.git` 的 git 仓库根目录。
@@ -203,11 +217,12 @@ class LocalAgentBridgeLauncher {
   /// 停止进程内桥接服务（幂等：未运行则直接返回）。
   Future<void> stop() async {
     final server = _server;
-    if (server == null) return;
     _server = null;
     _workspacePath = null;
     _sessionToken = null;
+    _registeredWorkspaces.clear();
     LocalAgentBridgeEndpoint.reset();
+    if (server == null) return;
     try {
       // force: true 立即关闭监听并断开已建立的连接。
       await server.close(force: true);

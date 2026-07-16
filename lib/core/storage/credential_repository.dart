@@ -105,8 +105,8 @@ class CredentialRepository {
 
   String credentialIdFor(String configId) => '$_keyPrefix$configId';
 
-  /// 当前平台是否存在可用的安全存储。Web 等无 Keychain/Keystore 环境为 false，
-  /// 调用方据此决定是否回退到 Hive 明文 legacyApiKey。
+  /// 当前平台是否存在可用的安全存储。Web 等无 Keychain/Keystore 环境为 false；
+  /// 调用方必须拒绝保存或请求，不能回退到 Hive 明文。
   bool get secureStorageAvailable => _secureStorageAvailable;
 
   static String? cached(String configId) => _cache[configId];

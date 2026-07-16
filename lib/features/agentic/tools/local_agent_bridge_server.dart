@@ -116,7 +116,16 @@ Future<void> _route(
   }
 
   // 其余路由都依赖 workspace：从请求体读取 conversationId 做分区路由。
-  final body = await _readJson(request);
+  Map<String, dynamic> body;
+  try {
+    body = await _readJson(request);
+  } on _RequestBodyTooLarge {
+    await _json(request, {'error': 'invalid_request'}, statusCode: 413);
+    return;
+  } on FormatException {
+    await _json(request, {'error': 'invalid_json'}, statusCode: 400);
+    return;
+  }
   final ws = _workspaceFor(workspaces, body['conversationId'] as String?);
 
   if (request.uri.path == '/workspace/list') {
@@ -287,11 +296,22 @@ Directory _workspaceFor(
 }
 
 Future<Map<String, dynamic>> _readJson(HttpRequest request) async {
-  final raw = await utf8.decoder.bind(request).join();
+  final bytes = <int>[];
+  await for (final chunk in request) {
+    if (bytes.length + chunk.length > _maxRequestBytes) {
+      throw const _RequestBodyTooLarge();
+    }
+    bytes.addAll(chunk);
+  }
+  final raw = utf8.decode(bytes);
   if (raw.trim().isEmpty) return {};
   final decoded = jsonDecode(raw);
   if (decoded is Map<String, dynamic>) return decoded;
   throw const FormatException('Expected JSON object');
+}
+
+class _RequestBodyTooLarge implements Exception {
+  const _RequestBodyTooLarge();
 }
 
 String _normalizeWorkspacePath(Directory workspace, String path) {
