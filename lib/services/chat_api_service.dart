@@ -7,6 +7,8 @@ import 'package:chat_group/core/streaming/sse_parser.dart';
 import 'package:dio/dio.dart';
 
 class ChatApiService {
+  static const String _emptyCompletionMessage = '模型返回了空内容';
+
   final Dio _dio;
   final RetrySleep _retrySleep;
 
@@ -102,8 +104,17 @@ class ChatApiService {
 
       if (response.statusCode == 200) {
         final data = response.data as Map<String, dynamic>;
-        final reply = data['choices']?[0]?['message']?['content']?.toString() ??
-            '(empty)';
+        final message = data['choices']?[0]?['message'];
+        final standardReply = message?['content']?.toString() ?? '';
+        // 推理模型的 OpenAI 兼容层可能只填 reasoning_content。
+        // 标准 content 仍优先，仅它为空时才使用兼容字段。
+        final reasoningReply = message?['reasoning_content']?.toString() ?? '';
+        final reply = standardReply.trim().isNotEmpty
+            ? standardReply
+            : reasoningReply;
+        if (reply.trim().isEmpty) {
+          return {'success': false, 'message': _emptyCompletionMessage};
+        }
         final usage = data['usage'];
         return {
           'success': true,
@@ -261,7 +272,19 @@ class ChatApiService {
       return {'success': false, 'message': '流式请求失败: $e'};
     }
     if (content.trim().isEmpty) {
-      return {'success': false, 'message': '模型返回了空内容'};
+      // 部分 OpenAI 兼容服务的 SSE 通道只返回 [DONE]，但同一
+      // 请求的非流式通道可正常返回内容；立即回退一次避免任务误报。
+      return _sendChatMessageOnce(
+        apiKey: apiKey,
+        provider: provider,
+        customBaseUrl: customBaseUrl,
+        model: model,
+        messages: messages,
+        temperature: temperature,
+        maxTokens: maxTokens,
+        receiveTimeout: receiveTimeout,
+        cancelToken: cancelToken,
+      );
     }
     return {
       'success': true,

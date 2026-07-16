@@ -28,9 +28,19 @@ void main() {
     final pendingBranch = resumeBody.indexOf(
       'ToolRequest.fromJsonString(task.pendingToolRequestJson)',
     );
+    final beginConversationWork = resumeBody.indexOf(
+      '_conversationController.beginWork()',
+    );
+    final beginRun = resumeBody.indexOf('_workModeSession.beginRun()');
+    final finishAndDispatch = resumeBody.indexOf(
+      '_finishWorkActivityAndDispatchNext()',
+    );
 
     expect(workModeGuard, inInclusiveRange(0, loadWorkspace - 1));
     expect(loadWorkspace, inInclusiveRange(0, registerWorkspace - 1));
     expect(registerWorkspace, inInclusiveRange(0, pendingBranch - 1));
+    expect(pendingBranch, inInclusiveRange(0, beginConversationWork - 1));
+    expect(beginConversationWork, inInclusiveRange(0, beginRun - 1));
+    expect(finishAndDispatch, greaterThan(beginRun));
   });
 }

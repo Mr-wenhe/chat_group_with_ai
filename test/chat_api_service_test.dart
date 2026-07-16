@@ -200,6 +200,127 @@ void main() {
     expect(captured.receiveTimeout, const Duration(seconds: 60));
   });
 
+  test('empty streamed completion falls back to one non-stream request',
+      () async {
+    final requests = <RequestOptions>[];
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        requests.add(options);
+        final requestData = options.data as Map<String, dynamic>;
+        if (requestData['stream'] == true) {
+          handler.resolve(Response<ResponseBody>(
+            requestOptions: options,
+            statusCode: 200,
+            data: ResponseBody(
+              Stream.value(
+                Uint8List.fromList(utf8.encode('data: [DONE]\n')),
+              ),
+              200,
+            ),
+          ));
+          return;
+        }
+        handler.resolve(Response(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'choices': [
+              {
+                'message': {'content': '<html>fallback</html>'}
+              }
+            ]
+          },
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio);
+
+    final result = await service.sendChatMessageStreamed(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isTrue);
+    expect(result['message'], '<html>fallback</html>');
+    expect(requests, hasLength(2));
+    expect((requests.first.data as Map)['stream'], isTrue);
+    expect((requests.last.data as Map)['stream'], isNull);
+  });
+
+  test('empty non-stream completion is rejected instead of being accepted',
+      () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'choices': [
+              {
+                'message': {'content': '   '}
+              }
+            ]
+          },
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio);
+
+    final result = await service.sendChatMessage(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isFalse);
+    expect(result['message'], '模型返回了空内容');
+  });
+
+  test('non-stream completion accepts reasoning content when content is empty',
+      () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'choices': [
+              {
+                'message': {
+                  'content': '',
+                  'reasoning_content': '<html>reasoning fallback</html>',
+                }
+              }
+            ]
+          },
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio);
+
+    final result = await service.sendChatMessage(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isTrue);
+    expect(result['message'], '<html>reasoning fallback</html>');
+  });
+
   test('streamed agent completion forwards its cancellation token', () async {
     late CancelToken? capturedToken;
     final dio = Dio();

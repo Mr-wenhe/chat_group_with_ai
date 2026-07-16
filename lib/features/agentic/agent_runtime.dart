@@ -449,7 +449,7 @@ class AgentRuntime {
     }
     final explicitCreateVerb = RegExp(
       r'(生成|创建|写|设计|制作|做一个|做个|实现|开发|输出|导出|修改|改写|'
-      r'create|write|build|make|generate)',
+      r'create|write|build|make|generate|modify|edit|revise|update|change)',
       caseSensitive: false,
     ).hasMatch(lower);
     // 没有显式创建动词时，把“我要一份… + 文件制品关键词”也视为生成意图
@@ -466,7 +466,7 @@ class AgentRuntime {
     ).hasMatch(lower);
     final readModifyVerb = RegExp(
       r'(读|查看|看|打开|检查|分析|改一下|修改成|改成|更新|解析|预览|展示|'
-      r'analyze|read|open|check|view|preview)',
+      r'analyze|read|open|check|view|preview|modify|edit|revise|update|change)',
       caseSensitive: false,
     ).hasMatch(lower);
     // “一份 / 一个文件” 等量词表明用户想要“一份全新的制品”，而非指代已有文件。
@@ -560,12 +560,15 @@ class AgentRuntime {
   static bool _isArtifactRevisionRequest(String request) {
     final body = _requestBody(request).toLowerCase();
     final editVerb = RegExp(
-      r'(修改|修复|改写|改成|调整|优化|完善|fix|revise|update)',
+      r'(修改|修复|改写|改成|调整|优化|完善|'
+      r'fix|modify|edit|revise|update|change)',
       caseSensitive: false,
     ).hasMatch(body);
     final artifactReference = RegExp(
       r'(它|这个(?:页面|文件|代码)|该(?:页面|文件|代码)|附件|上一个|上次|'
-      r'刚才|之前|现有|当前)',
+      r'刚才|之前|现有|当前|'
+      r'\bsame\b|\bthis\b|\bthat\b|\bprevious\b|\blast\b|'
+      r'\bexisting\b|\bcurrent\b|\battachment\b)',
       caseSensitive: false,
     ).hasMatch(body);
     return editVerb && artifactReference;
@@ -1166,6 +1169,12 @@ class AgentRuntime {
       final generationMessages = <Map<String, dynamic>>[
         {'role': 'system', 'content': prompt},
         ...?conversationHistory,
+        // 当前请求已从历史中去重，必须作为最后一个 user turn 补回。
+        // 否则历史以 assistant 结尾时，兼容模型可能续写上一份附件内容。
+        {
+          'role': 'user',
+          'content': '当前文件生成请求（只执行这一条）：$userRequest',
+        },
       ];
       // 首轮文件内容生成 LLM 调用前上报「思考中（生成文件内容）」。
       await _reportProgress(AgentRuntimeProgress(
@@ -2116,34 +2125,26 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     if (request == null) return null;
     final path = request.args['path'] as String? ?? '';
     final ext = path.split('.').last.toLowerCase();
-    // HTML/SVG/CSS are highly subjective visual artifacts. The old local
-    // template produced an empty shell, which is worse than an honest retry.
-    // Keep deterministic fallbacks only for code/scripts/technical markdown.
-    if (const {
-      'html',
-      'htm',
-      'svg',
-      'css',
-      'pdf',
-      'doc',
-      'docx',
-      'xls',
-      'xlsx',
-      'ppt',
-      'pptx',
-      'zip',
-      'png',
-      'jpg',
-      'jpeg',
-    }.contains(ext)) {
-      return null;
-    }
-    if ((ext == 'md' || ext == 'markdown') &&
-        !RegExp(r'(技术文档|项目|工程|报告|总结|readme)', caseSensitive: false)
-            .hasMatch(userRequest)) {
-      return null;
-    }
-    return request;
+    final isTechnicalMarkdown = (ext == 'md' || ext == 'markdown') &&
+        RegExp(r'(技术文档|项目|工程|报告|总结|readme)', caseSensitive: false)
+            .hasMatch(userRequest);
+    // 只保留确实有可运行/可解析本地模板的类型。其余扩展名以前会写入
+    // “Agentic Live Test”说明页，造成非空但不可运行的伪代码附件。
+    const deterministicTemplateExtensions = {
+      'dart',
+      'java',
+      'sh',
+      'bash',
+      'c',
+      'cc',
+      'cpp',
+      'h',
+      'hpp',
+      'json',
+    };
+    return isTechnicalMarkdown || deterministicTemplateExtensions.contains(ext)
+        ? request
+        : null;
   }
 
   /// 模糊推断文件名：当关键词命中但用户未给出具体文件名时，

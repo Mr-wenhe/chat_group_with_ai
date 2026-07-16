@@ -319,6 +319,29 @@ void main() {
     expect(result.message, isNot(contains('工具任务失败')));
   });
 
+  test('model timeout never writes a generic placeholder as Python code',
+      () async {
+    final fakeTool = _FakeWorkspaceFileTool();
+    final runtime = AgentRuntime(
+      complete: (_) async => throw TimeoutException('generation stalled'),
+      workspaceFileTool: fakeTool,
+      retrySleep: (_) async {},
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: 'Create validated_sales.py with sales statistics.',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.failed);
+    expect(fakeTool.lastWritePath, isNull);
+    expect(fakeTool.lastWriteContent, isNull);
+  });
+
   test('explicit rich HTML request skips tool planning and generates once',
       () async {
     var completionCalls = 0;
@@ -2316,6 +2339,89 @@ void main() {
     expect(result.status, AgentRuntimeStatus.completed);
     expect(fakeTool.lastWritePath, 'page_6.html');
     expect(fakeTool.lastWriteContent, contains('可点击'));
+  });
+
+  test('English same-file revision overwrites the existing artifact',
+      () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      existingFiles: const {
+        'interactive_counter.html': '<html>original</html>',
+      },
+      patchResult: const {
+        'ok': true,
+        'path': 'interactive_counter.html',
+        'bytes': 48,
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => const {
+        'success': true,
+        'message': '<!doctype html><html><head><title>Counter</title></head>'
+            '<body><button>+10</button></body></html>',
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: 'Modify the same interactive_counter.html and add +10.',
+      approved: true,
+    );
+
+    expect(
+      result.status,
+      AgentRuntimeStatus.completed,
+      reason: result.message,
+    );
+    expect(fakeTool.lastWritePath, 'interactive_counter.html');
+    expect(fakeTool.lastWriteContent, contains('+10'));
+  });
+
+  test('direct file generation keeps the current request as the last turn',
+      () async {
+    late List<Map<String, dynamic>> capturedMessages;
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: const {
+        'ok': true,
+        'path': 'role_task_board.html',
+        'bytes': 96,
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        capturedMessages = messages;
+        return const {
+          'success': true,
+          'message': '<!doctype html><html><body><h1>Task Board</h1>'
+              '<input><button>Add</button><button>Complete</button>'
+              '</body></html>',
+        };
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.run(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      skills: [_skill()],
+      userRequest: 'Create role_task_board.html with Add and Complete buttons.',
+      conversationHistory: const [
+        {
+          'role': 'assistant',
+          'content': '<html><body>stale counter output</body></html>',
+        },
+      ],
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(capturedMessages.last['role'], 'user');
+    expect(capturedMessages.last['content'], contains('role_task_board.html'));
+    expect(fakeTool.lastWriteContent, contains('Task Board'));
   });
 
   test('non-write tools (workspace.list) do not append file preview', () async {

@@ -477,6 +477,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       await _presentPendingAgentApproval(approval);
       return;
     }
+    if (_conversationController.beginWork() == null) return;
+    if (_canTouchUi) setState(() {});
     final workModeRun = _workModeSession.beginRun();
     final cancelToken = workModeRun.token;
     try {
@@ -493,6 +495,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       );
     } finally {
       _workModeSession.finishRun(workModeRun);
+      await _finishWorkActivityAndDispatchNext();
     }
   }
 
@@ -831,17 +834,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       );
     } finally {
       _workModeSession.finishRun(workModeRun);
-      _finishWorkActivity();
-      final next = _pendingAgentApproval == null
-          ? _conversationController.takeNext()
-          : null;
-      if (next != null && _canTouchUi) {
-        await _dispatchUserRequest(
-          text: next.text,
-          mentionedIds: next.mentionedIds,
-          userMessage: next.message,
-        );
-      }
+      await _finishWorkActivityAndDispatchNext();
+    }
+  }
+
+  Future<void> _finishWorkActivityAndDispatchNext() async {
+    _finishWorkActivity();
+    final next = _pendingAgentApproval == null
+        ? _conversationController.takeNext()
+        : null;
+    if (next != null && _canTouchUi) {
+      await _dispatchUserRequest(
+        text: next.text,
+        mentionedIds: next.mentionedIds,
+        userMessage: next.message,
+      );
     }
   }
 
@@ -1711,8 +1718,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       contextWindowManager: ContextWindowManager(
         maxRetries: 0,
         thresholdTokens: (capability.contextWindow - agentMaxTokens)
-                .clamp(4096, kContextCompressThresholdTokens)
-                .toInt(),
+            .clamp(4096, kContextCompressThresholdTokens)
+            .toInt(),
         complete: (contextMessages) async {
           final apiKey = await _credentialResolver.resolve(config);
           if (apiKey == null) {
@@ -1979,7 +1986,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         return true;
       } finally {
         _workModeSession.finishRun(workModeRun);
-        _finishWorkActivity();
+        await _finishWorkActivityAndDispatchNext();
       }
     }
     if (action == WorkModeApprovalAction.cancelPending) {
@@ -2056,7 +2063,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return true;
     } finally {
       _workModeSession.finishRun(workModeRun);
-      _finishWorkActivity();
+      await _finishWorkActivityAndDispatchNext();
     }
   }
 
