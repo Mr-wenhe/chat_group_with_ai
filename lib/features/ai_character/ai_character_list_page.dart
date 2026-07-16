@@ -1,5 +1,7 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
+import 'package:chat_group/core/database/data_lifecycle_models.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/character_presets.dart';
 import 'package:chat_group/features/ai_character/action_skill_count.dart';
 import 'package:chat_group/features/direct_chat/pinned_ordering.dart';
@@ -12,6 +14,7 @@ import 'providers/ai_character_providers.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/data_lifecycle_result_dialog.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
@@ -486,30 +489,78 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
 
   Future<void> _confirmDelete(
       BuildContext context, WidgetRef ref, AICharacter character) async {
-    final confirm = await showDialog<bool>(
+    final service = DataLifecycleService(db: ref.read(databaseServiceProvider));
+    final plan = await service.previewCharacter(character.id);
+    if (!context.mounted) return;
+    var policy = CharacterDeletionPolicy.keepMessageHistory;
+    final selectedPolicy = await showDialog<CharacterDeletionPolicy>(
       context: context,
-      builder: (context) => AlertDialog(
-        icon: Icon(Icons.delete_outline_rounded,
-            color: Theme.of(context).colorScheme.error, size: 28),
-        title: Text('删除「${character.name}」？'),
-        content: const Text('此操作不可撤销，该角色的所有数据将被删除。'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('取消')),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: FilledButton.styleFrom(
-                backgroundColor: Theme.of(context).colorScheme.error),
-            child: const Text('删除'),
+      builder: (context) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          icon: Icon(Icons.delete_outline_rounded,
+              color: Theme.of(context).colorScheme.error, size: 28),
+          title: Text('删除「${character.name}」？'),
+          content: SizedBox(
+            width: 460,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '影响：${plan.count('groups')} 个群聊、'
+                    '${plan.count('directMessages')} 条私聊、'
+                    '${plan.count('skills')} 个技能、'
+                    '${plan.count('tasks')} 个任务、'
+                    '${plan.count('memories')} 条记忆、'
+                    '${plan.count('relationships')} 条关系。',
+                  ),
+                  RadioListTile<CharacterDeletionPolicy>(
+                    contentPadding: EdgeInsets.zero,
+                    value: CharacterDeletionPolicy.keepMessageHistory,
+                    groupValue: policy,
+                    title: const Text('保留历史消息'),
+                    subtitle: const Text(
+                      '从群组移除角色，删除技能、任务、记忆和关系；群聊与私聊历史保留为只读“已删除角色”。',
+                    ),
+                    onChanged: (value) => setDialogState(() => policy = value!),
+                  ),
+                  RadioListTile<CharacterDeletionPolicy>(
+                    contentPadding: EdgeInsets.zero,
+                    value: CharacterDeletionPolicy.deleteRelatedData,
+                    groupValue: policy,
+                    title: const Text('同时删除私聊历史'),
+                    subtitle: const Text(
+                      '群聊历史仍保留；私聊消息及其无其他引用的 APP 附件一并删除。',
+                    ),
+                    onChanged: (value) => setDialogState(() => policy = value!),
+                  ),
+                ],
+              ),
+            ),
           ),
-        ],
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context),
+                child: const Text('取消')),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, policy),
+              style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(context).colorScheme.error),
+              child: const Text('确认删除'),
+            ),
+          ],
+        ),
       ),
     );
-    if (confirm == true) {
-      await ref
+    if (selectedPolicy != null) {
+      final result = await ref
           .read(aiCharactersProvider.notifier)
-          .deleteCharacter(character.id);
+          .deleteCharacter(character.id, policy: selectedPolicy);
+      ref.invalidate(chatGroupsProvider);
+      if (!result.isComplete && context.mounted) {
+        await showIncompleteDeletionDialog(context, result);
+      }
     }
   }
 

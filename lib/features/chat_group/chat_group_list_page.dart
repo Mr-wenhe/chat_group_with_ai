@@ -1,4 +1,5 @@
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/chat_group/group_chat_inbox.dart';
@@ -9,6 +10,7 @@ import './providers/chat_group_providers.dart';
 import 'chat_group_form_page.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/data_lifecycle_result_dialog.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 
@@ -178,13 +180,23 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
 
   Future<void> _confirmDelete(
       BuildContext context, WidgetRef ref, ChatGroup group) async {
+    final plan = await DataLifecycleService(db: _db).previewGroup(group.id);
+    if (!context.mounted) return;
     final confirm = await showDialog<bool>(
       context: context,
       builder: (context) => AlertDialog(
         icon: Icon(Icons.delete_outline_rounded,
             color: Theme.of(context).colorScheme.error, size: 28),
         title: Text('删除「${group.name}」？'),
-        content: const Text('此操作不可撤销，该群聊的所有消息将被删除。'),
+        content: Text(
+          '此操作不可撤销，将删除群聊及关联的：\n'
+          '• ${plan.count('messages')} 条消息\n'
+          '• ${plan.count('groupMemories') + plan.count('characterMemories')} 条记忆\n'
+          '• ${plan.count('relationships')} 条关系\n'
+          '• ${plan.count('tasks')} 个任务、${plan.count('workspaces')} 条工作区记录\n'
+          '• ${plan.count('settings')} 项会话状态\n'
+          '• ${plan.count('attachments')} 个无其他引用的 APP 附件',
+        ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(context, false),
@@ -199,7 +211,11 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
       ),
     );
     if (confirm == true) {
-      await ref.read(chatGroupsProvider.notifier).deleteGroup(group.id);
+      final result =
+          await ref.read(chatGroupsProvider.notifier).deleteGroup(group.id);
+      if (!result.isComplete && context.mounted) {
+        await showIncompleteDeletionDialog(context, result);
+      }
       if (mounted) setState(() {});
     }
   }

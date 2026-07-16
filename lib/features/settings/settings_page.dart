@@ -2,7 +2,11 @@ import 'dart:io';
 
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/database/data_lifecycle_models.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
+import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
+import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 import 'package:chat_group/features/settings/ai_processing_directory_policy.dart';
 import 'package:chat_group/features/settings/api_config_form_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
@@ -15,6 +19,7 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/data_lifecycle_result_dialog.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
@@ -144,6 +149,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _isTtsEnabled = true;
   Map<String, dynamic> _tokenUsage = {};
   String _aiProcessingDirPath = '';
+  MediaUsage _mediaUsage = MediaUsage.empty;
+  bool _hasPendingDeletion = false;
+  bool _isCleaningMedia = false;
 
   @override
   void initState() {
@@ -153,6 +161,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _isTtsEnabled = db.isTtsEnabled;
     _tokenUsage = db.getTokenUsage();
     _loadAiProcessingDirPath();
+    _loadLifecycleState();
+  }
+
+  Future<void> _loadLifecycleState() async {
+    final service = DataLifecycleService(db: ref.read(databaseServiceProvider));
+    final usage = await service.mediaUsage();
+    if (!mounted) return;
+    setState(() {
+      _mediaUsage = usage;
+      _hasPendingDeletion = service.hasPendingOperation;
+    });
   }
 
   Future<void> _loadAiProcessingDirPath() async {
@@ -432,10 +451,52 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               _SettingTile(
                 cs: cs,
                 icon: Icons.cleaning_services_rounded,
+                iconColor: cs.secondary,
+                title: '媒体占用',
+                subtitle: '${_formatBytes(_mediaUsage.totalBytes)} · '
+                    '${_mediaUsage.orphanFiles} 个孤儿文件可清理',
+                onTap: _isCleaningMedia ? null : _cleanupOrphanMedia,
+              ),
+              if (_hasPendingDeletion) ...[
+                Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+                _SettingTile(
+                  cs: cs,
+                  icon: Icons.sync_problem_rounded,
+                  iconColor: cs.error,
+                  title: '重试未完成删除',
+                  subtitle: '上次删除部分完成；重试是幂等操作',
+                  onTap: _retryPendingDeletion,
+                ),
+              ],
+              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              _SettingTile(
+                cs: cs,
+                icon: Icons.forum_outlined,
                 iconColor: cs.error,
-                title: '清除所有数据',
-                subtitle: '删除所有角色、群组、消息和 API 配置',
-                onTap: () => _confirmClearData(context),
+                title: '清除聊天内容',
+                subtitle: '删除消息、记忆、关系、任务和会话状态；保留角色、群聊、API 配置及偏好',
+                onTap: () =>
+                    _confirmClearData(context, DataClearScope.chatContent),
+              ),
+              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              _SettingTile(
+                cs: cs,
+                icon: Icons.delete_sweep_outlined,
+                iconColor: cs.error,
+                title: '清除全部用户内容',
+                subtitle: '另删除角色、群聊、技能和 API 配置；保留主题、TTS 和目录偏好',
+                onTap: () =>
+                    _confirmClearData(context, DataClearScope.userContent),
+              ),
+              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              _SettingTile(
+                cs: cs,
+                icon: Icons.restart_alt_rounded,
+                iconColor: cs.error,
+                title: '恢复出厂设置',
+                subtitle: '删除全部用户内容，并重置主题、TTS、目录等偏好',
+                onTap: () =>
+                    _confirmClearData(context, DataClearScope.factoryReset),
               ),
             ],
           ),
@@ -469,30 +530,80 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   Future<void> _confirmDeleteConfig(
       BuildContext context, ApiConfig config) async {
     final cs = Theme.of(context).colorScheme;
-    final confirm = await showDialog<bool>(
+    final plan = await DataLifecycleService(
+      db: ref.read(databaseServiceProvider),
+    ).previewApiConfig(config.id);
+    if (!context.mounted) return;
+    final replacements = ref
+        .read(apiConfigsProvider)
+        .where((candidate) => candidate.id != config.id)
+        .toList(growable: false);
+    var replacementId = '';
+    final selection = await showDialog<String>(
       context: context,
-      builder: (ctx) => AlertDialog(
-        icon: Icon(Icons.warning_amber_rounded, color: cs.error, size: 28),
-        title: Text('删除「${config.name}」？'),
-        content: const Text('此操作不可撤销，使用该配置的角色将无法回复。'),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(ctx, false),
-              child: const Text('取消')),
-          FilledButton(
-            onPressed: () => Navigator.pop(ctx, true),
-            style: FilledButton.styleFrom(backgroundColor: cs.error),
-            child: const Text('删除'),
+      builder: (ctx) => StatefulBuilder(
+        builder: (ctx, setDialogState) => AlertDialog(
+          icon: Icon(Icons.warning_amber_rounded, color: cs.error, size: 28),
+          title: Text('删除「${config.name}」？'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('当前有 ${plan.count('characters')} 个角色使用该配置。'
+                    '删除后旧凭据会同步移除，不会回退使用旧 Key。'),
+                const SizedBox(height: 16),
+                DropdownButtonFormField<String>(
+                  value: replacementId,
+                  decoration: const InputDecoration(
+                    labelText: '受影响角色',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    const DropdownMenuItem(
+                      value: '',
+                      child: Text('解绑（角色将无法回复）'),
+                    ),
+                    ...replacements.map(
+                      (candidate) => DropdownMenuItem(
+                        value: candidate.id,
+                        child: Text('替换为 ${candidate.name}'),
+                      ),
+                    ),
+                  ],
+                  onChanged: (value) => setDialogState(
+                    () => replacementId = value ?? '',
+                  ),
+                ),
+              ],
+            ),
           ),
-        ],
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
+            FilledButton(
+              onPressed: () => Navigator.pop(ctx, replacementId),
+              style: FilledButton.styleFrom(backgroundColor: cs.error),
+              child: const Text('确认删除'),
+            ),
+          ],
+        ),
       ),
     );
 
-    if (confirm == true && context.mounted) {
-      await ref.read(apiConfigsProvider.notifier).deleteConfig(config.id);
+    if (selection != null && context.mounted) {
+      final result = await ref.read(apiConfigsProvider.notifier).deleteConfig(
+            config.id,
+            replacementConfigId: selection.isEmpty ? null : selection,
+          );
       if (context.mounted) {
-        AppToast.show(context, '「${config.name}」已删除',
-            icon: Icons.delete_outline_rounded);
+        if (result.isComplete) {
+          AppToast.show(context, '「${config.name}」已删除',
+              icon: Icons.delete_outline_rounded);
+        } else {
+          await showIncompleteDeletionDialog(context, result);
+        }
       }
     }
   }
@@ -852,16 +963,31 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     return '${(cachedTokens / inputTokens * 100).toStringAsFixed(1)}%';
   }
 
-  Future<void> _confirmClearData(BuildContext context) async {
+  Future<void> _confirmClearData(
+    BuildContext context,
+    DataClearScope scope,
+  ) async {
     final cs = Theme.of(context).colorScheme;
+    final (title, description) = switch (scope) {
+      DataClearScope.chatContent => (
+          '清除聊天内容？',
+          '将永久删除消息、附件、记忆、关系、任务、工作区记录和会话状态。角色、群聊、API 配置、主题、TTS 和目录偏好会保留。',
+        ),
+      DataClearScope.userContent => (
+          '清除全部用户内容？',
+          '将永久删除聊天内容、角色、群聊、技能、API 配置及安全凭据。主题、TTS 和目录偏好会保留。',
+        ),
+      DataClearScope.factoryReset => (
+          '恢复出厂设置？',
+          '将永久删除全部用户内容及安全凭据，并重置主题、TTS、目录等所有偏好。',
+        ),
+    };
     final confirm = await showDialog<bool>(
       context: context,
       builder: (ctx) => AlertDialog(
         icon: Icon(Icons.warning_amber_rounded, color: cs.error, size: 28),
-        title: const Text('清除所有数据？'),
-        content: const Text(
-          '此操作不可撤销，所有角色、群组、消息和 API 配置将被永久删除。\n\n请先备份数据库文件，再确认继续。',
-        ),
+        title: Text(title),
+        content: Text('$description\n\n此操作不可撤销，请先导出高价值对话。'),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -877,13 +1003,65 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
     if (confirm == true && context.mounted) {
       final db = ref.read(databaseServiceProvider);
-      await db.clearAllData();
+      final result = await DataLifecycleService(db: db).clear(scope);
       ref.invalidate(apiConfigsProvider);
+      ref.invalidate(aiCharactersProvider);
+      ref.invalidate(chatGroupsProvider);
+      if (scope == DataClearScope.factoryReset) {
+        ref.invalidate(appSkinModeProvider);
+        _currentSkinMode = db.savedAppSkinMode;
+        _isTtsEnabled = db.isTtsEnabled;
+        await _loadAiProcessingDirPath();
+      }
+      await _loadLifecycleState();
       if (context.mounted) {
-        AppToast.show(context, '所有数据已清除',
-            icon: Icons.cleaning_services_rounded);
+        if (result.isComplete) {
+          AppToast.show(context, title.replaceFirst('？', '完成'),
+              icon: Icons.cleaning_services_rounded);
+        } else {
+          await showIncompleteDeletionDialog(context, result);
+        }
       }
     }
+  }
+
+  Future<void> _cleanupOrphanMedia() async {
+    setState(() => _isCleaningMedia = true);
+    final result = await DataLifecycleService(
+      db: ref.read(databaseServiceProvider),
+    ).cleanupOrphanMedia();
+    await _loadLifecycleState();
+    if (!mounted) return;
+    setState(() => _isCleaningMedia = false);
+    if (result.isComplete) {
+      AppToast.show(context, '已清理 ${result.reclaimedFiles} 个孤儿附件',
+          icon: Icons.cleaning_services_rounded);
+    } else {
+      await showIncompleteDeletionDialog(context, result);
+    }
+  }
+
+  Future<void> _retryPendingDeletion() async {
+    final result = await DataLifecycleService(
+      db: ref.read(databaseServiceProvider),
+    ).retryPendingOperation();
+    ref.invalidate(apiConfigsProvider);
+    ref.invalidate(aiCharactersProvider);
+    ref.invalidate(chatGroupsProvider);
+    await _loadLifecycleState();
+    if (!mounted) return;
+    if (result.isComplete) {
+      AppToast.show(context, '未完成删除已重试完成',
+          icon: Icons.check_circle_outline_rounded);
+    } else {
+      await showIncompleteDeletionDialog(context, result);
+    }
+  }
+
+  String _formatBytes(int bytes) {
+    if (bytes < 1024) return '$bytes B';
+    if (bytes < 1024 * 1024) return '${(bytes / 1024).toStringAsFixed(1)} KB';
+    return '${(bytes / (1024 * 1024)).toStringAsFixed(1)} MB';
   }
 }
 

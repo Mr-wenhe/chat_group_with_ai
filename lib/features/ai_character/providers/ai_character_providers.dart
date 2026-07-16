@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_models.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import '../../../providers/providers.dart';
 
@@ -30,9 +32,16 @@ class AICharactersNotifier extends StateNotifier<List<AICharacter>> {
     _loadCharacters();
   }
 
-  Future<void> deleteCharacter(String id) async {
-    await _db.aiCharacterBox.delete(id);
+  Future<DataLifecycleResult> deleteCharacter(
+    String id, {
+    required CharacterDeletionPolicy policy,
+  }) async {
+    final result = await DataLifecycleService(db: _db).deleteCharacter(
+      id,
+      policy: policy,
+    );
     _loadCharacters();
+    return result;
   }
 
   AICharacter? getCharacterById(String id) {

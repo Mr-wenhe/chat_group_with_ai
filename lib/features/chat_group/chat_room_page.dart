@@ -4,6 +4,7 @@ import 'dart:io';
 import 'dart:math';
 
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
@@ -256,8 +257,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _disposed = true;
     ConversationPresenceService.instance.leave(widget.groupId);
     WidgetsBinding.instance.removeObserver(this);
-    for (final attachment in List<MediaAttachment>.from(_pendingAttachments)) {
-      unawaited(_deletePendingAttachmentFile(attachment));
+    if (_pendingAttachments.isNotEmpty) {
+      unawaited(_cleanupMediaPaths(_pendingAttachments));
     }
     _pendingAttachments.clear();
     _workModeSession.requestStop('页面已关闭');
@@ -4031,7 +4032,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   AICharacter _unknownCharacter() {
     return AICharacter(
-      name: '未知',
+      name: '已删除角色',
       avatar: '?',
       age: 0,
       role: '',
@@ -4804,22 +4805,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         .where((a) => a.id == att.id)
         .toList(growable: false);
     setState(() => _pendingAttachments.removeWhere((a) => a.id == att.id));
-    for (final attachment in removed) {
-      unawaited(_deletePendingAttachmentFile(attachment));
-    }
+    if (removed.isNotEmpty) unawaited(_cleanupMediaPaths(removed));
   }
 
-  Future<void> _deletePendingAttachmentFile(MediaAttachment attachment) async {
-    final dataDir = _db.dataDirPath;
-    if (dataDir == null) return;
-    final mediaRoot =
-        '${Directory(dataDir).absolute.path}${Platform.pathSeparator}media';
-    final file = File(attachment.localPath).absolute;
-    if (!file.path.startsWith('$mediaRoot${Platform.pathSeparator}')) return;
-    try {
-      if (await file.exists()) {
-        await file.delete();
-      }
-    } catch (_) {}
+  Future<void> _cleanupMediaPaths(Iterable<MediaAttachment> attachments) async {
+    await DataLifecycleService(db: _db).cleanupMediaPaths(
+      attachments.map((attachment) => attachment.localPath),
+    );
   }
 }

@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_models.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import '../../../providers/providers.dart';
 
@@ -29,9 +31,10 @@ class ChatGroupsNotifier extends StateNotifier<List<ChatGroup>> {
     _loadGroups();
   }
 
-  Future<void> deleteGroup(String id) async {
-    await _db.chatGroupBox.delete(id);
+  Future<DataLifecycleResult> deleteGroup(String id) async {
+    final result = await DataLifecycleService(db: _db).deleteGroup(id);
     _loadGroups();
+    return result;
   }
 
   ChatGroup? getGroupById(String id) {

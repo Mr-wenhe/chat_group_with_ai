@@ -1,4 +1,5 @@
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
 
@@ -29,8 +30,9 @@ class ChatRoomRepository {
     return db.messageBox.put(message.id, message);
   }
 
-  Future<void> deleteMessage(String messageId) {
-    return db.deleteMessage(messageId, groupId: conversationId);
+  Future<void> deleteMessage(String messageId) async {
+    await DataLifecycleService(db: db)
+        .deleteMessage(messageId, groupId: conversationId);
   }
 
   Future<void> persistReplyUsage(AICharacter character) {

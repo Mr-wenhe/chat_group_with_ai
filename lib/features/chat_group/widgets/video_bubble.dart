@@ -41,9 +41,7 @@ class _VideoBubbleState extends State<VideoBubble> {
         placeholder: const Center(child: CircularProgressIndicator()),
       );
       setState(() {});
-    }).catchError((e) {
-      debugPrint('[视频] 初始化失败：$e');
-    });
+    }).catchError((_) {});
   }
 
   @override

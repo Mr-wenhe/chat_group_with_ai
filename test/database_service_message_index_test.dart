@@ -94,7 +94,10 @@ void main() {
     await db.messageBox.put(progress.id, progress);
     await db.addMessageToGroupIndex(progress);
 
-    await db.deleteMessage(progress.id, groupId: progress.groupId);
+    await db.deleteMessageRecordAndIndex(
+      progress.id,
+      groupId: progress.groupId,
+    );
 
     expect(db.messageBox.containsKey(progress.id), isFalse);
     expect(await db.messagesForGroup(progress.groupId), isEmpty);

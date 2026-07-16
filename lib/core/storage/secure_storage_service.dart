@@ -53,14 +53,8 @@ class SecureStorageService {
     }
   }
 
-  Future<void> deleteApiConfigKey(String configId) async {
-    try {
-      await _storage.delete(key: '$_apiConfigKeyPrefix$configId');
-    } on PlatformException {
-      // Some macOS debug builds do not have Keychain entitlements. Deleting the
-      // Hive row still removes the config from the app in that environment.
-    }
-  }
+  Future<void> deleteApiConfigKey(String configId) =>
+      _storage.delete(key: '$_apiConfigKeyPrefix$configId');
 
   Future<void> saveDefaultProvider(String provider) async {
     await _storage.write(key: 'default_provider', value: provider);
@@ -94,7 +88,7 @@ class SecureStorageService {
     try {
       await _storage.delete(key: _wecomAppConfigKey);
     } on PlatformException {
-      // 同 deleteApiConfigKey：macOS debug 无 Keychain 权限时静默忽略。
+      // 企业微信配置沿用旧的 best-effort 清理语义。
     }
   }
 }

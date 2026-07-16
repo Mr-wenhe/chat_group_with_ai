@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/streaming/sse_parser.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -70,6 +72,20 @@ void main() {
       expect(bad, hasLength(1));
       expect(bad.first.type, ChatStreamEventType.error);
       expect(p.doneEvent().content, 'OK');
+    });
+
+    test('非法 SSE 不会把原始正文写入日志', () {
+      const secretMarker = 'runtime-security-secret-marker';
+      final logs = <String>[];
+
+      runZoned(
+        () => SseParser().ingest('data: $secretMarker\n'),
+        zoneSpecification: ZoneSpecification(
+          print: (_, __, ___, message) => logs.add(message),
+        ),
+      );
+
+      expect(logs.join('\n'), isNot(contains(secretMarker)));
     });
 
     test('reset 清空缓冲与累计内容', () {

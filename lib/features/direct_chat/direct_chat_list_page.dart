@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
@@ -46,7 +47,10 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
 
   void _loadSummaries() {
     final summaries = DirectChatInbox.buildSummaries(
-      characters: _db.aiCharacterBox.values.toList(),
+      characters: [
+        ..._db.aiCharacterBox.values,
+        ...DataLifecycleService(db: _db).deletedCharacters(),
+      ],
       messages: _db.messageBox.values.toList(),
       readAtByConversation: _db.directChatReadAtByConversation(),
       sourceByConversation: _db.directChatSourceByConversation(),
@@ -190,12 +194,16 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
                   onTap: () => _openDirectChat(summary),
                   onTogglePin: () =>
                       _togglePinnedCharacter(summary.character.id),
-                  onOpenCharacter: () => Navigator.of(context).push(
-                    MaterialPageRoute(
-                      builder: (_) =>
-                          AICharacterFormPage(character: summary.character),
-                    ),
-                  ),
+                  onOpenCharacter:
+                      _db.aiCharacterBox.containsKey(summary.character.id)
+                          ? () => Navigator.of(context).push(
+                                MaterialPageRoute(
+                                  builder: (_) => AICharacterFormPage(
+                                    character: summary.character,
+                                  ),
+                                ),
+                              )
+                          : null,
                 );
               },
             ),
@@ -251,7 +259,7 @@ class _DirectChatCard extends StatelessWidget {
   final bool isPinned;
   final VoidCallback onTap;
   final VoidCallback onTogglePin;
-  final VoidCallback onOpenCharacter;
+  final VoidCallback? onOpenCharacter;
 
   const _DirectChatCard({
     required this.summary,

@@ -88,9 +88,8 @@ class SseParser {
       }
       _fullContent += content;
       return ChatStreamEvent.token(content);
-    } catch (e) {
-      // 解析失败不应中断流，但保留原因便于排障（不向用户暴露原始异常）
-      print('[SSE] 解析 data 行失败: $e | 原始行: $line');
+    } catch (_) {
+      // 解析失败不应中断流，也不应把模型正文或供应商错误原文写入日志。
       return ChatStreamEvent.error('SSE 数据解析失败');
     }
   }

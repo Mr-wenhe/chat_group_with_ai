@@ -186,14 +186,10 @@ class CredentialRepository {
     }
     if (configId.trim().isEmpty) return const CredentialWriteResult.success();
     try {
-      // 同时删除新、旧两套 key；旧 key 删除失败为 best-effort，不阻断主流程。
+      // 两套 key 都删除成功才算完成，避免配置元数据删除后遗留孤儿凭据。
       await _store.delete(credentialIdFor(configId));
       _cache.remove(configId);
-      try {
-        await _legacyStorage.deleteApiConfigKey(configId);
-      } on Object {
-        // 旧前缀删除是过渡期 best-effort，不记录异常细节。
-      }
+      await _legacyStorage.deleteApiConfigKey(configId);
       return const CredentialWriteResult.success();
     } on PlatformException catch (error) {
       return CredentialWriteResult.failed(_mapPlatformFailure(error));

@@ -8,7 +8,6 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
-import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/core/storage/legacy_api_credential_migrator.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
@@ -233,82 +232,6 @@ class DatabaseService {
       config.credentialId = existing!.credentialId;
     }
     await apiConfigBox.put(config.id, config);
-  }
-
-  Future<void> deleteApiConfig(String id) async {
-    final credentials = CredentialRepository();
-    // 无安全存储平台（Web）：没有安全 key 可删，直接清 Hive 即可，不抛错。
-    if (credentials.secureStorageAvailable) {
-      final deleted = await credentials.delete(id);
-      if (!deleted.isSuccess) {
-        throw StateError('凭据不可用，未删除配置');
-      }
-    }
-    await apiConfigBox.delete(id);
-    for (final character in aiCharacterBox.values) {
-      if (character.apiConfigId == id) {
-        character.apiConfigId = '';
-        character.apiKey = '';
-        await aiCharacterBox.put(character.id, character);
-      }
-    }
-  }
-
-  Future<void> clearAllData() async {
-    // 先收集需要一并清理的安全存储凭证 key，避免清空 Hive 后丢失映射关系。
-    final apiConfigIds = apiConfigBox.keys.cast<String>().toList();
-
-    await apiConfigBox.clear();
-    await aiCharacterBox.clear();
-    await chatGroupBox.clear();
-    await messageBox.clear();
-    await groupMemoryBox.clear();
-    await characterMemoryBox.clear();
-    await relationshipStateBox.clear();
-    await characterSkillBox.clear();
-    await agentTaskBox.clear();
-    await workModeWorkspaceBox.clear();
-    await appSettingsBox.delete(_messageIdsByGroupKey);
-    await appSettingsBox.delete(_directChatReadAtKey);
-    await appSettingsBox.delete(_directChatSourceKey);
-    await appSettingsBox.delete(_directChatLastProactiveAtKey);
-    await appSettingsBox.delete(_groupChatReadAtKey);
-    await appSettingsBox.delete(_groupChatLastProactiveAtKey);
-    await appSettingsBox.delete(_pinnedCharacterIdsKey);
-    await appSettingsBox.delete(_pinnedGroupIdsKey);
-    await appSettingsBox.delete(_aiProcessingDirKey);
-
-    // 清理安全存储中的凭证，防止「删库但 Keychain/EncryptedSharedPreferences
-    // 里 API key 残留」造成的隐私泄漏与孤儿 key。
-    await _clearSecureCredentials(apiConfigIds);
-
-    _tokenUsageCache = _emptyTokenUsage();
-    _messageIdsCache = null;
-    _tokenUsageFlushTimer?.cancel();
-  }
-
-  /// 一并清理安全存储中的凭证，避免删库后凭证残留。
-  ///
-  /// [apiConfigIds] 为清空前从 Hive 收集到的 id，用于在删库前仍能映射到对应的
-  /// 安全存储 key。角色自身的 key 并不以 `api_key_{characterId}` 形式存于安全
-  /// 存储（key 在 ApiConfig 里，已随 [apiConfigIds] 清理），故无需再按角色维度
-  /// 删除。安全存储在某些平台（如 macOS debug 无 Keychain 权限）可能不可用，
-  /// 故整体用 try/catch 包裹，清库流程绝不因此崩溃。
-  Future<void> _clearSecureCredentials(
-    List<String> apiConfigIds,
-  ) async {
-    final credentials = CredentialRepository();
-    for (final id in apiConfigIds) {
-      // This is reached only from the user's explicit full-data reset. Each
-      // repository delete removes both the new and transitional key prefixes.
-      await credentials.delete(id);
-    }
-    CredentialRepository.clearCache();
-    try {
-      await SecureStorageService().deleteWeComAppConfig();
-    } on Object {
-      // The explicit data-reset flow must not disclose platform error details.
-    }
   }
 
   Box<AICharacter> get aiCharacterBox => Hive.box<AICharacter>(_aiCharacterBox);
@@ -693,7 +616,9 @@ class DatabaseService {
     await appSettingsBox.put(_messageIdsByGroupKey, _messageIdsCache);
   }
 
-  Future<void> deleteMessage(
+  /// Low-level primitive for the data lifecycle service; feature code must use
+  /// that service so attachment garbage collection also runs.
+  Future<void> deleteMessageRecordAndIndex(
     String messageId, {
     required String groupId,
   }) async {
@@ -737,6 +662,16 @@ class DatabaseService {
     byGroup[groupId] = ids;
     _messageIdsCache = Map<String, dynamic>.from(byGroup);
     await appSettingsBox.put(_messageIdsByGroupKey, _messageIdsCache);
+  }
+
+  void invalidateMessageIndexCache() => _messageIdsCache = null;
+
+  /// Keeps in-memory indexes from restoring content removed by the lifecycle
+  /// service after a later delayed flush.
+  void resetLifecycleCaches() {
+    _tokenUsageFlushTimer?.cancel();
+    _tokenUsageCache = null;
+    _messageIdsCache = null;
   }
 
   static const String _directChatReadAtKey = 'direct_chat_read_at';

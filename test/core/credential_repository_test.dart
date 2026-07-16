@@ -33,6 +33,7 @@ class FakeCredentialStore implements CredentialStore {
 /// 旧前缀（api_config_key_）方法，前缀与正式实现保持一致。
 class FakeSecureStorageService extends SecureStorageService {
   final Map<String, String> legacy = {};
+  Object? deleteError;
 
   @override
   Future<bool> saveApiConfigKey(String configId, String apiKey) async {
@@ -47,6 +48,7 @@ class FakeSecureStorageService extends SecureStorageService {
 
   @override
   Future<void> deleteApiConfigKey(String configId) async {
+    if (deleteError != null) throw deleteError!;
     legacy.remove('api_config_key_$configId');
   }
 }
@@ -54,12 +56,17 @@ class FakeSecureStorageService extends SecureStorageService {
 void main() {
   group('CredentialRepository', () {
     late FakeCredentialStore store;
+    late FakeSecureStorageService legacy;
     late CredentialRepository repository;
 
     setUp(() {
       store = FakeCredentialStore();
-      repository =
-          CredentialRepository(store: store, secureStorageAvailable: true);
+      legacy = FakeSecureStorageService();
+      repository = CredentialRepository(
+        store: store,
+        legacyStorage: legacy,
+        secureStorageAvailable: true,
+      );
     });
 
     test('saves, verifies, reads and deletes a config credential', () async {
@@ -129,8 +136,8 @@ void main() {
 
       test('save 同时双写到新前缀与旧 api_config_key_ 前缀', () async {
         expect((await repository.save('cfg-9', 'topsecret')).isSuccess, isTrue);
-        expect(await store.read(repository.credentialIdFor('cfg-9')),
-            'topsecret');
+        expect(
+            await store.read(repository.credentialIdFor('cfg-9')), 'topsecret');
         expect(legacy.legacy['api_config_key_cfg-9'], 'topsecret');
       });
 
@@ -155,6 +162,16 @@ void main() {
         expect((await repository.delete('cfg-3')).isSuccess, isTrue);
         expect(await store.read(repository.credentialIdFor('cfg-3')), isNull);
         expect(legacy.legacy['api_config_key_cfg-3'], isNull);
+      });
+
+      test('delete 不会把旧前缀删除失败报告为成功', () async {
+        await repository.save('cfg-3', 'secret');
+        legacy.deleteError = PlatformException(code: 'permission_denied');
+
+        final result = await repository.delete('cfg-3');
+
+        expect(result.failure, CredentialFailure.permissionDenied);
+        expect(legacy.legacy['api_config_key_cfg-3'], 'secret');
       });
     });
   });

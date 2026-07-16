@@ -108,10 +108,10 @@ class ConversationExportService {
       List<Message>.from(messages)
         ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
 
-  /// 发送者展示名：用户统一显示「用户」，AI 取角色名（未知则降级为 id）。
+  /// 发送者展示名：用户统一显示「用户」，已删除 AI 使用稳定占位名。
   String _senderName(Message m, Map<String, AICharacter> charById) {
     if (m.senderType == 'user') return '用户';
-    return charById[m.senderId]?.name ?? '未知';
+    return charById[m.senderId]?.name ?? '已删除角色';
   }
 
   /// 发送者角色：用户为「用户」，AI 取角色 role（未知则空）。

@@ -1,4 +1,5 @@
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
@@ -90,8 +91,10 @@ class ChatRoomLoader {
 
   Future<ChatRoomLoadContext> _loadDirect(String conversationId) async {
     final characterId = DirectChatSession.characterIdFrom(conversationId);
-    final character =
-        characterId == null ? null : db.aiCharacterBox.get(characterId);
+    final character = characterId == null
+        ? null
+        : db.aiCharacterBox.get(characterId) ??
+            DataLifecycleService(db: db).deletedCharacter(characterId);
     if (character == null) {
       throw const ChatRoomLoadException('私聊角色不存在');
     }

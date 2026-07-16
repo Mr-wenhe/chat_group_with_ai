@@ -1,5 +1,7 @@
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_models.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import '../../../providers/providers.dart';
 
@@ -29,9 +31,16 @@ class ApiConfigsNotifier extends StateNotifier<List<ApiConfig>> {
     _loadConfigs();
   }
 
-  Future<void> deleteConfig(String id) async {
-    await _db.deleteApiConfig(id);
+  Future<DataLifecycleResult> deleteConfig(
+    String id, {
+    String? replacementConfigId,
+  }) async {
+    final result = await DataLifecycleService(db: _db).deleteApiConfig(
+      id,
+      replacementConfigId: replacementConfigId,
+    );
     _loadConfigs();
+    return result;
   }
 
   ApiConfig? getById(String id) {
