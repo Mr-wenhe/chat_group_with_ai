@@ -44,7 +44,8 @@ class ChatRoomLoader {
     final activeCharacters = allCharacters
         .where((character) => character.isActive)
         .toList(growable: false);
-    final messages = await db.messagesForGroup(conversationId);
+    final messagePage = await db.loadLatestMessages(conversationId);
+    final messages = messagePage.messages;
     await db.markGroupChatRead(
       conversationId,
       readAt: readThrough(messages.map((message) => message.timestamp)),
@@ -86,6 +87,8 @@ class ChatRoomLoader {
       groupMemory: memory,
       hasAnyApiConfig: activeCharacters.any(_hasApiConfig),
       isDirectChat: false,
+      hasOlderMessages: messagePage.hasOlder,
+      totalMessageCount: messagePage.totalCount,
     );
   }
 
@@ -99,7 +102,8 @@ class ChatRoomLoader {
       throw const ChatRoomLoadException('私聊角色不存在');
     }
 
-    final messages = await db.messagesForGroup(conversationId);
+    final messagePage = await db.loadLatestMessages(conversationId);
+    final messages = messagePage.messages;
     await db.markDirectChatRead(
       conversationId,
       readAt: readThrough(messages.map((message) => message.timestamp)),
@@ -124,6 +128,8 @@ class ChatRoomLoader {
       groupMemory: null,
       hasAnyApiConfig: character.isActive && _hasApiConfig(character),
       isDirectChat: true,
+      hasOlderMessages: messagePage.hasOlder,
+      totalMessageCount: messagePage.totalCount,
     );
   }
 

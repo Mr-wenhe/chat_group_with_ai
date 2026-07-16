@@ -11,6 +11,25 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('native and web attachments share single and message size limits', () {
+    expect(isWithinAttachmentLimit(maxAttachmentBytes), isTrue);
+    expect(isWithinAttachmentLimit(maxAttachmentBytes + 1), isFalse);
+    expect(
+      canAddAttachment(
+        existingBytes: maxAttachmentTotalBytes - 1,
+        newBytes: 1,
+      ),
+      isTrue,
+    );
+    expect(
+      canAddAttachment(
+        existingBytes: maxAttachmentTotalBytes,
+        newBytes: 1,
+      ),
+      isFalse,
+    );
+  });
+
   test('web attachments are capped before base64 storage', () {
     expect(isWithinWebAttachmentLimit(maxWebAttachmentBytes), isTrue);
     expect(isWithinWebAttachmentLimit(maxWebAttachmentBytes + 1), isFalse);

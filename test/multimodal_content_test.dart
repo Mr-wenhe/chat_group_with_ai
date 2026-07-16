@@ -9,6 +9,40 @@ import 'package:chat_group/features/chat_group/multimodal_content.dart';
 
 void main() {
   group('buildUserMessageContent', () {
+    test('async preparation reads image bytes without synchronous IO',
+        () async {
+      var readCompleted = false;
+      final message = Message(
+        groupId: 'g1',
+        senderId: 'user',
+        senderType: 'user',
+        content: '异步图片',
+        media: [
+          MediaAttachment(
+            type: 'image',
+            localPath: '/tmp/async.png',
+            mimeType: 'image/png',
+          ),
+        ],
+      );
+
+      final future = prepareUserMessageContent(
+        message,
+        supportsVision: true,
+        fileReader: (_) async {
+          await Future<void>.delayed(Duration.zero);
+          readCompleted = true;
+          return Uint8List.fromList([1, 2, 3]);
+        },
+      );
+      expect(readCompleted, isFalse);
+
+      final result = await future as List<Map<String, dynamic>>;
+      expect(readCompleted, isTrue);
+      expect(result[1]['image_url']['url'],
+          'data:image/png;base64,${base64Encode([1, 2, 3])}');
+    });
+
     test('无媒体 → 返回 String 文案', () {
       final message = Message(
         groupId: 'g1',

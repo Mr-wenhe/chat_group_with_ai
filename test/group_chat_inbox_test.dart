@@ -1,3 +1,4 @@
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/chat_group/group_chat_inbox.dart';
@@ -5,6 +6,39 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('GroupChatInbox', () {
+    test('builds inbox from summary index without a message scan', () {
+      final group = _group(id: 'g1', name: '索引群');
+      final last = Message(
+        id: 'last',
+        groupId: 'g1',
+        senderId: 'ai',
+        senderType: 'ai',
+        content: '@我 indexed',
+        timestamp: DateTime(2026, 7, 16),
+      );
+
+      final summaries = GroupChatInbox.buildIndexedSummaries(
+        groups: [group],
+        records: {
+          'g1': ConversationSummaryRecord(
+            conversationId: 'g1',
+            lastMessageId: 'last',
+            preview: last.content,
+            timestamp: last.timestamp,
+            messageCount: 50000,
+            unreadCount: 3,
+            mentionCount: 1,
+          ),
+        },
+        messageById: (id) => id == 'last' ? last : null,
+        pinnedIds: const {},
+      );
+
+      expect(summaries.single.lastMessage, same(last));
+      expect(summaries.single.unreadCount, 3);
+      expect(summaries.single.mentionCount, 1);
+    });
+
     test('counts unread ai messages after read time for each group', () {
       final group = _group(id: 'g1', name: '脑暴群');
       final readAt = DateTime(2026, 7, 8, 10);

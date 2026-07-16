@@ -1,3 +1,4 @@
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
@@ -6,6 +7,40 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('DirectChatInbox', () {
+    test('builds direct inbox from summary index', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final conversationId = DirectChatSession.conversationIdFor('alice');
+      final last = Message(
+        id: 'last',
+        groupId: conversationId,
+        senderId: 'alice',
+        senderType: 'ai',
+        content: 'indexed',
+        timestamp: DateTime(2026, 7, 16),
+      );
+
+      final summaries = DirectChatInbox.buildIndexedSummaries(
+        characters: [alice],
+        records: {
+          conversationId: ConversationSummaryRecord(
+            conversationId: conversationId,
+            lastMessageId: last.id,
+            preview: last.content,
+            timestamp: last.timestamp,
+            messageCount: 10000,
+            unreadCount: 2,
+            lastUserMessageAt: DateTime(2026, 7, 15),
+          ),
+        },
+        messageById: (id) => id == last.id ? last : null,
+        sourceByConversation: const {},
+      );
+
+      expect(summaries.single.unreadCount, 2);
+      expect(summaries.single.hasUserMessage, isTrue);
+      expect(summaries.single.lastUserMessageAt, DateTime(2026, 7, 15));
+    });
+
     test('builds direct chat summaries sorted by latest message', () {
       final alice = _character(id: 'alice', name: '小夏');
       final bob = _character(id: 'bob', name: '阿哲');

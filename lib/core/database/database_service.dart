@@ -1,6 +1,7 @@
 import 'dart:io';
 import 'dart:convert';
 import 'dart:async';
+import 'dart:math';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -48,6 +49,72 @@ class DatabaseOpenException implements Exception {
   String toString() => '无法打开数据库 box "$boxName"：$cause';
 }
 
+class MessagePage {
+  final List<Message> messages;
+  final bool hasOlder;
+  final int totalCount;
+
+  const MessagePage({
+    required this.messages,
+    required this.hasOlder,
+    required this.totalCount,
+  });
+}
+
+/// Rebuildable inbox cache. The message box remains the source of truth.
+class ConversationSummaryRecord {
+  final String conversationId;
+  final String? lastMessageId;
+  final String preview;
+  final DateTime? timestamp;
+  final int messageCount;
+  final int unreadCount;
+  final int mentionCount;
+  final DateTime? lastReadAt;
+  final DateTime? lastUserMessageAt;
+
+  const ConversationSummaryRecord({
+    required this.conversationId,
+    this.lastMessageId,
+    this.preview = '',
+    this.timestamp,
+    this.messageCount = 0,
+    this.unreadCount = 0,
+    this.mentionCount = 0,
+    this.lastReadAt,
+    this.lastUserMessageAt,
+  });
+
+  factory ConversationSummaryRecord.fromMap(
+    String conversationId,
+    Map<dynamic, dynamic> map,
+  ) {
+    return ConversationSummaryRecord(
+      conversationId: conversationId,
+      lastMessageId: map['lastMessageId']?.toString(),
+      preview: map['preview']?.toString() ?? '',
+      timestamp: DateTime.tryParse(map['timestamp']?.toString() ?? ''),
+      messageCount: (map['messageCount'] as num?)?.toInt() ?? 0,
+      unreadCount: (map['unreadCount'] as num?)?.toInt() ?? 0,
+      mentionCount: (map['mentionCount'] as num?)?.toInt() ?? 0,
+      lastReadAt: DateTime.tryParse(map['lastReadAt']?.toString() ?? ''),
+      lastUserMessageAt:
+          DateTime.tryParse(map['lastUserMessageAt']?.toString() ?? ''),
+    );
+  }
+
+  Map<String, dynamic> toMap() => {
+        'lastMessageId': lastMessageId,
+        'preview': preview,
+        'timestamp': timestamp?.toIso8601String(),
+        'messageCount': messageCount,
+        'unreadCount': unreadCount,
+        'mentionCount': mentionCount,
+        'lastReadAt': lastReadAt?.toIso8601String(),
+        'lastUserMessageAt': lastUserMessageAt?.toIso8601String(),
+      };
+}
+
 class DatabaseService {
   static const String _aiCharacterBox = 'ai_characters';
   static const String _apiConfigBox = 'api_configs';
@@ -80,6 +147,9 @@ class DatabaseService {
   Timer? _tokenUsageFlushTimer;
   Map<String, dynamic>? _tokenUsageCache;
   Map<String, dynamic>? _messageIdsCache;
+  Map<String, ConversationSummaryRecord>? _conversationSummaryCache;
+  int? _messageIndexCountCache;
+  Future<void>? _messageIndexBuildFuture;
   static const Duration _tokenUsageFlushDelay = Duration(seconds: 2);
 
   Future<void> init() async {
@@ -578,8 +648,155 @@ class DatabaseService {
   }
 
   static const String _messageIdsByGroupKey = 'message_ids_by_group';
+  static const String _messageIndexCountKey = 'message_index_count';
+  static const String _conversationSummariesKey = 'conversation_summaries';
+
+  Future<void> persistMessage(Message message) async {
+    await messageBox.put(message.id, message);
+    await addMessageToGroupIndex(message);
+  }
+
+  Future<void> updateMessage(Message message) async {
+    await messageBox.put(message.id, message);
+    final summaries = Map<String, ConversationSummaryRecord>.from(
+      conversationSummaries(),
+    );
+    final current = summaries[message.groupId];
+    if (current?.lastMessageId != message.id) return;
+    summaries[message.groupId] = ConversationSummaryRecord(
+      conversationId: message.groupId,
+      lastMessageId: message.id,
+      preview: message.content,
+      timestamp: message.timestamp,
+      messageCount: current!.messageCount,
+      unreadCount: current.unreadCount,
+      mentionCount: current.mentionCount,
+      lastReadAt: current.lastReadAt,
+      lastUserMessageAt: current.lastUserMessageAt,
+    );
+    _conversationSummaryCache = summaries;
+    await appSettingsBox.put(_conversationSummariesKey, {
+      for (final entry in summaries.entries) entry.key: entry.value.toMap(),
+    });
+  }
+
+  Future<void> ensureMessageIndex() async {
+    final storedCount = appSettingsBox.get(_messageIndexCountKey);
+    _messageIndexCountCache ??= storedCount is int ? storedCount : -1;
+    if (_messageIndexCountCache != messageBox.length) {
+      await (_messageIndexBuildFuture ??= _rebuildMessageIndexOnce());
+    }
+  }
+
+  Future<void> _rebuildMessageIndexOnce() async {
+    try {
+      await rebuildMessageIndex();
+    } finally {
+      _messageIndexBuildFuture = null;
+    }
+  }
+
+  Future<void> rebuildMessageIndex() async {
+    final messagesByGroup = <String, List<Message>>{};
+    for (final message in messageBox.values) {
+      messagesByGroup.putIfAbsent(message.groupId, () => []).add(message);
+    }
+    final idsByGroup = <String, dynamic>{};
+    final summaries = <String, ConversationSummaryRecord>{};
+    for (final entry in messagesByGroup.entries) {
+      entry.value.sort(_compareMessages);
+      idsByGroup[entry.key] = entry.value.map((message) => message.id).toList();
+      summaries[entry.key] = _summaryFor(entry.key, entry.value);
+    }
+    _messageIdsCache = idsByGroup;
+    _conversationSummaryCache = summaries;
+    _messageIndexCountCache = messageBox.length;
+    await appSettingsBox.putAll({
+      _messageIdsByGroupKey: idsByGroup,
+      _conversationSummariesKey: {
+        for (final entry in summaries.entries) entry.key: entry.value.toMap(),
+      },
+      _messageIndexCountKey: messageBox.length,
+    });
+  }
+
+  Future<MessagePage> loadLatestMessages(
+    String groupId, {
+    int limit = 80,
+  }) async {
+    await ensureMessageIndex();
+    final ids = _messageIdsForGroup(groupId) ?? const <String>[];
+    final start = max(0, ids.length - limit);
+    return _pageFromIds(ids, start, ids.length);
+  }
+
+  Future<MessagePage> loadMessagesBefore(
+    String groupId, {
+    required String beforeMessageId,
+    int limit = 80,
+  }) async {
+    await ensureMessageIndex();
+    final ids = _messageIdsForGroup(groupId) ?? const <String>[];
+    final end = ids.indexOf(beforeMessageId);
+    if (end < 0) return loadLatestMessages(groupId, limit: limit);
+    return _pageFromIds(ids, max(0, end - limit), end);
+  }
+
+  Future<MessagePage> loadMessagesAround(
+    String groupId,
+    String messageId, {
+    int limit = 80,
+  }) async {
+    await ensureMessageIndex();
+    final ids = _messageIdsForGroup(groupId) ?? const <String>[];
+    final target = ids.indexOf(messageId);
+    if (target < 0) return loadLatestMessages(groupId, limit: limit);
+    final start = max(0, min(target - limit ~/ 2, ids.length - limit));
+    return _pageFromIds(ids, start, min(ids.length, start + limit));
+  }
+
+  Future<List<Message>> searchMessages(String groupId, String query) async {
+    await ensureMessageIndex();
+    final normalized = query.trim().toLowerCase();
+    if (normalized.isEmpty) return const [];
+    return (_messageIdsForGroup(groupId) ?? const <String>[])
+        .map(messageBox.get)
+        .whereType<Message>()
+        .where((message) => message.content.toLowerCase().contains(normalized))
+        .toList(growable: false);
+  }
+
+  MessagePage _pageFromIds(List<String> ids, int start, int end) {
+    final messages = ids
+        .sublist(start, end)
+        .map(messageBox.get)
+        .whereType<Message>()
+        .toList(growable: false);
+    return MessagePage(
+      messages: messages,
+      hasOlder: start > 0,
+      totalCount: ids.length,
+    );
+  }
+
+  Map<String, ConversationSummaryRecord> conversationSummaries() {
+    if (_conversationSummaryCache != null) {
+      return Map.unmodifiable(_conversationSummaryCache!);
+    }
+    final raw = appSettingsBox.get(_conversationSummariesKey);
+    final map = raw is Map ? raw : const {};
+    _conversationSummaryCache = {
+      for (final entry in map.entries)
+        entry.key.toString(): ConversationSummaryRecord.fromMap(
+          entry.key.toString(),
+          entry.value is Map ? entry.value as Map : const {},
+        ),
+    };
+    return Map.unmodifiable(_conversationSummaryCache!);
+  }
 
   Future<List<Message>> messagesForGroup(String groupId) async {
+    await ensureMessageIndex();
     final indexedIds = _messageIdsForGroup(groupId);
     if (indexedIds != null && indexedIds.isNotEmpty) {
       final indexedMessages = indexedIds
@@ -610,10 +827,21 @@ class DatabaseService {
     final byGroup = _messageIdsByGroup();
     final ids = List<String>.from(byGroup[message.groupId] ?? const <String>[]);
     if (ids.contains(message.id)) return;
-    ids.add(message.id);
+    final insertionIndex = ids.indexWhere((id) {
+      final existing = messageBox.get(id);
+      return existing != null && _compareMessages(message, existing) < 0;
+    });
+    insertionIndex < 0
+        ? ids.add(message.id)
+        : ids.insert(insertionIndex, message.id);
     byGroup[message.groupId] = ids;
     _messageIdsCache = Map<String, dynamic>.from(byGroup);
-    await appSettingsBox.put(_messageIdsByGroupKey, _messageIdsCache);
+    _messageIndexCountCache = messageBox.length;
+    await _updateConversationSummaryForAdded(message);
+    await appSettingsBox.putAll({
+      _messageIdsByGroupKey: _messageIdsCache,
+      _messageIndexCountKey: _messageIndexCountCache,
+    });
   }
 
   /// Low-level primitive for the data lifecycle service; feature code must use
@@ -628,7 +856,12 @@ class DatabaseService {
       ..remove(messageId);
     byGroup[groupId] = ids;
     _messageIdsCache = Map<String, dynamic>.from(byGroup);
-    await appSettingsBox.put(_messageIdsByGroupKey, _messageIdsCache);
+    _messageIndexCountCache = messageBox.length;
+    await _updateConversationSummary(groupId, ids);
+    await appSettingsBox.putAll({
+      _messageIdsByGroupKey: _messageIdsCache,
+      _messageIndexCountKey: _messageIndexCountCache,
+    });
   }
 
   Map<String, dynamic> _messageIdsByGroup() {
@@ -661,10 +894,131 @@ class DatabaseService {
     final byGroup = _messageIdsByGroup();
     byGroup[groupId] = ids;
     _messageIdsCache = Map<String, dynamic>.from(byGroup);
-    await appSettingsBox.put(_messageIdsByGroupKey, _messageIdsCache);
+    _messageIndexCountCache = messageBox.length;
+    await _updateConversationSummary(groupId, ids);
+    await appSettingsBox.putAll({
+      _messageIdsByGroupKey: _messageIdsCache,
+      _messageIndexCountKey: _messageIndexCountCache,
+    });
   }
 
-  void invalidateMessageIndexCache() => _messageIdsCache = null;
+  Future<void> _updateConversationSummary(
+    String groupId,
+    List<String> ids,
+  ) async {
+    final messages =
+        ids.map(messageBox.get).whereType<Message>().toList(growable: false);
+    final summaries = Map<String, ConversationSummaryRecord>.from(
+      conversationSummaries(),
+    );
+    if (messages.isEmpty) {
+      summaries.remove(groupId);
+    } else {
+      summaries[groupId] = _summaryFor(groupId, messages);
+    }
+    _conversationSummaryCache = summaries;
+    await appSettingsBox.put(_conversationSummariesKey, {
+      for (final entry in summaries.entries) entry.key: entry.value.toMap(),
+    });
+  }
+
+  Future<void> _updateConversationSummaryForAdded(Message message) async {
+    final summaries = Map<String, ConversationSummaryRecord>.from(
+      conversationSummaries(),
+    );
+    final current = summaries[message.groupId];
+    final direct = message.groupId.startsWith('dm:');
+    final readAt = current?.lastReadAt ??
+        (direct
+            ? directChatReadAtByConversation()
+            : groupChatReadAtByGroup())[message.groupId];
+    final isUnread = message.senderType == 'ai' &&
+        (readAt == null || message.timestamp.isAfter(readAt));
+    final ownerName = !direct && Hive.isBoxOpen(_chatGroupBox)
+        ? chatGroupBox.get(message.groupId)?.ownerName.trim() ?? ''
+        : '';
+    final mentionNames = {'我', if (ownerName.isNotEmpty) ownerName};
+    final isMention = isUnread &&
+        !direct &&
+        RegExp(r'@([^@\s，。！？!?、；;：:,.]+)')
+            .allMatches(message.content)
+            .any((match) => mentionNames.contains(match.group(1)?.trim()));
+    final isLatest = current?.timestamp == null ||
+        !message.timestamp.isBefore(current!.timestamp!);
+    summaries[message.groupId] = ConversationSummaryRecord(
+      conversationId: message.groupId,
+      lastMessageId: isLatest ? message.id : current.lastMessageId,
+      preview: isLatest ? message.content : current.preview,
+      timestamp: isLatest ? message.timestamp : current.timestamp,
+      messageCount: (current?.messageCount ?? 0) + 1,
+      unreadCount: (current?.unreadCount ?? 0) + (isUnread ? 1 : 0),
+      mentionCount: (current?.mentionCount ?? 0) + (isMention ? 1 : 0),
+      lastReadAt: readAt,
+      lastUserMessageAt: message.senderType == 'user'
+          ? message.timestamp
+          : current?.lastUserMessageAt,
+    );
+    _conversationSummaryCache = summaries;
+    await appSettingsBox.put(_conversationSummariesKey, {
+      for (final entry in summaries.entries) entry.key: entry.value.toMap(),
+    });
+  }
+
+  ConversationSummaryRecord _summaryFor(
+    String groupId,
+    List<Message> messages,
+  ) {
+    final sorted = messages.toList(growable: false)..sort(_compareMessages);
+    final last = sorted.isEmpty ? null : sorted.last;
+    final direct = groupId.startsWith('dm:');
+    final readAt = (direct
+        ? directChatReadAtByConversation()
+        : groupChatReadAtByGroup())[groupId];
+    final unread = sorted.where((message) {
+      return message.senderType == 'ai' &&
+          (readAt == null || message.timestamp.isAfter(readAt));
+    }).toList(growable: false);
+    final ownerName = Hive.isBoxOpen(_chatGroupBox)
+        ? chatGroupBox.get(groupId)?.ownerName.trim() ?? ''
+        : '';
+    final mentionCount = direct
+        ? 0
+        : unread.where((message) {
+            final names = {'我', if (ownerName.isNotEmpty) ownerName};
+            return RegExp(r'@([^@\s，。！？!?、；;：:,.]+)')
+                .allMatches(message.content)
+                .any((match) => names.contains(match.group(1)?.trim()));
+          }).length;
+    DateTime? lastUserMessageAt;
+    for (final message in sorted.reversed) {
+      if (message.senderType == 'user') {
+        lastUserMessageAt = message.timestamp;
+        break;
+      }
+    }
+    return ConversationSummaryRecord(
+      conversationId: groupId,
+      lastMessageId: last?.id,
+      preview: last?.content ?? '',
+      timestamp: last?.timestamp,
+      messageCount: sorted.length,
+      unreadCount: unread.length,
+      mentionCount: mentionCount,
+      lastReadAt: readAt,
+      lastUserMessageAt: lastUserMessageAt,
+    );
+  }
+
+  static int _compareMessages(Message a, Message b) {
+    final byTime = a.timestamp.compareTo(b.timestamp);
+    return byTime != 0 ? byTime : a.id.compareTo(b.id);
+  }
+
+  void invalidateMessageIndexCache() {
+    _messageIdsCache = null;
+    _conversationSummaryCache = null;
+    _messageIndexCountCache = null;
+  }
 
   /// Keeps in-memory indexes from restoring content removed by the lifecycle
   /// service after a later delayed flush.
@@ -672,6 +1026,8 @@ class DatabaseService {
     _tokenUsageFlushTimer?.cancel();
     _tokenUsageCache = null;
     _messageIdsCache = null;
+    _conversationSummaryCache = null;
+    _messageIndexCountCache = null;
   }
 
   static const String _directChatReadAtKey = 'direct_chat_read_at';
@@ -700,6 +1056,7 @@ class DatabaseService {
     );
     map[conversationId] = (readAt ?? DateTime.now()).toIso8601String();
     await appSettingsBox.put(_directChatReadAtKey, map);
+    await _markSummaryRead(conversationId, map[conversationId]!);
   }
 
   Map<String, DateTime> groupChatReadAtByGroup() {
@@ -718,6 +1075,30 @@ class DatabaseService {
     );
     map[groupId] = (readAt ?? DateTime.now()).toIso8601String();
     await appSettingsBox.put(_groupChatReadAtKey, map);
+    await _markSummaryRead(groupId, map[groupId]!);
+  }
+
+  Future<void> _markSummaryRead(String conversationId, String value) async {
+    final summaries = Map<String, ConversationSummaryRecord>.from(
+      conversationSummaries(),
+    );
+    final current = summaries[conversationId];
+    if (current == null) return;
+    summaries[conversationId] = ConversationSummaryRecord(
+      conversationId: conversationId,
+      lastMessageId: current.lastMessageId,
+      preview: current.preview,
+      timestamp: current.timestamp,
+      messageCount: current.messageCount,
+      unreadCount: 0,
+      mentionCount: 0,
+      lastReadAt: DateTime.tryParse(value),
+      lastUserMessageAt: current.lastUserMessageAt,
+    );
+    _conversationSummaryCache = summaries;
+    await appSettingsBox.put(_conversationSummariesKey, {
+      for (final entry in summaries.entries) entry.key: entry.value.toMap(),
+    });
   }
 
   Map<String, DirectChatSource> directChatSourceByConversation() {

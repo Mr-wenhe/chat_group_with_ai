@@ -48,17 +48,18 @@ class DirectChatProactiveService {
     final charactersById = {
       for (final character in characters) character.id: character
     };
-    final allMessages = db.messageBox.values.toList();
-    final summaries = DirectChatInbox.buildSummaries(
+    await db.ensureMessageIndex();
+    final summaries = DirectChatInbox.buildIndexedSummaries(
       characters: characters,
-      messages: allMessages,
-      readAtByConversation: db.directChatReadAtByConversation(),
+      records: db.conversationSummaries(),
+      messageById: db.messageBox.get,
       sourceByConversation: db.directChatSourceByConversation(),
     );
     final candidateSummaries = summaries
         .where((summary) => _canGenerateProactiveMessage(summary.character))
         .toList();
 
+    final allMessages = db.messageBox.values.toList();
     final recentGroupMessages = allMessages
         .where((message) =>
             !DirectChatSession.isDirectConversationId(message.groupId))
@@ -159,8 +160,7 @@ class DirectChatProactiveService {
       senderType: 'ai',
       content: content,
     );
-    await db.messageBox.put(message.id, message);
-    await db.addMessageToGroupIndex(message);
+    await db.persistMessage(message);
     await db.saveDirectChatSource(conversationId, candidate.source);
     await db.saveDirectChatLastProactiveAt(candidate.character.id, now);
     await _recordUsage(candidate.character, conversationId, result);

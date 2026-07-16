@@ -19,7 +19,6 @@ import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
-import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/agentic/agent_attachment_context.dart';
@@ -38,12 +37,14 @@ import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
 import 'package:chat_group/features/chat_group/agentic_reply_utils.dart';
 import 'package:chat_group/features/chat_group/attachment_utils.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
+import 'package:chat_group/features/chat_group/auto_chat_scheduler.dart';
 import 'package:chat_group/features/chat_group/chat_group_form_page.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/chat_room_loader.dart';
 import 'package:chat_group/features/chat_group/chat_room_repository.dart';
 import 'package:chat_group/features/chat_group/chat_scroll_utils.dart';
 import 'package:chat_group/features/chat_group/chat_room_utils.dart';
+import 'package:chat_group/features/chat_group/conversation_controller.dart';
 import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
@@ -53,6 +54,7 @@ import 'package:chat_group/features/chat_group/multimodal_content.dart';
 import 'package:chat_group/features/chat_group/picked_attachment_payload.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
 import 'package:chat_group/features/chat_group/scene_behavior.dart';
+import 'package:chat_group/features/chat_group/streaming_reply_session.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_message_list.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_room_app_bar.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_room_banners.dart';
@@ -109,11 +111,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   late final ReplyEligibilityPolicy _replyEligibility;
   late final ChatRoomRepository _repository;
   late final ChatRoomLoader _loader;
+  final ConversationController _conversationController =
+      ConversationController();
+  late final AutoChatScheduler _autoChatScheduler;
 
   ChatGroup? _group;
   List<AICharacter> _characters = []; // 活跃角色（用于 AI 回复等逻辑）
   List<AICharacter> _allGroupCharacters = []; // 全部群成员（含停用），供 @ 弹窗使用
   List<Message> _messages = [];
+  bool _hasOlderMessages = false;
+  bool _isLoadingOlder = false;
+  int _totalMessageCount = 0;
   GroupMemory? _groupMemory;
   List<CharacterMemory> _characterMemories = [];
   List<RelationshipState> _relationshipStates = [];
@@ -129,14 +137,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _workModeSession.pendingApproval = value;
 
   bool _isLoading = true;
-  bool _isAiReplying = false;
+  bool get _isAiReplying => _conversationController.isBusy;
   int _consecutiveRound = 0;
 
   /// 用户发言后的普通群聊最多连续三轮，避免角色互相回复形成无限循环。
   static const int _maxAutoRounds = 3;
 
   // 用户消息队列：AI 回复期间用户发的消息排队在此，回合结束后自动触发回复。
-  final List<PendingUserMessage> _pendingUserMessages = [];
 
   // @ 成员选择弹窗
   OverlayEntry? _mentionOverlay;
@@ -150,17 +157,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   final GlobalKey _inputFieldKey = GlobalKey();
 
   // AI 自主聊天
-  Timer? _autoChatTimer;
   bool _isAutoChatEnabled = true;
   int _autoChatRoundCount = 0;
-  bool _isAutoChatRoundRunning = false;
   bool _discardCurrentStream = false;
 
   /// 一次空闲自动聊天 burst 的上限；达到后进入冷却，而不是持续灌水。
   static const int _maxAutoChatRounds = 4;
   static const Duration _autoChatInitialDelay = Duration(seconds: 8);
   static const Duration _autoChatBurstPause = Duration(seconds: 35);
-  static const Duration _streamUiFlushInterval = Duration(milliseconds: 80);
   static const Duration _searchDebounceDuration = Duration(milliseconds: 250);
   static const int _autoChatMinIntervalSeconds = 12;
   static const int _autoChatIntervalJitterSeconds = 9;
@@ -205,11 +209,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   // —— 流式输出（打字机）相关状态 ——
   Message? _streamingMessage; // 正在逐 token 渲染的内存态临时消息（不落库）
-  StreamSubscription<ChatStreamEvent>? _streamSub; // 当前流的订阅，供「停止生成」取消
-  Completer<void>? _streamDone; // 标记本轮流式是否结束
-  bool _isStreaming = false; // 是否正在流式生成（控制「停止生成」按钮显隐）
+  StreamingReplySession? _streamingSession;
+  bool get _isStreaming => _streamingSession?.isActive ?? false;
   bool _disposed = false; // dispose 守卫，避免异步回调在销毁后写状态
-  Timer? _streamUiFlushTimer;
   final ChatMessageListController _messageListController =
       ChatMessageListController();
 
@@ -233,6 +235,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       conversationId: widget.groupId,
       isDirectChat: _isDirectChat,
     );
+    _autoChatScheduler = AutoChatScheduler(
+      nextInterval: () => Duration(
+        seconds: _autoChatBaseIntervalSeconds +
+            _autoChatRandom.nextInt(_autoChatIntervalJitterSeconds),
+      ),
+      runRound: _tryAutoChatRound,
+    );
     _speech = MessageSpeechService(
       engine: FlutterTtsSpeechEngine(),
       onStateChanged: _handleSpeechState,
@@ -243,6 +252,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         setState(() => _isInputEmpty = isEmpty);
       }
     });
+    _scrollController.addListener(_handleMessageScroll);
     _loadData();
   }
 
@@ -262,20 +272,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     _pendingAttachments.clear();
     _workModeSession.requestStop('页面已关闭');
+    _conversationController.dispose();
+    _autoChatScheduler.dispose();
     unawaited(LocalAgentBridgeLauncher().stop());
-    unawaited(_streamSub?.cancel());
-    _streamSub = null;
-    if (_streamDone != null && !_streamDone!.isCompleted) {
-      _streamDone!.complete();
-    }
-    _streamDone = null;
-    _streamUiFlushTimer?.cancel();
+    unawaited(_streamingSession?.dispose());
+    _streamingSession = null;
     _searchDebounceTimer?.cancel();
     _textController.dispose();
     _scrollController.dispose();
     _inputFocusNode.dispose();
     _searchController.dispose();
-    _autoChatTimer?.cancel();
     _mentionHighlightTimer?.cancel();
     _hideMentionOverlay();
     _mentionSearchController.dispose();
@@ -307,6 +313,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         _characters = loaded.activeCharacters;
         _allGroupCharacters = loaded.allCharacters;
         _messages = loaded.messages;
+        _hasOlderMessages = loaded.hasOlderMessages;
+        _totalMessageCount = loaded.totalMessageCount;
         _groupMemory = loaded.groupMemory;
         _characterMemories = loaded.characterMemories;
         _relationshipStates = loaded.relationships;
@@ -345,6 +353,47 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (!mounted || _disposed) return;
       AppToast.show(context, error.message, icon: Icons.error_outline_rounded);
       Navigator.pop(context);
+    }
+  }
+
+  void _handleMessageScroll() {
+    if (!_scrollController.hasClients ||
+        _scrollController.position.pixels > 120 ||
+        !_hasOlderMessages ||
+        _isLoadingOlder) {
+      return;
+    }
+    unawaited(_loadOlderMessages());
+  }
+
+  Future<void> _loadOlderMessages() async {
+    if (_messages.isEmpty || _isLoadingOlder || !_hasOlderMessages) return;
+    _isLoadingOlder = true;
+    final oldPixels =
+        _scrollController.hasClients ? _scrollController.position.pixels : 0.0;
+    final oldExtent = _scrollController.hasClients
+        ? _scrollController.position.maxScrollExtent
+        : 0.0;
+    try {
+      final page = await _repository.loadOlder(_messages.first.id);
+      if (!_canTouchUi) return;
+      final existingIds = _messages.map((message) => message.id).toSet();
+      setState(() {
+        _messages = [
+          ...page.messages.where((message) => existingIds.add(message.id)),
+          ..._messages,
+        ];
+        _hasOlderMessages = page.hasOlder;
+        _totalMessageCount = page.totalCount;
+      });
+      WidgetsBinding.instance.addPostFrameCallback((_) {
+        if (!_scrollController.hasClients) return;
+        final addedExtent =
+            _scrollController.position.maxScrollExtent - oldExtent;
+        _scrollController.jumpTo(oldPixels + addedExtent);
+      });
+    } finally {
+      _isLoadingOlder = false;
     }
   }
 
@@ -440,14 +489,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return;
     }
     if (!_canTouchUi) return;
-    _autoChatTimer?.cancel();
     setState(() => _autoChatStatus = AutoChatStatus.waiting);
-    _autoChatTimer = Timer.periodic(
-      Duration(
+    _autoChatScheduler.start(
+      initialDelay: Duration(
         seconds: _autoChatBaseIntervalSeconds +
             _autoChatRandom.nextInt(_autoChatIntervalJitterSeconds),
       ),
-      (_) => _tryAutoChatRound(),
     );
   }
 
@@ -459,8 +506,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   void _stopAutoChat() {
-    _autoChatTimer?.cancel();
-    _autoChatTimer = null;
+    _autoChatScheduler.stop();
     _autoChatRoundCount = 0;
     if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.paused);
   }
@@ -488,11 +534,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     if (_autoChatRoundCount >= _maxAutoChatRounds) {
       _stopAutoChat();
-      Future.delayed(_autoChatBurstPause, () {
-        if (_canTouchUi && _isAutoChatEnabled && !_workModeEnabled) {
-          _startAutoChat();
-        }
-      });
+      _autoChatScheduler.coolDown(_autoChatBurstPause);
       return;
     }
 
@@ -533,9 +575,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return;
     }
 
+    if (_conversationController.beginAuto() == null) return;
     setState(() {
-      _isAiReplying = true;
-      _isAutoChatRoundRunning = true;
       _autoChatRoundCount++;
       _autoChatStatus = AutoChatStatus.generating;
     });
@@ -552,6 +593,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           intent: _pendingReplyIntents[speaker.id],
         );
         if (_workModeEnabled) break;
+        if (_conversationController.state.phase == ConversationPhase.stopping) {
+          break;
+        }
         await _delay(replyContent);
       }
 
@@ -564,9 +608,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
     } finally {
       if (_canTouchUi) {
+        _conversationController.complete();
         setState(() {
-          _isAiReplying = false;
-          _isAutoChatRoundRunning = false;
           _autoChatStatus = _isAutoChatEnabled && !_workModeEnabled
               ? AutoChatStatus.waiting
               : AutoChatStatus.paused;
@@ -575,8 +618,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     // 处理排队中的用户消息：当前回合结束后自动触发下一轮 AI 回复。
-    if (_pendingUserMessages.isNotEmpty && _canTouchUi) {
-      final next = _pendingUserMessages.removeAt(0);
+    final next = _conversationController.takeNext();
+    if (next != null && _canTouchUi) {
       await _runAiRound(
           userMessage: next.text, mentionedIds: next.mentionedIds);
     }
@@ -664,7 +707,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     if (_isAiReplying) {
       // AI 正在回复中，排队等待当前回合结束后再处理。
-      _pendingUserMessages.add(PendingUserMessage(
+      _conversationController.enqueue(PendingUserMessage(
         text,
         mentionedIds,
         message: userMessage,
@@ -738,7 +781,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
     );
-    if (_canTouchUi) setState(() => _isAiReplying = true);
+    if (_conversationController.beginWork() == null) return;
+    if (_canTouchUi) setState(() {});
     final workModeRun = _workModeSession.beginRun();
     final cancelToken = workModeRun.token;
     try {
@@ -763,9 +807,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       );
     } finally {
       _workModeSession.finishRun(workModeRun);
-      if (_canTouchUi) setState(() => _isAiReplying = false);
-      if (_pendingUserMessages.isNotEmpty && _canTouchUi) {
-        final next = _pendingUserMessages.removeAt(0);
+      _finishWorkActivity();
+      final next = _pendingAgentApproval == null
+          ? _conversationController.takeNext()
+          : null;
+      if (next != null && _canTouchUi) {
         await _dispatchUserRequest(
           text: next.text,
           mentionedIds: next.mentionedIds,
@@ -781,15 +827,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       bool isAutoChat = false,
       Message? currentUserMessage}) async {
     if (!isAutoChat && _consecutiveRound >= _maxAutoRounds) {
-      setState(() => _isAiReplying = false);
       if (_pendingMentionedIds.isNotEmpty) {
         _pendingMentionedIds.clear();
       }
       return;
     }
 
+    final conversationRun = isAutoChat
+        ? _conversationController.beginAuto()
+        : _conversationController.beginNormal();
+    if (conversationRun == null) return;
     setState(() {
-      _isAiReplying = true;
       if (!isAutoChat) _consecutiveRound++;
     });
 
@@ -803,14 +851,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (charactersToReply.isEmpty) {
       if (_characters.any(_isEligibleToReply)) {
         setState(() {
-          _isAiReplying = false;
+          _conversationController.complete();
           if (!isAutoChat) _consecutiveRound = 0;
         });
         return;
       }
       final blockReason = _firstBlockReason(_characters);
       setState(() {
-        _isAiReplying = false;
+        _conversationController.complete();
         if (!isAutoChat) _consecutiveRound = 0;
         _lastReplyBlockReason = blockReason;
         _autoChatStatus = AutoChatStatus.unavailable;
@@ -859,6 +907,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         }
       }
       repliedIds.add(character.id);
+      if (_conversationController.state.phase == ConversationPhase.stopping) {
+        break;
+      }
       await _delay(
         replyContent,
         fast: mentionedIds?.contains(character.id) ?? false,
@@ -905,13 +956,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (!_canTouchUi) return;
 
     setState(() {
-      _isAiReplying = false;
+      _conversationController.complete();
       if (!isAutoChat) _consecutiveRound = 0;
     });
 
     // 处理排队中的用户消息：当前回合结束后自动触发下一轮 AI 回复。
-    if (_pendingUserMessages.isNotEmpty && _canTouchUi) {
-      final next = _pendingUserMessages.removeAt(0);
+    final next = _conversationController.takeNext();
+    if (next != null && _canTouchUi) {
       await _dispatchUserRequest(
         text: next.text,
         mentionedIds: next.mentionedIds,
@@ -967,7 +1018,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     final webSearch = await _webSearch.searchIfNeeded(userMessage);
     final apiMessages = _withWebSearchContext(
-      _buildApiMessages(
+      await _buildApiMessages(
         character,
         effectiveContext,
         userMessage,
@@ -997,84 +1048,43 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     _scrollToBottom();
 
-    // 订阅流式事件；用 Completer 协调「流结束」与「用户停止生成」两种收尾路径。
-    final done = Completer<void>();
-    String fullContent = '';
-    var failed = false;
-    int? promptTokens;
-    int? completionTokens;
-    int? cachedTokens;
-
-    final sub = _chatApi
-        .streamChatMessage(
-      apiKey: apiKey,
-      provider: provider,
-      customBaseUrl: config.customBaseUrl,
-      model: config.modelName,
-      messages: apiMessages,
-    )
-        .listen(
-      (e) {
-        switch (e.type) {
-          case ChatStreamEventType.token:
-            fullContent += e.delta ?? '';
-            temp.content = fullContent;
-            if (_canTouchUi) _scheduleStreamingUiFlush();
-            break;
-          case ChatStreamEventType.done:
-            if ((e.content ?? '').isNotEmpty) fullContent = e.content!;
-            temp.content = fullContent;
-            if (_canTouchUi) _flushStreamingUi();
-            if (e.promptTokens != null) promptTokens = e.promptTokens;
-            if (e.completionTokens != null) {
-              completionTokens = e.completionTokens;
-            }
-            if (e.cachedTokens != null) cachedTokens = e.cachedTokens;
-            if (!done.isCompleted) done.complete();
-            break;
-          case ChatStreamEventType.error:
-            failed = true;
-            _lastReplyBlockReason = ReplyBlockReason.networkError;
-            fullContent = '[${character.name} 回复失败: ${e.message}]';
-            temp.content = fullContent;
-            if (_canTouchUi) {
-              setState(() => _autoChatStatus = AutoChatStatus.error);
-            }
-            if (_canTouchUi) _flushStreamingUi();
-            if (!done.isCompleted) done.complete();
-        }
+    final session = StreamingReplySession();
+    _streamingSession = session;
+    if (_canTouchUi) setState(() {});
+    final result = await session.run(
+      _chatApi.streamChatMessage(
+        apiKey: apiKey,
+        provider: provider,
+        customBaseUrl: config.customBaseUrl,
+        model: config.modelName,
+        messages: apiMessages,
+      ),
+      onDraft: (draft) {
+        temp.content = draft;
+        _conversationController.updateStreamingDraft(draft);
+        _flushStreamingUi();
       },
-      onError: (err) {
-        failed = true;
-        _lastReplyBlockReason = ReplyBlockReason.networkError;
-        fullContent = '[${character.name} 回复失败: $err]';
-        temp.content = fullContent;
-        if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.error);
-        if (_canTouchUi) _flushStreamingUi();
-        if (!done.isCompleted) done.complete();
-      },
-      onDone: () {
-        if (!done.isCompleted) done.complete();
-      },
-      cancelOnError: false,
     );
-
-    // 记录订阅与完成器，供「停止生成」取消。
-    _streamSub = sub;
-    _streamDone = done;
-    if (mounted) setState(() => _isStreaming = true);
-
-    // 等待流结束，或被用户点击「停止生成」取消。
-    await done.future;
     if (_disposed) return '';
+    var fullContent = result.content;
+    var failed = result.failed;
+    final promptTokens = result.promptTokens;
+    final completionTokens = result.completionTokens;
+    final cachedTokens = result.cachedTokens;
+    if (failed) {
+      _lastReplyBlockReason = ReplyBlockReason.networkError;
+      fullContent = '[${character.name} 回复失败: ${result.error}]';
+      temp.content = fullContent;
+      if (_canTouchUi) {
+        setState(() => _autoChatStatus = AutoChatStatus.error);
+      }
+    }
+    if (identical(_streamingSession, session)) _streamingSession = null;
 
     if (_discardCurrentStream) {
       _discardCurrentStream = false;
-      _streamSub = null;
-      _streamDone = null;
       if (_canTouchUi) {
         setState(() {
-          _isStreaming = false;
           _streamingMessage = null;
           _messages = List<Message>.from(_messages)
             ..removeWhere((message) => message.id == temp.id);
@@ -1083,10 +1093,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return '';
     }
 
-    // 收尾：清理订阅状态。
-    _streamSub = null;
-    _streamDone = null;
-    if (mounted) setState(() => _isStreaming = false);
+    if (_canTouchUi) setState(() {});
 
     // 空内容也给出可见反馈，否则 @ 触发会像没有人理会。
     if (!failed && fullContent.trim().isEmpty) {
@@ -1138,8 +1145,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (promptTokens != null && completionTokens != null) {
         await _repository.recordTokenUsage(
           characterId: character.id,
-          inputTokens: promptTokens!,
-          outputTokens: completionTokens!,
+          inputTokens: promptTokens,
+          outputTokens: completionTokens,
           cachedTokens: cachedTokens ?? 0,
         );
       }
@@ -1164,8 +1171,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (promptTokens != null && completionTokens != null) {
       _repository.recordTokenUsage(
         characterId: character.id,
-        inputTokens: promptTokens!,
-        outputTokens: completionTokens!,
+        inputTokens: promptTokens,
+        outputTokens: completionTokens,
         cachedTokens: cachedTokens ?? 0,
       );
     }
@@ -1757,7 +1764,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _pendingAgentApproval = null;
       final workModeRun = _workModeSession.beginRun();
       final cancelToken = workModeRun.token;
-      if (_canTouchUi) setState(() => _isAiReplying = true);
+      _beginWorkActivity();
       try {
         final runtime = _agentRuntimeFor(
           character: pending.character,
@@ -1806,7 +1813,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         return true;
       } finally {
         _workModeSession.finishRun(workModeRun);
-        if (_canTouchUi) setState(() => _isAiReplying = false);
+        _finishWorkActivity();
       }
     }
     if (action == WorkModeApprovalAction.cancelPending) {
@@ -1815,13 +1822,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         pending.task,
         reason: '用户发送了新的工作指令，旧审批任务已取消。',
       );
+      _conversationController.complete();
+      if (_canTouchUi) setState(() {});
       return false;
     }
 
     _pendingAgentApproval = null;
     final workModeRun = _workModeSession.beginRun();
     final cancelToken = workModeRun.token;
-    if (_canTouchUi) setState(() => _isAiReplying = true);
+    _beginWorkActivity();
     try {
       final runtime = _agentRuntimeFor(
         character: pending.character,
@@ -1881,7 +1890,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return true;
     } finally {
       _workModeSession.finishRun(workModeRun);
-      if (_canTouchUi) setState(() => _isAiReplying = false);
+      _finishWorkActivity();
     }
   }
 
@@ -1889,6 +1898,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     PendingAgentToolApproval approval,
   ) async {
     _pendingAgentApproval = approval;
+    if (!_conversationController.isBusy) {
+      _conversationController.beginWork();
+    }
+    _conversationController.waitForApproval();
+    if (_canTouchUi) setState(() {});
     final decision = await _showAgentApprovalDialog(
       approval.request,
       approval.character,
@@ -1902,11 +1916,29 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         approval.task,
         reason: '用户关闭了工具审批对话框，任务已取消。',
       );
+      _conversationController.complete();
+      if (_canTouchUi) setState(() {});
       return true;
     }
     return _handlePendingAgentApproval(
       action == WorkModeApprovalAction.approve ? '批准' : '拒绝',
     );
+  }
+
+  void _beginWorkActivity() {
+    if (!_conversationController.resumeWork()) {
+      _conversationController.beginWork();
+    }
+    if (_canTouchUi) setState(() {});
+  }
+
+  void _finishWorkActivity() {
+    if (_pendingAgentApproval != null) {
+      _conversationController.waitForApproval();
+    } else {
+      _conversationController.complete();
+    }
+    if (_canTouchUi) setState(() {});
   }
 
   /// 以弹层（AlertDialog）形式请求用户批准/拒绝工具调用，替代原来的“打字批准”。
@@ -2078,16 +2110,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 停止当前流式生成：取消订阅并保留已生成的（部分）内容落库。
   void _stopStreaming() {
     if (!_isStreaming) return;
+    final runType = _conversationController.state.run?.type;
     _flushStreamingUi();
-    _streamSub?.cancel();
-    _streamSub = null;
-    // 唤醒 await done.future，让 _generateAiReply 收尾并把现有内容落库。
-    if (_streamDone != null && !_streamDone!.isCompleted) {
-      _streamDone!.complete();
+    _conversationController.requestStop();
+    unawaited(_streamingSession?.stop());
+    if (runType == ConversationRunType.automatic) {
+      _stopAutoChat();
     }
     if (_canTouchUi) {
       setState(() {
-        _isStreaming = false;
         _autoChatStatus = AutoChatStatus.paused;
       });
     }
@@ -2126,12 +2157,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return null;
   }
 
-  List<Map<String, dynamic>> _buildApiMessages(
+  Future<List<Map<String, dynamic>>> _buildApiMessages(
       AICharacter character, List<Message> context, String? userMessage,
       {bool isAutoChat = false,
       ReplyIntent? intent,
       bool supportsVision = false,
-      Message? currentUserMessage}) {
+      Message? currentUserMessage}) async {
     if (_isDirectChat) {
       return _buildDirectApiMessages(character, context, userMessage,
           supportsVision: supportsVision,
@@ -2319,7 +2350,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         // 真人用户消息 → user 角色；含媒体时按多模态策略生成 content。
         msgs.add({
           'role': 'user',
-          'content': buildUserMessageContent(m, supportsVision: supportsVision),
+          'content': await prepareUserMessageContent(
+            m,
+            supportsVision: supportsVision,
+          ),
         });
       } else if (m.senderId == character.id) {
         // 当前角色自己的消息 → assistant 角色（LLM 看到自己的历史发言）。
@@ -2337,10 +2371,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     // ── 8. 当前用户消息（仅当历史为空时） ──────────────────────────
     if (userMessage != null && historyMessages.isEmpty) {
       // 历史为空时当前用户消息尚未进入 context，需直接基于其构建 content。
-      final content = currentUserMessage != null
-          ? buildUserMessageContent(currentUserMessage,
-              supportsVision: supportsVision)
-          : userMessage;
+      dynamic content = userMessage;
+      if (currentUserMessage != null) {
+        content = await prepareUserMessageContent(
+          currentUserMessage,
+          supportsVision: supportsVision,
+        );
+      }
       msgs.add({'role': 'user', 'content': content});
     }
 
@@ -2407,13 +2444,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         '不要替对方完成职责；用 @ 推动下一棒。';
   }
 
-  List<Map<String, dynamic>> _buildDirectApiMessages(
+  Future<List<Map<String, dynamic>>> _buildDirectApiMessages(
     AICharacter character,
     List<Message> context,
     String? userMessage, {
     bool supportsVision = false,
     Message? currentUserMessage,
-  }) {
+  }) async {
     final msgs = <Map<String, dynamic>>[];
     if (character.memorySummary.isNotEmpty) {
       msgs.add({
@@ -2466,8 +2503,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         // 含媒体时按多模态策略生成 content。
         msgs.add({
           'role': 'user',
-          'content':
-              buildUserMessageContent(message, supportsVision: supportsVision),
+          'content': await prepareUserMessageContent(
+            message,
+            supportsVision: supportsVision,
+          ),
         });
       } else if (message.senderId == character.id) {
         msgs.add({'role': 'assistant', 'content': message.content});
@@ -2476,10 +2515,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     if (userMessage != null && recentHistory.isEmpty) {
       // 历史为空时当前用户消息尚未进入 context，直接基于其构建 content。
-      final content = currentUserMessage != null
-          ? buildUserMessageContent(currentUserMessage,
-              supportsVision: supportsVision)
-          : userMessage;
+      dynamic content = userMessage;
+      if (currentUserMessage != null) {
+        content = await prepareUserMessageContent(
+          currentUserMessage,
+          supportsVision: supportsVision,
+        );
+      }
       msgs.add({'role': 'user', 'content': content});
     }
 
@@ -2506,6 +2548,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (!_canTouchUi) return;
     setState(() {
       _messages = List.from(_messages)..add(message);
+      _totalMessageCount++;
     });
     _scrollToBottom();
   }
@@ -2560,7 +2603,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (_isDirectChat) return;
     final now = DateTime.now();
     if (!ChatOrchestrator.shouldUpdateGroupMemory(
-      messageCount: _messages.length,
+      messageCount: _totalMessageCount,
       hasExistingSummary: _groupMemory?.topicSummary.trim().isNotEmpty ?? false,
       lastSummaryAt: _groupMemory?.lastSummaryAt,
       now: now,
@@ -2642,7 +2685,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     String latestReply,
   ) async {
     if (!ChatOrchestrator.shouldEvolveCharacterMemory(
-      messageCount: _messages.length,
+      messageCount: _totalMessageCount,
       hasUserMessage: _messages.any((message) => message.senderType == 'user'),
     )) {
       return;
@@ -3393,17 +3436,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
-  void _scheduleStreamingUiFlush() {
-    if (_streamUiFlushTimer?.isActive ?? false) return;
-    _streamUiFlushTimer = Timer(_streamUiFlushInterval, () {
-      _streamUiFlushTimer = null;
-      _flushStreamingUi();
-    });
-  }
-
   void _flushStreamingUi({bool forceScroll = false}) {
-    _streamUiFlushTimer?.cancel();
-    _streamUiFlushTimer = null;
     if (!_canTouchUi) return;
     final shouldScroll = forceScroll || _isNearBottom();
     setState(() {});
@@ -3480,8 +3513,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (enabled && !_workModeEnabled) {
       _startAutoChat();
     } else {
-      _autoChatTimer?.cancel();
-      _autoChatTimer = null;
+      _autoChatScheduler.stop();
     }
   }
 
@@ -3489,7 +3521,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     await WorkModeConfigService(db: _db).setWorkMode(widget.groupId, enabled);
     _workModeSession.setEnabled(enabled);
     if (enabled) {
-      if (_isAutoChatRoundRunning) {
+      if (_autoChatScheduler.isRunning) {
         _discardCurrentStream = true;
         _stopStreaming();
       }
@@ -3503,6 +3535,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           reason: '工作模式已关闭，待审批任务已取消。',
         );
       }
+      _conversationController.complete();
     }
     if (_canTouchUi) {
       setState(() {});
@@ -3551,22 +3584,44 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     _searchDebounceTimer?.cancel();
     _searchDebounceTimer = Timer(_searchDebounceDuration, () {
-      _applySearch(query);
+      unawaited(_applySearch(query));
     });
   }
 
-  void _applySearch(String query) {
+  Future<void> _applySearch(String query) async {
     if (!_canTouchUi) return;
     final q = query.toLowerCase();
+    final results = await _repository.search(q);
+    if (!_canTouchUi || _searchController.text.trim().toLowerCase() != q) {
+      return;
+    }
     setState(() {
-      _searchResults =
-          _messages.where((m) => m.content.toLowerCase().contains(q)).toList();
+      _searchResults = results;
       _searchFocusIndex = _searchResults.isEmpty ? null : 0;
     });
     if (_searchResults.isNotEmpty) {
-      final idx = _messages.indexOf(_searchResults[0]);
-      _scrollToMessageIndex(idx);
+      await _focusSearchResult(_searchResults[0]);
     }
+  }
+
+  Future<void> _focusSearchResult(Message message) async {
+    if (!_messages.any((loaded) => loaded.id == message.id)) {
+      final page = await _repository.loadAround(message.id);
+      if (!_canTouchUi) return;
+      final byId = <String, Message>{
+        for (final loaded in _messages) loaded.id: loaded,
+        for (final loaded in page.messages) loaded.id: loaded,
+      };
+      final merged = byId.values.toList()
+        ..sort((a, b) {
+          final byTime = a.timestamp.compareTo(b.timestamp);
+          return byTime != 0 ? byTime : a.id.compareTo(b.id);
+        });
+      setState(() => _messages = merged);
+    }
+    _scrollToMessageIndex(
+      _messages.indexWhere((loaded) => loaded.id == message.id),
+    );
   }
 
   void _scrollToMessageIndex(int index) {
@@ -3608,8 +3663,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           _searchResults.length);
     });
     final msg = _searchResults[_searchFocusIndex!];
-    final idx = _messages.indexOf(msg);
-    _scrollToMessageIndex(idx);
+    unawaited(_focusSearchResult(msg));
   }
 
   void _searchNext() {
@@ -3618,8 +3672,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _searchFocusIndex = ((_searchFocusIndex! + 1) % _searchResults.length);
     });
     final msg = _searchResults[_searchFocusIndex!];
-    final idx = _messages.indexOf(msg);
-    _scrollToMessageIndex(idx);
+    unawaited(_focusSearchResult(msg));
   }
 
   String get _searchResultLabel {
@@ -3855,6 +3908,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   Future<void> _regenerateAiReply(
       Message original, AICharacter character) async {
     if (_isRegenerating || _isAiReplying) return;
+    if (_conversationController.beginNormal() == null) return;
     setState(() {
       _isRegenerating = true;
       _regenerateMessageId = original.id;
@@ -3864,6 +3918,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final apiKey =
         config == null ? null : await _credentialResolver.resolve(config);
     if (config == null || apiKey == null) {
+      _conversationController.complete();
       if (_canTouchUi) setState(() => _isRegenerating = false);
       return;
     }
@@ -3876,7 +3931,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final provider = ApiProvider.values.firstWhere(
         (p) => p.name == config.provider,
         orElse: () => ApiProvider.deepseek);
-    final apiMessages = _buildApiMessages(character, _regenerateContext, null,
+    final apiMessages = await _buildApiMessages(
+        character, _regenerateContext, null,
         supportsVision: provider.supportsVision);
 
     final temp = Message(
@@ -3892,66 +3948,36 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
     _scrollToBottom();
 
-    final done = Completer<void>();
-    String fullContent = '';
-    var failed = false;
-    int? promptTokens;
-    int? completionTokens;
-    int? cachedTokens;
-
-    final sub = _chatApi
-        .streamChatMessage(
-      apiKey: apiKey,
-      provider: provider,
-      customBaseUrl: config.customBaseUrl,
-      model: config.modelName,
-      messages: apiMessages,
-    )
-        .listen((e) {
-      if (!mounted) return;
-      if (!_canTouchUi) return;
-      switch (e.type) {
-        case ChatStreamEventType.token:
-          fullContent += e.delta ?? '';
-          temp.content = fullContent;
-          _scheduleStreamingUiFlush();
-          break;
-        case ChatStreamEventType.done:
-          if ((e.content ?? '').isNotEmpty) fullContent = e.content!;
-          temp.content = fullContent;
-          _flushStreamingUi();
-          if (e.promptTokens != null) promptTokens = e.promptTokens;
-          if (e.completionTokens != null) completionTokens = e.completionTokens;
-          if (e.cachedTokens != null) cachedTokens = e.cachedTokens;
-          if (!done.isCompleted) done.complete();
-          break;
-        case ChatStreamEventType.error:
-          failed = true;
-          fullContent = '[${character.name} 重新生成失败: ${e.message}]';
-          temp.content = fullContent;
-          _flushStreamingUi();
-          if (!done.isCompleted) done.complete();
-      }
-    }, onError: (err) {
-      if (!_canTouchUi) return;
-      failed = true;
-      fullContent = '[${character.name} 重新生成失败: $err]';
+    final session = StreamingReplySession();
+    _streamingSession = session;
+    if (_canTouchUi) setState(() {});
+    final result = await session.run(
+      _chatApi.streamChatMessage(
+        apiKey: apiKey,
+        provider: provider,
+        customBaseUrl: config.customBaseUrl,
+        model: config.modelName,
+        messages: apiMessages,
+      ),
+      onDraft: (draft) {
+        temp.content = draft;
+        _conversationController.updateStreamingDraft(draft);
+        _flushStreamingUi();
+      },
+    );
+    if (_disposed) return;
+    if (identical(_streamingSession, session)) _streamingSession = null;
+    var fullContent = result.content;
+    var failed = result.failed;
+    final promptTokens = result.promptTokens;
+    final completionTokens = result.completionTokens;
+    final cachedTokens = result.cachedTokens;
+    if (failed) {
+      fullContent = '[${character.name} 重新生成失败: ${result.error}]';
       temp.content = fullContent;
       _flushStreamingUi();
-      if (!done.isCompleted) done.complete();
-    }, onDone: () {
-      if (!done.isCompleted) done.complete();
-    });
-
-    _streamSub = sub;
-    _streamDone = done;
-    if (mounted) setState(() => _isStreaming = true);
-
-    await done.future;
-    if (_disposed) return;
-    _streamSub = null;
-    _streamDone = null;
-    if (mounted) setState(() => _isStreaming = false);
+    }
+    if (_canTouchUi) setState(() {});
 
     if (failed) {
       final retryContent = await _retryFailedReply(
@@ -3994,8 +4020,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (promptTokens != null && completionTokens != null) {
       _repository.recordTokenUsage(
         characterId: character.id,
-        inputTokens: promptTokens!,
-        outputTokens: completionTokens!,
+        inputTokens: promptTokens,
+        outputTokens: completionTokens,
         cachedTokens: cachedTokens ?? 0,
       );
     }
@@ -4005,6 +4031,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     if (_canTouchUi) {
+      _conversationController.complete();
       setState(() {
         _streamingMessage = null;
         _isRegenerating = false;
@@ -4069,6 +4096,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         _isDirectChat ? directReadUserMessageIds(_messages) : const <String>{};
     // #5 性能：消息/角色索引 Map 在父页预计算一次，避免在子组件每次 build 重建。
     final messageIndex = {for (final message in _messages) message.id: message};
+    for (final message in _messages) {
+      final quotedId = message.replyToMessageId;
+      if (quotedId == null || messageIndex.containsKey(quotedId)) continue;
+      final quoted = _db.messageBox.get(quotedId);
+      if (quoted != null) messageIndex[quotedId] = quoted;
+    }
     final characterIndex = {
       for (final character in _allGroupCharacters) character.id: character,
     };
@@ -4127,6 +4160,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               onTap: _jumpToNextUserMention,
               onClear: _clearUserMentions,
             ),
+          if (_isLoadingOlder) const LinearProgressIndicator(minHeight: 2),
           Expanded(
             child: _messages.isEmpty
                 ? _buildEmptyState(cs)
@@ -4151,6 +4185,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                     onLongPress: _showMessageActionSheet,
                     onSenderTap: _openCharacterSettings,
                     onMentionSender: _insertMention,
+                    onQuotedTap: (message) =>
+                        unawaited(_focusSearchResult(message)),
                   ),
           ),
           if (_isAiReplying)
@@ -4498,16 +4534,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             icon: Icons.info_outline_rounded);
       }
       for (final file in selectedFiles) {
+        final size = await file.length();
+        if (!_canAddAttachment(size)) {
+          _showAttachmentLimit(file.name);
+          continue;
+        }
         late final MediaAttachment att;
         if (kIsWeb) {
           final bytes = await file.readAsBytes();
-          if (!_canAddWebAttachment(bytes.lengthInBytes)) {
-            if (mounted) {
-              AppToast.show(context, '${file.name} 加入后超过 Web 端单条消息 10 MB 限制',
-                  icon: Icons.info_outline_rounded);
-            }
-            continue;
-          }
           att = await _db.copyBytesToMedia(
             bytes,
             'image',
@@ -4535,16 +4569,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     try {
       final file = await _imagePicker.pickVideo(source: ImageSource.gallery);
       if (file == null) return;
+      if (!_canAddAttachment(await file.length())) {
+        _showAttachmentLimit(file.name);
+        return;
+      }
       late final MediaAttachment att;
       if (kIsWeb) {
         final bytes = await file.readAsBytes();
-        if (!_canAddWebAttachment(bytes.lengthInBytes)) {
-          if (mounted) {
-            AppToast.show(context, '${file.name} 加入后超过 Web 端单条消息 10 MB 限制',
-                icon: Icons.info_outline_rounded);
-          }
-          return;
-        }
         att = await _db.copyBytesToMedia(
           bytes,
           'video',
@@ -4580,12 +4611,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         if (payload == null) continue;
         late final MediaAttachment att;
         if (payload is PickedAttachmentBytes) {
-          if (!_canAddWebAttachment(payload.bytes.lengthInBytes)) {
-            if (mounted) {
-              AppToast.show(
-                  context, '${payload.fileName} 加入后超过 Web 端单条消息 10 MB 限制',
-                  icon: Icons.info_outline_rounded);
-            }
+          if (!_canAddAttachment(payload.bytes.lengthInBytes)) {
+            _showAttachmentLimit(payload.fileName);
             continue;
           }
           att = await _db.copyBytesToMedia(
@@ -4596,6 +4623,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         } else if (payload is PickedAttachmentPath) {
           final source = File(payload.path);
           if (!await source.exists()) continue;
+          if (!_canAddAttachment(await source.length())) {
+            _showAttachmentLimit(payload.fileName);
+            continue;
+          }
           att = await _db.copyToMedia(
             source,
             _attachmentTypeForPath(payload.path),
@@ -4632,6 +4663,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         }
         final source = File(path);
         if (!await source.exists()) continue;
+        if (!_canAddAttachment(await source.length())) {
+          _showAttachmentLimit(fileNameFromPath(path));
+          continue;
+        }
         final att = await _db.copyToMedia(
           source,
           _attachmentTypeForPath(path),
@@ -4691,6 +4726,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           if (path.trim().isEmpty || path.startsWith('content://')) continue;
           final source = File(path);
           if (!await source.exists()) continue;
+          if (!_canAddAttachment(await source.length())) {
+            _showAttachmentLimit(fileNameFromPath(path));
+            continue;
+          }
           attachments.add(await _db.copyToMedia(
             source,
             _attachmentTypeForPath(path),
@@ -4702,11 +4741,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         try {
           final image = await Pasteboard.image;
           if (image != null && image.isNotEmpty) {
-            if (!_canAddWebAttachment(image.length)) {
-              if (mounted) {
-                AppToast.show(context, '剪贴板图片加入后超过 Web 端单条消息 10 MB 限制',
-                    icon: Icons.info_outline_rounded);
-              }
+            if (!_canAddAttachment(image.length)) {
+              _showAttachmentLimit('剪贴板图片');
               return;
             }
             attachments.add(await _db.copyBytesToMedia(
@@ -4786,15 +4822,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return 'file';
   }
 
-  bool _canAddWebAttachment(int newBytes) {
-    if (!kIsWeb) return true;
+  bool _canAddAttachment(int newBytes) {
     final existingBytes = _pendingAttachments.fold<int>(
       0,
       (sum, attachment) => sum + (attachment.fileSize ?? 0),
     );
-    return canAddWebAttachment(
+    return canAddAttachment(
       existingBytes: existingBytes,
       newBytes: newBytes,
+    );
+  }
+
+  void _showAttachmentLimit(String fileName) {
+    if (!mounted) return;
+    AppToast.show(
+      context,
+      '$fileName 超过单文件或单条消息 10 MB 限制',
+      icon: Icons.info_outline_rounded,
     );
   }
 

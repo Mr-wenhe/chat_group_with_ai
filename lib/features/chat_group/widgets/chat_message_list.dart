@@ -7,8 +7,7 @@ import 'package:flutter/material.dart';
 class ChatMessageListController {
   final Object _scope = Object();
 
-  GlobalKey keyFor(String messageId) =>
-      GlobalObjectKey((_scope, messageId));
+  GlobalKey keyFor(String messageId) => GlobalObjectKey((_scope, messageId));
 
   BuildContext? contextFor(String messageId) =>
       keyFor(messageId).currentContext;
@@ -33,6 +32,7 @@ class ChatMessageList extends StatelessWidget {
   final void Function(Message message, AICharacter? sender) onLongPress;
   final void Function(AICharacter sender) onSenderTap;
   final void Function(AICharacter sender) onMentionSender;
+  final void Function(Message message) onQuotedTap;
 
   /// P2：进度气泡总耗时起点查表，key=task.id，value=runStartedAtMs；
   /// 为 null 时进度气泡不展示实时耗时。
@@ -58,6 +58,7 @@ class ChatMessageList extends StatelessWidget {
     required this.onLongPress,
     required this.onSenderTap,
     required this.onMentionSender,
+    required this.onQuotedTap,
     this.progressStartTimes,
   });
 
@@ -113,6 +114,9 @@ class ChatMessageList extends StatelessWidget {
                 quotedSenderName: quotedMessage == null
                     ? null
                     : senderNameById(quotedMessage.senderId),
+                onQuotedTap: quotedMessage == null
+                    ? null
+                    : () => onQuotedTap(quotedMessage),
                 ownerName: ownerName,
                 readReceiptText: isDirectChat && message.senderType == 'user'
                     ? (readUserMessageIds.contains(message.id) ? '已读' : '未读')

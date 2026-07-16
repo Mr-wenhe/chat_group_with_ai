@@ -62,6 +62,8 @@ class ChatRoomLoadContext {
   final GroupMemory? groupMemory;
   final bool hasAnyApiConfig;
   final bool isDirectChat;
+  final bool hasOlderMessages;
+  final int totalMessageCount;
 
   const ChatRoomLoadContext({
     required this.displayGroup,
@@ -73,6 +75,8 @@ class ChatRoomLoadContext {
     required this.groupMemory,
     required this.hasAnyApiConfig,
     required this.isDirectChat,
+    this.hasOlderMessages = false,
+    this.totalMessageCount = 0,
   });
 
   static ChatGroup directDisplayGroup({

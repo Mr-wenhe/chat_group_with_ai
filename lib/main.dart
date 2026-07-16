@@ -26,12 +26,38 @@ void main() async {
     return;
   }
 
-  runApp(
-    ProviderScope(
-      overrides: [databaseServiceProvider.overrideWithValue(db)],
-      child: const MyApp(),
+  final messageIndexReady = db.ensureMessageIndex();
+  runApp(ProviderScope(
+    overrides: [databaseServiceProvider.overrideWithValue(db)],
+    child: FutureBuilder<void>(
+      future: messageIndexReady,
+      builder: (context, snapshot) {
+        if (snapshot.hasError) {
+          return DatabaseRecoveryApp(
+            error: snapshot.error!,
+            dataDirPath: db.dataDirPath,
+          );
+        }
+        if (snapshot.connectionState != ConnectionState.done) {
+          return const MaterialApp(
+            home: Scaffold(
+              body: Center(
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  children: [
+                    CircularProgressIndicator(),
+                    SizedBox(height: 16),
+                    Text('正在整理聊天记录…'),
+                  ],
+                ),
+              ),
+            ),
+          );
+        }
+        return const MyApp();
+      },
     ),
-  );
+  ));
 }
 
 final scaffoldMessengerKey = GlobalKey<ScaffoldMessengerState>();

@@ -30,14 +30,18 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
     _db = ref.read(databaseServiceProvider);
   }
 
+  Future<void> _loadSummaries() async {
+    if (mounted) setState(() {});
+  }
+
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final groups = ref.watch(chatGroupsProvider);
-    final summaries = GroupChatInbox.buildSummaries(
+    final summaries = GroupChatInbox.buildIndexedSummaries(
       groups: groups,
-      messages: _db.messageBox.values.toList(),
-      readAtByGroup: _db.groupChatReadAtByGroup(),
+      records: _db.conversationSummaries(),
+      messageById: _db.messageBox.get,
       pinnedIds: _db.pinnedGroupIds(),
       activeGroupId: ConversationPresenceService.instance.activeConversationId,
     );
@@ -160,15 +164,15 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
       summary.group.id,
       readAt: _readThrough(summary.lastMessage),
     );
-    if (mounted) setState(() {});
+    await _loadSummaries();
     if (!mounted) return;
     await Navigator.of(context).pushNamed('/chat/${summary.group.id}');
-    if (mounted) setState(() {});
+    await _loadSummaries();
   }
 
   Future<void> _togglePinnedGroup(String groupId) async {
     await _db.togglePinnedGroup(groupId);
-    if (mounted) setState(() {});
+    await _loadSummaries();
   }
 
   DateTime _readThrough(Message? lastMessage) {

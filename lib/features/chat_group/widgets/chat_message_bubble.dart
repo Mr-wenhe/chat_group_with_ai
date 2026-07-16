@@ -36,6 +36,7 @@ class ChatMessageBubble extends StatelessWidget {
   final Color Function(AICharacter) senderColor;
   final Message? quotedMessage;
   final String? quotedSenderName;
+  final VoidCallback? onQuotedTap;
   final String ownerName;
   final String? readReceiptText;
 
@@ -58,6 +59,7 @@ class ChatMessageBubble extends StatelessWidget {
     required this.senderColor,
     this.quotedMessage,
     this.quotedSenderName,
+    this.onQuotedTap,
     required this.ownerName,
     this.readReceiptText,
     this.runStartedAtMs,
@@ -145,7 +147,7 @@ class ChatMessageBubble extends StatelessWidget {
                         if (message.replyToMessageId != null)
                           _buildQuotedRef(
                             context,
-                            quotedMessage ?? message,
+                            quotedMessage,
                             quotedSenderName,
                             isUser,
                           ),
@@ -185,40 +187,43 @@ class ChatMessageBubble extends StatelessWidget {
     final snippet = quoted.content.length > 50
         ? '${quoted.content.substring(0, 50)}...'
         : quoted.content;
-    return Container(
-      margin: const EdgeInsets.only(bottom: 7),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
-      decoration: BoxDecoration(
-        color: isUser
-            ? WeComChatTokens.lightText.withOpacity(0.08)
-            : WeComChatTokens.lightChatBackground.withOpacity(0.8),
-        borderRadius: BorderRadius.circular(3),
-      ),
-      child: Row(
-        children: [
-          Container(
-            width: 2,
-            height: 28,
-            color: WeComChatTokens.mention,
-          ),
-          const SizedBox(width: 7),
-          if (senderName != null)
-            Text(senderName,
-                style: const TextStyle(
-                    fontSize: 11,
-                    fontWeight: FontWeight.w600,
-                    color: WeComChatTokens.mention)),
-          const SizedBox(width: 6),
-          Expanded(
-            child: Text(snippet,
-                maxLines: 1,
-                overflow: TextOverflow.ellipsis,
-                style: TextStyle(
-                  fontSize: 12,
-                  color: WeComChatTokens.text(context).withOpacity(0.68),
-                )),
-          ),
-        ],
+    return GestureDetector(
+      onTap: onQuotedTap,
+      child: Container(
+        margin: const EdgeInsets.only(bottom: 7),
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+        decoration: BoxDecoration(
+          color: isUser
+              ? WeComChatTokens.lightText.withOpacity(0.08)
+              : WeComChatTokens.lightChatBackground.withOpacity(0.8),
+          borderRadius: BorderRadius.circular(3),
+        ),
+        child: Row(
+          children: [
+            Container(
+              width: 2,
+              height: 28,
+              color: WeComChatTokens.mention,
+            ),
+            const SizedBox(width: 7),
+            if (senderName != null)
+              Text(senderName,
+                  style: const TextStyle(
+                      fontSize: 11,
+                      fontWeight: FontWeight.w600,
+                      color: WeComChatTokens.mention)),
+            const SizedBox(width: 6),
+            Expanded(
+              child: Text(snippet,
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: WeComChatTokens.text(context).withOpacity(0.68),
+                  )),
+            ),
+          ],
+        ),
       ),
     );
   }
@@ -477,8 +482,7 @@ class _ProgressLogBubbleState extends State<ProgressLogBubble> {
   void initState() {
     super.initState();
     // 仅当携带启动时刻且当前为进行中（非终态）时，启动每秒刷新 Timer。
-    if (widget.runStartedAtMs != null &&
-        !_isFinalState(_normalizedContent)) {
+    if (widget.runStartedAtMs != null && !_isFinalState(_normalizedContent)) {
       _timer = Timer.periodic(
         const Duration(seconds: 1),
         (_) => setState(() {}),
@@ -498,8 +502,7 @@ class _ProgressLogBubbleState extends State<ProgressLogBubble> {
     final content = _normalizedContent;
     final lines = content.split('\n');
     final header = lines.first;
-    final stepLines =
-        lines.skip(1).where((l) => l.trim().isNotEmpty).toList();
+    final stepLines = lines.skip(1).where((l) => l.trim().isNotEmpty).toList();
     final doneCount =
         stepLines.where((l) => l.startsWith(stepPrefixDone)).length;
     final isFinal = _isFinalState(content);

@@ -105,4 +105,144 @@ void main() {
       progress.groupId: <String>[],
     });
   });
+
+  test('loads a 10000-message conversation by latest, before and around pages',
+      () async {
+    final db = DatabaseService();
+    final base = DateTime(2026, 1, 1);
+    final messages = <String, Message>{
+      for (var i = 0; i < 10000; i++)
+        'm$i': Message(
+          id: 'm$i',
+          groupId: 'large',
+          senderId: i.isEven ? 'user' : 'ai',
+          senderType: i.isEven ? 'user' : 'ai',
+          content: 'message $i',
+          timestamp: base.add(Duration(seconds: i)),
+        ),
+    };
+    await db.messageBox.putAll(messages);
+    await db.rebuildMessageIndex();
+
+    final latest = await db.loadLatestMessages('large', limit: 80);
+    expect(latest.messages, hasLength(80));
+    expect(latest.messages.first.id, 'm9920');
+    expect(latest.hasOlder, isTrue);
+
+    final older = await db.loadMessagesBefore(
+      'large',
+      beforeMessageId: latest.messages.first.id,
+      limit: 80,
+    );
+    expect(older.messages.first.id, 'm9840');
+    expect(older.messages.last.id, 'm9919');
+
+    final around = await db.loadMessagesAround('large', 'm5000', limit: 51);
+    expect(around.messages.map((message) => message.id), contains('m5000'));
+    expect(around.messages, hasLength(51));
+  });
+
+  test('summary index updates incrementally and search covers unloaded history',
+      () async {
+    final db = DatabaseService();
+    final first = Message(
+      id: 'first',
+      groupId: 'g1',
+      senderId: 'ai',
+      senderType: 'ai',
+      content: 'old searchable needle',
+      timestamp: DateTime(2026, 1, 1),
+    );
+    final last = Message(
+      id: 'last',
+      groupId: 'g1',
+      senderId: 'user',
+      senderType: 'user',
+      content: 'latest',
+      timestamp: DateTime(2026, 1, 2),
+    );
+
+    await db.persistMessage(first);
+    await db.persistMessage(last);
+
+    final summary = db.conversationSummaries()['g1']!;
+    expect(summary.lastMessageId, 'last');
+    expect(summary.preview, 'latest');
+    expect(summary.messageCount, 2);
+    expect(
+      (await db.searchMessages('g1', 'needle')).single.id,
+      'first',
+    );
+  });
+
+  test('marking group and direct conversations read clears cached unread',
+      () async {
+    final db = DatabaseService();
+    for (final conversationId in ['group-read', 'dm:character-read']) {
+      for (var index = 0; index < 3; index++) {
+        await db.persistMessage(Message(
+          id: '$conversationId-$index',
+          groupId: conversationId,
+          senderId: 'ai',
+          senderType: 'ai',
+          content: '@我 unread $index',
+          timestamp: DateTime(2026, 1, 1, 0, index),
+        ));
+      }
+      expect(db.conversationSummaries()[conversationId]?.unreadCount, 3);
+
+      if (conversationId.startsWith('dm:')) {
+        await db.markDirectChatRead(
+          conversationId,
+          readAt: DateTime(2026, 1, 1, 1),
+        );
+      } else {
+        await db.markGroupChatRead(
+          conversationId,
+          readAt: DateTime(2026, 1, 1, 1),
+        );
+      }
+
+      final readSummary = db.conversationSummaries()[conversationId]!;
+      expect(readSummary.unreadCount, 0);
+      expect(readSummary.mentionCount, 0);
+
+      await db.persistMessage(Message(
+        id: '$conversationId-next',
+        groupId: conversationId,
+        senderId: 'ai',
+        senderType: 'ai',
+        content: 'new unread',
+        timestamp: DateTime(2026, 1, 2),
+      ));
+      expect(db.conversationSummaries()[conversationId]?.unreadCount, 1);
+    }
+  });
+
+  test('50000-message fixture rebuilds 100 conversation summaries', () async {
+    final db = DatabaseService();
+    final base = DateTime(2026, 1, 1);
+    final messages = <String, Message>{};
+    for (var index = 0; index < 50000; index++) {
+      final id = 'fixture-$index';
+      messages[id] = Message(
+        id: id,
+        groupId: 'group-${index % 100}',
+        senderId: index.isEven ? 'user' : 'ai',
+        senderType: index.isEven ? 'user' : 'ai',
+        content: 'fixture message $index',
+        timestamp: base.add(Duration(seconds: index)),
+      );
+    }
+    await db.messageBox.putAll(messages);
+    await db.rebuildMessageIndex();
+
+    final stopwatch = Stopwatch()..start();
+    final summaries = db.conversationSummaries();
+    stopwatch.stop();
+
+    expect(summaries, hasLength(100));
+    expect(summaries['group-0']?.messageCount, 500);
+    expect(stopwatch.elapsed, lessThan(const Duration(milliseconds: 100)));
+  });
 }

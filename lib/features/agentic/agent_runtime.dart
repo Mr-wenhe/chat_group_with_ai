@@ -7,6 +7,7 @@ import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/retry_handler.dart';
 import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
+import 'package:chat_group/features/agentic/agent_runtime_components.dart';
 import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/agentic/agent_progress_meta.dart';
 import 'package:chat_group/features/agentic/file_validator.dart';
@@ -709,121 +710,6 @@ class AgentRuntime {
         lower.contains('```');
   }
 
-  /// 更宽松的工具请求提取（[ToolRequest.tryParse] 失败后的兜底）：
-  /// 仅在文本确实含有工具调用痕迹时调用，尝试识别几种常见变形让真正的工具调用
-  /// 尽可能执行；若仍无法构造合法请求则返回 null，由调用方退化为简洁提示。
-  static ToolRequest? _looseParseToolRequest(String content) {
-    // 变形 1：<function=toolName> ... </function>，体内是 JSON 或 path/content 键值。
-    final fnMatch = RegExp(
-      r'<function\s*=\s*([\w.\-]+)\s*>([\s\S]*?)</function>',
-      caseSensitive: false,
-    ).firstMatch(content);
-    if (fnMatch != null) {
-      final toolName = fnMatch.group(1)!;
-      final tool = AgentToolName.fromWire(toolName);
-      final body = fnMatch.group(2)!;
-      if (tool != null) {
-        final args = _extractArgsFromText(body);
-        if (args != null) {
-          return ToolRequest(
-            tool: tool,
-            reason: args['reason'] as String? ?? '模型请求执行 $toolName',
-            args: args,
-          );
-        }
-      }
-    }
-    // 变形 2：文本出现 workspace.patch/write 且带 path/content 键值（无外层 wrapper）。
-    if (content.contains('workspace.patch') ||
-        content.contains('workspace.write')) {
-      final args = _extractArgsFromText(content);
-      if (args != null && args['path'] is String && args['content'] is String) {
-        return ToolRequest(
-          tool: AgentToolName.workspacePatch,
-          reason: args['reason'] as String? ?? '模型请求写入文件',
-          args: args,
-        );
-      }
-    }
-    return null;
-  }
-
-  /// 从文本中尽量提取工具参数（优先解析 JSON，退化到正则抓 path/content）。
-  static Map<String, dynamic>? _extractArgsFromText(String text) {
-    final balanced = _firstBalancedJsonObject(text);
-    if (balanced is Map<String, dynamic>) {
-      final args = balanced['args'];
-      if (args is Map<String, dynamic>) return args;
-      // 退化：JSON 顶层直接是 path/content（无 args 包裹）。
-      if (balanced['path'] is String) return balanced;
-    }
-    final path = _firstJsonString(text, 'path');
-    final contentVal = _firstJsonString(text, 'content');
-    if (path != null && contentVal != null) {
-      final reason = _firstJsonString(text, 'reason');
-      return {
-        'path': path,
-        'content': contentVal,
-        if (reason != null) 'reason': reason,
-      };
-    }
-    return null;
-  }
-
-  /// 找到文本中第一个「括号配平」的 {...} 子串并 jsonDecode，失败返回 null。
-  static Map<String, dynamic>? _firstBalancedJsonObject(String text) {
-    final start = text.indexOf('{');
-    if (start < 0) return null;
-    var depth = 0;
-    var inString = false;
-    var escape = false;
-    for (var i = start; i < text.length; i++) {
-      final ch = text[i];
-      if (inString) {
-        if (escape) {
-          escape = false;
-        } else if (ch == '\\') {
-          escape = true;
-        } else if (ch == '"') {
-          inString = false;
-        }
-        continue;
-      }
-      if (ch == '"') {
-        inString = true;
-      } else if (ch == '{') {
-        depth++;
-      } else if (ch == '}') {
-        depth--;
-        if (depth == 0) {
-          final candidate = text.substring(start, i + 1);
-          try {
-            final decoded = jsonDecode(candidate);
-            if (decoded is Map<String, dynamic>) return decoded;
-          } on FormatException {
-            // 非合法 JSON，停止扫描。
-          }
-          break;
-        }
-      }
-    }
-    return null;
-  }
-
-  /// 用正则抓出形如 "key": "value" 的 JSON 字符串值（兼容基本转义）。
-  static String? _firstJsonString(String text, String key) {
-    final match = RegExp(
-      r'"$key"\s*:\s*"((?:[^"\\]|\\.)*)"',
-    ).firstMatch(text);
-    if (match == null) return null;
-    final raw = match.group(1)!;
-    return raw
-        .replaceAll('\\"', '"')
-        .replaceAll('\\\\', '\\')
-        .replaceAll('\\n', '\n')
-        .replaceAll('\\t', '\t');
-  }
-
   Future<AgentRuntimeResult> run({
     required AICharacter character,
     required List<CharacterSkill> skills,
@@ -1013,7 +899,7 @@ class AgentRuntime {
     }
 
     final content = first['message']?.toString() ?? '';
-    final request = ToolRequest.tryParse(content);
+    final request = AgentProtocolParser.parseStrict(content);
     if (request != null) {
       return _handleToolRequest(
         character: character,
@@ -1048,7 +934,7 @@ class AgentRuntime {
     if (_containsToolCallTrace(content) || hasExplicitFileIntent) {
       // 文本含有工具调用痕迹但 tryParse 解析失败：尝试用更宽松的方式兜底提取
       // 工具请求并执行；提取失败才退化为简洁提示，绝不泄露原始规划文本。
-      final looseRequest = _looseParseToolRequest(content);
+      final looseRequest = AgentProtocolParser.parseLoose(content);
       if (looseRequest != null) {
         return _handleToolRequest(
           character: character,
@@ -1209,7 +1095,9 @@ class AgentRuntime {
     List<Map<String, dynamic>>? conversationHistory,
     List<ToolRequest> executedRequests = const [],
   }) async {
-    if (!_canGenerateNewFileDirectly(userRequest, conversationHistory)) return null;
+    if (!_canGenerateNewFileDirectly(userRequest, conversationHistory)) {
+      return null;
+    }
     final path = _inferGeneratedFilePath(userRequest, conversationHistory);
     if (path == null) return null;
 
@@ -1295,8 +1183,7 @@ class AgentRuntime {
         return null;
       }
       var output = result['message']?.toString() ?? '';
-      final parsed =
-          ToolRequest.tryParse(output) ?? _looseParseToolRequest(output);
+      final parsed = AgentProtocolParser.parse(output);
       if (parsed != null && parsed.tool == AgentToolName.workspacePatch) {
         return parsed;
       }
@@ -1418,7 +1305,8 @@ class AgentRuntime {
     }.join('、');
 
     // 极简 re-prompt：明确告诉模型上次输出格式不对、这次必须只输出 JSON 块。
-    final originalFilePath = _inferGeneratedFilePath(userRequest, conversationHistory);
+    final originalFilePath =
+        _inferGeneratedFilePath(userRequest, conversationHistory);
     final pathHint = originalFilePath != null
         ? '注意：用户要求修改的文件是 `$originalFilePath`，不要创建新文件，直接对已有文件发起 workspace.patch 写入修改后的完整内容。\n'
         : '';
@@ -1454,8 +1342,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
             timeout: const Duration(seconds: 30));
         if (retry['success'] != true) return null;
         final retryContent = retry['message']?.toString() ?? '';
-        final request = ToolRequest.tryParse(retryContent) ??
-            _looseParseToolRequest(retryContent);
+        final request = AgentProtocolParser.parse(retryContent);
         if (request != null) return request;
       } on TimeoutException {
         return null;
@@ -1509,8 +1396,8 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         stage: AgentRuntimeProgressStage.waitingForApproval,
         executedRequests: executedRequests,
         pendingRequest: request,
-        currentStepLabel:
-            waitingApprovalLabel(request.tool.wireName, request.args['path']?.toString()),
+        currentStepLabel: waitingApprovalLabel(
+            request.tool.wireName, request.args['path']?.toString()),
       ));
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.waitingForApproval,
@@ -1530,7 +1417,8 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         executedRequests: executedRequests,
         currentStepLabel: callingToolLabel(request.tool.wireName),
       ));
-      toolResult = await _execute(request, character, executedRequests: executedRequests);
+      toolResult = await _execute(request, character,
+          executedRequests: executedRequests);
     } catch (e) {
       // 工具执行抛错：上报「步骤失败」，reason 取异常首行（简短中文/英文）。
       await _reportProgress(AgentRuntimeProgress(
@@ -1735,7 +1623,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     // 多步骤任务（例如先 skill.create，再生成页面）也可能在后续回复里直接
     // 吐出裸 HTML/代码。与首轮规划保持同一恢复策略，把现成内容继续转换为
     // workspace.patch，不能只用“请查看附件”护栏吞掉正文却没有真正创建文件。
-    final nextRequest = ToolRequest.tryParse(content) ??
+    final nextRequest = AgentProtocolParser.parse(content) ??
         _recoverGeneratedFileRequest(userRequest, content);
     if (nextRequest != null) {
       // 第二层防御：已成功写入过文件后，禁止 LLM 再发起写文件请求。
@@ -1935,36 +1823,28 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     AICharacter character, {
     List<ToolRequest> executedRequests = const [],
   }) async {
-    return switch (request.tool) {
-      AgentToolName.workspaceList => await _workspaceFileTool.list(
-          path: request.args['path'] as String? ?? '.'),
-      AgentToolName.workspaceRead => await () async {
-        // 读取文件分支：上报「读取文件中」。
+    final executor = AgentToolExecutor(
+      workspace: workspaceFileTool,
+      browser: browserContextTool,
+      createSkill: skillCreateHandler,
+      downloadSkill: skillDownloadHandler,
+    );
+    return executor.execute(
+      request,
+      patchWorkspace: () => _executeWorkspacePatch(
+        request,
+        allowCommandValidation:
+            _hasPermission(character, ToolPermission.commandRun),
+        executedRequests: executedRequests,
+      ),
+      onReadStarted: (path) async {
         await _reportProgress(AgentRuntimeProgress(
           stage: AgentRuntimeProgressStage.readingFile,
           executedRequests: executedRequests,
-          currentStepLabel: readingFileLabel(
-            request.args['path'] as String? ?? '',
-          ),
+          currentStepLabel: readingFileLabel(path),
         ));
-        return _workspaceFileTool.read(
-          request.args['path'] as String? ?? '',
-        );
-      }(),
-      AgentToolName.workspacePatch => await _executeWorkspacePatch(
-          request,
-          allowCommandValidation:
-              _hasPermission(character, ToolPermission.commandRun),
-          executedRequests: executedRequests,
-        ),
-      AgentToolName.commandRun => await _workspaceFileTool
-          .runCommand(request.args['command'] as String? ?? ''),
-      AgentToolName.browserContext => _browserSnapshotToJson(
-          await _browserContextTool.currentTab(),
-        ),
-      AgentToolName.skillCreate => await _skillCreateHandler(request.args),
-      AgentToolName.skillDownload => await _skillDownloadHandler(request.args),
-    };
+      },
+    );
   }
 
   /// 执行 workspace.patch（写文件）：先调用桥接服务 `/workspace/write` 落盘，
@@ -2130,40 +2010,6 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       throw StateError('Workspace file tool is not configured.');
     }
     return tool;
-  }
-
-  BrowserContextTool get _browserContextTool {
-    final tool = browserContextTool;
-    if (tool == null) {
-      throw StateError('Browser context tool is not configured.');
-    }
-    return tool;
-  }
-
-  SkillCreateHandler get _skillCreateHandler {
-    final handler = skillCreateHandler;
-    if (handler == null) {
-      throw StateError('Skill create handler is not configured.');
-    }
-    return handler;
-  }
-
-  SkillDownloadHandler get _skillDownloadHandler {
-    final handler = skillDownloadHandler;
-    if (handler == null) {
-      throw StateError('Skill download handler is not configured.');
-    }
-    return handler;
-  }
-
-  Map<String, dynamic> _browserSnapshotToJson(BrowserContextSnapshot snapshot) {
-    return {
-      'url': snapshot.url,
-      'title': snapshot.title,
-      'selectedText': snapshot.selectedText,
-      'pageText': snapshot.safePageText,
-      'capturedAt': snapshot.capturedAt.toIso8601String(),
-    };
   }
 
   /// 连接级错误的文本兜底关键词（非 Dio 异常时按文本判断）。

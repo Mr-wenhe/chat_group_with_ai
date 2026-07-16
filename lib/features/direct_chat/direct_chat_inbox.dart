@@ -1,3 +1,4 @@
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/direct_chat_source.dart';
 import 'package:chat_group/core/models/message.dart';
@@ -28,6 +29,47 @@ class DirectChatSummary {
 }
 
 class DirectChatInbox {
+  static List<DirectChatSummary> buildIndexedSummaries({
+    required List<AICharacter> characters,
+    required Map<String, ConversationSummaryRecord> records,
+    required Message? Function(String id) messageById,
+    required Map<String, DirectChatSource> sourceByConversation,
+    String? activeConversationId,
+  }) {
+    final charactersById = {
+      for (final character in characters) character.id: character,
+    };
+    final summaries = <DirectChatSummary>[];
+    for (final record in records.values) {
+      if (!DirectChatSession.isDirectConversationId(record.conversationId) ||
+          record.lastMessageId == null) {
+        continue;
+      }
+      final characterId =
+          DirectChatSession.characterIdFrom(record.conversationId);
+      final character =
+          characterId == null ? null : charactersById[characterId];
+      final lastMessage = messageById(record.lastMessageId!);
+      if (character == null || lastMessage == null) continue;
+      summaries.add(DirectChatSummary(
+        conversationId: record.conversationId,
+        character: character,
+        lastMessage: lastMessage,
+        unreadCount: activeConversationId == record.conversationId
+            ? 0
+            : record.unreadCount,
+        source: sourceByConversation[record.conversationId] ??
+            DirectChatSource.direct,
+        hasUserMessage: record.lastUserMessageAt != null,
+        lastUserMessageAt: record.lastUserMessageAt,
+      ));
+    }
+    summaries.sort(
+      (a, b) => b.lastMessage.timestamp.compareTo(a.lastMessage.timestamp),
+    );
+    return summaries;
+  }
+
   static List<DirectChatSummary> buildSummaries({
     required List<AICharacter> characters,
     required List<Message> messages,

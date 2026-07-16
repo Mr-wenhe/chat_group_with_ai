@@ -4,16 +4,27 @@ import 'package:file_picker/file_picker.dart';
 
 const int maxWebAttachmentBytes = 10 * 1024 * 1024;
 const int maxWebAttachmentTotalBytes = 10 * 1024 * 1024;
+const int maxAttachmentBytes = maxWebAttachmentBytes;
+const int maxAttachmentTotalBytes = maxWebAttachmentTotalBytes;
+
+bool isWithinAttachmentLimit(int byteLength) =>
+    byteLength <= maxAttachmentBytes;
+
+bool canAddAttachment({
+  required int existingBytes,
+  required int newBytes,
+}) =>
+    isWithinAttachmentLimit(newBytes) &&
+    existingBytes + newBytes <= maxAttachmentTotalBytes;
 
 bool isWithinWebAttachmentLimit(int byteLength) =>
-    byteLength <= maxWebAttachmentBytes;
+    isWithinAttachmentLimit(byteLength);
 
 bool canAddWebAttachment({
   required int existingBytes,
   required int newBytes,
 }) =>
-    isWithinWebAttachmentLimit(newBytes) &&
-    existingBytes + newBytes <= maxWebAttachmentTotalBytes;
+    canAddAttachment(existingBytes: existingBytes, newBytes: newBytes);
 
 sealed class PickedAttachmentPayload {
   const PickedAttachmentPayload(this.fileName);

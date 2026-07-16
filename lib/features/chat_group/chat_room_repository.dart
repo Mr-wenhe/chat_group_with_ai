@@ -22,12 +22,27 @@ class ChatRoomRepository {
   }
 
   Future<void> persistNewMessage(Message message) async {
-    await db.messageBox.put(message.id, message);
-    await db.addMessageToGroupIndex(message);
+    await db.persistMessage(message);
   }
 
+  Future<MessagePage> loadLatest({int limit = 80}) =>
+      db.loadLatestMessages(conversationId, limit: limit);
+
+  Future<MessagePage> loadOlder(String beforeMessageId, {int limit = 80}) =>
+      db.loadMessagesBefore(
+        conversationId,
+        beforeMessageId: beforeMessageId,
+        limit: limit,
+      );
+
+  Future<MessagePage> loadAround(String messageId, {int limit = 80}) =>
+      db.loadMessagesAround(conversationId, messageId, limit: limit);
+
+  Future<List<Message>> search(String query) =>
+      db.searchMessages(conversationId, query);
+
   Future<void> updateMessage(Message message) {
-    return db.messageBox.put(message.id, message);
+    return db.updateMessage(message);
   }
 
   Future<void> deleteMessage(String messageId) async {

@@ -135,18 +135,19 @@ class AppBottomNav extends ConsumerWidget {
     final db = ref.watch(databaseServiceProvider);
     final activeConversationId =
         ConversationPresenceService.instance.activeConversationId;
-    final directSummaries = DirectChatInbox.buildSummaries(
+    final records = db.conversationSummaries();
+    final directSummaries = DirectChatInbox.buildIndexedSummaries(
       characters: db.aiCharacterBox.values.toList(),
-      messages: db.messageBox.values.toList(),
-      readAtByConversation: db.directChatReadAtByConversation(),
+      records: records,
+      messageById: db.messageBox.get,
       sourceByConversation: db.directChatSourceByConversation(),
       activeConversationId: activeConversationId,
     );
     final directUnread = DirectChatInbox.totalUnread(directSummaries);
-    final groupSummaries = GroupChatInbox.buildSummaries(
+    final groupSummaries = GroupChatInbox.buildIndexedSummaries(
       groups: db.chatGroupBox.values.toList(),
-      messages: db.messageBox.values.toList(),
-      readAtByGroup: db.groupChatReadAtByGroup(),
+      records: records,
+      messageById: db.messageBox.get,
       pinnedIds: db.pinnedGroupIds(),
       activeGroupId: activeConversationId,
     );

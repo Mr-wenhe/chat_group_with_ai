@@ -32,10 +32,10 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
   void initState() {
     super.initState();
     _db = ref.read(databaseServiceProvider);
-    _loadSummaries();
+    _summaries = _buildSummaries();
     _refreshTimer = Timer.periodic(
       const Duration(seconds: 30),
-      (_) => _loadSummaries(),
+      (_) => unawaited(_loadSummaries()),
     );
   }
 
@@ -45,14 +45,20 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
     super.dispose();
   }
 
-  void _loadSummaries() {
-    final summaries = DirectChatInbox.buildSummaries(
+  Future<void> _loadSummaries() async {
+    final summaries = _buildSummaries();
+    if (!mounted) return;
+    setState(() => _summaries = summaries);
+  }
+
+  List<DirectChatSummary> _buildSummaries() {
+    final summaries = DirectChatInbox.buildIndexedSummaries(
       characters: [
         ..._db.aiCharacterBox.values,
         ...DataLifecycleService(db: _db).deletedCharacters(),
       ],
-      messages: _db.messageBox.values.toList(),
-      readAtByConversation: _db.directChatReadAtByConversation(),
+      records: _db.conversationSummaries(),
+      messageById: _db.messageBox.get,
       sourceByConversation: _db.directChatSourceByConversation(),
       activeConversationId:
           ConversationPresenceService.instance.activeConversationId,
@@ -68,8 +74,7 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
       return (originalIndex[a.conversationId] ?? 0)
           .compareTo(originalIndex[b.conversationId] ?? 0);
     });
-    if (!mounted) return;
-    setState(() => _summaries = summaries);
+    return summaries;
   }
 
   Future<void> _checkProactiveNow() async {
@@ -79,7 +84,8 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
         await DirectChatProactiveService(db: _db).tryCreateProactiveMessage();
     if (!mounted) return;
     setState(() => _isCheckingProactive = false);
-    _loadSummaries();
+    await _loadSummaries();
+    if (!mounted) return;
     if (result == null) {
       AppToast.show(context, '暂时没有角色主动来聊', icon: Icons.info_outline_rounded);
       return;
@@ -99,16 +105,16 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
       readAt:
           summary.lastMessage.timestamp.add(const Duration(milliseconds: 1)),
     );
-    _loadSummaries();
+    await _loadSummaries();
     final characterId = summary.character.id;
     if (!mounted) return;
     await Navigator.of(context).pushNamed('/dm/$characterId');
-    _loadSummaries();
+    await _loadSummaries();
   }
 
   Future<void> _openDirectChatByCharacterId(String characterId) async {
     await Navigator.of(context).pushNamed('/dm/$characterId');
-    _loadSummaries();
+    await _loadSummaries();
   }
 
   @override
@@ -249,7 +255,7 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
 
   Future<void> _togglePinnedCharacter(String characterId) async {
     await _db.togglePinnedCharacter(characterId);
-    _loadSummaries();
+    await _loadSummaries();
   }
 }
 

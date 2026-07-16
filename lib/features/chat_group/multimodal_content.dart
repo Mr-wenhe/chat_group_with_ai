@@ -1,13 +1,14 @@
 import 'dart:convert';
 import 'dart:io';
-import 'dart:typed_data';
 
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:flutter/foundation.dart';
 
 /// 读文件字节的函数签名，便于在单测中注入假数据（不依赖真实文件）。
 typedef FileBytesReader = Uint8List Function(String path);
+typedef AsyncFileBytesReader = Future<Uint8List> Function(String path);
 
 const int defaultMaxVisionImages = 4;
 const int defaultMaxInlineImageBytes = 5 * 1024 * 1024;
@@ -39,6 +40,7 @@ dynamic buildUserMessageContent(
   FileBytesReader? fileReader,
   int maxVisionImages = defaultMaxVisionImages,
   int maxInlineImageBytes = defaultMaxInlineImageBytes,
+  Map<String, String> preparedImageDataUris = const {},
 }) {
   final media = message.media ?? const <MediaAttachment>[];
   if (media.isEmpty) {
@@ -79,23 +81,27 @@ dynamic buildUserMessageContent(
         skippedImageCount++;
         continue;
       }
-      Uint8List bytes;
-      try {
-        bytes = readBytes(image.localPath);
-      } catch (_) {
-        unreadableImageCount++;
-        continue;
-      }
-      if (bytes.lengthInBytes > maxInlineImageBytes) {
-        skippedImageCount++;
-        continue;
+      final preparedDataUri = preparedImageDataUris[image.localPath];
+      Uint8List? bytes;
+      if (preparedDataUri == null) {
+        try {
+          bytes = readBytes(image.localPath);
+        } catch (_) {
+          unreadableImageCount++;
+          continue;
+        }
+        if (bytes.lengthInBytes > maxInlineImageBytes) {
+          skippedImageCount++;
+          continue;
+        }
       }
       readableImageCount++;
       final mime = image.mimeType ?? 'image/jpeg';
-      final base64Data = base64Encode(bytes);
       parts.add({
         'type': 'image_url',
-        'image_url': {'url': 'data:$mime;base64,$base64Data'},
+        'image_url': {
+          'url': preparedDataUri ?? 'data:$mime;base64,${base64Encode(bytes!)}',
+        },
       });
     }
     if (unreadableImageCount > 0) {
@@ -135,11 +141,73 @@ dynamic buildUserMessageContent(
   }
 }
 
-/// 默认实现：直接从本地文件同步读取字节。
+/// Prepares image bytes and Base64 away from the chat page's synchronous UI
+/// path, then reuses the established content-shaping rules above.
+Future<dynamic> prepareUserMessageContent(
+  Message message, {
+  required bool supportsVision,
+  AsyncFileBytesReader? fileReader,
+  int maxVisionImages = defaultMaxVisionImages,
+  int maxInlineImageBytes = defaultMaxInlineImageBytes,
+}) async {
+  if (!supportsVision || message.media == null) {
+    return buildUserMessageContent(
+      message,
+      supportsVision: supportsVision,
+      maxVisionImages: maxVisionImages,
+      maxInlineImageBytes: maxInlineImageBytes,
+    );
+  }
+  final readBytes = fileReader ?? _defaultAsyncFileReader;
+  final prepared = <String, String>{};
+  for (final image in message.media!.where((item) => item.type == 'image')) {
+    if (prepared.length >= maxVisionImages ||
+        (image.fileSize ?? 0) > maxInlineImageBytes) {
+      continue;
+    }
+    try {
+      final data = decodeAttachmentDataUri(image.localPath);
+      if (data != null) {
+        prepared[image.localPath] = image.localPath;
+        continue;
+      }
+      final bytes = await readBytes(image.localPath);
+      if (bytes.lengthInBytes > maxInlineImageBytes) continue;
+      final encoded = await compute(_encodeBase64, bytes);
+      prepared[image.localPath] =
+          'data:${image.mimeType ?? 'image/jpeg'};base64,$encoded';
+    } catch (_) {
+      // The established builder adds the same unreadable-image hint.
+    }
+  }
+  return buildUserMessageContent(
+    message,
+    supportsVision: supportsVision,
+    fileReader: (path) {
+      final data = decodeAttachmentDataUri(path);
+      if (data != null) return data.bytes;
+      throw FileSystemException('Image was not prepared', path);
+    },
+    maxVisionImages: maxVisionImages,
+    maxInlineImageBytes: maxInlineImageBytes,
+    preparedImageDataUris: prepared,
+  );
+}
+
+String _encodeBase64(Uint8List bytes) => base64Encode(bytes);
+
+Future<Uint8List> _defaultAsyncFileReader(String path) async {
+  final data = decodeAttachmentDataUri(path);
+  if (data != null) return data.bytes;
+  return File(path).readAsBytes();
+}
+
+/// Legacy synchronous entry point only supports already-inline data URIs.
 Uint8List _defaultFileReader(String path) {
   final data = decodeAttachmentDataUri(path);
   if (data != null) return data.bytes;
-  return File(path).readAsBytesSync();
+  throw FileSystemException(
+      'Use prepareUserMessageContent for local files', path);
 }
 
 String _unreadableImageHint(int count) {

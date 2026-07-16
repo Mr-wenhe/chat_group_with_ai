@@ -1,3 +1,4 @@
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
@@ -23,6 +24,35 @@ class GroupChatSummary {
 }
 
 class GroupChatInbox {
+  static List<GroupChatSummary> buildIndexedSummaries({
+    required List<ChatGroup> groups,
+    required Map<String, ConversationSummaryRecord> records,
+    required Message? Function(String id) messageById,
+    required Set<String> pinnedIds,
+    String? activeGroupId,
+  }) {
+    final summaries = groups.map((group) {
+      final record = records[group.id];
+      final active = activeGroupId == group.id;
+      return GroupChatSummary(
+        group: group,
+        lastMessage: record?.lastMessageId == null
+            ? null
+            : messageById(record!.lastMessageId!),
+        unreadCount: active ? 0 : record?.unreadCount ?? 0,
+        mentionCount: active ? 0 : record?.mentionCount ?? 0,
+        isPinned: pinnedIds.contains(group.id),
+      );
+    }).toList();
+    summaries.sort((a, b) {
+      if (a.isPinned != b.isPinned) return a.isPinned ? -1 : 1;
+      final aTime = records[a.group.id]?.timestamp ?? a.group.createdAt;
+      final bTime = records[b.group.id]?.timestamp ?? b.group.createdAt;
+      return bTime.compareTo(aTime);
+    });
+    return summaries;
+  }
+
   static List<GroupChatSummary> buildSummaries({
     required List<ChatGroup> groups,
     required List<Message> messages,

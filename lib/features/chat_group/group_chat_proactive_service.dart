@@ -103,8 +103,7 @@ class GroupChatProactiveService {
       senderType: 'ai',
       content: content,
     );
-    await db.messageBox.put(message.id, message);
-    await db.addMessageToGroupIndex(message);
+    await db.persistMessage(message);
     await db.saveGroupChatLastProactiveAt(candidate.group.id, now);
     await _recordUsage(candidate.character, candidate.group.id, result);
 
