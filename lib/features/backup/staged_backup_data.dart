@@ -1,0 +1,315 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:chat_group/core/database/database_service.dart';
+
+import 'backup_entity_codec.dart';
+import 'backup_models.dart';
+
+class StagedBackupData {
+  final List<Map<String, dynamic>> apiConfigs;
+  final List<Map<String, dynamic>> characters;
+  final List<Map<String, dynamic>> groups;
+  final List<Map<String, dynamic>> messages;
+  final List<Map<String, dynamic>> groupMemories;
+  final List<Map<String, dynamic>> characterMemories;
+  final List<Map<String, dynamic>> relationships;
+  final List<Map<String, dynamic>> skills;
+  final List<Map<String, dynamic>> tasks;
+  final List<Map<String, dynamic>> workspaces;
+  final Map<String, dynamic> settings;
+
+  const StagedBackupData({
+    required this.apiConfigs,
+    required this.characters,
+    required this.groups,
+    required this.messages,
+    required this.groupMemories,
+    required this.characterMemories,
+    required this.relationships,
+    required this.skills,
+    required this.tasks,
+    required this.workspaces,
+    required this.settings,
+  });
+
+  static Future<StagedBackupData> load(
+    Directory staging,
+    BackupManifest manifest,
+  ) async {
+    final data = StagedBackupData(
+      apiConfigs: await _records(staging, 'data/api_configs.json'),
+      characters: await _records(staging, 'data/characters.json'),
+      groups: await _records(staging, 'data/groups.json'),
+      messages: await _lines(staging, 'data/messages.jsonl'),
+      groupMemories: await _records(staging, 'data/group_memories.json'),
+      characterMemories:
+          await _records(staging, 'data/character_memories.json'),
+      relationships: await _records(staging, 'data/relationships.json'),
+      skills: await _records(staging, 'data/skills.json'),
+      tasks: await _records(staging, 'data/agent_tasks.json'),
+      workspaces: await _records(staging, 'data/work_mode.json'),
+      settings: await _map(staging, 'data/settings.json'),
+    );
+    data._validate(manifest);
+    return data;
+  }
+
+  int conflicts(DatabaseService db) {
+    var count = 0;
+    count += _conflicts(apiConfigs, db.apiConfigBox.containsKey);
+    count += _conflicts(characters, db.aiCharacterBox.containsKey);
+    count += _conflicts(groups, db.chatGroupBox.containsKey);
+    count += _conflicts(messages, db.messageBox.containsKey);
+    count += _conflicts(groupMemories, db.groupMemoryBox.containsKey);
+    count += _conflicts(characterMemories, db.characterMemoryBox.containsKey);
+    count += _conflicts(relationships, db.relationshipStateBox.containsKey);
+    count += _conflicts(skills, db.characterSkillBox.containsKey);
+    count += _conflicts(tasks, db.agentTaskBox.containsKey);
+    count += _conflicts(workspaces, db.workModeWorkspaceBox.containsKey);
+    count += settings.keys.where(db.appSettingsBox.containsKey).length;
+    return count;
+  }
+
+  void _validate(BackupManifest manifest) {
+    _validateRecordKeys();
+    _validateSettingKeys();
+    final ids = <String, Set<String>>{
+      'apiConfigs': _ids(apiConfigs),
+      'characters': _ids(characters),
+      'groups': _ids(groups),
+      'messages': _ids(messages),
+      'characterMemories': _ids(characterMemories),
+      'relationships': _ids(relationships),
+      'skills': _ids(skills),
+      'agentTasks': _ids(tasks),
+    };
+    _expectCounts(manifest);
+    final apiIds = ids['apiConfigs']!;
+    final characterIds = ids['characters']!;
+    final groupIds = ids['groups']!;
+    final messageIds = ids['messages']!;
+
+    for (final record in characters) {
+      final value = BackupEntityCodec.value(record);
+      final apiConfigId = value['apiConfigId']?.toString() ?? '';
+      if (apiConfigId.isNotEmpty && !apiIds.contains(apiConfigId)) {
+        throw BackupException('角色引用了不存在的 API 配置：$apiConfigId');
+      }
+      for (final skillId in _strings(value['skillIds'])) {
+        if (!ids['skills']!.contains(skillId)) {
+          throw BackupException('角色引用了不存在的技能：$skillId');
+        }
+      }
+    }
+    for (final record in groups) {
+      for (final characterId
+          in _strings(BackupEntityCodec.value(record)['aiCharacterIds'])) {
+        if (!characterIds.contains(characterId)) {
+          throw BackupException('群聊引用了不存在的角色：$characterId');
+        }
+      }
+    }
+    for (final record in messages) {
+      final value = BackupEntityCodec.value(record);
+      _validateConversation(value['groupId'], groupIds, characterIds);
+      if (value['senderType'] == 'ai' &&
+          !characterIds.contains(value['senderId'])) {
+        throw BackupException('消息引用了不存在的角色：${value['senderId']}');
+      }
+      final replyId = value['replyToMessageId']?.toString();
+      if (replyId != null && !messageIds.contains(replyId)) {
+        throw BackupException('消息引用了不存在的回复：$replyId');
+      }
+      for (final media in value['media'] as List? ?? const []) {
+        final path = Map<String, dynamic>.from(media as Map)['path'].toString();
+        if (!manifest.files.containsKey(path) ||
+            !path.startsWith('attachments/')) {
+          throw BackupException('附件引用无效：$path');
+        }
+      }
+    }
+    for (final record in groupMemories) {
+      _validateConversation(
+        BackupEntityCodec.value(record)['groupId'],
+        groupIds,
+        characterIds,
+      );
+    }
+    for (final record in characterMemories) {
+      final value = BackupEntityCodec.value(record);
+      _validateConversation(value['groupId'], groupIds, characterIds);
+      _require(ids: characterIds, value: value['characterId']);
+    }
+    for (final record in relationships) {
+      final value = BackupEntityCodec.value(record);
+      _validateConversation(value['groupId'], groupIds, characterIds);
+      _require(ids: characterIds, value: value['sourceCharacterId']);
+      if (value['targetType'] == 'ai') {
+        _require(ids: characterIds, value: value['targetId']);
+      }
+    }
+    for (final record in skills) {
+      final characterId = BackupEntityCodec.value(record)['characterId'];
+      if (characterId != '' && !characterIds.contains(characterId)) {
+        throw BackupException('技能引用了不存在的角色：$characterId');
+      }
+    }
+    for (final record in tasks) {
+      final value = BackupEntityCodec.value(record);
+      _validateConversation(value['groupId'], groupIds, characterIds);
+      _require(ids: characterIds, value: value['characterId']);
+    }
+    for (final record in workspaces) {
+      _validateConversation(
+        BackupEntityCodec.value(record)['conversationId'],
+        groupIds,
+        characterIds,
+      );
+    }
+  }
+
+  void _expectCounts(BackupManifest manifest) {
+    final actual = {
+      'apiConfigs': apiConfigs.length,
+      'characters': characters.length,
+      'groups': groups.length,
+      'messages': messages.length,
+      'groupMemories': groupMemories.length,
+      'characterMemories': characterMemories.length,
+      'relationships': relationships.length,
+      'skills': skills.length,
+      'agentTasks': tasks.length,
+      'workMode': workspaces.length,
+      'settings': settings.length,
+    };
+    for (final entry in actual.entries) {
+      if (manifest.counts[entry.key] != entry.value) {
+        throw BackupException('条目计数不一致：${entry.key}');
+      }
+    }
+  }
+
+  static void _validateConversation(
+    Object? value,
+    Set<String> groupIds,
+    Set<String> characterIds,
+  ) {
+    final id = value?.toString() ?? '';
+    final valid = id.startsWith('dm:')
+        ? characterIds.contains(id.substring(3))
+        : groupIds.contains(id);
+    if (!valid) throw BackupException('会话引用无效：$id');
+  }
+
+  static void _require({required Set<String> ids, required Object? value}) {
+    if (!ids.contains(value)) throw BackupException('引用无效：$value');
+  }
+
+  static Set<String> _ids(List<Map<String, dynamic>> records) {
+    final result = <String>{};
+    for (final record in records) {
+      final id = BackupEntityCodec.value(record)['id']?.toString();
+      if (id == null ||
+          id.isEmpty ||
+          BackupEntityCodec.key(record) != id ||
+          !result.add(id)) {
+        throw const BackupException('备份包含无效或重复 ID');
+      }
+    }
+    return result;
+  }
+
+  void _validateRecordKeys() {
+    for (final records in [
+      apiConfigs,
+      characters,
+      groups,
+      messages,
+      groupMemories,
+      characterMemories,
+      relationships,
+      skills,
+      tasks,
+      workspaces,
+    ]) {
+      final keys = <String>{};
+      for (final record in records) {
+        if (!keys.add(BackupEntityCodec.key(record))) {
+          throw const BackupException('备份包含重复存储键');
+        }
+      }
+    }
+  }
+
+  void _validateSettingKeys() {
+    const allowed = {
+      'theme_mode',
+      'app_skin_mode',
+      'tts_enabled',
+      'direct_chat_read_at',
+      'direct_chat_source',
+      'direct_chat_last_proactive_at',
+      'group_chat_read_at',
+      'group_chat_last_proactive_at',
+      'pinned_character_ids',
+      'pinned_group_ids',
+      'token_usage',
+    };
+    for (final key in settings.keys) {
+      if (!allowed.contains(key) &&
+          !key.startsWith('work_mode_enabled:') &&
+          !key.startsWith('context_compressed_through:')) {
+        throw BackupException('备份包含不允许的设置：$key');
+      }
+    }
+  }
+
+  static int _conflicts(
+    List<Map<String, dynamic>> records,
+    bool Function(Object key) contains,
+  ) =>
+      records.where((record) => contains(BackupEntityCodec.key(record))).length;
+
+  static Future<List<Map<String, dynamic>>> _records(
+    Directory root,
+    String path,
+  ) async {
+    final decoded = jsonDecode(await File('${root.path}/$path').readAsString());
+    if (decoded is! List) throw BackupException('数据文件格式无效：$path');
+    return decoded.map(_record).toList(growable: false);
+  }
+
+  static Future<List<Map<String, dynamic>>> _lines(
+    Directory root,
+    String path,
+  ) async {
+    final result = <Map<String, dynamic>>[];
+    await for (final line in File('${root.path}/$path')
+        .openRead()
+        .transform(utf8.decoder)
+        .transform(const LineSplitter())) {
+      if (line.trim().isNotEmpty) result.add(_record(jsonDecode(line)));
+    }
+    return result;
+  }
+
+  static Future<Map<String, dynamic>> _map(
+    Directory root,
+    String path,
+  ) async {
+    final decoded = jsonDecode(await File('${root.path}/$path').readAsString());
+    if (decoded is! Map) throw BackupException('数据文件格式无效：$path');
+    return Map<String, dynamic>.from(decoded);
+  }
+
+  static Map<String, dynamic> _record(Object? value) {
+    if (value is! Map || value['key'] is! String || value['value'] is! Map) {
+      throw const BackupException('备份记录格式无效');
+    }
+    return Map<String, dynamic>.from(value);
+  }
+
+  static List<String> _strings(Object? value) =>
+      (value as List? ?? const []).map((item) => item.toString()).toList();
+}

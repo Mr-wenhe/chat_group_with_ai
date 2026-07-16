@@ -146,6 +146,8 @@ void main() {
     expect(find.text('恢复出厂设置'), findsOneWidget);
     expect(find.text('媒体占用'), findsOneWidget);
 
+    await tester.ensureVisible(find.text('清除聊天内容'));
+    await tester.pump(const Duration(milliseconds: 200));
     await tester.tap(find.text('清除聊天内容'));
     await tester.pump(const Duration(milliseconds: 300));
     expect(

@@ -10,6 +10,7 @@ import 'package:chat_group/features/chat_group/providers/chat_group_providers.da
 import 'package:chat_group/features/settings/ai_processing_directory_policy.dart';
 import 'package:chat_group/features/settings/api_config_form_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
+import 'package:chat_group/features/settings/backup_restore_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/ai_providers/ai_api_service.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
@@ -437,6 +438,15 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 subtitle: '将群聊导出为 Markdown / JSON 并分享',
                 onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(builder: (_) => const ExportPage())),
+              ),
+              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              _SettingTile(
+                cs: cs,
+                icon: Icons.backup_rounded,
+                iconColor: cs.primary,
+                title: '完整备份与恢复',
+                subtitle: '版本化备份、导入预览、冲突处理与失败回滚（不含 API Key）',
+                onTap: _openBackupRestore,
               ),
               Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
               _SettingTile(
@@ -1023,6 +1033,19 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         }
       }
     }
+  }
+
+  Future<void> _openBackupRestore() async {
+    final restored = await Navigator.of(context).push<bool>(
+      MaterialPageRoute(builder: (_) => const BackupRestorePage()),
+    );
+    if (restored != true || !mounted) return;
+    final db = ref.read(databaseServiceProvider);
+    setState(() {
+      _currentSkinMode = db.savedAppSkinMode;
+      _isTtsEnabled = db.isTtsEnabled;
+    });
+    await _loadLifecycleState();
   }
 
   Future<void> _cleanupOrphanMedia() async {
