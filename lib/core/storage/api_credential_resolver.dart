@@ -1,3 +1,5 @@
+import 'package:flutter/foundation.dart';
+
 import '../models/api_config.dart';
 import 'credential_repository.dart';
 
@@ -17,7 +19,16 @@ class SecureApiCredentialResolver implements ApiCredentialResolver {
 
   @override
   Future<String?> resolve(ApiConfig config) async {
-    if (!config.hasCredential || config.credentialId.isEmpty) return null;
+    if (!config.hasCredential) return null;
+    if (config.credentialId ==
+        CredentialRepository.developmentHiveCredentialId) {
+      // macOS debug may not have Keychain access. This fallback is deliberately
+      // unavailable in release builds, where a secure credential is mandatory.
+      return !kReleaseMode && config.legacyApiKey.isNotEmpty
+          ? config.legacyApiKey
+          : null;
+    }
+    if (config.credentialId.isEmpty) return null;
     final result = await _credentials.read(config.id);
     return result.isAvailable ? result.value : null;
   }

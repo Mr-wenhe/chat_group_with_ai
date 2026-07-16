@@ -16,6 +16,9 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback onNextResult;
   final VoidCallback onExitSearch;
   final VoidCallback onExport;
+  final IconData webSearchIcon;
+  final String webSearchTooltip;
+  final VoidCallback onConfigureWebSearch;
 
   const ChatRoomAppBar({
     super.key,
@@ -33,6 +36,9 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
     required this.onNextResult,
     required this.onExitSearch,
     required this.onExport,
+    required this.webSearchIcon,
+    required this.webSearchTooltip,
+    required this.onConfigureWebSearch,
   });
 
   @override
@@ -93,6 +99,11 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
               ),
             ]
           : [
+              IconButton(
+                icon: Icon(webSearchIcon, size: 21),
+                onPressed: onConfigureWebSearch,
+                tooltip: webSearchTooltip,
+              ),
               IconButton(
                 icon: const Icon(Icons.search_rounded, size: 22),
                 onPressed: onEnterSearch,

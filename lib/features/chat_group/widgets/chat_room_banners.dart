@@ -1,5 +1,45 @@
 import 'package:flutter/material.dart';
 
+class SearchStatusBanner extends StatelessWidget {
+  final String message;
+  final bool busy;
+  final VoidCallback? onTap;
+
+  const SearchStatusBanner({
+    super.key,
+    required this.message,
+    required this.busy,
+    this.onTap,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
+      child: Material(
+        color: colors.tertiaryContainer.withOpacity(0.48),
+        borderRadius: BorderRadius.circular(10),
+        child: ListTile(
+          dense: true,
+          minLeadingWidth: 20,
+          leading: busy
+              ? const SizedBox.square(
+                  dimension: 16,
+                  child: CircularProgressIndicator(strokeWidth: 2),
+                )
+              : Icon(Icons.public_rounded, size: 18, color: colors.tertiary),
+          title: Text(message, maxLines: 2, overflow: TextOverflow.ellipsis),
+          trailing: onTap == null
+              ? null
+              : const Icon(Icons.chevron_right_rounded, size: 18),
+          onTap: onTap,
+        ),
+      ),
+    );
+  }
+}
+
 class ApiWarningBanner extends StatelessWidget {
   final String message;
   final VoidCallback onConfigure;

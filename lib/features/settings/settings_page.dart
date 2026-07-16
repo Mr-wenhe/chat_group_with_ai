@@ -11,6 +11,9 @@ import 'package:chat_group/features/settings/ai_processing_directory_policy.dart
 import 'package:chat_group/features/settings/api_config_form_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/settings/backup_restore_page.dart';
+import 'package:chat_group/features/settings/ai_governance_page.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/ai_providers/ai_api_service.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
@@ -144,7 +147,7 @@ class SettingsPage extends ConsumerStatefulWidget {
 }
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
-  final _apiService = AiApiService();
+  late final AiApiService _apiService;
   final _credentialResolver = SecureApiCredentialResolver();
   AppSkinMode _currentSkinMode = AppSkinMode.dark;
   bool _isTtsEnabled = true;
@@ -158,6 +161,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   void initState() {
     super.initState();
     final db = ref.read(databaseServiceProvider);
+    _apiService = AiApiService(
+      AiRequestGateway(store: AiGovernanceStore(db)),
+    );
     _currentSkinMode = db.savedAppSkinMode;
     _isTtsEnabled = db.isTtsEnabled;
     _tokenUsage = db.getTokenUsage();
@@ -318,6 +324,23 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   onDelete: () => _confirmDeleteConfig(context, c),
                   onTest: () => _testApiKey(context, c),
                 )),
+          const SizedBox(height: 12),
+          AppCard(
+            cs: cs,
+            margin: EdgeInsets.zero,
+            children: [
+              _SettingTile(
+                cs: cs,
+                icon: Icons.policy_outlined,
+                iconColor: cs.primary,
+                title: '模型、成本与联网治理',
+                subtitle: '能力注册表、预算、费用账本、联网策略与脱敏诊断',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const AiGovernancePage()),
+                ),
+              ),
+            ],
+          ),
           const SizedBox(height: 28),
           _SectionHeader(
             title: '企业微信推送',

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'core/binding/dedup_key_event_binding.dart';
 import 'core/database/database_service.dart';
 import 'core/database/database_recovery_page.dart';
 import 'core/theme/app_theme.dart';
@@ -13,7 +14,7 @@ import 'features/settings/settings_page.dart';
 import 'providers/providers.dart';
 
 void main() async {
-  WidgetsFlutterBinding.ensureInitialized();
+  DedupKeyEventBinding.ensureInitialized();
 
   final db = DatabaseService();
   try {

@@ -3,9 +3,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
-import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
+import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/ai_providers/ai_api_service.dart';
 import './providers/api_config_providers.dart';
 
@@ -20,9 +22,8 @@ class ApiConfigFormPage extends ConsumerStatefulWidget {
 
 class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   final _formKey = GlobalKey<FormState>();
-  final _apiService = AiApiService();
-  late final CredentialRepository _credentials;
-  late final SecureApiCredentialResolver _credentialResolver;
+  late final AiApiService _apiService;
+  final _credentialResolver = SecureApiCredentialResolver();
   late TextEditingController _nameController;
   late TextEditingController _modelController;
   late TextEditingController _apiKeyController;
@@ -36,8 +37,10 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   @override
   void initState() {
     super.initState();
-    _credentials = CredentialRepository();
-    _credentialResolver = SecureApiCredentialResolver(_credentials);
+    final db = ref.read(databaseServiceProvider);
+    _apiService = AiApiService(
+      AiRequestGateway(store: AiGovernanceStore(db)),
+    );
     final c = widget.config;
     _nameController = TextEditingController(text: c?.name ?? '');
     _modelController = TextEditingController(text: c?.modelName ?? '');
@@ -247,28 +250,13 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     final provider = _selectedProvider;
     final model =
         _selectedModel.isEmpty ? _modelController.text.trim() : _selectedModel;
-    String? temporaryConfigId;
     try {
       final enteredApiKey = _apiKeyController.text.trim();
-      String? apiKey;
-      if (enteredApiKey.isNotEmpty) {
-        final probe = ApiConfig(
-          name: '连接测试',
-          provider: provider.name,
-          modelName: model,
-          customBaseUrl: _baseUrlController.text.trim(),
-        );
-        temporaryConfigId = probe.id;
-        final saved = await _credentials.save(probe.id, enteredApiKey);
-        if (saved.isSuccess) {
-          probe
-            ..credentialId = _credentials.credentialIdFor(probe.id)
-            ..hasCredential = true;
-          apiKey = await _credentialResolver.resolve(probe);
-        }
-      } else if (widget.config != null) {
-        apiKey = await _credentialResolver.resolve(widget.config!);
-      }
+      final apiKey = enteredApiKey.isNotEmpty
+          ? enteredApiKey
+          : widget.config == null
+              ? null
+              : await _credentialResolver.resolve(widget.config!);
       if (!mounted) return;
       if (apiKey == null || apiKey.isEmpty) {
         AppToast.show(context, '安全 API 凭据不可用', icon: Icons.key_off_outlined);
@@ -294,9 +282,6 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
         AppToast.show(context, '连接测试失败', icon: Icons.error_outline_rounded);
       }
     } finally {
-      if (temporaryConfigId != null) {
-        await _credentials.delete(temporaryConfigId);
-      }
       if (mounted) setState(() => _isTesting = false);
     }
   }

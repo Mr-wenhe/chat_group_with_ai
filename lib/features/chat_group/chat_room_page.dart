@@ -34,6 +34,10 @@ import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_launcher.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
+import 'package:chat_group/features/ai_governance/search_coordinator.dart';
 import 'package:chat_group/features/chat_group/agentic_reply_utils.dart';
 import 'package:chat_group/features/chat_group/attachment_utils.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
@@ -72,7 +76,6 @@ import 'package:chat_group/features/work_mode/work_mode_session.dart';
 import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/providers/providers.dart';
-import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:chat_group/services/message_speech_service.dart';
 import 'package:chat_group/services/web_search_service.dart';
@@ -102,12 +105,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   final _textController = TextEditingController();
   final _scrollController = ScrollController();
   final _inputFocusNode = FocusNode();
-  final _chatApi = ChatApiService();
   final _credentialResolver = SecureApiCredentialResolver();
-  final _webSearch = WebSearchService();
   final _random = Random();
   late final MessageSpeechService _speech;
   late final DatabaseService _db;
+  late final AiGovernanceStore _governanceStore;
+  late final AiRequestGateway _aiGateway;
+  late final SearchCoordinator _searchCoordinator;
   late final ReplyEligibilityPolicy _replyEligibility;
   late final ChatRoomRepository _repository;
   late final ChatRoomLoader _loader;
@@ -206,6 +210,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   // 是否存在已配置 API Key 的角色（决定 AI 能否回复/自动聊天）
   bool _hasAnyApiConfig = false;
   Timer? _searchDebounceTimer;
+  WebSearchPolicy? _searchPolicyOverride;
+  SearchRunState _webSearchState = const SearchRunState(SearchRunStatus.idle);
 
   // —— 流式输出（打字机）相关状态 ——
   Message? _streamingMessage; // 正在逐 token 渲染的内存态临时消息（不落库）
@@ -226,6 +232,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     WidgetsBinding.instance.addObserver(this);
     ConversationPresenceService.instance.enter(widget.groupId);
     _db = ref.read(databaseServiceProvider);
+    _governanceStore = AiGovernanceStore(_db);
+    _aiGateway = AiRequestGateway(
+      store: _governanceStore,
+      onWarning: _showGovernanceWarning,
+    );
+    _searchCoordinator = SearchCoordinator(store: _governanceStore);
+    _searchPolicyOverride =
+        _governanceStore.conversationSearchPolicy(widget.groupId);
     _loader = ChatRoomLoader(db: _db, resolveApiConfig: _resolveApiConfig);
     _replyEligibility = ReplyEligibilityPolicy(
       resolveApiConfig: _resolveApiConfig,
@@ -322,7 +336,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           WorkModeConfigService(db: _db).isWorkMode(widget.groupId),
         );
         _hasAnyApiConfig = loaded.hasAnyApiConfig;
-        _isAutoChatEnabled = true;
+        _isAutoChatEnabled = _governanceStore.budgetSettings.autoChatEnabled;
         _autoChatStatus = loaded.hasAnyApiConfig
             ? AutoChatStatus.waiting
             : AutoChatStatus.unavailable;
@@ -439,6 +453,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       (value) => value.name == config.provider,
       orElse: () => ApiProvider.deepseek,
     );
+    final workspace = await WorkModeWorkspaceService(db: _db).loadOrCreate(
+      conversationId: widget.groupId,
+      isDirectChat: _isDirectChat,
+    );
+    if (!_canTouchUi || !_workModeEnabled) return;
+    await LocalAgentBridgeLauncher().registerWorkspace(
+      conversationId: widget.groupId,
+      workspacePath: workspace.workDirPath,
+    );
+    if (!_canTouchUi || !_workModeEnabled) return;
     final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
     if (pending != null) {
       final approval = PendingAgentToolApproval(
@@ -1016,7 +1040,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       fallbackContext: context,
     );
 
-    final webSearch = await _webSearch.searchIfNeeded(userMessage);
+    final webSearch = await _searchCoordinator.searchIfAllowed(
+      text: userMessage,
+      conversationId: widget.groupId,
+      requestConsent: _confirmWebSearch,
+      onStatus: (state) {
+        if (_canTouchUi) setState(() => _webSearchState = state);
+      },
+    );
+    final capability = _aiGateway.capability(provider, config.modelName);
     final apiMessages = _withWebSearchContext(
       await _buildApiMessages(
         character,
@@ -1024,7 +1056,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         userMessage,
         isAutoChat: isAutoChat,
         intent: intent,
-        supportsVision: provider.supportsVision,
+        supportsVision: capability.supportsVision,
         currentUserMessage: currentUserMessage,
       ),
       webSearch,
@@ -1052,12 +1084,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _streamingSession = session;
     if (_canTouchUi) setState(() {});
     final result = await session.run(
-      _chatApi.streamChatMessage(
+      _aiGateway.streamChatMessage(
         apiKey: apiKey,
         provider: provider,
         customBaseUrl: config.customBaseUrl,
         model: config.modelName,
         messages: apiMessages,
+        purpose:
+            isAutoChat ? AiRequestPurpose.autoChat : AiRequestPurpose.reply,
+        conversationId: widget.groupId,
+        characterId: character.id,
+        userInitiated: !isAutoChat,
       ),
       onDraft: (draft) {
         temp.content = draft;
@@ -1068,9 +1105,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (_disposed) return '';
     var fullContent = result.content;
     var failed = result.failed;
-    final promptTokens = result.promptTokens;
-    final completionTokens = result.completionTokens;
-    final cachedTokens = result.cachedTokens;
     if (failed) {
       _lastReplyBlockReason = ReplyBlockReason.networkError;
       fullContent = '[${character.name} 回复失败: ${result.error}]';
@@ -1109,12 +1143,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _flushStreamingUi();
     }
 
-    if (failed) {
+    if (failed && !AiRequestGateway.isBlockedMessage(result.error)) {
       final retryContent = await _retryFailedReply(
         character: character,
         config: config,
         provider: provider,
         apiMessages: apiMessages,
+        userInitiated: !isAutoChat,
       );
       if (retryContent != null && retryContent.trim().isNotEmpty) {
         failed = false;
@@ -1142,14 +1177,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           excludeMessageId: temp.id,
         )) {
       _recordReplyUsage(character);
-      if (promptTokens != null && completionTokens != null) {
-        await _repository.recordTokenUsage(
-          characterId: character.id,
-          inputTokens: promptTokens,
-          outputTokens: completionTokens,
-          cachedTokens: cachedTokens ?? 0,
-        );
-      }
       if (_canTouchUi) {
         setState(() {
           _messages = List.from(_messages)
@@ -1168,14 +1195,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     await _markCurrentConversationRead(throughMessage: temp);
     _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
-    if (promptTokens != null && completionTokens != null) {
-      _repository.recordTokenUsage(
-        characterId: character.id,
-        inputTokens: promptTokens,
-        outputTokens: completionTokens,
-        cachedTokens: cachedTokens ?? 0,
-      );
-    }
     if (!failed && intent != null) {
       await _persistRelationshipForIntent(
         character: character,
@@ -1195,23 +1214,153 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required ApiConfig config,
     required ApiProvider provider,
     required List<Map<String, dynamic>> apiMessages,
+    required bool userInitiated,
   }) async {
     final apiKey = await _credentialResolver.resolve(config);
     if (apiKey == null) return null;
-    final result = await _chatApi.sendChatMessageStreamed(
+    final result = await _aiGateway.sendChatMessageStreamed(
       apiKey: apiKey,
       provider: provider,
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
       messages: apiMessages,
       temperature: 0.75,
+      purpose: AiRequestPurpose.retry,
+      conversationId: widget.groupId,
+      characterId: character.id,
+      userInitiated: userInitiated,
     );
-    await _recordTokenUsageFromResult(character, result);
     if (result['success'] == true) {
       final content = result['message']?.toString().trim() ?? '';
       if (content.isNotEmpty) return content;
     }
     return null;
+  }
+
+  WebSearchPolicy get _effectiveWebSearchPolicy =>
+      _searchPolicyOverride ?? _governanceStore.globalSearchPolicy;
+
+  void _showGovernanceWarning(String warning) {
+    if (!_canTouchUi) return;
+    AppToast.show(
+      context,
+      warning,
+      icon: Icons.account_balance_wallet_outlined,
+    );
+  }
+
+  IconData get _webSearchPolicyIcon => switch (_effectiveWebSearchPolicy) {
+        WebSearchPolicy.off => Icons.public_off_rounded,
+        WebSearchPolicy.ask => Icons.help_outline_rounded,
+        WebSearchPolicy.auto => Icons.public_rounded,
+      };
+
+  Future<bool> _confirmWebSearch(String query) async {
+    if (!_canTouchUi) return false;
+    return await showDialog<bool>(
+          context: context,
+          builder: (dialogContext) => AlertDialog(
+            title: const Text('允许本次联网搜索？'),
+            content: Text(
+              '查询将发送给 DuckDuckGo Instant Answer：\n\n$query',
+            ),
+            actions: [
+              TextButton(
+                onPressed: () => Navigator.pop(dialogContext, false),
+                child: const Text('不搜索'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.pop(dialogContext, true),
+                child: const Text('仅本次允许'),
+              ),
+            ],
+          ),
+        ) ??
+        false;
+  }
+
+  Future<void> _configureWebSearchPolicy() async {
+    final selection = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => SimpleDialog(
+        title: const Text('本会话联网搜索'),
+        children: [
+          SimpleDialogOption(
+            onPressed: () => Navigator.pop(dialogContext, 'global'),
+            child: Text('跟随全局（${_governanceStore.globalSearchPolicy.label}）'),
+          ),
+          for (final policy in WebSearchPolicy.values)
+            SimpleDialogOption(
+              onPressed: () => Navigator.pop(dialogContext, policy.name),
+              child: Text(policy.label),
+            ),
+          const Padding(
+            padding: EdgeInsets.fromLTRB(24, 12, 24, 4),
+            child: Text(
+              '搜索会把查询发送到 DuckDuckGo Instant Answer；它不是完整网页搜索。',
+            ),
+          ),
+        ],
+      ),
+    );
+    if (selection == null) return;
+    final policy = selection == 'global'
+        ? null
+        : WebSearchPolicy.values.firstWhere(
+            (value) => value.name == selection,
+          );
+    await _governanceStore.saveConversationSearchPolicy(
+      widget.groupId,
+      policy,
+    );
+    if (_canTouchUi) setState(() => _searchPolicyOverride = policy);
+  }
+
+  String get _webSearchStatusText => switch (_webSearchState.status) {
+        SearchRunStatus.idle => '',
+        SearchRunStatus.disabled => '联网搜索已关闭，本次未发送第三方请求',
+        SearchRunStatus.awaitingConsent => '等待确认是否联网搜索',
+        SearchRunStatus.denied => '本次联网搜索未获同意',
+        SearchRunStatus.searching =>
+          '正在通过 DuckDuckGo 搜索：${_webSearchState.query}',
+        SearchRunStatus.completed =>
+          '联网搜索完成 · ${_webSearchState.snapshot?.results.length ?? 0} 个来源',
+        SearchRunStatus.noResults => '联网搜索完成，但资料不足',
+        SearchRunStatus.failed => '联网搜索失败，回复将明确标注资料不足',
+      };
+
+  void _showWebSearchSources() {
+    final snapshot = _webSearchState.snapshot;
+    if (snapshot == null) return;
+    showDialog<void>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('联网搜索来源'),
+        content: SizedBox(
+          width: 520,
+          child: ListView(
+            shrinkWrap: true,
+            children: [
+              Text('查询：${snapshot.query}'),
+              Text('时间：${snapshot.searchedAt.toLocal()}'),
+              if (snapshot.error != null) Text('状态：${snapshot.error}'),
+              for (final result in snapshot.results)
+                ListTile(
+                  contentPadding: EdgeInsets.zero,
+                  title: Text(result.title),
+                  subtitle: Text('${result.snippet}\n${result.url}'),
+                ),
+            ],
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
   }
 
   List<Map<String, dynamic>> _withWebSearchContext(
@@ -1512,21 +1661,31 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     WorkModeRunHandle? workModeRun,
   }) {
     final bridge = LocalAgentBridgeClient();
+    final capability = _aiGateway.capability(provider, config.modelName);
+    final agentMaxTokens =
+        min(AgentRuntime.preferredMaxOutputTokens, capability.maxOutput);
+    final summaryMaxTokens =
+        min(AgentRuntime.preferredSummaryOutputTokens, capability.maxOutput);
     return AgentRuntime(
       complete: (messages) async {
         final apiKey = await _credentialResolver.resolve(config);
         if (apiKey == null) {
           return const {'success': false, 'message': 'API 凭据不可用'};
         }
-        return _chatApi.sendChatMessageStreamed(
+        return _aiGateway.sendChatMessageStreamed(
           apiKey: apiKey,
           provider: provider,
           customBaseUrl: config.customBaseUrl,
           model: config.modelName,
           messages: messages,
-          maxTokens: 8192,
+          maxTokens: agentMaxTokens,
           receiveTimeout: AgentRuntime.completionTimeout,
           cancelToken: cancelToken,
+          purpose: AiRequestPurpose.agent,
+          conversationId: widget.groupId,
+          characterId: character.id,
+          requiresTools: true,
+          userInitiated: true,
         );
       },
       workspaceFileTool: WorkspaceFileTool(
@@ -1546,25 +1705,32 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       // 导致用户“生成个人主页”却只得到 <p>内容由AI生成</p>。关闭后由 LLM
       // 通过 planning prompt 生成真实文件内容（args.content 放完整内容）。
       enableLocalFilePlanner: false,
-      // ChatApiService 负责带降温和非流式降级的重试；Runtime 不再嵌套。
+      // 统一网关负责逐次预算预检和重试；Runtime 不再嵌套重试。
       completionMaxRetries: 0,
       onProgress: (progress) => _persistAgentProgress(task, progress),
       contextWindowManager: ContextWindowManager(
         maxRetries: 0,
+        thresholdTokens: (capability.contextWindow - agentMaxTokens)
+                .clamp(4096, kContextCompressThresholdTokens)
+                .toInt(),
         complete: (contextMessages) async {
           final apiKey = await _credentialResolver.resolve(config);
           if (apiKey == null) {
             return const {'success': false, 'message': 'API 凭据不可用'};
           }
-          return _chatApi.sendChatMessage(
+          return _aiGateway.sendChatMessage(
             apiKey: apiKey,
             provider: provider,
             customBaseUrl: config.customBaseUrl,
             model: config.modelName,
             messages: contextMessages,
             temperature: 0.3,
-            maxTokens: 2048,
+            maxTokens: summaryMaxTokens,
             cancelToken: cancelToken,
+            purpose: AiRequestPurpose.summary,
+            conversationId: widget.groupId,
+            characterId: character.id,
+            userInitiated: true,
           );
         },
       ),
@@ -2663,7 +2829,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
     ];
 
-    final result = await _chatApi.sendChatMessage(
+    final result = await _aiGateway.sendChatMessage(
       apiKey: apiKey,
       provider: ApiProvider.values.firstWhere((p) => p.name == config.provider,
           orElse: () => ApiProvider.deepseek),
@@ -2671,9 +2837,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       model: config.modelName,
       messages: msgs,
       temperature: 0.4,
+      purpose: AiRequestPurpose.summary,
+      conversationId: widget.groupId,
+      characterId: character.id,
     );
-
-    await _recordTokenUsageFromResult(character, result);
     if (result['success'] ?? false) {
       return result['message']?.toString().trim() ?? '';
     }
@@ -2713,7 +2880,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       latestReply: latestReply,
     );
 
-    final result = await _chatApi.sendChatMessage(
+    final result = await _aiGateway.sendChatMessage(
       apiKey: apiKey,
       provider: ApiProvider.values.firstWhere((p) => p.name == config.provider,
           orElse: () => ApiProvider.deepseek),
@@ -2732,9 +2899,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         },
       ],
       temperature: 0.35,
+      purpose: AiRequestPurpose.summary,
+      conversationId: widget.groupId,
+      characterId: character.id,
     );
-
-    await _recordTokenUsageFromResult(character, result);
     if (!(result['success'] ?? false)) return;
     final updated = result['message']?.toString().trim() ?? '';
     if (updated.isEmpty) return;
@@ -2800,19 +2968,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   void _recordReplyUsage(AICharacter character) {
     _replyEligibility.recordReplyUsage(character);
     _repository.persistReplyUsage(character);
-  }
-
-  Future<void> _recordTokenUsageFromResult(
-      AICharacter character, Map<String, dynamic> result) async {
-    final promptTokens = result['promptTokens'];
-    final completionTokens = result['completionTokens'];
-    if (promptTokens is! int || completionTokens is! int) return;
-    await _repository.recordTokenUsage(
-      characterId: character.id,
-      inputTokens: promptTokens,
-      outputTokens: completionTokens,
-      cachedTokens: result['cachedTokens'] is int ? result['cachedTokens'] : 0,
-    );
   }
 
   Future<void> _delay(String content, {bool fast = false}) async {
@@ -3323,7 +3478,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         if (apiKey == null) {
           return const {'success': false, 'message': 'API 凭据不可用'};
         }
-        return _chatApi.sendChatMessage(
+        return _aiGateway.sendChatMessage(
           apiKey: apiKey,
           provider: provider,
           customBaseUrl: config.customBaseUrl,
@@ -3331,8 +3486,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           messages: messages,
           temperature: 0.3,
           maxTokens: 2048,
+          purpose: AiRequestPurpose.summary,
+          conversationId: widget.groupId,
+          characterId: character.id,
         );
       },
+      thresholdTokens:
+          (_aiGateway.capability(provider, config.modelName).contextWindow -
+                  2048)
+              .clamp(4096, kContextCompressThresholdTokens)
+              .toInt(),
     );
     if (!manager.shouldSummarize(apiHistory)) return fallbackContext;
 
@@ -3933,7 +4096,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         orElse: () => ApiProvider.deepseek);
     final apiMessages = await _buildApiMessages(
         character, _regenerateContext, null,
-        supportsVision: provider.supportsVision);
+        supportsVision:
+            _aiGateway.capability(provider, config.modelName).supportsVision);
 
     final temp = Message(
         groupId: widget.groupId,
@@ -3952,12 +4116,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _streamingSession = session;
     if (_canTouchUi) setState(() {});
     final result = await session.run(
-      _chatApi.streamChatMessage(
+      _aiGateway.streamChatMessage(
         apiKey: apiKey,
         provider: provider,
         customBaseUrl: config.customBaseUrl,
         model: config.modelName,
         messages: apiMessages,
+        purpose: AiRequestPurpose.reply,
+        conversationId: widget.groupId,
+        characterId: character.id,
+        userInitiated: true,
       ),
       onDraft: (draft) {
         temp.content = draft;
@@ -3969,9 +4137,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (identical(_streamingSession, session)) _streamingSession = null;
     var fullContent = result.content;
     var failed = result.failed;
-    final promptTokens = result.promptTokens;
-    final completionTokens = result.completionTokens;
-    final cachedTokens = result.cachedTokens;
     if (failed) {
       fullContent = '[${character.name} 重新生成失败: ${result.error}]';
       temp.content = fullContent;
@@ -3979,12 +4144,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     if (_canTouchUi) setState(() {});
 
-    if (failed) {
+    if (failed && !AiRequestGateway.isBlockedMessage(result.error)) {
       final retryContent = await _retryFailedReply(
         character: character,
         config: config,
         provider: provider,
         apiMessages: apiMessages,
+        userInitiated: true,
       );
       if (retryContent != null && retryContent.trim().isNotEmpty) {
         failed = false;
@@ -4017,14 +4183,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     await _repository.persistNewMessage(temp);
     _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
-    if (promptTokens != null && completionTokens != null) {
-      _repository.recordTokenUsage(
-        characterId: character.id,
-        inputTokens: promptTokens,
-        outputTokens: completionTokens,
-        cachedTokens: cachedTokens ?? 0,
-      );
-    }
     if (!failed && fullContent.trim().isNotEmpty) {
       await _maybeEvolveCharacterMemory(character, fullContent);
       await _maybeUpdateMemory();
@@ -4133,6 +4291,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         onExport: () => Navigator.of(context).push(MaterialPageRoute(
           builder: (_) => ExportPage(initialGroupId: widget.groupId),
         )),
+        webSearchIcon: _webSearchPolicyIcon,
+        webSearchTooltip: '联网搜索：${_effectiveWebSearchPolicy.label}',
+        onConfigureWebSearch: _configureWebSearchPolicy,
       ),
       body: Column(
         children: [
@@ -4151,6 +4312,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               onEdit: () => Navigator.of(context).push(MaterialPageRoute(
                 builder: (_) => ChatGroupFormPage(group: _group),
               )),
+            ),
+          if (_webSearchState.status != SearchRunStatus.idle)
+            SearchStatusBanner(
+              message: _webSearchStatusText,
+              busy: _webSearchState.status == SearchRunStatus.searching ||
+                  _webSearchState.status == SearchRunStatus.awaitingConsent,
+              onTap: _webSearchState.snapshot == null
+                  ? null
+                  : _showWebSearchSources,
             ),
           _buildConversationControls(cs),
           if (_pendingUserMentionMessageIds.isNotEmpty &&

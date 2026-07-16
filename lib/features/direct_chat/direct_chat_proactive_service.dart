@@ -7,6 +7,9 @@ import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_policy.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
@@ -26,16 +29,21 @@ class DirectChatProactiveResult {
 
 class DirectChatProactiveService {
   final DatabaseService db;
-  final ChatApiService chatApi;
+  final AiRequestGateway gateway;
   final Random random;
   final ApiCredentialResolver credentialResolver;
 
   DirectChatProactiveService({
     required this.db,
     ChatApiService? chatApi,
+    AiRequestGateway? gateway,
     Random? random,
     ApiCredentialResolver? credentialResolver,
-  })  : chatApi = chatApi ?? ChatApiService(),
+  })  : gateway = gateway ??
+            AiRequestGateway(
+              store: AiGovernanceStore(db),
+              client: chatApi,
+            ),
         random = random ?? Random(),
         credentialResolver =
             credentialResolver ?? SecureApiCredentialResolver();
@@ -133,7 +141,7 @@ class DirectChatProactiveService {
             .take(8)
             .toList();
 
-    final result = await chatApi.sendChatMessage(
+    final result = await gateway.sendChatMessage(
       apiKey: apiKey,
       provider: ApiProvider.values.firstWhere(
         (provider) => provider.name == config.provider,
@@ -149,6 +157,9 @@ class DirectChatProactiveService {
         groupContext: sourceGroupContext,
       ),
       temperature: 0.8,
+      purpose: AiRequestPurpose.proactive,
+      conversationId: conversationId,
+      characterId: candidate.character.id,
     );
     if (!(result['success'] ?? false)) return null;
     final content = result['message']?.toString().trim() ?? '';
@@ -163,7 +174,6 @@ class DirectChatProactiveService {
     await db.persistMessage(message);
     await db.saveDirectChatSource(conversationId, candidate.source);
     await db.saveDirectChatLastProactiveAt(candidate.character.id, now);
-    await _recordUsage(candidate.character, conversationId, result);
     // 记用：与聊天走同一套每小时额度累计。先从盒里取最新对象再累加，
     // 避免用方法入口的旧快照覆盖聊天室内已持久化的并发增量（lost-update）。
     final latest =
@@ -242,22 +252,5 @@ class DirectChatProactiveService {
         {'role': 'user', 'content': '最近群聊里和我相关的话题：\n${groupLines.join('\n')}'},
       {'role': 'user', 'content': '现在你主动发来一条私聊消息。'},
     ];
-  }
-
-  Future<void> _recordUsage(
-    AICharacter character,
-    String conversationId,
-    Map<String, dynamic> result,
-  ) async {
-    final promptTokens = result['promptTokens'];
-    final completionTokens = result['completionTokens'];
-    if (promptTokens is! int || completionTokens is! int) return;
-    await db.recordTokenUsage(
-      characterId: character.id,
-      groupId: conversationId,
-      inputTokens: promptTokens,
-      outputTokens: completionTokens,
-      cachedTokens: result['cachedTokens'] is int ? result['cachedTokens'] : 0,
-    );
   }
 }

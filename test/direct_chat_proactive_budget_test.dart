@@ -73,11 +73,15 @@ void main() {
     await Hive.openBox<ChatGroup>('chat_groups');
     await Hive.openBox<Message>('messages');
     await Hive.openBox<dynamic>('app_settings');
+    // 主动 DM 经网关写入独立账本 box（ai_governance_ledger）；未走 DatabaseService.init()
+    // 时此处显式预开，避免 AiGovernanceStore 访问未打开的 box 抛 HiveError。
+    await Hive.openBox<dynamic>(DatabaseService.aiGovernanceLedgerBoxName);
     db = DatabaseService();
     chatApi = FakeChatApiService();
   });
 
   tearDown(() async {
+    db.resetLifecycleCaches();
     await Hive.close();
     if (await tempDir.exists()) await tempDir.delete(recursive: true);
   });

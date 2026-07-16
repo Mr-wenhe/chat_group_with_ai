@@ -13,6 +13,7 @@ import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:flutter/foundation.dart';
 
 /// Owns every destructive cross-box operation.
 ///
@@ -53,6 +54,19 @@ class DataLifecycleService {
 
   bool get hasPendingOperation =>
       db.appSettingsBox.get(pendingOperationKey) is Map;
+
+  Future<void> _deleteSecureCredential(String configId) async {
+    final config = db.apiConfigBox.get(configId);
+    final isDevelopmentHiveCredential = !kReleaseMode &&
+        config?.credentialId ==
+            CredentialRepository.developmentHiveCredentialId &&
+        config?.legacyApiKey.isNotEmpty == true;
+    if (!credentials.secureStorageAvailable || isDevelopmentHiveCredential) {
+      return;
+    }
+    final result = await credentials.delete(configId);
+    if (!result.isSuccess) throw StateError('credential deletion failed');
+  }
 
   Future<DeletionPlan> previewGroup(String groupId) =>
       _planner.previewGroup(groupId);
@@ -331,11 +345,7 @@ class DataLifecycleService {
     final credentialDeleted = await _runner.attempt(
       'API 凭据删除失败',
       incomplete,
-      () async {
-        if (!credentials.secureStorageAvailable) return;
-        final result = await credentials.delete(configId);
-        if (!result.isSuccess) throw StateError('credential deletion failed');
-      },
+      () => _deleteSecureCredential(configId),
     );
     if (!credentialDeleted) return _finish(incomplete);
     final replacement = replacementConfigId == null
@@ -407,13 +417,7 @@ class DataLifecycleService {
         final deleted = await _runner.attempt(
           'API 凭据删除失败',
           incomplete,
-          () async {
-            if (!credentials.secureStorageAvailable) return;
-            final result = await credentials.delete(configId);
-            if (!result.isSuccess) {
-              throw StateError('credential deletion failed');
-            }
-          },
+          () => _deleteSecureCredential(configId),
         );
         if (deleted) {
           deletableConfigIds.add(configId);

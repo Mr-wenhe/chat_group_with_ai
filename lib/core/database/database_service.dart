@@ -127,6 +127,7 @@ class DatabaseService {
   static const String agentSkillBoxName = 'character_skills';
   static const String agentTaskBoxName = 'agent_tasks';
   static const String workModeWorkspaceBoxName = 'work_mode_workspaces';
+  static const String aiGovernanceLedgerBoxName = 'ai_governance_ledger';
   static const String _releaseTemplateManifestAsset =
       'assets/release_templates/seed_manifest.json';
   static const List<String> _releaseHiveFiles = [
@@ -188,6 +189,7 @@ class DatabaseService {
     await _openBoxSafely<AgentTask>(agentTaskBoxName);
     await _openBoxSafely<WorkModeWorkspace>(workModeWorkspaceBoxName);
     await _openBoxSafely<dynamic>(_appSettingsBox);
+    await _openBoxSafely<dynamic>(aiGovernanceLedgerBoxName);
     await _migrateApiConfigCredentials();
   }
 
@@ -286,20 +288,31 @@ class DatabaseService {
     final existing = apiConfigBox.get(config.id);
     if (config.legacyApiKey.isNotEmpty) {
       final credentials = CredentialRepository();
-      if (!credentials.secureStorageAvailable) {
-        throw StateError('当前平台没有可用的安全凭据存储，未保存配置');
-      }
-      final saved = await credentials.save(config.id, config.legacyApiKey);
-      if (!saved.isSuccess) {
+      final saved = credentials.secureStorageAvailable
+          ? await credentials.save(config.id, config.legacyApiKey)
+          : const CredentialWriteResult.failed(CredentialFailure.unavailable);
+      if (saved.isSuccess) {
+        config.legacyApiKey = '';
+        config.hasCredential = true;
+        config.credentialId = credentials.credentialIdFor(config.id);
+      } else if (kReleaseMode) {
         throw StateError('凭据不可用，未保存配置');
+      } else {
+        // macOS debug builds can lack Keychain access. Keep the development
+        // credential in Hive so local runs remain usable; release never does.
+        config.hasCredential = true;
+        config.credentialId = CredentialRepository.developmentHiveCredentialId;
       }
-      config.legacyApiKey = '';
-      config.hasCredential = true;
-      config.credentialId = credentials.credentialIdFor(config.id);
     } else if (existing?.hasCredential == true) {
       // 编辑元数据时不要求重新输入密钥；保留已验证的安全存储映射。
       config.hasCredential = true;
       config.credentialId = existing!.credentialId;
+      if (!kReleaseMode &&
+          existing.credentialId ==
+              CredentialRepository.developmentHiveCredentialId &&
+          existing.legacyApiKey.isNotEmpty) {
+        config.legacyApiKey = existing.legacyApiKey;
+      }
     }
     await apiConfigBox.put(config.id, config);
   }

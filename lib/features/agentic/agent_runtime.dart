@@ -144,6 +144,8 @@ class AgentRuntime {
   /// 12 步可容纳“读取 → 修改 → 验证”等逐次审批流水线，同时继续限制模型/工具
   /// 循环。每次模型请求另有独立超时，因此这里是步骤预算，不是无限重试次数。
   static const int maxToolSteps = 12;
+  static const int preferredMaxOutputTokens = 8192;
+  static const int preferredSummaryOutputTokens = 2048;
   static const Duration completionTimeout = Duration(seconds: 120);
   static const Duration fileGenerationTimeout = Duration(minutes: 5);
 

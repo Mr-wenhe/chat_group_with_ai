@@ -59,4 +59,24 @@ void main() {
 
     expect(await resolver.resolve(config), 'secure-key');
   });
+
+  test('resolves a debug fallback credential with the explicit marker',
+      () async {
+    final resolver = SecureApiCredentialResolver(
+      CredentialRepository(
+        store: _MemoryCredentialStore(),
+        secureStorageAvailable: true,
+      ),
+    );
+    final config = ApiConfig(
+      id: 'debug-fallback',
+      name: 'debug',
+      provider: 'custom',
+      apiKey: 'debug-secret',
+      hasCredential: true,
+      credentialId: CredentialRepository.developmentHiveCredentialId,
+    );
+
+    expect(await resolver.resolve(config), 'debug-secret');
+  });
 }

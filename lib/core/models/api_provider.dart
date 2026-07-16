@@ -14,19 +14,6 @@ enum ApiProvider {
 
   String get apiPath => '/chat/completions';
 
-  /// 该 provider 是否支持图片视觉输入（多模态）。
-  ///
-  /// qwen / zhipu / moonshot / custom 的主流模型支持图片输入；
-  /// deepseek / baidu / xfyun 默认按不支持处理，避免向不支持视觉的端点发送图片。
-  bool get supportsVision => switch (this) {
-        ApiProvider.qwen ||
-        ApiProvider.zhipu ||
-        ApiProvider.moonshot ||
-        ApiProvider.custom =>
-          true,
-        _ => false,
-      };
-
   static const Map<String, List<String>> providerModels = {
     'deepseek': ['deepseek-chat', 'deepseek-reasoner'],
     'qwen': [

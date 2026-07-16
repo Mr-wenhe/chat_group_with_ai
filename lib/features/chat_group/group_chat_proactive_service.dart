@@ -8,6 +8,9 @@ import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_policy.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 
 class GroupChatProactiveResult {
@@ -24,16 +27,21 @@ class GroupChatProactiveResult {
 
 class GroupChatProactiveService {
   final DatabaseService db;
-  final ChatApiService chatApi;
+  final AiRequestGateway gateway;
   final Random random;
   final ApiCredentialResolver credentialResolver;
 
   GroupChatProactiveService({
     required this.db,
     ChatApiService? chatApi,
+    AiRequestGateway? gateway,
     Random? random,
     ApiCredentialResolver? credentialResolver,
-  })  : chatApi = chatApi ?? ChatApiService(),
+  })  : gateway = gateway ??
+            AiRequestGateway(
+              store: AiGovernanceStore(db),
+              client: chatApi,
+            ),
         random = random ?? Random(),
         credentialResolver =
             credentialResolver ?? SecureApiCredentialResolver();
@@ -76,7 +84,7 @@ class GroupChatProactiveService {
         ? groupMessages.sublist(groupMessages.length - 12)
         : groupMessages;
 
-    final result = await chatApi.sendChatMessage(
+    final result = await gateway.sendChatMessage(
       apiKey: apiKey,
       provider: ApiProvider.values.firstWhere(
         (provider) => provider.name == config.provider,
@@ -92,6 +100,9 @@ class GroupChatProactiveService {
         charactersById: charactersById,
       ),
       temperature: 0.85,
+      purpose: AiRequestPurpose.proactive,
+      conversationId: candidate.group.id,
+      characterId: candidate.character.id,
     );
     if (!(result['success'] ?? false)) return null;
     final content = result['message']?.toString().trim() ?? '';
@@ -105,7 +116,6 @@ class GroupChatProactiveService {
     );
     await db.persistMessage(message);
     await db.saveGroupChatLastProactiveAt(candidate.group.id, now);
-    await _recordUsage(candidate.character, candidate.group.id, result);
 
     return GroupChatProactiveResult(
       group: candidate.group,
@@ -164,22 +174,5 @@ class GroupChatProactiveService {
         {'role': 'user', 'content': '最近群聊记录：\n$transcript'},
       {'role': 'user', 'content': '现在你主动在群里说一句。'},
     ];
-  }
-
-  Future<void> _recordUsage(
-    AICharacter character,
-    String groupId,
-    Map<String, dynamic> result,
-  ) async {
-    final promptTokens = result['promptTokens'];
-    final completionTokens = result['completionTokens'];
-    if (promptTokens is! int || completionTokens is! int) return;
-    await db.recordTokenUsage(
-      characterId: character.id,
-      groupId: groupId,
-      inputTokens: promptTokens,
-      outputTokens: completionTokens,
-      cachedTokens: result['cachedTokens'] is int ? result['cachedTokens'] : 0,
-    );
   }
 }

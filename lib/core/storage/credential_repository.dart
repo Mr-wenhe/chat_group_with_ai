@@ -89,6 +89,7 @@ class SecureStorageCredentialStore implements CredentialStore {
 /// 对 [SecureStorageService] 的依赖。完成迁移前请勿删除旧路径。
 class CredentialRepository {
   static const _keyPrefix = 'credential.api-config.';
+  static const developmentHiveCredentialId = 'development-hive';
   static final _cache = <String, String>{};
 
   final CredentialStore _store;
