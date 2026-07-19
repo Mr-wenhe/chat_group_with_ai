@@ -12,6 +12,8 @@ import 'package:chat_group/features/settings/api_config_form_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/settings/backup_restore_page.dart';
 import 'package:chat_group/features/settings/ai_governance_page.dart';
+import 'package:chat_group/features/document/document_understanding_service.dart';
+import 'package:chat_group/features/search/global_search_page.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -331,6 +333,27 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
             children: [
               _SettingTile(
                 cs: cs,
+                icon: Icons.manage_search_rounded,
+                iconColor: cs.primary,
+                title: '全局搜索',
+                subtitle: '离线搜索群聊、私聊、角色名和附件文件名；可清除与重建索引',
+                onTap: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => const GlobalSearchPage(),
+                )),
+              ),
+              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              _SettingTile(
+                cs: cs,
+                icon: Icons.document_scanner_outlined,
+                iconColor: cs.primary,
+                title: '文档解析缓存',
+                subtitle:
+                    '${DocumentUnderstandingService.cachedDocumentCount} 个本地文档 · 可随时清除并按需重建',
+                onTap: _showDocumentCache,
+              ),
+              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              _SettingTile(
+                cs: cs,
                 icon: Icons.policy_outlined,
                 iconColor: cs.primary,
                 title: '模型、成本与联网治理',
@@ -544,6 +567,32 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     Navigator.of(context).push(
       MaterialPageRoute(builder: (_) => ApiConfigFormPage(config: config)),
     );
+  }
+
+  Future<void> _showDocumentCache() async {
+    final clear = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('文档解析缓存'),
+        content:
+            Text('当前缓存 ${DocumentUnderstandingService.cachedDocumentCount} 个文档。'
+                '缓存只在内存中保存，可由原附件重新解析。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('关闭'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            child: const Text('清除缓存'),
+          ),
+        ],
+      ),
+    );
+    if (clear == true) {
+      DocumentUnderstandingService.clearCache();
+      if (mounted) setState(() {});
+    }
   }
 
   /// 分区标题栏的「新增」按钮：无论是否已存在配置，都可随时创建新的 API Key。

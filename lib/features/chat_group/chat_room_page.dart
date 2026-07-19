@@ -69,6 +69,9 @@ import 'package:chat_group/features/chat_group/widgets/member_sheet.dart';
 import 'package:chat_group/features/chat_group/widgets/sheet_button.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:chat_group/features/document/document_understanding_service.dart';
+import 'package:chat_group/features/memory/memory_controls.dart';
+import 'package:chat_group/features/memory/memory_management_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
@@ -93,8 +96,13 @@ enum AutoChatStatus { idle, waiting, generating, paused, unavailable, error }
 
 class ChatRoomPage extends ConsumerStatefulWidget {
   final String groupId;
+  final String? initialMessageId;
 
-  const ChatRoomPage({super.key, required this.groupId});
+  const ChatRoomPage({
+    super.key,
+    required this.groupId,
+    this.initialMessageId,
+  });
 
   @override
   ConsumerState<ChatRoomPage> createState() => _ChatRoomPageState();
@@ -115,6 +123,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   late final ReplyEligibilityPolicy _replyEligibility;
   late final ChatRoomRepository _repository;
   late final ChatRoomLoader _loader;
+  late final MemoryControls _memoryControls;
   final ConversationController _conversationController =
       ConversationController();
   late final AutoChatScheduler _autoChatScheduler;
@@ -128,6 +137,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   int _totalMessageCount = 0;
   GroupMemory? _groupMemory;
   List<CharacterMemory> _characterMemories = [];
+  // ponytail: pinned compression stays in this room session; recompute after
+  // reopening instead of creating another persisted memory channel.
+  final Map<String, ({String checkpoint, String summary})>
+      _transientContextCompression = {};
   List<RelationshipState> _relationshipStates = [];
   final WorkModeSession<PendingAgentToolApproval> _workModeSession =
       WorkModeSession<PendingAgentToolApproval>();
@@ -216,6 +229,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   // —— 流式输出（打字机）相关状态 ——
   Message? _streamingMessage; // 正在逐 token 渲染的内存态临时消息（不落库）
   StreamingReplySession? _streamingSession;
+  DocumentProcessingToken? _documentProcessingToken;
+  double _documentProcessingProgress = 0;
   bool get _isStreaming => _streamingSession?.isActive ?? false;
   bool _disposed = false; // dispose 守卫，避免异步回调在销毁后写状态
   final ChatMessageListController _messageListController =
@@ -241,6 +256,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _searchPolicyOverride =
         _governanceStore.conversationSearchPolicy(widget.groupId);
     _loader = ChatRoomLoader(db: _db, resolveApiConfig: _resolveApiConfig);
+    _memoryControls = MemoryControls(_db);
     _replyEligibility = ReplyEligibilityPolicy(
       resolveApiConfig: _resolveApiConfig,
     );
@@ -286,6 +302,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     _pendingAttachments.clear();
     _workModeSession.requestStop('页面已关闭');
+    _documentProcessingToken?.cancel();
     _conversationController.dispose();
     _autoChatScheduler.dispose();
     unawaited(LocalAgentBridgeLauncher().stop());
@@ -320,14 +337,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   Future<void> _loadData() async {
     try {
       final loaded = await _loader.load(widget.groupId);
+      var initialMessages = loaded.messages;
+      var hasOlderMessages = loaded.hasOlderMessages;
+      final targetId = widget.initialMessageId;
+      if (targetId != null &&
+          !initialMessages.any((message) => message.id == targetId)) {
+        final page = await _repository.loadAround(targetId);
+        initialMessages = page.messages;
+        hasOlderMessages = page.hasOlder;
+      }
       if (!_canTouchUi) return;
 
       setState(() {
         _group = loaded.displayGroup;
         _characters = loaded.activeCharacters;
         _allGroupCharacters = loaded.allCharacters;
-        _messages = loaded.messages;
-        _hasOlderMessages = loaded.hasOlderMessages;
+        _messages = initialMessages;
+        _hasOlderMessages = hasOlderMessages;
         _totalMessageCount = loaded.totalMessageCount;
         _groupMemory = loaded.groupMemory;
         _characterMemories = loaded.characterMemories;
@@ -348,7 +374,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         _isLoading = false;
       });
 
-      scrollToBottomAfterInitialLayout(_scrollController);
+      if (targetId == null) {
+        scrollToBottomAfterInitialLayout(_scrollController);
+      } else {
+        _highlightMessageTemporarily(targetId);
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (!_canTouchUi) return;
+          final target = _messages.where((message) => message.id == targetId);
+          if (target.isNotEmpty) unawaited(_focusSearchResult(target.first));
+        });
+      }
       _scheduleAgentTaskRecovery();
       if (ChatActivityPolicy.canStartAutoChat(
         workModeEnabled: _workModeEnabled,
@@ -1040,7 +1075,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
     );
-    final effectiveContext = await _compactContextIfNeeded(
+    final compactedContext = await _compactContextIfNeeded(
       character: character,
       config: config,
       provider: provider,
@@ -1059,12 +1094,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final apiMessages = _withWebSearchContext(
       await _buildApiMessages(
         character,
-        effectiveContext,
+        compactedContext.messages,
         userMessage,
         isAutoChat: isAutoChat,
         intent: intent,
         supportsVision: capability.supportsVision,
         currentUserMessage: currentUserMessage,
+        transientContextSummary: compactedContext.summary,
       ),
       webSearch,
     );
@@ -1758,11 +1794,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     AICharacter character,
     ContextSummary summary,
   ) async {
-    final memory = HumanizedMemoryService.memoryForCharacter(
-      groupId: widget.groupId,
+    final memory = MemoryPromptSelector.characterMemory(
+      conversationId: widget.groupId,
       character: character,
-      existing: _characterMemories,
+      memories: _characterMemories,
     );
+    if (!_memoryControls.canAutoUpdateCharacter(memory, character)) return;
     final manager = ContextWindowManager(
       complete: (_) async => const {'success': true, 'message': '{}'},
     );
@@ -1772,6 +1809,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       summary: summary,
       saveCharacter: (value) => _db.aiCharacterBox.put(value.id, value),
       saveMemory: _saveCompactedCharacterMemory,
+      retained: _memoryControls.pinnedCharacterEntries(memory),
     );
   }
 
@@ -2307,6 +2345,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final targetType = targetId == 'user'
         ? RelationshipTargetType.user
         : RelationshipTargetType.ai;
+    if (!_memoryControls.automaticMemoryEnabled) return;
+    for (final relationship in _relationshipStates) {
+      if (relationship.groupId == widget.groupId &&
+          relationship.sourceCharacterId == character.id &&
+          relationship.targetId == targetId &&
+          !_memoryControls.canAutoUpdateRelationship(relationship)) {
+        return;
+      }
+    }
     _relationshipStates = HumanizedMemoryService.applyLocalRelationshipRules(
       relationships: _relationshipStates,
       groupId: widget.groupId,
@@ -2335,34 +2382,43 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       {bool isAutoChat = false,
       ReplyIntent? intent,
       bool supportsVision = false,
-      Message? currentUserMessage}) async {
+      Message? currentUserMessage,
+      String? transientContextSummary}) async {
     if (_isDirectChat) {
       return _buildDirectApiMessages(character, context, userMessage,
           supportsVision: supportsVision,
-          currentUserMessage: currentUserMessage);
+          currentUserMessage: currentUserMessage,
+          transientContextSummary: transientContextSummary);
     }
 
     final msgs = <Map<String, dynamic>>[];
 
     // ── 1. 群聊记忆摘要 ───────────────────────────────────────────────
-    if (_groupMemory != null && _groupMemory!.topicSummary.isNotEmpty) {
-      msgs.add(
-          {'role': 'system', 'content': '【群聊记忆】${_groupMemory!.topicSummary}'});
+    final selectedGroupMemory = MemoryPromptSelector.groupSummary(_groupMemory);
+    if (selectedGroupMemory.isNotEmpty) {
+      msgs.add({'role': 'system', 'content': '【群聊记忆】$selectedGroupMemory'});
     }
 
     // ── 2. 角色个体记忆（如果有的话） ────────────────────────────────
-    if (character.memorySummary.isNotEmpty) {
+    final selectedLegacyMemory = MemoryPromptSelector.legacySummary(character);
+    if (selectedLegacyMemory.isNotEmpty) {
       msgs.add({
         'role': 'system',
-        'content': '【${character.name}的自我记忆】${character.memorySummary}'
+        'content': '【${character.name}的自我记忆】$selectedLegacyMemory'
+      });
+    }
+    if (transientContextSummary?.isNotEmpty == true) {
+      msgs.add({
+        'role': 'system',
+        'content': '【会话内压缩摘要】$transientContextSummary',
       });
     }
 
     if (intent != null) {
-      final memory = HumanizedMemoryService.memoryForCharacter(
-        groupId: widget.groupId,
+      final memory = MemoryPromptSelector.characterMemory(
+        conversationId: widget.groupId,
         character: character,
-        existing: _characterMemories,
+        memories: _characterMemories,
       );
       msgs.add({
         'role': 'system',
@@ -2518,6 +2574,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final recentHistory = historyMessages.length > 20
         ? historyMessages.sublist(historyMessages.length - 20)
         : historyMessages;
+    final documentContext = await _documentContextFor(
+      userMessage,
+      recentHistory,
+      currentUserMessage,
+    );
+    if (documentContext.isNotEmpty) {
+      msgs.add({'role': 'system', 'content': documentContext});
+    }
     for (final m in recentHistory) {
       if (m.senderType == 'user') {
         // 真人用户消息 → user 角色；含媒体时按多模态策略生成 content。
@@ -2526,6 +2590,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           'content': await prepareUserMessageContent(
             m,
             supportsVision: supportsVision,
+            documentQuery: userMessage,
+            includeDocumentContext: false,
           ),
         });
       } else if (m.senderId == character.id) {
@@ -2549,12 +2615,53 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         content = await prepareUserMessageContent(
           currentUserMessage,
           supportsVision: supportsVision,
+          documentQuery: userMessage,
+          includeDocumentContext: false,
         );
       }
       msgs.add({'role': 'user', 'content': content});
     }
 
     return msgs;
+  }
+
+  Future<String> _documentContextFor(
+    String? query,
+    List<Message> history,
+    Message? current,
+  ) {
+    if (query == null || query.trim().isEmpty) return Future.value('');
+    final messages = <Message>[...history];
+    if (current != null && !messages.any((item) => item.id == current.id)) {
+      messages.add(current);
+    }
+    final attachments = messages
+        .expand((message) => message.media ?? const <MediaAttachment>[])
+        .where(DocumentUnderstandingService.supports)
+        .toList(growable: false);
+    if (attachments.isEmpty) return Future.value('');
+    final token = DocumentProcessingToken();
+    _documentProcessingToken = token;
+    _documentProcessingProgress = 0;
+    if (_canTouchUi) setState(() {});
+    return DocumentUnderstandingService.buildPromptContext(
+      query: query,
+      attachments: attachments,
+      cancelToken: token,
+      onProgress: (value) {
+        if (_canTouchUi && identical(_documentProcessingToken, token)) {
+          setState(() => _documentProcessingProgress = value);
+        }
+      },
+    ).whenComplete(() {
+      if (_canTouchUi && identical(_documentProcessingToken, token)) {
+        setState(() => _documentProcessingToken = null);
+      }
+    });
+  }
+
+  void _stopDocumentProcessing() {
+    _documentProcessingToken?.cancel();
   }
 
   String _collaborationPromptFor({
@@ -2623,19 +2730,27 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     String? userMessage, {
     bool supportsVision = false,
     Message? currentUserMessage,
+    String? transientContextSummary,
   }) async {
     final msgs = <Map<String, dynamic>>[];
-    if (character.memorySummary.isNotEmpty) {
+    final selectedLegacyMemory = MemoryPromptSelector.legacySummary(character);
+    if (selectedLegacyMemory.isNotEmpty) {
       msgs.add({
         'role': 'system',
-        'content': '【${character.name}的自我记忆】${character.memorySummary}'
+        'content': '【${character.name}的自我记忆】$selectedLegacyMemory'
+      });
+    }
+    if (transientContextSummary?.isNotEmpty == true) {
+      msgs.add({
+        'role': 'system',
+        'content': '【会话内压缩摘要】$transientContextSummary',
       });
     }
 
-    final memory = HumanizedMemoryService.memoryForCharacter(
-      groupId: widget.groupId,
+    final memory = MemoryPromptSelector.characterMemory(
+      conversationId: widget.groupId,
       character: character,
-      existing: _characterMemories,
+      memories: _characterMemories,
     );
     if (memory.facts.isNotEmpty ||
         memory.relationshipNotes.isNotEmpty ||
@@ -2671,6 +2786,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     final recentHistory =
         context.length > 20 ? context.sublist(context.length - 20) : context;
+    final documentContext = await _documentContextFor(
+      userMessage,
+      recentHistory,
+      currentUserMessage,
+    );
+    if (documentContext.isNotEmpty) {
+      msgs.add({'role': 'system', 'content': documentContext});
+    }
     for (final message in recentHistory) {
       if (message.senderType == 'user') {
         // 含媒体时按多模态策略生成 content。
@@ -2679,6 +2802,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           'content': await prepareUserMessageContent(
             message,
             supportsVision: supportsVision,
+            documentQuery: userMessage,
+            includeDocumentContext: false,
           ),
         });
       } else if (message.senderId == character.id) {
@@ -2693,6 +2818,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         content = await prepareUserMessageContent(
           currentUserMessage,
           supportsVision: supportsVision,
+          documentQuery: userMessage,
+          includeDocumentContext: false,
         );
       }
       msgs.add({'role': 'user', 'content': content});
@@ -2759,21 +2886,27 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       final messageId = _pendingUserMentionMessageIds.removeAt(0);
       final index = _messages.indexWhere((m) => m.id == messageId);
       if (index < 0) continue;
-      setState(() => _highlightedMentionMessageId = messageId);
+      _highlightMessageTemporarily(messageId);
       _scrollToMessageIndex(index);
-      _mentionHighlightTimer?.cancel();
-      _mentionHighlightTimer = Timer(const Duration(seconds: 2), () {
-        if (_canTouchUi && _highlightedMentionMessageId == messageId) {
-          setState(() => _highlightedMentionMessageId = null);
-        }
-      });
       return;
     }
     if (_canTouchUi) setState(() {});
   }
 
+  void _highlightMessageTemporarily(String messageId) {
+    if (!_canTouchUi) return;
+    setState(() => _highlightedMentionMessageId = messageId);
+    _mentionHighlightTimer?.cancel();
+    _mentionHighlightTimer = Timer(const Duration(seconds: 2), () {
+      if (_canTouchUi && _highlightedMentionMessageId == messageId) {
+        setState(() => _highlightedMentionMessageId = null);
+      }
+    });
+  }
+
   Future<void> _maybeUpdateMemory() async {
     if (_isDirectChat) return;
+    if (!_memoryControls.canAutoUpdateGroup(_groupMemory)) return;
     final now = DateTime.now();
     if (!ChatOrchestrator.shouldUpdateGroupMemory(
       messageCount: _totalMessageCount,
@@ -2858,6 +2991,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     AICharacter character,
     String latestReply,
   ) async {
+    final memory = MemoryPromptSelector.characterMemory(
+      conversationId: widget.groupId,
+      character: character,
+      memories: _characterMemories,
+    );
+    if (!_memoryControls.canAutoUpdateCharacter(memory, character)) return;
     if (!ChatOrchestrator.shouldEvolveCharacterMemory(
       messageCount: _totalMessageCount,
       hasUserMessage: _messages.any((message) => message.senderType == 'user'),
@@ -2913,25 +3052,26 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (!(result['success'] ?? false)) return;
     final updated = result['message']?.toString().trim() ?? '';
     if (updated.isEmpty) return;
-    await _mergeHumanizedMemory(character, updated);
     final parsed = HumanizedMemoryService.parseLayeredMemoryJson(updated);
-    character.memorySummary = HumanizedMemoryService.mergeGlobalSummary(
-      existing: character.memorySummary,
+    final mergedMemory = await _mergeHumanizedMemory(character, parsed);
+    if (mergedMemory == null) return;
+    character.memorySummary = _memoryControls.mergeAutomaticGlobalSummary(
+      character: character,
+      memory: mergedMemory,
       update: parsed,
     );
     await character.save();
     if (_canTouchUi) setState(() {});
   }
 
-  Future<void> _mergeHumanizedMemory(
+  Future<CharacterMemory?> _mergeHumanizedMemory(
     AICharacter character,
-    String rawJson,
+    LayeredMemoryUpdate update,
   ) async {
-    final update = HumanizedMemoryService.parseLayeredMemoryJson(rawJson);
     if (update.facts.isEmpty &&
         update.relationshipNotes.isEmpty &&
         update.personaGrowth.isEmpty) {
-      return;
+      return null;
     }
 
     final memory = HumanizedMemoryService.memoryForCharacter(
@@ -2939,7 +3079,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       character: character,
       existing: _characterMemories,
     );
-    HumanizedMemoryService.mergeLayeredMemory(memory, update);
+    _memoryControls.mergeAutomaticCharacterMemory(memory, update);
     await _db.characterMemoryBox.put(memory.id, memory);
     final index = _characterMemories.indexWhere((m) => m.id == memory.id);
     if (index == -1) {
@@ -2947,6 +3087,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     } else {
       _characterMemories = [..._characterMemories]..[index] = memory;
     }
+    return memory;
   }
 
   Map<String, String> _senderNameMap() {
@@ -3462,22 +3603,39 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         : _messages.toList();
   }
 
-  Future<List<Message>> _compactContextIfNeeded({
+  Future<({List<Message> messages, String? summary})> _compactContextIfNeeded({
     required AICharacter character,
     required ApiConfig config,
     required ApiProvider provider,
     required List<Message> fallbackContext,
   }) async {
+    final memory = MemoryPromptSelector.characterMemory(
+      conversationId: widget.groupId,
+      character: character,
+      memories: _characterMemories,
+    );
+    final transient = _transientContextCompression[character.id];
+    if (!_memoryControls.automaticMemoryEnabled) {
+      return (messages: fallbackContext, summary: transient?.summary);
+    }
+    final canPersist =
+        _memoryControls.canAutoUpdateCharacter(memory, character);
     final checkpointKey =
         'context_compressed_through:${widget.groupId}:${character.id}';
-    final checkpoint = _db.appSettingsBox.get(checkpointKey) as String?;
+    final checkpoint = transient?.checkpoint ??
+        _db.appSettingsBox.get(checkpointKey) as String?;
     final pending = _messagesAfterCheckpoint(checkpoint);
-    final apiHistory = pending
-        .map((message) => <String, dynamic>{
-              'role': message.senderType == 'user' ? 'user' : 'assistant',
-              'content': message.content,
-            })
-        .toList();
+    final apiHistory = <Map<String, dynamic>>[
+      if (transient != null)
+        {
+          'role': 'system',
+          'content': '已有压缩摘要：${transient.summary}',
+        },
+      ...pending.map((message) => <String, dynamic>{
+            'role': message.senderType == 'user' ? 'user' : 'assistant',
+            'content': message.content,
+          }),
+    ];
     final manager = ContextWindowManager(
       maxRetries: 0,
       complete: (messages) async {
@@ -3504,31 +3662,42 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               .clamp(4096, kContextCompressThresholdTokens)
               .toInt(),
     );
-    if (!manager.shouldSummarize(apiHistory)) return fallbackContext;
+    if (!manager.shouldSummarize(apiHistory)) {
+      return (messages: fallbackContext, summary: transient?.summary);
+    }
 
     try {
       final summary = await manager.summarize(
         apiHistory,
         isDirectChat: _isDirectChat,
       );
-      final memory = HumanizedMemoryService.memoryForCharacter(
-        groupId: widget.groupId,
-        character: character,
-        existing: _characterMemories,
-      );
+      if (!canPersist) {
+        if (pending.isNotEmpty) {
+          _transientContextCompression[character.id] = (
+            checkpoint: pending.last.id,
+            summary: summary.summary,
+          );
+        }
+        return (
+          messages: _lastUserOnly(fallbackContext),
+          summary: summary.summary,
+        );
+      }
       await manager.persistToCharacterMemory(
         character: character,
         memory: memory,
         summary: summary,
         saveCharacter: (value) => _db.aiCharacterBox.put(value.id, value),
         saveMemory: _saveCompactedCharacterMemory,
+        retained: _memoryControls.pinnedCharacterEntries(memory),
       );
       if (pending.isNotEmpty) {
         await _db.appSettingsBox.put(checkpointKey, pending.last.id);
       }
-      return _lastUserOnly(fallbackContext);
+      _transientContextCompression.remove(character.id);
+      return (messages: _lastUserOnly(fallbackContext), summary: null);
     } catch (_) {
-      return fallbackContext;
+      return (messages: fallbackContext, summary: transient?.summary);
     }
   }
 
@@ -4298,6 +4467,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         onExport: () => Navigator.of(context).push(MaterialPageRoute(
           builder: (_) => ExportPage(initialGroupId: widget.groupId),
         )),
+        onOpenMemory: _openMemoryManagement,
         webSearchIcon: _webSearchPolicyIcon,
         webSearchTooltip: '联网搜索：${_effectiveWebSearchPolicy.label}',
         onConfigureWebSearch: _configureWebSearchPolicy,
@@ -4366,7 +4536,27 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                         unawaited(_focusSearchResult(message)),
                   ),
           ),
-          if (_isAiReplying)
+          if (_documentProcessingToken != null)
+            Container(
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+              alignment: Alignment.centerLeft,
+              child: Row(
+                children: [
+                  Expanded(
+                    child: LinearProgressIndicator(
+                      value: _documentProcessingProgress,
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  TextButton.icon(
+                    onPressed: _stopDocumentProcessing,
+                    icon: const Icon(Icons.stop_rounded, size: 16),
+                    label: const Text('取消文档解析'),
+                  ),
+                ],
+              ),
+            )
+          else if (_isAiReplying)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
               alignment: Alignment.centerLeft,
@@ -4474,6 +4664,24 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         },
       ),
     );
+  }
+
+  Future<void> _openMemoryManagement() async {
+    await Navigator.of(context).push(MaterialPageRoute(
+      builder: (_) => MemoryManagementPage(
+        conversationId: widget.groupId,
+      ),
+    ));
+    if (!_canTouchUi) return;
+    final loaded = await _loader.load(widget.groupId);
+    if (!_canTouchUi) return;
+    setState(() {
+      _groupMemory = loaded.groupMemory;
+      _characterMemories = loaded.characterMemories;
+      _relationshipStates = loaded.relationships;
+      _characters = loaded.activeCharacters;
+      _allGroupCharacters = loaded.allCharacters;
+    });
   }
 
   String _memberStatusText(AICharacter c) {

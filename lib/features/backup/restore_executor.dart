@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:crypto/crypto.dart';
 import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
+import 'package:chat_group/features/document/document_understanding_service.dart';
 
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';
@@ -117,6 +118,7 @@ class RestoreExecutor {
       }
       db.resetLifecycleCaches();
       await db.ensureMessageIndex();
+      DocumentUnderstandingService.clearCache();
       return RestoreReport(
         inserted: inserted,
         skipped: plan.skipped,
@@ -125,6 +127,7 @@ class RestoreExecutor {
     } on Object catch (error) {
       final rollbackErrors = await transaction.rollback();
       db.resetLifecycleCaches();
+      DocumentUnderstandingService.clearCache();
       try {
         await db.ensureMessageIndex();
       } on Object catch (rebuildError) {

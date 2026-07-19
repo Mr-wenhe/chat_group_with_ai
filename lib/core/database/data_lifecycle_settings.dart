@@ -14,6 +14,7 @@ class DataLifecycleSettings {
   static const _groupProactiveKey = 'group_chat_last_proactive_at';
   static const _pinnedCharacterKey = 'pinned_character_ids';
   static const _pinnedGroupKey = 'pinned_group_ids';
+  static const _memoryPinnedKey = 'memory_pinned_keys_v1';
   static const _tokenUsageKey = 'token_usage';
   static const _workModePrefix = 'work_mode_enabled:';
   static const _checkpointPrefix = 'context_compressed_through:';
@@ -64,6 +65,10 @@ class DataLifecycleSettings {
     );
     await db.appSettingsBox.delete('$_workModePrefix$conversationId');
     await _deleteKeysWithPrefix('$_checkpointPrefix$conversationId:');
+    await _removeMemoryPins(
+      (pin) =>
+          pin.startsWith('group:$conversationId:') || !_memoryPinExists(pin),
+    );
     await _removeTokenUsage(
       isGroup ? 'byGroup' : 'byCharacter',
       conversationId,
@@ -81,6 +86,9 @@ class DataLifecycleSettings {
     await _removeTokenUsage('byCharacter', characterId);
     await db.appSettingsBox.delete('$_workModePrefix$conversationId');
     await _deleteKeysWithPrefix('$_checkpointPrefix$conversationId:');
+    await _removeMemoryPins(
+      (pin) => pin == 'legacy:$characterId' || !_memoryPinExists(pin),
+    );
     if (removeConversation) {
       await this.removeConversation(conversationId, isGroup: false);
     }
@@ -96,6 +104,7 @@ class DataLifecycleSettings {
       _groupReadKey,
       _groupProactiveKey,
       _tokenUsageKey,
+      _memoryPinnedKey,
       deletedCharacterSnapshotsKey,
     ];
     await db.appSettingsBox.deleteAll(keys);
@@ -186,6 +195,36 @@ class DataLifecycleSettings {
             .where((key) => key.startsWith(prefix))
             .toList(),
       );
+
+  Future<void> _removeMemoryPins(bool Function(String pin) remove) async {
+    final raw = db.appSettingsBox.get(_memoryPinnedKey);
+    if (raw is! List) return;
+    await db.appSettingsBox.put(
+      _memoryPinnedKey,
+      raw.whereType<String>().where((pin) => !remove(pin)).toList(),
+    );
+  }
+
+  bool _memoryPinExists(String pin) {
+    if (pin.startsWith('character:')) {
+      return db.characterMemoryBox.containsKey(
+        pin.substring(10).split(':').first,
+      );
+    }
+    if (pin.startsWith('legacy:')) {
+      return db.aiCharacterBox.containsKey(pin.substring(7));
+    }
+    if (pin.startsWith('relationship:')) {
+      return db.relationshipStateBox.containsKey(pin.substring(13));
+    }
+    if (pin.startsWith('group:')) {
+      final payload = pin.substring(6);
+      final separator = payload.indexOf(':');
+      return separator > 0 &&
+          db.chatGroupBox.containsKey(payload.substring(0, separator));
+    }
+    return false;
+  }
 
   Map<String, dynamic> _snapshots() {
     final raw = db.appSettingsBox.get(deletedCharacterSnapshotsKey);

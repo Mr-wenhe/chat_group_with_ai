@@ -254,6 +254,7 @@ class StagedBackupData {
       'group_chat_last_proactive_at',
       'pinned_character_ids',
       'pinned_group_ids',
+      'memory_pinned_keys_v1',
       'token_usage',
     };
     for (final key in settings.keys) {

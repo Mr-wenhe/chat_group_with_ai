@@ -102,11 +102,17 @@ class ContextWindowManager {
     required ContextSummary summary,
     required CharacterSaver saveCharacter,
     required CharacterMemorySaver saveMemory,
+    LayeredMemoryUpdate retained = const LayeredMemoryUpdate(),
   }) async {
-    HumanizedMemoryService.mergeLayeredMemory(memory, summary.layeredUpdate);
+    HumanizedMemoryService.mergeLayeredMemory(
+      memory,
+      summary.layeredUpdate,
+      retained: retained,
+    );
     character.memorySummary = HumanizedMemoryService.mergeGlobalSummary(
       existing: character.memorySummary,
       update: summary.layeredUpdate,
+      retained: retained,
     );
     await saveMemory(memory);
     await saveCharacter(character);

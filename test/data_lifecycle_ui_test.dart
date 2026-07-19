@@ -136,7 +136,10 @@ void main() {
     await tester.scrollUntilVisible(
       find.text('清除聊天内容'),
       500,
-      scrollable: find.byType(Scrollable).last,
+      scrollable: find.byWidgetPredicate(
+        (widget) =>
+            widget is Scrollable && widget.axisDirection == AxisDirection.down,
+      ),
     );
     await tester.drag(find.byType(ListView), const Offset(0, -180));
     await tester.pump(const Duration(milliseconds: 200));

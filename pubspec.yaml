@@ -58,6 +58,11 @@ dependencies:
   desktop_drop: ^0.7.1
   open_filex: ^4.7.0
   archive: ^4.0.9
+  # 纯 Dart PDF 文本提取；27.2.5 兼容 Dart 2.17+，避免新版 Flutter SDK 下限。
+  # 正式发布前须确认项目满足 Syncfusion Community 或 Commercial 授权条件。
+  syncfusion_flutter_pdf: 27.2.5
+  # DOCX/XLSX 的 Open XML 解析。
+  xml: 6.5.0
   crypto: ^3.0.7
   package_info_plus: ">=8.0.0 <9.0.0"
 

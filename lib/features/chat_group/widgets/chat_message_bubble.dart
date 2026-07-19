@@ -13,6 +13,7 @@ import 'package:chat_group/features/chat_group/widgets/blinking_cursor.dart';
 import 'package:chat_group/features/chat_group/widgets/message_selectable_text.dart';
 import 'package:chat_group/features/chat_group/widgets/video_bubble.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
+import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
 
@@ -349,7 +350,8 @@ class ChatMessageBubble extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    formatAttachmentSize(att.fileSize),
+                    '${formatAttachmentSize(att.fileSize)} · '
+                    '${DocumentUnderstandingService.statusLabel(att)}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 11, color: subtleColor),

@@ -16,6 +16,7 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback onNextResult;
   final VoidCallback onExitSearch;
   final VoidCallback onExport;
+  final VoidCallback onOpenMemory;
   final IconData webSearchIcon;
   final String webSearchTooltip;
   final VoidCallback onConfigureWebSearch;
@@ -36,6 +37,7 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
     required this.onNextResult,
     required this.onExitSearch,
     required this.onExport,
+    required this.onOpenMemory,
     required this.webSearchIcon,
     required this.webSearchTooltip,
     required this.onConfigureWebSearch,
@@ -108,6 +110,11 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
                 icon: const Icon(Icons.search_rounded, size: 22),
                 onPressed: onEnterSearch,
                 tooltip: '搜索消息',
+              ),
+              IconButton(
+                icon: const Icon(Icons.psychology_alt_outlined, size: 22),
+                onPressed: onOpenMemory,
+                tooltip: '查看实际使用的记忆',
               ),
               if (showGroupActions)
                 IconButton(

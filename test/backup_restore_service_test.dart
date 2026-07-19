@@ -378,6 +378,60 @@ void main() {
     );
   });
 
+  test('copy restore preserves and remaps memory pin controls', () async {
+    final attachment = File('${mediaDirectory.path}/memory-pins.txt');
+    await attachment.writeAsString('memory pins');
+    await _seedCoreData(db, attachment);
+    await db.appSettingsBox.put('memory_pinned_keys_v1', [
+      'group:group-1:group-1_2026-29',
+      'character:memory-1:facts:dXNlcg==',
+      'legacy:char-1',
+      'relationship:relationship-1',
+    ]);
+    final backup = File('${testRoot.path}/memory-pins.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(
+      destination: backup,
+      selection: const BackupSelection.all(),
+    );
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.copyWithNewIds,
+    );
+
+    final copiedGroup =
+        db.chatGroupBox.values.singleWhere((item) => item.id != 'group-1');
+    final copiedCharacter =
+        db.aiCharacterBox.values.singleWhere((item) => item.id != 'char-1');
+    final copiedMemory = db.characterMemoryBox.values
+        .singleWhere((item) => item.id != 'memory-1');
+    final copiedRelationship = db.relationshipStateBox.values
+        .singleWhere((item) => item.id != 'relationship-1');
+    final copiedGroupMemory = db.groupMemoryBox.values
+        .singleWhere((item) => item.groupId == copiedGroup.id);
+    final pins = (db.appSettingsBox.get('memory_pinned_keys_v1') as List)
+        .whereType<String>()
+        .toSet();
+
+    expect(
+      pins,
+      contains('group:${copiedGroup.id}:${copiedGroupMemory.key}'),
+    );
+    expect(
+      pins,
+      contains('character:${copiedMemory.id}:facts:dXNlcg=='),
+    );
+    expect(pins, contains('legacy:${copiedCharacter.id}'));
+    expect(pins, contains('relationship:${copiedRelationship.id}'));
+  });
+
   test('missing attachment is reported once and omitted from the package',
       () async {
     final attachment = File('${mediaDirectory.path}/missing.txt');

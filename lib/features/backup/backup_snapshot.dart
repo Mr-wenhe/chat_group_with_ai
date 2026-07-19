@@ -115,6 +115,7 @@ class _Snapshot {
       'group_chat_last_proactive_at',
       'pinned_character_ids',
       'pinned_group_ids',
+      'memory_pinned_keys_v1',
       'token_usage',
     };
     final result = <String, dynamic>{};
@@ -162,6 +163,17 @@ class _Snapshot {
         if (value is List && value.contains(conversationId)) {
           result[key] = [conversationId];
         }
+      } else if (key == 'memory_pinned_keys_v1' && value is List) {
+        final pins = value
+            .whereType<String>()
+            .where((pin) => _memoryPinBelongsToConversation(
+                  db,
+                  pin,
+                  conversationId,
+                  directCharacterId,
+                ))
+            .toList(growable: false);
+        if (pins.isNotEmpty) result[key] = pins;
       } else if (value is Map &&
           (key == 'direct_chat_read_at' || key == 'direct_chat_source')) {
         if (value.containsKey(conversationId)) {
@@ -186,5 +198,32 @@ class _Snapshot {
       }
     }
     return result;
+  }
+
+  static bool _memoryPinBelongsToConversation(
+    DatabaseService db,
+    String pin,
+    String conversationId,
+    String? directCharacterId,
+  ) {
+    if (pin.startsWith('group:$conversationId:')) return true;
+    if (pin.startsWith('character:')) {
+      final id = pin.substring(10).split(':').first;
+      return db.characterMemoryBox.get(id)?.groupId == conversationId;
+    }
+    if (pin.startsWith('relationship:')) {
+      return db.relationshipStateBox.get(pin.substring(13))?.groupId ==
+          conversationId;
+    }
+    if (pin.startsWith('legacy:')) {
+      final characterId = pin.substring(7);
+      return characterId == directCharacterId ||
+          (db.chatGroupBox
+                  .get(conversationId)
+                  ?.aiCharacterIds
+                  .contains(characterId) ??
+              false);
+    }
+    return false;
   }
 }

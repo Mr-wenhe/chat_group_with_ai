@@ -120,6 +120,11 @@ void main() {
     await db.appSettingsBox.put('pinned_group_ids', ['g1', 'g2']);
     await db.appSettingsBox.put('work_mode_enabled:g1', true);
     await db.appSettingsBox.put('context_compressed_through:g1:c1', 'm1');
+    await db.appSettingsBox.put('memory_pinned_keys_v1', [
+      'group:g1:g1_week',
+      'character:cm1:facts:dGVzdA==',
+      'relationship:r1',
+    ]);
 
     final plan = await service.previewGroup('g1');
     expect(plan.count('messages'), 1);
@@ -143,6 +148,7 @@ void main() {
     expect(await removedFile.exists(), isFalse);
     expect(await sharedFile.exists(), isTrue);
     expect(db.pinnedGroupIds(), {'g2'});
+    expect(db.appSettingsBox.get('memory_pinned_keys_v1'), isEmpty);
     expect(service.hasPendingOperation, isFalse);
   });
 
@@ -254,6 +260,11 @@ void main() {
     await db.appSettingsBox.put('pinned_character_ids', [characterId]);
     await db.appSettingsBox
         .put('direct_chat_last_proactive_at', {characterId: 'x'});
+    await db.appSettingsBox.put('memory_pinned_keys_v1', [
+      'legacy:$characterId',
+      'character:cm:facts:dGVzdA==',
+      'relationship:r',
+    ]);
 
     final result = await service.deleteCharacter(
       characterId,
@@ -270,6 +281,7 @@ void main() {
     expect(db.characterSkillBox.isEmpty, isTrue);
     expect(db.agentTaskBox.isEmpty, isTrue);
     expect(db.workModeWorkspaceBox.isEmpty, isTrue);
+    expect(db.appSettingsBox.get('memory_pinned_keys_v1'), isEmpty);
     expect(service.deletedCharacter(characterId)!.name, '角色c1');
 
     final loaded = await ChatRoomLoader(db: db, resolveApiConfig: (_) => null)

@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:flutter/foundation.dart';
 
 /// 读文件字节的函数签名，便于在单测中注入假数据（不依赖真实文件）。
@@ -149,10 +150,36 @@ Future<dynamic> prepareUserMessageContent(
   AsyncFileBytesReader? fileReader,
   int maxVisionImages = defaultMaxVisionImages,
   int maxInlineImageBytes = defaultMaxInlineImageBytes,
+  String? documentQuery,
+  DocumentTextReader? documentTextReader,
+  DocumentProcessingToken? documentCancelToken,
+  bool includeDocumentContext = true,
 }) async {
+  final documentContext = includeDocumentContext
+      ? await DocumentUnderstandingService.buildPromptContext(
+          query: documentQuery ?? message.content,
+          attachments: message.media ?? const [],
+          readText: documentTextReader,
+          cancelToken: documentCancelToken,
+        )
+      : '';
+  final preparedMessage = documentContext.isEmpty
+      ? message
+      : Message(
+          id: message.id,
+          groupId: message.groupId,
+          senderId: message.senderId,
+          senderType: message.senderType,
+          content: '${message.content}\n\n$documentContext',
+          timestamp: message.timestamp,
+          replyToMessageId: message.replyToMessageId,
+          isMention: message.isMention,
+          mentionedAiIds: message.mentionedAiIds,
+          media: message.media,
+        );
   if (!supportsVision || message.media == null) {
     return buildUserMessageContent(
-      message,
+      preparedMessage,
       supportsVision: supportsVision,
       maxVisionImages: maxVisionImages,
       maxInlineImageBytes: maxInlineImageBytes,
@@ -181,7 +208,7 @@ Future<dynamic> prepareUserMessageContent(
     }
   }
   return buildUserMessageContent(
-    message,
+    preparedMessage,
     supportsVision: supportsVision,
     fileReader: (path) {
       final data = decodeAttachmentDataUri(path);

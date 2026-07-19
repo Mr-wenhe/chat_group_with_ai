@@ -117,13 +117,24 @@ class HumanizedMemoryService {
 
   static void mergeLayeredMemory(
     CharacterMemory memory,
-    LayeredMemoryUpdate update,
-  ) {
-    memory.facts = _mergeLayer(memory.facts, update.facts);
-    memory.relationshipNotes =
-        _mergeLayer(memory.relationshipNotes, update.relationshipNotes);
-    memory.personaGrowth =
-        _mergeLayer(memory.personaGrowth, update.personaGrowth);
+    LayeredMemoryUpdate update, {
+    LayeredMemoryUpdate retained = const LayeredMemoryUpdate(),
+  }) {
+    memory.facts = _mergeLayer(
+      memory.facts,
+      update.facts,
+      retained: retained.facts,
+    );
+    memory.relationshipNotes = _mergeLayer(
+      memory.relationshipNotes,
+      update.relationshipNotes,
+      retained: retained.relationshipNotes,
+    );
+    memory.personaGrowth = _mergeLayer(
+      memory.personaGrowth,
+      update.personaGrowth,
+      retained: retained.personaGrowth,
+    );
     memory.lastUpdatedAt = DateTime.now();
   }
 
@@ -134,20 +145,48 @@ class HumanizedMemoryService {
   static String mergeGlobalSummary({
     required String existing,
     required LayeredMemoryUpdate update,
+    LayeredMemoryUpdate retained = const LayeredMemoryUpdate(),
     int maxChars = 900,
   }) {
     final current = _parseGlobalSummary(existing);
-    final facts = _mergeLayer(current.facts, update.facts);
-    final relationships =
-        _mergeLayer(current.relationshipNotes, update.relationshipNotes);
-    final growth = _mergeLayer(current.personaGrowth, update.personaGrowth);
-    final parts = <String>[
-      if (facts.isNotEmpty) '【事实】${facts.take(6).join('；')}',
-      if (relationships.isNotEmpty) '【关系】${relationships.take(5).join('；')}',
-      if (growth.isNotEmpty) '【成长】${growth.take(5).join('；')}',
-    ];
-    final value = parts.join('\n');
-    return value.length <= maxChars ? value : value.substring(0, maxChars);
+    final facts = _mergeLayer(
+      current.facts,
+      update.facts,
+      retained: retained.facts,
+    );
+    final relationships = _mergeLayer(
+      current.relationshipNotes,
+      update.relationshipNotes,
+      retained: retained.relationshipNotes,
+    );
+    final growth = _mergeLayer(
+      current.personaGrowth,
+      update.personaGrowth,
+      retained: retained.personaGrowth,
+    );
+    final summaryFacts = _summaryLayer(facts, retained.facts, 6);
+    final summaryRelationships =
+        _summaryLayer(relationships, retained.relationshipNotes, 5);
+    final summaryGrowth = _summaryLayer(growth, retained.personaGrowth, 5);
+    String build() => [
+          if (summaryFacts.isNotEmpty) '【事实】${summaryFacts.join('；')}',
+          if (summaryRelationships.isNotEmpty)
+            '【关系】${summaryRelationships.join('；')}',
+          if (summaryGrowth.isNotEmpty) '【成长】${summaryGrowth.join('；')}',
+        ].join('\n');
+
+    var value = build();
+    while (value.length > maxChars) {
+      final removed = _removeOldestUnretained(summaryFacts, retained.facts) ||
+          _removeOldestUnretained(
+            summaryRelationships,
+            retained.relationshipNotes,
+          ) ||
+          _removeOldestUnretained(summaryGrowth, retained.personaGrowth);
+      if (!removed) break;
+      value = build();
+    }
+    return value;
   }
 
   static LayeredMemoryUpdate _parseGlobalSummary(String raw) {
@@ -189,16 +228,45 @@ class HumanizedMemoryService {
   }
 
   static List<String> _mergeLayer(
-      List<String> existing, List<String> incoming) {
+    List<String> existing,
+    List<String> incoming, {
+    List<String> retained = const [],
+  }) {
     final result = <String>[];
-    for (final text in [...existing, ...incoming]) {
+    final retainedValues = retained.map((item) => _clip(item.trim())).toSet();
+    for (final text in [...existing, ...retained, ...incoming]) {
       final clipped = _clip(text.trim());
       if (clipped.isEmpty) continue;
       result.remove(clipped);
       result.add(clipped);
     }
-    if (result.length <= maxLayerEntries) return result;
-    return result.sublist(result.length - maxLayerEntries);
+    while (result.length > maxLayerEntries) {
+      if (!_removeOldestUnretained(result, retainedValues)) break;
+    }
+    return result;
+  }
+
+  static bool _removeOldestUnretained(
+    List<String> values,
+    Iterable<String> retained,
+  ) {
+    final retainedValues = retained.toSet();
+    final index = values.indexWhere((item) => !retainedValues.contains(item));
+    if (index < 0) return false;
+    values.removeAt(index);
+    return true;
+  }
+
+  static List<String> _summaryLayer(
+    List<String> values,
+    List<String> retained,
+    int limit,
+  ) {
+    final result = values.toList();
+    while (result.length > limit) {
+      if (!_removeOldestUnretained(result, retained)) break;
+    }
+    return result;
   }
 
   static String _clip(String text) {

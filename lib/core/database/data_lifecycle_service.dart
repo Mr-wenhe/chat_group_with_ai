@@ -13,6 +13,7 @@ import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:flutter/foundation.dart';
 
 /// Owns every destructive cross-box operation.
@@ -187,10 +188,18 @@ class DataLifecycleService {
 
   Future<MediaUsage> mediaUsage() => _media.usage();
 
-  Future<DataLifecycleResult> cleanupOrphanMedia() => _media.cleanup();
+  Future<DataLifecycleResult> cleanupOrphanMedia() async {
+    final result = await _media.cleanup();
+    DocumentUnderstandingService.clearCache();
+    return result;
+  }
 
-  Future<DataLifecycleResult> cleanupMediaPaths(Iterable<String> paths) =>
-      _media.cleanupPaths(paths);
+  Future<DataLifecycleResult> cleanupMediaPaths(Iterable<String> paths) async {
+    final values = paths.toList(growable: false);
+    final result = await _media.cleanupPaths(values);
+    DocumentUnderstandingService.evictPaths(values);
+    return result;
+  }
 
   Future<DataLifecycleResult> _runMessageDeletion(
     String messageId,

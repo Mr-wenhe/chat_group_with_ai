@@ -165,8 +165,17 @@ class _RestorePlan {
       value['conversationId'] = mappedConversation;
       return mappedConversation;
     });
-    final settings = _remapSettings(data.settings, characterMap, groupMap,
-        conversation, db, strategy, skipped);
+    final settings = _remapSettings(
+      data.settings,
+      characterMap,
+      groupMap,
+      memoryMap,
+      relationshipMap,
+      conversation,
+      db,
+      strategy,
+      skipped,
+    );
     return _RestorePlan(
       apiConfigs: apiConfigs,
       characters: characters,
@@ -297,6 +306,8 @@ class _RestorePlan {
     Map<String, dynamic> source,
     Map<String, String> characters,
     Map<String, String> groups,
+    Map<String, String> memories,
+    Map<String, String> relationships,
     String Function(String) conversation,
     DatabaseService db,
     RestoreConflictStrategy strategy,
@@ -308,6 +319,17 @@ class _RestorePlan {
       dynamic value = entry.value;
       if (key == 'pinned_character_ids') value = _mapList(value, characters);
       if (key == 'pinned_group_ids') value = _mapList(value, groups);
+      if (key == 'memory_pinned_keys_v1') {
+        value = _strings(value)
+            .map((pin) => _mapMemoryPin(
+                  pin,
+                  characters,
+                  groups,
+                  memories,
+                  relationships,
+                ))
+            .toList(growable: false);
+      }
       if (value is Map &&
           (key == 'direct_chat_read_at' || key == 'direct_chat_source')) {
         value = _mapKeys(value, conversation);
@@ -373,6 +395,45 @@ class _RestorePlan {
 
   static List<String> _mapList(Object? value, Map<String, String> mapping) =>
       _strings(value).map((id) => mapping[id] ?? id).toList();
+
+  static String _mapMemoryPin(
+    String pin,
+    Map<String, String> characters,
+    Map<String, String> groups,
+    Map<String, String> memories,
+    Map<String, String> relationships,
+  ) {
+    if (pin.startsWith('character:')) {
+      final payload = pin.substring(10);
+      final separator = payload.indexOf(':');
+      final id = separator < 0 ? payload : payload.substring(0, separator);
+      return 'character:${memories[id] ?? id}'
+          '${separator < 0 ? '' : payload.substring(separator)}';
+    }
+    if (pin.startsWith('legacy:')) {
+      final id = pin.substring(7);
+      return 'legacy:${characters[id] ?? id}';
+    }
+    if (pin.startsWith('relationship:')) {
+      final id = pin.substring(13);
+      return 'relationship:${relationships[id] ?? id}';
+    }
+    if (pin.startsWith('group:')) {
+      final payload = pin.substring(6);
+      final separator = payload.indexOf(':');
+      if (separator < 0) return pin;
+      final oldGroup = payload.substring(0, separator);
+      final newGroup = groups[oldGroup] ?? oldGroup;
+      var memoryKey = payload.substring(separator + 1);
+      if (memoryKey == oldGroup) {
+        memoryKey = newGroup;
+      } else if (memoryKey.startsWith('${oldGroup}_')) {
+        memoryKey = '$newGroup${memoryKey.substring(oldGroup.length)}';
+      }
+      return 'group:$newGroup:$memoryKey';
+    }
+    return pin;
+  }
 
   static Map<String, dynamic> _mapKeys(
     Map source,
