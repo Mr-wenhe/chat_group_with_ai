@@ -145,7 +145,7 @@ class _DateDivider extends StatelessWidget {
         child: Container(
           padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
           decoration: BoxDecoration(
-            color: WeComChatTokens.timePill(context).withOpacity(0.92),
+            color: WeComChatTokens.timePill(context).withValues(alpha: 0.92),
             borderRadius: BorderRadius.circular(4),
           ),
           child: Text(

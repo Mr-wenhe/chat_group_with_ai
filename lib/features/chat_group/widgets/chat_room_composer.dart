@@ -186,7 +186,7 @@ class ChatRoomComposer extends StatelessWidget {
                           : WeComChatTokens.divider(context),
                       foregroundColor: canSend
                           ? WeComChatTokens.lightText
-                          : colorScheme.onSurfaceVariant.withOpacity(0.5),
+                          : colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
                       shape: RoundedRectangleBorder(
                         borderRadius: BorderRadius.circular(4),
                       ),
@@ -237,9 +237,9 @@ class _QuoteBar extends StatelessWidget {
       margin: const EdgeInsets.only(left: 16, right: 16, top: 8),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
       decoration: BoxDecoration(
-        color: colorScheme.primaryContainer.withOpacity(0.4),
+        color: colorScheme.primaryContainer.withValues(alpha: 0.4),
         borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: colorScheme.primary.withOpacity(0.3)),
+        border: Border.all(color: colorScheme.primary.withValues(alpha: 0.3)),
       ),
       child: Row(
         children: [

@@ -301,7 +301,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                       children: [
                         Icon(Icons.settings_remote_outlined,
                             size: 40,
-                            color: cs.onSurfaceVariant.withOpacity(0.4)),
+                            color: cs.onSurfaceVariant.withValues(alpha: 0.4)),
                         const SizedBox(height: 12),
                         Text('还没有 API 配置',
                             style: TextStyle(
@@ -341,7 +341,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   builder: (_) => const GlobalSearchPage(),
                 )),
               ),
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.document_scanner_outlined,
@@ -351,7 +351,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     '${DocumentUnderstandingService.cachedDocumentCount} 个本地文档 · 可随时清除并按需重建',
                 onTap: _showDocumentCache,
               ),
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.policy_outlined,
@@ -415,7 +415,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   },
                 ),
               ),
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.volume_up_outlined,
@@ -455,7 +455,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onTap: kIsWeb ? null : _chooseAiProcessingDir,
               ),
               if (!kIsWeb) ...[
-                Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+                Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
                 _SettingTile(
                   cs: cs,
                   icon: Icons.restore_rounded,
@@ -485,7 +485,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(builder: (_) => const ExportPage())),
               ),
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.backup_rounded,
@@ -494,7 +494,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 subtitle: '版本化备份、导入预览、冲突处理与失败回滚（不含 API Key）',
                 onTap: _openBackupRestore,
               ),
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.info_outline_rounded,
@@ -503,7 +503,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 subtitle: '查看应用信息与开源许可',
                 onTap: () {},
               ),
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.cleaning_services_rounded,
@@ -514,7 +514,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onTap: _isCleaningMedia ? null : _cleanupOrphanMedia,
               ),
               if (_hasPendingDeletion) ...[
-                Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+                Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
                 _SettingTile(
                   cs: cs,
                   icon: Icons.sync_problem_rounded,
@@ -524,7 +524,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   onTap: _retryPendingDeletion,
                 ),
               ],
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.forum_outlined,
@@ -534,7 +534,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onTap: () =>
                     _confirmClearData(context, DataClearScope.chatContent),
               ),
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.delete_sweep_outlined,
@@ -544,7 +544,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onTap: () =>
                     _confirmClearData(context, DataClearScope.userContent),
               ),
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.restart_alt_rounded,
@@ -799,7 +799,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ],
               ),
             ),
-            Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+            Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               child: Row(
@@ -811,7 +811,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ],
               ),
             ),
-            Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+            Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               child: Row(
@@ -823,7 +823,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 ],
               ),
             ),
-            Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+            Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
             Padding(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
               child: Row(
@@ -836,7 +836,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               ),
             ),
             if (byGroup.isNotEmpty) ...[
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                 child: Text('各群消耗',
@@ -894,7 +894,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               const SizedBox(height: 4),
             ],
             if (byChar.isNotEmpty) ...[
-              Divider(height: 1, color: cs.outlineVariant.withOpacity(0.5)),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                 child: Text('各角色消耗',
@@ -1011,7 +1011,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         width: 36,
         height: 36,
         decoration: BoxDecoration(
-            color: color.withOpacity(0.14),
+            color: color.withValues(alpha: 0.14),
             borderRadius: BorderRadius.circular(10)),
         child: Icon(icon, size: 18, color: color));
   }
@@ -1232,7 +1232,7 @@ class _ApiConfigCard extends StatelessWidget {
                       padding: const EdgeInsets.symmetric(
                           horizontal: 6, vertical: 2),
                       decoration: BoxDecoration(
-                        color: pColor.withOpacity(0.12),
+                        color: pColor.withValues(alpha: 0.12),
                         borderRadius: BorderRadius.circular(6),
                       ),
                       child: Text(label,
@@ -1305,8 +1305,8 @@ class _ApiConfigCard extends StatelessWidget {
       height: 40,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: pColor.withOpacity(0.14),
-        border: Border.all(color: pColor.withOpacity(0.3), width: 1.5),
+        color: pColor.withValues(alpha: 0.14),
+        border: Border.all(color: pColor.withValues(alpha: 0.3), width: 1.5),
       ),
       child: Center(
           child: Text(config.name.isNotEmpty ? config.name[0] : '?',

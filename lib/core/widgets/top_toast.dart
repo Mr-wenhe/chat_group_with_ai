@@ -41,7 +41,7 @@ class AppToast {
                       border: Border.all(color: cs.outlineVariant),
                       boxShadow: [
                         BoxShadow(
-                          color: Colors.black.withOpacity(0.22),
+                          color: Colors.black.withValues(alpha: 0.22),
                           blurRadius: 18,
                           offset: const Offset(0, 8),
                         ),

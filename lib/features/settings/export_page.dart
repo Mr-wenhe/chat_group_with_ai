@@ -152,7 +152,7 @@ class _ExportPageState extends ConsumerState<ExportPage> {
         mainAxisAlignment: MainAxisAlignment.center,
         children: [
           Icon(Icons.forum_outlined,
-              size: 64, color: cs.primary.withOpacity(0.3)),
+              size: 64, color: cs.primary.withValues(alpha: 0.3)),
           const SizedBox(height: 24),
           Text('还没有群组',
               style: TextStyle(

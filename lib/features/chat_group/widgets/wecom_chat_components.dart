@@ -131,7 +131,7 @@ class WeComBubbleSurface extends StatelessWidget {
   Widget build(BuildContext context) {
     final bubbleColor = isHighlighted
         ? Color.alphaBlend(
-            Theme.of(context).colorScheme.primary.withOpacity(0.12),
+            Theme.of(context).colorScheme.primary.withValues(alpha: 0.12),
             WeComChatTokens.bubble(context, isUser: isUser),
           )
         : WeComChatTokens.bubble(context, isUser: isUser);

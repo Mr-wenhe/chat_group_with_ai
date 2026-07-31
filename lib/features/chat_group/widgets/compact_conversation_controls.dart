@@ -35,9 +35,9 @@ class CompactConversationControls extends StatelessWidget {
         alignment: Alignment.centerRight,
         child: DecoratedBox(
           decoration: BoxDecoration(
-            color: cs.surfaceContainerHighest.withOpacity(0.72),
+            color: cs.surfaceContainerHighest.withValues(alpha: 0.72),
             borderRadius: BorderRadius.circular(10),
-            border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
+            border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.5)),
           ),
           child: Padding(
             padding: const EdgeInsets.all(3),
@@ -97,7 +97,7 @@ class CompactConversationControls extends StatelessWidget {
         maximumSize: const Size(36, 36),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
         backgroundColor: enabled ? cs.primaryContainer : Colors.transparent,
-        disabledForegroundColor: cs.onSurface.withOpacity(0.28),
+        disabledForegroundColor: cs.onSurface.withValues(alpha: 0.28),
       ),
     );
   }

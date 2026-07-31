@@ -152,7 +152,7 @@ class _SearchField extends StatelessWidget {
             decoration: InputDecoration(
               hintText: '搜索消息...',
               hintStyle: TextStyle(
-                color: colorScheme.onSurfaceVariant.withOpacity(0.6),
+                color: colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
               ),
               border: _border(colorScheme.outlineVariant),
               enabledBorder: _border(colorScheme.outlineVariant),
@@ -172,7 +172,7 @@ class _SearchField extends StatelessWidget {
         Container(
           padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
           decoration: BoxDecoration(
-            color: colorScheme.primaryContainer.withOpacity(0.5),
+            color: colorScheme.primaryContainer.withValues(alpha: 0.5),
             borderRadius: BorderRadius.circular(8),
           ),
           child: Text(

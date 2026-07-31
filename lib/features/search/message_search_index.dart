@@ -158,7 +158,9 @@ class MessageSearchIndex {
 
   bool _matchesFilters(Message message, MessageSearchFilters filters) {
     if (filters.conversationId != null &&
-        message.groupId != filters.conversationId) return false;
+        message.groupId != filters.conversationId) {
+      return false;
+    }
     if (filters.senderId != null && message.senderId != filters.senderId) {
       return false;
     }
@@ -171,7 +173,9 @@ class MessageSearchIndex {
     if (filters.mentionsOnly &&
         !message.isMention &&
         message.mentionedAiIds.isEmpty &&
-        !message.content.contains('@')) return false;
+        !message.content.contains('@')) {
+      return false;
+    }
     final attachmentType = filters.attachmentType;
     if (attachmentType != null &&
         !(message.media ?? const [])

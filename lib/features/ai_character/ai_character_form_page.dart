@@ -184,7 +184,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       color: cs.surfaceContainer,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: cs.outlineVariant.withOpacity(0.5)),
+        side: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.5)),
       ),
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
@@ -204,7 +204,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                     height: 36,
                     decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: cs.primary.withOpacity(0.12)),
+                        color: cs.primary.withValues(alpha: 0.12)),
                     child: Center(
                         child: Text(p.avatar,
                             style: TextStyle(
@@ -549,7 +549,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: cs.primaryContainer,
-        border: Border.all(color: cs.primary.withOpacity(0.2), width: 1.5),
+        border: Border.all(color: cs.primary.withValues(alpha: 0.2), width: 1.5),
       ),
       child: Center(
           child: Text(displayAvatar,

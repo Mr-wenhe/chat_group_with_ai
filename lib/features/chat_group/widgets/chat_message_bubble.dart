@@ -88,7 +88,7 @@ class ChatMessageBubble extends StatelessWidget {
                   width: 40,
                   height: 40,
                   decoration: BoxDecoration(
-                    color: senderColor(sender!).withOpacity(0.14),
+                    color: senderColor(sender!).withValues(alpha: 0.14),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   alignment: Alignment.center,
@@ -195,8 +195,8 @@ class ChatMessageBubble extends StatelessWidget {
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
         decoration: BoxDecoration(
           color: isUser
-              ? WeComChatTokens.lightText.withOpacity(0.08)
-              : WeComChatTokens.lightChatBackground.withOpacity(0.8),
+              ? WeComChatTokens.lightText.withValues(alpha: 0.08)
+              : WeComChatTokens.lightChatBackground.withValues(alpha: 0.8),
           borderRadius: BorderRadius.circular(3),
         ),
         child: Row(
@@ -220,7 +220,7 @@ class ChatMessageBubble extends StatelessWidget {
                   overflow: TextOverflow.ellipsis,
                   style: TextStyle(
                     fontSize: 12,
-                    color: WeComChatTokens.text(context).withOpacity(0.68),
+                    color: WeComChatTokens.text(context).withValues(alpha: 0.68),
                   )),
             ),
           ],
@@ -315,10 +315,10 @@ class ChatMessageBubble extends StatelessWidget {
     bool isUser,
   ) {
     final textColor = WeComChatTokens.text(context);
-    final subtleColor = textColor.withOpacity(0.62);
+    final subtleColor = textColor.withValues(alpha: 0.62);
     final fillColor = isUser
-        ? WeComChatTokens.lightText.withOpacity(0.07)
-        : WeComChatTokens.chatBackground(context).withOpacity(0.7);
+        ? WeComChatTokens.lightText.withValues(alpha: 0.07)
+        : WeComChatTokens.chatBackground(context).withValues(alpha: 0.7);
     return InkWell(
       onTap: () => _openAttachment(context, att),
       borderRadius: BorderRadius.circular(8),

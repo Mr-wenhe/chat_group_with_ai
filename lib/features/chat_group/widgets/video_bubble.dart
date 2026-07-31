@@ -61,7 +61,7 @@ class _VideoBubbleState extends State<VideoBubble> {
         child: _chewieController != null
             ? Chewie(controller: _chewieController!)
             : Container(
-                color: Colors.black.withOpacity(0.08),
+                color: Colors.black.withValues(alpha: 0.08),
                 child: const Center(child: CircularProgressIndicator()),
               ),
       ),

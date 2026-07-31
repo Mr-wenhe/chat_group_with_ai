@@ -18,7 +18,7 @@ class SearchStatusBanner extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
       child: Material(
-        color: colors.tertiaryContainer.withOpacity(0.48),
+        color: colors.tertiaryContainer.withValues(alpha: 0.48),
         borderRadius: BorderRadius.circular(10),
         child: ListTile(
           dense: true,
@@ -57,9 +57,9 @@ class ApiWarningBanner extends StatelessWidget {
       margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
       padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
       decoration: BoxDecoration(
-        color: colorScheme.errorContainer.withOpacity(0.5),
+        color: colorScheme.errorContainer.withValues(alpha: 0.5),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: colorScheme.error.withOpacity(0.4)),
+        border: Border.all(color: colorScheme.error.withValues(alpha: 0.4)),
       ),
       child: Row(
         children: [
@@ -109,9 +109,9 @@ class AnnouncementBanner extends StatelessWidget {
       margin: const EdgeInsets.fromLTRB(12, 8, 12, 4),
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
       decoration: BoxDecoration(
-        color: colorScheme.secondaryContainer.withOpacity(0.32),
+        color: colorScheme.secondaryContainer.withValues(alpha: 0.32),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: colorScheme.secondary.withOpacity(0.28)),
+        border: Border.all(color: colorScheme.secondary.withValues(alpha: 0.28)),
       ),
       child: Row(
         children: [
@@ -156,7 +156,7 @@ class UserMentionBanner extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 4, 12, 4),
       child: Material(
-        color: colorScheme.primaryContainer.withOpacity(0.72),
+        color: colorScheme.primaryContainer.withValues(alpha: 0.72),
         borderRadius: BorderRadius.circular(12),
         child: InkWell(
           onTap: onTap,
@@ -165,7 +165,7 @@ class UserMentionBanner extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: colorScheme.primary.withOpacity(0.32)),
+              border: Border.all(color: colorScheme.primary.withValues(alpha: 0.32)),
             ),
             child: Row(
               children: [

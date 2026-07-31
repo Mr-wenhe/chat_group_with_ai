@@ -128,7 +128,7 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
             width: 96,
             height: 96,
             decoration: BoxDecoration(
-              color: cs.primaryContainer.withOpacity(0.5),
+              color: cs.primaryContainer.withValues(alpha: 0.5),
               shape: BoxShape.circle,
             ),
             child: Icon(Icons.group_add_rounded, size: 44, color: cs.primary),
@@ -260,13 +260,13 @@ class _GroupCard extends StatelessWidget {
         margin: const EdgeInsets.only(bottom: 12),
         elevation: 0,
         color: summary.hasUnread
-            ? cs.primaryContainer.withOpacity(0.22)
+            ? cs.primaryContainer.withValues(alpha: 0.22)
             : cs.surfaceContainer,
         shape: RoundedRectangleBorder(
           borderRadius: BorderRadius.circular(18),
           side: BorderSide(
             color: summary.hasUnread
-                ? cs.primary.withOpacity(0.42)
+                ? cs.primary.withValues(alpha: 0.42)
                 : cs.outlineVariant,
             width: summary.hasUnread ? 1.5 : 1,
           ),
@@ -331,7 +331,7 @@ class _GroupCard extends StatelessWidget {
                           group.description,
                           style: TextStyle(
                               fontSize: 12,
-                              color: cs.onSurfaceVariant.withOpacity(0.7)),
+                              color: cs.onSurfaceVariant.withValues(alpha: 0.7)),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),

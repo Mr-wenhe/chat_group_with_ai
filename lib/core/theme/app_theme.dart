@@ -126,8 +126,8 @@ class AppTheme {
           borderRadius: BorderRadius.circular(18),
           side: BorderSide(
             color: isDark
-                ? Colors.white.withOpacity(0.06)
-                : Colors.black.withOpacity(0.05),
+                ? Colors.white.withValues(alpha: 0.06)
+                : Colors.black.withValues(alpha: 0.05),
           ),
         ),
       ),
@@ -147,8 +147,8 @@ class AppTheme {
           borderRadius: BorderRadius.circular(20),
           side: BorderSide(
             color: isDark
-                ? Colors.white.withOpacity(0.06)
-                : Colors.black.withOpacity(0.05),
+                ? Colors.white.withValues(alpha: 0.06)
+                : Colors.black.withValues(alpha: 0.05),
           ),
         ),
       ),
@@ -167,7 +167,7 @@ class AppTheme {
       inputDecorationTheme: InputDecorationTheme(
         filled: true,
         fillColor: isDark
-            ? cs.surfaceContainerHighest.withOpacity(0.6)
+            ? cs.surfaceContainerHighest.withValues(alpha: 0.6)
             : cs.surfaceContainerLowest,
         border: OutlineInputBorder(
           borderRadius: BorderRadius.circular(12),
@@ -185,7 +185,7 @@ class AppTheme {
             const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
         labelStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
         hintStyle: TextStyle(
-            fontSize: 13, color: cs.onSurfaceVariant.withOpacity(0.5)),
+            fontSize: 13, color: cs.onSurfaceVariant.withValues(alpha: 0.5)),
       ),
       textTheme: TextTheme(
         titleLarge: TextStyle(

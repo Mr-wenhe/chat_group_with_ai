@@ -228,7 +228,7 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
               width: 96,
               height: 96,
               decoration: BoxDecoration(
-                color: cs.primaryContainer.withOpacity(0.5),
+                color: cs.primaryContainer.withValues(alpha: 0.5),
                 shape: BoxShape.circle,
               ),
               child: Icon(Icons.mark_chat_unread_rounded,
@@ -285,13 +285,13 @@ class _DirectChatCard extends StatelessWidget {
       margin: const EdgeInsets.only(bottom: 12),
       elevation: 0,
       color: summary.hasUnread
-          ? cs.primaryContainer.withOpacity(0.28)
+          ? cs.primaryContainer.withValues(alpha: 0.28)
           : cs.surfaceContainer,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(18),
         side: BorderSide(
           color: summary.hasUnread
-              ? cs.primary.withOpacity(0.45)
+              ? cs.primary.withValues(alpha: 0.45)
               : cs.outlineVariant,
           width: summary.hasUnread ? 1.5 : 1,
         ),
@@ -308,7 +308,7 @@ class _DirectChatCard extends StatelessWidget {
                 borderRadius: BorderRadius.circular(24),
                 child: CircleAvatar(
                   radius: 24,
-                  backgroundColor: color.withOpacity(0.14),
+                  backgroundColor: color.withValues(alpha: 0.14),
                   child: Text(
                     character.avatar.isNotEmpty
                         ? character.avatar

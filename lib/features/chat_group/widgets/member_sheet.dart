@@ -214,7 +214,7 @@ class _MemberSheetState extends State<MemberSheet> {
                 ),
                 Divider(
                   height: 24,
-                  color: colorScheme.outlineVariant.withOpacity(0.4),
+                  color: colorScheme.outlineVariant.withValues(alpha: 0.4),
                 ),
                 if (filtered.isEmpty)
                   Padding(
@@ -289,9 +289,9 @@ class _MemberTile extends StatelessWidget {
               height: 44,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: avatarColor.withOpacity(0.15),
+                color: avatarColor.withValues(alpha: 0.15),
                 border: Border.all(
-                  color: avatarColor.withOpacity(0.3),
+                  color: avatarColor.withValues(alpha: 0.3),
                   width: 1.5,
                 ),
               ),
@@ -332,7 +332,7 @@ class _MemberTile extends StatelessWidget {
                           vertical: 2,
                         ),
                         decoration: BoxDecoration(
-                          color: colorScheme.primary.withOpacity(0.16),
+                          color: colorScheme.primary.withValues(alpha: 0.16),
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: Text(

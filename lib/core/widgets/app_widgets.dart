@@ -30,12 +30,12 @@ class AppCard extends StatelessWidget {
       borderRadius: BorderRadius.circular(18),
       border: Border.all(
         color: isDark
-            ? Colors.white.withOpacity(0.06)
-            : Colors.black.withOpacity(0.05),
+            ? Colors.white.withValues(alpha: 0.06)
+            : Colors.black.withValues(alpha: 0.05),
       ),
       boxShadow: [
         BoxShadow(
-          color: Colors.black.withOpacity(isDark ? 0.28 : 0.06),
+          color: Colors.black.withValues(alpha: isDark ? 0.28 : 0.06),
           blurRadius: isDark ? 18 : 14,
           offset: Offset(0, isDark ? 8 : 4),
         ),
@@ -85,7 +85,7 @@ class AppSectionHeader extends StatelessWidget {
         const SizedBox(width: 12),
         Expanded(
             child:
-                Divider(color: cs.primary.withOpacity(0.15), thickness: 0.5)),
+                Divider(color: cs.primary.withValues(alpha: 0.15), thickness: 0.5)),
       ],
     );
   }
@@ -113,12 +113,12 @@ InputDecoration appInputDecoration(
     ),
     filled: true,
     fillColor: isDark
-        ? cs.surfaceContainerHighest.withOpacity(0.6)
+        ? cs.surfaceContainerHighest.withValues(alpha: 0.6)
         : cs.surfaceContainerLowest,
     contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
     labelStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
     hintStyle:
-        TextStyle(fontSize: 13, color: cs.onSurfaceVariant.withOpacity(0.5)),
+        TextStyle(fontSize: 13, color: cs.onSurfaceVariant.withValues(alpha: 0.5)),
   );
 }
 
@@ -160,12 +160,12 @@ class AppBottomNav extends ConsumerWidget {
           borderRadius: BorderRadius.circular(24),
           border: Border.all(
             color: isDark
-                ? Colors.white.withOpacity(0.06)
-                : Colors.black.withOpacity(0.05),
+                ? Colors.white.withValues(alpha: 0.06)
+                : Colors.black.withValues(alpha: 0.05),
           ),
           boxShadow: [
             BoxShadow(
-              color: Colors.black.withOpacity(isDark ? 0.35 : 0.1),
+              color: Colors.black.withValues(alpha: isDark ? 0.35 : 0.1),
               blurRadius: 24,
               offset: const Offset(0, 10),
             ),
@@ -176,7 +176,7 @@ class AppBottomNav extends ConsumerWidget {
           elevation: 0,
           height: 64,
           selectedIndex: currentIndex,
-          indicatorColor: cs.primary.withOpacity(0.18),
+          indicatorColor: cs.primary.withValues(alpha: 0.18),
           labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
           onDestinationSelected: (i) {
             if (i == currentIndex) return;
@@ -247,7 +247,7 @@ class AppFab extends StatelessWidget {
         borderRadius: BorderRadius.circular(16),
         boxShadow: [
           BoxShadow(
-            color: AppTheme.dark.primary.withOpacity(0.4),
+            color: AppTheme.dark.primary.withValues(alpha: 0.4),
             blurRadius: 18,
             offset: const Offset(0, 8),
           ),
@@ -308,7 +308,7 @@ class AppPrimaryButton extends StatelessWidget {
               ? []
               : [
                   BoxShadow(
-                    color: AppTheme.dark.primary.withOpacity(0.35),
+                    color: AppTheme.dark.primary.withValues(alpha: 0.35),
                     blurRadius: 16,
                     offset: const Offset(0, 6),
                   ),

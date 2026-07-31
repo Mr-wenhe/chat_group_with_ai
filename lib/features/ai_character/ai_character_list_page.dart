@@ -280,7 +280,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
             width: 96,
             height: 96,
             decoration: BoxDecoration(
-              color: cs.primaryContainer.withOpacity(0.5),
+              color: cs.primaryContainer.withValues(alpha: 0.5),
               shape: BoxShape.circle,
             ),
             child: Icon(Icons.person_add_rounded, size: 44, color: cs.primary),
@@ -403,7 +403,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
       color: cs.surfaceContainer,
       shape: RoundedRectangleBorder(
         borderRadius: BorderRadius.circular(16),
-        side: BorderSide(color: cs.outlineVariant.withOpacity(0.5)),
+        side: BorderSide(color: cs.outlineVariant.withValues(alpha: 0.5)),
       ),
       child: InkWell(
         borderRadius: BorderRadius.circular(16),
@@ -420,7 +420,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                     height: 36,
                     decoration: BoxDecoration(
                         shape: BoxShape.circle,
-                        color: cs.primary.withOpacity(0.12)),
+                        color: cs.primary.withValues(alpha: 0.12)),
                     child: Center(
                         child: Text(p.avatar,
                             style: TextStyle(
@@ -774,7 +774,7 @@ class _CharacterCard extends StatelessWidget {
           borderRadius: BorderRadius.circular(18),
           side: BorderSide(
             color: character.isActive
-                ? displayColor.withOpacity(0.35)
+                ? displayColor.withValues(alpha: 0.35)
                 : cs.outlineVariant,
             width: character.isActive ? 1.5 : 1,
           ),
@@ -804,7 +804,7 @@ class _CharacterCard extends StatelessWidget {
                             padding: const EdgeInsets.symmetric(
                                 horizontal: 6, vertical: 2),
                             decoration: BoxDecoration(
-                                color: displayColor.withOpacity(0.12),
+                                color: displayColor.withValues(alpha: 0.12),
                                 borderRadius: BorderRadius.circular(6)),
                             child: Text(displayLabel,
                                 style: TextStyle(
@@ -959,8 +959,8 @@ class _CharacterCard extends StatelessWidget {
       height: 48,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
-        color: pColor.withOpacity(0.14),
-        border: Border.all(color: pColor.withOpacity(0.3), width: 1.5),
+        color: pColor.withValues(alpha: 0.14),
+        border: Border.all(color: pColor.withValues(alpha: 0.3), width: 1.5),
       ),
       child: Stack(
         children: [
