@@ -182,6 +182,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 当前群信息；私聊场景为 loader 构造出的"展示用"伪群对象。
   ChatGroup? _group;
+
   /// 活跃角色（用于 AI 回复等逻辑）
   List<AICharacter> _characters = [];
 
@@ -1914,6 +1915,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return const [];
     }
     final requestedPaths = <String>[];
+
     /// 归一化并去重收集安全的相对路径；越权路径直接丢弃。
     void addPath(String raw) {
       final path = WorkspacePathGuard.normalizeToRelative(raw);
@@ -3756,20 +3758,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                     size: 16, color: cs.onSurfaceVariant),
                 isDense: true,
                 filled: true,
-                fillColor: cs.surfaceContainerHighest.withOpacity(0.6),
+                fillColor: cs.surfaceContainerHighest.withValues(alpha: 0.6),
                 border: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(10),
-                  borderSide:
-                      BorderSide(color: cs.outlineVariant.withOpacity(0.6)),
+                  borderSide: BorderSide(
+                      color: cs.outlineVariant.withValues(alpha: 0.6)),
                 ),
                 enabledBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(10),
-                  borderSide:
-                      BorderSide(color: cs.outlineVariant.withOpacity(0.6)),
+                  borderSide: BorderSide(
+                      color: cs.outlineVariant.withValues(alpha: 0.6)),
                 ),
                 focusedBorder: OutlineInputBorder(
                   borderRadius: BorderRadius.circular(10),
-                  borderSide: BorderSide(color: cs.primary.withOpacity(0.6)),
+                  borderSide:
+                      BorderSide(color: cs.primary.withValues(alpha: 0.6)),
                 ),
                 contentPadding:
                     const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
@@ -3777,7 +3780,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               onChanged: _onMentionSearchChanged,
             ),
           ),
-          Divider(height: 1, color: cs.outlineVariant.withOpacity(0.4)),
+          Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.4)),
           // 成员列表（Expanded 保证 ListView 有可滚动的空间）
           Expanded(
             child: _buildMentionList(cs),
@@ -3840,8 +3843,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
             padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
             decoration: BoxDecoration(
-              color:
-                  selected ? cs.primary.withOpacity(0.14) : Colors.transparent,
+              color: selected
+                  ? cs.primary.withValues(alpha: 0.14)
+                  : Colors.transparent,
               borderRadius: BorderRadius.circular(10),
             ),
             child: Row(
@@ -3851,9 +3855,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                   height: 34,
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
-                    color: pColor.withOpacity(0.14),
-                    border:
-                        Border.all(color: pColor.withOpacity(0.3), width: 1.2),
+                    color: pColor.withValues(alpha: 0.14),
+                    border: Border.all(
+                        color: pColor.withValues(alpha: 0.3), width: 1.2),
                   ),
                   child: Center(
                     child: Text(
@@ -3901,7 +3905,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         margin: const EdgeInsets.symmetric(horizontal: 6, vertical: 2),
         padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 8),
         decoration: BoxDecoration(
-          color: selected ? cs.primary.withOpacity(0.14) : Colors.transparent,
+          color: selected
+              ? cs.primary.withValues(alpha: 0.14)
+              : Colors.transparent,
           borderRadius: BorderRadius.circular(10),
         ),
         child: Row(
@@ -3911,8 +3917,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               height: 34,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
-                color: cs.primary.withOpacity(0.14),
-                border: Border.all(color: cs.primary.withOpacity(0.3)),
+                color: cs.primary.withValues(alpha: 0.14),
+                border: Border.all(color: cs.primary.withValues(alpha: 0.3)),
               ),
               child: Icon(Icons.groups_rounded, size: 18, color: cs.primary),
             ),
@@ -5560,7 +5566,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                 decoration: BoxDecoration(
                   color: cs.surfaceContainerHighest,
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: cs.outlineVariant.withOpacity(0.5)),
+                  border: Border.all(
+                      color: cs.outlineVariant.withValues(alpha: 0.5)),
                 ),
                 child: Text(emoji, style: const TextStyle(fontSize: 24)),
               ),
