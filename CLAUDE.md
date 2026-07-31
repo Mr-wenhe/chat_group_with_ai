@@ -118,11 +118,11 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 - ✅ **Private chat inbox + foreground proactive contact.** `/direct-chats` lists private histories with unread counts; private chats use `dm:{characterId}`; foreground watcher can create proactive DMs from stale private chats or recent group context.
 - **Cost estimation.** Token usage exists, but provider/model-specific price calculation is not implemented.
 - **Chat history search.**
-- **Import / restore flow.** Export exists, but importing characters/groups/conversations is not yet available.
+- ✅ **Import / restore flow.** `lib/features/backup/` implements versioned `.cgbak` backup + restore, reachable from Settings → 「完整备份与恢复」. Covers ApiConfig / AICharacter / ChatGroup / Message (+ media attachments) / GroupMemory / CharacterMemory / RelationshipState / CharacterSkill / AgentTask / WorkModeWorkspace and an allowlisted subset of `app_settings`. Three conflict strategies (empty-only / skip-existing / copy-with-new-ids, the last remapping all cross-entity ID references), staged extraction with sha256 verification before any write, and full rollback on commit failure. API keys are excluded by construction and re-asserted on both export and import; restored `ApiConfig`s need their Key re-bound.
 - **Offline proactive contact.** Fully closed-app AI generation needs pre-generated local notifications or a server-side push service; current implementation is foreground/local only.
 
 ### Known limitations (current implementation)
 
-- Import for characters/groups/conversations not yet available — only export (added 2026-07-07); data is local-only and easy to lose.
+- Backup/restore covers every Hive box except `ai_governance_ledger` (usage audit trail is intentionally device-local and not portable). `WorkModeWorkspace.workDirPath` is deliberately dropped on import since local paths aren't portable. Backup packages only accept an exact `formatVersion`/`schemaVersion` match — there is no cross-version migration path, so a backup from a future schema is rejected rather than upgraded.
 - Test coverage covers SSE parsing, presets, export safety, mention parsing, activity policy, chat orchestration, and humanized memory/prompt logic. UI-heavy chat room behavior still relies mostly on extracted logic tests.
 - Versioned `data/*.hive` may contain live API keys and chat data, so repository access should be treated as sensitive.
