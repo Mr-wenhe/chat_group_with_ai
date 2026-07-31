@@ -92,10 +92,27 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:pasteboard/pasteboard.dart';
 
+/// 空闲自动聊天（idle auto-chat）的对外可见状态，用于顶部状态条展示。
+///
+/// - [idle]：未启动 / 已停止
+/// - [waiting]：已启动，正在等待下一次触发的间隔
+/// - [generating]：本轮正在调用 LLM 生成回复
+/// - [paused]：一个 burst 达到上限后的冷却期
+/// - [unavailable]：没有任何配置了 API Key 的角色，功能不可用
+/// - [error]：上一轮生成失败
 enum AutoChatStatus { idle, waiting, generating, paused, unavailable, error }
 
+/// 聊天页面（群聊 + 私聊共用）。
+///
+/// 路由既可以是 `/chat/{groupId}`（群聊），也可以是 `/dm/{characterId}`（私聊）；
+/// 私聊场景下 [groupId] 传入的是 `dm:{characterId}` 形式的会话键，
+/// 由 [DirectChatSession] 负责识别与解析。
 class ChatRoomPage extends ConsumerStatefulWidget {
+  /// 会话 id：群聊为 ChatGroup.id，私聊为 `dm:{characterId}`。
   final String groupId;
+
+  /// 可选的定位目标消息 id（例如从搜索结果 / 通知跳转进来时），
+  /// 打开后会加载该消息所在分页并高亮滚动定位。
   final String? initialMessageId;
 
   const ChatRoomPage({
@@ -108,53 +125,123 @@ class ChatRoomPage extends ConsumerStatefulWidget {
   ConsumerState<ChatRoomPage> createState() => _ChatRoomPageState();
 }
 
+/// 聊天页面状态。
+///
+/// 混入 [WidgetsBindingObserver] 以监听 App 前后台切换：回到前台时重新登记
+/// 当前会话的"在场状态"并把消息标记为已读。
 class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     with WidgetsBindingObserver {
+  /// 输入框文本控制器。
   final _textController = TextEditingController();
+
+  /// 消息列表滚动控制器（同时用于触顶加载更早消息）。
   final _scrollController = ScrollController();
+
+  /// 输入框焦点，用于 @ 弹窗、发送后重新聚焦等。
   final _inputFocusNode = FocusNode();
+
+  /// API 凭证解析器：从安全存储中取出 apiKey，避免明文散落在业务层。
   final _credentialResolver = SecureApiCredentialResolver();
+
+  /// 通用随机源（挑选发言人、随机文案等）。
   final _random = Random();
+
+  /// 语音朗读服务（TTS），长按 AI 消息可朗读。
   late final MessageSpeechService _speech;
+
+  /// Hive 数据访问入口。
   late final DatabaseService _db;
+
+  /// AI 治理数据存储（预算 / 限流 / 用量 / 搜索策略）。
   late final AiGovernanceStore _governanceStore;
+
+  /// AI 请求网关：所有 LLM 调用先过它做限流与预算校验。
   late final AiRequestGateway _aiGateway;
+
+  /// 联网搜索协调器：决定是否搜索、执行搜索并计入治理用量。
   late final SearchCoordinator _searchCoordinator;
+
+  /// 回复资格策略：判断某角色本轮能否发言（API 配置、频率上限等）。
   late final ReplyEligibilityPolicy _replyEligibility;
+
+  /// 当前会话的消息仓储（分页加载 / 落库）。
   late final ChatRoomRepository _repository;
+
+  /// 首屏数据加载器（群信息、成员、消息、记忆、关系态一次性取回）。
   late final ChatRoomLoader _loader;
+
+  /// 记忆控制器：群记忆 / 角色记忆的生成与更新。
   late final MemoryControls _memoryControls;
+
+  /// 会话串行控制器：保证同一时刻只有一轮 AI 回复在跑，并支持中断。
   final ConversationController _conversationController =
       ConversationController();
+
+  /// 空闲自动聊天调度器（按随机间隔触发 [_tryAutoChatRound]）。
   late final AutoChatScheduler _autoChatScheduler;
 
+  /// 当前群信息；私聊场景为 loader 构造出的"展示用"伪群对象。
   ChatGroup? _group;
-  List<AICharacter> _characters = []; // 活跃角色（用于 AI 回复等逻辑）
-  List<AICharacter> _allGroupCharacters = []; // 全部群成员（含停用），供 @ 弹窗使用
+  /// 活跃角色（用于 AI 回复等逻辑）
+  List<AICharacter> _characters = [];
+
+  /// 全部群成员（含停用），供 @ 弹窗使用
+  List<AICharacter> _allGroupCharacters = [];
+
+  /// 当前已加载到内存的消息（按时间升序，仅当前分页窗口）。
   List<Message> _messages = [];
+
+  /// 是否还有更早的历史消息可以向上加载。
   bool _hasOlderMessages = false;
+
+  /// 正在加载更早消息的重入保护标记。
   bool _isLoadingOlder = false;
+
+  /// 会话的消息总数（用于展示"共 N 条"等信息）。
   int _totalMessageCount = 0;
+
+  /// 群级周记忆（按 year_week 归档）。
   GroupMemory? _groupMemory;
+
+  /// 每个角色在本会话中的分层记忆。
   List<CharacterMemory> _characterMemories = [];
   // ponytail: pinned compression stays in this room session; recompute after
   // reopening instead of creating another persisted memory channel.
+  /// 上下文压缩的会话内缓存：characterId -> (压缩检查点, 压缩摘要)。
+  ///
+  /// 故意不落库——离开页面后重新计算，避免再引入一条需要维护的持久化记忆通道。
   final Map<String, ({String checkpoint, String summary})>
       _transientContextCompression = {};
+
+  /// 角色之间的有向关系状态（好感 / 熟悉度等），影响发言意图选择。
   List<RelationshipState> _relationshipStates = [];
+
+  /// 工作模式会话状态：是否启用、待用户审批的工具调用、停止请求等。
   final WorkModeSession<PendingAgentToolApproval> _workModeSession =
       WorkModeSession<PendingAgentToolApproval>();
+
+  /// 本轮已为各角色决策好但尚未消费的发言意图：characterId -> 意图。
   final Map<String, ReplyIntent> _pendingReplyIntents = {};
+
+  /// 自动聊天轮次计数器，用于按固定节奏（而非每轮）触发记忆更新，降低成本。
   int _autoChatMemoryTick = 0;
 
+  /// 是否处于工作模式（工作模式下禁用空闲自动聊天）。
   bool get _workModeEnabled => _workModeSession.enabled;
+
+  /// 当前等待用户确认的 agentic 工具调用（为空表示无待审批项）。
   PendingAgentToolApproval? get _pendingAgentApproval =>
       _workModeSession.pendingApproval;
   set _pendingAgentApproval(PendingAgentToolApproval? value) =>
       _workModeSession.pendingApproval = value;
 
+  /// 首屏数据是否仍在加载。
   bool _isLoading = true;
+
+  /// 当前是否有 AI 回复回合正在进行（发送按钮、停止按钮等据此变化）。
   bool get _isAiReplying => _conversationController.isBusy;
+
+  /// 用户本次发言后已自动进行的连续轮数。
   int _consecutiveRound = 0;
 
   /// 用户发言后的普通群聊最多连续三轮，避免角色互相回复形成无限循环。
@@ -163,10 +250,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   // 用户消息队列：AI 回复期间用户发的消息排队在此，回合结束后自动触发回复。
 
   // @ 成员选择弹窗
+  /// @ 成员弹窗的 Overlay 句柄（非空表示弹窗已插入 Overlay）。
   OverlayEntry? _mentionOverlay;
+
+  /// 是否正在展示 @ 成员弹窗。
   bool _showMentionPopup = false;
+
+  /// 按搜索词过滤后的候选 @ 成员。
   List<AICharacter> _filteredMentionMembers = [];
-  int _mentionSelectedIndex = 0; // 键盘上下选择的高亮项
+
+  /// 键盘上下选择的高亮项
+  int _mentionSelectedIndex = 0;
+
+  /// @ 弹窗内的搜索输入控制器。
   final TextEditingController _mentionSearchController =
       TextEditingController();
 
@@ -174,28 +270,51 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   final GlobalKey _inputFieldKey = GlobalKey();
 
   // AI 自主聊天
+  /// 空闲自动聊天开关（同时受治理设置里的全局开关约束）。
   bool _isAutoChatEnabled = true;
+
+  /// 当前 burst 内已执行的自动聊天轮数。
   int _autoChatRoundCount = 0;
+
+  /// 丢弃当前流式输出的标记：用户点"停止生成"后置位，让流回调不再写状态。
   bool _discardCurrentStream = false;
 
   /// 一次空闲自动聊天 burst 的上限；达到后进入冷却，而不是持续灌水。
   static const int _maxAutoChatRounds = 4;
+
+  /// 进入房间后延迟多久启动空闲自动聊天。
   static const Duration _autoChatInitialDelay = Duration(seconds: 8);
+
+  /// 一个 burst 结束后的冷却时长。
   static const Duration _autoChatBurstPause = Duration(seconds: 35);
+
+  /// 消息搜索输入的防抖时长。
   static const Duration _searchDebounceDuration = Duration(milliseconds: 250);
+
+  /// 自动聊天两轮之间的最小间隔（秒）。
   static const int _autoChatMinIntervalSeconds = 12;
+
+  /// 叠加在最小间隔之上的随机抖动上限（秒），避免节奏机械。
   static const int _autoChatIntervalJitterSeconds = 9;
+
+  /// 自动聊天专用随机源（与 [_random] 分离，便于独立推理其随机性）。
   final Random _autoChatRandom = Random();
+
+  /// 自动聊天当前状态（驱动顶部状态条 UI）。
   AutoChatStatus _autoChatStatus = AutoChatStatus.idle;
+
+  /// 最近一次"无人可回复"的原因，用于给用户明确提示（如未配置 API Key）。
   ReplyBlockReason? _lastReplyBlockReason;
 
   // 待回应 @ 列表
+  /// 用户 @ 到但尚未回复的角色 id 队列，下一轮优先让这些角色发言。
   final List<String> _pendingMentionedIds = [];
 
   // 并发兜底：记录当前正在执行 agentic 任务的角色 id，防止同一角色在同一轮内
   // 被重复触发（极端情况下的重入会产生重复消息 / 重复文件）。
   final Set<String> _agenticRunningCharacterIds = {};
 
+  /// 输入框是否为空（缓存以避免每次输入都全量 rebuild）。
   bool _isInputEmpty = true;
 
   /// 是否允许发送：文案非空 或 有待发送附件。
@@ -203,56 +322,103 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   // —— 待发送附件（图片多选 / 视频单选），发送后清空 ——
   final List<MediaAttachment> _pendingAttachments = [];
+
+  /// 系统相册 / 相机选择器。
   final ImagePicker _imagePicker = ImagePicker();
+
+  /// 正在把剪贴板内容转成附件（避免重复粘贴）。
   bool _isPastingAttachments = false;
+
+  /// 桌面端是否有文件正被拖拽悬停在窗口上（用于高亮拖放区域）。
   bool _isDraggingFiles = false;
 
   // —— 引用回复（quote-reply）——
+  /// 当前被引用的消息；非空时输入框上方显示引用条。
   Message? _quotedMessage;
 
   // —— 重新生成 ——
+  /// 是否处于"重新生成"流程中。
   bool _isRegenerating = false;
+
+  /// 正在被重新生成的消息 id。
   String _regenerateMessageId = '';
+
+  /// 重新生成时使用的上下文快照（该消息之前的历史）。
   List<Message> _regenerateContext = [];
 
   // —— 搜索 ——
+  /// 是否处于消息搜索模式（AppBar 切换为搜索框）。
   bool _isSearching = false;
+
+  /// 搜索关键词输入控制器。
   final TextEditingController _searchController = TextEditingController();
+
+  /// 当前搜索命中的消息列表。
   List<Message> _searchResults = [];
+
+  /// 搜索结果中当前定位到的下标（用于上一条 / 下一条跳转）。
   int? _searchFocusIndex;
   // 是否存在已配置 API Key 的角色（决定 AI 能否回复/自动聊天）
   bool _hasAnyApiConfig = false;
+
+  /// 搜索输入防抖定时器。
   Timer? _searchDebounceTimer;
+
+  /// 用户在本会话手动覆盖的联网搜索策略（为空表示用全局策略）。
   WebSearchPolicy? _searchPolicyOverride;
+
+  /// 联网搜索的运行状态（用于展示"正在搜索…"等提示）。
   SearchRunState _webSearchState = const SearchRunState(SearchRunStatus.idle);
 
   // —— 流式输出（打字机）相关状态 ——
-  Message? _streamingMessage; // 正在逐 token 渲染的内存态临时消息（不落库）
+  /// 正在逐 token 渲染的内存态临时消息（不落库）
+  Message? _streamingMessage;
+
+  /// 当前流式回复会话（持有 StreamSubscription，可取消）。
   StreamingReplySession? _streamingSession;
+
+  /// 文档解析任务令牌（可取消长时间的文档理解流程）。
   DocumentProcessingToken? _documentProcessingToken;
+
+  /// 文档解析进度 0~1。
   double _documentProcessingProgress = 0;
+
+  /// 当前是否正在流式输出。
   bool get _isStreaming => _streamingSession?.isActive ?? false;
-  bool _disposed = false; // dispose 守卫，避免异步回调在销毁后写状态
+
+  /// dispose 守卫，避免异步回调在销毁后写状态
+  bool _disposed = false;
+
+  /// 消息列表控制器（供列表内部做定位、动画等）。
   final ChatMessageListController _messageListController =
       ChatMessageListController();
 
   // —— @我 提醒 ——
+  /// 已收到但用户还没查看的"@我"消息 id 队列。
   final List<String> _pendingUserMentionMessageIds = [];
+
+  /// 当前被临时高亮的消息 id（跳转定位后短暂高亮）。
   String? _highlightedMentionMessageId;
+
+  /// 高亮自动取消定时器。
   Timer? _mentionHighlightTimer;
 
   @override
   void initState() {
     super.initState();
+    // 监听 App 生命周期，用于前台恢复时刷新在场状态 / 已读状态。
     WidgetsBinding.instance.addObserver(this);
+    // 登记"当前正在查看该会话"，让主动私聊的通知逻辑不打扰当前界面。
     ConversationPresenceService.instance.enter(widget.groupId);
     _db = ref.read(databaseServiceProvider);
     _governanceStore = AiGovernanceStore(_db);
+    // 所有 LLM 调用都经由网关，超限时通过 onWarning 回调向用户提示。
     _aiGateway = AiRequestGateway(
       store: _governanceStore,
       onWarning: _showGovernanceWarning,
     );
     _searchCoordinator = SearchCoordinator(store: _governanceStore);
+    // 读取本会话此前保存过的搜索策略覆盖值。
     _searchPolicyOverride =
         _governanceStore.conversationSearchPolicy(widget.groupId);
     _loader = ChatRoomLoader(db: _db, resolveApiConfig: _resolveApiConfig);
@@ -265,6 +431,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       conversationId: widget.groupId,
       isDirectChat: _isDirectChat,
     );
+    // 调度器只负责"何时触发"，具体一轮怎么跑交给 _tryAutoChatRound。
     _autoChatScheduler = AutoChatScheduler(
       nextInterval: () => Duration(
         seconds: _autoChatBaseIntervalSeconds +
@@ -276,12 +443,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       engine: FlutterTtsSpeechEngine(),
       onStateChanged: _handleSpeechState,
     );
+    // 仅在"空/非空"状态翻转时 setState，避免每敲一个字都重建整页。
     _textController.addListener(() {
       final isEmpty = _textController.text.trim().isEmpty;
       if (isEmpty != _isInputEmpty) {
         setState(() => _isInputEmpty = isEmpty);
       }
     });
+    // 触顶时加载更早的历史消息。
     _scrollController.addListener(_handleMessageScroll);
     _loadData();
   }
@@ -289,14 +458,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   @override
   void didChangeDependencies() {
     super.didChangeDependencies();
+    // 依赖变化（例如路由复用同一 State）时重新登记在场状态。
     ConversationPresenceService.instance.enter(widget.groupId);
   }
 
   @override
   void dispose() {
+    // 先置位守卫标记，后续异步回调据此直接返回，不再触碰已销毁的 State。
     _disposed = true;
     ConversationPresenceService.instance.leave(widget.groupId);
     WidgetsBinding.instance.removeObserver(this);
+    // 未发送的附件已落盘到临时目录，需要清理避免残留垃圾文件。
     if (_pendingAttachments.isNotEmpty) {
       unawaited(_cleanupMediaPaths(_pendingAttachments));
     }
@@ -305,6 +477,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _documentProcessingToken?.cancel();
     _conversationController.dispose();
     _autoChatScheduler.dispose();
+    // 关闭本地 agent 桥接进程，避免页面退出后仍有子进程驻留。
     unawaited(LocalAgentBridgeLauncher().stop());
     unawaited(_streamingSession?.dispose());
     _streamingSession = null;
@@ -322,24 +495,33 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   @override
   void didChangeAppLifecycleState(AppLifecycleState state) {
+    // 回到前台：重新登记在场并把当前会话标记为已读。
     if (state == AppLifecycleState.resumed) {
       ConversationPresenceService.instance.enter(widget.groupId);
       unawaited(_markCurrentConversationRead());
     }
   }
 
+  /// 当前会话是否为私聊（`dm:` 前缀）。
   bool get _isDirectChat =>
       DirectChatSession.isDirectConversationId(widget.groupId);
 
+  /// 私聊对应的角色 id；群聊场景返回 null。
   String? get _directCharacterId =>
       DirectChatSession.characterIdFrom(widget.groupId);
 
+  /// 首屏加载：一次性取回群信息、成员、消息分页、记忆与关系态。
+  ///
+  /// 若带了 [ChatRoomPage.initialMessageId] 且该消息不在首屏分页内，
+  /// 会改为加载"目标消息所在窗口"，再高亮定位过去。
+  /// 加载失败（会话已被删除等）时弹提示并退出页面。
   Future<void> _loadData() async {
     try {
       final loaded = await _loader.load(widget.groupId);
       var initialMessages = loaded.messages;
       var hasOlderMessages = loaded.hasOlderMessages;
       final targetId = widget.initialMessageId;
+      // 目标消息不在默认分页中：改用"围绕目标消息"的分页窗口。
       if (targetId != null &&
           !initialMessages.any((message) => message.id == targetId)) {
         final page = await _repository.loadAround(targetId);
@@ -366,6 +548,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         _autoChatStatus = loaded.hasAnyApiConfig
             ? AutoChatStatus.waiting
             : AutoChatStatus.unavailable;
+        // 私聊且对方没有可用 API 配置时，直接给出明确的阻塞原因提示。
         _lastReplyBlockReason = loaded.isDirectChat &&
                 loaded.allCharacters.isNotEmpty &&
                 !loaded.hasAnyApiConfig
@@ -375,8 +558,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       });
 
       if (targetId == null) {
+        // 常规进入：首帧布局完成后滚到底部。
         scrollToBottomAfterInitialLayout(_scrollController);
       } else {
+        // 带定位目标：高亮并滚动到该消息。
         _highlightMessageTemporarily(targetId);
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (!_canTouchUi) return;
@@ -384,6 +569,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           if (target.isNotEmpty) unawaited(_focusSearchResult(target.first));
         });
       }
+      // 检查是否有上次异常中断的 agentic 任务需要恢复。
       _scheduleAgentTaskRecovery();
       if (ChatActivityPolicy.canStartAutoChat(
         workModeEnabled: _workModeEnabled,
@@ -391,6 +577,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         hasCharacters: loaded.activeCharacters.isNotEmpty,
         hasApiConfig: loaded.hasAnyApiConfig,
       )) {
+        // 私聊更克制：延迟更久再主动开口，避免一进来就被打扰。
         final delay = loaded.isDirectChat
             ? const Duration(seconds: 18)
             : _autoChatInitialDelay;
@@ -405,6 +592,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 滚动监听：接近顶部（<120px）且还有历史消息时，自动加载上一页。
   void _handleMessageScroll() {
     if (!_scrollController.hasClients ||
         _scrollController.position.pixels > 120 ||
@@ -415,6 +603,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     unawaited(_loadOlderMessages());
   }
 
+  /// 向上加载更早的一页消息，并保持用户当前视觉位置不跳动。
+  ///
+  /// 做法：记录加载前的滚动偏移与内容总高，插入新消息后在下一帧
+  /// 按"新增高度"补偿偏移，避免列表顶部插入导致内容瞬移。
   Future<void> _loadOlderMessages() async {
     if (_messages.isEmpty || _isLoadingOlder || !_hasOlderMessages) return;
     _isLoadingOlder = true;
@@ -428,6 +620,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (!_canTouchUi) return;
       final existingIds = _messages.map((message) => message.id).toSet();
       setState(() {
+        // 用 Set.add 的返回值顺手去重，防止分页边界重复插入同一条消息。
         _messages = [
           ...page.messages.where((message) => existingIds.add(message.id)),
           ..._messages,
@@ -446,24 +639,32 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 在首帧之后异步询问是否恢复中断的 agentic 任务。
+  ///
+  /// 放到 post-frame 是为了确保此时已有可用的 context 弹出对话框。
   void _scheduleAgentTaskRecovery() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_canTouchUi) unawaited(_offerAgentTaskRecovery());
     });
   }
 
+  /// 查找本会话中"可在工作模式下恢复"的 agentic 任务，取最近一条询问用户。
+  ///
+  /// 仅工作模式生效；用户选择继续则续跑，否则标记为放弃并清理。
   Future<void> _offerAgentTaskRecovery() async {
     if (!_workModeEnabled) return;
     final tasks = _db.agentTaskBox.values
         .where((task) =>
             task.groupId == widget.groupId && task.canResumeInWorkMode)
         .toList()
+      // 按最后更新时间倒序，优先恢复最近中断的那个任务。
       ..sort((a, b) =>
           (b.updatedAt ?? b.createdAt).compareTo(a.updatedAt ?? a.createdAt));
     if (tasks.isEmpty || !_canTouchUi) return;
     final task = tasks.first;
     final continueTask = await showDialog<bool>(
       context: context,
+      // 强制用户明确选择"继续/放弃"，避免任务悬挂在不确定状态。
       barrierDismissible: false,
       builder: (dialogContext) => AgentTaskRecoveryDialog(
         task: task,
@@ -478,6 +679,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 恢复一个中断的 agentic 任务。
+  ///
+  /// 两种恢复路径：
+  /// 1. 任务卡在"等待工具审批"→ 重建审批项并再次弹给用户确认；
+  /// 2. 否则从已完成的操作列表继续跑 agentic 循环。
   Future<void> _resumeAgentTask(AgentTask task) async {
     if (!_workModeEnabled || !task.workModeTask) return;
     final character = _db.aiCharacterBox.get(task.characterId);
@@ -492,6 +698,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       conversationId: widget.groupId,
       isDirectChat: _isDirectChat,
     );
+    // 每个 await 之后都要复检：期间用户可能已退出页面或关闭工作模式。
     if (!_canTouchUi || !_workModeEnabled) return;
     await LocalAgentBridgeLauncher().registerWorkspace(
       conversationId: widget.groupId,
@@ -500,6 +707,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (!_canTouchUi || !_workModeEnabled) return;
     final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
     if (pending != null) {
+      // 路径 1：中断点正好停在待审批的工具调用上。
       final approval = PendingAgentToolApproval(
         character: character,
         config: config,
@@ -512,6 +720,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       await _presentPendingAgentApproval(approval);
       return;
     }
+    // 路径 2：直接续跑 agentic 循环。
     if (_conversationController.beginWork() == null) return;
     if (_canTouchUi) setState(() {});
     final workModeRun = _workModeSession.beginRun();
@@ -534,6 +743,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 把任务里以 JSON 字符串保存的"已执行操作"还原成 [ToolRequest] 列表。
+  ///
+  /// 解析失败的条目会被 [Iterable.whereType] 静默丢弃——历史数据格式变化时
+  /// 不应阻断整个任务恢复。
   List<ToolRequest> _restoredExecutedRequests(AgentTask task) {
     return task.completedOperations
         .map(ToolRequest.fromJsonString)
@@ -541,6 +754,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         .toList();
   }
 
+  /// 启动空闲自动聊天调度器（首次延迟带随机抖动）。
   void _startAutoChat() {
     if (!ChatActivityPolicy.canStartAutoChat(
       workModeEnabled: _workModeEnabled,
@@ -560,6 +774,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 自动聊天的基础间隔（秒）。
+  ///
+  /// 私聊固定 45 秒（更克制）；群聊取群配置的 replyIntervalSeconds，
+  /// 并夹到 5~60 秒防止用户配出极端值把接口打爆或几乎不说话。
   int get _autoChatBaseIntervalSeconds {
     if (_isDirectChat) return 45;
     final configured =
@@ -567,12 +785,20 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return configured.clamp(5, 60);
   }
 
+  /// 停止自动聊天并把轮次计数归零，状态置为 [AutoChatStatus.paused]。
   void _stopAutoChat() {
     _autoChatScheduler.stop();
     _autoChatRoundCount = 0;
     if (_canTouchUi) setState(() => _autoChatStatus = AutoChatStatus.paused);
   }
 
+  /// 执行一轮空闲自动聊天。
+  ///
+  /// 多重让位条件（任一命中则本轮跳过或进入冷却）：
+  /// - 策略层不允许（工作模式 / 开关关闭 / 无角色 / 无 API 配置）；
+  /// - 已有回复在跑、正在流式输出、或用户正在输入（不打断用户）；
+  /// - 私聊里 AI 已连说 3 条而用户没回（避免单方面刷屏）；
+  /// - 本 burst 轮数达上限 → 停止并冷却 [_autoChatBurstPause]。
   Future<void> _tryAutoChatRound() async {
     if (!ChatActivityPolicy.canStartAutoChat(
       workModeEnabled: _workModeEnabled,
@@ -600,6 +826,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return;
     }
 
+    // 由拟人化编排器根据记忆、关系、话题契合度挑选本轮发言者及其发言意图。
     final autoIntents = HumanizedChatOrchestrator.selectReplyIntents(
       characters: _characters,
       recentMessages: _messages.toList(),
@@ -613,10 +840,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       random: _autoChatRandom,
       isAutoChat: true,
     );
+    // 排除正在跑 agentic 任务的角色，防止同一角色重入产生重复消息/文件。
     var speakers = _charactersForIntents(autoIntents)
         .where((c) => !_agenticRunningCharacterIds.contains(c.id))
         .toList();
     final lastAiSenderId = _lastAiSenderId;
+    // 有多个候选时避免让上一条的发言者连说两轮；只剩一个候选就不再过滤。
     final speakersToUse = speakers.length <= 1
         ? speakers
         : speakers.where((c) => c.id != lastAiSenderId).toList();
@@ -637,6 +866,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return;
     }
 
+    // beginAuto 返回 null 表示已有回合占用，本轮直接放弃。
     if (_conversationController.beginAuto() == null) return;
     setState(() {
       _autoChatRoundCount++;
@@ -645,6 +875,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     try {
       for (final speaker in speakersToUse) {
+        // 循环内逐次复检开关：用户可能中途关闭自动聊天或切到工作模式。
         if (!_isAutoChatEnabled || _workModeEnabled) break;
         if (!_isEligibleToReply(speaker)) continue;
         final replyContent = await _generateAiReply(
@@ -658,9 +889,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         if (_conversationController.state.phase == ConversationPhase.stopping) {
           break;
         }
+        // 按内容长度模拟"打字时间"，让多人接话有真实节奏。
         await _delay(replyContent);
       }
 
+      // 自动聊天每 3 轮才更新一次记忆，避免每轮都额外调用一次 LLM。
       if (!_workModeEnabled) {
         _autoChatMemoryTick++;
         if (_autoChatMemoryTick >= 3) {
@@ -687,20 +920,27 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 是否可以安全操作 UI / 写 State（未卸载且未 dispose）。
   bool get _canTouchUi => mounted && !_disposed;
 
+  /// 覆盖 [setState] 统一加守卫：异步回调无需各自判断是否已销毁。
   @override
   void setState(VoidCallback fn) {
     if (!_canTouchUi) return;
     super.setState(fn);
   }
 
+  /// 计算这批消息对应的"已读截止时间"。
   DateTime _readThrough(List<Message> messages) {
     return ChatRoomLoader.readThrough(
       messages.map((message) => message.timestamp),
     );
   }
 
+  /// 把当前会话标记为已读并清除"@我"横幅。
+  ///
+  /// 传 [throughMessage] 时只按该条消息的时间戳推进已读位置，
+  /// 否则按当前已加载消息的最大时间戳。
   Future<void> _markCurrentConversationRead({Message? throughMessage}) async {
     await _repository.markRead(
       throughMessage == null
@@ -710,6 +950,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _clearActiveUserMentionBanner();
   }
 
+  /// 发送用户消息的主入口。
+  ///
+  /// 顺序：收起 @ 弹窗 → 解析 @ 列表 → 拦截工具审批指令 → 构造并落库消息
+  /// → 私聊标记来源/已读 → 清理引用与附件 → 派发 AI 回复（或排队）。
   Future<void> _sendMessage() async {
     _hideMentionOverlay();
     final text = _textController.text.trim();
@@ -747,6 +991,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
     await _appendMessage(userMessage);
     if (_isDirectChat) {
+      // 记录该私聊由用户主动发起，影响后续主动联系的冷却判断。
       await _db.saveDirectChatSource(widget.groupId, DirectChatSource.direct);
       await _repository.markRead(_readThrough(_messages));
     }
@@ -757,6 +1002,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       setState(() => _pendingAttachments.clear());
     }
 
+    // 用户开口即重置 burst 计数，让自动聊天重新获得完整额度。
     _autoChatRoundCount = 0;
 
     if (_characters.isEmpty) {
@@ -784,6 +1030,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 根据当前模式把用户请求派发给"工作模式任务"或"普通聊天回合"。
   Future<void> _dispatchUserRequest({
     required String text,
     required List<String> mentionedIds,
@@ -804,6 +1051,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 工作模式：选出唯一执行者，准备工作区，然后跑 agentic 工具循环。
+  ///
+  /// 与普通群聊不同，工作模式只让一个角色执行（避免多角色并发写同一工作区），
+  /// 且必须是启用了 Agentic 能力的活跃角色。
   Future<void> _runWorkModeTask({
     required String text,
     required List<String> mentionedIds,
@@ -822,6 +1073,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       ));
       return;
     }
+    // 策略层判断这条输入是否值得触发一次工作任务（例如纯闲聊则跳过）。
     if (!WorkModePolicy.shouldRun(
       enabled: _workModeEnabled,
       character: executor,
@@ -839,15 +1091,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       ));
       return;
     }
+    // 配置里存的是 provider 名字符串，找不到时兜底为 deepseek。
     final provider = ApiProvider.values.firstWhere(
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
     );
     if (_conversationController.beginWork() == null) return;
+    // 空 setState 用于让"正在执行"相关的按钮态立即刷新。
     if (_canTouchUi) setState(() {});
     final workModeRun = _workModeSession.beginRun();
     final cancelToken = workModeRun.token;
     try {
+      // 为本会话准备（或复用）独立工作目录，并注册给本地 agent 桥接进程。
       final workspace = await WorkModeWorkspaceService(db: _db).loadOrCreate(
         conversationId: widget.groupId,
         isDirectChat: _isDirectChat,
@@ -873,6 +1128,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 结束工作活动状态，并在没有待审批项时继续处理排队的用户消息。
+  ///
+  /// 有待审批工具时故意不取队列——必须等用户先决定批准或取消。
   Future<void> _finishWorkActivityAndDispatchNext() async {
     _finishWorkActivity();
     final next = _pendingAgentApproval == null
@@ -887,6 +1145,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 执行一轮普通群聊 / 私聊的 AI 回复。
+  ///
+  /// [userMessage] 本轮触发的用户文本（自动聊天时为 null）；
+  /// [mentionedIds] 用户 @ 到的角色；[isAutoChat] 区分空闲自动聊天；
+  /// [currentUserMessage] 用户消息实体（含附件），供多模态上下文使用。
+  ///
+  /// 非自动轮受 [_maxAutoRounds] 约束，防止角色互相接话形成无限循环。
   Future<void> _runAiRound(
       {String? userMessage,
       List<String>? mentionedIds,
@@ -907,6 +1172,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (!isAutoChat) _consecutiveRound++;
     });
 
+    // 私聊固定由对方角色回复；群聊则由意图编排器挑选发言者。
     var charactersToReply = _isDirectChat
         ? _directReplyCharacters()
         : _charactersForIntents(_selectGroupReplyIntents(
@@ -915,6 +1181,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             isAutoChat: isAutoChat,
           ));
     if (charactersToReply.isEmpty) {
+      // 有人有资格但编排器选择"本轮沉默"：静默收尾，不算异常。
       if (_characters.any(_isEligibleToReply)) {
         setState(() {
           _conversationController.complete();
@@ -922,6 +1189,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         });
         return;
       }
+      // 确实没人能回复：记录原因并给出可操作提示（如跳转设置页配 API Key）。
       final blockReason = _firstBlockReason(_characters);
       setState(() {
         _conversationController.complete();
@@ -958,6 +1226,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           currentUserMessage: currentUserMessage,
         );
       } catch (e) {
+        // 单个角色失败不中断整轮：写入可见的失败气泡，继续下一个角色。
         replyContent = '[${character.name} 回复失败: $e]';
         await _appendMessage(Message(
           groupId: widget.groupId,
@@ -976,6 +1245,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (_conversationController.state.phase == ConversationPhase.stopping) {
         break;
       }
+      // 被 @ 的角色回复更快，符合"被点名会立刻应答"的直觉。
       await _delay(
         replyContent,
         fast: mentionedIds?.contains(character.id) ?? false,
@@ -985,6 +1255,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
     }
 
+    // 代 @ 提醒：用户 @ 的人本轮都没回复时，让另一个在场角色帮忙 @ 一下，
+    // 模拟真实群里"某人没看到，别人帮他叫一声"的行为。
     if (!_isDirectChat &&
         mentionedIds != null &&
         mentionedIds.isNotEmpty &&
@@ -1037,6 +1309,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 生成单个角色的一条回复（流式打字机路径），返回最终文本。
+  ///
+  /// 主要步骤：
+  /// 1. 解析 API 配置与密钥，缺失则写入占位消息并置位阻塞原因；
+  /// 2. 必要时压缩上下文（[_compactContextIfNeeded]）；
+  /// 3. 按策略决定是否联网搜索，并把搜索结果作为 system 上下文注入；
+  /// 4. 插入一条内存态空消息用于逐 token 渲染，**不立即落库**；
+  /// 5. 失败则重试一次；空回复用兜底文案；重复回复直接丢弃；
+  /// 6. 完成后清洗内容（去名字前缀、去 tool_call 协议泄漏），只落库一次；
+  /// 7. 更新用量、关系态与角色记忆。
   Future<String> _generateAiReply(
       AICharacter character, List<Message> context, String? userMessage,
       {bool isAutoChat = false,
@@ -1075,6 +1357,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
     );
+    // 上下文超出模型窗口时先做压缩，拿到压缩后的消息与摘要。
     final compactedContext = await _compactContextIfNeeded(
       character: character,
       config: config,
@@ -1082,6 +1365,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       fallbackContext: context,
     );
 
+    // 按会话/全局策略决定是否联网搜索；ask 策略下通过 _confirmWebSearch 征求同意。
     final webSearch = await _searchCoordinator.searchIfAllowed(
       text: userMessage,
       conversationId: widget.groupId,
@@ -1090,6 +1374,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         if (_canTouchUi) setState(() => _webSearchState = state);
       },
     );
+    // 查询模型能力（是否支持图片输入），决定要不要拼多模态内容。
     final capability = _aiGateway.capability(provider, config.modelName);
     final apiMessages = _withWebSearchContext(
       await _buildApiMessages(
@@ -1104,6 +1389,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       ),
       webSearch,
     );
+    // 上面的 await 期间用户可能切到工作模式，此时放弃这次自动聊天回复。
     if (isAutoChat && _workModeEnabled) {
       _discardCurrentStream = false;
       return '';
@@ -1139,6 +1425,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         characterId: character.id,
         userInitiated: !isAutoChat,
       ),
+      // 每收到一段增量就直接改临时消息的 content 并请求重绘（不走 setState 全量重建）。
       onDraft: (draft) {
         temp.content = draft;
         _conversationController.updateStreamingDraft(draft);
@@ -1156,8 +1443,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         setState(() => _autoChatStatus = AutoChatStatus.error);
       }
     }
+    // 仅当 _streamingSession 还是本次会话时才清空，避免误清后来者。
     if (identical(_streamingSession, session)) _streamingSession = null;
 
+    // 用户点了"停止生成"：丢弃这条内存态消息，不落库。
     if (_discardCurrentStream) {
       _discardCurrentStream = false;
       if (_canTouchUi) {
@@ -1186,6 +1475,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _flushStreamingUi();
     }
 
+    // 失败重试一次；但被治理网关拦下（超预算/限流）时不重试，否则只是重复挨拒。
     if (failed && !AiRequestGateway.isBlockedMessage(result.error)) {
       final retryContent = await _retryFailedReply(
         character: character,
@@ -1213,6 +1503,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     // （尤其使用过 agentic 能力的角色，system prompt 里可能残留工具说明）。
     // 在落库与返回前清洗之，避免协议泄漏被当作普通聊天贴出来。
     fullContent = sanitizeNonAgenticReply(fullContent);
+    // 与近期消息重复时直接丢弃这条（只记用量），避免刷屏式复读。
     if (!failed &&
         isDuplicateAiReply(
           fullContent,
@@ -1233,11 +1524,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     temp.content = fullContent;
     temp.isMention = mentionedIds.isNotEmpty;
     temp.mentionedAiIds = mentionedIds;
+    // media 置空：AI 流式回复不携带附件，清掉以免残留脏数据落库。
     temp.media = null;
     await _repository.persistNewMessage(temp);
     await _markCurrentConversationRead(throughMessage: temp);
     _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
+    // 关系态与角色记忆只在成功回复后更新，失败占位不该污染长期状态。
     if (!failed && intent != null) {
       await _persistRelationshipForIntent(
         character: character,
@@ -1252,6 +1545,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return fullContent;
   }
 
+  /// 对失败的回复做一次非流式重试，成功返回内容，否则返回 null。
+  ///
+  /// 用非流式接口重试是为了简化逻辑：此时 UI 上已有占位气泡，只需拿到完整文本替换。
   Future<String?> _retryFailedReply({
     required AICharacter character,
     required ApiConfig config,
@@ -1280,9 +1576,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return null;
   }
 
+  /// 当前生效的联网搜索策略：会话级覆盖优先于全局设置。
   WebSearchPolicy get _effectiveWebSearchPolicy =>
       _searchPolicyOverride ?? _governanceStore.globalSearchPolicy;
 
+  /// 展示 AI 治理网关的告警（预算即将耗尽 / 被限流等）。
   void _showGovernanceWarning(String warning) {
     if (!_canTouchUi) return;
     AppToast.show(
@@ -1292,12 +1590,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 搜索策略对应的 AppBar 图标。
   IconData get _webSearchPolicyIcon => switch (_effectiveWebSearchPolicy) {
         WebSearchPolicy.off => Icons.public_off_rounded,
         WebSearchPolicy.ask => Icons.help_outline_rounded,
         WebSearchPolicy.auto => Icons.public_rounded,
       };
 
+  /// `ask` 策略下逐次征求用户同意；明确展示查询内容与接收方，便于知情决定。
   Future<bool> _confirmWebSearch(String query) async {
     if (!_canTouchUi) return false;
     return await showDialog<bool>(
@@ -1319,9 +1619,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             ],
           ),
         ) ??
+        // 用户点空白关闭对话框视为不允许（默认保守）。
         false;
   }
 
+  /// 配置本会话的联网搜索策略（可选择跟随全局，即清除覆盖值）。
   Future<void> _configureWebSearchPolicy() async {
     final selection = await showDialog<String>(
       context: context,
@@ -1347,6 +1649,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       ),
     );
     if (selection == null) return;
+    // 'global' 哨兵值表示清除会话级覆盖，回落到全局策略。
     final policy = selection == 'global'
         ? null
         : WebSearchPolicy.values.firstWhere(
@@ -1359,6 +1662,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (_canTouchUi) setState(() => _searchPolicyOverride = policy);
   }
 
+  /// 联网搜索状态对应的用户可读提示文案。
   String get _webSearchStatusText => switch (_webSearchState.status) {
         SearchRunStatus.idle => '',
         SearchRunStatus.disabled => '联网搜索已关闭，本次未发送第三方请求',
@@ -1372,6 +1676,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         SearchRunStatus.failed => '联网搜索失败，回复将明确标注资料不足',
       };
 
+  /// 展示上一次联网搜索命中的来源列表（查询词、时间、标题、摘要、链接）。
   void _showWebSearchSources() {
     final snapshot = _webSearchState.snapshot;
     if (snapshot == null) return;
@@ -1406,6 +1711,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 把搜索结果作为一条 system 消息注入到请求消息列表中。
+  ///
+  /// 插入位置在"最后一条 system 消息之后、第一条非 system 消息之前"，
+  /// 既不破坏人格设定的优先级，也确保搜索资料在对话内容之前被模型看到。
   List<Map<String, dynamic>> _withWebSearchContext(
     List<Map<String, dynamic>> messages,
     WebSearchSnapshot? snapshot,
@@ -1417,6 +1726,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       'role': 'system',
       'content': snapshot.toPromptContext(),
     };
+    // insertAt <= 0：全是 system 消息（-1）或首条就是非 system（0），都插到最前。
     if (insertAt <= 0) {
       next.insert(0, contextMessage);
     } else {
@@ -1425,6 +1735,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return next;
   }
 
+  /// 生成 agentic（工具调用）回复：跑 [AgentRuntime] 多步循环并落库结果。
+  ///
+  /// [resumeTask] 非空表示从检查点恢复；[workMode] 表示工作模式（更强的规划上下文
+  /// 与工作区支持）；[cancelToken] / [workModeRun] 用于中途取消。
+  ///
+  /// 三种结束路径：
+  /// - 等待工具审批 → 弹审批 UI，任务挂起；
+  /// - 未完成（超步数/超时/出错）→ 写部分完成报告，并提示可恢复；
+  /// - 完成 → 写最终消息（可能带生成的文件附件），更新用量与记忆。
   Future<String> _generateAgenticReply({
     required AICharacter character,
     required ApiConfig config,
@@ -1455,7 +1774,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       task
         ..status = AgentTaskStatus.planning
         ..updatedAt = DateTime.now();
+      // 先落库任务：即使 App 崩溃也能在下次打开时提供恢复入口。
       await _db.agentTaskBox.put(task.id, task);
+      // 在聊天流里插入一条"正在执行"的进度消息，后续原地更新。
       await _upsertAgentProgressMessage(
         task,
         agentProgressMessageContent(characterName: character.name),
@@ -1470,6 +1791,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         workModeRun: workModeRun,
       );
 
+      // 把附件（图片/文档）解析成文本描述并拼进请求，让 agent 能"看到"附件。
       final mediaEnhancedRequest =
           await AgentAttachmentContext.enhanceCurrentRequest(
         userRequest: userMessage,
@@ -1482,6 +1804,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       final restoredRequests = resumeTask == null
           ? const <ToolRequest>[]
           : _restoredExecutedRequests(resumeTask);
+      // 恢复场景：显式告知模型哪些工具操作已完成，防止重复写文件 / 重复执行副作用。
       if (restoredRequests.isNotEmpty) {
         conversationHistory.insert(0, {
           'role': 'system',
@@ -1489,6 +1812,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               '不要重复执行：${restoredRequests.map((request) => request.toJsonString()).join('；')}',
         });
       }
+      // 依据请求内容匹配该角色可用的技能（含是否需要新建技能的判断）。
       final skillResolution =
           CharacterSkillResolver.resolveFor(character, userMessage);
 
@@ -1502,11 +1826,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         userRequest: mediaEnhancedRequest,
         conversationHistory: conversationHistory,
         priorExecutedRequests: restoredRequests,
+        // 已有保存过的匹配技能时就不再强制创建，避免重复造轮子。
         forceSkillCreation: skillResolution.needsSkillCreation &&
             !_savedSkillMatchesRequest(character, userMessage),
         workModeContext:
             workMode ? WorkModePolicy.planningContext(character) : '',
       );
+      // 路径一：需要用户批准某个工具调用，任务挂起等待。
       if (result.status == AgentRuntimeStatus.waitingForApproval &&
           result.pendingToolRequest != null) {
         final approval = PendingAgentToolApproval(
@@ -1523,6 +1849,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         return result.message;
       }
       await _finishAgentTask(task, result);
+      // 路径二：未跑完（超步数 / 超时 / 失败）。有已执行操作时给出部分完成报告。
       if (result.status != AgentRuntimeStatus.completed) {
         final rawContent = result.executedToolRequests.isEmpty
             ? result.message
@@ -1535,11 +1862,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           content: content,
         );
         await _appendMessage(message);
+        // 已有实际进展才值得提示恢复，否则从头重跑更简单。
         if (result.executedToolRequests.isNotEmpty) {
           _scheduleAgentTaskRecovery();
         }
         return content;
       }
+      // 路径三：正常完成。把工具产出的文件作为附件挂在消息上。
       final content = _stripNamePrefix(result.message, character.name);
       final attachments = await _attachmentsForAgentToolResult(
         character: character,
@@ -1560,10 +1889,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
       return content;
     } finally {
+      // 无论成功失败都要释放并发标记，否则该角色将永久无法再触发 agentic。
       _agenticRunningCharacterIds.remove(character.id);
     }
   }
 
+  /// 把 agentic 工具产出的工作区文件复制成可在聊天里查看的附件。
+  ///
+  /// 只处理 [AgentToolName.workspacePatch] 类工具：从 patch 与参数里收集目标路径，
+  /// 经 [WorkspacePathGuard] 过滤掉越权路径（如 `../`），最多取 6 个文件。
+  /// 每个文件按优先级取内容：工具回读 → patch 里的 content → 通过桥接重新读盘。
   Future<List<MediaAttachment>> _attachmentsForAgentToolResult({
     required AICharacter character,
     required AgentRuntimeResult result,
@@ -1579,12 +1914,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return const [];
     }
     final requestedPaths = <String>[];
+    /// 归一化并去重收集安全的相对路径；越权路径直接丢弃。
     void addPath(String raw) {
       final path = WorkspacePathGuard.normalizeToRelative(raw);
       if (!WorkspacePathGuard.isSafeRelativePath(path)) return;
       if (!requestedPaths.contains(path)) requestedPaths.add(path);
     }
 
+    // 路径来源有两处：工具参数里的 path，以及 patch 文本里的 +++ / diff --git 行。
     for (final request in patchRequests) {
       final directPath = request.args['path'];
       if (directPath is String) {
@@ -1596,6 +1933,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         addPath(path);
       }
     }
+    // 不同工具用 ok / exitCode 表达成功，两者任一成立即视为成功。
     final resultOk =
         result.toolResult?['ok'] == true || result.toolResult?['exitCode'] == 0;
     final normalizedResultPath = result.toolResult?['path'] is String
@@ -1603,6 +1941,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             result.toolResult!['path'] as String,
           )
         : null;
+    // 汇总"请求写入的路径"与"工具实际报告的路径"，得到最终产物清单。
     final paths = resolveAgentArtifactPaths(
       requestedPaths: requestedPaths,
       actualResultPath: normalizedResultPath,
@@ -1616,12 +1955,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       bridge,
       conversationId: widget.groupId,
     );
+    // 取最后一个带 content 的 patch：多次修改同一文件时后写的才是最终内容。
     final lastPatchWithContent = patchRequests.reversed.firstWhere(
       (request) => request.args['content'] is String,
       orElse: () => patchRequests.last,
     );
+    // 上限 6 个附件，防止一次任务产出大量文件把聊天界面撑爆。
     for (final path in paths.take(6)) {
       try {
+        // 优先级 1：工具执行后自己回读的内容，最可信。
         final readback = resultOk && path == normalizedResultPath
             ? result.toolResult!['readbackContent']
             : null;
@@ -1635,6 +1977,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           ));
           continue;
         }
+        // 优先级 2：patch 请求里携带的完整内容。
         final generatedContent = resultOk &&
                 (path == normalizedResultPath || normalizedResultPath == null)
             ? lastPatchWithContent.args['content']
@@ -1652,6 +1995,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         // Always read through the active bridge. Resolving [path] against the
         // app process cwd can attach a same-named file from the old workspace
         // immediately after the user switches project directories.
+        // 优先级 3：通过桥接重新读盘（必须走桥接，不能按进程 cwd 解析）。
         final read = await workspaceTool.read(path);
         final content = read['content'];
         if (content is String) {
@@ -1665,16 +2009,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         }
       } catch (_) {
         // A single generated file failing to copy must not expose its path.
+        // 单个文件复制失败不影响其余附件，也不把路径泄漏到 UI 上。
       }
     }
     return attachments;
   }
 
+  /// 从 unified diff 文本里提取被修改的目标文件路径。
+  ///
+  /// 识别两种行：`+++ b/path`（新文件内容侧）与 `diff --git a/x b/y`（取 b 侧）。
+  /// `/dev/null`（删除文件）与越权路径会被跳过。
   List<String> _pathsFromPatch(String patch) {
     final paths = <String>[];
     void addPath(String raw) {
       final path = raw.trim();
       if (path.isEmpty || path == '/dev/null') return;
+      // 去掉 diff 惯例的 `b/` 前缀，得到工作区相对路径。
       final normalized = path.startsWith('b/') ? path.substring(2) : path;
       if (!WorkspacePathGuard.isSafeRelativePath(normalized)) return;
       if (!paths.contains(normalized)) paths.add(normalized);
@@ -1694,6 +2044,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return paths;
   }
 
+  /// 为一次 agentic 运行组装 [AgentRuntime]（补全回调、工具集、审批策略等）。
+  ///
+  /// 关键约定：
+  /// - 输出 token 上限取"运行时偏好值"与"模型能力上限"的较小者；
+  /// - 所有 LLM 调用都经 [_aiGateway]，由网关统一做预算预检与重试；
+  /// - 工作模式下放开全部工具权限并使用工作模式的审批策略；
+  /// - 停止检查绑定到本次 run 的句柄（而非共享标志），避免新 run 复活旧 run。
   AgentRuntime _agentRuntimeFor({
     required AICharacter character,
     required ApiConfig config,
@@ -1710,6 +2067,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final summaryMaxTokens =
         min(AgentRuntime.preferredSummaryOutputTokens, capability.maxOutput);
     return AgentRuntime(
+      // agentic 主循环的补全回调：每一步"思考/决定调用哪个工具"都走这里。
       complete: (messages) async {
         final apiKey = await _credentialResolver.resolve(config);
         if (apiKey == null) {
@@ -1751,11 +2109,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       // 统一网关负责逐次预算预检和重试；Runtime 不再嵌套重试。
       completionMaxRetries: 0,
       onProgress: (progress) => _persistAgentProgress(task, progress),
+      // 上下文接近模型窗口时自动摘要压缩；阈值 = 窗口 - 输出预留，并夹到安全区间。
       contextWindowManager: ContextWindowManager(
         maxRetries: 0,
         thresholdTokens: (capability.contextWindow - agentMaxTokens)
             .clamp(4096, kContextCompressThresholdTokens)
             .toInt(),
+        // 压缩用低温度、独立的 summary 预算通道，与主循环区分计费用途。
         complete: (contextMessages) async {
           final apiKey = await _credentialResolver.resolve(config);
           if (apiKey == null) {
@@ -1782,6 +2142,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       approvalPolicy: workMode
           ? WorkModePolicy.requiresApproval
           : AgentRuntime.requiresApproval,
+      // 工作模式默认授予全部工具权限（仍受审批策略约束）。
       grantedPermissions: workMode ? ToolPermission.values.toSet() : null,
       // per-run 停止状态：捕获本 run 的句柄，而非共享标志。新 run 的 beginRun
       // 不会把旧 run 复活，旧 run 在自己的检查点读到的是自己的停止状态。
@@ -1790,6 +2151,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 把 agentic 上下文压缩产生的摘要沉淀进角色长期记忆。
+  ///
+  /// 受记忆控制约束：用户手动锁定（pinned）的条目会被保留，
+  /// 且当该角色记忆不允许自动更新时直接跳过。
   Future<void> _persistAgentContextSummary(
     AICharacter character,
     ContextSummary summary,
@@ -1800,6 +2165,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       memories: _characterMemories,
     );
     if (!_memoryControls.canAutoUpdateCharacter(memory, character)) return;
+    // 这里只借用 manager 的落库逻辑，不再发起 LLM 调用，故 complete 传空实现。
     final manager = ContextWindowManager(
       complete: (_) async => const {'success': true, 'message': '{}'},
     );
@@ -1821,6 +2187,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 非持久化，不写入 Hive。供进度气泡实时耗时展示查表。
   final Map<String, int> _progressStartTimes = {};
 
+  /// 每次 agent 进度上报：更新内存态、落库任务检查点、刷新进度气泡文案。
+  ///
+  /// 落库检查点是任务可恢复的前提——App 崩溃后靠它续跑。
   Future<void> _persistAgentProgress(
     AgentTask task,
     AgentRuntimeProgress progress,
@@ -1848,6 +2217,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 原地更新（或首次插入）任务的进度气泡消息。
+  ///
+  /// 消息 id 由任务派生（[WorkModeTaskLifecycle.progressMessageId]），
+  /// 保证多次进度上报复用同一条消息，而不是刷出一串进度消息。
   Future<void> _upsertAgentProgressMessage(
     AgentTask task,
     String content,
@@ -1876,6 +2249,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     ));
   }
 
+  /// 结算一个 agentic 任务的终态：写入状态/摘要，并处理进度气泡的去留。
+  ///
+  /// 状态判定：完成 → completed；未完成但有已执行操作 → 部分完成（可恢复）；
+  /// 什么都没做成 → failed。
   Future<void> _finishAgentTask(
     AgentTask task,
     AgentRuntimeResult result,
@@ -1931,6 +2308,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _progressStartTimes.remove(task.id);
   }
 
+  /// 删除任务对应的进度气泡消息（内存与库中同时移除）。
   Future<void> _removeAgentProgressMessage(AgentTask task) async {
     final id = WorkModeTaskLifecycle.progressMessageId(task);
     await _repository.deleteMessage(id);
@@ -1942,6 +2320,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 取消一个 agentic 任务：标记取消原因、落库、删除进度气泡并清理内存表。
   Future<void> _cancelAgentTask(
     AgentTask task, {
     required String reason,
@@ -1954,6 +2333,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _progressStartTimes.remove(task.id);
   }
 
+  /// 生成"任务部分完成"的用户可读报告：列出已完成的工具操作与中断原因，
+  /// 并提示可从检查点继续或放弃。
   String _partialCompletionReport(AgentRuntimeResult result) {
     final operations = result.executedToolRequests.map((request) {
       final path = request.args['path']?.toString();
@@ -1967,11 +2348,24 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         '你可以选择“继续执行”从检查点恢复，或“放弃”结束任务。';
   }
 
+  /// 把用户输入解释为对"待审批工具调用"的裁决并执行。
+  ///
+  /// 返回 true 表示这条输入已被当作审批指令消耗掉（不应再作为普通消息落库）。
+  ///
+  /// 三种裁决：
+  /// - [WorkModeApprovalAction.reject]：跳过该工具，让 agent 换个方式继续；
+  /// - [WorkModeApprovalAction.cancelPending]：用户发了新指令，取消旧任务
+  ///   （返回 false，让这条新输入继续走正常发送流程）；
+  /// - 其余（批准）：执行该工具并继续 agent 循环。
+  ///
+  /// 批准/拒绝后都可能再次遇到新的待审批工具，此时递归回到
+  /// [_presentPendingAgentApproval] 形成多步审批链。
   Future<bool> _handlePendingAgentApproval(String text) async {
     final pending = _pendingAgentApproval;
     if (pending == null) return false;
     final action = WorkModeTaskLifecycle.actionForInput(text);
     if (action == WorkModeApprovalAction.reject) {
+      // 拒绝：先清空待审批项，再让 runtime 跳过该工具继续推进。
       _pendingAgentApproval = null;
       final workModeRun = _workModeSession.beginRun();
       final cancelToken = workModeRun.token;
@@ -1993,6 +2387,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           priorExecutedRequests: pending.priorExecutedRequests,
           conversationHistory: pending.conversationHistory,
         );
+        // 跳过后又碰到新的待审批工具：递归进入下一轮审批。
         if (result.status == AgentRuntimeStatus.waitingForApproval &&
             result.pendingToolRequest != null) {
           final nextApproval = PendingAgentToolApproval(
@@ -2028,6 +2423,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
     }
     if (action == WorkModeApprovalAction.cancelPending) {
+      // 用户没在回答审批，而是发了新指令：取消旧任务，返回 false 让这条
+      // 新输入按普通消息继续走发送流程。
       _pendingAgentApproval = null;
       await _cancelAgentTask(
         pending.task,
@@ -2038,6 +2435,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return false;
     }
 
+    // 批准：执行该工具，然后继续 agent 循环。
     _pendingAgentApproval = null;
     final workModeRun = _workModeSession.beginRun();
     final cancelToken = workModeRun.token;
@@ -2074,6 +2472,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         return _presentPendingAgentApproval(nextApproval);
       }
       await _finishAgentTask(pending.task, result);
+      // 工具跑完但模型没给文字总结时，也要给用户一个明确的完成反馈。
       final content = _stripNamePrefix(
         result.message.trim().isEmpty
             ? '[${pending.character.name} 工具执行完成，但没有返回内容]'
@@ -2105,10 +2504,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 挂起任务并弹出工具审批对话框，把用户的选择交给 [_handlePendingAgentApproval]。
+  ///
+  /// 对话框被返回键关闭（decision 为 null）会被统一当作取消任务，
+  /// 避免任务永久停在 waitingForApproval 检查点上。
   Future<bool> _presentPendingAgentApproval(
     PendingAgentToolApproval approval,
   ) async {
     _pendingAgentApproval = approval;
+    // 从"恢复任务"路径进来时可能还没有活跃回合，这里补一个。
     if (!_conversationController.isBusy) {
       _conversationController.beginWork();
     }
@@ -2120,6 +2524,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
     final action = WorkModeTaskLifecycle.actionForDialogDecision(decision);
     if (action == WorkModeApprovalAction.cancelPending) {
+      // identical 校验：期间可能已被别的路径替换成新的审批项，只清自己那个。
       if (identical(_pendingAgentApproval, approval)) {
         _pendingAgentApproval = null;
       }
@@ -2131,11 +2536,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (_canTouchUi) setState(() {});
       return true;
     }
+    // 复用文本审批入口，保证弹层与打字两种方式走完全相同的后续逻辑。
     return _handlePendingAgentApproval(
       action == WorkModeApprovalAction.approve ? '批准' : '拒绝',
     );
   }
 
+  /// 标记进入"工作执行中"状态（恢复已挂起的回合，或开启新回合）。
   void _beginWorkActivity() {
     if (!_conversationController.resumeWork()) {
       _conversationController.beginWork();
@@ -2143,6 +2550,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (_canTouchUi) setState(() {});
   }
 
+  /// 结束工作活动：仍有待审批项时停在"等待审批"，否则彻底完成本回合。
   void _finishWorkActivity() {
     if (_pendingAgentApproval != null) {
       _conversationController.waitForApproval();
@@ -2164,6 +2572,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (!_canTouchUi || !mounted) return null;
     final decision = await showDialog<bool>(
       context: context,
+      // 不允许点遮罩关闭：审批是明确的二选一决定。
       barrierDismissible: false,
       builder: (ctx) => AlertDialog(
         title: Text('${character.name} 请求使用工具'),
@@ -2189,6 +2598,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return decision;
   }
 
+  /// `skill_create` 工具的落地实现：把 LLM 给出的技能定义存为 [CharacterSkill]
+  /// 并挂到该角色的 skillIds 上。
+  ///
+  /// 返回给 runtime 的 Map 即工具执行结果（`ok` / `error` 约定）。
+  /// instructions 缺失时直接失败，因为没有步骤的技能没有意义。
   Future<Map<String, dynamic>> _saveGeneratedSkillFromArgs({
     required AICharacter character,
     required Map<String, dynamic> args,
@@ -2197,6 +2611,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (instructionsRaw is! List) {
       return {'ok': false, 'error': 'instructions_missing'};
     }
+    // 兼容 LLM 可能用 permissions 或 requiredPermissions 两种键名。
     final permissionNames = (args['permissions'] is List
             ? args['permissions'] as List
             : args['requiredPermissions'] is List
@@ -2204,6 +2619,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                 : const [])
         .whereType<String>()
         .toSet();
+    // 只保留枚举里真实存在的权限名，杜绝模型臆造出的权限被写入。
     final permissions = ToolPermission.values
         .where((permission) => permissionNames.contains(permission.name))
         .toList();
@@ -2228,10 +2644,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     };
   }
 
+  /// `skill_download` 工具的落地实现：从内置专家技能目录安装一个模板技能。
+  ///
+  /// templateId 缺省时按角色特征推荐一个。已安装过同名同领域技能则复用，
+  /// 避免重复下载产生多份副本。
   Future<Map<String, dynamic>> _downloadExpertSkillFromArgs({
     required AICharacter character,
     required Map<String, dynamic> args,
   }) async {
+    // 兼容 templateId / id 两种键名，都没有就按角色推荐。
     final templateId = args['templateId'] as String? ??
         args['id'] as String? ??
         _recommendedTemplateIdFor(character, args['domain'] as String?);
@@ -2246,6 +2667,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         'templateId': templateId
       };
     }
+    // 幂等：同名 + 同领域视为已安装，直接复用而不新建。
     final existing = _db.characterSkillBox.values.where(
       (skill) =>
           skill.characterId == character.id &&
@@ -2258,6 +2680,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (existing.isEmpty) {
       await _db.characterSkillBox.put(skill.id, skill);
     }
+    // 用 Set 合并，保证 skillIds 不出现重复项。
     final skillIds = <String>{...character.skillIds, skill.id};
     character.skillIds = skillIds.toList();
     await _db.aiCharacterBox.put(character.id, character);
@@ -2270,6 +2693,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     };
   }
 
+  /// 为角色推荐一个专家技能模板 id：优先匹配指定 [domain]，否则取推荐列表第一个。
   String? _recommendedTemplateIdFor(AICharacter character, String? domain) {
     final templates = SkillDownloadService.recommendedTemplatesFor(character);
     if (domain != null && domain.trim().isNotEmpty) {
@@ -2280,6 +2704,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return templates.isEmpty ? null : templates.first.id;
   }
 
+  /// 汇总本次 agentic 运行可用的技能：已安装技能 + 本次解析出的技能。
+  ///
+  /// 归属判断放宽为"skill.characterId 匹配 **或** 出现在 character.skillIds 里"，
+  /// 兼容通过 skillIds 关联的共享技能。
   List<CharacterSkill> _agenticSkillsFor(
       AICharacter character, String userRequest,
       {CharacterSkillBundle? resolution}) {
@@ -2296,6 +2724,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 判断该角色已保存的技能中是否已有能覆盖本次请求的，
+  /// 用于避免"每次都强制新建技能"。
+  ///
+  /// 匹配方式：技能描述包含整段请求，或技能名/领域拆出的关键词出现在请求里。
+  /// `general` / `custom` 这类泛化词被排除，否则几乎任何请求都会误命中。
   bool _savedSkillMatchesRequest(
     AICharacter character,
     String userRequest,
@@ -2309,6 +2742,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     for (final skill in saved) {
       if (skill.description.toLowerCase().contains(request)) return true;
       final capability = '${skill.name} ${skill.domain}'.toLowerCase();
+      // \u540c\u65f6\u5339\u914d\u82f1\u6587/\u6570\u5b57\u8bcd\uff08\u22652 \u5b57\u7b26\uff09\u4e0e\u4e2d\u6587\u8bcd\uff082~8 \u5b57\uff09\uff0c\u9002\u914d\u4e2d\u82f1\u6df7\u6392\u6280\u80fd\u540d\u3002
       final tokens = RegExp(r'[a-z0-9_+#.-]{2,}|[\u4e00-\u9fff]{2,8}')
           .allMatches(capability)
           .map((match) => match.group(0)!)
@@ -2322,9 +2756,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   void _stopStreaming() {
     if (!_isStreaming) return;
     final runType = _conversationController.state.run?.type;
+    // 先把最后一段增量刷进 UI，避免用户看到内容比实际生成的少。
     _flushStreamingUi();
     _conversationController.requestStop();
     unawaited(_streamingSession?.stop());
+    // 若被停的是自动聊天回合，连调度器一起停，否则马上又会自动开口。
     if (runType == ConversationRunType.automatic) {
       _stopAutoChat();
     }
@@ -2335,6 +2771,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 根据本次发言意图更新并落库角色关系状态（好感/亲密度等）。
+  ///
+  /// 目标对象取意图指定的 targetId；意图没指定但本轮由用户触发时视为对 `user`。
+  /// 尊重记忆控制开关：全局关闭自动记忆、或该条关系被用户锁定时直接跳过。
   Future<void> _persistRelationshipForIntent({
     required AICharacter character,
     required ReplyIntent intent,
@@ -2361,6 +2801,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       targetId: targetId,
       targetType: targetType,
       actionName: intent.action.name,
+      // 语气里带刺/冷淡则不算友好互动，避免负面互动也拉高亲密度。
       friendlyTone:
           !intent.toneHint.contains('带刺') && !intent.toneHint.contains('冷淡'),
     );
@@ -2369,6 +2810,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 解析角色可用的 API 配置；未绑定或没有凭据时返回 null（视为不可回复）。
   ApiConfig? _resolveApiConfig(AICharacter character) {
     if (character.apiConfigId.isNotEmpty) {
       final config = _db.apiConfigBox.get(character.apiConfigId);
@@ -2377,6 +2819,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return null;
   }
 
+  /// 组装发给 LLM 的完整消息列表（群聊版；私聊转交 [_buildDirectApiMessages]）。
+  ///
+  /// system 消息按固定顺序层层叠加，顺序即优先级：
+  /// 1. 群聊记忆摘要 → 2. 角色自我记忆 / 会话内压缩摘要 / 发言意图上下文
+  /// → 3. 群聊场景与当前话题焦点 → 3.5 当前需回应的那条消息
+  /// → 4. 自动聊天提示 → 5. 角色人设 → 6. 其他成员信息 → 历史对话。
+  ///
+  /// [supportsVision] 为 true 时图片附件会拼成多模态内容，否则退化为文字描述。
   Future<List<Map<String, dynamic>>> _buildApiMessages(
       AICharacter character, List<Message> context, String? userMessage,
       {bool isAutoChat = false,
@@ -2570,6 +3020,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     // ── 7. 聊天历史（最多 20 条） ──────────────────────────────────
+    // 截断到最近 20 条：够维持话题连贯，又不会把 token 预算耗在远古历史上。
     final historyMessages = context.toList();
     final recentHistory = historyMessages.length > 20
         ? historyMessages.sublist(historyMessages.length - 20)
@@ -2625,6 +3076,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return msgs;
   }
 
+  /// 解析历史与当前消息里的文档附件，生成可注入 prompt 的文档上下文。
+  ///
+  /// 无查询词或无可解析附件时返回空串（不触发任何解析开销）。
+  /// 解析过程可能较慢，通过 [DocumentProcessingToken] 支持用户中途取消，
+  /// 并用 identical 校验确保只有"当前那次"解析才更新进度 UI。
   Future<String> _documentContextFor(
     String? query,
     List<Message> history,
@@ -2660,16 +3116,24 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
   }
 
+  /// 取消正在进行的文档解析。
   void _stopDocumentProcessing() {
     _documentProcessingToken?.cancel();
   }
 
+  /// 当用户一次 @ 多位角色做项目类任务时，生成"开发/验收"分工的协作提示。
+  ///
+  /// 触发条件：@ 到 ≥2 个已知角色，且文本含项目类关键词（开发/测试/BUG/代码…）。
+  /// 分工规则：名字/角色/标签里带测试、QA、验收、质量的角色任验收者
+  /// （找不到则取最后一个被 @ 的），另一位任开发者；当前角色按身份拿到对应指令。
+  /// 不满足条件时返回空串，表示不注入协作提示。
   String _collaborationPromptFor({
     required String? userMessage,
     required AICharacter currentCharacter,
   }) {
     if (userMessage == null || userMessage.trim().isEmpty) return '';
     final mentioned = parseMentionedCharacterIds(userMessage, _characters);
+    // 少于两人不构成协作，无需分工。
     if (mentioned.length < 2) return '';
     final lower = userMessage.toLowerCase();
     final looksLikeProjectTask = lower.contains('开发') ||
@@ -2695,6 +3159,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     if (mentionedCharacters.length < 2) return '';
 
+    // 从被 @ 的人里挑测试/验收角色：名字、职位、性格标签任一命中关键词即可。
     AICharacter? verifier;
     for (final character in mentionedCharacters) {
       final text = '${character.name} ${character.role} '
@@ -2708,10 +3173,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         break;
       }
     }
+    // 没有明显的测试角色时，约定最后一个被 @ 的人做验收，其余第一个做开发。
     verifier ??= mentionedCharacters.last;
     final executor = mentionedCharacters
         .firstWhere((character) => character.id != verifier!.id);
 
+    // 同一段协作提示会发给每个角色，但"你的职责"随当前角色而变。
     final currentRole = currentCharacter.id == executor.id
         ? '你是本次任务的开发/执行者。先给出实现计划或交付内容；完成后必须 @${verifier.name} 请他验收。'
         : currentCharacter.id == verifier.id
@@ -2724,6 +3191,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         '不要替对方完成职责；用 @ 推动下一棒。';
   }
 
+  /// 组装私聊场景的 LLM 消息列表。
+  ///
+  /// 与群聊版的区别：没有群成员/场景/协作提示，改为注入私聊人格上下文，
+  /// 且历史里只保留"用户消息 + 该角色自己的消息"（私聊本就只有两方）。
   Future<List<Map<String, dynamic>>> _buildDirectApiMessages(
     AICharacter character,
     List<Message> context,
@@ -2752,6 +3223,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       character: character,
       memories: _characterMemories,
     );
+    // 分层记忆按类别拼装，每类最多取 4 条，控制 prompt 体积。
     if (memory.facts.isNotEmpty ||
         memory.relationshipNotes.isNotEmpty ||
         memory.personaGrowth.isNotEmpty) {
@@ -2784,6 +3256,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
     msgs.add({'role': 'system', 'content': character.systemPrompt});
 
+    // 私聊同样只保留最近 20 条历史。
     final recentHistory =
         context.length > 20 ? context.sublist(context.length - 20) : context;
     final documentContext = await _documentContextFor(
@@ -2809,6 +3282,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       } else if (message.senderId == character.id) {
         msgs.add({'role': 'assistant', 'content': message.content});
       }
+      // 其余（例如系统消息 / 别的角色残留消息）在私聊语境下忽略。
     }
 
     if (userMessage != null && recentHistory.isEmpty) {
@@ -2840,6 +3314,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return ChatOrchestrator.stripNamePrefix(content, characterName);
   }
 
+  /// 落库并追加一条消息到列表末尾，然后滚动到底部。
+  ///
+  /// AI 消息会顺带推进已读位置——用户正看着这条消息，没有理由算作未读。
   Future<void> _appendMessage(Message message) async {
     await _repository.persistNewMessage(message);
     if (message.senderType == 'ai') {
@@ -2853,11 +3330,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _scrollToBottom();
   }
 
+  /// 用户在群里被称呼时使用的名字：取群主名，为空则用"我"。
   String get _ownerMentionName {
     final name = _group?.ownerName.trim() ?? '';
     return name.isEmpty ? '我' : name;
   }
 
+  /// 若这条 AI 消息 @ 到了用户，登记为"待查看的 @我"以显示提醒横幅。
+  ///
+  /// 用户正在看这个会话时不登记——他已经看到了，弹提醒只是噪音。
   void _registerUserMentionIfNeeded(Message message) {
     if (!_canTouchUi || message.senderType != 'ai') return;
     if (ConversationPresenceService.instance.isActive(widget.groupId)) return;
@@ -2871,16 +3352,22 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     setState(() => _pendingUserMentionMessageIds.add(message.id));
   }
 
+  /// 标记已读时清掉"@我"横幅（带 _canTouchUi 守卫，可在异步流程中调用）。
   void _clearActiveUserMentionBanner() {
     if (!_canTouchUi || _pendingUserMentionMessageIds.isEmpty) return;
     setState(() => _pendingUserMentionMessageIds.clear());
   }
 
+  /// 用户手动点"忽略"时清空全部待查看的 @我 提醒。
   void _clearUserMentions() {
     if (_pendingUserMentionMessageIds.isEmpty) return;
     setState(() => _pendingUserMentionMessageIds.clear());
   }
 
+  /// 跳转到下一条 @我 的消息并高亮。
+  ///
+  /// 逐个出队：若目标消息已不在当前分页窗口内（index < 0）则跳过继续找下一条，
+  /// 全部找不到时也要 setState 一次，让横幅上的计数归零。
   void _jumpToNextUserMention() {
     while (_pendingUserMentionMessageIds.isNotEmpty) {
       final messageId = _pendingUserMentionMessageIds.removeAt(0);
@@ -2893,6 +3380,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (_canTouchUi) setState(() {});
   }
 
+  /// 临时高亮某条消息 2 秒（跳转定位后帮助用户找到目标）。
+  ///
+  /// 定时器回调里比对 messageId，避免连续跳转时旧定时器误清新高亮。
   void _highlightMessageTemporarily(String messageId) {
     if (!_canTouchUi) return;
     setState(() => _highlightedMentionMessageId = messageId);
@@ -2904,6 +3394,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
   }
 
+  /// 按策略条件（消息量、距上次摘要的间隔等）更新群周记忆摘要。
+  ///
+  /// 私聊没有群记忆，直接返回；用户手动锁定群记忆时也不自动覆盖。
   Future<void> _maybeUpdateMemory() async {
     if (_isDirectChat) return;
     if (!_memoryControls.canAutoUpdateGroup(_groupMemory)) return;
@@ -2918,6 +3411,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     // Mark before async work to prevent concurrent summary generation.
+    // 先占位写入 lastSummaryAt：后续 await 期间若又触发一轮，
+    // shouldUpdateGroupMemory 会因间隔不足而拒绝，避免并发生成重复摘要。
     if (_groupMemory != null) {
       _groupMemory!.lastSummaryAt = now;
       await _groupMemory!.save();
@@ -2942,10 +3437,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 调用 LLM 把「旧群记忆 + 最近对话」合并成新的群体记忆摘要。
+  ///
+  /// 借用第一个角色的 API 配置发请求（摘要与具体人格无关）；
+  /// 无可用配置或调用失败时返回空串，调用方据此跳过更新。
   Future<String> _generateSummary(
     String recentText, {
     String previousSummary = '',
   }) async {
+    // 摘要只需要一个可用的 API 通道，借用首个角色的配置即可。
     final character = _characters.isNotEmpty ? _characters.first : null;
     if (character == null) return '';
 
@@ -2987,6 +3487,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return '';
   }
 
+  /// 按策略条件演进角色的分层长期记忆（事实 / 关系 / 表达习惯）。
+  ///
+  /// 让 LLM 以严格 JSON 输出记忆更新，解析后合并进 [CharacterMemory]，
+  /// 并同步刷新角色上的紧凑记忆摘要。低温度（0.35）以保证输出稳定可解析。
   Future<void> _maybeEvolveCharacterMemory(
     AICharacter character,
     String latestReply,
@@ -3064,6 +3568,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (_canTouchUi) setState(() {});
   }
 
+  /// 把解析出的记忆更新合并进该角色的 [CharacterMemory] 并落库。
+  ///
+  /// 三类记忆都为空时返回 null，表示这次没有值得保存的东西。
   Future<CharacterMemory?> _mergeHumanizedMemory(
     AICharacter character,
     LayeredMemoryUpdate update,
@@ -3081,6 +3588,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
     _memoryControls.mergeAutomaticCharacterMemory(memory, update);
     await _db.characterMemoryBox.put(memory.id, memory);
+    // 用新列表替换而非原地修改，保证 setState 能识别出变化。
     final index = _characterMemories.indexWhere((m) => m.id == memory.id);
     if (index == -1) {
       _characterMemories = [..._characterMemories, memory];
@@ -3090,6 +3598,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return memory;
   }
 
+  /// senderId → 展示名的映射（用于把消息转写成带说话人的文字稿）。
+  ///
+  /// 含停用成员，历史消息里的角色才不会显示成未知；`user` 映射为群主名。
   Map<String, String> _senderNameMap() {
     return {
       'user': _group?.ownerName ?? '我',
@@ -3098,26 +3609,35 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     };
   }
 
+  /// 该角色本轮是否有资格发言（委托 [ReplyEligibilityPolicy]）。
   bool _isEligibleToReply(AICharacter character) {
     return _replyEligibility.isEligible(character);
   }
 
+  /// 该角色不能发言的具体原因（未配置 API、超出频率上限等）。
   ReplyBlockReason? _blockReasonFor(AICharacter character) {
     return _replyEligibility.blockReasonFor(character);
   }
 
+  /// 当前有资格发言的活跃角色。
   List<AICharacter> get _eligibleCharacters =>
       _characters.where(_isEligibleToReply).toList();
 
+  /// 取这批角色中第一个可解释的阻塞原因，用于给用户一条明确提示。
   ReplyBlockReason? _firstBlockReason(List<AICharacter> characters) {
     return _replyEligibility.firstBlockReason(characters);
   }
 
+  /// 记录一次发言用量：更新内存里的频率计数，并落库到角色模型。
   void _recordReplyUsage(AICharacter character) {
     _replyEligibility.recordReplyUsage(character);
     _repository.persistReplyUsage(character);
   }
 
+  /// 模拟"打字/思考"的发言间隔，让多角色接话有真实节奏。
+  ///
+  /// [fast] 用于被 @ 点名的场景——几乎立刻应答（180ms）；
+  /// 否则按内容长度加随机抖动计算延迟。
   Future<void> _delay(String content, {bool fast = false}) async {
     if (fast) {
       await Future.delayed(const Duration(milliseconds: 180));
@@ -3129,6 +3649,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     ));
   }
 
+  /// 移除 @ 成员弹窗并复位其全部相关状态。
   void _hideMentionOverlay() {
     _mentionOverlay?.remove();
     _mentionOverlay = null;
@@ -3138,6 +3659,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _mentionSearchController.clear();
   }
 
+  /// 在输入框上方弹出 @ 成员选择浮层。
+  ///
+  /// 用输入框的 [RenderBox] 实时定位：水平居中于输入框并夹在屏幕内，
+  /// 垂直放在输入框上方，高度受输入框上方剩余空间限制（120~260px）。
   void _showMentionOverlay(Offset globalPosition) {
     if (_showMentionPopup) return;
     _showMentionPopup = true;
@@ -3168,9 +3693,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         final content = _buildMentionPopupContent(cs);
         return Positioned(
           left: left,
+          // bottom 相对屏幕底部计算，使浮层贴在输入框上沿再留 8px 间隙。
           bottom: screenHeight - inputTop + 8,
           width: popupWidth,
           child: TapRegion(
+            // 点击浮层外任意处即收起。
             onTapOutside: (_) => _hideMentionOverlay(),
             child: Material(
               elevation: 8,
@@ -3190,6 +3717,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     overlay.insert(_mentionOverlay!);
   }
 
+  /// 构建 @ 弹窗内容：标题栏（含人数）+ 搜索框 + 成员列表。
   Widget _buildMentionPopupContent(ColorScheme cs) {
     return Container(
       constraints: const BoxConstraints(maxWidth: 280, maxHeight: 260),
@@ -3276,6 +3804,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _mentionOverlay?.markNeedsBuild();
   }
 
+  /// 是否展示 `@all` 选项：搜索为空，或搜索词是 all/所有人/全部 的前缀。
   bool get _showMentionAllOption {
     final q = _mentionSearchController.text.trim().toLowerCase();
     return q.isEmpty ||
@@ -3284,6 +3813,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         '全部'.contains(q);
   }
 
+  /// 构建 @ 候选列表；`@all` 占据首项，故成员下标需整体后移一位。
   Widget _buildMentionList(ColorScheme cs) {
     final showAll = _showMentionAllOption;
     if (_filteredMentionMembers.isEmpty && !showAll) {
@@ -3362,6 +3892,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 构建 `@all`（提到所有群成员）这一项。
   Widget _buildMentionAllTile(ColorScheme cs, {required bool selected}) {
     return InkWell(
       onTap: _insertMentionAll,
@@ -3415,6 +3946,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (event is! KeyDownEvent) return KeyEventResult.ignored;
 
     final key = event.logicalKey;
+    // @all 占一项，故总选项数 = 成员数 + (是否展示 @all)。
     final optionCount =
         _filteredMentionMembers.length + (_showMentionAllOption ? 1 : 0);
     if (optionCount <= 0) return KeyEventResult.ignored;
@@ -3434,6 +3966,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return KeyEventResult.handled;
     } else if (key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.numpadEnter) {
+      // 回车确认当前高亮项：首项可能是 @all，其余按偏移取成员。
       if (_showMentionAllOption && _mentionSelectedIndex == 0) {
         _insertMentionAll();
       } else {
@@ -3452,17 +3985,24 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return KeyEventResult.ignored;
   }
 
+  /// 插入 `@all `（提到所有群成员）。
   void _insertMentionAll() {
     _insertMentionText('@all ');
   }
 
+  /// 插入对某个角色的 @ 引用。
   void _insertMention(AICharacter character) {
     _insertMentionText('@${character.name} ');
   }
 
+  /// 用 [mentionText] 替换掉光标前那段正在输入的 `@查询词`。
+  ///
+  /// 从光标前一位向左找最近的 `@` 作为替换起点（找不到就从头替换），
+  /// 插入后把光标移到 @ 文本之后，并立刻把焦点还给输入框。
   void _insertMentionText(String mentionText) {
     final text = _textController.text;
     int cursorPos = _textController.selection.baseOffset;
+    // baseOffset 为 -1 表示无选区（未聚焦），退化为在末尾插入。
     if (cursorPos < 0) cursorPos = text.length;
 
     final searchEnd = cursorPos > 0 ? cursorPos - 1 : 0;
@@ -3491,6 +4031,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return !query.contains(' ');
   }
 
+  /// 输入框文本变化时维护 @ 弹窗的显示与候选过滤。
+  ///
+  /// 私聊没有 @ 概念，直接返回。弹窗未开时检测是否刚进入 `@查询` 状态并弹出；
+  /// 已开时按光标前的 `@查询词` 重新过滤，遇到空格或删掉 `@` 则收起。
   void _handleTextChanged(String text) {
     if (_isDirectChat) return;
     if (!_showMentionPopup) {
@@ -3518,11 +4062,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     final query = textBeforeCursor.substring(atIndex + 1);
+    // 出现空格说明这个 @ 已经输完（或只是普通文本里的 @），收起弹窗。
     if (query.contains(' ')) {
       _hideMentionOverlay();
       return;
     }
 
+    // 空查询显示全部成员；否则按名称/角色/标签过滤。
     _filteredMentionMembers = query.isEmpty
         ? List.from(_allGroupCharacters)
         : _allGroupCharacters
@@ -3542,11 +4088,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 解析文本中 @ 到的角色 id 列表；私聊场景恒为空。
   List<String> _parseMentions(String content) {
     if (_isDirectChat) return const [];
     return parseMentionedCharacterIds(content, _characters);
   }
 
+  /// 把发言意图列表映射为对应的角色对象。
+  ///
+  /// 用 [Iterable.whereType] 过滤掉找不到角色的意图（角色可能刚被删除/停用）。
   List<AICharacter> _charactersForIntents(List<ReplyIntent> intents) {
     final byId = {for (final c in _characters) c.id: c};
     return intents
@@ -3555,6 +4105,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         .toList();
   }
 
+  /// 私聊本轮的回复者：固定为会话对方角色（前提是它有资格回复）。
+  ///
+  /// 私聊没有意图编排，故顺手清空 [_pendingReplyIntents]。
   List<AICharacter> _directReplyCharacters() {
     _pendingReplyIntents.clear();
     return DirectChatSession.selectReplyCharacters(
@@ -3564,6 +4117,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 为群聊本轮挑选发言者及其发言意图，并缓存到 [_pendingReplyIntents]。
+  ///
+  /// 若本轮没有被 @ 的人，则尽量排除上一条的发言者，避免同一角色连说两轮；
+  /// 但过滤后为空时保留原结果（宁可连说，也不要整轮没人回应）。
   List<ReplyIntent> _selectGroupReplyIntents({
     required String? userMessage,
     required List<String>? mentionedIds,
@@ -3583,11 +4140,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       isAutoChat: isAutoChat,
     );
     final lastAiSenderId = _lastAiSenderId;
+    // 被 @ 点名时必须让被点的人回答，此时不做"避免连说"的过滤。
     if (lastAiSenderId != null &&
         (mentionedIds == null || mentionedIds.isEmpty)) {
       final filtered = replyIntents
           .where((intent) => intent.speakerId != lastAiSenderId)
           .toList();
+      // 过滤后为空则保留原列表，宁可连说也不要本轮无人回应。
       if (filtered.isNotEmpty) replyIntents = filtered;
     }
     _pendingReplyIntents
@@ -3597,12 +4156,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return replyIntents;
   }
 
+  /// 取最近 20 条消息作为 LLM 上下文（够连贯，又不过度消耗 token）。
   List<Message> _recentMessagesForContext() {
     return _messages.length > 20
         ? _messages.sublist(_messages.length - 20)
         : _messages.toList();
   }
 
+  /// 上下文超出模型窗口时做压缩，返回压缩后的消息与摘要。
+  ///
+  /// 压缩摘要有两条通道：
+  /// - 允许自动更新记忆时，摘要沉淀进角色的 [CharacterMemory]（跨会话保留），
+  ///   并在 `app_settings` 里记录压缩检查点，下次只压缩检查点之后的新消息；
+  /// - 不允许时，只写入 [_transientContextCompression]（仅本次会话有效）。
+  ///
+  /// 关闭自动记忆时直接返回原始上下文，不做任何压缩调用。
   Future<({List<Message> messages, String? summary})> _compactContextIfNeeded({
     required AICharacter character,
     required ApiConfig config,
@@ -3620,10 +4188,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
     final canPersist =
         _memoryControls.canAutoUpdateCharacter(memory, character);
+    // 检查点按「会话 + 角色」维度存放，各角色独立推进压缩进度。
     final checkpointKey =
         'context_compressed_through:${widget.groupId}:${character.id}';
     final checkpoint = transient?.checkpoint ??
         _db.appSettingsBox.get(checkpointKey) as String?;
+    // 只把检查点之后的新消息交给压缩器，已压缩部分由摘要代表。
     final pending = _messagesAfterCheckpoint(checkpoint);
     final apiHistory = <Map<String, dynamic>>[
       if (transient != null)
@@ -3662,6 +4232,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               .clamp(4096, kContextCompressThresholdTokens)
               .toInt(),
     );
+    // 没超过阈值就不压缩，省下一次 LLM 调用。
     if (!manager.shouldSummarize(apiHistory)) {
       return (messages: fallbackContext, summary: transient?.summary);
     }
@@ -3672,6 +4243,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         isDirectChat: _isDirectChat,
       );
       if (!canPersist) {
+        // 不允许写长期记忆：摘要只留在本次会话内存里。
         if (pending.isNotEmpty) {
           _transientContextCompression[character.id] = (
             checkpoint: pending.last.id,
@@ -3683,6 +4255,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           summary: summary.summary,
         );
       }
+      // 允许持久化：摘要进角色记忆，检查点落 app_settings。
       await manager.persistToCharacterMemory(
         character: character,
         memory: memory,
@@ -3694,13 +4267,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (pending.isNotEmpty) {
         await _db.appSettingsBox.put(checkpointKey, pending.last.id);
       }
+      // 已沉淀进长期记忆，会话内的临时摘要不再需要。
       _transientContextCompression.remove(character.id);
       return (messages: _lastUserOnly(fallbackContext), summary: null);
     } catch (_) {
+      // 压缩失败就退回完整上下文：宁可多花 token，也不能丢上下文。
       return (messages: fallbackContext, summary: transient?.summary);
     }
   }
 
+  /// 取压缩检查点之后的新消息；无检查点时返回全部。
+  ///
+  /// 检查点消息已不在当前分页窗口（index < 0）或它就是最后一条时返回空列表。
   List<Message> _messagesAfterCheckpoint(String? checkpoint) {
     if (checkpoint == null || checkpoint.isEmpty) return _messages.toList();
     final index = _messages.indexWhere((message) => message.id == checkpoint);
@@ -3708,6 +4286,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return _messages.sublist(index + 1);
   }
 
+  /// 保存压缩后的角色记忆，并同步刷新内存中的 [_characterMemories]。
   Future<void> _saveCompactedCharacterMemory(CharacterMemory memory) async {
     await _db.characterMemoryBox.put(memory.id, memory);
     final index = _characterMemories.indexWhere((item) => item.id == memory.id);
@@ -3718,6 +4297,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 压缩后仅保留最后一条用户消息作为上下文。
+  ///
+  /// 历史已由摘要代表，这里只需保留"当前要回应的那句话"。
   List<Message> _lastUserOnly(List<Message> messages) {
     for (final message in messages.reversed) {
       if (message.senderType == 'user') return [message];
@@ -3741,6 +4323,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 上一条 AI 消息的发送者 id（用于避免同一角色连续发言）。
+  ///
+  /// 从后往前扫，遇到用户消息就返回 null——用户已经开口，
+  /// 此时"上一个 AI 发言者"这个约束不再适用。
   String? get _lastAiSenderId {
     for (final message in _messages.reversed) {
       if (message.senderType == 'ai') return message.senderId;
@@ -3749,6 +4335,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return null;
   }
 
+  /// 统计自用户最后一次发言以来，AI 已连续说了多少条。
+  ///
+  /// 私聊用它做刷屏保护：连说 3 条还没等到用户回复就暂停主动发言。
   int _directAiMessagesSinceLastUser() {
     var count = 0;
     for (final message in _messages.reversed) {
@@ -3758,6 +4347,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return count;
   }
 
+  /// 把"无人可回复"的原因翻译成用户可读的提示文案。
   String _replyBlockText(ReplyBlockReason? reason) {
     switch (reason) {
       case ReplyBlockReason.noApiConfig:
@@ -3775,21 +4365,32 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 流式输出期间刷新 UI，并按需跟随滚动。
+  ///
+  /// 只有用户本来就在底部附近时才自动跟随——否则会把正在翻看历史的用户
+  /// 强行拽回底部。[forceScroll] 用于必须回到底部的场景。
   void _flushStreamingUi({bool forceScroll = false}) {
     if (!_canTouchUi) return;
     final shouldScroll = forceScroll || _isNearBottom();
     setState(() {});
     if (shouldScroll) {
+      // 流式跟随用 jumpTo（animated: false），避免每个 token 都触发一次动画。
       _scrollToBottom(animated: false);
     }
   }
 
+  /// 当前是否滚动在底部附近（默认 160px 容差）。
+  ///
+  /// 尚未附着滚动视图时返回 true，视作"在底部"，让首帧内容正常跟随。
   bool _isNearBottom({double threshold = 160}) {
     if (!_scrollController.hasClients) return true;
     final position = _scrollController.position;
     return position.maxScrollExtent - position.pixels <= threshold;
   }
 
+  /// 滚动到列表底部。
+  ///
+  /// 放在 post-frame 回调里执行，确保新消息已完成布局、maxScrollExtent 已更新。
   void _scrollToBottom({bool animated = true}) {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
@@ -3807,6 +4408,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
   }
 
+  /// 为角色分配一个稳定的气泡/头像配色。
+  ///
+  /// 按角色 id 的字符码之和取模选色，保证同一角色每次进入都是同一个颜色。
   Color _senderColor(AICharacter sender) {
     const palette = [
       Color(0xFF576B95),
@@ -3821,6 +4425,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return palette[hash % palette.length];
   }
 
+  /// 自动发言状态条的展示文案。
+  ///
+  /// 工作模式与总开关的优先级高于具体运行状态——它们是"为什么不发言"的根因。
   String get _autoChatStatusText {
     if (_workModeEnabled) return '工作模式中，自动发言已暂停';
     if (!_isAutoChatEnabled) return '自动发言已关闭';
@@ -3842,6 +4449,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 切换空闲自动发言开关（仅本次会话内存态，不改全局治理设置）。
   void _toggleAutoChat(bool enabled) {
     if (!_canTouchUi) return;
     setState(() {
@@ -3856,10 +4464,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 切换工作模式（持久化到本会话配置）。
+  ///
+  /// 开启：中断进行中的自动发言流式输出并停掉调度器，再检查可恢复的任务。
+  /// 关闭：停掉本地 agent 桥接进程、取消尚未审批的工具调用，恢复自动发言。
   Future<void> _toggleWorkMode(bool enabled) async {
     await WorkModeConfigService(db: _db).setWorkMode(widget.groupId, enabled);
     _workModeSession.setEnabled(enabled);
     if (enabled) {
+      // 正在自动发言的话先丢弃当前这条流式输出，避免它写进工作模式会话。
       if (_autoChatScheduler.isRunning) {
         _discardCurrentStream = true;
         _stopStreaming();
@@ -3886,6 +4499,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 构建 AppBar 下方的会话控件（自动发言 / 工作模式两个开关）。
+  ///
+  /// 私聊不展示自动发言开关（私聊的主动联系由前台守护服务统一管控）。
   Widget _buildConversationControls(ColorScheme cs) {
     return CompactConversationControls(
       showAutoChat: !_isDirectChat,
@@ -3899,12 +4515,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 进入消息搜索模式（AppBar 切换为搜索框）。
   void _enterSearch() {
     setState(() => _isSearching = true);
     _searchResults = [];
     _searchFocusIndex = null;
   }
 
+  /// 退出搜索模式并清理关键词、结果与定位状态。
   void _exitSearch() {
     _searchDebounceTimer?.cancel();
     setState(() {
@@ -3915,6 +4533,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
   }
 
+  /// 搜索输入的防抖入口：停止输入 250ms 后才真正查库。
   void _performSearch(String query) {
     if (query.trim().isEmpty) {
       _searchDebounceTimer?.cancel();
@@ -3927,6 +4546,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
   }
 
+  /// 执行搜索并定位到第一条命中。
+  ///
+  /// 查库返回后再比对一次输入框内容：若用户已改了关键词，丢弃这次过期结果。
   Future<void> _applySearch(String query) async {
     if (!_canTouchUi) return;
     final q = query.toLowerCase();
@@ -3943,6 +4565,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 滚动定位到某条搜索结果。
+  ///
+  /// 目标消息不在当前分页窗口时，先加载它所在的窗口并与现有消息按 id 去重合并、
+  /// 按时间（时间相同则按 id）重排，保证列表顺序稳定后再定位。
   Future<void> _focusSearchResult(Message message) async {
     if (!_messages.any((loaded) => loaded.id == message.id)) {
       final page = await _repository.loadAround(message.id);
@@ -3963,6 +4589,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 把第 [index] 条消息滚动到可见区域（对齐到视口 20% 高度处）。
+  ///
+  /// 该项已渲染时直接用 [Scrollable.ensureVisible]；尚未渲染时先按每条约 80px
+  /// 估算跳到附近，等下一帧该项挂载后再精确对齐。
   void _scrollToMessageIndex(int index) {
     if (index < 0 || index >= _messages.length) return;
     if (!_scrollController.hasClients) return;
@@ -3995,9 +4625,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
   }
 
+  /// 跳到上一条搜索结果（到头则环回末条）。
   void _searchPrev() {
     if (_searchResults.isEmpty || _searchFocusIndex == null) return;
     setState(() {
+      // 先加长度再取模，避免下标为 0 时出现负数。
       _searchFocusIndex = ((_searchFocusIndex! - 1 + _searchResults.length) %
           _searchResults.length);
     });
@@ -4005,6 +4637,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     unawaited(_focusSearchResult(msg));
   }
 
+  /// 跳到下一条搜索结果（到尾则环回首条）。
   void _searchNext() {
     if (_searchResults.isEmpty || _searchFocusIndex == null) return;
     setState(() {
@@ -4014,6 +4647,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     unawaited(_focusSearchResult(msg));
   }
 
+  /// 搜索计数标签：有定位时显示"第 N / 共 M"，否则只显示总数。
   String get _searchResultLabel {
     if (_searchResults.isEmpty) return '';
     if (_searchFocusIndex == null) return '${_searchResults.length} 条结果';
@@ -4021,11 +4655,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   // —— 语音播放 ——
+  /// 当前是否正在朗读。
   bool _isSpeaking = false;
+
+  /// 正在被朗读的消息 id（用于把按钮切成"停止朗读"）。
   String? _speakingMessageId;
 
+  /// TTS 总开关（存于 Hive app_settings，由设置页控制）。
   bool get _isTtsEnabled => _db.isTtsEnabled;
 
+  /// TTS 状态回调：同步朗读状态，并把引擎错误以 Toast 形式提示用户。
   void _handleSpeechState(SpeechPlaybackState state) {
     if (!_canTouchUi) return;
     setState(() {
@@ -4042,6 +4681,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 朗读一条消息；若正在朗读别的内容会先停下（同一时刻只播一条）。
   Future<void> _ttsSpeak(Message message) async {
     if (_isSpeaking) {
       await _speech.stop();
@@ -4051,8 +4691,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     await _speech.speak(messageId: message.id, text: text);
   }
 
+  /// 停止朗读。
   Future<void> _ttsStop() => _speech.stop();
 
+  /// 长按消息弹出的操作面板。
+  ///
+  /// 仅 AI 消息（[sender] 非空）提供重新生成 / 引用回复 / @ 该角色；
+  /// 朗读项受 TTS 总开关控制；推送到企业微信对所有消息可用。
   void _showMessageActionSheet(Message message, AICharacter? sender) {
     final cs = Theme.of(context).colorScheme;
     showModalBottomSheet(
@@ -4134,6 +4779,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 弹出"推送到企业微信"对话框（可选发给同事 UserID 或群 Webhook）。
   void _showWeComPushDialog(String defaultContent) {
     final service = WeComPushService();
     var targetType = 'user';
@@ -4244,6 +4890,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 重新生成某条 AI 回复：用"排除该条之后"的上下文重新请求，替换原消息。
+  ///
+  /// 新消息通过 replyToMessageId 指向被重新生成的原消息，保留可追溯关系。
+  /// 流程与 [_generateAiReply] 类似（流式 → 失败重试 → 空内容兜底 → 落库），
+  /// 但不参与意图/关系态更新——这是用户手动动作，不代表角色的自主行为。
   Future<void> _regenerateAiReply(
       Message original, AICharacter character) async {
     if (_isRegenerating || _isAiReplying) return;
@@ -4262,6 +4913,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return;
     }
 
+    // 上下文里剔除原消息本身，否则模型会看到"自己上次的答案"而倾向复读。
     final msgsBefore = _messages.where((m) => m.id != original.id).toList();
     _regenerateContext = msgsBefore.length > 20
         ? msgsBefore.sublist(msgsBefore.length - 20)
@@ -4282,6 +4934,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         content: '');
     setState(() {
       _streamingMessage = temp;
+      // 移除旧消息、追加新的流式占位，视觉上就是"这条被重写了"。
       _messages = List.from(_messages)
         ..removeWhere((m) => m.id == original.id)
         ..add(temp);
@@ -4355,6 +5008,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     temp.content = fullContent;
     temp.isMention = mentionedIds.isNotEmpty;
     temp.mentionedAiIds = mentionedIds;
+    // 指回原消息，保留"这条是对哪条的重写"的可追溯关系。
     temp.replyToMessageId = original.id;
     await _repository.persistNewMessage(temp);
     _recordReplyUsage(character);
@@ -4375,15 +5029,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 进入引用回复：记录被引用消息并聚焦输入框。
   void _quoteMessage(Message message) {
     setState(() => _quotedMessage = message);
     _inputFocusNode.requestFocus();
   }
 
+  /// 取消引用回复。
   void _cancelQuote() {
     setState(() => _quotedMessage = null);
   }
 
+  /// 按 senderId 取展示名；`user` 返回群主名，找不到角色时返回占位名。
   String _senderNameById(String id) {
     if (id == 'user') return _ownerMentionName;
     final c = _allGroupCharacters.firstWhere((c) => c.id == id,
@@ -4391,6 +5048,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return c.name;
   }
 
+  /// 角色已被删除时的占位对象，避免历史消息渲染时空指针。
   AICharacter _unknownCharacter() {
     return AICharacter(
       name: '已删除角色',
@@ -4405,10 +5063,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 页面主体。
+  ///
+  /// 结构：AppBar（标题/搜索/导出/记忆/联网开关）+ 若干条件横幅
+  /// （无 API Key、群公告、联网状态、@我 提醒）+ 会话开关 + 消息列表 + 输入区。
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
 
+    // 首屏加载中：只渲染标题栏 + loading，避免读到未初始化的 _group 等字段。
     if (_isLoading) {
       return Scaffold(
         backgroundColor: WeComChatTokens.chatBackground(context),
@@ -4426,10 +5089,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       );
     }
 
+    // 私聊需要知道哪些用户消息已被对方"读过"，以渲染已读标记。
     final readUserMessageIds =
         _isDirectChat ? directReadUserMessageIds(_messages) : const <String>{};
     // #5 性能：消息/角色索引 Map 在父页预计算一次，避免在子组件每次 build 重建。
     final messageIndex = {for (final message in _messages) message.id: message};
+    // 被引用的消息可能已滑出当前分页窗口，按需回库补齐，否则引用条显示不出来。
     for (final message in _messages) {
       final quotedId = message.replyToMessageId;
       if (quotedId == null || messageIndex.containsKey(quotedId)) continue;
@@ -4536,6 +5201,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                         unawaited(_focusSearchResult(message)),
                   ),
           ),
+          // 底部状态区：文档解析进度优先于"AI 正在回复"提示（前者更需要可取消）。
           if (_documentProcessingToken != null)
             Container(
               padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
@@ -4589,6 +5255,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 空会话时的引导页：图标 + 标题 + 用法说明 + 提示 chip（群聊/私聊文案不同）。
   Widget _buildEmptyState(ColorScheme cs) {
     return Center(
       child: Padding(
@@ -4648,6 +5315,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 弹出群成员列表面板（可查看状态、进角色设置、发起私聊）。
   void _showMembersSheet() {
     showModalBottomSheet(
       context: context,
@@ -4666,6 +5334,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 打开记忆管理页；返回后重新加载记忆/关系/成员，让页面反映用户的编辑结果。
   Future<void> _openMemoryManagement() async {
     await Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => MemoryManagementPage(
@@ -4684,6 +5353,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
   }
 
+  /// 成员面板里的单行状态文案：「职位 · 年龄 · 可回复状态 · 本小时用量」。
   String _memberStatusText(AICharacter c) {
     final blockReason = _blockReasonFor(c);
     final base = '${c.role} · ${c.age}岁';
@@ -4699,6 +5369,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return '$base · $status · $usage';
   }
 
+  /// 跳转到角色编辑页。
   void _openCharacterSettings(AICharacter character) {
     Navigator.of(context).push(
       MaterialPageRoute(
@@ -4706,6 +5377,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 是否运行在桌面端（决定回车发送、拖放文件等交互）。
   bool get _isDesktop =>
       !kIsWeb &&
       (defaultTargetPlatform == TargetPlatform.macOS ||
@@ -4714,6 +5386,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 输入区键盘事件：@ 弹窗打开时走导航；桌面端回车发送、Shift+回车换行。
   KeyEventResult _handleKeyEvent(KeyEvent event) {
+    // 单独放行 Shift 抬起/按下，否则会干扰 Shift+Enter 的组合判断。
     if (event is KeyDownEvent &&
         (event.logicalKey == LogicalKeyboardKey.shiftLeft ||
             event.logicalKey == LogicalKeyboardKey.shiftRight)) {
@@ -4724,6 +5397,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     // @ 弹窗键盘导航优先（↑↓ 选择、回车插入、Esc 关闭）
     if (_showMentionPopup) return _handleMentionKeyEvent(event);
     final key = event.logicalKey;
+    // Ctrl/Cmd+V：自行处理剪贴板（可能含图片），不走 TextField 默认粘贴。
     if (key == LogicalKeyboardKey.keyV &&
         (HardwareKeyboard.instance.isControlPressed ||
             HardwareKeyboard.instance.isMetaPressed)) {
@@ -4748,6 +5422,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return KeyEventResult.ignored;
   }
 
+  /// 构建底部输入区（引用条、附件预览、拖放区、表情、发送/停止按钮）。
+  ///
+  /// 具体 UI 在 [ChatRoomComposer]，此处只做状态与回调的接线。
   Widget _buildInputArea() {
     return ChatRoomComposer(
       textController: _textController,
@@ -4836,6 +5513,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 弹出常用表情面板，点选后在光标处内联插入。
   void _showEmojiPanel() {
     const emojis = [
       '😀',
@@ -4894,6 +5572,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   /// 从相册多选图片，复制到媒体目录并加入待发送列表。
+  ///
+  /// 受 [defaultMaxVisionImages]（4 张）约束：多选超出时截断并提示，
+  /// 单张超过体积上限则跳过该张而不中断其余图片。
+  /// Web 端只能拿到字节流，原生端直接按路径复制文件。
   Future<void> _pickImages() async {
     try {
       final currentImageCount =
@@ -4908,6 +5590,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
 
       final files = await _imagePicker.pickMultiImage(
+        // 压缩到 1600px / 85% 质量：足够视觉模型识别，又能显著降低上传体积。
         maxWidth: 1600,
         maxHeight: 1600,
         imageQuality: 85,
@@ -4942,7 +5625,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         }
         if (mounted) setState(() => _pendingAttachments.add(att));
       }
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
         AppToast.show(context, '选择图片失败：$e', icon: Icons.error_outline_rounded);
       }
@@ -4950,6 +5633,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   /// 从相册选择单个视频，复制到媒体目录并加入待发送列表。
+  ///
+  /// 视频体积大，仅支持单选。
   Future<void> _pickVideo() async {
     try {
       final file = await _imagePicker.pickVideo(source: ImageSource.gallery);
@@ -4975,13 +5660,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         );
       }
       if (mounted) setState(() => _pendingAttachments.add(att));
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
         AppToast.show(context, '选择视频失败：$e', icon: Icons.error_outline_rounded);
       }
     }
   }
 
+  /// 选择任意类型文件（可多选）作为附件。
+  ///
+  /// 不同平台拿到的载荷不同（Web 为字节、原生为路径），
+  /// 由 [resolvePickedAttachmentPayload] 归一后再分支处理。
+  /// 一个都没成功时提示"没有可读取的文件"。
   Future<void> _pickFiles() async {
     try {
       final result = await FilePicker.platform.pickFiles(
@@ -5026,13 +5716,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (mounted && added == 0) {
         AppToast.show(context, '没有可读取的文件', icon: Icons.info_outline_rounded);
       }
-    } catch (_) {
+    } catch (e) {
       if (mounted) {
         AppToast.show(context, '选择文件失败：$e', icon: Icons.error_outline_rounded);
       }
     }
   }
 
+  /// 处理桌面端拖放进来的路径。
+  ///
+  /// 文件按附件处理；文件夹无法作为附件，改为把绝对路径插入输入框
+  /// （便于让 agentic 工具去读该目录）。
   Future<void> _handleDroppedFiles(Iterable<String> paths) async {
     if (paths.isEmpty) return;
     var addedFiles = 0;
@@ -5077,18 +5771,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         AppToast.show(context, '已添加 ${parts.join('、')}',
             icon: Icons.attach_file_rounded);
       }
-    } catch (_) {
+    } catch (e) {
       if (_canTouchUi && mounted) {
         AppToast.show(context, '拖放失败：$e', icon: Icons.error_outline_rounded);
       }
     }
   }
 
+  /// 在光标处插入文本（替换当前选区）。
+  ///
+  /// [inline] 为 true 时紧贴插入（表情、粘贴文本）；否则在已有内容后另起一行
+  /// （拖入的文件夹路径等，独占一行更清晰）。
   void _insertTextAtCursor(String text, {bool inline = false}) {
     if (text.trim().isEmpty) return;
     final current = _textController.text;
     final selection = _textController.selection;
     final insertion = inline || current.trim().isEmpty ? text : '\n$text';
+    // 选区偏移为 -1 表示未聚焦，退化为在末尾插入。
     final start = selection.start < 0 ? current.length : selection.start;
     final end = selection.end < 0 ? current.length : selection.end;
     final next = current.replaceRange(start, end, insertion);
@@ -5099,12 +5798,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 把剪贴板内容转成附件或文本插入输入框。
+  ///
+  /// 按优先级依次尝试：文件路径 → 图片位图 → 纯文本。
+  /// 每种尝试都各自 try/catch：某个平台不支持某种剪贴板类型是常态，
+  /// 不应因此中断后续回退路径。[_isPastingAttachments] 防止重复触发。
   Future<void> _pasteClipboardAttachments({bool showEmptyHint = false}) async {
     if (_isPastingAttachments) return;
     _isPastingAttachments = true;
     try {
       final attachments = <MediaAttachment>[];
 
+      // 优先级 1：剪贴板中的文件路径。Android 的 content:// URI 无法直接读，跳过。
       try {
         final files = await Pasteboard.files();
         for (final path in files) {
@@ -5123,6 +5828,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       } catch (_) {}
 
       if (attachments.isEmpty) {
+        // 优先级 2：剪贴板位图（如系统截图），落盘成带时间戳的 png。
         try {
           final image = await Pasteboard.image;
           if (image != null && image.isNotEmpty) {
@@ -5142,6 +5848,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       }
 
       if (attachments.isEmpty) {
+        // 优先级 3：纯文本，直接插入输入框。
         String? clipboardText;
         try {
           final data = await Clipboard.getData(Clipboard.kTextPlain);
@@ -5174,7 +5881,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       setState(() => _pendingAttachments.addAll(attachments));
       AppToast.show(context, '已粘贴 ${attachments.length} 个附件',
           icon: Icons.content_paste_rounded);
-    } catch (_) {
+    } catch (e) {
       if (mounted && showEmptyHint) {
         AppToast.show(context, '粘贴失败：$e', icon: Icons.error_outline_rounded);
       }
@@ -5183,6 +5890,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
+  /// 根据文件扩展名判定附件类型：`image` / `video` / 其余归为 `file`。
   String _attachmentTypeForPath(String path) {
     final ext = extensionOfPath(path);
     const imageExts = {
@@ -5207,6 +5915,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return 'file';
   }
 
+  /// 判断再加一个 [newBytes] 字节的附件是否仍在体积限制内。
+  ///
+  /// 限制同时作用于单文件与单条消息总量（各 10 MB）。
   bool _canAddAttachment(int newBytes) {
     final existingBytes = _pendingAttachments.fold<int>(
       0,
@@ -5218,6 +5929,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
+  /// 提示某个文件因超过体积限制而被跳过。
   void _showAttachmentLimit(String fileName) {
     if (!mounted) return;
     AppToast.show(
@@ -5237,6 +5949,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (removed.isNotEmpty) unawaited(_cleanupMediaPaths(removed));
   }
 
+  /// 删除这些附件在媒体目录里的副本文件。
+  ///
+  /// 附件被移除或页面关闭时调用，避免未发送的临时文件长期堆积。
   Future<void> _cleanupMediaPaths(Iterable<MediaAttachment> attachments) async {
     await DataLifecycleService(db: _db).cleanupMediaPaths(
       attachments.map((attachment) => attachment.localPath),
