@@ -3297,7 +3297,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       if (r.affinity < -20 && r.friction > 60) {
         msgs.add({
           'role': 'system',
-          'content': '行为准则：你和用户关系很差，如果对方态度不好，你有权敷衍、转移话题，不必每条都认真回复。',
+          'content': '行为准则：你和用户关系很差，你会不耐烦、懒得认真回应，语气带刺、想尽快结束对话。',
         });
         break;
       } else if (r.affinity < 0 || r.friction > 50) {

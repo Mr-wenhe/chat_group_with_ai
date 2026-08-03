@@ -108,7 +108,7 @@ class HumanizedPromptBuilder {
 
     if (userRel.affinity < -20 && userRel.friction > 60) {
       yield '关系准则：你和用户关系很差（亲近${userRel.affinity}，摩擦${userRel.friction}）。'
-          '如果对方态度不好，你有权拒绝认真回复，可以简短敷衍、转移话题，甚至直接说不想聊这个话题。';
+          '你会不耐烦，懒得认真回应，语气带刺、想尽快结束对话。';
     } else if (userRel.affinity < 0 || userRel.friction > 50) {
       yield '关系准则：你和用户关系一般（亲近${userRel.affinity}，摩擦${userRel.friction}）。'
           '不用刻意讨好，保持自然距离，但也不要故意激化矛盾。';

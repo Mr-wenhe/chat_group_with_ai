@@ -184,22 +184,18 @@ class HumanizedChatOrchestrator {
       }
     }
 
-    // 关系驱动：用户对角色好感极低或摩擦极高时，角色可能拒绝回复。
-    // 群聊中角色对用户的关系直接影响回复意愿；私聊中则是唯一的关系维度。
+    // 关系驱动：用户对角色好感极低或摩擦极高时，角色强制带刺回复。
+    // 不沉默——宁可怼人也不让消息石沉大海。
     final userRelation = _relationTowardUser(
         relationships, groupId, character.id);
     if (userRelation != null && !mentionedIds.contains(character.id)) {
       if (userRelation.affinity < -20 && userRelation.friction > 60) {
-        // 亲近为负且摩擦很高：大概率沉默，小概率带刺回应。
-        if (random.nextDouble() < 0.72) {
-          reasons.add('hostile-silence');
-          return null;
-        }
+        // 亲近为负且摩擦很高：强制带刺回复，表达不耐烦。
         score += 20;
         action = ReplyAction.challenge;
         tone = '不耐烦、不想理、但碍于场面说两句';
         length = ReplyLengthHint.oneLiner;
-        reasons.add('hostile-reluctant');
+        reasons.add('hostile-response');
       } else if (userRelation.affinity < -10 || userRelation.friction > 70) {
         // 关系紧张但未到破裂：降低回复意愿，语气变冷淡。
         score -= 14;
