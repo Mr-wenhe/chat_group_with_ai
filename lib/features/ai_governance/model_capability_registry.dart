@@ -135,6 +135,26 @@ class ModelCapabilityRegistry {
       price: _deepSeekReasonerPrice,
       source: 'DeepSeek API Docs 价格与模型快照',
     ),
+    'deepseek/deepseek-v3': _text(
+      provider: 'deepseek',
+      context: 65536,
+      price: _deepSeekChatPrice,
+      source: 'DeepSeek API Docs 价格与模型快照',
+    ),
+    'deepseek/deepseek-r1': _text(
+      provider: 'deepseek',
+      context: 65536,
+      output: 8192,
+      price: _deepSeekReasonerPrice,
+      source: 'DeepSeek API Docs 价格与模型快照',
+    ),
+    'deepseek/deepseek-r1-distill-llama-70b': _text(
+      provider: 'deepseek',
+      context: 65536,
+      output: 8192,
+      price: _deepSeekReasonerPrice,
+      source: 'DeepSeek API Docs 价格与模型快照',
+    ),
     for (final model in [
       'deepseek-vl',
       'deepseek-vl-1.3b',
