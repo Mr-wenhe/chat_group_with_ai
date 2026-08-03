@@ -62,6 +62,7 @@ class HumanizedMemoryService {
     required RelationshipTargetType targetType,
     required String actionName,
     required bool friendlyTone,
+    bool isPrivateChat = false,
   }) {
     if (targetId == null || targetId.isEmpty) return relationships;
 
@@ -109,7 +110,18 @@ class HumanizedMemoryService {
             friendlyTone ? RelationshipMood.warm : RelationshipMood.awkward;
         break;
       default:
+        // answer / topicShift / 默认：群聊中只加熟悉度，不改变亲密/信任/摩擦
         relation.familiarity += 2;
+    }
+
+    // 私聊中：角色主动回复用户本身就是一种亲近行为，额外增加亲密和信任。
+    // 这样用户在关系状态面板中能直观看到私聊互动带来的数值变化。
+    if (isPrivateChat && actionName != 'challenge' && actionName != 'callOut') {
+      relation.affinity += 2;
+      relation.trust += 1;
+      if (relation.recentMood == RelationshipMood.neutral) {
+        relation.recentMood = RelationshipMood.warm;
+      }
     }
 
     relation.clampScores();

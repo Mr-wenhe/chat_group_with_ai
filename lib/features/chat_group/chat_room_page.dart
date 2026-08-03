@@ -3,8 +3,8 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:math';
 
-import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
@@ -40,14 +40,14 @@ import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/ai_governance/search_coordinator.dart';
 import 'package:chat_group/features/chat_group/agentic_reply_utils.dart';
 import 'package:chat_group/features/chat_group/attachment_utils.dart';
-import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
 import 'package:chat_group/features/chat_group/auto_chat_scheduler.dart';
+import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
 import 'package:chat_group/features/chat_group/chat_group_form_page.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/chat_room_loader.dart';
 import 'package:chat_group/features/chat_group/chat_room_repository.dart';
-import 'package:chat_group/features/chat_group/chat_scroll_utils.dart';
 import 'package:chat_group/features/chat_group/chat_room_utils.dart';
+import 'package:chat_group/features/chat_group/chat_scroll_utils.dart';
 import 'package:chat_group/features/chat_group/conversation_controller.dart';
 import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
@@ -1533,11 +1533,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _registerUserMentionIfNeeded(temp);
     // 关系态与角色记忆只在成功回复后更新，失败占位不该污染长期状态。
     if (!failed) {
-      // 私聊中 _directReplyCharacters 清空了 _pendingReplyIntents，导致
-      // intent 为 null，关系状态永不更新。这里为私聊创建默认 intent 以
-      // 触发 _persistRelationshipForIntent 中的 affinity/trust/friction 更新。
-      final effectiveIntent = intent ??
-          (_isDirectChat
+      // 私聊中 _directReplyCharacters 清空了 _pendingReplyIntents，但实际
+      // 传进来的 intent 可能 targetId=null（来源待查），需同时兜底这两种情况。
+      final effectiveIntent = (intent == null || intent.targetId == null)
+          ? (_isDirectChat
               ? ReplyIntent(
                   speakerId: character.id,
                   action: ReplyAction.answer,
@@ -1546,7 +1545,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                   toneHint: 'neutral',
                   reason: 'Direct chat reply',
                 )
-              : null);
+              : null)
+          : intent;
       if (effectiveIntent != null) {
         await _persistRelationshipForIntent(
           character: character,
@@ -2822,6 +2822,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       // 语气里带刺/冷淡则不算友好互动，避免负面互动也拉高亲密度。
       friendlyTone:
           !intent.toneHint.contains('带刺') && !intent.toneHint.contains('冷淡'),
+      isPrivateChat: _isDirectChat,
     );
     for (final relation in _relationshipStates) {
       await _db.relationshipStateBox.put(relation.id, relation);
