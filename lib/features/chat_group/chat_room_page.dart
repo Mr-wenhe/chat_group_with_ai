@@ -757,6 +757,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 启动空闲自动聊天调度器（首次延迟带随机抖动）。
   void _startAutoChat() {
+    if (_isDirectChat) return;
     if (!ChatActivityPolicy.canStartAutoChat(
       workModeEnabled: _workModeEnabled,
       autoChatEnabled: _isAutoChatEnabled,
