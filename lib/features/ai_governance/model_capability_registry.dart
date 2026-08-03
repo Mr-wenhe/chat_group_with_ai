@@ -124,33 +124,33 @@ class ModelCapabilityRegistry {
   static final Map<String, ModelCapability Function(String)> _specs = {
     'deepseek/deepseek-chat': _text(
       provider: 'deepseek',
-      context: 65536,
+      context: 1000000,
       price: _deepSeekChatPrice,
       source: 'DeepSeek API Docs 价格与模型快照',
     ),
     'deepseek/deepseek-reasoner': _text(
       provider: 'deepseek',
-      context: 65536,
+      context: 1000000,
       output: 8192,
       price: _deepSeekReasonerPrice,
       source: 'DeepSeek API Docs 价格与模型快照',
     ),
     'deepseek/deepseek-v3': _text(
       provider: 'deepseek',
-      context: 65536,
+      context: 1000000,
       price: _deepSeekChatPrice,
       source: 'DeepSeek API Docs 价格与模型快照',
     ),
     'deepseek/deepseek-r1': _text(
       provider: 'deepseek',
-      context: 65536,
+      context: 1000000,
       output: 8192,
       price: _deepSeekReasonerPrice,
       source: 'DeepSeek API Docs 价格与模型快照',
     ),
     'deepseek/deepseek-r1-distill-llama-70b': _text(
       provider: 'deepseek',
-      context: 65536,
+      context: 1000000,
       output: 8192,
       price: _deepSeekReasonerPrice,
       source: 'DeepSeek API Docs 价格与模型快照',
@@ -163,7 +163,7 @@ class ModelCapabilityRegistry {
       'deepseek-vl2-small',
       'deepseek-vl2-tiny',
     ])
-      'deepseek/$model': _vision(provider: 'deepseek', context: 65536),
+      'deepseek/$model': _vision(provider: 'deepseek', context: 1000000),
     for (final model in ['qwen-turbo', 'qwen-plus', 'qwen-max'])
       'qwen/$model': _text(provider: 'qwen', context: 131072),
     'qwen/qwen-long': _text(provider: 'qwen', context: 1000000),
