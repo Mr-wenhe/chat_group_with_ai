@@ -17,6 +17,33 @@ class ModelCapabilityRegistry {
     CustomModelCapability? custom,
   }) {
     final normalized = modelId.trim().toLowerCase();
+    final spec = _specs['${provider.name}/$normalized'];
+
+    // 用户自定义能力优先保留（价格、视觉/流式/工具声明），
+    // 但上下文窗口和输出上限取自定义值与内置值的较大者，
+    // 避免用户输入了一个低于内置能力的旧数值导致后续被误拦截。
+    if (custom != null && spec != null) {
+      final builtin = spec(modelId);
+      return ModelCapability(
+        provider: provider.name,
+        modelId: modelId,
+        isKnown: true,
+        supportsStreaming: custom.supportsStreaming,
+        supportsVision: custom.supportsVision,
+        supportsTools: custom.supportsTools,
+        contextWindow: custom.contextWindow > builtin.contextWindow
+            ? custom.contextWindow
+            : builtin.contextWindow,
+        maxOutput: custom.maxOutput > builtin.maxOutput
+            ? custom.maxOutput
+            : builtin.maxOutput,
+        price: builtin.price,
+        source: '用户声明 + 内置快照',
+        version: 'custom-local',
+        updatedAt: _snapshotDate,
+      );
+    }
+
     if (custom != null) {
       return ModelCapability(
         provider: provider.name,
@@ -33,8 +60,9 @@ class ModelCapabilityRegistry {
         updatedAt: _snapshotDate,
       );
     }
-    final spec = _specs['${provider.name}/$normalized'];
+
     if (spec != null) return spec(modelId);
+
     return ModelCapability(
       provider: provider.name,
       modelId: modelId,
