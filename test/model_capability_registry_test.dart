@@ -121,4 +121,39 @@ void main() {
       isFalse,
     );
   });
+
+  test('自定义能力与内置取较大值，避免旧配置被误拦截', () {
+    final resolved = registry.resolve(
+      provider: ApiProvider.deepseek,
+      modelId: 'deepseek-chat',
+      custom: const CustomModelCapability(
+        supportsStreaming: true,
+        supportsVision: false,
+        supportsTools: false,
+        contextWindow: 200000,
+        maxOutput: 1024,
+      ),
+    );
+    expect(resolved.contextWindow, 1000000);
+    expect(resolved.supportsStreaming, isTrue);
+    expect(resolved.supportsVision, isFalse);
+    expect(resolved.source, contains('用户声明'));
+  });
+
+  test('纯未知模型的自定义能力不使用内置值', () {
+    final resolved = registry.resolve(
+      provider: ApiProvider.custom,
+      modelId: 'my-private-model',
+      custom: const CustomModelCapability(
+        supportsStreaming: true,
+        supportsVision: false,
+        supportsTools: false,
+        contextWindow: 32000,
+        maxOutput: 4000,
+      ),
+    );
+    expect(resolved.contextWindow, 32000);
+    expect(resolved.supportsStreaming, isTrue);
+    expect(resolved.price, isNull);
+  });
 }
