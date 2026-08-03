@@ -20,6 +20,21 @@ class HumanizedMemoryService {
   static const int maxLayerEntries = 10;
   static const int maxEntryChars = 80;
 
+  /// 去除 LLM 输出中可能出现的 Markdown 代码块包裹。
+  ///
+  /// 支持 ```json … ```、``` … ``` 等常见格式；无包裹时原样返回。
+  static String _stripCodeFence(String text) {
+    // 匹配以 ``` 开头、可选 json 标记、任意内容、以 ``` 结尾的模式。
+    final codeFence = RegExp(r'^```(?:json)?\s*\n?(.*?)\n?```\s*$', dotAll: true);
+    final match = codeFence.firstMatch(text);
+    if (match != null) return match.group(1)!.trim();
+    // 也兼容 ```json 不带换行的紧凑格式。
+    final compactFence = RegExp(r'^```(?:json)?(.+?)```\s*$', dotAll: true);
+    final compactMatch = compactFence.firstMatch(text);
+    if (compactMatch != null) return compactMatch.group(1)!.trim();
+    return text;
+  }
+
   static CharacterMemory memoryForCharacter({
     required String groupId,
     required AICharacter character,
@@ -101,9 +116,15 @@ class HumanizedMemoryService {
     return updated;
   }
 
+  /// 从 LLM 回复中解析分层记忆 JSON。
+  ///
+  /// 兼容 LLM 输出被 Markdown 代码块包裹的情况（```json ... ``` 或 ``` ... ```），
+  /// 不同模型行为不同，部分模型倾向于输出带 fence 的 JSON。
   static LayeredMemoryUpdate parseLayeredMemoryJson(String raw) {
     try {
-      final decoded = jsonDecode(raw);
+      final text = _stripCodeFence(raw.trim());
+      if (text.isEmpty) return const LayeredMemoryUpdate();
+      final decoded = jsonDecode(text);
       if (decoded is! Map<String, dynamic>) return const LayeredMemoryUpdate();
       return LayeredMemoryUpdate(
         facts: _readLayer(decoded['facts']),

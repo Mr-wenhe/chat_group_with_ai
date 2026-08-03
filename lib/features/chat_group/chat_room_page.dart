@@ -1532,12 +1532,28 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     // 关系态与角色记忆只在成功回复后更新，失败占位不该污染长期状态。
-    if (!failed && intent != null) {
-      await _persistRelationshipForIntent(
-        character: character,
-        intent: intent,
-        userMessage: userMessage,
-      );
+    if (!failed) {
+      // 私聊中 _directReplyCharacters 清空了 _pendingReplyIntents，导致
+      // intent 为 null，关系状态永不更新。这里为私聊创建默认 intent 以
+      // 触发 _persistRelationshipForIntent 中的 affinity/trust/friction 更新。
+      final effectiveIntent = intent ??
+          (_isDirectChat
+              ? ReplyIntent(
+                  speakerId: character.id,
+                  action: ReplyAction.answer,
+                  targetId: 'user',
+                  lengthHint: ReplyLengthHint.normal,
+                  toneHint: 'neutral',
+                  reason: 'Direct chat reply',
+                )
+              : null);
+      if (effectiveIntent != null) {
+        await _persistRelationshipForIntent(
+          character: character,
+          intent: effectiveIntent,
+          userMessage: userMessage,
+        );
+      }
     }
     if (!failed && fullContent.trim().isNotEmpty) {
       await _maybeEvolveCharacterMemory(character, fullContent);
@@ -3239,6 +3255,27 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           if (memory.personaGrowth.isNotEmpty)
             '表达习惯：${memory.personaGrowth.take(4).join('；')}',
         ].join('\n'),
+      });
+    }
+
+    // 私聊关系状态注入：角色对用户的好感/信任/摩擦等，让 AI 在回复时感知
+    // 用户与角色之间的历史关系变化。群聊版通过 buildIntentContext 注入，
+    // 私聊版没有 intent，这里单独注入角色与用户之间的关系。
+    final userRelations = _relationshipStates.where(
+      (r) =>
+          r.sourceCharacterId == character.id &&
+          r.targetType == RelationshipTargetType.user,
+    );
+    if (userRelations.isNotEmpty) {
+      final lines = userRelations.map((r) {
+        final mood = r.recentMood.name;
+        final note =
+            r.notes.trim().isEmpty ? '没有明确备注' : r.notes.trim();
+        return '亲近${r.affinity}，信任${r.trust}，摩擦${r.friction}，熟悉度${r.familiarity}，最近情绪$mood，$note';
+      }).join('；');
+      msgs.add({
+        'role': 'system',
+        'content': '【你和用户的关系】$lines',
       });
     }
 
