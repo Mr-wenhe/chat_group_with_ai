@@ -757,7 +757,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 启动空闲自动聊天调度器（首次延迟带随机抖动）。
   void _startAutoChat() {
-    if (_isDirectChat) return;
     if (!ChatActivityPolicy.canStartAutoChat(
       workModeEnabled: _workModeEnabled,
       autoChatEnabled: _isAutoChatEnabled,
@@ -2858,7 +2857,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return _buildDirectApiMessages(character, context, userMessage,
           supportsVision: supportsVision,
           currentUserMessage: currentUserMessage,
-          transientContextSummary: transientContextSummary);
+          transientContextSummary: transientContextSummary,
+          isAutoChat: isAutoChat);
     }
 
     final msgs = <Map<String, dynamic>>[];
@@ -3222,6 +3222,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     bool supportsVision = false,
     Message? currentUserMessage,
     String? transientContextSummary,
+    bool isAutoChat = false,
   }) async {
     final msgs = <Map<String, dynamic>>[];
     final selectedLegacyMemory = MemoryPromptSelector.legacySummary(character);
@@ -3293,6 +3294,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       'content': '当前真实时间：${DateTime.now().toLocal().toIso8601String()}。'
           '涉及当前事实、新闻、价格、职位、规则或你不知道的内容时，不要编造；请说明不确定，并建议联网搜索或让用户授权搜索。'
           '如果用户要求你贴图、发图或发送附件，可以自然说明“我附上了”，应用会把本轮产物作为图片或文件附件显示。'
+          '${isAutoChat ? '用户暂时没有回复你，你主动发一条消息找他聊天，可以问问他近况、分享一件事或开启新话题，但不要重复之前说过的话。' : '用户刚给你发了一条消息，请自然回应。'}'
           '私聊主动找用户时最多连续三条，之后等待用户回复。',
     });
     msgs.add({'role': 'system', 'content': character.systemPrompt});
