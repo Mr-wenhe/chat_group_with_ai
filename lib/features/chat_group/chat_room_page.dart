@@ -53,6 +53,7 @@ import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
+import 'package:chat_group/features/chat_group/user_message_sentiment.dart';
 import 'package:chat_group/features/chat_group/models/chat_room_models.dart';
 import 'package:chat_group/features/chat_group/multimodal_content.dart';
 import 'package:chat_group/features/chat_group/picked_attachment_payload.dart';
@@ -1045,10 +1046,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       );
       return;
     }
+    final sentiment = UserMessageSentimentAnalyzer.analyze(text);
     await _runAiRound(
       userMessage: text,
       mentionedIds: mentionedIds,
       currentUserMessage: userMessage,
+      userSentiment: sentiment,
     );
   }
 
@@ -1157,7 +1160,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       {String? userMessage,
       List<String>? mentionedIds,
       bool isAutoChat = false,
-      Message? currentUserMessage}) async {
+      Message? currentUserMessage,
+      UserMessageSentiment? userSentiment}) async {
     if (!isAutoChat && _consecutiveRound >= _maxAutoRounds) {
       if (_pendingMentionedIds.isNotEmpty) {
         _pendingMentionedIds.clear();
@@ -1180,6 +1184,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             userMessage: userMessage,
             mentionedIds: mentionedIds,
             isAutoChat: isAutoChat,
+            userSentiment: userSentiment,
           ));
     if (charactersToReply.isEmpty) {
       // 有人有资格但编排器选择"本轮沉默"：静默收尾，不算异常。
@@ -1225,6 +1230,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           isAutoChat: isAutoChat,
           intent: _pendingReplyIntents[character.id],
           currentUserMessage: currentUserMessage,
+          userSentiment: userSentiment,
         );
       } catch (e) {
         // 单个角色失败不中断整轮：写入可见的失败气泡，继续下一个角色。
@@ -1324,7 +1330,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       AICharacter character, List<Message> context, String? userMessage,
       {bool isAutoChat = false,
       ReplyIntent? intent,
-      Message? currentUserMessage}) async {
+      Message? currentUserMessage,
+      UserMessageSentiment? userSentiment}) async {
     if (isAutoChat && _workModeEnabled) return '';
     // 并发兜底：同一角色正在执行 agentic 任务时，auto-chat / 其他并发路径
     // 不得触发同一角色的普通 LLM 回复，否则会出现「agentic 兜底文案 + 普通
@@ -1552,6 +1559,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           character: character,
           intent: effectiveIntent,
           userMessage: userMessage,
+          userSentiment: userSentiment,
         );
       }
     }
@@ -2797,6 +2805,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required AICharacter character,
     required ReplyIntent intent,
     required String? userMessage,
+    UserMessageSentiment? userSentiment,
   }) async {
     final targetId = intent.targetId ?? (userMessage != null ? 'user' : null);
     if (targetId == null || targetId.isEmpty) return;
@@ -2823,6 +2832,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       friendlyTone:
           !intent.toneHint.contains('带刺') && !intent.toneHint.contains('冷淡'),
       isPrivateChat: _isDirectChat,
+      userSentiment: userSentiment,
     );
     for (final relation in _relationshipStates) {
       await _db.relationshipStateBox.put(relation.id, relation);
@@ -3280,6 +3290,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         'role': 'system',
         'content': '【你和用户的关系】$lines',
       });
+    }
+
+    // 私聊中同样注入关系行为准则，让角色知道可以拒绝或保持距离。
+    for (final r in userRelations) {
+      if (r.affinity < -20 && r.friction > 60) {
+        msgs.add({
+          'role': 'system',
+          'content': '行为准则：你和用户关系很差，如果对方态度不好，你有权敷衍、转移话题，不必每条都认真回复。',
+        });
+        break;
+      } else if (r.affinity < 0 || r.friction > 50) {
+        msgs.add({
+          'role': 'system',
+          'content': '行为准则：你和用户关系一般，不用刻意讨好，保持自然距离。',
+        });
+        break;
+      }
     }
 
     msgs.add({
@@ -4172,6 +4199,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required String? userMessage,
     required List<String>? mentionedIds,
     required bool isAutoChat,
+    UserMessageSentiment? userSentiment,
   }) {
     var replyIntents = HumanizedChatOrchestrator.selectReplyIntents(
       characters: _characters,
@@ -4185,6 +4213,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       isEligible: _isEligibleToReply,
       random: _random,
       isAutoChat: isAutoChat,
+      userSentiment: userSentiment,
     );
     final lastAiSenderId = _lastAiSenderId;
     // 被 @ 点名时必须让被点的人回答，此时不做"避免连说"的过滤。

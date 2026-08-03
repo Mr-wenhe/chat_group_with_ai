@@ -41,6 +41,7 @@ class HumanizedPromptBuilder {
         '你最近形成的表达习惯：${_limit(memory.personaGrowth, 4)}',
       if (relevantRelations.isNotEmpty)
         '你和相关成员的关系：${relevantRelations.join('；')}',
+      ..._relationshipBehaviorInstructions(relationships, character),
       '本轮动作：${intent.action.name}，主要对象：$targetName。',
       '本轮语气：${intent.toneHint}。',
       lengthInstruction(intent.lengthHint),
@@ -88,5 +89,33 @@ class HumanizedPromptBuilder {
       final note = r.notes.trim().isEmpty ? '没有明确备注' : r.notes.trim();
       return '$name：亲近${r.affinity}，信任${r.trust}，摩擦${r.friction}，最近情绪$mood，$note';
     }).toList();
+  }
+
+  /// 根据角色对用户的关系状态，注入行为准则，让角色能够根据关系
+  /// 自主决定回复态度（拒绝、敷衍、热情等）。
+  static Iterable<String> _relationshipBehaviorInstructions(
+      List<RelationshipState> relationships, AICharacter character) sync* {
+    RelationshipState? userRel;
+    for (final r in relationships) {
+      if (r.sourceCharacterId == character.id &&
+          r.targetId == 'user' &&
+          r.targetType == RelationshipTargetType.user) {
+        userRel = r;
+        break;
+      }
+    }
+    if (userRel == null) return;
+
+    if (userRel.affinity < -20 && userRel.friction > 60) {
+      yield '关系准则：你和用户关系很差（亲近${userRel.affinity}，摩擦${userRel.friction}）。'
+          '如果对方态度不好，你有权拒绝认真回复，可以简短敷衍、转移话题，甚至直接说不想聊这个话题。';
+    } else if (userRel.affinity < 0 || userRel.friction > 50) {
+      yield '关系准则：你和用户关系一般（亲近${userRel.affinity}，摩擦${userRel.friction}）。'
+          '不用刻意讨好，保持自然距离，但也不要故意激化矛盾。';
+    } else if (userRel.affinity >= 50 || userRel.trust >= 40) {
+      yield '关系准则：你和用户关系很好（亲近${userRel.affinity}，信任${userRel.trust}）。'
+          '可以更自然、更放松，适当关心对方，但不要每条都讨好。';
+    }
+    // 默认情况（中性关系）：不注入特殊规则，让角色自然回应。
   }
 }

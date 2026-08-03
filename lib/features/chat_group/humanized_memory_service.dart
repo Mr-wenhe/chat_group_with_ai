@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/features/chat_group/user_message_sentiment.dart';
 
 class LayeredMemoryUpdate {
   final List<String> facts;
@@ -63,6 +64,7 @@ class HumanizedMemoryService {
     required String actionName,
     required bool friendlyTone,
     bool isPrivateChat = false,
+    UserMessageSentiment? userSentiment,
   }) {
     if (targetId == null || targetId.isEmpty) return relationships;
 
@@ -120,6 +122,20 @@ class HumanizedMemoryService {
       relation.affinity += 2;
       relation.trust += 1;
       if (relation.recentMood == RelationshipMood.neutral) {
+        relation.recentMood = RelationshipMood.warm;
+      }
+    }
+
+    // 用户消息的态度直接影响关系：友好增进好感，冒犯降低好感并增加摩擦。
+    if (userSentiment != null) {
+      relation.affinity += userSentiment.affinityDelta;
+      relation.friction += userSentiment.frictionDelta;
+      if (userSentiment.isOffensive) {
+        relation.recentMood = RelationshipMood.annoyed;
+      } else if (userSentiment.isCold) {
+        relation.recentMood = RelationshipMood.cold;
+      } else if (userSentiment.isRespectful &&
+          relation.recentMood == RelationshipMood.neutral) {
         relation.recentMood = RelationshipMood.warm;
       }
     }
