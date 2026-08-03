@@ -20,6 +20,7 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
   final IconData webSearchIcon;
   final String webSearchTooltip;
   final VoidCallback onConfigureWebSearch;
+  final VoidCallback? onClearConversation;
 
   const ChatRoomAppBar({
     super.key,
@@ -41,6 +42,7 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
     required this.webSearchIcon,
     required this.webSearchTooltip,
     required this.onConfigureWebSearch,
+    this.onClearConversation,
   });
 
   @override
@@ -116,6 +118,12 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
                 onPressed: onOpenMemory,
                 tooltip: '查看实际使用的记忆',
               ),
+              if (onClearConversation != null)
+                IconButton(
+                  icon: const Icon(Icons.delete_sweep_outlined, size: 22),
+                  onPressed: onClearConversation,
+                  tooltip: '清空对话（保留记忆）',
+                ),
               if (showGroupActions)
                 IconButton(
                   icon: const Icon(Icons.upload_rounded, size: 22),

@@ -5212,6 +5212,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         webSearchIcon: _webSearchPolicyIcon,
         webSearchTooltip: '联网搜索：${_effectiveWebSearchPolicy.label}',
         onConfigureWebSearch: _configureWebSearchPolicy,
+        onClearConversation: _isDirectChat ? _showClearConversationDialog : null,
       ),
       body: Column(
         children: [
@@ -5408,6 +5409,43 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         },
       ),
     );
+  }
+
+  /// 清空当前私聊的对话消息（保留角色记忆和关系状态）。
+  Future<void> _showClearConversationDialog() async {
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.delete_sweep_outlined, color: Colors.orange),
+        title: const Text('清空对话'),
+        content: const Text(
+            '将删除本对话的所有聊天记录，但保留角色记忆和亲密度等关系数据。此操作不可撤销。'),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('清空'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    await _repository.deleteAllMessages();
+    if (!_canTouchUi) return;
+    setState(() {
+      _messages = const <Message>[];
+      _streamingMessage = null;
+    });
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('对话已清空，角色记忆和关系数据已保留')),
+      );
+    }
   }
 
   /// 打开记忆管理页；返回后重新加载记忆/关系/成员，让页面反映用户的编辑结果。
