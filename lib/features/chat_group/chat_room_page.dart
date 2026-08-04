@@ -366,6 +366,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 搜索输入防抖定时器。
   Timer? _searchDebounceTimer;
 
+  /// 联网搜索状态 banner 自动隐藏定时器。
+  Timer? _searchBannerDismissTimer;
+
   /// 用户在本会话手动覆盖的联网搜索策略（为空表示用全局策略）。
   WebSearchPolicy? _searchPolicyOverride;
 
@@ -484,6 +487,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     unawaited(_streamingSession?.dispose());
     _streamingSession = null;
     _searchDebounceTimer?.cancel();
+    _searchBannerDismissTimer?.cancel();
     _textController.dispose();
     _scrollController.dispose();
     _inputFocusNode.dispose();
@@ -1379,7 +1383,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       conversationId: widget.groupId,
       requestConsent: _confirmWebSearch,
       onStatus: (state) {
-        if (_canTouchUi) setState(() => _webSearchState = state);
+        if (!_canTouchUi) return;
+        _searchBannerDismissTimer?.cancel();
+        setState(() => _webSearchState = state);
+        if (!state.status.isTerminal) return;
+        _searchBannerDismissTimer = Timer(const Duration(seconds: 3), () {
+          if (_canTouchUi) setState(() => _webSearchState = const SearchRunState(SearchRunStatus.idle));
+        });
       },
     );
     // 查询模型能力（是否支持图片输入），决定要不要拼多模态内容。

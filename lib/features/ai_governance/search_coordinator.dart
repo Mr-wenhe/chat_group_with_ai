@@ -13,6 +13,19 @@ enum SearchRunStatus {
   failed,
 }
 
+extension SearchRunStatusExt on SearchRunStatus {
+  bool get isTerminal =>
+      switch (this) {
+        SearchRunStatus.completed ||
+        SearchRunStatus.noResults ||
+        SearchRunStatus.failed ||
+        SearchRunStatus.disabled ||
+        SearchRunStatus.denied =>
+          true,
+        _ => false,
+      };
+}
+
 class SearchRunState {
   final SearchRunStatus status;
   final String query;
