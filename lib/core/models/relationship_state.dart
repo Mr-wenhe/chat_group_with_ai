@@ -27,6 +27,31 @@ enum RelationshipMood {
   cold,
 }
 
+/// 关系阶段枚举。
+@HiveType(typeId: 23)
+enum RelationshipStage {
+  @HiveField(0)
+  stranger,
+
+  @HiveField(1)
+  acquaintance,
+
+  @HiveField(2)
+  friend,
+
+  @HiveField(3)
+  closeFriend,
+
+  @HiveField(4)
+  romantic,
+
+  @HiveField(5)
+  strained,
+
+  @HiveField(6)
+  hostile,
+}
+
 @HiveType(typeId: 8)
 class RelationshipState extends HiveObject {
   @HiveField(0)
@@ -68,6 +93,22 @@ class RelationshipState extends HiveObject {
   @HiveField(12)
   final DateTime createdAt;
 
+  /// 关系阶段；迁移后运行时唯一键从 (groupId, source, target) 改为 (source, targetType, targetId)。
+  @HiveField(13, defaultValue: RelationshipStage.stranger)
+  RelationshipStage stage;
+
+  /// 事件版本号；每次关系事件写入单调递增。
+  @HiveField(14, defaultValue: 0)
+  int revision;
+
+  /// 最新关系事件 ID。
+  @HiveField(15)
+  String? lastEventId;
+
+  /// 最后更新时间。
+  @HiveField(16)
+  DateTime updatedAt;
+
   RelationshipState({
     String? id,
     required this.groupId,
@@ -82,9 +123,63 @@ class RelationshipState extends HiveObject {
     this.notes = '',
     DateTime? lastInteractionAt,
     DateTime? createdAt,
+    this.stage = RelationshipStage.stranger,
+    this.revision = 0,
+    this.lastEventId,
+    DateTime? updatedAt,
   })  : id = id ?? const Uuid().v4(),
         lastInteractionAt = lastInteractionAt ?? DateTime.now(),
-        createdAt = createdAt ?? DateTime.now();
+        createdAt = createdAt ?? DateTime.now(),
+        updatedAt = updatedAt ?? DateTime.now();
+
+  /// 从旧的 per-group 快照创建全局关系状态。
+  factory RelationshipState.global({
+    String? id,
+    required String sourceCharacterId,
+    required RelationshipTargetType targetType,
+    required String targetId,
+    int affinity = 0,
+    int trust = 0,
+    int friction = 0,
+    int familiarity = 0,
+    RelationshipMood recentMood = RelationshipMood.neutral,
+    String notes = '',
+    DateTime? lastInteractionAt,
+    RelationshipStage stage = RelationshipStage.stranger,
+    int revision = 0,
+    String? lastEventId,
+    DateTime? updatedAt,
+  }) {
+    return RelationshipState(
+      id: id ?? _stableId(sourceCharacterId, targetType, targetId),
+      groupId: 'global',
+      sourceCharacterId: sourceCharacterId,
+      targetId: targetId,
+      targetType: targetType,
+      affinity: affinity,
+      trust: trust,
+      friction: friction,
+      familiarity: familiarity,
+      recentMood: recentMood,
+      notes: notes,
+      lastInteractionAt: lastInteractionAt,
+      stage: stage,
+      revision: revision,
+      lastEventId: lastEventId,
+      updatedAt: updatedAt,
+    );
+  }
+
+  /// 生成稳定的全局关系 ID：rel:<source>:<targetType>:<target>
+  static String stableGlobalId(
+      String sourceCharacterId, RelationshipTargetType targetType, String targetId) {
+    return 'rel:$sourceCharacterId:${targetType.name}:$targetId';
+  }
+
+  static String _stableId(
+      String sourceCharacterId, RelationshipTargetType targetType, String targetId) {
+    return 'rel:$sourceCharacterId:${targetType.name}:$targetId';
+  }
 
   void clampScores() {
     affinity = affinity.clamp(-100, 100).toInt();

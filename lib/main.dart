@@ -10,6 +10,7 @@ import 'features/chat_group/chat_room_page.dart';
 import 'features/direct_chat/direct_chat_foreground_watcher.dart';
 import 'features/direct_chat/direct_chat_list_page.dart';
 import 'features/direct_chat/direct_chat_session.dart';
+import 'features/memory/memory_migrator.dart';
 import 'features/settings/settings_page.dart';
 import 'providers/providers.dart';
 
@@ -19,6 +20,13 @@ void main() async {
   final db = DatabaseService();
   try {
     await db.init();
+    // 幂等迁移；失败不影响启动。
+    try {
+      final migrator = MemoryMigrator(db);
+      await migrator.migrate();
+    } on Object catch (_) {
+      // 静默失败，下次启动重试。
+    }
   } catch (error) {
     runApp(DatabaseRecoveryApp(
       error: error,

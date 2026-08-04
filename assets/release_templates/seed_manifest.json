@@ -11,6 +11,9 @@
     "work_mode_workspaces.hive",
     "group_memories.hive",
     "messages.hive",
-    "relationship_states.hive"
+    "relationship_states.hive",
+    "user_profile.hive",
+    "permanent_memories.hive",
+    "relationship_events.hive"
   ]
 }

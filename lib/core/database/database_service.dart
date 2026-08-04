@@ -26,6 +26,9 @@ import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/core/models/user_profile.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/models/relationship_event.dart';
 
 /// Indicates that an existing Hive box could not be opened safely.
 ///
@@ -128,6 +131,9 @@ class DatabaseService {
   static const String agentTaskBoxName = 'agent_tasks';
   static const String workModeWorkspaceBoxName = 'work_mode_workspaces';
   static const String aiGovernanceLedgerBoxName = 'ai_governance_ledger';
+  static const String _userProfileBox = 'user_profile';
+  static const String _permanentMemoryBox = 'permanent_memories';
+  static const String _relationshipEventBox = 'relationship_events';
   static const String _releaseTemplateManifestAsset =
       'assets/release_templates/seed_manifest.json';
   static const List<String> _releaseHiveFiles = [
@@ -142,6 +148,9 @@ class DatabaseService {
     'group_memories.hive',
     'messages.hive',
     'relationship_states.hive',
+    'user_profile.hive',
+    'permanent_memories.hive',
+    'relationship_events.hive',
   ];
 
   Directory? _dataDir;
@@ -178,6 +187,10 @@ class DatabaseService {
     Hive.registerAdapter(AgentTaskStatusAdapter());
     Hive.registerAdapter(AgentTaskAdapter());
     Hive.registerAdapter(WorkModeWorkspaceAdapter());
+    Hive.registerAdapter(UserProfileAdapter());
+    Hive.registerAdapter(PermanentMemoryAdapter());
+    Hive.registerAdapter(RelationshipStageAdapter());
+    Hive.registerAdapter(RelationshipEventAdapter());
 
     await _openBoxSafely<AICharacter>(_aiCharacterBox);
     await _openBoxSafely<ApiConfig>(_apiConfigBox);
@@ -191,6 +204,9 @@ class DatabaseService {
     await _openBoxSafely<WorkModeWorkspace>(workModeWorkspaceBoxName);
     await _openBoxSafely<dynamic>(_appSettingsBox);
     await _openBoxSafely<dynamic>(aiGovernanceLedgerBoxName);
+    await _openBoxSafely<UserProfile>(_userProfileBox);
+    await _openBoxSafely<PermanentMemory>(_permanentMemoryBox);
+    await _openBoxSafely<RelationshipEvent>(_relationshipEventBox);
     await _migrateApiConfigCredentials();
   }
 
@@ -380,6 +396,11 @@ class DatabaseService {
   Box<WorkModeWorkspace> get workModeWorkspaceBox =>
       Hive.box<WorkModeWorkspace>(workModeWorkspaceBoxName);
   Box<dynamic> get appSettingsBox => Hive.box(_appSettingsBox);
+  Box<UserProfile> get userProfileBox => Hive.box<UserProfile>(_userProfileBox);
+  Box<PermanentMemory> get permanentMemoryBox =>
+      Hive.box<PermanentMemory>(_permanentMemoryBox);
+  Box<RelationshipEvent> get relationshipEventBox =>
+      Hive.box<RelationshipEvent>(_relationshipEventBox);
   String? get dataDirPath => _dataDir?.path;
 
   static const String _aiProcessingDirKey = 'ai_processing_dir';

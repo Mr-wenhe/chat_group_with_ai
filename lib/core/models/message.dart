@@ -38,6 +38,10 @@ class Message extends HiveObject {
   @HiveField(9)
   List<MediaAttachment>? media;
 
+  /// 消息发送时在场可见的 AI 角色 ID 快照；旧消息为空列表。
+  @HiveField(10, defaultValue: <String>[])
+  List<String> visibleToCharacterIds;
+
   Message({
     String? id,
     required this.groupId,
@@ -49,7 +53,9 @@ class Message extends HiveObject {
     this.isMention = false,
     List<String>? mentionedAiIds,
     this.media,
+    List<String>? visibleToCharacterIds,
   })  : id = id ?? const Uuid().v4(),
         timestamp = timestamp ?? DateTime.now(),
-        mentionedAiIds = mentionedAiIds ?? [];
+        mentionedAiIds = mentionedAiIds ?? const [],
+        visibleToCharacterIds = visibleToCharacterIds ?? const [];
 }

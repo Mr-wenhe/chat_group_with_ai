@@ -11,6 +11,9 @@ import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/core/models/user_profile.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/work_mode_workspace.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
@@ -33,7 +36,9 @@ class MemoryCredentialStore implements CredentialStore {
   Future<String?> read(String key) async => values[key];
 
   @override
-  Future<void> write(String key, String value) async => values[key] = value;
+  Future<void> write(String key, String value) async {
+    values[key] = value;
+  }
 }
 
 class MemoryLegacyCredentialStore extends SecureStorageService {
@@ -57,6 +62,9 @@ Future<Directory> openLifecycleHive() async {
   await Hive.openBox<AgentTask>('agent_tasks');
   await Hive.openBox<WorkModeWorkspace>('work_mode_workspaces');
   await Hive.openBox<dynamic>('app_settings');
+  await Hive.openBox<UserProfile>('user_profile');
+  await Hive.openBox<PermanentMemory>('permanent_memories');
+  await Hive.openBox<RelationshipEvent>('relationship_events');
   return directory;
 }
 
@@ -120,5 +128,32 @@ void _registerAdapters() {
   if (!Hive.isAdapterRegistered(13)) Hive.registerAdapter(AgentTaskAdapter());
   if (!Hive.isAdapterRegistered(16)) {
     Hive.registerAdapter(WorkModeWorkspaceAdapter());
+  }
+  if (!Hive.isAdapterRegistered(23)) {
+    Hive.registerAdapter(RelationshipStageAdapter());
+  }
+  if (!Hive.isAdapterRegistered(18)) {
+    Hive.registerAdapter(MemoryStatusAdapter());
+  }
+  if (!Hive.isAdapterRegistered(19)) {
+    Hive.registerAdapter(PermanentMemoryAdapter());
+  }
+  if (!Hive.isAdapterRegistered(20)) {
+    Hive.registerAdapter(RelationshipEventCreatorAdapter());
+  }
+  if (!Hive.isAdapterRegistered(21)) {
+    Hive.registerAdapter(RelationshipEventAdapter());
+  }
+  if (!Hive.isAdapterRegistered(22)) {
+    Hive.registerAdapter(UserProfileAdapter());
+  }
+  if (!Hive.isAdapterRegistered(14)) {
+    Hive.registerAdapter(MemoryKindAdapter());
+  }
+  if (!Hive.isAdapterRegistered(15)) {
+    Hive.registerAdapter(MemoryOriginTypeAdapter());
+  }
+  if (!Hive.isAdapterRegistered(18)) {
+    Hive.registerAdapter(MemoryStatusAdapter());
   }
 }
