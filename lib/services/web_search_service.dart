@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 
 class WebSearchResult {
@@ -103,7 +105,7 @@ class WebSearchService {
 
   Future<WebSearchSnapshot> search(String query) async {
     try {
-      final response = await _dio.get<Map<String, dynamic>>(
+      final response = await _dio.get(
         'https://api.duckduckgo.com/',
         queryParameters: {
           'q': query,
@@ -113,7 +115,31 @@ class WebSearchService {
           'no_redirect': '1',
         },
       );
-      final data = response.data ?? const <String, dynamic>{};
+      // DuckDuckGo 返回 Content-Type: application/x-javascript，Dio 5.10 不自动按 JSON 解析
+      Map<String, dynamic> data;
+      final raw = response.data;
+      if (raw is Map<String, dynamic>) {
+        data = raw;
+      } else if (raw is String) {
+        final decoded = jsonDecode(raw);
+        if (decoded is Map<String, dynamic>) {
+          data = decoded;
+        } else {
+          return WebSearchSnapshot(
+            query: query,
+            searchedAt: DateTime.now(),
+            results: const [],
+            error: '搜索结果格式异常',
+          );
+        }
+      } else {
+        return WebSearchSnapshot(
+          query: query,
+          searchedAt: DateTime.now(),
+          results: const [],
+          error: '搜索结果格式异常',
+        );
+      }
       return WebSearchSnapshot(
         query: query,
         searchedAt: DateTime.now(),
