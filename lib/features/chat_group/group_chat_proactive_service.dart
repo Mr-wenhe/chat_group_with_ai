@@ -8,6 +8,7 @@ import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_policy.dart';
+import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
@@ -39,7 +40,7 @@ class GroupChatProactiveService {
     ApiCredentialResolver? credentialResolver,
   })  : gateway = gateway ??
             AiRequestGateway(
-              store: AiGovernanceStore(db),
+              store: AiGovernanceStore.forDatabase(db),
               client: chatApi,
             ),
         random = random ?? Random(),
@@ -75,6 +76,16 @@ class GroupChatProactiveService {
     if (config == null) return null;
     final apiKey = await credentialResolver.resolve(config);
     if (apiKey == null) return null;
+
+    // 统一每小时发言预算：群聊主动消息与聊天内回复共用同一套额度判定与记用，
+    // 避免角色在房内已触顶 hourlyLimit 仍被后台轮询频繁灌水。达到上限则跳过
+    // 本次主动消息，绝不伪造发送。
+    final eligibility =
+        ReplyEligibilityPolicy(resolveApiConfig: _resolveApiConfig);
+    if (eligibility.blockReasonFor(candidate.character) ==
+        ReplyBlockReason.hourlyLimit) {
+      return null;
+    }
 
     final groupMessages = allMessages
         .where((message) => message.groupId == candidate.group.id)
@@ -116,6 +127,8 @@ class GroupChatProactiveService {
     );
     await db.persistMessage(message);
     await db.saveGroupChatLastProactiveAt(candidate.group.id, now);
+    // 记用：统一由数据库按角色串行写回，避免并发入口丢失增量。
+    await db.recordCharacterReplyUsage(candidate.character.id);
 
     return GroupChatProactiveResult(
       group: candidate.group,

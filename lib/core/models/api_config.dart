@@ -10,19 +10,19 @@ class ApiConfig extends HiveObject {
   @HiveField(0)
   String id;
 
-  @HiveField(1)
+  @HiveField(1, defaultValue: '')
   String name;
 
-  @HiveField(2)
+  @HiveField(2, defaultValue: '')
   String provider;
 
-  @HiveField(3)
+  @HiveField(3, defaultValue: '')
   String modelName;
 
-  @HiveField(4)
-  String legacyApiKey;
+  @HiveField(4, defaultValue: '')
+  String? _legacyApiKey;
 
-  @HiveField(5)
+  @HiveField(5, defaultValue: '')
   String customBaseUrl;
 
   @HiveField(6)
@@ -36,7 +36,20 @@ class ApiConfig extends HiveObject {
 
   /// Runtime-only compatibility accessor. It never exposes the legacy Hive key.
   String get apiKey => CredentialRepository.cached(id) ?? '';
-  set apiKey(String value) => legacyApiKey = value;
+
+  /// Returns true when a non-empty credential is configured.
+  bool get hasApiKey =>
+      (CredentialRepository.cached(id) ?? _legacyApiKey ?? '').isNotEmpty;
+
+  /// Explicit migration/development fallback boundary for the legacy Hive key.
+  String? get legacyApiKeyForMigration => _legacyApiKey;
+  void setLegacyApiKeyForMigration(String? value) => _legacyApiKey = value;
+
+  set apiKey(String value) {
+    // 写入 Hive 字段以兼容迁移流程；运行时通过 CredentialRepository
+    // 读取时优先走安全存储。
+    _legacyApiKey = value;
+  }
 
   ApiConfig({
     String? id,
@@ -49,7 +62,7 @@ class ApiConfig extends HiveObject {
     this.credentialId = '',
     this.hasCredential = false,
   })  : id = id ?? const Uuid().v4(),
-        legacyApiKey = apiKey,
+        _legacyApiKey = apiKey,
         modelName = modelName ?? ApiProvider.defaultModels[provider] ?? '',
         createdAt = createdAt ?? DateTime.now();
 }

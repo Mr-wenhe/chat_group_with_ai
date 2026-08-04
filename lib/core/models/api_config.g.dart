@@ -18,14 +18,14 @@ class ApiConfigAdapter extends TypeAdapter<ApiConfig> {
     };
     return ApiConfig(
       id: fields[0] as String?,
-      name: fields[1] as String,
-      provider: fields[2] as String,
-      modelName: fields[3] as String?,
-      customBaseUrl: fields[5] as String,
+      name: fields[1] == null ? '' : fields[1] as String,
+      provider: fields[2] == null ? '' : fields[2] as String,
+      modelName: fields[3] == null ? '' : fields[3] as String?,
+      customBaseUrl: fields[5] == null ? '' : fields[5] as String,
       createdAt: fields[6] as DateTime?,
       credentialId: fields[7] == null ? '' : fields[7] as String,
       hasCredential: fields[8] == null ? false : fields[8] as bool,
-    )..legacyApiKey = fields[4] as String;
+    ).._legacyApiKey = fields[4] == null ? '' : fields[4] as String?;
   }
 
   @override
@@ -41,7 +41,7 @@ class ApiConfigAdapter extends TypeAdapter<ApiConfig> {
       ..writeByte(3)
       ..write(obj.modelName)
       ..writeByte(4)
-      ..write(obj.legacyApiKey)
+      ..write(obj._legacyApiKey)
       ..writeByte(5)
       ..write(obj.customBaseUrl)
       ..writeByte(6)

@@ -1,5 +1,7 @@
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/ai_governance/ai_request_guard.dart';
+import 'package:chat_group/features/ai_governance/model_capability_registry.dart';
 
 class MemoryGovernanceStore implements GovernancePersistence {
   @override
@@ -14,11 +16,24 @@ class MemoryGovernanceStore implements GovernancePersistence {
   final List<AiRequestDiagnostic> diagnostics = [];
   @override
   final List<SearchAuditEntry> searchAudits = [];
+  AiRequestGuard? _guard;
 
   MemoryGovernanceStore({
     this.budgetSettings = const BudgetSettings(),
     this.globalSearchPolicy = WebSearchPolicy.off,
   });
+
+  /// 共享的预算 guard：同一 store 实例的所有消费者共享同一个 guard，
+  /// 确保 _reservedMicros 预留计数跨网关实例可见。
+  @override
+  AiRequestGuard get guard {
+    _guard ??= AiRequestGuard(
+      store: this,
+      registry: ModelCapabilityRegistry(),
+      clock: DateTime.now,
+    );
+    return _guard!;
+  }
 
   @override
   WebSearchPolicy? conversationSearchPolicy(String conversationId) =>

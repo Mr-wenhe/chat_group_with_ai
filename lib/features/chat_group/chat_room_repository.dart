@@ -1,6 +1,5 @@
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
-import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
 
 /// Persistence facade for the chat page's high-frequency message operations.
@@ -65,10 +64,6 @@ class ChatRoomRepository {
       await box.delete(key);
     }
     return toDelete.length;
-  }
-
-  Future<void> persistReplyUsage(AICharacter character) {
-    return db.aiCharacterBox.put(character.id, character);
   }
 
   Future<void> recordTokenUsage({

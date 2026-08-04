@@ -103,11 +103,21 @@ class WeComPushService {
         _tokenExpireAt = DateTime.now().add(Duration(seconds: expires));
         return _cachedToken;
       }
+      // 认证失败（errcode != 0）时清除缓存，避免后续请求继续使用失效 token。
+      _cachedToken = null;
+      _tokenExpireAt = null;
       return null;
     } on DioException {
+      // 网络错误不一定是凭据问题，不清除缓存。
       return null;
     }
   }
+
+  /// 企微 API 错误码中，token 无效/过期的典型值。
+  static bool _isAuthError(WeComPushResult result) =>
+      result.errcode == 40014 ||
+      result.errcode == 42001 ||
+      result.errcode == 42007;
 
   /// 把文本推送给指定同事（UserID，可 `id1|id2` 多人）。
   Future<WeComPushResult> sendToUser(String userId, String content) async {
@@ -132,7 +142,12 @@ class WeComPushService {
         queryParameters: {'access_token': token},
         data: buildUserBody(userId, content, agentId),
       );
-      return parseResult(resp.data);
+      final result = parseResult(resp.data);
+      if (!result.ok && _isAuthError(result)) {
+        _cachedToken = null;
+        _tokenExpireAt = null;
+      }
+      return result;
     } on DioException catch (e) {
       return WeComPushResult(ok: false, detail: '网络错误：${e.message}');
     }

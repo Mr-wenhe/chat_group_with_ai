@@ -312,7 +312,9 @@ class _DirectChatCard extends StatelessWidget {
                   child: Text(
                     character.avatar.isNotEmpty
                         ? character.avatar
-                        : character.name.substring(0, 1),
+                        : character.name.isNotEmpty
+                            ? character.name.substring(0, 1)
+                            : '?',
                     style: TextStyle(
                       fontWeight: FontWeight.w700,
                       color: color,

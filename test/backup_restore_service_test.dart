@@ -111,7 +111,10 @@ void main() {
     expect(report.errors, isEmpty);
     expect(report.inserted['characters'], 1);
     expect(db.apiConfigBox.get('api-1')!.hasCredential, isFalse);
-    expect(db.apiConfigBox.get('api-1')!.legacyApiKey, isEmpty);
+    expect(
+      db.apiConfigBox.get('api-1')!.legacyApiKeyForMigration,
+      isEmpty,
+    );
     expect(
       db.apiConfigBox.get('api-1')!.customBaseUrl,
       'https://example.com/v1?region=cn',

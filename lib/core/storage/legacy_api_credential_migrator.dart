@@ -57,7 +57,7 @@ class LegacyApiCredentialMigrator {
     ApiConfig config,
     SaveApiConfig saveConfig,
   ) async {
-    final legacySecret = config.legacyApiKey;
+    final legacySecret = config.legacyApiKeyForMigration ?? '';
     var secret = (await credentials.read(config.id)).value;
     if (legacySecret.isNotEmpty) {
       final write = await credentials.save(config.id, legacySecret);
@@ -67,17 +67,16 @@ class LegacyApiCredentialMigrator {
     }
     if (secret == null || secret.isEmpty) return null;
     final credentialId = credentials.credentialIdFor(config.id);
-    if (config.legacyApiKey.isEmpty &&
-        config.hasCredential &&
-        config.credentialId == credentialId) {
+    if (config.legacyApiKeyForMigration?.isEmpty ??
+        true && config.hasCredential && config.credentialId == credentialId) {
       return secret;
     }
 
-    final oldLegacy = config.legacyApiKey;
+    final oldLegacy = config.legacyApiKeyForMigration ?? '';
     final oldCredentialId = config.credentialId;
     final oldHasCredential = config.hasCredential;
     config
-      ..legacyApiKey = ''
+      ..setLegacyApiKeyForMigration('')
       ..credentialId = credentialId
       ..hasCredential = true;
     try {
@@ -85,7 +84,7 @@ class LegacyApiCredentialMigrator {
       return secret;
     } catch (_) {
       config
-        ..legacyApiKey = oldLegacy
+        ..setLegacyApiKeyForMigration(oldLegacy)
         ..credentialId = oldCredentialId
         ..hasCredential = oldHasCredential;
       return null;

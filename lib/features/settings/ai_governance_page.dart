@@ -31,7 +31,7 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
   void initState() {
     super.initState();
     _db = ref.read(databaseServiceProvider);
-    _store = AiGovernanceStore(_db);
+    _store = AiGovernanceStore.forDatabase(_db);
     _budget = _store.budgetSettings;
     _searchPolicy = _store.globalSearchPolicy;
     _daily = TextEditingController(

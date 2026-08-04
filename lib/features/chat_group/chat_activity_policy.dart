@@ -36,14 +36,13 @@ class ChatActivityPolicy {
         : maxReplyCount;
     final effectiveMaxReplyCount =
         min(eligible.length, max(replyCap, mentionedIds.length));
+    final eligibleById = {for (final c in eligible) c.id: c};
+    final selectedIds = <String>{};
     void addById(String id) {
       if (selected.length >= effectiveMaxReplyCount) return;
-      for (final character in eligible) {
-        if (character.id == id && !selected.any((c) => c.id == id)) {
-          selected.add(character);
-          return;
-        }
-      }
+      if (!selectedIds.add(id)) return;
+      final character = eligibleById[id];
+      if (character != null) selected.add(character);
     }
 
     for (final id in mentionedIds) {
@@ -55,7 +54,7 @@ class ChatActivityPolicy {
 
     final desiredCount = effectiveMaxReplyCount;
     final remaining = _shuffled(
-      eligible.where((c) => !selected.any((s) => s.id == c.id)).toList(),
+      eligible.where((c) => !selectedIds.contains(c.id)).toList(),
       random ?? Random(),
     );
     for (final character in remaining) {

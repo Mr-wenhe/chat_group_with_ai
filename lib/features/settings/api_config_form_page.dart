@@ -39,7 +39,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     super.initState();
     final db = ref.read(databaseServiceProvider);
     _apiService = AiApiService(
-      AiRequestGateway(store: AiGovernanceStore(db)),
+      AiRequestGateway(store: AiGovernanceStore.forDatabase(db)),
     );
     final c = widget.config;
     _nameController = TextEditingController(text: c?.name ?? '');

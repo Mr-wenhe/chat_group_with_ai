@@ -413,7 +413,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     // 登记"当前正在查看该会话"，让主动私聊的通知逻辑不打扰当前界面。
     ConversationPresenceService.instance.enter(widget.groupId);
     _db = ref.read(databaseServiceProvider);
-    _governanceStore = AiGovernanceStore(_db);
+    _governanceStore = AiGovernanceStore.forDatabase(_db);
     // 所有 LLM 调用都经由网关，超限时通过 onWarning 回调向用户提示。
     _aiGateway = AiRequestGateway(
       store: _governanceStore,
@@ -1518,7 +1518,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           _messages,
           excludeMessageId: temp.id,
         )) {
-      _recordReplyUsage(character);
+      await _recordReplyUsage(character);
       if (_canTouchUi) {
         setState(() {
           _messages = List.from(_messages)
@@ -1536,7 +1536,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     temp.media = null;
     await _repository.persistNewMessage(temp);
     await _markCurrentConversationRead(throughMessage: temp);
-    _recordReplyUsage(character);
+    await _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     // 关系态与角色记忆只在成功回复后更新，失败占位不该污染长期状态。
     if (!failed) {
@@ -1907,7 +1907,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         media: attachments.isEmpty ? null : attachments,
       );
       await _appendMessage(message);
-      _recordReplyUsage(character);
+      await _recordReplyUsage(character);
       _registerUserMentionIfNeeded(message);
       if (content.trim().isNotEmpty) {
         await _maybeEvolveCharacterMemory(character, content);
@@ -2517,7 +2517,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         media: attachments.isEmpty ? null : attachments,
       );
       await _appendMessage(message);
-      _recordReplyUsage(pending.character);
+      await _recordReplyUsage(pending.character);
       _registerUserMentionIfNeeded(message);
       if (result.status == AgentRuntimeStatus.completed &&
           content.trim().isNotEmpty) {
@@ -3282,8 +3282,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (userRelations.isNotEmpty) {
       final lines = userRelations.map((r) {
         final mood = r.recentMood.name;
-        final note =
-            r.notes.trim().isEmpty ? '没有明确备注' : r.notes.trim();
+        final note = r.notes.trim().isEmpty ? '没有明确备注' : r.notes.trim();
         return '亲近${r.affinity}，信任${r.trust}，摩擦${r.friction}，熟悉度${r.familiarity}，最近情绪$mood，$note';
       }).join('；');
       msgs.add({
@@ -3698,10 +3697,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     return _replyEligibility.firstBlockReason(characters);
   }
 
-  /// 记录一次发言用量：更新内存里的频率计数，并落库到角色模型。
-  void _recordReplyUsage(AICharacter character) {
-    _replyEligibility.recordReplyUsage(character);
-    _repository.persistReplyUsage(character);
+  /// 记录一次发言用量：由数据库按角色串行读取、递增并持久化。
+  Future<void> _recordReplyUsage(AICharacter character) {
+    return _db.recordCharacterReplyUsage(character.id);
   }
 
   /// 模拟"打字/思考"的发言间隔，让多角色接话有真实节奏。
@@ -5010,10 +5008,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         content: '');
     setState(() {
       _streamingMessage = temp;
-      // 移除旧消息、追加新的流式占位，视觉上就是"这条被重写了"。
-      _messages = List.from(_messages)
-        ..removeWhere((m) => m.id == original.id)
-        ..add(temp);
+      // 保留原消息在列表中，视觉上用流式占位覆盖；成功后移除原消息。
+      _messages = List.from(_messages)..add(temp);
     });
     _scrollToBottom();
 
@@ -5086,8 +5082,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     temp.mentionedAiIds = mentionedIds;
     // 指回原消息，保留"这条是对哪条的重写"的可追溯关系。
     temp.replyToMessageId = original.id;
-    await _repository.persistNewMessage(temp);
-    _recordReplyUsage(character);
+    if (!failed) {
+      await _repository.persistNewMessage(temp);
+    }
+    await _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     if (!failed && fullContent.trim().isNotEmpty) {
       await _maybeEvolveCharacterMemory(character, fullContent);
@@ -5101,6 +5099,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         _isRegenerating = false;
         _regenerateMessageId = '';
         _regenerateContext = [];
+        if (failed) {
+          // 重生成失败：移除占位消息，保留原消息。
+          _messages = _messages.where((m) => m.id != temp.id).toList();
+        } else {
+          // 成功：移除原消息，保留新消息。
+          _messages = _messages.where((m) => m.id != original.id).toList();
+        }
       });
     }
   }
@@ -5212,7 +5217,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         webSearchIcon: _webSearchPolicyIcon,
         webSearchTooltip: '联网搜索：${_effectiveWebSearchPolicy.label}',
         onConfigureWebSearch: _configureWebSearchPolicy,
-        onClearConversation: _isDirectChat ? _showClearConversationDialog : null,
+        onClearConversation:
+            _isDirectChat ? _showClearConversationDialog : null,
       ),
       body: Column(
         children: [
@@ -5418,8 +5424,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       builder: (dialogContext) => AlertDialog(
         icon: const Icon(Icons.delete_sweep_outlined, color: Colors.orange),
         title: const Text('清空对话'),
-        content: const Text(
-            '将删除本对话的所有聊天记录，但保留角色记忆和亲密度等关系数据。此操作不可撤销。'),
+        content: const Text('将删除本对话的所有聊天记录，但保留角色记忆和亲密度等关系数据。此操作不可撤销。'),
         actions: [
           TextButton(
             onPressed: () => Navigator.pop(dialogContext, false),

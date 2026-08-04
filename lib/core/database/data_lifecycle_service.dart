@@ -61,7 +61,7 @@ class DataLifecycleService {
     final isDevelopmentHiveCredential = !kReleaseMode &&
         config?.credentialId ==
             CredentialRepository.developmentHiveCredentialId &&
-        config?.legacyApiKey.isNotEmpty == true;
+        config?.legacyApiKeyForMigration?.isNotEmpty == true;
     if (!credentials.secureStorageAvailable || isDevelopmentHiveCredential) {
       return;
     }

@@ -10,6 +10,7 @@ import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
+import 'package:chat_group/features/chat_group/group_chat_proactive_service.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -148,6 +149,51 @@ void main() {
     // 统一记用：发送后每小时计数 +1，并记录时间戳。
     expect(db.aiCharacterBox.get('char-1')!.hourlyReplyCount, 1);
     expect(db.aiCharacterBox.get('char-1')!.lastReplyTimestamp, isNotNull);
+  });
+
+  test('群聊主动消息遵守每小时上限并成功后记用', () async {
+    seedCharacter(atHourlyLimit: true);
+    await db.chatGroupBox.put(
+      'group-1',
+      ChatGroup(
+        id: 'group-1',
+        name: '测试群',
+        theme: '测试主题',
+        aiCharacterIds: const ['char-1'],
+      ),
+    );
+    final blockedService = GroupChatProactiveService(
+      db: db,
+      chatApi: chatApi,
+      credentialResolver: FakeApiCredentialResolver(),
+    );
+
+    expect(await blockedService.tryCreateProactiveMessage(), isNull);
+    expect(chatApi.sendCount, 0);
+
+    final character = db.aiCharacterBox.get('char-1')!;
+    character.hourlyReplyCount = 0;
+    character.lastReplyTimestamp = null;
+    await db.aiCharacterBox.put(character.id, character);
+    final service = GroupChatProactiveService(
+      db: db,
+      chatApi: chatApi,
+      credentialResolver: FakeApiCredentialResolver(),
+    );
+
+    expect(await service.tryCreateProactiveMessage(), isNotNull);
+    expect(chatApi.sendCount, 1);
+    expect(db.aiCharacterBox.get('char-1')!.hourlyReplyCount, 1);
+  });
+
+  test('角色回复额度并发写入不会丢失增量', () async {
+    seedCharacter(atHourlyLimit: false);
+    await Future.wait([
+      db.recordCharacterReplyUsage('char-1'),
+      db.recordCharacterReplyUsage('char-1'),
+    ]);
+
+    expect(db.aiCharacterBox.get('char-1')!.hourlyReplyCount, 2);
   });
 
   test('没有关联安全配置时，不回退使用角色遗留 Key', () async {

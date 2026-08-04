@@ -446,6 +446,42 @@ void main() {
     expect((fallbackRequest.data as Map)['stream'], isNull);
     expect((fallbackRequest.data as Map)['temperature'], 0.4);
   });
+
+  test('streamed error followed by DONE does not report success',
+      () async {
+    final controller = StreamController<Uint8List>();
+    addTearDown(controller.close);
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 200,
+          data: ResponseBody(controller.stream, 200),
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio);
+    final future = service.sendChatMessageStreamed(
+      apiKey: 'test-key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'test-model',
+      messages: const [
+        {'role': 'user', 'content': '触发错误'}
+      ],
+    );
+    controller
+      ..add(Uint8List.fromList(utf8.encode(
+        'data: {"error":{"message":"rate limit exceeded"}}\n',
+      )))
+      ..add(Uint8List.fromList(utf8.encode('data: [DONE]\n')));
+
+    final result = await future.timeout(const Duration(milliseconds: 500));
+
+    expect(result['success'], isFalse);
+    expect(result['message'], contains('rate limit exceeded'));
+  });
 }
 
 class _ThrowingStreamChatApiService extends ChatApiService {

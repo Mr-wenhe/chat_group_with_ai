@@ -203,9 +203,6 @@ class HumanizedChatOrchestrator {
         if (action == ReplyAction.answer || action == ReplyAction.agree) {
           action = ReplyAction.topicShift;
           tone = '敷衍、不想深入聊、转移话题';
-        } else if (action == ReplyAction.answer) {
-          tone = '冷淡、简短、不想多聊';
-          length = ReplyLengthHint.oneLiner;
         }
       } else if (userRelation.affinity < 0 && userRelation.recentMood == RelationshipMood.cold) {
         // 冷淡情绪下好感为负：降低回复意愿。

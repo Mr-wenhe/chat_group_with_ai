@@ -164,7 +164,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     super.initState();
     final db = ref.read(databaseServiceProvider);
     _apiService = AiApiService(
-      AiRequestGateway(store: AiGovernanceStore(db)),
+      AiRequestGateway(store: AiGovernanceStore.forDatabase(db)),
     );
     _currentSkinMode = db.savedAppSkinMode;
     _isTtsEnabled = db.isTtsEnabled;

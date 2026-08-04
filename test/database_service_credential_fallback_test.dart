@@ -36,7 +36,7 @@ void main() {
       saved.credentialId,
       CredentialRepository.developmentHiveCredentialId,
     );
-    expect(saved.legacyApiKey, 'secret');
+    expect(saved.legacyApiKeyForMigration, 'secret');
 
     await database.saveApiConfig(ApiConfig(
       id: config.id,
@@ -48,7 +48,7 @@ void main() {
 
     final updated = database.apiConfigBox.get(config.id)!;
     expect(updated.name, 'renamed');
-    expect(updated.legacyApiKey, 'secret');
+    expect(updated.legacyApiKeyForMigration, 'secret');
   });
 
   test('debug fallback config deletes without Keychain access', () async {

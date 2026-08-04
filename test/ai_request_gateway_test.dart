@@ -10,6 +10,7 @@ import 'helpers/memory_governance_store.dart';
 
 class FakeCompletionClient extends ChatApiService {
   int sendCount = 0;
+  final temperatures = <double>[];
   Future<Map<String, dynamic>> Function(int count)? responder;
 
   @override
@@ -26,6 +27,7 @@ class FakeCompletionClient extends ChatApiService {
     CancelToken? cancelToken,
   }) async {
     sendCount++;
+    temperatures.add(temperature);
     return responder?.call(sendCount) ??
         {
           'success': true,
@@ -229,6 +231,39 @@ void main() {
     expect(diagnostic, isNot(contains(secret)));
     expect(diagnostic, isNot(contains(body)));
     expect(diagnostic.toLowerCase(), isNot(contains('authorization')));
+  });
+
+  test('网关重试按 RetryAttempt 回退温度', () async {
+    final store = MemoryGovernanceStore();
+    final client = FakeCompletionClient();
+    client.responder = (count) async => count <= 5
+        ? {'success': false, 'statusCode': 503, 'message': 'busy'}
+        : {
+            'success': true,
+            'message': 'ok',
+            'promptTokens': 1,
+            'completionTokens': 1,
+          };
+    final gateway = AiRequestGateway(
+      store: store,
+      client: client,
+      retrySleep: (_) async {},
+    );
+
+    final result = await gateway.sendChatMessage(
+      apiKey: 'secret',
+      provider: ApiProvider.deepseek,
+      model: 'deepseek-chat',
+      messages: messages,
+      purpose: AiRequestPurpose.reply,
+      conversationId: 'group-1',
+      characterId: 'char-1',
+      temperature: 0.9,
+      maxRetries: 5,
+    );
+
+    expect(result['success'], isTrue);
+    expect(client.temperatures, [0.9, 0.9, 0.9, 0.9, 0.6, 0.4]);
   });
 
   test('重试前再次预算预检', () async {

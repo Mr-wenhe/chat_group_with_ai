@@ -41,25 +41,25 @@ class RelationshipState extends HiveObject {
   @HiveField(3)
   final String targetId;
 
-  @HiveField(4)
+  @HiveField(4, defaultValue: RelationshipTargetType.ai)
   RelationshipTargetType targetType;
 
-  @HiveField(5)
+  @HiveField(5, defaultValue: 0)
   int affinity;
 
-  @HiveField(6)
+  @HiveField(6, defaultValue: 0)
   int trust;
 
-  @HiveField(7)
+  @HiveField(7, defaultValue: 0)
   int friction;
 
-  @HiveField(8)
+  @HiveField(8, defaultValue: 0)
   int familiarity;
 
-  @HiveField(9)
+  @HiveField(9, defaultValue: RelationshipMood.neutral)
   RelationshipMood recentMood;
 
-  @HiveField(10)
+  @HiveField(10, defaultValue: '')
   String notes;
 
   @HiveField(11)

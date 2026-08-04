@@ -60,10 +60,25 @@ class ChatOrchestrator {
         messages.length > 3 ? messages.sublist(messages.length - 3) : messages;
     final joined = recent.map((m) => m.content).join(' → ');
     if (joined.length > 200) {
-      return '\n\n【当前对话焦点】最近大家在聊：${joined.substring(0, 200)}...';
+      return '\n\n【当前对话焦点】最近大家在聊：${_truncateUtf16(joined, 200)}...';
     }
     return '\n\n【当前对话焦点】最近大家在聊：$joined';
   }
+
+  /// 在不超过 [max] UTF-16 代码单元的位置截断，不切断代理对（surrogate pair）。
+  static String _truncateUtf16(String text, int max) {
+    if (text.length <= max) return text;
+    var end = max;
+    // 若截断点恰好落在代理对的第一个代码单元（高代理符）上，
+    // 说明前一对代理对已在截断位置结束，退让 1 位避免挂起孤立代理对。
+    if (end > 0 && _isHighSurrogate(text.codeUnitAt(end - 1))) {
+      end--;
+    }
+    return text.substring(0, end);
+  }
+
+  static bool _isHighSurrogate(int codeUnit) =>
+      codeUnit >= 0xD800 && codeUnit <= 0xDBFF;
 
   static String recentDialogueTranscript({
     required List<Message> messages,

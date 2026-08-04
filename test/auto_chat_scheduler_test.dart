@@ -47,4 +47,32 @@ void main() {
     expect(calls, greaterThan(beforeCooldown));
     scheduler.dispose();
   });
+
+  test('coolDown during a round does not get overwritten by nextInterval',
+      () async {
+    var calls = 0;
+    late AutoChatScheduler scheduler;
+    scheduler = AutoChatScheduler(
+      nextInterval: () => const Duration(milliseconds: 1),
+      runRound: () async {
+        calls++;
+        if (calls == 1) {
+          // 第一轮期间触发冷却，覆盖默认的 nextInterval
+          scheduler.coolDown(const Duration(milliseconds: 30));
+        }
+      },
+    );
+    scheduler.start(initialDelay: Duration.zero);
+
+    // 等待第一轮完成并进入冷却
+    await Future<void>.delayed(const Duration(milliseconds: 5));
+    final atCooldown = calls;
+    // 冷却期间不应有新轮次
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(calls, atCooldown);
+    // 冷却结束后应恢复调度
+    await Future<void>.delayed(const Duration(milliseconds: 40));
+    expect(calls, greaterThan(atCooldown));
+    scheduler.dispose();
+  });
 }

@@ -27,8 +27,8 @@ class BackupEntityCodec {
         'modelName': item.modelName,
         'customBaseUrl': _publicUrl(item.customBaseUrl),
         'createdAt': _date(item.createdAt),
-        'credentialRequired':
-            item.hasCredential || item.legacyApiKey.isNotEmpty,
+        'credentialRequired': item.hasCredential ||
+            item.legacyApiKeyForMigration?.isNotEmpty == true,
       };
 
   static ApiConfig decodeApiConfig(Map<String, dynamic> json) => ApiConfig(
@@ -354,26 +354,45 @@ class BackupEntityCodec {
   static DateTime? _optionalDate(Object? value) =>
       value == null ? null : DateTime.parse(value.toString());
 
-  static List<String> _strings(Object? value) =>
-      (value as List? ?? const []).map((item) => item.toString()).toList();
+  static List<String> _strings(Object? value) {
+    if (value is! List) return const [];
+    final result = <String>[];
+    for (final item in value) {
+      if (item is String) {
+        result.add(item);
+      }
+    }
+    return result;
+  }
 
   static T _enum<T extends Enum>(
     Map<String, dynamic> json,
     String key,
     List<T> values,
-  ) =>
-      values.firstWhere(
-        (item) => item.name == json[key],
-        orElse: () => throw FormatException('字段 $key 无效'),
-      );
+  ) {
+    final raw = json[key];
+    if (raw == null) {
+      throw FormatException('字段 $key 缺失');
+    }
+    final name = raw.toString();
+    final found = values.where((item) => item.name == name);
+    if (found.isEmpty) {
+      throw FormatException('字段 $key 值 "$name" 不在已知枚举 $values 中');
+    }
+    return found.first;
+  }
 
-  static List<T> _enums<T extends Enum>(Object? value, List<T> values) =>
-      _strings(value)
-          .map((name) => values.firstWhere(
-                (item) => item.name == name,
-                orElse: () => throw FormatException('枚举值 $name 无效'),
-              ))
-          .toList();
+  static List<T> _enums<T extends Enum>(Object? value, List<T> values) {
+    final strings = _strings(value);
+    if (strings.isEmpty || values.isEmpty) return const [];
+    return strings.map((name) {
+      final found = values.where((item) => item.name == name);
+      if (found.isEmpty) {
+        throw FormatException('枚举值 "$name" 不在已知枚举 $values 中');
+      }
+      return found.first;
+    }).toList();
+  }
 
   static String _publicUrl(String value) {
     if (value.isEmpty) return '';

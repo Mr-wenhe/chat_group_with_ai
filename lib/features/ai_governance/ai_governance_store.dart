@@ -1,5 +1,7 @@
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
+import 'package:chat_group/features/ai_governance/ai_request_guard.dart';
+import 'package:chat_group/features/ai_governance/model_capability_registry.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:uuid/uuid.dart';
 
@@ -34,6 +36,10 @@ abstract class GovernancePersistence {
   Future<void> clearDiagnostics();
   Future<void> addSearchAudit(SearchAuditEntry entry);
   Future<void> clearSearchAudits();
+
+  /// 返回共享的 [AiRequestGuard]。同一数据库实例多次调用应返回
+  /// 同一个 guard，确保 _reservedMicros 预算预留在整个应用中可见。
+  AiRequestGuard get guard;
 }
 
 class AiGovernanceStore implements GovernancePersistence {
@@ -49,9 +55,37 @@ class AiGovernanceStore implements GovernancePersistence {
   static const _searchAuditLimit = 100;
   static const _detailRetention = Duration(days: 90);
 
+  static final Map<int, AiGovernanceStore> _instances = {};
+
+  /// 为给定的 [DatabaseService] 返回共享的 [AiGovernanceStore] 实例。
+  /// 同一数据库实例多次调用返回同一个 store，确保预算预留、账本
+  /// 等并发敏感状态在整个应用中被所有消费者共享。
+  static AiGovernanceStore forDatabase(DatabaseService db) {
+    final identity = Object.hash(db, db.hashCode);
+    return _instances.putIfAbsent(identity, () => AiGovernanceStore._(db));
+  }
+
   final DatabaseService db;
   bool _legacyLedgerMigrated = false;
+  AiRequestGuard? _guard;
 
+  AiGovernanceStore._(this.db);
+
+  /// 共享的预算 guard：同一 store 实例的所有消费者共享同一个 guard，
+  /// 确保 _reservedMicros 预留计数跨网关实例可见。
+  @override
+  AiRequestGuard get guard {
+    _guard ??= AiRequestGuard(
+      store: this,
+      registry: ModelCapabilityRegistry(),
+      clock: DateTime.now,
+    );
+    return _guard!;
+  }
+
+  /// 创建新实例（仅供 [forDatabase] 内部使用）。
+  /// 普通代码应通过 [forDatabase] 获取共享实例。
+  @Deprecated('Use AiGovernanceStore.forDatabase(db) instead')
   AiGovernanceStore(this.db);
 
   /// 防御性打开账本 box：若尚未打开（例如调用方未经过 [DatabaseService.init]，

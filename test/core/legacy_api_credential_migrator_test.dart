@@ -102,7 +102,7 @@ void main() {
 
     await harness.migrate();
 
-    expect(config.legacyApiKey, isEmpty);
+    expect(config.legacyApiKeyForMigration, isEmpty);
     expect(config.hasCredential, isTrue);
     expect(config.credentialId, harness.repository.credentialIdFor(config.id));
     expect((await harness.repository.read(config.id)).value, 'secret');
@@ -125,7 +125,7 @@ void main() {
 
     await harness.migrate();
 
-    expect(config.legacyApiKey, 'config-secret');
+    expect(config.legacyApiKeyForMigration, 'config-secret');
     expect(config.hasCredential, isFalse);
     expect(character.apiKey, 'character-secret');
     expect(character.apiConfigId, isEmpty);
@@ -319,7 +319,10 @@ void main() {
     await migrate();
 
     expect(configs, hasLength(2));
-    expect(configs.get('legacy-config')!.legacyApiKey, isEmpty);
+    expect(
+      configs.get('legacy-config')!.legacyApiKeyForMigration,
+      isEmpty,
+    );
     expect(characters.get('a')!.apiKey, isEmpty);
     expect(characters.get('a')!.apiConfigId, characters.get('b')!.apiConfigId);
     expect(groups.get('group')!.name, 'unchanged group');
@@ -331,7 +334,10 @@ void main() {
     characters = await Hive.openBox<AICharacter>('ai_characters');
     groups = await Hive.openBox<ChatGroup>('chat_groups');
     messages = await Hive.openBox<Message>('messages');
-    expect(configs.get('legacy-config')!.legacyApiKey, 'config-secret');
+    expect(
+      configs.get('legacy-config')!.legacyApiKeyForMigration,
+      'config-secret',
+    );
     expect(characters.get('a')!.apiKey, 'shared-secret');
     expect(groups.get('group')!.name, 'unchanged group');
     expect(messages.get('message')!.content, 'unchanged message');

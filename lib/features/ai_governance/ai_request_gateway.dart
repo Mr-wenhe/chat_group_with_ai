@@ -6,7 +6,6 @@ import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/ai_request_guard.dart';
-import 'package:chat_group/features/ai_governance/model_capability_registry.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:dio/dio.dart';
 import 'package:uuid/uuid.dart';
@@ -24,16 +23,11 @@ class AiRequestGateway {
   AiRequestGateway({
     required this.store,
     ChatApiService? client,
-    ModelCapabilityRegistry? registry,
     DateTime Function()? clock,
     RetrySleep? retrySleep,
     this.onWarning,
   })  : client = client ?? ChatApiService(),
-        guard = AiRequestGuard(
-          store: store,
-          registry: registry ?? ModelCapabilityRegistry(),
-          clock: clock ?? DateTime.now,
-        ),
+        guard = store.guard,
         clock = clock ?? DateTime.now,
         retrySleep = retrySleep ?? Future<void>.delayed;
 
@@ -74,13 +68,13 @@ class AiRequestGateway {
       streaming: false,
       requiresTools: requiresTools,
       userInitiated: userInitiated,
-      operation: () => client.sendChatMessage(
+      operation: (attempt) => client.sendChatMessage(
         apiKey: apiKey,
         provider: provider,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
-        temperature: temperature,
+        temperature: attempt.temperatureFor(temperature),
         maxTokens: maxTokens,
         receiveTimeout: receiveTimeout,
         maxRetries: 0,
@@ -119,13 +113,13 @@ class AiRequestGateway {
       streaming: true,
       requiresTools: requiresTools,
       userInitiated: userInitiated,
-      operation: () => client.sendChatMessageStreamed(
+      operation: (attempt) => client.sendChatMessageStreamed(
         apiKey: apiKey,
         provider: provider,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
-        temperature: temperature,
+        temperature: attempt.temperatureFor(temperature),
         maxTokens: maxTokens,
         receiveTimeout: receiveTimeout,
         maxRetries: 0,
@@ -187,6 +181,7 @@ class AiRequestGateway {
     var outputCharacters = 0;
     String status = 'cancelled';
     String? failureType;
+    bool attemptRecorded = false;
     try {
       await for (final event in client.streamChatMessage(
         apiKey: apiKey,
@@ -211,6 +206,7 @@ class AiRequestGateway {
           failureType = _failureType(event.message);
         }
         if (event.type == ChatStreamEventType.done) {
+          attemptRecorded = true;
           await _recordAttempt(
             requestId: rootRequestId,
             rootRequestId: rootRequestId,
@@ -237,7 +233,7 @@ class AiRequestGateway {
       }
     } finally {
       guard.release(conversationId, prepared.reservedMicros);
-      if (status != 'success') {
+      if (!attemptRecorded && status != 'success') {
         await _recordAttempt(
           requestId: rootRequestId,
           rootRequestId: rootRequestId,
@@ -275,7 +271,7 @@ class AiRequestGateway {
     required bool streaming,
     required bool requiresTools,
     required bool userInitiated,
-    required Future<Map<String, dynamic>> Function() operation,
+    required RetryOperation<Map<String, dynamic>> operation,
   }) async {
     final rootRequestId = const Uuid().v4();
     var attempts = 0;
@@ -306,9 +302,8 @@ class AiRequestGateway {
               rootRequestId: rootRequestId,
               provider: provider,
               model: model,
-              purpose: attempt.retryNumber == 0
-                  ? purpose
-                  : AiRequestPurpose.retry,
+              purpose:
+                  attempt.retryNumber == 0 ? purpose : AiRequestPurpose.retry,
               reason: prepared.reason!,
               retryCount: attempt.retryNumber,
             );
@@ -325,7 +320,7 @@ class AiRequestGateway {
           }
 
           final stopwatch = Stopwatch()..start();
-          final response = await operation();
+          final response = await operation(attempt);
           final success = response['success'] == true;
           final inputTokens = response['promptTokens'] as int?;
           final outputTokens = response['completionTokens'] as int?;
@@ -338,9 +333,8 @@ class AiRequestGateway {
             model: response['model']?.toString() ?? model,
             characterId: characterId,
             conversationId: conversationId,
-            purpose: attempt.retryNumber == 0
-                ? purpose
-                : AiRequestPurpose.retry,
+            purpose:
+                attempt.retryNumber == 0 ? purpose : AiRequestPurpose.retry,
             originPurpose: purpose,
             capability: prepared.capability!,
             estimatedInputTokens: prepared.inputTokens,
@@ -353,8 +347,7 @@ class AiRequestGateway {
             latencyMs: stopwatch.elapsedMilliseconds,
             retryCount: attempt.retryNumber,
             status: success ? 'success' : 'failed',
-            failureType:
-                success ? null : _failureType(responseText, response),
+            failureType: success ? null : _failureType(responseText, response),
           );
           return {
             ...response,

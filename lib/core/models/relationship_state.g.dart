@@ -21,13 +21,17 @@ class RelationshipStateAdapter extends TypeAdapter<RelationshipState> {
       groupId: fields[1] as String,
       sourceCharacterId: fields[2] as String,
       targetId: fields[3] as String,
-      targetType: fields[4] as RelationshipTargetType,
-      affinity: fields[5] as int,
-      trust: fields[6] as int,
-      friction: fields[7] as int,
-      familiarity: fields[8] as int,
-      recentMood: fields[9] as RelationshipMood,
-      notes: fields[10] as String,
+      targetType: fields[4] == null
+          ? RelationshipTargetType.ai
+          : fields[4] as RelationshipTargetType,
+      affinity: fields[5] == null ? 0 : fields[5] as int,
+      trust: fields[6] == null ? 0 : fields[6] as int,
+      friction: fields[7] == null ? 0 : fields[7] as int,
+      familiarity: fields[8] == null ? 0 : fields[8] as int,
+      recentMood: fields[9] == null
+          ? RelationshipMood.neutral
+          : fields[9] as RelationshipMood,
+      notes: fields[10] == null ? '' : fields[10] as String,
       lastInteractionAt: fields[11] as DateTime?,
       createdAt: fields[12] as DateTime?,
     );

@@ -153,5 +153,17 @@ void main() {
       expect(done.completionTokens, 12);
       expect(done.cachedTokens, 40);
     });
+
+    test('解析器终止后 [DONE] 不产生 done 事件', () {
+      // 模拟：解析器先遇到 provider error 终止，然后服务端仍发送 [DONE]
+      final p = SseParser();
+      final events = p.ingest(
+          'data: {"error":{"message":"rate limit"}}\ndata: [DONE]\n');
+      // error 事件已产出
+      expect(events, hasLength(1));
+      expect(events.first.type, ChatStreamEventType.error);
+      // 解析器已终止
+      expect(p.terminated, isTrue);
+    });
   });
 }

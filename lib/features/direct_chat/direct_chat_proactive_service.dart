@@ -41,7 +41,7 @@ class DirectChatProactiveService {
     ApiCredentialResolver? credentialResolver,
   })  : gateway = gateway ??
             AiRequestGateway(
-              store: AiGovernanceStore(db),
+              store: AiGovernanceStore.forDatabase(db),
               client: chatApi,
             ),
         random = random ?? Random(),
@@ -174,12 +174,8 @@ class DirectChatProactiveService {
     await db.persistMessage(message);
     await db.saveDirectChatSource(conversationId, candidate.source);
     await db.saveDirectChatLastProactiveAt(candidate.character.id, now);
-    // 记用：与聊天走同一套每小时额度累计。先从盒里取最新对象再累加，
-    // 避免用方法入口的旧快照覆盖聊天室内已持久化的并发增量（lost-update）。
-    final latest =
-        db.aiCharacterBox.get(candidate.character.id) ?? candidate.character;
-    eligibility.recordReplyUsage(latest);
-    await db.aiCharacterBox.put(latest.id, latest);
+    // 记用：统一由数据库按角色串行写回，避免并发入口丢失增量。
+    await db.recordCharacterReplyUsage(candidate.character.id);
 
     return DirectChatProactiveResult(
       character: candidate.character,

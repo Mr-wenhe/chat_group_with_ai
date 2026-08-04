@@ -380,7 +380,11 @@ class ChatApiService {
       // 逐行交给 SseParser，把产出的事件透传给调用方。
       await for (final line in stream) {
         if (RegExp(r'^data:\s*\[DONE\]\s*$').hasMatch(line.trim())) {
-          yield parser.doneEvent();
+          // 仅当解析器未被终止（错误/超限）时才产生 done 事件，
+          // 避免错误后服务端仍然发送 [DONE] 导致误判为成功。
+          if (!parser.terminated) {
+            yield parser.doneEvent();
+          }
           return;
         }
         final event = parser.ingestLine(line);
@@ -388,8 +392,11 @@ class ChatApiService {
           yield event;
         }
       }
-      // 流正常结束，返回累计的完整内容。
-      yield parser.doneEvent();
+      // 流正常结束，仅当解析器未被终止（非 [DONE] 路径）时产出 done 事件，
+      // 避免把 error/超限终止误报为成功。
+      if (!parser.terminated) {
+        yield parser.doneEvent();
+      }
     } on DioException catch (e) {
       yield ChatStreamEvent.error(_dioErrorMessage(e));
     } catch (e) {

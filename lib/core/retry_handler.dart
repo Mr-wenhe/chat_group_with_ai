@@ -31,6 +31,7 @@ class RetryHandler {
     Duration(milliseconds: 1500),
     Duration(milliseconds: 3000),
     Duration(milliseconds: 5000),
+    Duration(milliseconds: 8000),
   ];
 
   static Future<T> executeWithRetry<T>({

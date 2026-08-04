@@ -39,21 +39,26 @@ class MemoryControls {
 
   final DatabaseService db;
 
-  const MemoryControls(this.db);
+  MemoryControls(this.db);
 
   bool get automaticMemoryEnabled =>
-      AiGovernanceStore(db).budgetSettings.summaryEnabled;
+      AiGovernanceStore.forDatabase(db).budgetSettings.summaryEnabled;
 
   Future<void> setAutomaticMemoryEnabled(bool enabled) {
-    final store = AiGovernanceStore(db);
+    final store = AiGovernanceStore.forDatabase(db);
     return store.saveBudgetSettings(
       store.budgetSettings.copyWith(summaryEnabled: enabled),
     );
   }
 
+  Set<String>? _pinnedCache;
+
   Set<String> get pinnedKeys {
-    final raw = db.appSettingsBox.get(_pinnedKey);
-    return raw is List ? raw.whereType<String>().toSet() : <String>{};
+    _pinnedCache ??= () {
+      final raw = db.appSettingsBox.get(_pinnedKey);
+      return raw is List ? raw.whereType<String>().toSet() : <String>{};
+    }();
+    return Set<String>.from(_pinnedCache!);
   }
 
   bool isPinned(String key) => pinnedKeys.contains(key);
@@ -61,6 +66,7 @@ class MemoryControls {
   Future<void> setPinned(String key, bool pinned) async {
     final values = pinnedKeys;
     pinned ? values.add(key) : values.remove(key);
+    _pinnedCache = null; // invalidate cache
     await db.appSettingsBox.put(_pinnedKey, values.toList()..sort());
   }
 
@@ -281,7 +287,9 @@ class MemoryControls {
           .toList(growable: false);
 
   Future<void> _removePinnedKeys(Iterable<String> keys) async {
-    final values = pinnedKeys..removeAll(keys);
+    final values = pinnedKeys;
+    values.removeAll(keys);
+    _pinnedCache = null;
     await db.appSettingsBox.put(_pinnedKey, values.toList()..sort());
   }
 

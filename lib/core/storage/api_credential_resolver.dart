@@ -24,8 +24,9 @@ class SecureApiCredentialResolver implements ApiCredentialResolver {
         CredentialRepository.developmentHiveCredentialId) {
       // macOS debug may not have Keychain access. This fallback is deliberately
       // unavailable in release builds, where a secure credential is mandatory.
-      return !kReleaseMode && config.legacyApiKey.isNotEmpty
-          ? config.legacyApiKey
+      return !kReleaseMode &&
+              (config.legacyApiKeyForMigration?.isNotEmpty ?? false)
+          ? (config.legacyApiKeyForMigration ?? '')
           : null;
     }
     if (config.credentialId.isEmpty) return null;

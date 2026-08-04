@@ -149,6 +149,7 @@ class DatabaseService {
   Map<String, dynamic>? _tokenUsageCache;
   Map<String, dynamic>? _messageIdsCache;
   Map<String, ConversationSummaryRecord>? _conversationSummaryCache;
+  final Map<String, Future<void>> _replyUsageWrites = {};
   int? _messageIndexCountCache;
   Future<void>? _messageIndexBuildFuture;
   static const Duration _tokenUsageFlushDelay = Duration(seconds: 2);
@@ -286,13 +287,14 @@ class DatabaseService {
 
   Future<void> saveApiConfig(ApiConfig config) async {
     final existing = apiConfigBox.get(config.id);
-    if (config.legacyApiKey.isNotEmpty) {
+    if (config.legacyApiKeyForMigration?.isNotEmpty ?? false) {
       final credentials = CredentialRepository();
       final saved = credentials.secureStorageAvailable
-          ? await credentials.save(config.id, config.legacyApiKey)
+          ? await credentials.save(
+              config.id, config.legacyApiKeyForMigration ?? '')
           : const CredentialWriteResult.failed(CredentialFailure.unavailable);
       if (saved.isSuccess) {
-        config.legacyApiKey = '';
+        config.setLegacyApiKeyForMigration('');
         config.hasCredential = true;
         config.credentialId = credentials.credentialIdFor(config.id);
       } else if (kReleaseMode) {
@@ -310,11 +312,57 @@ class DatabaseService {
       if (!kReleaseMode &&
           existing.credentialId ==
               CredentialRepository.developmentHiveCredentialId &&
-          existing.legacyApiKey.isNotEmpty) {
-        config.legacyApiKey = existing.legacyApiKey;
+          (existing.legacyApiKeyForMigration?.isNotEmpty ?? false)) {
+        config.setLegacyApiKeyForMigration(
+          existing.legacyApiKeyForMigration ?? '',
+        );
       }
     }
     await apiConfigBox.put(config.id, config);
+  }
+
+  /// Serializes reply-usage updates per character so chat and proactive
+  /// services cannot overwrite each other's read-modify-write result.
+  Future<void> recordCharacterReplyUsage(String characterId) {
+    final previous = _replyUsageWrites[characterId] ?? Future<void>.value();
+    final next = previous.then<void>(
+      (_) => _persistCharacterReplyUsage(characterId),
+      onError: (Object _, StackTrace __) =>
+          _persistCharacterReplyUsage(characterId),
+    );
+    _replyUsageWrites[characterId] = next;
+    next.then<void>(
+      (_) => _removeReplyUsageWrite(characterId, next),
+      onError: (Object _, StackTrace __) {
+        _removeReplyUsageWrite(characterId, next);
+      },
+    );
+    return next;
+  }
+
+  Future<void> _persistCharacterReplyUsage(String characterId) async {
+    final character = aiCharacterBox.get(characterId);
+    if (character == null) return;
+    final current = DateTime.now();
+    final last = character.lastReplyTimestamp;
+    final withinHour = last != null && current.difference(last).inMinutes < 60;
+    final sameDay = last != null &&
+        last.year == current.year &&
+        last.month == current.month &&
+        last.day == current.day;
+    if (!sameDay || !withinHour) {
+      character.hourlyReplyCount = 1;
+    } else {
+      character.hourlyReplyCount += 1;
+    }
+    character.lastReplyTimestamp = current;
+    await aiCharacterBox.put(character.id, character);
+  }
+
+  void _removeReplyUsageWrite(String characterId, Future<void> write) {
+    if (identical(_replyUsageWrites[characterId], write)) {
+      _replyUsageWrites.remove(characterId);
+    }
   }
 
   Box<AICharacter> get aiCharacterBox => Hive.box<AICharacter>(_aiCharacterBox);
@@ -697,16 +745,28 @@ class DatabaseService {
     final storedCount = appSettingsBox.get(_messageIndexCountKey);
     _messageIndexCountCache ??= storedCount is int ? storedCount : -1;
     if (_messageIndexCountCache != messageBox.length) {
-      await (_messageIndexBuildFuture ??= _rebuildMessageIndexOnce());
+      // Use a Completer to prevent concurrent rebuilds from multiple callers.
+      final existing = _messageIndexBuildFuture;
+      if (existing != null) {
+        await existing;
+        return;
+      }
+      final completer = Completer<void>();
+      _messageIndexBuildFuture = completer.future;
+      try {
+        await _rebuildMessageIndexOnce();
+        completer.complete();
+      } on Object catch (e) {
+        completer.completeError(e);
+        rethrow;
+      } finally {
+        _messageIndexBuildFuture = null;
+      }
     }
   }
 
   Future<void> _rebuildMessageIndexOnce() async {
-    try {
-      await rebuildMessageIndex();
-    } finally {
-      _messageIndexBuildFuture = null;
-    }
+    await rebuildMessageIndex();
   }
 
   Future<void> rebuildMessageIndex() async {
@@ -1061,15 +1121,36 @@ class DatabaseService {
     String conversationId, {
     DateTime? readAt,
   }) async {
+    final timestamp = (readAt ?? DateTime.now()).toIso8601String();
+    final summaries = Map<String, ConversationSummaryRecord>.from(
+      conversationSummaries(),
+    );
+    final current = summaries[conversationId];
+    if (current != null) {
+      summaries[conversationId] = ConversationSummaryRecord(
+        conversationId: conversationId,
+        lastMessageId: current.lastMessageId,
+        preview: current.preview,
+        timestamp: current.timestamp,
+        messageCount: current.messageCount,
+        unreadCount: 0,
+        mentionCount: 0,
+        lastReadAt: DateTime.tryParse(timestamp),
+        lastUserMessageAt: current.lastUserMessageAt,
+      );
+    }
+    _conversationSummaryCache = summaries;
+    await appSettingsBox.put(_conversationSummariesKey, {
+      for (final entry in summaries.entries) entry.key: entry.value.toMap(),
+    });
     final map = Map<String, String>.from(
       appSettingsBox.get(_directChatReadAtKey) is Map
           ? Map<String, dynamic>.from(appSettingsBox.get(_directChatReadAtKey))
               .map((key, value) => MapEntry(key, value.toString()))
           : const <String, String>{},
     );
-    map[conversationId] = (readAt ?? DateTime.now()).toIso8601String();
+    map[conversationId] = timestamp;
     await appSettingsBox.put(_directChatReadAtKey, map);
-    await _markSummaryRead(conversationId, map[conversationId]!);
   }
 
   Map<String, DateTime> groupChatReadAtByGroup() {
