@@ -166,6 +166,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                             onToggle: () {
                               character.isActive = !character.isActive;
                               character.save();
+                              ref.invalidate(aiCharactersProvider);
                             },
                             // 点击模型标签可单独切换该角色关联的 API 配置（Bug 2/4）
                             onConfigChange: () =>
