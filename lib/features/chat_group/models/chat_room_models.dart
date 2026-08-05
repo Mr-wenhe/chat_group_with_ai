@@ -14,6 +14,7 @@ import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 
 /// A user message queued during an AI reply round.
@@ -60,6 +61,7 @@ class ChatRoomLoadContext {
   final List<CharacterMemory> characterMemories;
   final List<RelationshipState> relationships;
   final GroupMemory? groupMemory;
+  final UserProfile? userProfile;
   final bool hasAnyApiConfig;
   final bool isDirectChat;
   final bool hasOlderMessages;
@@ -73,6 +75,7 @@ class ChatRoomLoadContext {
     required this.characterMemories,
     required this.relationships,
     required this.groupMemory,
+    this.userProfile,
     required this.hasAnyApiConfig,
     required this.isDirectChat,
     this.hasOlderMessages = false,

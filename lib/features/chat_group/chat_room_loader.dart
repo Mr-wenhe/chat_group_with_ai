@@ -2,6 +2,7 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/group_memory.dart';
+import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/models/chat_room_models.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
@@ -81,14 +82,13 @@ class ChatRoomLoader {
       characterMemories: db.characterMemoryBox.values
           .where((item) => item.groupId == conversationId)
           .toList(growable: false),
-      relationships: db.relationshipStateBox.values
-          .where((item) => item.groupId == conversationId)
-          .toList(growable: false),
+      relationships: _stableGlobalRelationships(),
       groupMemory: memory,
       hasAnyApiConfig: activeCharacters.any(_hasApiConfig),
       isDirectChat: false,
       hasOlderMessages: messagePage.hasOlder,
       totalMessageCount: messagePage.totalCount,
+      userProfile: db.userProfileBox.get('me'),
     );
   }
 
@@ -122,20 +122,51 @@ class ChatRoomLoader {
       characterMemories: db.characterMemoryBox.values
           .where((item) => item.groupId == conversationId)
           .toList(growable: false),
-      relationships: db.relationshipStateBox.values
-          .where((item) => item.groupId == conversationId)
-          .toList(growable: false),
+      // 全局关系：私聊同样按稳定快照优先。
+      relationships: _stableGlobalRelationships(),
       groupMemory: null,
       hasAnyApiConfig: character.isActive && _hasApiConfig(character),
       isDirectChat: true,
       hasOlderMessages: messagePage.hasOlder,
       totalMessageCount: messagePage.totalCount,
+      userProfile: db.userProfileBox.get('me'),
     );
   }
 
   bool _hasApiConfig(AICharacter character) {
     final config = resolveApiConfig(character);
     return config?.hasCredential == true;
+  }
+
+  /// 按 stableGlobalId 逐项选择最优关系快照：全局优先，否则取最新 legacy。
+  ///
+  /// 旧实现是"有任意全局快照就丢弃全部 legacy"，导致 A→user 只有 legacy 时被错误丢弃。
+  /// 这里改为按每个 stableGlobalId 独立决策：有全局用全局，没有才用最新 legacy。
+  List<RelationshipState> _stableGlobalRelationships() {
+    final allRelationships = db.relationshipStateBox.values;
+    // 先按 stableGlobalId 分组，全局优先。
+    final bestByStableId = <String, RelationshipState>{};
+    for (final r in allRelationships) {
+      if (r.sourceCharacterId.isEmpty) continue;
+      final stableId = RelationshipState.stableGlobalId(
+        r.sourceCharacterId,
+        r.targetType,
+        r.targetId,
+      );
+      final existing = bestByStableId[stableId];
+      if (existing == null) {
+        bestByStableId[stableId] = r;
+      } else if (r.groupId == 'global' && existing.groupId != 'global') {
+        // 全局快照优先于 legacy。
+        bestByStableId[stableId] = r;
+      } else if (r.groupId != 'global' &&
+          existing.groupId != 'global' &&
+          r.updatedAt.isAfter(existing.updatedAt)) {
+        // 同为 legacy 时取最新。
+        bestByStableId[stableId] = r;
+      }
+    }
+    return bestByStableId.values.toList();
   }
 
   static DateTime readThrough(Iterable<DateTime> timestamps) {

@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
+import 'package:chat_group/features/memory/memory_context_selector.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
@@ -149,7 +150,7 @@ class DirectChatProactiveService {
       ),
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
-      messages: _buildMessages(
+      messages: await _buildMessages(
         character: candidate.character,
         source: candidate.source,
         reason: candidate.reason,
@@ -197,13 +198,13 @@ class DirectChatProactiveService {
     return config?.hasCredential == true;
   }
 
-  List<Map<String, dynamic>> _buildMessages({
+  Future<List<Map<String, dynamic>>> _buildMessages({
     required AICharacter character,
     required DirectChatSource source,
     required String reason,
     required List<Message> directContext,
     required List<Message> groupContext,
-  }) {
+  }) async {
     final contextLines = <String>[];
     for (final message in directContext) {
       final speaker = message.senderType == 'user' ? '我' : character.name;
@@ -221,26 +222,46 @@ class DirectChatProactiveService {
             ? '你自然想到用户，决定第一次主动私聊问候。'
             : '你是延续之前的私聊来主动联系。';
 
-    final persistentMemory =
-        DirectChatSession.persistentMemoryPrompt(character);
+    // 用全局记忆选择器替代旧 memorySummary 旁路。
+    final selector = MemoryContextSelector(db);
+    String permanentMemory = '';
+    try {
+      permanentMemory = await selector.select(
+        observerCharacterId: character.id,
+        participantCharacterIds: [character.id],
+        currentTargetId: 'user',
+      );
+    } on Object {
+      // Box not yet opened in test environments; skip memory injection.
+    }
+
+    String ownerName = '我';
+    try {
+      final profile = db.userProfileBox.get('me');
+      if (profile?.displayName.trim().isNotEmpty ?? false) {
+        ownerName = profile!.displayName.trim();
+      }
+    } on Object {
+      // Box not yet opened in test environments; fall back to default.
+    }
 
     return [
       {
         'role': 'system',
         'content': DirectChatSession.buildPromptContext(
           character: character,
-          ownerName: '我',
+          ownerName: ownerName,
         ),
       },
       {'role': 'system', 'content': character.systemPrompt},
-      if (persistentMemory.isNotEmpty)
-        {'role': 'system', 'content': persistentMemory},
+      if (permanentMemory.isNotEmpty)
+        {'role': 'system', 'content': permanentMemory},
       {
         'role': 'system',
         'content': '这次由你主动发起私聊。$sourceText'
             '原因：$reason。'
             '只发一条自然的开场消息，1-2 句，像真实联系人突然想起这件事来找我。'
-            '不要解释规则，不要说“系统让我”。',
+            '不要解释规则，不要说”系统让我”。',
       },
       if (contextLines.isNotEmpty)
         {'role': 'user', 'content': '最近私聊：\n${contextLines.join('\n')}'},

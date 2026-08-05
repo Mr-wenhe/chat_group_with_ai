@@ -105,18 +105,18 @@ void main() {
       );
     });
 
-    test('planning context contains role, memory, and installed skills', () {
+    test('planning context contains role and installed skills', () {
       final character = _character(id: 'worker')
         ..role = '产品经理'
-        ..memorySummary = '用户偏好简洁周报'
         ..skillIds = const ['weekly-report'];
 
       final context = WorkModePolicy.planningContext(character);
 
       expect(context, contains('产品经理'));
-      expect(context, contains('用户偏好简洁周报'));
       expect(context, contains('weekly-report'));
       expect(context, contains('工作区读取'));
+      // memorySummary is no longer injected; global memory is provided by MemoryContextSelector.
+      expect(context, isNot(contains('用户偏好简洁周报')));
     });
 
     test('resolved work skills include every installed character skill', () {

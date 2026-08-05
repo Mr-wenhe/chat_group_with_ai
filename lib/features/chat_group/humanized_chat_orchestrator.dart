@@ -129,7 +129,6 @@ class HumanizedChatOrchestrator {
       } else if (last.senderType == 'ai') {
         final relation = _relationToward(
           relationships,
-          groupId,
           character.id,
           last.senderId,
         );
@@ -187,7 +186,7 @@ class HumanizedChatOrchestrator {
     // 关系驱动：用户对角色好感极低或摩擦极高时，角色强制带刺回复。
     // 不沉默——宁可怼人也不让消息石沉大海。
     final userRelation = _relationTowardUser(
-        relationships, groupId, character.id);
+        relationships, character.id);
     if (userRelation != null && !mentionedIds.contains(character.id)) {
       if (userRelation.affinity < -20 && userRelation.friction > 60) {
         // 亲近为负且摩擦很高：强制带刺回复，表达不耐烦。
@@ -300,7 +299,6 @@ class HumanizedChatOrchestrator {
 
     final related = relationships
         .where((r) =>
-            r.groupId == groupId &&
             r.sourceCharacterId == character.id &&
             r.targetType == RelationshipTargetType.ai &&
             r.targetId != character.id)
@@ -319,13 +317,11 @@ class HumanizedChatOrchestrator {
 
   static RelationshipState? _relationToward(
     List<RelationshipState> relationships,
-    String groupId,
     String sourceId,
     String targetId,
   ) {
     for (final relation in relationships) {
-      if (relation.groupId == groupId &&
-          relation.sourceCharacterId == sourceId &&
+      if (relation.sourceCharacterId == sourceId &&
           relation.targetId == targetId) {
         return relation;
       }
@@ -335,10 +331,9 @@ class HumanizedChatOrchestrator {
 
   /// 查找指定角色对真人用户的关系记录（用于关系驱动的回复意愿判断）。
   static RelationshipState? _relationTowardUser(
-      List<RelationshipState> relationships, String groupId, String characterId) {
+      List<RelationshipState> relationships, String characterId) {
     for (final relation in relationships) {
-      if (relation.groupId == groupId &&
-          relation.sourceCharacterId == characterId &&
+      if (relation.sourceCharacterId == characterId &&
           relation.targetId == 'user' &&
           relation.targetType == RelationshipTargetType.user) {
         return relation;

@@ -401,6 +401,19 @@ class DatabaseService {
       Hive.box<PermanentMemory>(_permanentMemoryBox);
   Box<RelationshipEvent> get relationshipEventBox =>
       Hive.box<RelationshipEvent>(_relationshipEventBox);
+
+  /// 从用户人物信息卡获取显示名，空则返回默认值。
+  String ownerNameFromProfile({String fallback = '我'}) {
+    try {
+      final profile = userProfileBox.get('me');
+      if (profile?.displayName.trim().isNotEmpty ?? false) {
+        return profile!.displayName.trim();
+      }
+    } on Object {
+      // Box not yet opened in test environments.
+    }
+    return fallback;
+  }
   String? get dataDirPath => _dataDir?.path;
 
   static const String _aiProcessingDirKey = 'ai_processing_dir';
@@ -1028,9 +1041,7 @@ class DatabaseService {
             : groupChatReadAtByGroup())[message.groupId];
     final isUnread = message.senderType == 'ai' &&
         (readAt == null || message.timestamp.isAfter(readAt));
-    final ownerName = !direct && Hive.isBoxOpen(_chatGroupBox)
-        ? chatGroupBox.get(message.groupId)?.ownerName.trim() ?? ''
-        : '';
+    final ownerName = !direct ? ownerNameFromProfile() : '我';
     final mentionNames = {'我', if (ownerName.isNotEmpty) ownerName};
     final isMention = isUnread &&
         !direct &&
@@ -1072,9 +1083,7 @@ class DatabaseService {
       return message.senderType == 'ai' &&
           (readAt == null || message.timestamp.isAfter(readAt));
     }).toList(growable: false);
-    final ownerName = Hive.isBoxOpen(_chatGroupBox)
-        ? chatGroupBox.get(groupId)?.ownerName.trim() ?? ''
-        : '';
+    final ownerName = !direct ? ownerNameFromProfile() : '我';
     final mentionCount = direct
         ? 0
         : unread.where((message) {

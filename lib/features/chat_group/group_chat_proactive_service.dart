@@ -8,6 +8,7 @@ import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_policy.dart';
+import 'package:chat_group/features/memory/memory_context_selector.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
@@ -95,6 +96,13 @@ class GroupChatProactiveService {
         ? groupMessages.sublist(groupMessages.length - 12)
         : groupMessages;
 
+    final messages = await _buildMessages(
+      character: candidate.character,
+      group: candidate.group,
+      reason: candidate.reason,
+      context: context,
+      charactersById: charactersById,
+    );
     final result = await gateway.sendChatMessage(
       apiKey: apiKey,
       provider: ApiProvider.values.firstWhere(
@@ -103,13 +111,7 @@ class GroupChatProactiveService {
       ),
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
-      messages: _buildMessages(
-        character: candidate.character,
-        group: candidate.group,
-        reason: candidate.reason,
-        context: context,
-        charactersById: charactersById,
-      ),
+      messages: messages,
       temperature: 0.85,
       purpose: AiRequestPurpose.proactive,
       conversationId: candidate.group.id,
@@ -150,15 +152,22 @@ class GroupChatProactiveService {
     return config?.hasCredential == true;
   }
 
-  List<Map<String, dynamic>> _buildMessages({
+  Future<List<Map<String, dynamic>>> _buildMessages({
     required AICharacter character,
     required ChatGroup group,
     required String reason,
     required List<Message> context,
     required Map<String, AICharacter> charactersById,
-  }) {
-    final ownerName =
-        group.ownerName.trim().isEmpty ? '我' : group.ownerName.trim();
+  }) async {
+    String ownerName = '我';
+    try {
+      final profile = db.userProfileBox.get('me');
+      if (profile?.displayName.trim().isNotEmpty ?? false) {
+        ownerName = profile!.displayName.trim();
+      }
+    } on Object {
+      // Box not yet opened in test environments; fall back to default.
+    }
     final transcript = context.map((message) {
       final speaker = message.senderType == 'user'
           ? ownerName
@@ -170,6 +179,18 @@ class GroupChatProactiveService {
         .map((id) => charactersById[id]?.name)
         .whereType<String>()
         .join('、');
+
+    // 统一全局记忆上下文。
+    String permanentMemory = '';
+    try {
+      permanentMemory = await MemoryContextSelector(db).select(
+        observerCharacterId: character.id,
+        participantCharacterIds: group.aiCharacterIds,
+        userMessage: context.isNotEmpty ? context.last.content : null,
+      );
+    } on Object {
+      // Box not yet opened in test environments; skip memory injection.
+    }
 
     return [
       {
@@ -183,6 +204,8 @@ class GroupChatProactiveService {
             '${otherMembers.isEmpty ? '' : '其他 AI 成员：$otherMembers。'}',
       },
       {'role': 'system', 'content': character.systemPrompt},
+      if (permanentMemory.isNotEmpty)
+        {'role': 'system', 'content': permanentMemory},
       if (transcript.isNotEmpty)
         {'role': 'user', 'content': '最近群聊记录：\n$transcript'},
       {'role': 'user', 'content': '现在你主动在群里说一句。'},

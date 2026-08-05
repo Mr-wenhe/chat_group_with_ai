@@ -3,42 +3,21 @@ import 'dart:io';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
-import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/chat_group.dart';
-import 'package:chat_group/core/models/media_attachment.dart';
-import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
-import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_service.dart';
-import 'package:chat_group/services/chat_api_service.dart';
-import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
-import 'package:hive/hive.dart';
 
-/// 用内存版 ChatApiService 验证「主动 DM 走统一每小时发言预算」：
-/// 达到上限时跳过（不调模型、不伪造发送），未达上限时正常发送并记用。
-class FakeChatApiService extends ChatApiService {
-  int sendCount = 0;
+import 'helpers/capturing_chat_api_service.dart';
+import 'helpers/lifecycle_hive.dart';
 
-  @override
-  Future<Map<String, dynamic>> sendChatMessage({
-    required String apiKey,
-    required ApiProvider provider,
-    String? customBaseUrl,
-    required String model,
-    required List<Map<String, dynamic>> messages,
-    double? temperature,
-    int? maxTokens,
-    Duration? receiveTimeout,
-    int? maxRetries,
-    CancelToken? cancelToken,
-  }) async {
-    sendCount++;
-    // 不返回 token 计数，避免触发 DatabaseService 的延迟 flush timer，
-    // 否则测试结束 Hive 关闭后定时器回调会访问已关闭的 box。
-    return {'success': true, 'message': '主动私聊内容'};
-  }
+/// 用内存版 ChatApiService 验证主动消息入口和「主动 DM 走统一每小时发言预算」。
+class FakeChatApiService extends CapturingChatApiService {
+  FakeChatApiService() : super(responseText: '主动私聊内容');
 }
 
 class FakeApiCredentialResolver implements ApiCredentialResolver {
@@ -53,38 +32,14 @@ void main() {
   late FakeChatApiService chatApi;
 
   setUp(() async {
-    tempDir = await Directory.systemTemp.createTemp('proactive_hive_');
-    Hive.init(tempDir.path);
-    if (!Hive.isAdapterRegistered(0)) {
-      Hive.registerAdapter(AICharacterAdapter());
-    }
-    if (!Hive.isAdapterRegistered(4)) Hive.registerAdapter(ApiConfigAdapter());
-    if (!Hive.isAdapterRegistered(1)) Hive.registerAdapter(ChatGroupAdapter());
-    if (!Hive.isAdapterRegistered(2)) Hive.registerAdapter(MessageAdapter());
-    if (!Hive.isAdapterRegistered(9)) {
-      Hive.registerAdapter(MediaAttachmentAdapter());
-    }
-    // AICharacter 内嵌 List<ToolPermission>（默认含 skillCreate/skillDownload），
-    // 写入 aiCharacterBox 需该适配器，与 DatabaseService.init() 保持一致。
-    if (!Hive.isAdapterRegistered(10)) {
-      Hive.registerAdapter(ToolPermissionAdapter());
-    }
-    await Hive.openBox<AICharacter>('ai_characters');
-    await Hive.openBox<ApiConfig>('api_configs');
-    await Hive.openBox<ChatGroup>('chat_groups');
-    await Hive.openBox<Message>('messages');
-    await Hive.openBox<dynamic>('app_settings');
-    // 主动 DM 经网关写入独立账本 box（ai_governance_ledger）；未走 DatabaseService.init()
-    // 时此处显式预开，避免 AiGovernanceStore 访问未打开的 box 抛 HiveError。
-    await Hive.openBox<dynamic>(DatabaseService.aiGovernanceLedgerBoxName);
+    tempDir = await openLifecycleHive();
     db = DatabaseService();
     chatApi = FakeChatApiService();
   });
 
   tearDown(() async {
     db.resetLifecycleCaches();
-    await Hive.close();
-    if (await tempDir.exists()) await tempDir.delete(recursive: true);
+    await closeLifecycleHive(tempDir);
   });
 
   AICharacter seedCharacter({required bool atHourlyLimit}) {
@@ -149,6 +104,144 @@ void main() {
     // 统一记用：发送后每小时计数 +1，并记录时间戳。
     expect(db.aiCharacterBox.get('char-1')!.hourlyReplyCount, 1);
     expect(db.aiCharacterBox.get('char-1')!.lastReplyTimestamp, isNotNull);
+  });
+
+  test('主动私聊公开入口把统一记忆送到 fake API 的 system messages', () async {
+    final character = seedCharacter(atHourlyLimit: false);
+    character.memorySummary = 'LEGACY_SUMMARY_不得出现';
+    await db.aiCharacterBox.put(character.id, character);
+    await db.userProfileBox.put(
+      'me',
+      UserProfile(
+        displayName: '人物卡名称_入口测试',
+        preferredAddress: '测试用户',
+        avatar: '',
+        bio: '入口测试人物卡',
+      ),
+    );
+    await db.permanentMemoryBox.put(
+      'pm-direct-entry',
+      PermanentMemory(
+        observerCharacterId: character.id,
+        kind: MemoryKind.fact,
+        content: 'PERMANENT_DM_必须出现',
+        subjectIds: const ['user'],
+        status: MemoryStatus.active,
+        importance: 90,
+        originType: MemoryOriginType.direct,
+        originConversationId: 'dm:${character.id}',
+        originNameSnapshot: '入口测试私聊',
+      ),
+    );
+    await db.relationshipStateBox.put(
+      'rel-direct-entry',
+      RelationshipState(
+        id: 'rel:char-1:user:global',
+        groupId: 'global',
+        sourceCharacterId: character.id,
+        targetId: 'user',
+        targetType: RelationshipTargetType.user,
+        affinity: 80,
+        trust: 60,
+        friction: 10,
+        familiarity: 70,
+        recentMood: RelationshipMood.warm,
+      ),
+    );
+
+    final service = DirectChatProactiveService(
+      db: db,
+      chatApi: chatApi,
+      credentialResolver: FakeApiCredentialResolver(),
+    );
+
+    expect(await service.tryCreateProactiveMessage(), isNotNull);
+    expect(chatApi.sendCount, 1);
+    expect(chatApi.messageCalls, hasLength(1));
+    final systemContent = chatApi.messageCalls.single
+        .where((message) => message['role'] == 'system')
+        .map((message) => message['content'].toString())
+        .join('\n');
+    expect(systemContent, contains('人物卡名称_入口测试'));
+    expect(systemContent, contains('PERMANENT_DM_必须出现'));
+    expect(systemContent, contains('最近情绪warm'));
+    expect(systemContent, isNot(contains('LEGACY_SUMMARY_不得出现')));
+  });
+
+  test('主动群聊公开入口把统一记忆送到 fake API 且使用人物卡名称', () async {
+    final character = seedCharacter(atHourlyLimit: false);
+    character.memorySummary = 'LEGACY_SUMMARY_不得出现';
+    await db.aiCharacterBox.put(character.id, character);
+    await db.userProfileBox.put(
+      'me',
+      UserProfile(
+        displayName: '人物卡名称_入口测试',
+        preferredAddress: '测试用户',
+        avatar: '',
+        bio: '入口测试人物卡',
+      ),
+    );
+    await db.chatGroupBox.put(
+      'group-entry',
+      ChatGroup(
+        id: 'group-entry',
+        name: '入口测试群',
+        theme: '测试主题',
+        ownerName: '旧群主名_不得出现',
+        aiCharacterIds: [character.id],
+      ),
+    );
+    await db.permanentMemoryBox.put(
+      'pm-group-entry',
+      PermanentMemory(
+        observerCharacterId: character.id,
+        kind: MemoryKind.fact,
+        content: 'PERMANENT_GROUP_必须出现',
+        subjectIds: const ['user'],
+        status: MemoryStatus.active,
+        importance: 90,
+        originType: MemoryOriginType.group,
+        originConversationId: 'group-entry',
+        originNameSnapshot: '入口测试群',
+      ),
+    );
+    await db.relationshipStateBox.put(
+      'rel-group-entry',
+      RelationshipState(
+        id: 'rel:char-1:user:global',
+        groupId: 'global',
+        sourceCharacterId: character.id,
+        targetId: 'user',
+        targetType: RelationshipTargetType.user,
+        affinity: 80,
+        trust: 60,
+        friction: 10,
+        familiarity: 70,
+        recentMood: RelationshipMood.warm,
+      ),
+    );
+
+    final service = GroupChatProactiveService(
+      db: db,
+      chatApi: chatApi,
+      credentialResolver: FakeApiCredentialResolver(),
+    );
+
+    expect(
+      await service.tryCreateProactiveMessage(preferredGroupId: 'group-entry'),
+      isNotNull,
+    );
+    expect(chatApi.sendCount, 1);
+    expect(chatApi.messageCalls, hasLength(1));
+    final systemContent = chatApi.messageCalls.single
+        .where((message) => message['role'] == 'system')
+        .map((message) => message['content'].toString())
+        .join('\n');
+    expect(systemContent, contains('人物卡名称_入口测试'));
+    expect(systemContent, isNot(contains('旧群主名_不得出现')));
+    expect(systemContent, contains('PERMANENT_GROUP_必须出现'));
+    expect(systemContent, contains('最近情绪warm'));
+    expect(systemContent, isNot(contains('LEGACY_SUMMARY_不得出现')));
   });
 
   test('群聊主动消息遵守每小时上限并成功后记用', () async {

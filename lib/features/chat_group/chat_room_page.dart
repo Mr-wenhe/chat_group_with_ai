@@ -18,6 +18,7 @@ import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
@@ -53,6 +54,7 @@ import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
+import 'package:chat_group/features/memory/memory_context_selector.dart';
 import 'package:chat_group/features/chat_group/user_message_sentiment.dart';
 import 'package:chat_group/features/chat_group/models/chat_room_models.dart';
 import 'package:chat_group/features/chat_group/multimodal_content.dart';
@@ -75,12 +77,14 @@ import 'package:chat_group/features/memory/memory_controls.dart';
 import 'package:chat_group/features/memory/memory_management_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
+import 'package:chat_group/features/work_mode/work_mode_memory_runner.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_mode_session.dart';
 import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
+import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/services/message_speech_service.dart';
 import 'package:chat_group/services/web_search_service.dart';
 import 'package:chat_group/services/wecom_push_service.dart';
@@ -116,10 +120,18 @@ class ChatRoomPage extends ConsumerStatefulWidget {
   /// 打开后会加载该消息所在分页并高亮滚动定位。
   final String? initialMessageId;
 
+  /// 测试或嵌入场景可替换 API client，不改变生产默认网关。
+  final ChatApiService? chatApi;
+
+  /// 测试或嵌入场景可替换凭据解析器，不改变生产安全边界。
+  final ApiCredentialResolver? credentialResolver;
+
   const ChatRoomPage({
     super.key,
     required this.groupId,
     this.initialMessageId,
+    this.chatApi,
+    this.credentialResolver,
   });
 
   @override
@@ -142,7 +154,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   final _inputFocusNode = FocusNode();
 
   /// API 凭证解析器：从安全存储中取出 apiKey，避免明文散落在业务层。
-  final _credentialResolver = SecureApiCredentialResolver();
+  late final ApiCredentialResolver _credentialResolver;
 
   /// 通用随机源（挑选发言人、随机文案等）。
   final _random = Random();
@@ -174,6 +186,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 记忆控制器：群记忆 / 角色记忆的生成与更新。
   late final MemoryControls _memoryControls;
 
+  /// 统一全局记忆上下文选择器（跨群/DM，按 observerCharacterId 读取）。
+  late final MemoryContextSelector _memoryContextSelector;
+
   /// 会话串行控制器：保证同一时刻只有一轮 AI 回复在跑，并支持中断。
   final ConversationController _conversationController =
       ConversationController();
@@ -183,6 +198,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 当前群信息；私聊场景为 loader 构造出的"展示用"伪群对象。
   ChatGroup? _group;
+
+  /// 全局用户人物信息卡（来自 UserProfile box）。
+  UserProfile? _userProfile;
 
   /// 活跃角色（用于 AI 回复等逻辑）
   List<AICharacter> _characters = [];
@@ -416,10 +434,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     // 登记"当前正在查看该会话"，让主动私聊的通知逻辑不打扰当前界面。
     ConversationPresenceService.instance.enter(widget.groupId);
     _db = ref.read(databaseServiceProvider);
+    _credentialResolver =
+        widget.credentialResolver ?? SecureApiCredentialResolver();
     _governanceStore = AiGovernanceStore.forDatabase(_db);
     // 所有 LLM 调用都经由网关，超限时通过 onWarning 回调向用户提示。
     _aiGateway = AiRequestGateway(
       store: _governanceStore,
+      client: widget.chatApi,
       onWarning: _showGovernanceWarning,
     );
     _searchCoordinator = SearchCoordinator(store: _governanceStore);
@@ -428,6 +449,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         _governanceStore.conversationSearchPolicy(widget.groupId);
     _loader = ChatRoomLoader(db: _db, resolveApiConfig: _resolveApiConfig);
     _memoryControls = MemoryControls(_db);
+    _memoryContextSelector = MemoryContextSelector(_db);
     _replyEligibility = ReplyEligibilityPolicy(
       resolveApiConfig: _resolveApiConfig,
     );
@@ -538,6 +560,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
       setState(() {
         _group = loaded.displayGroup;
+        _userProfile = loaded.userProfile;
         _characters = loaded.activeCharacters;
         _allGroupCharacters = loaded.allCharacters;
         _messages = initialMessages;
@@ -1185,7 +1208,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     var charactersToReply = _isDirectChat
         ? _directReplyCharacters()
         : _charactersForIntents(_selectGroupReplyIntents(
-            userMessage: userMessage,
+            userMessage: userMessage!, // nullable param, non-null at this point
             mentionedIds: mentionedIds,
             isAutoChat: isAutoChat,
             userSentiment: userSentiment,
@@ -1388,17 +1411,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         setState(() => _webSearchState = state);
         if (!state.status.isTerminal) return;
         _searchBannerDismissTimer = Timer(const Duration(seconds: 3), () {
-          if (_canTouchUi) setState(() => _webSearchState = const SearchRunState(SearchRunStatus.idle));
+          if (_canTouchUi)
+            setState(() =>
+                _webSearchState = const SearchRunState(SearchRunStatus.idle));
         });
       },
     );
     // 查询模型能力（是否支持图片输入），决定要不要拼多模态内容。
     final capability = _aiGateway.capability(provider, config.modelName);
     final apiMessages = _withWebSearchContext(
-      await _buildApiMessages(
-        character,
-        compactedContext.messages,
-        userMessage,
+      await buildPromptMessages(
+        character: character,
+        context: compactedContext.messages,
+        userMessage: userMessage,
         isAutoChat: isAutoChat,
         intent: intent,
         supportsVision: capability.supportsVision,
@@ -1851,22 +1876,37 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       final skillResolution =
           CharacterSkillResolver.resolveFor(character, userMessage);
 
-      final result = await runtime.run(
-        character: character,
-        skills: _agenticSkillsFor(
-          character,
-          userMessage,
-          resolution: skillResolution,
-        ),
-        userRequest: mediaEnhancedRequest,
-        conversationHistory: conversationHistory,
-        priorExecutedRequests: restoredRequests,
-        // 已有保存过的匹配技能时就不再强制创建，避免重复造轮子。
-        forceSkillCreation: skillResolution.needsSkillCreation &&
-            !_savedSkillMatchesRequest(character, userMessage),
-        workModeContext:
-            workMode ? WorkModePolicy.planningContext(character) : '',
-      );
+      Future<AgentRuntimeResult> runRuntime(
+        List<Map<String, dynamic>> preparedHistory,
+      ) {
+        return runtime.run(
+          character: character,
+          skills: _agenticSkillsFor(
+            character,
+            userMessage,
+            resolution: skillResolution,
+          ),
+          userRequest: mediaEnhancedRequest,
+          conversationHistory: preparedHistory,
+          priorExecutedRequests: restoredRequests,
+          // 已有保存过的匹配技能时就不再强制创建，避免重复造轮子。
+          forceSkillCreation: skillResolution.needsSkillCreation &&
+              !_savedSkillMatchesRequest(character, userMessage),
+          workModeContext:
+              workMode ? WorkModePolicy.planningContext(character) : '',
+        );
+      }
+
+      final result = workMode
+          ? await runWithUnifiedMemory(
+              selector: _memoryContextSelector,
+              conversationHistory: conversationHistory,
+              observerCharacterId: character.id,
+              participantCharacterIds: _characters.map((c) => c.id).toList(),
+              userMessage: userMessage,
+              run: runRuntime,
+            )
+          : await runRuntime(conversationHistory);
       // 路径一：需要用户批准某个工具调用，任务挂起等待。
       if (result.status == AgentRuntimeStatus.waitingForApproval &&
           result.pendingToolRequest != null) {
@@ -2866,6 +2906,28 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// → 4. 自动聊天提示 → 5. 角色人设 → 6. 其他成员信息 → 历史对话。
   ///
   /// [supportsVision] 为 true 时图片附件会拼成多模态内容，否则退化为文字描述。
+  Future<List<Map<String, dynamic>>> buildPromptMessages({
+    required AICharacter character,
+    required List<Message> context,
+    String? userMessage,
+    bool isAutoChat = false,
+    ReplyIntent? intent,
+    bool supportsVision = false,
+    Message? currentUserMessage,
+    String? transientContextSummary,
+  }) {
+    return _buildApiMessages(
+      character,
+      context,
+      userMessage,
+      isAutoChat: isAutoChat,
+      intent: intent,
+      supportsVision: supportsVision,
+      currentUserMessage: currentUserMessage,
+      transientContextSummary: transientContextSummary,
+    );
+  }
+
   Future<List<Map<String, dynamic>>> _buildApiMessages(
       AICharacter character, List<Message> context, String? userMessage,
       {bool isAutoChat = false,
@@ -2889,14 +2951,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       msgs.add({'role': 'system', 'content': '【群聊记忆】$selectedGroupMemory'});
     }
 
-    // ── 2. 角色个体记忆（如果有的话） ────────────────────────────────
-    final selectedLegacyMemory = MemoryPromptSelector.legacySummary(character);
-    if (selectedLegacyMemory.isNotEmpty) {
-      msgs.add({
-        'role': 'system',
-        'content': '【${character.name}的自我记忆】$selectedLegacyMemory'
-      });
+    // ── 1.5 统一全局永久记忆（跨群/DM，按 observerCharacterId 读取） ──
+    final permanentMemory = await _memoryContextSelector.select(
+      observerCharacterId: character.id,
+      participantCharacterIds: _characters.map((c) => c.id).toList(),
+      currentTargetId: intent?.targetId,
+      userMessage: userMessage,
+    );
+    if (permanentMemory.isNotEmpty) {
+      msgs.add({'role': 'system', 'content': permanentMemory});
     }
+
     if (transientContextSummary?.isNotEmpty == true) {
       msgs.add({
         'role': 'system',
@@ -2905,24 +2970,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     if (intent != null) {
-      final memory = MemoryPromptSelector.characterMemory(
-        conversationId: widget.groupId,
-        character: character,
-        memories: _characterMemories,
-      );
       msgs.add({
         'role': 'system',
-        'content': HumanizedPromptBuilder.buildIntentContext(
+        'content': HumanizedPromptBuilder.buildRelationContext(
           character: character,
-          groupName: _group?.name ?? '这个群',
-          groupTheme: _group?.theme ?? '日常聊天',
-          ownerName: (_group?.ownerName.trim().isNotEmpty ?? false)
-              ? _group!.ownerName.trim()
-              : '我',
           intent: intent,
-          memory: memory,
           relationships: _relationshipStates,
           charactersById: {for (final c in _characters) c.id: c},
+          ownerName: _ownerMentionName,
         ),
       });
     }
@@ -2933,9 +2988,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final groupDescription = _group?.description ?? '';
     final announcement = _group?.announcement.trim() ?? '';
     final groupMemory = _groupMemory?.topicSummary ?? '';
-    final ownerName = (_group?.ownerName.trim().isNotEmpty ?? false)
-        ? _group!.ownerName.trim()
-        : '我';
     final isGroupAddressed = userMessage != null &&
         ChatActivityPolicy.isGroupAddressedMessage(userMessage);
     final scene = SceneBehavior.resolve(groupTheme);
@@ -2955,7 +3007,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           '你正在参加一个高活跃度群聊「$groupName」，主题是「$groupTheme」。'
           '${announcement.isEmpty ? '' : '群公告：$announcement。'}'
           '回复要像真实聊天群：自然接话、简短、有个人观点，可以顺手回应上一位成员或点名邀请别人，但不要每次都长篇总结。'
-          '${HumanizedPromptBuilder.ownerMentionInstruction(ownerName)}'
+          '${HumanizedPromptBuilder.ownerMentionInstruction(_ownerMentionName)}'
           '当前真实时间：${DateTime.now().toLocal().toIso8601String()}。'
           '如果用户询问时间、日期、今天/明天/昨天，必须以这个真实时间为准。'
           '如果用户问到你不知道或可能过期的信息，必须明确说不确定，并建议或请求联网搜索；不要编造事实、价格、新闻、人物职位或链接。'
@@ -3017,7 +3069,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     } else if (context.isNotEmpty && isAutoChat) {
       final last = context.last;
       final speakerName = last.senderType == 'user'
-          ? ownerName
+          ? _ownerMentionName
           : nameById[last.senderId] ?? '一位群友';
       final truncated = last.content.length > 100
           ? '${last.content.substring(0, 100)}...'
@@ -3245,13 +3297,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     bool isAutoChat = false,
   }) async {
     final msgs = <Map<String, dynamic>>[];
-    final selectedLegacyMemory = MemoryPromptSelector.legacySummary(character);
-    if (selectedLegacyMemory.isNotEmpty) {
-      msgs.add({
-        'role': 'system',
-        'content': '【${character.name}的自我记忆】$selectedLegacyMemory'
-      });
+    // ── 1. 全局永久记忆（跨群/DM，按 observerCharacterId 读取） ─────────
+    final permanentMemory = await _memoryContextSelector.select(
+      observerCharacterId: character.id,
+      participantCharacterIds: [character.id],
+      currentTargetId: 'user',
+      userMessage: userMessage,
+    );
+    if (permanentMemory.isNotEmpty) {
+      msgs.add({'role': 'system', 'content': permanentMemory});
     }
+
     if (transientContextSummary?.isNotEmpty == true) {
       msgs.add({
         'role': 'system',
@@ -3259,50 +3315,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       });
     }
 
-    final memory = MemoryPromptSelector.characterMemory(
-      conversationId: widget.groupId,
-      character: character,
-      memories: _characterMemories,
-    );
-    // 分层记忆按类别拼装，每类最多取 4 条，控制 prompt 体积。
-    if (memory.facts.isNotEmpty ||
-        memory.relationshipNotes.isNotEmpty ||
-        memory.personaGrowth.isNotEmpty) {
-      msgs.add({
-        'role': 'system',
-        'content': [
-          if (memory.facts.isNotEmpty)
-            '记得的事实：${memory.facts.take(4).join('；')}',
-          if (memory.relationshipNotes.isNotEmpty)
-            '关系记忆：${memory.relationshipNotes.take(4).join('；')}',
-          if (memory.personaGrowth.isNotEmpty)
-            '表达习惯：${memory.personaGrowth.take(4).join('；')}',
-        ].join('\n'),
-      });
-    }
-
-    // 私聊关系状态注入：角色对用户的好感/信任/摩擦等，让 AI 在回复时感知
-    // 用户与角色之间的历史关系变化。群聊版通过 buildIntentContext 注入，
-    // 私聊版没有 intent，这里单独注入角色与用户之间的关系。
-    final userRelations = _relationshipStates.where(
+    // 私聊关系行为准则：由 MemoryContextSelector 注入关系数值，
+    // 这里仅补充行为规则（冷漠/热情/拒绝），不重复输出亲近/信任/摩擦等。
+    for (final r in _relationshipStates.where(
       (r) =>
           r.sourceCharacterId == character.id &&
           r.targetType == RelationshipTargetType.user,
-    );
-    if (userRelations.isNotEmpty) {
-      final lines = userRelations.map((r) {
-        final mood = r.recentMood.name;
-        final note = r.notes.trim().isEmpty ? '没有明确备注' : r.notes.trim();
-        return '亲近${r.affinity}，信任${r.trust}，摩擦${r.friction}，熟悉度${r.familiarity}，最近情绪$mood，$note';
-      }).join('；');
-      msgs.add({
-        'role': 'system',
-        'content': '【你和用户的关系】$lines',
-      });
-    }
-
-    // 私聊中同样注入关系行为准则，让角色知道可以拒绝或保持距离。
-    for (final r in userRelations) {
+    )) {
       if (r.affinity < -20 && r.friction > 60) {
         msgs.add({
           'role': 'system',
@@ -3409,10 +3428,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _scrollToBottom();
   }
 
-  /// 用户在群里被称呼时使用的名字：取群主名，为空则用"我"。
+  /// 用户在群里被称呼时使用的名字：取人物卡显示名，为空则用"我"。
   String get _ownerMentionName {
-    final name = _group?.ownerName.trim() ?? '';
-    return name.isEmpty ? '我' : name;
+    final profile = _userProfile;
+    return profile?.displayName.trim().isNotEmpty ?? false
+        ? profile!.displayName.trim()
+        : '我';
   }
 
   /// 若这条 AI 消息 @ 到了用户，登记为"待查看的 @我"以显示提醒横幅。
@@ -3682,7 +3703,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 含停用成员，历史消息里的角色才不会显示成未知；`user` 映射为群主名。
   Map<String, String> _senderNameMap() {
     return {
-      'user': _group?.ownerName ?? '我',
+      'user': _ownerMentionName,
       for (final c in _allGroupCharacters) c.id: c.name,
       for (final c in _characters) c.id: c.name,
     };
@@ -5416,7 +5437,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       isScrollControlled: true,
       builder: (_) => MemberSheet(
         characters: _characters,
-        ownerName: _group?.ownerName ?? '我',
+        ownerName: _ownerMentionName,
         senderColor: _senderColor,
         statusText: _memberStatusText,
         onOpenSettings: _openCharacterSettings,

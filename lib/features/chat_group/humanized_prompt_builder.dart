@@ -51,6 +51,31 @@ class HumanizedPromptBuilder {
     ].join('\n');
   }
 
+  /// 仅注入关系行为准则（关系数值已由 [MemoryContextSelector] 输出）。
+  ///
+  /// 群聊调用时机：当 [MemoryContextSelector] 已注入完整关系快照后，
+  /// 这里只补充本轮动作、语气和行为规则，不重复输出亲近/信任/摩擦等数值。
+  static String buildRelationContext({
+    required AICharacter character,
+    required ReplyIntent intent,
+    required List<RelationshipState> relationships,
+    required Map<String, AICharacter> charactersById,
+    String ownerName = '我',
+  }) {
+    final targetName = intent.targetId == null
+        ? '当前话题'
+        : charactersById[intent.targetId!]?.name ?? ownerName;
+
+    final parts = <String>[
+      '本轮动作：${intent.action.name}，主要对象：$targetName。',
+      '本轮语气：${intent.toneHint}。',
+      lengthInstruction(intent.lengthHint),
+      ..._relationshipBehaviorInstructions(relationships, character),
+      '你是在群里自然接话，不要带自己的名字前缀。',
+    ];
+    return parts.join('\n');
+  }
+
   static String lengthInstruction(ReplyLengthHint hint) {
     return switch (hint) {
       ReplyLengthHint.oneLiner => '长度要求：一句话，尽量不超过 25 个字。',
@@ -107,13 +132,13 @@ class HumanizedPromptBuilder {
     if (userRel == null) return;
 
     if (userRel.affinity < -20 && userRel.friction > 60) {
-      yield '关系准则：你和用户关系很差（亲近${userRel.affinity}，摩擦${userRel.friction}）。'
-          '你会不耐烦，懒得认真回应，语气带刺、想尽快结束对话。';
+      yield '关系准则：你和用户关系很差。'
+          '你会不耐烦，懒得认真回应，语气可以带刺，并倾向尽快结束对话。';
     } else if (userRel.affinity < 0 || userRel.friction > 50) {
-      yield '关系准则：你和用户关系一般（亲近${userRel.affinity}，摩擦${userRel.friction}）。'
-          '不用刻意讨好，保持自然距离，但也不要故意激化矛盾。';
+      yield '关系准则：你和用户存在距离或摩擦。'
+          '不用刻意讨好，保持自然距离，但不要无故激化矛盾。';
     } else if (userRel.affinity >= 50 || userRel.trust >= 40) {
-      yield '关系准则：你和用户关系很好（亲近${userRel.affinity}，信任${userRel.trust}）。'
+      yield '关系准则：你和用户关系很好。'
           '可以更自然、更放松，适当关心对方，但不要每条都讨好。';
     }
     // 默认情况（中性关系）：不注入特殊规则，让角色自然回应。
