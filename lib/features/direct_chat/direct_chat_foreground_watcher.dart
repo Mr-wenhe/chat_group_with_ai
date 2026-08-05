@@ -6,6 +6,7 @@ import 'package:chat_group/features/chat_group/group_chat_proactive_service.dart
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_policy.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:chat_group/features/memory/observation_entry.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:flutter/material.dart';
 
@@ -68,6 +69,12 @@ class _DirectChatForegroundWatcherState
     }
     _checking = true;
     try {
+      // 前台空闲时补偿启动后新产生的失败任务；入口自身尊重开关和 maxBatch。
+      try {
+        await ObservationEntry(db: widget.db).processRetryQueue(maxBatch: 5);
+      } on Object {
+        // 重试失败不应影响主动消息轮询，任务由队列保留到下一次检查。
+      }
       final activeConversationId =
           ConversationPresenceService.instance.activeConversationId;
       final preferredConversationId = _preferredConversationId ??

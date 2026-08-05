@@ -52,9 +52,10 @@ import 'package:chat_group/features/chat_group/chat_scroll_utils.dart';
 import 'package:chat_group/features/chat_group/conversation_controller.dart';
 import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
-import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
+import 'package:chat_group/features/memory/observation_entry.dart';
+import 'package:chat_group/features/memory/relationship_event_service.dart';
 import 'package:chat_group/features/chat_group/user_message_sentiment.dart';
 import 'package:chat_group/features/chat_group/models/chat_room_models.dart';
 import 'package:chat_group/features/chat_group/multimodal_content.dart';
@@ -188,6 +189,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 统一全局记忆上下文选择器（跨群/DM，按 observerCharacterId 读取）。
   late final MemoryContextSelector _memoryContextSelector;
+
+  /// 统一全局永久记忆观察入口（落库后触发记忆提炼）。
+  late final ObservationEntry _observationEntry;
+
+  /// 关系事件服务（方向性关系历史 + 幂等快照更新）。
+  late final RelationshipEventService _relationshipEventService;
 
   /// 会话串行控制器：保证同一时刻只有一轮 AI 回复在跑，并支持中断。
   final ConversationController _conversationController =
@@ -450,6 +457,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _loader = ChatRoomLoader(db: _db, resolveApiConfig: _resolveApiConfig);
     _memoryControls = MemoryControls(_db);
     _memoryContextSelector = MemoryContextSelector(_db);
+    _observationEntry = ObservationEntry(db: _db);
+    _relationshipEventService = RelationshipEventService(_db);
     _replyEligibility = ReplyEligibilityPolicy(
       resolveApiConfig: _resolveApiConfig,
     );
@@ -1569,8 +1578,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     temp.mentionedAiIds = mentionedIds;
     // media 置空：AI 流式回复不携带附件，清掉以免残留脏数据落库。
     temp.media = null;
-    await _repository.persistNewMessage(temp);
-    await _markCurrentConversationRead(throughMessage: temp);
+    await _appendMessage(temp);
     await _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     // 关系态与角色记忆只在成功回复后更新，失败占位不该污染长期状态。
@@ -1593,13 +1601,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         await _persistRelationshipForIntent(
           character: character,
           intent: effectiveIntent,
+          aiReplyMessage: temp,
           userMessage: userMessage,
           userSentiment: userSentiment,
         );
       }
-    }
-    if (!failed && fullContent.trim().isNotEmpty) {
-      await _maybeEvolveCharacterMemory(character, fullContent);
     }
     if (_canTouchUi) setState(() => _streamingMessage = null);
     return fullContent;
@@ -1959,9 +1965,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       await _appendMessage(message);
       await _recordReplyUsage(character);
       _registerUserMentionIfNeeded(message);
-      if (content.trim().isNotEmpty) {
-        await _maybeEvolveCharacterMemory(character, content);
-      }
       return content;
     } finally {
       // 无论成功失败都要释放并发标记，否则该角色将永久无法再触发 agentic。
@@ -2227,33 +2230,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
-  /// 把 agentic 上下文压缩产生的摘要沉淀进角色长期记忆。
-  ///
-  /// 受记忆控制约束：用户手动锁定（pinned）的条目会被保留，
-  /// 且当该角色记忆不允许自动更新时直接跳过。
+  /// Agentic 摘要只在当前运行时使用；长期记忆统一由 ObservationEntry 管理。
   Future<void> _persistAgentContextSummary(
     AICharacter character,
     ContextSummary summary,
-  ) async {
-    final memory = MemoryPromptSelector.characterMemory(
-      conversationId: widget.groupId,
-      character: character,
-      memories: _characterMemories,
-    );
-    if (!_memoryControls.canAutoUpdateCharacter(memory, character)) return;
-    // 这里只借用 manager 的落库逻辑，不再发起 LLM 调用，故 complete 传空实现。
-    final manager = ContextWindowManager(
-      complete: (_) async => const {'success': true, 'message': '{}'},
-    );
-    await manager.persistToCharacterMemory(
-      character: character,
-      memory: memory,
-      summary: summary,
-      saveCharacter: (value) => _db.aiCharacterBox.put(value.id, value),
-      saveMemory: _saveCompactedCharacterMemory,
-      retained: _memoryControls.pinnedCharacterEntries(memory),
-    );
-  }
+  ) async {}
 
   /// 记录每个任务最后一次上报的进度，供 [_finishAgentTask] 生成终态 ✅ 摘要。
   /// 仅运行时态，不写入 Hive。
@@ -2569,10 +2550,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       await _appendMessage(message);
       await _recordReplyUsage(pending.character);
       _registerUserMentionIfNeeded(message);
-      if (result.status == AgentRuntimeStatus.completed &&
-          content.trim().isNotEmpty) {
-        await _maybeEvolveCharacterMemory(pending.character, content);
-      }
       return true;
     } finally {
       _workModeSession.finishRun(workModeRun);
@@ -2851,10 +2828,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   ///
   /// 目标对象取意图指定的 targetId；意图没指定但本轮由用户触发时视为对 `user`。
   /// 尊重记忆控制开关：全局关闭自动记忆、或该条关系被用户锁定时直接跳过。
+  ///
+  /// 不再直接写 per-group RelationshipState，改为通过全局事件 → 全局快照路径。
+  /// [aiReplyMessage] 是 AI 实际回复的消息，用于关系事件的消息内容和事件溯源。
   Future<void> _persistRelationshipForIntent({
     required AICharacter character,
     required ReplyIntent intent,
-    required String? userMessage,
+    required Message aiReplyMessage,
+    String? userMessage,
     UserMessageSentiment? userSentiment,
   }) async {
     final targetId = intent.targetId ?? (userMessage != null ? 'user' : null);
@@ -2863,30 +2844,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         ? RelationshipTargetType.user
         : RelationshipTargetType.ai;
     if (!_memoryControls.automaticMemoryEnabled) return;
-    for (final relationship in _relationshipStates) {
-      if (relationship.groupId == widget.groupId &&
-          relationship.sourceCharacterId == character.id &&
-          relationship.targetId == targetId &&
-          !_memoryControls.canAutoUpdateRelationship(relationship)) {
-        return;
-      }
-    }
-    _relationshipStates = HumanizedMemoryService.applyLocalRelationshipRules(
-      relationships: _relationshipStates,
-      groupId: widget.groupId,
-      speakerId: character.id,
+
+    await persistRelationshipEvents(
+      service: _relationshipEventService,
+      sourceCharacterId: character.id,
       targetId: targetId,
       targetType: targetType,
-      actionName: intent.action.name,
-      // 语气里带刺/冷淡则不算友好互动，避免负面互动也拉高亲密度。
-      friendlyTone:
-          !intent.toneHint.contains('带刺') && !intent.toneHint.contains('冷淡'),
-      isPrivateChat: _isDirectChat,
+      message: aiReplyMessage,
+      conversationId: widget.groupId,
+      conversationNameSnapshot: _group?.name ?? '',
+      allCharacters: _allGroupCharacters,
+      visibleCharacterIds: _visibleCharacterIdsForMessage(),
       userSentiment: userSentiment,
     );
-    for (final relation in _relationshipStates) {
-      await _db.relationshipStateBox.put(relation.id, relation);
-    }
   }
 
   /// 解析角色可用的 API 配置；未绑定或没有凭据时返回 null（视为不可回复）。
@@ -3416,16 +3386,61 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   ///
   /// AI 消息会顺带推进已读位置——用户正看着这条消息，没有理由算作未读。
   Future<void> _appendMessage(Message message) async {
+    final visibleIds = _visibleCharacterIdsForMessage();
+    if (message.visibleToCharacterIds.isEmpty) {
+      message.visibleToCharacterIds = List<String>.from(visibleIds);
+    }
     await _repository.persistNewMessage(message);
     if (message.senderType == 'ai') {
       await _markCurrentConversationRead(throughMessage: message);
     }
+    // 触发统一永久记忆观察入口（不阻塞聊天流程）。
+    unawaited(_observationEntry
+        .observeMessage(
+          message: message,
+          visibleCharacterIds: visibleIds,
+          conversationId: widget.groupId,
+          conversationNameSnapshot:
+              _isDirectChat ? _directChatName() : (_group?.name ?? ''),
+          allCharacters: _allGroupCharacters,
+          isGroupChat: !_isDirectChat,
+          userProfile: _userProfile,
+        )
+        .catchError((_) {}));
     if (!_canTouchUi) return;
+    final existingIndex =
+        _messages.indexWhere((existing) => existing.id == message.id);
     setState(() {
-      _messages = List.from(_messages)..add(message);
-      _totalMessageCount++;
+      if (existingIndex < 0) {
+        _messages = List.from(_messages)..add(message);
+        _totalMessageCount++;
+      } else {
+        _messages = List.from(_messages)..[existingIndex] = message;
+      }
     });
     _scrollToBottom();
+  }
+
+  /// 消息发送时在场/可见的 AI 角色 ID 列表。
+  ///
+  /// 群聊：所有活跃成员；私聊：只有目标角色。
+  List<String> _visibleCharacterIdsForMessage() {
+    if (_isDirectChat) {
+      final charId = _directCharacterId;
+      return charId != null && _characters.any((c) => c.id == charId)
+          ? [charId]
+          : _characters.map((c) => c.id).toList();
+    }
+    return _characters.map((c) => c.id).toList();
+  }
+
+  String _directChatName() {
+    final charId = _directCharacterId;
+    if (charId == null) return '私聊';
+    for (final c in _allGroupCharacters) {
+      if (c.id == charId) return c.name;
+    }
+    return '私聊';
   }
 
   /// 用户在群里被称呼时使用的名字：取人物卡显示名，为空则用"我"。
@@ -3585,117 +3600,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return result['message']?.toString().trim() ?? '';
     }
     return '';
-  }
-
-  /// 按策略条件演进角色的分层长期记忆（事实 / 关系 / 表达习惯）。
-  ///
-  /// 让 LLM 以严格 JSON 输出记忆更新，解析后合并进 [CharacterMemory]，
-  /// 并同步刷新角色上的紧凑记忆摘要。低温度（0.35）以保证输出稳定可解析。
-  Future<void> _maybeEvolveCharacterMemory(
-    AICharacter character,
-    String latestReply,
-  ) async {
-    final memory = MemoryPromptSelector.characterMemory(
-      conversationId: widget.groupId,
-      character: character,
-      memories: _characterMemories,
-    );
-    if (!_memoryControls.canAutoUpdateCharacter(memory, character)) return;
-    if (!ChatOrchestrator.shouldEvolveCharacterMemory(
-      messageCount: _totalMessageCount,
-      hasUserMessage: _messages.any((message) => message.senderType == 'user'),
-    )) {
-      return;
-    }
-
-    final config = _resolveApiConfig(character);
-    if (config == null) return;
-    final apiKey = await _credentialResolver.resolve(config);
-    if (apiKey == null) return;
-
-    final transcript = ChatOrchestrator.recentDialogueTranscript(
-      messages: _messages,
-      senderNames: _senderNameMap(),
-      maxMessages: 14,
-      maxChars: 1400,
-    );
-    if (transcript.trim().isEmpty) return;
-
-    final prompt = ChatOrchestrator.buildMemoryEvolutionPrompt(
-      character: character,
-      groupName: _group?.name ?? '这个群',
-      groupTheme: _group?.theme ?? '日常聊天',
-      currentMemory: character.memorySummary,
-      recentTranscript: transcript,
-      latestReply: latestReply,
-    );
-
-    final result = await _aiGateway.sendChatMessage(
-      apiKey: apiKey,
-      provider: ApiProvider.values.firstWhere((p) => p.name == config.provider,
-          orElse: () => ApiProvider.deepseek),
-      customBaseUrl: config.customBaseUrl,
-      model: config.modelName,
-      messages: [
-        {
-          'role': 'system',
-          'content': '你只负责更新角色长期记忆。必须输出严格 JSON，不要 Markdown，不要解释。',
-        },
-        {
-          'role': 'user',
-          'content': '$prompt\n\n输出 JSON 形状：'
-              '{"facts":["稳定事实"],"relationshipNotes":["关系或情绪变化"],'
-              '"personaGrowth":["表达习惯、偏好、雷点或长期执念"],"discard":["不保存内容"]}',
-        },
-      ],
-      temperature: 0.35,
-      purpose: AiRequestPurpose.summary,
-      conversationId: widget.groupId,
-      characterId: character.id,
-    );
-    if (!(result['success'] ?? false)) return;
-    final updated = result['message']?.toString().trim() ?? '';
-    if (updated.isEmpty) return;
-    final parsed = HumanizedMemoryService.parseLayeredMemoryJson(updated);
-    final mergedMemory = await _mergeHumanizedMemory(character, parsed);
-    if (mergedMemory == null) return;
-    character.memorySummary = _memoryControls.mergeAutomaticGlobalSummary(
-      character: character,
-      memory: mergedMemory,
-      update: parsed,
-    );
-    await character.save();
-    if (_canTouchUi) setState(() {});
-  }
-
-  /// 把解析出的记忆更新合并进该角色的 [CharacterMemory] 并落库。
-  ///
-  /// 三类记忆都为空时返回 null，表示这次没有值得保存的东西。
-  Future<CharacterMemory?> _mergeHumanizedMemory(
-    AICharacter character,
-    LayeredMemoryUpdate update,
-  ) async {
-    if (update.facts.isEmpty &&
-        update.relationshipNotes.isEmpty &&
-        update.personaGrowth.isEmpty) {
-      return null;
-    }
-
-    final memory = HumanizedMemoryService.memoryForCharacter(
-      groupId: widget.groupId,
-      character: character,
-      existing: _characterMemories,
-    );
-    _memoryControls.mergeAutomaticCharacterMemory(memory, update);
-    await _db.characterMemoryBox.put(memory.id, memory);
-    // 用新列表替换而非原地修改，保证 setState 能识别出变化。
-    final index = _characterMemories.indexWhere((m) => m.id == memory.id);
-    if (index == -1) {
-      _characterMemories = [..._characterMemories, memory];
-    } else {
-      _characterMemories = [..._characterMemories]..[index] = memory;
-    }
-    return memory;
   }
 
   /// senderId → 展示名的映射（用于把消息转写成带说话人的文字稿）。
@@ -4270,10 +4174,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 上下文超出模型窗口时做压缩，返回压缩后的消息与摘要。
   ///
-  /// 压缩摘要有两条通道：
-  /// - 允许自动更新记忆时，摘要沉淀进角色的 [CharacterMemory]（跨会话保留），
-  ///   并在 `app_settings` 里记录压缩检查点，下次只压缩检查点之后的新消息；
-  /// - 不允许时，只写入 [_transientContextCompression]（仅本次会话有效）。
+  /// 压缩摘要只写入 [_transientContextCompression]（仅本次会话有效）。
   ///
   /// 关闭自动记忆时直接返回原始上下文，不做任何压缩调用。
   Future<({List<Message> messages, String? summary})> _compactContextIfNeeded({
@@ -4282,24 +4183,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required ApiProvider provider,
     required List<Message> fallbackContext,
   }) async {
-    final memory = MemoryPromptSelector.characterMemory(
-      conversationId: widget.groupId,
-      character: character,
-      memories: _characterMemories,
-    );
     final transient = _transientContextCompression[character.id];
     if (!_memoryControls.automaticMemoryEnabled) {
       return (messages: fallbackContext, summary: transient?.summary);
     }
-    final canPersist =
-        _memoryControls.canAutoUpdateCharacter(memory, character);
-    // 检查点按「会话 + 角色」维度存放，各角色独立推进压缩进度。
-    final checkpointKey =
-        'context_compressed_through:${widget.groupId}:${character.id}';
-    final checkpoint = transient?.checkpoint ??
-        _db.appSettingsBox.get(checkpointKey) as String?;
-    // 只把检查点之后的新消息交给压缩器，已压缩部分由摘要代表。
-    final pending = _messagesAfterCheckpoint(checkpoint);
+    final pending = _messages;
     final apiHistory = <Map<String, dynamic>>[
       if (transient != null)
         {
@@ -4347,58 +4235,20 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         apiHistory,
         isDirectChat: _isDirectChat,
       );
-      if (!canPersist) {
-        // 不允许写长期记忆：摘要只留在本次会话内存里。
-        if (pending.isNotEmpty) {
-          _transientContextCompression[character.id] = (
-            checkpoint: pending.last.id,
-            summary: summary.summary,
-          );
-        }
-        return (
-          messages: _lastUserOnly(fallbackContext),
-          summary: summary.summary,
-        );
-      }
-      // 允许持久化：摘要进角色记忆，检查点落 app_settings。
-      await manager.persistToCharacterMemory(
-        character: character,
-        memory: memory,
-        summary: summary,
-        saveCharacter: (value) => _db.aiCharacterBox.put(value.id, value),
-        saveMemory: _saveCompactedCharacterMemory,
-        retained: _memoryControls.pinnedCharacterEntries(memory),
+      // ponytail: transient-only compression, restore durable summaries if
+      // cross-session context compression becomes a measured bottleneck.
+      _transientContextCompression[character.id] = (
+        checkpoint:
+            pending.isEmpty ? (transient?.checkpoint ?? '') : pending.last.id,
+        summary: summary.summary,
       );
-      if (pending.isNotEmpty) {
-        await _db.appSettingsBox.put(checkpointKey, pending.last.id);
-      }
-      // 已沉淀进长期记忆，会话内的临时摘要不再需要。
-      _transientContextCompression.remove(character.id);
-      return (messages: _lastUserOnly(fallbackContext), summary: null);
+      return (
+        messages: _lastUserOnly(fallbackContext),
+        summary: summary.summary,
+      );
     } catch (_) {
       // 压缩失败就退回完整上下文：宁可多花 token，也不能丢上下文。
       return (messages: fallbackContext, summary: transient?.summary);
-    }
-  }
-
-  /// 取压缩检查点之后的新消息；无检查点时返回全部。
-  ///
-  /// 检查点消息已不在当前分页窗口（index < 0）或它就是最后一条时返回空列表。
-  List<Message> _messagesAfterCheckpoint(String? checkpoint) {
-    if (checkpoint == null || checkpoint.isEmpty) return _messages.toList();
-    final index = _messages.indexWhere((message) => message.id == checkpoint);
-    if (index < 0 || index + 1 >= _messages.length) return const [];
-    return _messages.sublist(index + 1);
-  }
-
-  /// 保存压缩后的角色记忆，并同步刷新内存中的 [_characterMemories]。
-  Future<void> _saveCompactedCharacterMemory(CharacterMemory memory) async {
-    await _db.characterMemoryBox.put(memory.id, memory);
-    final index = _characterMemories.indexWhere((item) => item.id == memory.id);
-    if (index < 0) {
-      _characterMemories = [..._characterMemories, memory];
-    } else {
-      _characterMemories = [..._characterMemories]..[index] = memory;
     }
   }
 
@@ -5113,13 +4963,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     temp.mentionedAiIds = mentionedIds;
     // 指回原消息，保留"这条是对哪条的重写"的可追溯关系。
     temp.replyToMessageId = original.id;
-    if (!failed) {
-      await _repository.persistNewMessage(temp);
-    }
+    if (!failed) await _appendMessage(temp);
     await _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     if (!failed && fullContent.trim().isNotEmpty) {
-      await _maybeEvolveCharacterMemory(character, fullContent);
       await _maybeUpdateMemory();
     }
 

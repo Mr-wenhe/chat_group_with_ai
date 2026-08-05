@@ -1,3 +1,5 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/binding/dedup_key_event_binding.dart';
@@ -11,6 +13,7 @@ import 'features/direct_chat/direct_chat_foreground_watcher.dart';
 import 'features/direct_chat/direct_chat_list_page.dart';
 import 'features/direct_chat/direct_chat_session.dart';
 import 'features/memory/memory_migrator.dart';
+import 'features/memory/observation_entry.dart';
 import 'features/settings/settings_page.dart';
 import 'providers/providers.dart';
 
@@ -36,6 +39,9 @@ void main() async {
   }
 
   final messageIndexReady = db.ensureMessageIndex();
+  unawaited(
+    ObservationEntry(db: db).processRetryQueue().catchError((_) => 0),
+  );
   runApp(ProviderScope(
     overrides: [databaseServiceProvider.overrideWithValue(db)],
     child: FutureBuilder<void>(

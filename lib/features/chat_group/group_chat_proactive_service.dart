@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'dart:async';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -7,8 +8,11 @@ import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
+import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_policy.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
+import 'package:chat_group/features/memory/observation_entry.dart';
+import 'package:chat_group/features/memory/relationship_event_service.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
@@ -53,17 +57,23 @@ class GroupChatProactiveService {
     String? preferredGroupId,
   }) async {
     final now = DateTime.now();
-    final characters =
-        db.aiCharacterBox.values.where(_canGenerateProactiveMessage).toList();
+    final allCharacters = db.aiCharacterBox.values.toList();
+    final characters = allCharacters
+        .where((character) =>
+            character.isActive && _canGenerateProactiveMessage(character))
+        .toList();
     final groups = db.chatGroupBox.values.toList()..shuffle(random);
     final allMessages = db.messageBox.values.toList();
     final charactersById = {
-      for (final character in characters) character.id: character
+      for (final character in allCharacters) character.id: character
+    };
+    final eligibleCharactersById = {
+      for (final character in characters) character.id: character,
     };
 
     final candidate = GroupChatProactivePolicy.selectCandidate(
       groups: groups,
-      charactersById: charactersById,
+      charactersById: eligibleCharactersById,
       messages: allMessages,
       readAtByGroup: db.groupChatReadAtByGroup(),
       lastProactiveAtByGroup: db.groupChatLastProactiveAtByGroup(),
@@ -121,16 +131,47 @@ class GroupChatProactiveService {
     final content = result['message']?.toString().trim() ?? '';
     if (content.isEmpty) return null;
 
+    final visibleCharacters = candidate.group.aiCharacterIds
+        .map((id) => charactersById[id])
+        .whereType<AICharacter>()
+        .where((character) => character.isActive)
+        .toList(growable: false);
     final message = Message(
       groupId: candidate.group.id,
       senderId: candidate.character.id,
       senderType: 'ai',
       content: content,
+      mentionedAiIds: parseMentionedCharacterIds(content, visibleCharacters),
+      visibleToCharacterIds:
+          visibleCharacters.map((character) => character.id).toList(),
     );
     await db.persistMessage(message);
     await db.saveGroupChatLastProactiveAt(candidate.group.id, now);
     // 记用：统一由数据库按角色串行写回，避免并发入口丢失增量。
     await db.recordCharacterReplyUsage(candidate.character.id);
+
+    // 触发统一永久记忆观察入口。
+    unawaited(ObservationEntry(db: db)
+        .observeMessage(
+          message: message,
+          visibleCharacterIds: message.visibleToCharacterIds,
+          conversationId: candidate.group.id,
+          conversationNameSnapshot: candidate.group.name,
+          allCharacters: allCharacters,
+          isGroupChat: true,
+          userProfile: db.userProfileBox.get('me'),
+        )
+        .catchError((_) {}));
+    unawaited(
+      RelationshipEventService(db)
+          .observeProactiveMessage(
+            message: message,
+            conversationId: candidate.group.id,
+            conversationNameSnapshot: candidate.group.name,
+            allCharacters: allCharacters,
+          )
+          .catchError((_) {}),
+    );
 
     return GroupChatProactiveResult(
       group: candidate.group,

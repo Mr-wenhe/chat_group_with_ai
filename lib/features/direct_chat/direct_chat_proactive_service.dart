@@ -1,4 +1,5 @@
 import 'dart:math';
+import 'dart:async';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -7,6 +8,8 @@ import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
+import 'package:chat_group/features/memory/observation_entry.dart';
+import 'package:chat_group/features/memory/relationship_event_service.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
@@ -171,12 +174,36 @@ class DirectChatProactiveService {
       senderId: candidate.character.id,
       senderType: 'ai',
       content: content,
+      visibleToCharacterIds: [candidate.character.id],
     );
     await db.persistMessage(message);
     await db.saveDirectChatSource(conversationId, candidate.source);
     await db.saveDirectChatLastProactiveAt(candidate.character.id, now);
     // 记用：统一由数据库按角色串行写回，避免并发入口丢失增量。
     await db.recordCharacterReplyUsage(candidate.character.id);
+
+    // 触发统一永久记忆观察入口。
+    unawaited(ObservationEntry(db: db)
+        .observeMessage(
+          message: message,
+          visibleCharacterIds: message.visibleToCharacterIds,
+          conversationId: conversationId,
+          conversationNameSnapshot: '私聊',
+          allCharacters: characters,
+          isGroupChat: false,
+          userProfile: db.userProfileBox.get('me'),
+        )
+        .catchError((_) {}));
+    unawaited(
+      RelationshipEventService(db)
+          .observeProactiveMessage(
+            message: message,
+            conversationId: conversationId,
+            conversationNameSnapshot: '私聊',
+            allCharacters: characters,
+          )
+          .catchError((_) {}),
+    );
 
     return DirectChatProactiveResult(
       character: candidate.character,
