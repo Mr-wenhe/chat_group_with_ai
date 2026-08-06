@@ -9,6 +9,7 @@ import 'package:chat_group/features/ai_character/providers/ai_character_provider
 import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 import 'package:chat_group/features/settings/ai_processing_directory_policy.dart';
 import 'package:chat_group/features/settings/api_config_form_page.dart';
+import 'package:chat_group/features/memory/memory_management_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/settings/backup_restore_page.dart';
 import 'package:chat_group/features/settings/user_profile_page.dart';
@@ -522,6 +523,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 title: '完整备份与恢复',
                 subtitle: '版本化备份、导入预览、冲突处理与失败回滚（不含 API Key）',
                 onTap: _openBackupRestore,
+              ),
+              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              _SettingTile(
+                cs: cs,
+                icon: Icons.memory_rounded,
+                iconColor: cs.primary,
+                title: '永久记忆审计',
+                subtitle: '查看和管理所有 AI 的全局永久记忆',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(builder: (_) => const MemoryManagementPage()),
+                ),
               ),
               Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
