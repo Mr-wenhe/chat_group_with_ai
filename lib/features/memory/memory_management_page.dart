@@ -1,9 +1,8 @@
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
-import 'package:chat_group/core/models/character_memory.dart';
-import 'package:chat_group/core/models/group_memory.dart';
-import 'package:chat_group/core/models/relationship_state.dart';
-import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/features/memory/memory_audit_filter.dart';
+import 'package:chat_group/features/memory/memory_audit_filter_widget.dart';
 import 'package:chat_group/features/memory/memory_controls.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
@@ -11,11 +10,11 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:intl/intl.dart';
 
 class MemoryManagementPage extends ConsumerStatefulWidget {
-  final String conversationId;
+  final String? conversationId;
 
   const MemoryManagementPage({
     super.key,
-    required this.conversationId,
+    this.conversationId,
   });
 
   @override
@@ -26,403 +25,384 @@ class MemoryManagementPage extends ConsumerStatefulWidget {
 class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
   late final DatabaseService _db;
   late final MemoryControls _controls;
+  MemoryAuditFilter _filter = const MemoryAuditFilter();
 
   @override
   void initState() {
     super.initState();
     _db = ref.read(databaseServiceProvider);
     _controls = MemoryControls(_db);
+    _filter = MemoryAuditFilter(
+      originConversationId: widget.conversationId,
+    );
   }
 
-  List<AICharacter> get _characters {
-    final directId = DirectChatSession.characterIdFrom(widget.conversationId);
-    if (directId != null) {
-      return [_db.aiCharacterBox.get(directId)]
-          .whereType<AICharacter>()
-          .toList();
-    }
-    final group = _db.chatGroupBox.get(widget.conversationId);
-    return (group?.aiCharacterIds ?? const <String>[])
-        .map(_db.aiCharacterBox.get)
-        .whereType<AICharacter>()
-        .toList(growable: false);
-  }
-
-  List<GroupMemory> get _groupMemories => _db.groupMemoryBox.values
-      .where((item) =>
-          item.groupId == widget.conversationId &&
-          item.topicSummary.trim().isNotEmpty)
-      .toList(growable: false);
-
-  List<CharacterMemory> get _characterMemories => _db.characterMemoryBox.values
-      .where((item) => item.groupId == widget.conversationId)
-      .toList(growable: false);
-
-  List<RelationshipState> get _relationships => _db.relationshipStateBox.values
-      .where((item) => item.groupId == widget.conversationId)
-      .toList(growable: false);
+  List<AICharacter> get _characters => _db.aiCharacterBox.values.toList();
 
   @override
   Widget build(BuildContext context) {
-    final memories = _characterMemories;
+    final allMemories = _db.permanentMemoryBox.values.toList(growable: false);
+    final filtered = _filter.apply(allMemories);
     final charactersById = {for (final item in _characters) item.id: item};
+
     return Scaffold(
       appBar: AppBar(
-        title: const Text('记忆审计与控制'),
+        title: Text(_filter.isEmpty
+            ? '全部永久记忆'
+            : '筛选结果（${filtered.length} 条）'),
         actions: [
-          PopupMenuButton<String>(
-            tooltip: '快捷遗忘',
-            onSelected: _forget,
-            itemBuilder: (_) => const [
-              PopupMenuItem(value: 'topic', child: Text('忘记这个话题')),
-              PopupMenuItem(value: 'user', child: Text('忘记关于我的内容')),
+          IconButton(
+            tooltip: '清除筛选',
+            onPressed: () {
+              setState(() {
+                _filter = const MemoryAuditFilter();
+              });
+            },
+            icon: const Icon(Icons.filter_list_off_rounded),
+          ),
+        ],
+      ),
+      body: Column(
+        children: [
+          MemoryAuditFilterWidget(
+            filter: _filter,
+            characters: _characters,
+            onChanged: (f) => setState(() => _filter = f),
+          ),
+          const Divider(height: 1),
+          Expanded(
+            child: filtered.isEmpty
+                ? const Center(child: Text('没有符合条件的永久记忆'))
+                : ListView.builder(
+                    padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
+                    itemCount: filtered.length,
+                    itemBuilder: (context, index) =>
+                        _memoryCard(filtered[index], charactersById),
+                  ),
+          ),
+          _migrationDiagnostic(charactersById),
+        ],
+      ),
+    );
+  }
+
+  Widget _memoryCard(PermanentMemory memory, Map<String, AICharacter> charactersById) {
+    final observer = charactersById[memory.observerCharacterId];
+    final observerName = observer?.name ?? '已删除角色';
+    final subjectNames = memory.subjectIds.map((sid) {
+      if (sid == 'user') return '我';
+      return charactersById[sid]?.name ?? '已删除角色';
+    }).toList();
+
+    final kindLabel = switch (memory.kind) {
+      MemoryKind.fact => '知',
+      MemoryKind.preference => '偏好',
+      MemoryKind.commitment => '承诺',
+      MemoryKind.sharedExperience => '经历',
+      MemoryKind.relationshipNote => '关系',
+      MemoryKind.personaGrowth => '成长',
+      MemoryKind.explicitInstruction => '指令',
+    };
+
+    return Card(
+      child: InkWell(
+        onLongPress: () => _showActionSheet(memory),
+        child: Padding(
+          padding: const EdgeInsets.all(14),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
+                children: [
+                  Chip(label: Text(kindLabel)),
+                  const SizedBox(width: 8),
+                  Text(observerName, style: const TextStyle(fontWeight: FontWeight.w600)),
+                  const Spacer(),
+                  _statusBadge(memory.status),
+                  if (memory.pinned)
+                    IconButton(
+                      tooltip: '取消固定',
+                      icon: const Icon(Icons.push_pin_rounded, size: 18, color: Colors.orange),
+                      onPressed: () async {
+                        await _controls.unpinPermanent(memory);
+                        if (mounted) setState(() {});
+                      },
+                    )
+                  else
+                    IconButton(
+                      tooltip: '固定',
+                      icon: const Icon(Icons.push_pin_outlined, size: 18),
+                      onPressed: () async {
+                        await _controls.pinPermanent(memory);
+                        if (mounted) setState(() {});
+                      },
+                    ),
+                ],
+              ),
+              const SizedBox(height: 8),
+              Text(memory.content, style: const TextStyle(fontSize: 15)),
+              const SizedBox(height: 6),
+              if (subjectNames.isNotEmpty)
+                Text('主体：${subjectNames.join("、")}',
+                    style: TextStyle(fontSize: 12, color: Theme.of(context).colorScheme.onSurfaceVariant)),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 12,
+                runSpacing: 4,
+                children: [
+                  Text('重要度 ${memory.importance} · 置信 ${memory.confidence.toStringAsFixed(2)}',
+                      style: const TextStyle(fontSize: 12)),
+                  if (memory.explicitlyRequested)
+                    const Text('明确记忆', style: TextStyle(fontSize: 12, color: Colors.purple)),
+                  Text(_time(memory.occurredAt), style: const TextStyle(fontSize: 12)),
+                  Text(memory.originType.name, style: const TextStyle(fontSize: 12)),
+                  Text(memory.originNameSnapshot, style: const TextStyle(fontSize: 12)),
+                ],
+              ),
+              const SizedBox(height: 4),
+              Wrap(
+                spacing: 8,
+                children: [
+                  if (memory.sourceMessageIds.isNotEmpty)
+                    Text('${memory.sourceMessageIds.length} 条证据消息',
+                        style: const TextStyle(fontSize: 11, color: Colors.blueGrey))
+                  else if (memory.originType == MemoryOriginType.legacyMigration)
+                    const Text('旧版迁移记录，无原始消息证据',
+                        style: TextStyle(fontSize: 11, color: Colors.orange)),
+                  if (memory.supersedesIds.isNotEmpty)
+                    Text('取代了 ${memory.supersedesIds.length} 条旧记录',
+                        style: const TextStyle(fontSize: 11, color: Colors.teal)),
+                  if (_controls.supersededByCount(memory.id) > 0)
+                    Text('被 ${_controls.supersededByCount(memory.id)} 条记录取代',
+                        style: const TextStyle(fontSize: 11, color: Colors.deepOrange)),
+                ],
+              ),
             ],
           ),
-        ],
-      ),
-      body: ListView(
-        padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
-        children: [
-          SwitchListTile(
-            contentPadding: EdgeInsets.zero,
-            title: const Text('自动记忆'),
-            subtitle: const Text('关闭后不再发起群摘要、角色记忆或上下文记忆 API 调用'),
-            value: _controls.automaticMemoryEnabled,
-            onChanged: (value) async {
-              await _controls.setAutomaticMemoryEnabled(value);
-              if (mounted) setState(() {});
-            },
-          ),
-          const Card(
-            child: Padding(
-              padding: EdgeInsets.all(12),
-              child: Text('下列内容就是后续请求实际使用的本地记忆。固定会暂停该记录的自动更新；'
-                  '角色记忆可单条固定，编辑或删除会立即同步清理 legacy 摘要。'),
-            ),
-          ),
-          if (_groupMemories.isNotEmpty) ...[
-            const _SectionTitle('群记忆'),
-            for (final memory in _groupMemories) _groupMemoryCard(memory),
-          ],
-          const _SectionTitle('角色记忆'),
-          if (memories.isEmpty &&
-              _characters.every((item) => item.memorySummary.trim().isEmpty))
-            const ListTile(title: Text('当前会话还没有角色记忆')),
-          for (final character in _characters)
-            _characterCard(
-              character,
-              memories
-                  .where((item) => item.characterId == character.id)
-                  .toList(growable: false),
-            ),
-          if (_relationships.isNotEmpty) ...[
-            const _SectionTitle('关系状态'),
-            for (final relationship in _relationships)
-              _relationshipCard(relationship, charactersById),
-          ],
-        ],
-      ),
-    );
-  }
-
-  Widget _groupMemoryCard(GroupMemory memory) {
-    final key = _controls.groupKey(memory);
-    return Card(
-      child: ListTile(
-        title: Text(memory.topicSummary),
-        subtitle: Text('来源：群聊自动摘要 · 更新：${_time(memory.lastSummaryAt)}'),
-        trailing: _actions(
-          pinned: _controls.isPinned(key),
-          onPin: (value) => _controls.setPinned(key, value),
-          onEdit: () => _editText(
-            title: '编辑群记忆',
-            initial: memory.topicSummary,
-            save: (value) => _controls.updateGroup(memory, value),
-          ),
-          onDelete: () => _controls.deleteGroup(memory),
         ),
       ),
     );
   }
 
-  Widget _characterCard(
-    AICharacter character,
-    List<CharacterMemory> memories,
-  ) {
-    return Card(
-      child: ExpansionTile(
-        title: Text(character.name),
-        subtitle: Text('${memories.length} 条会话记忆记录'),
-        children: [
-          if (character.memorySummary.trim().isNotEmpty)
-            ListTile(
-              title: const Text('跨会话 legacy 摘要'),
-              subtitle: Text(character.memorySummary),
-              trailing: _actions(
-                pinned: _controls.isPinned(_controls.legacyKey(character)),
-                onPin: (value) =>
-                    _controls.setPinned(_controls.legacyKey(character), value),
-                onEdit: () => _editText(
-                  title: '编辑跨会话摘要',
-                  initial: character.memorySummary,
-                  save: (value) => _controls.updateLegacy(character, value),
-                ),
-                onDelete: () => _controls.deleteLegacy(character),
-              ),
-            ),
-          for (final memory in memories) ...[
-            ListTile(
-              title: Text('会话记忆 · ${_time(memory.lastUpdatedAt)}'),
-              subtitle: Text('来源：对话摘要 · 适用：${memory.groupId}'),
-              trailing: IconButton(
-                tooltip: _controls.isPinned(_controls.characterKey(memory))
-                    ? '取消固定'
-                    : '固定，暂停自动覆盖',
-                icon: Icon(_controls.isPinned(_controls.characterKey(memory))
-                    ? Icons.push_pin
-                    : Icons.push_pin_outlined),
-                onPressed: () => _pin(
-                  _controls.characterKey(memory),
-                  !_controls.isPinned(_controls.characterKey(memory)),
-                ),
-              ),
-            ),
-            ..._layerTiles(character, memory, CharacterMemoryLayer.facts),
-            ..._layerTiles(
-              character,
-              memory,
-              CharacterMemoryLayer.relationshipNotes,
-            ),
-            ..._layerTiles(
-              character,
-              memory,
-              CharacterMemoryLayer.personaGrowth,
-            ),
-          ],
-        ],
-      ),
-    );
-  }
-
-  List<Widget> _layerTiles(
-    AICharacter character,
-    CharacterMemory memory,
-    CharacterMemoryLayer layer,
-  ) {
-    final values = switch (layer) {
-      CharacterMemoryLayer.facts => memory.facts,
-      CharacterMemoryLayer.relationshipNotes => memory.relationshipNotes,
-      CharacterMemoryLayer.personaGrowth => memory.personaGrowth,
+  Widget _statusBadge(MemoryStatus status) {
+    final (label, color) = switch (status) {
+      MemoryStatus.active => ('有效', Colors.green),
+      MemoryStatus.superseded => ('已取代', Colors.orange),
+      MemoryStatus.invalidated => ('已失效', Colors.red),
     };
-    final label = switch (layer) {
-      CharacterMemoryLayer.facts => '事实',
-      CharacterMemoryLayer.relationshipNotes => '关系变化',
-      CharacterMemoryLayer.personaGrowth => '偏好/表达摘要',
-    };
-    return [
-      for (var index = 0; index < values.length; index++)
-        ListTile(
-          dense: true,
-          leading: Chip(label: Text(label)),
-          title: Text(values[index]),
-          subtitle: const Text('状态：有效 · 置信：未提供'),
-          trailing: _actions(
-            pinned: _controls.isPinned(
-              _controls.characterEntryKey(memory, layer, values[index]),
-            ),
-            onPin: (value) => _controls.setPinned(
-              _controls.characterEntryKey(memory, layer, values[index]),
-              value,
-            ),
-            onEdit: () => _editText(
-              title: '编辑$label',
-              initial: values[index],
-              save: (value) => _controls.updateCharacterEntry(
-                memory: memory,
-                character: character,
-                layer: layer,
-                index: index,
-                value: value,
-              ),
-            ),
-            onDelete: () => _controls.deleteCharacterEntry(
-              memory: memory,
-              character: character,
-              layer: layer,
-              index: index,
-            ),
-          ),
-        ),
-    ];
-  }
-
-  Widget _relationshipCard(
-    RelationshipState relationship,
-    Map<String, AICharacter> charactersById,
-  ) {
-    final source = charactersById[relationship.sourceCharacterId]?.name ?? '角色';
-    final target = relationship.targetType == RelationshipTargetType.user
-        ? '我'
-        : charactersById[relationship.targetId]?.name ?? '已删除角色';
-    return Card(
-      child: ListTile(
-        title: Text('$source → $target · ${relationship.recentMood.name}'),
-        subtitle:
-            Text('亲近 ${relationship.affinity} · 信任 ${relationship.trust} · '
-                '摩擦 ${relationship.friction}\n${relationship.notes}'),
-        trailing: _actions(
-          pinned: _controls.isPinned(
-            _controls.relationshipKey(relationship),
-          ),
-          onPin: (value) => _controls.setPinned(
-            _controls.relationshipKey(relationship),
-            value,
-          ),
-          onEdit: () => _editText(
-            title: '编辑关系备注',
-            initial: relationship.notes,
-            save: (value) => _controls.updateRelationship(relationship, value),
-          ),
-          onDelete: () => _controls.deleteRelationship(relationship),
-        ),
+    return Container(
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+      decoration: BoxDecoration(
+        color: color.withValues(alpha: 0.15),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: color.withValues(alpha: 0.4)),
       ),
+      child: Text(label, style: TextStyle(fontSize: 11, color: color)),
     );
   }
 
-  Widget _actions({
-    bool? pinned,
-    Future<void> Function(bool value)? onPin,
-    required Future<void> Function() onEdit,
-    required Future<void> Function() onDelete,
-  }) {
-    return Wrap(
-      children: [
-        if (pinned != null)
-          IconButton(
-            tooltip: pinned ? '取消固定' : '固定，暂停自动覆盖',
-            icon: Icon(pinned ? Icons.push_pin : Icons.push_pin_outlined),
-            onPressed: () async {
-              await onPin!(!pinned);
-              if (mounted) setState(() {});
-            },
-          ),
-        IconButton(
-          tooltip: '编辑',
-          icon: const Icon(Icons.edit_outlined),
-          onPressed: () async {
-            await onEdit();
-            if (mounted) setState(() {});
-          },
-        ),
-        IconButton(
-          tooltip: '删除',
-          icon: const Icon(Icons.delete_outline),
-          onPressed: () => _confirmDelete(onDelete),
-        ),
-      ],
-    );
-  }
-
-  Future<void> _editText({
-    required String title,
-    required String initial,
-    required Future<void> Function(String value) save,
-  }) async {
-    final controller = TextEditingController(text: initial);
-    final value = await showDialog<String>(
+  Future<void> _showActionSheet(PermanentMemory memory) async {
+    final canEdit = memory.originType != MemoryOriginType.legacyMigration;
+    await showModalBottomSheet(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(title),
-        content: TextField(
-          controller: controller,
-          autofocus: true,
-          maxLines: 6,
-          decoration: const InputDecoration(border: OutlineInputBorder()),
+      builder: (ctx) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (memory.pinned)
+              ListTile(
+                leading: const Icon(Icons.push_pin_rounded),
+                title: const Text('取消固定'),
+                onTap: () async {
+                  await _controls.unpinPermanent(memory);
+                  if (mounted) setState(() {});
+                  if (ctx.mounted) Navigator.pop(ctx);
+                },
+              )
+            else
+              ListTile(
+                leading: const Icon(Icons.push_pin_outlined),
+                title: const Text('固定'),
+                onTap: () async {
+                  await _controls.pinPermanent(memory);
+                  if (mounted) setState(() {});
+                  if (ctx.mounted) Navigator.pop(ctx);
+                },
+              ),
+            if (canEdit)
+              ListTile(
+                leading: const Icon(Icons.edit_outlined),
+                title: const Text('修正'),
+                onTap: () async {
+                  if (ctx.mounted) Navigator.pop(ctx);
+                  await _correctionDialog(memory);
+                },
+              ),
+            ListTile(
+              leading: const Icon(Icons.delete_outline, color: Colors.red),
+              title: const Text('删除'),
+              onTap: () async {
+                if (ctx.mounted) Navigator.pop(ctx);
+                await _confirmDelete(memory);
+              },
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Future<void> _correctionDialog(PermanentMemory old) async {
+    final controller = TextEditingController(text: old.content);
+    final subjectIds = List<String>.from(old.subjectIds);
+    final result = await showDialog<_CorrectionResult>(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text('修正记忆'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            TextField(
+              controller: controller,
+              maxLines: 6,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                hintText: '输入修正后的内容',
+              ),
+            ),
+            const SizedBox(height: 12),
+            const Text('主体 ID（逗号分隔，留空 = 自身成长）'),
+            const SizedBox(height: 4),
+            TextField(
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                hintText: 'user, c1, c2',
+              ),
+              onChanged: (v) {
+                subjectIds.clear();
+                subjectIds.addAll(v.split(',').map((s) => s.trim()).where((s) => s.isNotEmpty).toList());
+              },
+            ),
+          ],
         ),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('取消'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
           FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, controller.text),
-            child: const Text('保存'),
+            onPressed: () {
+              final content = controller.text.trim();
+              if (content.isEmpty) return;
+              Navigator.pop(ctx, _CorrectionResult(content, subjectIds));
+            },
+            child: const Text('保存修正'),
           ),
         ],
       ),
     );
     controller.dispose();
-    if (value != null && value.trim().isNotEmpty) await save(value);
+    if (result == null) return;
+
+    final wasPinned = old.pinned;
+    if (wasPinned) {
+      final confirmed = await showDialog<bool>(
+        context: context,
+        builder: (ctx) => AlertDialog(
+          title: const Text('此记忆已被固定'),
+          content: const Text('修正后将用新记录取代这条固定记忆，原记录保留但标记为已取代。继续？'),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
+            FilledButton(onPressed: () => Navigator.pop(ctx, true), child: const Text('继续修正')),
+          ],
+        ),
+      );
+      if (confirmed != true) return;
+    }
+
+    await _controls.editPermanent(
+      old,
+      correctedContent: result.content,
+      subjectIds: result.subjectIds,
+    );
+    if (mounted) setState(() {});
   }
 
-  Future<void> _confirmDelete(Future<void> Function() delete) async {
+  Future<void> _confirmDelete(PermanentMemory memory) async {
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('删除这条记忆？'),
-        content: const Text('删除后，后续请求不会再注入该内容。'),
+      builder: (ctx) => AlertDialog(
+        title: const Text('删除这条永久记忆？'),
+        content: const Text('删除后，后续请求不会再注入该内容。删除不会自动恢复旧版本。'),
         actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('取消'),
-          ),
+          TextButton(onPressed: () => Navigator.pop(ctx, false), child: const Text('取消')),
           FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
+            onPressed: () => Navigator.pop(ctx, true),
             child: const Text('删除'),
           ),
         ],
       ),
     );
-    if (confirmed == true) await delete();
+    if (confirmed != true) return;
+    await _controls.deletePermanent(memory);
     if (mounted) setState(() {});
   }
 
-  Future<void> _pin(String key, bool value) async {
-    await _controls.setPinned(key, value);
-    if (mounted) setState(() {});
-  }
+  Widget _migrationDiagnostic(Map<String, AICharacter> charactersById) {
+    final legacyMemories = _db.permanentMemoryBox.values
+        .where((m) => m.originType == MemoryOriginType.legacyMigration)
+        .length;
+    final hasLegacyCharacterData = _db.characterMemoryBox.values.isNotEmpty ||
+        charactersById.values.any((c) => c.memorySummary.trim().isNotEmpty);
 
-  Future<void> _forget(String kind) async {
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: Text(kind == 'topic' ? '忘记这个话题？' : '忘记关于我的内容？'),
-        content: Text(kind == 'topic'
-            ? '当前会话的群摘要会被清空。'
-            : '当前会话角色的事实、关系记忆和跨会话 legacy 摘要会被清空。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            child: const Text('确认遗忘'),
-          ),
+    if (!hasLegacyCharacterData && legacyMemories == 0) {
+      return const SizedBox.shrink();
+    }
+
+    return Card(
+      margin: const EdgeInsets.fromLTRB(16, 0, 16, 32),
+      color: Theme.of(context).colorScheme.surfaceContainerHighest,
+      child: ExpansionTile(
+        initiallyExpanded: hasLegacyCharacterData,
+        title: const Text('迁移诊断'),
+        subtitle: Text(
+          hasLegacyCharacterData
+              ? '检测到旧版记忆数据，仅展示不编辑'
+              : '已迁移 $legacyMemories 条旧版记忆记录',
+        ),
+        children: [
+          if (hasLegacyCharacterData)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Text(
+                '检测到旧版 CharacterMemory 或 memorySummary 数据。'
+                '请运行迁移工具将其导入永久记忆系统。'
+                '此区域仅展示，不可直接编辑。',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
+          if (legacyMemories > 0)
+            Padding(
+              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
+              child: Text(
+                '已从旧版迁移 $legacyMemories 条记忆记录。'
+                '这些记录可在此页面查看和管理。',
+                style: TextStyle(
+                  fontSize: 13,
+                  color: Theme.of(context).colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ),
         ],
       ),
     );
-    if (confirmed != true) return;
-    if (kind == 'topic') {
-      await _controls.forgetTopic(widget.conversationId);
-    } else {
-      await _controls.forgetAboutUser(widget.conversationId);
-    }
-    if (mounted) setState(() {});
   }
 
-  String _time(DateTime value) =>
-      DateFormat('yyyy-MM-dd HH:mm').format(value.toLocal());
+  String _time(DateTime value) => DateFormat('yyyy-MM-dd HH:mm').format(value.toLocal());
 }
 
-class _SectionTitle extends StatelessWidget {
-  final String text;
-
-  const _SectionTitle(this.text);
-
-  @override
-  Widget build(BuildContext context) => Padding(
-        padding: const EdgeInsets.fromLTRB(4, 20, 4, 8),
-        child: Text(text, style: Theme.of(context).textTheme.titleMedium),
-      );
+class _CorrectionResult {
+  final String content;
+  final List<String> subjectIds;
+  const _CorrectionResult(this.content, this.subjectIds);
 }
