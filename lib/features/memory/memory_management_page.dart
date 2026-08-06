@@ -44,6 +44,13 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
     final allMemories = _db.permanentMemoryBox.values.toList(growable: false);
     final filtered = _filter.apply(allMemories);
     final charactersById = {for (final item in _characters) item.id: item};
+    final supersededCount = <String, int>{};
+    for (final memory in allMemories) {
+      if (memory.status != MemoryStatus.active) continue;
+      for (final sid in memory.supersedesIds) {
+        supersededCount[sid] = (supersededCount[sid] ?? 0) + 1;
+      }
+    }
 
     return Scaffold(
       appBar: AppBar(
@@ -77,7 +84,7 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
                     padding: const EdgeInsets.fromLTRB(16, 12, 16, 32),
                     itemCount: filtered.length,
                     itemBuilder: (context, index) =>
-                        _memoryCard(filtered[index], charactersById),
+                        _memoryCard(filtered[index], charactersById, supersededCount),
                   ),
           ),
           _migrationDiagnostic(charactersById),
@@ -86,7 +93,7 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
     );
   }
 
-  Widget _memoryCard(PermanentMemory memory, Map<String, AICharacter> charactersById) {
+  Widget _memoryCard(PermanentMemory memory, Map<String, AICharacter> charactersById, Map<String, int> supersededCount) {
     final observer = charactersById[memory.observerCharacterId];
     final observerName = observer?.name ?? '已删除角色';
     final subjectNames = memory.subjectIds.map((sid) {
@@ -172,8 +179,8 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
                   if (memory.supersedesIds.isNotEmpty)
                     Text('取代了 ${memory.supersedesIds.length} 条旧记录',
                         style: const TextStyle(fontSize: 11, color: Colors.teal)),
-                  if (_controls.supersededByCount(memory.id) > 0)
-                    Text('被 ${_controls.supersededByCount(memory.id)} 条记录取代',
+                  if ((supersededCount[memory.id] ?? 0) > 0)
+                    Text('被 ${supersededCount[memory.id]} 条记录取代',
                         style: const TextStyle(fontSize: 11, color: Colors.deepOrange)),
                 ],
               ),
