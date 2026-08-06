@@ -1,6 +1,11 @@
+import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/features/memory/memory_audit_filter.dart';
+import 'package:chat_group/features/memory/memory_audit_filter_widget.dart';
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+
+import 'helpers/lifecycle_hive.dart';
 
 void main() {
   group('MemoryAuditFilter', () {
@@ -219,6 +224,88 @@ void main() {
       expect(result.length, 1);
       expect(result.first.observerCharacterId, 'c1');
       expect(result.first.pinned, isTrue);
+    });
+  });
+
+  group('MemoryAuditFilterWidget', () {
+    testWidgets('empty filter renders nothing', (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: const MemoryAuditFilter(),
+            characters: const [],
+            onChanged: (_) {},
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text('清除筛选'), findsNothing);
+    });
+
+    testWidgets('non-empty filter shows chips and clear button', (tester) async {
+      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: MemoryAuditFilter(observerCharacterId: 'c1'),
+            characters: chars,
+            onChanged: (_) {},
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      expect(find.text('角色: 角色c1'), findsOneWidget);
+      expect(find.text('清除筛选'), findsOneWidget);
+    });
+
+    testWidgets('tapping clear button emits empty filter', (tester) async {
+      MemoryAuditFilter? captured;
+      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: MemoryAuditFilter(observerCharacterId: 'c1'),
+            characters: chars,
+            onChanged: (f) => captured = f,
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      await tester.tap(find.text('清除筛选'));
+      await tester.pumpAndSettle();
+
+      expect(captured, isNotNull);
+      expect(captured!.isEmpty, isTrue);
+    });
+
+    testWidgets('tapping chip delete invokes onChanged', (tester) async {
+      MemoryAuditFilter? captured;
+      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: MemoryAuditFilter(observerCharacterId: 'c1', status: MemoryStatus.active),
+            characters: chars,
+            onChanged: (f) => captured = f,
+          ),
+        ),
+      ));
+      await tester.pumpAndSettle();
+
+      // Chip delete button sits at the trailing edge of the Chip.
+      // Tap at the rightmost area of the "角色: 角色c1" Chip.
+      final rawChip = find.byType(RawChip).first;
+      final chipRect = tester.getRect(rawChip);
+      final deleteX = chipRect.right - 2;
+      final chipCenterY = chipRect.center.dy;
+      await tester.tapAt(Offset(deleteX, chipCenterY));
+      await tester.pumpAndSettle();
+
+      expect(captured, isNotNull);
+      expect(captured!.observerCharacterId, isNull);
     });
   });
 }

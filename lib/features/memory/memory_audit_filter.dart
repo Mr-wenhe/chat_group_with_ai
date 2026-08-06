@@ -45,12 +45,12 @@ class MemoryAuditFilter {
     bool? pinnedOnly,
   }) {
     return MemoryAuditFilter(
-      observerCharacterId: observerCharacterId ?? this.observerCharacterId,
+      observerCharacterId: observerCharacterId,
       subjectFilter: subjectFilter ?? this.subjectFilter,
-      originType: originType ?? this.originType,
-      originConversationId: originConversationId ?? this.originConversationId,
-      status: status ?? this.status,
-      memoryKind: memoryKind ?? this.memoryKind,
+      originType: originType,
+      originConversationId: originConversationId,
+      status: status,
+      memoryKind: memoryKind,
       pinnedOnly: pinnedOnly ?? this.pinnedOnly,
     );
   }
