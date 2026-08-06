@@ -1,5 +1,6 @@
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/features/memory/memory_audit_filter.dart';
 import 'package:chat_group/features/memory/memory_audit_filter_widget.dart';
@@ -87,7 +88,7 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
                         _memoryCard(filtered[index], charactersById, supersededCount),
                   ),
           ),
-          _migrationDiagnostic(charactersById),
+          _migrationDiagnostic(_characters, _db),
         ],
       ),
     );
@@ -352,12 +353,13 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
     if (mounted) setState(() {});
   }
 
-  Widget _migrationDiagnostic(Map<String, AICharacter> charactersById) {
+  Widget _migrationDiagnostic(List<AICharacter> characters, DatabaseService db) {
     final legacyMemories = _db.permanentMemoryBox.values
         .where((m) => m.originType == MemoryOriginType.legacyMigration)
         .length;
-    final hasLegacyCharacterData = _db.characterMemoryBox.values.isNotEmpty ||
-        charactersById.values.any((c) => c.memorySummary.trim().isNotEmpty);
+    final legacyCharMemories = _db.characterMemoryBox.values.toList(growable: false);
+    final hasLegacyCharacterData = legacyCharMemories.isNotEmpty ||
+        characters.any((c) => c.memorySummary.trim().isNotEmpty);
 
     if (!hasLegacyCharacterData && legacyMemories == 0) {
       return const SizedBox.shrink();
@@ -375,19 +377,13 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
               : '已迁移 $legacyMemories 条旧版记忆记录',
         ),
         children: [
-          if (hasLegacyCharacterData)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
-              child: Text(
-                '检测到旧版 CharacterMemory 或 memorySummary 数据。'
-                '请运行迁移工具将其导入永久记忆系统。'
-                '此区域仅展示，不可直接编辑。',
-                style: TextStyle(
-                  fontSize: 13,
-                  color: Theme.of(context).colorScheme.onSurfaceVariant,
-                ),
-              ),
-            ),
+          if (hasLegacyCharacterData) ...[
+            // Group character memories by groupId
+            for (final char in characters)
+              if (char.memorySummary.trim().isNotEmpty ||
+                  legacyCharMemories.any((cm) => cm.characterId == char.id))
+                _characterMemorySection(char, legacyCharMemories),
+          ],
           if (legacyMemories > 0)
             Padding(
               padding: const EdgeInsets.fromLTRB(16, 0, 16, 12),
@@ -400,6 +396,112 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
                 ),
               ),
             ),
+        ],
+      ),
+    );
+  }
+
+  Widget _characterMemorySection(
+      AICharacter char, List<CharacterMemory> legacyCharMemories) {
+    final charMemories = legacyCharMemories
+        .where((cm) => cm.characterId == char.id)
+        .toList(growable: false);
+
+    // Group by groupId
+    final byGroup = <String, List<CharacterMemory>>{};
+    for (final cm in charMemories) {
+      byGroup.putIfAbsent(cm.groupId, () => []).add(cm);
+    }
+
+    return ExpansionTile(
+      dense: true,
+      initiallyExpanded: true,
+      title: Text('旧版记忆（${char.name}）'),
+      subtitle: Text(
+        char.memorySummary.trim().isNotEmpty
+            ? '有跨会话摘要 + ${charMemories.length} 条会话记忆'
+            : '${charMemories.length} 条会话记忆',
+        style: const TextStyle(fontSize: 12),
+      ),
+      children: [
+        if (char.memorySummary.trim().isNotEmpty)
+          Padding(
+            padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '跨会话 legacy 摘要（${char.name}）',
+                  style: TextStyle(
+                    fontSize: 13,
+                    fontWeight: FontWeight.w600,
+                    color: Theme.of(context).colorScheme.primary,
+                  ),
+                ),
+                const SizedBox(height: 4),
+                Text(
+                  char.memorySummary.trim(),
+                  style: TextStyle(
+                    fontSize: 13,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        for (final entry in byGroup.entries)
+          ExpansionTile(
+            dense: true,
+            initiallyExpanded: true,
+            title: Text('群组 ${entry.key}'),
+            subtitle: Text('${entry.value.length} 条记忆'),
+            children: [
+              for (final cm in entry.value) ...[
+                if (cm.facts.isNotEmpty)
+                  _layerRow('事实', cm.facts.join('；')),
+                if (cm.relationshipNotes.isNotEmpty)
+                  _layerRow('关系备注', cm.relationshipNotes.join('；')),
+                if (cm.personaGrowth.isNotEmpty)
+                  _layerRow('成长', cm.personaGrowth.join('；')),
+                if (cm.facts.isEmpty &&
+                    cm.relationshipNotes.isEmpty &&
+                    cm.personaGrowth.isEmpty)
+                  const Padding(
+                    padding: EdgeInsets.fromLTRB(16, 0, 16, 8),
+                    child: Text(
+                      '（空）',
+                      style: TextStyle(fontSize: 13, fontStyle: FontStyle.italic),
+                    ),
+                  ),
+              ],
+            ],
+          ),
+      ],
+    );
+  }
+
+  Widget _layerRow(String label, String content) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            label,
+            style: TextStyle(
+              fontSize: 12,
+              fontWeight: FontWeight.w600,
+              color: Theme.of(context).colorScheme.primary,
+            ),
+          ),
+          const SizedBox(height: 2),
+          Text(
+            content,
+            style: TextStyle(
+              fontSize: 13,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
         ],
       ),
     );

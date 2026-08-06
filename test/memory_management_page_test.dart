@@ -188,10 +188,35 @@ void main() {
           MemoryManagementPage(conversationId: 'group-1'),
         ));
       });
-      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpAndSettle();
 
-      expect(find.text('【事实】旧事实'), findsNothing);
+      expect(find.text('【事实】旧事实'), findsOneWidget);
+      expect(find.text('旧事实'), findsOneWidget);
       expect(find.text('迁移诊断'), findsOneWidget);
+    });
+
+    testWidgets('migration diagnostic shows character memory content',
+        (tester) async {
+      await tester.runAsync(() async {
+        final char = testCharacter('char-a', apiConfigId: 'cfg');
+        char.memorySummary = '【事实】旧跨会话事实';
+        await db.aiCharacterBox.put(char.id, char);
+        final cm = CharacterMemory(
+          id: 'cm1', groupId: 'group-1', characterId: char.id,
+          facts: ['会话事实1'],
+          personaGrowth: ['成长记录'],
+        );
+        await db.characterMemoryBox.put(cm.id, cm);
+
+        await tester.pumpWidget(app(
+          MemoryManagementPage(conversationId: 'group-1'),
+        ));
+      });
+      await tester.pumpAndSettle();
+
+      expect(find.text('【事实】旧跨会话事实'), findsOneWidget);
+      expect(find.text('会话事实1'), findsOneWidget);
+      expect(find.text('成长记录'), findsOneWidget);
     });
 
     testWidgets('legacy permanent memory records show migration badge',
@@ -210,7 +235,7 @@ void main() {
           const MemoryManagementPage(),
         ));
       });
-      await tester.pump(const Duration(milliseconds: 100));
+      await tester.pumpAndSettle();
 
       // Legacy records display their content; the migration badge text
       // ("旧版迁移记录，无原始消息证据") is in a Wrap that may be clipped
