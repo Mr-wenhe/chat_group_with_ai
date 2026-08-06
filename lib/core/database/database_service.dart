@@ -190,6 +190,7 @@ class DatabaseService {
     Hive.registerAdapter(UserProfileAdapter());
     Hive.registerAdapter(PermanentMemoryAdapter());
     Hive.registerAdapter(RelationshipStageAdapter());
+    Hive.registerAdapter(RelationshipEventCreatorAdapter());
     Hive.registerAdapter(RelationshipEventAdapter());
 
     await _openBoxSafely<AICharacter>(_aiCharacterBox);
