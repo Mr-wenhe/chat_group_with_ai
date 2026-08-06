@@ -3,6 +3,7 @@ import 'dart:io';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/group_memory.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
@@ -197,5 +198,164 @@ void main() {
     expect(stored.relationshipNotes, isEmpty);
     expect(stored.personaGrowth, ['角色说话更简洁']);
     expect(db.aiCharacterBox.get(character.id)!.memorySummary, isEmpty);
+  });
+
+  group('MemoryControls permanent memory operations', () {
+    test('pinPermanent persists and un-pin clears', () async {
+      final db = DatabaseService();
+      final char = testCharacter('c1');
+      await db.aiCharacterBox.put(char.id, char);
+      final memory = PermanentMemory(
+        observerCharacterId: 'c1', kind: MemoryKind.fact,
+        content: '用户喜欢苹果', status: MemoryStatus.active,
+        originType: MemoryOriginType.group, originNameSnapshot: '群1',
+      );
+      await db.permanentMemoryBox.put(memory.id, memory);
+      final controls = MemoryControls(db);
+
+      await controls.pinPermanent(memory);
+      expect(db.permanentMemoryBox.get(memory.id)!.pinned, isTrue);
+
+      await controls.unpinPermanent(memory);
+      expect(db.permanentMemoryBox.get(memory.id)!.pinned, isFalse);
+    });
+
+    test('editPermanent creates new manual record and supersedes old', () async {
+      final db = DatabaseService();
+      final char = testCharacter('c1');
+      await db.aiCharacterBox.put(char.id, char);
+      final old = PermanentMemory(
+        observerCharacterId: 'c1', kind: MemoryKind.fact,
+        content: '用户喜欢吃苹果', status: MemoryStatus.active,
+        originType: MemoryOriginType.group, originNameSnapshot: '群1',
+        subjectIds: const ['user'],
+      );
+      await db.permanentMemoryBox.put(old.id, old);
+      final controls = MemoryControls(db);
+
+      final newMemory = await controls.editPermanent(
+        old,
+        correctedContent: '用户喜欢吃苹果和香蕉',
+        subjectIds: const ['user'],
+      );
+
+      expect(newMemory.status, MemoryStatus.active);
+      expect(newMemory.originType, MemoryOriginType.manual);
+      expect(newMemory.confidence, 1.0);
+      expect(newMemory.sourceMessageIds, isEmpty);
+      expect(newMemory.supersedesIds, contains(old.id));
+      expect(newMemory.content, '用户喜欢吃苹果和香蕉');
+      expect(db.permanentMemoryBox.get(old.id)!.status, MemoryStatus.superseded);
+    });
+
+    test('editPermanent is idempotent — duplicate save does not create extra records',
+        () async {
+      final db = DatabaseService();
+      final char = testCharacter('c1');
+      await db.aiCharacterBox.put(char.id, char);
+      final old = PermanentMemory(
+        observerCharacterId: 'c1', kind: MemoryKind.fact,
+        content: '用户住在上海', status: MemoryStatus.active,
+        originType: MemoryOriginType.group, originNameSnapshot: '群1',
+        subjectIds: const ['user'],
+      );
+      await db.permanentMemoryBox.put(old.id, old);
+      final controls = MemoryControls(db);
+
+      final first = await controls.editPermanent(old, correctedContent: '用户住在北京', subjectIds: const ['user']);
+      final second = await controls.editPermanent(first, correctedContent: '用户住在北京', subjectIds: const ['user']);
+
+      expect(first.id, second.id);
+      final allActive = db.permanentMemoryBox.values.where((m) => m.status == MemoryStatus.active).toList();
+      expect(allActive.length, 1);
+    });
+
+    test('editPermanent on pinned record warns and still supersedes', () async {
+      final db = DatabaseService();
+      final char = testCharacter('c1');
+      await db.aiCharacterBox.put(char.id, char);
+      final old = PermanentMemory(
+        observerCharacterId: 'c1', kind: MemoryKind.fact,
+        content: '用户住在上海', status: MemoryStatus.active,
+        originType: MemoryOriginType.group, originNameSnapshot: '群1',
+        pinned: true, subjectIds: const ['user'],
+      );
+      await db.permanentMemoryBox.put(old.id, old);
+      final controls = MemoryControls(db);
+
+      final newMemory = await controls.editPermanent(old, correctedContent: '用户住在北京', subjectIds: const ['user']);
+
+      expect(newMemory.status, MemoryStatus.active);
+      expect(db.permanentMemoryBox.get(old.id)!.status, MemoryStatus.superseded);
+      expect(db.permanentMemoryBox.get(old.id)!.pinned, isTrue); // pin flag preserved on old
+    });
+
+    test('deletePermanent physically removes record', () async {
+      final db = DatabaseService();
+      final char = testCharacter('c1');
+      await db.aiCharacterBox.put(char.id, char);
+      final memory = PermanentMemory(
+        observerCharacterId: 'c1', kind: MemoryKind.fact,
+        content: '用户住在上海', status: MemoryStatus.active,
+        originType: MemoryOriginType.group, originNameSnapshot: '群1',
+      );
+      await db.permanentMemoryBox.put(memory.id, memory);
+      final controls = MemoryControls(db);
+
+      await controls.deletePermanent(memory);
+      expect(db.permanentMemoryBox.get(memory.id), isNull);
+    });
+
+    test('deletePermanent does not delete other records in the same correction chain',
+        () async {
+      final db = DatabaseService();
+      final char = testCharacter('c1');
+      await db.aiCharacterBox.put(char.id, char);
+      final v1 = PermanentMemory(
+        observerCharacterId: 'c1', kind: MemoryKind.fact,
+        content: 'v1', status: MemoryStatus.superseded,
+        originType: MemoryOriginType.group, originNameSnapshot: '群1',
+      );
+      final v2 = PermanentMemory(
+        observerCharacterId: 'c1', kind: MemoryKind.fact,
+        content: 'v2', status: MemoryStatus.active,
+        originType: MemoryOriginType.group, originNameSnapshot: '群1',
+        supersedesIds: [v1.id],
+      );
+      await db.permanentMemoryBox.putAll({v1.id: v1, v2.id: v2});
+      final controls = MemoryControls(db);
+
+      await controls.deletePermanent(v2);
+      expect(db.permanentMemoryBox.get(v1.id), isNotNull);
+      expect(db.permanentMemoryBox.get(v2.id), isNull);
+    });
+
+    test('supersededByCount computes reverse chain correctly', () async {
+      final db = DatabaseService();
+      final char = testCharacter('c1');
+      await db.aiCharacterBox.put(char.id, char);
+      final v1 = PermanentMemory(
+        observerCharacterId: 'c1', kind: MemoryKind.fact,
+        content: 'v1', status: MemoryStatus.superseded,
+        originType: MemoryOriginType.group, originNameSnapshot: '群1',
+      );
+      final v2 = PermanentMemory(
+        observerCharacterId: 'c1', kind: MemoryKind.fact,
+        content: 'v2', status: MemoryStatus.active,
+        originType: MemoryOriginType.group, originNameSnapshot: '群1',
+        supersedesIds: [v1.id],
+      );
+      final v3 = PermanentMemory(
+        observerCharacterId: 'c1', kind: MemoryKind.fact,
+        content: 'v3', status: MemoryStatus.active,
+        originType: MemoryOriginType.group, originNameSnapshot: '群1',
+        supersedesIds: [v1.id],
+      );
+      await db.permanentMemoryBox.putAll({v1.id: v1, v2.id: v2, v3.id: v3});
+      final controls = MemoryControls(db);
+
+      expect(controls.supersededByCount(v1.id), 2);
+      expect(controls.supersededByCount(v2.id), 0);
+    });
   });
 }

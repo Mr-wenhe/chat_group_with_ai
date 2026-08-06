@@ -4,6 +4,7 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/group_memory.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
@@ -206,6 +207,97 @@ class MemoryControls {
   Future<void> deleteRelationship(RelationshipState relationship) async {
     await db.relationshipStateBox.delete(relationship.key ?? relationship.id);
     await setPinned(relationshipKey(relationship), false);
+  }
+
+  Future<void> pinPermanent(PermanentMemory memory) async {
+    memory.pinned = true;
+    await memory.save();
+  }
+
+  Future<void> unpinPermanent(PermanentMemory memory) async {
+    memory.pinned = false;
+    await memory.save();
+  }
+
+  Future<PermanentMemory> editPermanent(
+    PermanentMemory old, {
+    required String correctedContent,
+    required List<String> subjectIds,
+  }) async {
+    // Idempotency: if an active record already exists with the same content + subjects, return it.
+    final existing = db.permanentMemoryBox.values.any(
+      (m) =>
+          m.observerCharacterId == old.observerCharacterId &&
+          m.kind == old.kind &&
+          m.status == MemoryStatus.active &&
+          m.content == correctedContent &&
+          _listsEqual(m.subjectIds, subjectIds),
+    );
+    if (existing) {
+      return db.permanentMemoryBox.values.firstWhere(
+        (m) =>
+            m.observerCharacterId == old.observerCharacterId &&
+            m.kind == old.kind &&
+            m.status == MemoryStatus.active &&
+            m.content == correctedContent &&
+            _listsEqual(m.subjectIds, subjectIds),
+      );
+    }
+
+    final now = DateTime.now();
+    final replacement = PermanentMemory(
+      observerCharacterId: old.observerCharacterId,
+      kind: old.kind,
+      content: correctedContent.trim(),
+      subjectIds: List<String>.from(subjectIds),
+      status: MemoryStatus.active,
+      originType: MemoryOriginType.manual,
+      originNameSnapshot: old.originNameSnapshot,
+      confidence: 1.0,
+      explicitlyRequested: false,
+      supersedesIds: [old.id],
+      occurredAt: old.occurredAt,
+      createdAt: now,
+      updatedAt: now,
+    );
+    await db.permanentMemoryBox.put(replacement.id, replacement);
+
+    final superseded = PermanentMemory(
+      observerCharacterId: old.observerCharacterId,
+      kind: old.kind,
+      content: old.content,
+      subjectIds: List<String>.from(old.subjectIds),
+      status: MemoryStatus.superseded,
+      originType: old.originType,
+      originNameSnapshot: old.originNameSnapshot,
+      confidence: old.confidence,
+      explicitlyRequested: old.explicitlyRequested,
+      pinned: old.pinned,
+      supersedesIds: List<String>.from(old.supersedesIds),
+      occurredAt: old.occurredAt,
+      createdAt: old.createdAt,
+      updatedAt: now,
+    );
+    await db.permanentMemoryBox.put(old.id, superseded);
+
+    return replacement;
+  }
+
+  Future<void> deletePermanent(PermanentMemory memory) async {
+    await db.permanentMemoryBox.delete(memory.id);
+  }
+
+  int supersededByCount(String memoryId) =>
+      db.permanentMemoryBox.values
+          .where((m) => m.status == MemoryStatus.active && m.supersedesIds.contains(memoryId))
+          .length;
+
+  static bool _listsEqual(List<String> a, List<String> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
   }
 
   Future<void> updateRelationship(
