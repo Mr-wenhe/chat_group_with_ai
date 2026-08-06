@@ -82,7 +82,7 @@ class ChatRoomLoader {
       characterMemories: db.characterMemoryBox.values
           .where((item) => item.groupId == conversationId)
           .toList(growable: false),
-      relationships: _stableGlobalRelationships(),
+      relationships: stableGlobalRelationships(),
       groupMemory: memory,
       hasAnyApiConfig: activeCharacters.any(_hasApiConfig),
       isDirectChat: false,
@@ -123,7 +123,7 @@ class ChatRoomLoader {
           .where((item) => item.groupId == conversationId)
           .toList(growable: false),
       // 全局关系：私聊同样按稳定快照优先。
-      relationships: _stableGlobalRelationships(),
+      relationships: stableGlobalRelationships(),
       groupMemory: null,
       hasAnyApiConfig: character.isActive && _hasApiConfig(character),
       isDirectChat: true,
@@ -142,7 +142,7 @@ class ChatRoomLoader {
   ///
   /// 旧实现是"有任意全局快照就丢弃全部 legacy"，导致 A→user 只有 legacy 时被错误丢弃。
   /// 这里改为按每个 stableGlobalId 独立决策：有全局用全局，没有才用最新 legacy。
-  List<RelationshipState> _stableGlobalRelationships() {
+  List<RelationshipState> stableGlobalRelationships() {
     final allRelationships = db.relationshipStateBox.values;
     // 先按 stableGlobalId 分组，全局优先。
     final bestByStableId = <String, RelationshipState>{};

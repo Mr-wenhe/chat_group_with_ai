@@ -174,6 +174,33 @@ class ObservationEntry {
     required bool isGroupChat,
     UserProfile? userProfile,
   }) async {
+    await observeDeterministic(
+      message: message,
+      visibleCharacterIds: visibleCharacterIds,
+      conversationId: conversationId,
+      conversationNameSnapshot: conversationNameSnapshot,
+      allCharacters: allCharacters,
+    );
+    await distillMessage(
+      message: message,
+      conversationId: conversationId,
+      conversationNameSnapshot: conversationNameSnapshot,
+      allCharacters: allCharacters,
+      isGroupChat: isGroupChat,
+      userProfile: userProfile,
+    );
+  }
+
+  /// 完成不依赖网络的记忆、遗忘和关系写入。
+  ///
+  /// 消息生产入口必须等待此方法；只有 [distillMessage] 可以后台执行。
+  Future<void> observeDeterministic({
+    required Message message,
+    required List<String> visibleCharacterIds,
+    required String conversationId,
+    required String conversationNameSnapshot,
+    required List<AICharacter> allCharacters,
+  }) async {
     if (message.senderType != 'user' && message.senderType != 'ai') return;
 
     // 确保 visibleToCharacterIds 已设置。
@@ -225,6 +252,27 @@ class ObservationEntry {
               .catchError((_) => false),
       ]);
     }
+  }
+
+  /// 执行可能访问 LLM 的永久记忆提炼；失败由持久化重试队列接管。
+  Future<void> distillMessage({
+    required Message message,
+    required String conversationId,
+    required String conversationNameSnapshot,
+    required List<AICharacter> allCharacters,
+    required bool isGroupChat,
+    UserProfile? userProfile,
+  }) async {
+    if (message.senderType != 'user' && message.senderType != 'ai') return;
+    if (!MemoryControls(db).automaticMemoryEnabled) return;
+
+    final triggerResult = _runTriggers(
+      message,
+      allowExplicitCommands: message.senderType == 'user',
+    );
+    if (triggerResult.forceForget) return;
+
+    final observers = message.visibleToCharacterIds;
 
     if (triggerResult.isEmpty) return;
     if (observers.isEmpty) return;

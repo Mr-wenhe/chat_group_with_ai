@@ -183,7 +183,9 @@ class MemoryMigrator {
           sourceMessageIds: const [],
           participantIds: const [],
           occurredAt: cm.lastUpdatedAt,
-        ))) created++;
+        ))) {
+          created++;
+        }
       }
       for (final note in cm.relationshipNotes) {
         if (await _putPermanentMemory(PermanentMemory(
@@ -200,7 +202,9 @@ class MemoryMigrator {
           sourceMessageIds: const [],
           participantIds: const [],
           occurredAt: cm.lastUpdatedAt,
-        ))) created++;
+        ))) {
+          created++;
+        }
       }
       for (final growth in cm.personaGrowth) {
         if (await _putPermanentMemory(PermanentMemory(
@@ -217,7 +221,9 @@ class MemoryMigrator {
           sourceMessageIds: const [],
           participantIds: const [],
           occurredAt: cm.lastUpdatedAt,
-        ))) created++;
+        ))) {
+          created++;
+        }
       }
     }
     return created;

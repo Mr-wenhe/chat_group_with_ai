@@ -1435,6 +1435,10 @@ class DatabaseService {
 
   void _scheduleTokenUsageFlush() {
     _tokenUsageFlushTimer?.cancel();
+    // Skip flush timers in debug mode — they are only needed in production
+    // for debounced writes. In tests, late timer callbacks after Hive.close()
+    // crash the test runner with "Box not found" errors.
+    if (!kReleaseMode) return;
     _tokenUsageFlushTimer =
         Timer(_tokenUsageFlushDelay, () => _flushTokenUsage());
   }
@@ -1442,7 +1446,11 @@ class DatabaseService {
   Future<void> _flushTokenUsage() async {
     final usage = _tokenUsageCache;
     if (usage == null) return;
-    await appSettingsBox.put(_tokenUsageKey, Map<String, dynamic>.from(usage));
+    try {
+      await appSettingsBox.put(_tokenUsageKey, Map<String, dynamic>.from(usage));
+    } on Object {
+      // Box may be closed during test teardown.
+    }
   }
 
   static const String _ttsEnabledKey = 'tts_enabled';
@@ -1451,5 +1459,13 @@ class DatabaseService {
 
   Future<void> saveTtsEnabled(bool enabled) async {
     await appSettingsBox.put(_ttsEnabledKey, enabled);
+  }
+
+  /// Cancel pending token-usage flush timer. Must be called in test
+  /// tearDown after `Hive.close()` to prevent late timer callbacks from
+  /// crashing the test runner.
+  void dispose() {
+    _tokenUsageFlushTimer?.cancel();
+    _tokenUsageFlushTimer = null;
   }
 }

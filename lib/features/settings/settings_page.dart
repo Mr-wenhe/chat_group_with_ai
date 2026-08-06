@@ -11,6 +11,7 @@ import 'package:chat_group/features/settings/ai_processing_directory_policy.dart
 import 'package:chat_group/features/settings/api_config_form_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/settings/backup_restore_page.dart';
+import 'package:chat_group/features/settings/user_profile_page.dart';
 import 'package:chat_group/features/settings/ai_governance_page.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:chat_group/features/search/global_search_page.dart';
@@ -374,6 +375,34 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               style: TextStyle(fontSize: 13, color: Color(0xFF888888))),
           const SizedBox(height: 12),
           const _WeComConfigCard(),
+          const SizedBox(height: 28),
+          _SectionHeader(
+            title: '我的资料',
+            cs: cs,
+          ),
+          const SizedBox(height: 4),
+          Text('编辑你的全球显示名和人物信息卡',
+              style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
+          const SizedBox(height: 12),
+          AppCard(
+            cs: cs,
+            margin: EdgeInsets.zero,
+            children: [
+              _SettingTile(
+                cs: cs,
+                icon: Icons.person_outline_rounded,
+                iconColor: cs.primary,
+                title: _buildProfileTitle(cs),
+                subtitle: _buildProfileSubtitle(cs),
+                onTap: () async {
+                  await Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => const UserProfilePage()),
+                  );
+                  if (mounted) setState(() {});
+                },
+              ),
+            ],
+          ),
           const SizedBox(height: 28),
           _SectionHeader(title: '外观', cs: cs),
           const SizedBox(height: 12),
@@ -1150,6 +1179,45 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
           icon: Icons.check_circle_outline_rounded);
     } else {
       await showIncompleteDeletionDialog(context, result);
+    }
+  }
+
+  String _buildProfileTitle(ColorScheme cs) {
+    try {
+      final name = ref
+          .read(databaseServiceProvider)
+          .userProfileBox
+          .get('me')
+          ?.displayName
+          .trim();
+      if (name != null && name.isNotEmpty) return name;
+    } on Object {
+      // Box not yet opened in test environments.
+    }
+    return '我';
+  }
+
+  String _buildProfileSubtitle(ColorScheme cs) {
+    try {
+      final profile = ref
+          .read(databaseServiceProvider)
+          .userProfileBox
+          .get('me');
+      if (profile == null) return '尚未设置人物信息卡';
+      final parts = <String>[];
+      if (profile.preferredAddress.trim().isNotEmpty) {
+        parts.add('称呼：${profile.preferredAddress.trim()}');
+      }
+      if (profile.bio.trim().isNotEmpty) {
+        parts.add(profile.bio.trim());
+      }
+      if (profile.interests.isNotEmpty) {
+        parts.add('兴趣：${profile.interests.join('、')}');
+      }
+      if (parts.isEmpty) return '点击编辑你的资料';
+      return parts.join(' · ');
+    } on Object {
+      return '尚未设置人物信息卡';
     }
   }
 

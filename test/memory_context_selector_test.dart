@@ -310,6 +310,50 @@ Future<void> main() async {
     });
   });
 
+  // ─── User profile refresh ───────────────────────────────────────────────────
+
+  group('User profile refresh', () {
+    test('updated profile replaces old data in selector output', () async {
+      final db = DatabaseService();
+      await db.userProfileBox.put('me', UserProfile(
+        displayName: '旧名',
+        preferredAddress: '',
+        avatar: '',
+        bio: '旧简介',
+      ));
+
+      final selector = MemoryContextSelector(db);
+      var result = await selector.select(
+        observerCharacterId: 'char-a',
+        participantCharacterIds: const [],
+        currentTargetId: 'user',
+      );
+      expect(result, contains('旧名'));
+      expect(result, contains('旧简介'));
+
+      // 更新人物卡。
+      await db.userProfileBox.put('me', UserProfile(
+        displayName: '新名',
+        preferredAddress: '称呼',
+        avatar: '',
+        bio: '新简介',
+      ));
+
+      // 重新创建 selector（复用 db 实例即可，数据来自 Hive）。
+      final selector2 = MemoryContextSelector(db);
+      result = await selector2.select(
+        observerCharacterId: 'char-a',
+        participantCharacterIds: const [],
+        currentTargetId: 'user',
+      );
+      expect(result, contains('新名'));
+      expect(result, contains('称呼'));
+      expect(result, contains('新简介'));
+      expect(result, isNot(contains('旧名')));
+      expect(result, isNot(contains('旧简介')));
+    });
+  });
+
   // ─── Relationship selection ──────────────────────────────────────────────────
 
   group('Relationship selection', () {

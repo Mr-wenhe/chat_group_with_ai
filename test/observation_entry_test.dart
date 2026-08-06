@@ -81,9 +81,42 @@ void main() {
       ids.map((id) => makeChar(id)).toList();
 
   group('Stage 07: observer scope and message visibility', () {
+    test('deterministic boundary persists local state before distillation',
+        () async {
+      final chars = charList(['a1']);
+      final message = makeMsg(
+        senderType: 'user',
+        content: '永久记住我喜欢红茶',
+      );
+      final entry = ObservationEntry(db: db);
+
+      await entry.observeDeterministic(
+        message: message,
+        visibleCharacterIds: ['a1'],
+        conversationId: 'g1',
+        conversationNameSnapshot: 'TestGroup',
+        allCharacters: chars,
+      );
+
+      expect(db.permanentMemoryBox.values.single.pinned, isTrue);
+      expect(db.relationshipEventBox.values.single.sourceCharacterId, 'a1');
+      expect(entry.loadRetryQueue(), isEmpty);
+
+      await entry.distillMessage(
+        message: message,
+        conversationId: 'g1',
+        conversationNameSnapshot: 'TestGroup',
+        allCharacters: chars,
+        isGroupChat: true,
+      );
+      expect(entry.loadRetryQueue(), hasLength(1));
+    });
+
     test('group chat message visible to all active members', () async {
       final chars = charList(['a1', 'a2', 'a3']);
-      for (final c in chars) await db.aiCharacterBox.put(c.id, c);
+      for (final c in chars) {
+        await db.aiCharacterBox.put(c.id, c);
+      }
       await db.chatGroupBox.put(
           'g1',
           ChatGroup(
@@ -110,7 +143,9 @@ void main() {
 
     test('DM message only visible to target AI', () async {
       final chars = charList(['a1']);
-      for (final c in chars) await db.aiCharacterBox.put(c.id, c);
+      for (final c in chars) {
+        await db.aiCharacterBox.put(c.id, c);
+      }
 
       final message = makeMsg(
           senderType: 'user',
@@ -890,7 +925,9 @@ void main() {
 
     test('retry queue abandons after max attempts', () async {
       final chars = charList(['a1']);
-      for (final c in chars) await db.aiCharacterBox.put(c.id, c);
+      for (final c in chars) {
+        await db.aiCharacterBox.put(c.id, c);
+      }
 
       await db.appSettingsBox.put('memory_retry_queue_v1', [
         {
@@ -1693,7 +1730,9 @@ void main() {
   group('full flow verification', () {
     test('explicit memory and local relationship work without API', () async {
       final chars = charList(['a1']);
-      for (final c in chars) await db.aiCharacterBox.put(c.id, c);
+      for (final c in chars) {
+        await db.aiCharacterBox.put(c.id, c);
+      }
 
       // Explicit memory without API.
       final message = makeMsg(senderType: 'user', content: '记住我叫小明');

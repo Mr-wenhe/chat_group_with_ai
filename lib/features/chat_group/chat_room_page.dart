@@ -1420,9 +1420,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         setState(() => _webSearchState = state);
         if (!state.status.isTerminal) return;
         _searchBannerDismissTimer = Timer(const Duration(seconds: 3), () {
-          if (_canTouchUi)
+          if (_canTouchUi) {
             setState(() =>
                 _webSearchState = const SearchRunState(SearchRunStatus.idle));
+          }
         });
       },
     );
@@ -2857,6 +2858,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       visibleCharacterIds: _visibleCharacterIdsForMessage(),
       userSentiment: userSentiment,
     );
+    _relationshipStates = _loader.stableGlobalRelationships();
   }
 
   /// 解析角色可用的 API 配置；未绑定或没有凭据时返回 null（视为不可回复）。
@@ -3394,11 +3396,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (message.senderType == 'ai') {
       await _markCurrentConversationRead(throughMessage: message);
     }
-    // 触发统一永久记忆观察入口（不阻塞聊天流程）。
+    // 本地记忆/遗忘/关系必须在返回前落库；只有 LLM 提炼后台执行。
+    await _observationEntry.observeDeterministic(
+      message: message,
+      visibleCharacterIds: visibleIds,
+      conversationId: widget.groupId,
+      conversationNameSnapshot:
+          _isDirectChat ? _directChatName() : (_group?.name ?? ''),
+      allCharacters: _allGroupCharacters,
+    );
+    _relationshipStates = _loader.stableGlobalRelationships();
     unawaited(_observationEntry
-        .observeMessage(
+        .distillMessage(
           message: message,
-          visibleCharacterIds: visibleIds,
           conversationId: widget.groupId,
           conversationNameSnapshot:
               _isDirectChat ? _directChatName() : (_group?.name ?? ''),

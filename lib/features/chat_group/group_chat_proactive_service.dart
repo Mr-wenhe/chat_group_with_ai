@@ -150,11 +150,17 @@ class GroupChatProactiveService {
     // 记用：统一由数据库按角色串行写回，避免并发入口丢失增量。
     await db.recordCharacterReplyUsage(candidate.character.id);
 
-    // 触发统一永久记忆观察入口。
-    unawaited(ObservationEntry(db: db)
-        .observeMessage(
+    final observation = ObservationEntry(db: db);
+    await observation.observeDeterministic(
+      message: message,
+      visibleCharacterIds: message.visibleToCharacterIds,
+      conversationId: candidate.group.id,
+      conversationNameSnapshot: candidate.group.name,
+      allCharacters: allCharacters,
+    );
+    unawaited(observation
+        .distillMessage(
           message: message,
-          visibleCharacterIds: message.visibleToCharacterIds,
           conversationId: candidate.group.id,
           conversationNameSnapshot: candidate.group.name,
           allCharacters: allCharacters,
@@ -162,15 +168,11 @@ class GroupChatProactiveService {
           userProfile: db.userProfileBox.get('me'),
         )
         .catchError((_) {}));
-    unawaited(
-      RelationshipEventService(db)
-          .observeProactiveMessage(
-            message: message,
-            conversationId: candidate.group.id,
-            conversationNameSnapshot: candidate.group.name,
-            allCharacters: allCharacters,
-          )
-          .catchError((_) {}),
+    await RelationshipEventService(db).observeProactiveMessage(
+      message: message,
+      conversationId: candidate.group.id,
+      conversationNameSnapshot: candidate.group.name,
+      allCharacters: allCharacters,
     );
 
     return GroupChatProactiveResult(

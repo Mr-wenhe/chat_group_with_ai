@@ -182,11 +182,17 @@ class DirectChatProactiveService {
     // 记用：统一由数据库按角色串行写回，避免并发入口丢失增量。
     await db.recordCharacterReplyUsage(candidate.character.id);
 
-    // 触发统一永久记忆观察入口。
-    unawaited(ObservationEntry(db: db)
-        .observeMessage(
+    final observation = ObservationEntry(db: db);
+    await observation.observeDeterministic(
+      message: message,
+      visibleCharacterIds: message.visibleToCharacterIds,
+      conversationId: conversationId,
+      conversationNameSnapshot: '私聊',
+      allCharacters: characters,
+    );
+    unawaited(observation
+        .distillMessage(
           message: message,
-          visibleCharacterIds: message.visibleToCharacterIds,
           conversationId: conversationId,
           conversationNameSnapshot: '私聊',
           allCharacters: characters,
@@ -194,15 +200,11 @@ class DirectChatProactiveService {
           userProfile: db.userProfileBox.get('me'),
         )
         .catchError((_) {}));
-    unawaited(
-      RelationshipEventService(db)
-          .observeProactiveMessage(
-            message: message,
-            conversationId: conversationId,
-            conversationNameSnapshot: '私聊',
-            allCharacters: characters,
-          )
-          .catchError((_) {}),
+    await RelationshipEventService(db).observeProactiveMessage(
+      message: message,
+      conversationId: conversationId,
+      conversationNameSnapshot: '私聊',
+      allCharacters: characters,
     );
 
     return DirectChatProactiveResult(

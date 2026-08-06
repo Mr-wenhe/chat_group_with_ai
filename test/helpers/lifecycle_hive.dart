@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
@@ -68,7 +69,9 @@ Future<Directory> openLifecycleHive() async {
   return directory;
 }
 
-Future<void> closeLifecycleHive(Directory directory) async {
+Future<void> closeLifecycleHive(Directory directory,
+    [DatabaseService? db]) async {
+  db?.dispose();
   await Hive.close();
   CredentialRepository.clearCache();
   if (await directory.exists()) await directory.delete(recursive: true);

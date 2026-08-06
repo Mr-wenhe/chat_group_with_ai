@@ -63,6 +63,13 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 | `/dm/{characterId}` | `ChatRoomPage` | One-on-one private chat using `dm:{characterId}` as message groupId |
 | `/settings` | `SettingsPage` | API configs, data management |
 
+### 死循环防护规则
+
+- **Flutter widget 层禁止无限循环**：`initState` 中必须使用同步加载（如 `_loadExistingProfileSync`），禁止使用 `WidgetsBinding.instance.addPostFrameCallback` 触发 `setState`；任何 `addPostFrameCallback` → `setState` → rebuild → 再次 callback 的链条均视为禁止。
+- **测试环境防死循环**：在 `setUpAll` / `setUp` 中打开 Hive box 后，每个测试用例的 `pumpWidget` 后最多 pump 一次动画帧；如果发现测试在 CI 中 hang，记录问题文件路径并退出该测试用例，不要无限重试。
+- **CI 超时硬限制**：单测试用例执行超过 30 秒视为疑似死循环，自动终止并报告失败。
+- **AppToast timer 隔离**：`AppToast.show()` 内部使用 3 秒 Timer，Timer 的 dismiss 回调触发 `OverlayEntry.remove()` 在 Flutter test frame pump 中持续产生 frame，导致 `await` 永不 resolve。测试中必须使用 `tester.runAsync()` 包裹所有 Hive 写操作，禁止在测试中直接调用含 `AppToast.show()` 的生产方法。
+
 ### Important Caveats
 
 - `AICharacter` tracks hourly reply counts via `lastReplyTimestamp` and `hourlyReplyCount` directly on the model — these are mutated in `_isEligibleToReply` without re-saving to DB each time, only the limit check is enforced during a round.
