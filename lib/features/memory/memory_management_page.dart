@@ -88,7 +88,7 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
                         _memoryCard(filtered[index], charactersById, supersededCount),
                   ),
           ),
-          _migrationDiagnostic(_characters, _db),
+          _migrationDiagnostic(_characters),
         ],
       ),
     );
@@ -353,7 +353,7 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
     if (mounted) setState(() {});
   }
 
-  Widget _migrationDiagnostic(List<AICharacter> characters, DatabaseService db) {
+  Widget _migrationDiagnostic(List<AICharacter> characters) {
     final legacyMemories = _db.permanentMemoryBox.values
         .where((m) => m.originType == MemoryOriginType.legacyMigration)
         .length;

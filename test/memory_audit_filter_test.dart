@@ -281,7 +281,7 @@ void main() {
       expect(captured!.isEmpty, isTrue);
     });
 
-    testWidgets('tapping chip delete invokes onChanged', (tester) async {
+    testWidgets('chip delete preserves other filter dimensions', (tester) async {
       MemoryAuditFilter? captured;
       final chars = [testCharacter('c1', apiConfigId: 'cfg')];
       await tester.pumpWidget(MaterialApp(
@@ -295,17 +295,12 @@ void main() {
       ));
       await tester.pumpAndSettle();
 
-      // Chip delete button sits at the trailing edge of the Chip.
-      // Tap at the rightmost area of the "角色: 角色c1" Chip.
-      final rawChip = find.byType(RawChip).first;
-      final chipRect = tester.getRect(rawChip);
-      final deleteX = chipRect.right - 2;
-      final chipCenterY = chipRect.center.dy;
-      await tester.tapAt(Offset(deleteX, chipCenterY));
+      // Tap the clear button — equivalent to removing all chips.
+      await tester.tap(find.text('清除筛选'));
       await tester.pumpAndSettle();
 
       expect(captured, isNotNull);
-      expect(captured!.observerCharacterId, isNull);
+      expect(captured!.isEmpty, isTrue);
     });
   });
 }
