@@ -7,12 +7,14 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
 import 'package:chat_group/features/memory/observation_entry.dart';
 import 'package:chat_group/features/memory/memory_controls.dart';
+import 'package:chat_group/features/memory/relationship_controls.dart';
 import 'package:chat_group/features/memory/relationship_event_service.dart';
 import 'package:chat_group/features/chat_group/user_message_sentiment.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1468,6 +1470,184 @@ void main() {
       expect(restored.lastEventId, event.id);
       expect(restored.affinity, event.affinityAfter);
       expect(restored.stage, event.stageAfter);
+    });
+
+    test('automatic replay preserves notes from a failed manual snapshot write',
+        () async {
+      await db.aiCharacterBox.put('a', makeChar('a'));
+      await db.aiCharacterBox.put('b', makeChar('b'));
+      final initial = RelationshipState.global(
+        sourceCharacterId: 'a',
+        targetType: RelationshipTargetType.ai,
+        targetId: 'b',
+        notes: '旧备注',
+      );
+      await db.relationshipStateBox.put(initial.id, initial);
+
+      final controls = RelationshipControls(db)..testFailStateWriteOnce = true;
+      await expectLater(
+        controls.applyManualUpdate(
+          relationship: initial,
+          affinity: 42,
+          trust: 12,
+          friction: 4,
+          familiarity: 30,
+          mood: RelationshipMood.warm,
+          stage: RelationshipStage.friend,
+          notes: '人工备注',
+        ),
+        throwsA(isA<Object>()),
+      );
+      expect(db.relationshipEventBox.values.single.notesAfter, '人工备注');
+      expect(db.relationshipStateBox.get(initial.id)!.notes, '旧备注');
+
+      final message = makeMsg(
+        senderType: 'ai',
+        senderId: 'a',
+        content: '支持B',
+        groupId: 'g1',
+      );
+      message.visibleToCharacterIds = ['a', 'b'];
+      await RelationshipEventService(db).observeAndApply(
+        sourceCharacterId: 'a',
+        targetId: 'b',
+        targetType: RelationshipTargetType.ai,
+        message: message,
+        conversationId: 'g1',
+        conversationNameSnapshot: 'TestGroup',
+        allCharacters: charList(['a', 'b']),
+      );
+
+      final restored = db.relationshipStateBox.get(initial.id)!;
+      expect(restored.notes, '人工备注');
+      expect(restored.revision, 2);
+    });
+
+    test('old automatic replay preserves current notes', () async {
+      await db.aiCharacterBox.put('a', makeChar('a'));
+      await db.aiCharacterBox.put('b', makeChar('b'));
+      final message = makeMsg(
+        senderType: 'ai',
+        senderId: 'a',
+        content: '支持B',
+        groupId: 'g1',
+      )..visibleToCharacterIds = ['a', 'b'];
+      final initial = RelationshipState.global(
+        sourceCharacterId: 'a',
+        targetType: RelationshipTargetType.ai,
+        targetId: 'b',
+        affinity: 12,
+        trust: 15,
+        notes: '保留的人工备注',
+        lastInteractionAt: DateTime(2026, 8, 1, 12),
+      );
+      await db.relationshipStateBox.put(initial.id, initial);
+      final event = RelationshipEvent(
+        id: 're:a:ai:b:${message.id}',
+        sourceCharacterId: 'a',
+        targetType: RelationshipTargetType.ai,
+        targetId: 'b',
+        reason: '旧自动事件',
+        affinityBefore: initial.affinity,
+        affinityAfter: 20,
+        trustBefore: initial.trust,
+        trustAfter: 25,
+        frictionBefore: initial.friction,
+        frictionAfter: initial.friction,
+        familiarityBefore: initial.familiarity,
+        familiarityAfter: initial.familiarity + 2,
+        moodBefore: initial.recentMood,
+        moodAfter: RelationshipMood.warm,
+        stageBefore: initial.stage,
+        stageAfter: initial.stage,
+        originConversationId: 'g1',
+        originNameSnapshot: 'TestGroup',
+        sourceMessageIds: [message.id],
+        revision: 1,
+        occurredAt: DateTime(2026, 8, 2, 12),
+        confidence: 0.8,
+        createdBy: RelationshipEventCreator.automatic,
+      );
+      await db.relationshipEventBox.put(event.id, event);
+
+      final repaired = await RelationshipEventService(db).observeAndApply(
+        sourceCharacterId: 'a',
+        targetId: 'b',
+        targetType: RelationshipTargetType.ai,
+        message: message,
+        conversationId: 'g1',
+        conversationNameSnapshot: 'TestGroup',
+        allCharacters: charList(['a', 'b']),
+      );
+
+      final restored = db.relationshipStateBox.get(initial.id)!;
+      expect(repaired, isTrue);
+      expect(event.notesAfter, isEmpty);
+      expect(restored.notes, '保留的人工备注');
+      expect(restored.revision, event.revision);
+    });
+
+    test('manual replay preserves the existing interaction time', () async {
+      await db.aiCharacterBox.put('a', makeChar('a'));
+      await db.aiCharacterBox.put('b', makeChar('b'));
+      final message = makeMsg(
+        senderType: 'ai',
+        senderId: 'a',
+        content: '支持B',
+        groupId: 'g1',
+      )..visibleToCharacterIds = ['a', 'b'];
+      final interactionAt = DateTime(2026, 8, 1, 12);
+      final initial = RelationshipState.global(
+        sourceCharacterId: 'a',
+        targetType: RelationshipTargetType.ai,
+        targetId: 'b',
+        notes: '旧备注',
+        lastInteractionAt: interactionAt,
+      );
+      await db.relationshipStateBox.put(initial.id, initial);
+      final event = RelationshipEvent(
+        id: 're:a:ai:b:${message.id}',
+        sourceCharacterId: 'a',
+        targetType: RelationshipTargetType.ai,
+        targetId: 'b',
+        reason: '用户手动编辑关系',
+        affinityBefore: initial.affinity,
+        affinityAfter: 40,
+        trustBefore: initial.trust,
+        trustAfter: 40,
+        frictionBefore: initial.friction,
+        frictionAfter: initial.friction,
+        familiarityBefore: initial.familiarity,
+        familiarityAfter: 40,
+        moodBefore: initial.recentMood,
+        moodAfter: RelationshipMood.warm,
+        stageBefore: initial.stage,
+        stageAfter: RelationshipStage.friend,
+        originNameSnapshot: '人工编辑',
+        sourceMessageIds: const [],
+        notesBefore: initial.notes,
+        notesAfter: '新的人工备注',
+        revision: 1,
+        occurredAt: DateTime(2026, 8, 10, 12),
+        confidence: 1.0,
+        createdBy: RelationshipEventCreator.manual,
+      );
+      await db.relationshipEventBox.put(event.id, event);
+
+      final repaired = await RelationshipEventService(db).observeAndApply(
+        sourceCharacterId: 'a',
+        targetId: 'b',
+        targetType: RelationshipTargetType.ai,
+        message: message,
+        conversationId: 'g1',
+        conversationNameSnapshot: 'TestGroup',
+        allCharacters: charList(['a', 'b']),
+      );
+
+      final restored = db.relationshipStateBox.get(initial.id)!;
+      expect(repaired, isTrue);
+      expect(restored.notes, event.notesAfter);
+      expect(restored.lastInteractionAt, interactionAt);
     });
 
     test('next event projects pending earlier events before applying itself',

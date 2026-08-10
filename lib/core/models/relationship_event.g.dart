@@ -42,13 +42,15 @@ class RelationshipEventAdapter extends TypeAdapter<RelationshipEvent> {
       confidence: fields[22] as double,
       createdBy: fields[23] as RelationshipEventCreator,
       createdAt: fields[24] as DateTime?,
+      notesBefore: fields[25] == null ? '' : fields[25] as String,
+      notesAfter: fields[26] == null ? '' : fields[26] as String,
     );
   }
 
   @override
   void write(BinaryWriter writer, RelationshipEvent obj) {
     writer
-      ..writeByte(25)
+      ..writeByte(27)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -98,7 +100,11 @@ class RelationshipEventAdapter extends TypeAdapter<RelationshipEvent> {
       ..writeByte(23)
       ..write(obj.createdBy)
       ..writeByte(24)
-      ..write(obj.createdAt);
+      ..write(obj.createdAt)
+      ..writeByte(25)
+      ..write(obj.notesBefore)
+      ..writeByte(26)
+      ..write(obj.notesAfter);
   }
 
   @override

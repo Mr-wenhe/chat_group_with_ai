@@ -8,6 +8,7 @@ import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/features/chat_group/user_message_sentiment.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/memory/memory_controls.dart';
+import 'package:chat_group/features/memory/relationship_direction_lock.dart';
 
 /// Persists the direct relation and all visible bystander projections.
 ///
@@ -107,8 +108,6 @@ class _AfterSnapshot {
 /// 2. 幂等更新 RelationshipState 当前快照（绝对 After 值，不是 delta）
 /// 3. 阶段防跳变和 romantic 语义约束
 class RelationshipEventService {
-  static final Map<String, Future<void>> _locks = {};
-
   final DatabaseService db;
 
   RelationshipEventService(this.db);
@@ -214,27 +213,20 @@ class RelationshipEventService {
       targetType,
       targetId,
     );
-    final lockKey = '${identityHashCode(db)}:$stableId';
-    final previous = _locks[lockKey];
-    final gate = Completer<void>();
-    _locks[lockKey] = gate.future;
-    try {
-      if (previous != null) await previous;
-      return await _observeAndApplyLocked(
-        sourceCharacterId: sourceCharacterId,
-        targetId: targetId,
-        targetType: targetType,
-        message: message,
-        conversationId: conversationId,
-        conversationNameSnapshot: conversationNameSnapshot,
-        allCharacters: allCharacters,
-        userSentiment: userSentiment,
-        isBystander: isBystander,
-      );
-    } finally {
-      gate.complete();
-      if (identical(_locks[lockKey], gate.future)) _locks.remove(lockKey);
-    }
+    return RelationshipDirectionLock.run(
+        db: db,
+        relationshipId: stableId,
+        action: () => _observeAndApplyLocked(
+              sourceCharacterId: sourceCharacterId,
+              targetId: targetId,
+              targetType: targetType,
+              message: message,
+              conversationId: conversationId,
+              conversationNameSnapshot: conversationNameSnapshot,
+              allCharacters: allCharacters,
+              userSentiment: userSentiment,
+              isBystander: isBystander,
+            ));
   }
 
   Future<bool> _observeAndApplyLocked({
@@ -356,6 +348,8 @@ class RelationshipEventService {
       originConversationId: conversationId,
       originNameSnapshot: conversationNameSnapshot,
       sourceMessageIds: [message.id],
+      notesBefore: relation.notes,
+      notesAfter: relation.notes,
       revision: relation.revision + 1,
       occurredAt: message.timestamp,
       confidence: delta.confidence,
@@ -394,6 +388,9 @@ class RelationshipEventService {
     RelationshipEvent event,
   ) async {
     final now = DateTime.now();
+    final interactionAt = event.createdBy == RelationshipEventCreator.manual
+        ? relation.lastInteractionAt
+        : event.occurredAt;
     await db.relationshipStateBox.put(
       relation.id,
       RelationshipState(
@@ -407,14 +404,27 @@ class RelationshipEventService {
         friction: event.frictionAfter,
         familiarity: event.familiarityAfter,
         recentMood: event.moodAfter,
-        notes: relation.notes,
-        lastInteractionAt: event.occurredAt,
+        notes: _notesAfterReplay(relation, event),
+        lastInteractionAt: interactionAt,
         stage: event.stageAfter,
         revision: event.revision,
         lastEventId: event.id,
         updatedAt: now,
       ),
     );
+  }
+
+  String _notesAfterReplay(
+    RelationshipState relation,
+    RelationshipEvent event,
+  ) {
+    // Automatic events created before notes auditing deserialize with an empty
+    // After value and must not erase a newer manual note on the snapshot.
+    if (event.createdBy == RelationshipEventCreator.automatic &&
+        event.notesAfter.isEmpty) {
+      return relation.notes;
+    }
+    return event.notesAfter;
   }
 
   // ── Delta 计算 ───────────────────────────────────────────────────

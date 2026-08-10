@@ -14,6 +14,7 @@ import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/settings/backup_restore_page.dart';
 import 'package:chat_group/features/settings/user_profile_page.dart';
 import 'package:chat_group/features/settings/ai_governance_page.dart';
+import 'package:chat_group/features/memory/relationship_audit_page.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:chat_group/features/search/global_search_page.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
@@ -343,7 +344,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   builder: (_) => const GlobalSearchPage(),
                 )),
               ),
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.document_scanner_outlined,
@@ -353,7 +355,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                     '${DocumentUnderstandingService.cachedDocumentCount} 个本地文档 · 可随时清除并按需重建',
                 onTap: _showDocumentCache,
               ),
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.policy_outlined,
@@ -445,7 +448,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   },
                 ),
               ),
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.volume_up_outlined,
@@ -485,7 +489,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onTap: kIsWeb ? null : _chooseAiProcessingDir,
               ),
               if (!kIsWeb) ...[
-                Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+                Divider(
+                    height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
                 _SettingTile(
                   cs: cs,
                   icon: Icons.restore_rounded,
@@ -515,7 +520,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onTap: () => Navigator.of(context).push(
                     MaterialPageRoute(builder: (_) => const ExportPage())),
               ),
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.backup_rounded,
@@ -524,7 +530,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 subtitle: '版本化备份、导入预览、冲突处理与失败回滚（不含 API Key）',
                 onTap: _openBackupRestore,
               ),
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.memory_rounded,
@@ -532,10 +539,26 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 title: '永久记忆审计',
                 subtitle: '查看和管理所有 AI 的全局永久记忆',
                 onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(builder: (_) => const MemoryManagementPage()),
+                  MaterialPageRoute(
+                      builder: (_) => const MemoryManagementPage()),
                 ),
               ),
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              _SettingTile(
+                cs: cs,
+                icon: Icons.account_tree_outlined,
+                iconColor: cs.primary,
+                title: '关系审计',
+                subtitle: '查看全局方向关系、事件时间线并管理人工状态',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const RelationshipAuditPage(),
+                  ),
+                ),
+              ),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.info_outline_rounded,
@@ -544,7 +567,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 subtitle: '查看应用信息与开源许可',
                 onTap: () {},
               ),
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.cleaning_services_rounded,
@@ -555,7 +579,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onTap: _isCleaningMedia ? null : _cleanupOrphanMedia,
               ),
               if (_hasPendingDeletion) ...[
-                Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+                Divider(
+                    height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
                 _SettingTile(
                   cs: cs,
                   icon: Icons.sync_problem_rounded,
@@ -565,7 +590,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                   onTap: _retryPendingDeletion,
                 ),
               ],
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.forum_outlined,
@@ -575,7 +601,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onTap: () =>
                     _confirmClearData(context, DataClearScope.chatContent),
               ),
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.delete_sweep_outlined,
@@ -585,7 +612,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 onTap: () =>
                     _confirmClearData(context, DataClearScope.userContent),
               ),
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               _SettingTile(
                 cs: cs,
                 icon: Icons.restart_alt_rounded,
@@ -877,7 +905,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               ),
             ),
             if (byGroup.isNotEmpty) ...[
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                 child: Text('各群消耗',
@@ -935,7 +964,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
               const SizedBox(height: 4),
             ],
             if (byChar.isNotEmpty) ...[
-              Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
               Padding(
                 padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
                 child: Text('各角色消耗',
@@ -1211,10 +1241,8 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
   String _buildProfileSubtitle(ColorScheme cs) {
     try {
-      final profile = ref
-          .read(databaseServiceProvider)
-          .userProfileBox
-          .get('me');
+      final profile =
+          ref.read(databaseServiceProvider).userProfileBox.get('me');
       if (profile == null) return '尚未设置人物信息卡';
       final parts = <String>[];
       if (profile.preferredAddress.trim().isNotEmpty) {

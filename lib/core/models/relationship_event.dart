@@ -114,6 +114,14 @@ class RelationshipEvent extends HiveObject {
   @HiveField(24)
   final DateTime createdAt;
 
+  /// Manual edits also audit the notes field. Older events omit these fields
+  /// and are read as empty strings for backward compatibility.
+  @HiveField(25, defaultValue: '')
+  final String notesBefore;
+
+  @HiveField(26, defaultValue: '')
+  final String notesAfter;
+
   RelationshipEvent({
     String? id,
     required this.sourceCharacterId,
@@ -140,6 +148,8 @@ class RelationshipEvent extends HiveObject {
     this.confidence = 1.0,
     required this.createdBy,
     DateTime? createdAt,
+    this.notesBefore = '',
+    this.notesAfter = '',
   })  : id = id ?? const Uuid().v4(),
         sourceMessageIds = sourceMessageIds ?? const [],
         occurredAt = occurredAt ?? DateTime.now(),

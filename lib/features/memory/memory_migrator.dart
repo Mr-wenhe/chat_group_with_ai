@@ -122,7 +122,8 @@ class MemoryMigrator {
     }
 
     final candidates = groups
-        .where((g) => g.ownerName.trim().isNotEmpty && g.ownerName.trim() != '我')
+        .where(
+            (g) => g.ownerName.trim().isNotEmpty && g.ownerName.trim() != '我')
         .map((g) => g.ownerName.trim())
         .toSet()
         .toList();
@@ -142,7 +143,8 @@ class MemoryMigrator {
         return gb.createdAt.compareTo(ga.createdAt);
       });
       displayName = candidates.first;
-      warning = '多个 ownerName 候选(${candidates.join(',')})，已选择 "$displayName"，请在人物卡中确认';
+      warning =
+          '多个 ownerName 候选(${candidates.join(',')})，已选择 "$displayName"，请在人物卡中确认';
     }
 
     final profile = UserProfile(
@@ -153,7 +155,8 @@ class MemoryMigrator {
     );
     await _db.userProfileBox.put('me', profile);
 
-    return _ProfileResult(created: 1, selectedName: displayName, warning: warning);
+    return _ProfileResult(
+        created: 1, selectedName: displayName, warning: warning);
   }
 
   // ---- 2. CharacterMemory -> PermanentMemory ----
@@ -164,8 +167,9 @@ class MemoryMigrator {
 
     int created = 0;
     for (final cm in memories) {
-      final originType =
-          cm.groupId.startsWith('dm:') ? MemoryOriginType.direct : MemoryOriginType.group;
+      final originType = cm.groupId.startsWith('dm:')
+          ? MemoryOriginType.direct
+          : MemoryOriginType.group;
       final originName = await _resolveOriginName(cm.groupId);
 
       for (final fact in cm.facts) {
@@ -315,7 +319,8 @@ class MemoryMigrator {
 
     final grouped = <String, List<RelationshipState>>{};
     for (final rs in oldStates) {
-      final key = '${rs.sourceCharacterId}|${rs.targetType.name}|${rs.targetId}';
+      final key =
+          '${rs.sourceCharacterId}|${rs.targetType.name}|${rs.targetId}';
       grouped.putIfAbsent(key, () => []).add(rs);
     }
 
@@ -415,6 +420,8 @@ class MemoryMigrator {
             trust: rs.trust,
             familiarity: rs.familiarity,
           ),
+          notesBefore: rs.notes,
+          notesAfter: rs.notes,
           originConversationId: rs.groupId,
           originNameSnapshot: await _resolveOriginName(rs.groupId),
           sourceMessageIds: const [],
