@@ -831,6 +831,72 @@ Future<void> main() async {
       expect(result, isNot(contains('北京')));
     });
 
+    test('deleting active memory removes it from prompt; deleting correction '
+        'does not resurrect superseded parent', () async {
+      final db = DatabaseService();
+      await db.aiCharacterBox.put('char-a', AICharacter(
+        id: 'char-a', name: '阿月', avatar: '🌙', age: 25, role: '插画师',
+        personalityTags: const [], systemPrompt: '你是阿月', apiKey: 'k', apiProvider: 'deepseek',
+      ));
+      await db.userProfileBox.put('me', UserProfile(
+        displayName: '用户',
+        preferredAddress: '',
+        avatar: '',
+        bio: '',
+        personality: const [],
+        interests: const [],
+        importantBackground: const [],
+        age: null,
+      ));
+
+      final parent = PermanentMemory(
+        id: 'prompt-parent',
+        observerCharacterId: 'char-a',
+        kind: MemoryKind.fact,
+        content: '旧版事实',
+        subjectIds: const ['user'],
+        status: MemoryStatus.active,
+        importance: 60,
+        originType: MemoryOriginType.group,
+        originNameSnapshot: '群聊',
+      );
+      final correction = PermanentMemory(
+        id: 'prompt-correction',
+        observerCharacterId: 'char-a',
+        kind: MemoryKind.fact,
+        content: '新版事实',
+        subjectIds: const ['user'],
+        status: MemoryStatus.active,
+        importance: 60,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动',
+        supersedesIds: ['prompt-parent'],
+      );
+      await db.permanentMemoryBox.putAll({'prompt-parent': parent, 'prompt-correction': correction});
+
+      final selector = MemoryContextSelector(db);
+
+      // Before delete: prompt contains the correction, not the parent.
+      var result = await selector.select(
+        observerCharacterId: 'char-a',
+        participantCharacterIds: const ['char-a'],
+      );
+      expect(result, contains('新版事实'));
+      expect(result, isNot(contains('旧版事实')));
+
+      // Delete the correction.
+      await db.permanentMemoryBox.delete('prompt-correction');
+
+      // After deleting correction: the parent is no longer superseded by any
+      // active record, so it reappears in the prompt.
+      result = await selector.select(
+        observerCharacterId: 'char-a',
+        participantCharacterIds: const ['char-a'],
+      );
+      expect(result, isNot(contains('新版事实')));
+      expect(result, contains('旧版事实'));
+    });
+
     test('strict budget: first memory cannot exceed budget', () async {
       final db = DatabaseService();
       await db.aiCharacterBox.put('char-a', AICharacter(

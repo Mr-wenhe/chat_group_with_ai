@@ -14,6 +14,16 @@ class SubjectFilter {
   }
 
   SubjectFilter call() => this;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is SubjectFilter &&
+          runtimeType == other.runtimeType &&
+          characterId == other.characterId;
+
+  @override
+  int get hashCode => characterId.hashCode;
 }
 
 class MemoryAuditFilter {
@@ -35,7 +45,17 @@ class MemoryAuditFilter {
     this.pinnedOnly,
   });
 
+  /// Copy with explicit-clear semantics: a parameter value of `clear: true`
+  /// resets that field to its default; `clear: false` keeps the current value;
+  /// a non-null non-boolean parameter sets the new value.
   MemoryAuditFilter copyWith({
+    bool clearObserverCharacterId = false,
+    bool clearSubjectFilter = false,
+    bool clearOriginType = false,
+    bool clearOriginConversationId = false,
+    bool clearStatus = false,
+    bool clearMemoryKind = false,
+    bool clearPinnedOnly = false,
     String? observerCharacterId,
     SubjectFilter? subjectFilter,
     MemoryOriginType? originType,
@@ -45,13 +65,19 @@ class MemoryAuditFilter {
     bool? pinnedOnly,
   }) {
     return MemoryAuditFilter(
-      observerCharacterId: observerCharacterId ?? this.observerCharacterId,
-      subjectFilter: subjectFilter ?? this.subjectFilter,
-      originType: originType ?? this.originType,
-      originConversationId: originConversationId ?? this.originConversationId,
-      status: status ?? this.status,
-      memoryKind: memoryKind ?? this.memoryKind,
-      pinnedOnly: pinnedOnly ?? this.pinnedOnly,
+      observerCharacterId: clearObserverCharacterId
+          ? null
+          : (observerCharacterId ?? this.observerCharacterId),
+      subjectFilter: clearSubjectFilter
+          ? SubjectFilter.all
+          : (subjectFilter ?? this.subjectFilter),
+      originType: clearOriginType ? null : (originType ?? this.originType),
+      originConversationId: clearOriginConversationId
+          ? null
+          : (originConversationId ?? this.originConversationId),
+      status: clearStatus ? null : (status ?? this.status),
+      memoryKind: clearMemoryKind ? null : (memoryKind ?? this.memoryKind),
+      pinnedOnly: clearPinnedOnly ? null : (pinnedOnly ?? this.pinnedOnly),
     );
   }
 
@@ -67,9 +93,17 @@ class MemoryAuditFilter {
   List<PermanentMemory> apply(List<PermanentMemory> memories) {
     if (isEmpty) return List.unmodifiable(memories);
     return memories.where((m) {
-      if (observerCharacterId != null && m.observerCharacterId != observerCharacterId) return false;
-      if (originType != null && m.originType != originType) return false;
-      if (originConversationId != null && m.originConversationId != originConversationId) return false;
+      if (observerCharacterId != null &&
+          m.observerCharacterId != observerCharacterId) {
+        return false;
+      }
+      if (originType != null && m.originType != originType) {
+        return false;
+      }
+      if (originConversationId != null &&
+          m.originConversationId != originConversationId) {
+        return false;
+      }
       if (status != null && m.status != status) return false;
       if (memoryKind != null && m.kind != memoryKind) return false;
       if (pinnedOnly != null) {
@@ -79,11 +113,17 @@ class MemoryAuditFilter {
       if (subjectFilter == SubjectFilter.all) {
         // no subject filtering
       } else if (subjectFilter == SubjectFilter.aboutMe) {
-        if (!m.subjectIds.contains('user')) return false;
+        if (!m.subjectIds.contains('user')) {
+          return false;
+        }
       } else if (subjectFilter == SubjectFilter.selfGrowth) {
-        if (m.subjectIds.isNotEmpty) return false;
+        if (m.kind != MemoryKind.personaGrowth && m.subjectIds.isNotEmpty) {
+          return false;
+        }
       } else {
-        if (!m.subjectIds.contains(subjectFilter.characterId)) return false;
+        if (!m.subjectIds.contains(subjectFilter.characterId)) {
+          return false;
+        }
       }
       return true;
     }).toList(growable: false);

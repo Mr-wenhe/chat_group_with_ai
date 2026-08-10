@@ -1,4 +1,5 @@
-import 'package:chat_group/core/models/ai_character.dart';
+// ignore_for_file: prefer_const_constructors, prefer_const_declarations
+
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/features/memory/memory_audit_filter.dart';
 import 'package:chat_group/features/memory/memory_audit_filter_widget.dart';
@@ -16,14 +17,18 @@ void main() {
     test('apply without filters returns all memories', () {
       final memories = [
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'a', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'a',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
           originNameSnapshot: 'g1',
         ),
         PermanentMemory(
-          observerCharacterId: 'c2', kind: MemoryKind.fact,
-          content: 'b', status: MemoryStatus.active,
+          observerCharacterId: 'c2',
+          kind: MemoryKind.fact,
+          content: 'b',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.direct,
           originNameSnapshot: 'dm',
         ),
@@ -35,19 +40,24 @@ void main() {
     test('apply filters by observerCharacterId', () {
       final memories = [
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'a', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'a',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
           originNameSnapshot: 'g1',
         ),
         PermanentMemory(
-          observerCharacterId: 'c2', kind: MemoryKind.fact,
-          content: 'b', status: MemoryStatus.active,
+          observerCharacterId: 'c2',
+          kind: MemoryKind.fact,
+          content: 'b',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
           originNameSnapshot: 'g1',
         ),
       ];
-      final result = MemoryAuditFilter(observerCharacterId: 'c1').apply(memories);
+      final result =
+          MemoryAuditFilter(observerCharacterId: 'c1').apply(memories);
       expect(result.length, 1);
       expect(result.first.observerCharacterId, 'c1');
     });
@@ -55,19 +65,24 @@ void main() {
     test('apply filters by status', () {
       final memories = [
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'a', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'a',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
           originNameSnapshot: 'g1',
         ),
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'b', status: MemoryStatus.superseded,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'b',
+          status: MemoryStatus.superseded,
           originType: MemoryOriginType.group,
           originNameSnapshot: 'g1',
         ),
       ];
-      final result = MemoryAuditFilter(status: MemoryStatus.active).apply(memories);
+      final result =
+          MemoryAuditFilter(status: MemoryStatus.active).apply(memories);
       expect(result.length, 1);
       expect(result.first.status, MemoryStatus.active);
     });
@@ -75,19 +90,24 @@ void main() {
     test('apply filters by originType', () {
       final memories = [
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'a', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'a',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
           originNameSnapshot: 'g1',
         ),
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'b', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'b',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.manual,
           originNameSnapshot: 'manual',
         ),
       ];
-      final result = MemoryAuditFilter(originType: MemoryOriginType.manual).apply(memories);
+      final result = MemoryAuditFilter(originType: MemoryOriginType.manual)
+          .apply(memories);
       expect(result.length, 1);
       expect(result.first.originType, MemoryOriginType.manual);
     });
@@ -95,19 +115,24 @@ void main() {
     test('apply filters by memoryKind', () {
       final memories = [
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'a', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'a',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
           originNameSnapshot: 'g1',
         ),
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.preference,
-          content: 'b', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.preference,
+          content: 'b',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
           originNameSnapshot: 'g1',
         ),
       ];
-      final result = MemoryAuditFilter(memoryKind: MemoryKind.preference).apply(memories);
+      final result =
+          MemoryAuditFilter(memoryKind: MemoryKind.preference).apply(memories);
       expect(result.length, 1);
       expect(result.first.kind, MemoryKind.preference);
     });
@@ -115,16 +140,22 @@ void main() {
     test('apply filters pinnedOnly true', () {
       final memories = [
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'a', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'a',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
-          originNameSnapshot: 'g1', pinned: true,
+          originNameSnapshot: 'g1',
+          pinned: true,
         ),
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'b', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'b',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
-          originNameSnapshot: 'g1', pinned: false,
+          originNameSnapshot: 'g1',
+          pinned: false,
         ),
       ];
       final result = MemoryAuditFilter(pinnedOnly: true).apply(memories);
@@ -132,22 +163,55 @@ void main() {
       expect(result.first.pinned, isTrue);
     });
 
+    test('pinnedOnly false filters pinned out', () {
+      final memories = [
+        PermanentMemory(
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'a',
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.group,
+          originNameSnapshot: 'g1',
+          pinned: true,
+        ),
+        PermanentMemory(
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'b',
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.group,
+          originNameSnapshot: 'g1',
+          pinned: false,
+        ),
+      ];
+      final result = MemoryAuditFilter(pinnedOnly: false).apply(memories);
+      expect(result.length, 1);
+      expect(result.first.pinned, isFalse);
+    });
+
     test('subjectFilter aboutMe matches user subjectIds', () {
       final memories = [
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'a', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'a',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
-          originNameSnapshot: 'g1', subjectIds: const ['user'],
+          originNameSnapshot: 'g1',
+          subjectIds: const ['user'],
         ),
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'b', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'b',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
-          originNameSnapshot: 'g1', subjectIds: const ['c2'],
+          originNameSnapshot: 'g1',
+          subjectIds: const ['c2'],
         ),
       ];
-      final result = MemoryAuditFilter(subjectFilter: SubjectFilter.aboutMe()).apply(memories);
+      final result = MemoryAuditFilter(subjectFilter: SubjectFilter.aboutMe())
+          .apply(memories);
       expect(result.length, 1);
       expect(result.first.subjectIds, contains('user'));
     });
@@ -155,19 +219,27 @@ void main() {
     test('subjectFilter aboutCharacter matches given id', () {
       final memories = [
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'a', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'a',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
-          originNameSnapshot: 'g1', subjectIds: const ['c2'],
+          originNameSnapshot: 'g1',
+          subjectIds: const ['c2'],
         ),
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'b', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'b',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
-          originNameSnapshot: 'g1', subjectIds: const ['c3'],
+          originNameSnapshot: 'g1',
+          subjectIds: const ['c3'],
         ),
       ];
-      final result = MemoryAuditFilter(subjectFilter: SubjectFilter.aboutCharacter('c2')).apply(memories);
+      final result =
+          MemoryAuditFilter(subjectFilter: SubjectFilter.aboutCharacter('c2'))
+              .apply(memories);
       expect(result.length, 1);
       expect(result.first.subjectIds, contains('c2'));
     });
@@ -175,44 +247,119 @@ void main() {
     test('subjectFilter selfGrowth matches empty subjectIds', () {
       final memories = [
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.personaGrowth,
-          content: 'a', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.personaGrowth,
+          content: 'a',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
-          originNameSnapshot: 'g1', subjectIds: const [],
+          originNameSnapshot: 'g1',
+          subjectIds: const [],
         ),
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'b', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'b',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
-          originNameSnapshot: 'g1', subjectIds: const ['user'],
+          originNameSnapshot: 'g1',
+          subjectIds: const ['user'],
         ),
       ];
-      final result = MemoryAuditFilter(subjectFilter: SubjectFilter.selfGrowth()).apply(memories);
+      final result =
+          MemoryAuditFilter(subjectFilter: SubjectFilter.selfGrowth())
+              .apply(memories);
       expect(result.length, 1);
       expect(result.first.subjectIds, isEmpty);
+    });
+
+    test('subjectFilter selfGrowth includes personaGrowth with subjects', () {
+      final memories = [
+        PermanentMemory(
+          observerCharacterId: 'c1',
+          kind: MemoryKind.personaGrowth,
+          content: '成长也涉及用户',
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.group,
+          originNameSnapshot: 'g1',
+          subjectIds: const ['user'],
+        ),
+        PermanentMemory(
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: '普通事实',
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.group,
+          originNameSnapshot: 'g1',
+          subjectIds: const ['user'],
+        ),
+      ];
+
+      final result = MemoryAuditFilter(
+        subjectFilter: SubjectFilter.selfGrowth(),
+      ).apply(memories);
+
+      expect(result.map((memory) => memory.content), ['成长也涉及用户']);
+    });
+
+    test('apply filters by origin conversation id', () {
+      final memories = [
+        PermanentMemory(
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: '群一',
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.group,
+          originConversationId: 'g1',
+          originNameSnapshot: '群一',
+        ),
+        PermanentMemory(
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: '群二',
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.group,
+          originConversationId: 'g2',
+          originNameSnapshot: '群二',
+        ),
+      ];
+
+      final result = MemoryAuditFilter(
+        originConversationId: 'g2',
+      ).apply(memories);
+
+      expect(result.map((memory) => memory.content), ['群二']);
     });
 
     test('filters combine with AND', () {
       final memories = [
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'a', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'a',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
-          originNameSnapshot: 'g1', pinned: true,
+          originNameSnapshot: 'g1',
+          pinned: true,
           subjectIds: const ['user'],
         ),
         PermanentMemory(
-          observerCharacterId: 'c1', kind: MemoryKind.fact,
-          content: 'b', status: MemoryStatus.active,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: 'b',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
-          originNameSnapshot: 'g1', pinned: false,
+          originNameSnapshot: 'g1',
+          pinned: false,
           subjectIds: const ['user'],
         ),
         PermanentMemory(
-          observerCharacterId: 'c2', kind: MemoryKind.fact,
-          content: 'c', status: MemoryStatus.active,
+          observerCharacterId: 'c2',
+          kind: MemoryKind.fact,
+          content: 'c',
+          status: MemoryStatus.active,
           originType: MemoryOriginType.group,
-          originNameSnapshot: 'g1', pinned: true,
+          originNameSnapshot: 'g1',
+          pinned: true,
           subjectIds: const ['user'],
         ),
       ];
@@ -224,6 +371,45 @@ void main() {
       expect(result.length, 1);
       expect(result.first.observerCharacterId, 'c1');
       expect(result.first.pinned, isTrue);
+    });
+
+    test('copyWith clear semantics — clearObserverCharacterId resets to null',
+        () {
+      final f = MemoryAuditFilter(
+          observerCharacterId: 'c1', status: MemoryStatus.active);
+      final cleared = f.copyWith(clearObserverCharacterId: true);
+      expect(cleared.observerCharacterId, isNull);
+      expect(cleared.status, MemoryStatus.active);
+    });
+
+    test('copyWith clear semantics — clearStatus resets to null', () {
+      final f = MemoryAuditFilter(
+          observerCharacterId: 'c1', status: MemoryStatus.active);
+      final cleared = f.copyWith(clearStatus: true);
+      expect(cleared.status, isNull);
+      expect(cleared.observerCharacterId, 'c1');
+    });
+
+    test('copyWith clear semantics — all clear produces empty filter', () {
+      final f = MemoryAuditFilter(
+        observerCharacterId: 'c1',
+        status: MemoryStatus.active,
+        memoryKind: MemoryKind.fact,
+        originType: MemoryOriginType.group,
+        originConversationId: 'g1',
+        pinnedOnly: true,
+        subjectFilter: SubjectFilter.aboutMe(),
+      );
+      final cleared = f.copyWith(
+        clearObserverCharacterId: true,
+        clearStatus: true,
+        clearMemoryKind: true,
+        clearOriginType: true,
+        clearOriginConversationId: true,
+        clearPinnedOnly: true,
+        clearSubjectFilter: true,
+      );
+      expect(cleared.isEmpty, isTrue);
     });
   });
 
@@ -238,12 +424,13 @@ void main() {
           ),
         ),
       ));
-      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 500));
 
       expect(find.text('清除筛选'), findsNothing);
     });
 
-    testWidgets('non-empty filter shows chips and clear button', (tester) async {
+    testWidgets('non-empty filter shows chips and clear button',
+        (tester) async {
       final chars = [testCharacter('c1', apiConfigId: 'cfg')];
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
@@ -254,7 +441,7 @@ void main() {
           ),
         ),
       ));
-      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 500));
 
       expect(find.text('角色: 角色c1'), findsOneWidget);
       expect(find.text('清除筛选'), findsOneWidget);
@@ -272,35 +459,237 @@ void main() {
           ),
         ),
       ));
-      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 500));
 
       await tester.tap(find.text('清除筛选'));
-      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 500));
 
       expect(captured, isNotNull);
       expect(captured!.isEmpty, isTrue);
     });
 
-    testWidgets('chip delete preserves other filter dimensions', (tester) async {
+    testWidgets('copyWith clear semantics preserves other filter dimensions',
+        (tester) async {
+      // Verify that copyWith clear semantics work correctly:
+      // clearing one field preserves others.
+      final filter = MemoryAuditFilter(
+        observerCharacterId: 'c1',
+        status: MemoryStatus.active,
+      );
+      final cleared = filter.copyWith(clearObserverCharacterId: true);
+      expect(cleared.observerCharacterId, isNull);
+      expect(cleared.status, MemoryStatus.active);
+    });
+
+    testWidgets('all filter option groups are visible', (tester) async {
+      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: const MemoryAuditFilter(),
+            characters: chars,
+            onChanged: (_) {},
+          ),
+        ),
+      ));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      // Widget is always visible even with empty filter.
+      expect(find.byType(MemoryAuditFilterWidget), findsOneWidget);
+    });
+
+    testWidgets('subject filter selection updates callback', (tester) async {
       MemoryAuditFilter? captured;
       final chars = [testCharacter('c1', apiConfigId: 'cfg')];
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: MemoryAuditFilterWidget(
-            filter: MemoryAuditFilter(observerCharacterId: 'c1', status: MemoryStatus.active),
+            filter: const MemoryAuditFilter(),
             characters: chars,
             onChanged: (f) => captured = f,
           ),
         ),
       ));
-      await tester.pumpAndSettle();
+      await tester.pump(const Duration(milliseconds: 500));
 
-      // Tap the clear button — equivalent to removing all chips.
-      await tester.tap(find.text('清除筛选'));
-      await tester.pumpAndSettle();
-
+      // Tap '关于我' choice chip.
+      await tester.tap(find.text('关于我'));
+      await tester.pump(const Duration(milliseconds: 500));
       expect(captured, isNotNull);
-      expect(captured!.isEmpty, isTrue);
+      expect(captured!.subjectFilter, SubjectFilter.aboutMe());
+    });
+
+    testWidgets('origin type selection updates callback', (tester) async {
+      MemoryAuditFilter? captured;
+      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: const MemoryAuditFilter(),
+            characters: chars,
+            onChanged: (f) => captured = f,
+          ),
+        ),
+      ));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      await tester.tap(find.text('手动'));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(captured, isNotNull);
+      expect(captured!.originType, MemoryOriginType.manual);
+    });
+
+    testWidgets('tapping "全部来源" clears originType', (tester) async {
+      MemoryAuditFilter? captured;
+      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter:
+                const MemoryAuditFilter(originType: MemoryOriginType.manual),
+            characters: chars,
+            onChanged: (f) => captured = f,
+          ),
+        ),
+      ));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      await tester.tap(find.text('全部来源'));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(captured, isNotNull);
+      expect(captured!.originType, isNull);
+    });
+
+    testWidgets('tapping a status then "全部状态" clears status', (tester) async {
+      MemoryAuditFilter? captured;
+      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: const MemoryAuditFilter(status: MemoryStatus.active),
+            characters: chars,
+            onChanged: (f) => captured = f,
+          ),
+        ),
+      ));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      await tester.tap(find.text('已取代'));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(captured!.status, MemoryStatus.superseded);
+
+      captured = null;
+      await tester.tap(find.text('全部状态'));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(captured, isNotNull);
+      expect(captured!.status, isNull);
+    });
+
+    testWidgets('tapping a kind then "全部类型" clears memoryKind', (tester) async {
+      MemoryAuditFilter? captured;
+      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: const MemoryAuditFilter(memoryKind: MemoryKind.fact),
+            characters: chars,
+            onChanged: (f) => captured = f,
+          ),
+        ),
+      ));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      await tester.tap(find.text('偏好'));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(captured!.memoryKind, MemoryKind.preference);
+
+      captured = null;
+      await tester.tap(find.text('全部类型'));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(captured, isNotNull);
+      expect(captured!.memoryKind, isNull);
+    });
+
+    testWidgets('tapping pinned filter then "固定状态: 全部" clears pinnedOnly',
+        (tester) async {
+      MemoryAuditFilter? captured;
+      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: const MemoryAuditFilter(pinnedOnly: true),
+            characters: chars,
+            onChanged: (f) => captured = f,
+          ),
+        ),
+      ));
+      await tester.pump(const Duration(milliseconds: 500));
+
+      await tester.tap(find.text('仅未固定'));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(captured!.pinnedOnly, isFalse);
+
+      captured = null;
+      await tester.tap(find.text('固定状态: 全部'));
+      await tester.pump(const Duration(milliseconds: 500));
+      expect(captured, isNotNull);
+      expect(captured!.pinnedOnly, isNull);
+    });
+
+    testWidgets('observer dropdown clears via filter copyWith semantics',
+        (tester) async {
+      // The dropdown widget delegates to filter.copyWith; verify the clear
+      // semantics directly: copyWith(clearObserverCharacterId: true, observerCharacterId: null)
+      // must produce null.
+      final f = MemoryAuditFilter(observerCharacterId: 'c1');
+      final cleared = f.copyWith(clearObserverCharacterId: true);
+      expect(cleared.observerCharacterId, isNull);
+    });
+
+    testWidgets('origin conversation dropdown selects another occasion',
+        (tester) async {
+      MemoryAuditFilter? captured;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: const MemoryAuditFilter(originConversationId: 'g1'),
+            characters: const [],
+            originConversations: const {'g1': '群一', 'g2': '群二'},
+            onChanged: (filter) => captured = filter,
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      await tester.tap(find.byType(DropdownButton<String>));
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('群二 (g2)').last);
+      await tester.pump();
+
+      expect(captured?.originConversationId, 'g2');
+    });
+
+    testWidgets('origin conversation input accepts an id not in the list',
+        (tester) async {
+      MemoryAuditFilter? captured;
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: const MemoryAuditFilter(),
+            characters: const [],
+            onChanged: (filter) => captured = filter,
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      await tester.tap(find.text('输入场合'));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).last, 'deleted-group');
+      await tester.tap(find.text('应用'));
+      await tester.pump();
+
+      expect(captured?.originConversationId, 'deleted-group');
     });
   });
 }

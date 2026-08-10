@@ -128,8 +128,9 @@ class StreamingReplySession {
     if (_disposed) return;
     _disposed = true;
     _flushTimer?.cancel();
-    await _subscription?.cancel();
+    final subscription = _subscription;
     _subscription = null;
+    await subscription?.cancel();
     final done = _done;
     if (done != null && !done.isCompleted) {
       done.complete(StreamingReplyResult(

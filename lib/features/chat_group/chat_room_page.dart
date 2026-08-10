@@ -300,6 +300,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 空闲自动聊天开关（同时受治理设置里的全局开关约束）。
   bool _isAutoChatEnabled = true;
 
+  /// 页面是否在前台活跃（deactivate 时置 false，防止异步回调在路由弹出后重建页面）。
+  bool _pageActive = true;
+
   /// 当前 burst 内已执行的自动聊天轮数。
   int _autoChatRoundCount = 0;
 
@@ -393,6 +396,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 联网搜索状态 banner 自动隐藏定时器。
   Timer? _searchBannerDismissTimer;
+
+  /// 自动聊天启动延迟定时器（页面离开时取消，避免测试挂起）。
+  Timer? _autoChatStartTimer;
 
   /// 用户在本会话手动覆盖的联网搜索策略（为空表示用全局策略）。
   WebSearchPolicy? _searchPolicyOverride;
@@ -499,12 +505,29 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   @override
+  void deactivate() {
+    _pageActive = false;
+    _autoChatStartTimer?.cancel();
+    _autoChatStartTimer = null;
+    _autoChatScheduler.stop();
+    super.deactivate();
+  }
+
+  @override
+  void activate() {
+    super.activate();
+    _pageActive = true;
+    ConversationPresenceService.instance.enter(widget.groupId);
+    if (!_isLoading && !_workModeEnabled) {
+      _startAutoChat();
+    }
+  }
+
+  @override
   void dispose() {
-    // 先置位守卫标记，后续异步回调据此直接返回，不再触碰已销毁的 State。
     _disposed = true;
     ConversationPresenceService.instance.leave(widget.groupId);
     WidgetsBinding.instance.removeObserver(this);
-    // 未发送的附件已落盘到临时目录，需要清理避免残留垃圾文件。
     if (_pendingAttachments.isNotEmpty) {
       unawaited(_cleanupMediaPaths(_pendingAttachments));
     }
@@ -513,10 +536,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _documentProcessingToken?.cancel();
     _conversationController.dispose();
     _autoChatScheduler.dispose();
-    // 关闭本地 agent 桥接进程，避免页面退出后仍有子进程驻留。
     unawaited(LocalAgentBridgeLauncher().stop());
-    unawaited(_streamingSession?.dispose());
+    final streamingSession = _streamingSession;
     _streamingSession = null;
+    if (streamingSession != null) unawaited(streamingSession.dispose());
     _searchDebounceTimer?.cancel();
     _searchBannerDismissTimer?.cancel();
     _textController.dispose();
@@ -619,13 +642,24 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         final delay = loaded.isDirectChat
             ? const Duration(seconds: 18)
             : _autoChatInitialDelay;
-        Future.delayed(delay, () {
+        _autoChatStartTimer = Timer(delay, () {
+          _autoChatStartTimer = null;
           if (_canTouchUi && !_workModeEnabled) _startAutoChat();
         });
       }
     } on ChatRoomLoadException catch (error) {
       if (!mounted || _disposed) return;
       AppToast.show(context, error.message, icon: Icons.error_outline_rounded);
+      Navigator.pop(context);
+    } on Object catch (error) {
+      // A source jump can race with a test teardown or database recovery. Once
+      // the page is inactive, the load has no safe UI destination anymore.
+      if (!mounted || _disposed || !_pageActive) return;
+      AppToast.show(
+        context,
+        '会话加载失败：$error',
+        icon: Icons.error_outline_rounded,
+      );
       Navigator.pop(context);
     }
   }
@@ -838,6 +872,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// - 私聊里 AI 已连说 3 条而用户没回（避免单方面刷屏）；
   /// - 本 burst 轮数达上限 → 停止并冷却 [_autoChatBurstPause]。
   Future<void> _tryAutoChatRound() async {
+    if (!_pageActive) return;
     if (!ChatActivityPolicy.canStartAutoChat(
       workModeEnabled: _workModeEnabled,
       autoChatEnabled: _isAutoChatEnabled,
@@ -958,8 +993,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
-  /// 是否可以安全操作 UI / 写 State（未卸载且未 dispose）。
-  bool get _canTouchUi => mounted && !_disposed;
+  /// 是否可以安全操作 UI / 写 State（未卸载、未 dispose 且页面仍在前台）。
+  bool get _canTouchUi => mounted && !_disposed && _pageActive;
 
   /// 覆盖 [setState] 统一加守卫：异步回调无需各自判断是否已销毁。
   @override

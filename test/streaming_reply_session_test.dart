@@ -57,4 +57,21 @@ void main() {
 
     expect(callbackCount, 0);
   });
+
+  test('dispose cancels the owned SSE subscription', () async {
+    var cancelled = false;
+    final controller = StreamController<ChatStreamEvent>(
+      onCancel: () {
+        cancelled = true;
+      },
+    );
+    final session = StreamingReplySession(flushInterval: Duration.zero);
+    final run = session.run(controller.stream, onDraft: (_) {});
+
+    await session.dispose();
+    await run;
+
+    expect(cancelled, isTrue);
+    await controller.close();
+  });
 }

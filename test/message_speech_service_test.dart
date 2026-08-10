@@ -55,6 +55,18 @@ void main() {
 
     expect(engine.language, 'en-GB');
   });
+
+  test('dispose stops active playback', () async {
+    final engine = _FakeSpeechEngine(languages: ['zh-CN']);
+    final service = MessageSpeechService(engine: engine);
+    await service.speak(messageId: 'm1', text: '测试');
+
+    service.dispose();
+    await Future<void>.delayed(Duration.zero);
+
+    expect(engine.stopCalls, 1);
+    expect(service.state.isSpeaking, isFalse);
+  });
 }
 
 class _FakeSpeechEngine implements SpeechEngine {
@@ -66,6 +78,7 @@ class _FakeSpeechEngine implements SpeechEngine {
   double? volume;
   double? pitch;
   double? rate;
+  int stopCalls = 0;
   void Function()? _start;
   void Function()? _completion;
   void Function()? _cancel;
@@ -99,6 +112,7 @@ class _FakeSpeechEngine implements SpeechEngine {
 
   @override
   Future<dynamic> stop() async {
+    stopCalls++;
     _cancel?.call();
     return 1;
   }
