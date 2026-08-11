@@ -121,7 +121,11 @@ class RelationshipControls {
     );
   }
 
-  /// Deletes only the global state, events, and pin for one direction.
+  /// Deletes every snapshot, event, and pin for one stable direction.
+  ///
+  /// Legacy per-group snapshots must be removed with the global snapshot;
+  /// otherwise the read path can fall back to them immediately after this
+  /// explicit deletion.
   Future<void> deleteRelationshipHistory(
     RelationshipState relationship,
   ) async {
@@ -483,7 +487,5 @@ class RelationshipControls {
       event != null && _stableIdForEvent(event) == stableId;
 
   bool _stateAtKeyMatches(RelationshipState? state, String stableId) =>
-      state != null &&
-      state.groupId == globalGroupId &&
-      _stableIdForState(state) == stableId;
+      state != null && _stableIdForState(state) == stableId;
 }

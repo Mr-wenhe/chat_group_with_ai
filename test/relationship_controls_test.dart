@@ -1,8 +1,11 @@
 import 'dart:io';
 
+import 'package:chat_group/core/database/data_lifecycle_settings.dart';
+import 'package:chat_group/core/database/relationship_snapshot_rebuilder.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/features/memory/memory_context_selector.dart';
 import 'package:chat_group/features/memory/relationship_controls.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -257,7 +260,7 @@ void main() {
     expect(db.relationshipStateBox.get(initial.id), isNotNull);
   });
 
-  test('delete removes only one global direction, its events and its pin',
+  test('delete removes one direction across global and legacy snapshots',
       () async {
     final aToB = relation();
     final bToA = relation(source: 'b', target: 'a');
@@ -294,7 +297,7 @@ void main() {
     expect(db.relationshipStateBox.get(aToB.id), isNull);
     expect(db.relationshipStateBox.get(bToA.id), isNotNull);
     expect(db.relationshipStateBox.get(cToB.id), isNotNull);
-    expect(db.relationshipStateBox.get(legacy.id), isNotNull);
+    expect(db.relationshipStateBox.get(legacy.id), isNull);
     expect(
       db.relationshipEventBox.values.where(
         (event) =>
@@ -319,6 +322,37 @@ void main() {
       controls.globalRelationships().map((value) => value.id),
       containsAll(<String>[bToA.id, cToB.id]),
     );
+  });
+
+  test('deleted relationship stays absent after snapshot rebuild', () async {
+    final global = relation(notes: '要删除的关系');
+    final legacy = RelationshipState(
+      id: 'legacy-a-b',
+      groupId: 'old-group',
+      sourceCharacterId: global.sourceCharacterId,
+      targetType: global.targetType,
+      targetId: global.targetId,
+      notes: global.notes,
+    );
+    await put(global);
+    await db.relationshipStateBox.put(legacy.id, legacy);
+
+    await RelationshipControls(db).deleteRelationshipHistory(global);
+    await RelationshipSnapshotRebuilder(
+      db: db,
+      settings: DataLifecycleSettings(db),
+    ).rebuildFor([global.id]);
+
+    final prompt = await MemoryContextSelector(db).select(
+      observerCharacterId: global.sourceCharacterId,
+      participantCharacterIds: [
+        global.sourceCharacterId,
+        global.targetId,
+      ],
+      currentTargetId: global.targetId,
+    );
+    expect(prompt, isEmpty);
+    expect(db.relationshipStateBox.get(legacy.id), isNull);
   });
 
   test('manual score ranges reject invalid values', () async {

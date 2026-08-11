@@ -20,6 +20,7 @@ import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/models/work_mode_workspace.dart';
 import 'package:chat_group/features/chat_group/chat_room_loader.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:chat_group/features/memory/memory_context_selector.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
@@ -889,6 +890,79 @@ void main() {
     expect(db.relationshipStateBox.get(globalId)!.affinity, 8);
     expect(db.relationshipStateBox.get(globalId)!.lastEventId, otherEvent.id);
     expect(db.messageBox.containsKey('dm-c10'), isTrue);
+  });
+
+  test('conversation deletion rebuild does not resurrect legacy relationship',
+      () async {
+    const conversationId = 'g-deleted-relationship';
+    final globalId = RelationshipState.stableGlobalId(
+      'source',
+      RelationshipTargetType.user,
+      'user',
+    );
+    final global = RelationshipState.global(
+      id: globalId,
+      sourceCharacterId: 'source',
+      targetType: RelationshipTargetType.user,
+      targetId: 'user',
+      affinity: 80,
+      notes: 'global relation',
+    );
+    final legacy = RelationshipState(
+      id: 'legacy-deleted-relationship',
+      groupId: conversationId,
+      sourceCharacterId: 'source',
+      targetType: RelationshipTargetType.user,
+      targetId: 'user',
+      affinity: 20,
+      notes: 'legacy relation',
+    );
+    await db.relationshipStateBox.putAll({
+      global.id: global,
+      legacy.id: legacy,
+    });
+    await db.relationshipEventBox.put(
+      'event-deleted-relationship',
+      testRelationshipEvent(
+        id: 'event-deleted-relationship',
+        sourceCharacterId: 'source',
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        originConversationId: conversationId,
+        revision: 1,
+        affinityAfter: 80,
+      ),
+    );
+
+    final selector = MemoryContextSelector(db);
+    expect(
+      await selector.select(
+        observerCharacterId: 'source',
+        participantCharacterIds: const ['source'],
+        currentTargetId: 'user',
+      ),
+      contains('真人用户'),
+    );
+
+    expect(
+      (await service.clearConversation(
+        conversationId,
+        deleteAssociatedPermanentData: true,
+      ))
+          .isComplete,
+      isTrue,
+    );
+
+    expect(db.relationshipStateBox.get(globalId), isNull);
+    expect(db.relationshipStateBox.get(legacy.id), isNull);
+    expect(
+      await selector.select(
+        observerCharacterId: 'source',
+        participantCharacterIds: const ['source'],
+        currentTargetId: 'user',
+      ),
+      isEmpty,
+    );
   });
 
   test('full character deletion removes observer and target references',

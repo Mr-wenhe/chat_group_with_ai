@@ -11,6 +11,7 @@ import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/features/chat_group/chat_room_loader.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
+import 'package:chat_group/features/memory/relationship_controls.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -784,6 +785,43 @@ Future<void> main() async {
       expect(context.relationships.length, 1);
       expect(context.relationships.first.affinity, 50);
     });
+
+    test('deleted global relationship does not fall back to legacy in prompt',
+        () async {
+      final db = DatabaseService();
+      final global = RelationshipState.global(
+        sourceCharacterId: 'char-a',
+        targetType: RelationshipTargetType.ai,
+        targetId: 'char-b',
+        affinity: 80,
+        notes: 'global relationship',
+      );
+      final legacy = RelationshipState(
+        id: 'legacy-deleted-relationship',
+        groupId: 'group-1',
+        sourceCharacterId: 'char-a',
+        targetType: RelationshipTargetType.ai,
+        targetId: 'char-b',
+        affinity: 20,
+        notes: 'legacy relationship',
+      );
+      await db.relationshipStateBox.put(global.id, global);
+      await db.relationshipStateBox.put(legacy.id, legacy);
+
+      await RelationshipControls(db).deleteRelationshipHistory(global);
+
+      final prompt = await MemoryContextSelector(db).select(
+        observerCharacterId: 'char-a',
+        participantCharacterIds: const ['char-a', 'char-b'],
+        currentTargetId: 'char-b',
+      );
+      expect(prompt, isEmpty);
+      expect(
+        ChatRoomLoader(db: db, resolveApiConfig: (config) => null)
+            .stableGlobalRelationships(),
+        isEmpty,
+      );
+    });
   });
 
   // ─── Selector invalidation chain ─────────────────────────────────────────────
@@ -855,7 +893,7 @@ Future<void> main() async {
         kind: MemoryKind.fact,
         content: '旧版事实',
         subjectIds: const ['user'],
-        status: MemoryStatus.active,
+        status: MemoryStatus.superseded,
         importance: 60,
         originType: MemoryOriginType.group,
         originNameSnapshot: '群聊',
@@ -887,14 +925,13 @@ Future<void> main() async {
       // Delete the correction.
       await db.permanentMemoryBox.delete('prompt-correction');
 
-      // After deleting correction: the parent is no longer superseded by any
-      // active record, so it reappears in the prompt.
+      // Deleting a correction must not restore its superseded parent.
       result = await selector.select(
         observerCharacterId: 'char-a',
         participantCharacterIds: const ['char-a'],
       );
       expect(result, isNot(contains('新版事实')));
-      expect(result, contains('旧版事实'));
+      expect(result, isNot(contains('旧版事实')));
     });
 
     test('strict budget: first memory cannot exceed budget', () async {

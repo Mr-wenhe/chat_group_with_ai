@@ -1327,6 +1327,58 @@ void main() {
       expect(relation!.revision, 1);
     });
 
+    test('new relationship event recreates a deleted direction', () async {
+      await db.aiCharacterBox.put('a', makeChar('a'));
+      await db.aiCharacterBox.put('b', makeChar('b'));
+
+      final initial = RelationshipState.global(
+        sourceCharacterId: 'a',
+        targetType: RelationshipTargetType.ai,
+        targetId: 'b',
+        notes: '旧关系备注',
+      );
+      final legacy = RelationshipState(
+        id: 'legacy-a-b',
+        groupId: 'old-group',
+        sourceCharacterId: 'a',
+        targetType: RelationshipTargetType.ai,
+        targetId: 'b',
+        notes: '旧关系备注',
+      );
+      await db.relationshipStateBox.put(initial.id, initial);
+      await db.relationshipStateBox.put(legacy.id, legacy);
+      await RelationshipControls(db).deleteRelationshipHistory(initial);
+
+      final message = makeMsg(
+        senderType: 'ai',
+        senderId: 'a',
+        content: '新的互动',
+        groupId: 'g2',
+      );
+      message.visibleToCharacterIds = ['a', 'b'];
+      final result = await RelationshipEventService(db).observeAndApply(
+        sourceCharacterId: 'a',
+        targetId: 'b',
+        targetType: RelationshipTargetType.ai,
+        message: message,
+        conversationId: 'g2',
+        conversationNameSnapshot: '新群聊',
+        allCharacters: charList(['a', 'b']),
+      );
+
+      expect(result, isTrue);
+      final restored = db.relationshipStateBox.get(initial.id);
+      expect(restored, isNotNull);
+      expect(restored!.groupId, 'global');
+      expect(restored.notes, isEmpty);
+      final prompt = await MemoryContextSelector(db).select(
+        observerCharacterId: 'a',
+        participantCharacterIds: const ['a', 'b'],
+        currentTargetId: 'b',
+      );
+      expect(prompt, contains('AI:b'));
+    });
+
     test('stage anti-skip: normal event does not jump multiple levels',
         () async {
       await db.aiCharacterBox.put('a', makeChar('a'));
