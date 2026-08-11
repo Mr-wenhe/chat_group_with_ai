@@ -78,6 +78,21 @@ void main() {
     );
   });
 
+  test('DeepSeek v4 models are selectable and support streaming requests', () {
+    const models = ['deepseek-v4-pro', 'deepseek-v4-flash'];
+    final selectableModels = ApiProvider.providerModels['deepseek']!;
+
+    for (final model in models) {
+      expect(selectableModels, contains(model));
+      final capability = registry.resolve(
+        provider: ApiProvider.deepseek,
+        modelId: model,
+      );
+      expect(capability.isKnown, isTrue, reason: model);
+      expect(capability.supportsStreaming, isTrue, reason: model);
+    }
+  });
+
   test('预算金额字符串确定性转换为微美元', () {
     expect(MoneyMicros.parseUsd('1'), 1000000);
     expect(MoneyMicros.parseUsd('0.000001'), 1);

@@ -58,6 +58,46 @@ void main() {
     expect(temperatures, [0.9, 0.9, 0.9]);
   });
 
+  test('DeepSeek v4 model names are forwarded unchanged to the request payload',
+      () async {
+    final capturedModels = <String>[];
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        capturedModels.add(
+          ((options.data as Map<String, dynamic>)['model'] as String),
+        );
+        handler.resolve(Response(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'choices': [
+              {
+                'message': {'content': 'ok'}
+              }
+            ]
+          },
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio, retrySleep: (_) async {});
+
+    for (final model in const ['deepseek-v4-pro', 'deepseek-v4-flash']) {
+      final result = await service.sendChatMessage(
+        apiKey: 'key',
+        provider: ApiProvider.deepseek,
+        model: model,
+        messages: const [
+          {'role': 'user', 'content': 'hello'}
+        ],
+        maxRetries: 0,
+      );
+      expect(result['success'], isTrue, reason: model);
+    }
+
+    expect(capturedModels, const ['deepseek-v4-pro', 'deepseek-v4-flash']);
+  });
+
   test('non-stream completion does not retry HTTP 400', () async {
     var calls = 0;
     final dio = Dio();
@@ -198,6 +238,45 @@ void main() {
     expect((captured.data as Map<String, dynamic>)['stream'], isTrue);
     expect((captured.data as Map<String, dynamic>)['max_tokens'], 4096);
     expect(captured.receiveTimeout, const Duration(seconds: 60));
+  });
+
+  test('DeepSeek v4 model names are forwarded unchanged to streaming payload',
+      () async {
+    final capturedModels = <String>[];
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        capturedModels.add(
+          ((options.data as Map<String, dynamic>)['model'] as String),
+        );
+        final sse = [
+          Uint8List.fromList(utf8.encode(
+            'data: {"choices":[{"delta":{"content":"ok"}}]}\n',
+          )),
+          Uint8List.fromList(utf8.encode('data: [DONE]\n')),
+        ];
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 200,
+          data: ResponseBody(Stream.fromIterable(sse), 200),
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio);
+
+    for (final model in const ['deepseek-v4-pro', 'deepseek-v4-flash']) {
+      final events = await service.streamChatMessage(
+        apiKey: 'key',
+        provider: ApiProvider.deepseek,
+        model: model,
+        messages: const [
+          {'role': 'user', 'content': 'hello'}
+        ],
+      ).toList();
+      expect(events.last.type, ChatStreamEventType.done, reason: model);
+    }
+
+    expect(capturedModels, const ['deepseek-v4-pro', 'deepseek-v4-flash']);
   });
 
   test('empty streamed completion falls back to one non-stream request',

@@ -163,6 +163,13 @@ class ModelCapabilityRegistry {
       price: _deepSeekReasonerPrice,
       source: 'DeepSeek API Docs 价格与模型快照',
     ),
+    // v4 模型先登记通用文本/流式能力，不录入未经确认的价格快照。
+    for (final model in ['deepseek-v4-pro', 'deepseek-v4-flash'])
+      'deepseek/$model': _text(
+        provider: 'deepseek',
+        context: 1000000,
+        source: 'DeepSeek v4 模型选项',
+      ),
     'deepseek/deepseek-v3': _text(
       provider: 'deepseek',
       context: 1000000,

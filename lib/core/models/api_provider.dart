@@ -15,7 +15,12 @@ enum ApiProvider {
   String get apiPath => '/chat/completions';
 
   static const Map<String, List<String>> providerModels = {
-    'deepseek': ['deepseek-chat', 'deepseek-reasoner'],
+    'deepseek': [
+      'deepseek-chat',
+      'deepseek-reasoner',
+      'deepseek-v4-pro',
+      'deepseek-v4-flash',
+    ],
     'qwen': [
       'qwen-turbo',
       'qwen-plus',
