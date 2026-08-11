@@ -9,7 +9,7 @@ import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
-import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:chat_group/features/memory/memory_conflict_resolver.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter/foundation.dart';
 import 'package:uuid/uuid.dart';
@@ -44,6 +44,13 @@ class MemoryControls {
   final DatabaseService db;
 
   MemoryControls(this.db);
+
+  static Future<void> _rejectLegacyWrite(String method) => Future.error(
+        UnsupportedError(
+          '$method 已退役；旧 CharacterMemory/AICharacter/RelationshipState '
+          '仅保留用于兼容读取，请改用全局永久记忆或关系事件 API',
+        ),
+      );
 
   /// Test seam: when true, the second write in editPermanent's idempotent
   /// path throws, triggering compensation rollback.
@@ -158,69 +165,36 @@ class MemoryControls {
     await setPinned(groupKey(memory), false);
   }
 
+  @Deprecated('旧 CharacterMemory 已只读；请使用永久记忆审计 API')
   Future<void> updateCharacterEntry({
     required CharacterMemory memory,
     required AICharacter character,
     required CharacterMemoryLayer layer,
     required int index,
     required String value,
-  }) async {
-    final values = _layer(memory, layer);
-    final previous = values[index];
-    final previousKey = characterEntryKey(memory, layer, previous);
-    final wasPinned = isPinned(previousKey);
-    values[index] = value.trim();
-    values.removeWhere((item) => item.isEmpty);
-    memory.lastUpdatedAt = DateTime.now();
-    character.memorySummary = _replaceLegacyEntry(
-      character.memorySummary,
-      layer,
-      previous,
-      value.trim(),
-    );
-    await db.characterMemoryBox.put(memory.id, memory);
-    await db.aiCharacterBox.put(character.id, character);
-    await setPinned(previousKey, false);
-    if (wasPinned && value.trim().isNotEmpty) {
-      await setPinned(characterEntryKey(memory, layer, value), true);
-    }
-  }
+  }) =>
+      _rejectLegacyWrite('updateCharacterEntry');
 
+  @Deprecated('旧 CharacterMemory 已只读；请使用永久记忆审计 API')
   Future<void> deleteCharacterEntry({
     required CharacterMemory memory,
     required AICharacter character,
     required CharacterMemoryLayer layer,
     required int index,
-  }) async {
-    final values = _layer(memory, layer);
-    final previous = values.removeAt(index);
-    final entryKey = characterEntryKey(memory, layer, previous);
-    memory.lastUpdatedAt = DateTime.now();
-    character.memorySummary = _replaceLegacyEntry(
-      character.memorySummary,
-      layer,
-      previous,
-      '',
-    );
-    await db.characterMemoryBox.put(memory.id, memory);
-    await db.aiCharacterBox.put(character.id, character);
-    await setPinned(entryKey, false);
-  }
+  }) =>
+      _rejectLegacyWrite('deleteCharacterEntry');
 
-  Future<void> updateLegacy(AICharacter character, String value) async {
-    character.memorySummary = value.trim();
-    await db.aiCharacterBox.put(character.id, character);
-  }
+  @Deprecated('memorySummary 已只读；请使用永久记忆审计 API')
+  Future<void> updateLegacy(AICharacter character, String value) =>
+      _rejectLegacyWrite('updateLegacy');
 
-  Future<void> deleteLegacy(AICharacter character) async {
-    await updateLegacy(character, '');
-    await setPinned(legacyKey(character), false);
-  }
+  @Deprecated('memorySummary 已只读；请使用永久记忆审计 API')
+  Future<void> deleteLegacy(AICharacter character) =>
+      _rejectLegacyWrite('deleteLegacy');
 
-  Future<void> deleteRelationship(RelationshipState relationship) async {
-    await db.relationshipStateBox.delete(relationship.key ?? relationship.id);
-    await setPinned(relationshipKey(relationship), false);
-  }
+  @Deprecated('旧 RelationshipState 已只读；请使用 RelationshipControls')
+  Future<void> deleteRelationship(RelationshipState relationship) =>
+      _rejectLegacyWrite('deleteRelationship');
 
   // ── Permanent memory ──────────────────────────────────────────────────────
 
@@ -261,8 +235,14 @@ class MemoryControls {
   }
 
   /// Write [stored] back with [pinned] updated, preserving all other fields.
-  Future<void> _writePermanent(dynamic key, PermanentMemory stored,
-      {required bool pinned, MemoryStatus? status, DateTime? updatedAt}) async {
+  Future<void> _writePermanent(
+    dynamic key,
+    PermanentMemory stored, {
+    required bool pinned,
+    MemoryStatus? status,
+    DateTime? updatedAt,
+    String? invalidationReason,
+  }) async {
     final updated = PermanentMemory(
       id: stored.id,
       observerCharacterId: stored.observerCharacterId,
@@ -283,6 +263,7 @@ class MemoryControls {
       occurredAt: stored.occurredAt,
       createdAt: stored.createdAt,
       updatedAt: updatedAt ?? stored.updatedAt,
+      invalidationReason: invalidationReason ?? stored.invalidationReason,
     );
     await db.permanentMemoryBox.put(key, updated);
   }
@@ -388,6 +369,7 @@ class MemoryControls {
           occurredAt: rawExisting.occurredAt,
           createdAt: rawExisting.createdAt,
           updatedAt: now,
+          invalidationReason: rawExisting.invalidationReason,
         );
         try {
           if (testFailExistingSupersedesWrite) {
@@ -437,6 +419,7 @@ class MemoryControls {
             occurredAt: rawExisting.occurredAt,
             createdAt: rawExisting.createdAt,
             updatedAt: rawExisting.updatedAt,
+            invalidationReason: rawExisting.invalidationReason,
           );
           await db.permanentMemoryBox.put(existingKey, rollbackExisting);
           rethrow;
@@ -479,6 +462,7 @@ class MemoryControls {
       occurredAt: old.occurredAt,
       createdAt: now,
       updatedAt: now,
+      invalidationReason: null,
     );
 
     await db.permanentMemoryBox.put(replacement.id, replacement);
@@ -569,15 +553,12 @@ class MemoryControls {
     return true;
   }
 
+  @Deprecated('旧 RelationshipState 已只读；请使用 RelationshipControls')
   Future<void> updateRelationship(
     RelationshipState relationship,
     String notes,
-  ) async {
-    relationship
-      ..notes = notes.trim()
-      ..lastInteractionAt = DateTime.now();
-    await db.relationshipStateBox.put(relationship.id, relationship);
-  }
+  ) =>
+      _rejectLegacyWrite('updateRelationship');
 
   Future<void> forgetTopic(String conversationId) async {
     for (final memory in db.groupMemoryBox.values
@@ -586,46 +567,27 @@ class MemoryControls {
     }
   }
 
+  @Deprecated('旧会话记忆已只读；仅失效对应来源的永久记忆')
   Future<void> forgetAboutUser(String conversationId) async {
-    final memories = db.characterMemoryBox.values
-        .where((item) => item.groupId == conversationId)
+    final memories = db.permanentMemoryBox.values
+        .where(
+          (memory) =>
+              memory.status == MemoryStatus.active &&
+              memory.originConversationId == conversationId &&
+              memory.subjectIds.contains('user'),
+        )
         .toList(growable: false);
-    final characterIds = memories.map((item) => item.characterId).toSet();
-    final directCharacterId = DirectChatSession.characterIdFrom(conversationId);
-    if (directCharacterId != null) characterIds.add(directCharacterId);
-    characterIds.addAll(
-      db.chatGroupBox.get(conversationId)?.aiCharacterIds ?? const [],
-    );
+    final now = DateTime.now();
     for (final memory in memories) {
-      final removedKeys = [
-        for (final value in memory.facts)
-          characterEntryKey(memory, CharacterMemoryLayer.facts, value),
-        for (final value in memory.relationshipNotes)
-          characterEntryKey(
-            memory,
-            CharacterMemoryLayer.relationshipNotes,
-            value,
-          ),
-      ];
-      memory
-        ..facts = []
-        ..relationshipNotes = []
-        ..lastUpdatedAt = DateTime.now();
-      await db.characterMemoryBox.put(memory.id, memory);
-      await _removePinnedKeys(removedKeys);
-    }
-    for (final characterId in characterIds) {
-      final character = db.aiCharacterBox.get(characterId);
-      if (character == null) continue;
-      await deleteLegacy(character);
-    }
-    final relationships = db.relationshipStateBox.values
-        .where((item) =>
-            item.groupId == conversationId &&
-            item.targetType == RelationshipTargetType.user)
-        .toList(growable: false);
-    for (final relationship in relationships) {
-      await deleteRelationship(relationship);
+      final key = _resolvePermanentKey(memory);
+      await _writePermanent(
+        key,
+        memory,
+        pinned: memory.pinned,
+        status: MemoryStatus.invalidated,
+        updatedAt: now,
+        invalidationReason: MemoryConflictResolver.userForgetReason,
+      );
     }
   }
 
@@ -646,54 +608,4 @@ class MemoryControls {
       _layer(memory, layer)
           .where((value) => isPinned(characterEntryKey(memory, layer, value)))
           .toList(growable: false);
-
-  Future<void> _removePinnedKeys(Iterable<String> keys) async {
-    final values = pinnedKeys;
-    values.removeAll(keys);
-    _pinnedCache = null;
-    await db.appSettingsBox.put(_pinnedKey, values.toList()..sort());
-  }
-
-  static String _replaceLegacyEntry(
-    String summary,
-    CharacterMemoryLayer layer,
-    String previous,
-    String replacement,
-  ) {
-    final label = switch (layer) {
-      CharacterMemoryLayer.facts => '事实',
-      CharacterMemoryLayer.relationshipNotes => '关系',
-      CharacterMemoryLayer.personaGrowth => '成长',
-    };
-    return _replaceInTaggedLayer(summary, label, previous, replacement);
-  }
-
-  static String _replaceInTaggedLayer(
-    String summary,
-    String label,
-    String previous,
-    String replacement,
-  ) {
-    if (summary.trim() == previous.trim()) return replacement.trim();
-    final pattern = RegExp('【$label】([^\\n]*)');
-    return summary
-        .replaceFirstMapped(pattern, (match) {
-          final values = match
-              .group(1)!
-              .split('；')
-              .map((value) => value.trim())
-              .where((value) => value.isNotEmpty)
-              .toList();
-          final index = values.indexOf(previous.trim());
-          if (index < 0) return match.group(0)!;
-          if (replacement.trim().isEmpty) {
-            values.removeAt(index);
-          } else {
-            values[index] = replacement.trim();
-          }
-          return values.isEmpty ? '' : '【$label】${values.join('；')}';
-        })
-        .replaceAll(RegExp(r'\n{2,}'), '\n')
-        .trim();
-  }
 }

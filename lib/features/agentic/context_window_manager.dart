@@ -98,7 +98,8 @@ class ContextWindowManager {
 
   /// **Stage 16 退役**：此方法将上下文压缩结果写回 [CharacterMemory] 和
   /// [AICharacter.memorySummary]，已不再被运行时调用。新系统通过
-  /// [PermanentMemory] 沉淀长期记忆。保留供兼容测试使用。
+  /// [PermanentMemory] 沉淀长期记忆。保留签名以便旧调用方得到明确失败。
+  @Deprecated('Stage 16 已退役；请通过 ObservationEntry 写入永久记忆')
   Future<void> persistToCharacterMemory({
     required AICharacter character,
     required CharacterMemory memory,
@@ -106,20 +107,13 @@ class ContextWindowManager {
     required CharacterSaver saveCharacter,
     required CharacterMemorySaver saveMemory,
     LayeredMemoryUpdate retained = const LayeredMemoryUpdate(),
-  }) async {
-    HumanizedMemoryService.mergeLayeredMemory(
-      memory,
-      summary.layeredUpdate,
-      retained: retained,
-    );
-    character.memorySummary = HumanizedMemoryService.mergeGlobalSummary(
-      existing: character.memorySummary,
-      update: summary.layeredUpdate,
-      retained: retained,
-    );
-    await saveMemory(memory);
-    await saveCharacter(character);
-  }
+  }) =>
+      Future.error(
+        UnsupportedError(
+          'persistToCharacterMemory 已退役；旧 CharacterMemory 和 memorySummary '
+          '仅保留用于兼容读取',
+        ),
+      );
 
   List<Map<String, dynamic>> _summaryMessages(
     List<Map<String, dynamic>> messages,

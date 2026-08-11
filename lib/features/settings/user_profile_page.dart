@@ -3,6 +3,7 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
+import 'package:chat_group/features/memory/memory_conflict_resolver.dart';
 import 'package:chat_group/providers/providers.dart';
 
 /// 输入过滤常量。
@@ -10,8 +11,7 @@ const _kMaxAge = 150;
 const _kMinAge = 1;
 
 /// 隐私提示文案。
-const _kPrivacyNotice =
-    '这些资料可能随聊天上下文发送给你配置的第三方 LLM 服务。';
+const _kPrivacyNotice = '这些资料可能随聊天上下文发送给你配置的第三方 LLM 服务。';
 
 /// 我的人物信息卡页面。
 class UserProfilePage extends ConsumerStatefulWidget {
@@ -107,8 +107,7 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
     final result = await doSave();
     if (result == null || !mounted) return;
     AppToast.dismiss();
-    AppToast.show(context, '人物信息卡已保存',
-        icon: Icons.check_circle_outlined);
+    AppToast.show(context, '人物信息卡已保存', icon: Icons.check_circle_outlined);
     if (mounted && Navigator.of(context).canPop()) {
       Navigator.of(context).pop();
     }
@@ -128,8 +127,7 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
     try {
       final db = ref.read(databaseServiceProvider);
       final ageText = ageController.text.trim();
-      final int? parsedAge =
-          ageText.isEmpty ? null : int.tryParse(ageText);
+      final int? parsedAge = ageText.isEmpty ? null : int.tryParse(ageText);
 
       final now = DateTime.now();
       final existing = db.userProfileBox.get('me');
@@ -147,17 +145,18 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
         bio: bioController.text.trim(),
         personality: splitList(personalityController.text),
         interests: splitList(interestsController.text),
-        importantBackground:
-            splitList(importantBackgroundController.text),
+        importantBackground: splitList(importantBackgroundController.text),
         updatedAt: now,
         createdAt: existing?.createdAt ?? now,
       );
       await db.userProfileBox.put('me', profile);
+      await MemoryConflictResolver(db)
+          .invalidateConflictingProfileMemories(profile);
       return true;
     } on Object catch (e) {
-      if (!mounted) return null;
-      AppToast.show(context, '保存失败：$e',
-          icon: Icons.error_outline_rounded);
+      if (!skipToast && mounted) {
+        AppToast.show(context, '保存失败：$e', icon: Icons.error_outline_rounded);
+      }
       return null;
     } finally {
       isSaving = false;
@@ -246,8 +245,8 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
                       Expanded(
                         child: TextFormField(
                           controller: displayNameController,
-                          decoration: appInputDecoration(
-                              '名字 *', '你在 AI 面前的显示名称', Icons.badge_outlined, cs),
+                          decoration: appInputDecoration('名字 *',
+                              '你在 AI 面前的显示名称', Icons.badge_outlined, cs),
                           validator: _validateDisplayName,
                         ),
                       ),
@@ -256,14 +255,14 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: preferredAddressController,
-                    decoration: appInputDecoration(
-                        '称呼', 'AI 默认如何称呼你（留空则用名字）', Icons.record_voice_over_outlined, cs),
+                    decoration: appInputDecoration('称呼', 'AI 默认如何称呼你（留空则用名字）',
+                        Icons.record_voice_over_outlined, cs),
                   ),
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: avatarController,
-                    decoration: appInputDecoration(
-                        '头像', '单个 emoji 或头像标识', Icons.emoji_emotions_outlined, cs),
+                    decoration: appInputDecoration('头像', '单个 emoji 或头像标识',
+                        Icons.emoji_emotions_outlined, cs),
                   ),
                 ],
               ),
@@ -283,8 +282,8 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: ageController,
-                    decoration: appInputDecoration(
-                        '年龄', '$_kMinAge–$_kMaxAge，可留空', Icons.cake_outlined, cs),
+                    decoration: appInputDecoration('年龄',
+                        '$_kMinAge–$_kMaxAge，可留空', Icons.cake_outlined, cs),
                     keyboardType: TextInputType.number,
                     validator: _validateAge,
                   ),
@@ -307,18 +306,14 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
                 children: [
                   TextFormField(
                     controller: personalityController,
-                    decoration: appInputDecoration(
-                        '性格标签',
-                        '用逗号分隔，如：温柔、理性、幽默',
+                    decoration: appInputDecoration('性格标签', '用逗号分隔，如：温柔、理性、幽默',
                         Icons.psychology_outlined, cs),
                   ),
                   const SizedBox(height: 12),
                   TextFormField(
                     controller: interestsController,
                     decoration: appInputDecoration(
-                        '兴趣',
-                        '用逗号分隔，如：画画、爬山、爵士乐',
-                        Icons.favorite_outlined, cs),
+                        '兴趣', '用逗号分隔，如：画画、爬山、爵士乐', Icons.favorite_outlined, cs),
                   ),
                 ],
               ),
@@ -332,10 +327,8 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
                 children: [
                   TextFormField(
                     controller: importantBackgroundController,
-                    decoration: appInputDecoration(
-                        '重要背景 / 明确事实',
-                        '用逗号分隔，如：住在上海、有一只猫',
-                        Icons.public_outlined, cs),
+                    decoration: appInputDecoration('重要背景 / 明确事实',
+                        '用逗号分隔，如：住在上海、有一只猫', Icons.public_outlined, cs),
                     maxLines: 3,
                   ),
                 ],

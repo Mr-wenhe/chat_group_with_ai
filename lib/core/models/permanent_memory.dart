@@ -138,6 +138,10 @@ class PermanentMemory extends HiveObject {
   @HiveField(18)
   DateTime updatedAt;
 
+  /// 记忆失效的结构化原因，例如人物卡覆盖或用户明确遗忘。
+  @HiveField(19)
+  final String? invalidationReason;
+
   PermanentMemory({
     String? id,
     required this.observerCharacterId,
@@ -158,6 +162,7 @@ class PermanentMemory extends HiveObject {
     DateTime? occurredAt,
     DateTime? createdAt,
     DateTime? updatedAt,
+    this.invalidationReason,
   })  : id = id ?? const Uuid().v4(),
         subjectIds = subjectIds ?? const [],
         supersedesIds = supersedesIds ?? const [],

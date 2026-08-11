@@ -479,6 +479,7 @@ class ObservationEntry {
         occurredAt: memory.occurredAt,
         createdAt: memory.createdAt,
         updatedAt: now,
+        invalidationReason: MemoryConflictResolver.userForgetReason,
       );
       await db.permanentMemoryBox.put(updated.id, updated);
     }
@@ -755,6 +756,10 @@ class ObservationEntry {
         occurredAt: message.timestamp,
         createdAt: now,
         updatedAt: now,
+        invalidationReason:
+            conflictResult.action == ConflictAction.profileOverride
+                ? MemoryConflictResolver.profileOverrideReason
+                : null,
       );
 
       if (explicitId != null) {
@@ -799,6 +804,9 @@ class ObservationEntry {
           occurredAt: old.occurredAt,
           createdAt: old.createdAt,
           updatedAt: now,
+          invalidationReason: replacementStatus == MemoryStatus.invalidated
+              ? MemoryConflictResolver.profileOverrideReason
+              : old.invalidationReason,
         );
         await db.permanentMemoryBox.put(updated.id, updated);
       }

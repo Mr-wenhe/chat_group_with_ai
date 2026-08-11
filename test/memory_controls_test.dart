@@ -1,4 +1,5 @@
-// ignore_for_file: prefer_const_constructors, prefer_const_declarations
+// These tests intentionally exercise retired compatibility entry points.
+// ignore_for_file: prefer_const_constructors, prefer_const_declarations, deprecated_member_use_from_same_package
 import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
@@ -31,8 +32,7 @@ void main() {
     await closeLifecycleHive(directory, db);
   });
 
-  test('deleting a structured memory also removes the legacy prompt copy',
-      () async {
+  test('legacy character edit API rejects writes to retired boxes', () async {
     final character = testCharacter('c1')
       ..memorySummary = '【事实】用户住在上海；用户养猫\n【成长】喜欢简洁回答';
     final memory = CharacterMemory(
@@ -45,18 +45,19 @@ void main() {
     await db.aiCharacterBox.put(character.id, character);
     await db.characterMemoryBox.put(memory.id, memory);
 
-    await MemoryControls(db).deleteCharacterEntry(
-      memory: memory,
-      character: character,
-      layer: CharacterMemoryLayer.facts,
-      index: 0,
+    await expectLater(
+      MemoryControls(db).deleteCharacterEntry(
+        memory: memory,
+        character: character,
+        layer: CharacterMemoryLayer.facts,
+        index: 0,
+      ),
+      throwsA(isA<UnsupportedError>()),
     );
 
-    expect(db.characterMemoryBox.get(memory.id)!.facts, ['用户养猫']);
-    expect(db.aiCharacterBox.get(character.id)!.memorySummary,
-        isNot(contains('用户住在上海')));
+    expect(db.characterMemoryBox.get(memory.id)!.facts, ['用户住在上海', '用户养猫']);
     expect(
-        db.aiCharacterBox.get(character.id)!.memorySummary, contains('用户养猫'));
+        db.aiCharacterBox.get(character.id)!.memorySummary, contains('用户住在上海'));
   });
 
   test('pinned memory and disabled automatic memory block automatic updates',
@@ -115,7 +116,8 @@ void main() {
     expect(character.memorySummary, contains('用户住在上海'));
   });
 
-  test('editing a pinned entry moves its pin to the new value', () async {
+  test('legacy pinned-entry edit API leaves old data and pins unchanged',
+      () async {
     final character = testCharacter('c1')..memorySummary = '【事实】旧值';
     final memory = CharacterMemory(
       id: 'm1',
@@ -131,23 +133,20 @@ void main() {
     );
     await controls.setPinned(oldKey, true);
 
-    await controls.updateCharacterEntry(
-      memory: memory,
-      character: character,
-      layer: CharacterMemoryLayer.facts,
-      index: 0,
-      value: '新值',
+    await expectLater(
+      controls.updateCharacterEntry(
+        memory: memory,
+        character: character,
+        layer: CharacterMemoryLayer.facts,
+        index: 0,
+        value: '新值',
+      ),
+      throwsA(isA<UnsupportedError>()),
     );
 
-    expect(controls.isPinned(oldKey), isFalse);
-    expect(
-      controls.isPinned(controls.characterEntryKey(
-        memory,
-        CharacterMemoryLayer.facts,
-        '新值',
-      )),
-      isTrue,
-    );
+    expect(controls.isPinned(oldKey), isTrue);
+    expect(memory.facts, ['旧值']);
+    expect(character.memorySummary, '【事实】旧值');
   });
 
   test('a pinned relationship rejects local automatic updates', () async {
@@ -176,7 +175,8 @@ void main() {
     expect(db.groupMemoryBox.get('g1_week')!.topicSummary, isEmpty);
   });
 
-  test('forgetting user content clears structured and legacy injection paths',
+  test(
+      'forgetting user content invalidates new memories without old-box writes',
       () async {
     final character = testCharacter('c1')..memorySummary = '用户的敏感偏好';
     final memory = CharacterMemory(
@@ -198,14 +198,63 @@ void main() {
       ),
     );
     await db.characterMemoryBox.put(memory.id, memory);
+    await db.permanentMemoryBox.put(
+      'permanent-g1',
+      PermanentMemory(
+        id: 'permanent-g1',
+        observerCharacterId: character.id,
+        kind: MemoryKind.fact,
+        content: '用户的敏感偏好',
+        subjectIds: const ['user'],
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.group,
+        originConversationId: 'g1',
+        originNameSnapshot: '测试群',
+      ),
+    );
 
     await MemoryControls(db).forgetAboutUser('g1');
 
     final stored = db.characterMemoryBox.get(memory.id)!;
-    expect(stored.facts, isEmpty);
-    expect(stored.relationshipNotes, isEmpty);
+    expect(stored.facts, ['用户的敏感偏好']);
+    expect(stored.relationshipNotes, ['用户不喜欢被追问']);
     expect(stored.personaGrowth, ['角色说话更简洁']);
+    expect(db.aiCharacterBox.get(character.id)!.memorySummary, '用户的敏感偏好');
+    expect(db.permanentMemoryBox.get('permanent-g1')!.status,
+        MemoryStatus.invalidated);
+    expect(db.permanentMemoryBox.get('permanent-g1')!.invalidationReason,
+        'userForget');
+  });
+
+  test('retired legacy and relationship write APIs reject without writes',
+      () async {
+    final character = testCharacter('c1');
+    final relationship = RelationshipState(
+      id: 'r1',
+      groupId: 'g1',
+      sourceCharacterId: 'c1',
+      targetId: 'user',
+      targetType: RelationshipTargetType.user,
+    );
+    await db.aiCharacterBox.put(character.id, character);
+    await db.relationshipStateBox.put(relationship.id, relationship);
+    final controls = MemoryControls(db);
+
+    await expectLater(controls.updateLegacy(character, '新摘要'),
+        throwsA(isA<UnsupportedError>()));
+    await expectLater(
+        controls.deleteLegacy(character), throwsA(isA<UnsupportedError>()));
+    await expectLater(
+      controls.updateRelationship(relationship, '新备注'),
+      throwsA(isA<UnsupportedError>()),
+    );
+    await expectLater(
+      controls.deleteRelationship(relationship),
+      throwsA(isA<UnsupportedError>()),
+    );
+
     expect(db.aiCharacterBox.get(character.id)!.memorySummary, isEmpty);
+    expect(db.relationshipStateBox.get(relationship.id)!.notes, isEmpty);
   });
 
   group('MemoryControls permanent memory operations', () {

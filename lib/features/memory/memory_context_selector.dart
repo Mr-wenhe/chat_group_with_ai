@@ -2,6 +2,7 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/user_profile.dart';
+import 'package:chat_group/features/memory/memory_conflict_resolver.dart';
 
 /// 统一全局记忆上下文选择器。
 ///
@@ -55,6 +56,7 @@ class MemoryContextSelector {
       participantCharacterIds: participantCharacterIds,
       currentTargetId: currentTargetId,
       userMessage: userMessage,
+      userProfile: profile,
       budget: characterBudget,
     );
 
@@ -160,6 +162,7 @@ class MemoryContextSelector {
     required List<String> participantCharacterIds,
     String? currentTargetId,
     String? userMessage,
+    required UserProfile? userProfile,
     required int budget,
   }) {
     // 先构建被 supersede 的 ID 集合。
@@ -179,6 +182,16 @@ class MemoryContextSelector {
       if (memory.status != MemoryStatus.active) continue;
       // 排除被其他有效记录 supersede 的旧记录。
       if (supersededIds.contains(memory.id)) continue;
+      if (!memory.pinned &&
+          MemoryConflictResolver.conflictsWithProfile(
+            memory.content,
+            memory.subjectIds,
+            userProfile: userProfile,
+          )) {
+        // Keep the audit record, but never let an old active record outrank
+        // the current user-maintained profile if a save was interrupted.
+        continue;
+      }
       if (memory.pinned) {
         // pinned 记忆直接收录，不受 participant 限制（用户明确固定）。
         allMemories.add(memory);

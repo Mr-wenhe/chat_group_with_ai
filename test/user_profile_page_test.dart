@@ -1,4 +1,5 @@
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/features/settings/user_profile_page.dart';
@@ -19,6 +20,7 @@ void main() {
 
   setUp(() async {
     await db.userProfileBox.delete('me');
+    await db.permanentMemoryBox.clear();
   });
 
   tearDownAll(() async {
@@ -42,8 +44,7 @@ void main() {
       expect(find.text('我的资料'), findsOneWidget);
     });
 
-    testWidgets('renders all form sections and field labels',
-        (tester) async {
+    testWidgets('renders all form sections and field labels', (tester) async {
       await tester.pumpWidget(app(const UserProfilePage()));
       await tester.pump(const Duration(milliseconds: 300));
 
@@ -64,6 +65,39 @@ void main() {
   });
 
   group('UserProfilePage save persistence', () {
+    testWidgets('doSave invalidates conflicting memories after writing profile',
+        (tester) async {
+      await tester.runAsync(() async {
+        await db.permanentMemoryBox.put(
+          'profile-conflict',
+          PermanentMemory(
+            id: 'profile-conflict',
+            observerCharacterId: 'char-1',
+            kind: MemoryKind.fact,
+            content: '用户叫旧名字',
+            subjectIds: const ['user'],
+            status: MemoryStatus.active,
+            originType: MemoryOriginType.group,
+            originNameSnapshot: '测试群',
+          ),
+        );
+      });
+
+      final pageKey = GlobalKey<UserProfilePageState>();
+      await tester.pumpWidget(app(UserProfilePage(key: pageKey)));
+      await tester.pump(const Duration(milliseconds: 300));
+      pageKey.currentState!.displayNameController.text = '新名字';
+      await tester.pump();
+
+      final result = await tester
+          .runAsync(() => pageKey.currentState!.doSave(skipToast: true));
+      expect(result, isTrue);
+      final memory = db.permanentMemoryBox.get('profile-conflict')!;
+      expect(memory.status, MemoryStatus.invalidated);
+      expect(memory.invalidationReason, 'profileOverride');
+      expect(db.userProfileBox.get('me')!.displayName, '新名字');
+    });
+
     testWidgets('doSave persists all fields through production Hive write',
         (tester) async {
       final pageKey = GlobalKey<UserProfilePageState>();
@@ -107,8 +141,8 @@ void main() {
       pageKey.currentState!.displayNameController.text = '   ';
       await tester.pump(const Duration(milliseconds: 100));
 
-      final result = await tester.runAsync(
-          () => pageKey.currentState!.doSave(skipToast: true));
+      final result = await tester
+          .runAsync(() => pageKey.currentState!.doSave(skipToast: true));
       expect(result, isNull);
       expect(db.userProfileBox.get('me'), isNull);
     });

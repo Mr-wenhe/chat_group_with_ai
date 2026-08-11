@@ -23,6 +23,9 @@ class ConflictResult {
 
 /// Handles conflict detection and audit-safe invalidation for permanent memory.
 class MemoryConflictResolver {
+  static const profileOverrideReason = 'profileOverride';
+  static const userForgetReason = 'userForget';
+
   final DatabaseService db;
 
   const MemoryConflictResolver(this.db);
@@ -44,7 +47,7 @@ class MemoryConflictResolver {
     );
     if (exactDuplicate) return const ConflictResult(ConflictAction.duplicate);
 
-    if (_conflictsWithProfile(content, subjectIds, userProfile: userProfile)) {
+    if (conflictsWithProfile(content, subjectIds, userProfile: userProfile)) {
       final toInvalidate = db.permanentMemoryBox.values
           .where(
             (memory) =>
@@ -53,7 +56,7 @@ class MemoryConflictResolver {
                 memory.kind == kind &&
                 !memory.pinned &&
                 _listsOverlap(memory.subjectIds, subjectIds) &&
-                _conflictsWithProfile(
+                conflictsWithProfile(
                   memory.content,
                   memory.subjectIds,
                   userProfile: userProfile,
@@ -91,6 +94,51 @@ class MemoryConflictResolver {
     if (isSupplement) return const ConflictResult(ConflictAction.supplement);
 
     return const ConflictResult(ConflictAction.create);
+  }
+
+  /// Invalidates active, non-pinned memories that contradict the current
+  /// user profile. The profile remains the authoritative source of truth.
+  Future<int> invalidateConflictingProfileMemories(UserProfile profile) async {
+    final candidates = db.permanentMemoryBox.values
+        .where(
+          (memory) =>
+              memory.status == MemoryStatus.active &&
+              !memory.pinned &&
+              conflictsWithProfile(
+                memory.content,
+                memory.subjectIds,
+                userProfile: profile,
+              ),
+        )
+        .toList(growable: false);
+    final now = DateTime.now();
+    for (final memory in candidates) {
+      final key = _resolveMemoryKey(memory);
+      final invalidated = PermanentMemory(
+        id: memory.id,
+        observerCharacterId: memory.observerCharacterId,
+        kind: memory.kind,
+        content: memory.content,
+        subjectIds: memory.subjectIds,
+        status: MemoryStatus.invalidated,
+        importance: memory.importance,
+        confidence: memory.confidence,
+        explicitlyRequested: memory.explicitlyRequested,
+        pinned: memory.pinned,
+        supersedesIds: memory.supersedesIds,
+        originType: memory.originType,
+        originConversationId: memory.originConversationId,
+        originNameSnapshot: memory.originNameSnapshot,
+        sourceMessageIds: memory.sourceMessageIds,
+        participantIds: memory.participantIds,
+        occurredAt: memory.occurredAt,
+        createdAt: memory.createdAt,
+        updatedAt: now,
+        invalidationReason: profileOverrideReason,
+      );
+      await db.permanentMemoryBox.put(key, invalidated);
+    }
+    return candidates.length;
   }
 
   bool _listsOverlap(List<String> a, List<String> b) =>
@@ -132,7 +180,7 @@ class MemoryConflictResolver {
     return result;
   }
 
-  bool _conflictsWithProfile(
+  static bool conflictsWithProfile(
     String content,
     List<String> subjectIds, {
     required UserProfile? userProfile,
@@ -175,5 +223,16 @@ class MemoryConflictResolver {
       }
     }
     return false;
+  }
+
+  dynamic _resolveMemoryKey(PermanentMemory memory) {
+    final box = db.permanentMemoryBox;
+    final key = memory.key;
+    if (key != null && box.get(key)?.id == memory.id) return key;
+    if (box.get(memory.id)?.id == memory.id) return memory.id;
+    for (final candidate in box.keys) {
+      if (box.get(candidate)?.id == memory.id) return candidate;
+    }
+    throw StateError('PermanentMemory not found in box: id=${memory.id}');
   }
 }

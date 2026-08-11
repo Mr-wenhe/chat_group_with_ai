@@ -357,6 +357,51 @@ void main() {
             .toList();
         expect(charMemories, isEmpty);
       });
+
+      test('preserves unparseable summaries as legacy growth memories',
+          () async {
+        const summaries = {
+          'plain': '用户来自上海，喜欢简洁回答',
+          'empty-tag': '【事实】【关系】',
+          'damaged-tag': '【事实用户来自上海',
+        };
+        for (final entry in summaries.entries) {
+          await db.aiCharacterBox.put(
+            entry.key,
+            AICharacter(
+              id: entry.key,
+              name: entry.key,
+              avatar: '🙂',
+              age: 22,
+              role: '助手',
+              personalityTags: const [],
+              systemPrompt: '',
+              memorySummary: entry.value,
+              apiKey: '',
+              apiProvider: '',
+            ),
+          );
+        }
+
+        final report = await MemoryMigrator(db).migrate();
+        final memories = db.permanentMemoryBox.values.toList();
+
+        expect(report.permanentMemoriesCreated, 3);
+        expect(memories, hasLength(3));
+        expect(
+          memories,
+          everyElement(
+            predicate<PermanentMemory>(
+              (memory) =>
+                  memory.kind == MemoryKind.personaGrowth &&
+                  memory.originType == MemoryOriginType.legacyMigration &&
+                  memory.subjectIds.isEmpty,
+            ),
+          ),
+        );
+        expect(memories.map((memory) => memory.content),
+            containsAll(summaries.values));
+      });
     });
 
     group('RelationshipState -> global snapshot + RelationshipEvent', () {

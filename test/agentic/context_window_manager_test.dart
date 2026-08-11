@@ -1,3 +1,6 @@
+// These tests intentionally exercise retired compatibility entry points.
+// ignore_for_file: deprecated_member_use_from_same_package
+
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/features/agentic/context_window_manager.dart';
@@ -37,7 +40,7 @@ void main() {
     expect(compacted.last, {'role': 'user', 'content': '当前任务'});
   });
 
-  test('摘要写入角色全局记忆和会话三层记忆', () async {
+  test('退役摘要写入 API refuses legacy model writes', () async {
     final character = _character();
     final memory = CharacterMemory(groupId: 'dm:c1', characterId: character.id);
     var characterSaved = false;
@@ -50,20 +53,23 @@ void main() {
     );
     const manager = ContextWindowManager(complete: _unusedCompletion);
 
-    await manager.persistToCharacterMemory(
-      character: character,
-      memory: memory,
-      summary: summary,
-      saveCharacter: (_) async => characterSaved = true,
-      saveMemory: (_) async => memorySaved = true,
+    await expectLater(
+      manager.persistToCharacterMemory(
+        character: character,
+        memory: memory,
+        summary: summary,
+        saveCharacter: (_) async => characterSaved = true,
+        saveMemory: (_) async => memorySaved = true,
+      ),
+      throwsA(isA<UnsupportedError>()),
     );
 
-    expect(characterSaved, isTrue);
-    expect(memorySaved, isTrue);
-    expect(character.memorySummary, contains('任务尚待补充测试'));
-    expect(memory.facts, contains('任务尚待补充测试'));
-    expect(memory.relationshipNotes, contains('用户偏好简洁答案'));
-    expect(memory.personaGrowth, contains('先给结论再解释'));
+    expect(characterSaved, isFalse);
+    expect(memorySaved, isFalse);
+    expect(character.memorySummary, isEmpty);
+    expect(memory.facts, isEmpty);
+    expect(memory.relationshipNotes, isEmpty);
+    expect(memory.personaGrowth, isEmpty);
   });
 
   test('摘要 LLM 遇到瞬态失败后按统一策略恢复', () async {

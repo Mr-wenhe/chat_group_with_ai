@@ -10,8 +10,8 @@ import 'package:uuid/uuid.dart';
 /// UUID v5 URL namespace constant (RFC 4122).
 const _kUuidNamespaceUrl = '6ba7b811-9dad-11d1-80b4-00c04fd430c8';
 
-/// 迁移 schema marker 版本；每次结构性变更递增。
-const _kMemoryMigratorSchemaVersion = 1;
+/// 迁移 schema marker 版本；修复摘要兜底后递增，确保旧 marker 会重跑。
+const _kMemoryMigratorSchemaVersion = 2;
 
 /// app_settings 中存储迁移完成的 marker key。
 const _kMemoryMigrationMarkerKey = 'memory_migration_marker_v1';
@@ -80,23 +80,32 @@ class MemoryMigrator {
     if (profileResult.warning != null) warnings.add(profileResult.warning!);
 
     memories += await _migrateCharacterMemories();
-    memories += await _migrateMemorySummaries();
+    final summaryResult = await _migrateMemorySummaries();
+    memories += summaryResult.created;
+    warnings.addAll(summaryResult.warnings);
 
     final relResult = await _migrateRelationshipStates();
     relSnapshots = relResult.snapshotsCreated;
     relEvents = relResult.eventsCreated;
     warnings.addAll(relResult.warnings);
 
-    await _writeMarker({
-      'version': _schemaVersion,
-      'migratedAt': DateTime.now().toUtc().toIso8601String(),
-      'stats': {
-        'userProfiles': userProfiles,
-        'permanentMemories': memories,
-        'relationshipSnapshots': relSnapshots,
-        'relationshipEvents': relEvents,
-      },
-    });
+    if (summaryResult.failedCharacterIds.isEmpty) {
+      await _writeMarker({
+        'version': _schemaVersion,
+        'migratedAt': DateTime.now().toUtc().toIso8601String(),
+        'stats': {
+          'userProfiles': userProfiles,
+          'permanentMemories': memories,
+          'relationshipSnapshots': relSnapshots,
+          'relationshipEvents': relEvents,
+        },
+      });
+    } else {
+      warnings.add(
+        'memorySummary 迁移未完成，下一次启动将重试失败角色：'
+        '${summaryResult.failedCharacterIds.join(', ')}',
+      );
+    }
 
     return MemoryMigrationReport(
       alreadyMigrated: false,
@@ -235,71 +244,96 @@ class MemoryMigrator {
 
   // ---- 3. memorySummary -> legacyMigration memories ----
 
-  Future<int> _migrateMemorySummaries() async {
+  Future<_MemorySummaryMigrationResult> _migrateMemorySummaries() async {
     final characters = _db.aiCharacterBox.values.toList(growable: false);
     int created = 0;
+    final failedCharacterIds = <String>[];
+    final warnings = <String>[];
 
     for (final char in characters) {
       final summary = char.memorySummary.trim();
       if (summary.isEmpty) continue;
 
       // 按角色粒度检查是否已迁移，支持部分重试
-      final charMigratedKey = 'memory_summary_migrated_${char.id}';
+      final charMigratedKey = 'memory_summary_migrated_v2_${char.id}';
       final alreadyMigrated = _db.appSettingsBox.get(charMigratedKey);
       if (alreadyMigrated == true) continue;
 
-      // 解析 【标签】内容【标签】内容 格式，内容内部按 ； 拆分
-      final taggedEntries = <MemoryKind, List<String>>{};
-      final tagPattern = RegExp(r'【(事实|关系|成长)】([^【]*)');
-      for (final match in tagPattern.allMatches(summary)) {
-        final tag = match.group(1)?.trim();
-        final rawContent = match.group(2)?.trim() ?? '';
-        if (tag == null) continue;
+      try {
+        // 解析 【标签】内容【标签】内容 格式，内容内部按 ； 拆分。
+        // 整段无法完整解析时保留原文，避免部分提取造成不可逆丢失。
+        final taggedEntries = _parseTaggedSummary(summary) ??
+            <MemoryKind, List<String>>{
+              MemoryKind.personaGrowth: [summary],
+            };
 
-        final entries = rawContent
-            .split('；')
-            .map((s) => s.trim())
-            .where((s) => s.isNotEmpty)
-            .toList();
-        if (entries.isEmpty) continue;
-
-        final kind = switch (tag) {
-          '事实' => MemoryKind.fact,
-          '关系' => MemoryKind.relationshipNote,
-          '成长' => MemoryKind.personaGrowth,
-          _ => null,
-        };
-        if (kind != null) {
-          taggedEntries.putIfAbsent(kind, () => []).addAll(entries);
-        }
-      }
-
-      for (final entry in taggedEntries.entries) {
-        for (final content in entry.value) {
-          if (await _putPermanentMemory(PermanentMemory(
-            observerCharacterId: char.id,
-            kind: entry.key,
-            content: content,
-            subjectIds: const [],
-            status: MemoryStatus.active,
-            importance: 45,
-            confidence: 0.3,
-            originType: MemoryOriginType.legacyMigration,
-            originConversationId: null,
-            originNameSnapshot: '旧版跨会话摘要，原场合未知',
-            sourceMessageIds: const [],
-            participantIds: const [],
-            occurredAt: char.createdAt,
-          ))) {
-            created++;
+        for (final entry in taggedEntries.entries) {
+          for (final content in entry.value) {
+            if (await _putPermanentMemory(PermanentMemory(
+              observerCharacterId: char.id,
+              kind: entry.key,
+              content: content,
+              subjectIds: const [],
+              status: MemoryStatus.active,
+              importance: 45,
+              confidence: 0.3,
+              originType: MemoryOriginType.legacyMigration,
+              originConversationId: null,
+              originNameSnapshot: '旧版跨会话摘要，原场合未知',
+              sourceMessageIds: const [],
+              participantIds: const [],
+              occurredAt: char.createdAt,
+            ))) {
+              created++;
+            }
           }
         }
-      }
 
-      // 标记该角色摘要已迁移（无论是否提取到条目）
-      await _db.appSettingsBox.put(charMigratedKey, true);
+        // 只有该角色的所有记录都写入成功后才落角色 marker。
+        await _db.appSettingsBox.put(charMigratedKey, true);
+      } on Object catch (error) {
+        failedCharacterIds.add(char.id);
+        warnings.add('角色 ${char.id} 的 memorySummary 迁移失败：$error');
+      }
     }
-    return created;
+    return _MemorySummaryMigrationResult(
+      created: created,
+      failedCharacterIds: failedCharacterIds,
+      warnings: warnings,
+    );
+  }
+
+  Map<MemoryKind, List<String>>? _parseTaggedSummary(String summary) {
+    final tagPattern = RegExp(r'【(事实|关系|成长)】([^【]*)');
+    final matches = tagPattern.allMatches(summary).toList(growable: false);
+    if (matches.isEmpty) return null;
+
+    final entries = <MemoryKind, List<String>>{};
+    var cursor = 0;
+    for (final match in matches) {
+      if (summary.substring(cursor, match.start).trim().isNotEmpty) {
+        return null;
+      }
+      final rawContent = match.group(2)?.trim() ?? '';
+      final values = rawContent
+          .split('；')
+          .map((value) => value.trim())
+          .where((value) => value.isNotEmpty)
+          .toList();
+      if (values.isEmpty) return null;
+
+      final kind = switch (match.group(1)?.trim()) {
+        '事实' => MemoryKind.fact,
+        '关系' => MemoryKind.relationshipNote,
+        '成长' => MemoryKind.personaGrowth,
+        _ => null,
+      };
+      if (kind == null) return null;
+      entries.putIfAbsent(kind, () => []).addAll(values);
+      cursor = match.end;
+    }
+    if (summary.substring(cursor).trim().isNotEmpty) return null;
+    return entries.isEmpty ? null : entries;
   }
 
   // ---- 4. RelationshipState -> 全局快照 + RelationshipEvent ----
@@ -529,6 +563,18 @@ class _ProfileResult {
     required this.created,
     this.selectedName,
     this.warning,
+  });
+}
+
+class _MemorySummaryMigrationResult {
+  final int created;
+  final List<String> failedCharacterIds;
+  final List<String> warnings;
+
+  const _MemorySummaryMigrationResult({
+    required this.created,
+    required this.failedCharacterIds,
+    required this.warnings,
   });
 }
 

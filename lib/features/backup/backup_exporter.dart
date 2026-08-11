@@ -60,7 +60,7 @@ class BackupExporter {
           continue;
         }
         final file = File(attachment.localPath);
-        if (!await file.exists() || !_isManagedFile(file)) {
+        if (!await file.exists() || !await _isManagedFile(file)) {
           missing++;
         } else {
           bytes += await file.length();
@@ -335,7 +335,7 @@ class BackupExporter {
   ) async {
     final source = File(attachment.localPath);
     if (!isAttachmentDataUri(attachment.localPath) &&
-        (!await source.exists() || !_isManagedFile(source))) {
+        (!await source.exists() || !await _isManagedFile(source))) {
       return null;
     }
     final bytes = isAttachmentDataUri(attachment.localPath)
@@ -359,10 +359,18 @@ class BackupExporter {
     return relativePath;
   }
 
-  bool _isManagedFile(File file) {
-    final root = '${mediaDirectory.absolute.path}${Platform.pathSeparator}';
-    return file.absolute.path.startsWith(root) &&
-        file.statSync().type == FileSystemEntityType.file;
+  Future<bool> _isManagedFile(File file) async {
+    try {
+      final root = await mediaDirectory.resolveSymbolicLinks();
+      final resolved = await file.resolveSymbolicLinks();
+      final rootPrefix = root.endsWith(Platform.pathSeparator)
+          ? root
+          : '$root${Platform.pathSeparator}';
+      return resolved.startsWith(rootPrefix) &&
+          (await File(resolved).stat()).type == FileSystemEntityType.file;
+    } on Object {
+      return false;
+    }
   }
 
   Future<void> _writeJson<T>(

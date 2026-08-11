@@ -118,6 +118,10 @@ class MemoryAuditCard extends StatelessWidget {
                       style: const TextStyle(fontSize: 12)),
                   Text(memory.originNameSnapshot,
                       style: const TextStyle(fontSize: 12)),
+                  if (memory.invalidationReason != null)
+                    Text('失效原因：${memory.invalidationReason}',
+                        style:
+                            const TextStyle(fontSize: 12, color: Colors.red)),
                 ],
               ),
               const SizedBox(height: 4),

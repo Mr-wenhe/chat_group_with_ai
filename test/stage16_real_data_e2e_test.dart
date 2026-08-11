@@ -155,6 +155,8 @@ void main() {
 
       // ── 9. 跨场景验证：真实群 A → 群 B 读取同一 AI 永久记忆 ────────
       final selector = MemoryContextSelector(db);
+      // 未标记的旧摘要按原文保留，真实数据中可能超过默认 Prompt 预算。
+      const stage16MemoryBudget = 12000;
       final groups = db.chatGroupBox.values
           .where((group) => group.aiCharacterIds.isNotEmpty)
           .toList(growable: false);
@@ -217,6 +219,7 @@ void main() {
         participantCharacterIds: participantIdsA,
         currentTargetId: 'user',
         userMessage: 'Stage 16 群 A ${groupA.id}',
+        characterBudget: stage16MemoryBudget,
       );
 
       // 在"群 B"上下文中查询同一角色：参数来自另一真实群。
@@ -225,6 +228,7 @@ void main() {
         participantCharacterIds: participantIdsB,
         currentTargetId: 'user',
         userMessage: 'Stage 16 群 B ${groupB.id}',
+        characterBudget: stage16MemoryBudget,
       );
       expect(memoryInContextA, contains(sharedContent),
           reason: '群 A 应读到观察者的永久记忆');
@@ -237,6 +241,7 @@ void main() {
         participantCharacterIds: [observerCharacterId],
         currentTargetId: 'user',
         userMessage: 'Stage 16 DM $observerCharacterId',
+        characterBudget: stage16MemoryBudget,
       );
       expect(dmMemory, contains(sharedContent),
           reason: '群 → DM 应能读取同一 AI 的永久记忆');
@@ -247,6 +252,7 @@ void main() {
         participantCharacterIds: participantIdsA,
         currentTargetId: 'user',
         userMessage: 'Stage 16 群 A ${groupA.id}',
+        characterBudget: stage16MemoryBudget,
       );
       expect(backToGroupMemory, contains(sharedContent),
           reason: 'DM → 群应能读取同一 AI 的永久记忆');
@@ -292,6 +298,7 @@ void main() {
           participantCharacterIds: allParticipantIds,
           currentTargetId: 'user',
           userMessage: bMemory.content,
+          characterBudget: stage16MemoryBudget,
         );
         expect(bSelected, contains(bMemory.content), reason: 'B 应能读取自己的永久记忆正文');
 
@@ -300,6 +307,7 @@ void main() {
           participantCharacterIds: [observerCharacterId, secondCharacterId],
           currentTargetId: secondCharacterId,
           userMessage: bMemory.content,
+          characterBudget: stage16MemoryBudget,
         );
         expect(aSelected, isNot(contains(bMemory.content)),
             reason: 'A 的查询结果不应包含 B 的永久记忆正文');

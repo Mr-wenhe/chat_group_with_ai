@@ -294,6 +294,7 @@ class BackupEntityCodec {
         'occurredAt': _date(item.occurredAt),
         'createdAt': _date(item.createdAt),
         'updatedAt': _date(item.updatedAt),
+        'invalidationReason': item.invalidationReason,
       };
 
   static Map<String, dynamic> relationshipEvent(
@@ -395,6 +396,7 @@ class BackupEntityCodec {
         occurredAt: _dateTime(json, 'occurredAt'),
         createdAt: _dateTime(json, 'createdAt'),
         updatedAt: _dateTime(json, 'updatedAt'),
+        invalidationReason: json['invalidationReason']?.toString(),
       );
 
   static RelationshipEvent decodeRelationshipEvent(

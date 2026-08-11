@@ -36,13 +36,14 @@ class PermanentMemoryAdapter extends TypeAdapter<PermanentMemory> {
       occurredAt: fields[16] as DateTime?,
       createdAt: fields[17] as DateTime?,
       updatedAt: fields[18] as DateTime?,
+      invalidationReason: fields[19] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, PermanentMemory obj) {
     writer
-      ..writeByte(19)
+      ..writeByte(20)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -80,7 +81,9 @@ class PermanentMemoryAdapter extends TypeAdapter<PermanentMemory> {
       ..writeByte(17)
       ..write(obj.createdAt)
       ..writeByte(18)
-      ..write(obj.updatedAt);
+      ..write(obj.updatedAt)
+      ..writeByte(19)
+      ..write(obj.invalidationReason);
   }
 
   @override

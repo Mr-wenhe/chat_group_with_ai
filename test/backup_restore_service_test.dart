@@ -698,6 +698,29 @@ void main() {
     expect(prepared.preview.attachmentCount, 0);
   });
 
+  test('symlinked attachment outside media directory is omitted', () async {
+    final outside = File('${testRoot.path}/outside.txt');
+    await outside.writeAsString('must not enter backup');
+    final link = Link('${mediaDirectory.path}/escape.txt');
+    await link.create(outside.path);
+    await _seedCoreData(db, File(link.path));
+    final backup = File('${testRoot.path}/symlink.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+
+    final estimate = await service.estimate(const BackupSelection.all());
+    final result = await service.createBackup(destination: backup);
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+
+    expect(estimate.missingAttachments, 1);
+    expect(result.manifest.missingAttachments, ['note.txt']);
+    expect(prepared.preview.attachmentCount, 0);
+  });
+
   test('unknown schema and staging tampering are rejected before commit',
       () async {
     final unknown = File('${testRoot.path}/unknown.cgbak');
