@@ -170,6 +170,9 @@ class ChatOrchestrator {
     return (now ?? DateTime.now()).difference(lastSummaryAt) >= minInterval;
   }
 
+  /// **Stage 16 退役**：此方法判断是否应演进旧 [CharacterMemory]，
+  /// 已不再被运行时调用。新系统通过 [PermanentMemory] 提炼入口
+  /// 和 [ObservationEntry] 统一触发。保留供兼容测试使用。
   static bool shouldEvolveCharacterMemory({
     required int messageCount,
     required bool hasUserMessage,

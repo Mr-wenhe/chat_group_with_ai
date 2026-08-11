@@ -96,6 +96,9 @@ class ContextWindowManager {
     return result;
   }
 
+  /// **Stage 16 退役**：此方法将上下文压缩结果写回 [CharacterMemory] 和
+  /// [AICharacter.memorySummary]，已不再被运行时调用。新系统通过
+  /// [PermanentMemory] 沉淀长期记忆。保留供兼容测试使用。
   Future<void> persistToCharacterMemory({
     required AICharacter character,
     required CharacterMemory memory,

@@ -37,6 +37,9 @@ class DirectChatSession {
         '不要替别人发言，不要说自己是 AI，不要带自己的名字前缀。';
   }
 
+  /// **Stage 16 退役**：此方法读取 [AICharacter.memorySummary] 注入 Prompt，
+  /// 已不再被运行时调用。永久记忆由 [MemoryContextSelector] 统一注入。
+  /// 保留供兼容测试使用，不得在新生成入口恢复调用。
   static String persistentMemoryPrompt(AICharacter character) {
     final memory = character.memorySummary.trim();
     if (memory.isEmpty) return '';

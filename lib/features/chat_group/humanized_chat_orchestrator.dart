@@ -353,6 +353,12 @@ class HumanizedChatOrchestrator {
     return random.nextBool() ? ReplyAction.agree : ReplyAction.askBack;
   }
 
+  /// 话题契合度评分。
+  ///
+  /// **Stage 16 退役**：不再读取 [CharacterMemory.personaGrowth] 作为运行时
+  /// 话题匹配来源。永久记忆的人格成长由 [MemoryContextSelector] 统一注入
+  /// Prompt，发言选择只依赖角色自身属性（role、personalityTags）。
+  /// [memories] 参数保留兼容签名，但内容不参与运行时评分。
   static int _topicInterest(
     AICharacter character,
     List<CharacterMemory> memories,
@@ -360,11 +366,11 @@ class HumanizedChatOrchestrator {
   ) {
     final text = userMessage?.toLowerCase() ?? '';
     if (text.isEmpty) return 0;
+    // 旧版曾把 CharacterMemory.personaGrowth 拼入 haystack；
+    // 永久记忆迁移后该路径已退役，避免双源注入。
     final haystack = [
       character.role,
       ...character.personalityTags,
-      for (final memory in memories.where((m) => m.characterId == character.id))
-        ...memory.personaGrowth,
     ].join(' ').toLowerCase();
 
     var score = 0;

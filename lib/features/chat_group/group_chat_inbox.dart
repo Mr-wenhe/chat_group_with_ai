@@ -53,12 +53,16 @@ class GroupChatInbox {
     return summaries;
   }
 
+  /// **Stage 16 退役**：此方法不再从 [ChatGroup.ownerName] 读取真人名称，
+  /// 改为接收 [userDisplayName] 参数（应来自 [UserProfile.displayName]）。
+  /// 保留方法供测试和兼容诊断使用；运行时收件箱走 [buildIndexedSummaries]。
   static List<GroupChatSummary> buildSummaries({
     required List<ChatGroup> groups,
     required List<Message> messages,
     required Map<String, DateTime> readAtByGroup,
     required Set<String> pinnedIds,
     String? activeGroupId,
+    String userDisplayName = '我',
   }) {
     final messagesByGroup = <String, List<Message>>{};
     for (final message in messages) {
@@ -82,7 +86,7 @@ class GroupChatInbox {
       final mentionCount = unreadMessages.where((message) {
         return ChatActivityPolicy.contentMentionsUser(
           message.content,
-          group.ownerName.trim().isEmpty ? '我' : group.ownerName.trim(),
+          userDisplayName.trim().isEmpty ? '我' : userDisplayName.trim(),
         );
       }).length;
       return GroupChatSummary(

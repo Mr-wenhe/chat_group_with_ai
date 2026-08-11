@@ -123,7 +123,9 @@ class _Snapshot {
           : selectedPermanentMemories.map((entry) {
               final item = entry.value;
               return MapEntry<Object, Map<String, dynamic>>(
-                entry.key,
+                // Migrated memories use a stable Hive key that differs from
+                // the entity id; the backup format is keyed by canonical id.
+                item.id,
                 BackupEntityCodec.permanentMemory(
                   item,
                   sourceMessageIds: sourceMessages(item.sourceMessageIds),
@@ -157,7 +159,8 @@ class _Snapshot {
             }).map((entry) {
               final item = entry.value;
               return MapEntry<Object, Map<String, dynamic>>(
-                entry.key,
+                // Migrated events have the same stable-key/id split as memories.
+                item.id,
                 BackupEntityCodec.relationshipEvent(
                   item,
                   sourceMessageIds: sourceMessages(item.sourceMessageIds),

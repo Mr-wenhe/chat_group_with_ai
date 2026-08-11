@@ -36,6 +36,10 @@ class HumanizedMemoryService {
     return text;
   }
 
+  /// **Stage 16 退役**：此方法按 `groupId + characterId` 查找旧
+  /// [CharacterMemory]，并在缺失时回退读取 [AICharacter.memorySummary]。
+  /// 已不再被运行时 Prompt 路径调用；仅 [MemoryControls] 管理编辑入口使用。
+  /// 永久记忆由 [MemoryContextSelector] 统一注入。
   static CharacterMemory memoryForCharacter({
     required String groupId,
     required AICharacter character,
@@ -55,6 +59,10 @@ class HumanizedMemoryService {
     );
   }
 
+  /// **Stage 16 退役**：此方法按 `groupId` 查找/创建旧 per-group
+  /// [RelationshipState]，已不再被运行时调用。全局方向关系由
+  /// [RelationshipEventService] 追加事件并幂等更新全局快照。
+  /// 保留供兼容测试使用。
   static List<RelationshipState> applyLocalRelationshipRules({
     required List<RelationshipState> relationships,
     required String groupId,
@@ -187,10 +195,10 @@ class HumanizedMemoryService {
     memory.lastUpdatedAt = DateTime.now();
   }
 
-  /// 合并跨会话的角色长期记忆。
-  ///
-  /// [AICharacter.memorySummary] 是所有群聊和私聊都会注入的全局摘要，因此新一轮
-  /// 记忆不能覆盖旧内容。这里解析现有分层文本、去重合并新内容并重新限制长度。
+  /// **Stage 16 退役**：此方法合并并写回 [AICharacter.memorySummary] 格式，
+  /// 已不再被运行时调用（[ContextWindowManager.persistToCharacterMemory] 已退役）。
+  /// 仅 [MemoryControls] 管理编辑入口保留兼容调用。
+  /// 新系统通过 [PermanentMemory] 沉淀长期记忆。
   static String mergeGlobalSummary({
     required String existing,
     required LayeredMemoryUpdate update,

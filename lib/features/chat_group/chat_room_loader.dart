@@ -85,6 +85,8 @@ class ChatRoomLoader {
       activeCharacters: activeCharacters,
       allCharacters: allCharacters,
       messages: messages,
+      // Stage 16: 旧 CharacterMemory 仍加载以兼容管理页和签名，
+      // 但已不作为运行时 Prompt 权威来源。永久记忆由 MemoryContextSelector 注入。
       characterMemories: db.characterMemoryBox.values
           .where((item) => item.groupId == conversationId)
           .toList(growable: false),
@@ -125,6 +127,7 @@ class ChatRoomLoader {
       activeCharacters: activeCharacters,
       allCharacters: [character],
       messages: messages,
+      // Stage 16: 旧 CharacterMemory 仍加载以兼容签名，已不作为运行时权威。
       characterMemories: db.characterMemoryBox.values
           .where((item) => item.groupId == conversationId)
           .toList(growable: false),
