@@ -78,9 +78,8 @@ class MemoryContextSelector {
     if (parts.isEmpty) return '';
 
     // 在顶部说明优先级规则，但不暴露底层存储细节。
-    final header = profile != null
-        ? '以下是你了解的用户信息（人物信息卡优先于记忆）和你的相关记忆。'
-        : '以下是你积累的相关记忆。';
+    final header =
+        profile != null ? '以下是你了解的用户信息（人物信息卡优先于记忆）和你的相关记忆。' : '以下是你积累的相关记忆。';
 
     return '$header\n\n${parts.join('\n\n')}';
   }
@@ -112,28 +111,13 @@ class MemoryContextSelector {
     String? currentTargetId,
     required int budget,
   }) {
-    // 按 stableGlobalId 逐项选最优（全局 > 最新 legacy）。
-    final bestByStableId = <String, RelationshipState>{};
-    for (final relation in db.relationshipStateBox.values) {
-      if (relation.sourceCharacterId != observerCharacterId) continue;
-      if (relation.targetId == observerCharacterId) continue;
-      final stableId = RelationshipState.stableGlobalId(
-        relation.sourceCharacterId,
-        relation.targetType,
-        relation.targetId,
-      );
-      final existing = bestByStableId[stableId];
-      if (existing == null) {
-        bestByStableId[stableId] = relation;
-      } else if (relation.groupId == 'global' && existing.groupId != 'global') {
-        bestByStableId[stableId] = relation;
-      } else if (relation.groupId != 'global' &&
-          existing.groupId != 'global' &&
-          relation.updatedAt.isAfter(existing.updatedAt)) {
-        bestByStableId[stableId] = relation;
-      }
-    }
-    final candidates = bestByStableId.values.toList();
+    final candidates = RelationshipState.selectStableSnapshots(
+      db.relationshipStateBox.values.where(
+        (relation) =>
+            relation.sourceCharacterId == observerCharacterId &&
+            relation.targetId != observerCharacterId,
+      ),
+    );
 
     // 优先：对当前目标的关系；其次：对用户的关系。
     candidates.sort((a, b) {
@@ -152,7 +136,8 @@ class MemoryContextSelector {
           : 'AI:${r.targetId}';
       final stage = r.stage.name;
       final note = r.notes.trim().isEmpty ? '' : '，${r.notes.trim()}';
-      final line = '$name($stage)：亲近${r.affinity}，信任${r.trust}，摩擦${r.friction}，熟悉度${r.familiarity}，最近情绪${r.recentMood.name}$note';
+      final line =
+          '$name($stage)：亲近${r.affinity}，信任${r.trust}，摩擦${r.friction}，熟悉度${r.familiarity}，最近情绪${r.recentMood.name}$note';
       final needed = line.length;
       if (used + needed > budget) break;
       lines.add(line);
@@ -208,9 +193,8 @@ class MemoryContextSelector {
         continue;
       }
       // 有主体：检查主体是否在当前参与者中或就是用户。
-      final relevant = memory.subjectIds.any((sid) =>
-          sid == 'user' ||
-          participantCharacterIds.contains(sid));
+      final relevant = memory.subjectIds
+          .any((sid) => sid == 'user' || participantCharacterIds.contains(sid));
       if (relevant) {
         allMemories.add(memory);
       }
@@ -230,10 +214,14 @@ class MemoryContextSelector {
       if (aHit != bHit) return bHit.compareTo(aHit);
 
       // 重要度。
-      if (a.importance != b.importance) return b.importance.compareTo(a.importance);
+      if (a.importance != b.importance) {
+        return b.importance.compareTo(a.importance);
+      }
 
       // 置信度。
-      if (a.confidence != b.confidence) return b.confidence.compareTo(a.confidence);
+      if (a.confidence != b.confidence) {
+        return b.confidence.compareTo(a.confidence);
+      }
 
       // 关键词重合。
       final aKw = _keywordOverlap(a, keywords);
@@ -259,7 +247,8 @@ class MemoryContextSelector {
   }
 
   /// 关系目标优先级：当前目标 > 用户 > 其他 AI。
-  static int _relationTargetPriority(RelationshipState r, String? currentTargetId) {
+  static int _relationTargetPriority(
+      RelationshipState r, String? currentTargetId) {
     if (currentTargetId != null && r.targetId == currentTargetId) return 0;
     if (r.targetType == RelationshipTargetType.user) return 1;
     return 2;

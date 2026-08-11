@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:chat_group/core/database/data_lifecycle_models.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_settings.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/api_config.dart';
@@ -11,12 +12,16 @@ import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/models/work_mode_workspace.dart';
 import 'package:chat_group/features/chat_group/chat_room_loader.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive/hive.dart';
 
 import 'helpers/lifecycle_hive.dart';
 
@@ -218,6 +223,19 @@ void main() {
       'cm',
       CharacterMemory(id: 'cm', groupId: 'g1', characterId: characterId),
     );
+    await db.permanentMemoryBox.putAll({
+      'pm-self': testPermanentMemory(
+        id: 'pm-self',
+        observerCharacterId: characterId,
+        originConversationId: 'g1',
+      ),
+      'pm-about': testPermanentMemory(
+        id: 'pm-about',
+        observerCharacterId: 'c2',
+        subjectIds: [characterId],
+        originConversationId: 'g1',
+      ),
+    });
     await db.relationshipStateBox.put(
       'r',
       RelationshipState(
@@ -228,6 +246,52 @@ void main() {
         targetType: RelationshipTargetType.ai,
       ),
     );
+    final sourceRelationshipId = RelationshipState.stableGlobalId(
+      characterId,
+      RelationshipTargetType.user,
+      'user',
+    );
+    final targetRelationshipId = RelationshipState.stableGlobalId(
+      'c2',
+      RelationshipTargetType.ai,
+      characterId,
+    );
+    await db.relationshipStateBox.putAll({
+      sourceRelationshipId: RelationshipState.global(
+        id: sourceRelationshipId,
+        sourceCharacterId: characterId,
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        affinity: 10,
+      ),
+      targetRelationshipId: RelationshipState.global(
+        id: targetRelationshipId,
+        sourceCharacterId: 'c2',
+        targetType: RelationshipTargetType.ai,
+        targetId: characterId,
+        affinity: 20,
+      ),
+    });
+    await db.relationshipEventBox.putAll({
+      'event-source': testRelationshipEvent(
+        id: 'event-source',
+        sourceCharacterId: characterId,
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        originConversationId: 'g1',
+        revision: 1,
+        affinityAfter: 10,
+      ),
+      'event-target': testRelationshipEvent(
+        id: 'event-target',
+        sourceCharacterId: 'c2',
+        targetType: RelationshipTargetType.ai,
+        targetId: characterId,
+        originConversationId: 'g1',
+        revision: 1,
+        affinityAfter: 20,
+      ),
+    });
     await db.characterSkillBox.put(
       's',
       CharacterSkill(
@@ -264,24 +328,31 @@ void main() {
       'legacy:$characterId',
       'character:cm:facts:dGVzdA==',
       'relationship:r',
+      'relationship:$sourceRelationshipId',
     ]);
 
     final result = await service.deleteCharacter(
       characterId,
       policy: CharacterDeletionPolicy.keepMessageHistory,
     );
-
     expect(result.isComplete, isTrue);
     expect(db.aiCharacterBox.containsKey(characterId), isFalse);
     expect(db.chatGroupBox.get('g1')!.aiCharacterIds, ['c2']);
     expect(db.messageBox.get('gm')!.mentionedAiIds, ['c2']);
     expect(db.messageBox.containsKey('dm'), isTrue);
     expect(db.characterMemoryBox.isEmpty, isTrue);
-    expect(db.relationshipStateBox.isEmpty, isTrue);
+    expect(db.relationshipStateBox.containsKey('r'), isTrue);
+    expect(db.relationshipStateBox.get('r')!.targetId, characterId);
+    expect(db.relationshipStateBox.containsKey(targetRelationshipId), isTrue);
+    expect(db.relationshipStateBox.containsKey(sourceRelationshipId), isFalse);
+    expect(db.permanentMemoryBox.containsKey('pm-self'), isFalse);
+    expect(db.permanentMemoryBox.containsKey('pm-about'), isTrue);
+    expect(db.relationshipEventBox.containsKey('event-source'), isFalse);
+    expect(db.relationshipEventBox.containsKey('event-target'), isTrue);
     expect(db.characterSkillBox.isEmpty, isTrue);
     expect(db.agentTaskBox.isEmpty, isTrue);
     expect(db.workModeWorkspaceBox.isEmpty, isTrue);
-    expect(db.appSettingsBox.get('memory_pinned_keys_v1'), isEmpty);
+    expect(db.appSettingsBox.get('memory_pinned_keys_v1'), ['relationship:r']);
     expect(service.deletedCharacter(characterId)!.name, '角色c1');
 
     final loaded = await ChatRoomLoader(db: db, resolveApiConfig: (_) => null)
@@ -295,6 +366,48 @@ void main() {
         ))
             .isComplete,
         isTrue);
+  });
+
+  test('group history uses a deleted character identity snapshot', () async {
+    const characterId = 'history-character';
+    await db.aiCharacterBox.put(characterId, testCharacter(characterId));
+    await db.chatGroupBox.put(
+      'history-group',
+      ChatGroup(
+        id: 'history-group',
+        name: '历史群',
+        theme: '',
+        aiCharacterIds: [characterId],
+      ),
+    );
+    await db.messageBox.put(
+      'history-message',
+      Message(
+        id: 'history-message',
+        groupId: 'history-group',
+        senderId: characterId,
+        senderType: 'ai',
+        content: '保留历史身份',
+      ),
+    );
+
+    expect(
+      (await service.deleteCharacter(
+        characterId,
+        policy: CharacterDeletionPolicy.keepMessageHistory,
+      ))
+          .isComplete,
+      isTrue,
+    );
+
+    final loaded = await ChatRoomLoader(
+      db: db,
+      resolveApiConfig: (_) => null,
+    ).load('history-group');
+    expect(loaded.messages.single.content, '保留历史身份');
+    expect(loaded.activeCharacters, isEmpty);
+    expect(loaded.allCharacters.single.name, '角色history-character');
+    expect(loaded.allCharacters.single.avatar, '角');
   });
 
   test('character full policy deletes private history and orphan attachment',
@@ -325,6 +438,724 @@ void main() {
     expect(db.messageBox.isEmpty, isTrue);
     expect(await attachment.exists(), isFalse);
     expect(service.deletedCharacter(characterId), isNull);
+  });
+
+  test('group deletion keeps permanent data and global state by default',
+      () async {
+    await db.chatGroupBox.putAll({
+      'g1':
+          ChatGroup(id: 'g1', name: '一群', theme: '', aiCharacterIds: const []),
+      'g2':
+          ChatGroup(id: 'g2', name: '二群', theme: '', aiCharacterIds: const []),
+    });
+    await db.messageBox.putAll({
+      'm1': Message(
+        id: 'm1',
+        groupId: 'g1',
+        senderId: 'user',
+        senderType: 'user',
+        content: '群一证据',
+      ),
+      'm2': Message(
+        id: 'm2',
+        groupId: 'g2',
+        senderId: 'user',
+        senderType: 'user',
+        content: '群二保留',
+      ),
+    });
+    await db.permanentMemoryBox.putAll({
+      'pm-g1': testPermanentMemory(
+        id: 'pm-g1',
+        originConversationId: 'g1',
+        originNameSnapshot: '一群',
+        sourceMessageIds: ['m1'],
+      ),
+      'pm-g2': testPermanentMemory(
+        id: 'pm-g2',
+        originConversationId: 'g2',
+        originNameSnapshot: '二群',
+      ),
+      'pm-unknown': testPermanentMemory(
+        id: 'pm-unknown',
+        originConversationId: null,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+      ),
+    });
+    await db.relationshipEventBox.putAll({
+      'event-g1': testRelationshipEvent(
+        id: 'event-g1',
+        originConversationId: 'g1',
+        originNameSnapshot: '一群',
+        sourceMessageIds: ['m1'],
+        revision: 1,
+        affinityAfter: 10,
+      ),
+      'event-g2': testRelationshipEvent(
+        id: 'event-g2',
+        originConversationId: 'g2',
+        originNameSnapshot: '二群',
+        revision: 2,
+        affinityAfter: 20,
+      ),
+    });
+    final globalId = RelationshipState.stableGlobalId(
+      'source',
+      RelationshipTargetType.user,
+      'user',
+    );
+    await db.relationshipStateBox.putAll({
+      'legacy-g1': RelationshipState(
+        id: 'legacy-g1',
+        groupId: 'g1',
+        sourceCharacterId: 'source',
+        targetId: 'user',
+        targetType: RelationshipTargetType.user,
+      ),
+      globalId: RelationshipState.global(
+        id: globalId,
+        sourceCharacterId: 'source',
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        affinity: 20,
+        revision: 2,
+        lastEventId: 'event-g2',
+      ),
+    });
+    await db.appSettingsBox.put(DataLifecycleSettings.memoryPinnedKey, [
+      'relationship:$globalId',
+    ]);
+
+    final plan = await service.previewGroup('g1');
+    expect(plan.count('messages'), 1);
+    expect(plan.count('permanentMemories'), 0);
+    expect(plan.optionalCount('permanentMemories'), 1);
+    expect(plan.optionalCount('relationshipEvents'), 1);
+    expect(plan.retainedCount('globalRelationshipStates'), 1);
+    expect(plan.count('memoryPins'), 0);
+
+    expect((await service.deleteGroup('g1')).isComplete, isTrue);
+    expect(db.chatGroupBox.containsKey('g1'), isFalse);
+    expect(db.messageBox.containsKey('m1'), isFalse);
+    expect(db.messageBox.containsKey('m2'), isTrue);
+    expect(db.relationshipStateBox.containsKey('legacy-g1'), isFalse);
+    expect(db.relationshipStateBox.containsKey(globalId), isTrue);
+    expect(db.appSettingsBox.get(DataLifecycleSettings.memoryPinnedKey), [
+      'relationship:$globalId',
+    ]);
+    expect(db.permanentMemoryBox.length, 3);
+    expect(db.relationshipEventBox.length, 2);
+    expect(db.permanentMemoryBox.get('pm-g1')!.originNameSnapshot, '一群');
+    expect(db.permanentMemoryBox.get('pm-g1')!.sourceMessageIds, ['m1']);
+    expect(db.relationshipEventBox.get('event-g1')!.originNameSnapshot, '一群');
+    expect(db.relationshipEventBox.get('event-g1')!.sourceMessageIds, ['m1']);
+  });
+
+  test('group associated deletion is exact and rebuilds global state',
+      () async {
+    await db.chatGroupBox.putAll({
+      'g1':
+          ChatGroup(id: 'g1', name: '一群', theme: '', aiCharacterIds: const []),
+      'g2':
+          ChatGroup(id: 'g2', name: '二群', theme: '', aiCharacterIds: const []),
+    });
+    await db.messageBox.putAll({
+      'm1': Message(
+        id: 'm1',
+        groupId: 'g1',
+        senderId: 'user',
+        senderType: 'user',
+        content: '删除来源',
+      ),
+      'm2': Message(
+        id: 'm2',
+        groupId: 'g2',
+        senderId: 'user',
+        senderType: 'user',
+        content: '保留来源',
+      ),
+    });
+    await db.permanentMemoryBox.putAll({
+      'pm-g1': testPermanentMemory(
+        id: 'pm-g1',
+        originConversationId: 'g1',
+      ),
+      'pm-g2': testPermanentMemory(
+        id: 'pm-g2',
+        originConversationId: 'g2',
+      ),
+      'pm-unknown': testPermanentMemory(
+        id: 'pm-unknown',
+        originConversationId: null,
+        originType: MemoryOriginType.manual,
+      ),
+    });
+    final keepEvent = testRelationshipEvent(
+      id: 'event-keep',
+      originConversationId: 'g2',
+      revision: 1,
+      affinityAfter: 11,
+      createdBy: RelationshipEventCreator.manual,
+      notesBefore: '',
+      notesAfter: '保留备注',
+    );
+    final deleteEvent = testRelationshipEvent(
+      id: 'event-delete',
+      originConversationId: 'g1',
+      revision: 2,
+      affinityAfter: 22,
+    );
+    await db.relationshipEventBox.putAll({
+      keepEvent.id: keepEvent,
+      deleteEvent.id: deleteEvent,
+    });
+    final globalId = RelationshipState.stableGlobalId(
+      'source',
+      RelationshipTargetType.user,
+      'user',
+    );
+    await db.relationshipStateBox.put(
+      globalId,
+      RelationshipState.global(
+        id: globalId,
+        sourceCharacterId: 'source',
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        affinity: 22,
+        notes: '保留备注',
+        revision: 2,
+        lastEventId: deleteEvent.id,
+      ),
+    );
+    await db.appSettingsBox.put('memory_pinned_keys_v1', [
+      'relationship:$globalId',
+    ]);
+
+    final plan = await service.previewGroup('g1');
+    expect(plan.optionalCount('permanentMemories'), 1);
+    expect(plan.optionalCount('relationshipEvents'), 1);
+
+    expect(
+      (await service.deleteGroup(
+        'g1',
+        deleteAssociatedPermanentData: true,
+      ))
+          .isComplete,
+      isTrue,
+    );
+    expect(db.permanentMemoryBox.containsKey('pm-g1'), isFalse);
+    expect(db.permanentMemoryBox.containsKey('pm-g2'), isTrue);
+    expect(db.permanentMemoryBox.containsKey('pm-unknown'), isTrue);
+    expect(db.relationshipEventBox.containsKey(deleteEvent.id), isFalse);
+    expect(db.relationshipEventBox.containsKey(keepEvent.id), isTrue);
+    final rebuilt = db.relationshipStateBox.get(globalId)!;
+    expect(rebuilt.groupId, 'global');
+    expect(rebuilt.affinity, 11);
+    expect(rebuilt.revision, 1);
+    expect(rebuilt.lastEventId, keepEvent.id);
+    expect(rebuilt.notes, '保留备注');
+    expect(db.appSettingsBox.get('memory_pinned_keys_v1'), [
+      'relationship:$globalId',
+    ]);
+    expect(
+      (await service.deleteGroup(
+        'g1',
+        deleteAssociatedPermanentData: true,
+      ))
+          .isComplete,
+      isTrue,
+    );
+    expect(db.relationshipStateBox.get(globalId)!.lastEventId, keepEvent.id);
+  });
+
+  test('deleting the latest manual note event restores the previous note',
+      () async {
+    await db.chatGroupBox.putAll({
+      'g1': ChatGroup(id: 'g1', name: '删除群', theme: '', aiCharacterIds: []),
+      'g2': ChatGroup(id: 'g2', name: '保留群', theme: '', aiCharacterIds: []),
+    });
+    final globalId = RelationshipState.stableGlobalId(
+      'source',
+      RelationshipTargetType.user,
+      'user',
+    );
+    final previousEvent = testRelationshipEvent(
+      id: 'event-previous-note',
+      originConversationId: 'g2',
+      revision: 1,
+      createdBy: RelationshipEventCreator.manual,
+      affinityAfter: 1,
+      notesBefore: '初始备注',
+      notesAfter: '旧备注',
+    );
+    final latestEvent = testRelationshipEvent(
+      id: 'event-latest-note',
+      originConversationId: 'g1',
+      revision: 2,
+      createdBy: RelationshipEventCreator.manual,
+      affinityAfter: 2,
+      notesBefore: '旧备注',
+      notesAfter: '已删除备注',
+    );
+    final followingAutomaticEvent = testRelationshipEvent(
+      id: 'event-following-automatic',
+      originConversationId: 'g2',
+      revision: 3,
+      createdBy: RelationshipEventCreator.automatic,
+      affinityAfter: 3,
+      notesBefore: '已删除备注',
+      notesAfter: '已删除备注',
+    );
+    await db.relationshipEventBox.putAll({
+      previousEvent.id: previousEvent,
+      latestEvent.id: latestEvent,
+      followingAutomaticEvent.id: followingAutomaticEvent,
+    });
+    await db.relationshipStateBox.put(
+      globalId,
+      RelationshipState.global(
+        id: globalId,
+        sourceCharacterId: 'source',
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        revision: followingAutomaticEvent.revision,
+        lastEventId: followingAutomaticEvent.id,
+        notes: latestEvent.notesAfter,
+      ),
+    );
+
+    final result = await service.deleteGroup(
+      'g1',
+      deleteAssociatedPermanentData: true,
+    );
+
+    expect(result.isComplete, isTrue);
+    expect(db.relationshipEventBox.containsKey(latestEvent.id), isFalse);
+    expect(db.relationshipEventBox.containsKey(previousEvent.id), isTrue);
+    expect(db.relationshipStateBox.get(globalId)!.notes, '旧备注');
+  });
+
+  test('conversation clearing matches a complete DM id', () async {
+    const conversationId = 'dm:c1';
+    const otherConversationId = 'dm:c10';
+    await db.messageBox.putAll({
+      'dm-c1': Message(
+        id: 'dm-c1',
+        groupId: conversationId,
+        senderId: 'c1',
+        senderType: 'ai',
+        content: 'c1 私聊',
+      ),
+      'dm-c10': Message(
+        id: 'dm-c10',
+        groupId: otherConversationId,
+        senderId: 'c10',
+        senderType: 'ai',
+        content: 'c10 私聊',
+      ),
+    });
+    await db.permanentMemoryBox.putAll({
+      'pm-c1': testPermanentMemory(
+        id: 'pm-c1',
+        originConversationId: conversationId,
+        originType: MemoryOriginType.direct,
+      ),
+      'pm-c10': testPermanentMemory(
+        id: 'pm-c10',
+        originConversationId: otherConversationId,
+        originType: MemoryOriginType.direct,
+      ),
+    });
+    final clearEvent = testRelationshipEvent(
+      id: 'event-c1',
+      originConversationId: conversationId,
+      revision: 1,
+      affinityAfter: 5,
+    );
+    final otherEvent = testRelationshipEvent(
+      id: 'event-c10',
+      originConversationId: otherConversationId,
+      revision: 2,
+      affinityAfter: 8,
+    );
+    await db.relationshipEventBox.putAll({
+      clearEvent.id: clearEvent,
+      otherEvent.id: otherEvent,
+    });
+    final globalId = RelationshipState.stableGlobalId(
+      'source',
+      RelationshipTargetType.user,
+      'user',
+    );
+    await db.relationshipStateBox.putAll({
+      'legacy-dm': RelationshipState(
+        id: 'legacy-dm',
+        groupId: conversationId,
+        sourceCharacterId: 'source',
+        targetId: 'user',
+        targetType: RelationshipTargetType.user,
+      ),
+      globalId: RelationshipState.global(
+        id: globalId,
+        sourceCharacterId: 'source',
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        affinity: 8,
+        revision: 2,
+        lastEventId: otherEvent.id,
+      ),
+    });
+    await db.appSettingsBox.putAll({
+      'message_ids_by_group': {
+        conversationId: ['dm-c1'],
+        otherConversationId: ['dm-c10'],
+      },
+      'conversation_summaries': {
+        conversationId: {'preview': 'c1'},
+        otherConversationId: {'preview': 'c10'},
+      },
+      'direct_chat_read_at': {
+        conversationId: 'read-c1',
+        otherConversationId: 'read-c10',
+      },
+      'direct_chat_source': {
+        conversationId: 'direct',
+        otherConversationId: 'proactive',
+      },
+      'direct_chat_last_proactive_at': {
+        'c1': 'p1',
+        'c10': 'p10',
+      },
+      'pinned_character_ids': ['c1', 'c10'],
+      'memory_pinned_keys_v1': ['relationship:$globalId'],
+      'memory_retry_queue_v1': [
+        {
+          'messageId': 'dm-c1',
+          'observerId': 'c1',
+          'conversationId': conversationId,
+        },
+        {
+          'messageId': 'dm-c10',
+          'observerId': 'c10',
+          'conversationId': otherConversationId,
+        },
+      ],
+      'retry:dm-c1:c1': true,
+      'retry:dm-c10:c10': true,
+    });
+
+    final plan = await service.previewConversation(conversationId);
+    expect(plan.count('messages'), 1);
+    expect(plan.optionalCount('permanentMemories'), 1);
+    expect(plan.optionalCount('relationshipEvents'), 1);
+
+    expect(
+        (await service.clearConversation(conversationId)).isComplete, isTrue);
+    expect(db.messageBox.containsKey('dm-c1'), isFalse);
+    expect(db.messageBox.containsKey('dm-c10'), isTrue);
+    expect(db.permanentMemoryBox.containsKey('pm-c1'), isTrue);
+    expect(db.relationshipEventBox.containsKey(clearEvent.id), isTrue);
+    expect(db.relationshipStateBox.containsKey('legacy-dm'), isFalse);
+    expect(db.appSettingsBox.get('direct_chat_read_at'), {
+      otherConversationId: 'read-c10',
+    });
+    expect(db.appSettingsBox.get('direct_chat_last_proactive_at'), {
+      'c10': 'p10',
+    });
+    expect(db.appSettingsBox.get('pinned_character_ids'), ['c10']);
+    expect(db.appSettingsBox.get('memory_retry_queue_v1'), [
+      {
+        'messageId': 'dm-c10',
+        'observerId': 'c10',
+        'conversationId': otherConversationId,
+      },
+    ]);
+    expect(db.appSettingsBox.containsKey('retry:dm-c1:c1'), isFalse);
+    expect(db.appSettingsBox.containsKey('retry:dm-c10:c10'), isTrue);
+
+    expect(
+      (await service.clearConversation(
+        conversationId,
+        deleteAssociatedPermanentData: true,
+      ))
+          .isComplete,
+      isTrue,
+    );
+    expect(db.permanentMemoryBox.containsKey('pm-c1'), isFalse);
+    expect(db.permanentMemoryBox.containsKey('pm-c10'), isTrue);
+    expect(db.relationshipEventBox.containsKey(clearEvent.id), isFalse);
+    expect(db.relationshipEventBox.containsKey(otherEvent.id), isTrue);
+    expect(db.relationshipStateBox.get(globalId)!.affinity, 8);
+    expect(db.relationshipStateBox.get(globalId)!.lastEventId, otherEvent.id);
+    expect(db.messageBox.containsKey('dm-c10'), isTrue);
+  });
+
+  test('full character deletion removes observer and target references',
+      () async {
+    const characterId = 'c1';
+    const otherCharacterId = 'c2';
+    final conversationId = DirectChatSession.conversationIdFor(characterId);
+    final otherConversationId =
+        DirectChatSession.conversationIdFor(otherCharacterId);
+    await db.aiCharacterBox.putAll({
+      characterId: testCharacter(characterId),
+      otherCharacterId: testCharacter(otherCharacterId),
+    });
+    await db.chatGroupBox.put(
+      'g1',
+      ChatGroup(
+        id: 'g1',
+        name: '群聊',
+        theme: '',
+        aiCharacterIds: [characterId, otherCharacterId],
+      ),
+    );
+    await db.messageBox.putAll({
+      'group': Message(
+        id: 'group',
+        groupId: 'g1',
+        senderId: otherCharacterId,
+        senderType: 'ai',
+        content: '提及',
+        mentionedAiIds: [characterId, otherCharacterId],
+      ),
+      'dm-c1': Message(
+        id: 'dm-c1',
+        groupId: conversationId,
+        senderId: characterId,
+        senderType: 'ai',
+        content: '删除私聊',
+      ),
+      'dm-c2': Message(
+        id: 'dm-c2',
+        groupId: otherConversationId,
+        senderId: otherCharacterId,
+        senderType: 'ai',
+        content: '其他私聊',
+      ),
+    });
+    await db.permanentMemoryBox.putAll({
+      'pm-observer': testPermanentMemory(
+        id: 'pm-observer',
+        observerCharacterId: characterId,
+        subjectIds: [otherCharacterId],
+      ),
+      'pm-subject': testPermanentMemory(
+        id: 'pm-subject',
+        observerCharacterId: otherCharacterId,
+        subjectIds: [characterId],
+      ),
+      'pm-unrelated': testPermanentMemory(
+        id: 'pm-unrelated',
+        observerCharacterId: otherCharacterId,
+        subjectIds: ['user'],
+      ),
+    });
+    final sourceEvent = testRelationshipEvent(
+      id: 'event-source-c1',
+      sourceCharacterId: characterId,
+      targetType: RelationshipTargetType.user,
+      targetId: 'user',
+      revision: 1,
+      affinityAfter: 10,
+    );
+    final targetEvent = testRelationshipEvent(
+      id: 'event-target-c1',
+      sourceCharacterId: otherCharacterId,
+      targetType: RelationshipTargetType.ai,
+      targetId: characterId,
+      revision: 1,
+      affinityAfter: 20,
+    );
+    final unrelatedEvent = testRelationshipEvent(
+      id: 'event-unrelated',
+      sourceCharacterId: otherCharacterId,
+      targetType: RelationshipTargetType.user,
+      targetId: 'user',
+      revision: 1,
+      affinityAfter: 30,
+    );
+    await db.relationshipEventBox.putAll({
+      sourceEvent.id: sourceEvent,
+      targetEvent.id: targetEvent,
+      unrelatedEvent.id: unrelatedEvent,
+    });
+    final sourceRelationId = RelationshipState.stableGlobalId(
+      characterId,
+      RelationshipTargetType.user,
+      'user',
+    );
+    final targetRelationId = RelationshipState.stableGlobalId(
+      otherCharacterId,
+      RelationshipTargetType.ai,
+      characterId,
+    );
+    final unrelatedRelationId = RelationshipState.stableGlobalId(
+      otherCharacterId,
+      RelationshipTargetType.user,
+      'user',
+    );
+    await db.relationshipStateBox.putAll({
+      sourceRelationId: RelationshipState.global(
+        id: sourceRelationId,
+        sourceCharacterId: characterId,
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        affinity: 10,
+      ),
+      targetRelationId: RelationshipState.global(
+        id: targetRelationId,
+        sourceCharacterId: otherCharacterId,
+        targetType: RelationshipTargetType.ai,
+        targetId: characterId,
+        affinity: 20,
+      ),
+      unrelatedRelationId: RelationshipState.global(
+        id: unrelatedRelationId,
+        sourceCharacterId: otherCharacterId,
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        affinity: 30,
+      ),
+    });
+    await db.appSettingsBox.putAll({
+      'direct_chat_read_at': {conversationId: 'read'},
+      'direct_chat_source': {conversationId: 'direct'},
+      'direct_chat_last_proactive_at': {characterId: 'proactive'},
+      'pinned_character_ids': [characterId, otherCharacterId],
+      'memory_pinned_keys_v1': [
+        'relationship:$sourceRelationId',
+        'relationship:$targetRelationId',
+        'relationship:$unrelatedRelationId',
+      ],
+    });
+
+    final plan = await service.previewCharacter(
+      characterId,
+      policy: CharacterDeletionPolicy.deleteRelatedData,
+    );
+    expect(plan.count('observerPermanentMemories'), 1);
+    expect(plan.count('subjectPermanentMemories'), 1);
+    expect(plan.count('sourceRelationshipStates'), 1);
+    expect(plan.count('targetRelationshipStates'), 1);
+    expect(plan.count('sourceRelationshipEvents'), 1);
+    expect(plan.count('targetRelationshipEvents'), 1);
+
+    expect(
+      (await service.deleteCharacter(
+        characterId,
+        policy: CharacterDeletionPolicy.deleteRelatedData,
+      ))
+          .isComplete,
+      isTrue,
+    );
+    expect(db.aiCharacterBox.containsKey(characterId), isFalse);
+    expect(db.chatGroupBox.get('g1')!.aiCharacterIds, [otherCharacterId]);
+    expect(db.messageBox.get('group')!.mentionedAiIds, [otherCharacterId]);
+    expect(db.messageBox.containsKey('dm-c1'), isFalse);
+    expect(db.messageBox.containsKey('dm-c2'), isTrue);
+    expect(db.permanentMemoryBox.containsKey('pm-observer'), isFalse);
+    expect(db.permanentMemoryBox.containsKey('pm-subject'), isFalse);
+    expect(db.permanentMemoryBox.containsKey('pm-unrelated'), isTrue);
+    expect(db.relationshipEventBox.containsKey(sourceEvent.id), isFalse);
+    expect(db.relationshipEventBox.containsKey(targetEvent.id), isFalse);
+    expect(db.relationshipEventBox.containsKey(unrelatedEvent.id), isTrue);
+    expect(db.relationshipStateBox.containsKey(sourceRelationId), isFalse);
+    expect(db.relationshipStateBox.containsKey(targetRelationId), isFalse);
+    expect(db.relationshipStateBox.containsKey(unrelatedRelationId), isTrue);
+    expect(db.appSettingsBox.get('pinned_character_ids'), [otherCharacterId]);
+    expect(db.appSettingsBox.get('memory_pinned_keys_v1'), [
+      'relationship:$unrelatedRelationId',
+    ]);
+    expect(service.deletedCharacter(characterId), isNull);
+  });
+
+  test('pending retry keeps app settings created after planning', () async {
+    await db.chatGroupBox.put(
+      'g1',
+      ChatGroup(id: 'g1', name: '旧群', theme: '', aiCharacterIds: const []),
+    );
+    await db.appSettingsBox.putAll({
+      'message_ids_by_group': {
+        'g1': ['old-message'],
+      },
+      'group_chat_read_at': {'g1': 'old-read'},
+      'pinned_group_ids': ['g1'],
+      'work_mode_enabled:g1': true,
+      'memory_pinned_keys_v1': ['group:g1:old'],
+      'memory_retry_queue_v1': [
+        {
+          'messageId': 'old-message',
+          'observerId': 'c1',
+          'conversationId': 'g1',
+        },
+      ],
+      'retry:old-message:c1': true,
+    });
+
+    final plan = await service.previewGroup('g1');
+    await db.appSettingsBox.put(
+      DataLifecycleService.pendingOperationKey,
+      {
+        'kind': 'group',
+        'id': 'g1',
+        'deleteAssociatedPermanentData': false,
+        'targets': plan.targets.toMap(),
+      },
+    );
+
+    await db.appSettingsBox.put('message_ids_by_group', {
+      'g1': ['old-message'],
+      'g2': ['new-message'],
+    });
+    await db.appSettingsBox.put('group_chat_read_at', {
+      'g1': 'old-read',
+      'g2': 'new-read',
+    });
+    await db.appSettingsBox.put('pinned_group_ids', ['g1', 'g2']);
+    await db.appSettingsBox.put('work_mode_enabled:g2', true);
+    await db.appSettingsBox.put('memory_pinned_keys_v1', [
+      'group:g1:old',
+      'group:g2:new',
+    ]);
+    await db.appSettingsBox.put('memory_retry_queue_v1', [
+      {
+        'messageId': 'old-message',
+        'observerId': 'c1',
+        'conversationId': 'g1',
+      },
+      {
+        'messageId': 'new-message',
+        'observerId': 'c2',
+        'conversationId': 'g2',
+      },
+    ]);
+    await db.appSettingsBox.putAll({
+      'retry:old-message:c1': true,
+      'retry:new-message:c2': true,
+    });
+
+    expect((await service.retryPendingOperation()).isComplete, isTrue);
+    expect(db.appSettingsBox.get('message_ids_by_group'), {
+      'g2': ['new-message'],
+    });
+    expect(db.appSettingsBox.get('group_chat_read_at'), {
+      'g2': 'new-read',
+    });
+    expect(db.appSettingsBox.get('pinned_group_ids'), ['g2']);
+    expect(db.appSettingsBox.get('work_mode_enabled:g2'), isTrue);
+    expect(db.appSettingsBox.get('memory_pinned_keys_v1'), ['group:g2:new']);
+    expect(db.appSettingsBox.get('memory_retry_queue_v1'), [
+      {
+        'messageId': 'new-message',
+        'observerId': 'c2',
+        'conversationId': 'g2',
+      },
+    ]);
+    expect(db.appSettingsBox.containsKey('retry:old-message:c1'), isFalse);
+    expect(db.appSettingsBox.containsKey('retry:new-message:c2'), isTrue);
+    expect(service.hasPendingOperation, isFalse);
   });
 
   test('API config supports replacement, unlink, credential deletion and retry',
@@ -370,6 +1201,7 @@ void main() {
     expect(character.apiProvider, 'custom');
     expect(character.modelName, 'new-model');
     expect(character.customBaseUrl, 'https://example.test');
+    await db.aiCharacterBox.put('c2', testCharacter('c2', apiConfigId: 'new'));
     final conflict = await service.deleteGroup('unrelated');
     expect(conflict.incompleteItems, ['请先在设置中重试未完成删除']);
 
@@ -379,6 +1211,7 @@ void main() {
     expect(credentialStore.values, isEmpty);
     expect(db.apiConfigBox.containsKey('new'), isFalse);
     expect(character.apiConfigId, isEmpty);
+    expect(db.aiCharacterBox.get('c2')!.apiConfigId, 'new');
   });
 
   test('clear scopes preserve only their documented preference set', () async {
@@ -393,6 +1226,8 @@ void main() {
     );
     await db.aiCharacterBox.put('c1', character);
     await db.apiConfigBox.put('a1', config);
+    credentialStore.values[service.credentials.credentialIdFor('a1')] =
+        'secret';
     await db.chatGroupBox.put(
       'g1',
       ChatGroup(id: 'g1', name: 'group', theme: '', aiCharacterIds: ['c1']),
@@ -409,6 +1244,54 @@ void main() {
         requiredPermissions: const [],
       ),
     );
+    await db.userProfileBox.put(
+      'me',
+      UserProfile(
+        displayName: '用户',
+        preferredAddress: '你',
+        avatar: '我',
+        bio: 'profile',
+      ),
+    );
+    await db.permanentMemoryBox.put(
+      'pm-g1',
+      testPermanentMemory(id: 'pm-g1', originConversationId: 'g1'),
+    );
+    final globalId = RelationshipState.stableGlobalId(
+      'c1',
+      RelationshipTargetType.user,
+      'user',
+    );
+    await db.relationshipEventBox.put(
+      'event-g1',
+      testRelationshipEvent(
+        id: 'event-g1',
+        sourceCharacterId: 'c1',
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        originConversationId: 'g1',
+        revision: 1,
+        affinityAfter: 3,
+      ),
+    );
+    await db.relationshipStateBox.putAll({
+      'legacy-g1': RelationshipState(
+        id: 'legacy-g1',
+        groupId: 'g1',
+        sourceCharacterId: 'c1',
+        targetId: 'user',
+        targetType: RelationshipTargetType.user,
+      ),
+      globalId: RelationshipState.global(
+        id: globalId,
+        sourceCharacterId: 'c1',
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        affinity: 3,
+        revision: 1,
+        lastEventId: 'event-g1',
+      ),
+    });
     await db.messageBox.put(
       'm1',
       Message(
@@ -440,6 +1323,12 @@ void main() {
     expect(db.chatGroupBox.length, 1);
     expect(db.apiConfigBox.length, 1);
     expect(db.characterSkillBox.length, 1);
+    expect(db.permanentMemoryBox.containsKey('pm-g1'), isTrue);
+    expect(db.relationshipEventBox.containsKey('event-g1'), isTrue);
+    expect(db.relationshipStateBox.containsKey(globalId), isTrue);
+    expect(db.relationshipStateBox.containsKey('legacy-g1'), isFalse);
+    expect(db.userProfileBox.containsKey('me'), isTrue);
+    expect(credentialStore.values, isNotEmpty);
     expect(db.appSettingsBox.get('theme_mode'), 'light');
     expect(db.appSettingsBox.get('tts_enabled'), isFalse);
     expect(db.appSettingsBox.get('pinned_group_ids'), ['g1']);
@@ -452,10 +1341,25 @@ void main() {
     expect(db.chatGroupBox.isEmpty, isTrue);
     expect(db.apiConfigBox.isEmpty, isTrue);
     expect(db.characterSkillBox.isEmpty, isTrue);
+    expect(db.permanentMemoryBox.isEmpty, isTrue);
+    expect(db.relationshipEventBox.isEmpty, isTrue);
+    expect(db.relationshipStateBox.isEmpty, isTrue);
+    expect(db.userProfileBox.isEmpty, isTrue);
+    expect(credentialStore.values, isEmpty);
     expect(db.appSettingsBox.get('theme_mode'), 'light');
     expect(db.appSettingsBox.get('tts_enabled'), isFalse);
     expect(db.appSettingsBox.get('ai_processing_dir'), '/user/workspace');
     expect(db.appSettingsBox.containsKey('pinned_group_ids'), isFalse);
+
+    await Hive.close();
+    await reopenLifecycleHive(hiveDirectory);
+    expect(db.aiCharacterBox.isEmpty, isTrue);
+    expect(db.chatGroupBox.isEmpty, isTrue);
+    expect(db.messageBox.isEmpty, isTrue);
+    expect(db.permanentMemoryBox.isEmpty, isTrue);
+    expect(db.relationshipEventBox.isEmpty, isTrue);
+    expect(db.relationshipStateBox.isEmpty, isTrue);
+    expect(db.userProfileBox.isEmpty, isTrue);
 
     expect(
         (await service.clear(DataClearScope.factoryReset)).isComplete, isTrue);
@@ -463,4 +1367,94 @@ void main() {
     expect(
         (await service.clear(DataClearScope.factoryReset)).isComplete, isTrue);
   });
+}
+
+DateTime testLifecycleDate(int second) =>
+    DateTime.utc(2026, 8, 1, 0, 0, second);
+
+PermanentMemory testPermanentMemory({
+  required String id,
+  String observerCharacterId = 'observer',
+  MemoryKind kind = MemoryKind.fact,
+  String content = 'memory',
+  List<String> subjectIds = const [],
+  MemoryStatus status = MemoryStatus.active,
+  MemoryOriginType originType = MemoryOriginType.group,
+  String? originConversationId,
+  String originNameSnapshot = '',
+  List<String> sourceMessageIds = const [],
+}) {
+  final timestamp = testLifecycleDate(id.hashCode.abs() % 50);
+  return PermanentMemory(
+    id: id,
+    observerCharacterId: observerCharacterId,
+    kind: kind,
+    content: content,
+    subjectIds: subjectIds,
+    status: status,
+    originType: originType,
+    originConversationId: originConversationId,
+    originNameSnapshot: originNameSnapshot,
+    sourceMessageIds: sourceMessageIds,
+    occurredAt: timestamp,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+  );
+}
+
+RelationshipEvent testRelationshipEvent({
+  required String id,
+  String sourceCharacterId = 'source',
+  RelationshipTargetType targetType = RelationshipTargetType.user,
+  String targetId = 'user',
+  String reason = 'test',
+  int affinityBefore = 0,
+  required int affinityAfter,
+  int trustBefore = 0,
+  int trustAfter = 0,
+  int frictionBefore = 0,
+  int frictionAfter = 0,
+  int familiarityBefore = 0,
+  int familiarityAfter = 0,
+  RelationshipMood moodBefore = RelationshipMood.neutral,
+  RelationshipMood moodAfter = RelationshipMood.neutral,
+  RelationshipStage stageBefore = RelationshipStage.stranger,
+  RelationshipStage stageAfter = RelationshipStage.acquaintance,
+  String? originConversationId,
+  String originNameSnapshot = '',
+  List<String> sourceMessageIds = const [],
+  required int revision,
+  RelationshipEventCreator createdBy = RelationshipEventCreator.automatic,
+  String notesBefore = '',
+  String notesAfter = '',
+}) {
+  final timestamp = testLifecycleDate(revision);
+  return RelationshipEvent(
+    id: id,
+    sourceCharacterId: sourceCharacterId,
+    targetType: targetType,
+    targetId: targetId,
+    reason: reason,
+    affinityBefore: affinityBefore,
+    affinityAfter: affinityAfter,
+    trustBefore: trustBefore,
+    trustAfter: trustAfter,
+    frictionBefore: frictionBefore,
+    frictionAfter: frictionAfter,
+    familiarityBefore: familiarityBefore,
+    familiarityAfter: familiarityAfter,
+    moodBefore: moodBefore,
+    moodAfter: moodAfter,
+    stageBefore: stageBefore,
+    stageAfter: stageAfter,
+    originConversationId: originConversationId,
+    originNameSnapshot: originNameSnapshot,
+    sourceMessageIds: sourceMessageIds,
+    revision: revision,
+    occurredAt: timestamp,
+    createdBy: createdBy,
+    createdAt: timestamp,
+    notesBefore: notesBefore,
+    notesAfter: notesAfter,
+  );
 }

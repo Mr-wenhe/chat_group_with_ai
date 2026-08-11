@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_settings.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
@@ -130,6 +131,47 @@ void main() {
 
       expect(find.text('已删除角色'), findsOneWidget);
       expect(find.text('删除角色后仍可审计'), findsOneWidget);
+    });
+
+    testWidgets('deleted observer and subject use identity snapshots',
+        (tester) async {
+      await tester.runAsync(() async {
+        await db.appSettingsBox.put(
+          DataLifecycleSettings.deletedCharacterSnapshotsKey,
+          {
+            'deleted-observer': {
+              'name': '快照观察者',
+              'avatar': '观',
+              'age': 27,
+              'role': '观察者',
+            },
+            'deleted-subject': {
+              'name': '快照主体',
+              'avatar': '主',
+              'age': 28,
+              'role': '主体',
+            },
+          },
+        );
+        await db.permanentMemoryBox.put(
+          'pm-snapshot',
+          PermanentMemory(
+            observerCharacterId: 'deleted-observer',
+            kind: MemoryKind.sharedExperience,
+            content: '历史快照可审计',
+            subjectIds: const ['deleted-subject'],
+            status: MemoryStatus.active,
+            originType: MemoryOriginType.group,
+            originNameSnapshot: '快照群',
+          ),
+        );
+        await tester.pumpWidget(app(const MemoryManagementPage()));
+      });
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('快照观察者'), findsWidgets);
+      expect(find.text('主体：快照主体'), findsOneWidget);
+      expect(find.text('已删除角色'), findsNothing);
     });
 
     testWidgets('originConversationId sets initial filter only',
@@ -579,10 +621,12 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
       final correctionDialog = find.byType(AlertDialog);
       await tester.enterText(
-        find.descendant(
-          of: correctionDialog,
-          matching: find.byType(TextField),
-        ).first,
+        find
+            .descendant(
+              of: correctionDialog,
+              matching: find.byType(TextField),
+            )
+            .first,
         '修正后的内容',
       );
       await tester.tap(find.text('保存修正'));

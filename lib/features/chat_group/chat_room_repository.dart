@@ -1,4 +1,5 @@
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_models.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/message.dart';
 
@@ -49,21 +50,14 @@ class ChatRoomRepository {
         .deleteMessage(messageId, groupId: conversationId);
   }
 
-  /// 删除该会话的所有消息（清空对话），不影响记忆和关系数据。
-  Future<int> deleteAllMessages() async {
-    final box = db.messageBox;
-    final toDelete = <String>[];
-    for (final key in box.keys) {
-      final message = box.get(key);
-      if (message == null) continue;
-      if (message.groupId == conversationId) {
-        toDelete.add(key.toString());
-      }
-    }
-    for (final key in toDelete) {
-      await box.delete(key);
-    }
-    return toDelete.length;
+  /// Clears this exact group or DM conversation through the lifecycle service.
+  Future<DataLifecycleResult> clearConversation({
+    bool deleteAssociatedPermanentData = false,
+  }) {
+    return DataLifecycleService(db: db).clearConversation(
+      conversationId,
+      deleteAssociatedPermanentData: deleteAssociatedPermanentData,
+    );
   }
 
   Future<void> recordTokenUsage({

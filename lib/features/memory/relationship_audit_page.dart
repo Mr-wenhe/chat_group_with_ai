@@ -68,7 +68,20 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
       final legacy = allStates
           .where((relationship) => relationship.groupId != 'global')
           .toList(growable: false);
-      final characters = _db.aiCharacterBox.values.toList(growable: false);
+      final referencedCharacterIds = <String>{
+        for (final relationship in allStates) ...{
+          relationship.sourceCharacterId,
+          if (relationship.targetType == RelationshipTargetType.ai)
+            relationship.targetId,
+        },
+      };
+      final characterIds = <String>{
+        ..._db.aiCharacterBox.values.map((character) => character.id),
+        ...referencedCharacterIds,
+      };
+      final characters = DataLifecycleService(db: _db).charactersForIds(
+        characterIds,
+      );
       final userProfile = _db.userProfileBox.get('me');
       final allEvents = _db.relationshipEventBox.values.toList(growable: false);
       final sourceIds =

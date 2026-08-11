@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/message.dart';
@@ -63,7 +64,20 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
         final message = _db.messageBox.get(id);
         if (message != null) sourceMessages[id] = message;
       }
-      final characters = _db.aiCharacterBox.values.toList(growable: false);
+      final referencedCharacterIds = <String>{
+        for (final memory in memories) ...{
+          memory.observerCharacterId,
+          ...memory.subjectIds.where((id) => id != 'user'),
+          ...memory.participantIds.where((id) => id != 'user'),
+        },
+      };
+      final characterIds = <String>{
+        ..._db.aiCharacterBox.values.map((character) => character.id),
+        ...referencedCharacterIds,
+      };
+      final characters = DataLifecycleService(db: _db).charactersForIds(
+        characterIds,
+      );
       final legacyCharacterMemories =
           _db.characterMemoryBox.values.toList(growable: false);
       if (!mounted) return;

@@ -149,6 +149,7 @@ class RelationshipState extends HiveObject {
     int revision = 0,
     String? lastEventId,
     DateTime? updatedAt,
+    DateTime? createdAt,
   }) {
     return RelationshipState(
       id: id ?? _stableId(sourceCharacterId, targetType, targetId),
@@ -163,6 +164,7 @@ class RelationshipState extends HiveObject {
       recentMood: recentMood,
       notes: notes,
       lastInteractionAt: lastInteractionAt,
+      createdAt: createdAt,
       stage: stage,
       revision: revision,
       lastEventId: lastEventId,
@@ -171,13 +173,57 @@ class RelationshipState extends HiveObject {
   }
 
   /// 生成稳定的全局关系 ID：rel:<source>:<targetType>:<target>
-  static String stableGlobalId(
-      String sourceCharacterId, RelationshipTargetType targetType, String targetId) {
+  static String stableGlobalId(String sourceCharacterId,
+      RelationshipTargetType targetType, String targetId) {
     return 'rel:$sourceCharacterId:${targetType.name}:$targetId';
   }
 
-  static String _stableId(
-      String sourceCharacterId, RelationshipTargetType targetType, String targetId) {
+  /// Selects one snapshot per directional relationship for reads.
+  ///
+  /// A global snapshot is authoritative over legacy per-group snapshots. If
+  /// several snapshots share that scope, the newest [updatedAt] wins; the
+  /// remaining fields make equal timestamps deterministic.
+  static List<RelationshipState> selectStableSnapshots(
+    Iterable<RelationshipState> relationships,
+  ) {
+    final bestByStableId = <String, RelationshipState>{};
+    for (final candidate in relationships) {
+      if (candidate.sourceCharacterId.isEmpty) continue;
+      final stableId = stableGlobalId(
+        candidate.sourceCharacterId,
+        candidate.targetType,
+        candidate.targetId,
+      );
+      final current = bestByStableId[stableId];
+      if (current == null || _isPreferredSnapshot(candidate, current)) {
+        bestByStableId[stableId] = candidate;
+      }
+    }
+
+    final entries = bestByStableId.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    return [for (final entry in entries) entry.value];
+  }
+
+  static bool _isPreferredSnapshot(
+    RelationshipState candidate,
+    RelationshipState current,
+  ) {
+    final candidateIsGlobal = candidate.groupId == 'global';
+    final currentIsGlobal = current.groupId == 'global';
+    if (candidateIsGlobal != currentIsGlobal) return candidateIsGlobal;
+
+    final updatedAt = candidate.updatedAt.compareTo(current.updatedAt);
+    if (updatedAt != 0) return updatedAt > 0;
+    final revision = candidate.revision.compareTo(current.revision);
+    if (revision != 0) return revision > 0;
+    final createdAt = candidate.createdAt.compareTo(current.createdAt);
+    if (createdAt != 0) return createdAt > 0;
+    return candidate.id.compareTo(current.id) > 0;
+  }
+
+  static String _stableId(String sourceCharacterId,
+      RelationshipTargetType targetType, String targetId) {
     return 'rel:$sourceCharacterId:${targetType.name}:$targetId';
   }
 

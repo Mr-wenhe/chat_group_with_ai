@@ -34,6 +34,11 @@ class PromptTestDatabaseService extends DatabaseService {
   }
 
   @override
+  Future<List<Message>> messagesForGroup(String groupId) {
+    return Future.value(const <Message>[]);
+  }
+
+  @override
   Future<void> markGroupChatRead(String groupId, {DateTime? readAt}) async {}
 
   @override

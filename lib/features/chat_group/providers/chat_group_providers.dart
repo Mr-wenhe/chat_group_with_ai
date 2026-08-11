@@ -31,8 +31,14 @@ class ChatGroupsNotifier extends StateNotifier<List<ChatGroup>> {
     _loadGroups();
   }
 
-  Future<DataLifecycleResult> deleteGroup(String id) async {
-    final result = await DataLifecycleService(db: _db).deleteGroup(id);
+  Future<DataLifecycleResult> deleteGroup(
+    String id, {
+    bool deleteAssociatedPermanentData = false,
+  }) async {
+    final result = await DataLifecycleService(db: _db).deleteGroup(
+      id,
+      deleteAssociatedPermanentData: deleteAssociatedPermanentData,
+    );
     _loadGroups();
     return result;
   }

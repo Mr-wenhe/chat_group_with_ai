@@ -444,8 +444,17 @@ class RelationshipEventService {
     RelationshipMood targetMood = RelationshipMood.neutral;
     double confidence = 0.5;
 
-    // 高影响行为检测。
-    if (message.senderType == 'user' && userSentiment?.isEmotional == true) {
+    // 高影响行为检测。明确的浪漫语义优先于通用情绪分类，避免“喜欢你”
+    // 被只标记为友好互动而永远无法触发 romantic 阶段候选。
+    if (_hasRomanticCue(content)) {
+      affinityDelta = 12;
+      trustDelta = 8;
+      familiarityDelta = isGroupChat ? 3 : 6;
+      targetMood = RelationshipMood.warm;
+      reason = '浪漫表达';
+      confidence = 0.9;
+    } else if (message.senderType == 'user' &&
+        userSentiment?.isEmotional == true) {
       affinityDelta = userSentiment!.affinityDelta;
       frictionDelta = userSentiment.frictionDelta;
       familiarityDelta = isGroupChat ? 3 : 6;
@@ -543,6 +552,74 @@ class RelationshipEventService {
 
   int _dampenDelta(int value) => value.sign * (value.abs() ~/ 2);
 
+  static final _romanticNegationPattern = RegExp(
+    r'(?:不|没|无|别|不要|不是|没有|并不|绝不|从不|不太|不想|不愿|不会)',
+  );
+  static final _romanticObjectContinuationPattern = RegExp(
+    r'^(?:的|推荐|分享|说|写|发|拍|做|选|提供|送|制作|电影|歌曲|视频|书|建议|意见|答案|方案)',
+  );
+
+  bool _hasRomanticCue(String content) {
+    final normalized = content.replaceAll(RegExp(r'\s+'), '');
+    if (_containsPositiveCue(
+      normalized,
+      const ['喜欢你', '爱你'],
+      rejectObjectContext: true,
+    )) {
+      return true;
+    }
+
+    const directedCues = [
+      '和你约会',
+      '跟你约会',
+      '与你约会',
+      '和你谈恋爱',
+      '跟你谈恋爱',
+      '与你谈恋爱',
+      '和你在一起',
+      '跟你在一起',
+      '与你在一起',
+      '我们在一起',
+      '向你表白',
+      '对你表白',
+      '向你告白',
+      '对你告白',
+    ];
+    if (_containsPositiveCue(normalized, directedCues)) return true;
+
+    // Standalone confession/romance language remains supported, but still
+    // respects nearby negation (for example, "不是来表白的").
+    return _containsPositiveCue(normalized, const ['表白', '告白', '浪漫']);
+  }
+
+  bool _containsPositiveCue(
+    String content,
+    Iterable<String> cues, {
+    bool rejectObjectContext = false,
+  }) {
+    for (final cue in cues) {
+      var index = content.indexOf(cue);
+      while (index >= 0) {
+        if (!_isNegatedCue(content, index)) {
+          final end = index + cue.length;
+          final continuation = content.substring(end);
+          if (!rejectObjectContext ||
+              !_romanticObjectContinuationPattern.hasMatch(continuation)) {
+            return true;
+          }
+        }
+        index = content.indexOf(cue, index + cue.length);
+      }
+    }
+    return false;
+  }
+
+  bool _isNegatedCue(String content, int cueStart) {
+    final prefixStart = cueStart > 8 ? cueStart - 8 : 0;
+    final prefix = content.substring(prefixStart, cueStart);
+    return _romanticNegationPattern.hasMatch(prefix);
+  }
+
   // ── 阶段防跳变 ───────────────────────────────────────────────────
 
   /// 关系阶段升级路径（只允许正向逐步升级）。
@@ -611,6 +688,13 @@ class RelationshipEventService {
     RelationshipStage current,
     RelationshipDelta delta,
   ) {
+    // Only a positive delta carrying explicit romantic language may propose
+    // this stage; _resolveStageTransition performs the final evidence check.
+    if (_hasRomanticEvidence(delta) &&
+        delta.affinityDelta > 0 &&
+        delta.trustDelta > 0) {
+      return RelationshipStage.romantic;
+    }
     // 高摩擦 + 低亲密 → 负面阶段。
     if (delta.frictionDelta > 10 && delta.affinityDelta <= -5) {
       return RelationshipStage.strained;

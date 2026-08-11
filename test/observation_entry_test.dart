@@ -1396,6 +1396,94 @@ void main() {
       expect(updated.stage, isNot(RelationshipStage.romantic));
     });
 
+    test('romantic stage is reachable from explicit romantic language',
+        () async {
+      await db.aiCharacterBox.put('a', makeChar('a'));
+      await db.aiCharacterBox.put('b', makeChar('b'));
+
+      final service = RelationshipEventService(db);
+      final relation = RelationshipState.global(
+        sourceCharacterId: 'a',
+        targetType: RelationshipTargetType.ai,
+        targetId: 'b',
+        stage: RelationshipStage.closeFriend,
+        affinity: 95,
+        trust: 90,
+      );
+      await db.relationshipStateBox.put(relation.id, relation);
+
+      final message = makeMsg(
+        senderType: 'ai',
+        senderId: 'a',
+        content: '我喜欢你，想和你约会',
+        groupId: 'g1',
+      );
+      message.visibleToCharacterIds = ['a', 'b'];
+
+      await service.observeAndApply(
+        sourceCharacterId: 'a',
+        targetId: 'b',
+        targetType: RelationshipTargetType.ai,
+        message: message,
+        conversationId: 'g1',
+        conversationNameSnapshot: 'TestGroup',
+        allCharacters: charList(['a', 'b']),
+      );
+
+      final updated = db.relationshipStateBox.get(relation.id)!;
+      expect(updated.stage, RelationshipStage.romantic);
+      expect(db.relationshipEventBox.values.single.reason, contains('浪漫'));
+    });
+
+    test('romantic cues ignore negation and object-directed phrases', () async {
+      const contents = [
+        '我不喜欢你',
+        '我不爱你',
+        '喜欢你推荐的电影',
+      ];
+
+      for (var index = 0; index < contents.length; index++) {
+        final sourceId = 'negative-source-$index';
+        final targetId = 'negative-target-$index';
+        final relation = RelationshipState.global(
+          sourceCharacterId: sourceId,
+          targetType: RelationshipTargetType.ai,
+          targetId: targetId,
+          stage: RelationshipStage.closeFriend,
+          affinity: 95,
+          trust: 90,
+        );
+        await db.relationshipStateBox.put(relation.id, relation);
+
+        final message = makeMsg(
+          senderType: 'ai',
+          senderId: sourceId,
+          content: contents[index],
+          groupId: 'g1',
+        );
+        message.visibleToCharacterIds = [sourceId, targetId];
+
+        await RelationshipEventService(db).observeAndApply(
+          sourceCharacterId: sourceId,
+          targetId: targetId,
+          targetType: RelationshipTargetType.ai,
+          message: message,
+          conversationId: 'g1',
+          conversationNameSnapshot: 'TestGroup',
+          allCharacters: charList([sourceId, targetId]),
+        );
+
+        final updated = db.relationshipStateBox.get(relation.id)!;
+        expect(updated.stage, RelationshipStage.closeFriend,
+            reason: contents[index]);
+        expect(updated.affinity, 96, reason: contents[index]);
+        final event = db.relationshipEventBox.values.singleWhere(
+          (candidate) => candidate.sourceCharacterId == sourceId,
+        );
+        expect(event.reason, isNot('浪漫表达'), reason: contents[index]);
+      }
+    });
+
     test('event written before snapshot update', () async {
       await db.aiCharacterBox.put('a', makeChar('a'));
       await db.aiCharacterBox.put('b', makeChar('b'));

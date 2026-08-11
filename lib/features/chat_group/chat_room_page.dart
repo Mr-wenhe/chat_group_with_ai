@@ -68,6 +68,7 @@ import 'package:chat_group/features/chat_group/widgets/chat_room_app_bar.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_room_banners.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_room_composer.dart';
 import 'package:chat_group/features/chat_group/widgets/compact_conversation_controls.dart';
+import 'package:chat_group/core/widgets/data_lifecycle_result_dialog.dart';
 import 'package:chat_group/features/chat_group/widgets/hint_chip.dart';
 import 'package:chat_group/features/chat_group/widgets/member_sheet.dart';
 import 'package:chat_group/features/chat_group/widgets/sheet_button.dart';
@@ -5044,12 +5045,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     setState(() => _quotedMessage = null);
   }
 
-  /// 按 senderId 取展示名；`user` 返回群主名，找不到角色时返回占位名。
+  /// 按 senderId 取展示名；历史角色优先使用删除时保存的身份快照。
   String _senderNameById(String id) {
     if (id == 'user') return _ownerMentionName;
-    final c = _allGroupCharacters.firstWhere((c) => c.id == id,
-        orElse: () => _unknownCharacter());
-    return c.name;
+    return _displayCharacterById(id)?.name ?? _unknownCharacter().name;
+  }
+
+  AICharacter? _displayCharacterById(String id) {
+    for (final character in _allGroupCharacters) {
+      if (character.id == id) return character;
+    }
+    return DataLifecycleService(db: _db).characterOrDeleted(id);
   }
 
   /// 角色已被删除时的占位对象，避免历史消息渲染时空指针。
@@ -5105,9 +5111,18 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       final quoted = _db.messageBox.get(quotedId);
       if (quoted != null) messageIndex[quotedId] = quoted;
     }
-    final characterIndex = {
+    final characterIndex = <String, AICharacter>{
       for (final character in _allGroupCharacters) character.id: character,
     };
+    final lifecycle = DataLifecycleService(db: _db);
+    for (final message in _messages) {
+      if (message.senderType == 'user' ||
+          characterIndex.containsKey(message.senderId)) {
+        continue;
+      }
+      final character = lifecycle.characterOrDeleted(message.senderId);
+      if (character != null) characterIndex[character.id] = character;
+    }
     return Scaffold(
       backgroundColor: WeComChatTokens.chatBackground(context),
       appBar: ChatRoomAppBar(
@@ -5140,8 +5155,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         webSearchIcon: _webSearchPolicyIcon,
         webSearchTooltip: '联网搜索：${_effectiveWebSearchPolicy.label}',
         onConfigureWebSearch: _configureWebSearchPolicy,
-        onClearConversation:
-            _isDirectChat ? _showClearConversationDialog : null,
+        onClearConversation: _showClearConversationDialog,
       ),
       body: Column(
         children: [
@@ -5340,39 +5354,130 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
   }
 
-  /// 清空当前私聊的对话消息（保留角色记忆和关系状态）。
+  /// 清空当前群聊或私聊，并让用户明确选择是否删除来源永久数据。
   Future<void> _showClearConversationDialog() async {
+    final service = DataLifecycleService(db: _db);
+    var deleteAssociatedPermanentData = false;
+    var displayedPlan = await service.previewConversation(widget.groupId);
+    if (!mounted) return;
+
     final confirmed = await showDialog<bool>(
       context: context,
-      builder: (dialogContext) => AlertDialog(
-        icon: const Icon(Icons.delete_sweep_outlined, color: Colors.orange),
-        title: const Text('清空对话'),
-        content: const Text('将删除本对话的所有聊天记录，但保留角色记忆和亲密度等关系数据。此操作不可撤销。'),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext, false),
-            child: const Text('取消'),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          icon: const Icon(Icons.delete_sweep_outlined, color: Colors.orange),
+          title: Text(_isDirectChat ? '清空私聊' : '清空群聊'),
+          content: SizedBox(
+            width: 460,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '默认删除：${displayedPlan.count('messages')} 条消息、'
+                    '${displayedPlan.count('groupMemories') + displayedPlan.count('characterMemories')} 条场合记忆、'
+                    '${displayedPlan.count('relationshipStates')} 条旧关系、'
+                    '${displayedPlan.count('tasks')} 个任务、'
+                    '${displayedPlan.count('workspaces')} 条工作区记录。',
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '默认保留：${displayedPlan.retainedCount('permanentMemories')} 条永久记忆、'
+                    '${displayedPlan.retainedCount('relationshipEvents')} 条关系事件、'
+                    '${displayedPlan.retainedCount('globalRelationshipStates')} 条全局关系快照。',
+                  ),
+                  const SizedBox(height: 8),
+                  if (displayedPlan.optionalCounts.isNotEmpty)
+                    Text(
+                      '可选关联删除：${displayedPlan.optionalCount('permanentMemories')} 条永久记忆、'
+                      '${displayedPlan.optionalCount('relationshipEvents')} 条关系事件。',
+                    )
+                  else
+                    Text(
+                      '本次将删除来源永久数据：${displayedPlan.count('permanentMemories')} 条永久记忆、'
+                      '${displayedPlan.count('relationshipEvents')} 条关系事件。',
+                    ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: deleteAssociatedPermanentData,
+                    title: const Text('同时删除源自此会话的永久记忆和关系事件'),
+                    subtitle: const Text(
+                      '只匹配完整来源 ID；未知来源、其他场合和全局关系快照不会删除。',
+                    ),
+                    onChanged: (value) async {
+                      final nextValue = value ?? false;
+                      final nextPlan = await service.previewConversation(
+                        widget.groupId,
+                        deleteAssociatedPermanentData: nextValue,
+                      );
+                      if (!dialogContext.mounted) return;
+                      setDialogState(() {
+                        deleteAssociatedPermanentData = nextValue;
+                        displayedPlan = nextPlan;
+                      });
+                    },
+                  ),
+                  Text(
+                    '会话状态 ${displayedPlan.count('settings')} 项，'
+                    '索引 ${displayedPlan.count('sessionIndexes')} 项，'
+                    '记忆 pin ${displayedPlan.count('memoryPins')} 个，'
+                    '重试记录 ${displayedPlan.count('retryRecords')} 条，'
+                    '附件 ${displayedPlan.count('attachments')} 个。'
+                    '此操作不可撤销。',
+                  ),
+                ],
+              ),
+            ),
           ),
-          FilledButton(
-            onPressed: () => Navigator.pop(dialogContext, true),
-            style: FilledButton.styleFrom(backgroundColor: Colors.red),
-            child: const Text('清空'),
-          ),
-        ],
+          actions: [
+            TextButton(
+              onPressed: () => Navigator.pop(dialogContext, false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, true),
+              style: FilledButton.styleFrom(backgroundColor: Colors.red),
+              child: const Text('清空'),
+            ),
+          ],
+        ),
       ),
     );
     if (confirmed != true || !mounted) return;
 
-    await _repository.deleteAllMessages();
+    final result = await _repository.clearConversation(
+      deleteAssociatedPermanentData: deleteAssociatedPermanentData,
+    );
+    if (!_canTouchUi) return;
+    final loaded = await _loader.load(widget.groupId);
     if (!_canTouchUi) return;
     setState(() {
-      _messages = const <Message>[];
+      _group = loaded.displayGroup;
+      _userProfile = loaded.userProfile;
+      _characters = loaded.activeCharacters;
+      _allGroupCharacters = loaded.allCharacters;
+      _messages = loaded.messages;
+      _hasOlderMessages = loaded.hasOlderMessages;
+      _totalMessageCount = loaded.totalMessageCount;
+      _groupMemory = loaded.groupMemory;
+      _characterMemories = loaded.characterMemories;
+      _relationshipStates = loaded.relationships;
       _streamingMessage = null;
+      _pendingMentionedIds.clear();
+      _pendingUserMentionMessageIds.clear();
+      _searchResults = const <Message>[];
     });
+    if (!result.isComplete && mounted) {
+      await showIncompleteDeletionDialog(context, result);
+      return;
+    }
     if (mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('对话已清空，角色记忆和关系数据已保留')),
-      );
+      final message = deleteAssociatedPermanentData
+          ? '会话已清空，来源永久数据已按选择删除'
+          : '会话已清空，永久记忆和关系事件已保留';
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
     }
   }
 

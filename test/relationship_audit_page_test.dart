@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/data_lifecycle_settings.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
@@ -299,6 +300,41 @@ void main() {
     await tester.pump(const Duration(milliseconds: 200));
 
     expect(find.text('已删除角色 → 已删除角色'), findsOneWidget);
+  });
+
+  testWidgets('deleted observer and target use identity snapshots',
+      (tester) async {
+    await tester.runAsync(() async {
+      await db.appSettingsBox.put(
+        DataLifecycleSettings.deletedCharacterSnapshotsKey,
+        {
+          'deleted-observer': {
+            'name': '快照观察者',
+            'avatar': '观',
+            'age': 27,
+            'role': '观察者',
+          },
+          'deleted-target': {
+            'name': '快照目标',
+            'avatar': '目',
+            'age': 28,
+            'role': '目标',
+          },
+        },
+      );
+      final relation = state(
+        source: 'deleted-observer',
+        targetType: RelationshipTargetType.ai,
+        target: 'deleted-target',
+      );
+      await db.relationshipStateBox.put(relation.id, relation);
+    });
+
+    await tester.pumpWidget(app());
+    await tester.pump(const Duration(milliseconds: 200));
+
+    expect(find.text('快照观察者 → 快照目标'), findsOneWidget);
+    expect(find.text('已删除角色 → 已删除角色'), findsNothing);
   });
 
   testWidgets('timeline sorts by revision and labels every event source',

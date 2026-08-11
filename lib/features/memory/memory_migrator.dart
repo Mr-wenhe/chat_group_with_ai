@@ -305,7 +305,12 @@ class MemoryMigrator {
   // ---- 4. RelationshipState -> 全局快照 + RelationshipEvent ----
 
   Future<_RelationshipMigrationResult> _migrateRelationshipStates() async {
-    final oldStates = _db.relationshipStateBox.values.toList(growable: false);
+    // A retry can run after the first pass has already written the global
+    // snapshot but before the marker is durable. Only legacy per-group rows
+    // are migration input; global rows are generated output.
+    final oldStates = _db.relationshipStateBox.values
+        .where((state) => state.groupId != 'global')
+        .toList(growable: false);
     if (oldStates.isEmpty) {
       return const _RelationshipMigrationResult(
         snapshotsCreated: 0,
@@ -454,6 +459,11 @@ class MemoryMigrator {
     required int trust,
     required int familiarity,
   }) {
+    // Negative affinity takes precedence over familiarity. Otherwise a very
+    // familiar relationship with strong hostility would be misclassified as
+    // acquaintance, and the hostile branch would never be reachable.
+    if (affinity < -40) return RelationshipStage.hostile;
+    if (affinity < -20) return RelationshipStage.strained;
     if (familiarity == 0 && affinity <= 0) return RelationshipStage.stranger;
     if (familiarity < 20) return RelationshipStage.acquaintance;
     if (familiarity < 50) {
@@ -463,8 +473,6 @@ class MemoryMigrator {
     if (familiarity >= 50 && affinity > 40 && trust > 20) {
       return RelationshipStage.closeFriend;
     }
-    if (affinity < -20) return RelationshipStage.strained;
-    if (affinity < -40) return RelationshipStage.hostile;
     if (familiarity >= 50) return RelationshipStage.friend;
     return RelationshipStage.acquaintance;
   }

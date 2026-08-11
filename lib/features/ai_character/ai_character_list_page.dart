@@ -482,6 +482,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
     final plan = await service.previewCharacter(character.id);
     if (!context.mounted) return;
     var policy = CharacterDeletionPolicy.keepMessageHistory;
+    var displayedPlan = plan;
     final selectedPolicy = await showDialog<CharacterDeletionPolicy>(
       context: context,
       builder: (context) => StatefulBuilder(
@@ -497,12 +498,28 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text(
-                    '影响：${plan.count('groups')} 个群聊、'
-                    '${plan.count('directMessages')} 条私聊、'
-                    '${plan.count('skills')} 个技能、'
-                    '${plan.count('tasks')} 个任务、'
-                    '${plan.count('memories')} 条记忆、'
-                    '${plan.count('relationships')} 条关系。',
+                    '关联统计：${displayedPlan.count('groups')} 个群聊、'
+                    '${displayedPlan.retainedCount('groupMessages')} 条群聊历史、'
+                    '${displayedPlan.count('mentions')} 条消息提及引用。',
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '永久记忆：该 AI 作为 observer ${displayedPlan.count('observerPermanentMemories')} 条；'
+                    '其他 observer 关于它 ${displayedPlan.count('subjectPermanentMemories')} 条。',
+                  ),
+                  Text(
+                    '关系快照：作为 source ${displayedPlan.count('sourceRelationshipStates')} 条，'
+                    '作为 target ${displayedPlan.count('targetRelationshipStates')} 条；'
+                    '事件 source ${displayedPlan.count('sourceRelationshipEvents')} 条，'
+                    'target ${displayedPlan.count('targetRelationshipEvents')} 条。',
+                  ),
+                  Text(
+                    '角色辅助数据：${displayedPlan.count('skills')} 个技能、'
+                    '${displayedPlan.count('tasks')} 个任务、'
+                    '${displayedPlan.count('workspaces')} 条工作区、'
+                    '${displayedPlan.count('memoryPins')} 个 memory pin、'
+                    '${displayedPlan.count('retryRecords')} 条重试记录、'
+                    '${displayedPlan.count('settings')} 项私聊索引/状态。',
                   ),
                   RadioListTile<CharacterDeletionPolicy>(
                     contentPadding: EdgeInsets.zero,
@@ -512,7 +529,17 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                     subtitle: const Text(
                       '从群组移除角色，删除技能、任务、记忆和关系；群聊与私聊历史保留为只读“已删除角色”。',
                     ),
-                    onChanged: (value) => setDialogState(() => policy = value!),
+                    onChanged: (value) async {
+                      if (value == null) return;
+                      setDialogState(() => policy = value);
+                      final next = await service.previewCharacter(
+                        character.id,
+                        policy: value,
+                      );
+                      if (context.mounted) {
+                        setDialogState(() => displayedPlan = next);
+                      }
+                    },
                   ),
                   RadioListTile<CharacterDeletionPolicy>(
                     contentPadding: EdgeInsets.zero,
@@ -522,7 +549,17 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                     subtitle: const Text(
                       '群聊历史仍保留；私聊消息及其无其他引用的 APP 附件一并删除。',
                     ),
-                    onChanged: (value) => setDialogState(() => policy = value!),
+                    onChanged: (value) async {
+                      if (value == null) return;
+                      setDialogState(() => policy = value);
+                      final next = await service.previewCharacter(
+                        character.id,
+                        policy: value,
+                      );
+                      if (context.mounted) {
+                        setDialogState(() => displayedPlan = next);
+                      }
+                    },
                   ),
                 ],
               ),
@@ -556,8 +593,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
   /// 批量替换配置：选择「源配置」与「目标配置」，
   /// 将所有当前使用源配置的角色对齐到目标配置。
   /// API Key 仅由共享配置的凭据仓库持有，故角色侧 apiKey 清空。
-  Future<void> _batchReplaceConfig(
-      BuildContext context, WidgetRef ref) async {
+  Future<void> _batchReplaceConfig(BuildContext context, WidgetRef ref) async {
     final cs = Theme.of(context).colorScheme;
     final apiConfigs = ref.read(apiConfigsProvider);
     final characters = ref.read(aiCharactersProvider);
@@ -576,18 +612,19 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
     }
 
     // 默认源：第一个有角色使用的配置；没有则提示无角色可替换
-    String sourceId = apiConfigs.firstWhere(
-      (c) => (usageCount[c.id] ?? 0) > 0,
-      orElse: () => apiConfigs.first,
-    ).id;
+    String sourceId = apiConfigs
+        .firstWhere(
+          (c) => (usageCount[c.id] ?? 0) > 0,
+          orElse: () => apiConfigs.first,
+        )
+        .id;
     if ((usageCount[sourceId] ?? 0) == 0) {
       AppToast.show(context, '当前没有角色关联任何配置，无需替换',
           icon: Icons.info_outline_rounded);
       return;
     }
     // 默认目标：第一个不等于源的配置
-    String targetId =
-        apiConfigs.firstWhere((c) => c.id != sourceId).id;
+    String targetId = apiConfigs.firstWhere((c) => c.id != sourceId).id;
 
     final result = await showDialog<({String sourceId, String targetId})>(
       context: context,
@@ -604,10 +641,8 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
             targetId = targetCandidates.first.id;
           }
           final affected = usageCount[sourceId] ?? 0;
-          final sourceConfig =
-              apiConfigs.firstWhere((c) => c.id == sourceId);
-          final targetConfig =
-              apiConfigs.firstWhere((c) => c.id == targetId);
+          final sourceConfig = apiConfigs.firstWhere((c) => c.id == sourceId);
+          final targetConfig = apiConfigs.firstWhere((c) => c.id == targetId);
 
           return AlertDialog(
             title: const Text('批量替换模型配置'),
@@ -618,8 +653,8 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                 crossAxisAlignment: CrossAxisAlignment.start,
                 children: [
                   Text('源配置（当前正在使用的）',
-                      style: TextStyle(
-                          fontSize: 13, color: cs.onSurfaceVariant)),
+                      style:
+                          TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
                   const SizedBox(height: 6),
                   DropdownButtonFormField<String>(
                     value: sourceId,
@@ -644,8 +679,8 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                   ),
                   const SizedBox(height: 14),
                   Text('目标配置（替换为）',
-                      style: TextStyle(
-                          fontSize: 13, color: cs.onSurfaceVariant)),
+                      style:
+                          TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
                   const SizedBox(height: 6),
                   DropdownButtonFormField<String>(
                     value: targetId,
@@ -676,8 +711,8 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                     child: Text(
                       '将把 $affected 个使用「${sourceConfig.name}」的角色'
                       '替换为「${targetConfig.name}」（模型 ${targetConfig.modelName}）',
-                      style: TextStyle(
-                          fontSize: 12, color: cs.onSurfaceVariant),
+                      style:
+                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
                     ),
                   ),
                 ],
@@ -685,13 +720,12 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
             ),
             actions: [
               TextButton(
-                  onPressed: () => Navigator.pop(ctx),
-                  child: const Text('取消')),
+                  onPressed: () => Navigator.pop(ctx), child: const Text('取消')),
               FilledButton(
                 onPressed: affected == 0
                     ? null
-                    : () => Navigator.pop(ctx,
-                        (sourceId: sourceId, targetId: targetId)),
+                    : () => Navigator.pop(
+                        ctx, (sourceId: sourceId, targetId: targetId)),
                 child: Text('替换 $affected 个角色'),
               ),
             ],

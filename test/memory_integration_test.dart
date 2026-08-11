@@ -185,6 +185,53 @@ void main() {
       expect(bRels.first.groupId, 'global');
     });
 
+    test('loader and selector choose the newest global snapshot', () async {
+      await db.relationshipStateBox.put(
+        'rel:old-global-user',
+        RelationshipState(
+          id: 'rel:old-global-user',
+          groupId: 'global',
+          sourceCharacterId: 'char-a',
+          targetId: 'user',
+          targetType: RelationshipTargetType.user,
+          affinity: 20,
+          familiarity: 20,
+          trust: 20,
+          updatedAt: DateTime(2026, 8, 1),
+        ),
+      );
+      await db.relationshipStateBox.put(
+        'rel:new-global-user',
+        RelationshipState(
+          id: 'rel:new-global-user',
+          groupId: 'global',
+          sourceCharacterId: 'char-a',
+          targetId: 'user',
+          targetType: RelationshipTargetType.user,
+          affinity: 90,
+          familiarity: 80,
+          trust: 70,
+          updatedAt: DateTime(2026, 8, 2),
+        ),
+      );
+
+      final loader = ChatRoomLoader(
+        db: db,
+        resolveApiConfig: (c) => null,
+      );
+      final context = await loader.load('group-1');
+      expect(context.relationships, hasLength(1));
+      expect(context.relationships.single.affinity, 90);
+
+      final prompt = await MemoryContextSelector(db).select(
+        observerCharacterId: 'char-a',
+        participantCharacterIds: const ['char-a', 'char-b'],
+        currentTargetId: 'user',
+      );
+      expect(prompt, contains('亲近90'));
+      expect(prompt, isNot(contains('亲近20')));
+    });
+
     test('group chat: no global → falls back to latest legacy per stableId',
         () async {
       await db.relationshipStateBox.put(

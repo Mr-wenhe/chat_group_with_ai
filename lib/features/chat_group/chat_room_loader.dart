@@ -37,16 +37,22 @@ class ChatRoomLoader {
     final group = db.chatGroupBox.get(conversationId);
     if (group == null) throw const ChatRoomLoadException('群聊不存在');
 
-    final allCharacters = group.aiCharacterIds
-        .map(db.aiCharacterBox.get)
-        .whereType<AICharacter>()
-        .toList()
-      ..sort((a, b) => a.name.compareTo(b.name));
+    final messagePage = await db.loadLatestMessages(conversationId);
+    final messages = messagePage.messages;
+    // A deleted member is removed from ChatGroup.aiCharacterIds, so recover
+    // its snapshot from every historical sender before building the index.
+    final historyMessages = await db.messagesForGroup(conversationId);
+    final characterIds = <String>{
+      ...group.aiCharacterIds,
+      for (final message in historyMessages)
+        if (message.senderType != 'user') message.senderId,
+    };
+    final allCharacters = DataLifecycleService(db: db).charactersForIds(
+      characterIds,
+    );
     final activeCharacters = allCharacters
         .where((character) => character.isActive)
         .toList(growable: false);
-    final messagePage = await db.loadLatestMessages(conversationId);
-    final messages = messagePage.messages;
     await db.markGroupChatRead(
       conversationId,
       readAt: readThrough(messages.map((message) => message.timestamp)),
@@ -139,34 +145,10 @@ class ChatRoomLoader {
   }
 
   /// 按 stableGlobalId 逐项选择最优关系快照：全局优先，否则取最新 legacy。
-  ///
-  /// 旧实现是"有任意全局快照就丢弃全部 legacy"，导致 A→user 只有 legacy 时被错误丢弃。
-  /// 这里改为按每个 stableGlobalId 独立决策：有全局用全局，没有才用最新 legacy。
   List<RelationshipState> stableGlobalRelationships() {
-    final allRelationships = db.relationshipStateBox.values;
-    // 先按 stableGlobalId 分组，全局优先。
-    final bestByStableId = <String, RelationshipState>{};
-    for (final r in allRelationships) {
-      if (r.sourceCharacterId.isEmpty) continue;
-      final stableId = RelationshipState.stableGlobalId(
-        r.sourceCharacterId,
-        r.targetType,
-        r.targetId,
-      );
-      final existing = bestByStableId[stableId];
-      if (existing == null) {
-        bestByStableId[stableId] = r;
-      } else if (r.groupId == 'global' && existing.groupId != 'global') {
-        // 全局快照优先于 legacy。
-        bestByStableId[stableId] = r;
-      } else if (r.groupId != 'global' &&
-          existing.groupId != 'global' &&
-          r.updatedAt.isAfter(existing.updatedAt)) {
-        // 同为 legacy 时取最新。
-        bestByStableId[stableId] = r;
-      }
-    }
-    return bestByStableId.values.toList();
+    return RelationshipState.selectStableSnapshots(
+      db.relationshipStateBox.values,
+    );
   }
 
   static DateTime readThrough(Iterable<DateTime> timestamps) {

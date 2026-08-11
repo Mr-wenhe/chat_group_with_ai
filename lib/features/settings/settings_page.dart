@@ -1121,6 +1121,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     DataClearScope scope,
   ) async {
     final cs = Theme.of(context).colorScheme;
+    final service = DataLifecycleService(db: ref.read(databaseServiceProvider));
+    final plan = await service.previewClear(scope);
+    if (!context.mounted) return;
     final (title, description) = switch (scope) {
       DataClearScope.chatContent => (
           '清除聊天内容？',
@@ -1140,7 +1143,31 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       builder: (ctx) => AlertDialog(
         icon: Icon(Icons.warning_amber_rounded, color: cs.error, size: 28),
         title: Text(title),
-        content: Text('$description\n\n此操作不可撤销，请先导出高价值对话。'),
+        content: SizedBox(
+          width: 460,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(description),
+                const SizedBox(height: 16),
+                Text(
+                  '将删除：${_clearCountSummary(plan, scope)}',
+                  style: const TextStyle(fontWeight: FontWeight.w600),
+                ),
+                const SizedBox(height: 8),
+                Text(_clearDetailSummary(plan, scope)),
+                if (plan.retainedCounts.isNotEmpty) ...[
+                  const SizedBox(height: 8),
+                  Text('明确保留：${_retainedClearSummary(plan)}'),
+                ],
+                const SizedBox(height: 16),
+                const Text('此操作不可撤销，请先导出高价值对话。'),
+              ],
+            ),
+          ),
+        ),
         actions: [
           TextButton(
               onPressed: () => Navigator.pop(ctx, false),
@@ -1156,10 +1183,11 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
 
     if (confirm == true && context.mounted) {
       final db = ref.read(databaseServiceProvider);
-      final result = await DataLifecycleService(db: db).clear(scope);
+      final result = await service.clear(scope);
       ref.invalidate(apiConfigsProvider);
       ref.invalidate(aiCharactersProvider);
       ref.invalidate(chatGroupsProvider);
+      _tokenUsage = db.getTokenUsage();
       if (scope == DataClearScope.factoryReset) {
         ref.invalidate(appSkinModeProvider);
         _currentSkinMode = db.savedAppSkinMode;
@@ -1176,6 +1204,61 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
         }
       }
     }
+  }
+
+  String _clearCountSummary(DeletionPlan plan, DataClearScope scope) {
+    final entries = <String>[
+      '${plan.count('messages')} 条消息',
+      '${plan.count('attachments')} 个附件',
+      '${plan.count('groupMemories') + plan.count('characterMemories')} 条场合记忆',
+      '${plan.count('relationshipStates')} 条关系快照',
+      '${plan.count('relationshipEvents')} 条关系事件',
+      '${plan.count('permanentMemories')} 条永久记忆',
+    ];
+    if (scope != DataClearScope.chatContent) {
+      entries.addAll([
+        '${plan.count('aiCharacters')} 个角色',
+        '${plan.count('groups')} 个群聊',
+        '${plan.count('apiConfigs')} 个 API 配置',
+      ]);
+    }
+    return entries.join('、');
+  }
+
+  String _clearDetailSummary(DeletionPlan plan, DataClearScope scope) {
+    final entries = <String>[
+      '任务 ${plan.count('tasks')} 个',
+      '工作区 ${plan.count('workspaces')} 条',
+      '技能 ${plan.count('characterSkills')} 个',
+      '会话状态 ${plan.count('settings')} 项',
+      '会话索引 ${plan.count('sessionIndexes')} 项',
+      '记忆 pin ${plan.count('memoryPins')} 个',
+      '重试记录 ${plan.count('retryRecords')} 条',
+    ];
+    if (scope != DataClearScope.chatContent) {
+      entries.addAll([
+        '凭据 ${plan.count('credentials')} 个',
+        '用户资料 ${plan.count('userProfiles')} 条',
+      ]);
+    }
+    return entries.join(' · ');
+  }
+
+  String _retainedClearSummary(DeletionPlan plan) {
+    final entries = <String>[];
+    for (final entry in const [
+      ('aiCharacters', '角色'),
+      ('groups', '群聊'),
+      ('apiConfigs', 'API 配置'),
+      ('permanentMemories', '永久记忆'),
+      ('relationshipEvents', '关系事件'),
+      ('globalRelationshipStates', '全局关系快照'),
+      ('userProfiles', '用户资料'),
+    ]) {
+      final count = plan.retainedCount(entry.$1);
+      if (count > 0) entries.add('$count 个${entry.$2}');
+    }
+    return entries.isEmpty ? '无额外数据' : entries.join('、');
   }
 
   Future<void> _openBackupRestore() async {

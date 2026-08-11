@@ -52,6 +52,18 @@ Future<Directory> openLifecycleHive() async {
       await Directory.systemTemp.createTemp('chat_group_lifecycle_test_');
   Hive.init(directory.path);
   _registerAdapters();
+  await _openLifecycleBoxes();
+  return directory;
+}
+
+/// Reopens the same on-disk fixture after Hive has been closed.
+Future<void> reopenLifecycleHive(Directory directory) async {
+  Hive.init(directory.path);
+  _registerAdapters();
+  await _openLifecycleBoxes();
+}
+
+Future<void> _openLifecycleBoxes() async {
   await Hive.openBox<AICharacter>('ai_characters');
   await Hive.openBox<ApiConfig>('api_configs');
   await Hive.openBox<ChatGroup>('chat_groups');
@@ -66,7 +78,6 @@ Future<Directory> openLifecycleHive() async {
   await Hive.openBox<UserProfile>('user_profile');
   await Hive.openBox<PermanentMemory>('permanent_memories');
   await Hive.openBox<RelationshipEvent>('relationship_events');
-  return directory;
 }
 
 Future<void> closeLifecycleHive(Directory directory,

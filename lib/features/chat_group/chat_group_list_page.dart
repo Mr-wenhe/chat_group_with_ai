@@ -186,37 +186,89 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
       BuildContext context, WidgetRef ref, ChatGroup group) async {
     final plan = await DataLifecycleService(db: _db).previewGroup(group.id);
     if (!context.mounted) return;
+    var deleteAssociatedPermanentData = false;
+    var displayedPlan = plan;
     final confirm = await showDialog<bool>(
       context: context,
-      builder: (context) => AlertDialog(
-        icon: Icon(Icons.delete_outline_rounded,
-            color: Theme.of(context).colorScheme.error, size: 28),
-        title: Text('删除「${group.name}」？'),
-        content: Text(
-          '此操作不可撤销，将删除群聊及关联的：\n'
-          '• ${plan.count('messages')} 条消息\n'
-          '• ${plan.count('groupMemories') + plan.count('characterMemories')} 条记忆\n'
-          '• ${plan.count('relationships')} 条关系\n'
-          '• ${plan.count('tasks')} 个任务、${plan.count('workspaces')} 条工作区记录\n'
-          '• ${plan.count('settings')} 项会话状态\n'
-          '• ${plan.count('attachments')} 个无其他引用的 APP 附件',
-        ),
-        actions: [
-          TextButton(
-              onPressed: () => Navigator.pop(context, false),
-              child: const Text('取消')),
-          FilledButton(
-            onPressed: () => Navigator.pop(context, true),
-            style: FilledButton.styleFrom(
-                backgroundColor: Theme.of(context).colorScheme.error),
-            child: const Text('删除'),
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          icon: Icon(Icons.delete_outline_rounded,
+              color: Theme.of(context).colorScheme.error, size: 28),
+          title: Text('删除「${group.name}」？'),
+          content: SizedBox(
+            width: 460,
+            child: SingleChildScrollView(
+              child: Column(
+                mainAxisSize: MainAxisSize.min,
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    '默认删除：${displayedPlan.count('messages')} 条消息、'
+                    '${displayedPlan.count('groupMemories') + displayedPlan.count('characterMemories')} 条场合记忆、'
+                    '${displayedPlan.count('relationships')} 条旧关系、'
+                    '${displayedPlan.count('tasks')} 个任务、${displayedPlan.count('workspaces')} 条工作区记录。',
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '默认保留：${displayedPlan.retainedCount('permanentMemories')} 条永久记忆、'
+                    '${displayedPlan.retainedCount('relationshipEvents')} 条关系事件、'
+                    '${displayedPlan.retainedCount('globalRelationshipStates')} 条全局关系快照。',
+                  ),
+                  const SizedBox(height: 8),
+                  Text(
+                    '可选关联删除：${displayedPlan.optionalCount('permanentMemories')} 条永久记忆、'
+                    '${displayedPlan.optionalCount('relationshipEvents')} 条关系事件。',
+                  ),
+                  CheckboxListTile(
+                    contentPadding: EdgeInsets.zero,
+                    value: deleteAssociatedPermanentData,
+                    title: const Text('同时删除源自此群的永久记忆和关系事件'),
+                    subtitle: const Text('只匹配来源场合 ID，未知来源和其他群/私聊数据不会删除。'),
+                    onChanged: (value) async {
+                      final nextValue = value ?? false;
+                      final nextPlan =
+                          await DataLifecycleService(db: _db).previewGroup(
+                        group.id,
+                        deleteAssociatedPermanentData: nextValue,
+                      );
+                      if (!dialogContext.mounted) return;
+                      setDialogState(() {
+                        deleteAssociatedPermanentData = nextValue;
+                        displayedPlan = nextPlan;
+                      });
+                    },
+                  ),
+                  Text(
+                    '会话状态 ${displayedPlan.count('settings')} 项，'
+                    '索引 ${displayedPlan.count('sessionIndexes')} 项，'
+                    '记忆 pin ${displayedPlan.count('memoryPins')} 个，'
+                    '重试记录 ${displayedPlan.count('retryRecords')} 条，'
+                    '附件 ${displayedPlan.count('attachments')} 个。'
+                    '其中为无其他引用的 APP 附件；此操作不可撤销。',
+                  ),
+                ],
+              ),
+            ),
           ),
-        ],
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(context, false),
+                child: const Text('取消')),
+            FilledButton(
+              onPressed: () => Navigator.pop(context, true),
+              style: FilledButton.styleFrom(
+                  backgroundColor: Theme.of(context).colorScheme.error),
+              child: const Text('删除'),
+            ),
+          ],
+        ),
       ),
     );
     if (confirm == true) {
-      final result =
-          await ref.read(chatGroupsProvider.notifier).deleteGroup(group.id);
+      final result = await ref.read(chatGroupsProvider.notifier).deleteGroup(
+            group.id,
+            deleteAssociatedPermanentData: deleteAssociatedPermanentData,
+          );
       if (!result.isComplete && context.mounted) {
         await showIncompleteDeletionDialog(context, result);
       }
@@ -331,7 +383,8 @@ class _GroupCard extends StatelessWidget {
                           group.description,
                           style: TextStyle(
                               fontSize: 12,
-                              color: cs.onSurfaceVariant.withValues(alpha: 0.7)),
+                              color:
+                                  cs.onSurfaceVariant.withValues(alpha: 0.7)),
                           maxLines: 1,
                           overflow: TextOverflow.ellipsis,
                         ),
