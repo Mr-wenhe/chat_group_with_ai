@@ -7,6 +7,7 @@ import 'core/database/database_service.dart';
 import 'core/database/database_recovery_page.dart';
 import 'core/theme/app_theme.dart';
 import 'features/ai_character/ai_character_list_page.dart';
+import 'features/ai_character/character_gender_migrator.dart';
 import 'features/chat_group/chat_group_list_page.dart';
 import 'features/chat_group/chat_room_page.dart';
 import 'features/direct_chat/direct_chat_foreground_watcher.dart';
@@ -27,6 +28,7 @@ void main() async {
     try {
       final migrator = MemoryMigrator(db);
       await migrator.migrate();
+      await CharacterGenderMigrator(db).migrate();
     } on Object catch (_) {
       // 静默失败，下次启动重试。
     }

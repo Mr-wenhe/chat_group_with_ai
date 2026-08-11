@@ -46,7 +46,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
         ? characters
         : characters.where((c) {
             final haystack =
-                '${c.name} ${c.role} ${c.personalityTags.join(' ')}'
+                '${c.name} ${c.gender.label} ${c.role} ${c.personalityTags.join(' ')}'
                     .toLowerCase();
             return haystack.contains(query);
           }).toList();
@@ -971,7 +971,7 @@ class _CharacterCard extends StatelessWidget {
                         ],
                       ),
                       const SizedBox(height: 4),
-                      Text('${character.role} · ${character.age}岁',
+                      Text('${character.gender.label} · ${character.role} · ${character.age}岁',
                           style: TextStyle(
                               fontSize: 13, color: cs.onSurfaceVariant)),
                       if (character.personalityTags.isNotEmpty) ...[

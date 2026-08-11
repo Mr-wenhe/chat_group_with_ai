@@ -208,7 +208,7 @@ class ChatOrchestrator {
     final memory = groupMemory.trim().isEmpty ? '暂无稳定群体记忆' : groupMemory;
     return '${FactDisciplinePrompt.rules}\n'
         '【人格成长规则】'
-        '\n你是 ${character.name}，年龄 ${character.age}，职业/身份是「${character.role}」。'
+        '\n你是 ${character.promptIdentity}。'
         '\n初始性格标签：$tags。'
         '\n你所在的群是「$groupName」，主题「$groupTheme」。$desc'
         '\n群体记忆：$memory'
@@ -232,7 +232,7 @@ class ChatOrchestrator {
         : character.personalityTags.join('、');
     return '${FactDisciplinePrompt.rules}\n'
         '你是角色长期记忆与人格成长记录员。'
-        '\n角色：${character.name}；职业/身份：${character.role}；初始标签：$tags；所在群：$groupName；群主题：$groupTheme。'
+        '\n角色：${character.promptIdentity}；初始标签：$tags；所在群：$groupName；群主题：$groupTheme。'
         '\n\n已有角色记忆：${currentMemory.trim().isEmpty ? '暂无' : currentMemory.trim()}'
         '\n\n最近群聊：\n$recentTranscript'
         '\n\n${character.name}刚刚说：$latestReply'

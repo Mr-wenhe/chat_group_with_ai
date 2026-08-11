@@ -9,6 +9,49 @@ import 'package:flutter_test/flutter_test.dart';
 import 'helpers/lifecycle_hive.dart';
 
 void main() {
+  group('MemoryConversationScope', () {
+    final aboutUser = PermanentMemory(
+      observerCharacterId: 'a',
+      kind: MemoryKind.fact,
+      content: '用户喜欢咖啡',
+      subjectIds: const ['user'],
+      status: MemoryStatus.active,
+      originType: MemoryOriginType.group,
+      originNameSnapshot: '别的群',
+    );
+    final aboutMember = PermanentMemory(
+      observerCharacterId: 'a',
+      kind: MemoryKind.fact,
+      content: 'B喜欢茶',
+      subjectIds: const ['b'],
+      status: MemoryStatus.active,
+      originType: MemoryOriginType.group,
+      originNameSnapshot: '别的群',
+    );
+    final aboutOutsider = PermanentMemory(
+      observerCharacterId: 'a',
+      kind: MemoryKind.fact,
+      content: '群外角色喜欢水',
+      subjectIds: const ['outside'],
+      status: MemoryStatus.active,
+      originType: MemoryOriginType.group,
+      originNameSnapshot: '别的群',
+    );
+
+    test('direct chat shows only the target AI memories about the user', () {
+      final scope = MemoryConversationScope.direct('a');
+
+      expect(scope.apply([aboutUser, aboutMember]), [aboutUser]);
+    });
+
+    test('group chat includes cross-occasion memories for current members', () {
+      final scope = MemoryConversationScope.group({'a', 'b'});
+
+      expect(scope.apply([aboutUser, aboutMember, aboutOutsider]),
+          [aboutUser, aboutMember]);
+    });
+  });
+
   group('MemoryAuditFilter', () {
     test('isEmpty returns true for default filter', () {
       expect(MemoryAuditFilter().isEmpty, isTrue);

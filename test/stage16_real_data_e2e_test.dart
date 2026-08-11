@@ -418,6 +418,9 @@ Future<void> _copyRealHiveFiles(Directory target) async {
 /// 注册 Hive adapter（如果尚未注册）。
 void _registerAdaptersIfNeeded() {
   if (!Hive.isAdapterRegistered(0)) Hive.registerAdapter(AICharacterAdapter());
+  if (!Hive.isAdapterRegistered(24)) {
+    Hive.registerAdapter(CharacterGenderAdapter());
+  }
   if (!Hive.isAdapterRegistered(1)) Hive.registerAdapter(ChatGroupAdapter());
   if (!Hive.isAdapterRegistered(2)) Hive.registerAdapter(MessageAdapter());
   if (!Hive.isAdapterRegistered(3)) Hive.registerAdapter(GroupMemoryAdapter());

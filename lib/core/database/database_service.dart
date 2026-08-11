@@ -173,6 +173,7 @@ class DatabaseService {
       await Hive.initFlutter(dir.path);
     }
     Hive.registerAdapter(AICharacterAdapter());
+    Hive.registerAdapter(CharacterGenderAdapter());
     Hive.registerAdapter(ApiConfigAdapter());
     Hive.registerAdapter(ChatGroupAdapter());
     Hive.registerAdapter(MessageAdapter());

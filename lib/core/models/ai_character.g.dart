@@ -40,13 +40,16 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
       toolPermissions: fields[20] == null
           ? [ToolPermission.skillCreate, ToolPermission.skillDownload]
           : (fields[20] as List?)?.cast<ToolPermission>(),
+      gender: fields[21] == null
+          ? CharacterGender.female
+          : fields[21] as CharacterGender,
     );
   }
 
   @override
   void write(BinaryWriter writer, AICharacter obj) {
     writer
-      ..writeByte(21)
+      ..writeByte(22)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -88,7 +91,9 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
       ..writeByte(19)
       ..write(obj.skillIds)
       ..writeByte(20)
-      ..write(obj.toolPermissions);
+      ..write(obj.toolPermissions)
+      ..writeByte(21)
+      ..write(obj.gender);
   }
 
   @override
@@ -98,6 +103,45 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
   bool operator ==(Object other) =>
       identical(this, other) ||
       other is AICharacterAdapter &&
+          runtimeType == other.runtimeType &&
+          typeId == other.typeId;
+}
+
+class CharacterGenderAdapter extends TypeAdapter<CharacterGender> {
+  @override
+  final int typeId = 24;
+
+  @override
+  CharacterGender read(BinaryReader reader) {
+    switch (reader.readByte()) {
+      case 0:
+        return CharacterGender.male;
+      case 1:
+        return CharacterGender.female;
+      default:
+        return CharacterGender.male;
+    }
+  }
+
+  @override
+  void write(BinaryWriter writer, CharacterGender obj) {
+    switch (obj) {
+      case CharacterGender.male:
+        writer.writeByte(0);
+        break;
+      case CharacterGender.female:
+        writer.writeByte(1);
+        break;
+    }
+  }
+
+  @override
+  int get hashCode => typeId.hashCode;
+
+  @override
+  bool operator ==(Object other) =>
+      identical(this, other) ||
+      other is CharacterGenderAdapter &&
           runtimeType == other.runtimeType &&
           typeId == other.typeId;
 }

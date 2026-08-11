@@ -40,7 +40,11 @@ void main() {
     });
 
   test('builds one-on-one prompt context without group-chat framing', () {
-      final character = _character(id: 'target', name: '小夏');
+      final character = _character(
+        id: 'target',
+        name: '小夏',
+        gender: CharacterGender.male,
+      );
 
       final prompt = DirectChatSession.buildPromptContext(
         character: character,
@@ -49,6 +53,7 @@ void main() {
 
       expect(prompt, contains('一对一私聊'));
       expect(prompt, contains('小夏'));
+      expect(prompt, contains('性别男'));
       expect(prompt, contains('真人用户叫「我」'));
       expect(prompt, isNot(contains('群聊')));
       expect(prompt, isNot(contains('群友')));
@@ -67,7 +72,11 @@ void main() {
   });
 }
 
-AICharacter _character({required String id, required String name}) {
+AICharacter _character({
+  required String id,
+  required String name,
+  CharacterGender gender = CharacterGender.female,
+}) {
   return AICharacter(
     id: id,
     name: name,
@@ -79,5 +88,6 @@ AICharacter _character({required String id, required String name}) {
     apiKey: 'key',
     apiProvider: 'deepseek',
     apiConfigId: '',
+    gender: gender,
   );
 }

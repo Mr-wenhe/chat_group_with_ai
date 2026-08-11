@@ -68,6 +68,7 @@ class BackupEntityCodec {
         'skillIds': item.skillIds,
         'toolPermissions':
             item.toolPermissions.map((item) => item.name).toList(),
+        'gender': item.gender.name,
       };
 
   static Map<String, dynamic> characterForBackup(
@@ -101,6 +102,8 @@ class BackupEntityCodec {
         agenticEnabled: json['agenticEnabled'] as bool? ?? true,
         skillIds: _strings(json['skillIds']),
         toolPermissions: _enums(json['toolPermissions'], ToolPermission.values),
+        gender: _optionalEnum(json['gender'], CharacterGender.values) ??
+            CharacterGender.female,
       );
 
   static Map<String, dynamic> group(ChatGroup item) => {

@@ -5,6 +5,17 @@ import 'tool_permission.dart';
 
 part 'ai_character.g.dart';
 
+@HiveType(typeId: 24)
+enum CharacterGender {
+  @HiveField(0)
+  male,
+
+  @HiveField(1)
+  female;
+
+  String get label => this == CharacterGender.male ? '男' : '女';
+}
+
 @HiveType(typeId: 0)
 class AICharacter extends HiveObject {
   @HiveField(0)
@@ -73,6 +84,10 @@ class AICharacter extends HiveObject {
   ])
   List<ToolPermission> toolPermissions;
 
+  /// 创建后不可变。旧数据读取为女，再由一次性迁移覆盖为推断结果。
+  @HiveField(21, defaultValue: CharacterGender.female)
+  CharacterGender gender;
+
   AICharacter({
     String? id,
     required this.name,
@@ -95,6 +110,7 @@ class AICharacter extends HiveObject {
     this.agenticEnabled = true,
     List<String>? skillIds,
     List<ToolPermission>? toolPermissions,
+    this.gender = CharacterGender.female,
   })  : id = id ?? const Uuid().v4(),
         modelName = modelName ?? ApiProvider.defaultModels[apiProvider] ?? '',
         createdAt = createdAt ?? DateTime.now(),
@@ -102,4 +118,13 @@ class AICharacter extends HiveObject {
         skillIds = skillIds ?? const [],
         toolPermissions = toolPermissions ??
             const [ToolPermission.skillCreate, ToolPermission.skillDownload];
+
+  String get promptIdentity =>
+      '$name，$age岁，性别${gender.label}，身份是$role';
+
+  String get rolePlaySystemPrompt {
+    final prompt = systemPrompt.trim();
+    final genderRule = '角色性别为${gender.label}，请保持称谓和角色表现与该设定一致。';
+    return prompt.isEmpty ? genderRule : '$genderRule\n$prompt';
+  }
 }

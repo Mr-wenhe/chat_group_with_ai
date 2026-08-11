@@ -98,6 +98,9 @@ void main() {
     final attachment = File('${mediaDirectory.path}/photo.bin');
     await attachment.writeAsBytes([1, 2, 3, 4]);
     await _seedCoreData(db, attachment, apiKey: 'sk-not-exported');
+    final sourceCharacter = db.aiCharacterBox.get('char-1')!;
+    sourceCharacter.gender = CharacterGender.male;
+    await sourceCharacter.save();
     final backup = File('${testRoot.path}/roundtrip.cgbak');
     final sourceService = BackupRestoreService(
       db: db,
@@ -139,6 +142,7 @@ void main() {
       'https://example.com/v1?region=cn',
     );
     expect(db.aiCharacterBox.get('char-1')!.apiKey, isEmpty);
+    expect(db.aiCharacterBox.get('char-1')!.gender, CharacterGender.male);
     expect(db.chatGroupBox.get('group-1')!.aiCharacterIds, ['char-1']);
     expect(db.messageBox.get('msg-2')!.replyToMessageId, 'msg-1');
     expect(

@@ -28,6 +28,8 @@ class MemoryManagementPage extends ConsumerStatefulWidget {
 }
 
 class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
+  static const _filterViewportHeight = 240.0;
+
   late final DatabaseService _db;
   late final MemoryControls _controls;
   late MemoryAuditFilter _filter;
@@ -175,11 +177,17 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
       body: CustomScrollView(
         slivers: [
           SliverToBoxAdapter(
-            child: MemoryAuditFilterWidget(
-              filter: _filter,
-              characters: _characters,
-              originConversations: _originConversations(),
-              onChanged: (f) => setState(() => _filter = f),
+            // The filter owns an internal scroll view. Bound it here so the
+            // audit list remains reachable when the filter is embedded in a
+            // sliver.
+            child: SizedBox(
+              height: _filterViewportHeight,
+              child: MemoryAuditFilterWidget(
+                filter: _filter,
+                characters: _characters,
+                originConversations: _originConversations(),
+                onChanged: (f) => setState(() => _filter = f),
+              ),
             ),
           ),
           const SliverToBoxAdapter(child: Divider(height: 1)),

@@ -44,6 +44,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   bool _isEditing = false;
   String? _existingCharacterId;
   String _selectedApiConfigId = '';
+  CharacterGender? _selectedGender;
   bool _isSaving = false;
   bool _agenticEnabled = true;
   List<ToolPermission> _toolPermissions = const [];
@@ -69,6 +70,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         TextEditingController(text: (c?.hourlyReplyLimit ?? 60).toString());
 
     _selectedApiConfigId = c?.apiConfigId ?? '';
+    _selectedGender = c?.gender;
     _agenticEnabled = c?.agenticEnabled ?? true;
     _selectedSkillTemplateIds =
         Set<String>.from(c?.skillIds ?? const <String>[]);
@@ -345,15 +347,39 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                     ),
                     const SizedBox(width: 14),
                     Expanded(
-                      child: TextFormField(
-                        controller: _roleController,
-                        decoration: appInputDecoration('角色 *', '游戏达人 / 心理咨询师',
-                            Icons.work_outline_rounded, cs),
-                        onChanged: (_) => setState(() {}),
-                        validator: (v) => v?.isEmpty ?? true ? '请输入角色' : null,
+                      child: DropdownButtonFormField<CharacterGender>(
+                        value: _selectedGender,
+                        decoration: appInputDecoration(
+                          '性别 *',
+                          _isEditing ? '保存后不可修改' : '请选择',
+                          _isEditing
+                              ? Icons.lock_outline_rounded
+                              : Icons.wc_rounded,
+                          cs,
+                        ),
+                        items: CharacterGender.values
+                            .map((gender) => DropdownMenuItem(
+                                  value: gender,
+                                  child: Text(gender.label),
+                                ))
+                            .toList(growable: false),
+                        onChanged: _isEditing
+                            ? null
+                            : (gender) =>
+                                setState(() => _selectedGender = gender),
+                        validator: (gender) =>
+                            gender == null ? '请选择性别' : null,
                       ),
                     ),
                   ],
+                ),
+                const SizedBox(height: 14),
+                TextFormField(
+                  controller: _roleController,
+                  decoration: appInputDecoration('角色 *', '游戏达人 / 心理咨询师',
+                      Icons.work_outline_rounded, cs),
+                  onChanged: (_) => setState(() {}),
+                  validator: (v) => v?.isEmpty ?? true ? '请输入角色' : null,
                 ),
                 const SizedBox(height: 14),
                 TextFormField(
@@ -612,6 +638,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         toolPermissions:
             _agenticEnabled ? _normalizedToolPermissions() : const [],
         createdAt: widget.character?.createdAt ?? DateTime.now(),
+        gender: _isEditing ? widget.character!.gender : _selectedGender!,
       );
 
       if (_isEditing) {
@@ -654,6 +681,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       systemPrompt: _systemPromptController.text.trim(),
       apiKey: '',
       apiProvider: 'deepseek',
+      gender: _selectedGender ?? CharacterGender.female,
     );
   }
 

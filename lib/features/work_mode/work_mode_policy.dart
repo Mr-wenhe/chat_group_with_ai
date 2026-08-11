@@ -58,7 +58,7 @@ class WorkModePolicy {
   static String planningContext(AICharacter character) => '''
 【工作模式】
 角色职责：${character.role}
-角色设定：${character.systemPrompt}
+角色设定：${character.rolePlaySystemPrompt}
 已安装 Skill IDs：${character.skillIds.isEmpty ? '无' : character.skillIds.join(', ')}
 
 你正处于显式工作模式。本轮输入是工作指令或对之前任务的补充，不得改走普通闲聊。

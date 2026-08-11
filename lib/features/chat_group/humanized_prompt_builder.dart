@@ -30,7 +30,7 @@ class HumanizedPromptBuilder {
     return [
       '【真人化发言上下文】',
       FactDisciplinePrompt.rules,
-      '你是${character.name}，${character.age}岁，身份是${character.role}。',
+      '你是${character.promptIdentity}。',
       '你正在「$groupName」里聊天，群主题是「$groupTheme」，真人用户/群主叫「$ownerName」。',
       if (character.personalityTags.isNotEmpty)
         '你的基础性格标签：${character.personalityTags.join('、')}。',

@@ -282,7 +282,7 @@ class DirectChatProactiveService {
           ownerName: ownerName,
         ),
       },
-      {'role': 'system', 'content': character.systemPrompt},
+      {'role': 'system', 'content': character.rolePlaySystemPrompt},
       if (permanentMemory.isNotEmpty)
         {'role': 'system', 'content': permanentMemory},
       {

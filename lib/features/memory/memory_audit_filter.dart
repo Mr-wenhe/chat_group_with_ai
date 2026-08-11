@@ -1,5 +1,45 @@
 import 'package:chat_group/core/models/permanent_memory.dart';
 
+enum MemoryConversationScopeType { settings, direct, group }
+
+/// Limits chat-entry memory views without changing the global memory model.
+class MemoryConversationScope {
+  final MemoryConversationScopeType type;
+  final String? directCharacterId;
+  final Set<String> groupCharacterIds;
+
+  const MemoryConversationScope.settings()
+      : type = MemoryConversationScopeType.settings,
+        directCharacterId = null,
+        groupCharacterIds = const {};
+
+  MemoryConversationScope.direct(String characterId)
+      : type = MemoryConversationScopeType.direct,
+        directCharacterId = characterId,
+        groupCharacterIds = const {};
+
+  MemoryConversationScope.group(Set<String> characterIds)
+      : type = MemoryConversationScopeType.group,
+        directCharacterId = null,
+        groupCharacterIds = Set.unmodifiable(characterIds);
+
+  bool get isReadOnly => type != MemoryConversationScopeType.settings;
+
+  List<PermanentMemory> apply(List<PermanentMemory> memories) {
+    return memories.where((memory) {
+      if (type == MemoryConversationScopeType.settings) return true;
+      if (type == MemoryConversationScopeType.direct) {
+        return memory.observerCharacterId == directCharacterId &&
+            memory.subjectIds.contains('user');
+      }
+      if (!groupCharacterIds.contains(memory.observerCharacterId)) return false;
+      if (memory.subjectIds.isEmpty) return true;
+      final visibleSubjects = {'user', ...groupCharacterIds};
+      return memory.subjectIds.every(visibleSubjects.contains);
+    }).toList(growable: false);
+  }
+}
+
 class SubjectFilter {
   final String? characterId;
 

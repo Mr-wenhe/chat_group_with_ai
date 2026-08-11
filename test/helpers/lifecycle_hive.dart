@@ -111,6 +111,9 @@ AICharacter testCharacter(String id, {String apiConfigId = ''}) => AICharacter(
 
 void _registerAdapters() {
   if (!Hive.isAdapterRegistered(0)) Hive.registerAdapter(AICharacterAdapter());
+  if (!Hive.isAdapterRegistered(24)) {
+    Hive.registerAdapter(CharacterGenderAdapter());
+  }
   if (!Hive.isAdapterRegistered(1)) Hive.registerAdapter(ChatGroupAdapter());
   if (!Hive.isAdapterRegistered(2)) Hive.registerAdapter(MessageAdapter());
   if (!Hive.isAdapterRegistered(3)) Hive.registerAdapter(GroupMemoryAdapter());

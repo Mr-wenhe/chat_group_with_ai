@@ -238,7 +238,7 @@ class GroupChatProactiveService {
     return [
       {
         'role': 'system',
-        'content': '你是${character.name}，${character.age}岁，身份是${character.role}。'
+        'content': '你是${character.promptIdentity}。'
             '你正在群聊「${group.name}」里，主题是「${group.theme}」。'
             '群主/真人用户叫「$ownerName」。'
             '现在由你主动在群里发一条自然消息。原因：$reason。'
@@ -246,7 +246,7 @@ class GroupChatProactiveService {
             '不要解释规则，不要说自己是 AI，不要带自己的名字前缀。'
             '${otherMembers.isEmpty ? '' : '其他 AI 成员：$otherMembers。'}',
       },
-      {'role': 'system', 'content': character.systemPrompt},
+      {'role': 'system', 'content': character.rolePlaySystemPrompt},
       if (permanentMemory.isNotEmpty)
         {'role': 'system', 'content': permanentMemory},
       if (transcript.isNotEmpty)

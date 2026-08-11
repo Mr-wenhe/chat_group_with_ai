@@ -240,6 +240,9 @@ void main() {
     if (!Hive.isAdapterRegistered(0)) {
       Hive.registerAdapter(AICharacterAdapter());
     }
+    if (!Hive.isAdapterRegistered(24)) {
+      Hive.registerAdapter(CharacterGenderAdapter());
+    }
     if (!Hive.isAdapterRegistered(1)) {
       Hive.registerAdapter(ChatGroupAdapter());
     }

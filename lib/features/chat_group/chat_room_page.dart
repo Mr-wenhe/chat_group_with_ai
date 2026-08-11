@@ -3033,7 +3033,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           ? '暂无其他 AI 角色'
           : otherCharacters
               .map((c) =>
-                  '${c.name}，${c.age}岁，${c.role}，${c.personalityTags.join('/')} ')
+                  '${c.promptIdentity}，${c.personalityTags.join('/')} ')
               .join('；');
       final sceneContext = scene.roomContextPrompt(candidates);
       if (sceneContext.isNotEmpty) {
@@ -3095,7 +3095,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           _characters.where((c) => c.id != character.id).toList();
       if (otherCharacters.isNotEmpty) {
         final charInfo = otherCharacters
-            .map((c) => '${c.name}(${c.role}, ${c.age}岁)')
+            .map((c) => '${c.name}(${c.gender.label}, ${c.role}, ${c.age}岁)')
             .join('、');
         msgs.add({
           'role': 'system',
@@ -3106,7 +3106,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     // ── 5. 角色人设 ─────────────────────────────────────────────────
-    msgs.add({'role': 'system', 'content': character.systemPrompt});
+    msgs.add({'role': 'system', 'content': character.rolePlaySystemPrompt});
 
     // ── 6. 其他角色信息 ─────────────────────────────────────────────
     final otherCharacters2 =
@@ -3114,7 +3114,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (otherCharacters2.isNotEmpty) {
       final characterInfo = otherCharacters2
           .map((c) =>
-              '${c.name}(${c.role}, ${c.age}岁, ${c.personalityTags.join('/')})')
+              '${c.name}(${c.gender.label}, ${c.role}, ${c.age}岁, ${c.personalityTags.join('/')})')
           .join('；');
       msgs.add({'role': 'system', 'content': '群聊中的其他角色：$characterInfo'});
     }
@@ -3360,7 +3360,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           '${isAutoChat ? '用户暂时没有回复你，你主动发一条消息找他聊天，可以问问他近况、分享一件事或开启新话题，但不要重复之前说过的话。' : '用户刚给你发了一条消息，请自然回应。'}'
           '私聊主动找用户时最多连续三条，之后等待用户回复。',
     });
-    msgs.add({'role': 'system', 'content': character.systemPrompt});
+    msgs.add({'role': 'system', 'content': character.rolePlaySystemPrompt});
 
     // 私聊同样只保留最近 20 条历史。
     final recentHistory =
@@ -5503,7 +5503,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 成员面板里的单行状态文案：「职位 · 年龄 · 可回复状态 · 本小时用量」。
   String _memberStatusText(AICharacter c) {
     final blockReason = _blockReasonFor(c);
-    final base = '${c.role} · ${c.age}岁';
+    final base = '${c.gender.label} · ${c.role} · ${c.age}岁';
     final usage = '${c.hourlyReplyCount}/${c.hourlyReplyLimit} 次/小时';
     final status = switch (blockReason) {
       null => '可回复',
