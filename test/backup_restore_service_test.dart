@@ -10,9 +10,15 @@ import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/features/backup/backup_models.dart';
 import 'package:chat_group/features/backup/backup_restore_service.dart';
+import 'package:chat_group/features/backup/staged_backup_data.dart';
+import 'package:chat_group/features/memory/memory_migrator.dart';
+import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers/lifecycle_hive.dart';
@@ -22,6 +28,14 @@ void main() {
   late Directory hiveDirectory;
   late Directory mediaDirectory;
   late DatabaseService db;
+
+  Future<void> reopenEmptyDatabase() async {
+    await closeLifecycleHive(hiveDirectory);
+    hiveDirectory = await openLifecycleHive();
+    mediaDirectory = Directory('${hiveDirectory.path}/media');
+    await mediaDirectory.create();
+    db = DatabaseService();
+  }
 
   setUp(() async {
     testRoot = await Directory.systemTemp.createTemp('backup_restore_test_');
@@ -36,7 +50,7 @@ void main() {
     if (await testRoot.exists()) await testRoot.delete(recursive: true);
   });
 
-  test('v1 backup excludes secrets and content-addresses attachments',
+  test('v2 backup excludes secrets and content-addresses attachments',
       () async {
     const secret = 'sk-stage04-must-never-leak';
     final attachment = File('${mediaDirectory.path}/note.txt');
@@ -51,7 +65,7 @@ void main() {
     ).createBackup(destination: backup);
 
     expect(result.manifest.formatVersion, 1);
-    expect(result.manifest.schemaVersion, 1);
+    expect(result.manifest.schemaVersion, 2);
     expect(result.manifest.counts['messages'], 2);
     expect(result.manifest.counts['attachments'], 1);
     expect(result.manifest.missingAttachments, isEmpty);
@@ -60,6 +74,11 @@ void main() {
     expect(
       archive.files
           .any((file) => _containsBytes(file.content, utf8.encode(secret))),
+      isFalse,
+    );
+    expect(
+      archive.files.any(
+          (file) => _containsBytes(file.content, utf8.encode('secure:api-1'))),
       isFalse,
     );
 
@@ -128,7 +147,7 @@ void main() {
     );
     expect(db.characterMemoryBox.get('memory-1')!.characterId, 'char-1');
     expect(
-      db.relationshipStateBox.get('relationship-1')!.targetId,
+      db.relationshipStateBox.get('rel:char-1:ai:char-1')!.targetId,
       'char-1',
     );
     final restoredMedia = db.messageBox.get('msg-1')!.media!.single;
@@ -295,6 +314,13 @@ void main() {
     expect(estimate.attachmentCount, 0);
     expect(result.manifest.counts['messages'], 0);
     expect(result.manifest.counts['attachments'], 0);
+
+    final prepared = await service.inspect(result.file);
+    addTearDown(prepared.dispose);
+    expect(
+      prepared.manifest.files,
+      isNot(contains('data/relationships.json')),
+    );
   });
 
   test('conversation backup keeps only that conversation settings', () async {
@@ -331,6 +357,222 @@ void main() {
     expect(settings['group_chat_read_at'], {
       'group-1': '2026-07-16T00:00:00.000Z',
     });
+  });
+
+  test('v2 full backup includes global memory files and only global relations',
+      () async {
+    await _seedGlobalMemoryData(db, mediaDirectory);
+    final backup = File('${testRoot.path}/global.cgbak');
+    final result = await BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    ).createBackup(destination: backup);
+
+    expect(result.manifest.schemaVersion, 2);
+    expect(result.manifest.backupKind, BackupKind.full);
+    expect(result.manifest.includesGlobalData, isTrue);
+    expect(
+      result.manifest.files.keys,
+      containsAll([
+        'data/user_profile.json',
+        'data/permanent_memories.json',
+        'data/relationship_events.json',
+        'data/relationships.json',
+      ]),
+    );
+    final archive = ZipDecoder().decodeBytes(await backup.readAsBytes());
+    final relationships =
+        _recordsFromArchive(archive, 'data/relationships.json');
+    expect(
+      relationships.map((record) => record['value']['groupId']),
+      everyElement('global'),
+    );
+    expect(
+      _recordsFromArchive(archive, 'data/permanent_memories.json'),
+      hasLength(2),
+    );
+    expect(
+      _recordsFromArchive(archive, 'data/relationship_events.json'),
+      hasLength(2),
+    );
+  });
+
+  test('v2 conversation backup isolates global evidence and marks legacy data',
+      () async {
+    await _seedGlobalMemoryData(db, mediaDirectory);
+    final backup = File('${testRoot.path}/conversation-v2.cgbak');
+    final result = await BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    ).createBackup(
+      destination: backup,
+      selection: const BackupSelection.conversation('group-1'),
+    );
+    final prepared = await BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    ).inspect(backup);
+    addTearDown(prepared.dispose);
+    final archive = ZipDecoder().decodeBytes(await backup.readAsBytes());
+
+    expect(result.manifest.backupKind, BackupKind.conversation);
+    expect(result.manifest.conversationId, 'group-1');
+    expect(result.manifest.includesGlobalData, isFalse);
+    expect(result.manifest.compatibilityData,
+        contains('data/character_memories.json'));
+    expect(archive.findFile('data/user_profile.json'), isNull);
+    expect(archive.findFile('data/relationships.json'), isNull);
+    expect(_recordsFromArchive(archive, 'data/character_memories.json'),
+        hasLength(1));
+
+    final memories =
+        _recordsFromArchive(archive, 'data/permanent_memories.json');
+    expect(memories, hasLength(1));
+    final memory = memories.single['value'] as Map;
+    expect(memory['originConversationId'], 'group-1');
+    expect(memory['sourceMessageIds'], ['msg-1']);
+    expect(memory['supersedesIds'], isEmpty);
+    expect(memory['participantIds'], ['user', 'char-1']);
+
+    final events =
+        _recordsFromArchive(archive, 'data/relationship_events.json');
+    expect(events, hasLength(1));
+    expect(events.single['value']['originConversationId'], 'group-1');
+    expect(events.single['value']['sourceMessageIds'], ['msg-1']);
+    expect(prepared.manifest.files.containsKey('data/relationships.json'),
+        isFalse);
+  });
+
+  test('v1 and v2 manifests are both recognized without converting v1', () {
+    final v1 = BackupManifest.fromJson({
+      'format': BackupManifest.formatName,
+      'formatVersion': 1,
+      'schemaVersion': 1,
+      'appVersion': '1.0.0',
+      'createdAt': '2026-08-01T00:00:00.000Z',
+      'scope': 'all',
+      'counts': <String, int>{},
+      'files': <String, dynamic>{},
+      'missingAttachments': <String>[],
+    });
+    final v2 = BackupManifest.fromJson({
+      'format': BackupManifest.formatName,
+      'formatVersion': 1,
+      'schemaVersion': 2,
+      'backupKind': 'conversation',
+      'includesGlobalData': false,
+      'appVersion': '2.0.0',
+      'createdAt': '2026-08-01T00:00:00.000Z',
+      'scope': 'conversation',
+      'conversationId': 'dm:char-1',
+      'counts': <String, int>{},
+      'files': <String, dynamic>{},
+      'missingAttachments': <String>[],
+    });
+
+    expect(v1.schemaVersion, 1);
+    expect(v1.isSupportedSchema, isTrue);
+    expect(v1.toJson()['schemaVersion'], 1);
+    expect(v2.schemaVersion, 2);
+    expect(v2.backupKind, BackupKind.conversation);
+    expect(v2.conversationId, 'dm:char-1');
+  });
+
+  test('real v1 fixture passes inspector and staged data loading', () async {
+    final fixture = await _writeV1Fixture(testRoot);
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+
+    final prepared = await service.inspect(fixture);
+    addTearDown(prepared.dispose);
+    final data = await StagedBackupData.load(
+      prepared.stagingDirectory,
+      prepared.manifest,
+    );
+
+    expect(prepared.manifest.schemaVersion, 1);
+    expect(prepared.manifest.isSupportedSchema, isTrue);
+    expect(data.characters, hasLength(1));
+    expect(data.groups, hasLength(1));
+    expect(data.messages, hasLength(1));
+    expect(data.relationships, hasLength(1));
+    expect(data.userProfiles, isEmpty);
+    expect(data.permanentMemories, isEmpty);
+    expect(data.relationshipEvents, isEmpty);
+  });
+
+  test('rejects configuration backup carrying v2 global files', () async {
+    final fixture = await _writeInvalidConfigurationGlobalFixture(testRoot);
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+
+    await expectLater(
+      service.inspect(fixture),
+      throwsA(isA<BackupException>()),
+    );
+  });
+
+  test('failed staging generation leaves no successful package', () async {
+    final emptyAttachment = File('${mediaDirectory.path}/empty.txt');
+    await emptyAttachment.writeAsString('');
+    await _seedCoreData(db, emptyAttachment);
+    await db.appSettingsBox.put('token_usage', {
+      'invalid': DateTime.utc(2026, 8, 1),
+    });
+    final destination = File('${testRoot.path}/failed.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+
+    await expectLater(
+      service.createBackup(destination: destination),
+      throwsA(isA<BackupException>()),
+    );
+    expect(await destination.exists(), isFalse);
+    expect(
+      await testRoot
+          .list()
+          .where((entity) => entity.path.contains('backup_export_'))
+          .isEmpty,
+      isTrue,
+    );
+  });
+
+  test('repeated v2 export keeps data file bytes stable', () async {
+    await _seedGlobalMemoryData(db, mediaDirectory);
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final first = File('${testRoot.path}/stable-1.cgbak');
+    final second = File('${testRoot.path}/stable-2.cgbak');
+    await service.createBackup(destination: first);
+    await service.createBackup(destination: second);
+    final firstArchive = ZipDecoder().decodeBytes(await first.readAsBytes());
+    final secondArchive = ZipDecoder().decodeBytes(await second.readAsBytes());
+    for (final path in [
+      'data/messages.jsonl',
+      'data/permanent_memories.json',
+      'data/relationship_events.json',
+      'data/relationships.json',
+    ]) {
+      expect(
+        firstArchive.findFile(path)!.content,
+        orderedEquals(secondArchive.findFile(path)!.content),
+      );
+    }
   });
 
   test('direct conversation copy remaps dm id, sender and read state',
@@ -515,6 +757,820 @@ void main() {
     expect(db.chatGroupBox, isEmpty);
     expect(db.messageBox, isEmpty);
   });
+
+  test('v2 full restore round-trips global profile, memory, events and state',
+      () async {
+    await _seedGlobalMemoryData(db, mediaDirectory);
+    final backup = File('${testRoot.path}/stage15-full.cgbak');
+    final sourceService = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await sourceService.createBackup(destination: backup);
+
+    await reopenEmptyDatabase();
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+    final report = await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.emptyOnly,
+    );
+
+    expect(report.inserted['userProfiles'], 1);
+    expect(report.inserted['permanentMemories'], 2);
+    expect(report.inserted['relationshipEvents'], 2);
+    expect(db.userProfileBox.get('me')!.displayName, '用户');
+    expect(db.aiCharacterBox.get('char-1')!.memorySummary, '跨会话旧摘要机密');
+    final memory = db.permanentMemoryBox.get('memory-current')!;
+    expect(memory.sourceMessageIds, ['msg-1']);
+    expect(memory.supersedesIds, ['memory-other']);
+    final event = db.relationshipEventBox.get('event-current')!;
+    expect(event.sourceCharacterId, 'char-1');
+    expect(event.sourceMessageIds, ['msg-1']);
+    final relationship = db.relationshipStateBox.get('rel:char-1:user:user')!;
+    expect(relationship.stage, RelationshipStage.acquaintance);
+    expect(relationship.revision, 1);
+    expect(relationship.lastEventId, 'event-current');
+    expect(relationship.updatedAt, isNotNull);
+  });
+
+  test('copyWithNewIds remaps every global reference and preserves user',
+      () async {
+    await _seedGlobalMemoryData(db, mediaDirectory);
+    final backup = File('${testRoot.path}/stage15-copy.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(destination: backup);
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+
+    final report = await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.copyWithNewIds,
+    );
+    expect(report.remapped['characters'], 2);
+    expect(report.remapped['groups'], 2);
+    expect(report.remapped['messages'], 3);
+    expect(report.remapped['permanentMemories'], 2);
+    expect(report.remapped['relationshipEvents'], 2);
+
+    final copiedCharacter = db.aiCharacterBox.values
+        .singleWhere((item) => item.name == '小夏' && item.id != 'char-1');
+    final copiedGroup = db.chatGroupBox.values.singleWhere(
+      (item) => item.aiCharacterIds.contains(copiedCharacter.id),
+    );
+    final copiedMessage = db.messageBox.values.singleWhere(
+      (item) => item.groupId == copiedGroup.id && item.content == 'hello',
+    );
+    final copiedMemory = db.permanentMemoryBox.values.singleWhere(
+      (item) => item.content == '当前会话事实' && item.id != 'memory-current',
+    );
+    final copiedOtherMemory = db.permanentMemoryBox.values.singleWhere(
+      (item) => item.content == '其他会话事实' && item.id != 'memory-other',
+    );
+    final copiedEvent = db.relationshipEventBox.values.singleWhere(
+      (item) => item.reason == '当前事件' && item.id != 'event-current',
+    );
+    final copiedRelationship = db.relationshipStateBox.values.singleWhere(
+      (item) =>
+          item.sourceCharacterId == copiedCharacter.id &&
+          item.targetType == RelationshipTargetType.user,
+    );
+
+    expect(copiedMessage.id, isNot('msg-1'));
+    expect(copiedMessage.visibleToCharacterIds, [copiedCharacter.id]);
+    expect(copiedMemory.observerCharacterId, copiedCharacter.id);
+    expect(copiedMemory.subjectIds, contains('user'));
+    expect(copiedMemory.participantIds, contains(copiedCharacter.id));
+    expect(copiedMemory.sourceMessageIds, [copiedMessage.id]);
+    expect(copiedMemory.supersedesIds, [copiedOtherMemory.id]);
+    expect(copiedEvent.id, isNot('event-current'));
+    expect(copiedEvent.sourceCharacterId, copiedCharacter.id);
+    expect(copiedEvent.targetId, 'user');
+    expect(copiedEvent.sourceMessageIds, [copiedMessage.id]);
+    expect(
+      copiedRelationship.id,
+      RelationshipState.stableGlobalId(
+        copiedCharacter.id,
+        RelationshipTargetType.user,
+        'user',
+      ),
+    );
+    expect(db.relationshipStateBox.get(copiedRelationship.id),
+        same(copiedRelationship));
+    expect(copiedRelationship.lastEventId, copiedEvent.id);
+    expect(db.userProfileBox.keys, ['me']);
+  });
+
+  test(
+      'conversation restore replays only its events and keeps other direction state',
+      () async {
+    await _seedGlobalMemoryData(db, mediaDirectory);
+    await db.relationshipEventBox.put(
+      'event-current-later',
+      RelationshipEvent(
+        id: 'event-current-later',
+        sourceCharacterId: 'char-1',
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        reason: '当前事件后续',
+        affinityBefore: 5,
+        affinityAfter: 9,
+        trustBefore: 4,
+        trustAfter: 7,
+        frictionBefore: 0,
+        frictionAfter: 0,
+        familiarityBefore: 5,
+        familiarityAfter: 8,
+        moodBefore: RelationshipMood.warm,
+        moodAfter: RelationshipMood.protective,
+        stageBefore: RelationshipStage.acquaintance,
+        stageAfter: RelationshipStage.friend,
+        originConversationId: 'group-1',
+        originNameSnapshot: '测试群',
+        sourceMessageIds: const ['msg-2'],
+        revision: 2,
+        occurredAt: DateTime.utc(2026, 8, 1, 13),
+        createdBy: RelationshipEventCreator.automatic,
+        createdAt: DateTime.utc(2026, 8, 1, 13),
+      ),
+    );
+    final backup = File('${testRoot.path}/stage15-conversation.cgbak');
+    final sourceService = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await sourceService.createBackup(
+      destination: backup,
+      selection: const BackupSelection.conversation('group-1'),
+    );
+
+    await reopenEmptyDatabase();
+    final unrelatedAt = DateTime.utc(2026, 7, 1);
+    await db.relationshipStateBox.put(
+      'rel:other:user:user',
+      RelationshipState.global(
+        id: 'rel:other:user:user',
+        sourceCharacterId: 'other',
+        targetType: RelationshipTargetType.user,
+        targetId: 'user',
+        affinity: 77,
+        lastInteractionAt: unrelatedAt,
+      ),
+    );
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.skipExisting,
+    );
+
+    expect(db.userProfileBox, isEmpty);
+    expect(db.aiCharacterBox.get('char-1')!.memorySummary, isEmpty);
+    expect(db.relationshipStateBox.get('rel:other:user:user')!.affinity, 77);
+    final replayed = db.relationshipStateBox.get('rel:char-1:user:user');
+    expect(replayed, isNotNull);
+    expect(replayed!.affinity, 9);
+    expect(replayed.trust, 7);
+    expect(replayed.lastEventId, 'event-current-later');
+    expect(db.relationshipStateBox.get('relationship-1'), isNull);
+    expect(db.chatGroupBox.keys, contains('group-1'));
+    expect(db.relationshipEventBox.keys, contains('event-current'));
+    expect(db.relationshipEventBox.keys, contains('event-current-later'));
+  });
+
+  test('repeated v2 global import is idempotent for memories and events',
+      () async {
+    await _seedGlobalMemoryData(db, mediaDirectory);
+    final backup = File('${testRoot.path}/stage15-repeat.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(destination: backup);
+    await reopenEmptyDatabase();
+    final restoreService = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final first = await restoreService.inspect(backup);
+    addTearDown(first.dispose);
+    await restoreService.restore(
+      first,
+      strategy: RestoreConflictStrategy.emptyOnly,
+    );
+    final memories = db.permanentMemoryBox.length;
+    final events = db.relationshipEventBox.length;
+
+    final second = await restoreService.inspect(backup);
+    addTearDown(second.dispose);
+    final report = await restoreService.restore(
+      second,
+      strategy: RestoreConflictStrategy.copyWithNewIds,
+    );
+
+    expect(report.skipped['duplicateImport'], 1);
+    expect(db.permanentMemoryBox.length, memories);
+    expect(db.relationshipEventBox.length, events);
+  });
+
+  test('full restore preserves evidence IDs for deleted messages', () async {
+    await _seedGlobalMemoryData(db, mediaDirectory);
+    final backup = File('${testRoot.path}/stage15-deleted-source.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(destination: backup);
+    final withMemory = await _rewriteBackupJson(
+      backup,
+      File('${testRoot.path}/stage15-deleted-source-memory.cgbak'),
+      'data/permanent_memories.json',
+      (value) {
+        for (final record in value as List) {
+          if ((record as Map)['value']['id'] == 'memory-current') {
+            record['value']['sourceMessageIds'] = ['deleted-message'];
+          }
+        }
+      },
+    );
+    final rewritten = await _rewriteBackupJson(
+      withMemory,
+      File('${testRoot.path}/stage15-deleted-source-event.cgbak'),
+      'data/relationship_events.json',
+      (value) {
+        for (final record in value as List) {
+          if ((record as Map)['value']['id'] == 'event-current') {
+            record['value']['sourceMessageIds'] = ['deleted-message'];
+          }
+        }
+      },
+    );
+
+    await reopenEmptyDatabase();
+    final restoreService = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final prepared = await restoreService.inspect(rewritten);
+    addTearDown(prepared.dispose);
+    await restoreService.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.emptyOnly,
+    );
+
+    expect(db.messageBox.containsKey('deleted-message'), isFalse);
+    expect(db.permanentMemoryBox.get('memory-current')!.sourceMessageIds,
+        ['deleted-message']);
+    expect(db.relationshipEventBox.get('event-current')!.sourceMessageIds,
+        ['deleted-message']);
+  });
+
+  test('v1 restore keeps legacy boxes then runs idempotent migration',
+      () async {
+    final fixture = await _writeV1Fixture(testRoot);
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final prepared = await service.inspect(fixture);
+    addTearDown(prepared.dispose);
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.emptyOnly,
+    );
+
+    expect(db.characterMemoryBox.get('legacy-memory')!.facts, ['旧版事实']);
+    expect(
+      db.permanentMemoryBox.values,
+      contains(
+          predicate<PermanentMemory>((memory) => memory.content == '旧版事实')),
+    );
+    expect(db.userProfileBox.get('me'), isNotNull);
+    expect(db.relationshipStateBox.get('rel:char-1:user:user'), isNotNull);
+    expect(
+      db.relationshipEventBox.values,
+      contains(predicate<RelationshipEvent>((event) =>
+          event.createdBy == RelationshipEventCreator.legacyMigration)),
+    );
+    expect(db.appSettingsBox.get('memory_migration_marker_v1'), isA<Map>());
+
+    final second = await MemoryMigrator(db).migrate();
+    expect(second.alreadyMigrated, isTrue);
+    expect(db.permanentMemoryBox.values, hasLength(2));
+  });
+
+  test('missing global references are rejected before any restore write',
+      () async {
+    await _seedGlobalMemoryData(db, mediaDirectory);
+    final backup = File('${testRoot.path}/stage15-invalid-source.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(destination: backup);
+    final conversationBackup = File(
+      '${testRoot.path}/stage15-invalid-source-conversation.cgbak',
+    );
+    await service.createBackup(
+      destination: conversationBackup,
+      selection: const BackupSelection.conversation('group-1'),
+    );
+    final invalid = await _rewriteBackupJson(
+      conversationBackup,
+      File('${testRoot.path}/stage15-invalid.cgbak'),
+      'data/permanent_memories.json',
+      (value) {
+        final records = value as List;
+        (records.first as Map)['value']
+            ['sourceMessageIds'] = ['missing-message'];
+      },
+    );
+
+    await expectLater(
+      service.inspect(invalid),
+      throwsA(isA<BackupException>()),
+    );
+    final invalidSupersedes = await _rewriteBackupJson(
+      backup,
+      File('${testRoot.path}/stage15-invalid-supersedes.cgbak'),
+      'data/permanent_memories.json',
+      (value) {
+        for (final record in value as List) {
+          if ((record as Map)['value']['id'] == 'memory-current') {
+            record['value']['supersedesIds'] = ['missing-memory'];
+          }
+        }
+      },
+    );
+    await expectLater(
+      service.inspect(invalidSupersedes),
+      throwsA(isA<BackupException>()),
+    );
+    final invalidLastEvent = await _rewriteBackupJson(
+      backup,
+      File('${testRoot.path}/stage15-invalid-last-event.cgbak'),
+      'data/relationships.json',
+      (value) {
+        for (final record in value as List) {
+          if ((record as Map)['value']['id'] == 'rel:char-1:user:user') {
+            record['value']['lastEventId'] = 'missing-event';
+          }
+        }
+      },
+    );
+    await expectLater(
+      service.inspect(invalidLastEvent),
+      throwsA(isA<BackupException>()),
+    );
+    expect(db.permanentMemoryBox, hasLength(2));
+    expect(db.relationshipEventBox, hasLength(2));
+  });
+
+  test(
+      'global restore write failure rolls back profile, memory, events and relations',
+      () async {
+    await _seedGlobalMemoryData(db, mediaDirectory);
+    final backup = File('${testRoot.path}/stage15-rollback.cgbak');
+    final sourceService = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await sourceService.createBackup(destination: backup);
+    await reopenEmptyDatabase();
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+      onCommitWrite: (count) {
+        if (count == 12) throw StateError('stage15 global write failure');
+      },
+    );
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+
+    await expectLater(
+      service.restore(
+        prepared,
+        strategy: RestoreConflictStrategy.emptyOnly,
+      ),
+      throwsA(isA<BackupException>()),
+    );
+    expect(db.userProfileBox, isEmpty);
+    expect(db.permanentMemoryBox, isEmpty);
+    expect(db.relationshipEventBox, isEmpty);
+    expect(db.relationshipStateBox, isEmpty);
+    expect(db.aiCharacterBox, isEmpty);
+    expect(await mediaDirectory.list().toList(), isEmpty);
+  });
+}
+
+Future<File> _writeV1Fixture(Directory root) async {
+  const character = {
+    'id': 'char-1',
+    'name': '旧角色',
+    'avatar': '旧',
+    'age': 20,
+    'role': '测试',
+    'personalityTags': <String>[],
+    'systemPrompt': 'legacy',
+    'memorySummary': '【事实】旧版摘要事实',
+    'apiProvider': '',
+    'modelName': '',
+    'customBaseUrl': '',
+    'hourlyReplyLimit': 60,
+    'hourlyReplyCount': 0,
+    'lastReplyTimestamp': null,
+    'isActive': true,
+    'createdAt': '2026-08-01T00:00:00.000Z',
+    'apiConfigId': '',
+    'agenticEnabled': true,
+    'skillIds': <String>[],
+    'toolPermissions': <String>[],
+  };
+  const group = {
+    'id': 'group-1',
+    'name': '旧群',
+    'theme': '旧版',
+    'description': '',
+    'aiCharacterIds': ['char-1'],
+    'createdAt': '2026-08-01T00:00:00.000Z',
+  };
+  const message = {
+    'key': 'message-1',
+    'value': {
+      'id': 'message-1',
+      'groupId': 'group-1',
+      'senderId': 'user',
+      'senderType': 'user',
+      'content': '旧版消息',
+      'timestamp': '2026-08-01T00:00:00.000Z',
+      'replyToMessageId': null,
+      'isMention': false,
+      'mentionedAiIds': <String>[],
+      'media': <dynamic>[],
+    },
+  };
+  const relationship = {
+    'key': 'relationship-1',
+    'value': {
+      'id': 'relationship-1',
+      'groupId': 'group-1',
+      'sourceCharacterId': 'char-1',
+      'targetId': 'user',
+      'targetType': 'user',
+      'affinity': 1,
+      'trust': 1,
+      'friction': 0,
+      'familiarity': 1,
+      'recentMood': 'neutral',
+      'notes': '',
+      'lastInteractionAt': '2026-08-01T00:00:00.000Z',
+      'createdAt': '2026-08-01T00:00:00.000Z',
+    },
+  };
+  const characterMemory = {
+    'key': 'legacy-memory',
+    'value': {
+      'id': 'legacy-memory',
+      'groupId': 'group-1',
+      'characterId': 'char-1',
+      'facts': ['旧版事实'],
+      'relationshipNotes': <String>[],
+      'personaGrowth': <String>[],
+      'lastUpdatedAt': '2026-08-01T00:00:00.000Z',
+      'createdAt': '2026-08-01T00:00:00.000Z',
+    },
+  };
+  final contents = <String, String>{
+    'data/api_configs.json': '[]',
+    'data/characters.json': jsonEncode([
+      {'key': 'char-1', 'value': character}
+    ]),
+    'data/groups.json': jsonEncode([
+      {'key': 'group-1', 'value': group}
+    ]),
+    'data/messages.jsonl': '${jsonEncode(message)}\n',
+    'data/group_memories.json': '[]',
+    'data/character_memories.json': jsonEncode([characterMemory]),
+    'data/relationships.json': jsonEncode([relationship]),
+    'data/skills.json': '[]',
+    'data/agent_tasks.json': '[]',
+    'data/work_mode.json': '[]',
+    'data/settings.json': '{}',
+  };
+  final archive = Archive();
+  final files = <String, dynamic>{};
+  for (final entry in contents.entries) {
+    final bytes = utf8.encode(entry.value);
+    files[entry.key] = {
+      'bytes': bytes.length,
+      'sha256': sha256.convert(bytes).toString(),
+    };
+    archive.addFile(ArchiveFile.string(entry.key, entry.value));
+  }
+  archive.addFile(ArchiveFile.string(
+    'manifest.json',
+    jsonEncode({
+      'format': BackupManifest.formatName,
+      'formatVersion': 1,
+      'schemaVersion': 1,
+      'appVersion': '1.0.0',
+      'createdAt': '2026-08-01T00:00:00.000Z',
+      'scope': 'all',
+      'counts': {
+        'apiConfigs': 0,
+        'characters': 1,
+        'groups': 1,
+        'messages': 1,
+        'characterMemories': 1,
+        'groupMemories': 0,
+        'relationships': 1,
+        'skills': 0,
+        'agentTasks': 0,
+        'workMode': 0,
+        'settings': 0,
+        'attachments': 0,
+      },
+      'files': files,
+      'missingAttachments': <String>[],
+      'credentialsIncluded': false,
+    }),
+  ));
+  final fixture = File('${root.path}/legacy-v1.cgbak');
+  await fixture.writeAsBytes(ZipEncoder().encodeBytes(archive));
+  return fixture;
+}
+
+Future<File> _rewriteBackupJson(
+  File source,
+  File destination,
+  String path,
+  void Function(dynamic value) mutate,
+) async {
+  final archive = ZipDecoder().decodeBytes(await source.readAsBytes());
+  final manifestFile = archive.findFile('manifest.json')!;
+  final manifest = Map<String, dynamic>.from(
+    jsonDecode(utf8.decode(manifestFile.content)) as Map,
+  );
+  final dataFile = archive.findFile(path)!;
+  final decoded = jsonDecode(utf8.decode(dataFile.content));
+  mutate(decoded);
+  final content = jsonEncode(decoded);
+  final bytes = utf8.encode(content);
+  final files = Map<String, dynamic>.from(manifest['files'] as Map);
+  files[path] = {
+    'bytes': bytes.length,
+    'sha256': sha256.convert(bytes).toString(),
+  };
+  manifest['files'] = files;
+
+  final rewritten = Archive();
+  for (final file in archive.files) {
+    if (file.name == path) {
+      rewritten.addFile(ArchiveFile.string(path, content));
+    } else if (file.name == 'manifest.json') {
+      rewritten
+          .addFile(ArchiveFile.string('manifest.json', jsonEncode(manifest)));
+    } else {
+      rewritten.addFile(ArchiveFile(file.name, file.size, file.content));
+    }
+  }
+  await destination.writeAsBytes(ZipEncoder().encodeBytes(rewritten));
+  return destination;
+}
+
+Future<File> _writeInvalidConfigurationGlobalFixture(Directory root) async {
+  const globalPaths = [
+    'data/user_profile.json',
+    'data/permanent_memories.json',
+    'data/relationship_events.json',
+    'data/relationships.json',
+  ];
+  final archive = Archive();
+  final files = <String, dynamic>{};
+  for (final path in globalPaths) {
+    const content = '[]';
+    final bytes = utf8.encode(content);
+    files[path] = {
+      'bytes': bytes.length,
+      'sha256': sha256.convert(bytes).toString(),
+    };
+    archive.addFile(ArchiveFile.string(path, content));
+  }
+  archive.addFile(ArchiveFile.string(
+    'manifest.json',
+    jsonEncode({
+      'format': BackupManifest.formatName,
+      'formatVersion': 1,
+      'schemaVersion': 2,
+      'backupKind': 'full',
+      'includesGlobalData': false,
+      'appVersion': '2.0.0',
+      'createdAt': '2026-08-01T00:00:00.000Z',
+      'scope': 'configurationOnly',
+      'counts': <String, int>{},
+      'files': files,
+      'missingAttachments': <String>[],
+    }),
+  ));
+  final fixture = File('${root.path}/invalid-configuration-global.cgbak');
+  await fixture.writeAsBytes(ZipEncoder().encodeBytes(archive));
+  return fixture;
+}
+
+List<Map<String, dynamic>> _recordsFromArchive(
+  Archive archive,
+  String path,
+) {
+  final file = archive.findFile(path);
+  if (file == null) return const [];
+  final decoded = jsonDecode(utf8.decode(file.content));
+  return (decoded as List)
+      .map((item) => Map<String, dynamic>.from(item as Map))
+      .toList(growable: false);
+}
+
+Future<void> _seedGlobalMemoryData(
+  DatabaseService db,
+  Directory mediaDirectory,
+) async {
+  final attachment = File('${mediaDirectory.path}/global.txt');
+  await attachment.writeAsString('global');
+  await _seedCoreData(db, attachment);
+  final seededCharacter = db.aiCharacterBox.get('char-1')!
+    ..memorySummary = '跨会话旧摘要机密';
+  await db.aiCharacterBox.put(seededCharacter.id, seededCharacter);
+  await db.aiCharacterBox.put('char-2', testCharacter('char-2'));
+  await db.chatGroupBox.put(
+    'group-2',
+    ChatGroup(
+      id: 'group-2',
+      name: '其他群',
+      theme: '隔离',
+      aiCharacterIds: const ['char-2'],
+    ),
+  );
+  await db.messageBox.put(
+    'other-msg',
+    Message(
+      id: 'other-msg',
+      groupId: 'group-2',
+      senderId: 'char-2',
+      senderType: 'ai',
+      content: 'other conversation',
+    ),
+  );
+  final occurredAt = DateTime.utc(2026, 8, 1, 12);
+  await db.userProfileBox.put(
+    'me',
+    UserProfile(
+      displayName: '用户',
+      preferredAddress: '朋友',
+      avatar: '我',
+      bio: '备份测试',
+      updatedAt: occurredAt,
+      createdAt: occurredAt,
+    ),
+  );
+  await db.permanentMemoryBox.put(
+    'memory-current',
+    PermanentMemory(
+      id: 'memory-current',
+      observerCharacterId: 'char-1',
+      kind: MemoryKind.fact,
+      content: '当前会话事实',
+      subjectIds: const ['user', 'char-2'],
+      participantIds: const ['user', 'char-1', 'char-2'],
+      supersedesIds: const ['memory-other'],
+      status: MemoryStatus.active,
+      originType: MemoryOriginType.group,
+      originConversationId: 'group-1',
+      originNameSnapshot: '测试群',
+      sourceMessageIds: const ['msg-1'],
+      occurredAt: occurredAt,
+      createdAt: occurredAt,
+      updatedAt: occurredAt,
+    ),
+  );
+  await db.permanentMemoryBox.put(
+    'memory-other',
+    PermanentMemory(
+      id: 'memory-other',
+      observerCharacterId: 'char-2',
+      kind: MemoryKind.preference,
+      content: '其他会话事实',
+      subjectIds: const ['user'],
+      participantIds: const ['user', 'char-2'],
+      status: MemoryStatus.active,
+      originType: MemoryOriginType.group,
+      originConversationId: 'group-2',
+      originNameSnapshot: '其他群',
+      sourceMessageIds: const ['other-msg'],
+      occurredAt: occurredAt,
+      createdAt: occurredAt,
+      updatedAt: occurredAt,
+    ),
+  );
+  await db.relationshipEventBox.put(
+    'event-current',
+    RelationshipEvent(
+      id: 'event-current',
+      sourceCharacterId: 'char-1',
+      targetType: RelationshipTargetType.user,
+      targetId: 'user',
+      reason: '当前事件',
+      affinityBefore: 0,
+      affinityAfter: 5,
+      trustBefore: 0,
+      trustAfter: 4,
+      frictionBefore: 0,
+      frictionAfter: 0,
+      familiarityBefore: 0,
+      familiarityAfter: 5,
+      moodBefore: RelationshipMood.neutral,
+      moodAfter: RelationshipMood.warm,
+      stageBefore: RelationshipStage.stranger,
+      stageAfter: RelationshipStage.acquaintance,
+      originConversationId: 'group-1',
+      originNameSnapshot: '测试群',
+      sourceMessageIds: const ['msg-1'],
+      revision: 1,
+      occurredAt: occurredAt,
+      createdBy: RelationshipEventCreator.automatic,
+      createdAt: occurredAt,
+    ),
+  );
+  await db.relationshipEventBox.put(
+    'event-other',
+    RelationshipEvent(
+      id: 'event-other',
+      sourceCharacterId: 'char-2',
+      targetType: RelationshipTargetType.user,
+      targetId: 'user',
+      reason: '其他事件',
+      affinityBefore: 0,
+      affinityAfter: 3,
+      trustBefore: 0,
+      trustAfter: 2,
+      frictionBefore: 0,
+      frictionAfter: 0,
+      familiarityBefore: 0,
+      familiarityAfter: 3,
+      moodBefore: RelationshipMood.neutral,
+      moodAfter: RelationshipMood.warm,
+      stageBefore: RelationshipStage.stranger,
+      stageAfter: RelationshipStage.acquaintance,
+      originConversationId: 'group-2',
+      originNameSnapshot: '其他群',
+      sourceMessageIds: const ['other-msg'],
+      revision: 1,
+      occurredAt: occurredAt,
+      createdBy: RelationshipEventCreator.automatic,
+      createdAt: occurredAt,
+    ),
+  );
+  await db.relationshipStateBox.put(
+    'rel:char-1:user:user',
+    RelationshipState.global(
+      id: 'rel:char-1:user:user',
+      sourceCharacterId: 'char-1',
+      targetType: RelationshipTargetType.user,
+      targetId: 'user',
+      affinity: 5,
+      trust: 4,
+      familiarity: 5,
+      recentMood: RelationshipMood.warm,
+      stage: RelationshipStage.acquaintance,
+      revision: 1,
+      lastEventId: 'event-current',
+      lastInteractionAt: occurredAt,
+      updatedAt: occurredAt,
+      createdAt: occurredAt,
+    ),
+  );
 }
 
 bool _containsBytes(List<int> source, List<int> pattern) {
@@ -589,6 +1645,7 @@ Future<void> _seedCoreData(
       senderType: 'user',
       content: 'hello',
       media: [media],
+      visibleToCharacterIds: const ['char-1'],
     ),
     'msg-2': Message(
       id: 'msg-2',
@@ -598,6 +1655,7 @@ Future<void> _seedCoreData(
       content: 'reply',
       replyToMessageId: 'msg-1',
       media: [media],
+      visibleToCharacterIds: const ['char-1'],
     ),
   });
   await db.groupMemoryBox.put(
@@ -617,7 +1675,7 @@ Future<void> _seedCoreData(
     'relationship-1',
     RelationshipState(
       id: 'relationship-1',
-      groupId: 'group-1',
+      groupId: 'global',
       sourceCharacterId: 'char-1',
       targetId: 'char-1',
       targetType: RelationshipTargetType.ai,

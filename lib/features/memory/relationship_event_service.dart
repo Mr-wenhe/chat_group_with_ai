@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:math' as math;
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -111,6 +112,117 @@ class RelationshipEventService {
   final DatabaseService db;
 
   RelationshipEventService(this.db);
+
+  /// Replays imported absolute snapshots without re-running message heuristics.
+  ///
+  /// Events are history; the current relation is a projection of the newest
+  /// event in that direction. [writeEvent] and [writeState] let a restore
+  /// transaction record both inserts and updates for rollback.
+  Future<void> replayImportedEvents(
+    Iterable<RelationshipEvent> importedEvents, {
+    Future<void> Function(RelationshipEvent event)? writeEvent,
+    Future<void> Function(RelationshipState state)? writeState,
+  }) async {
+    final events = importedEvents.toList()..sort(_compareReplayEvents);
+    final affectedDirections = <String>{};
+    for (final event in events) {
+      affectedDirections.add(_directionKey(
+        event.sourceCharacterId,
+        event.targetType,
+        event.targetId,
+      ));
+      if (db.relationshipEventBox.containsKey(event.id)) continue;
+      if (writeEvent != null) {
+        await writeEvent(event);
+      } else {
+        await db.relationshipEventBox.put(event.id, event);
+      }
+    }
+
+    for (final direction in affectedDirections) {
+      final parts = direction.split('|');
+      final sourceCharacterId = parts[0];
+      final targetType = RelationshipTargetType.values
+          .firstWhere((type) => type.name == parts[1]);
+      final targetId = parts.sublist(2).join('|');
+      final directionEvents = db.relationshipEventBox.values
+          .where((event) =>
+              _directionKey(
+                event.sourceCharacterId,
+                event.targetType,
+                event.targetId,
+              ) ==
+              direction)
+          .toList()
+        ..sort(_compareReplayEvents);
+      if (directionEvents.isEmpty) continue;
+
+      final latest = directionEvents.last;
+      final stableId = RelationshipState.stableGlobalId(
+        sourceCharacterId,
+        targetType,
+        targetId,
+      );
+      final current = db.relationshipStateBox.get(stableId);
+      if (current?.lastEventId == latest.id) continue;
+
+      final projected = RelationshipState(
+        id: current?.id ?? stableId,
+        groupId: 'global',
+        sourceCharacterId: sourceCharacterId,
+        targetId: targetId,
+        targetType: targetType,
+        affinity: latest.affinityAfter,
+        trust: latest.trustAfter,
+        friction: latest.frictionAfter,
+        familiarity: latest.familiarityAfter,
+        recentMood: latest.moodAfter,
+        notes: _notesAfterImportedEvent(current, latest),
+        lastInteractionAt: latest.createdBy == RelationshipEventCreator.manual
+            ? current?.lastInteractionAt
+            : latest.occurredAt,
+        createdAt: current?.createdAt ?? latest.createdAt,
+        stage: latest.stageAfter,
+        revision: math.max(current?.revision ?? 0, latest.revision),
+        lastEventId: latest.id,
+        updatedAt: DateTime.now(),
+      );
+      if (writeState != null) {
+        await writeState(projected);
+      } else {
+        await db.relationshipStateBox.put(projected.id, projected);
+      }
+    }
+  }
+
+  static int _compareReplayEvents(
+    RelationshipEvent left,
+    RelationshipEvent right,
+  ) {
+    final occurred = left.occurredAt.compareTo(right.occurredAt);
+    if (occurred != 0) return occurred;
+    final created = left.createdAt.compareTo(right.createdAt);
+    if (created != 0) return created;
+    return left.id.compareTo(right.id);
+  }
+
+  static String _directionKey(
+    String sourceCharacterId,
+    RelationshipTargetType targetType,
+    String targetId,
+  ) =>
+      '$sourceCharacterId|${targetType.name}|$targetId';
+
+  String _notesAfterImportedEvent(
+    RelationshipState? relation,
+    RelationshipEvent event,
+  ) {
+    if (event.createdBy == RelationshipEventCreator.automatic &&
+        event.notesAfter.isEmpty) {
+      return relation?.notes ?? '';
+    }
+    return event.notesAfter;
+  }
 
   /// Applies the default directional effects for a message created outside
   /// [ChatRoomPage] (for example a foreground proactive reply).

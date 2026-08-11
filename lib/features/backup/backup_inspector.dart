@@ -27,6 +27,9 @@ class BackupInspector {
     'data/agent_tasks.json',
     'data/work_mode.json',
     'data/settings.json',
+    'data/user_profile.json',
+    'data/permanent_memories.json',
+    'data/relationship_events.json',
   };
 
   final DatabaseService db;
@@ -59,12 +62,13 @@ class BackupInspector {
         ),
       );
       if (manifest.formatVersion != BackupManifest.currentFormatVersion ||
-          manifest.schemaVersion != BackupManifest.currentSchemaVersion) {
+          !manifest.isSupportedSchema) {
         throw BackupException(
           '不支持的备份版本：format=${manifest.formatVersion}, '
           'schema=${manifest.schemaVersion}',
         );
       }
+      _validateManifestShape(manifest);
       await _validateManifestFiles(staging, manifest, archive);
       final data = await StagedBackupData.load(staging, manifest);
       _assertNoSecrets(data);
@@ -95,6 +99,41 @@ class BackupInspector {
         }
       }
       await input?.close();
+    }
+  }
+
+  void _validateManifestShape(BackupManifest manifest) {
+    if (manifest.schemaVersion == 1) return;
+    if (manifest.backupKind == BackupKind.conversation &&
+        manifest.conversationId == null) {
+      throw const BackupException('会话备份缺少 conversationId');
+    }
+    if (manifest.backupKind == BackupKind.full &&
+        manifest.conversationId != null) {
+      throw const BackupException('完整备份不应包含 conversationId');
+    }
+    const globalFiles = {
+      'data/permanent_memories.json',
+      'data/relationship_events.json',
+    };
+    final allGlobalFiles = {
+      'data/user_profile.json',
+      ...globalFiles,
+      'data/relationships.json',
+    };
+    if (manifest.backupKind == BackupKind.conversation) {
+      if (manifest.includesGlobalData ||
+          manifest.files.containsKey('data/user_profile.json') ||
+          manifest.files.containsKey('data/relationships.json') ||
+          !manifest.files.keys.toSet().containsAll(globalFiles)) {
+        throw const BackupException('会话备份包含非法全局数据');
+      }
+    } else if (manifest.includesGlobalData) {
+      if (!manifest.files.keys.toSet().containsAll(allGlobalFiles)) {
+        throw const BackupException('完整备份缺少全局数据文件');
+      }
+    } else if (manifest.files.keys.any(allGlobalFiles.contains)) {
+      throw const BackupException('配置备份不应包含全局数据文件');
     }
   }
 
@@ -188,6 +227,9 @@ class BackupInspector {
       data.skills,
       data.tasks,
       data.workspaces,
+      data.userProfiles,
+      data.permanentMemories,
+      data.relationshipEvents,
       data.settings,
     ];
     for (final value in values) {

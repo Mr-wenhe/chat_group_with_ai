@@ -2,6 +2,8 @@ import 'dart:io';
 
 enum BackupScope { all, configurationOnly, conversation }
 
+enum BackupKind { full, conversation }
+
 enum RestoreConflictStrategy { emptyOnly, skipExisting, copyWithNewIds }
 
 class BackupSelection {
@@ -36,7 +38,8 @@ class BackupFileEntry {
 
 class BackupManifest {
   static const currentFormatVersion = 1;
-  static const currentSchemaVersion = 1;
+  static const currentSchemaVersion = 2;
+  static const supportedSchemaVersions = {1, 2};
   static const formatName = 'chat_group_backup';
 
   final int formatVersion;
@@ -44,10 +47,13 @@ class BackupManifest {
   final String appVersion;
   final DateTime createdAt;
   final BackupScope scope;
+  final BackupKind backupKind;
+  final bool includesGlobalData;
   final String? conversationId;
   final Map<String, int> counts;
   final Map<String, BackupFileEntry> files;
   final List<String> missingAttachments;
+  final List<String> compatibilityData;
 
   const BackupManifest({
     required this.formatVersion,
@@ -55,11 +61,19 @@ class BackupManifest {
     required this.appVersion,
     required this.createdAt,
     required this.scope,
+    BackupKind? backupKind,
+    bool? includesGlobalData,
     required this.counts,
     required this.files,
     required this.missingAttachments,
+    List<String>? compatibilityData,
     this.conversationId,
-  });
+  })  : backupKind = backupKind ??
+            (scope == BackupScope.conversation
+                ? BackupKind.conversation
+                : BackupKind.full),
+        includesGlobalData = includesGlobalData ?? false,
+        compatibilityData = compatibilityData ?? const [];
 
   Map<String, dynamic> toJson() => {
         'format': formatName,
@@ -68,10 +82,13 @@ class BackupManifest {
         'appVersion': appVersion,
         'createdAt': createdAt.toUtc().toIso8601String(),
         'scope': scope.name,
+        if (schemaVersion >= 2) 'backupKind': backupKind.name,
+        if (schemaVersion >= 2) 'includesGlobalData': includesGlobalData,
         if (conversationId != null) 'conversationId': conversationId,
         'counts': counts,
         'files': files.map((key, value) => MapEntry(key, value.toJson())),
         'missingAttachments': missingAttachments,
+        if (schemaVersion >= 2) 'compatibilityData': compatibilityData,
         'credentialsIncluded': false,
       };
 
@@ -80,23 +97,42 @@ class BackupManifest {
       throw const FormatException('不是 Chat Group 备份文件');
     }
     final scopeName = json['scope']?.toString();
+    final scope = BackupScope.values.firstWhere(
+      (scope) => scope.name == scopeName,
+      orElse: () => throw const FormatException('未知备份范围'),
+    );
+    final kindName = json['backupKind']?.toString();
+    final backupKind = kindName == null
+        ? (scope == BackupScope.conversation
+            ? BackupKind.conversation
+            : BackupKind.full)
+        : BackupKind.values.firstWhere(
+            (kind) => kind.name == kindName,
+            orElse: () => throw const FormatException('未知备份类型'),
+          );
     return BackupManifest(
       formatVersion: (json['formatVersion'] as num?)?.toInt() ?? -1,
       schemaVersion: (json['schemaVersion'] as num?)?.toInt() ?? -1,
       appVersion: json['appVersion']?.toString() ?? '',
       createdAt: DateTime.parse(json['createdAt']?.toString() ?? ''),
-      scope: BackupScope.values.firstWhere(
-        (scope) => scope.name == scopeName,
-        orElse: () => throw const FormatException('未知备份范围'),
-      ),
+      scope: scope,
+      backupKind: backupKind,
+      includesGlobalData: json['includesGlobalData'] as bool? ??
+          ((json['schemaVersion'] as num?)?.toInt() == 2 &&
+              backupKind == BackupKind.full),
       conversationId: json['conversationId']?.toString(),
       counts: _intMap(json['counts']),
       files: _fileMap(json['files']),
       missingAttachments: (json['missingAttachments'] as List? ?? const [])
           .map((item) => item.toString())
           .toList(growable: false),
+      compatibilityData: (json['compatibilityData'] as List? ?? const [])
+          .map((item) => item.toString())
+          .toList(growable: false),
     );
   }
+
+  bool get isSupportedSchema => supportedSchemaVersions.contains(schemaVersion);
 
   static Map<String, int> _intMap(Object? value) =>
       Map<String, dynamic>.from(value as Map? ?? const {})

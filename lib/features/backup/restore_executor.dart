@@ -1,8 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/features/memory/memory_migrator.dart';
+import 'package:chat_group/features/memory/relationship_event_service.dart';
 import 'package:crypto/crypto.dart';
 import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
@@ -42,11 +45,31 @@ class RestoreExecutor {
     if (strategy == RestoreConflictStrategy.emptyOnly && !_coreIsEmpty) {
       throw const BackupException('当前数据库不是空库，请选择其他冲突策略');
     }
-    final plan = _RestorePlan.build(db, data, strategy);
+    final importKey = _restoreImportKey(prepared.manifest);
+    if (db.appSettingsBox.get(importKey) == true) {
+      return const RestoreReport(
+        inserted: {},
+        skipped: {'duplicateImport': 1},
+        remapped: {},
+      );
+    }
+    final plan = _RestorePlan.build(
+      db,
+      data,
+      strategy,
+      prepared.manifest,
+    );
     plan.validate(db);
     final inserted = <String, int>{};
     final transaction = _RestoreTransaction(onCommitWrite);
     try {
+      if (plan.isV1) {
+        transaction.snapshotBox(db.userProfileBox);
+        transaction.snapshotBox(db.permanentMemoryBox);
+        transaction.snapshotBox(db.relationshipStateBox);
+        transaction.snapshotBox(db.relationshipEventBox);
+        transaction.snapshotBox(db.appSettingsBox);
+      }
       await mediaDirectory.create(recursive: true);
       if (await FileSystemEntity.type(mediaDirectory.path,
               followLinks: false) !=
@@ -102,12 +125,38 @@ class RestoreExecutor {
           inserted,
           transaction);
       await _putRecords(
-          db.relationshipStateBox,
-          plan.relationships,
-          BackupEntityCodec.decodeRelationship,
-          'relationships',
-          inserted,
-          transaction);
+        db.userProfileBox,
+        plan.userProfiles,
+        BackupEntityCodec.decodeUserProfile,
+        'userProfiles',
+        inserted,
+        transaction,
+      );
+      await _putRecords(
+        db.permanentMemoryBox,
+        plan.permanentMemories,
+        BackupEntityCodec.decodePermanentMemory,
+        'permanentMemories',
+        inserted,
+        transaction,
+      );
+      await _putRecords(
+        db.relationshipEventBox,
+        plan.relationshipEvents,
+        BackupEntityCodec.decodeRelationshipEvent,
+        'relationshipEvents',
+        inserted,
+        transaction,
+      );
+      if (plan.restoreGlobalRelationships) {
+        await _putRecords(
+            db.relationshipStateBox,
+            plan.relationships,
+            BackupEntityCodec.decodeRelationship,
+            'relationships',
+            inserted,
+            transaction);
+      }
       await _putRecords(db.agentTaskBox, plan.tasks,
           BackupEntityCodec.decodeTask, 'agentTasks', inserted, transaction);
       await _putRecords(db.workModeWorkspaceBox, plan.workspaces,
@@ -115,6 +164,27 @@ class RestoreExecutor {
       for (final entry in plan.settings.entries) {
         await transaction.putSetting(db.appSettingsBox, entry.key, entry.value);
         inserted['settings'] = (inserted['settings'] ?? 0) + 1;
+      }
+      if (plan.isConversation && plan.relationshipEvents.isNotEmpty) {
+        await RelationshipEventService(db).replayImportedEvents(
+          plan.relationshipEvents
+              .map((record) => BackupEntityCodec.decodeRelationshipEvent(
+                    BackupEntityCodec.value(record),
+                  )),
+          writeState: (state) async {
+            await transaction.replace(
+              db.relationshipStateBox,
+              state.id,
+              state,
+            );
+          },
+        );
+      }
+      if (plan.isV1) {
+        await MemoryMigrator(db).migrate(force: true);
+      }
+      if (plan.requiresImportMarker) {
+        await transaction.putSetting(db.appSettingsBox, importKey, true);
       }
       db.resetLifecycleCaches();
       await db.ensureMessageIndex();
@@ -147,9 +217,27 @@ class RestoreExecutor {
       db.groupMemoryBox.isEmpty &&
       db.characterMemoryBox.isEmpty &&
       db.relationshipStateBox.isEmpty &&
+      db.userProfileBox.isEmpty &&
+      db.permanentMemoryBox.isEmpty &&
+      db.relationshipEventBox.isEmpty &&
       db.characterSkillBox.isEmpty &&
       db.agentTaskBox.isEmpty &&
       db.workModeWorkspaceBox.isEmpty;
+
+  static String _restoreImportKey(BackupManifest manifest) {
+    final material = manifest.files.entries.toList()
+      ..sort((a, b) => a.key.compareTo(b.key));
+    final fingerprint = [
+      manifest.schemaVersion,
+      manifest.backupKind.name,
+      manifest.conversationId ?? '',
+      ...material.map(
+          (entry) => '${entry.key}:${entry.value.bytes}:${entry.value.sha256}'),
+    ].join('|');
+    return 'backup_restore:${manifest.schemaVersion}:${sha256.convert(
+      utf8.encode(fingerprint),
+    )}';
+  }
 
   Future<Map<String, String>> _commitAttachments(
     Directory staging,
@@ -226,6 +314,16 @@ class _RestoreTransaction {
     await _afterWrite();
   }
 
+  Future<void> replace<T>(Box<T> box, Object key, T value) async {
+    final existed = box.containsKey(key);
+    final previous = box.get(key);
+    await box.put(key, value);
+    _rollbacks.add(
+      () => existed ? box.put(key, previous as T) : box.delete(key),
+    );
+    await _afterWrite();
+  }
+
   Future<void> putSetting(Box<dynamic> box, String key, dynamic value) async {
     final existed = box.containsKey(key);
     final previous = box.get(key);
@@ -237,6 +335,16 @@ class _RestoreTransaction {
   void createdFile(File file) => _rollbacks.add(() async {
         if (await file.exists()) await file.delete();
       });
+
+  void snapshotBox<T>(Box<T> box) {
+    final snapshot = Map<dynamic, dynamic>.from(box.toMap());
+    _rollbacks.add(() async {
+      await box.clear();
+      for (final entry in snapshot.entries) {
+        await box.put(entry.key, entry.value as T);
+      }
+    });
+  }
 
   Future<void> _afterWrite() async {
     _writes++;

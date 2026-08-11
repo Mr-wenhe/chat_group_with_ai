@@ -8,12 +8,19 @@ class _RestorePlan {
   final List<Map<String, dynamic>> groupMemories;
   final List<Map<String, dynamic>> characterMemories;
   final List<Map<String, dynamic>> relationships;
+  final List<Map<String, dynamic>> userProfiles;
+  final List<Map<String, dynamic>> permanentMemories;
+  final List<Map<String, dynamic>> relationshipEvents;
   final List<Map<String, dynamic>> skills;
   final List<Map<String, dynamic>> tasks;
   final List<Map<String, dynamic>> workspaces;
   final Map<String, dynamic> settings;
   final Map<String, int> skipped;
   final Map<String, int> remapped;
+  final bool isV1;
+  final bool isConversation;
+  final bool restoreGlobalRelationships;
+  final bool requiresImportMarker;
 
   const _RestorePlan({
     required this.apiConfigs,
@@ -23,18 +30,26 @@ class _RestorePlan {
     required this.groupMemories,
     required this.characterMemories,
     required this.relationships,
+    required this.userProfiles,
+    required this.permanentMemories,
+    required this.relationshipEvents,
     required this.skills,
     required this.tasks,
     required this.workspaces,
     required this.settings,
     required this.skipped,
     required this.remapped,
+    required this.isV1,
+    required this.isConversation,
+    required this.restoreGlobalRelationships,
+    required this.requiresImportMarker,
   });
 
   factory _RestorePlan.build(
     DatabaseService db,
     StagedBackupData data,
     RestoreConflictStrategy strategy,
+    BackupManifest manifest,
   ) {
     final skipped = <String, int>{};
     final remapped = <String, int>{};
@@ -53,11 +68,18 @@ class _RestorePlan {
         strategy, 'skills', skipped, remapped);
     final messageMap = _mapping(data.messages, db.messageBox.containsKey,
         strategy, 'messages', skipped, remapped);
-    final memoryMap = _mapping(
+    final characterMemoryMap = _mapping(
         data.characterMemories,
         db.characterMemoryBox.containsKey,
         strategy,
         'characterMemories',
+        skipped,
+        remapped);
+    final permanentMemoryMap = _mapping(
+        data.permanentMemories,
+        db.permanentMemoryBox.containsKey,
+        strategy,
+        'permanentMemories',
         skipped,
         remapped);
     final relationshipMap = _mapping(
@@ -67,11 +89,41 @@ class _RestorePlan {
         'relationships',
         skipped,
         remapped);
+    final eventMap = _mapping(
+        data.relationshipEvents,
+        db.relationshipEventBox.containsKey,
+        strategy,
+        'relationshipEvents',
+        skipped,
+        remapped);
+    for (final record in data.relationships) {
+      final value = BackupEntityCodec.value(record);
+      if (value['groupId']?.toString() != 'global') continue;
+      final oldId = value['id'].toString();
+      final source = characterMap[value['sourceCharacterId']] ??
+          value['sourceCharacterId'].toString();
+      final targetType = RelationshipTargetType.values.firstWhere(
+        (type) => type.name == value['targetType'],
+      );
+      final target = targetType == RelationshipTargetType.ai
+          ? characterMap[value['targetId']] ?? value['targetId'].toString()
+          : 'user';
+      final stableId =
+          RelationshipState.stableGlobalId(source, targetType, target);
+      if (relationshipMap[oldId] == oldId && stableId != oldId) {
+        remapped['relationships'] = (remapped['relationships'] ?? 0) + 1;
+      }
+      relationshipMap[oldId] = stableId;
+    }
     final taskMap = _mapping(data.tasks, db.agentTaskBox.containsKey, strategy,
         'agentTasks', skipped, remapped);
+    final isConversation = manifest.backupKind == BackupKind.conversation;
+
     String conversation(String id) => id.startsWith('dm:')
         ? 'dm:${characterMap[id.substring(3)] ?? id.substring(3)}'
         : groupMap[id] ?? id;
+    String? optionalConversation(Object? value) =>
+        value == null ? null : conversation(value.toString());
 
     final apiConfigs =
         _rewrite(data.apiConfigs, apiMap, db.apiConfigBox.containsKey, strategy,
@@ -107,6 +159,8 @@ class _RestorePlan {
       value['replyToMessageId'] =
           messageMap[value['replyToMessageId']] ?? value['replyToMessageId'];
       value['mentionedAiIds'] = _mapList(value['mentionedAiIds'], characterMap);
+      value['visibleToCharacterIds'] =
+          _mapList(value['visibleToCharacterIds'], characterMap);
     });
     final groupMemories = _rewriteStorage(
         data.groupMemories,
@@ -125,24 +179,68 @@ class _RestorePlan {
       }
       return '${newGroup}_${const Uuid().v4()}';
     });
-    final characterMemories = _rewrite(data.characterMemories, memoryMap,
-        db.characterMemoryBox.containsKey, strategy, (value) {
-      value['id'] = memoryMap[value['id']]!;
-      value['groupId'] = groupMap[value['groupId']] ?? value['groupId'];
+    final characterMemories = _rewrite(
+        data.characterMemories,
+        characterMemoryMap,
+        db.characterMemoryBox.containsKey,
+        strategy, (value) {
+      value['id'] = characterMemoryMap[value['id']]!;
+      value['groupId'] = conversation(value['groupId'].toString());
       value['characterId'] =
           characterMap[value['characterId']] ?? value['characterId'];
+    });
+    final permanentMemories = _rewrite(
+        data.permanentMemories,
+        permanentMemoryMap,
+        db.permanentMemoryBox.containsKey,
+        strategy, (value) {
+      value['id'] = permanentMemoryMap[value['id']]!;
+      value['observerCharacterId'] =
+          characterMap[value['observerCharacterId']] ??
+              value['observerCharacterId'];
+      value['subjectIds'] = _mapList(value['subjectIds'], characterMap);
+      value['participantIds'] = _mapList(value['participantIds'], characterMap);
+      value['sourceMessageIds'] =
+          _mapList(value['sourceMessageIds'], messageMap);
+      value['supersedesIds'] =
+          _mapList(value['supersedesIds'], permanentMemoryMap);
+      value['originConversationId'] =
+          optionalConversation(value['originConversationId']);
     });
     final relationships = _rewrite(data.relationships, relationshipMap,
         db.relationshipStateBox.containsKey, strategy, (value) {
       value['id'] = relationshipMap[value['id']]!;
-      value['groupId'] = groupMap[value['groupId']] ?? value['groupId'];
+      final oldGroup = value['groupId']?.toString() ?? '';
+      value['groupId'] =
+          oldGroup == 'global' ? 'global' : conversation(oldGroup);
       value['sourceCharacterId'] = characterMap[value['sourceCharacterId']] ??
           value['sourceCharacterId'];
       if (value['targetType'] == RelationshipTargetType.ai.name) {
         value['targetId'] =
             characterMap[value['targetId']] ?? value['targetId'];
+      } else {
+        value['targetId'] = 'user';
       }
+      value['lastEventId'] =
+          eventMap[value['lastEventId']] ?? value['lastEventId'];
     });
+    final relationshipEvents = _rewrite(data.relationshipEvents, eventMap,
+        db.relationshipEventBox.containsKey, strategy, (value) {
+      value['id'] = eventMap[value['id']]!;
+      value['sourceCharacterId'] = characterMap[value['sourceCharacterId']] ??
+          value['sourceCharacterId'];
+      if (value['targetType'] == RelationshipTargetType.ai.name) {
+        value['targetId'] =
+            characterMap[value['targetId']] ?? value['targetId'];
+      } else {
+        value['targetId'] = 'user';
+      }
+      value['sourceMessageIds'] =
+          _mapList(value['sourceMessageIds'], messageMap);
+      value['originConversationId'] =
+          optionalConversation(value['originConversationId']);
+    });
+    final userProfiles = _rewriteUserProfiles(data.userProfiles, db, skipped);
     final tasks = _rewrite(
         data.tasks, taskMap, db.agentTaskBox.containsKey, strategy, (value) {
       value['id'] = taskMap[value['id']]!;
@@ -169,7 +267,7 @@ class _RestorePlan {
       data.settings,
       characterMap,
       groupMap,
-      memoryMap,
+      characterMemoryMap,
       relationshipMap,
       conversation,
       db,
@@ -184,13 +282,41 @@ class _RestorePlan {
       groupMemories: groupMemories,
       characterMemories: characterMemories,
       relationships: relationships,
+      userProfiles: userProfiles,
+      permanentMemories: permanentMemories,
+      relationshipEvents: relationshipEvents,
       skills: skills,
       tasks: tasks,
       workspaces: workspaces,
       settings: settings,
       skipped: skipped,
       remapped: remapped,
+      isV1: manifest.schemaVersion == 1,
+      isConversation: isConversation,
+      restoreGlobalRelationships: !isConversation,
+      requiresImportMarker: manifest.schemaVersion == 1 ||
+          data.permanentMemories.isNotEmpty ||
+          data.relationshipEvents.isNotEmpty,
     );
+  }
+
+  static List<Map<String, dynamic>> _rewriteUserProfiles(
+    List<Map<String, dynamic>> records,
+    DatabaseService db,
+    Map<String, int> skipped,
+  ) {
+    final result = <Map<String, dynamic>>[];
+    for (final record in records) {
+      final key = BackupEntityCodec.key(record);
+      if (db.userProfileBox.containsKey(key)) {
+        skipped['userProfiles'] = (skipped['userProfiles'] ?? 0) + 1;
+        continue;
+      }
+      final value = BackupEntityCodec.value(record);
+      value['id'] = 'me';
+      result.add(BackupEntityCodec.record('me', value));
+    }
+    return result;
   }
 
   Set<String> get attachmentPaths => messages
@@ -200,18 +326,43 @@ class _RestorePlan {
       .toSet();
 
   void validate(DatabaseService db) {
-    final charactersAvailable = {
-      ...db.aiCharacterBox.keys.map((key) => key.toString()),
-      ...characters.map((record) => BackupEntityCodec.key(record)),
-    };
-    final groupsAvailable = {
-      ...db.chatGroupBox.keys.map((key) => key.toString()),
-      ...groups.map((record) => BackupEntityCodec.key(record)),
-    };
-    final messagesAvailable = {
-      ...db.messageBox.keys.map((key) => key.toString()),
-      ...messages.map((record) => BackupEntityCodec.key(record)),
-    };
+    _validateUniqueKeys();
+    final charactersAvailable = _available(
+      db.aiCharacterBox.keys,
+      characters,
+    );
+    final groupsAvailable = _available(db.chatGroupBox.keys, groups);
+    final messagesAvailable = _available(db.messageBox.keys, messages);
+    final apiConfigsAvailable = _available(db.apiConfigBox.keys, apiConfigs);
+    final skillsAvailable = _available(db.characterSkillBox.keys, skills);
+    final memoriesAvailable = _available(
+      db.permanentMemoryBox.keys,
+      permanentMemories,
+    );
+    final eventsAvailable = _available(
+      db.relationshipEventBox.keys,
+      relationshipEvents,
+    );
+
+    for (final record in characters) {
+      final value = BackupEntityCodec.value(record);
+      final apiConfigId = value['apiConfigId']?.toString() ?? '';
+      if (apiConfigId.isNotEmpty &&
+          !apiConfigsAvailable.contains(apiConfigId)) {
+        throw BackupException('恢复计划 API 配置引用无效：$apiConfigId');
+      }
+      for (final skillId in _strings(value['skillIds'])) {
+        if (!skillsAvailable.contains(skillId)) {
+          throw BackupException('恢复计划技能引用无效：$skillId');
+        }
+      }
+    }
+    for (final record in skills) {
+      final characterId = BackupEntityCodec.value(record)['characterId'];
+      if (characterId != '' && !charactersAvailable.contains(characterId)) {
+        throw BackupException('恢复计划技能角色引用无效：$characterId');
+      }
+    }
     for (final record in groups) {
       for (final id
           in _strings(BackupEntityCodec.value(record)['aiCharacterIds'])) {
@@ -222,15 +373,214 @@ class _RestorePlan {
     }
     for (final record in messages) {
       final value = BackupEntityCodec.value(record);
-      final conversation = value['groupId'].toString();
-      final validConversation = conversation.startsWith('dm:')
-          ? charactersAvailable.contains(conversation.substring(3))
-          : groupsAvailable.contains(conversation);
-      if (!validConversation) throw BackupException('恢复计划会话引用无效：$conversation');
+      _validateConversation(
+        value['groupId'],
+        groupsAvailable,
+        charactersAvailable,
+      );
+      if (value['senderType'] == 'ai' &&
+          !charactersAvailable.contains(value['senderId'])) {
+        throw BackupException('恢复计划消息角色引用无效：${value['senderId']}');
+      }
+      for (final id in _strings(value['mentionedAiIds'])) {
+        if (!charactersAvailable.contains(id)) {
+          throw BackupException('恢复计划提及角色引用无效：$id');
+        }
+      }
       final reply = value['replyToMessageId']?.toString();
       if (reply != null && !messagesAvailable.contains(reply)) {
         throw BackupException('恢复计划回复引用无效：$reply');
       }
+    }
+    for (final record in groupMemories) {
+      _validateConversation(
+        BackupEntityCodec.value(record)['groupId'],
+        groupsAvailable,
+        charactersAvailable,
+      );
+    }
+    for (final record in characterMemories) {
+      final value = BackupEntityCodec.value(record);
+      _validateConversation(
+          value['groupId'], groupsAvailable, charactersAvailable);
+      _require(charactersAvailable, value['characterId']);
+    }
+    for (final record in relationships) {
+      final value = BackupEntityCodec.value(record);
+      final groupId = value['groupId']?.toString() ?? '';
+      if (isV1 || groupId != 'global') {
+        _validateConversation(groupId, groupsAvailable, charactersAvailable);
+      }
+      _validateRelationshipTarget(value, charactersAvailable, '关系');
+      _require(charactersAvailable, value['sourceCharacterId']);
+      final eventId = value['lastEventId']?.toString();
+      if (eventId != null &&
+          eventId.isNotEmpty &&
+          !eventsAvailable.contains(eventId)) {
+        throw BackupException('恢复计划 lastEventId 引用无效：$eventId');
+      }
+    }
+    for (final record in permanentMemories) {
+      final value = BackupEntityCodec.value(record);
+      _require(charactersAvailable, value['observerCharacterId']);
+      _validateSubjects(value['subjectIds'], charactersAvailable);
+      _validateSubjects(value['participantIds'], charactersAvailable);
+      _validateSourceMessageIds(value['sourceMessageIds'], messagesAvailable);
+      for (final id in _strings(value['supersedesIds'])) {
+        _require(memoriesAvailable, id);
+      }
+      if (isConversation) {
+        _validateOriginConversation(value['originConversationId'],
+            groupsAvailable, charactersAvailable);
+      }
+    }
+    for (final record in relationshipEvents) {
+      final value = BackupEntityCodec.value(record);
+      _require(charactersAvailable, value['sourceCharacterId']);
+      _validateRelationshipTarget(value, charactersAvailable, '关系事件');
+      _validateSourceMessageIds(value['sourceMessageIds'], messagesAvailable);
+      if (isConversation) {
+        _validateOriginConversation(value['originConversationId'],
+            groupsAvailable, charactersAvailable);
+      }
+    }
+    for (final record in tasks) {
+      final value = BackupEntityCodec.value(record);
+      _validateConversation(
+          value['groupId'], groupsAvailable, charactersAvailable);
+      _require(charactersAvailable, value['characterId']);
+    }
+    for (final record in workspaces) {
+      _validateConversation(
+        BackupEntityCodec.value(record)['conversationId'],
+        groupsAvailable,
+        charactersAvailable,
+      );
+    }
+    if (isConversation) {
+      _validateConversationBoundary(groupsAvailable, charactersAvailable);
+    }
+  }
+
+  void _validateConversationBoundary(
+    Set<String> groupsAvailable,
+    Set<String> charactersAvailable,
+  ) {
+    if (userProfiles.isNotEmpty || relationships.isNotEmpty) {
+      throw const BackupException('会话恢复计划包含禁止的全局数据');
+    }
+    final conversations = <String>{
+      ...messages.map(
+          (record) => BackupEntityCodec.value(record)['groupId'].toString()),
+    };
+    for (final record in [...permanentMemories, ...relationshipEvents]) {
+      final origin =
+          BackupEntityCodec.value(record)['originConversationId']?.toString();
+      if (origin != null) conversations.add(origin);
+    }
+    if (conversations.length > 1) {
+      throw const BackupException('会话恢复计划跨越多个场合');
+    }
+    for (final conversation in conversations) {
+      _validateConversation(conversation, groupsAvailable, charactersAvailable);
+    }
+  }
+
+  void _validateUniqueKeys() {
+    for (final records in [
+      apiConfigs,
+      characters,
+      groups,
+      messages,
+      groupMemories,
+      characterMemories,
+      relationships,
+      userProfiles,
+      permanentMemories,
+      relationshipEvents,
+      skills,
+      tasks,
+      workspaces,
+    ]) {
+      final keys = <String>{};
+      for (final record in records) {
+        if (!keys.add(BackupEntityCodec.key(record))) {
+          throw const BackupException('恢复计划包含重复存储键');
+        }
+      }
+    }
+  }
+
+  static Set<String> _available(
+    Iterable<dynamic> existingKeys,
+    List<Map<String, dynamic>> records,
+  ) =>
+      {
+        ...existingKeys.map((key) => key.toString()),
+        ...records.map(BackupEntityCodec.key),
+      };
+
+  static void _validateRelationshipTarget(
+    Map<String, dynamic> value,
+    Set<String> characters,
+    String label,
+  ) {
+    final type = value['targetType']?.toString();
+    final target = value['targetId']?.toString();
+    if (type == RelationshipTargetType.ai.name) {
+      _require(characters, target);
+    } else if (type == RelationshipTargetType.user.name) {
+      if (target != 'user') {
+        throw BackupException('$label 的 user targetId 必须保持 user');
+      }
+    } else {
+      throw BackupException('$label targetType 无效：$type');
+    }
+  }
+
+  static void _validateOriginConversation(
+    Object? value,
+    Set<String> groups,
+    Set<String> characters,
+  ) {
+    final id = value?.toString();
+    if (id == null || id.isEmpty) return;
+    _validateConversation(id, groups, characters);
+  }
+
+  static void _validateSubjects(Object? value, Set<String> characters) {
+    for (final id in _strings(value)) {
+      if (id != 'user' && !characters.contains(id)) {
+        throw BackupException('主体引用无效：$id');
+      }
+    }
+  }
+
+  void _validateSourceMessageIds(
+    Object? value,
+    Set<String> messages,
+  ) {
+    if (!isConversation) return;
+    for (final id in _strings(value)) {
+      _require(messages, id);
+    }
+  }
+
+  static void _validateConversation(
+    Object? value,
+    Set<String> groups,
+    Set<String> characters,
+  ) {
+    final id = value?.toString() ?? '';
+    final valid = id.startsWith('dm:')
+        ? characters.contains(id.substring(3))
+        : groups.contains(id);
+    if (!valid) throw BackupException('恢复计划会话引用无效：$id');
+  }
+
+  static void _require(Set<String> ids, Object? value) {
+    if (!ids.contains(value?.toString())) {
+      throw BackupException('恢复计划引用无效：$value');
     }
   }
 
@@ -295,7 +645,10 @@ class _RestorePlan {
       }
       final value = BackupEntityCodec.value(record);
       var newKey = mutate(oldKey, value);
-      if (contains(newKey)) newKey = '${newKey}_${const Uuid().v4()}';
+      if (contains(newKey) ||
+          result.any((item) => BackupEntityCodec.key(item) == newKey)) {
+        newKey = '${newKey}_${const Uuid().v4()}';
+      }
       if (newKey != oldKey) remapped[countKey] = (remapped[countKey] ?? 0) + 1;
       result.add(BackupEntityCodec.record(newKey, value));
     }

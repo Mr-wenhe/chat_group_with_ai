@@ -17,6 +17,9 @@ class StagedBackupData {
   final List<Map<String, dynamic>> skills;
   final List<Map<String, dynamic>> tasks;
   final List<Map<String, dynamic>> workspaces;
+  final List<Map<String, dynamic>> userProfiles;
+  final List<Map<String, dynamic>> permanentMemories;
+  final List<Map<String, dynamic>> relationshipEvents;
   final Map<String, dynamic> settings;
 
   const StagedBackupData({
@@ -30,6 +33,9 @@ class StagedBackupData {
     required this.skills,
     required this.tasks,
     required this.workspaces,
+    required this.userProfiles,
+    required this.permanentMemories,
+    required this.relationshipEvents,
     required this.settings,
   });
 
@@ -45,10 +51,17 @@ class StagedBackupData {
       groupMemories: await _records(staging, 'data/group_memories.json'),
       characterMemories:
           await _records(staging, 'data/character_memories.json'),
-      relationships: await _records(staging, 'data/relationships.json'),
+      relationships: await _optionalRecords(staging, 'data/relationships.json'),
       skills: await _records(staging, 'data/skills.json'),
       tasks: await _records(staging, 'data/agent_tasks.json'),
       workspaces: await _records(staging, 'data/work_mode.json'),
+      userProfiles: manifest.includesGlobalData
+          ? await _records(staging, 'data/user_profile.json')
+          : await _optionalRecords(staging, 'data/user_profile.json'),
+      permanentMemories:
+          await _optionalRecords(staging, 'data/permanent_memories.json'),
+      relationshipEvents:
+          await _optionalRecords(staging, 'data/relationship_events.json'),
       settings: await _map(staging, 'data/settings.json'),
     );
     data._validate(manifest);
@@ -67,6 +80,10 @@ class StagedBackupData {
     count += _conflicts(skills, db.characterSkillBox.containsKey);
     count += _conflicts(tasks, db.agentTaskBox.containsKey);
     count += _conflicts(workspaces, db.workModeWorkspaceBox.containsKey);
+    count += _conflicts(userProfiles, db.userProfileBox.containsKey);
+    count += _conflicts(permanentMemories, db.permanentMemoryBox.containsKey);
+    count +=
+        _conflicts(relationshipEvents, db.relationshipEventBox.containsKey);
     count += settings.keys.where(db.appSettingsBox.containsKey).length;
     return count;
   }
@@ -83,12 +100,23 @@ class StagedBackupData {
       'relationships': _ids(relationships),
       'skills': _ids(skills),
       'agentTasks': _ids(tasks),
+      'userProfiles': _ids(userProfiles),
+      'permanentMemories': _ids(permanentMemories),
+      'relationshipEvents': _ids(relationshipEvents),
     };
     _expectCounts(manifest);
     final apiIds = ids['apiConfigs']!;
     final characterIds = ids['characters']!;
     final groupIds = ids['groups']!;
     final messageIds = ids['messages']!;
+    final memoryIds = ids['permanentMemories']!;
+    final eventIds = ids['relationshipEvents']!;
+
+    if (manifest.schemaVersion >= 2 &&
+        manifest.backupKind == BackupKind.conversation &&
+        (userProfiles.isNotEmpty || relationships.isNotEmpty)) {
+      throw const BackupException('会话备份不得包含 UserProfile 或全局关系快照');
+    }
 
     for (final record in characters) {
       final value = BackupEntityCodec.value(record);
@@ -143,11 +171,79 @@ class StagedBackupData {
     }
     for (final record in relationships) {
       final value = BackupEntityCodec.value(record);
-      _validateConversation(value['groupId'], groupIds, characterIds);
+      if (manifest.schemaVersion >= 2 && value['groupId'] != 'global') {
+        throw const BackupException('v2 relationships 必须是全局快照');
+      }
+      if (manifest.schemaVersion < 2) {
+        _validateConversation(value['groupId'], groupIds, characterIds);
+      }
       _require(ids: characterIds, value: value['sourceCharacterId']);
       if (value['targetType'] == 'ai') {
         _require(ids: characterIds, value: value['targetId']);
+      } else if (value['targetType'] == 'user') {
+        if (value['targetId'] != 'user') {
+          throw const BackupException('关系的 user targetId 必须保持 user');
+        }
+      } else {
+        throw BackupException('关系 targetType 无效：${value['targetType']}');
       }
+      final lastEventId = value['lastEventId']?.toString();
+      if (lastEventId != null &&
+          lastEventId.isNotEmpty &&
+          !eventIds.contains(lastEventId)) {
+        throw BackupException('关系引用了不存在的 lastEventId：$lastEventId');
+      }
+    }
+    for (final record in userProfiles) {
+      if (BackupEntityCodec.key(record) != 'me') {
+        throw const BackupException('user_profile.json 只能包含 me');
+      }
+    }
+    for (final record in permanentMemories) {
+      final value = BackupEntityCodec.value(record);
+      _require(ids: characterIds, value: value['observerCharacterId']);
+      _validateSubjectIds(value['subjectIds'], characterIds);
+      _validateSubjectIds(value['participantIds'], characterIds);
+      _validateSourceMessageIds(
+        value['sourceMessageIds'],
+        messageIds,
+        manifest,
+      );
+      for (final supersedesId in _strings(value['supersedesIds'])) {
+        if (!memoryIds.contains(supersedesId)) {
+          throw BackupException('永久记忆引用了不存在的 supersedes 记录：$supersedesId');
+        }
+      }
+      _validateOriginConversation(
+        value['originConversationId'],
+        manifest,
+        groupIds,
+        characterIds,
+      );
+    }
+    for (final record in relationshipEvents) {
+      final value = BackupEntityCodec.value(record);
+      _require(ids: characterIds, value: value['sourceCharacterId']);
+      if (value['targetType'] == 'ai') {
+        _require(ids: characterIds, value: value['targetId']);
+      } else if (value['targetType'] == 'user') {
+        if (value['targetId'] != 'user') {
+          throw const BackupException('关系事件的 user targetId 必须保持 user');
+        }
+      } else {
+        throw BackupException('关系事件 targetType 无效：${value['targetType']}');
+      }
+      _validateSourceMessageIds(
+        value['sourceMessageIds'],
+        messageIds,
+        manifest,
+      );
+      _validateOriginConversation(
+        value['originConversationId'],
+        manifest,
+        groupIds,
+        characterIds,
+      );
     }
     for (final record in skills) {
       final characterId = BackupEntityCodec.value(record)['characterId'];
@@ -182,9 +278,13 @@ class StagedBackupData {
       'agentTasks': tasks.length,
       'workMode': workspaces.length,
       'settings': settings.length,
+      'userProfiles': userProfiles.length,
+      'permanentMemories': permanentMemories.length,
+      'relationshipEvents': relationshipEvents.length,
     };
     for (final entry in actual.entries) {
-      if (manifest.counts[entry.key] != entry.value) {
+      if (manifest.counts.containsKey(entry.key) &&
+          manifest.counts[entry.key] != entry.value) {
         throw BackupException('条目计数不一致：${entry.key}');
       }
     }
@@ -204,6 +304,40 @@ class StagedBackupData {
 
   static void _require({required Set<String> ids, required Object? value}) {
     if (!ids.contains(value)) throw BackupException('引用无效：$value');
+  }
+
+  static void _validateSubjectIds(Object? value, Set<String> characterIds) {
+    for (final id in _strings(value)) {
+      if (id != 'user' && !characterIds.contains(id)) {
+        throw BackupException('永久数据引用了不存在的角色：$id');
+      }
+    }
+  }
+
+  static void _validateSourceMessageIds(
+    Object? value,
+    Set<String> messageIds,
+    BackupManifest manifest,
+  ) {
+    // Deleted conversations intentionally leave auditable evidence IDs in
+    // global memories/events; those IDs are external to a later full backup.
+    if (manifest.backupKind == BackupKind.full) return;
+    for (final id in _strings(value)) {
+      _require(ids: messageIds, value: id);
+    }
+  }
+
+  static void _validateOriginConversation(
+    Object? value,
+    BackupManifest manifest,
+    Set<String> groupIds,
+    Set<String> characterIds,
+  ) {
+    final conversationId = value?.toString();
+    if (manifest.backupKind == BackupKind.conversation &&
+        conversationId != manifest.conversationId) {
+      throw const BackupException('会话全局数据来源场合不匹配');
+    }
   }
 
   static Set<String> _ids(List<Map<String, dynamic>> records) {
@@ -232,6 +366,9 @@ class StagedBackupData {
       skills,
       tasks,
       workspaces,
+      userProfiles,
+      permanentMemories,
+      relationshipEvents,
     ]) {
       final keys = <String>{};
       for (final record in records) {
@@ -279,6 +416,15 @@ class StagedBackupData {
     final decoded = jsonDecode(await File('${root.path}/$path').readAsString());
     if (decoded is! List) throw BackupException('数据文件格式无效：$path');
     return decoded.map(_record).toList(growable: false);
+  }
+
+  static Future<List<Map<String, dynamic>>> _optionalRecords(
+    Directory root,
+    String path,
+  ) async {
+    final file = File('${root.path}/$path');
+    if (!await file.exists()) return const [];
+    return _records(root, path);
   }
 
   static Future<List<Map<String, dynamic>>> _lines(

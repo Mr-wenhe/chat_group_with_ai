@@ -55,9 +55,9 @@ class MemoryMigrator {
       : _uuid = uuid ?? const Uuid(),
         _schemaVersion = schemaVersion ?? _kMemoryMigratorSchemaVersion;
 
-  Future<MemoryMigrationReport> migrate() async {
+  Future<MemoryMigrationReport> migrate({bool force = false}) async {
     final marker = _readMarker();
-    if (marker != null && _parseVersion(marker) == _schemaVersion) {
+    if (!force && marker != null && _parseVersion(marker) == _schemaVersion) {
       return const MemoryMigrationReport(
         alreadyMigrated: true,
         userProfileCreated: 0,

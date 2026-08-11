@@ -5,6 +5,8 @@ import 'package:archive/archive_io.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:crypto/crypto.dart';
 import 'package:uuid/uuid.dart';
 
@@ -25,6 +27,9 @@ class BackupExporter {
     'agentTasks': 'data/agent_tasks.json',
     'workMode': 'data/work_mode.json',
     'settings': 'data/settings.json',
+    'userProfile': 'data/user_profile.json',
+    'permanentMemories': 'data/permanent_memories.json',
+    'relationshipEvents': 'data/relationship_events.json',
   };
 
   final DatabaseService db;
@@ -70,7 +75,9 @@ class BackupExporter {
         'messages': snapshot.messages.length,
         'memories': snapshot.groupMemories.length +
             snapshot.characterMemories.length +
-            snapshot.relationships.length,
+            snapshot.relationships.length +
+            snapshot.permanentMemories.length +
+            snapshot.relationshipEvents.length,
       },
       attachmentBytes: bytes,
       attachmentCount: paths.length - missing,
@@ -108,7 +115,11 @@ class BackupExporter {
           staging,
           _dataFiles['characters']!,
           snapshot.characters,
-          (item) => BackupEntityCodec.character(item),
+          (item) => BackupEntityCodec.characterForBackup(
+                item,
+                includeMemorySummary:
+                    selection.scope != BackupScope.conversation,
+              ),
           files,
           counts,
           'characters');
@@ -131,14 +142,44 @@ class BackupExporter {
           files,
           counts,
           'characterMemories');
-      await _writeJson(
-          staging,
-          _dataFiles['relationships']!,
-          snapshot.relationships,
-          (item) => BackupEntityCodec.relationship(item),
-          files,
-          counts,
-          'relationships');
+      if (selection.scope == BackupScope.all) {
+        await _writeJson(
+            staging,
+            _dataFiles['relationships']!,
+            snapshot.relationships,
+            (item) => BackupEntityCodec.relationship(item),
+            files,
+            counts,
+            'relationships');
+      }
+      if (selection.scope != BackupScope.configurationOnly) {
+        await _writeJson(
+            staging,
+            _dataFiles['permanentMemories']!,
+            snapshot.permanentMemories,
+            (item) => item,
+            files,
+            counts,
+            'permanentMemories');
+        await _writeJson(
+            staging,
+            _dataFiles['relationshipEvents']!,
+            snapshot.relationshipEvents,
+            (item) => item,
+            files,
+            counts,
+            'relationshipEvents');
+      }
+      if (selection.scope == BackupScope.all) {
+        await _writeJson(
+            staging,
+            _dataFiles['userProfile']!,
+            snapshot.userProfiles,
+            (item) => BackupEntityCodec.userProfile(item),
+            files,
+            counts,
+            'userProfiles');
+      }
       await _writeJson(staging, _dataFiles['skills']!, snapshot.skills,
           (item) => BackupEntityCodec.skill(item), files, counts, 'skills');
       await _writeJson(staging, _dataFiles['agentTasks']!, snapshot.tasks,
@@ -159,16 +200,25 @@ class BackupExporter {
         appVersion: appVersion,
         createdAt: DateTime.now(),
         scope: selection.scope,
+        backupKind: selection.scope == BackupScope.conversation
+            ? BackupKind.conversation
+            : BackupKind.full,
+        includesGlobalData: selection.scope == BackupScope.all,
         conversationId: selection.conversationId,
         counts: counts,
         files: files,
         missingAttachments: missing,
+        compatibilityData: selection.scope == BackupScope.conversation &&
+                snapshot.characterMemories.isNotEmpty
+            ? const ['data/character_memories.json']
+            : const [],
       );
       final manifestFile = File('${staging.path}/manifest.json');
       await manifestFile.writeAsString(
         const JsonEncoder.withIndent('  ').convert(manifest.toJson()),
         flush: true,
       );
+      await _validateStaging(staging, files);
       await ZipFileEncoder().zipDirectory(
         staging,
         filename: partial.path,
@@ -183,6 +233,47 @@ class BackupExporter {
     } finally {
       if (await staging.exists()) await staging.delete(recursive: true);
       if (await partial.exists()) await partial.delete();
+    }
+  }
+
+  Future<void> _validateStaging(
+    Directory staging,
+    Map<String, BackupFileEntry> files,
+  ) async {
+    final actualPaths = <String>{};
+    await for (final entity in staging.list(recursive: true)) {
+      if (entity is File) {
+        actualPaths
+            .add(entity.path.substring(staging.path.length + 1).replaceAll(
+                  Platform.pathSeparator,
+                  '/',
+                ));
+      }
+    }
+    actualPaths.remove('manifest.json');
+    if (actualPaths.length != files.length ||
+        !actualPaths.containsAll(files.keys)) {
+      throw const BackupException('备份 staging 文件清单不一致');
+    }
+    for (final entry in files.entries) {
+      final file = File('${staging.path}/${entry.key}');
+      if (!await file.exists() || await file.length() != entry.value.bytes) {
+        throw BackupException('备份 staging 文件无效：${entry.key}');
+      }
+      if (entry.key.endsWith('.json')) {
+        try {
+          jsonDecode(await file.readAsString());
+        } on Object catch (error) {
+          throw BackupException('备份 JSON 无法解析：${entry.key}：$error');
+        }
+      } else if (entry.key.endsWith('.jsonl')) {
+        await for (final line in file
+            .openRead()
+            .transform(utf8.decoder)
+            .transform(const LineSplitter())) {
+          if (line.trim().isNotEmpty) jsonDecode(line);
+        }
+      }
     }
   }
 
@@ -229,6 +320,7 @@ class BackupExporter {
       await sink.flush();
       await sink.close();
     }
+    if (snapshot.messages.isEmpty) await file.writeAsString('\n', flush: true);
     files[relativePath] = await _fileEntry(file);
     counts['messages'] = snapshot.messages.length;
     counts['attachments'] = attachmentsByHash.length;

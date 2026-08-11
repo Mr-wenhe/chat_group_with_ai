@@ -11,6 +11,9 @@ class _Snapshot {
   final List<MapEntry<Object, dynamic>> skills;
   final List<MapEntry<Object, dynamic>> tasks;
   final List<MapEntry<Object, dynamic>> workspaces;
+  final List<MapEntry<Object, dynamic>> userProfiles;
+  final List<MapEntry<Object, Map<String, dynamic>>> permanentMemories;
+  final List<MapEntry<Object, Map<String, dynamic>>> relationshipEvents;
   final Map<String, dynamic> settings;
 
   const _Snapshot({
@@ -24,6 +27,9 @@ class _Snapshot {
     required this.skills,
     required this.tasks,
     required this.workspaces,
+    required this.userProfiles,
+    required this.permanentMemories,
+    required this.relationshipEvents,
     required this.settings,
   });
 
@@ -54,6 +60,29 @@ class _Snapshot {
         .toSet();
     final all = selection.scope == BackupScope.all;
     bool inConversation(String id) => all || id == conversationId;
+    final messages = configurationOnly
+        ? const <MapEntry<Object, dynamic>>[]
+        : _entries(
+            db.messageBox.toMap(), (item) => inConversation(item.groupId));
+    final messageIds = messages.map((entry) => entry.value.id).toSet();
+    final visibleCharacterIds = characterIds;
+    final visibleIds = {'user', ...visibleCharacterIds};
+    List<String> sourceMessages(Iterable<String> ids) => all
+        ? ids.toList(growable: false)
+        : ids.where(messageIds.contains).toList(growable: false);
+    final selectedPermanentMemories = configurationOnly
+        ? const <MapEntry<Object, PermanentMemory>>[]
+        : _entries(db.permanentMemoryBox.toMap(), (item) {
+            if (all) return true;
+            return item.originConversationId == conversationId &&
+                visibleCharacterIds.contains(item.observerCharacterId);
+          });
+    final permanentMemoryIds =
+        selectedPermanentMemories.map((entry) => entry.value.id).toSet();
+    final globalRelationships = all
+        ? RelationshipState.selectStableSnapshots(db.relationshipStateBox.values
+            .where((item) => item.groupId == 'global'))
+        : const <RelationshipState>[];
 
     return _Snapshot(
       apiConfigs: _entries(db.apiConfigBox.toMap(),
@@ -62,10 +91,7 @@ class _Snapshot {
           (item) => all || characterIds.contains(item.id)),
       groups: _entries(db.chatGroupBox.toMap(),
           (item) => all || configurationOnly || item.id == conversationId),
-      messages: configurationOnly
-          ? const []
-          : _entries(
-              db.messageBox.toMap(), (item) => inConversation(item.groupId)),
+      messages: messages,
       groupMemories: configurationOnly
           ? const []
           : _entries(db.groupMemoryBox.toMap(),
@@ -76,8 +102,8 @@ class _Snapshot {
               (item) => inConversation(item.groupId)),
       relationships: configurationOnly
           ? const []
-          : _entries(db.relationshipStateBox.toMap(),
-              (item) => inConversation(item.groupId)),
+          : _entriesByValues(
+              db.relationshipStateBox.toMap(), globalRelationships),
       skills: _entries(
           db.characterSkillBox.toMap(),
           (item) =>
@@ -90,6 +116,54 @@ class _Snapshot {
           ? const []
           : _entries(db.workModeWorkspaceBox.toMap(),
               (item) => inConversation(item.conversationId)),
+      userProfiles:
+          all ? _entries(db.userProfileBox.toMap(), (_) => true) : const [],
+      permanentMemories: configurationOnly
+          ? const []
+          : selectedPermanentMemories.map((entry) {
+              final item = entry.value;
+              return MapEntry<Object, Map<String, dynamic>>(
+                entry.key,
+                BackupEntityCodec.permanentMemory(
+                  item,
+                  sourceMessageIds: sourceMessages(item.sourceMessageIds),
+                  subjectIds: all
+                      ? item.subjectIds
+                      : item.subjectIds.where(visibleIds.contains).toList(),
+                  participantIds: all
+                      ? item.participantIds
+                      : item.participantIds.where(visibleIds.contains).toList(),
+                  supersedesIds: all
+                      ? item.supersedesIds
+                      : item.supersedesIds
+                          .where(permanentMemoryIds.contains)
+                          .toList(),
+                ),
+              );
+            }).toList(growable: false),
+      relationshipEvents: configurationOnly
+          ? const []
+          : _entries(db.relationshipEventBox.toMap(), (item) {
+              if (all) return true;
+              final sourceVisible =
+                  visibleCharacterIds.contains(item.sourceCharacterId);
+              final targetVisible =
+                  item.targetType == RelationshipTargetType.user
+                      ? true
+                      : visibleCharacterIds.contains(item.targetId);
+              return item.originConversationId == conversationId &&
+                  sourceVisible &&
+                  targetVisible;
+            }).map((entry) {
+              final item = entry.value;
+              return MapEntry<Object, Map<String, dynamic>>(
+                entry.key,
+                BackupEntityCodec.relationshipEvent(
+                  item,
+                  sourceMessageIds: sourceMessages(item.sourceMessageIds),
+                ),
+              );
+            }).toList(growable: false),
       settings: _selectedSettings(db, selection),
     );
   }
@@ -98,10 +172,19 @@ class _Snapshot {
     Map<dynamic, T> source,
     bool Function(T value) include,
   ) =>
-      source.entries
+      (source.entries
           .where((entry) => include(entry.value))
           .map((entry) => MapEntry<Object, T>(entry.key, entry.value))
-          .toList(growable: false);
+          .toList()
+        ..sort((a, b) => a.key.toString().compareTo(b.key.toString())));
+
+  static List<MapEntry<Object, T>> _entriesByValues<T>(
+    Map<dynamic, T> source,
+    Iterable<T> values,
+  ) {
+    final selected = values.toSet();
+    return _entries(source, selected.contains);
+  }
 
   static Map<String, dynamic> _safeSettings(DatabaseService db) {
     const keys = {
