@@ -84,7 +84,8 @@ class AICharacter extends HiveObject {
   ])
   List<ToolPermission> toolPermissions;
 
-  /// 创建后不可变。旧数据读取为女，再由一次性迁移覆盖为推断结果。
+  /// 创建后不可变。缺少该字段的旧记录兼容读取为女；迁移是否完成必须
+  /// 由版本化迁移状态判断，不能由这个兼容默认值推断。
   @HiveField(21, defaultValue: CharacterGender.female)
   CharacterGender gender;
 
@@ -119,8 +120,7 @@ class AICharacter extends HiveObject {
         toolPermissions = toolPermissions ??
             const [ToolPermission.skillCreate, ToolPermission.skillDownload];
 
-  String get promptIdentity =>
-      '$name，$age岁，性别${gender.label}，身份是$role';
+  String get promptIdentity => '$name，$age岁，性别${gender.label}，身份是$role';
 
   String get rolePlaySystemPrompt {
     final prompt = systemPrompt.trim();

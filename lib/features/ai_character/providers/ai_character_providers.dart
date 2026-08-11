@@ -28,6 +28,10 @@ class AICharactersNotifier extends StateNotifier<List<AICharacter>> {
   }
 
   Future<void> updateCharacter(AICharacter character) async {
+    final savedCharacter = _db.aiCharacterBox.get(character.id);
+    if (savedCharacter != null) {
+      character.gender = savedCharacter.gender;
+    }
     await _db.aiCharacterBox.put(character.id, character);
     _loadCharacters();
   }
