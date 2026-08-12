@@ -1,43 +1,14 @@
 import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/features/memory/memory_audit_presenter.dart';
+
+export 'memory_audit_presenter.dart'
+    show MemoryAuditLabel, MemoryAuditLabels, MemoryAuditSearchProjection;
 
 enum MemoryConversationScopeType { settings, direct, group }
 
 enum MemoryAuditSortOrder {
   updatedAtDescending,
   occurredAtDescending,
-}
-
-/// The complete user-visible search projection for one memory row.
-///
-/// The filter searches every field in this object. Callers that have friendly
-/// character names should provide them here instead of passing a pre-joined
-/// string, so observer, subject, source, kind, and status remain part of the
-/// contract.
-class MemoryAuditSearchProjection {
-  final String content;
-  final String observerName;
-  final List<String> subjectNames;
-  final String originName;
-  final String kindLabel;
-  final String statusLabel;
-
-  const MemoryAuditSearchProjection({
-    required this.content,
-    required this.observerName,
-    required this.subjectNames,
-    required this.originName,
-    required this.kindLabel,
-    required this.statusLabel,
-  });
-
-  String get searchableText => [
-        content,
-        observerName,
-        ...subjectNames,
-        originName,
-        kindLabel,
-        statusLabel,
-      ].join(' · ');
 }
 
 typedef MemoryAuditSearchText = MemoryAuditSearchProjection Function(
@@ -304,9 +275,17 @@ class MemoryAuditFilter {
           content: memory.content,
           observerName: '',
           subjectNames: const [],
-          originName: memory.originNameSnapshot,
-          kindLabel: _kindLabel(memory.kind),
-          statusLabel: _statusLabel(memory.status),
+          originName: MemoryAuditPresenter.normalizeLegacyOriginSnapshot(
+                memory.originNameSnapshot,
+                originType: memory.originType,
+                conversationId: memory.originConversationId,
+              ) ??
+              '',
+          kindLabel: MemoryAuditLabels.kind(memory.kind).label,
+          statusLabel: MemoryAuditLabels.status(memory.status).label,
+          originTypeLabel:
+              MemoryAuditLabels.originType(memory.originType).label,
+          pinnedLabel: MemoryAuditLabels.pinned(memory.pinned).label,
         );
     return projection.searchableText.toLowerCase().contains(query);
   }
@@ -322,16 +301,15 @@ class MemoryAuditFilter {
       );
       if (pinned != 0) return pinned;
 
-      final history =
-          _rank(left.memory.status == MemoryStatus.active).compareTo(
-        _rank(right.memory.status == MemoryStatus.active),
-      );
+      final leftIsCurrent = _isCurrentMemory(left.memory);
+      final rightIsCurrent = _isCurrentMemory(right.memory);
+      final history = _rank(leftIsCurrent).compareTo(_rank(rightIsCurrent));
       if (history != 0) return history;
 
       final useOccurredAt =
           sortOrder == MemoryAuditSortOrder.occurredAtDescending &&
-              left.memory.status == MemoryStatus.active &&
-              right.memory.status == MemoryStatus.active;
+              _isCurrentMemory(left.memory) &&
+              _isCurrentMemory(right.memory);
       final primaryDate = useOccurredAt
           ? right.memory.occurredAt.compareTo(left.memory.occurredAt)
           : right.memory.updatedAt.compareTo(left.memory.updatedAt);
@@ -352,24 +330,9 @@ class MemoryAuditFilter {
 
   int _rank(bool value) => value ? 0 : 1;
 
-  String _kindLabel(MemoryKind kind) {
-    return switch (kind) {
-      MemoryKind.fact => '事实 知',
-      MemoryKind.preference => '偏好',
-      MemoryKind.commitment => '承诺',
-      MemoryKind.sharedExperience => '经历',
-      MemoryKind.relationshipNote => '关系',
-      MemoryKind.personaGrowth => '成长',
-      MemoryKind.explicitInstruction => '指令',
-    };
-  }
-
-  String _statusLabel(MemoryStatus status) {
-    return switch (status) {
-      MemoryStatus.active => '有效',
-      MemoryStatus.superseded => '已取代',
-      MemoryStatus.invalidated => '已失效',
-    };
+  bool _isCurrentMemory(PermanentMemory memory) {
+    return memory.status == MemoryStatus.active &&
+        memory.originType != MemoryOriginType.legacyMigration;
   }
 }
 

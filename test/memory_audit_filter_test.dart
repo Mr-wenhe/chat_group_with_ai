@@ -258,6 +258,40 @@ void main() {
       );
     });
 
+    test('search ignores IDs wrapped in legacy source snapshots', () {
+      final memories = [
+        PermanentMemory(
+          id: 'legacy-direct',
+          observerCharacterId: 'c1',
+          kind: MemoryKind.preference,
+          content: '正文',
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.direct,
+          originConversationId: 'dm:character-id',
+          originNameSnapshot: '私聊:character-id',
+        ),
+        PermanentMemory(
+          id: 'legacy-group',
+          observerCharacterId: 'c1',
+          kind: MemoryKind.preference,
+          content: '正文',
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.group,
+          originConversationId: 'group-id',
+          originNameSnapshot: '群聊:group-id',
+        ),
+      ];
+
+      expect(
+        MemoryAuditFilter(searchQuery: 'character-id').apply(memories),
+        isEmpty,
+      );
+      expect(
+        MemoryAuditFilter(searchQuery: 'group-id').apply(memories),
+        isEmpty,
+      );
+    });
+
     test('search accepts a friendly projection for observer and subject names',
         () {
       final memory = PermanentMemory(
@@ -347,6 +381,58 @@ void main() {
         MemoryAuditFilter(searchQuery: '已失效').apply([memory]),
         [memory],
       );
+    });
+
+    test('default search includes localized origin labels, not enum names', () {
+      final memory = PermanentMemory(
+        observerCharacterId: 'c1',
+        kind: MemoryKind.preference,
+        content: '正文',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.group,
+        originNameSnapshot: '旅行群',
+      );
+
+      expect(
+        MemoryAuditFilter(searchQuery: '群聊').apply([memory]),
+        [memory],
+      );
+      expect(
+        MemoryAuditFilter(searchQuery: 'group').apply([memory]),
+        isEmpty,
+      );
+      expect(
+        MemoryAuditFilter(searchQuery: 'preference').apply([memory]),
+        isEmpty,
+      );
+    });
+
+    test('active sorting keeps legacy migration records in history order', () {
+      final time = DateTime(2026, 1, 1);
+      PermanentMemory item({
+        required String id,
+        required MemoryOriginType origin,
+      }) {
+        return PermanentMemory(
+          id: id,
+          observerCharacterId: 'c1',
+          kind: MemoryKind.fact,
+          content: id,
+          status: MemoryStatus.active,
+          originType: origin,
+          originNameSnapshot: '来源',
+          occurredAt: time,
+          createdAt: time,
+          updatedAt: time,
+        );
+      }
+
+      final result = MemoryAuditFilter().apply([
+        item(id: 'current', origin: MemoryOriginType.manual),
+        item(id: 'legacy', origin: MemoryOriginType.legacyMigration),
+      ]);
+
+      expect(result.map((memory) => memory.id), ['current', 'legacy']);
     });
 
     test('default search uses the Chinese name 事实 for fact memories', () {
@@ -1256,7 +1342,50 @@ void main() {
       expect(cleared.observerCharacterId, isNull);
     });
 
-    testWidgets('origin conversation dropdown selects another occasion',
+    testWidgets('filter labels use the shared full Chinese terms',
+        (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: const MemoryAuditFilter(
+              memoryKind: MemoryKind.fact,
+              originType: MemoryOriginType.legacyMigration,
+            ),
+            characters: const [],
+            onChanged: (_) {},
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      expect(find.text('类型: 事实'), findsOneWidget);
+      expect(find.text('来源: 旧版迁移'), findsOneWidget);
+      expect(find.text('知'), findsNothing);
+      expect(find.text('legacyMigration'), findsNothing);
+    });
+
+    testWidgets('deleted selector values use placeholders instead of IDs',
+        (tester) async {
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: MemoryAuditFilterWidget(
+            filter: MemoryAuditFilter(
+              observerCharacterId: 'deleted-observer',
+              subjectFilter: SubjectFilter.aboutCharacter('deleted-subject'),
+            ),
+            characters: const [],
+            onChanged: (_) {},
+          ),
+        ),
+      ));
+      await tester.pump();
+
+      expect(find.text('已删除角色'), findsWidgets);
+      expect(find.text('deleted-observer'), findsNothing);
+      expect(find.text('deleted-subject'), findsNothing);
+    });
+
+    testWidgets('source occasion search uses friendly names without IDs',
         (tester) async {
       MemoryAuditFilter? captured;
       await tester.pumpWidget(MaterialApp(
@@ -1271,15 +1400,25 @@ void main() {
       ));
       await tester.pump();
 
-      await tester.tap(find.byType(DropdownButton<String>));
+      expect(find.text('g1'), findsNothing);
+      await tester.tap(
+        find.byKey(const ValueKey('memory-filter-origin-conversation')),
+      );
       await tester.pumpAndSettle();
-      await tester.tap(find.text('群二 (g2)').last);
+      expect(find.text('群一'), findsWidgets);
+      expect(find.text('g1'), findsNothing);
+
+      await tester.enterText(find.byType(TextField).last, '群二');
+      await tester.pumpAndSettle();
+      expect(find.text('群二'), findsOneWidget);
+      expect(find.text('g2'), findsNothing);
+      await tester.tap(find.text('群二').last);
       await tester.pump();
 
       expect(captured?.originConversationId, 'g2');
     });
 
-    testWidgets('origin conversation input accepts an id not in the list',
+    testWidgets('advanced filters apply only after confirmation',
         (tester) async {
       MemoryAuditFilter? captured;
       await tester.pumpWidget(MaterialApp(
@@ -1293,13 +1432,41 @@ void main() {
       ));
       await tester.pump();
 
-      await tester.tap(find.text('输入场合'));
+      await tester.tap(
+        find.byKey(const ValueKey('open-advanced-memory-filter')),
+      );
       await tester.pumpAndSettle();
-      await tester.enterText(find.byType(TextField).last, 'deleted-group');
-      await tester.tap(find.text('应用'));
-      await tester.pump();
+      expect(find.byType(AlertDialog), findsOneWidget);
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('memory-filter-dialog-status')),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('memory-filter-dialog-status')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('已取代').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+      expect(captured, isNull);
 
-      expect(captured?.originConversationId, 'deleted-group');
+      await tester.tap(
+        find.byKey(const ValueKey('open-advanced-memory-filter')),
+      );
+      await tester.pumpAndSettle();
+      await tester.ensureVisible(
+        find.byKey(const ValueKey('memory-filter-dialog-status')),
+      );
+      await tester.tap(
+        find.byKey(const ValueKey('memory-filter-dialog-status')),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('已取代').last);
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('应用筛选'));
+      await tester.pumpAndSettle();
+
+      expect(captured?.status, MemoryStatus.superseded);
     });
   });
 }

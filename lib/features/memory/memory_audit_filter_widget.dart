@@ -1,6 +1,8 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/features/memory/memory_audit_filter.dart';
+import 'package:chat_group/features/memory/memory_audit_filter_dialog.dart';
+import 'package:chat_group/features/memory/memory_audit_presenter.dart';
 import 'package:flutter/material.dart';
 
 class MemoryAuditFilterWidget extends StatelessWidget {
@@ -9,6 +11,7 @@ class MemoryAuditFilterWidget extends StatelessWidget {
   final MemoryAuditFilter filter;
   final List<AICharacter> characters;
   final Map<String, String> originConversations;
+  final MemoryAuditPresenter? presenter;
   final ValueChanged<MemoryAuditFilter> onChanged;
 
   const MemoryAuditFilterWidget({
@@ -16,27 +19,78 @@ class MemoryAuditFilterWidget extends StatelessWidget {
     required this.filter,
     required this.characters,
     this.originConversations = const {},
+    this.presenter,
     required this.onChanged,
   });
 
+  MemoryAuditPresenter get _displayPresenter =>
+      presenter ??
+      MemoryAuditPresenter(
+        characterNames: {
+          for (final character in characters) character.id: character.name,
+        },
+        conversationNames: originConversations,
+      );
+
   @override
   Widget build(BuildContext context) {
+    final observerEntries = <DropdownMenuEntry<String>>[
+      const DropdownMenuEntry(value: _all, label: '全部 AI'),
+      for (final character in characters)
+        DropdownMenuEntry(value: character.id, label: character.name),
+    ];
+    final selectedObserver = filter.observerCharacterId;
+    if (selectedObserver != null &&
+        !observerEntries.any((entry) => entry.value == selectedObserver)) {
+      observerEntries.add(
+        DropdownMenuEntry(
+            value: selectedObserver, label: _charName(selectedObserver)),
+      );
+    }
+    final subjectEntries = <DropdownMenuEntry<String>>[
+      const DropdownMenuEntry(value: _all, label: '全部对象'),
+      const DropdownMenuEntry(value: '__about_me__', label: '关于我'),
+      const DropdownMenuEntry(value: '__self_growth__', label: '自身成长'),
+      for (final character in characters)
+        DropdownMenuEntry(value: character.id, label: character.name),
+    ];
+    final selectedSubject = filter.subjectFilter.characterId;
+    if (selectedSubject != null &&
+        !subjectEntries.any((entry) => entry.value == selectedSubject) &&
+        selectedSubject != '__all__' &&
+        selectedSubject != '__about_me__' &&
+        selectedSubject != '__self_growth__') {
+      subjectEntries.add(
+        DropdownMenuEntry(
+            value: selectedSubject, label: _charName(selectedSubject)),
+      );
+    }
     return SingleChildScrollView(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
+          _MemoryAuditSearchField(
+            initialValue: filter.searchQuery ?? '',
+            onChanged: (value) => onChanged(
+              filter.copyWith(
+                searchQuery: value,
+                clearSearchQuery: value.trim().isEmpty,
+              ),
+            ),
+          ),
           Row(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Expanded(child: _originConversationDropdown(context)),
+              Expanded(child: _originConversationSelector()),
               const SizedBox(width: 8),
               Padding(
                 padding: const EdgeInsets.only(top: 8),
                 child: OutlinedButton.icon(
-                  onPressed: () => _showOriginConversationInput(context),
-                  icon: const Icon(Icons.edit_location_alt_outlined, size: 16),
-                  label: const Text('输入场合'),
+                  key: const ValueKey('open-advanced-memory-filter'),
+                  onPressed: () => _showAdvancedFilter(context),
+                  icon: const Icon(Icons.tune_rounded, size: 16),
+                  label: const Text('高级筛选'),
                 ),
               ),
             ],
@@ -47,11 +101,7 @@ class MemoryAuditFilterWidget extends StatelessWidget {
             key: ValueKey('observer-${filter.observerCharacterId}'),
             label: '观察 AI',
             value: filter.observerCharacterId ?? _all,
-            entries: [
-              const DropdownMenuEntry(value: _all, label: '全部 AI'),
-              for (final character in characters)
-                DropdownMenuEntry(value: character.id, label: character.name),
-            ],
+            entries: observerEntries,
             onSelected: (value) => onChanged(filter.copyWith(
               observerCharacterId: value,
               clearObserverCharacterId: value == _all,
@@ -62,13 +112,7 @@ class MemoryAuditFilterWidget extends StatelessWidget {
             key: ValueKey('subject-${filter.subjectFilter.characterId}'),
             label: '记忆对象',
             value: filter.subjectFilter.characterId ?? _all,
-            entries: [
-              const DropdownMenuEntry(value: _all, label: '全部对象'),
-              const DropdownMenuEntry(value: '__about_me__', label: '关于我'),
-              const DropdownMenuEntry(value: '__self_growth__', label: '自身成长'),
-              for (final character in characters)
-                DropdownMenuEntry(value: character.id, label: character.name),
-            ],
+            entries: subjectEntries,
             onSelected: (value) {
               final subject = switch (value) {
                 _all => SubjectFilter.all,
@@ -104,24 +148,25 @@ class MemoryAuditFilterWidget extends StatelessWidget {
             ),
           if (filter.originConversationId != null)
             _removableChip(
-              label: '场合: ${filter.originConversationId}',
+              label: '场合: ${_originName(filter.originConversationId!)}',
               onRemove: () => onChanged(
                 filter.copyWith(clearOriginConversationId: true),
               ),
             ),
           if (filter.status != null)
             _removableChip(
-              label: '状态: ${_statusLabel(filter.status!)}',
+              label: '状态: ${MemoryAuditLabels.status(filter.status!).label}',
               onRemove: () => onChanged(filter.copyWith(clearStatus: true)),
             ),
           if (filter.memoryKind != null)
             _removableChip(
-              label: '类型: ${_kindLabel(filter.memoryKind!)}',
+              label: '类型: ${MemoryAuditLabels.kind(filter.memoryKind!).label}',
               onRemove: () => onChanged(filter.copyWith(clearMemoryKind: true)),
             ),
           if (filter.originType != null)
             _removableChip(
-              label: '来源: ${filter.originType!.name}',
+              label:
+                  '来源: ${MemoryAuditLabels.originType(filter.originType!).label}',
               onRemove: () => onChanged(filter.copyWith(clearOriginType: true)),
             ),
           if (filter.pinnedOnly != null)
@@ -193,17 +238,12 @@ class MemoryAuditFilterWidget extends StatelessWidget {
               selected: filter.originType == null,
               onTap: () => onChanged(filter.copyWith(clearOriginType: true)),
             ),
-            for (final entry in const {
-              MemoryOriginType.group: '群聊',
-              MemoryOriginType.direct: '私聊',
-              MemoryOriginType.manual: '手动',
-              MemoryOriginType.legacyMigration: '迁移',
-            }.entries)
+            for (final value in MemoryOriginType.values)
               (
-                label: entry.value,
-                selected: filter.originType == entry.key,
+                label: MemoryAuditLabels.originType(value).label,
+                selected: filter.originType == value,
                 onTap: () => onChanged(
-                      filter.copyWith(originType: entry.key),
+                      filter.copyWith(originType: value),
                     ),
               ),
           ],
@@ -216,15 +256,11 @@ class MemoryAuditFilterWidget extends StatelessWidget {
               selected: filter.status == null,
               onTap: () => onChanged(filter.copyWith(clearStatus: true)),
             ),
-            for (final entry in const {
-              MemoryStatus.active: '有效',
-              MemoryStatus.superseded: '已取代',
-              MemoryStatus.invalidated: '已失效',
-            }.entries)
+            for (final value in MemoryStatus.values)
               (
-                label: entry.value,
-                selected: filter.status == entry.key,
-                onTap: () => onChanged(filter.copyWith(status: entry.key)),
+                label: MemoryAuditLabels.status(value).label,
+                selected: filter.status == value,
+                onTap: () => onChanged(filter.copyWith(status: value)),
               ),
           ],
         ),
@@ -236,19 +272,11 @@ class MemoryAuditFilterWidget extends StatelessWidget {
               selected: filter.memoryKind == null,
               onTap: () => onChanged(filter.copyWith(clearMemoryKind: true)),
             ),
-            for (final entry in const {
-              MemoryKind.fact: '知',
-              MemoryKind.preference: '偏好',
-              MemoryKind.commitment: '承诺',
-              MemoryKind.sharedExperience: '经历',
-              MemoryKind.relationshipNote: '关系',
-              MemoryKind.personaGrowth: '成长',
-              MemoryKind.explicitInstruction: '指令',
-            }.entries)
+            for (final value in MemoryKind.values)
               (
-                label: entry.value,
-                selected: filter.memoryKind == entry.key,
-                onTap: () => onChanged(filter.copyWith(memoryKind: entry.key)),
+                label: MemoryAuditLabels.kind(value).label,
+                selected: filter.memoryKind == value,
+                onTap: () => onChanged(filter.copyWith(memoryKind: value)),
               ),
           ],
         ),
@@ -307,72 +335,47 @@ class MemoryAuditFilterWidget extends StatelessWidget {
     );
   }
 
-  Widget _originConversationDropdown(BuildContext context) {
+  Widget _originConversationSelector() {
     const allValue = '__all_origin_conversations__';
     final values = <String>[allValue, ...originConversations.keys];
     final selectedId = filter.originConversationId;
     if (selectedId != null && !values.contains(selectedId)) {
       values.add(selectedId);
     }
-    final labels = <String, String>{
-      allValue: '全部场合',
-      for (final entry in originConversations.entries)
-        entry.key:
-            '${entry.value.isEmpty ? entry.key : entry.value} (${entry.key})',
-    };
-    if (selectedId != null && !labels.containsKey(selectedId)) {
-      labels[selectedId] = selectedId;
-    }
-
-    return InputDecorator(
-      decoration: InputDecoration(
-        labelText: '场合',
-        contentPadding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
-        border: OutlineInputBorder(
-          borderRadius: BorderRadius.circular(20),
-          borderSide: BorderSide(color: Theme.of(context).colorScheme.outline),
+    final entries = <DropdownMenuEntry<String>>[
+      const DropdownMenuEntry(value: allValue, label: '全部场合'),
+      for (final value in values.skip(1))
+        DropdownMenuEntry(
+          value: value,
+          label: _originName(value),
         ),
-      ),
-      child: DropdownButtonHideUnderline(
-        child: DropdownButton<String>(
-          isDense: true,
-          value: selectedId ?? allValue,
-          items: [
-            for (final value in values)
-              DropdownMenuItem<String>(
-                value: value,
-                child: Text(
-                  labels[value] ?? value,
-                  style: const TextStyle(fontSize: 13),
-                ),
-              ),
-          ],
-          onChanged: (value) {
-            if (value == null || value == allValue) {
-              onChanged(filter.copyWith(clearOriginConversationId: true));
-            } else {
-              onChanged(filter.copyWith(originConversationId: value));
-            }
-          },
-        ),
-      ),
+    ];
+    return _searchableSelector(
+      key: const ValueKey('memory-filter-origin-conversation'),
+      label: '来源场合',
+      value: selectedId ?? allValue,
+      entries: entries,
+      onSelected: (value) {
+        if (value == allValue) {
+          onChanged(filter.copyWith(clearOriginConversationId: true));
+        } else {
+          onChanged(filter.copyWith(originConversationId: value));
+        }
+      },
     );
   }
 
-  Future<void> _showOriginConversationInput(BuildContext context) async {
-    final entered = await showDialog<String>(
+  Future<void> _showAdvancedFilter(BuildContext context) async {
+    final next = await showDialog<MemoryAuditFilter>(
       context: context,
-      builder: (_) => _OriginConversationDialog(
-        initialValue: filter.originConversationId ?? '',
+      builder: (_) => MemoryAuditFilterDialog(
+        filter: filter,
+        characters: characters,
+        originConversations: originConversations,
+        presenter: _displayPresenter,
       ),
     );
-    if (entered == null || entered.isEmpty) {
-      if (entered != null) {
-        onChanged(filter.copyWith(clearOriginConversationId: true));
-      }
-    } else {
-      onChanged(filter.copyWith(originConversationId: entered));
-    }
+    if (next != null) onChanged(next);
   }
 
   Widget _removableChip({
@@ -389,28 +392,15 @@ class MemoryAuditFilterWidget extends StatelessWidget {
 
   String _charName(String? id) {
     if (id == null) return '';
-    final character = characters.cast<AICharacter?>().firstWhere(
-          (item) => item?.id == id,
-          orElse: () => null,
-        );
-    return character?.name ?? id;
+    return _displayPresenter.characterNames[id] ??
+        _displayPresenter.characterSnapshotNames[id] ??
+        '已删除角色';
   }
 
-  String _statusLabel(MemoryStatus status) => switch (status) {
-        MemoryStatus.active => '有效',
-        MemoryStatus.superseded => '已取代',
-        MemoryStatus.invalidated => '已失效',
-      };
-
-  String _kindLabel(MemoryKind kind) => switch (kind) {
-        MemoryKind.fact => '知',
-        MemoryKind.preference => '偏好',
-        MemoryKind.commitment => '承诺',
-        MemoryKind.sharedExperience => '经历',
-        MemoryKind.relationshipNote => '关系',
-        MemoryKind.personaGrowth => '成长',
-        MemoryKind.explicitInstruction => '指令',
-      };
+  String _originName(String id) => _displayPresenter.resolveConversationName(
+        id,
+        snapshotName: originConversations[id] ?? '',
+      );
 
   String _subjectLabel(SubjectFilter value) => switch (value.characterId) {
         '__all__' => '全部主体',
@@ -444,19 +434,34 @@ class MemoryAuditFilterWidget extends StatelessWidget {
   }
 }
 
-class _OriginConversationDialog extends StatefulWidget {
+class _MemoryAuditSearchField extends StatefulWidget {
   final String initialValue;
+  final ValueChanged<String> onChanged;
 
-  const _OriginConversationDialog({required this.initialValue});
+  const _MemoryAuditSearchField({
+    required this.initialValue,
+    required this.onChanged,
+  });
 
   @override
-  State<_OriginConversationDialog> createState() =>
-      _OriginConversationDialogState();
+  State<_MemoryAuditSearchField> createState() =>
+      _MemoryAuditSearchFieldState();
 }
 
-class _OriginConversationDialogState extends State<_OriginConversationDialog> {
+class _MemoryAuditSearchFieldState extends State<_MemoryAuditSearchField> {
   late final TextEditingController _controller =
       TextEditingController(text: widget.initialValue);
+
+  @override
+  void didUpdateWidget(covariant _MemoryAuditSearchField oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (widget.initialValue != _controller.text) {
+      _controller.value = TextEditingValue(
+        text: widget.initialValue,
+        selection: TextSelection.collapsed(offset: widget.initialValue.length),
+      );
+    }
+  }
 
   @override
   void dispose() {
@@ -466,27 +471,15 @@ class _OriginConversationDialogState extends State<_OriginConversationDialog> {
 
   @override
   Widget build(BuildContext context) {
-    return AlertDialog(
-      title: const Text('输入场合 ID'),
-      content: TextField(
-        controller: _controller,
-        autofocus: true,
-        decoration: const InputDecoration(
-          labelText: '场合 ID',
-          hintText: '例如 group-1 或 dm:character-id',
-        ),
-        onSubmitted: (value) => Navigator.pop(context, value.trim()),
+    return TextField(
+      key: const ValueKey('memory-audit-search'),
+      controller: _controller,
+      onChanged: widget.onChanged,
+      decoration: const InputDecoration(
+        labelText: '搜索记忆',
+        hintText: '搜索观察 AI、正文、对象、来源场合或中文术语',
+        prefixIcon: Icon(Icons.search_rounded),
       ),
-      actions: [
-        TextButton(
-          onPressed: () => Navigator.pop(context),
-          child: const Text('取消'),
-        ),
-        FilledButton(
-          onPressed: () => Navigator.pop(context, _controller.text.trim()),
-          child: const Text('应用'),
-        ),
-      ],
     );
   }
 }

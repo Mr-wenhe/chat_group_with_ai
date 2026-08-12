@@ -214,6 +214,60 @@ void main() {
       await tester.pump(const Duration(milliseconds: 300));
       expect(find.text('群2记忆'), findsOneWidget);
     });
+
+    testWidgets('memory search uses friendly observer name projection',
+        (tester) async {
+      await tester.runAsync(() async {
+        final character = testCharacter('char-search', apiConfigId: 'cfg');
+        character.name = 'Amy';
+        await db.aiCharacterBox.put(character.id, character);
+        await db.permanentMemoryBox.put(
+          'pm-search',
+          PermanentMemory(
+            observerCharacterId: character.id,
+            kind: MemoryKind.fact,
+            content: '咖啡偏好',
+            status: MemoryStatus.active,
+            originType: MemoryOriginType.manual,
+            originNameSnapshot: '手动记录',
+          ),
+        );
+        await tester.pumpWidget(app(const MemoryManagementPage()));
+      });
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final search = find.byKey(const ValueKey('memory-audit-search'));
+      await tester.enterText(search, 'Amy');
+      await tester.pump();
+      expect(find.text('咖啡偏好'), findsOneWidget);
+
+      await tester.enterText(search, '不存在的内容');
+      await tester.pump();
+      expect(find.text('咖啡偏好'), findsNothing);
+    });
+
+    testWidgets('memory list uses friendly deleted-source projection',
+        (tester) async {
+      await tester.runAsync(() async {
+        await db.permanentMemoryBox.put(
+          'pm-deleted-source',
+          PermanentMemory(
+            observerCharacterId: 'deleted-character',
+            kind: MemoryKind.fact,
+            content: '删除场合后仍可读',
+            status: MemoryStatus.active,
+            originType: MemoryOriginType.group,
+            originConversationId: 'deleted-group',
+            originNameSnapshot: 'deleted-group',
+          ),
+        );
+        await tester.pumpWidget(app(const MemoryManagementPage()));
+      });
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('已删除群聊'), findsOneWidget);
+      expect(find.text('deleted-group'), findsNothing);
+    });
   });
 
   group('MemoryControls operations', () {
@@ -346,6 +400,8 @@ void main() {
       expect(find.text('【事实】旧事实'), findsOneWidget);
       expect(find.text('旧事实'), findsOneWidget);
       expect(find.text('迁移诊断'), findsOneWidget);
+      expect(find.text('群组 group-1'), findsNothing);
+      expect(find.text('已删除群聊'), findsOneWidget);
     });
 
     testWidgets('migration diagnostic shows character memory content',
@@ -609,6 +665,7 @@ void main() {
               status: MemoryStatus.active,
               originType: MemoryOriginType.legacyMigration,
               originNameSnapshot: '旧版迁移',
+              subjectIds: const ['user', 'correction-deleted-subject'],
             ));
         await tester.pumpWidget(app(const MemoryManagementPage()));
       });
@@ -620,6 +677,16 @@ void main() {
       await tester.tap(find.widgetWithText(ListTile, '修正'));
       await tester.pump(const Duration(milliseconds: 300));
       final correctionDialog = find.byType(AlertDialog);
+      final subjectField = find
+          .descendant(
+            of: correctionDialog,
+            matching: find.byType(TextField),
+          )
+          .last;
+      expect(
+        tester.widget<TextField>(subjectField).controller!.text,
+        '我, 已删除角色',
+      );
       await tester.enterText(
         find
             .descendant(
@@ -639,7 +706,10 @@ void main() {
         db.permanentMemoryBox.values.any(
           (memory) =>
               memory.content == '修正后的内容' &&
-              memory.originType == MemoryOriginType.manual,
+              memory.originType == MemoryOriginType.manual &&
+              memory.subjectIds.toSet().containsAll(
+                const ['user', 'correction-deleted-subject'],
+              ),
         ),
         isTrue,
       );

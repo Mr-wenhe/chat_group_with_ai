@@ -1,14 +1,13 @@
-import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
+import 'package:chat_group/features/memory/memory_audit_presenter.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
 class MemoryAuditCard extends StatelessWidget {
-  final PermanentMemory memory;
-  final Map<String, AICharacter> charactersById;
   final Map<String, int> supersededCount;
+  final MemoryAuditRow displayRow;
   final VoidCallback onPin;
   final VoidCallback onUnpin;
   final VoidCallback onAction;
@@ -16,9 +15,8 @@ class MemoryAuditCard extends StatelessWidget {
 
   const MemoryAuditCard({
     super.key,
-    required this.memory,
-    required this.charactersById,
     required this.supersededCount,
+    required this.displayRow,
     required this.onPin,
     required this.onUnpin,
     required this.onAction,
@@ -27,27 +25,10 @@ class MemoryAuditCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final observer = charactersById[memory.observerCharacterId];
-    final observerName = observer?.name ?? '已删除角色';
-    final subjectNames = memory.subjectIds.map((sid) {
-      if (sid == 'user') return '我';
-      return charactersById[sid]?.name ?? '已删除角色';
-    }).toList();
-
-    final kindLabel = switch (memory.kind) {
-      MemoryKind.fact => '知',
-      MemoryKind.preference => '偏好',
-      MemoryKind.commitment => '承诺',
-      MemoryKind.sharedExperience => '经历',
-      MemoryKind.relationshipNote => '关系',
-      MemoryKind.personaGrowth => '成长',
-      MemoryKind.explicitInstruction => '指令',
-    };
-
-    final (statusLabel, statusColor) = switch (memory.status) {
-      MemoryStatus.active => ('有效', Colors.green),
-      MemoryStatus.superseded => ('已取代', Colors.orange),
-      MemoryStatus.invalidated => ('已失效', Colors.red),
+    final statusColor = switch (displayRow.statusValue) {
+      MemoryStatus.active => Colors.green,
+      MemoryStatus.superseded => Colors.orange,
+      MemoryStatus.invalidated => Colors.red,
     };
 
     return Card(
@@ -60,10 +41,10 @@ class MemoryAuditCard extends StatelessWidget {
             children: [
               Row(
                 children: [
-                  Chip(label: Text(kindLabel)),
+                  Chip(label: Text(displayRow.kind.label)),
                   const SizedBox(width: 8),
                   Expanded(
-                    child: Text(observerName,
+                    child: Text(displayRow.observerName,
                         style: const TextStyle(fontWeight: FontWeight.w600)),
                   ),
                   Container(
@@ -75,10 +56,10 @@ class MemoryAuditCard extends StatelessWidget {
                       border:
                           Border.all(color: statusColor.withValues(alpha: 0.4)),
                     ),
-                    child: Text(statusLabel,
+                    child: Text(displayRow.status.label,
                         style: TextStyle(fontSize: 11, color: statusColor)),
                   ),
-                  if (memory.pinned)
+                  if (displayRow.pinnedValue)
                     IconButton(
                       tooltip: '取消固定',
                       icon: const Icon(Icons.push_pin_rounded,
@@ -94,10 +75,10 @@ class MemoryAuditCard extends StatelessWidget {
                 ],
               ),
               const SizedBox(height: 8),
-              Text(memory.content, style: const TextStyle(fontSize: 15)),
+              Text(displayRow.content, style: const TextStyle(fontSize: 15)),
               const SizedBox(height: 6),
-              if (subjectNames.isNotEmpty)
-                Text('主体：${subjectNames.join("、")}',
+              if (displayRow.subjectNames.isNotEmpty)
+                Text('主体：${displayRow.subjectNames.join("、")}',
                     style: TextStyle(
                         fontSize: 12,
                         color: Theme.of(context).colorScheme.onSurfaceVariant)),
@@ -107,19 +88,19 @@ class MemoryAuditCard extends StatelessWidget {
                 runSpacing: 4,
                 children: [
                   Text(
-                      '重要度 ${memory.importance} · 置信 ${memory.confidence.toStringAsFixed(2)}',
+                      '重要度 ${displayRow.importance} · 置信 ${displayRow.confidence.toStringAsFixed(2)}',
                       style: const TextStyle(fontSize: 12)),
-                  if (memory.explicitlyRequested)
+                  if (displayRow.explicitlyRequested)
                     const Text('明确记忆',
                         style: TextStyle(fontSize: 12, color: Colors.purple)),
-                  Text(_time(memory.occurredAt),
+                  Text(_time(displayRow.occurredAt),
                       style: const TextStyle(fontSize: 12)),
-                  Text(memory.originType.name,
+                  Text(displayRow.originType.label,
                       style: const TextStyle(fontSize: 12)),
-                  Text(memory.originNameSnapshot,
+                  Text(displayRow.originName,
                       style: const TextStyle(fontSize: 12)),
-                  if (memory.invalidationReason != null)
-                    Text('失效原因：${memory.invalidationReason}',
+                  if (displayRow.invalidationReason != null)
+                    Text('失效原因：${displayRow.invalidationReason}',
                         style:
                             const TextStyle(fontSize: 12, color: Colors.red)),
                 ],
@@ -128,17 +109,18 @@ class MemoryAuditCard extends StatelessWidget {
               Wrap(
                 spacing: 8,
                 children: [
-                  if (memory.originType == MemoryOriginType.legacyMigration)
+                  if (displayRow.originTypeValue ==
+                      MemoryOriginType.legacyMigration)
                     Text(
-                      memory.sourceMessageIds.isEmpty
+                      displayRow.sourceMessageIds.isEmpty
                           ? '旧版迁移记录，无原始消息证据'
-                          : '${memory.sourceMessageIds.length} 条证据消息',
+                          : '${displayRow.sourceMessageIds.length} 条证据消息',
                       style:
                           const TextStyle(fontSize: 11, color: Colors.orange),
                     )
-                  else if (memory.sourceMessageIds.isEmpty)
+                  else if (displayRow.sourceMessageIds.isEmpty)
                     Text(
-                      '无原始消息 · ${memory.originNameSnapshot}',
+                      '无原始消息 · ${displayRow.originName}',
                       style: TextStyle(
                           fontSize: 11,
                           color:
@@ -146,15 +128,16 @@ class MemoryAuditCard extends StatelessWidget {
                     )
                   else
                     _SourceTraceButton(
-                      memory: memory,
+                      sourceMessageIds: displayRow.sourceMessageIds,
+                      originName: displayRow.originName,
                       messagesById: messagesById,
                     ),
-                  if (memory.supersedesIds.isNotEmpty)
-                    Text('取代了 ${memory.supersedesIds.length} 条旧记录',
+                  if (displayRow.supersedesCount > 0)
+                    Text('取代了 ${displayRow.supersedesCount} 条旧记录',
                         style:
                             const TextStyle(fontSize: 11, color: Colors.teal)),
-                  if ((supersededCount[memory.id] ?? 0) > 0)
-                    Text('被 ${supersededCount[memory.id]} 条记录取代',
+                  if ((supersededCount[displayRow.memoryId] ?? 0) > 0)
+                    Text('被 ${supersededCount[displayRow.memoryId]} 条记录取代',
                         style: const TextStyle(
                             fontSize: 11, color: Colors.deepOrange)),
                 ],
@@ -173,19 +156,20 @@ class MemoryAuditCard extends StatelessWidget {
 }
 
 class _SourceTraceButton extends StatelessWidget {
-  final PermanentMemory memory;
+  final List<String> sourceMessageIds;
+  final String originName;
   final Map<String, Message> messagesById;
 
   const _SourceTraceButton({
-    required this.memory,
+    required this.sourceMessageIds,
+    required this.originName,
     required this.messagesById,
   });
 
   @override
   Widget build(BuildContext context) {
-    final sourceIds = memory.sourceMessageIds;
     Message? foundMessage;
-    for (final id in sourceIds) {
+    for (final id in sourceMessageIds) {
       final candidate = messagesById[id];
       if (candidate != null) {
         foundMessage = candidate;
@@ -199,7 +183,7 @@ class _SourceTraceButton extends StatelessWidget {
         child: TextButton.icon(
           onPressed: null,
           icon: const Icon(Icons.link_off_rounded, size: 14),
-          label: Text('原消息已不可用（${memory.originNameSnapshot}）'),
+          label: Text('原消息已不可用（$originName）'),
           style: TextButton.styleFrom(
             foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
           ),

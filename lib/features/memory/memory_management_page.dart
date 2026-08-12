@@ -9,6 +9,7 @@ import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/features/memory/memory_audit_card.dart';
 import 'package:chat_group/features/memory/memory_audit_filter.dart';
 import 'package:chat_group/features/memory/memory_audit_filter_widget.dart';
+import 'package:chat_group/features/memory/memory_audit_presenter.dart';
 import 'package:chat_group/features/memory/memory_controls.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
@@ -102,6 +103,9 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
 
   Map<String, String> _originConversations() {
     final result = <String, String>{};
+    for (final group in _db.chatGroupBox.values) {
+      result[group.id] = group.name.trim();
+    }
     for (final memory in _allMemories) {
       final id = memory.originConversationId;
       if (id == null || id.trim().isEmpty) continue;
@@ -152,8 +156,18 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
     }
 
     final allMemories = _allMemories;
-    final filtered = _filter.apply(allMemories);
-    final charactersById = {for (final item in _characters) item.id: item};
+    final originConversations = _originConversations();
+    final presenter = MemoryAuditPresenter(
+      characterNames: {
+        for (final character in _characters) character.id: character.name
+      },
+      conversationNames: originConversations,
+    );
+    final filtered = _filter.apply(
+      allMemories,
+      searchText: (memory) => presenter.present(memory).searchProjection,
+    );
+    final displayRows = filtered.map(presenter.present).toList(growable: false);
     final supersededCount = <String, int>{};
     for (final memory in allMemories) {
       if (memory.status != MemoryStatus.active) continue;
@@ -185,7 +199,8 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
               child: MemoryAuditFilterWidget(
                 filter: _filter,
                 characters: _characters,
-                originConversations: _originConversations(),
+                originConversations: originConversations,
+                presenter: presenter,
                 onChanged: (f) => setState(() => _filter = f),
               ),
             ),
@@ -199,31 +214,43 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
           else
             SliverList(
               delegate: SliverChildBuilderDelegate(
-                (context, index) => MemoryAuditCard(
-                  memory: filtered[index],
-                  charactersById: charactersById,
-                  supersededCount: supersededCount,
-                  messagesById: _sourceMessagesById,
-                  onPin: () async {
-                    await _controls.pinPermanent(filtered[index]);
-                    await _loadSnapshot();
-                  },
-                  onUnpin: () async {
-                    await _controls.unpinPermanent(filtered[index]);
-                    await _loadSnapshot();
-                  },
-                  onAction: () => _showActionSheet(filtered[index]),
-                ),
+                (context, index) {
+                  final memoryId = displayRows[index].memoryId;
+                  return MemoryAuditCard(
+                    displayRow: displayRows[index],
+                    supersededCount: supersededCount,
+                    messagesById: _sourceMessagesById,
+                    onPin: () async {
+                      final memory = _memoryForId(memoryId);
+                      if (memory == null) return;
+                      await _controls.pinPermanent(memory);
+                      await _loadSnapshot();
+                    },
+                    onUnpin: () async {
+                      final memory = _memoryForId(memoryId);
+                      if (memory == null) return;
+                      await _controls.unpinPermanent(memory);
+                      await _loadSnapshot();
+                    },
+                    onAction: () {
+                      if (_memoryForId(memoryId) != null) {
+                        unawaited(_showActionSheet(memoryId));
+                      }
+                    },
+                  );
+                },
                 childCount: filtered.length,
               ),
             ),
-          SliverToBoxAdapter(child: _buildDiagnostic(context)),
+          SliverToBoxAdapter(child: _buildDiagnostic(context, presenter)),
         ],
       ),
     );
   }
 
-  Future<void> _showActionSheet(PermanentMemory memory) async {
+  Future<void> _showActionSheet(String memoryId) async {
+    final memory = _memoryForId(memoryId);
+    if (memory == null) return;
     await showModalBottomSheet(
       context: context,
       builder: (ctx) => SafeArea(
@@ -235,7 +262,9 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
                 leading: const Icon(Icons.push_pin_rounded),
                 title: const Text('取消固定'),
                 onTap: () async {
-                  await _controls.unpinPermanent(memory);
+                  final current = _memoryForId(memoryId);
+                  if (current == null) return;
+                  await _controls.unpinPermanent(current);
                   await _loadSnapshot();
                   if (ctx.mounted) Navigator.pop(ctx);
                 },
@@ -245,7 +274,9 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
                 leading: const Icon(Icons.push_pin_outlined),
                 title: const Text('固定'),
                 onTap: () async {
-                  await _controls.pinPermanent(memory);
+                  final current = _memoryForId(memoryId);
+                  if (current == null) return;
+                  await _controls.pinPermanent(current);
                   await _loadSnapshot();
                   if (ctx.mounted) Navigator.pop(ctx);
                 },
@@ -255,7 +286,8 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
               title: const Text('修正'),
               onTap: () async {
                 if (ctx.mounted) Navigator.pop(ctx);
-                await _correctionDialog(memory);
+                final current = _memoryForId(memoryId);
+                if (current != null) await _correctionDialog(current);
               },
             ),
             ListTile(
@@ -263,7 +295,8 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
               title: const Text('删除'),
               onTap: () async {
                 if (ctx.mounted) Navigator.pop(ctx);
-                await _confirmDelete(memory);
+                final current = _memoryForId(memoryId);
+                if (current != null) await _confirmDelete(current);
               },
             ),
           ],
@@ -272,10 +305,26 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
     );
   }
 
+  PermanentMemory? _memoryForId(String id) {
+    for (final memory in _allMemories) {
+      if (memory.id == id) return memory;
+    }
+    return null;
+  }
+
   Future<void> _correctionDialog(PermanentMemory old) async {
     final contentController = TextEditingController(text: old.content);
-    final subjectController =
-        TextEditingController(text: old.subjectIds.join(', '));
+    final presenter = _auditPresenter();
+    final originalSubjectIdsByName = <String, List<String>>{};
+    for (final id in old.subjectIds) {
+      final name = _subjectDisplayName(id, presenter);
+      originalSubjectIdsByName.putIfAbsent(name, () => []).add(id);
+    }
+    final subjectController = TextEditingController(
+      text: old.subjectIds
+          .map((id) => _subjectDisplayName(id, presenter))
+          .join(', '),
+    );
     String? subjectError;
     if (!mounted) return;
     final pageContext = context;
@@ -302,7 +351,7 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
                     controller: subjectController,
                     decoration: InputDecoration(
                       border: const OutlineInputBorder(),
-                      hintText: 'user, c1, c2',
+                      hintText: '我, 角色名1, 角色名2',
                       errorText: subjectError,
                     ),
                   ),
@@ -316,15 +365,29 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
                   onPressed: () {
                     final content = contentController.text.trim();
                     if (content.isEmpty) return;
+                    final subjectNameUses = <String, int>{};
                     final rawSubjects = subjectController.text
                         .split(',')
                         .map((s) => s.trim())
                         .where((s) => s.isNotEmpty)
+                        .map(
+                          (name) => _subjectId(
+                            name,
+                            presenter,
+                            originalSubjectIdsByName,
+                            subjectNameUses,
+                          ),
+                        )
                         .toSet()
                         .toList();
-                    if (!_validateSubjectIds(rawSubjects)) {
+                    if (!_validateSubjectIds(
+                      rawSubjects,
+                      preservedIds: originalSubjectIdsByName.values.expand(
+                        (ids) => ids,
+                      ),
+                    )) {
                       setDialogState(() {
-                        subjectError = '只允许 "user" 或现有 AI 角色 ID';
+                        subjectError = '只允许填写“我”或现有 AI 角色名称';
                       });
                       return;
                     }
@@ -401,13 +464,61 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
     await _loadSnapshot();
   }
 
-  bool _validateSubjectIds(List<String> ids) {
+  bool _validateSubjectIds(
+    List<String> ids, {
+    Iterable<String> preservedIds = const [],
+  }) {
     if (ids.isEmpty) return true;
-    final validIds = _characters.map((c) => c.id).toSet();
+    final validIds = {
+      ..._characters.map((c) => c.id),
+      ...preservedIds,
+    };
     return ids.every((id) => id == 'user' || validIds.contains(id));
   }
 
-  Widget _buildDiagnostic(BuildContext context) {
+  MemoryAuditPresenter _auditPresenter() {
+    final originConversations = _originConversations();
+    return MemoryAuditPresenter(
+      characterNames: {
+        for (final character in _characters) character.id: character.name,
+      },
+      conversationNames: originConversations,
+    );
+  }
+
+  String _subjectDisplayName(String id, MemoryAuditPresenter presenter) {
+    if (id == 'user') return '我';
+    return presenter.characterNames[id] ??
+        presenter.characterSnapshotNames[id] ??
+        '已删除角色';
+  }
+
+  String _subjectId(
+    String name,
+    MemoryAuditPresenter presenter,
+    Map<String, List<String>> originalIdsByName,
+    Map<String, int> nameUses,
+  ) {
+    final originalIds = originalIdsByName[name];
+    final useIndex = nameUses[name] ?? 0;
+    if (originalIds != null && useIndex < originalIds.length) {
+      nameUses[name] = useIndex + 1;
+      return originalIds[useIndex];
+    }
+    if (name == '我') return 'user';
+    for (final entry in presenter.characterNames.entries) {
+      if (entry.value.trim() == name) return entry.key;
+    }
+    for (final entry in presenter.characterSnapshotNames.entries) {
+      if (entry.value.trim() == name) return entry.key;
+    }
+    return name;
+  }
+
+  Widget _buildDiagnostic(
+    BuildContext context,
+    MemoryAuditPresenter presenter,
+  ) {
     final legacyMemories = _allMemories
         .where((m) => m.originType == MemoryOriginType.legacyMigration)
         .length;
@@ -435,7 +546,10 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
               if (char.memorySummary.trim().isNotEmpty ||
                   legacyCharMemories.any((cm) => cm.characterId == char.id))
                 _CharMemoryTile(
-                    char: char, legacyCharMemories: legacyCharMemories),
+                  char: char,
+                  legacyCharMemories: legacyCharMemories,
+                  presenter: presenter,
+                ),
           ],
           if (legacyMemories > 0)
             Padding(
@@ -457,10 +571,12 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
 class _CharMemoryTile extends StatelessWidget {
   final AICharacter char;
   final List<CharacterMemory> legacyCharMemories;
+  final MemoryAuditPresenter presenter;
 
   const _CharMemoryTile({
     required this.char,
     required this.legacyCharMemories,
+    required this.presenter,
   });
 
   @override
@@ -507,7 +623,7 @@ class _CharMemoryTile extends StatelessWidget {
           ExpansionTile(
             dense: true,
             initiallyExpanded: true,
-            title: Text('群组 ${entry.key}'),
+            title: Text(presenter.resolveConversationName(entry.key)),
             subtitle: Text('${entry.value.length} 条记忆'),
             children: [
               for (final cm in entry.value) ...[
