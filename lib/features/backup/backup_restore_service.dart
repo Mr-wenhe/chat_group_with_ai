@@ -1,6 +1,7 @@
 import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/features/ai_character/character_gender_migrator.dart';
 
 import 'backup_exporter.dart';
 import 'backup_inspector.dart';
@@ -12,12 +13,14 @@ class BackupRestoreService {
   final Directory mediaDirectory;
   final Directory tempRoot;
   final CommitWriteHook? onCommitWrite;
+  final CharacterGenderMigrator? genderMigrator;
 
   const BackupRestoreService({
     required this.db,
     required this.mediaDirectory,
     required this.tempRoot,
     this.onCommitWrite,
+    this.genderMigrator,
   });
 
   Future<BackupExportResult> createBackup({
@@ -57,5 +60,6 @@ class BackupRestoreService {
         db: db,
         mediaDirectory: mediaDirectory,
         onCommitWrite: onCommitWrite,
+        genderMigrator: genderMigrator,
       ).restore(prepared, strategy);
 }

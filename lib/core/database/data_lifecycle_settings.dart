@@ -397,6 +397,7 @@ class DataLifecycleSettings {
       'avatar': character.avatar,
       'age': character.age,
       'role': character.role,
+      'gender': character.gender.name,
     };
     await db.appSettingsBox.put(deletedCharacterSnapshotsKey, snapshots);
   }
@@ -691,6 +692,12 @@ class DataLifecycleSettings {
 
   AICharacter? _characterFromSnapshot(String id, dynamic raw) {
     if (raw is! Map) return null;
+    final genderName = raw['gender']?.toString();
+    final gender = switch (genderName) {
+      'male' => CharacterGender.male,
+      'female' => CharacterGender.female,
+      _ => CharacterGender.female,
+    };
     return AICharacter(
       id: id,
       name: raw['name']?.toString() ?? '已删除角色',
@@ -704,6 +711,8 @@ class DataLifecycleSettings {
       apiConfigId: '',
       isActive: false,
       agenticEnabled: false,
+      gender: gender,
+      hasKnownGender: genderName == 'male' || genderName == 'female',
     );
   }
 }

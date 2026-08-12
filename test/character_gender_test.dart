@@ -40,6 +40,32 @@ void main() {
     expect(amy.rolePlaySystemPrompt, contains(amy.systemPrompt));
   });
 
+  test(
+      'shared role-play prompt contains the full identity and preserves prompt',
+      () {
+    final male = character(
+      name: '阿杰',
+      role: '工程师',
+      systemPrompt: '先确认事实，再给出简短方案。',
+      gender: CharacterGender.male,
+    );
+    final femaleWithoutPrompt = character(
+      name: '小雨',
+      role: '记者',
+      systemPrompt: '',
+      gender: CharacterGender.female,
+    );
+
+    expect(male.rolePlaySystemPrompt, contains(male.promptIdentity));
+    expect(male.rolePlaySystemPrompt, contains('角色性别为男'));
+    expect(male.rolePlaySystemPrompt, contains(male.systemPrompt));
+    expect(
+      femaleWithoutPrompt.rolePlaySystemPrompt,
+      contains(femaleWithoutPrompt.promptIdentity),
+    );
+    expect(femaleWithoutPrompt.rolePlaySystemPrompt, contains('角色性别为女'));
+  });
+
   test('local migration uses explicit identity evidence before name hints', () {
     final result = CharacterGenderMigrator.inferLocally(
       character(

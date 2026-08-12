@@ -124,7 +124,7 @@ String formatMemberStatus(
     ReplyBlockReason.alreadyGenerating => '生成中',
     ReplyBlockReason.networkError => '网络异常',
   };
-  return '${character.gender.label} · ${character.role} · ${character.age}岁 · '
+  return '${character.displayGenderLabel} · ${character.role} · ${character.age}岁 · '
       '$status · $usage';
 }
 
@@ -3051,8 +3051,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       final candidates = otherCharacters.isEmpty
           ? '暂无其他 AI 角色'
           : otherCharacters
-              .map((c) =>
-                  '${c.promptIdentity}，${c.personalityTags.join('/')} ')
+              .map((c) => '${c.promptIdentity}，${c.personalityTags.join('/')} ')
               .join('；');
       final sceneContext = scene.roomContextPrompt(candidates);
       if (sceneContext.isNotEmpty) {
@@ -3114,7 +3113,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           _characters.where((c) => c.id != character.id).toList();
       if (otherCharacters.isNotEmpty) {
         final charInfo = otherCharacters
-            .map((c) => '${c.name}(${c.gender.label}, ${c.role}, ${c.age}岁)')
+            .map((c) =>
+                '${c.name}(${c.displayGenderLabel}, ${c.role}, ${c.age}岁)')
             .join('、');
         msgs.add({
           'role': 'system',
@@ -3133,7 +3133,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (otherCharacters2.isNotEmpty) {
       final characterInfo = otherCharacters2
           .map((c) =>
-              '${c.name}(${c.gender.label}, ${c.role}, ${c.age}岁, ${c.personalityTags.join('/')})')
+              '${c.name}(${c.displayGenderLabel}, ${c.role}, ${c.age}岁, ${c.personalityTags.join('/')})')
           .join('；');
       msgs.add({'role': 'system', 'content': '群聊中的其他角色：$characterInfo'});
     }

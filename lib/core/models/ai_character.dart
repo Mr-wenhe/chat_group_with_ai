@@ -89,6 +89,10 @@ class AICharacter extends HiveObject {
   @HiveField(21, defaultValue: CharacterGender.female)
   CharacterGender gender;
 
+  /// Deleted snapshots from before gender was stored keep their identity but
+  /// must not present the Hive compatibility default as a known gender.
+  final bool hasKnownGender;
+
   AICharacter({
     String? id,
     required this.name,
@@ -112,6 +116,7 @@ class AICharacter extends HiveObject {
     List<String>? skillIds,
     List<ToolPermission>? toolPermissions,
     this.gender = CharacterGender.female,
+    this.hasKnownGender = true,
   })  : id = id ?? const Uuid().v4(),
         modelName = modelName ?? ApiProvider.defaultModels[apiProvider] ?? '',
         createdAt = createdAt ?? DateTime.now(),
@@ -120,13 +125,15 @@ class AICharacter extends HiveObject {
         toolPermissions = toolPermissions ??
             const [ToolPermission.skillCreate, ToolPermission.skillDownload];
 
-  String get promptIdentity => '$name，$age岁，性别${gender.label}，身份是$role';
+  String get displayGenderLabel => hasKnownGender ? gender.label : '未知';
+
+  String get promptIdentity => '$name，$age岁，性别$displayGenderLabel，身份是$role';
 
   String get rolePlaySystemPrompt {
     final prompt = systemPrompt.trim().isEmpty ? null : systemPrompt;
     return [
       '你是$promptIdentity。',
-      '角色性别为${gender.label}，请保持称谓和角色表现与该设定一致。',
+      '角色性别为$displayGenderLabel，请保持称谓和角色表现与该设定一致。',
       if (prompt != null) prompt,
     ].join('\n');
   }

@@ -15,13 +15,47 @@ import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/features/backup/backup_models.dart';
+import 'package:chat_group/features/backup/backup_entity_codec.dart';
 import 'package:chat_group/features/backup/backup_restore_service.dart';
 import 'package:chat_group/features/backup/staged_backup_data.dart';
+import 'package:chat_group/features/ai_character/character_gender_migrator.dart';
+import 'package:chat_group/features/ai_character/character_gender_migration_state.dart';
 import 'package:chat_group/features/memory/memory_migrator.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers/lifecycle_hive.dart';
+
+class _FakeGenderMigrator extends CharacterGenderMigrator {
+  final bool complete;
+  bool called = false;
+  Set<String> candidateIdsAtCall = {};
+
+  _FakeGenderMigrator(
+    super.db, {
+    required this.complete,
+  });
+
+  @override
+  Future<int> migrate() async {
+    called = true;
+    final raw = db.appSettingsBox.get(CharacterGenderMigrator.stateKey);
+    final state =
+        raw is Map ? CharacterGenderMigrationState.tryFromMap(raw) : null;
+    candidateIdsAtCall = {...?state?.candidateIds};
+    if (!complete) return 0;
+
+    for (final id in candidateIdsAtCall) {
+      final character = db.aiCharacterBox.get(id);
+      if (character == null) continue;
+      character.gender = CharacterGender.male;
+      await db.aiCharacterBox.put(id, character);
+    }
+    await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, true);
+    await db.appSettingsBox.delete(CharacterGenderMigrator.stateKey);
+    return candidateIdsAtCall.length;
+  }
+}
 
 void main() {
   late Directory testRoot;
@@ -156,6 +190,46 @@ void main() {
     );
     final restoredMedia = db.messageBox.get('msg-1')!.media!.single;
     expect(await File(restoredMedia.localPath).readAsBytes(), [1, 2, 3, 4]);
+  });
+
+  test('backup round-trip preserves both gender values', () async {
+    final attachment = File('${mediaDirectory.path}/gender.txt');
+    await attachment.writeAsString('gender');
+    await _seedCoreData(db, attachment);
+    final first = db.aiCharacterBox.get('char-1')!
+      ..gender = CharacterGender.male;
+    await first.save();
+    final second = testCharacter('char-2', apiConfigId: 'api-1')
+      ..gender = CharacterGender.female;
+    await db.aiCharacterBox.put(second.id, second);
+
+    final backup = File('${testRoot.path}/gender-roundtrip.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(destination: backup);
+    final archive = ZipDecoder().decodeBytes(await backup.readAsBytes());
+    final records = _recordsFromArchive(archive, 'data/characters.json');
+    expect(
+      {
+        for (final record in records)
+          BackupEntityCodec.key(record):
+              BackupEntityCodec.value(record)['gender'],
+      },
+      {'char-1': 'male', 'char-2': 'female'},
+    );
+
+    await reopenEmptyDatabase();
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.emptyOnly,
+    );
+    expect(db.aiCharacterBox.get('char-1')!.gender, CharacterGender.male);
+    expect(db.aiCharacterBox.get('char-2')!.gender, CharacterGender.female);
   });
 
   test('repeated import supports skip and copy-with-new-ids', () async {
@@ -1105,6 +1179,327 @@ void main() {
     final second = await MemoryMigrator(db).migrate();
     expect(second.alreadyMigrated, isTrue);
     expect(db.permanentMemoryBox.values, hasLength(2));
+  });
+
+  test('legacy character restore migrates only the missing gender', () async {
+    final legacy = await _writeV1Fixture(testRoot);
+    final fixture = await _rewriteBackupJson(
+      legacy,
+      File('${testRoot.path}/legacy-missing-gender.cgbak'),
+      'data/characters.json',
+      (value) {
+        final character = ((value as List).single as Map)['value'] as Map;
+        character['role'] = '父亲';
+        character['systemPrompt'] = '我是男性';
+      },
+    );
+    final locked = testCharacter('locked')..gender = CharacterGender.male;
+    await db.aiCharacterBox.put(locked.id, locked);
+    await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, true);
+
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final prepared = await service.inspect(fixture);
+    addTearDown(prepared.dispose);
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.skipExisting,
+    );
+
+    expect(db.aiCharacterBox.get('char-1')!.gender, CharacterGender.male);
+    expect(db.aiCharacterBox.get('locked')!.gender, CharacterGender.male);
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.migrationKey), true);
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.stateKey), isNull);
+  });
+
+  test('legacy restore completes gender migration before returning', () async {
+    final legacy = await _writeV1Fixture(testRoot);
+    final fixture = await _rewriteBackupJson(
+      legacy,
+      File('${testRoot.path}/legacy-restore-migrates.cgbak'),
+      'data/characters.json',
+      (value) {
+        final character = ((value as List).single as Map)['value'] as Map;
+        character['role'] = '父亲';
+        character['systemPrompt'] = '我是男性';
+      },
+    );
+    final migrator = _FakeGenderMigrator(db, complete: true);
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+      genderMigrator: migrator,
+    );
+    final prepared = await service.inspect(fixture);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.emptyOnly,
+    );
+
+    expect(migrator.called, isTrue);
+    expect(db.aiCharacterBox.get('char-1')!.gender, CharacterGender.male);
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.migrationKey), true);
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.stateKey), isNull);
+  });
+
+  test('invalid gender state keeps other database candidates on legacy restore',
+      () async {
+    final existing = testCharacter('old-candidate')
+      ..role = '父亲'
+      ..systemPrompt = '我是男性';
+    await db.aiCharacterBox.put(existing.id, existing);
+    await db.appSettingsBox.put(CharacterGenderMigrator.stateKey, {
+      'candidateIds': ['old-candidate'],
+      'completedIds': ['missing-candidate'],
+      'decisions': <String, dynamic>{},
+    });
+    await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, false);
+
+    final legacy = await _writeV1Fixture(testRoot);
+    final fixture = await _rewriteBackupJson(
+      legacy,
+      File('${testRoot.path}/legacy-invalid-gender-state.cgbak'),
+      'data/characters.json',
+      (value) {
+        final character = ((value as List).single as Map)['value'] as Map;
+        character['role'] = '父亲';
+        character['systemPrompt'] = '我是男性';
+      },
+    );
+    final migrator = _FakeGenderMigrator(db, complete: false);
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+      genderMigrator: migrator,
+    );
+    final prepared = await service.inspect(fixture);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.skipExisting,
+    );
+
+    expect(migrator.called, isTrue);
+    expect(migrator.candidateIdsAtCall,
+        containsAll(<String>{'old-candidate', 'char-1'}));
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.migrationKey), false);
+  });
+
+  test(
+      'completed gender migration limits invalid state rebuild to restored IDs',
+      () async {
+    final existing = testCharacter('old-candidate')
+      ..role = '父亲'
+      ..systemPrompt = '我是男性';
+    await db.aiCharacterBox.put(existing.id, existing);
+    await db.appSettingsBox.put(CharacterGenderMigrator.stateKey, {
+      'candidateIds': ['old-candidate'],
+      'completedIds': ['missing-candidate'],
+      'decisions': <String, dynamic>{},
+    });
+    await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, true);
+
+    final legacy = await _writeV1Fixture(testRoot);
+    final fixture = await _rewriteBackupJson(
+      legacy,
+      File('${testRoot.path}/legacy-completed-invalid-gender-state.cgbak'),
+      'data/characters.json',
+      (value) {
+        final character = ((value as List).single as Map)['value'] as Map;
+        character['role'] = '父亲';
+        character['systemPrompt'] = '我是男性';
+      },
+    );
+    final migrator = _FakeGenderMigrator(db, complete: false);
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+      genderMigrator: migrator,
+    );
+    final prepared = await service.inspect(fixture);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.skipExisting,
+    );
+
+    expect(migrator.called, isTrue);
+    expect(migrator.candidateIdsAtCall, contains('char-1'));
+    expect(migrator.candidateIdsAtCall, isNot(contains('old-candidate')));
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.migrationKey), false);
+  });
+
+  test('completed gender migration discards a valid residual state', () async {
+    final existing = testCharacter('old-candidate')
+      ..role = '父亲'
+      ..systemPrompt = '我是男性';
+    await db.aiCharacterBox.put(existing.id, existing);
+    await db.appSettingsBox.put(
+      CharacterGenderMigrator.stateKey,
+      CharacterGenderMigrationState(
+        candidateIds: {'old-candidate'},
+        decisions: {'old-candidate': CharacterGender.female},
+      ).toMap(),
+    );
+    await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, true);
+
+    final legacy = await _writeV1Fixture(testRoot);
+    final fixture = await _rewriteBackupJson(
+      legacy,
+      File('${testRoot.path}/legacy-completed-valid-gender-state.cgbak'),
+      'data/characters.json',
+      (value) {
+        final character = ((value as List).single as Map)['value'] as Map;
+        character['role'] = '父亲';
+        character['systemPrompt'] = '我是男性';
+      },
+    );
+    final migrator = _FakeGenderMigrator(db, complete: false);
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+      genderMigrator: migrator,
+    );
+    final prepared = await service.inspect(fixture);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.skipExisting,
+    );
+
+    expect(migrator.called, isTrue);
+    expect(migrator.candidateIdsAtCall, {'char-1'});
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.migrationKey), false);
+  });
+
+  test('incomplete gender migration rebuilds candidates when state is missing',
+      () async {
+    final existing = testCharacter('old-candidate')
+      ..role = '父亲'
+      ..systemPrompt = '我是男性';
+    await db.aiCharacterBox.put(existing.id, existing);
+    await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, false);
+
+    final legacy = await _writeV1Fixture(testRoot);
+    final fixture = await _rewriteBackupJson(
+      legacy,
+      File('${testRoot.path}/legacy-missing-gender-state.cgbak'),
+      'data/characters.json',
+      (value) {
+        final character = ((value as List).single as Map)['value'] as Map;
+        character['role'] = '父亲';
+        character['systemPrompt'] = '我是男性';
+      },
+    );
+    final migrator = _FakeGenderMigrator(db, complete: false);
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+      genderMigrator: migrator,
+    );
+    final prepared = await service.inspect(fixture);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.skipExisting,
+    );
+
+    expect(migrator.called, isTrue);
+    expect(migrator.candidateIdsAtCall,
+        containsAll(<String>{'old-candidate', 'char-1'}));
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.migrationKey), false);
+  });
+
+  test('legacy restore clears completed gender progress for the restored ID',
+      () async {
+    final legacy = await _writeV1Fixture(testRoot);
+    final fixture = await _rewriteBackupJson(
+      legacy,
+      File('${testRoot.path}/legacy-completed-gender.cgbak'),
+      'data/characters.json',
+      (value) {
+        final character = ((value as List).single as Map)['value'] as Map;
+        character['role'] = '父亲';
+        character['systemPrompt'] = '我是男性';
+      },
+    );
+    await db.appSettingsBox.put(
+      CharacterGenderMigrator.stateKey,
+      CharacterGenderMigrationState(
+        candidateIds: {'char-1'},
+        completedIds: {'char-1'},
+      ).toMap(),
+    );
+    await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, true);
+
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final prepared = await service.inspect(fixture);
+    addTearDown(prepared.dispose);
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.skipExisting,
+    );
+
+    expect(db.aiCharacterBox.get('char-1')!.gender, CharacterGender.male);
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.migrationKey), true);
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.stateKey), isNull);
+  });
+
+  test('legacy restore clears a stale gender decision for the restored ID',
+      () async {
+    final legacy = await _writeV1Fixture(testRoot);
+    final fixture = await _rewriteBackupJson(
+      legacy,
+      File('${testRoot.path}/legacy-decided-gender.cgbak'),
+      'data/characters.json',
+      (value) {
+        final character = ((value as List).single as Map)['value'] as Map;
+        character['role'] = '父亲';
+        character['systemPrompt'] = '我是男性';
+      },
+    );
+    await db.appSettingsBox.put(
+      CharacterGenderMigrator.stateKey,
+      CharacterGenderMigrationState(
+        candidateIds: {'char-1'},
+        decisions: {'char-1': CharacterGender.female},
+      ).toMap(),
+    );
+    await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, true);
+
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final prepared = await service.inspect(fixture);
+    addTearDown(prepared.dispose);
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.skipExisting,
+    );
+
+    expect(db.aiCharacterBox.get('char-1')!.gender, CharacterGender.male);
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.migrationKey), true);
+    expect(db.appSettingsBox.get(CharacterGenderMigrator.stateKey), isNull);
   });
 
   test('missing global references are rejected before any restore write',

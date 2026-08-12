@@ -18,20 +18,39 @@ import 'features/memory/observation_entry.dart';
 import 'features/settings/settings_page.dart';
 import 'providers/providers.dart';
 
+const startupCharacterGenderMigrationTimeout = Duration(seconds: 6);
+
+/// Runs before [runApp] so every legacy character has a durable gender before
+/// any chat prompt can be built, while still bounding startup on bad networks.
+Future<void> runCharacterGenderMigration(
+  DatabaseService db, {
+  CharacterGenderMigrator? migrator,
+  Duration timeout = startupCharacterGenderMigrationTimeout,
+}) async {
+  final activeMigrator = migrator ?? CharacterGenderMigrator(db);
+  final migration = activeMigrator.migrate();
+  try {
+    await migration.timeout(timeout);
+  } on TimeoutException {
+    activeMigrator.cancel();
+    try {
+      await migration;
+    } on Object {
+      // The migrator has already applied its local fallback and safe
+      // diagnostic before completing or failing this cancellation drain.
+    }
+  } on Object {
+    // The migrator records only safe diagnostic categories; startup remains
+    // usable if storage or an unexpected platform error defeats the retry.
+  }
+}
+
 void main() async {
   DedupKeyEventBinding.ensureInitialized();
 
   final db = DatabaseService();
   try {
     await db.init();
-    // 幂等迁移；失败不影响启动。
-    try {
-      final migrator = MemoryMigrator(db);
-      await migrator.migrate();
-      await CharacterGenderMigrator(db).migrate();
-    } on Object catch (_) {
-      // 静默失败，下次启动重试。
-    }
   } catch (error) {
     runApp(DatabaseRecoveryApp(
       error: error,
@@ -39,6 +58,14 @@ void main() async {
     ));
     return;
   }
+  // These migrations are independent: a legacy-memory warning must not skip
+  // the gender pass required before the first real character prompt.
+  try {
+    await MemoryMigrator(db).migrate();
+  } on Object {
+    // Memory migration is retryable and must not prevent the UI from opening.
+  }
+  await runCharacterGenderMigration(db);
 
   final messageIndexReady = db.ensureMessageIndex();
   unawaited(

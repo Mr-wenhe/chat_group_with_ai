@@ -5,6 +5,7 @@ import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/database/data_lifecycle_settings.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/character_skill.dart';
@@ -192,7 +193,8 @@ void main() {
       () async {
     const characterId = 'c1';
     final conversationId = DirectChatSession.conversationIdFor(characterId);
-    await db.aiCharacterBox.put(characterId, testCharacter(characterId));
+    final deleted = testCharacter(characterId)..gender = CharacterGender.male;
+    await db.aiCharacterBox.put(characterId, deleted);
     await db.aiCharacterBox.put('c2', testCharacter('c2'));
     await db.chatGroupBox.put(
       'g1',
@@ -355,6 +357,11 @@ void main() {
     expect(db.workModeWorkspaceBox.isEmpty, isTrue);
     expect(db.appSettingsBox.get('memory_pinned_keys_v1'), ['relationship:r']);
     expect(service.deletedCharacter(characterId)!.name, '角色c1');
+    expect(service.deletedCharacter(characterId)!.gender, CharacterGender.male);
+
+    await Hive.close();
+    await reopenLifecycleHive(hiveDirectory);
+    expect(service.deletedCharacter(characterId)!.gender, CharacterGender.male);
 
     final loaded = await ChatRoomLoader(db: db, resolveApiConfig: (_) => null)
         .load(conversationId);
@@ -409,6 +416,28 @@ void main() {
     expect(loaded.activeCharacters, isEmpty);
     expect(loaded.allCharacters.single.name, '角色history-character');
     expect(loaded.allCharacters.single.avatar, '角');
+  });
+
+  test('legacy deleted snapshot without gender does not surface fake female',
+      () async {
+    await db.appSettingsBox.put(
+      DataLifecycleSettings.deletedCharacterSnapshotsKey,
+      {
+        'legacy-deleted': {
+          'name': '旧删除角色',
+          'avatar': '旧',
+          'age': 20,
+          'role': '旧角色',
+        },
+      },
+    );
+
+    final snapshot = service.deletedCharacter('legacy-deleted');
+    expect(snapshot, isNotNull);
+    expect(snapshot!.hasKnownGender, isFalse);
+    expect(snapshot.displayGenderLabel, '未知');
+    expect(snapshot.promptIdentity, isNot(contains('性别女')));
+    expect(service.deletedCharacters().single.name, '旧删除角色');
   });
 
   test('character full policy deletes private history and orphan attachment',

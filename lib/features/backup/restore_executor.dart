@@ -4,6 +4,8 @@ import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/features/ai_character/character_gender_migrator.dart';
+import 'package:chat_group/features/ai_character/character_gender_migration_state.dart';
 import 'package:chat_group/features/memory/memory_migrator.dart';
 import 'package:chat_group/features/memory/relationship_event_service.dart';
 import 'package:crypto/crypto.dart';
@@ -23,11 +25,13 @@ class RestoreExecutor {
   final DatabaseService db;
   final Directory mediaDirectory;
   final CommitWriteHook? onCommitWrite;
+  final CharacterGenderMigrator? genderMigrator;
 
   const RestoreExecutor({
     required this.db,
     required this.mediaDirectory,
     this.onCommitWrite,
+    this.genderMigrator,
   });
 
   Future<RestoreReport> restore(
@@ -61,6 +65,7 @@ class RestoreExecutor {
     );
     plan.validate(db);
     final inserted = <String, int>{};
+    var genderMigrationQueued = false;
     final transaction = _RestoreTransaction(onCommitWrite);
     try {
       if (plan.isV1) {
@@ -101,6 +106,8 @@ class RestoreExecutor {
           'characters',
           inserted,
           transaction);
+      genderMigrationQueued =
+          await _queueLegacyGenderMigration(plan.characters, transaction);
       await _putRecords(db.chatGroupBox, plan.groups,
           BackupEntityCodec.decodeGroup, 'groups', inserted, transaction);
       await _putRecords(
@@ -189,6 +196,9 @@ class RestoreExecutor {
       db.resetLifecycleCaches();
       await db.ensureMessageIndex();
       DocumentUnderstandingService.clearCache();
+      if (genderMigrationQueued) {
+        await (genderMigrator ?? CharacterGenderMigrator(db)).migrate();
+      }
       return RestoreReport(
         inserted: inserted,
         skipped: plan.skipped,
@@ -297,6 +307,53 @@ class RestoreExecutor {
       );
       inserted[countKey] = (inserted[countKey] ?? 0) + 1;
     }
+  }
+
+  Future<bool> _queueLegacyGenderMigration(
+    List<Map<String, dynamic>> characters,
+    _RestoreTransaction transaction,
+  ) async {
+    final missingGenderIds = characters
+        .where((record) => BackupEntityCodec.value(record)['gender'] == null)
+        .map(BackupEntityCodec.key)
+        .toSet();
+    if (missingGenderIds.isEmpty) return false;
+
+    final existing = db.appSettingsBox.get(CharacterGenderMigrator.stateKey);
+    final migrationCompleted =
+        db.appSettingsBox.get(CharacterGenderMigrator.migrationKey) == true;
+    final current = existing is Map
+        ? (migrationCompleted
+            ? null
+            : CharacterGenderMigrationState.tryFromMap(existing))
+        : null;
+    final databaseCharacterIds =
+        db.aiCharacterBox.values.map((character) => character.id);
+    final rebuildAllCandidates = !migrationCompleted && current == null;
+    final completedIds = {...?current?.completedIds}
+      ..removeAll(missingGenderIds);
+    final decisions = {...?current?.decisions}
+      ..removeWhere((id, _) => missingGenderIds.contains(id));
+    final state = CharacterGenderMigrationState(
+      candidateIds: {
+        ...?current?.candidateIds,
+        if (rebuildAllCandidates) ...databaseCharacterIds,
+        ...missingGenderIds,
+      },
+      completedIds: completedIds,
+      decisions: decisions,
+    );
+    await transaction.putSetting(
+      db.appSettingsBox,
+      CharacterGenderMigrator.stateKey,
+      state.toMap(),
+    );
+    await transaction.putSetting(
+      db.appSettingsBox,
+      CharacterGenderMigrator.migrationKey,
+      false,
+    );
+    return true;
   }
 }
 

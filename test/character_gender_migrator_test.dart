@@ -1,7 +1,76 @@
+import 'dart:convert';
+import 'dart:io';
+
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
-import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/models/api_config.dart';
+import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/ai_character/character_gender_migrator.dart';
+import 'package:chat_group/services/chat_api_service.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive/hive.dart';
+
+import 'helpers/lifecycle_hive.dart';
+
+class _FakeCredentials implements ApiCredentialResolver {
+  final Map<String, String?> values;
+  final requestedConfigIds = <String>[];
+
+  _FakeCredentials(this.values);
+
+  @override
+  Future<String?> resolve(ApiConfig config) async {
+    requestedConfigIds.add(config.id);
+    return values[config.id];
+  }
+}
+
+class _FakeChatApiService extends ChatApiService {
+  final Map<String, Map<String, dynamic>> responsesByModel;
+  final Map<String, Duration> delaysByModel;
+  final Map<String, Object> errorsByModel;
+  final calls = <({String model, List<Map<String, dynamic>> messages})>[];
+
+  _FakeChatApiService({
+    this.responsesByModel = const {},
+    this.delaysByModel = const {},
+    this.errorsByModel = const {},
+  });
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessage({
+    required String apiKey,
+    required ApiProvider provider,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration? receiveTimeout,
+    int maxRetries = 3,
+    CancelToken? cancelToken,
+  }) async {
+    calls.add((model: model, messages: messages));
+    final delay = delaysByModel[model];
+    if (delay != null) await Future<void>.delayed(delay);
+    final error = errorsByModel[model];
+    if (error != null) throw error;
+    return responsesByModel[model] ??
+        const <String, dynamic>{'success': true, 'message': '[]'};
+  }
+}
+
+ApiConfig apiConfig(String id, {bool hasCredential = true}) => ApiConfig(
+      id: id,
+      name: id,
+      provider: 'custom',
+      modelName: 'model-$id',
+      customBaseUrl: 'https://example.invalid',
+      hasCredential: hasCredential,
+      credentialId: hasCredential ? 'credential-$id' : '',
+    );
 
 void main() {
   AICharacter character({
@@ -9,6 +78,7 @@ void main() {
     String name = 'Amy',
     String role = '助手',
     String systemPrompt = '',
+    String apiConfigId = '',
   }) =>
       AICharacter(
         id: id,
@@ -20,285 +90,386 @@ void main() {
         systemPrompt: systemPrompt,
         apiKey: '',
         apiProvider: 'custom',
+        apiConfigId: apiConfigId,
       );
 
-  Message message({
-    required String senderId,
-    required String senderType,
-    required String content,
-    required DateTime timestamp,
-  }) =>
-      Message(
-        id: '$senderId-${timestamp.microsecondsSinceEpoch}-$senderType',
-        groupId: 'group',
-        senderId: senderId,
-        senderType: senderType,
-        content: content,
-        timestamp: timestamp,
-      );
+  group('migration orchestration', () {
+    late Directory directory;
+    late DatabaseService db;
 
-  test('builds bounded evidence from only the character’s recent AI replies',
-      () {
-    final amy = character(
-      name: 'A' * 100,
-      role: 'R' * 200,
-      systemPrompt: 'P' * 700,
-    );
-    final base = DateTime(2026);
-    final entries = CharacterGenderMigrator.buildInferenceEntries(
-      [amy],
-      [
-        message(
-          senderId: amy.id,
-          senderType: 'user',
-          content: 'must exclude user',
-          timestamp: base.add(const Duration(seconds: 30)),
-        ),
-        message(
-          senderId: 'other',
-          senderType: 'ai',
-          content: 'must exclude other AI',
-          timestamp: base.add(const Duration(seconds: 31)),
-        ),
-        for (var index = 0; index < 10; index++)
-          message(
-            senderId: amy.id,
-            senderType: 'ai',
-            content: '$index-${'x' * 300}',
-            timestamp: base.add(Duration(seconds: index)),
+    setUp(() async {
+      directory = await openLifecycleHive();
+      db = DatabaseService();
+    });
+
+    tearDown(() => closeLifecycleHive(directory, db));
+
+    test('writes completion for an empty database without calling the LLM',
+        () async {
+      final api = _FakeChatApiService();
+
+      final migrated = await CharacterGenderMigrator(
+        db,
+        api: api,
+        credentials: _FakeCredentials({}),
+      ).migrate();
+
+      expect(migrated, 0);
+      expect(api.calls, isEmpty);
+      expect(db.appSettingsBox.get(CharacterGenderMigrator.migrationKey), true);
+    });
+
+    test('batches characters by their configured API before saving genders',
+        () async {
+      await db.apiConfigBox.putAll({
+        'config-a': apiConfig('config-a'),
+        'config-b': apiConfig('config-b'),
+      });
+      await db.aiCharacterBox.putAll({
+        'c1': character(id: 'c1', apiConfigId: 'config-a'),
+        'c2': character(id: 'c2', apiConfigId: 'config-a'),
+        'c3': character(id: 'c3', apiConfigId: 'config-b'),
+      });
+      final api = _FakeChatApiService(
+        responsesByModel: {
+          'model-config-a': _responseFor(
+            {'c1': '男', 'c2': '男'},
           ),
-      ],
-    );
+          'model-config-b': _responseFor({'c3': '女'}),
+        },
+      );
 
-    final entry = entries.single;
-    expect(entry['name'], hasLength(CharacterGenderMigrator.maxNameLength));
-    expect(entry['role'], hasLength(CharacterGenderMigrator.maxRoleLength));
-    expect(
-      entry['systemPrompt'],
-      hasLength(CharacterGenderMigrator.maxSystemPromptLength),
-    );
-    final replies = entry['recentReplies']! as List<String>;
-    expect(replies, hasLength(CharacterGenderMigrator.maxRecentReplies));
-    expect(replies.first, startsWith('9-'));
-    expect(
-        replies.every(
-            (reply) => reply.length <= CharacterGenderMigrator.maxReplyLength),
-        isTrue);
-    expect(replies.join(), isNot(contains('must exclude')));
-  });
+      await CharacterGenderMigrator(
+        db,
+        api: api,
+        credentials: _FakeCredentials({
+          'config-a': 'key-a',
+          'config-b': 'key-b',
+        }),
+      ).migrate();
 
-  test(
-      'parses JSON and fenced JSON while retaining only valid known unique IDs',
-      () {
-    final ids = {'amy', 'jay'};
-    const raw = '''Here is the result:
-```json
-[
-  {"id":"amy","gender":"男"},
-  {"id":"amy","gender":"女"},
-  {"id":"jay","gender":"女"},
-  {"id":"unknown","gender":"男"},
-  {"id":"bad","gender":"未知"},
-  {"id":"missing"},
-  {"gender":"男"}
-]
-```
-Thanks.''';
+      expect(api.calls, hasLength(2));
+      expect(
+        _requestIds(
+            api.calls.singleWhere((call) => call.model == 'model-config-a')),
+        {'c1', 'c2'},
+      );
+      expect(
+        _requestIds(
+            api.calls.singleWhere((call) => call.model == 'model-config-b')),
+        {'c3'},
+      );
+      expect(db.aiCharacterBox.get('c1')!.gender, CharacterGender.male);
+      expect(db.aiCharacterBox.get('c2')!.gender, CharacterGender.male);
+      expect(db.aiCharacterBox.get('c3')!.gender, CharacterGender.female);
+    });
 
-    expect(
-      CharacterGenderMigrator.parseLlmResult(raw, knownCharacterIds: ids),
-      {
-        'amy': CharacterGender.male,
-        'jay': CharacterGender.female,
-      },
-    );
-    expect(
-      CharacterGenderMigrator.parseLlmResult(
-        '[{"id":"amy","gender":"男"}]',
-        knownCharacterIds: ids,
-      ),
-      {'amy': CharacterGender.male},
-    );
-    expect(
-      CharacterGenderMigrator.parseLlmResult(
-        '说明[仅供参考]\n```json\n[{"id":"amy","gender":"女"}]\n```',
-        knownCharacterIds: ids,
-      ),
-      {'amy': CharacterGender.female},
-    );
-  });
-
-  test('invalid LLM responses safely return no results', () {
-    expect(
-      CharacterGenderMigrator.parseLlmResult(
-        'not JSON [',
-        knownCharacterIds: {'amy'},
-      ),
-      isEmpty,
-    );
-  });
-
-  test('local inference prioritizes explicit identity, then name hints', () {
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: '小明', systemPrompt: '我是女性。'),
-        const [],
-      ),
-      CharacterGender.female,
-    );
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: 'Amy', systemPrompt: '我是男性。'),
-        const [],
-      ),
-      CharacterGender.male,
-    );
-    expect(
-      CharacterGenderMigrator.inferLocally(character(name: '阿杰'), const []),
-      CharacterGender.male,
-    );
-  });
-
-  test('local inference never infers gender from an ordinary occupation alone',
-      () {
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: 'AI-01', role: '护士', systemPrompt: ''),
-        const [],
-      ),
-      CharacterGender.female,
-    );
-  });
-
-  test('local inference accepts explicit gendered role titles but not jobs',
-      () {
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: 'AI-01', role: '全职爸爸'),
-        const [],
-      ),
-      CharacterGender.male,
-    );
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: 'AI-01', role: '宝妈'),
-        const [],
-      ),
-      CharacterGender.female,
-    );
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: 'AI-01', role: '男性用户的顾问'),
-        const [],
-      ),
-      CharacterGender.female,
-    );
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(
-          name: 'AI-01',
-          systemPrompt: '你是一名男性用户的顾问。',
+    test(
+        'uses local rules for missing config, credentials, failures, empty data, and timeout',
+        () async {
+      await db.apiConfigBox.putAll({
+        'no-credential': apiConfig('no-credential', hasCredential: false),
+        'throws': apiConfig('throws'),
+        'empty': apiConfig('empty'),
+        'slow': apiConfig('slow'),
+      });
+      await db.aiCharacterBox.putAll({
+        'no-config': character(
+          id: 'no-config',
+          systemPrompt: '我是男性。',
         ),
-        const [],
-      ),
-      CharacterGender.female,
-    );
-  });
-
-  test('local inference handles gendered identity phrases with occupations',
-      () {
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: 'AI-01', systemPrompt: '你是一名男性医生。'),
-        const [],
-      ),
-      CharacterGender.male,
-    );
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: 'AI-01', systemPrompt: '我是女性瑜伽教练。'),
-        const [],
-      ),
-      CharacterGender.female,
-    );
-  });
-
-  test('local inference ignores gendered terms that describe someone else', () {
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(
-          name: 'AI-01',
-          systemPrompt: '我爸爸是男性，我的妻子是一位女性。',
+        'no-credential': character(
+          id: 'no-credential',
+          apiConfigId: 'no-credential',
+          systemPrompt: '我是女性。',
         ),
-        const ['哥哥最近来看我，但这不是我的身份。'],
-      ),
-      CharacterGender.female,
-    );
+        'throws': character(id: 'throws', apiConfigId: 'throws', name: '阿杰'),
+        'empty': character(id: 'empty', apiConfigId: 'empty'),
+        'slow': character(id: 'slow', apiConfigId: 'slow', name: '阿杰'),
+      });
+      final api = _FakeChatApiService(
+        errorsByModel: {'model-throws': StateError('TOP_SECRET_API_ERROR')},
+        delaysByModel: {'model-slow': const Duration(milliseconds: 100)},
+        responsesByModel: {
+          'model-empty': const <String, dynamic>{
+            'success': true,
+            'message': '',
+          },
+        },
+      );
+
+      await CharacterGenderMigrator(
+        db,
+        api: api,
+        credentials: _FakeCredentials({
+          'throws': 'key-throws',
+          'empty': 'key-empty',
+          'slow': 'key-slow',
+        }),
+        llmPhaseTimeout: const Duration(milliseconds: 15),
+      ).migrate();
+
+      expect(db.aiCharacterBox.get('no-config')!.gender, CharacterGender.male);
+      expect(
+        db.aiCharacterBox.get('no-credential')!.gender,
+        CharacterGender.female,
+      );
+      expect(db.aiCharacterBox.get('throws')!.gender, CharacterGender.male);
+      expect(db.aiCharacterBox.get('empty')!.gender, CharacterGender.female);
+      expect(db.aiCharacterBox.get('slow')!.gender, CharacterGender.male);
+      expect(
+        api.calls.map((call) => call.model),
+        isNot(contains('model-no-credential')),
+      );
+    });
+
+    test('uses local rules for characters missing from a partial LLM response',
+        () async {
+      await db.apiConfigBox.put('config-a', apiConfig('config-a'));
+      await db.aiCharacterBox.putAll({
+        'c1': character(id: 'c1', apiConfigId: 'config-a'),
+        'c2': character(
+          id: 'c2',
+          apiConfigId: 'config-a',
+          name: '阿杰',
+        ),
+      });
+      final api = _FakeChatApiService(
+        responsesByModel: {
+          'model-config-a': _responseFor({'c1': '女'}),
+        },
+      );
+
+      await CharacterGenderMigrator(
+        db,
+        api: api,
+        credentials: _FakeCredentials({'config-a': 'key-a'}),
+      ).migrate();
+
+      expect(db.aiCharacterBox.get('c1')!.gender, CharacterGender.female);
+      expect(db.aiCharacterBox.get('c2')!.gender, CharacterGender.male);
+    });
+
+    test('persists each decision and resumes only unfinished characters',
+        () async {
+      await db.apiConfigBox.put('config-a', apiConfig('config-a'));
+      await db.aiCharacterBox.putAll({
+        'c1': character(id: 'c1', apiConfigId: 'config-a'),
+        'c2': character(id: 'c2', apiConfigId: 'config-a'),
+      });
+      final firstApi = _FakeChatApiService(
+        responsesByModel: {
+          'model-config-a': _responseFor({'c1': '男', 'c2': '男'}),
+        },
+      );
+      var failC2 = true;
+      Future<void> saveCharacter(AICharacter value) async {
+        if (value.id == 'c2' && failC2) {
+          failC2 = false;
+          throw StateError('simulated save failure');
+        }
+        await db.aiCharacterBox.put(value.id, value);
+      }
+
+      final firstCount = await CharacterGenderMigrator(
+        db,
+        api: firstApi,
+        credentials: _FakeCredentials({'config-a': 'key-a'}),
+        saveCharacter: saveCharacter,
+      ).migrate();
+
+      expect(firstCount, 1);
+      expect(db.aiCharacterBox.get('c1')!.gender, CharacterGender.male);
+      expect(
+        db.aiCharacterBox.get('c2')!.gender,
+        CharacterGender.male,
+        reason: '本次会话必须使用已决定的最终回退值，即使持久化失败',
+      );
+
+      final secondApi = _FakeChatApiService(
+        errorsByModel: {'model-config-a': StateError('must not re-infer')},
+      );
+      final secondCount = await CharacterGenderMigrator(
+        db,
+        api: secondApi,
+        credentials: _FakeCredentials({'config-a': 'key-a'}),
+      ).migrate();
+
+      expect(secondCount, 1);
+      expect(db.aiCharacterBox.get('c2')!.gender, CharacterGender.male);
+      expect(secondApi.calls, isEmpty);
+      expect(db.appSettingsBox.get(CharacterGenderMigrator.migrationKey), true);
+    });
+
+    test('applies local fallback in memory when state storage fails', () async {
+      final c1 = character(
+        id: 'c1',
+        systemPrompt: '我是男性。',
+      );
+      await db.aiCharacterBox.put('c1', c1);
+      await db.appSettingsBox.close();
+
+      await CharacterGenderMigrator(
+        db,
+        api: _FakeChatApiService(),
+        credentials: _FakeCredentials({}),
+      ).migrate();
+
+      expect(c1.gender, CharacterGender.male);
+      expect(db.aiCharacterBox.get('c1')!.gender, CharacterGender.male);
+    });
+
+    test('records a safe diagnostic after a top-level storage exception',
+        () async {
+      final c1 = character(
+        id: 'c1',
+        systemPrompt: '我是男性。',
+      );
+      await db.aiCharacterBox.put('c1', c1);
+      await db.apiConfigBox.close();
+
+      await CharacterGenderMigrator(
+        db,
+        api: _FakeChatApiService(),
+        credentials: _FakeCredentials({}),
+      ).migrate();
+
+      expect(c1.gender, CharacterGender.male);
+      final diagnosticMap = db.appSettingsBox
+          .get(CharacterGenderMigrator.diagnosticKey) as Map<dynamic, dynamic>;
+      expect(diagnosticMap['status'], 'completed');
+      expect(diagnosticMap['saved'], 1);
+      expect(diagnosticMap['saveFailures'], 0);
+      final diagnostic = jsonEncode(
+        diagnosticMap,
+      );
+      expect(diagnostic, contains('storage_failure'));
+      expect(diagnostic, isNot(contains('我是男性')));
+
+      await Hive.close();
+      await reopenLifecycleHive(directory);
+      final reopenedDb = DatabaseService();
+      expect(
+        reopenedDb.aiCharacterBox.get('c1')!.gender,
+        CharacterGender.male,
+      );
+    });
+
+    test('completion marker permanently locks the result', () async {
+      await db.apiConfigBox.put('config-a', apiConfig('config-a'));
+      await db.aiCharacterBox.put(
+        'c1',
+        character(id: 'c1', apiConfigId: 'config-a'),
+      );
+      final firstApi = _FakeChatApiService(
+        responsesByModel: {
+          'model-config-a': _responseFor({'c1': '男'}),
+        },
+      );
+      final migrator = CharacterGenderMigrator(
+        db,
+        api: firstApi,
+        credentials: _FakeCredentials({'config-a': 'key-a'}),
+      );
+      await migrator.migrate();
+
+      db.aiCharacterBox.get('c1')!.name = '另一个角色';
+      final secondApi = _FakeChatApiService(
+        errorsByModel: {'model-config-a': StateError('must not call')},
+      );
+      await CharacterGenderMigrator(
+        db,
+        api: secondApi,
+        credentials: _FakeCredentials({'config-a': 'key-a'}),
+      ).migrate();
+
+      expect(db.aiCharacterBox.get('c1')!.gender, CharacterGender.male);
+      expect(secondApi.calls, isEmpty);
+    });
+
+    test('characters created after migration begins are not legacy candidates',
+        () async {
+      await db.apiConfigBox.put('config-a', apiConfig('config-a'));
+      await db.aiCharacterBox.put(
+        'old',
+        character(id: 'old', apiConfigId: 'config-a'),
+      );
+      var failSave = true;
+      Future<void> failFirstSave(AICharacter value) async {
+        if (failSave) {
+          failSave = false;
+          throw StateError('pause migration');
+        }
+        await db.aiCharacterBox.put(value.id, value);
+      }
+
+      final api = _FakeChatApiService(
+        responsesByModel: {
+          'model-config-a': _responseFor({'old': '男'}),
+        },
+      );
+      await CharacterGenderMigrator(
+        db,
+        api: api,
+        credentials: _FakeCredentials({'config-a': 'key-a'}),
+        saveCharacter: failFirstSave,
+      ).migrate();
+      await db.aiCharacterBox.put('new', character(id: 'new'));
+
+      final restartApi = _FakeChatApiService(
+        responsesByModel: {
+          'model-config-a': _responseFor({'old': '男'}),
+        },
+      );
+      await CharacterGenderMigrator(
+        db,
+        api: restartApi,
+        credentials: _FakeCredentials({'config-a': 'key-a'}),
+      ).migrate();
+
+      expect(restartApi.calls, isEmpty);
+      expect(db.aiCharacterBox.get('old')!.gender, CharacterGender.male);
+      expect(db.aiCharacterBox.get('new')!.gender, CharacterGender.female);
+    });
+
+    test('records only safe diagnostic categories after an LLM failure',
+        () async {
+      await db.apiConfigBox.put('config-a', apiConfig('config-a'));
+      await db.aiCharacterBox.put(
+        'c1',
+        character(id: 'c1', apiConfigId: 'config-a'),
+      );
+      final api = _FakeChatApiService(
+        errorsByModel: {'model-config-a': StateError('TOP_SECRET_PROMPT')},
+      );
+
+      await CharacterGenderMigrator(
+        db,
+        api: api,
+        credentials: _FakeCredentials({'config-a': 'key-a'}),
+      ).migrate();
+
+      final diagnostic = jsonEncode(
+        db.appSettingsBox.get(CharacterGenderMigrator.diagnosticKey),
+      );
+      expect(diagnostic, contains('request_failed'));
+      expect(diagnostic, isNot(contains('TOP_SECRET_PROMPT')));
+      expect(diagnostic, isNot(contains('我是')));
+    });
   });
+}
 
-  test(
-      'local inference treats second-person text in AI replies as user evidence',
-      () {
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: 'AI-01'),
-        const ['你是男生，请继续说说你的想法。'],
-      ),
-      CharacterGender.female,
-    );
-  });
+Map<String, dynamic> _responseFor(Map<String, String> genders) => {
+      'success': true,
+      'message': jsonEncode([
+        for (final entry in genders.entries)
+          {'id': entry.key, 'gender': entry.value},
+      ]),
+    };
 
-  test('local inference ignores a bare "作为" in AI replies', () {
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: 'AI-01'),
-        const ['作为男性用户，你可以继续说。'],
-      ),
-      CharacterGender.female,
-    );
-  });
-
-  test('local inference uses only the newest eight replies', () {
-    final replies = [
-      ...List.filled(8, '我是女性。'),
-      ...List.filled(9, '我是男性。'),
-    ];
-
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: 'AI-01'),
-        replies,
-      ),
-      CharacterGender.female,
-    );
-  });
-
-  test('explicit conflict wins over name hints and falls back to female', () {
-    expect(
-      CharacterGenderMigrator.inferLocally(
-        character(name: '阿杰', systemPrompt: '我是男性。我是女性。'),
-        const [],
-      ),
-      CharacterGender.female,
-    );
-  });
-
-  test(
-      'local inference is deterministic and falls back to female for conflict, tie, and no evidence',
-      () {
-    final conflicted = character(systemPrompt: '我是男性。作为女性角色。');
-
-    expect(
-      CharacterGenderMigrator.inferLocally(conflicted, const []),
-      CharacterGender.female,
-    );
-    expect(
-      CharacterGenderMigrator.inferLocally(character(), const []),
-      CharacterGender.female,
-    );
-    expect(
-      CharacterGenderMigrator.inferLocally(character(), const []),
-      CharacterGenderMigrator.inferLocally(character(), const []),
-    );
-  });
+Set<String> _requestIds(
+  ({String model, List<Map<String, dynamic>> messages}) call,
+) {
+  final entries = jsonDecode(call.messages.last['content']! as String) as List;
+  return entries.map((entry) => (entry as Map)['id'] as String).toSet();
 }
