@@ -95,6 +95,13 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 9. **性能问题** — 避免列表内不必要的 `setState` / rebuild；大列表用 `ListView.builder`；Stream 监听及时 dispose
 10. **新老兼容** — 修改 public API 或数据模型时，检查是否影响旧数据迁移、Hive 字段版本、现有调用方
 
+### Review / 校验完整性规则
+
+- 当用户要求 Review、验收或校验某个阶段、模块、文件或改动集时，必须先明确本次范围，并完整检查范围内的需求符合性、正确性、边界与失败路径、测试有效性、可读性、架构、安全、性能、新老兼容和本清单中的代码质量要求。
+- 发现一个问题不得立即中断校验或直接给出最终结论；必须继续完成其余可执行检查，尽可能一次性收集全部问题。某项检查失败时，记录失败证据并继续不依赖该项的检查；只有安全风险、数据破坏风险或客观阻塞使后续检查无法进行时才停止，并明确未检查范围。
+- 最终报告必须集中列出所有发现，按严重级别排序，并为每项提供文件与行号、证据、影响和建议修复方向；同时列出已执行命令、通过项、失败项、未检查项及原因。完成完整范围前，不得只报告“第一个问题”，也不得宣称 Review / 校验完成。
+- “测试通过”不等于验收通过。测试、静态分析、实现逐行审查和与规格逐项对照均完成后，才可给出通过结论；如有阻塞问题，应一次性列全后给出不通过结论。
+
 ## Extensible Features (Roadmap)
 
 > Ideas derived from analyzing the current codebase, ordered by fun/value vs. effort. Pick a few per iteration.

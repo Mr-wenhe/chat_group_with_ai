@@ -26,6 +26,7 @@ app.*.map.json
 .playwright-cli/
 .workbuddy/
 migrate_working_dir/
+docs/superpowers/
 
 # IDEs
 *.iml
