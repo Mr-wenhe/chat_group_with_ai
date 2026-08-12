@@ -328,6 +328,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                 ),
                 const SizedBox(height: 14),
                 Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
                     Expanded(
                       child: TextFormField(
@@ -351,12 +352,16 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                         value: _selectedGender,
                         decoration: appInputDecoration(
                           '性别 *',
-                          _isEditing ? '保存后不可修改' : '请选择',
+                          '请选择',
                           _isEditing
                               ? Icons.lock_outline_rounded
                               : Icons.wc_rounded,
                           cs,
+                        ).copyWith(
+                          helperText:
+                              _isEditing ? '创建后不可修改' : '保存后不可修改，并会影响角色称谓与表达。',
                         ),
+                        isExpanded: true,
                         items: CharacterGender.values
                             .map((gender) => DropdownMenuItem(
                                   value: gender,

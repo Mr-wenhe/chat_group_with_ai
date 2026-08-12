@@ -109,6 +109,25 @@ import 'package:pasteboard/pasteboard.dart';
 /// - [error]：上一轮生成失败
 enum AutoChatStatus { idle, waiting, generating, paused, unavailable, error }
 
+/// 构建群成员面板的性别、职业、年龄、回复状态和限额文案。
+String formatMemberStatus(
+  AICharacter character,
+  ReplyBlockReason? blockReason,
+) {
+  final usage =
+      '${character.hourlyReplyCount}/${character.hourlyReplyLimit} 次/小时';
+  final status = switch (blockReason) {
+    null => '可回复',
+    ReplyBlockReason.noApiConfig => '未配置 API',
+    ReplyBlockReason.inactive => '已停用',
+    ReplyBlockReason.hourlyLimit => '达到上限',
+    ReplyBlockReason.alreadyGenerating => '生成中',
+    ReplyBlockReason.networkError => '网络异常',
+  };
+  return '${character.gender.label} · ${character.role} · ${character.age}岁 · '
+      '$status · $usage';
+}
+
 /// 聊天页面（群聊 + 私聊共用）。
 ///
 /// 路由既可以是 `/chat/{groupId}`（群聊），也可以是 `/dm/{characterId}`（私聊）；
@@ -5499,20 +5518,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     });
   }
 
-  /// 成员面板里的单行状态文案：「职位 · 年龄 · 可回复状态 · 本小时用量」。
+  /// 成员面板里的单行状态文案：「性别 · 职业 · 年龄 · 回复状态 · 本小时用量」。
   String _memberStatusText(AICharacter c) {
-    final blockReason = _blockReasonFor(c);
-    final base = '${c.gender.label} · ${c.role} · ${c.age}岁';
-    final usage = '${c.hourlyReplyCount}/${c.hourlyReplyLimit} 次/小时';
-    final status = switch (blockReason) {
-      null => '可回复',
-      ReplyBlockReason.noApiConfig => '未配置 API',
-      ReplyBlockReason.inactive => '已停用',
-      ReplyBlockReason.hourlyLimit => '达到上限',
-      ReplyBlockReason.alreadyGenerating => '生成中',
-      ReplyBlockReason.networkError => '网络异常',
-    };
-    return '$base · $status · $usage';
+    return formatMemberStatus(c, _blockReasonFor(c));
   }
 
   /// 跳转到角色编辑页。

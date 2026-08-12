@@ -122,7 +122,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
               controller: _searchController,
               decoration: appInputDecoration(
                 '搜索角色',
-                '按名字、角色或标签搜索',
+                '按名字、性别、角色或标签搜索',
                 Icons.search_rounded,
                 cs,
               ).copyWith(
@@ -971,7 +971,8 @@ class _CharacterCard extends StatelessWidget {
                         ],
                       ),
                       const SizedBox(height: 4),
-                      Text('${character.gender.label} · ${character.role} · ${character.age}岁',
+                      Text(
+                          '${character.gender.label} · ${character.role} · ${character.age}岁',
                           style: TextStyle(
                               fontSize: 13, color: cs.onSurfaceVariant)),
                       if (character.personalityTags.isNotEmpty) ...[
