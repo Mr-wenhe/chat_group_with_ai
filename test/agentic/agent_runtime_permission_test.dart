@@ -9,6 +9,7 @@ import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_client.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
+import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -88,6 +89,102 @@ void main() {
     expect(fakeTool.lastWriteContent, contains('灵魂收集者'));
     expect(fakeTool.lastWriteContent, contains('音乐 · 菜单'));
     expect(fakeTool.lastWriteContent, isNot(contains('内容由 AI 根据用户请求生成')));
+  });
+
+  test('direct file generation sends the shared role-play prompt', () async {
+    late List<Map<String, dynamic>> capturedMessages;
+    final character = _character(
+      toolPermissions: const [ToolPermission.workspacePatch],
+    );
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        capturedMessages = messages;
+        return const {
+          'success': true,
+          'message': '<!doctype html><html><body><h1>交付</h1></body></html>',
+        };
+      },
+      workspaceFileTool: _FakeWorkspaceFileTool(
+        patchResult: {'ok': true, 'path': 'page.html', 'bytes': 48},
+      ),
+    );
+
+    final result = await runtime.run(
+      character: character,
+      skills: [_skill()],
+      userRequest: '生成一个 HTML 个人主页',
+      approved: true,
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(capturedMessages.first['role'], 'system');
+    expect(
+      capturedMessages.first['content']
+              .toString()
+              .split(character.rolePlaySystemPrompt)
+              .length -
+          1,
+      1,
+    );
+    expect(capturedMessages.first['content'],
+        contains(character.rolePlaySystemPrompt));
+  });
+
+  test('work-mode tool result prompt keeps the shared role identity', () async {
+    final character = _character(
+      toolPermissions: const [ToolPermission.workspaceRead],
+    );
+    final capturedMessages = <List<Map<String, dynamic>>>[];
+    var calls = 0;
+    final runtime = AgentRuntime(
+      complete: (messages) async {
+        capturedMessages.add(messages);
+        calls++;
+        if (calls == 1) {
+          return const {
+            'success': true,
+            'message': '```agent_tool\n'
+                '{"tool":"workspace.read","reason":"读取需求",'
+                '"args":{"path":"requirements.md"}}\n```',
+          };
+        }
+        return const {'success': true, 'message': '已完成。'};
+      },
+      workspaceFileTool: _FakeWorkspaceFileTool(
+        readResult: {'ok': true, 'path': 'requirements.md', 'content': '需求'},
+      ),
+    );
+
+    final result = await runtime.run(
+      character: character,
+      skills: [_skill()],
+      userRequest: '读取需求并总结',
+      approved: true,
+      workModeContext: WorkModePolicy.planningContext(character),
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(capturedMessages, hasLength(2));
+    expect(
+      capturedMessages[0]
+              .first['content']
+              .toString()
+              .split(character.rolePlaySystemPrompt)
+              .length -
+          1,
+      1,
+    );
+    expect(
+      capturedMessages[1]
+              .first['content']
+              .toString()
+              .split(character.rolePlaySystemPrompt)
+              .length -
+          1,
+      1,
+    );
+    expect(capturedMessages[1].first['content'],
+        contains(character.rolePlaySystemPrompt));
   });
 
   test('raw HTML from planner is recovered into a file instead of chat text',
@@ -2341,8 +2438,7 @@ void main() {
     expect(fakeTool.lastWriteContent, contains('可点击'));
   });
 
-  test('English same-file revision overwrites the existing artifact',
-      () async {
+  test('English same-file revision overwrites the existing artifact', () async {
     final fakeTool = _FakeWorkspaceFileTool(
       existingFiles: const {
         'interactive_counter.html': '<html>original</html>',

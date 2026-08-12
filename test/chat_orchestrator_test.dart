@@ -534,7 +534,7 @@ void main() {
         groupMemory: '大家最近在聊工作压力。',
       );
 
-      expect(context, contains('心理咨询师'));
+      expect(context, isNot(contains(c.promptIdentity)));
       expect(context, contains('温柔、敏锐'));
       expect(context, contains('夜谈会'));
       expect(context, contains('大家最近在聊工作压力'));

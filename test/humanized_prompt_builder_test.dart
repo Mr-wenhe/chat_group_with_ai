@@ -69,6 +69,9 @@ void main() {
       );
 
       expect(content, contains('你是阿月'));
+      expect(content.split(character.rolePlaySystemPrompt).length - 1, 1);
+      expect(content.split(character.promptIdentity).length - 1, 1);
+      expect(content, contains(character.rolePlaySystemPrompt));
       expect(content, contains('性别女'));
       expect(content, contains('用户最近在准备一个海报'));
       expect(content, contains('我觉得小林说话有点冲'));

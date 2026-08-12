@@ -830,7 +830,7 @@ class AgentRuntime {
     }
 
     final prompt = AgentPromptBuilder.buildToolPlanningPrompt(
-      characterName: character.name,
+      rolePlaySystemPrompt: character.rolePlaySystemPrompt,
       skills: skills,
       userRequest: userRequest,
       workModeContext: workModeContext,
@@ -1150,7 +1150,9 @@ class AgentRuntime {
     List<ToolRequest> executedRequests = const [],
   }) async {
     final prompt = '''
-你是${character.name}。用户要你生成一个文件。
+${character.rolePlaySystemPrompt}
+
+用户要你生成一个文件。
 
 文件路径：$path
 用户请求：$userRequest
@@ -1322,6 +1324,8 @@ class AgentRuntime {
         ? '注意：用户要求修改的文件是 `$originalFilePath`，不要创建新文件，直接对已有文件发起 workspace.patch 写入修改后的完整内容。\n'
         : '';
     final repromptPrompt = '''
+${character.rolePlaySystemPrompt}
+
 【重要】你之前的回复没有被识别为有效的工具请求。
 
 用户请求：$userRequest
@@ -1545,7 +1549,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     }
 
     final finalPrompt = AgentPromptBuilder.buildToolResultPrompt(
-      characterName: character.name,
+      rolePlaySystemPrompt: character.rolePlaySystemPrompt,
       userRequest: userRequest,
       toolName: request.tool.wireName,
       toolResult: toolResult,

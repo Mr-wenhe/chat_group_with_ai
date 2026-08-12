@@ -162,6 +162,11 @@ void main() {
         .where((message) => message['role'] == 'system')
         .map((message) => message['content'].toString())
         .join('\n');
+    expect(systemContent.split(character.rolePlaySystemPrompt).length - 1, 1);
+    expect(systemContent.split(character.promptIdentity).length - 1, 1);
+    expect(systemContent, contains(character.promptIdentity));
+    expect(systemContent, contains('角色性别为${character.gender.label}'));
+    expect(systemContent, contains(character.systemPrompt));
     expect(systemContent, contains('人物卡名称_入口测试'));
     expect(systemContent, contains('PERMANENT_DM_必须出现'));
     expect(systemContent, contains('最近情绪warm'));
@@ -237,6 +242,11 @@ void main() {
         .where((message) => message['role'] == 'system')
         .map((message) => message['content'].toString())
         .join('\n');
+    expect(systemContent.split(character.rolePlaySystemPrompt).length - 1, 1);
+    expect(systemContent.split(character.promptIdentity).length - 1, 1);
+    expect(systemContent, contains(character.promptIdentity));
+    expect(systemContent, contains('角色性别为${character.gender.label}'));
+    expect(systemContent, contains(character.systemPrompt));
     expect(systemContent, contains('人物卡名称_入口测试'));
     expect(systemContent, isNot(contains('旧群主名_不得出现')));
     expect(systemContent, contains('PERMANENT_GROUP_必须出现'));

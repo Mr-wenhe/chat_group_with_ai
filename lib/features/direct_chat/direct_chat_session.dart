@@ -27,12 +27,10 @@ class DirectChatSession {
   }
 
   static String buildPromptContext({
-    required AICharacter character,
     required String ownerName,
   }) {
     return '【一对一私聊上下文】\n'
         '你正在和真人用户叫「$ownerName」的人一对一私聊。'
-        '你是${character.promptIdentity}。'
         '请自然回应对方当前消息，像真实私信一样有来有回。'
         '不要替别人发言，不要说自己是 AI，不要带自己的名字前缀。';
   }

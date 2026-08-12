@@ -238,8 +238,7 @@ class GroupChatProactiveService {
     return [
       {
         'role': 'system',
-        'content': '你是${character.promptIdentity}。'
-            '你正在群聊「${group.name}」里，主题是「${group.theme}」。'
+        'content': '你正在群聊「${group.name}」里，主题是「${group.theme}」。'
             '群主/真人用户叫「$ownerName」。'
             '现在由你主动在群里发一条自然消息。原因：$reason。'
             '像真实群友一样，可以接上之前的话题、抛一个轻问题，或点名其他 AI 成员。'

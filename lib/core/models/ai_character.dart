@@ -123,8 +123,11 @@ class AICharacter extends HiveObject {
   String get promptIdentity => '$name，$age岁，性别${gender.label}，身份是$role';
 
   String get rolePlaySystemPrompt {
-    final prompt = systemPrompt.trim();
-    final genderRule = '角色性别为${gender.label}，请保持称谓和角色表现与该设定一致。';
-    return prompt.isEmpty ? genderRule : '$genderRule\n$prompt';
+    final prompt = systemPrompt.trim().isEmpty ? null : systemPrompt;
+    return [
+      '你是$promptIdentity。',
+      '角色性别为${gender.label}，请保持称谓和角色表现与该设定一致。',
+      if (prompt != null) prompt,
+    ].join('\n');
   }
 }

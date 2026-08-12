@@ -6,7 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   test('prompt includes tool protocol and character skills', () {
     final prompt = AgentPromptBuilder.buildToolPlanningPrompt(
-      characterName: '代码大神',
+      rolePlaySystemPrompt: '你是代码大神，30岁，性别女，身份是工程师。\n写代码',
       skills: [
         CharacterSkill(
           characterId: 'c1',
@@ -36,7 +36,7 @@ void main() {
 
   test('result prompt requires evidence-led delivery and self-check', () {
     final prompt = AgentPromptBuilder.buildToolResultPrompt(
-      characterName: '工作助手',
+      rolePlaySystemPrompt: '你是工作助手，30岁，性别女，身份是助理。\n保持专业。',
       userRequest: '生成 report.md 并检查',
       toolName: 'workspace.patch',
       toolResult: const {
@@ -53,11 +53,12 @@ void main() {
     expect(prompt, contains('未完成项或风险'));
   });
 
-  test('result prompt forbids claiming attachment for non-file-write tools', () {
+  test('result prompt forbids claiming attachment for non-file-write tools',
+      () {
     // 虚假附件回归：skill.create 等非写入工具不会创建任何用户可见文件，
     // 约束文案必须明确禁止模型声称“已作为附件发送”。
     final prompt = AgentPromptBuilder.buildToolResultPrompt(
-      characterName: '工作助手',
+      rolePlaySystemPrompt: '你是工作助手，30岁，性别女，身份是助理。\n保持专业。',
       userRequest: '生成一份工资报表 Excel 文件',
       toolName: 'skill.create',
       toolResult: const {'ok': true, 'skillId': 's1'},
@@ -71,12 +72,11 @@ void main() {
     expect(prompt, contains('不可能产生任何附件'));
   });
 
-  test('result prompt only allows attachment claim for ok=true write tool',
-      () {
+  test('result prompt only allows attachment claim for ok=true write tool', () {
     // 反向：workspace.patch 且 ok=true 是合法写文件，不应出现
     // “当前工具 … 不是文件写入工具”这类禁止话术（否则会误伤正常交付）。
     final prompt = AgentPromptBuilder.buildToolResultPrompt(
-      characterName: '工作助手',
+      rolePlaySystemPrompt: '你是工作助手，30岁，性别女，身份是助理。\n保持专业。',
       userRequest: '生成 report.md',
       toolName: 'workspace.patch',
       toolResult: const {'ok': true, 'path': 'report.md'},
@@ -87,7 +87,7 @@ void main() {
   test('result prompt forbids attachment claim when write tool not ok', () {
     // workspace.patch 返回 ok≠true：明确禁止说“请查看附件”。
     final prompt = AgentPromptBuilder.buildToolResultPrompt(
-      characterName: '工作助手',
+      rolePlaySystemPrompt: '你是工作助手，30岁，性别女，身份是助理。\n保持专业。',
       userRequest: '生成 page.html',
       toolName: 'workspace.patch',
       toolResult: const {'ok': false, 'error': 'write_failed'},

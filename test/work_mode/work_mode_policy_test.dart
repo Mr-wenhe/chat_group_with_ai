@@ -113,6 +113,7 @@ void main() {
       final context = WorkModePolicy.planningContext(character);
 
       expect(context, contains('产品经理'));
+      expect(context, contains(character.promptIdentity));
       expect(context, contains('weekly-report'));
       expect(context, contains('工作区读取'));
       // memorySummary is no longer injected; global memory is provided by MemoryContextSelector.

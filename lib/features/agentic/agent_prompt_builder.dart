@@ -3,7 +3,7 @@ import 'package:chat_group/core/models/media_attachment.dart';
 
 class AgentPromptBuilder {
   static String buildToolPlanningPrompt({
-    required String characterName,
+    required String rolePlaySystemPrompt,
     required List<CharacterSkill> skills,
     required String userRequest,
     List<MediaAttachment>? media,
@@ -16,9 +16,13 @@ class AgentPromptBuilder {
           'Description: ${s.description}\n'
           'Steps:\n$steps';
     }).join('\n\n');
+    // WorkModePolicy already carries it in this context; avoid a second copy.
+    final identity = workModeContext.contains(rolePlaySystemPrompt)
+        ? ''
+        : '$rolePlaySystemPrompt\n\n';
 
     return '''
-你是$characterName。你不是只能聊天的人设，你有可复用技能，并且要像真实专家一样工作。
+$identity你不是只能聊天的人设，你有可复用技能，并且要像真实专家一样工作。
 
 用户请求：
 $userRequest${mediaHint(media)}
@@ -71,7 +75,7 @@ WorkBuddy 工作方式（严格按顺序在内部执行，不要泄露思维过�
   }
 
   static String buildToolResultPrompt({
-    required String characterName,
+    required String rolePlaySystemPrompt,
     required String userRequest,
     required String toolName,
     required Map<String, dynamic> toolResult,
@@ -81,7 +85,9 @@ WorkBuddy 工作方式（严格按顺序在内部执行，不要泄露思维过�
     final writeOk = isFileWrite && toolResult['ok'] == true;
 
     return '''
-你是$characterName。用户请求是：
+$rolePlaySystemPrompt
+
+用户请求是：
 $userRequest
 
 工具 $toolName 返回：
@@ -108,9 +114,7 @@ ${writeOk ? '''
 ''' : '''
 重要约束（违反会导致糟糕的用户体验）：
 - **严禁**将生成的文件内容、代码、HTML、Markdown 或任何产物原文粘贴到你的回复中。
-${isFileWrite
-    ? '- 本次写文件工具未返回成功状态（ok≠true）：如实说明写入失败的原因与建议，**不要**说"已生成文件 / 请查看附件"——因为并未成功创建任何附件。'
-    : '- 当前工具 `$toolName` 不是文件写入工具，因此不可能产生任何附件：**严禁**声称"已作为附件发送""已通过工作流生成文件"等话术；只需如实总结该工具做了什么。'}
+${isFileWrite ? '- 本次写文件工具未返回成功状态（ok≠true）：如实说明写入失败的原因与建议，**不要**说"已生成文件 / 请查看附件"——因为并未成功创建任何附件。' : '- 当前工具 `$toolName` 不是文件写入工具，因此不可能产生任何附件：**严禁**声称"已作为附件发送""已通过工作流生成文件"等话术；只需如实总结该工具做了什么。'}
 - 如果工具执行失败，简要说明失败原因和建议，**不要**尝试在聊天消息中贴代码来替代。
 - 如果还需要另一个工具（且不是写文件/补丁类工具）才能真正完成用户请求，只输出一个新的 agent_tool 代码块。
 - 如果已经完成，请用你的角色口吻给出最终答复，说明证据、已完成动作和剩余风险。

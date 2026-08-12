@@ -278,7 +278,6 @@ class DirectChatProactiveService {
       {
         'role': 'system',
         'content': DirectChatSession.buildPromptContext(
-          character: character,
           ownerName: ownerName,
         ),
       },

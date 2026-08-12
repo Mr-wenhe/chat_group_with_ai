@@ -208,7 +208,6 @@ class ChatOrchestrator {
     final memory = groupMemory.trim().isEmpty ? '暂无稳定群体记忆' : groupMemory;
     return '${FactDisciplinePrompt.rules}\n'
         '【人格成长规则】'
-        '\n你是 ${character.promptIdentity}。'
         '\n初始性格标签：$tags。'
         '\n你所在的群是「$groupName」，主题「$groupTheme」。$desc'
         '\n群体记忆：$memory'

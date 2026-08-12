@@ -3348,7 +3348,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     msgs.add({
       'role': 'system',
       'content': DirectChatSession.buildPromptContext(
-        character: character,
         ownerName: _ownerMentionName,
       ),
     });

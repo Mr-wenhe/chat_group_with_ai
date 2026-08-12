@@ -39,7 +39,7 @@ void main() {
       expect(selected, isEmpty);
     });
 
-  test('builds one-on-one prompt context without group-chat framing', () {
+    test('builds one-on-one prompt context without group-chat framing', () {
       final character = _character(
         id: 'target',
         name: '小夏',
@@ -47,13 +47,11 @@ void main() {
       );
 
       final prompt = DirectChatSession.buildPromptContext(
-        character: character,
         ownerName: '我',
       );
 
       expect(prompt, contains('一对一私聊'));
-      expect(prompt, contains('小夏'));
-      expect(prompt, contains('性别男'));
+      expect(prompt, isNot(contains(character.promptIdentity)));
       expect(prompt, contains('真人用户叫「我」'));
       expect(prompt, isNot(contains('群聊')));
       expect(prompt, isNot(contains('群友')));

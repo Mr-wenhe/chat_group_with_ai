@@ -13,6 +13,7 @@ import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
+import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -110,8 +111,22 @@ void main() {
       character: character,
       context: const <Message>[],
       userMessage: '你好',
+      intent: const ReplyIntent(
+        speakerId: 'char-1',
+        action: ReplyAction.answer,
+        targetId: 'user',
+        lengthHint: ReplyLengthHint.short,
+        toneHint: '自然',
+        reason: 'test-humanized-entry',
+      ),
     );
     final prompt = _allMessages(messages);
+    expect(prompt.split(character.rolePlaySystemPrompt).length - 1, 1);
+    expect(prompt.split(character.promptIdentity).length - 1, 1);
+    expect(prompt, contains(character.promptIdentity));
+    expect(prompt, contains('角色性别为${character.gender.label}'));
+    expect(prompt, contains(character.systemPrompt));
+    expect(prompt, contains('本轮动作：answer'));
     expect(prompt, contains('人物卡名称_入口测试'));
     expect(prompt, contains('PERMANENT_GROUP_必须出现'));
     expect(prompt, contains('最近情绪warm'));
@@ -119,6 +134,18 @@ void main() {
     expect(prompt, isNot(contains('LEGACY_SUMMARY_不得出现')));
     expect(prompt, isNot(contains('CHARACTER_MEMORY_GROUP_不得出现')));
     expect(prompt, isNot(contains('旧群主名_不得出现')));
+
+    final autoMessages = await pageState.buildPromptMessages(
+      character: character,
+      context: const <Message>[],
+      isAutoChat: true,
+    );
+    final autoPrompt = _allMessages(autoMessages);
+    expect(autoPrompt.split(character.rolePlaySystemPrompt).length - 1, 1);
+    expect(autoPrompt.split(character.promptIdentity).length - 1, 1);
+    expect(autoPrompt, contains(character.promptIdentity));
+    expect(autoPrompt, contains('角色性别为${character.gender.label}'));
+    expect(autoPrompt, contains(character.systemPrompt));
 
     await tester.pumpWidget(const SizedBox());
   });
@@ -156,6 +183,11 @@ void main() {
       userMessage: '你最近好吗',
     );
     final prompt = _allMessages(messages);
+    expect(prompt.split(character.rolePlaySystemPrompt).length - 1, 1);
+    expect(prompt.split(character.promptIdentity).length - 1, 1);
+    expect(prompt, contains(character.promptIdentity));
+    expect(prompt, contains('角色性别为${character.gender.label}'));
+    expect(prompt, contains(character.systemPrompt));
     expect(prompt, contains('人物卡名称_入口测试'));
     expect(prompt, contains('PERMANENT_DM_必须出现'));
     expect(prompt, contains('最近情绪warm'));
