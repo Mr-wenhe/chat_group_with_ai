@@ -1,9 +1,11 @@
 // ignore_for_file: prefer_const_constructors, prefer_const_declarations
 
 import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/features/memory/memory_audit_filter.dart';
 import 'package:chat_group/features/memory/memory_audit_filter_widget.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers/lifecycle_hive.dart';
@@ -1110,363 +1112,420 @@ void main() {
   });
 
   group('MemoryAuditFilterWidget', () {
-    testWidgets('empty filter renders nothing', (tester) async {
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: const MemoryAuditFilter(),
-            characters: const [],
-            onChanged: (_) {},
-          ),
-        ),
-      ));
-      await tester.pump(const Duration(milliseconds: 500));
-
-      expect(find.text('清除筛选'), findsNothing);
-    });
-
-    testWidgets('non-empty filter shows chips and clear button',
+    testWidgets('renders one transactional trigger without a tag wall',
         (tester) async {
-      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: MemoryAuditFilter(observerCharacterId: 'c1'),
-            characters: chars,
-            onChanged: (_) {},
-          ),
-        ),
+      await tester.pumpWidget(_filterApp(
+        filter: const MemoryAuditFilter(),
+        characters: [testCharacter('c1', apiConfigId: 'cfg')],
       ));
-      await tester.pump(const Duration(milliseconds: 500));
 
-      expect(find.text('角色: 角色c1'), findsOneWidget);
-      expect(find.text('清除筛选'), findsOneWidget);
+      expect(find.byKey(const ValueKey('open-advanced-memory-filter')),
+          findsOneWidget);
+      expect(find.byType(ChoiceChip), findsNothing);
+      expect(find.byKey(const ValueKey('memory-audit-search')), findsOneWidget);
+      expect(
+          tester
+              .getSize(
+                  find.byKey(const ValueKey('open-advanced-memory-filter')))
+              .height,
+          greaterThanOrEqualTo(44));
     });
 
-    testWidgets('tapping clear button emits empty filter', (tester) async {
-      MemoryAuditFilter? captured;
-      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: MemoryAuditFilter(observerCharacterId: 'c1'),
-            characters: chars,
-            onChanged: (f) => captured = f,
-          ),
-        ),
-      ));
-      await tester.pump(const Duration(milliseconds: 500));
-
-      await tester.tap(find.text('清除筛选'));
-      await tester.pump(const Duration(milliseconds: 500));
-
-      expect(captured, isNotNull);
-      expect(captured!.isEmpty, isTrue);
-    });
-
-    testWidgets('copyWith clear semantics preserves other filter dimensions',
-        (tester) async {
-      // Verify that copyWith clear semantics work correctly:
-      // clearing one field preserves others.
-      final filter = MemoryAuditFilter(
-        observerCharacterId: 'c1',
-        status: MemoryStatus.active,
-      );
-      final cleared = filter.copyWith(clearObserverCharacterId: true);
-      expect(cleared.observerCharacterId, isNull);
-      expect(cleared.status, MemoryStatus.active);
-    });
-
-    testWidgets('all filter option groups are visible', (tester) async {
-      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: const MemoryAuditFilter(),
-            characters: chars,
-            onChanged: (_) {},
-          ),
-        ),
-      ));
-      await tester.pump(const Duration(milliseconds: 500));
-
-      // Widget is always visible even with empty filter.
-      expect(find.byType(MemoryAuditFilterWidget), findsOneWidget);
-    });
-
-    testWidgets('subject filter selection updates callback', (tester) async {
-      MemoryAuditFilter? captured;
-      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: const MemoryAuditFilter(),
-            characters: chars,
-            onChanged: (f) => captured = f,
-          ),
-        ),
-      ));
-      await tester.pump(const Duration(milliseconds: 500));
-
-      // Tap '关于我' choice chip.
-      await tester.tap(find.text('关于我'));
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(captured, isNotNull);
-      expect(captured!.subjectFilter, SubjectFilter.aboutMe());
-    });
-
-    testWidgets('origin type selection updates callback', (tester) async {
-      MemoryAuditFilter? captured;
-      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: const MemoryAuditFilter(),
-            characters: chars,
-            onChanged: (f) => captured = f,
-          ),
-        ),
-      ));
-      await tester.pump(const Duration(milliseconds: 500));
-
-      await tester.tap(find.text('手动'));
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(captured, isNotNull);
-      expect(captured!.originType, MemoryOriginType.manual);
-    });
-
-    testWidgets('tapping "全部来源" clears originType', (tester) async {
-      MemoryAuditFilter? captured;
-      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter:
-                const MemoryAuditFilter(originType: MemoryOriginType.manual),
-            characters: chars,
-            onChanged: (f) => captured = f,
-          ),
-        ),
-      ));
-      await tester.pump(const Duration(milliseconds: 500));
-
-      await tester.tap(find.text('全部来源'));
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(captured, isNotNull);
-      expect(captured!.originType, isNull);
-    });
-
-    testWidgets('tapping a status then "全部状态" clears status', (tester) async {
-      MemoryAuditFilter? captured;
-      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: const MemoryAuditFilter(status: MemoryStatus.active),
-            characters: chars,
-            onChanged: (f) => captured = f,
-          ),
-        ),
-      ));
-      await tester.pump(const Duration(milliseconds: 500));
-
-      await tester.tap(find.text('已取代'));
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(captured!.status, MemoryStatus.superseded);
-
-      captured = null;
-      await tester.tap(find.text('全部状态'));
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(captured, isNotNull);
-      expect(captured!.status, isNull);
-    });
-
-    testWidgets('tapping a kind then "全部类型" clears memoryKind', (tester) async {
-      MemoryAuditFilter? captured;
-      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: const MemoryAuditFilter(memoryKind: MemoryKind.fact),
-            characters: chars,
-            onChanged: (f) => captured = f,
-          ),
-        ),
-      ));
-      await tester.pump(const Duration(milliseconds: 500));
-
-      await tester.tap(find.text('偏好'));
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(captured!.memoryKind, MemoryKind.preference);
-
-      captured = null;
-      await tester.tap(find.text('全部类型'));
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(captured, isNotNull);
-      expect(captured!.memoryKind, isNull);
-    });
-
-    testWidgets('tapping pinned filter then "固定状态: 全部" clears pinnedOnly',
+    testWidgets('cancel and barrier close do not apply the draft',
         (tester) async {
       MemoryAuditFilter? captured;
-      final chars = [testCharacter('c1', apiConfigId: 'cfg')];
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: const MemoryAuditFilter(pinnedOnly: true),
-            characters: chars,
-            onChanged: (f) => captured = f,
-          ),
-        ),
+      await tester.pumpWidget(_filterApp(
+        filter: const MemoryAuditFilter(status: MemoryStatus.active),
+        onChanged: (filter) => captured = filter,
       ));
-      await tester.pump(const Duration(milliseconds: 500));
 
-      await tester.tap(find.text('仅未固定'));
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(captured!.pinnedOnly, isFalse);
-
-      captured = null;
-      await tester.tap(find.text('固定状态: 全部'));
-      await tester.pump(const Duration(milliseconds: 500));
-      expect(captured, isNotNull);
-      expect(captured!.pinnedOnly, isNull);
-    });
-
-    testWidgets('observer dropdown clears via filter copyWith semantics',
-        (tester) async {
-      // The dropdown widget delegates to filter.copyWith; verify the clear
-      // semantics directly: copyWith(clearObserverCharacterId: true, observerCharacterId: null)
-      // must produce null.
-      final f = MemoryAuditFilter(observerCharacterId: 'c1');
-      final cleared = f.copyWith(clearObserverCharacterId: true);
-      expect(cleared.observerCharacterId, isNull);
-    });
-
-    testWidgets('filter labels use the shared full Chinese terms',
-        (tester) async {
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: const MemoryAuditFilter(
-              memoryKind: MemoryKind.fact,
-              originType: MemoryOriginType.legacyMigration,
-            ),
-            characters: const [],
-            onChanged: (_) {},
-          ),
-        ),
-      ));
-      await tester.pump();
-
-      expect(find.text('类型: 事实'), findsOneWidget);
-      expect(find.text('来源: 旧版迁移'), findsOneWidget);
-      expect(find.text('知'), findsNothing);
-      expect(find.text('legacyMigration'), findsNothing);
-    });
-
-    testWidgets('deleted selector values use placeholders instead of IDs',
-        (tester) async {
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: MemoryAuditFilter(
-              observerCharacterId: 'deleted-observer',
-              subjectFilter: SubjectFilter.aboutCharacter('deleted-subject'),
-            ),
-            characters: const [],
-            onChanged: (_) {},
-          ),
-        ),
-      ));
-      await tester.pump();
-
-      expect(find.text('已删除角色'), findsWidgets);
-      expect(find.text('deleted-observer'), findsNothing);
-      expect(find.text('deleted-subject'), findsNothing);
-    });
-
-    testWidgets('source occasion search uses friendly names without IDs',
-        (tester) async {
-      MemoryAuditFilter? captured;
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: const MemoryAuditFilter(originConversationId: 'g1'),
-            characters: const [],
-            originConversations: const {'g1': '群一', 'g2': '群二'},
-            onChanged: (filter) => captured = filter,
-          ),
-        ),
-      ));
-      await tester.pump();
-
-      expect(find.text('g1'), findsNothing);
-      await tester.tap(
-        find.byKey(const ValueKey('memory-filter-origin-conversation')),
-      );
-      await tester.pumpAndSettle();
-      expect(find.text('群一'), findsWidgets);
-      expect(find.text('g1'), findsNothing);
-
-      await tester.enterText(find.byType(TextField).last, '群二');
-      await tester.pumpAndSettle();
-      expect(find.text('群二'), findsOneWidget);
-      expect(find.text('g2'), findsNothing);
-      await tester.tap(find.text('群二').last);
-      await tester.pump();
-
-      expect(captured?.originConversationId, 'g2');
-    });
-
-    testWidgets('advanced filters apply only after confirmation',
-        (tester) async {
-      MemoryAuditFilter? captured;
-      await tester.pumpWidget(MaterialApp(
-        home: Scaffold(
-          body: MemoryAuditFilterWidget(
-            filter: const MemoryAuditFilter(),
-            characters: const [],
-            onChanged: (filter) => captured = filter,
-          ),
-        ),
-      ));
-      await tester.pump();
-
-      await tester.tap(
-        find.byKey(const ValueKey('open-advanced-memory-filter')),
-      );
-      await tester.pumpAndSettle();
-      expect(find.byType(AlertDialog), findsOneWidget);
+      await _openAdvanced(tester);
       await tester.ensureVisible(
-        find.byKey(const ValueKey('memory-filter-dialog-status')),
-      );
-      await tester.tap(
-        find.byKey(const ValueKey('memory-filter-dialog-status')),
-      );
+          find.byKey(const ValueKey('memory-filter-dialog-status')));
+      await tester
+          .tap(find.byKey(const ValueKey('memory-filter-dialog-status')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('已取代').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('取消'));
       await tester.pumpAndSettle();
+
       expect(captured, isNull);
 
-      await tester.tap(
-        find.byKey(const ValueKey('open-advanced-memory-filter')),
-      );
+      await _openAdvanced(tester);
+      await tester.tapAt(const Offset(20, 20));
       await tester.pumpAndSettle();
+      expect(captured, isNull);
+    });
+
+    testWidgets('reset changes only the draft until apply', (tester) async {
+      MemoryAuditFilter? captured;
+      await tester.pumpWidget(_filterApp(
+        filter: MemoryAuditFilter(
+          status: MemoryStatus.active,
+          memoryKind: MemoryKind.fact,
+        ),
+        onChanged: (filter) => captured = filter,
+      ));
+
+      await _openAdvanced(tester);
+      await tester.tap(find.text('重置'));
+      await tester.pumpAndSettle();
+      expect(captured, isNull);
+      await tester.tap(find.text('应用筛选'));
+      await tester.pumpAndSettle();
+
+      expect(captured, isNotNull);
+      expect(captured!.isEmpty, isTrue);
+      expect(captured!.status, isNull);
+      expect(captured!.memoryKind, isNull);
+    });
+
+    testWidgets('apply emits the changed filter once', (tester) async {
+      var applyCount = 0;
+      MemoryAuditFilter? captured;
+      await tester.pumpWidget(_filterApp(
+        onChanged: (filter) {
+          applyCount++;
+          captured = filter;
+        },
+      ));
+
+      await _openAdvanced(tester);
       await tester.ensureVisible(
-        find.byKey(const ValueKey('memory-filter-dialog-status')),
-      );
-      await tester.tap(
-        find.byKey(const ValueKey('memory-filter-dialog-status')),
-      );
+          find.byKey(const ValueKey('memory-filter-dialog-status')));
+      await tester
+          .tap(find.byKey(const ValueKey('memory-filter-dialog-status')));
       await tester.pumpAndSettle();
       await tester.tap(find.text('已取代').last);
       await tester.pumpAndSettle();
       await tester.tap(find.text('应用筛选'));
       await tester.pumpAndSettle();
 
+      expect(applyCount, 1);
       expect(captured?.status, MemoryStatus.superseded);
     });
+
+    testWidgets('searchable selectors use friendly names and search text',
+        (tester) async {
+      final chars = [testCharacter('c1'), testCharacter('c2')];
+      await tester.pumpWidget(_filterApp(
+        characters: chars,
+        originConversations: const {'g1': '群一', 'g2': '群二'},
+      ));
+
+      await _openAdvanced(tester);
+      await tester
+          .tap(find.byKey(const ValueKey('memory-filter-dialog-observer')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).last, '角色c2');
+      await tester.pumpAndSettle();
+      expect(find.text('角色c2'), findsOneWidget);
+      expect(find.text('c2'), findsNothing);
+      await tester.tap(find.text('角色c2').last);
+
+      await tester.ensureVisible(
+          find.byKey(const ValueKey('memory-filter-dialog-subject')));
+      await tester
+          .tap(find.byKey(const ValueKey('memory-filter-dialog-subject')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).last, '角色c1');
+      await tester.pumpAndSettle();
+      expect(find.text('角色c1'), findsOneWidget);
+      expect(find.text('c1'), findsNothing);
+      await tester.tap(find.text('角色c1').last);
+
+      await tester.ensureVisible(find
+          .byKey(const ValueKey('memory-filter-dialog-origin-conversation')));
+      await tester.tap(find
+          .byKey(const ValueKey('memory-filter-dialog-origin-conversation')));
+      await tester.pumpAndSettle();
+      await tester.enterText(find.byType(TextField).last, '群二');
+      await tester.pumpAndSettle();
+      expect(find.text('群二'), findsOneWidget);
+      expect(find.text('g2'), findsNothing);
+    });
+
+    testWidgets('scope hides fixed direct fields and limits group candidates',
+        (tester) async {
+      final chars = [
+        testCharacter('a'),
+        testCharacter('b'),
+        testCharacter('outside'),
+      ];
+      await tester.pumpWidget(_filterApp(
+        characters: chars,
+        scope: MemoryConversationScope.direct('a'),
+      ));
+      await _openAdvanced(tester);
+      expect(find.byKey(const ValueKey('memory-filter-dialog-observer')),
+          findsNothing);
+      expect(find.byKey(const ValueKey('memory-filter-dialog-subject')),
+          findsNothing);
+      await tester.tap(find.text('取消'));
+      await tester.pumpAndSettle();
+
+      await tester.pumpWidget(_filterApp(
+        characters: chars,
+        scope: MemoryConversationScope.group({'a', 'b'}),
+      ));
+      await _openAdvanced(tester);
+      await tester
+          .tap(find.byKey(const ValueKey('memory-filter-dialog-observer')));
+      await tester.pumpAndSettle();
+      expect(find.text('角色a'), findsOneWidget);
+      expect(find.text('角色b'), findsOneWidget);
+      expect(find.text('角色outside'), findsNothing);
+      await tester.tap(find.text('角色a').last);
+      await tester.ensureVisible(
+          find.byKey(const ValueKey('memory-filter-dialog-subject')));
+      await tester
+          .tap(find.byKey(const ValueKey('memory-filter-dialog-subject')));
+      await tester.pumpAndSettle();
+      expect(find.text('角色b'), findsOneWidget);
+      expect(find.text('角色outside'), findsNothing);
+    });
+
+    testWidgets('small filter dimensions use labeled standard controls',
+        (tester) async {
+      await tester.pumpWidget(_filterApp(
+        originConversations: const {'g1': '群一'},
+      ));
+      await _openAdvanced(tester);
+
+      for (final key in const [
+        'memory-filter-dialog-origin-type',
+        'memory-filter-dialog-status',
+        'memory-filter-dialog-kind',
+        'memory-filter-dialog-pinned',
+      ]) {
+        expect(find.byKey(ValueKey(key)), findsOneWidget);
+      }
+      expect(find.byType(ChoiceChip), findsNothing);
+      expect(find.text('来源方式'), findsOneWidget);
+      expect(find.text('记忆状态'), findsOneWidget);
+      expect(find.text('记忆类型'), findsOneWidget);
+      expect(find.text('固定状态'), findsOneWidget);
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('deleted selector values use friendly placeholders',
+        (tester) async {
+      await tester.pumpWidget(_filterApp(
+        filter: MemoryAuditFilter(
+          observerCharacterId: 'deleted-observer',
+          subjectFilter: SubjectFilter.aboutCharacter('deleted-subject'),
+          originConversationId: 'deleted-group',
+        ),
+        originConversations: const {'existing-group': '群一'},
+      ));
+
+      await _openAdvanced(tester);
+      expect(find.text('已删除角色'), findsWidgets);
+      expect(find.text('deleted-observer'), findsNothing);
+      expect(find.text('deleted-subject'), findsNothing);
+      expect(find.text('已删除群聊'), findsOneWidget);
+      expect(find.text('deleted-group'), findsNothing);
+    });
+
+    testWidgets('empty source candidates show an explicit empty state',
+        (tester) async {
+      await tester.pumpWidget(_filterApp(
+        characters: const [],
+        originConversations: const {},
+      ));
+
+      await _openAdvanced(tester);
+      expect(find.text('暂无可选来源场合'), findsOneWidget);
+      expect(
+          find.byKey(
+              const ValueKey('memory-filter-dialog-origin-conversation')),
+          findsOneWidget);
+    });
+
+    testWidgets('narrow keyboard keeps actions above the view inset',
+        (tester) async {
+      MemoryAuditFilter? captured;
+      tester.view.physicalSize = const Size(480, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      addTearDown(tester.view.resetViewInsets);
+
+      await tester.pumpWidget(_filterApp(
+        characters: [testCharacter('observer')],
+        originConversations: const {'g1': '群一'},
+        onChanged: (filter) => captured = filter,
+      ));
+      await _openAdvanced(tester);
+      await tester
+          .tap(find.byKey(const ValueKey('memory-filter-dialog-observer')));
+      await tester.pump();
+      await tester.enterText(find.byType(TextField).last, '角色');
+      tester.view.viewInsets = const FakeViewPadding(bottom: 320);
+      await tester.pumpAndSettle();
+
+      final visibleBottom = 800 - 320;
+      for (final key in const [
+        'memory-filter-dialog-reset',
+        'memory-filter-dialog-cancel',
+        'memory-filter-dialog-apply',
+      ]) {
+        await tester.ensureVisible(find.byKey(ValueKey(key)));
+        expect(tester.getRect(find.byKey(ValueKey(key))).bottom,
+            lessThanOrEqualTo(visibleBottom));
+      }
+      expect(tester.takeException(), isNull);
+      await tester
+          .tap(find.byKey(const ValueKey('memory-filter-dialog-apply')));
+      await tester.pumpAndSettle();
+      expect(captured, isNotNull);
+    });
+
+    testWidgets('filter dialog exposes keyboard traversal and semantics',
+        (tester) async {
+      final semantics = tester.ensureSemantics();
+
+      await tester.pumpWidget(_filterApp(
+        characters: [testCharacter('observer')],
+        originConversations: const {'g1': '群一'},
+      ));
+      await _openAdvanced(tester);
+
+      for (final label in const [
+        '观察 AI，可输入搜索',
+        '记忆对象，可输入搜索',
+        '来源场合，可输入搜索',
+      ]) {
+        final key = switch (label) {
+          '观察 AI，可输入搜索' => 'memory-filter-dialog-observer',
+          '记忆对象，可输入搜索' => 'memory-filter-dialog-subject',
+          _ => 'memory-filter-dialog-origin-conversation',
+        };
+        expect(tester.getSemantics(find.byKey(ValueKey(key))).label,
+            contains(label));
+      }
+      for (final key in const [
+        'memory-filter-dialog-reset',
+        'memory-filter-dialog-cancel',
+        'memory-filter-dialog-apply',
+      ]) {
+        expect(tester.getSize(find.byKey(ValueKey(key))).height,
+            greaterThanOrEqualTo(44));
+      }
+
+      final resetFocus = _buttonFocusNode(
+          tester, find.byKey(const ValueKey('memory-filter-dialog-reset')));
+      resetFocus.requestFocus();
+      await tester.pump();
+      final initialFocus = FocusManager.instance.primaryFocus;
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.pump();
+      expect(FocusManager.instance.primaryFocus, isNot(same(initialFocus)));
+      await tester.sendKeyDownEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.sendKeyEvent(LogicalKeyboardKey.tab);
+      await tester.sendKeyUpEvent(LogicalKeyboardKey.shiftLeft);
+      await tester.pump();
+      expect(FocusManager.instance.primaryFocus, same(initialFocus));
+      semantics.dispose();
+    });
+
+    testWidgets('filter buttons activate with Enter and Space', (tester) async {
+      MemoryAuditFilter? captured;
+      await tester.pumpWidget(_filterApp(
+        filter: const MemoryAuditFilter(status: MemoryStatus.active),
+        onChanged: (filter) => captured = filter,
+      ));
+      await _openAdvanced(tester);
+
+      final applyFocus = _buttonFocusNode(
+          tester, find.byKey(const ValueKey('memory-filter-dialog-apply')));
+      applyFocus.requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.enter);
+      await tester.pumpAndSettle();
+      expect(captured?.status, MemoryStatus.active);
+
+      await _openAdvanced(tester);
+      final cancelFocus = _buttonFocusNode(
+          tester, find.byKey(const ValueKey('memory-filter-dialog-cancel')));
+      cancelFocus.requestFocus();
+      await tester.pump();
+      await tester.sendKeyEvent(LogicalKeyboardKey.space);
+      await tester.pumpAndSettle();
+      expect(find.byType(AlertDialog), findsNothing);
+    });
+
+    testWidgets('narrow screens use the same content in a bottom sheet',
+        (tester) async {
+      tester.view.physicalSize = const Size(480, 800);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      await tester.pumpWidget(_filterApp());
+      await _openAdvanced(tester);
+
+      expect(find.byType(BottomSheet), findsOneWidget);
+      expect(find.byKey(const ValueKey('memory-filter-dialog-status')),
+          findsOneWidget);
+      final semantics = tester.ensureSemantics();
+      expect(
+          tester
+              .getSemantics(
+                  find.byKey(const ValueKey('memory-filter-dialog-close')))
+              .label,
+          contains('关闭'));
+      semantics.dispose();
+      await tester.binding.handlePopRoute();
+      await tester.pumpAndSettle();
+      expect(find.byType(BottomSheet), findsNothing);
+    });
+
+    testWidgets('desktop escape closes without applying', (tester) async {
+      MemoryAuditFilter? captured;
+      await tester.pumpWidget(_filterApp(
+        onChanged: (filter) => captured = filter,
+      ));
+      await _openAdvanced(tester);
+      expect(find.byType(AlertDialog), findsOneWidget);
+
+      await tester.sendKeyEvent(LogicalKeyboardKey.escape);
+      await tester.pumpAndSettle();
+
+      expect(find.byType(AlertDialog), findsNothing);
+      expect(captured, isNull);
+    });
   });
+}
+
+Widget _filterApp({
+  MemoryAuditFilter filter = const MemoryAuditFilter(),
+  List<AICharacter> characters = const [],
+  Map<String, String> originConversations = const {},
+  MemoryConversationScope scope = const MemoryConversationScope.settings(),
+  ValueChanged<MemoryAuditFilter>? onChanged,
+}) {
+  return MaterialApp(
+    home: Scaffold(
+      body: MemoryAuditFilterWidget(
+        filter: filter,
+        characters: characters,
+        originConversations: originConversations,
+        scope: scope,
+        onChanged: onChanged ?? (_) {},
+      ),
+    ),
+  );
+}
+
+Future<void> _openAdvanced(WidgetTester tester) async {
+  await tester.tap(find.byKey(const ValueKey('open-advanced-memory-filter')));
+  await tester.pumpAndSettle();
+}
+
+FocusNode _buttonFocusNode(WidgetTester tester, Finder button) {
+  final focusFinder = find.descendant(of: button, matching: find.byType(Focus));
+  expect(focusFinder, findsWidgets);
+  return (tester.state(focusFinder.last) as dynamic).focusNode as FocusNode;
 }

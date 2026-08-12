@@ -76,6 +76,46 @@ class MemoryConversationScope {
 
   bool get isReadOnly => type != MemoryConversationScopeType.settings;
 
+  /// Direct-chat entries already fix both dimensions in their route. Group
+  /// entries may choose an in-group observer and subject; settings can choose
+  /// from the full snapshot.
+  bool get showsObserverFilter => type != MemoryConversationScopeType.direct;
+
+  bool get showsSubjectFilter => type != MemoryConversationScopeType.direct;
+
+  /// Removes values that a chat entry cannot legally express before the draft
+  /// is shown or returned. [apply] remains the data boundary for loaded rows.
+  MemoryAuditFilter constrainFilter(MemoryAuditFilter filter) {
+    if (type == MemoryConversationScopeType.settings) {
+      return filter.copyWith();
+    }
+    if (type == MemoryConversationScopeType.direct) {
+      return filter.copyWith(
+        clearObserverCharacterId: true,
+        clearSubjectFilter: true,
+      );
+    }
+
+    final observer = groupCharacterIds.contains(filter.observerCharacterId)
+        ? filter.observerCharacterId
+        : null;
+    final allowedSubjects = observer == null
+        ? allowedSubjectIds!
+        : subjectIdsForObserver(observer)!;
+    final subjectId = filter.subjectFilter.characterId;
+    final subjectIsBuiltIn = subjectId == SubjectFilter.all.characterId ||
+        subjectId == SubjectFilter.aboutMe.characterId ||
+        subjectId == SubjectFilter.selfGrowth.characterId;
+    final subjectIsAllowed = subjectIsBuiltIn ||
+        (subjectId != null && allowedSubjects.contains(subjectId));
+
+    return filter.copyWith(
+      observerCharacterId: observer,
+      clearObserverCharacterId: observer == null,
+      clearSubjectFilter: !subjectIsAllowed,
+    );
+  }
+
   List<PermanentMemory> apply(List<PermanentMemory> memories) {
     return memories.where(_allows).toList(growable: false);
   }
@@ -216,6 +256,20 @@ class MemoryAuditFilter {
       pinnedOnly == null &&
       (searchQuery == null || searchQuery!.trim().isEmpty) &&
       sortOrder == MemoryAuditSortOrder.updatedAtDescending;
+
+  int get activeCriterionCount => [
+        observerCharacterId,
+        subjectFilter == SubjectFilter.all ? null : subjectFilter,
+        originType,
+        originConversationId,
+        status,
+        memoryKind,
+        pinnedOnly,
+        searchQuery?.trim().isEmpty == true ? null : searchQuery,
+        sortOrder == MemoryAuditSortOrder.updatedAtDescending
+            ? null
+            : sortOrder,
+      ].whereType<Object>().length;
 
   List<PermanentMemory> apply(
     List<PermanentMemory> memories, {
