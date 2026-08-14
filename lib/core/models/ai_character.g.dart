@@ -43,13 +43,14 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
       gender: fields[21] == null
           ? CharacterGender.female
           : fields[21] as CharacterGender,
+      hasKnownGender: fields[22] == null ? false : fields[22] as bool,
     );
   }
 
   @override
   void write(BinaryWriter writer, AICharacter obj) {
     writer
-      ..writeByte(22)
+      ..writeByte(23)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -93,7 +94,9 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
       ..writeByte(20)
       ..write(obj.toolPermissions)
       ..writeByte(21)
-      ..write(obj.gender);
+      ..write(obj.gender)
+      ..writeByte(22)
+      ..write(obj.hasKnownGender);
   }
 
   @override

@@ -542,7 +542,8 @@ class MemoryControls {
       .length;
 
   static List<String> _normalizedSubjectIds(List<String> ids) {
-    return ids.map((s) => s.trim()).where((s) => s.isNotEmpty).toSet().toList();
+    return ids.map((s) => s.trim()).where((s) => s.isNotEmpty).toSet().toList()
+      ..sort();
   }
 
   static bool _listsEqual(List<String> a, List<String> b) {

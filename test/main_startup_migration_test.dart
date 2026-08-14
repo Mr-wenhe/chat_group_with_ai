@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
@@ -7,6 +8,7 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/ai_character/character_gender_migrator.dart';
+import 'package:chat_group/features/memory/memory_migrator.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/main.dart';
 import 'package:dio/dio.dart';
@@ -64,6 +66,26 @@ class _CancelableDelayedChatApiService extends ChatApiService {
   }
 }
 
+class _HangingGenderMigrator extends CharacterGenderMigrator {
+  bool cancelled = false;
+
+  _HangingGenderMigrator(super.db);
+
+  @override
+  Future<int> migrate() => Completer<int>().future;
+
+  @override
+  void cancel() => cancelled = true;
+}
+
+class _HangingMemoryMigrator extends MemoryMigrator {
+  _HangingMemoryMigrator(super.db);
+
+  @override
+  Future<MemoryMigrationReport> migrate({bool force = false}) =>
+      Completer<MemoryMigrationReport>().future;
+}
+
 AICharacter _character({
   required String id,
   String systemPrompt = '',
@@ -79,6 +101,7 @@ AICharacter _character({
       apiKey: '',
       apiProvider: 'custom',
       apiConfigId: 'config-a',
+      hasKnownGender: false,
     );
 
 ApiConfig _config() => ApiConfig(
@@ -159,6 +182,29 @@ void main() {
     expect(diagnostic, isNot(contains('我是')));
   });
 
+  test('timeout does not wait forever for the cancelled migration', () async {
+    final migrator = _HangingGenderMigrator(db);
+
+    await runCharacterGenderMigration(
+      db,
+      migrator: migrator,
+      timeout: const Duration(milliseconds: 5),
+    ).timeout(const Duration(seconds: 1));
+
+    expect(migrator.cancelled, isTrue);
+  });
+
+  test('memory startup migration timeout does not block startup forever',
+      () async {
+    final migrator = _HangingMemoryMigrator(db);
+
+    await runMemoryMigration(
+      db,
+      migrator: migrator,
+      timeout: const Duration(milliseconds: 5),
+    ).timeout(const Duration(seconds: 1));
+  });
+
   test('top-level migration failure keeps a final session gender', () async {
     final character = _character(
       id: 'old-male',
@@ -179,7 +225,7 @@ void main() {
     );
 
     expect(api.calls, isZero);
-    expect(character.gender, CharacterGender.male);
+    expect(db.aiCharacterBox.get(character.id)!.gender, CharacterGender.male);
     final diagnostic = jsonEncode(
       db.appSettingsBox.get(CharacterGenderMigrator.diagnosticKey),
     );

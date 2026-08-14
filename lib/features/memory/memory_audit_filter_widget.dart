@@ -6,13 +6,13 @@ import 'package:flutter/material.dart';
 
 /// Opens the one transactional filter surface used by memory entry points.
 class MemoryAuditFilterWidget extends StatelessWidget {
-  static const _narrowBreakpoint = 600.0;
-
   final MemoryAuditFilter filter;
   final List<AICharacter> characters;
   final Map<String, String> originConversations;
   final MemoryAuditPresenter? presenter;
   final MemoryConversationScope scope;
+  final bool showAdvancedControls;
+  final bool showNavigationSelectors;
   final ValueChanged<MemoryAuditFilter> onChanged;
 
   const MemoryAuditFilterWidget({
@@ -22,6 +22,8 @@ class MemoryAuditFilterWidget extends StatelessWidget {
     this.originConversations = const {},
     this.presenter,
     this.scope = const MemoryConversationScope.settings(),
+    this.showAdvancedControls = true,
+    this.showNavigationSelectors = true,
     required this.onChanged,
   });
 
@@ -36,7 +38,7 @@ class MemoryAuditFilterWidget extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final conditionCount = filter.activeCriterionCount;
+    final conditionCount = filter.advancedCriterionCount;
     return Padding(
       padding: const EdgeInsets.fromLTRB(20, 8, 20, 16),
       child: Column(
@@ -51,65 +53,110 @@ class MemoryAuditFilterWidget extends StatelessWidget {
               ),
             ),
           ),
-          const SizedBox(height: 8),
-          Wrap(
-            spacing: 12,
-            runSpacing: 8,
-            crossAxisAlignment: WrapCrossAlignment.center,
-            children: [
-              OutlinedButton.icon(
-                key: const ValueKey('open-advanced-memory-filter'),
-                onPressed: () => _showAdvancedFilter(context),
-                icon: const Icon(Icons.tune_rounded, size: 18),
-                label: const Text('高级筛选'),
-              ),
-              if (!filter.isEmpty)
-                Text(
-                  '已设置 $conditionCount 项条件',
-                  key: const ValueKey('memory-filter-active-summary'),
-                  style: TextStyle(
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+          if (showAdvancedControls) ...[
+            const SizedBox(height: 8),
+            Wrap(
+              spacing: 12,
+              runSpacing: 8,
+              crossAxisAlignment: WrapCrossAlignment.center,
+              children: [
+                MemoryAuditFilterAction(
+                  filter: filter,
+                  characters: characters,
+                  originConversations: originConversations,
+                  presenter: _displayPresenter,
+                  scope: scope,
+                  showNavigationSelectors: showNavigationSelectors,
+                  label: '高级筛选',
+                  onChanged: onChanged,
+                ),
+                if (filter.hasAdvancedCriteria)
+                  Text(
+                    '已设置 $conditionCount 项条件',
+                    key: const ValueKey('memory-filter-active-summary'),
+                    style: TextStyle(
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
                   ),
-                ),
-              if (!filter.isEmpty)
-                TextButton(
-                  key: const ValueKey('clear-memory-filter'),
-                  onPressed: () => onChanged(const MemoryAuditFilter()),
-                  child: const Text('清除筛选'),
-                ),
-            ],
-          ),
+                if (filter.hasAdvancedCriteria)
+                  TextButton(
+                    key: const ValueKey('clear-memory-filter'),
+                    onPressed: () => onChanged(filter.clearAdvancedFilters()),
+                    child: const Text('清除筛选'),
+                  ),
+              ],
+            ),
+          ],
         ],
       ),
     );
   }
+}
 
-  Future<void> _showAdvancedFilter(BuildContext context) async {
+class MemoryAuditFilterAction extends StatelessWidget {
+  static const _narrowBreakpoint = 600.0;
+
+  final MemoryAuditFilter filter;
+  final List<AICharacter> characters;
+  final Map<String, String> originConversations;
+  final MemoryAuditPresenter presenter;
+  final MemoryConversationScope scope;
+  final bool showNavigationSelectors;
+  final String label;
+  final ValueChanged<MemoryAuditFilter> onChanged;
+
+  const MemoryAuditFilterAction({
+    super.key,
+    required this.filter,
+    required this.characters,
+    required this.originConversations,
+    required this.presenter,
+    required this.scope,
+    this.showNavigationSelectors = true,
+    required this.onChanged,
+    this.label = '高级筛选',
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final count = filter.advancedCriterionCount;
+    return Badge(
+      key: const ValueKey('memory-filter-advanced-badge'),
+      isLabelVisible: count > 0,
+      label: Text('$count'),
+      child: OutlinedButton.icon(
+        key: const ValueKey('open-advanced-memory-filter'),
+        onPressed: () => _showDialog(context),
+        icon: const Icon(Icons.tune_rounded, size: 18),
+        label: Text(label),
+      ),
+    );
+  }
+
+  Future<void> _showDialog(BuildContext context) async {
     final isNarrow = MediaQuery.sizeOf(context).width < _narrowBreakpoint;
     final dialog = MemoryAuditFilterDialog(
       filter: filter,
       characters: characters,
       originConversations: originConversations,
-      presenter: _displayPresenter,
+      presenter: presenter,
       scope: scope,
       inBottomSheet: isNarrow,
+      showNavigationSelectors: showNavigationSelectors,
     );
-    MemoryAuditFilter? next;
-    if (isNarrow) {
-      next = await showModalBottomSheet<MemoryAuditFilter>(
-        context: context,
-        isScrollControlled: true,
-        useSafeArea: true,
-        builder: (_) => dialog,
-      );
-    } else {
-      next = await showDialog<MemoryAuditFilter>(
-        context: context,
-        builder: (_) => dialog,
-      );
-    }
-    if (!context.mounted) return;
-    if (next != null) onChanged(next);
+    final dialogFuture = isNarrow
+        ? showModalBottomSheet<MemoryAuditFilter>(
+            context: context,
+            isScrollControlled: true,
+            useSafeArea: true,
+            builder: (_) => dialog,
+          )
+        : showDialog<MemoryAuditFilter>(
+            context: context,
+            builder: (_) => dialog,
+          );
+    final next = await dialogFuture;
+    if (context.mounted && next != null) onChanged(next);
   }
 }
 

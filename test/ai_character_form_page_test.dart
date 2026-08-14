@@ -46,7 +46,10 @@ void main() {
         child: MaterialApp(home: page),
       );
 
-  AICharacter character({CharacterGender gender = CharacterGender.female}) =>
+  AICharacter character({
+    CharacterGender gender = CharacterGender.female,
+    bool hasKnownGender = true,
+  }) =>
       AICharacter(
         id: 'character-1',
         name: 'Amy',
@@ -59,6 +62,7 @@ void main() {
         apiProvider: 'custom',
         apiConfigId: 'config-1',
         gender: gender,
+        hasKnownGender: hasKnownGender,
       );
 
   testWidgets('new character requires an explicit gender', (tester) async {
@@ -165,5 +169,20 @@ void main() {
       () => Future<void>.delayed(const Duration(milliseconds: 100)),
     );
     await tester.pump(const Duration(seconds: 4));
+  });
+
+  testWidgets('edit form keeps a legacy unknown gender visibly unresolved',
+      (tester) async {
+    final saved = character(
+      gender: CharacterGender.female,
+      hasKnownGender: false,
+    );
+
+    await tester.pumpWidget(app(AICharacterFormPage(character: saved)));
+    await tester.pump();
+
+    expect(find.text('未知（迁移中）'), findsOneWidget);
+    expect(find.text('女'), findsNothing);
+    expect(find.text('创建后不可修改'), findsOneWidget);
   });
 }

@@ -76,6 +76,7 @@ import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dar
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:chat_group/features/memory/memory_controls.dart';
+import 'package:chat_group/features/memory/memory_audit_filter.dart';
 import 'package:chat_group/features/memory/memory_management_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
@@ -5499,23 +5500,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
   }
 
-  /// 打开记忆管理页；返回后重新加载记忆/关系/成员，让页面反映用户的编辑结果。
+  /// 打开只读记忆浏览页；返回时保留聊天页已有的消息和滚动状态。
   Future<void> _openMemoryManagement() async {
     await Navigator.of(context).push(MaterialPageRoute(
       builder: (_) => MemoryManagementPage(
-        conversationId: widget.groupId,
+        scope: _isDirectChat && _directCharacterId != null
+            ? MemoryConversationScope.direct(_directCharacterId!)
+            : MemoryConversationScope.group(
+                (_group?.aiCharacterIds ??
+                        _characters.map((character) => character.id))
+                    .toSet(),
+              ),
       ),
     ));
-    if (!_canTouchUi) return;
-    final loaded = await _loader.load(widget.groupId);
-    if (!_canTouchUi) return;
-    setState(() {
-      _groupMemory = loaded.groupMemory;
-      _characterMemories = loaded.characterMemories;
-      _relationshipStates = loaded.relationships;
-      _characters = loaded.activeCharacters;
-      _allGroupCharacters = loaded.allCharacters;
-    });
   }
 
   /// 成员面板里的单行状态文案：「性别 · 职业 · 年龄 · 回复状态 · 本小时用量」。

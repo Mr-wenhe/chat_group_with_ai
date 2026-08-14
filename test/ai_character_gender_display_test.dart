@@ -19,6 +19,7 @@ AICharacter _character({
   required String role,
   int age = 28,
   int hourlyReplyCount = 0,
+  bool hasKnownGender = true,
 }) {
   return AICharacter(
     id: id,
@@ -32,6 +33,7 @@ AICharacter _character({
     apiProvider: 'custom',
     hourlyReplyCount: hourlyReplyCount,
     gender: gender,
+    hasKnownGender: hasKnownGender,
   );
 }
 
@@ -115,5 +117,31 @@ void main() {
 
     expect(find.text('男 · 工程师 · 28岁 · 可回复 · 2/60 次/小时'), findsOneWidget);
     expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('character list keeps a pending gender visibly unknown',
+      (tester) async {
+    final pending = _character(
+      id: 'pending',
+      name: '待迁移角色',
+      gender: CharacterGender.female,
+      role: '助手',
+      hasKnownGender: false,
+    );
+    await tester.runAsync(
+      () => db.aiCharacterBox.put(pending.id, pending),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseServiceProvider.overrideWithValue(db)],
+        child: const MaterialApp(home: AICharacterListPage()),
+      ),
+    );
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(find.text('未知 · 助手 · 28岁'), findsOneWidget);
+    expect(find.text('女 · 助手 · 28岁'), findsNothing);
   });
 }

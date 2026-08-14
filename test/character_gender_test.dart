@@ -17,6 +17,7 @@ void main() {
     String role = '瑜伽教练',
     String systemPrompt = '温柔地陪伴用户。',
     CharacterGender gender = CharacterGender.female,
+    bool hasKnownGender = true,
   }) {
     return AICharacter(
       id: id ?? name,
@@ -29,6 +30,7 @@ void main() {
       apiKey: '',
       apiProvider: 'custom',
       gender: gender,
+      hasKnownGender: hasKnownGender,
     );
   }
 
@@ -64,6 +66,19 @@ void main() {
       contains(femaleWithoutPrompt.promptIdentity),
     );
     expect(femaleWithoutPrompt.rolePlaySystemPrompt, contains('角色性别为女'));
+  });
+
+  test('role-play prompts always use a deterministic male or female label', () {
+    final pending = character(
+      name: '待迁移角色',
+      gender: CharacterGender.male,
+      hasKnownGender: false,
+    );
+
+    expect(pending.displayGenderLabel, '未知');
+    expect(pending.promptIdentity, contains('性别男'));
+    expect(pending.promptIdentity, isNot(contains('未知')));
+    expect(pending.rolePlaySystemPrompt, contains('角色性别为男'));
   });
 
   test('local migration uses explicit identity evidence before name hints', () {
@@ -103,6 +118,8 @@ void main() {
     );
 
     expect(decoded.gender, CharacterGender.female);
+    expect(decoded.hasKnownGender, isFalse);
+    expect(decoded.displayGenderLabel, '未知');
   });
 
   test('notifier saves a selected gender for a new character', () async {
@@ -114,6 +131,17 @@ void main() {
     await notifier.addCharacter(male);
 
     expect(fixture.box.get(male.id)!.gender, CharacterGender.male);
+  });
+
+  test('notifier rejects an unknown gender for a new character', () async {
+    final fixture = await _CharacterHiveFixture.open();
+    addTearDown(fixture.close);
+    final notifier = AICharactersNotifier(DatabaseService());
+    final unknown = character(name: '未选择角色', hasKnownGender: false);
+
+    await expectLater(notifier.addCharacter(unknown), throwsArgumentError);
+
+    expect(fixture.box.get(unknown.id), isNull);
   });
 
   test('notifier preserves gender while updating other editable fields',
@@ -135,6 +163,62 @@ void main() {
     expect(saved.gender, CharacterGender.male);
     expect(saved.name, '阿杰（新版）');
     expect(saved.role, '播客主持人');
+  });
+
+  test('notifier preserves gender when replacing an existing id', () async {
+    final fixture = await _CharacterHiveFixture.open();
+    addTearDown(fixture.close);
+    final notifier = AICharactersNotifier(DatabaseService());
+    final original = character(name: '阿杰', gender: CharacterGender.male);
+    await notifier.addCharacter(original);
+
+    await notifier.addCharacter(
+      character(
+        id: original.id,
+        name: '阿杰（替换）',
+        gender: CharacterGender.female,
+      ),
+    );
+
+    final saved = fixture.box.get(original.id)!;
+    expect(saved.gender, CharacterGender.male);
+    expect(saved.name, '阿杰（替换）');
+  });
+
+  test('a persisted character cannot change gender through the same object',
+      () async {
+    final fixture = await _CharacterHiveFixture.open();
+    addTearDown(fixture.close);
+    final original = character(name: '阿杰', gender: CharacterGender.male);
+    await fixture.box.put(original.id, original);
+
+    final persisted = fixture.box.get(original.id)!;
+    expect(
+      () => (persisted as dynamic).gender = CharacterGender.female,
+      throwsA(isA<NoSuchMethodError>()),
+    );
+    await fixture.box.put(persisted.id, persisted);
+
+    expect(fixture.box.get(original.id)!.gender, CharacterGender.male);
+  });
+
+  test('unknown gender state survives Hive until migration replacement',
+      () async {
+    final fixture = await _CharacterHiveFixture.open();
+    addTearDown(fixture.close);
+    final unknown = character(name: '旧角色', hasKnownGender: false);
+    await fixture.box.put(unknown.id, unknown);
+    await fixture.reopen();
+
+    expect(fixture.box.get(unknown.id)!.hasKnownGender, isFalse);
+    final resolved = fixture.box.get(unknown.id)!.withGender(
+          CharacterGender.male,
+        );
+    await fixture.box.put(resolved.id, resolved);
+
+    final saved = fixture.box.get(unknown.id)!;
+    expect(saved.gender, CharacterGender.male);
+    expect(saved.hasKnownGender, isTrue);
   });
 }
 
@@ -287,6 +371,21 @@ class _CharacterHiveFixture {
   }
 
   Box<AICharacter> get box => Hive.box<AICharacter>('ai_characters');
+
+  Future<void> reopen() async {
+    await Hive.close();
+    Hive.init(directory.path);
+    if (!Hive.isAdapterRegistered(0)) {
+      Hive.registerAdapter(AICharacterAdapter());
+    }
+    if (!Hive.isAdapterRegistered(10)) {
+      Hive.registerAdapter(ToolPermissionAdapter());
+    }
+    if (!Hive.isAdapterRegistered(24)) {
+      Hive.registerAdapter(CharacterGenderAdapter());
+    }
+    await Hive.openBox<AICharacter>('ai_characters');
+  }
 
   Future<void> close() async {
     await Hive.close();

@@ -99,6 +99,7 @@ class MemoryAuditRow {
   final List<String> sourceMessageIds;
   final int supersedesCount;
   final String observerName;
+  final String observerAvatar;
   final List<String> subjectNames;
   final String originName;
   final MemoryAuditLabel kind;
@@ -121,6 +122,7 @@ class MemoryAuditRow {
     required List<String> sourceMessageIds,
     required this.supersedesCount,
     required this.observerName,
+    this.observerAvatar = '',
     required List<String> subjectNames,
     required this.originName,
     required this.kind,
@@ -185,14 +187,17 @@ class MemoryAuditPresenter {
   );
 
   final Map<String, String> characterNames;
+  final Map<String, String> characterAvatars;
   final Map<String, String> characterSnapshotNames;
   final Map<String, String> conversationNames;
 
   MemoryAuditPresenter({
     Map<String, String> characterNames = const {},
+    Map<String, String> characterAvatars = const {},
     Map<String, String> characterSnapshotNames = const {},
     Map<String, String> conversationNames = const {},
   })  : characterNames = Map.unmodifiable(characterNames),
+        characterAvatars = Map.unmodifiable(characterAvatars),
         characterSnapshotNames = Map.unmodifiable(characterSnapshotNames),
         conversationNames = Map.unmodifiable(conversationNames);
 
@@ -210,6 +215,7 @@ class MemoryAuditPresenter {
       sourceMessageIds: List.unmodifiable(memory.sourceMessageIds),
       supersedesCount: memory.supersedesIds.length,
       observerName: _characterName(memory.observerCharacterId),
+      observerAvatar: characterAvatars[memory.observerCharacterId] ?? '',
       subjectNames: List.unmodifiable(
         memory.subjectIds.map(_characterName),
       ),
@@ -361,6 +367,11 @@ class MemoryAuditPresenter {
         normalized == _directCharacterId(id) ||
         normalized.startsWith(DirectChatSession.prefix) ||
         _uuidPattern.hasMatch(normalized);
+  }
+
+  static String safeDisplayName(String? value, [String? id]) {
+    final name = value?.trim() ?? '';
+    return name.isNotEmpty && !isTechnicalName(name, id) ? name : '已删除角色';
   }
 
   static String _legacySnapshotPayload(String value) {

@@ -193,7 +193,7 @@ void main() {
       () async {
     const characterId = 'c1';
     final conversationId = DirectChatSession.conversationIdFor(characterId);
-    final deleted = testCharacter(characterId)..gender = CharacterGender.male;
+    final deleted = testCharacter(characterId, gender: CharacterGender.male);
     await db.aiCharacterBox.put(characterId, deleted);
     await db.aiCharacterBox.put('c2', testCharacter('c2'));
     await db.chatGroupBox.put(
@@ -438,6 +438,20 @@ void main() {
     expect(snapshot.displayGenderLabel, '未知');
     expect(snapshot.promptIdentity, isNot(contains('性别女')));
     expect(service.deletedCharacters().single.name, '旧删除角色');
+  });
+
+  test('unknown deleted snapshot does not persist compatibility female',
+      () async {
+    final unknown = testCharacter('pending-deleted', hasKnownGender: false);
+    await DataLifecycleSettings(db).saveDeletedCharacter(unknown);
+
+    final raw = db.appSettingsBox.get(
+      DataLifecycleSettings.deletedCharacterSnapshotsKey,
+    ) as Map;
+    final snapshot = raw['pending-deleted'] as Map;
+    expect(snapshot.containsKey('gender'), isFalse);
+    expect(
+        service.deletedCharacter('pending-deleted')!.hasKnownGender, isFalse);
   });
 
   test('character full policy deletes private history and orphan attachment',

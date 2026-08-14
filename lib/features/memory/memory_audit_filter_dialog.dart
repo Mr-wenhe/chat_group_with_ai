@@ -12,6 +12,7 @@ class MemoryAuditFilterDialog extends StatefulWidget {
   final MemoryAuditPresenter presenter;
   final MemoryConversationScope scope;
   final bool inBottomSheet;
+  final bool showNavigationSelectors;
 
   const MemoryAuditFilterDialog({
     super.key,
@@ -21,6 +22,7 @@ class MemoryAuditFilterDialog extends StatefulWidget {
     required this.presenter,
     this.scope = const MemoryConversationScope.settings(),
     this.inBottomSheet = false,
+    this.showNavigationSelectors = true,
   });
 
   @override
@@ -127,7 +129,8 @@ class _MemoryAuditFilterDialogState extends State<MemoryAuditFilterDialog> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: [
-            if (widget.scope.showsObserverFilter)
+            if (widget.showNavigationSelectors &&
+                widget.scope.showsObserverFilter)
               _searchableSelector(
                 key: const ValueKey('memory-filter-dialog-observer'),
                 label: '观察 AI',
@@ -139,9 +142,11 @@ class _MemoryAuditFilterDialogState extends State<MemoryAuditFilterDialog> {
                   clearObserverCharacterId: value == _all,
                 )),
               ),
-            if (widget.scope.showsObserverFilter)
+            if (widget.showNavigationSelectors &&
+                widget.scope.showsObserverFilter)
               const _HelpText('拥有并可能在对话中使用这条记忆的角色。'),
-            if (widget.scope.showsSubjectFilter)
+            if (widget.showNavigationSelectors &&
+                widget.scope.showsSubjectFilter)
               _searchableSelector(
                 key: const ValueKey('memory-filter-dialog-subject'),
                 label: '记忆对象',
@@ -152,7 +157,8 @@ class _MemoryAuditFilterDialogState extends State<MemoryAuditFilterDialog> {
                   _draft.copyWith(subjectFilter: _subjectFilter(value)),
                 ),
               ),
-            if (widget.scope.showsSubjectFilter)
+            if (widget.showNavigationSelectors &&
+                widget.scope.showsSubjectFilter)
               const _HelpText('这条内容所描述的用户、角色或观察 AI 自身。'),
             _searchableSelector(
               key: const ValueKey('memory-filter-dialog-origin-conversation'),
@@ -286,7 +292,13 @@ class _MemoryAuditFilterDialogState extends State<MemoryAuditFilterDialog> {
     final entries = <DropdownMenuEntry<String>>[
       const DropdownMenuEntry(value: _all, label: '全部 AI'),
       for (final character in available)
-        DropdownMenuEntry(value: character.id, label: character.name),
+        DropdownMenuEntry(
+          value: character.id,
+          label: MemoryAuditPresenter.safeDisplayName(
+            character.name,
+            character.id,
+          ),
+        ),
     ];
     if (selected != null && !entries.any((entry) => entry.value == selected)) {
       entries.add(
@@ -299,16 +311,26 @@ class _MemoryAuditFilterDialogState extends State<MemoryAuditFilterDialog> {
   List<DropdownMenuEntry<String>> _subjectEntries() {
     final selectedObserver = _draft.observerCharacterId;
     final allowed = widget.scope.allowedSubjectIds;
+    final excludeObserver =
+        widget.scope.type == MemoryConversationScopeType.group;
     final available = widget.characters.where((character) {
       if (allowed != null && !allowed.contains(character.id)) return false;
-      return selectedObserver == null || character.id != selectedObserver;
+      return !excludeObserver ||
+          selectedObserver == null ||
+          character.id != selectedObserver;
     }).toList(growable: false);
     final entries = <DropdownMenuEntry<String>>[
       const DropdownMenuEntry(value: _all, label: '全部对象'),
       const DropdownMenuEntry(value: _aboutMe, label: '关于我'),
       const DropdownMenuEntry(value: _selfGrowth, label: '自身成长'),
       for (final character in available)
-        DropdownMenuEntry(value: character.id, label: character.name),
+        DropdownMenuEntry(
+          value: character.id,
+          label: MemoryAuditPresenter.safeDisplayName(
+            character.name,
+            character.id,
+          ),
+        ),
     ];
     final selected = _draft.subjectFilter.characterId;
     if (selected != null &&
@@ -357,10 +379,11 @@ class _MemoryAuditFilterDialogState extends State<MemoryAuditFilterDialog> {
   bool _isBuiltInSubject(String value) =>
       value == _all || value == _aboutMe || value == _selfGrowth;
 
-  String _characterName(String id) =>
-      widget.presenter.characterNames[id] ??
-      widget.presenter.characterSnapshotNames[id] ??
-      '已删除角色';
+  String _characterName(String id) => MemoryAuditPresenter.safeDisplayName(
+        widget.presenter.characterNames[id] ??
+            widget.presenter.characterSnapshotNames[id],
+        id,
+      );
 
   Widget _searchableSelector({
     required Key key,

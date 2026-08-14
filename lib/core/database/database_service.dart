@@ -189,6 +189,9 @@ class DatabaseService {
     Hive.registerAdapter(AgentTaskAdapter());
     Hive.registerAdapter(WorkModeWorkspaceAdapter());
     Hive.registerAdapter(UserProfileAdapter());
+    Hive.registerAdapter(MemoryKindAdapter());
+    Hive.registerAdapter(MemoryOriginTypeAdapter());
+    Hive.registerAdapter(MemoryStatusAdapter());
     Hive.registerAdapter(PermanentMemoryAdapter());
     Hive.registerAdapter(RelationshipStageAdapter());
     Hive.registerAdapter(RelationshipEventCreatorAdapter());
@@ -416,6 +419,7 @@ class DatabaseService {
     }
     return fallback;
   }
+
   String? get dataDirPath => _dataDir?.path;
 
   static const String _aiProcessingDirKey = 'ai_processing_dir';
@@ -1449,7 +1453,8 @@ class DatabaseService {
     final usage = _tokenUsageCache;
     if (usage == null) return;
     try {
-      await appSettingsBox.put(_tokenUsageKey, Map<String, dynamic>.from(usage));
+      await appSettingsBox.put(
+          _tokenUsageKey, Map<String, dynamic>.from(usage));
     } on Object {
       // Box may be closed during test teardown.
     }

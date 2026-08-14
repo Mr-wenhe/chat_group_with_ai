@@ -343,6 +343,57 @@ Future<void> main() async {
 
       expect(result, isNot(contains('代码写得不够好')));
     });
+
+    test('mixed-subject memories stay hidden even when pinned', () async {
+      final db = DatabaseService();
+      await db.permanentMemoryBox.put(
+        'mixed-private',
+        PermanentMemory(
+          id: 'mixed-private',
+          observerCharacterId: 'char-a',
+          kind: MemoryKind.fact,
+          content: '会话外角色的私密事实',
+          subjectIds: const ['user', 'char-outside'],
+          status: MemoryStatus.active,
+          pinned: true,
+          originType: MemoryOriginType.direct,
+          originConversationId: 'dm:char-a',
+          originNameSnapshot: '私聊',
+        ),
+      );
+
+      final result = await MemoryContextSelector(db).select(
+        observerCharacterId: 'char-a',
+        participantCharacterIds: const ['char-a'],
+        currentTargetId: 'user',
+      );
+
+      expect(result, isNot(contains('会话外角色的私密事实')));
+    });
+
+    test('empty non-growth memories are not injected', () async {
+      final db = DatabaseService();
+      await db.permanentMemoryBox.put(
+        'empty-fact',
+        PermanentMemory(
+          id: 'empty-fact',
+          observerCharacterId: 'char-a',
+          kind: MemoryKind.fact,
+          content: '没有主体的事实',
+          subjectIds: const [],
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.manual,
+          originNameSnapshot: '手动记录',
+        ),
+      );
+
+      final result = await MemoryContextSelector(db).select(
+        observerCharacterId: 'char-a',
+        participantCharacterIds: const ['char-a'],
+      );
+
+      expect(result, isNot(contains('没有主体的事实')));
+    });
   });
 
   // ─── User profile ────────────────────────────────────────────────────────────
@@ -598,6 +649,31 @@ Future<void> main() async {
         currentTargetId: 'char-b',
       );
       expect(resultB, contains('char-b'));
+    });
+
+    test('does not inject a relationship with an outside participant',
+        () async {
+      final db = DatabaseService();
+      await db.relationshipStateBox.put(
+        'rel-outside',
+        RelationshipState(
+          id: 'rel:char-a:ai:char-outside',
+          groupId: 'global',
+          sourceCharacterId: 'char-a',
+          targetId: 'char-outside',
+          targetType: RelationshipTargetType.ai,
+          familiarity: 90,
+          affinity: 80,
+        ),
+      );
+
+      final result = await MemoryContextSelector(db).select(
+        observerCharacterId: 'char-a',
+        participantCharacterIds: const ['char-a'],
+        currentTargetId: 'user',
+      );
+
+      expect(result, isNot(contains('char-outside')));
     });
   });
 

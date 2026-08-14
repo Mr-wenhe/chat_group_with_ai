@@ -2,16 +2,14 @@ import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/database/data_lifecycle_settings.dart';
+import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_memory.dart';
-import 'package:chat_group/core/models/chat_group.dart';
-import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
-import 'package:chat_group/features/chat_group/chat_room_page.dart';
+import 'package:chat_group/features/memory/memory_audit_filter.dart';
 import 'package:chat_group/features/memory/memory_controls.dart';
 import 'package:chat_group/features/memory/memory_management_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
-import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
@@ -39,6 +37,8 @@ void main() {
     await db.permanentMemoryBox.clear();
     await db.aiCharacterBox.clear();
     await db.messageBox.clear();
+    await db.characterMemoryBox.clear();
+    await db.chatGroupBox.clear();
   });
 
   Widget app(Widget home) => ProviderScope(
@@ -55,28 +55,86 @@ void main() {
     await tester.pump();
   }
 
-  Future<void> settleHiveWrites(WidgetTester tester, {int turns = 2}) async {
-    for (var i = 0; i < turns; i++) {
-      await tester.runAsync(
-        () => Future<void>.delayed(const Duration(milliseconds: 50)),
-      );
-      await tester.pump();
-    }
+  void useViewport(WidgetTester tester, Size size) {
+    tester.view.physicalSize = size;
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+  }
+
+  Future<void> pumpLoaded(WidgetTester tester, Widget page) async {
+    await tester.pumpWidget(app(page));
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 300));
+  }
+
+  Future<void> putCharacter(AICharacter character) async {
+    await TestWidgetsFlutterBinding.ensureInitialized().runAsync(
+      () => db.aiCharacterBox.put(character.id, character),
+    );
+  }
+
+  Future<void> putMemory(PermanentMemory memory) async {
+    await TestWidgetsFlutterBinding.ensureInitialized().runAsync(
+      () => db.permanentMemoryBox.put(memory.id, memory),
+    );
   }
 
   group('Global memory rendering', () {
     testWidgets('shows a loading state before reading the audit snapshot',
         (tester) async {
-      await tester.pumpWidget(app(const MemoryManagementPage()));
+      await tester.pumpWidget(app(const MemoryManagementPage(
+        scope: MemoryConversationScope.settings(),
+      )));
 
       expect(find.byType(CircularProgressIndicator), findsOneWidget);
 
       await tester.pump();
     });
 
+    testWidgets('memory page always exposes a safe back affordance',
+        (tester) async {
+      await pumpLoaded(
+          tester,
+          const MemoryManagementPage(
+            scope: MemoryConversationScope.settings(),
+          ));
+
+      expect(find.byType(BackButton), findsOneWidget);
+    });
+
+    testWidgets('memory page back button pops its independent route',
+        (tester) async {
+      await tester.pumpWidget(app(
+        Builder(
+          builder: (context) => Scaffold(
+            body: TextButton(
+              onPressed: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => const MemoryManagementPage(
+                    scope: MemoryConversationScope.settings(),
+                  ),
+                ),
+              ),
+              child: const Text('打开记忆页面'),
+            ),
+          ),
+        ),
+      ));
+      await tester.tap(find.text('打开记忆页面'));
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pump();
+
+      expect(find.text('打开记忆页面'), findsOneWidget);
+    });
+
     testWidgets(
         'page reads all permanent memories globally, not by conversation',
         (tester) async {
+      useViewport(tester, const Size(1200, 800));
       await tester.runAsync(() async {
         final charA = testCharacter('char-a', apiConfigId: 'cfg');
         final charB = testCharacter('char-b', apiConfigId: 'cfg');
@@ -104,7 +162,9 @@ void main() {
               originConversationId: 'group-b',
             ));
         await tester.pumpWidget(app(
-          const MemoryManagementPage(),
+          const MemoryManagementPage(
+            scope: MemoryConversationScope.settings(),
+          ),
         ));
       });
       await tester.pump(const Duration(milliseconds: 300));
@@ -114,6 +174,7 @@ void main() {
 
     testWidgets('deleted observer character is rendered as a placeholder',
         (tester) async {
+      useViewport(tester, const Size(1200, 800));
       await tester.runAsync(() async {
         await db.permanentMemoryBox.put(
             'pm-deleted',
@@ -125,7 +186,9 @@ void main() {
               originType: MemoryOriginType.group,
               originNameSnapshot: '群组',
             ));
-        await tester.pumpWidget(app(const MemoryManagementPage()));
+        await tester.pumpWidget(app(const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        )));
       });
       await tester.pump(const Duration(milliseconds: 300));
 
@@ -135,6 +198,7 @@ void main() {
 
     testWidgets('deleted observer and subject use identity snapshots',
         (tester) async {
+      useViewport(tester, const Size(1200, 800));
       await tester.runAsync(() async {
         await db.appSettingsBox.put(
           DataLifecycleSettings.deletedCharacterSnapshotsKey,
@@ -165,17 +229,28 @@ void main() {
             originNameSnapshot: '快照群',
           ),
         );
-        await tester.pumpWidget(app(const MemoryManagementPage()));
+        await tester.pumpWidget(app(const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        )));
       });
       await tester.pump(const Duration(milliseconds: 300));
 
       expect(find.text('快照观察者'), findsWidgets);
-      expect(find.text('主体：快照主体'), findsOneWidget);
+      expect(find.textContaining('快照主体', findRichText: true), findsWidgets);
       expect(find.text('已删除角色'), findsNothing);
+      expect(
+        find.byKey(const ValueKey('memory-observer-deleted-observer')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const ValueKey('memory-observer-deleted-subject')),
+        findsNothing,
+      );
     });
 
-    testWidgets('originConversationId sets initial filter only',
+    testWidgets('originConversationId starts as a clearable filter',
         (tester) async {
+      useViewport(tester, const Size(1200, 800));
       await tester.runAsync(() async {
         final char = testCharacter('char-a', apiConfigId: 'cfg');
         await db.aiCharacterBox.put(char.id, char);
@@ -202,21 +277,26 @@ void main() {
               originConversationId: 'group-2',
             ));
         await tester.pumpWidget(app(
-          const MemoryManagementPage(conversationId: 'group-1'),
+          const MemoryManagementPage(
+            conversationId: 'group-1',
+            scope: MemoryConversationScope.settings(),
+          ),
         ));
       });
       await tester.pump(const Duration(milliseconds: 300));
 
       expect(find.text('群1记忆'), findsOneWidget);
       expect(find.text('群2记忆'), findsNothing);
-
-      await tester.tap(find.text('清除筛选'));
-      await tester.pump(const Duration(milliseconds: 300));
+      expect(find.byKey(const ValueKey('clear-memory-filter')), findsOneWidget);
+      await tester.tap(find.byKey(const ValueKey('clear-memory-filter')));
+      await tester.pump();
+      expect(find.text('群1记忆'), findsOneWidget);
       expect(find.text('群2记忆'), findsOneWidget);
     });
 
     testWidgets('memory search uses friendly observer name projection',
         (tester) async {
+      useViewport(tester, const Size(1200, 800));
       await tester.runAsync(() async {
         final character = testCharacter('char-search', apiConfigId: 'cfg');
         character.name = 'Amy';
@@ -232,7 +312,9 @@ void main() {
             originNameSnapshot: '手动记录',
           ),
         );
-        await tester.pumpWidget(app(const MemoryManagementPage()));
+        await tester.pumpWidget(app(const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        )));
       });
       await tester.pump(const Duration(milliseconds: 300));
 
@@ -248,6 +330,7 @@ void main() {
 
     testWidgets('memory list uses friendly deleted-source projection',
         (tester) async {
+      useViewport(tester, const Size(1200, 800));
       await tester.runAsync(() async {
         await db.permanentMemoryBox.put(
           'pm-deleted-source',
@@ -261,11 +344,16 @@ void main() {
             originNameSnapshot: 'deleted-group',
           ),
         );
-        await tester.pumpWidget(app(const MemoryManagementPage()));
+        await tester.pumpWidget(app(const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        )));
       });
       await tester.pump(const Duration(milliseconds: 300));
 
-      expect(find.text('已删除群聊'), findsOneWidget);
+      expect(
+        find.textContaining('已删除群聊', findRichText: true),
+        findsOneWidget,
+      );
       expect(find.text('deleted-group'), findsNothing);
     });
   });
@@ -273,6 +361,7 @@ void main() {
   group('MemoryControls operations', () {
     testWidgets('editPermanent creates new manual record and supersedes old',
         (tester) async {
+      useViewport(tester, const Size(1200, 800));
       await tester.runAsync(() async {
         final char = testCharacter('char-a', apiConfigId: 'cfg');
         await db.aiCharacterBox.put(char.id, char);
@@ -293,14 +382,17 @@ void main() {
           subjectIds: const ['user'],
         );
         await tester.pumpWidget(app(
-          const MemoryManagementPage(),
+          const MemoryManagementPage(
+            scope: MemoryConversationScope.settings(),
+          ),
         ));
       });
       await tester.pump(const Duration(milliseconds: 300));
 
       await scrollTo(tester, find.text('用户喜欢吃苹果和香蕉'));
       expect(find.text('用户喜欢吃苹果和香蕉'), findsOneWidget);
-      await scrollTo(tester, find.text('用户喜欢吃苹果'));
+      await tester.tap(find.text('历史记录（1）'));
+      await tester.pump();
       expect(find.text('用户喜欢吃苹果'), findsOneWidget);
       expect(
           db.permanentMemoryBox.values
@@ -311,6 +403,7 @@ void main() {
     });
 
     testWidgets('deletePermanent removes record', (tester) async {
+      useViewport(tester, const Size(1200, 800));
       await tester.runAsync(() async {
         final char = testCharacter('char-a', apiConfigId: 'cfg');
         await db.aiCharacterBox.put(char.id, char);
@@ -326,7 +419,9 @@ void main() {
         final controls = MemoryControls(db);
         await controls.deletePermanent(memory);
         await tester.pumpWidget(app(
-          const MemoryManagementPage(),
+          const MemoryManagementPage(
+            scope: MemoryConversationScope.settings(),
+          ),
         ));
       });
       await tester.pump(const Duration(milliseconds: 300));
@@ -340,6 +435,7 @@ void main() {
     });
 
     testWidgets('pinPermanent persists pin state', (tester) async {
+      useViewport(tester, const Size(1200, 800));
       await tester.runAsync(() async {
         final char = testCharacter('char-a', apiConfigId: 'cfg');
         await db.aiCharacterBox.put(char.id, char);
@@ -356,7 +452,9 @@ void main() {
         final controls = MemoryControls(db);
         await controls.pinPermanent(memory);
         await tester.pumpWidget(app(
-          const MemoryManagementPage(),
+          const MemoryManagementPage(
+            scope: MemoryConversationScope.settings(),
+          ),
         ));
       });
       await tester.pump(const Duration(milliseconds: 300));
@@ -370,410 +468,1025 @@ void main() {
     });
   });
 
-  group('Migration diagnostic', () {
-    testWidgets('shows diagnostic when legacy character data exists',
-        (tester) async {
-      await tester.runAsync(() async {
-        final char = testCharacter('char-a', apiConfigId: 'cfg')
-          ..memorySummary = '【事实】旧事实';
-        await db.aiCharacterBox.put(char.id, char);
-        await db.characterMemoryBox.put(
-            'cm1',
-            CharacterMemory(
-              id: 'cm1',
-              groupId: 'group-1',
-              characterId: char.id,
-              facts: ['旧事实'],
-            ));
-        await tester.pumpWidget(app(
-          const MemoryManagementPage(conversationId: 'group-1'),
+  testWidgets('wide layout has a 280px observer sidebar and content surface',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final alice = testCharacter(
+      'alice',
+      apiConfigId: 'cfg',
+      gender: CharacterGender.female,
+    )
+      ..name = 'Alice'
+      ..role = '数据科学家';
+    await putCharacter(alice);
+    await putMemory(
+      PermanentMemory(
+        id: 'active-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.preference,
+        content: '喜欢手冲咖啡',
+        subjectIds: const ['user'],
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+        importance: 99,
+        confidence: .99,
+        sourceMessageIds: const ['source-message-id'],
+        participantIds: const ['participant-id'],
+      ),
+    );
+    await putMemory(
+      PermanentMemory(
+        id: 'history-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: '历史内容',
+        status: MemoryStatus.superseded,
+        originType: MemoryOriginType.group,
+        originNameSnapshot: '测试群',
+      ),
+    );
+
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
         ));
-      });
-      await tester.pump(const Duration(milliseconds: 500));
-      await tester.scrollUntilVisible(
-        find.text('迁移诊断'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pump(const Duration(milliseconds: 500));
 
-      expect(find.text('【事实】旧事实'), findsOneWidget);
-      expect(find.text('旧事实'), findsOneWidget);
-      expect(find.text('迁移诊断'), findsOneWidget);
-      expect(find.text('群组 group-1'), findsNothing);
-      expect(find.text('已删除群聊'), findsOneWidget);
-    });
-
-    testWidgets('migration diagnostic shows character memory content',
-        (tester) async {
-      await tester.runAsync(() async {
-        final char = testCharacter('char-a', apiConfigId: 'cfg');
-        char.memorySummary = '【事实】旧跨会话事实';
-        await db.aiCharacterBox.put(char.id, char);
-        final cm = CharacterMemory(
-          id: 'cm1',
-          groupId: 'group-1',
-          characterId: char.id,
-          facts: ['会话事实1'],
-          personaGrowth: ['成长记录'],
-        );
-        await db.characterMemoryBox.put(cm.id, cm);
-
-        await tester.pumpWidget(app(
-          const MemoryManagementPage(conversationId: 'group-1'),
-        ));
-      });
-      await tester.pump(const Duration(milliseconds: 500));
-      await tester.scrollUntilVisible(
-        find.text('迁移诊断'),
-        200,
-        scrollable: find.byType(Scrollable).first,
-      );
-      await tester.pump(const Duration(milliseconds: 500));
-
-      expect(find.text('【事实】旧跨会话事实'), findsOneWidget);
-      expect(find.text('会话事实1'), findsOneWidget);
-      expect(find.text('成长记录'), findsOneWidget);
-    });
-
-    testWidgets('legacy permanent memory records show migration badge',
-        (tester) async {
-      await tester.runAsync(() async {
-        final char = testCharacter('char-a', apiConfigId: 'cfg');
-        await db.aiCharacterBox.put(char.id, char);
-        await db.permanentMemoryBox.put(
-            'legacy-1',
-            PermanentMemory(
-              observerCharacterId: 'char-a',
-              kind: MemoryKind.fact,
-              content: '旧版迁移',
-              status: MemoryStatus.active,
-              originType: MemoryOriginType.legacyMigration,
-              originNameSnapshot: '旧数据',
-              sourceMessageIds: const [],
-            ));
-        await tester.pumpWidget(app(
-          const MemoryManagementPage(),
-        ));
-      });
-      await tester.pump(const Duration(milliseconds: 500));
-
-      expect(find.text('旧版迁移记录，无原始消息证据'), findsOneWidget);
-    });
+    expect(
+        find.byKey(const ValueKey('memory-observer-sidebar')), findsOneWidget);
+    expect(
+      tester
+          .getSize(find.byKey(const ValueKey('memory-observer-sidebar')))
+          .width,
+      280,
+    );
+    expect(find.byKey(const ValueKey('memory-content')), findsOneWidget);
+    expect(find.byKey(const ValueKey('memory-title-actions')), findsOneWidget);
+    expect(find.text('筛选'), findsOneWidget);
+    expect(find.byKey(const ValueKey('memory-observer-avatar-alice')),
+        findsOneWidget);
+    expect(find.byKey(const ValueKey('memory-row-observer-avatar')),
+        findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('memory-observer-alice')));
+    await tester.pump();
+    expect(
+        find.byKey(const ValueKey('memory-row-observer-avatar')), findsNothing);
+    expect(find.text('全部 AI'), findsOneWidget);
+    expect(find.text('Alice'), findsWidgets);
+    expect(find.textContaining('数据科学家'), findsWidgets);
+    expect(find.text('喜欢手冲咖啡'), findsOneWidget);
+    expect(find.text('历史记录（1）'), findsOneWidget);
+    expect(find.text('历史内容'), findsNothing);
+    expect(find.byType(Card), findsNothing);
+    expect(find.textContaining('重要度'), findsNothing);
+    expect(find.textContaining('置信'), findsNothing);
+    expect(find.text('source-message-id'), findsNothing);
+    expect(find.text('participant-id'), findsNothing);
+    await tester.tap(find.text('历史记录（1）'));
+    await tester.pump();
+    expect(find.text('历史内容'), findsOneWidget);
   });
 
-  group('Source traceability', () {
-    setUp(() {
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(
-        const MethodChannel('flutter_tts'),
-        (call) async {
-          switch (call.method) {
-            case 'awaitSpeakCompletion':
-            case 'speak':
-            case 'stop':
-              return 1;
-            case 'getLanguages':
-              return <String>['zh-CN'];
-            case 'setLanguage':
-            case 'setPitch':
-            case 'setSpeechRate':
-            case 'setVolume':
-              return 1;
-            case 'isLanguageAvailable':
-              return true;
-            default:
-              return null;
-          }
-        },
-      );
-    });
+  testWidgets('narrow layout provides a searchable selector without overflow',
+      (tester) async {
+    useViewport(tester, const Size(360, 800));
+    final alice = testCharacter(
+      'alice',
+      apiConfigId: 'cfg',
+      gender: CharacterGender.female,
+    )
+      ..name = 'Alice'
+      ..role = '数据科学家';
+    await putCharacter(alice);
 
-    tearDown(() {
-      TestDefaultBinaryMessengerBinding.instance.defaultBinaryMessenger
-          .setMockMethodCallHandler(
-        const MethodChannel('flutter_tts'),
-        null,
-      );
-    });
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
 
-    testWidgets('existing source messages show clickable "查看原消息" button',
-        (tester) async {
-      await tester.runAsync(() async {
-        final char = testCharacter('char-a', apiConfigId: 'cfg');
-        await db.aiCharacterBox.put(char.id, char);
-        await db.chatGroupBox.put(
-            'g1',
-            ChatGroup(
-              id: 'g1',
-              name: '测试群',
-              theme: '测试',
-              aiCharacterIds: [char.id],
-              createdAt: DateTime.now(),
-            ));
-        final msg = Message(
-          id: 'msg-1',
-          groupId: 'g-real',
-          senderId: 'user',
-          senderType: 'user',
-          content: '原消息内容',
-          timestamp: DateTime.now(),
-        );
-        await db.messageBox.put('msg-1', msg);
-        await db.permanentMemoryBox.put(
-            'pm-1',
-            PermanentMemory(
-              observerCharacterId: 'char-a',
-              kind: MemoryKind.fact,
-              content: '记忆内容',
-              status: MemoryStatus.active,
-              originType: MemoryOriginType.group,
-              originNameSnapshot: '测试群',
-              sourceMessageIds: const ['msg-1'],
-              originConversationId: 'g-wrong',
-            ));
-        await tester.pumpWidget(app(const MemoryManagementPage()));
-      });
-      await tester.pump(const Duration(milliseconds: 300));
-      expect(find.text('查看原消息'), findsOneWidget);
-    });
+    expect(
+        find.byKey(const ValueKey('memory-observer-selector')), findsOneWidget);
+    expect(find.byKey(const ValueKey('memory-observer-sidebar')), findsNothing);
+    expect(tester.takeException(), isNull);
 
-    testWidgets('missing source messages show a disabled trace action',
-        (tester) async {
-      await tester.runAsync(() async {
-        await db.permanentMemoryBox.put(
-            'pm-missing-source',
-            PermanentMemory(
-              observerCharacterId: 'char-a',
-              kind: MemoryKind.fact,
-              content: '没有来源消息',
-              status: MemoryStatus.active,
-              originType: MemoryOriginType.group,
-              originNameSnapshot: '已删除群组',
-              sourceMessageIds: const ['missing-message'],
-            ));
-        await tester.pumpWidget(app(const MemoryManagementPage()));
-      });
-      await tester.pump(const Duration(milliseconds: 300));
+    await tester.enterText(
+      find.byKey(const ValueKey('memory-observer-search')),
+      '数据科学家',
+    );
+    await tester.pump();
+    expect(find.text('Alice'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
 
-      expect(find.textContaining('原消息已不可用'), findsOneWidget);
-      expect(
-        tester
-            .widget<ButtonStyleButton>(
-              find.ancestor(
-                of: find.byIcon(Icons.link_off_rounded),
-                matching: find.bySubtype<ButtonStyleButton>(),
-              ),
-            )
-            .onPressed,
-        isNull,
-      );
-    });
+  testWidgets('observer navigation searches by name, gender, and occupation',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final alice = testCharacter(
+      'alice',
+      apiConfigId: 'cfg',
+      gender: CharacterGender.female,
+    )
+      ..name = 'Alice'
+      ..role = '数据科学家';
+    final bob = testCharacter(
+      'bob',
+      apiConfigId: 'cfg',
+      gender: CharacterGender.male,
+    )
+      ..name = 'Bob'
+      ..role = '建筑师';
+    await putCharacter(alice);
+    await putCharacter(bob);
 
-    testWidgets('clicking "查看原消息" uses sourceMessage.groupId to navigate',
-        (tester) async {
-      await tester.runAsync(() async {
-        final char = testCharacter('char-a', apiConfigId: 'cfg');
-        await db.aiCharacterBox.put(char.id, char);
-        await db.chatGroupBox.put(
-            'g-real',
-            ChatGroup(
-              id: 'g-real',
-              name: '真实群',
-              theme: '测试',
-              aiCharacterIds: [char.id],
-              createdAt: DateTime.now(),
-            ));
-        final msg = Message(
-          id: 'msg-1',
-          groupId: 'g-real',
-          senderId: 'user',
-          senderType: 'user',
-          content: '原消息内容',
-          timestamp: DateTime.now(),
-        );
-        await db.messageBox.put('msg-1', msg);
-        await db.permanentMemoryBox.put(
-            'pm-1',
-            PermanentMemory(
-              observerCharacterId: 'char-a',
-              kind: MemoryKind.fact,
-              content: '记忆内容',
-              status: MemoryStatus.active,
-              originType: MemoryOriginType.group,
-              originNameSnapshot: '测试群',
-              sourceMessageIds: const ['msg-1'],
-              originConversationId: 'g-wrong',
-            ));
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    final search = find.byKey(const ValueKey('memory-observer-search'));
 
-        await tester.pumpWidget(
-          ProviderScope(
-            overrides: [databaseServiceProvider.overrideWithValue(db)],
-            child: const MaterialApp(
-              home: MemoryManagementPage(),
-            ),
-          ),
-        );
-        await tester.pump(const Duration(milliseconds: 300));
+    await tester.enterText(search, '女');
+    await tester.pump();
+    expect(find.byKey(const ValueKey('memory-observer-alice')), findsOneWidget);
+    expect(find.byKey(const ValueKey('memory-observer-bob')), findsNothing);
 
-        await tester.tap(find.text('查看原消息'));
-        await tester.pump();
-        await tester.pump(const Duration(milliseconds: 300));
+    await tester.enterText(search, '建筑师');
+    await tester.pump();
+    expect(find.byKey(const ValueKey('memory-observer-bob')), findsOneWidget);
+    expect(find.byKey(const ValueKey('memory-observer-alice')), findsNothing);
 
-        // Verify ChatRoomPage is pushed with the source message's groupId.
-        final chatRoom =
-            find.byType(ChatRoomPage).evaluate().first.widget as ChatRoomPage;
-        expect(chatRoom.groupId, 'g-real');
-        expect(chatRoom.initialMessageId, 'msg-1');
+    await tester.enterText(search, '不存在的观察 AI');
+    await tester.pump();
+    expect(find.text('没有匹配的观察 AI'), findsOneWidget);
+    expect(find.byKey(const ValueKey('memory-observer-all')), findsOneWidget);
+    await tester.tap(find.text('清除搜索'));
+    await tester.pump();
+    final searchField = tester.widget<TextField>(search);
+    expect(searchField.controller, isNotNull);
+    expect(searchField.controller!.text, isEmpty);
+    expect(find.byKey(const ValueKey('memory-observer-alice')), findsOneWidget);
+  });
 
-        // Verify the source message's groupId in DB — this is what
-        // _SourceTraceButton reads to build ChatRoomPage(groupId: source.groupId).
-        final sourceMessage = db.messageBox.get('msg-1')!;
-        expect(sourceMessage.groupId, 'g-real');
-        expect(sourceMessage.id, 'msg-1');
+  testWidgets('memory object navigation searches and selects other characters',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final alice = testCharacter('alice', apiConfigId: 'cfg')..name = 'Alice';
+    final bob = testCharacter('bob', apiConfigId: 'cfg')
+      ..name = 'Bob'
+      ..role = '建筑师';
+    await putCharacter(alice);
+    await putCharacter(bob);
+    await putMemory(
+      PermanentMemory(
+        id: 'subject-bob-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: 'Bob负责建筑设计',
+        subjectIds: [bob.id],
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+      ),
+    );
 
-        // originConversationId is 'g-wrong' — proves the button uses
-        // sourceMessage.groupId, NOT originConversationId.
-        final pm = db.permanentMemoryBox.get('pm-1')!;
-        expect(pm.originConversationId, 'g-wrong');
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    expect(find.byKey(const ValueKey('memory-subject-quick-about-me')),
+        findsOneWidget);
+    expect(
+        find.byKey(const ValueKey('memory-subject-quick-all')), findsOneWidget);
+    expect(find.byKey(const ValueKey('memory-subject-quick-other')),
+        findsOneWidget);
+    expect(find.byKey(const ValueKey('memory-subject-quick-self-growth')),
+        findsOneWidget);
 
-        // Pop the pushed ChatRoomPage to clean up.
-        final ctx = tester.element(find.byType(MemoryManagementPage));
-        if (Navigator.of(ctx).canPop()) {
-          Navigator.of(ctx).pop();
-        }
-        await tester.pump(const Duration(milliseconds: 350));
-        await tester.pump(const Duration(milliseconds: 350));
-        expect(find.byType(ChatRoomPage), findsNothing);
+    await tester.tap(
+      find.byKey(const ValueKey('memory-subject-quick-other')),
+    );
+    await tester.pump();
+    ChoiceChip otherChip = tester.widget(
+      find.byKey(const ValueKey('memory-subject-quick-other')),
+    );
+    expect(otherChip.selected, isTrue);
+    final subjectSearch = find.byKey(const ValueKey('memory-subject-search'));
+    await tester.enterText(subjectSearch, '暂不选择');
+    await tester.pump();
+    await tester.enterText(subjectSearch, '');
+    await tester.pump();
+    otherChip = tester.widget(
+      find.byKey(const ValueKey('memory-subject-quick-other')),
+    );
+    expect(otherChip.selected, isTrue);
+    await tester.enterText(subjectSearch, '建筑师');
+    await tester.pumpAndSettle();
+    expect(find.text('Bob'), findsWidgets);
+    await tester.tap(find.text('Bob').last);
+    await tester.pump();
 
-        await Future.delayed(const Duration(milliseconds: 100));
-        await tester.pump(const Duration(milliseconds: 300));
-      });
-    });
+    expect(find.text('Bob负责建筑设计'), findsOneWidget);
+    otherChip = tester.widget(
+      find.byKey(const ValueKey('memory-subject-quick-other')),
+    );
+    expect(otherChip.selected, isTrue);
+  });
 
-    testWidgets('legacy migration records can use the correction flow',
-        (tester) async {
-      await tester.runAsync(() async {
-        final char = testCharacter('char-a', apiConfigId: 'cfg');
-        await db.aiCharacterBox.put(char.id, char);
-        await db.permanentMemoryBox.put(
-            'pm-legacy-edit',
-            PermanentMemory(
-              observerCharacterId: char.id,
-              kind: MemoryKind.fact,
-              content: '遗留错误内容',
-              status: MemoryStatus.active,
-              originType: MemoryOriginType.legacyMigration,
-              originNameSnapshot: '旧版迁移',
-              subjectIds: const ['user', 'correction-deleted-subject'],
-            ));
-        await tester.pumpWidget(app(const MemoryManagementPage()));
-      });
-      await tester.pump(const Duration(milliseconds: 300));
+  testWidgets('settings memory object search includes the current observer',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final alice = testCharacter('alice', apiConfigId: 'cfg')..name = 'Alice';
+    final bob = testCharacter('bob', apiConfigId: 'cfg')..name = 'Bob';
+    await putCharacter(alice);
+    await putCharacter(bob);
+    await putMemory(
+      PermanentMemory(
+        id: 'observer-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: '观察者自己的记录',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+      ),
+    );
 
-      await scrollTo(tester, find.text('遗留错误内容'));
-      await tester.longPress(find.text('遗留错误内容'));
-      await tester.pump(const Duration(milliseconds: 300));
-      await tester.tap(find.widgetWithText(ListTile, '修正'));
-      await tester.pump(const Duration(milliseconds: 300));
-      final correctionDialog = find.byType(AlertDialog);
-      final subjectField = find
-          .descendant(
-            of: correctionDialog,
-            matching: find.byType(TextField),
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    await tester.tap(find.byKey(const ValueKey('memory-observer-alice')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('memory-subject-quick-other')));
+    await tester.pump();
+    await tester.enterText(
+      find.byKey(const ValueKey('memory-subject-search')),
+      'Alice',
+    );
+    await tester.pumpAndSettle();
+
+    expect(
+      find.byKey(const ValueKey('memory-subject-option-alice')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('advanced filter count excludes navigation and search context',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final alice = testCharacter('alice', apiConfigId: 'cfg')..name = 'Alice';
+    await putCharacter(alice);
+    await putMemory(
+      PermanentMemory(
+        id: 'context-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: '上下文搜索内容',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+      ),
+    );
+
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    await tester.tap(find.byKey(const ValueKey('memory-observer-alice')));
+    await tester.enterText(
+      find.byKey(const ValueKey('memory-audit-search')),
+      '上下文',
+    );
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('memory-filter-active-summary')),
+      findsNothing,
+    );
+    expect(find.byKey(const ValueKey('memory-filter-advanced-badge')),
+        findsOneWidget);
+  });
+
+  testWidgets('clearing advanced filters preserves observer and search context',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final alice = testCharacter('alice', apiConfigId: 'cfg')..name = 'Alice';
+    await putCharacter(alice);
+    await putMemory(
+      PermanentMemory(
+        id: 'clear-context-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: '上下文保留',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+      ),
+    );
+
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    await tester.tap(find.byKey(const ValueKey('memory-observer-alice')));
+    final search = find.byKey(const ValueKey('memory-audit-search'));
+    await tester.enterText(search, '上下文');
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('open-advanced-memory-filter')));
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('memory-filter-dialog-status')),
+    );
+    await tester.tap(find.byKey(const ValueKey('memory-filter-dialog-status')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('已取代').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('应用筛选'));
+    await tester.pumpAndSettle();
+
+    expect(
+      tester
+          .widget<Badge>(
+            find.byKey(const ValueKey('memory-filter-advanced-badge')),
           )
-          .last;
-      expect(
-        tester.widget<TextField>(subjectField).controller!.text,
-        '我, 已删除角色',
-      );
-      await tester.enterText(
-        find
-            .descendant(
-              of: correctionDialog,
-              matching: find.byType(TextField),
-            )
-            .first,
-        '修正后的内容',
-      );
-      await tester.tap(find.text('保存修正'));
-      await tester.pump();
-      await settleHiveWrites(tester);
-      await tester.runAsync(() => db.permanentMemoryBox.flush());
-      await tester.pump();
+          .isLabelVisible,
+      isTrue,
+    );
+    await tester.tap(find.byKey(const ValueKey('clear-memory-filter')));
+    await tester.pump();
 
-      expect(
-        db.permanentMemoryBox.values.any(
-          (memory) =>
-              memory.content == '修正后的内容' &&
-              memory.originType == MemoryOriginType.manual &&
-              memory.subjectIds.toSet().containsAll(
-                const ['user', 'correction-deleted-subject'],
-              ),
+    expect(find.text('Alice 的永久记忆'), findsOneWidget);
+    expect(tester.widget<TextField>(search).controller!.text, '上下文');
+    expect(find.text('上下文保留'), findsOneWidget);
+    expect(
+      tester
+          .widget<Badge>(
+            find.byKey(const ValueKey('memory-filter-advanced-badge')),
+          )
+          .isLabelVisible,
+      isFalse,
+    );
+  });
+
+  testWidgets('100 observers and 1000 memories stay lazy and filter in memory',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final characters = [
+      for (var index = 0; index < 100; index++)
+        testCharacter('observer-$index', apiConfigId: 'cfg')
+          ..name = '观察者 $index',
+    ];
+    for (final character in characters) {
+      await putCharacter(character);
+    }
+    final memories = [
+      for (var index = 0; index < 1000; index++)
+        PermanentMemory(
+          id: 'history-lazy-$index',
+          observerCharacterId: characters.first.id,
+          kind: MemoryKind.fact,
+          content: '历史惰性 $index',
+          status: MemoryStatus.superseded,
+          originType: MemoryOriginType.manual,
+          originNameSnapshot: '手动记录',
+          occurredAt: DateTime(2024, 1, 1).add(Duration(minutes: index)),
+          updatedAt: DateTime(2024, 1, 1).add(Duration(minutes: index)),
         ),
-        isTrue,
+    ];
+    await TestWidgetsFlutterBinding.ensureInitialized().runAsync(
+      () => db.permanentMemoryBox.putAll({
+        for (final memory in memories) memory.id: memory,
+      }),
+    );
+
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    expect(find.byKey(const ValueKey('memory-observer-observer-99')),
+        findsNothing);
+    expect(find.text('历史记录（1000）'), findsOneWidget);
+    await tester.tap(find.text('历史记录（1000）'));
+    await tester.pump();
+    expect(
+        find.byKey(const ValueKey('memory-row-history-lazy-0')), findsNothing);
+
+    final search = find.byKey(const ValueKey('memory-audit-search'));
+    await tester.enterText(search, '历史惰性 999');
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('memory-row-history-lazy-999')),
+      findsOneWidget,
+    );
+    expect(find.text('历史惰性 0'), findsNothing);
+    await tester.enterText(search, '');
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('open-advanced-memory-filter')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.byKey(const ValueKey('memory-filter-dialog-status')));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('有效').last);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('应用筛选'));
+    await tester.pumpAndSettle();
+    expect(find.byType(CircularProgressIndicator), findsNothing);
+    expect(find.text('没有符合筛选条件的记忆'), findsOneWidget);
+    await tester.tap(find.byKey(const ValueKey('clear-memory-filter-empty')));
+    await tester.pump();
+    expect(
+      find.byKey(const ValueKey('memory-row-history-lazy-999')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('responsive boundary and long content stay usable',
+      (tester) async {
+    final alice = testCharacter('alice', apiConfigId: 'cfg')
+      ..name = '这是一个非常非常长的观察 AI 名称'
+      ..role = '这是一个非常非常长的职业名称，用于验证窄屏布局不会重叠';
+    await putCharacter(alice);
+    await putMemory(
+      PermanentMemory(
+        id: 'responsive-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: '这是一个很长很长的记忆摘要，用于验证 320px 宽度下仍然可以换行并通过详情入口继续浏览。',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '一个很长的来源场合名称',
+      ),
+    );
+
+    useViewport(tester, const Size(320, 800));
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    expect(find.byKey(const ValueKey('memory-observer-sidebar')), findsNothing);
+    expect(find.textContaining('很长很长的记忆摘要'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    useViewport(tester, const Size(600, 800));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('memory-observer-sidebar')), findsNothing);
+    expect(tester.takeException(), isNull);
+
+    useViewport(tester, const Size(899, 800));
+    await tester.pump();
+    expect(find.byKey(const ValueKey('memory-observer-sidebar')), findsNothing);
+    expect(tester.takeException(), isNull);
+
+    useViewport(tester, const Size(900, 800));
+    await tester.pump();
+    expect(
+        find.byKey(const ValueKey('memory-observer-sidebar')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+
+    useViewport(tester, const Size(1440, 800));
+    await tester.pump();
+    expect(
+        find.byKey(const ValueKey('memory-observer-sidebar')), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('large text scale keeps memory controls usable', (tester) async {
+    useViewport(tester, const Size(320, 800));
+    tester.platformDispatcher.textScaleFactorTestValue = 1.8;
+    addTearDown(tester.platformDispatcher.clearTextScaleFactorTestValue);
+    final alice = testCharacter('alice', apiConfigId: 'cfg')..name = 'Alice';
+    await putCharacter(alice);
+    await putMemory(
+      PermanentMemory(
+        id: 'text-scale-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: '大字体下仍然可读的记忆摘要',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+      ),
+    );
+
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    expect(
+        find.byKey(const ValueKey('memory-observer-selector')), findsOneWidget);
+    expect(find.byKey(const ValueKey('memory-subject-search')), findsNothing);
+    await tester.drag(
+      find.byKey(const ValueKey('memory-content')),
+      const Offset(0, -600),
+    );
+    await tester.pump();
+    expect(find.text('大字体下仍然可读的记忆摘要'), findsOneWidget);
+    expect(tester.takeException(), isNull);
+  });
+
+  testWidgets('long memory lists build rows lazily', (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final alice = testCharacter('alice', apiConfigId: 'cfg')..name = 'Alice';
+    await putCharacter(alice);
+    final memories = [
+      for (var index = 0; index < 120; index++)
+        PermanentMemory(
+          id: 'lazy-memory-$index',
+          observerCharacterId: alice.id,
+          kind: MemoryKind.fact,
+          content: '惰性记忆 $index',
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.manual,
+          originNameSnapshot: '手动记录',
+          occurredAt: DateTime(2024, 1, 1).add(Duration(minutes: index)),
+          updatedAt: DateTime(2024, 1, 1).add(Duration(minutes: index)),
+        ),
+    ];
+    await TestWidgetsFlutterBinding.ensureInitialized().runAsync(
+      () => db.permanentMemoryBox.putAll({
+        for (final memory in memories) memory.id: memory,
+      }),
+    );
+
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+
+    expect(
+      find.byKey(const ValueKey('memory-row-lazy-memory-0')),
+      findsNothing,
+    );
+    expect(
+      find.byKey(const ValueKey('memory-row-lazy-memory-119')),
+      findsOneWidget,
+    );
+  });
+
+  testWidgets('subject switch and filter count are visible and composable',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final alice = testCharacter('alice', apiConfigId: 'cfg')..name = 'Alice';
+    await putCharacter(alice);
+    await putMemory(
+      PermanentMemory(
+        id: 'subject-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: '用户住在上海',
+        subjectIds: const ['user'],
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+      ),
+    );
+
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    expect(find.text('记忆对象'), findsOneWidget);
+    expect(find.text('迁移诊断'), findsOneWidget);
+    expect(find.byKey(const ValueKey('open-advanced-memory-filter')),
+        findsOneWidget);
+
+    await tester.tap(
+      find.byKey(const ValueKey('memory-subject-quick-about-me')),
+    );
+    await tester.pump();
+    expect(find.text('用户住在上海'), findsOneWidget);
+    expect(find.text('1'), findsWidgets);
+  });
+
+  testWidgets('empty and no-result states have clear copy and actions',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+
+    expect(find.text('暂无可用观察 AI'), findsWidgets);
+    expect(find.text('去创建 AI'), findsOneWidget);
+
+    final alice = testCharacter('alice', apiConfigId: 'cfg')..name = 'Alice';
+    await putCharacter(alice);
+    await putMemory(
+      PermanentMemory(
+        id: 'search-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: '咖啡偏好',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+      ),
+    );
+    await pumpLoaded(
+      tester,
+      const MemoryManagementPage(
+        key: ValueKey('with-memory'),
+        scope: MemoryConversationScope.settings(),
+      ),
+    );
+
+    await tester.enterText(
+      find.byKey(const ValueKey('memory-audit-search')),
+      '不存在的记忆',
+    );
+    await tester.pump();
+    expect(find.text('没有找到匹配的记忆'), findsOneWidget);
+    expect(find.byKey(const ValueKey('clear-memory-search')), findsOneWidget);
+  });
+
+  testWidgets('shows a no-memory state when an observer AI exists',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    await putCharacter(testCharacter('alice', apiConfigId: 'cfg'));
+
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+
+    expect(find.text('还没有永久记忆'), findsOneWidget);
+    expect(find.text('返回设置'), findsOneWidget);
+  });
+
+  testWidgets('filter with no results gets a dedicated empty state',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final alice = testCharacter('alice', apiConfigId: 'cfg')..name = 'Alice';
+    await putCharacter(alice);
+    await putMemory(
+      PermanentMemory(
+        id: 'filter-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: '一条记忆',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+        originConversationId: 'group-1',
+      ),
+    );
+
+    await pumpLoaded(
+      tester,
+      const MemoryManagementPage(
+        conversationId: 'missing-group',
+        scope: MemoryConversationScope.settings(),
+      ),
+    );
+    expect(find.text('没有符合筛选条件的记忆'), findsOneWidget);
+    expect(find.byKey(const ValueKey('clear-memory-filter-empty')),
+        findsOneWidget);
+  });
+
+  testWidgets('migration diagnostics opens independently from the browser',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final alice = testCharacter('alice', apiConfigId: 'cfg')
+      ..name = 'Alice'
+      ..memorySummary = '【事实】旧版摘要';
+    await putCharacter(alice);
+    await TestWidgetsFlutterBinding.ensureInitialized().runAsync(
+      () => db.characterMemoryBox.put(
+        'legacy',
+        CharacterMemory(
+          id: 'legacy',
+          groupId: 'group-1',
+          characterId: alice.id,
+          facts: const ['旧版正文'],
+        ),
+      ),
+    );
+    await putMemory(
+      PermanentMemory(
+        id: 'detail-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: '当前记忆',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+      ),
+    );
+
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    expect(find.text('旧版摘要'), findsNothing);
+    expect(find.text('旧版正文'), findsNothing);
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('memory-migration-diagnostic')),
+    );
+    await tester.tap(find.byKey(const ValueKey('memory-migration-diagnostic')));
+    await tester.pumpAndSettle();
+    expect(find.text('迁移诊断'), findsOneWidget);
+    expect(find.text('Alice'), findsOneWidget);
+    expect(find.text('有跨会话摘要 · 1 条旧会话记忆'), findsOneWidget);
+    expect(find.text('旧版正文'), findsNothing);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
+    await tester.ensureVisible(
+      find.byKey(const ValueKey('memory-details-detail-memory')),
+    );
+    await tester
+        .tap(find.byKey(const ValueKey('memory-details-detail-memory')));
+    await tester.pumpAndSettle();
+    expect(find.text('记忆详情'), findsOneWidget);
+    expect(find.text('当前记忆'), findsOneWidget);
+  });
+
+  testWidgets('selection changes do not expose or trigger mutations',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final alice = testCharacter('alice', apiConfigId: 'cfg')..name = 'Alice';
+    final bob = testCharacter('bob', apiConfigId: 'cfg')..name = 'Bob';
+    await putCharacter(alice);
+    await putCharacter(bob);
+    await putMemory(
+      PermanentMemory(
+        id: 'safe-memory',
+        observerCharacterId: alice.id,
+        kind: MemoryKind.fact,
+        content: '不可误操作',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动记录',
+      ),
+    );
+
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    await tester.tap(find.byKey(const ValueKey('memory-observer-bob')));
+    await tester.pump();
+
+    expect(db.permanentMemoryBox.get('safe-memory')!.pinned, isFalse);
+    expect(find.byTooltip('固定'), findsNothing);
+    expect(find.byTooltip('删除'), findsNothing);
+  });
+
+  testWidgets('chat scope filters the browser and keeps details read-only',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final member = testCharacter('group-member', apiConfigId: 'cfg')
+      ..name = '群内 AI';
+    final outside = testCharacter('outside-ai', apiConfigId: 'cfg')
+      ..name = '群外 AI';
+    await putCharacter(member);
+    await putCharacter(outside);
+    await putMemory(
+      PermanentMemory(
+        id: 'group-visible-memory',
+        observerCharacterId: member.id,
+        kind: MemoryKind.fact,
+        content: '群内可见记忆',
+        subjectIds: const ['user'],
+        participantIds: [outside.id],
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.group,
+        originNameSnapshot: '当前群聊',
+      ),
+    );
+    await putMemory(
+      PermanentMemory(
+        id: 'group-hidden-memory',
+        observerCharacterId: outside.id,
+        kind: MemoryKind.fact,
+        content: '群外不可见记忆',
+        subjectIds: const ['user'],
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.group,
+        originNameSnapshot: '其他群聊',
+      ),
+    );
+
+    await pumpLoaded(
+      tester,
+      MemoryManagementPage(
+        scope: MemoryConversationScope.group({'group-member'}),
+      ),
+    );
+
+    expect(find.text('群内可见记忆'), findsOneWidget);
+    expect(find.text('群外不可见记忆'), findsNothing);
+    await tester.tap(find.byKey(const ValueKey('memory-subject-quick-other')));
+    await tester.pump();
+    await tester.tap(find.byKey(const ValueKey('memory-subject-search')));
+    await tester.pump();
+    expect(find.text('群外 AI'), findsNothing);
+    tester.binding.focusManager.primaryFocus?.unfocus();
+    await tester.pump();
+    await tester.tap(
+      find.byKey(const ValueKey('memory-details-group-visible-memory')),
+    );
+    await tester.pumpAndSettle();
+
+    expect(find.text('群内可见记忆'), findsOneWidget);
+    expect(find.byKey(const ValueKey('memory-detail-pin')), findsNothing);
+    expect(find.byKey(const ValueKey('memory-detail-correct')), findsNothing);
+    expect(find.byKey(const ValueKey('memory-detail-delete')), findsNothing);
+  });
+
+  testWidgets('direct scope fixes the observer and hides management UI',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final target = testCharacter('direct-target', apiConfigId: 'cfg')
+      ..name = '私聊 AI';
+    final other = testCharacter('direct-other', apiConfigId: 'cfg')
+      ..name = '其他 AI';
+    await putCharacter(target);
+    await putCharacter(other);
+    await putMemory(
+      PermanentMemory(
+        id: 'direct-visible-memory',
+        observerCharacterId: target.id,
+        kind: MemoryKind.preference,
+        content: '私聊可见记忆',
+        subjectIds: const ['user'],
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.direct,
+        originNameSnapshot: '私聊对象',
+      ),
+    );
+    await putMemory(
+      PermanentMemory(
+        id: 'direct-hidden-memory',
+        observerCharacterId: other.id,
+        kind: MemoryKind.preference,
+        content: '其他私聊不可见记忆',
+        subjectIds: const ['user'],
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.direct,
+        originNameSnapshot: '其他对象',
+      ),
+    );
+
+    await pumpLoaded(
+      tester,
+      MemoryManagementPage(
+        scope: MemoryConversationScope.direct(target.id),
+      ),
+    );
+
+    expect(find.text('私聊 AI 对我的记忆'), findsOneWidget);
+    expect(find.text('私聊可见记忆'), findsOneWidget);
+    expect(find.text('其他私聊不可见记忆'), findsNothing);
+    expect(find.byKey(const ValueKey('memory-observer-sidebar')), findsNothing);
+    expect(find.byKey(const ValueKey('memory-subject-selector')), findsNothing);
+    await tester.tap(
+      find.byKey(const ValueKey('memory-details-direct-visible-memory')),
+    );
+    await tester.pumpAndSettle();
+    expect(find.byKey(const ValueKey('memory-detail-pin')), findsNothing);
+    expect(find.byKey(const ValueKey('memory-detail-correct')), findsNothing);
+    expect(find.byKey(const ValueKey('memory-detail-delete')), findsNothing);
+  });
+
+  testWidgets('returns from detail with search and scroll context intact',
+      (tester) async {
+    useViewport(tester, const Size(1200, 800));
+    final observer = testCharacter('state-observer', apiConfigId: 'cfg')
+      ..name = '状态观察 AI';
+    await putCharacter(observer);
+    final memories = [
+      for (var index = 0; index < 32; index++)
+        PermanentMemory(
+          id: 'state-memory-$index',
+          observerCharacterId: observer.id,
+          kind: MemoryKind.fact,
+          content: '目标浏览记忆 $index',
+          status: MemoryStatus.active,
+          pinned: index == 0,
+          originType: MemoryOriginType.manual,
+          originNameSnapshot: '手动记录',
+          updatedAt: DateTime(2026, 8, 1).add(Duration(minutes: index)),
+        ),
+    ];
+    await TestWidgetsFlutterBinding.ensureInitialized().runAsync(
+      () => db.permanentMemoryBox.putAll({
+        for (final memory in memories) memory.id: memory,
+      }),
+    );
+
+    await pumpLoaded(
+        tester,
+        const MemoryManagementPage(
+          scope: MemoryConversationScope.settings(),
+        ));
+    final search = find.byKey(const ValueKey('memory-audit-search'));
+    await tester.enterText(search, '目标浏览');
+    await tester.pump();
+    final scrollables = find.byType(Scrollable);
+    final scrollableIndex = Iterable<int>.generate(
+      scrollables.evaluate().length,
+    ).firstWhere(
+      (index) =>
+          tester
+              .state<ScrollableState>(scrollables.at(index))
+              .position
+              .maxScrollExtent >
+          0,
+    );
+    final contentScrollable = scrollables.at(scrollableIndex);
+    final scrollable = tester.state<ScrollableState>(contentScrollable);
+    scrollable.position.jumpTo(scrollable.position.maxScrollExtent);
+    await tester.pump();
+    final target = find.byKey(
+      const ValueKey('memory-details-state-memory-1'),
+    );
+    expect(target, findsOneWidget);
+    final beforeOffset = scrollable.position.pixels;
+    expect(beforeOffset, greaterThan(0));
+
+    await tester.tap(target);
+    await tester.pumpAndSettle();
+    await tester.ensureVisible(find.byKey(const ValueKey('memory-detail-pin')));
+    await tester.runAsync(() async {
+      await tester.tap(find.byKey(const ValueKey('memory-detail-pin')));
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump();
+    expect(db.permanentMemoryBox.get('state-memory-1')!.pinned, isTrue);
+    await tester.pageBack();
+    await tester.pumpAndSettle();
+
+    final currentContentScrollable = find
+        .descendant(
+          of: find.byKey(const ValueKey('memory-content')),
+          matching: find.byType(Scrollable),
+        )
+        .first;
+    final afterScrollable =
+        tester.state<ScrollableState>(currentContentScrollable);
+    final afterOffset = afterScrollable.position.pixels;
+    expect(afterOffset, closeTo(beforeOffset, 2));
+    afterScrollable.position.jumpTo(0);
+    await tester.pump();
+    expect(tester.widget<TextField>(search).controller!.text, '目标浏览');
+    final targetRow = find.byKey(
+      const ValueKey('memory-row-state-memory-1'),
+    );
+    final originalPinnedRow = find.byKey(
+      const ValueKey('memory-row-state-memory-0'),
+    );
+    expect(targetRow, findsOneWidget);
+    expect(originalPinnedRow, findsOneWidget);
+    expect(
+      tester.getTopLeft(targetRow).dy,
+      lessThan(
+        tester.getTopLeft(originalPinnedRow).dy,
+      ),
+    );
+  });
+
+  testWidgets('shows a retryable error when the memory box cannot be read',
+      (tester) async {
+    await tester.runAsync(() => db.permanentMemoryBox.close());
+    try {
+      await tester.pumpWidget(app(const MemoryManagementPage(
+        scope: MemoryConversationScope.settings(),
+      )));
+      await tester.pump();
+      expect(find.text('永久记忆加载失败'), findsOneWidget);
+      expect(find.text('重试'), findsOneWidget);
+      await tester.runAsync(
+        () => Hive.openBox<PermanentMemory>('permanent_memories'),
       );
-      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.tap(find.text('重试'));
       await tester.pump();
-    });
-
-    testWidgets('pin and delete actions update the visible audit record',
-        (tester) async {
-      await tester.runAsync(() async {
-        final char = testCharacter('char-a', apiConfigId: 'cfg');
-        await db.aiCharacterBox.put(char.id, char);
-        await db.permanentMemoryBox.put(
-            'pm-actions',
-            PermanentMemory(
-              observerCharacterId: char.id,
-              kind: MemoryKind.fact,
-              content: '待处理记忆',
-              status: MemoryStatus.active,
-              originType: MemoryOriginType.manual,
-              originNameSnapshot: '手动',
-            ));
-        await tester.pumpWidget(app(const MemoryManagementPage()));
-      });
       await tester.pump(const Duration(milliseconds: 300));
-
-      await scrollTo(tester, find.text('待处理记忆'));
-      await tester.tap(find.byTooltip('固定'));
-      await tester.pump();
-      await settleHiveWrites(tester, turns: 1);
-      await tester.runAsync(() async {
-        await db.permanentMemoryBox.flush();
-        await db.appSettingsBox.flush();
-      });
-      await tester.pump();
-      expect(db.permanentMemoryBox.get('pm-actions')!.pinned, isTrue);
-
-      await scrollTo(tester, find.text('待处理记忆'));
-      await tester.longPress(find.text('待处理记忆'));
-      await tester.pump(const Duration(milliseconds: 300));
-      await tester.tap(find.widgetWithText(ListTile, '删除'));
-      await tester.pump(const Duration(milliseconds: 300));
-      await tester.tap(find.widgetWithText(FilledButton, '删除'));
-      await tester.pump();
-      await settleHiveWrites(tester, turns: 1);
-      await tester.runAsync(() => db.permanentMemoryBox.flush());
-      await tester.pump();
-
-      expect(db.permanentMemoryBox.get('pm-actions'), isNull);
-    });
-
-    testWidgets('shows an error state when the memory box cannot be read',
-        (tester) async {
-      await tester.runAsync(() => db.permanentMemoryBox.close());
-      try {
-        await tester.pumpWidget(app(const MemoryManagementPage()));
-        await tester.pump();
-
-        expect(find.text('永久记忆加载失败'), findsOneWidget);
-      } finally {
+      expect(find.text('永久记忆加载失败'), findsNothing);
+      expect(find.text('暂无可用观察 AI'), findsWidgets);
+    } finally {
+      if (!Hive.isBoxOpen('permanent_memories')) {
         await tester.runAsync(
           () => Hive.openBox<PermanentMemory>('permanent_memories'),
         );
       }
-    });
+    }
   });
 }

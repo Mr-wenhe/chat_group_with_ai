@@ -297,12 +297,21 @@ Directory _workspaceFor(
 
 Future<Map<String, dynamic>> _readJson(HttpRequest request) async {
   final bytes = <int>[];
+  var tooLarge = false;
   await for (final chunk in request) {
+    if (tooLarge) continue;
     if (bytes.length + chunk.length > _maxRequestBytes) {
-      throw const _RequestBodyTooLarge();
+      // Drain the chunked request before sending 413; otherwise dart:io can
+      // close the connection while the client is still uploading and the
+      // client observes "connection closed before full header".
+      // ponytail: drain until EOF; add an abortable read timeout if this local
+      // bridge ever accepts untrusted clients that can hold a stream open.
+      tooLarge = true;
+      continue;
     }
     bytes.addAll(chunk);
   }
+  if (tooLarge) throw const _RequestBodyTooLarge();
   final raw = utf8.decode(bytes);
   if (raw.trim().isEmpty) return {};
   final decoded = jsonDecode(raw);

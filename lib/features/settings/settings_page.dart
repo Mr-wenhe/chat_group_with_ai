@@ -10,6 +10,7 @@ import 'package:chat_group/features/chat_group/providers/chat_group_providers.da
 import 'package:chat_group/features/settings/ai_processing_directory_policy.dart';
 import 'package:chat_group/features/settings/api_config_form_page.dart';
 import 'package:chat_group/features/memory/memory_management_page.dart';
+import 'package:chat_group/features/memory/memory_audit_filter.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/settings/backup_restore_page.dart';
 import 'package:chat_group/features/settings/user_profile_page.dart';
@@ -540,7 +541,9 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
                 subtitle: '查看和管理所有 AI 的全局永久记忆',
                 onTap: () => Navigator.of(context).push(
                   MaterialPageRoute(
-                      builder: (_) => const MemoryManagementPage()),
+                      builder: (_) => const MemoryManagementPage(
+                            scope: MemoryConversationScope.settings(),
+                          )),
                 ),
               ),
               Divider(

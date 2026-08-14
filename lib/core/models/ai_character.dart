@@ -87,10 +87,14 @@ class AICharacter extends HiveObject {
   /// 创建后不可变。缺少该字段的旧记录兼容读取为女；迁移是否完成必须
   /// 由版本化迁移状态判断，不能由这个兼容默认值推断。
   @HiveField(21, defaultValue: CharacterGender.female)
-  CharacterGender gender;
+  final CharacterGender gender;
 
   /// Deleted snapshots from before gender was stored keep their identity but
   /// must not present the Hive compatibility default as a known gender.
+  ///
+  /// This is persisted for imported snapshots so a pending migration cannot
+  /// accidentally turn the compatibility value into a confirmed choice.
+  @HiveField(22, defaultValue: false)
   final bool hasKnownGender;
 
   AICharacter({
@@ -125,15 +129,54 @@ class AICharacter extends HiveObject {
         toolPermissions = toolPermissions ??
             const [ToolPermission.skillCreate, ToolPermission.skillDownload];
 
+  /// Creates the replacement object used by the one migration path allowed to
+  /// resolve gender. Ordinary edits must keep the saved object's gender.
+  AICharacter withGender(
+    CharacterGender value, {
+    bool hasKnownGender = true,
+  }) {
+    return AICharacter(
+      id: id,
+      name: name,
+      avatar: avatar,
+      age: age,
+      role: role,
+      personalityTags: List<String>.from(personalityTags),
+      systemPrompt: systemPrompt,
+      memorySummary: memorySummary,
+      apiKey: apiKey,
+      apiProvider: apiProvider,
+      modelName: modelName,
+      customBaseUrl: customBaseUrl,
+      hourlyReplyLimit: hourlyReplyLimit,
+      hourlyReplyCount: hourlyReplyCount,
+      lastReplyTimestamp: lastReplyTimestamp,
+      isActive: isActive,
+      createdAt: createdAt,
+      apiConfigId: apiConfigId,
+      agenticEnabled: agenticEnabled,
+      skillIds: List<String>.from(skillIds),
+      toolPermissions: List<ToolPermission>.from(toolPermissions),
+      gender: value,
+      hasKnownGender: hasKnownGender,
+    );
+  }
+
   String get displayGenderLabel => hasKnownGender ? gender.label : '未知';
 
-  String get promptIdentity => '$name，$age岁，性别$displayGenderLabel，身份是$role';
+  // Active legacy records need a deterministic prompt fallback while storage
+  // is still migrating; deleted snapshots remain visibly unknown and never
+  // become prompt participants.
+  String get _promptGenderLabel =>
+      hasKnownGender || isActive ? gender.label : displayGenderLabel;
+
+  String get promptIdentity => '$name，$age岁，性别$_promptGenderLabel，身份是$role';
 
   String get rolePlaySystemPrompt {
     final prompt = systemPrompt.trim().isEmpty ? null : systemPrompt;
     return [
       '你是$promptIdentity。',
-      '角色性别为$displayGenderLabel，请保持称谓和角色表现与该设定一致。',
+      '角色性别为$_promptGenderLabel，请保持称谓和角色表现与该设定一致。',
       if (prompt != null) prompt,
     ].join('\n');
   }

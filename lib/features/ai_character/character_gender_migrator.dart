@@ -10,6 +10,8 @@ import 'package:chat_group/features/ai_character/character_gender_migration_supp
 import 'package:chat_group/features/ai_character/character_gender_migration_state.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 
+part 'character_gender_migrator_fallback.dart';
+
 /// Gives legacy characters one immutable gender value, once.
 class CharacterGenderMigrator {
   static const migrationKey = 'character_gender_migration_v1';
@@ -97,140 +99,27 @@ class CharacterGenderMigrator {
     }
   }
 
-  void _resetSession() {
-    _remoteInferenceCancelled = false;
-    _llmCancellation = Completer<void>();
-    _sessionCharacters = const [];
-    _sessionReplies = const {};
-    _sessionState = null;
-    _sessionCandidateIds.clear();
-    _sessionDecisions.clear();
-    _sessionCompletedIds.clear();
-    _sessionReasonCodes.clear();
-    _sessionReport
-      ..remoteResolved = 0
-      ..localFallback = 0
-      ..saved = 0
-      ..saveFailures = 0
-      ..stateSaveFailures = 0
-      ..completed = false;
-    _sessionSavedCharacterIds.clear();
-    _sessionCandidateIdsKnown = false;
-  }
-
-  Map<String, List<String>> _readRepliesSafely(
-    List<AICharacter> characters,
-  ) {
-    try {
-      return CharacterGenderInference.repliesByCharacter(
-        characters,
-        db.messageBox.values,
-      );
-    } on Object {
-      _sessionReasonCodes.add('storage_failure');
-      return {
-        for (final character in characters) character.id: const <String>[],
-      };
-    }
-  }
-
-  int get _sessionCharacterCount => _sessionCandidateIdsKnown
-      ? _sessionCandidateIds.length
-      : _sessionCharacters.length;
-
-  String _reportStatus(CharacterGenderMigrationReport report) =>
-      report.completed && report.saveFailures == 0
-          ? 'completed'
-          : report.saved > 0
-              ? 'partial'
-              : 'failed';
-
-  Future<CharacterGenderMigrationReport> _applySessionFallback() async {
-    final report = _sessionReport;
-    final state = await _prepareFallbackState();
-    for (final character in _sessionCharacters) {
-      if (_sessionCandidateIdsKnown &&
-          !_sessionCandidateIds.contains(character.id)) {
-        continue;
-      }
-      if (_sessionCompletedIds.contains(character.id)) continue;
-      final recovered = _sessionDecisions[character.id];
-      final gender = recovered ??
-          CharacterGenderInference.inferLocally(
-            character,
-            _sessionReplies[character.id] ?? const [],
-          );
-      if (recovered == null) report.localFallback++;
-      _sessionDecisions[character.id] = gender;
-      character.gender = gender;
-      if (state != null) {
-        state.decisions[character.id] = gender;
-        await _tryWriteFallbackState(state, report);
-      }
-      try {
-        await _saveCharacter(character);
-        if (_sessionSavedCharacterIds.add(character.id)) report.saved++;
-        _sessionCompletedIds.add(character.id);
-        if (state != null) {
-          state.completedIds.add(character.id);
-          state.decisions.remove(character.id);
-          await _tryWriteFallbackState(state, report);
-        }
-      } on Object {
-        report.saveFailures++;
-        _sessionReasonCodes.add('character_save_failure');
-      }
-    }
-    if (state != null &&
-        state.candidateIds.every(state.completedIds.contains)) {
-      try {
-        await _completeMigration();
-      } on Object {
-        _sessionReasonCodes.add('state_save_failure');
-        report.stateSaveFailures++;
-      }
-      report.completed = _migrationIsLocked();
-    }
-    return report;
-  }
-
-  bool _migrationIsLocked() {
-    try {
-      return db.appSettingsBox.get(migrationKey) == true;
-    } on Object {
-      return false;
-    }
-  }
-
-  Future<CharacterGenderMigrationState?> _prepareFallbackState() async {
-    if (_sessionState != null) return _sessionState;
-    try {
-      return await _prepareState(_indexCharacters(_sessionCharacters));
-    } on Object {
-      _sessionReasonCodes.add('state_save_failure');
-      return _sessionState;
-    }
-  }
-
-  Future<void> _tryWriteFallbackState(
-    CharacterGenderMigrationState state,
-    CharacterGenderMigrationReport report,
-  ) async {
-    try {
-      await _writeState(state);
-    } on Object {
-      _sessionReasonCodes.add('state_save_failure');
-      report.stateSaveFailures++;
-    }
-  }
-
   Future<int> _migrateSafely(
     List<AICharacter> snapshot,
     Map<String, List<String>> replies,
   ) async {
-    if (db.appSettingsBox.get(migrationKey) == true) return 0;
+    final locked = db.appSettingsBox.get(migrationKey) == true;
+    final lockedBackfill = locked
+        ? snapshot.where((character) => !character.hasKnownGender).toList()
+        : const <AICharacter>[];
+    if (lockedBackfill.isEmpty && locked) return 0;
+    if (lockedBackfill.isNotEmpty) {
+      await _prepareLockedGenderBackfill(lockedBackfill);
+    }
 
-    final charactersById = _indexCharacters(snapshot);
+    // Only legacy records are eligible for inference. A known gender is a
+    // permanent user choice and must remain outside every migration retry,
+    // including a rebuilt or stale progress state.
+    final charactersById = _indexCharacters(
+      snapshot.where((character) => !character.hasKnownGender).toList(
+            growable: false,
+          ),
+    );
     if (charactersById.isEmpty) return _completeEmptyMigration();
 
     final state = await _prepareState(charactersById);
@@ -241,7 +130,11 @@ class CharacterGenderMigrator {
         .where((character) => !state.decisions.containsKey(character.id))
         .toList(growable: false);
     final llm = await _inferWithLlm(needsInference, replies);
-    final reasons = <String>{..._sessionReasonCodes, ...llm.reasonCodes};
+    final reasons = <String>{
+      ..._sessionReasonCodes,
+      if (lockedBackfill.isNotEmpty) 'gender_metadata_backfill',
+      ...llm.reasonCodes,
+    };
     final report = await _persistPendingCharacters(
       state,
       pending,
@@ -291,6 +184,23 @@ class CharacterGenderMigrator {
       characterCount: 0,
     );
     return 0;
+  }
+
+  Future<void> _prepareLockedGenderBackfill(
+    List<AICharacter> characters,
+  ) async {
+    // Older completed migrations already resolved field 21 but predate the
+    // known/unknown marker. Reuse that durable gender instead of re-inferring
+    // it, then let the normal write path persist field 22.
+    await _writeState(
+      CharacterGenderMigrationState(
+        candidateIds: {for (final character in characters) character.id},
+        decisions: {
+          for (final character in characters) character.id: character.gender,
+        },
+      ),
+    );
+    await db.appSettingsBox.put(migrationKey, false);
   }
 
   Future<CharacterGenderMigrationState> _prepareState(
@@ -386,7 +296,6 @@ class CharacterGenderMigrator {
         reasons.add('character_save_failure');
       }
       if (result.stateSaveFailed) {
-        character.gender = _sessionDecisions[character.id] ?? gender;
         report.stateSaveFailures++;
         reasons.add('state_save_failure');
       }
@@ -412,9 +321,9 @@ class CharacterGenderMigrator {
         stateSaveFailed: true,
       );
     }
-    character.gender = gender;
+    final resolvedCharacter = character.withGender(gender);
     try {
-      await _saveCharacter(character);
+      await _saveCharacter(resolvedCharacter);
     } on Object {
       return (
         characterSaved: false,

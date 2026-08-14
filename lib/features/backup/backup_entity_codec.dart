@@ -46,30 +46,32 @@ class BackupEntityCodec {
         hasCredential: false,
       );
 
-  static Map<String, dynamic> character(AICharacter item) => {
-        'id': item.id,
-        'name': item.name,
-        'avatar': item.avatar,
-        'age': item.age,
-        'role': item.role,
-        'personalityTags': item.personalityTags,
-        'systemPrompt': item.systemPrompt,
-        'memorySummary': item.memorySummary,
-        'apiProvider': item.apiProvider,
-        'modelName': item.modelName,
-        'customBaseUrl': _publicUrl(item.customBaseUrl),
-        'hourlyReplyLimit': item.hourlyReplyLimit,
-        'hourlyReplyCount': item.hourlyReplyCount,
-        'lastReplyTimestamp': item.lastReplyTimestamp?.toIso8601String(),
-        'isActive': item.isActive,
-        'createdAt': _date(item.createdAt),
-        'apiConfigId': item.apiConfigId,
-        'agenticEnabled': item.agenticEnabled,
-        'skillIds': item.skillIds,
-        'toolPermissions':
-            item.toolPermissions.map((item) => item.name).toList(),
-        'gender': item.gender.name,
-      };
+  static Map<String, dynamic> character(AICharacter item) {
+    final value = <String, dynamic>{
+      'id': item.id,
+      'name': item.name,
+      'avatar': item.avatar,
+      'age': item.age,
+      'role': item.role,
+      'personalityTags': item.personalityTags,
+      'systemPrompt': item.systemPrompt,
+      'memorySummary': item.memorySummary,
+      'apiProvider': item.apiProvider,
+      'modelName': item.modelName,
+      'customBaseUrl': _publicUrl(item.customBaseUrl),
+      'hourlyReplyLimit': item.hourlyReplyLimit,
+      'hourlyReplyCount': item.hourlyReplyCount,
+      'lastReplyTimestamp': item.lastReplyTimestamp?.toIso8601String(),
+      'isActive': item.isActive,
+      'createdAt': _date(item.createdAt),
+      'apiConfigId': item.apiConfigId,
+      'agenticEnabled': item.agenticEnabled,
+      'skillIds': item.skillIds,
+      'toolPermissions': item.toolPermissions.map((item) => item.name).toList(),
+    };
+    if (item.hasKnownGender) value['gender'] = item.gender.name;
+    return value;
+  }
 
   static Map<String, dynamic> characterForBackup(
     AICharacter item, {
@@ -80,31 +82,37 @@ class BackupEntityCodec {
     return value;
   }
 
-  static AICharacter decodeCharacter(Map<String, dynamic> json) => AICharacter(
-        id: _string(json, 'id'),
-        name: _string(json, 'name'),
-        avatar: _string(json, 'avatar'),
-        age: _integer(json, 'age'),
-        role: _string(json, 'role'),
-        personalityTags: _strings(json['personalityTags']),
-        systemPrompt: _string(json, 'systemPrompt'),
-        memorySummary: json['memorySummary']?.toString() ?? '',
-        apiKey: '',
-        apiProvider: json['apiProvider']?.toString() ?? '',
-        modelName: json['modelName']?.toString(),
-        customBaseUrl: json['customBaseUrl']?.toString() ?? '',
-        hourlyReplyLimit: (json['hourlyReplyLimit'] as num?)?.toInt() ?? 60,
-        hourlyReplyCount: (json['hourlyReplyCount'] as num?)?.toInt() ?? 0,
-        lastReplyTimestamp: _optionalDate(json['lastReplyTimestamp']),
-        isActive: json['isActive'] as bool? ?? true,
-        createdAt: _dateTime(json, 'createdAt'),
-        apiConfigId: json['apiConfigId']?.toString(),
-        agenticEnabled: json['agenticEnabled'] as bool? ?? true,
-        skillIds: _strings(json['skillIds']),
-        toolPermissions: _enums(json['toolPermissions'], ToolPermission.values),
-        gender: _optionalEnum(json['gender'], CharacterGender.values) ??
-            CharacterGender.female,
-      );
+  static AICharacter decodeCharacter(Map<String, dynamic> json) {
+    final gender = _decodeGender(json['gender']);
+    return AICharacter(
+      id: _string(json, 'id'),
+      name: _string(json, 'name'),
+      avatar: _string(json, 'avatar'),
+      age: _integer(json, 'age'),
+      role: _string(json, 'role'),
+      personalityTags: _strings(json['personalityTags']),
+      systemPrompt: _string(json, 'systemPrompt'),
+      memorySummary: json['memorySummary']?.toString() ?? '',
+      apiKey: '',
+      apiProvider: json['apiProvider']?.toString() ?? '',
+      modelName: json['modelName']?.toString(),
+      customBaseUrl: json['customBaseUrl']?.toString() ?? '',
+      hourlyReplyLimit: (json['hourlyReplyLimit'] as num?)?.toInt() ?? 60,
+      hourlyReplyCount: (json['hourlyReplyCount'] as num?)?.toInt() ?? 0,
+      lastReplyTimestamp: _optionalDate(json['lastReplyTimestamp']),
+      isActive: json['isActive'] as bool? ?? true,
+      createdAt: _dateTime(json, 'createdAt'),
+      apiConfigId: json['apiConfigId']?.toString(),
+      agenticEnabled: json['agenticEnabled'] as bool? ?? true,
+      skillIds: _strings(json['skillIds']),
+      toolPermissions: _enums(json['toolPermissions'], ToolPermission.values),
+      gender: gender ?? CharacterGender.female,
+      hasKnownGender: gender != null,
+    );
+  }
+
+  static bool hasValidGender(Map<String, dynamic> json) =>
+      _decodeGender(json['gender']) != null;
 
   static Map<String, dynamic> group(ChatGroup item) => {
         'id': item.id,
@@ -574,6 +582,14 @@ class BackupEntityCodec {
       throw FormatException('枚举值 "$name" 不在已知枚举 $values 中');
     }
     return found.first;
+  }
+
+  static CharacterGender? _decodeGender(Object? raw) {
+    if (raw is! String) return null;
+    for (final gender in CharacterGender.values) {
+      if (gender.name == raw) return gender;
+    }
+    return null;
   }
 
   static List<T> _enums<T extends Enum>(Object? value, List<T> values) {

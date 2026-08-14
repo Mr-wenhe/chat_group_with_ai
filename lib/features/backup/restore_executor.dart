@@ -314,7 +314,10 @@ class RestoreExecutor {
     _RestoreTransaction transaction,
   ) async {
     final missingGenderIds = characters
-        .where((record) => BackupEntityCodec.value(record)['gender'] == null)
+        .where(
+          (record) => !BackupEntityCodec.hasValidGender(
+              BackupEntityCodec.value(record)),
+        )
         .map(BackupEntityCodec.key)
         .toSet();
     if (missingGenderIds.isEmpty) return false;
@@ -327,8 +330,9 @@ class RestoreExecutor {
             ? null
             : CharacterGenderMigrationState.tryFromMap(existing))
         : null;
-    final databaseCharacterIds =
-        db.aiCharacterBox.values.map((character) => character.id);
+    final databaseCharacterIds = db.aiCharacterBox.values
+        .where((character) => !character.hasKnownGender)
+        .map((character) => character.id);
     final rebuildAllCandidates = !migrationCompleted && current == null;
     final completedIds = {...?current?.completedIds}
       ..removeAll(missingGenderIds);

@@ -70,7 +70,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         TextEditingController(text: (c?.hourlyReplyLimit ?? 60).toString());
 
     _selectedApiConfigId = c?.apiConfigId ?? '';
-    _selectedGender = c?.gender;
+    _selectedGender = c != null && c.hasKnownGender ? c.gender : null;
     _agenticEnabled = c?.agenticEnabled ?? true;
     _selectedSkillTemplateIds =
         Set<String>.from(c?.skillIds ?? const <String>[]);
@@ -270,6 +270,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
+    final hasKnownGender = widget.character?.hasKnownGender ?? true;
 
     return Scaffold(
       backgroundColor: cs.surface,
@@ -350,6 +351,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                     Expanded(
                       child: DropdownButtonFormField<CharacterGender>(
                         value: _selectedGender,
+                        hint: _isEditing && !hasKnownGender
+                            ? const Text('未知（迁移中）')
+                            : null,
                         decoration: appInputDecoration(
                           '性别 *',
                           '请选择',
@@ -373,7 +377,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                             : (gender) =>
                                 setState(() => _selectedGender = gender),
                         validator: (gender) =>
-                            gender == null ? '请选择性别' : null,
+                            gender == null && !_isEditing ? '请选择性别' : null,
                       ),
                     ),
                   ],
@@ -381,8 +385,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                 const SizedBox(height: 14),
                 TextFormField(
                   controller: _roleController,
-                  decoration: appInputDecoration('角色 *', '游戏达人 / 心理咨询师',
-                      Icons.work_outline_rounded, cs),
+                  decoration: appInputDecoration(
+                      '角色 *', '游戏达人 / 心理咨询师', Icons.work_outline_rounded, cs),
                   onChanged: (_) => setState(() {}),
                   validator: (v) => v?.isEmpty ?? true ? '请输入角色' : null,
                 ),
@@ -580,7 +584,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: cs.primaryContainer,
-        border: Border.all(color: cs.primary.withValues(alpha: 0.2), width: 1.5),
+        border:
+            Border.all(color: cs.primary.withValues(alpha: 0.2), width: 1.5),
       ),
       child: Center(
           child: Text(displayAvatar,

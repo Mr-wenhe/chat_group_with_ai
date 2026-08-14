@@ -48,8 +48,8 @@ class _FakeGenderMigrator extends CharacterGenderMigrator {
     for (final id in candidateIdsAtCall) {
       final character = db.aiCharacterBox.get(id);
       if (character == null) continue;
-      character.gender = CharacterGender.male;
-      await db.aiCharacterBox.put(id, character);
+      await db.aiCharacterBox
+          .put(id, character.withGender(CharacterGender.male));
     }
     await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, true);
     await db.appSettingsBox.delete(CharacterGenderMigrator.stateKey);
@@ -132,9 +132,9 @@ void main() {
     final attachment = File('${mediaDirectory.path}/photo.bin');
     await attachment.writeAsBytes([1, 2, 3, 4]);
     await _seedCoreData(db, attachment, apiKey: 'sk-not-exported');
-    final sourceCharacter = db.aiCharacterBox.get('char-1')!;
-    sourceCharacter.gender = CharacterGender.male;
-    await sourceCharacter.save();
+    final sourceCharacter =
+        db.aiCharacterBox.get('char-1')!.withGender(CharacterGender.male);
+    await db.aiCharacterBox.put(sourceCharacter.id, sourceCharacter);
     final backup = File('${testRoot.path}/roundtrip.cgbak');
     final sourceService = BackupRestoreService(
       db: db,
@@ -196,11 +196,14 @@ void main() {
     final attachment = File('${mediaDirectory.path}/gender.txt');
     await attachment.writeAsString('gender');
     await _seedCoreData(db, attachment);
-    final first = db.aiCharacterBox.get('char-1')!
-      ..gender = CharacterGender.male;
-    await first.save();
-    final second = testCharacter('char-2', apiConfigId: 'api-1')
-      ..gender = CharacterGender.female;
+    final first =
+        db.aiCharacterBox.get('char-1')!.withGender(CharacterGender.male);
+    await db.aiCharacterBox.put(first.id, first);
+    final second = testCharacter(
+      'char-2',
+      apiConfigId: 'api-1',
+      gender: CharacterGender.female,
+    );
     await db.aiCharacterBox.put(second.id, second);
 
     final backup = File('${testRoot.path}/gender-roundtrip.cgbak');
@@ -230,6 +233,60 @@ void main() {
     );
     expect(db.aiCharacterBox.get('char-1')!.gender, CharacterGender.male);
     expect(db.aiCharacterBox.get('char-2')!.gender, CharacterGender.female);
+  });
+
+  test('legacy backup without gender stays unknown until migration', () {
+    final json = BackupEntityCodec.character(testCharacter('legacy'))
+      ..remove('gender');
+
+    final decoded = BackupEntityCodec.decodeCharacter(json);
+
+    expect(decoded.gender, CharacterGender.female);
+    expect(decoded.hasKnownGender, isFalse);
+    expect(decoded.displayGenderLabel, '未知');
+  });
+
+  test('unknown gender is omitted from new backups', () {
+    final encoded = BackupEntityCodec.character(
+      testCharacter('pending', hasKnownGender: false),
+    );
+
+    expect(encoded.containsKey('gender'), isFalse);
+    expect(
+      BackupEntityCodec.decodeCharacter(encoded).hasKnownGender,
+      isFalse,
+    );
+  });
+
+  test('invalid gender in a backup is queued for migration', () async {
+    final legacy = await _writeV1Fixture(testRoot);
+    final fixture = await _rewriteBackupJson(
+      legacy,
+      File('${testRoot.path}/invalid-gender.cgbak'),
+      'data/characters.json',
+      (value) {
+        final character = ((value as List).single as Map)['value'] as Map;
+        character['gender'] = 'not-a-gender';
+      },
+    );
+    final migrator = _FakeGenderMigrator(db, complete: false);
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+      genderMigrator: migrator,
+    );
+    final prepared = await service.inspect(fixture);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.emptyOnly,
+    );
+
+    expect(migrator.called, isTrue);
+    expect(migrator.candidateIdsAtCall, contains('char-1'));
+    expect(db.aiCharacterBox.get('char-1')!.hasKnownGender, isFalse);
   });
 
   test('repeated import supports skip and copy-with-new-ids', () async {
@@ -1193,7 +1250,7 @@ void main() {
         character['systemPrompt'] = '我是男性';
       },
     );
-    final locked = testCharacter('locked')..gender = CharacterGender.male;
+    final locked = testCharacter('locked', gender: CharacterGender.male);
     await db.aiCharacterBox.put(locked.id, locked);
     await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, true);
 
@@ -1250,7 +1307,7 @@ void main() {
 
   test('invalid gender state keeps other database candidates on legacy restore',
       () async {
-    final existing = testCharacter('old-candidate')
+    final existing = testCharacter('old-candidate', hasKnownGender: false)
       ..role = '父亲'
       ..systemPrompt = '我是男性';
     await db.aiCharacterBox.put(existing.id, existing);
@@ -1296,7 +1353,7 @@ void main() {
   test(
       'completed gender migration limits invalid state rebuild to restored IDs',
       () async {
-    final existing = testCharacter('old-candidate')
+    final existing = testCharacter('old-candidate', hasKnownGender: false)
       ..role = '父亲'
       ..systemPrompt = '我是男性';
     await db.aiCharacterBox.put(existing.id, existing);
@@ -1340,7 +1397,7 @@ void main() {
   });
 
   test('completed gender migration discards a valid residual state', () async {
-    final existing = testCharacter('old-candidate')
+    final existing = testCharacter('old-candidate', hasKnownGender: false)
       ..role = '父亲'
       ..systemPrompt = '我是男性';
     await db.aiCharacterBox.put(existing.id, existing);
@@ -1386,10 +1443,16 @@ void main() {
 
   test('incomplete gender migration rebuilds candidates when state is missing',
       () async {
-    final existing = testCharacter('old-candidate')
+    final existing = testCharacter('old-candidate', hasKnownGender: false)
       ..role = '父亲'
       ..systemPrompt = '我是男性';
     await db.aiCharacterBox.put(existing.id, existing);
+    final locked = testCharacter(
+      'locked',
+      gender: CharacterGender.male,
+      hasKnownGender: true,
+    );
+    await db.aiCharacterBox.put(locked.id, locked);
     await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, false);
 
     final legacy = await _writeV1Fixture(testRoot);
@@ -1421,6 +1484,8 @@ void main() {
     expect(migrator.called, isTrue);
     expect(migrator.candidateIdsAtCall,
         containsAll(<String>{'old-candidate', 'char-1'}));
+    expect(migrator.candidateIdsAtCall, isNot(contains('locked')));
+    expect(db.aiCharacterBox.get('locked')!.gender, CharacterGender.male);
     expect(db.appSettingsBox.get(CharacterGenderMigrator.migrationKey), false);
   });
 

@@ -95,7 +95,13 @@ CredentialRepository testCredentials(MemoryCredentialStore store) =>
       secureStorageAvailable: true,
     );
 
-AICharacter testCharacter(String id, {String apiConfigId = ''}) => AICharacter(
+AICharacter testCharacter(
+  String id, {
+  String apiConfigId = '',
+  CharacterGender gender = CharacterGender.female,
+  bool hasKnownGender = true,
+}) =>
+    AICharacter(
       id: id,
       name: '角色$id',
       avatar: '角',
@@ -107,6 +113,8 @@ AICharacter testCharacter(String id, {String apiConfigId = ''}) => AICharacter(
       apiProvider: apiConfigId.isEmpty ? '' : 'deepseek',
       modelName: apiConfigId.isEmpty ? '' : 'deepseek-chat',
       apiConfigId: apiConfigId,
+      gender: gender,
+      hasKnownGender: hasKnownGender,
     );
 
 void _registerAdapters() {

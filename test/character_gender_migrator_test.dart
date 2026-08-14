@@ -79,6 +79,8 @@ void main() {
     String role = '助手',
     String systemPrompt = '',
     String apiConfigId = '',
+    CharacterGender gender = CharacterGender.female,
+    bool hasKnownGender = false,
   }) =>
       AICharacter(
         id: id,
@@ -91,6 +93,8 @@ void main() {
         apiKey: '',
         apiProvider: 'custom',
         apiConfigId: apiConfigId,
+        gender: gender,
+        hasKnownGender: hasKnownGender,
       );
 
   group('migration orchestration', () {
@@ -162,6 +166,44 @@ void main() {
       expect(db.aiCharacterBox.get('c1')!.gender, CharacterGender.male);
       expect(db.aiCharacterBox.get('c2')!.gender, CharacterGender.male);
       expect(db.aiCharacterBox.get('c3')!.gender, CharacterGender.female);
+    });
+
+    test('never re-infers a known gender from stale migration state', () async {
+      await db.apiConfigBox.put('config-a', apiConfig('config-a'));
+      await db.aiCharacterBox.putAll({
+        'known': character(
+          id: 'known',
+          apiConfigId: 'config-a',
+          gender: CharacterGender.male,
+          hasKnownGender: true,
+        ),
+        'legacy': character(id: 'legacy', apiConfigId: 'config-a'),
+      });
+      await db.appSettingsBox.put(
+        CharacterGenderMigrator.stateKey,
+        {
+          'candidateIds': ['known', 'legacy'],
+          'completedIds': <String>[],
+          'decisions': <String, String>{},
+        },
+      );
+      final api = _FakeChatApiService(
+        responsesByModel: {
+          'model-config-a': _responseFor({'legacy': '女', 'known': '女'}),
+        },
+      );
+
+      await CharacterGenderMigrator(
+        db,
+        api: api,
+        credentials: _FakeCredentials({'config-a': 'key-a'}),
+      ).migrate();
+
+      expect(api.calls, hasLength(1));
+      expect(_requestIds(api.calls.single), {'legacy'});
+      expect(db.aiCharacterBox.get('known')!.gender, CharacterGender.male);
+      expect(db.aiCharacterBox.get('known')!.hasKnownGender, isTrue);
+      expect(db.aiCharacterBox.get('legacy')!.gender, CharacterGender.female);
     });
 
     test(
@@ -282,9 +324,12 @@ void main() {
       expect(db.aiCharacterBox.get('c1')!.gender, CharacterGender.male);
       expect(
         db.aiCharacterBox.get('c2')!.gender,
-        CharacterGender.male,
-        reason: '本次会话必须使用已决定的最终回退值，即使持久化失败',
+        CharacterGender.female,
+        reason: '角色写入失败时不能绕过不可变保存边界',
       );
+      final pending = db.appSettingsBox.get(CharacterGenderMigrator.stateKey)
+          as Map<dynamic, dynamic>;
+      expect((pending['decisions'] as Map)['c2'], 'male');
 
       final secondApi = _FakeChatApiService(
         errorsByModel: {'model-config-a': StateError('must not re-infer')},
@@ -315,7 +360,6 @@ void main() {
         credentials: _FakeCredentials({}),
       ).migrate();
 
-      expect(c1.gender, CharacterGender.male);
       expect(db.aiCharacterBox.get('c1')!.gender, CharacterGender.male);
     });
 
@@ -334,7 +378,7 @@ void main() {
         credentials: _FakeCredentials({}),
       ).migrate();
 
-      expect(c1.gender, CharacterGender.male);
+      expect(db.aiCharacterBox.get('c1')!.gender, CharacterGender.male);
       final diagnosticMap = db.appSettingsBox
           .get(CharacterGenderMigrator.diagnosticKey) as Map<dynamic, dynamic>;
       expect(diagnosticMap['status'], 'completed');
@@ -387,6 +431,28 @@ void main() {
       expect(secondApi.calls, isEmpty);
     });
 
+    test('locked migration backfills the known flag without re-inference',
+        () async {
+      final legacy = character(id: 'legacy', systemPrompt: '我是男性。')
+          .withGender(CharacterGender.male, hasKnownGender: false);
+      await db.aiCharacterBox.put(legacy.id, legacy);
+      await db.appSettingsBox.put(CharacterGenderMigrator.migrationKey, true);
+      final api = _FakeChatApiService(
+        errorsByModel: {'model-': StateError('must not call')},
+      );
+
+      final saved = await CharacterGenderMigrator(
+        db,
+        api: api,
+        credentials: _FakeCredentials({}),
+      ).migrate();
+
+      expect(saved, 1);
+      expect(api.calls, isEmpty);
+      expect(db.aiCharacterBox.get('legacy')!.gender, CharacterGender.male);
+      expect(db.aiCharacterBox.get('legacy')!.hasKnownGender, isTrue);
+    });
+
     test('characters created after migration begins are not legacy candidates',
         () async {
       await db.apiConfigBox.put('config-a', apiConfig('config-a'));
@@ -414,7 +480,10 @@ void main() {
         credentials: _FakeCredentials({'config-a': 'key-a'}),
         saveCharacter: failFirstSave,
       ).migrate();
-      await db.aiCharacterBox.put('new', character(id: 'new'));
+      await db.aiCharacterBox.put(
+        'new',
+        character(id: 'new', hasKnownGender: true),
+      );
 
       final restartApi = _FakeChatApiService(
         responsesByModel: {

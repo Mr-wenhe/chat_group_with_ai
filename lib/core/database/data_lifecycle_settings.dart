@@ -392,13 +392,14 @@ class DataLifecycleSettings {
 
   Future<void> saveDeletedCharacter(AICharacter character) async {
     final snapshots = _snapshots();
-    snapshots[character.id] = {
+    final snapshot = <String, dynamic>{
       'name': character.name,
       'avatar': character.avatar,
       'age': character.age,
       'role': character.role,
-      'gender': character.gender.name,
     };
+    if (character.hasKnownGender) snapshot['gender'] = character.gender.name;
+    snapshots[character.id] = snapshot;
     await db.appSettingsBox.put(deletedCharacterSnapshotsKey, snapshots);
   }
 

@@ -119,7 +119,7 @@ void main() {
         visible: ['当前 AI 关于用户', '历史状态'],
       ),
       (
-        name: 'direct keeps current AI memories that include the user',
+        name: 'direct keeps only current AI memories solely about the user',
         scope: MemoryConversationScope.direct('a'),
         memories: [
           memory(content: '有效用户记忆'),
@@ -134,7 +134,6 @@ void main() {
           '有效用户记忆',
           '已取代用户记忆',
           '已失效用户记忆',
-          '混合主体',
         ],
       ),
       (
@@ -1286,6 +1285,28 @@ void main() {
       expect(find.text('角色outside'), findsNothing);
     });
 
+    testWidgets('settings keeps the selected observer as a subject candidate',
+        (tester) async {
+      final chars = [
+        testCharacter('a'),
+        testCharacter('b'),
+        testCharacter('outside'),
+      ];
+      await tester.pumpWidget(_filterApp(
+        filter: const MemoryAuditFilter(observerCharacterId: 'a'),
+        characters: chars,
+      ));
+      await _openAdvanced(tester);
+      await tester.tap(
+        find.byKey(const ValueKey('memory-filter-dialog-subject')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text('角色a'), findsWidgets);
+      expect(find.text('角色b'), findsOneWidget);
+      expect(find.text('角色outside'), findsOneWidget);
+    });
+
     testWidgets('small filter dimensions use labeled standard controls',
         (tester) async {
       await tester.pumpWidget(_filterApp(
@@ -1326,6 +1347,22 @@ void main() {
       expect(find.text('deleted-subject'), findsNothing);
       expect(find.text('已删除群聊'), findsOneWidget);
       expect(find.text('deleted-group'), findsNothing);
+    });
+
+    testWidgets('technical character names stay out of selector labels',
+        (tester) async {
+      const technicalId = '11111111-1111-4111-8111-111111111111';
+      final character = testCharacter(technicalId)..name = technicalId;
+      await tester.pumpWidget(_filterApp(characters: [character]));
+
+      await _openAdvanced(tester);
+      await tester.tap(
+        find.byKey(const ValueKey('memory-filter-dialog-observer')),
+      );
+      await tester.pumpAndSettle();
+
+      expect(find.text(technicalId), findsNothing);
+      expect(find.text('已删除角色'), findsOneWidget);
     });
 
     testWidgets('empty source candidates show an explicit empty state',

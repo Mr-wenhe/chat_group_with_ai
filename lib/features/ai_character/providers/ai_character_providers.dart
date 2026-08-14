@@ -23,17 +23,38 @@ class AICharactersNotifier extends StateNotifier<List<AICharacter>> {
   }
 
   Future<void> addCharacter(AICharacter character) async {
+    final savedCharacter = _db.aiCharacterBox.get(character.id);
+    _validateNewCharacterGender(character, savedCharacter);
+    if (savedCharacter != null) {
+      character = character.withGender(
+        savedCharacter.gender,
+        hasKnownGender: savedCharacter.hasKnownGender,
+      );
+    }
     await _db.aiCharacterBox.put(character.id, character);
     _loadCharacters();
   }
 
   Future<void> updateCharacter(AICharacter character) async {
     final savedCharacter = _db.aiCharacterBox.get(character.id);
+    _validateNewCharacterGender(character, savedCharacter);
     if (savedCharacter != null) {
-      character.gender = savedCharacter.gender;
+      character = character.withGender(
+        savedCharacter.gender,
+        hasKnownGender: savedCharacter.hasKnownGender,
+      );
     }
     await _db.aiCharacterBox.put(character.id, character);
     _loadCharacters();
+  }
+
+  void _validateNewCharacterGender(
+    AICharacter character,
+    AICharacter? savedCharacter,
+  ) {
+    if (savedCharacter == null && !character.hasKnownGender) {
+      throw ArgumentError('新建角色必须选择性别');
+    }
   }
 
   Future<DataLifecycleResult> deleteCharacter(

@@ -257,6 +257,7 @@ void main() {
       expect(memories.first.explicitlyRequested, isTrue);
       expect(memories.first.pinned, isTrue);
       expect(memories.first.content, contains('喜欢吃辣'));
+      expect(memories.first.subjectIds, ['user']);
     });
 
     test('"forget" keyword invalidates related memories', () async {

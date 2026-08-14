@@ -409,6 +409,7 @@ class ObservationEntry {
         originConversationId: conversationId,
         originNameSnapshot: conversationNameSnapshot,
         sourceMessageIds: [message.id],
+        subjectIds: const ['user'],
         participantIds: observers,
         occurredAt: message.timestamp,
         createdAt: now,

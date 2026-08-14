@@ -19,9 +19,41 @@ import 'features/settings/settings_page.dart';
 import 'providers/providers.dart';
 
 const startupCharacterGenderMigrationTimeout = Duration(seconds: 6);
+// Give cancelled remote inference enough time to finish its local Hive writes
+// under a busy device scheduler, while keeping startup strictly bounded.
+const startupCharacterGenderMigrationDrainTimeout = Duration(milliseconds: 500);
+const startupMemoryMigrationTimeout = Duration(seconds: 6);
 
-/// Runs before [runApp] so every legacy character has a durable gender before
-/// any chat prompt can be built, while still bounding startup on bad networks.
+/// Starts the retryable memory migration with a bounded startup wait.
+///
+/// The migration is idempotent and may finish after the first frame when the
+/// bound is exceeded. Keep its eventual future observed so a late storage
+/// error cannot become unhandled.
+Future<void> runMemoryMigration(
+  DatabaseService db, {
+  MemoryMigrator? migrator,
+  Duration timeout = startupMemoryMigrationTimeout,
+}) async {
+  final migration = (migrator ?? MemoryMigrator(db)).migrate();
+  try {
+    await migration.timeout(timeout);
+  } on TimeoutException {
+    // MemoryMigrator has no cancellation contract; its idempotent write pass
+    // may finish in the background while the app opens.
+    unawaited(
+      migration.then<void>(
+        (_) {},
+        onError: (Object _, StackTrace __) {},
+      ),
+    );
+  } on Object {
+    // A later startup retries the migration; opening the UI is still safe.
+  }
+}
+
+/// Runs before [runApp] when possible, while keeping the startup wait bounded
+/// on bad networks and storage failures. Active legacy characters use the
+/// deterministic compatibility gender in prompts if the local drain expires.
 Future<void> runCharacterGenderMigration(
   DatabaseService db, {
   CharacterGenderMigrator? migrator,
@@ -34,7 +66,16 @@ Future<void> runCharacterGenderMigration(
   } on TimeoutException {
     activeMigrator.cancel();
     try {
-      await migration;
+      await migration.timeout(startupCharacterGenderMigrationDrainTimeout);
+    } on TimeoutException {
+      // Cancellation is best effort. Startup must not wait for a stuck local
+      // write; the migration future still owns its eventual completion.
+      unawaited(
+        migration.then<void>(
+          (_) {},
+          onError: (Object _, StackTrace __) {},
+        ),
+      );
     } on Object {
       // The migrator has already applied its local fallback and safe
       // diagnostic before completing or failing this cancellation drain.
@@ -60,11 +101,7 @@ void main() async {
   }
   // These migrations are independent: a legacy-memory warning must not skip
   // the gender pass required before the first real character prompt.
-  try {
-    await MemoryMigrator(db).migrate();
-  } on Object {
-    // Memory migration is retryable and must not prevent the UI from opening.
-  }
+  await runMemoryMigration(db);
   await runCharacterGenderMigration(db);
 
   final messageIndexReady = db.ensureMessageIndex();

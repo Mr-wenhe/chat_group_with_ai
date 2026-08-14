@@ -87,6 +87,8 @@ AICharacter character({
   String name = 'Amy',
   String systemPrompt = '',
   String apiConfigId = '',
+  CharacterGender gender = CharacterGender.female,
+  bool hasKnownGender = false,
 }) =>
     AICharacter(
       id: id,
@@ -99,6 +101,8 @@ AICharacter character({
       apiKey: '',
       apiProvider: 'custom',
       apiConfigId: apiConfigId,
+      gender: gender,
+      hasKnownGender: hasKnownGender,
     );
 
 ApiConfig apiConfig(String id) => ApiConfig(
@@ -159,13 +163,16 @@ void main() {
 
   test('restored progress protects fallback after a later session failure',
       () async {
-    final completed = character(id: 'completed', name: '阿杰');
+    final completed = character(
+      id: 'completed',
+      name: '阿杰',
+      gender: CharacterGender.female,
+    );
     final recovered = character(
       id: 'recovered',
       systemPrompt: '我是男性。',
+      gender: CharacterGender.female,
     );
-    completed.gender = CharacterGender.female;
-    recovered.gender = CharacterGender.female;
     await db.aiCharacterBox.putAll({
       completed.id: completed,
       recovered.id: recovered,
@@ -238,6 +245,34 @@ void main() {
       reopenedDb.appSettingsBox.get(CharacterGenderMigrator.migrationKey),
       true,
     );
+  });
+
+  test('fallback never overwrites a known gender', () async {
+    final known = character(
+      id: 'known',
+      systemPrompt: '我是女性。',
+      gender: CharacterGender.male,
+      hasKnownGender: true,
+    );
+    final legacy = character(
+      id: 'legacy',
+      systemPrompt: '我是男性。',
+    );
+    await db.aiCharacterBox.putAll({
+      known.id: known,
+      legacy.id: legacy,
+    });
+    await db.appSettingsBox.close();
+
+    await CharacterGenderMigrator(
+      db,
+      api: _FakeChatApiService(),
+      credentials: _FakeCredentials({}),
+    ).migrate();
+
+    expect(db.aiCharacterBox.get('known')!.gender, CharacterGender.male);
+    expect(db.aiCharacterBox.get('known')!.hasKnownGender, isTrue);
+    expect(db.aiCharacterBox.get('legacy')!.gender, CharacterGender.male);
   });
 
   test('late completion cleanup failure preserves this run saved count',

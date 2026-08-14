@@ -126,7 +126,8 @@ class MemoryConversationScope {
         return true;
       case MemoryConversationScopeType.direct:
         return memory.observerCharacterId == directCharacterId &&
-            memory.subjectIds.contains('user');
+            memory.subjectIds.isNotEmpty &&
+            memory.subjectIds.every((id) => id == 'user');
       case MemoryConversationScopeType.group:
         return _allowsGroupMemory(memory);
     }
@@ -270,6 +271,30 @@ class MemoryAuditFilter {
             ? null
             : sortOrder,
       ].whereType<Object>().length;
+
+  /// Conditions owned by the advanced filter action. Observer, subject and
+  /// search are navigation context and must not affect its badge or reset.
+  int get advancedCriterionCount => [
+        originType,
+        originConversationId,
+        status,
+        memoryKind,
+        pinnedOnly,
+        sortOrder == MemoryAuditSortOrder.updatedAtDescending
+            ? null
+            : sortOrder,
+      ].whereType<Object>().length;
+
+  bool get hasAdvancedCriteria => advancedCriterionCount > 0;
+
+  MemoryAuditFilter clearAdvancedFilters() => copyWith(
+        clearOriginType: true,
+        clearOriginConversationId: true,
+        clearStatus: true,
+        clearMemoryKind: true,
+        clearPinnedOnly: true,
+        clearSortOrder: true,
+      );
 
   List<PermanentMemory> apply(
     List<PermanentMemory> memories, {

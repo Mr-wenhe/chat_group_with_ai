@@ -116,7 +116,7 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
               IconButton(
                 icon: const Icon(Icons.psychology_alt_outlined, size: 22),
                 onPressed: onOpenMemory,
-                tooltip: '查看实际使用的记忆',
+                tooltip: '查看记忆',
               ),
               if (onClearConversation != null)
                 IconButton(

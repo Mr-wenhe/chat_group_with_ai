@@ -113,11 +113,14 @@ class MemoryContextSelector {
     String? currentTargetId,
     required int budget,
   }) {
+    final visibleCharacterIds = participantCharacterIds.toSet();
     final candidates = RelationshipState.selectStableSnapshots(
       db.relationshipStateBox.values.where(
         (relation) =>
             relation.sourceCharacterId == observerCharacterId &&
-            relation.targetId != observerCharacterId,
+            relation.targetId != observerCharacterId &&
+            (relation.targetType == RelationshipTargetType.user ||
+                visibleCharacterIds.contains(relation.targetId)),
       ),
     );
 
@@ -165,6 +168,7 @@ class MemoryContextSelector {
     required UserProfile? userProfile,
     required int budget,
   }) {
+    final visibleCharacterIds = participantCharacterIds.toSet();
     // 先构建被 supersede 的 ID 集合。
     final supersededIds = <String>{};
     for (final memory in db.permanentMemoryBox.values) {
@@ -192,23 +196,18 @@ class MemoryContextSelector {
         // the current user-maintained profile if a save was interrupted.
         continue;
       }
-      if (memory.pinned) {
-        // pinned 记忆直接收录，不受 participant 限制（用户明确固定）。
-        allMemories.add(memory);
-        continue;
-      }
-      // 非 pinned 记忆：只收录当前观察者的记忆（observer 过滤已做），
-      // 以及当前会话可见范围内的来源记忆。
-      // privacyGate 已在写入时保证只有可见 AI 有记录，这里做二次确认。
+      // pin 只控制排序与自动覆盖，不得绕过当前会话的主体范围。
       if (memory.subjectIds.isEmpty) {
-        // 无主体的自身成长记忆允许通过。
-        allMemories.add(memory);
+        if (memory.kind == MemoryKind.personaGrowth) {
+          allMemories.add(memory);
+        }
         continue;
       }
-      // 有主体：检查主体是否在当前参与者中或就是用户。
-      final relevant = memory.subjectIds
-          .any((sid) => sid == 'user' || participantCharacterIds.contains(sid));
-      if (relevant) {
+      // 多主体记忆必须整体可见；只要包含会话外角色，就不能注入。
+      final allSubjectsAreVisible = memory.subjectIds.every(
+        (sid) => sid == 'user' || visibleCharacterIds.contains(sid),
+      );
+      if (allSubjectsAreVisible) {
         allMemories.add(memory);
       }
     }
