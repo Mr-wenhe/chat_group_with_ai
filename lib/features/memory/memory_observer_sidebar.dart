@@ -6,6 +6,7 @@ import 'package:flutter/material.dart';
 class MemoryObserverSidebar extends StatelessWidget {
   static const width = 280.0;
 
+  final double? sidebarWidth;
   final List<AICharacter> characters;
   final String? selectedObserverId;
   final String searchQuery;
@@ -17,6 +18,7 @@ class MemoryObserverSidebar extends StatelessWidget {
 
   const MemoryObserverSidebar({
     super.key,
+    this.sidebarWidth,
     required this.characters,
     required this.selectedObserverId,
     required this.searchQuery,
@@ -33,7 +35,7 @@ class MemoryObserverSidebar extends StatelessWidget {
     final cs = Theme.of(context).colorScheme;
     return SizedBox(
       key: const ValueKey('memory-observer-sidebar'),
-      width: width,
+      width: sidebarWidth ?? width,
       child: Material(
         color: cs.surfaceContainerLow,
         child: SafeArea(

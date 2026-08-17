@@ -9,7 +9,6 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
   final bool hasSearchResults;
   final String searchResultLabel;
   final bool showGroupActions;
-  final Widget? memberChip;
   final ValueChanged<String> onSearchChanged;
   final VoidCallback onEnterSearch;
   final VoidCallback onPreviousResult;
@@ -17,10 +16,13 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback onExitSearch;
   final VoidCallback onExport;
   final VoidCallback onOpenMemory;
+  final VoidCallback onOpenRelationship;
+  final String relationshipTooltip;
   final IconData webSearchIcon;
   final String webSearchTooltip;
   final VoidCallback onConfigureWebSearch;
   final VoidCallback? onClearConversation;
+  final VoidCallback? onOpenMembers;
 
   const ChatRoomAppBar({
     super.key,
@@ -31,7 +33,6 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
     required this.hasSearchResults,
     required this.searchResultLabel,
     required this.showGroupActions,
-    required this.memberChip,
     required this.onSearchChanged,
     required this.onEnterSearch,
     required this.onPreviousResult,
@@ -39,10 +40,13 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
     required this.onExitSearch,
     required this.onExport,
     required this.onOpenMemory,
+    required this.onOpenRelationship,
+    required this.relationshipTooltip,
     required this.webSearchIcon,
     required this.webSearchTooltip,
     required this.onConfigureWebSearch,
     this.onClearConversation,
+    this.onOpenMembers,
   });
 
   @override
@@ -104,11 +108,6 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
             ]
           : [
               IconButton(
-                icon: Icon(webSearchIcon, size: 21),
-                onPressed: onConfigureWebSearch,
-                tooltip: webSearchTooltip,
-              ),
-              IconButton(
                 icon: const Icon(Icons.search_rounded, size: 22),
                 onPressed: onEnterSearch,
                 tooltip: '搜索消息',
@@ -118,23 +117,102 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
                 onPressed: onOpenMemory,
                 tooltip: '查看记忆',
               ),
-              if (onClearConversation != null)
-                IconButton(
-                  icon: const Icon(Icons.delete_sweep_outlined, size: 22),
-                  onPressed: onClearConversation,
-                  tooltip: '清空对话（保留记忆）',
-                ),
-              if (showGroupActions)
-                IconButton(
-                  icon: const Icon(Icons.upload_rounded, size: 22),
-                  onPressed: onExport,
-                  tooltip: '导出本群对话',
-                ),
-              if (showGroupActions && memberChip != null) memberChip!,
+              IconButton(
+                icon: const Icon(Icons.favorite_border_rounded, size: 22),
+                onPressed: onOpenRelationship,
+                tooltip: relationshipTooltip,
+              ),
+              _MoreActionsButton(
+                showGroupActions: showGroupActions,
+                webSearchIcon: webSearchIcon,
+                webSearchTooltip: webSearchTooltip,
+                onConfigureWebSearch: onConfigureWebSearch,
+                onClearConversation: onClearConversation,
+                onExport: onExport,
+                onOpenMembers: onOpenMembers,
+              ),
               const SizedBox(width: 8),
             ],
     );
   }
+}
+
+enum _ChatRoomMoreAction { webSearch, clearConversation, export, members }
+
+class _MoreActionsButton extends StatelessWidget {
+  final bool showGroupActions;
+  final IconData webSearchIcon;
+  final String webSearchTooltip;
+  final VoidCallback onConfigureWebSearch;
+  final VoidCallback? onClearConversation;
+  final VoidCallback onExport;
+  final VoidCallback? onOpenMembers;
+
+  const _MoreActionsButton({
+    required this.showGroupActions,
+    required this.webSearchIcon,
+    required this.webSearchTooltip,
+    required this.onConfigureWebSearch,
+    required this.onClearConversation,
+    required this.onExport,
+    required this.onOpenMembers,
+  });
+
+  @override
+  Widget build(BuildContext context) => PopupMenuButton<_ChatRoomMoreAction>(
+        key: const ValueKey('chat-room-more-actions'),
+        icon: const Icon(Icons.more_vert_rounded),
+        tooltip: '更多操作',
+        onSelected: (action) => switch (action) {
+          _ChatRoomMoreAction.webSearch => onConfigureWebSearch(),
+          _ChatRoomMoreAction.clearConversation => onClearConversation?.call(),
+          _ChatRoomMoreAction.export => onExport(),
+          _ChatRoomMoreAction.members => onOpenMembers?.call(),
+        },
+        itemBuilder: (context) => [
+          PopupMenuItem(
+            value: _ChatRoomMoreAction.webSearch,
+            child: _MenuAction(icon: webSearchIcon, label: webSearchTooltip),
+          ),
+          if (showGroupActions && onOpenMembers != null)
+            const PopupMenuItem(
+              value: _ChatRoomMoreAction.members,
+              child: _MenuAction(
+                icon: Icons.group_outlined,
+                label: '群成员',
+              ),
+            ),
+          if (showGroupActions)
+            const PopupMenuItem(
+              value: _ChatRoomMoreAction.export,
+              child: _MenuAction(icon: Icons.upload_rounded, label: '导出对话'),
+            ),
+          if (onClearConversation != null)
+            const PopupMenuItem(
+              value: _ChatRoomMoreAction.clearConversation,
+              child: _MenuAction(
+                icon: Icons.delete_sweep_outlined,
+                label: '清空对话（保留记忆）',
+              ),
+            ),
+        ],
+      );
+}
+
+class _MenuAction extends StatelessWidget {
+  final IconData icon;
+  final String label;
+
+  const _MenuAction({required this.icon, required this.label});
+
+  @override
+  Widget build(BuildContext context) => Row(
+        children: [
+          Icon(icon, size: 20),
+          const SizedBox(width: 12),
+          Text(label),
+        ],
+      );
 }
 
 class _SearchField extends StatelessWidget {

@@ -9,6 +9,7 @@ import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
+import 'package:chat_group/features/memory/relationship_audit_detail_page.dart';
 import 'package:chat_group/features/memory/relationship_audit_filter.dart';
 import 'package:chat_group/features/memory/relationship_audit_filter_widget.dart';
 import 'package:chat_group/features/memory/relationship_audit_page.dart';
@@ -202,29 +203,51 @@ void main() {
     await tester.pumpWidget(app());
     await tester.pump(const Duration(milliseconds: 200));
 
-    expect(find.text('阿月 → 小明'), findsOneWidget);
+    expect(
+      find.byKey(ValueKey('relationship-row-${RelationshipState.stableGlobalId(
+        'a',
+        RelationshipTargetType.ai,
+        'b',
+      )}')),
+      findsOneWidget,
+    );
     await tester.scrollUntilVisible(
-      find.text('小明 → 阿月'),
+      find.byKey(ValueKey('relationship-row-${RelationshipState.stableGlobalId(
+        'b',
+        RelationshipTargetType.ai,
+        'a',
+      )}')),
       320,
       scrollable: find.byType(Scrollable).first,
     );
-    expect(find.text('小明 → 阿月'), findsOneWidget);
+    expect(
+      find.byKey(ValueKey('relationship-row-${RelationshipState.stableGlobalId(
+        'b',
+        RelationshipTargetType.ai,
+        'a',
+      )}')),
+      findsOneWidget,
+    );
     await tester.scrollUntilVisible(
-      find.text('阿月 → 小明（我）'),
+      find.byKey(ValueKey('relationship-row-${RelationshipState.stableGlobalId(
+        'a',
+        RelationshipTargetType.user,
+        'user',
+      )}')),
       320,
       scrollable: find.byType(Scrollable).first,
     );
-    expect(find.text('阿月 → 小明（我）'), findsOneWidget);
-    expect(find.textContaining('目标类型：用户'), findsOneWidget);
-    expect(find.text('亲密度 42'), findsAtLeastNWidgets(3));
-    expect(find.text('信任 -7'), findsAtLeastNWidgets(3));
-    expect(find.text('摩擦 13'), findsAtLeastNWidgets(3));
-    expect(find.text('熟悉度 86'), findsAtLeastNWidgets(3));
-    expect(find.text('当前情绪：温暖'), findsAtLeastNWidgets(3));
-    expect(find.text('阶段：朋友'), findsAtLeastNWidgets(3));
-    expect(find.textContaining('当前关系备注'), findsAtLeastNWidgets(3));
-    expect(find.text('revision 2'), findsAtLeastNWidgets(3));
-    expect(find.text('已固定'), findsNothing);
+    expect(
+      find.byKey(ValueKey('relationship-row-${RelationshipState.stableGlobalId(
+        'a',
+        RelationshipTargetType.user,
+        'user',
+      )}')),
+      findsOneWidget,
+    );
+    expect(find.text('小明'), findsAtLeastNWidgets(1));
+    expect(find.text('亲密度'), findsNothing);
+    expect(find.text('revision 2'), findsNothing);
     await tester.scrollUntilVisible(
       find.text('旧版关系诊断'),
       320,
@@ -236,6 +259,11 @@ void main() {
   testWidgets(
       'keeps global current relation visible when conversation filter is set',
       (tester) async {
+    final relationId = RelationshipState.stableGlobalId(
+      'a',
+      RelationshipTargetType.ai,
+      'b',
+    );
     await tester.runAsync(() async {
       final a = character('a', '阿月');
       final b = character('b', '小明');
@@ -264,29 +292,93 @@ void main() {
       ProviderScope(
         overrides: [databaseServiceProvider.overrideWithValue(db)],
         child: const MaterialApp(
-          home: RelationshipAuditPage(conversationId: 'group-current'),
+          home: RelationshipAuditPage(
+            conversationId: 'group-current',
+            allowedObserverCharacterIds: {'a'},
+          ),
         ),
       ),
     );
     await tester.pump(const Duration(milliseconds: 200));
 
-    expect(find.text('阿月 → 小明'), findsOneWidget);
-    final conversationSelector = find.byKey(
-      const ValueKey('relationship-filter-conversation'),
-    );
-    expect(conversationSelector, findsOneWidget);
-    final conversationDropdown = find.descendant(
-      of: conversationSelector,
-      matching: find.byType(DropdownButton<String>),
+    expect(
+        find.byKey(ValueKey('relationship-row-$relationId')), findsOneWidget);
+    expect(find.textContaining('事件来源已锁定'), findsAtLeastNWidgets(1));
+    await tester.tap(find.byKey(const ValueKey('open-relationship-filter')));
+    await tester.pumpAndSettle();
+    expect(
+      find.byKey(const ValueKey('relationship-filter-conversation')),
+      findsNothing,
     );
     expect(
-      tester.widget<DropdownButton<String>>(conversationDropdown).value,
-      'group-current',
+      find.byKey(const ValueKey('relationship-filter-observer')),
+      findsNothing,
     );
+    expect(
+      find.byKey(const ValueKey('relationship-filter-clear')),
+      findsNothing,
+    );
+  });
+
+  testWidgets('advanced observer selection updates the visible relationships',
+      (tester) async {
+    final aToUserId = RelationshipState.stableGlobalId(
+      'a',
+      RelationshipTargetType.user,
+      'user',
+    );
+    final bToUserId = RelationshipState.stableGlobalId(
+      'b',
+      RelationshipTargetType.user,
+      'user',
+    );
+    await tester.runAsync(() async {
+      final a = character('a', '阿月');
+      final b = character('b', '小明');
+      await db.aiCharacterBox.put(a.id, a);
+      await db.aiCharacterBox.put(b.id, b);
+      for (final relation in [
+        state(
+          source: 'a',
+          targetType: RelationshipTargetType.user,
+          target: 'user',
+        ),
+        state(
+          source: 'b',
+          targetType: RelationshipTargetType.user,
+          target: 'user',
+        ),
+      ]) {
+        await db.relationshipStateBox.put(relation.id, relation);
+      }
+    });
+
+    await tester.pumpWidget(app());
+    await tester.pump(const Duration(milliseconds: 200));
+    await tester.tap(find.byKey(const ValueKey('open-relationship-filter')));
+    await tester.pumpAndSettle();
+    final observerDropdown = find.descendant(
+      of: find.byKey(const ValueKey('relationship-filter-observer')),
+      matching: find.byType(DropdownButton<String>),
+    );
+    await tester.tap(observerDropdown);
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('小明').last);
+    await tester.pump();
+    await tester.tap(find.text('应用'));
+    await tester.pumpAndSettle();
+
+    expect(find.byKey(ValueKey('relationship-row-$aToUserId')), findsNothing);
+    expect(find.byKey(ValueKey('relationship-row-$bToUserId')), findsOneWidget);
   });
 
   testWidgets('missing observer and target roles use deleted placeholders',
       (tester) async {
+    final relationId = RelationshipState.stableGlobalId(
+      'deleted-observer',
+      RelationshipTargetType.ai,
+      'deleted-target',
+    );
     await tester.runAsync(() async {
       final relation = state(
         source: 'deleted-observer',
@@ -299,11 +391,18 @@ void main() {
     await tester.pumpWidget(app());
     await tester.pump(const Duration(milliseconds: 200));
 
-    expect(find.text('已删除角色 → 已删除角色'), findsOneWidget);
+    expect(
+        find.byKey(ValueKey('relationship-row-$relationId')), findsOneWidget);
+    expect(find.text('已删除角色'), findsAtLeastNWidgets(1));
   });
 
   testWidgets('deleted observer and target use identity snapshots',
       (tester) async {
+    final relationId = RelationshipState.stableGlobalId(
+      'deleted-observer',
+      RelationshipTargetType.ai,
+      'deleted-target',
+    );
     await tester.runAsync(() async {
       await db.appSettingsBox.put(
         DataLifecycleSettings.deletedCharacterSnapshotsKey,
@@ -333,12 +432,19 @@ void main() {
     await tester.pumpWidget(app());
     await tester.pump(const Duration(milliseconds: 200));
 
-    expect(find.text('快照观察者 → 快照目标'), findsOneWidget);
-    expect(find.text('已删除角色 → 已删除角色'), findsNothing);
+    expect(
+        find.byKey(ValueKey('relationship-row-$relationId')), findsOneWidget);
+    expect(find.text('快照目标'), findsOneWidget);
+    expect(find.text('已删除角色'), findsNothing);
   });
 
   testWidgets('timeline sorts by revision and labels every event source',
       (tester) async {
+    final relationId = RelationshipState.stableGlobalId(
+      'a',
+      RelationshipTargetType.ai,
+      'b',
+    );
     await tester.runAsync(() async {
       final a = character('a', '阿月');
       final b = character('b', '小明');
@@ -376,6 +482,7 @@ void main() {
             target: 'b',
             revision: record.$2,
             creator: record.$3,
+            originNameSnapshot: '',
           ),
         );
       }
@@ -383,17 +490,26 @@ void main() {
 
     await tester.pumpWidget(app());
     await tester.pump(const Duration(milliseconds: 200));
-    await tester.ensureVisible(find.text('原因：事件 1'));
-    expect(find.text('来源：自动'), findsOneWidget);
-    expect(find.text('来源：人工'), findsOneWidget);
-    expect(find.text('来源：旧版迁移'), findsOneWidget);
+    final row = find.byKey(ValueKey('relationship-row-$relationId'));
+    tester
+        .widget<InkWell>(
+          find.descendant(of: row, matching: find.byType(InkWell)),
+        )
+        .onTap!
+        .call();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.ensureVisible(find.text('事件 1'));
+    expect(find.textContaining('来源 · 自动记录'), findsOneWidget);
+    expect(find.textContaining('来源 · 人工编辑'), findsOneWidget);
+    expect(find.textContaining('来源 · 旧版迁移'), findsOneWidget);
     expect(
-      tester.getTopLeft(find.text('原因：事件 3')).dy,
-      lessThan(tester.getTopLeft(find.text('原因：事件 2')).dy),
+      tester.getTopLeft(find.text('事件 3')).dy,
+      lessThan(tester.getTopLeft(find.text('事件 2')).dy),
     );
     expect(
-      tester.getTopLeft(find.text('原因：事件 2')).dy,
-      lessThan(tester.getTopLeft(find.text('原因：事件 1')).dy),
+      tester.getTopLeft(find.text('事件 2')).dy,
+      lessThan(tester.getTopLeft(find.text('事件 1')).dy),
     );
   });
 
@@ -453,6 +569,8 @@ void main() {
       ),
     );
 
+    await tester.tap(find.byKey(const ValueKey('open-relationship-filter')));
+    await tester.pumpAndSettle();
     final targetAiDropdown = find.descendant(
       of: find.byKey(const ValueKey('relationship-filter-target-ai')),
       matching: find.byType(DropdownButton<String>),
@@ -461,9 +579,13 @@ void main() {
     await tester.pumpAndSettle();
     await tester.tap(find.text('小明').last);
     await tester.pump();
+    await tester.tap(find.text('应用'));
+    await tester.pumpAndSettle();
     expect(current.targetType, RelationshipTargetType.ai);
     expect(current.targetAiId, 'b');
 
+    await tester.tap(find.byKey(const ValueKey('open-relationship-filter')));
+    await tester.pumpAndSettle();
     final targetTypeDropdown = find.descendant(
       of: find.byKey(const ValueKey('relationship-filter-target-type')),
       matching: find.byType(DropdownButton<String>),
@@ -473,17 +595,31 @@ void main() {
     await tester.tap(find.text('用户').last);
     await tester.pump();
 
+    await tester.tap(find.text('应用'));
+    await tester.pumpAndSettle();
     expect(current.targetType, RelationshipTargetType.user);
     expect(current.targetAiId, isNull);
 
-    await tester.tap(targetAiDropdown);
+    await tester.tap(find.byKey(const ValueKey('open-relationship-filter')));
+    await tester.pumpAndSettle();
+    final reopenedTargetAiDropdown = find.descendant(
+      of: find.byKey(const ValueKey('relationship-filter-target-ai')),
+      matching: find.byType(DropdownButton<String>),
+    );
+    final reopenedTargetTypeDropdown = find.descendant(
+      of: find.byKey(const ValueKey('relationship-filter-target-type')),
+      matching: find.byType(DropdownButton<String>),
+    );
+    await tester.tap(reopenedTargetAiDropdown);
     await tester.pumpAndSettle();
     await tester.tap(find.text('小明').last);
     await tester.pump();
-    await tester.tap(targetTypeDropdown);
+    await tester.tap(reopenedTargetTypeDropdown);
     await tester.pumpAndSettle();
     await tester.tap(find.text('全部目标').last);
     await tester.pump();
+    await tester.tap(find.text('应用'));
+    await tester.pumpAndSettle();
 
     expect(current.targetType, isNull);
     expect(current.targetAiId, isNull);
@@ -491,6 +627,11 @@ void main() {
 
   testWidgets('source trace uses real message group and degrades safely',
       (tester) async {
+    final relationId = RelationshipState.stableGlobalId(
+      'a',
+      RelationshipTargetType.user,
+      'user',
+    );
     await tester.runAsync(() async {
       final a = character('a', '阿月');
       await db.aiCharacterBox.put(a.id, a);
@@ -536,6 +677,15 @@ void main() {
     final navigatorObserver = _RecordingNavigatorObserver();
     await tester.pumpWidget(app(navigatorObserver: navigatorObserver));
     await tester.pump(const Duration(milliseconds: 200));
+    final row = find.byKey(ValueKey('relationship-row-$relationId'));
+    tester
+        .widget<InkWell>(
+          find.descendant(of: row, matching: find.byType(InkWell)),
+        )
+        .onTap!
+        .call();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
     await tester.ensureVisible(find.text('查看原消息'));
     await tester.pump();
     final sourceTapTarget = find.ancestor(
@@ -545,11 +695,11 @@ void main() {
     expect(sourceTapTarget, findsOneWidget);
     tester.widget<InkWell>(sourceTapTarget).onTap!.call();
 
-    expect(navigatorObserver.pushedRoutes, hasLength(2));
+    expect(navigatorObserver.pushedRoutes, hasLength(3));
     final sourceRoute =
         navigatorObserver.pushedRoutes.last as MaterialPageRoute<dynamic>;
     final destination = sourceRoute.builder(
-      tester.element(find.byType(RelationshipAuditPage)),
+      tester.element(find.byType(RelationshipAuditDetailPage)),
     );
     expect(destination, isA<ChatRoomPage>());
     final chatRoom = destination as ChatRoomPage;
@@ -562,6 +712,11 @@ void main() {
 
   testWidgets('missing source message disables trace and preserves snapshot',
       (tester) async {
+    final relationId = RelationshipState.stableGlobalId(
+      'a',
+      RelationshipTargetType.user,
+      'user',
+    );
     await tester.runAsync(() async {
       final a = character('a', '阿月');
       await db.aiCharacterBox.put(a.id, a);
@@ -614,8 +769,18 @@ void main() {
     await tester.pumpWidget(app());
     await tester.pump(const Duration(milliseconds: 200));
 
-    expect(find.text('原消息已不可用（删除前来源群聊）'), findsOneWidget);
-    expect(find.text('原消息已不可用（已删除来源群聊）'), findsOneWidget);
+    final row = find.byKey(ValueKey('relationship-row-$relationId'));
+    tester
+        .widget<InkWell>(
+          find.descendant(of: row, matching: find.byType(InkWell)),
+        )
+        .onTap!
+        .call();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.ensureVisible(find.text('原消息不可用（删除前来源群聊）'));
+    expect(find.text('原消息不可用（删除前来源群聊）'), findsOneWidget);
+    expect(find.text('原消息不可用（已删除来源群聊）'), findsOneWidget);
     expect(find.text('查看原消息'), findsNothing);
   });
 
@@ -693,6 +858,11 @@ void main() {
 
   testWidgets('delete confirmation cancellation keeps relationship data',
       (tester) async {
+    final relationId = RelationshipState.stableGlobalId(
+      'a',
+      RelationshipTargetType.ai,
+      'b',
+    );
     await tester.runAsync(() async {
       final a = character('a', '阿月');
       final b = character('b', '小明');
@@ -718,11 +888,18 @@ void main() {
 
     await tester.pumpWidget(app());
     await tester.pump(const Duration(milliseconds: 200));
-    await tester.tap(find.byTooltip('关系操作'));
+    final row = find.byKey(ValueKey('relationship-row-$relationId'));
+    tester
+        .widget<InkWell>(
+          find.descendant(of: row, matching: find.byType(InkWell)),
+        )
+        .onTap!
+        .call();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.tap(find.byTooltip('更多'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('删除关系及历史'));
-    await tester.pumpAndSettle();
-    await tester.tap(find.text('继续'));
     await tester.pumpAndSettle();
     await tester.tap(find.text('取消'));
     await tester.pump();
@@ -742,6 +919,11 @@ void main() {
 
   testWidgets('empty source evidence never fabricates a trace action',
       (tester) async {
+    final relationId = RelationshipState.stableGlobalId(
+      'a',
+      RelationshipTargetType.user,
+      'user',
+    );
     await tester.runAsync(() async {
       final a = character('a', '阿月');
       await db.aiCharacterBox.put(a.id, a);
@@ -768,7 +950,17 @@ void main() {
 
     await tester.pumpWidget(app());
     await tester.pump(const Duration(milliseconds: 200));
-    expect(find.text('人工编辑，无原始消息证据'), findsOneWidget);
+    final row = find.byKey(ValueKey('relationship-row-$relationId'));
+    tester
+        .widget<InkWell>(
+          find.descendant(of: row, matching: find.byType(InkWell)),
+        )
+        .onTap!
+        .call();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 600));
+    await tester.ensureVisible(find.text('人工记录，无原始消息证据'));
+    expect(find.text('人工记录，无原始消息证据'), findsOneWidget);
     expect(find.text('查看原消息'), findsNothing);
   });
 }

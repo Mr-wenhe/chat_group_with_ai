@@ -78,6 +78,8 @@ import 'package:chat_group/features/document/document_understanding_service.dart
 import 'package:chat_group/features/memory/memory_controls.dart';
 import 'package:chat_group/features/memory/memory_audit_filter.dart';
 import 'package:chat_group/features/memory/memory_management_page.dart';
+import 'package:chat_group/features/memory/relationship_audit_page.dart';
+import 'package:chat_group/features/memory/relationship_private_detail_page.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_memory_runner.dart';
@@ -5155,13 +5157,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         hasSearchResults: _searchResults.isNotEmpty,
         searchResultLabel: _searchResultLabel,
         showGroupActions: !_isDirectChat,
-        memberChip: GestureDetector(
-          onTap: _showMembersSheet,
-          child: MemberStackChip(
-            characters: _characters,
-            senderColor: _senderColor,
-          ),
-        ),
         onSearchChanged: _performSearch,
         onEnterSearch: _enterSearch,
         onPreviousResult: _searchPrev,
@@ -5171,10 +5166,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           builder: (_) => ExportPage(initialGroupId: widget.groupId),
         )),
         onOpenMemory: _openMemoryManagement,
+        onOpenRelationship: _openRelationshipAudit,
+        relationshipTooltip: _isDirectChat ? '查看 AI 对我的关系' : '查看关系',
         webSearchIcon: _webSearchPolicyIcon,
         webSearchTooltip: '联网搜索：${_effectiveWebSearchPolicy.label}',
         onConfigureWebSearch: _configureWebSearchPolicy,
         onClearConversation: _showClearConversationDialog,
+        onOpenMembers: _isDirectChat ? null : _showMembersSheet,
       ),
       body: Column(
         children: [
@@ -5513,6 +5511,33 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               ),
       ),
     ));
+  }
+
+  /// Opens a read-only directional relationship for DMs and the scoped audit
+  /// browser for groups. The group scope only narrows observers; the snapshot
+  /// itself remains global and the conversation ID is used by the detail page.
+  Future<void> _openRelationshipAudit() async {
+    if (_isDirectChat && _directCharacterId != null) {
+      await Navigator.of(context).push(
+        MaterialPageRoute(
+          builder: (_) => RelationshipPrivateDetailPage(
+            characterId: _directCharacterId!,
+          ),
+        ),
+      );
+      return;
+    }
+    await Navigator.of(context).push(
+      MaterialPageRoute(
+        builder: (_) => RelationshipAuditPage(
+          conversationId: widget.groupId,
+          conversationName: _group?.name,
+          allowedObserverCharacterIds: (_group?.aiCharacterIds ??
+                  _characters.map((character) => character.id))
+              .toSet(),
+        ),
+      ),
+    );
   }
 
   /// 成员面板里的单行状态文案：「性别 · 职业 · 年龄 · 回复状态 · 本小时用量」。

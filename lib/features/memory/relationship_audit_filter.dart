@@ -9,6 +9,7 @@ class RelationshipAuditFilter {
   final RelationshipStage? stage;
   final bool? pinnedOnly;
   final String? originConversationId;
+  final String? searchQuery;
 
   const RelationshipAuditFilter({
     this.observerCharacterId,
@@ -17,6 +18,7 @@ class RelationshipAuditFilter {
     this.stage,
     this.pinnedOnly,
     this.originConversationId,
+    this.searchQuery,
   });
 
   RelationshipAuditFilter copyWith({
@@ -26,12 +28,14 @@ class RelationshipAuditFilter {
     bool clearStage = false,
     bool clearPinnedOnly = false,
     bool clearOriginConversationId = false,
+    bool clearSearchQuery = false,
     String? observerCharacterId,
     RelationshipTargetType? targetType,
     String? targetAiId,
     RelationshipStage? stage,
     bool? pinnedOnly,
     String? originConversationId,
+    String? searchQuery,
   }) {
     return RelationshipAuditFilter(
       observerCharacterId: clearObserverCharacterId
@@ -44,6 +48,7 @@ class RelationshipAuditFilter {
       originConversationId: clearOriginConversationId
           ? null
           : (originConversationId ?? this.originConversationId),
+      searchQuery: clearSearchQuery ? null : (searchQuery ?? this.searchQuery),
     );
   }
 
@@ -53,7 +58,24 @@ class RelationshipAuditFilter {
       targetAiId == null &&
       stage == null &&
       pinnedOnly == null &&
-      originConversationId == null;
+      originConversationId == null &&
+      (searchQuery == null || searchQuery!.trim().isEmpty);
+
+  int get advancedCriterionCount => [
+        targetAiId,
+        stage,
+        pinnedOnly,
+        originConversationId,
+      ].whereType<Object>().length;
+
+  bool get hasAdvancedCriteria => advancedCriterionCount > 0;
+
+  RelationshipAuditFilter clearAdvancedFilters() => copyWith(
+        clearTargetAiId: true,
+        clearStage: true,
+        clearPinnedOnly: true,
+        clearOriginConversationId: true,
+      );
 
   List<RelationshipState> apply(
     Iterable<RelationshipState> relationships, {
