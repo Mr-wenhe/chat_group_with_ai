@@ -493,6 +493,47 @@ void main() {
       expect(bMemory.subjectIds, isNot(contains('a')));
     });
 
+    test('group AI messages are distilled for other visible AI observers',
+        () async {
+      final chars = charList(['a', 'b']);
+      for (final character in chars) {
+        await db.aiCharacterBox.put(character.id, character);
+        await seedConfig(character.apiConfigId);
+      }
+      final chatApi = CapturingChatApiService(
+        responseText:
+            '[{"kind":"sharedExperience","content":"角色a邀请大家下班后一起跑步","subjectIds":["a"],"importance":70,"confidence":0.9}]',
+      );
+      final message = makeMsg(
+        senderType: 'ai',
+        senderId: 'a',
+        content: '下班后一起去跑步吧？',
+      )..visibleToCharacterIds = ['a', 'b'];
+
+      await ObservationEntry(
+        db: db,
+        chatApi: chatApi,
+        credentialResolver: TestMemoryCredentialResolver(),
+      ).observeMessage(
+        message: message,
+        visibleCharacterIds: message.visibleToCharacterIds,
+        conversationId: 'g1',
+        conversationNameSnapshot: 'TestGroup',
+        allCharacters: chars,
+        isGroupChat: true,
+      );
+
+      expect(chatApi.sendCount, 2);
+      expect(
+        db.permanentMemoryBox.values.any(
+          (memory) =>
+              memory.observerCharacterId == 'b' &&
+              memory.subjectIds.contains('a'),
+        ),
+        isTrue,
+      );
+    });
+
     test('ordinary preference messages enter LLM distillation', () async {
       final character = makeChar('a');
       await db.aiCharacterBox.put(character.id, character);

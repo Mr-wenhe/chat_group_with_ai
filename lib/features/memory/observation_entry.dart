@@ -274,11 +274,19 @@ class ObservationEntry {
 
     final observers = message.visibleToCharacterIds;
 
-    if (triggerResult.isEmpty) return;
+    // 群聊中的 AI 发言是其他在场 AI 建立相互记忆的唯一输入。即使文本
+    // 没有命中用户侧关键词，也交给提炼模型判断是否值得保留；私聊不变。
+    final isAiMessageVisibleToAnotherAi =
+        isGroupChat &&
+        message.senderType == 'ai' &&
+        observers.any((observerId) => observerId != message.senderId);
+    if (triggerResult.isEmpty && !isAiMessageVisibleToAnotherAi) return;
     if (observers.isEmpty) return;
 
     // 需要 LLM 提炼。
-    if (triggerResult.needsDistillation || triggerResult.forceMemory) {
+    if (triggerResult.needsDistillation ||
+        triggerResult.forceMemory ||
+        isAiMessageVisibleToAnotherAi) {
       await _enqueueDistillation(
         message: message,
         observers: observers,
