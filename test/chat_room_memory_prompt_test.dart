@@ -27,16 +27,24 @@ class FixedApiCredentialResolver implements ApiCredentialResolver {
 }
 
 class PromptTestDatabaseService extends DatabaseService {
+  List<Message> historyMessages = const [];
+
   @override
   Future<MessagePage> loadLatestMessages(String groupId, {int limit = 80}) {
+    final start =
+        historyMessages.length > limit ? historyMessages.length - limit : 0;
     return Future.value(
-      const MessagePage(messages: [], hasOlder: false, totalCount: 0),
+      MessagePage(
+        messages: historyMessages.sublist(start),
+        hasOlder: start > 0,
+        totalCount: historyMessages.length,
+      ),
     );
   }
 
   @override
   Future<List<Message>> messagesForGroup(String groupId) {
-    return Future.value(const <Message>[]);
+    return Future.value(historyMessages);
   }
 
   @override
@@ -51,7 +59,7 @@ class PromptTestDatabaseService extends DatabaseService {
 
 void main() {
   late Directory tempDir;
-  late DatabaseService db;
+  late PromptTestDatabaseService db;
 
   setUp(() async {
     tempDir = await openLifecycleHive();
@@ -146,6 +154,142 @@ void main() {
     expect(autoPrompt, contains(character.promptIdentity));
     expect(autoPrompt, contains('角色性别为${character.gender.label}'));
     expect(autoPrompt, contains(character.systemPrompt));
+
+    final hiddenMessages = await pageState.buildPromptMessages(
+      character: character,
+      context: [
+        Message(
+          groupId: 'group-prompt',
+          senderId: 'user',
+          senderType: 'user',
+          content: 'PROMPT_LEAK_不可见',
+          visibleToCharacterIds: const ['another-character'],
+        ),
+      ],
+    );
+    expect(_allMessages(hiddenMessages), isNot(contains('PROMPT_LEAK_不可见')));
+    expect(_allMessages(hiddenMessages), isNot(contains('GROUP_MEMORY_必须出现')));
+
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('分页之外的受限群消息不会注入共享群摘要', (tester) async {
+    final character = _character();
+    await tester.runAsync(() async {
+      await db.aiCharacterBox.put(character.id, character);
+      await db.chatGroupBox.put(
+        'group-paginated-privacy',
+        ChatGroup(
+          id: 'group-paginated-privacy',
+          name: '分页隐私测试群',
+          theme: '日常聊天',
+          aiCharacterIds: const ['char-1', 'private-character'],
+        ),
+      );
+      db.historyMessages = [
+        Message(
+          id: 'restricted-old',
+          groupId: 'group-paginated-privacy',
+          senderId: 'user',
+          senderType: 'user',
+          content: '分页之外的私密内容',
+          visibleToCharacterIds: const ['private-character'],
+        ),
+        for (var index = 0; index < 80; index++)
+          Message(
+            id: 'visible-$index',
+            groupId: 'group-paginated-privacy',
+            senderId: 'user',
+            senderType: 'user',
+            content: '公开消息$index',
+            visibleToCharacterIds: const ['char-1', 'private-character'],
+          ),
+      ];
+      await db.groupMemoryBox.put(
+        'group-paginated-privacy_${ChatOrchestrator.memoryPeriodKey(DateTime.now())}',
+        GroupMemory(
+          groupId: 'group-paginated-privacy',
+          topicSummary: 'PAGINATED_GROUP_MEMORY_不得注入',
+        ),
+      );
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseServiceProvider.overrideWithValue(db)],
+        child: MaterialApp(
+          home: ChatRoomPage(
+            groupId: 'group-paginated-privacy',
+            credentialResolver: FixedApiCredentialResolver(),
+          ),
+        ),
+      ),
+    );
+    await _pumpPageFrames(tester);
+
+    final dynamic pageState = tester.state(find.byType(ChatRoomPage));
+    final messages = await pageState.buildPromptMessages(
+      character: character,
+      context: const <Message>[],
+      userMessage: '你好',
+    );
+    expect(
+        _allMessages(messages), isNot(contains('PAGINATED_GROUP_MEMORY_不得注入')));
+
+    await tester.pumpWidget(const SizedBox());
+  });
+
+  testWidgets('群聊 legacy 消息没有权限快照时不注入角色 Prompt', (tester) async {
+    final character = _character();
+    await tester.runAsync(() async {
+      await db.aiCharacterBox.put(character.id, character);
+      await db.chatGroupBox.put(
+        'group-legacy-privacy',
+        ChatGroup(
+          id: 'group-legacy-privacy',
+          name: '旧消息隐私测试群',
+          theme: '日常聊天',
+          aiCharacterIds: [character.id],
+        ),
+      );
+      db.historyMessages = [
+        Message(
+          id: 'legacy-group-message',
+          groupId: 'group-legacy-privacy',
+          senderId: 'user',
+          senderType: 'user',
+          content: 'LEGACY_GROUP_MESSAGE_不得注入',
+        ),
+      ];
+      await db.groupMemoryBox.put(
+        'group-legacy-privacy_${ChatOrchestrator.memoryPeriodKey(DateTime.now())}',
+        GroupMemory(
+          groupId: 'group-legacy-privacy',
+          topicSummary: 'LEGACY_GROUP_MEMORY_不得注入',
+        ),
+      );
+    });
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseServiceProvider.overrideWithValue(db)],
+        child: MaterialApp(
+          home: ChatRoomPage(
+            groupId: 'group-legacy-privacy',
+            credentialResolver: FixedApiCredentialResolver(),
+          ),
+        ),
+      ),
+    );
+    await _pumpPageFrames(tester);
+
+    final dynamic pageState = tester.state(find.byType(ChatRoomPage));
+    final messages = await pageState.buildPromptMessages(
+      character: character,
+      context: db.historyMessages,
+      userMessage: '你好',
+    );
+    final prompt = _allMessages(messages);
+    expect(prompt, isNot(contains('LEGACY_GROUP_MESSAGE_不得注入')));
+    expect(prompt, isNot(contains('LEGACY_GROUP_MEMORY_不得注入')));
 
     await tester.pumpWidget(const SizedBox());
   });

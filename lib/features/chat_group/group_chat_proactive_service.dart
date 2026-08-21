@@ -102,9 +102,14 @@ class GroupChatProactiveService {
         .where((message) => message.groupId == candidate.group.id)
         .toList()
       ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
-    final context = groupMessages.length > 12
-        ? groupMessages.sublist(groupMessages.length - 12)
-        : groupMessages;
+    final visibleGroupMessages = groupMessages
+        .where((message) =>
+            message.visibleToCharacterIds.isNotEmpty &&
+            message.visibleToCharacterIds.contains(candidate.character.id))
+        .toList(growable: false);
+    final context = visibleGroupMessages.length > 12
+        ? visibleGroupMessages.sublist(visibleGroupMessages.length - 12)
+        : visibleGroupMessages;
 
     final messages = await _buildMessages(
       character: candidate.character,

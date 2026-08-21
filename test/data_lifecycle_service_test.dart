@@ -418,6 +418,187 @@ void main() {
     expect(loaded.allCharacters.single.avatar, '角');
   });
 
+  test('group history does not reactivate a character removed from the group',
+      () async {
+    const currentId = 'current-character';
+    const removedId = 'removed-character';
+    await db.aiCharacterBox.putAll({
+      currentId: testCharacter(currentId),
+      removedId: testCharacter(removedId),
+    });
+    await db.chatGroupBox.put(
+      'member-boundary-group',
+      ChatGroup(
+        id: 'member-boundary-group',
+        name: '成员边界群',
+        theme: '',
+        aiCharacterIds: const [currentId],
+      ),
+    );
+    await db.messageBox.put(
+      'removed-member-message',
+      Message(
+        id: 'removed-member-message',
+        groupId: 'member-boundary-group',
+        senderId: removedId,
+        senderType: 'ai',
+        content: '历史发言',
+      ),
+    );
+
+    final loaded = await ChatRoomLoader(
+      db: db,
+      resolveApiConfig: (_) => null,
+    ).load('member-boundary-group');
+
+    expect(
+        loaded.activeCharacters.map((character) => character.id), [currentId]);
+    expect(loaded.allCharacters.map((character) => character.id),
+        containsAll([currentId, removedId]));
+  });
+
+  test('loader detects restricted messages outside the initial page', () async {
+    const firstMemberId = 'page-member-a';
+    const secondMemberId = 'page-member-b';
+    const groupId = 'paginated-visibility-group';
+    await db.aiCharacterBox.putAll({
+      firstMemberId: testCharacter(firstMemberId),
+      secondMemberId: testCharacter(secondMemberId),
+    });
+    await db.chatGroupBox.put(
+      groupId,
+      ChatGroup(
+        id: groupId,
+        name: '分页可见性群',
+        theme: '',
+        aiCharacterIds: const [firstMemberId, secondMemberId],
+      ),
+    );
+
+    final baseTime = DateTime(2026, 1, 1);
+    await db.messageBox.putAll({
+      for (var index = 0; index < 81; index++)
+        'page-message-$index': Message(
+          id: 'page-message-$index',
+          groupId: groupId,
+          senderId: 'user',
+          senderType: 'user',
+          content: '消息$index',
+          timestamp: baseTime.add(Duration(minutes: index)),
+          visibleToCharacterIds: index == 0
+              ? const [firstMemberId]
+              : const [firstMemberId, secondMemberId],
+        ),
+    });
+
+    final loaded = await ChatRoomLoader(
+      db: db,
+      resolveApiConfig: (_) => null,
+    ).load(groupId);
+
+    expect(loaded.messages, hasLength(80));
+    expect(loaded.messages.any((message) => message.id == 'page-message-0'),
+        isFalse);
+    expect(loaded.hasRestrictedHistory, isTrue);
+  });
+
+  test(
+      'loader treats legacy messages without visibility snapshots as restricted',
+      () async {
+    const characterId = 'legacy-visibility-character';
+    const groupId = 'legacy-visibility-group';
+    await db.aiCharacterBox.put(characterId, testCharacter(characterId));
+    await db.chatGroupBox.put(
+      groupId,
+      ChatGroup(
+        id: groupId,
+        name: '旧消息群',
+        theme: '',
+        aiCharacterIds: const [characterId],
+      ),
+    );
+    await db.messageBox.put(
+      'legacy-visibility-message',
+      Message(
+        id: 'legacy-visibility-message',
+        groupId: groupId,
+        senderId: 'user',
+        senderType: 'user',
+        content: '旧消息',
+      ),
+    );
+
+    final loaded = await ChatRoomLoader(
+      db: db,
+      resolveApiConfig: (_) => null,
+    ).load(groupId);
+
+    expect(loaded.hasRestrictedHistory, isTrue);
+  });
+
+  test(
+      'deleting a message invalidates group memory unless explicitly transient',
+      () async {
+    const groupId = 'message-memory-invalidation-group';
+    await db.chatGroupBox.put(
+      groupId,
+      ChatGroup(
+        id: groupId,
+        name: '摘要失效群',
+        theme: '',
+        aiCharacterIds: const ['c1'],
+      ),
+    );
+    await db.messageBox.put(
+      'message-to-delete',
+      Message(
+        id: 'message-to-delete',
+        groupId: groupId,
+        senderId: 'user',
+        senderType: 'user',
+        content: '受限内容',
+        visibleToCharacterIds: const ['someone-else'],
+      ),
+    );
+    await db.groupMemoryBox.put(
+      'memory-to-invalidate',
+      GroupMemory(groupId: groupId, topicSummary: '旧摘要'),
+    );
+
+    expect(
+      (await service.deleteMessage('message-to-delete', groupId: groupId))
+          .isComplete,
+      isTrue,
+    );
+    expect(db.groupMemoryBox.get('memory-to-invalidate'), isNull);
+
+    await db.messageBox.put(
+      'transient-message',
+      Message(
+        id: 'transient-message',
+        groupId: groupId,
+        senderId: 'c1',
+        senderType: 'ai',
+        content: '临时进度',
+      ),
+    );
+    await db.groupMemoryBox.put(
+      'transient-memory',
+      GroupMemory(groupId: groupId, topicSummary: '保留摘要'),
+    );
+
+    expect(
+      (await service.deleteMessage(
+        'transient-message',
+        groupId: groupId,
+        invalidateGroupMemory: false,
+      ))
+          .isComplete,
+      isTrue,
+    );
+    expect(db.groupMemoryBox.get('transient-memory'), isNotNull);
+  });
+
   test('legacy deleted snapshot without gender does not surface fake female',
       () async {
     await db.appSettingsBox.put(

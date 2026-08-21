@@ -241,6 +241,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 当前已加载到内存的消息（按时间升序，仅当前分页窗口）。
   List<Message> _messages = [];
 
+  /// 完整历史中是否存在当前成员不可共同查看的消息。
+  bool _hasRestrictedHistory = false;
+
   /// 是否还有更早的历史消息可以向上加载。
   bool _hasOlderMessages = false;
 
@@ -619,6 +622,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         _characters = loaded.activeCharacters;
         _allGroupCharacters = loaded.allCharacters;
         _messages = initialMessages;
+        _hasRestrictedHistory = loaded.hasRestrictedHistory;
         _hasOlderMessages = hasOlderMessages;
         _totalMessageCount = loaded.totalMessageCount;
         _groupMemory = loaded.groupMemory;
@@ -926,6 +930,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final autoIntents = HumanizedChatOrchestrator.selectReplyIntents(
       characters: _characters,
       recentMessages: _messages.toList(),
+      recentMessagesForCharacter: (character) => _visibleContextForCharacter(
+        character.id,
+        _recentMessagesForContext(),
+      ),
       groupId: widget.groupId,
       groupTheme: _group?.theme ?? '日常聊天',
       userMessage: null,
@@ -1924,6 +1932,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       );
       final conversationHistory = await _agenticHistory(
         userMessage,
+        characterId: character.id,
         messages: context,
       );
       final restoredRequests = resumeTask == null
@@ -2427,7 +2436,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 删除任务对应的进度气泡消息（内存与库中同时移除）。
   Future<void> _removeAgentProgressMessage(AgentTask task) async {
     final id = WorkModeTaskLifecycle.progressMessageId(task);
-    await _repository.deleteMessage(id);
+    await _repository.deleteMessage(id, invalidateGroupMemory: false);
     if (_canTouchUi) {
       setState(() {
         _messages = List<Message>.from(_messages)
@@ -2965,8 +2974,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       bool supportsVision = false,
       Message? currentUserMessage,
       String? transientContextSummary}) async {
+    final visibleContext = _visibleContextForCharacter(character.id, context);
     if (_isDirectChat) {
-      return _buildDirectApiMessages(character, context, userMessage,
+      return _buildDirectApiMessages(character, visibleContext, userMessage,
           supportsVision: supportsVision,
           currentUserMessage: currentUserMessage,
           transientContextSummary: transientContextSummary,
@@ -2976,7 +2986,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final msgs = <Map<String, dynamic>>[];
 
     // ── 1. 群聊记忆摘要 ───────────────────────────────────────────────
-    final selectedGroupMemory = MemoryPromptSelector.groupSummary(_groupMemory);
+    // 群记忆是共享摘要；只要当前上下文存在角色不可见的消息，就不能把
+    // 这份摘要继续发给该角色，避免摘要成为绕过消息可见性的旁路。
+    final hasHiddenContext = _hasRestrictedHistory ||
+        _visibleContextForCharacter(character.id, _messages).length !=
+            _messages.length ||
+        visibleContext.length != context.length;
+    final selectedGroupMemory =
+        hasHiddenContext ? '' : MemoryPromptSelector.groupSummary(_groupMemory);
     if (selectedGroupMemory.isNotEmpty) {
       msgs.add({'role': 'system', 'content': '【群聊记忆】$selectedGroupMemory'});
     }
@@ -3017,12 +3034,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final groupTheme = _group?.theme ?? '日常聊天';
     final groupDescription = _group?.description ?? '';
     final announcement = _group?.announcement.trim() ?? '';
-    final groupMemory = _groupMemory?.topicSummary ?? '';
+    final groupMemory = selectedGroupMemory;
     final isGroupAddressed = userMessage != null &&
         ChatActivityPolicy.isGroupAddressedMessage(userMessage);
     final scene = SceneBehavior.resolve(groupTheme);
     final scenarioPrompt = scene.scenarioPrompt;
-    final recentContext = _extractRecentFocus(context);
+    final recentContext = _extractRecentFocus(visibleContext);
     final nameById = {for (final c in _characters) c.id: c.name};
     final personaContext = ChatOrchestrator.buildPersonaGrowthContext(
       character: character,
@@ -3081,9 +3098,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     }
 
     // ── 3.5 最后一条用户消息强调 ──────────────────────────────────
-    if (context.isNotEmpty && !isAutoChat) {
-      final lastUserMsg = context.lastWhere((m) => m.senderType == 'user',
-          orElse: () => context.first);
+    if (visibleContext.isNotEmpty && !isAutoChat) {
+      final lastUserMsg = visibleContext.lastWhere(
+          (m) => m.senderType == 'user',
+          orElse: () => visibleContext.first);
       if (lastUserMsg.senderType == 'user') {
         final speakerName = nameById[lastUserMsg.senderId] ?? '一位群友';
         final truncated = lastUserMsg.content.length > 100
@@ -3095,8 +3113,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               '【当前任务】$speakerName 刚说："$truncated" —— 请作为 ${character.name} 针对这条消息做出自然回应。'
         });
       }
-    } else if (context.isNotEmpty && isAutoChat) {
-      final last = context.last;
+    } else if (visibleContext.isNotEmpty && isAutoChat) {
+      final last = visibleContext.last;
       final speakerName = last.senderType == 'user'
           ? _ownerMentionName
           : nameById[last.senderId] ?? '一位群友';
@@ -3143,7 +3161,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     // ── 7. 聊天历史（最多 20 条） ──────────────────────────────────
     // 截断到最近 20 条：够维持话题连贯，又不会把 token 预算耗在远古历史上。
-    final historyMessages = context.toList();
+    final historyMessages = visibleContext;
     final recentHistory = historyMessages.length > 20
         ? historyMessages.sublist(historyMessages.length - 20)
         : historyMessages;
@@ -3449,6 +3467,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (message.visibleToCharacterIds.isEmpty) {
       message.visibleToCharacterIds = List<String>.from(visibleIds);
     }
+    if (!_isDirectChat &&
+        message.visibleToCharacterIds.isNotEmpty &&
+        !_characters.every((character) =>
+            message.visibleToCharacterIds.contains(character.id))) {
+      _hasRestrictedHistory = true;
+    }
     await _repository.persistNewMessage(message);
     if (message.senderType == 'ai') {
       await _markCurrentConversationRead(throughMessage: message);
@@ -3600,8 +3624,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       await _groupMemory!.save();
     }
 
+    final visibleToAllMessages = _messagesVisibleToAllCurrentMembers();
+    final hasRestrictedMessages = _hasRestrictedHistory ||
+        visibleToAllMessages.length != _messages.length;
     final topicHint = ChatOrchestrator.recentDialogueTranscript(
-      messages: _messages,
+      messages: visibleToAllMessages,
       senderNames: _senderNameMap(),
       maxMessages: 18,
       maxChars: 1800,
@@ -3610,7 +3637,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     final summary = await _generateSummary(
       topicHint,
-      previousSummary: _groupMemory?.topicSummary ?? '',
+      // 旧摘要可能在可见性快照存在前生成，不能让它把不可见内容续写回来。
+      previousSummary:
+          hasRestrictedMessages ? '' : _groupMemory?.topicSummary ?? '',
     );
     if (summary.isNotEmpty && _groupMemory != null) {
       _groupMemory!.topicSummary = summary;
@@ -4204,6 +4233,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     var replyIntents = HumanizedChatOrchestrator.selectReplyIntents(
       characters: _characters,
       recentMessages: _recentMessagesForContext(),
+      recentMessagesForCharacter: (character) => _visibleContextForCharacter(
+        character.id,
+        _recentMessagesForContext(),
+      ),
       groupId: widget.groupId,
       groupTheme: _group?.theme ?? '日常聊天',
       userMessage: userMessage,
@@ -4239,6 +4272,32 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         : _messages.toList();
   }
 
+  List<Message> _visibleContextForCharacter(
+    String characterId,
+    Iterable<Message> messages,
+  ) {
+    final isCurrentMember =
+        _characters.any((character) => character.id == characterId);
+    return messages.where((message) {
+      final visibleIds = message.visibleToCharacterIds;
+      // Group legacy messages have no authorization snapshot, so fail closed.
+      // Direct-chat history is already isolated by its stable conversation ID.
+      return visibleIds.isEmpty
+          ? _isDirectChat && isCurrentMember
+          : visibleIds.contains(characterId);
+    }).toList(growable: false);
+  }
+
+  /// 群摘要会被所有当前成员共享，因此只使用对每个当前成员都可见的消息。
+  List<Message> _messagesVisibleToAllCurrentMembers() {
+    final memberIds = _characters.map((character) => character.id).toSet();
+    if (memberIds.isEmpty) return const [];
+    return _messages.where((message) {
+      final visibleIds = message.visibleToCharacterIds;
+      return visibleIds.isNotEmpty && memberIds.every(visibleIds.contains);
+    }).toList(growable: false);
+  }
+
   /// 上下文超出模型窗口时做压缩，返回压缩后的消息与摘要。
   ///
   /// 压缩摘要只写入 [_transientContextCompression]（仅本次会话有效）。
@@ -4251,10 +4310,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     required List<Message> fallbackContext,
   }) async {
     final transient = _transientContextCompression[character.id];
+    final visibleFallbackContext = _visibleContextForCharacter(
+      character.id,
+      fallbackContext,
+    );
     if (!_memoryControls.automaticMemoryEnabled) {
-      return (messages: fallbackContext, summary: transient?.summary);
+      return (messages: visibleFallbackContext, summary: transient?.summary);
     }
-    final pending = _messages;
+    final pending = _visibleContextForCharacter(character.id, _messages);
     final apiHistory = <Map<String, dynamic>>[
       if (transient != null)
         {
@@ -4294,7 +4357,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     );
     // 没超过阈值就不压缩，省下一次 LLM 调用。
     if (!manager.shouldSummarize(apiHistory)) {
-      return (messages: fallbackContext, summary: transient?.summary);
+      return (messages: visibleFallbackContext, summary: transient?.summary);
     }
 
     try {
@@ -4310,12 +4373,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         summary: summary.summary,
       );
       return (
-        messages: _lastUserOnly(fallbackContext),
+        messages: _lastUserOnly(visibleFallbackContext),
         summary: summary.summary,
       );
     } catch (_) {
       // 压缩失败就退回完整上下文：宁可多花 token，也不能丢上下文。
-      return (messages: fallbackContext, summary: transient?.summary);
+      return (messages: visibleFallbackContext, summary: transient?.summary);
     }
   }
 
@@ -4337,10 +4400,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// - 附件会保留文件名、跨平台本地路径；安全的小型文本文件还会内联内容。
   Future<List<Map<String, dynamic>>> _agenticHistory(
     String userMessage, {
+    required String characterId,
     List<Message>? messages,
   }) {
+    final visibleMessages = _visibleContextForCharacter(
+      characterId,
+      messages ?? _recentMessagesForContext(),
+    );
     return AgentAttachmentContext.buildHistory(
-      messages: messages ?? _recentMessagesForContext(),
+      messages: visibleMessages,
       currentUserRequest: userMessage,
     );
   }
@@ -5475,6 +5543,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _characters = loaded.activeCharacters;
       _allGroupCharacters = loaded.allCharacters;
       _messages = loaded.messages;
+      _hasRestrictedHistory = loaded.hasRestrictedHistory;
       _hasOlderMessages = loaded.hasOlderMessages;
       _totalMessageCount = loaded.totalMessageCount;
       _groupMemory = loaded.groupMemory;

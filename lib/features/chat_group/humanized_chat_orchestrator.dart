@@ -53,6 +53,7 @@ class HumanizedChatOrchestrator {
   static List<ReplyIntent> selectReplyIntents({
     required List<AICharacter> characters,
     required List<Message> recentMessages,
+    List<Message> Function(AICharacter character)? recentMessagesForCharacter,
     required String groupId,
     required String groupTheme,
     required String? userMessage,
@@ -69,10 +70,12 @@ class HumanizedChatOrchestrator {
 
     final scored = <_ScoredIntent>[];
     for (final character in eligible) {
+      final characterMessages =
+          recentMessagesForCharacter?.call(character) ?? recentMessages;
       final intent = _intentForCharacter(
         character: character,
         allCharacters: characters,
-        recentMessages: recentMessages,
+        recentMessages: characterMessages,
         groupId: groupId,
         groupTheme: groupTheme,
         userMessage: userMessage,
@@ -185,8 +188,7 @@ class HumanizedChatOrchestrator {
 
     // 关系驱动：用户对角色好感极低或摩擦极高时，角色强制带刺回复。
     // 不沉默——宁可怼人也不让消息石沉大海。
-    final userRelation = _relationTowardUser(
-        relationships, character.id);
+    final userRelation = _relationTowardUser(relationships, character.id);
     if (userRelation != null && !mentionedIds.contains(character.id)) {
       if (userRelation.affinity < -20 && userRelation.friction > 60) {
         // 亲近为负且摩擦很高：强制带刺回复，表达不耐烦。
@@ -203,7 +205,8 @@ class HumanizedChatOrchestrator {
           action = ReplyAction.topicShift;
           tone = '敷衍、不想深入聊、转移话题';
         }
-      } else if (userRelation.affinity < 0 && userRelation.recentMood == RelationshipMood.cold) {
+      } else if (userRelation.affinity < 0 &&
+          userRelation.recentMood == RelationshipMood.cold) {
         // 冷淡情绪下好感为负：降低回复意愿。
         score -= 8;
         reasons.add('cold-mood');

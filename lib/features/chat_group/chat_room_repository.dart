@@ -45,9 +45,15 @@ class ChatRoomRepository {
     return db.updateMessage(message);
   }
 
-  Future<void> deleteMessage(String messageId) async {
-    await DataLifecycleService(db: db)
-        .deleteMessage(messageId, groupId: conversationId);
+  Future<void> deleteMessage(
+    String messageId, {
+    bool invalidateGroupMemory = true,
+  }) async {
+    await DataLifecycleService(db: db).deleteMessage(
+      messageId,
+      groupId: conversationId,
+      invalidateGroupMemory: invalidateGroupMemory,
+    );
   }
 
   /// Clears this exact group or DM conversation through the lifecycle service.

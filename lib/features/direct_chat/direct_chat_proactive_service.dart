@@ -77,22 +77,32 @@ class DirectChatProactiveService {
             !DirectChatSession.isDirectConversationId(message.groupId))
         .toList()
       ..sort((a, b) => b.timestamp.compareTo(a.timestamp));
-    final latestUserMessageAtByGroup = <String, DateTime>{};
+    final latestVisibleUserMessageAt = <String, Map<String, DateTime>>{};
     for (final message in recentGroupMessages) {
       if (message.senderType != 'user') continue;
-      latestUserMessageAtByGroup.putIfAbsent(message.groupId, () {
-        return message.timestamp;
-      });
+      final visibleIds = message.visibleToCharacterIds;
+      // Legacy group messages have no recipient proof, so they must not
+      // trigger a private conversation with any character.
+      if (visibleIds.isEmpty) continue;
+      final recipientIds = visibleIds;
+      final groupTimestamps = latestVisibleUserMessageAt.putIfAbsent(
+        message.groupId,
+        () => <String, DateTime>{},
+      );
+      for (final characterId in recipientIds) {
+        groupTimestamps.putIfAbsent(characterId, () => message.timestamp);
+      }
     }
     final groupCandidates = <DirectChatGroupCandidate>[];
     for (final group in db.chatGroupBox.values) {
-      final lastUserMessageAt = latestUserMessageAtByGroup[group.id];
-      if (lastUserMessageAt == null) continue;
       for (final characterId in group.aiCharacterIds) {
         final character = charactersById[characterId];
         if (character == null || !_canGenerateProactiveMessage(character)) {
           continue;
         }
+        final lastUserMessageAt =
+            latestVisibleUserMessageAt[group.id]?[characterId];
+        if (lastUserMessageAt == null) continue;
         groupCandidates.add(DirectChatGroupCandidate(
           character: character,
           groupId: group.id,
@@ -139,9 +149,12 @@ class DirectChatProactiveService {
         ? directMessages.sublist(directMessages.length - 12)
         : directMessages;
     final sourceGroupContext = candidate.sourceGroupId == null
-        ? recentGroupMessages.take(8).toList()
+        ? const <Message>[]
         : recentGroupMessages
             .where((message) => message.groupId == candidate.sourceGroupId)
+            .where((message) =>
+                message.visibleToCharacterIds.isNotEmpty &&
+                message.visibleToCharacterIds.contains(candidate.character.id))
             .take(8)
             .toList();
 

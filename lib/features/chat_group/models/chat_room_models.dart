@@ -67,6 +67,10 @@ class ChatRoomLoadContext {
   final bool hasOlderMessages;
   final int totalMessageCount;
 
+  /// Whether the full group history contains messages not visible to every
+  /// current member. The page only keeps a paginated message window.
+  final bool hasRestrictedHistory;
+
   const ChatRoomLoadContext({
     required this.displayGroup,
     required this.activeCharacters,
@@ -80,6 +84,7 @@ class ChatRoomLoadContext {
     required this.isDirectChat,
     this.hasOlderMessages = false,
     this.totalMessageCount = 0,
+    this.hasRestrictedHistory = false,
   });
 
   static ChatGroup directDisplayGroup({

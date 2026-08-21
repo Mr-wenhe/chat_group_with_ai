@@ -48,10 +48,6 @@ class GroupChatProactivePolicy {
               !DirectChatSession.isDirectConversationId(message.groupId))
           .toList()
         ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
-      if (_unreadAiCount(group.id, groupMessages, readAtByGroup) >=
-          maxUnreadBurstMessages) {
-        continue;
-      }
       final lastProactiveAt = lastProactiveAtByGroup[group.id];
       final cooldown =
           isPreferred ? _handoffCooldownFor(group) : _cooldownFor(group);
@@ -59,28 +55,38 @@ class GroupChatProactivePolicy {
           now.difference(lastProactiveAt) < cooldown) {
         continue;
       }
-      if (groupMessages.isNotEmpty) {
-        final last = groupMessages.last;
-        final quietPeriod = isPreferred
-            ? _handoffQuietPeriodFor(group)
-            : _quietPeriodFor(group);
-        if (last.senderType == 'ai' &&
-            now.difference(last.timestamp) < quietPeriod) {
+
+      for (final character
+          in _speakerCandidatesFor(group, charactersById, groupMessages)) {
+        final visibleMessages = groupMessages
+            .where((message) =>
+                message.visibleToCharacterIds.isNotEmpty &&
+                message.visibleToCharacterIds.contains(character.id))
+            .toList(growable: false);
+        if (_unreadAiCount(group.id, visibleMessages, readAtByGroup) >=
+            maxUnreadBurstMessages) {
           continue;
         }
+        if (visibleMessages.isNotEmpty) {
+          final last = visibleMessages.last;
+          final quietPeriod = isPreferred
+              ? _handoffQuietPeriodFor(group)
+              : _quietPeriodFor(group);
+          if (last.senderType == 'ai' &&
+              now.difference(last.timestamp) < quietPeriod) {
+            continue;
+          }
+        }
+        return GroupChatProactiveCandidate(
+          group: group,
+          character: character,
+          reason: isPreferred
+              ? '用户离开后继续推进群聊'
+              : visibleMessages.isEmpty
+                  ? '群聊破冰'
+                  : '延续群聊话题',
+        );
       }
-
-      final character = _speakerFor(group, charactersById, groupMessages);
-      if (character == null) continue;
-      return GroupChatProactiveCandidate(
-        group: group,
-        character: character,
-        reason: isPreferred
-            ? '用户离开后继续推进群聊'
-            : groupMessages.isEmpty
-                ? '群聊破冰'
-                : '延续群聊话题',
-      );
     }
     return null;
   }
@@ -124,7 +130,7 @@ class GroupChatProactivePolicy {
     return Duration(seconds: seconds);
   }
 
-  static AICharacter? _speakerFor(
+  static List<AICharacter> _speakerCandidatesFor(
     ChatGroup group,
     Map<String, AICharacter> charactersById,
     List<Message> messages,
@@ -134,15 +140,26 @@ class GroupChatProactivePolicy {
         .whereType<AICharacter>()
         .where((character) => character.isActive)
         .toList();
-    if (activeCharacters.isEmpty) return null;
+    if (activeCharacters.isEmpty) return const [];
 
-    final lastAiSenderId = messages.reversed
-        .where((message) => message.senderType == 'ai')
-        .map((message) => message.senderId)
-        .firstOrNull;
-    return activeCharacters.firstWhere(
-      (character) => character.id != lastAiSenderId,
-      orElse: () => activeCharacters.first,
-    );
+    // Keep the old preference for a different speaker, but calculate it from
+    // each candidate's visible history so hidden messages cannot affect who
+    // gets selected.
+    final lastVisibleAiByCharacter = {
+      for (final character in activeCharacters)
+        character.id: messages.reversed
+            .where((message) =>
+                message.senderType == 'ai' &&
+                message.visibleToCharacterIds.isNotEmpty &&
+                message.visibleToCharacterIds.contains(character.id))
+            .map((message) => message.senderId)
+            .firstOrNull,
+    };
+    return [
+      ...activeCharacters.where((character) =>
+          lastVisibleAiByCharacter[character.id] != character.id),
+      ...activeCharacters.where((character) =>
+          lastVisibleAiByCharacter[character.id] == character.id),
+    ];
   }
 }

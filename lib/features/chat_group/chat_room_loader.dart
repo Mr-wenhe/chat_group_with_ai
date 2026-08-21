@@ -50,8 +50,15 @@ class ChatRoomLoader {
     final allCharacters = DataLifecycleService(db: db).charactersForIds(
       characterIds,
     );
+    final currentMemberIds = group.aiCharacterIds.toSet();
+    final hasRestrictedHistory = historyMessages.any((message) {
+      final visibleIds = message.visibleToCharacterIds;
+      // Empty snapshots are legacy records without an authorization proof.
+      return visibleIds.isEmpty || !currentMemberIds.every(visibleIds.contains);
+    });
     final activeCharacters = allCharacters
-        .where((character) => character.isActive)
+        .where((character) =>
+            character.isActive && currentMemberIds.contains(character.id))
         .toList(growable: false);
     await db.markGroupChatRead(
       conversationId,
@@ -96,6 +103,7 @@ class ChatRoomLoader {
       isDirectChat: false,
       hasOlderMessages: messagePage.hasOlder,
       totalMessageCount: messagePage.totalCount,
+      hasRestrictedHistory: hasRestrictedHistory,
       userProfile: db.userProfileBox.get('me'),
     );
   }

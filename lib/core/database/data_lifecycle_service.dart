@@ -11,6 +11,7 @@ import 'package:chat_group/core/database/managed_media_store.dart';
 import 'package:chat_group/core/database/relationship_snapshot_rebuilder.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
+import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
@@ -109,8 +110,13 @@ class DataLifecycleService {
   Future<DataLifecycleResult> deleteMessage(
     String messageId, {
     required String groupId,
+    bool invalidateGroupMemory = true,
   }) async {
-    final targets = await _planMessage(messageId, groupId);
+    final targets = await _planMessage(
+      messageId,
+      groupId,
+      invalidateGroupMemory: invalidateGroupMemory,
+    );
     if (!await _begin({
       'kind': 'message',
       'id': messageId,
@@ -335,12 +341,19 @@ class DataLifecycleService {
             .toList(growable: false) ??
         const <String>[];
     await _runner.attempt('消息删除失败', incomplete, () async {
-      if (targets.keysFor(DeletionTargetNames.messages).isEmpty) return;
-      await db.deleteMessageRecordAndIndex(messageId, groupId: groupId);
-      await _clearReplyReferences(
-        targets.keysFor(DeletionTargetNames.replyReferences),
-      );
+      if (targets.keysFor(DeletionTargetNames.messages).isNotEmpty) {
+        await db.deleteMessageRecordAndIndex(messageId, groupId: groupId);
+        await _clearReplyReferences(
+          targets.keysFor(DeletionTargetNames.replyReferences),
+        );
+      }
     });
+    await _deleteTargetKeys(
+      '群记忆失效失败',
+      db.groupMemoryBox,
+      targets.keysFor(DeletionTargetNames.groupMemories),
+      incomplete,
+    );
     return _finish(incomplete, await cleanupMediaPaths(mediaPaths));
   }
 
@@ -840,8 +853,9 @@ class DataLifecycleService {
 
   Future<DeletionTargets> _planMessage(
     String messageId,
-    String groupId,
-  ) async {
+    String groupId, {
+    bool invalidateGroupMemory = true,
+  }) async {
     final messageKeys = await _runner.matchingKeys<Message>(
       db.messageBox,
       (message) => message.id == messageId && message.groupId == groupId,
@@ -850,10 +864,18 @@ class DataLifecycleService {
       db.messageBox,
       (message) => message.replyToMessageId == messageId,
     );
+    final groupMemories = invalidateGroupMemory
+        ? await _runner.matchingKeys<GroupMemory>(
+            db.groupMemoryBox,
+            (memory) => memory.groupId == groupId,
+          )
+        : const <dynamic>[];
     return DeletionTargets(
       boxKeys: {
         DeletionTargetNames.messages: messageKeys,
         DeletionTargetNames.replyReferences: replyReferences,
+        if (groupMemories.isNotEmpty)
+          DeletionTargetNames.groupMemories: groupMemories,
       },
     );
   }

@@ -40,6 +40,7 @@ void main() {
             senderType: 'ai',
             content: '你还没看这条',
             timestamp: now.subtract(const Duration(minutes: 5)),
+            visibleToCharacterIds: const ['alice'],
           ),
         ],
         readAtByGroup: const {},
@@ -63,6 +64,7 @@ void main() {
           senderType: 'ai',
           content: '未读 $index',
           timestamp: now.subtract(Duration(minutes: 10 - index)),
+          visibleToCharacterIds: const ['alice'],
         ),
       );
 
@@ -130,6 +132,7 @@ void main() {
           senderType: 'ai',
           content: '未读 $index',
           timestamp: now.subtract(Duration(minutes: 10 - index)),
+          visibleToCharacterIds: const ['alice'],
         ),
       );
 
@@ -166,6 +169,7 @@ void main() {
             senderType: 'ai',
             content: '刚才我说了',
             timestamp: lastAiAt,
+            visibleToCharacterIds: const ['alice', 'bob'],
           ),
         ],
         readAtByGroup: {
@@ -177,6 +181,34 @@ void main() {
 
       expect(candidate?.character.id, 'bob');
       expect(candidate?.reason, '延续群聊话题');
+    });
+
+    test('hidden recent messages do not suppress another visible speaker', () {
+      final alice = _character(id: 'alice', name: '小夏');
+      final bob = _character(id: 'bob', name: '阿哲');
+      final group = _group(id: 'g1', characterIds: ['alice', 'bob']);
+      final now = DateTime(2026, 7, 9, 10);
+
+      final candidate = GroupChatProactivePolicy.selectCandidate(
+        groups: [group],
+        charactersById: {'alice': alice, 'bob': bob},
+        messages: [
+          Message(
+            groupId: 'g1',
+            senderId: 'alice',
+            senderType: 'ai',
+            content: '只给小夏看的最近发言',
+            timestamp: now.subtract(const Duration(seconds: 1)),
+            visibleToCharacterIds: const ['alice'],
+          ),
+        ],
+        readAtByGroup: const {},
+        lastProactiveAtByGroup: const {},
+        now: now,
+      );
+
+      expect(candidate?.character.id, 'bob');
+      expect(candidate?.reason, '群聊破冰');
     });
   });
 }

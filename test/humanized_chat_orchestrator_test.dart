@@ -135,6 +135,46 @@ void main() {
       );
     });
 
+    test('per-character history callback excludes hidden messages from intent',
+        () {
+      final alice = character('a', '阿月', '插画师');
+      final relation = RelationshipState(
+        groupId: 'group-1',
+        sourceCharacterId: 'a',
+        targetId: 'b',
+        targetType: RelationshipTargetType.ai,
+        affinity: 70,
+        trust: 60,
+        familiarity: 80,
+        recentMood: RelationshipMood.warm,
+      );
+
+      final intents = HumanizedChatOrchestrator.selectReplyIntents(
+        characters: [alice],
+        recentMessages: [
+          Message(
+            groupId: 'group-1',
+            senderId: 'b',
+            senderType: 'ai',
+            content: '只给小林看的内容',
+            visibleToCharacterIds: const ['b'],
+          ),
+        ],
+        recentMessagesForCharacter: (_) => const [],
+        groupId: 'group-1',
+        groupTheme: '日常聊天',
+        userMessage: null,
+        mentionedIds: const [],
+        memories: const [],
+        relationships: [relation],
+        isEligible: (_) => true,
+        random: Random(3),
+      );
+
+      expect(intents, hasLength(1));
+      expect(intents.single.targetId, isNull);
+    });
+
     test('recent speaker receives cooldown penalty', () {
       final alice = character('a', '阿月', '插画师');
       final bob = character('b', '小林', '程序员');
