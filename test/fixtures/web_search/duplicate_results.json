@@ -1,0 +1,15 @@
+{
+  "Heading": "Same source",
+  "AbstractText": "First copy.",
+  "AbstractURL": "https://example.com/same#abstract",
+  "RelatedTopics": [
+    {
+      "Text": "Same source - Duplicate copy.",
+      "FirstURL": "https://EXAMPLE.com/same"
+    },
+    {
+      "Text": "Different source - Kept copy.",
+      "FirstURL": "https://example.com/different"
+    }
+  ]
+}

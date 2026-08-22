@@ -1,0 +1,12 @@
+{
+  "Results": [
+    {
+      "Text": "Flutter - Build beautiful, multiplatform apps.",
+      "FirstURL": "https://flutter.dev/"
+    },
+    {
+      "Result": "<a>Fallback title</a> - A result represented by HTML.",
+      "FirstURL": "https://example.com/html-result"
+    }
+  ]
+}

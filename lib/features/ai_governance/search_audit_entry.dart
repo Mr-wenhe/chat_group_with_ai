@@ -2,29 +2,7 @@ import 'dart:convert';
 
 import 'package:crypto/crypto.dart';
 
-/// 搜索链路使用的稳定失败分类。
-///
-/// 该枚举只描述可安全展示的类别，不携带 Dio 异常、响应体或凭据。
-enum SearchFailureType {
-  offline,
-  connection,
-  permissionMissing,
-  dns,
-  tls,
-  connectionTimeout,
-  receiveTimeout,
-  cancelled,
-  unauthorized,
-  forbidden,
-  quotaExceeded,
-  rateLimited,
-  providerUnavailable,
-  invalidResponse,
-  invalidConfiguration,
-  unsafeQuery,
-  noResults,
-  unknown,
-}
+export 'package:chat_group/core/search/search_failure_type.dart';
 
 class SearchAuditEntry {
   static const legacyProvider = 'duckDuckGoInstantAnswer';

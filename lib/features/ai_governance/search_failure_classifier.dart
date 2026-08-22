@@ -1,6 +1,6 @@
 import 'package:dio/dio.dart';
 
-import 'ai_governance_models.dart';
+import 'package:chat_group/core/search/search_failure_type.dart';
 
 /// Classifies a Dio failure without retaining the exception or its payload.
 ///

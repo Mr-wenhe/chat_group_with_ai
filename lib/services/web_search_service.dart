@@ -1,10 +1,15 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
 import 'package:uuid/uuid.dart';
 
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/search_failure_classifier.dart';
+import 'package:chat_group/features/web_search/application/search_snapshot_builder.dart';
+import 'package:chat_group/features/web_search/models/search_models.dart'
+    as domain;
+import 'package:chat_group/features/web_search/providers/duckduckgo_instant_answer_provider.dart';
 
 class WebSearchResult {
   final String title;
@@ -49,7 +54,8 @@ class WebSearchSnapshot {
 
   bool get hasResults => results.isNotEmpty;
   bool get hasFailure =>
-      error != null || failureType != null || safeMessage != null;
+      failureType != SearchFailureType.noResults &&
+      (error != null || failureType != null || safeMessage != null);
   int get sourceCount => results.length;
 
   String toPromptContext() {
@@ -77,15 +83,15 @@ class WebSearchSnapshot {
 
 class WebSearchService {
   WebSearchService({Dio? dio, Uuid? uuid})
-      : _dio = dio ??
-            Dio(BaseOptions(
-              connectTimeout: const Duration(seconds: 8),
-              receiveTimeout: const Duration(seconds: 12),
-            )),
-        _uuid = uuid ?? const Uuid();
+      : _uuid = uuid ?? const Uuid(),
+        _provider = DuckDuckGoInstantAnswerProvider(
+          dio: dio,
+          uuid: uuid,
+        );
 
-  final Dio _dio;
   final Uuid _uuid;
+  final DuckDuckGoInstantAnswerProvider _provider;
+  static const _snapshotBuilder = SearchSnapshotBuilder();
 
   static const providerName = SearchAuditEntry.legacyProvider;
 
@@ -136,55 +142,26 @@ class WebSearchService {
     final searchedAt = DateTime.now().toUtc();
     final stopwatch = Stopwatch()..start();
     try {
-      final response = await _dio.get(
-        'https://api.duckduckgo.com/',
-        queryParameters: {
-          'q': query,
-          'format': 'json',
-          'no_html': '1',
-          'skip_disambig': '1',
-          'no_redirect': '1',
-        },
-      );
-      // DuckDuckGo 返回 Content-Type: application/x-javascript，Dio 5.10 不自动按 JSON 解析。
-      final data = _decodeResponse(response.data);
-      if (data == null) {
-        return _invalidResponseSnapshot(
-          query: query,
-          requestId: requestId,
-          searchedAt: searchedAt,
-          statusCode: response.statusCode,
-          latencyMs: stopwatch.elapsedMilliseconds,
-        );
-      }
-      return WebSearchSnapshot(
+      final request = domain.SearchRequest(
         requestId: requestId,
+        rootRequestId: requestId,
+        turnId: requestId,
         query: query,
-        searchedAt: searchedAt,
+        originalTextHash: sha256.convert(utf8.encode(query.trim())).toString(),
+      );
+      final response = await _provider.search(
+        request,
+        credential: null,
+      );
+      final snapshot = _snapshotBuilder.build(
+        request: request,
         provider: providerName,
-        results: _parseResults(data),
-        statusCode: response.statusCode,
-        latencyMs: stopwatch.elapsedMilliseconds,
-      );
-    } on DioException catch (e) {
-      final failureType = searchFailureTypeFromDioException(e);
-      final safeMessage = safeMessageForSearchFailure(failureType);
-      return _failureSnapshot(
-        query: query,
-        requestId: requestId,
-        searchedAt: searchedAt,
-        failureType: failureType,
-        safeMessage: safeMessage,
-        statusCode: e.response?.statusCode,
-        latencyMs: stopwatch.elapsedMilliseconds,
-      );
-    } on FormatException {
-      return _invalidResponseSnapshot(
-        query: query,
-        requestId: requestId,
+        response: response,
         searchedAt: searchedAt,
         latencyMs: stopwatch.elapsedMilliseconds,
+        degraded: true,
       );
+      return _toLegacySnapshot(query, snapshot);
     } catch (_) {
       return _failureSnapshot(
         query: query,
@@ -197,30 +174,34 @@ class WebSearchService {
     }
   }
 
-  Map<String, dynamic>? _decodeResponse(dynamic raw) {
-    if (raw is Map<String, dynamic>) return raw;
-    if (raw is! String) return null;
-    final decoded = jsonDecode(raw);
-    return decoded is Map<String, dynamic> ? decoded : null;
-  }
-
-  WebSearchSnapshot _invalidResponseSnapshot({
-    required String query,
-    required String requestId,
-    required DateTime searchedAt,
-    required int latencyMs,
-    int? statusCode,
-  }) {
-    const failureType = SearchFailureType.invalidResponse;
-    const safeMessage = '搜索服务返回了无法识别的结果格式';
-    return _failureSnapshot(
+  WebSearchSnapshot _toLegacySnapshot(
+    String query,
+    domain.WebSearchSnapshot snapshot,
+  ) {
+    final failure = snapshot.failure;
+    final isNoResults = failure?.type == SearchFailureType.noResults;
+    final safeMessage = isNoResults ? null : failure?.safeMessage;
+    return WebSearchSnapshot(
+      requestId: snapshot.requestId,
       query: query,
-      requestId: requestId,
-      searchedAt: searchedAt,
-      failureType: failureType,
+      searchedAt: snapshot.searchedAt,
+      provider: snapshot.provider,
+      results: snapshot.results
+          .map(
+            (result) => WebSearchResult(
+              title: result.title,
+              snippet: result.snippet,
+              url: result.url.toString(),
+            ),
+          )
+          .toList(growable: false),
+      error: safeMessage,
+      failureType: failure?.type,
       safeMessage: safeMessage,
-      statusCode: statusCode,
-      latencyMs: latencyMs,
+      statusCode: snapshot.statusCode,
+      latencyMs: snapshot.latencyMs,
+      retryCount: snapshot.retryCount,
+      fromCache: snapshot.fromCache,
     );
   }
 
@@ -245,54 +226,5 @@ class WebSearchService {
       statusCode: statusCode,
       latencyMs: latencyMs,
     );
-  }
-
-  List<WebSearchResult> _parseResults(Map<String, dynamic> data) {
-    final results = <WebSearchResult>[];
-    void add(String? title, String? snippet, String? url) {
-      final cleanTitle = (title ?? '').trim();
-      final cleanSnippet = (snippet ?? '').trim();
-      if (cleanTitle.isEmpty && cleanSnippet.isEmpty) return;
-      final result = WebSearchResult(
-        title: cleanTitle.isEmpty ? '搜索结果' : cleanTitle,
-        snippet: cleanSnippet,
-        url: (url ?? '').trim(),
-      );
-      if (results.any((existing) =>
-          existing.title == result.title && existing.url == result.url)) {
-        return;
-      }
-      results.add(result);
-    }
-
-    add(
-      data['Heading'] as String?,
-      data['AbstractText'] as String?,
-      data['AbstractURL'] as String?,
-    );
-
-    void parseTopic(dynamic topic) {
-      if (topic is! Map) return;
-      if (topic['Topics'] is List) {
-        for (final nested in topic['Topics'] as List) {
-          parseTopic(nested);
-        }
-        return;
-      }
-      final text = topic['Text'] as String?;
-      final firstDash = text?.indexOf(' - ') ?? -1;
-      final title = firstDash > 0 ? text!.substring(0, firstDash) : text;
-      final snippet = firstDash > 0 ? text!.substring(firstDash + 3) : text;
-      add(title, snippet, topic['FirstURL'] as String?);
-    }
-
-    final topics = data['RelatedTopics'];
-    if (topics is List) {
-      for (final topic in topics) {
-        parseTopic(topic);
-        if (results.length >= 5) break;
-      }
-    }
-    return results;
   }
 }

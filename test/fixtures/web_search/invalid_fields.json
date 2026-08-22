@@ -1,0 +1,25 @@
+{
+  "Heading": 123,
+  "AbstractText": " ",
+  "AbstractURL": "ftp://example.com/not-supported",
+  "Results": [
+    {
+      "Text": "Invalid URL result",
+      "FirstURL": "not a URL"
+    },
+    {
+      "Text": "Valid result - kept after invalid data",
+      "FirstURL": "https://example.com/valid"
+    },
+    {
+      "Text": 99,
+      "FirstURL": "https://example.com/ignored"
+    }
+  ],
+  "RelatedTopics": [
+    null,
+    {
+      "Topics": "not a list"
+    }
+  ]
+}
