@@ -5,6 +5,7 @@ import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/model_capability_registry.dart';
 import 'package:chat_group/features/ai_governance/money_micros.dart';
 import 'package:chat_group/providers/providers.dart';
+import 'package:chat_group/features/web_search/presentation/web_search_settings_section.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -88,12 +89,16 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
                   ),
                   const SizedBox(height: 12),
                   const Text(
-                    '默认关闭。询问模式每次都需明确同意；搜索查询会发送给 '
-                    'DuckDuckGo Instant Answer，它不等同于完整 Web 搜索。',
+                    '默认关闭。询问模式每次都需明确同意；启用后，查询会发送给下方配置的 '
+                    'Provider。DuckDuckGo 仅作为百科即时答案兜底，不等同于完整 Web 搜索。',
                   ),
                 ],
               ),
             ),
+          ),
+          const SizedBox(height: 8),
+          WebSearchSettingsSection(
+            store: SearchProviderConfigStore(db: _db),
           ),
           _title('预算（USD，留空表示不限）'),
           Card(

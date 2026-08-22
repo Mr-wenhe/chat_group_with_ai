@@ -203,13 +203,19 @@ class _Snapshot {
       'pinned_group_ids',
       'memory_pinned_keys_v1',
       'token_usage',
+      SearchProviderConfigStore.configsKey,
+      SearchProviderConfigStore.defaultProviderKey,
     };
     final result = <String, dynamic>{};
     for (final key in db.appSettingsBox.keys.whereType<String>()) {
       if (keys.contains(key) ||
           key.startsWith('work_mode_enabled:') ||
           key.startsWith('context_compressed_through:')) {
-        result[key] = db.appSettingsBox.get(key);
+        result[key] = key == SearchProviderConfigStore.configsKey
+            ? SearchProviderConfigStore.backupValue(
+                db.appSettingsBox.get(key),
+              )
+            : db.appSettingsBox.get(key);
       }
     }
     return result;
@@ -228,6 +234,8 @@ class _Snapshot {
         'tts_enabled',
         'pinned_character_ids',
         'pinned_group_ids',
+        SearchProviderConfigStore.configsKey,
+        SearchProviderConfigStore.defaultProviderKey,
       };
       return Map.fromEntries(
         safe.entries.where((entry) => configurationKeys.contains(entry.key)),

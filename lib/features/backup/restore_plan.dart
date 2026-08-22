@@ -667,11 +667,29 @@ class _RestorePlan {
     Map<String, int> skipped,
   ) {
     final result = <String, dynamic>{};
+    final searchConfigIdRemap =
+        strategy == RestoreConflictStrategy.copyWithNewIds
+            ? _searchConfigIdRemap(source[SearchProviderConfigStore.configsKey])
+            : const <String, String>{};
     for (final entry in source.entries) {
       var key = entry.key;
       dynamic value = entry.value;
       if (key == 'pinned_character_ids') value = _mapList(value, characters);
       if (key == 'pinned_group_ids') value = _mapList(value, groups);
+      if (key == SearchProviderConfigStore.configsKey) {
+        value = _restoreSearchConfigs(
+          value,
+          db.appSettingsBox.get(key),
+          strategy,
+          searchConfigIdRemap,
+        );
+      }
+      if (key == SearchProviderConfigStore.defaultProviderKey &&
+          strategy == RestoreConflictStrategy.copyWithNewIds) {
+        final remapped = searchConfigIdRemap[value?.toString()];
+        if (remapped == null) continue;
+        value = remapped;
+      }
       if (key == 'memory_pinned_keys_v1') {
         value = _strings(value)
             .map((pin) => _mapMemoryPin(
@@ -725,7 +743,8 @@ class _RestorePlan {
               '${characters[oldCharacter] ?? oldCharacter}';
         }
       }
-      if (db.appSettingsBox.containsKey(key) &&
+      if (key != SearchProviderConfigStore.configsKey &&
+          db.appSettingsBox.containsKey(key) &&
           strategy != RestoreConflictStrategy.emptyOnly) {
         final existing = db.appSettingsBox.get(key);
         if (existing is List && value is List) {
@@ -744,6 +763,58 @@ class _RestorePlan {
       result[key] = value;
     }
     return result;
+  }
+
+  static List<Map<String, dynamic>> _restoreSearchConfigs(
+    Object? raw,
+    Object? existingRaw,
+    RestoreConflictStrategy strategy,
+    Map<String, String> idRemap,
+  ) {
+    final restored = SearchProviderConfigStore.restoreValue(raw);
+    if (strategy == RestoreConflictStrategy.emptyOnly) return restored;
+
+    final existing = _mapRecords(existingRaw);
+    final existingIds = existing
+        .map((item) => item['id']?.toString() ?? '')
+        .where((id) => id.isNotEmpty)
+        .toSet();
+    if (strategy == RestoreConflictStrategy.skipExisting) {
+      return [
+        ...existing,
+        ...restored.where(
+          (item) => !existingIds.contains(item['id']?.toString()),
+        ),
+      ];
+    }
+
+    return [
+      ...existing,
+      ...restored.map(
+        (item) => {
+          ...item,
+          'id': idRemap[item['id']?.toString()] ?? item['id'],
+          // A copied configuration must not silently replace the current
+          // default. The remapped default key below can still select it when
+          // the destination has no existing default.
+          'isDefault': false,
+        },
+      ),
+    ];
+  }
+
+  static Map<String, String> _searchConfigIdRemap(Object? raw) {
+    final result = <String, String>{};
+    if (raw is! List) return result;
+    for (final item in raw.whereType<Map>()) {
+      final id = item['id']?.toString() ?? '';
+      if (id.isNotEmpty) result[id] = const Uuid().v4();
+    }
+    return result;
+  }
+
+  static List<Map<String, dynamic>> _mapRecords(Object? raw) {
+    return SearchProviderConfigStore.normalizeExistingValue(raw);
   }
 
   static List<String> _mapList(Object? value, Map<String, String> mapping) =>

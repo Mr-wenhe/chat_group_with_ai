@@ -12,6 +12,7 @@ import 'package:crypto/crypto.dart';
 import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
+import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';

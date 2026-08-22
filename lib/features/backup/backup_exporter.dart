@@ -12,6 +12,7 @@ import 'package:uuid/uuid.dart';
 
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';
+import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 
 part 'backup_snapshot.dart';
 

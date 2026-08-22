@@ -5,6 +5,7 @@ import 'package:chat_group/core/database/database_service.dart';
 
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';
+import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 
 class StagedBackupData {
   final List<Map<String, dynamic>> apiConfigs;
@@ -393,6 +394,8 @@ class StagedBackupData {
       'pinned_group_ids',
       'memory_pinned_keys_v1',
       'token_usage',
+      SearchProviderConfigStore.configsKey,
+      SearchProviderConfigStore.defaultProviderKey,
     };
     for (final key in settings.keys) {
       if (!allowed.contains(key) &&
