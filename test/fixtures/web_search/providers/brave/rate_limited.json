@@ -1,0 +1,7 @@
+{
+  "type": "ErrorResponse",
+  "error": {
+    "code": "TOO_MANY_REQUESTS",
+    "detail": "Rate limit exceeded."
+  }
+}

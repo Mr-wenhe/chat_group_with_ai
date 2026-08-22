@@ -1,0 +1,7 @@
+{
+  "type": "ErrorResponse",
+  "error": {
+    "code": "INTERNAL_SERVER_ERROR",
+    "detail": "Search service unavailable."
+  }
+}

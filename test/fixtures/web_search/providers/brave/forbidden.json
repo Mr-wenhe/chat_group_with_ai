@@ -1,0 +1,7 @@
+{
+  "type": "ErrorResponse",
+  "error": {
+    "code": "FORBIDDEN",
+    "detail": "The request is not allowed."
+  }
+}

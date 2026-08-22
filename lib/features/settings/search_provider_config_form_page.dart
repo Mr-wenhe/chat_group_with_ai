@@ -8,8 +8,10 @@ import 'package:chat_group/features/web_search/data/search_credential_repository
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 import 'package:chat_group/features/web_search/models/search_provider_config.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart';
+import 'package:chat_group/features/web_search/providers/brave_search_provider.dart';
 import 'package:chat_group/features/web_search/providers/duckduckgo_instant_answer_provider.dart';
 import 'package:chat_group/features/web_search/providers/search_provider.dart';
+import 'package:chat_group/features/web_search/providers/tavily_search_provider.dart';
 import 'package:chat_group/features/web_search/security/search_endpoint_validator.dart';
 
 class SearchProviderConfigFormPage extends StatefulWidget {
@@ -317,14 +319,28 @@ class _SearchProviderConfigFormPageState
   }
 
   SearchProvider _defaultProviderFactory(SearchProviderConfig config) {
-    if (config.provider == SearchProviderKind.duckDuckGoInstantAnswer) {
-      return DuckDuckGoInstantAnswerProvider();
-    }
-    throw UnsupportedError('该 Provider 尚未接入连接测试');
+    return switch (config.provider) {
+      SearchProviderKind.tavily => TavilySearchProvider(
+          baseUrl: config.baseUrl,
+          isRelease: _store.isRelease,
+          allowLocalDevelopmentGateway: _store.allowLocalDevelopmentGateway,
+        ),
+      SearchProviderKind.brave => BraveSearchProvider(
+          baseUrl: config.baseUrl,
+          isRelease: _store.isRelease,
+          allowLocalDevelopmentGateway: _store.allowLocalDevelopmentGateway,
+        ),
+      SearchProviderKind.duckDuckGoInstantAnswer =>
+        DuckDuckGoInstantAnswerProvider(),
+      SearchProviderKind.gateway =>
+        throw UnsupportedError('Backend Gateway 尚未接入连接测试'),
+    };
   }
 
   bool _supportsConnectionTest(SearchProviderKind provider) =>
       widget.providerFactory != null ||
+      provider == SearchProviderKind.tavily ||
+      provider == SearchProviderKind.brave ||
       provider == SearchProviderKind.duckDuckGoInstantAnswer;
 
   String _providerLabel(SearchProviderKind provider) => switch (provider) {

@@ -1,9 +1,13 @@
 import 'search_failure.dart';
 
-const int searchQueryMaxLength = 1000;
+// Brave rejects queries longer than 400 characters. Keeping the shared
+// request model within that provider limit prevents later coordinators from
+// sending an otherwise valid SearchRequest that the HTTP adapter cannot use.
+const int searchQueryMaxLength = 400;
 const int searchTitleMaxLength = 300;
 const int searchSnippetMaxLength = 800;
 const int searchProviderNameMaxLength = 120;
+const int searchDefaultMaxResults = 5;
 const int searchMaxResultsLimit = 20;
 
 enum SearchProviderKind {
@@ -56,7 +60,7 @@ class SearchRequest {
     this.freshness = SearchFreshness.any,
     String locale = 'zh-CN',
     String? country,
-    int maxResults = 5,
+    int maxResults = searchDefaultMaxResults,
     this.safeSearch = true,
     this.forceRefresh = false,
   })  : query = sanitizeSearchText(query, maxLength: searchQueryMaxLength),

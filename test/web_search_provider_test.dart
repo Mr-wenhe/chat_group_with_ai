@@ -211,6 +211,10 @@ void main() {
       expect(request.query, 'current version');
       expect(request.originalTextHash, 'a' * 64);
       expect(
+        SearchRequest(query: 'x' * (searchQueryMaxLength + 20)).query,
+        hasLength(searchQueryMaxLength),
+      );
+      expect(
         () => SearchRequest(query: 'query', maxResults: 0),
         throwsArgumentError,
       );

@@ -1,0 +1,14 @@
+{
+  "type": "search",
+  "request_id": "brave-body-request-001",
+  "web": {
+    "type": "search",
+    "results": [
+      {
+        "title": "Brave Web Search",
+        "url": "https://search.brave.com/",
+        "description": "A valid result."
+      }
+    ]
+  }
+}

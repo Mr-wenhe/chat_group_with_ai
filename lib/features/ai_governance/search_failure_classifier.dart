@@ -10,19 +10,15 @@ import 'package:chat_group/core/search/search_failure_type.dart';
 SearchFailureType searchFailureTypeFromDioException(DioException error) {
   final statusCode = error.response?.statusCode;
   if (statusCode != null) {
-    if (statusCode == 401) return SearchFailureType.unauthorized;
-    if (statusCode == 403) return SearchFailureType.forbidden;
-    if (statusCode == 402) return SearchFailureType.quotaExceeded;
-    if (statusCode == 429) return SearchFailureType.rateLimited;
-    if (statusCode == 408) return SearchFailureType.connectionTimeout;
-    if (statusCode >= 500 && statusCode <= 599) {
-      return SearchFailureType.providerUnavailable;
-    }
-    if (statusCode >= 400 && statusCode <= 499) {
-      if (_looksLikeConfigurationFailure(error)) {
+    final httpFailure = searchFailureTypeFromStatusCode(statusCode);
+    if (httpFailure != SearchFailureType.invalidResponse || statusCode >= 400) {
+      if (statusCode >= 400 &&
+          statusCode <= 499 &&
+          httpFailure == SearchFailureType.invalidResponse &&
+          _looksLikeConfigurationFailure(error)) {
         return SearchFailureType.invalidConfiguration;
       }
-      return SearchFailureType.invalidResponse;
+      return httpFailure;
     }
   }
 
@@ -58,6 +54,23 @@ SearchFailureType searchFailureTypeFromDioException(DioException error) {
     DioExceptionType.badResponse => SearchFailureType.invalidResponse,
     DioExceptionType.unknown => SearchFailureType.unknown,
   };
+}
+
+/// Maps an HTTP status to the stable search failure category shared by every
+/// provider adapter. Provider-specific error bodies are intentionally ignored
+/// here because they can contain credentials or untrusted response text.
+SearchFailureType searchFailureTypeFromStatusCode(int statusCode) {
+  if (statusCode == 401) return SearchFailureType.unauthorized;
+  if (statusCode == 403) return SearchFailureType.forbidden;
+  if (statusCode == 402 || statusCode == 432 || statusCode == 433) {
+    return SearchFailureType.quotaExceeded;
+  }
+  if (statusCode == 429) return SearchFailureType.rateLimited;
+  if (statusCode == 408) return SearchFailureType.connectionTimeout;
+  if (statusCode >= 500 && statusCode <= 599) {
+    return SearchFailureType.providerUnavailable;
+  }
+  return SearchFailureType.invalidResponse;
 }
 
 /// Returns a user-facing diagnostic that contains no transport detail.

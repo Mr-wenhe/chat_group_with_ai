@@ -213,6 +213,25 @@ void main() {
       });
     }
   });
+
+  group('searchFailureTypeFromStatusCode', () {
+    test('maps provider authentication, quota, rate, and server failures', () {
+      expect(
+          searchFailureTypeFromStatusCode(401), SearchFailureType.unauthorized);
+      expect(
+        searchFailureTypeFromStatusCode(403),
+        SearchFailureType.forbidden,
+      );
+      expect(
+          searchFailureTypeFromStatusCode(429), SearchFailureType.rateLimited);
+      expect(searchFailureTypeFromStatusCode(500),
+          SearchFailureType.providerUnavailable);
+      expect(searchFailureTypeFromStatusCode(432),
+          SearchFailureType.quotaExceeded);
+      expect(searchFailureTypeFromStatusCode(433),
+          SearchFailureType.quotaExceeded);
+    });
+  });
 }
 
 DioException _dioException(

@@ -1,0 +1,11 @@
+{
+  "type": "search",
+  "query": {
+    "original": "empty",
+    "more_results_available": false
+  },
+  "web": {
+    "type": "search",
+    "results": []
+  }
+}
