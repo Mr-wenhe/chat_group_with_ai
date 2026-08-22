@@ -1,6 +1,10 @@
 import 'dart:convert';
 
 import 'package:dio/dio.dart';
+import 'package:uuid/uuid.dart';
+
+import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
+import 'package:chat_group/features/ai_governance/search_failure_classifier.dart';
 
 class WebSearchResult {
   final String title;
@@ -15,24 +19,44 @@ class WebSearchResult {
 }
 
 class WebSearchSnapshot {
+  final String requestId;
   final String query;
   final DateTime searchedAt;
+  final String provider;
   final List<WebSearchResult> results;
   final String? error;
+  final SearchFailureType? failureType;
+  final String? safeMessage;
+  final int? statusCode;
+  final int latencyMs;
+  final int retryCount;
+  final bool fromCache;
 
   const WebSearchSnapshot({
+    this.requestId = '',
     required this.query,
     required this.searchedAt,
+    this.provider = SearchAuditEntry.legacyProvider,
     required this.results,
     this.error,
+    this.failureType,
+    this.safeMessage,
+    this.statusCode,
+    this.latencyMs = 0,
+    this.retryCount = 0,
+    this.fromCache = false,
   });
 
   bool get hasResults => results.isNotEmpty;
+  bool get hasFailure =>
+      error != null || failureType != null || safeMessage != null;
+  int get sourceCount => results.length;
 
   String toPromptContext() {
     final time = searchedAt.toLocal().toIso8601String();
-    if (error != null && results.isEmpty) {
-      return '【联网搜索】查询 "$query" 失败：$error。'
+    if (hasFailure && results.isEmpty) {
+      final message = safeMessage ?? '联网搜索暂时失败';
+      return '【联网搜索】查询 "$query" 失败：$message。'
           '你必须明确说明没有可靠联网结果，不要编造。搜索时间：$time。';
     }
     if (results.isEmpty) {
@@ -52,14 +76,18 @@ class WebSearchSnapshot {
 }
 
 class WebSearchService {
-  WebSearchService({Dio? dio})
+  WebSearchService({Dio? dio, Uuid? uuid})
       : _dio = dio ??
             Dio(BaseOptions(
               connectTimeout: const Duration(seconds: 8),
               receiveTimeout: const Duration(seconds: 12),
-            ));
+            )),
+        _uuid = uuid ?? const Uuid();
 
   final Dio _dio;
+  final Uuid _uuid;
+
+  static const providerName = SearchAuditEntry.legacyProvider;
 
   static const _currentInfoTriggers = [
     '联网',
@@ -104,6 +132,9 @@ class WebSearchService {
   }
 
   Future<WebSearchSnapshot> search(String query) async {
+    final requestId = _uuid.v4();
+    final searchedAt = DateTime.now().toUtc();
+    final stopwatch = Stopwatch()..start();
     try {
       final response = await _dio.get(
         'https://api.duckduckgo.com/',
@@ -115,51 +146,105 @@ class WebSearchService {
           'no_redirect': '1',
         },
       );
-      // DuckDuckGo 返回 Content-Type: application/x-javascript，Dio 5.10 不自动按 JSON 解析
-      Map<String, dynamic> data;
-      final raw = response.data;
-      if (raw is Map<String, dynamic>) {
-        data = raw;
-      } else if (raw is String) {
-        final decoded = jsonDecode(raw);
-        if (decoded is Map<String, dynamic>) {
-          data = decoded;
-        } else {
-          return WebSearchSnapshot(
-            query: query,
-            searchedAt: DateTime.now(),
-            results: const [],
-            error: '搜索结果格式异常',
-          );
-        }
-      } else {
-        return WebSearchSnapshot(
+      // DuckDuckGo 返回 Content-Type: application/x-javascript，Dio 5.10 不自动按 JSON 解析。
+      final data = _decodeResponse(response.data);
+      if (data == null) {
+        return _invalidResponseSnapshot(
           query: query,
-          searchedAt: DateTime.now(),
-          results: const [],
-          error: '搜索结果格式异常',
+          requestId: requestId,
+          searchedAt: searchedAt,
+          statusCode: response.statusCode,
+          latencyMs: stopwatch.elapsedMilliseconds,
         );
       }
       return WebSearchSnapshot(
+        requestId: requestId,
         query: query,
-        searchedAt: DateTime.now(),
+        searchedAt: searchedAt,
+        provider: providerName,
         results: _parseResults(data),
+        statusCode: response.statusCode,
+        latencyMs: stopwatch.elapsedMilliseconds,
       );
     } on DioException catch (e) {
-      return WebSearchSnapshot(
+      final failureType = searchFailureTypeFromDioException(e);
+      final safeMessage = safeMessageForSearchFailure(failureType);
+      return _failureSnapshot(
         query: query,
-        searchedAt: DateTime.now(),
-        results: const [],
-        error: e.message ?? e.type.name,
+        requestId: requestId,
+        searchedAt: searchedAt,
+        failureType: failureType,
+        safeMessage: safeMessage,
+        statusCode: e.response?.statusCode,
+        latencyMs: stopwatch.elapsedMilliseconds,
       );
-    } catch (e) {
-      return WebSearchSnapshot(
+    } on FormatException {
+      return _invalidResponseSnapshot(
         query: query,
-        searchedAt: DateTime.now(),
-        results: const [],
-        error: e.toString(),
+        requestId: requestId,
+        searchedAt: searchedAt,
+        latencyMs: stopwatch.elapsedMilliseconds,
+      );
+    } catch (_) {
+      return _failureSnapshot(
+        query: query,
+        requestId: requestId,
+        searchedAt: searchedAt,
+        failureType: SearchFailureType.unknown,
+        safeMessage: safeMessageForSearchFailure(SearchFailureType.unknown),
+        latencyMs: stopwatch.elapsedMilliseconds,
       );
     }
+  }
+
+  Map<String, dynamic>? _decodeResponse(dynamic raw) {
+    if (raw is Map<String, dynamic>) return raw;
+    if (raw is! String) return null;
+    final decoded = jsonDecode(raw);
+    return decoded is Map<String, dynamic> ? decoded : null;
+  }
+
+  WebSearchSnapshot _invalidResponseSnapshot({
+    required String query,
+    required String requestId,
+    required DateTime searchedAt,
+    required int latencyMs,
+    int? statusCode,
+  }) {
+    const failureType = SearchFailureType.invalidResponse;
+    const safeMessage = '搜索服务返回了无法识别的结果格式';
+    return _failureSnapshot(
+      query: query,
+      requestId: requestId,
+      searchedAt: searchedAt,
+      failureType: failureType,
+      safeMessage: safeMessage,
+      statusCode: statusCode,
+      latencyMs: latencyMs,
+    );
+  }
+
+  WebSearchSnapshot _failureSnapshot({
+    required String query,
+    required String requestId,
+    required DateTime searchedAt,
+    required SearchFailureType failureType,
+    required String safeMessage,
+    required int latencyMs,
+    int? statusCode,
+  }) {
+    return WebSearchSnapshot(
+      requestId: requestId,
+      query: query,
+      searchedAt: searchedAt,
+      provider: providerName,
+      results: const [],
+      error: safeMessage,
+      failureType: failureType,
+      safeMessage: safeMessage,
+      statusCode: statusCode,
+      latencyMs: latencyMs,
+    );
   }
 
   List<WebSearchResult> _parseResults(Map<String, dynamic> data) {

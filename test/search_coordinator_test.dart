@@ -25,6 +25,24 @@ class FakeWebSearchService extends WebSearchService {
   }
 }
 
+class DiagnosticFakeWebSearchService extends WebSearchService {
+  @override
+  Future<WebSearchSnapshot> search(String query) async {
+    return WebSearchSnapshot(
+      requestId: 'req-diagnostic',
+      query: query,
+      searchedAt: DateTime(2026, 7, 16, 12),
+      provider: 'duckDuckGoInstantAnswer',
+      results: const [],
+      failureType: SearchFailureType.rateLimited,
+      statusCode: 429,
+      latencyMs: 812,
+      retryCount: 2,
+      fromCache: false,
+    );
+  }
+}
+
 void main() {
   test('关闭策略即使命中触发词也产生零搜索请求', () async {
     final store = MemoryGovernanceStore();
@@ -78,5 +96,31 @@ void main() {
     expect(result?.hasResults, isTrue);
     expect(service.searchCount, 1);
     expect(store.searchAudits.single.sources, ['https://example.com/source']);
+  });
+
+  test('把失败快照诊断字段写入搜索审计', () async {
+    final store =
+        MemoryGovernanceStore(globalSearchPolicy: WebSearchPolicy.auto);
+    final coordinator = SearchCoordinator(
+      store: store,
+      service: DiagnosticFakeWebSearchService(),
+    );
+
+    final result = await coordinator.searchIfAllowed(
+      text: '今天上海天气',
+      conversationId: 'group-1',
+      requestConsent: (_) async => true,
+    );
+
+    expect(result, isNotNull);
+    final audit = store.searchAudits.single;
+    expect(audit.requestId, 'req-diagnostic');
+    expect(audit.provider, 'duckDuckGoInstantAnswer');
+    expect(audit.failureType, 'rateLimited');
+    expect(audit.statusCode, 429);
+    expect(audit.latencyMs, 812);
+    expect(audit.retryCount, 2);
+    expect(audit.fromCache, isFalse);
+    expect(audit.sourceCount, 0);
   });
 }

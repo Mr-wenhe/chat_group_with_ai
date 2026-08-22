@@ -78,3 +78,6 @@ technical_documentation.md
 
 # QA verification scripts
 scripts/
+!scripts/
+scripts/*
+!scripts/verify_android_release_permissions.sh

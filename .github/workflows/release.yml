@@ -162,3 +162,19 @@ jobs:
           fi
           gh release upload "$TAG" "chat_group-windows-v${{ needs.prepare.outputs.version }}.zip" --clobber
           echo "🪟 Windows 产物已上传"
+
+  # Android 不是 Windows 发布任务的产物，但其最终 Manifest 必须保留联网
+  # 权限；在 Release 流程中构建真实 APK 并检查，而不是只检查源码 Manifest。
+  android-permissions:
+    name: Verify Android release permissions
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: subosito/flutter-action@v2
+        with:
+          flutter-version: "3.24.0"
+          channel: "stable"
+          cache: true
+      - run: flutter pub get
+      - run: flutter build apk --release
+      - run: bash scripts/verify_android_release_permissions.sh build/app/outputs/flutter-apk/app-release.apk

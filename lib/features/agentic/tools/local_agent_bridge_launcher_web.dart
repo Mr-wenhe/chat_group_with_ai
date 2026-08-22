@@ -13,6 +13,12 @@ class LocalAgentBridgeLauncher {
   /// 停止：Web / 移动端无子进程可关闭，空操作。
   Future<void> stop() async {}
 
+  /// 注册：Web / 移动端没有本地桥接服务，保持与桌面端一致的异步接口。
+  Future<void> registerWorkspace({
+    required String conversationId,
+    required String workspacePath,
+  }) async {}
+
   Future<void> restart({required String workspace}) async {}
 
   /// Web / 移动端始终视为未运行。

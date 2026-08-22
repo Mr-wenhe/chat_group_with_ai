@@ -110,6 +110,8 @@ ok "iOS 已打包 → $ART_DIR/chat_group-ios-app-v$VERSION.zip"
 
 # ===== Android（APK + AAB）=====
 build_one "Android APK" apk --release
+"$ROOT/scripts/verify_android_release_permissions.sh" \
+  build/app/outputs/flutter-apk/app-release.apk
 build_one "Android AAB" appbundle --release
 cp build/app/outputs/flutter-apk/app-release.apk  "$ART_DIR/chat_group-android-apk-v$VERSION.apk"
 cp build/app/outputs/bundle/release/app-release.aab "$ART_DIR/chat_group-android-aab-v$VERSION.aab"

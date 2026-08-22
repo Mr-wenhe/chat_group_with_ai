@@ -14,8 +14,7 @@ enum SearchRunStatus {
 }
 
 extension SearchRunStatusExt on SearchRunStatus {
-  bool get isTerminal =>
-      switch (this) {
+  bool get isTerminal => switch (this) {
         SearchRunStatus.completed ||
         SearchRunStatus.noResults ||
         SearchRunStatus.failed ||
@@ -80,17 +79,24 @@ class SearchCoordinator {
 
     onStatus?.call(SearchRunState(SearchRunStatus.searching, query: query));
     final snapshot = await service.search(query);
-    final status = snapshot.error != null
+    final status = snapshot.hasFailure
         ? SearchRunStatus.failed
         : snapshot.hasResults
             ? SearchRunStatus.completed
             : SearchRunStatus.noResults;
     onStatus?.call(SearchRunState(status, query: query, snapshot: snapshot));
     await store.addSearchAudit(SearchAuditEntry(
+      requestId: snapshot.requestId,
       conversationId: conversationId,
       query: query,
       searchedAt: snapshot.searchedAt,
       status: status.name,
+      provider: snapshot.provider,
+      failureType: snapshot.failureType?.name,
+      statusCode: snapshot.statusCode,
+      latencyMs: snapshot.latencyMs,
+      retryCount: snapshot.retryCount,
+      fromCache: snapshot.fromCache,
       sources: snapshot.results
           .map((result) => result.url)
           .where((url) => url.trim().isNotEmpty)

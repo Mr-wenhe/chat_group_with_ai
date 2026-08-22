@@ -1484,7 +1484,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         if (!_canTouchUi) return;
         _searchBannerDismissTimer?.cancel();
         setState(() => _webSearchState = state);
-        if (!state.status.isTerminal) return;
+        // 失败状态保留在页面上，便于用户在网络错误消失前打开具体诊断。
+        if (!state.status.isTerminal ||
+            state.status == SearchRunStatus.failed) {
+          return;
+        }
         _searchBannerDismissTimer = Timer(const Duration(seconds: 3), () {
           if (_canTouchUi) {
             setState(() =>
@@ -1806,7 +1810,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         SearchRunStatus.completed =>
           '联网搜索完成 · ${_webSearchState.snapshot?.results.length ?? 0} 个来源',
         SearchRunStatus.noResults => '联网搜索完成，但资料不足',
-        SearchRunStatus.failed => '联网搜索失败，回复将明确标注资料不足',
+        SearchRunStatus.failed =>
+          '联网搜索失败 · ${_webSearchState.snapshot?.failureType?.name ?? 'unknown'}，点击查看诊断',
       };
 
   /// 展示上一次联网搜索命中的来源列表（查询词、时间、标题、摘要、链接）。
@@ -1824,7 +1829,26 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             children: [
               Text('查询：${snapshot.query}'),
               Text('时间：${snapshot.searchedAt.toLocal()}'),
-              if (snapshot.error != null) Text('状态：${snapshot.error}'),
+              if (snapshot.failureType != null || snapshot.safeMessage != null)
+                Card(
+                  margin: const EdgeInsets.only(top: 12, bottom: 8),
+                  child: Padding(
+                    padding: const EdgeInsets.all(12),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Text(
+                          '失败类型：${snapshot.failureType?.name ?? 'unknown'}',
+                          style: const TextStyle(fontWeight: FontWeight.w600),
+                        ),
+                        const SizedBox(height: 4),
+                        Text(snapshot.safeMessage ?? '联网搜索失败，请稍后重试'),
+                        if (snapshot.statusCode != null)
+                          Text('HTTP 状态码：${snapshot.statusCode}'),
+                      ],
+                    ),
+                  ),
+                ),
               for (final result in snapshot.results)
                 ListTile(
                   contentPadding: EdgeInsets.zero,

@@ -1,3 +1,5 @@
+export 'search_audit_entry.dart';
+
 enum AiRequestPurpose {
   reply('普通回复'),
   autoChat('自动聊天'),
@@ -423,42 +425,4 @@ class AiRequestDiagnostic {
         'status=$status',
         'failureType=${failureType ?? '-'}',
       ].join('\n');
-}
-
-class SearchAuditEntry {
-  final String conversationId;
-  final String query;
-  final DateTime searchedAt;
-  final String status;
-  final List<String> sources;
-
-  const SearchAuditEntry({
-    required this.conversationId,
-    required this.query,
-    required this.searchedAt,
-    required this.status,
-    required this.sources,
-  });
-
-  factory SearchAuditEntry.fromMap(Map<dynamic, dynamic> map) {
-    return SearchAuditEntry(
-      conversationId: map['conversationId']?.toString() ?? '',
-      query: map['query']?.toString() ?? '',
-      searchedAt: DateTime.tryParse(map['searchedAt']?.toString() ?? '') ??
-          DateTime.fromMillisecondsSinceEpoch(0),
-      status: map['status']?.toString() ?? 'unknown',
-      sources: (map['sources'] as List?)
-              ?.map((item) => item.toString())
-              .toList(growable: false) ??
-          const [],
-    );
-  }
-
-  Map<String, dynamic> toMap() => {
-        'conversationId': conversationId,
-        'query': query,
-        'searchedAt': searchedAt.toUtc().toIso8601String(),
-        'status': status,
-        'sources': sources,
-      };
 }
