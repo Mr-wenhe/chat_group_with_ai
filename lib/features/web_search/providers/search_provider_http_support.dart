@@ -2,11 +2,10 @@ import 'dart:convert';
 
 import 'package:dio/dio.dart';
 
-import 'package:chat_group/features/ai_governance/search_failure_classifier.dart';
-
-import '../models/search_failure.dart';
 import '../models/search_models.dart';
 import '../security/search_endpoint_validator.dart';
+
+export '../models/search_failure_factory.dart';
 
 const Duration searchProviderConnectTimeout = Duration(seconds: 8);
 const Duration searchProviderReceiveTimeout = Duration(seconds: 12);
@@ -140,32 +139,6 @@ String? safeProviderRequestId(dynamic raw) {
   }
   return value;
 }
-
-SearchFailure buildSearchFailure({
-  required SearchFailureType type,
-  int? statusCode,
-  String? providerRequestId,
-}) {
-  return SearchFailure(
-    type: type,
-    safeMessage: safeMessageForSearchFailure(type),
-    statusCode: statusCode,
-    retryable: isRetryableSearchFailure(type),
-    providerRequestId: providerRequestId,
-  );
-}
-
-bool isRetryableSearchFailure(SearchFailureType type) => switch (type) {
-      SearchFailureType.offline ||
-      SearchFailureType.connection ||
-      SearchFailureType.dns ||
-      SearchFailureType.connectionTimeout ||
-      SearchFailureType.receiveTimeout ||
-      SearchFailureType.providerUnavailable ||
-      SearchFailureType.rateLimited =>
-        true,
-      _ => false,
-    };
 
 String _removeMarkup(String value) => value
     .replaceAll(RegExp(r'<[^>]*>'), '')

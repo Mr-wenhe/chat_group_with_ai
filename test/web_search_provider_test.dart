@@ -289,6 +289,7 @@ void main() {
       expect(snapshot.requestId, isNotEmpty);
       expect(snapshot.hasResults, isTrue);
       expect(snapshot.statusCode, 200);
+      expect(snapshot.degraded, isTrue);
     });
 
     test('keeps noResults terminal status compatible with SearchCoordinator',

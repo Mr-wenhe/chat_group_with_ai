@@ -1,6 +1,7 @@
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/search_coordinator.dart';
 import 'package:chat_group/services/web_search_service.dart';
+import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers/memory_governance_store.dart';
@@ -9,7 +10,10 @@ class FakeWebSearchService extends WebSearchService {
   int searchCount = 0;
 
   @override
-  Future<WebSearchSnapshot> search(String query) async {
+  Future<WebSearchSnapshot> search(
+    String query, {
+    CancelToken? cancelToken,
+  }) async {
     searchCount++;
     return WebSearchSnapshot(
       query: query,
@@ -27,7 +31,10 @@ class FakeWebSearchService extends WebSearchService {
 
 class DiagnosticFakeWebSearchService extends WebSearchService {
   @override
-  Future<WebSearchSnapshot> search(String query) async {
+  Future<WebSearchSnapshot> search(
+    String query, {
+    CancelToken? cancelToken,
+  }) async {
     return WebSearchSnapshot(
       requestId: 'req-diagnostic',
       query: query,

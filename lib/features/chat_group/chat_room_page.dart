@@ -482,7 +482,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       client: widget.chatApi,
       onWarning: _showGovernanceWarning,
     );
-    _searchCoordinator = SearchCoordinator(store: _governanceStore);
+    _searchCoordinator = SearchCoordinator(
+      store: _governanceStore,
+      service: WebSearchService(),
+    );
     // 读取本会话此前保存过的搜索策略覆盖值。
     _searchPolicyOverride =
         _governanceStore.conversationSearchPolicy(widget.groupId);
@@ -1480,6 +1483,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       text: userMessage,
       conversationId: widget.groupId,
       requestConsent: _confirmWebSearch,
+      sourceMessageId: currentUserMessage?.id,
+      turnId: currentUserMessage?.id,
       onStatus: (state) {
         if (!_canTouchUi) return;
         _searchBannerDismissTimer?.cancel();
@@ -1803,15 +1808,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   String get _webSearchStatusText => switch (_webSearchState.status) {
         SearchRunStatus.idle => '',
         SearchRunStatus.disabled => '联网搜索已关闭，本次未发送第三方请求',
+        SearchRunStatus.suggested => '建议联网搜索',
         SearchRunStatus.awaitingConsent => '等待确认是否联网搜索',
+        SearchRunStatus.planning => '正在整理搜索关键词…',
         SearchRunStatus.denied => '本次联网搜索未获同意',
         SearchRunStatus.searching =>
-          '正在通过 DuckDuckGo 搜索：${_webSearchState.query}',
+          '正在通过 ${_webSearchState.provider.isEmpty ? '搜索服务' : _webSearchState.provider} 搜索：${_webSearchState.query}',
+        SearchRunStatus.retrying =>
+          '搜索服务暂时不可用，正在重试 ${_webSearchState.retryNumber}/2…',
+        SearchRunStatus.evaluating => '正在整理搜索结果…',
         SearchRunStatus.completed =>
           '联网搜索完成 · ${_webSearchState.snapshot?.results.length ?? 0} 个来源',
         SearchRunStatus.noResults => '联网搜索完成，但资料不足',
         SearchRunStatus.failed =>
           '联网搜索失败 · ${_webSearchState.snapshot?.failureType?.name ?? 'unknown'}，点击查看诊断',
+        SearchRunStatus.cancelled => '联网搜索已取消',
       };
 
   /// 展示上一次联网搜索命中的来源列表（查询词、时间、标题、摘要、链接）。
@@ -5288,7 +5299,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
             SearchStatusBanner(
               message: _webSearchStatusText,
               busy: _webSearchState.status == SearchRunStatus.searching ||
-                  _webSearchState.status == SearchRunStatus.awaitingConsent,
+                  _webSearchState.status == SearchRunStatus.awaitingConsent ||
+                  _webSearchState.status == SearchRunStatus.planning ||
+                  _webSearchState.status == SearchRunStatus.retrying ||
+                  _webSearchState.status == SearchRunStatus.evaluating,
               onTap: _webSearchState.snapshot == null
                   ? null
                   : _showWebSearchSources,

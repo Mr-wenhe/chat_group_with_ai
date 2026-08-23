@@ -12,19 +12,32 @@ import 'package:chat_group/features/web_search/models/search_models.dart'
 import 'package:chat_group/features/web_search/providers/duckduckgo_instant_answer_provider.dart';
 
 class WebSearchResult {
+  final String sourceId;
   final String title;
   final String snippet;
   final String url;
+  final String provider;
+  final DateTime? publishedAt;
+  final double? providerScore;
 
   const WebSearchResult({
+    this.sourceId = '',
     required this.title,
     required this.snippet,
     required this.url,
+    this.provider = '',
+    this.publishedAt,
+    this.providerScore,
   });
 }
 
 class WebSearchSnapshot {
   final String requestId;
+  final String rootRequestId;
+  final String sourceMessageId;
+  final String turnId;
+  final String originalTextHash;
+  final List<String> executedQueries;
   final String query;
   final DateTime searchedAt;
   final String provider;
@@ -36,9 +49,15 @@ class WebSearchSnapshot {
   final int latencyMs;
   final int retryCount;
   final bool fromCache;
+  final bool degraded;
 
   const WebSearchSnapshot({
     this.requestId = '',
+    this.rootRequestId = '',
+    this.sourceMessageId = '',
+    this.turnId = '',
+    this.originalTextHash = '',
+    this.executedQueries = const [],
     required this.query,
     required this.searchedAt,
     this.provider = SearchAuditEntry.legacyProvider,
@@ -50,6 +69,7 @@ class WebSearchSnapshot {
     this.latencyMs = 0,
     this.retryCount = 0,
     this.fromCache = false,
+    this.degraded = false,
   });
 
   bool get hasResults => results.isNotEmpty;
@@ -57,6 +77,48 @@ class WebSearchSnapshot {
       failureType != SearchFailureType.noResults &&
       (error != null || failureType != null || safeMessage != null);
   int get sourceCount => results.length;
+
+  WebSearchSnapshot copyWith({
+    String? requestId,
+    String? rootRequestId,
+    String? sourceMessageId,
+    String? turnId,
+    String? originalTextHash,
+    List<String>? executedQueries,
+    String? query,
+    DateTime? searchedAt,
+    String? provider,
+    List<WebSearchResult>? results,
+    String? error,
+    SearchFailureType? failureType,
+    String? safeMessage,
+    int? statusCode,
+    int? latencyMs,
+    int? retryCount,
+    bool? fromCache,
+    bool? degraded,
+  }) {
+    return WebSearchSnapshot(
+      requestId: requestId ?? this.requestId,
+      rootRequestId: rootRequestId ?? this.rootRequestId,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      turnId: turnId ?? this.turnId,
+      originalTextHash: originalTextHash ?? this.originalTextHash,
+      executedQueries: executedQueries ?? this.executedQueries,
+      query: query ?? this.query,
+      searchedAt: searchedAt ?? this.searchedAt,
+      provider: provider ?? this.provider,
+      results: results ?? this.results,
+      error: error ?? this.error,
+      failureType: failureType ?? this.failureType,
+      safeMessage: safeMessage ?? this.safeMessage,
+      statusCode: statusCode ?? this.statusCode,
+      latencyMs: latencyMs ?? this.latencyMs,
+      retryCount: retryCount ?? this.retryCount,
+      fromCache: fromCache ?? this.fromCache,
+      degraded: degraded ?? this.degraded,
+    );
+  }
 
   String toPromptContext() {
     final time = searchedAt.toLocal().toIso8601String();
@@ -81,7 +143,19 @@ class WebSearchSnapshot {
   }
 }
 
-class WebSearchService {
+/// Compatibility port consumed by the coordinator. Keeping the old facade
+/// behind this interface lets the coordinator use the normalized Provider
+/// contract without importing a concrete Provider adapter.
+abstract interface class WebSearchServicePort {
+  bool shouldSearch(String? text);
+
+  Future<WebSearchSnapshot> search(
+    String query, {
+    CancelToken? cancelToken,
+  });
+}
+
+class WebSearchService implements WebSearchServicePort {
   WebSearchService({Dio? dio, Uuid? uuid})
       : _uuid = uuid ?? const Uuid(),
         _provider = DuckDuckGoInstantAnswerProvider(
@@ -124,6 +198,7 @@ class WebSearchService {
     '时间',
   ];
 
+  @override
   bool shouldSearch(String? text) {
     final value = text?.trim();
     if (value == null || value.isEmpty) return false;
@@ -137,7 +212,11 @@ class WebSearchService {
         lower.contains('web');
   }
 
-  Future<WebSearchSnapshot> search(String query) async {
+  @override
+  Future<WebSearchSnapshot> search(
+    String query, {
+    CancelToken? cancelToken,
+  }) async {
     final requestId = _uuid.v4();
     final searchedAt = DateTime.now().toUtc();
     final stopwatch = Stopwatch()..start();
@@ -152,6 +231,7 @@ class WebSearchService {
       final response = await _provider.search(
         request,
         credential: null,
+        cancelToken: cancelToken,
       );
       final snapshot = _snapshotBuilder.build(
         request: request,
@@ -202,6 +282,7 @@ class WebSearchService {
       latencyMs: snapshot.latencyMs,
       retryCount: snapshot.retryCount,
       fromCache: snapshot.fromCache,
+      degraded: snapshot.degraded,
     );
   }
 

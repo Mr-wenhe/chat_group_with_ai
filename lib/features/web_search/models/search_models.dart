@@ -39,6 +39,7 @@ enum SearchFreshness {
 class SearchRequest {
   final String requestId;
   final String rootRequestId;
+  final String sourceMessageId;
   final String turnId;
   final String query;
   final String? originalTextHash;
@@ -49,10 +50,12 @@ class SearchRequest {
   final int maxResults;
   final bool safeSearch;
   final bool forceRefresh;
+  final bool isSensitive;
 
   SearchRequest({
     this.requestId = '',
     this.rootRequestId = '',
+    String? sourceMessageId,
     this.turnId = '',
     required String query,
     String? originalTextHash,
@@ -63,11 +66,47 @@ class SearchRequest {
     int maxResults = searchDefaultMaxResults,
     this.safeSearch = true,
     this.forceRefresh = false,
+    this.isSensitive = false,
   })  : query = sanitizeSearchText(query, maxLength: searchQueryMaxLength),
+        sourceMessageId = sourceMessageId?.trim() ?? '',
         originalTextHash = _normalizeHash(originalTextHash),
         locale = locale.trim().isEmpty ? 'zh-CN' : locale.trim(),
         country = _normalizeOptionalText(country),
         maxResults = _validateMaxResults(maxResults);
+
+  SearchRequest copyWith({
+    String? requestId,
+    String? rootRequestId,
+    String? sourceMessageId,
+    String? turnId,
+    String? query,
+    String? originalTextHash,
+    SearchCategory? category,
+    SearchFreshness? freshness,
+    String? locale,
+    String? country,
+    int? maxResults,
+    bool? safeSearch,
+    bool? forceRefresh,
+    bool? isSensitive,
+  }) {
+    return SearchRequest(
+      requestId: requestId ?? this.requestId,
+      rootRequestId: rootRequestId ?? this.rootRequestId,
+      sourceMessageId: sourceMessageId ?? this.sourceMessageId,
+      turnId: turnId ?? this.turnId,
+      query: query ?? this.query,
+      originalTextHash: originalTextHash ?? this.originalTextHash,
+      category: category ?? this.category,
+      freshness: freshness ?? this.freshness,
+      locale: locale ?? this.locale,
+      country: country ?? this.country,
+      maxResults: maxResults ?? this.maxResults,
+      safeSearch: safeSearch ?? this.safeSearch,
+      forceRefresh: forceRefresh ?? this.forceRefresh,
+      isSensitive: isSensitive ?? this.isSensitive,
+    );
+  }
 }
 
 class WebSearchResult {
@@ -154,6 +193,39 @@ class WebSearchSnapshot {
         results = List.unmodifiable(results),
         latencyMs = latencyMs < 0 ? 0 : latencyMs,
         retryCount = retryCount < 0 ? 0 : retryCount;
+
+  WebSearchSnapshot copyWith({
+    String? requestId,
+    String? rootRequestId,
+    String? originalTextHash,
+    Iterable<String>? executedQueries,
+    DateTime? searchedAt,
+    String? provider,
+    Iterable<WebSearchResult>? results,
+    SearchFailure? failure,
+    bool clearFailure = false,
+    int? statusCode,
+    bool? fromCache,
+    bool? degraded,
+    int? latencyMs,
+    int? retryCount,
+  }) {
+    return WebSearchSnapshot(
+      requestId: requestId ?? this.requestId,
+      rootRequestId: rootRequestId ?? this.rootRequestId,
+      originalTextHash: originalTextHash ?? this.originalTextHash,
+      executedQueries: executedQueries ?? this.executedQueries,
+      searchedAt: searchedAt ?? this.searchedAt,
+      provider: provider ?? this.provider,
+      results: results ?? this.results,
+      failure: clearFailure ? null : failure ?? this.failure,
+      statusCode: statusCode ?? this.statusCode,
+      fromCache: fromCache ?? this.fromCache,
+      degraded: degraded ?? this.degraded,
+      latencyMs: latencyMs ?? this.latencyMs,
+      retryCount: retryCount ?? this.retryCount,
+    );
+  }
 
   bool get hasResults => results.isNotEmpty;
 
