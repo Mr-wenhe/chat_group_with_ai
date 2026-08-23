@@ -39,6 +39,11 @@ import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/ai_governance/search_coordinator.dart';
+import 'package:chat_group/features/web_search/application/search_turn_context.dart';
+import 'package:chat_group/features/web_search/application/search_runtime_provider_factory.dart';
+import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
+import 'package:chat_group/features/web_search/presentation/web_search_sources_dialog.dart';
+import 'package:chat_group/features/web_search/presentation/web_search_status_banner.dart';
 import 'package:chat_group/features/chat_group/agentic_reply_utils.dart';
 import 'package:chat_group/features/chat_group/attachment_utils.dart';
 import 'package:chat_group/features/chat_group/auto_chat_scheduler.dart';
@@ -101,6 +106,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:pasteboard/pasteboard.dart';
+import 'package:url_launcher/url_launcher.dart';
 
 /// 空闲自动聊天（idle auto-chat）的对外可见状态，用于顶部状态条展示。
 ///
@@ -196,7 +202,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   late final AiRequestGateway _aiGateway;
 
   /// 联网搜索协调器：决定是否搜索、执行搜索并计入治理用量。
-  late final SearchCoordinator _searchCoordinator;
+  late SearchCoordinator _searchCoordinator;
+
+  /// Prepares one immutable search snapshot per user turn and associates it
+  /// with every persisted AI reply that used the evidence.
+  late SearchTurnContextController _searchTurnController;
+
+  /// Runtime search defaults loaded from the settings box when this room opens.
+  late SearchRuntimeSettings _searchRuntimeSettings;
+
+  /// Metadata fingerprint used to refresh an already-mounted room after the
+  /// user returns from Settings without disturbing an unchanged turn cache.
+  String _searchRuntimeFingerprint = '';
+
+  /// Keeps external search data separate from the runtime rules prompt.
+  static const _searchContextFormatter = SearchContextFormatter();
 
   /// 回复资格策略：判断某角色本轮能否发言（API 配置、频率上限等）。
   late final ReplyEligibilityPolicy _replyEligibility;
@@ -482,10 +502,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       client: widget.chatApi,
       onWarning: _showGovernanceWarning,
     );
-    _searchCoordinator = SearchCoordinator(
-      store: _governanceStore,
-      service: WebSearchService(),
-    );
+    _initializeSearchRuntime();
     // 读取本会话此前保存过的搜索策略覆盖值。
     _searchPolicyOverride =
         _governanceStore.conversationSearchPolicy(widget.groupId);
@@ -531,6 +548,71 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     super.didChangeDependencies();
     // 依赖变化（例如路由复用同一 State）时重新登记在场状态。
     ConversationPresenceService.instance.enter(widget.groupId);
+    _reloadSearchRuntimeIfChanged();
+  }
+
+  void _initializeSearchRuntime() {
+    final settings = SearchProviderConfigStore(db: _db);
+    _searchRuntimeSettings = settings.runtimeSettings;
+    _searchCoordinator = _createSearchCoordinator(settings);
+    _searchTurnController = SearchTurnContextController(
+      coordinator: _searchCoordinator,
+    );
+    _searchRuntimeFingerprint = _searchRuntimeSignature(settings);
+  }
+
+  SearchCoordinator _createSearchCoordinator(
+    SearchProviderConfigStore settings,
+  ) {
+    return SearchCoordinator(
+      store: _governanceStore,
+      service: WebSearchService(),
+      routes: SearchRuntimeProviderFactory(store: settings).buildRoutes(),
+    );
+  }
+
+  void _reloadSearchRuntimeIfChanged() {
+    if (_disposed) return;
+    final settings = SearchProviderConfigStore(db: _db);
+    final fingerprint = _searchRuntimeSignature(settings);
+    if (fingerprint == _searchRuntimeFingerprint) {
+      return;
+    }
+    if (_isAiReplying || _isRegenerating || _isStreaming) {
+      return;
+    }
+
+    // A changed Provider or request default invalidates the current page's
+    // turn associations. Existing in-flight work is allowed to finish before
+    // this branch runs, so no reply can bind a snapshot to the wrong runtime.
+    _searchTurnController.clear();
+    _searchRuntimeSettings = settings.runtimeSettings;
+    _searchCoordinator = _createSearchCoordinator(settings);
+    _searchTurnController = SearchTurnContextController(
+      coordinator: _searchCoordinator,
+    );
+    _searchRuntimeFingerprint = fingerprint;
+  }
+
+  String _searchRuntimeSignature(SearchProviderConfigStore settings) {
+    final configs = settings.configs
+        .map(
+          (config) => {
+            'id': config.id,
+            'name': config.name,
+            'provider': config.provider.name,
+            'baseUrl': config.baseUrl,
+            'enabled': config.enabled,
+            'isDefault': config.isDefault,
+            'credentialId': config.credentialId,
+            'hasCredential': config.hasCredential,
+          },
+        )
+        .toList(growable: false);
+    return jsonEncode({
+      'configs': configs,
+      'runtime': settings.runtimeSettings.toMap(),
+    });
   }
 
   @override
@@ -547,6 +629,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     super.activate();
     _pageActive = true;
     ConversationPresenceService.instance.enter(widget.groupId);
+    _reloadSearchRuntimeIfChanged();
     if (!_isLoading && !_workModeEnabled) {
       _startAutoChat();
     }
@@ -576,6 +659,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _inputFocusNode.dispose();
     _searchController.dispose();
     _mentionHighlightTimer?.cancel();
+    _searchTurnController.clear();
     _hideMentionOverlay();
     _mentionSearchController.dispose();
     unawaited(_speech.dispose());
@@ -588,6 +672,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (state == AppLifecycleState.resumed) {
       ConversationPresenceService.instance.enter(widget.groupId);
       unawaited(_markCurrentConversationRead());
+      _reloadSearchRuntimeIfChanged();
     }
   }
 
@@ -1023,7 +1108,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final next = _conversationController.takeNext();
     if (next != null && _canTouchUi) {
       await _runAiRound(
-          userMessage: next.text, mentionedIds: next.mentionedIds);
+        userMessage: next.text,
+        mentionedIds: next.mentionedIds,
+        currentUserMessage: next.message,
+      );
     }
   }
 
@@ -1274,6 +1362,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return;
     }
 
+    if (!isAutoChat) _reloadSearchRuntimeIfChanged();
+
     final conversationRun = isAutoChat
         ? _conversationController.beginAuto()
         : _conversationController.beginNormal();
@@ -1323,6 +1413,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return;
     }
 
+    // Search is a user-turn concern, not a character concern. Prepare once
+    // before the reply loop so every group member and the DM counterpart see
+    // exactly the same evidence snapshot. Auto-chat returns a suppressed
+    // context without touching a third-party Provider.
+    final searchTurnContext = await _prepareSearchTurnContext(
+      userMessage: userMessage,
+      currentUserMessage: currentUserMessage,
+      isAutoChat: isAutoChat,
+    );
     final repliedIds = <String>[];
     for (final character in charactersToReply) {
       final wasPendingReply = _pendingMentionedIds.contains(character.id);
@@ -1336,6 +1435,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           intent: _pendingReplyIntents[character.id],
           currentUserMessage: currentUserMessage,
           userSentiment: userSentiment,
+          searchTurnContext: searchTurnContext,
         );
       } catch (e) {
         // 单个角色失败不中断整轮：写入可见的失败气泡，继续下一个角色。
@@ -1409,6 +1509,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       _conversationController.complete();
       if (!isAutoChat) _consecutiveRound = 0;
     });
+    _reloadSearchRuntimeIfChanged();
 
     // 处理排队中的用户消息：当前回合结束后自动触发下一轮 AI 回复。
     final next = _conversationController.takeNext();
@@ -1419,6 +1520,38 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         userMessage: next.message,
       );
     }
+  }
+
+  Future<SearchTurnContext> _prepareSearchTurnContext({
+    required String? userMessage,
+    required Message? currentUserMessage,
+    required bool isAutoChat,
+  }) async {
+    final query = userMessage?.trim() ?? '';
+    final origin =
+        isAutoChat ? SearchMessageOrigin.autoChat : SearchMessageOrigin.user;
+    final sourceMessageId = currentUserMessage?.id.trim() ?? '';
+    if (isAutoChat || query.isEmpty || sourceMessageId.isEmpty) {
+      return SearchTurnContext.suppressed(
+        conversationId: widget.groupId,
+        sourceMessageId: sourceMessageId,
+        turnId: sourceMessageId,
+        query: query,
+        origin: origin,
+      );
+    }
+    return _searchTurnController.prepareUserTurn(
+      conversationId: widget.groupId,
+      sourceMessageId: sourceMessageId,
+      turnId: sourceMessageId,
+      userMessage: query,
+      requestConsent: _confirmWebSearch,
+      onStatus: _handleWebSearchStatus,
+      locale: _searchRuntimeSettings.locale,
+      country: _searchRuntimeSettings.country,
+      maxResults: _searchRuntimeSettings.maxResults,
+      safeSearch: _searchRuntimeSettings.safeSearch,
+    );
   }
 
   /// 生成单个角色的一条回复（流式打字机路径），返回最终文本。
@@ -1436,7 +1569,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       {bool isAutoChat = false,
       ReplyIntent? intent,
       Message? currentUserMessage,
-      UserMessageSentiment? userSentiment}) async {
+      UserMessageSentiment? userSentiment,
+      SearchTurnContext? searchTurnContext}) async {
     if (isAutoChat && _workModeEnabled) return '';
     // 并发兜底：同一角色正在执行 agentic 任务时，auto-chat / 其他并发路径
     // 不得触发同一角色的普通 LLM 回复，否则会出现「agentic 兜底文案 + 普通
@@ -1478,30 +1612,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       fallbackContext: context,
     );
 
-    // 按会话/全局策略决定是否联网搜索；ask 策略下通过 _confirmWebSearch 征求同意。
-    final webSearch = await _searchCoordinator.searchIfAllowed(
-      text: userMessage,
-      conversationId: widget.groupId,
-      requestConsent: _confirmWebSearch,
-      sourceMessageId: currentUserMessage?.id,
-      turnId: currentUserMessage?.id,
-      onStatus: (state) {
-        if (!_canTouchUi) return;
-        _searchBannerDismissTimer?.cancel();
-        setState(() => _webSearchState = state);
-        // 失败状态保留在页面上，便于用户在网络错误消失前打开具体诊断。
-        if (!state.status.isTerminal ||
-            state.status == SearchRunStatus.failed) {
-          return;
-        }
-        _searchBannerDismissTimer = Timer(const Duration(seconds: 3), () {
-          if (_canTouchUi) {
-            setState(() =>
-                _webSearchState = const SearchRunState(SearchRunStatus.idle));
-          }
-        });
-      },
-    );
+    // The snapshot was prepared once by _runAiRound. A missing snapshot is a
+    // valid outcome (policy off, consent denied, stable question, or failure),
+    // and must not cause this character to search again.
+    final webSearch = searchTurnContext?.snapshot;
     // 查询模型能力（是否支持图片输入），决定要不要拼多模态内容。
     final capability = _aiGateway.capability(provider, config.modelName);
     final apiMessages = _withWebSearchContext(
@@ -1627,6 +1741,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
     // 移除 LLM 可能附带的名字前缀（UI 已独立显示角色名）。
     fullContent = _stripNamePrefix(fullContent, character.name);
+    fullContent = _searchContextFormatter.sanitizeCitationsWithSourceIds(
+      fullContent,
+      webSearch == null
+          ? const <String>[]
+          : _searchContextFormatter.formatLegacy(webSearch).sourceIds,
+    );
     // 防御：非 agentic 路径下 LLM 可能自发输出 tool_call 协议标签文本
     // （尤其使用过 agentic 能力的角色，system prompt 里可能残留工具说明）。
     // 在落库与返回前清洗之，避免协议泄漏被当作普通聊天贴出来。
@@ -1655,6 +1775,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     // media 置空：AI 流式回复不携带附件，清掉以免残留脏数据落库。
     temp.media = null;
     await _appendMessage(temp);
+    if (searchTurnContext != null) {
+      _searchTurnController.bindReply(temp.id, searchTurnContext);
+    }
     await _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     // 关系态与角色记忆只在成功回复后更新，失败占位不该污染长期状态。
@@ -1747,7 +1870,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           builder: (dialogContext) => AlertDialog(
             title: const Text('允许本次联网搜索？'),
             content: Text(
-              '查询将发送给 DuckDuckGo Instant Answer：\n\n$query',
+              '查询将发送给 $_activeSearchProviderLabel：\n\n$query',
             ),
             actions: [
               TextButton(
@@ -1781,10 +1904,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               onPressed: () => Navigator.pop(dialogContext, policy.name),
               child: Text(policy.label),
             ),
-          const Padding(
-            padding: EdgeInsets.fromLTRB(24, 12, 24, 4),
+          Padding(
+            padding: const EdgeInsets.fromLTRB(24, 12, 24, 4),
             child: Text(
-              '搜索会把查询发送到 DuckDuckGo Instant Answer；它不是完整网页搜索。',
+              '当前搜索源：$_activeSearchProviderLabel。自动聊天和主动消息默认不会触发第三方搜索。',
             ),
           ),
         ],
@@ -1804,6 +1927,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (_canTouchUi) setState(() => _searchPolicyOverride = policy);
   }
 
+  String get _activeSearchProviderLabel {
+    final routes = _searchCoordinator.providerRoutes;
+    return routes.isEmpty
+        ? 'DuckDuckGo Instant Answer'
+        : routes.first.providerName;
+  }
+
   /// 联网搜索状态对应的用户可读提示文案。
   String get _webSearchStatusText => switch (_webSearchState.status) {
         SearchRunStatus.idle => '',
@@ -1817,69 +1947,89 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         SearchRunStatus.retrying =>
           '搜索服务暂时不可用，正在重试 ${_webSearchState.retryNumber}/2…',
         SearchRunStatus.evaluating => '正在整理搜索结果…',
-        SearchRunStatus.completed =>
-          '联网搜索完成 · ${_webSearchState.snapshot?.results.length ?? 0} 个来源',
+        SearchRunStatus.completed => _completedWebSearchStatus,
         SearchRunStatus.noResults => '联网搜索完成，但资料不足',
         SearchRunStatus.failed =>
           '联网搜索失败 · ${_webSearchState.snapshot?.failureType?.name ?? 'unknown'}，点击查看诊断',
         SearchRunStatus.cancelled => '联网搜索已取消',
       };
 
+  String get _completedWebSearchStatus {
+    final snapshot = _webSearchState.snapshot;
+    final cacheLabel = snapshot?.fromCache == true ? '使用缓存 · ' : '';
+    final degradedLabel = snapshot?.degraded == true ? '已降级 · ' : '';
+    return '联网搜索完成 · $cacheLabel$degradedLabel'
+        '${snapshot?.results.length ?? 0} 个来源';
+  }
+
+  void _handleWebSearchStatus(SearchRunState state) {
+    if (!_canTouchUi) return;
+    _searchBannerDismissTimer?.cancel();
+    setState(() => _webSearchState = state);
+    // Failed state remains visible so the user can inspect the persisted-safe
+    // diagnostics instead of losing the only actionable error clue.
+    if (!state.status.isTerminal || state.status == SearchRunStatus.failed) {
+      return;
+    }
+    _searchBannerDismissTimer = Timer(const Duration(seconds: 3), () {
+      if (_canTouchUi) {
+        setState(
+          () => _webSearchState = const SearchRunState(SearchRunStatus.idle),
+        );
+      }
+    });
+  }
+
   /// 展示上一次联网搜索命中的来源列表（查询词、时间、标题、摘要、链接）。
   void _showWebSearchSources() {
     final snapshot = _webSearchState.snapshot;
     if (snapshot == null) return;
-    showDialog<void>(
-      context: context,
-      builder: (dialogContext) => AlertDialog(
-        title: const Text('联网搜索来源'),
-        content: SizedBox(
-          width: 520,
-          child: ListView(
-            shrinkWrap: true,
-            children: [
-              Text('查询：${snapshot.query}'),
-              Text('时间：${snapshot.searchedAt.toLocal()}'),
-              if (snapshot.failureType != null || snapshot.safeMessage != null)
-                Card(
-                  margin: const EdgeInsets.only(top: 12, bottom: 8),
-                  child: Padding(
-                    padding: const EdgeInsets.all(12),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: [
-                        Text(
-                          '失败类型：${snapshot.failureType?.name ?? 'unknown'}',
-                          style: const TextStyle(fontWeight: FontWeight.w600),
-                        ),
-                        const SizedBox(height: 4),
-                        Text(snapshot.safeMessage ?? '联网搜索失败，请稍后重试'),
-                        if (snapshot.statusCode != null)
-                          Text('HTTP 状态码：${snapshot.statusCode}'),
-                      ],
-                    ),
-                  ),
-                ),
-              for (final result in snapshot.results)
-                ListTile(
-                  contentPadding: EdgeInsets.zero,
-                  title: Text(result.title),
-                  subtitle: Text('${result.snippet}\n${result.url}'),
-                ),
-            ],
-          ),
-        ),
-        actions: [
-          TextButton(
-            onPressed: () => Navigator.pop(dialogContext),
-            child: const Text('关闭'),
-          ),
-        ],
-      ),
+    _showSourcesDialog(snapshot);
+  }
+
+  void _showSourcesForReply(Message message) {
+    final snapshot =
+        _searchTurnController.contextForReply(message.id)?.snapshot;
+    if (snapshot == null) return;
+    _showSourcesDialog(snapshot);
+  }
+
+  void _showSourcesDialog(WebSearchSnapshot snapshot) {
+    SourcesDialog.show(
+      context,
+      snapshot,
+      onOpenSource: (uri) => unawaited(_openSearchSource(uri)),
     );
   }
 
-  /// 把搜索结果作为一条 system 消息注入到请求消息列表中。
+  Future<void> _openSearchSource(Uri uri) async {
+    if (uri.host.trim().isEmpty ||
+        !{'http', 'https'}.contains(uri.scheme.toLowerCase())) {
+      _showSearchSourceOpenError('来源链接无效');
+      return;
+    }
+    try {
+      final launched = await launchUrl(
+        uri,
+        mode: LaunchMode.externalApplication,
+      );
+      if (launched || !_canTouchUi) return;
+      _showSearchSourceOpenError('打开来源失败');
+    } on Object catch (_) {
+      _showSearchSourceOpenError('打开来源失败');
+    }
+  }
+
+  void _showSearchSourceOpenError(String message) {
+    if (!_canTouchUi) return;
+    AppToast.show(
+      context,
+      message,
+      icon: Icons.error_outline_rounded,
+    );
+  }
+
+  /// 把搜索规则与 JSON evidence 数据作为隔离的消息注入请求。
   ///
   /// 插入位置在"最后一条 system 消息之后、第一条非 system 消息之前"，
   /// 既不破坏人格设定的优先级，也确保搜索资料在对话内容之前被模型看到。
@@ -1890,16 +2040,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     if (snapshot == null) return messages;
     final next = List<Map<String, dynamic>>.from(messages);
     final insertAt = next.indexWhere((message) => message['role'] != 'system');
-    final contextMessage = {
-      'role': 'system',
-      'content': snapshot.toPromptContext(),
-    };
-    // insertAt <= 0：全是 system 消息（-1）或首条就是非 system（0），都插到最前。
-    if (insertAt <= 0) {
-      next.insert(0, contextMessage);
-    } else {
-      next.insert(insertAt, contextMessage);
-    }
+    final contextMessages =
+        _searchContextFormatter.formatLegacyMessages(snapshot);
+    // 没有非 system 消息时，证据必须追加到现有 system 规则之后；否则
+    // 外部 evidence 会跑到人格与安全规则前面，破坏既定的注入边界。
+    final target = insertAt < 0 ? next.length : insertAt;
+    next.insertAll(target, contextMessages);
     return next;
   }
 
@@ -4861,6 +5007,39 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
                 Navigator.pop(ctx);
                 _regenerateAiReply(message, sender);
               }),
+              if (_searchTurnController.contextForRegeneration(message.id) !=
+                      null ||
+                  _userMessageBefore(message) != null) ...[
+                const SizedBox(height: 8),
+                SheetButton(
+                  ctx,
+                  cs,
+                  Icons.public_rounded,
+                  '刷新来源并重新生成',
+                  () {
+                    Navigator.pop(ctx);
+                    _regenerateAiReply(
+                      message,
+                      sender,
+                      forceRefresh: true,
+                    );
+                  },
+                ),
+              ],
+              if (_searchTurnController.contextForReply(message.id) !=
+                  null) ...[
+                const SizedBox(height: 8),
+                SheetButton(
+                  ctx,
+                  cs,
+                  Icons.library_books_outlined,
+                  '查看本条来源',
+                  () {
+                    Navigator.pop(ctx);
+                    _showSourcesForReply(message);
+                  },
+                ),
+              ],
               const SizedBox(height: 8),
               SheetButton(ctx, cs, Icons.format_quote_rounded, '引用回复', () {
                 Navigator.pop(ctx);
@@ -5020,8 +5199,59 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 新消息通过 replyToMessageId 指向被重新生成的原消息，保留可追溯关系。
   /// 流程与 [_generateAiReply] 类似（流式 → 失败重试 → 空内容兜底 → 落库），
   /// 但不参与意图/关系态更新——这是用户手动动作，不代表角色的自主行为。
-  Future<void> _regenerateAiReply(
-      Message original, AICharacter character) async {
+  Future<SearchTurnContext?> _regenerationSearchContext(
+    Message original, {
+    required bool forceRefresh,
+  }) async {
+    final existing = _searchTurnController.contextForRegeneration(original.id);
+    if (!forceRefresh) return existing;
+    final refreshed = await _searchTurnController.refreshRegeneration(
+      originalReplyId: original.id,
+      requestConsent: _confirmWebSearch,
+      onStatus: _handleWebSearchStatus,
+      locale: _searchRuntimeSettings.locale,
+      country: _searchRuntimeSettings.country,
+      maxResults: _searchRuntimeSettings.maxResults,
+      safeSearch: _searchRuntimeSettings.safeSearch,
+    );
+    if (refreshed != null) return refreshed;
+
+    // Older replies may predate Stage 07 and therefore have no in-memory
+    // association. An explicit refresh can still use the triggering user
+    // message when it is present; default regeneration never takes this path.
+    final source = _userMessageBefore(original);
+    if (source == null || source.content.trim().isEmpty) return null;
+    return _searchTurnController.prepareUserTurn(
+      conversationId: widget.groupId,
+      sourceMessageId: source.id,
+      turnId: source.id,
+      userMessage: source.content,
+      requestConsent: _confirmWebSearch,
+      origin: SearchMessageOrigin.regeneration,
+      forceRefresh: true,
+      onStatus: _handleWebSearchStatus,
+      locale: _searchRuntimeSettings.locale,
+      country: _searchRuntimeSettings.country,
+      maxResults: _searchRuntimeSettings.maxResults,
+      safeSearch: _searchRuntimeSettings.safeSearch,
+    );
+  }
+
+  Message? _userMessageBefore(Message original) {
+    final index = _messages.indexWhere((message) => message.id == original.id);
+    if (index < 0) return null;
+    for (var cursor = index - 1; cursor >= 0; cursor--) {
+      final candidate = _messages[cursor];
+      if (candidate.groupId == widget.groupId &&
+          candidate.senderType == 'user') {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  Future<void> _regenerateAiReply(Message original, AICharacter character,
+      {bool forceRefresh = false}) async {
     if (_isRegenerating || _isAiReplying) return;
     if (_conversationController.beginNormal() == null) return;
     setState(() {
@@ -5038,6 +5268,12 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       return;
     }
 
+    final searchTurnContext = await _regenerationSearchContext(
+      original,
+      forceRefresh: forceRefresh,
+    );
+    final webSearch = searchTurnContext?.snapshot;
+
     // 上下文里剔除原消息本身，否则模型会看到"自己上次的答案"而倾向复读。
     final msgsBefore = _messages.where((m) => m.id != original.id).toList();
     _regenerateContext = msgsBefore.length > 20
@@ -5047,10 +5283,16 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     final provider = ApiProvider.values.firstWhere(
         (p) => p.name == config.provider,
         orElse: () => ApiProvider.deepseek);
-    final apiMessages = await _buildApiMessages(
-        character, _regenerateContext, null,
+    final apiMessages = _withWebSearchContext(
+      await _buildApiMessages(
+        character,
+        _regenerateContext,
+        null,
         supportsVision:
-            _aiGateway.capability(provider, config.modelName).supportsVision);
+            _aiGateway.capability(provider, config.modelName).supportsVision,
+      ),
+      webSearch,
+    );
 
     final temp = Message(
         groupId: widget.groupId,
@@ -5128,12 +5370,23 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
         ? const <String>[]
         : parseMentionedCharacterIds(fullContent, _characters);
     fullContent = _stripNamePrefix(fullContent, character.name);
+    fullContent = _searchContextFormatter.sanitizeCitationsWithSourceIds(
+      fullContent,
+      webSearch == null
+          ? const <String>[]
+          : _searchContextFormatter.formatLegacy(webSearch).sourceIds,
+    );
     temp.content = fullContent;
     temp.isMention = mentionedIds.isNotEmpty;
     temp.mentionedAiIds = mentionedIds;
     // 指回原消息，保留"这条是对哪条的重写"的可追溯关系。
     temp.replyToMessageId = original.id;
-    if (!failed) await _appendMessage(temp);
+    if (!failed) {
+      await _appendMessage(temp);
+      if (searchTurnContext != null) {
+        _searchTurnController.bindReply(temp.id, searchTurnContext);
+      }
+    }
     await _recordReplyUsage(character);
     _registerUserMentionIfNeeded(temp);
     if (!failed && fullContent.trim().isNotEmpty) {
@@ -5155,6 +5408,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
           _messages = _messages.where((m) => m.id != original.id).toList();
         }
       });
+      _reloadSearchRuntimeIfChanged();
     }
   }
 
@@ -5296,14 +5550,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
               )),
             ),
           if (_webSearchState.status != SearchRunStatus.idle)
-            SearchStatusBanner(
+            WebSearchStatusBanner(
+              state: _webSearchState,
               message: _webSearchStatusText,
-              busy: _webSearchState.status == SearchRunStatus.searching ||
-                  _webSearchState.status == SearchRunStatus.awaitingConsent ||
-                  _webSearchState.status == SearchRunStatus.planning ||
-                  _webSearchState.status == SearchRunStatus.retrying ||
-                  _webSearchState.status == SearchRunStatus.evaluating,
-              onTap: _webSearchState.snapshot == null
+              onOpenDetails: _webSearchState.snapshot == null
                   ? null
                   : _showWebSearchSources,
             ),

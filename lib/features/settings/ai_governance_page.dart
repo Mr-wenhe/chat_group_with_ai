@@ -5,7 +5,10 @@ import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/model_capability_registry.dart';
 import 'package:chat_group/features/ai_governance/money_micros.dart';
 import 'package:chat_group/providers/providers.dart';
+import 'package:chat_group/features/web_search/application/search_cache_controller.dart';
+import 'package:chat_group/features/web_search/presentation/web_search_audit_card.dart';
 import 'package:chat_group/features/web_search/presentation/web_search_settings_section.dart';
+import 'package:chat_group/features/web_search/presentation/web_search_runtime_settings_card.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -20,6 +23,7 @@ class AiGovernancePage extends ConsumerStatefulWidget {
 class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
   late final DatabaseService _db;
   late final AiGovernanceStore _store;
+  late final SearchProviderConfigStore _searchSettings;
   final _registry = ModelCapabilityRegistry();
   late BudgetSettings _budget;
   late WebSearchPolicy _searchPolicy;
@@ -33,6 +37,7 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
     super.initState();
     _db = ref.read(databaseServiceProvider);
     _store = AiGovernanceStore.forDatabase(_db);
+    _searchSettings = SearchProviderConfigStore(db: _db);
     _budget = _store.budgetSettings;
     _searchPolicy = _store.globalSearchPolicy;
     _daily = TextEditingController(
@@ -98,7 +103,13 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
           ),
           const SizedBox(height: 8),
           WebSearchSettingsSection(
-            store: SearchProviderConfigStore(db: _db),
+            store: _searchSettings,
+          ),
+          const SizedBox(height: 8),
+          WebSearchRuntimeSettingsCard(
+            initialSettings: _searchSettings.runtimeSettings,
+            onSave: _searchSettings.saveRuntimeSettings,
+            onClearCache: () => SearchCacheController.clear(_searchSettings),
           ),
           _title('预算（USD，留空表示不限）'),
           Card(
@@ -164,7 +175,10 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
           _title('脱敏诊断'),
           _diagnosticsCard(),
           _title('联网记录'),
-          _searchAuditCard(),
+          WebSearchAuditCard(
+            entries: _store.searchAudits,
+            onClear: _clearSearchAudits,
+          ),
         ],
       ),
     );
@@ -320,31 +334,6 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
                   ClipboardData(text: item.toSafeText()),
                 ),
               ),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _searchAuditCard() {
-    final items = _store.searchAudits.reversed.toList(growable: false);
-    return Card(
-      child: Column(
-        children: [
-          ListTile(
-            title: Text('${items.length} 条联网记录'),
-            subtitle: const Text('含查询、时间、状态和来源；最多保留 100 条'),
-            trailing: TextButton(
-              onPressed: items.isEmpty ? null : _clearSearchAudits,
-              child: const Text('清除'),
-            ),
-          ),
-          for (final item in items.take(20))
-            ListTile(
-              dense: true,
-              title: Text(item.query),
-              subtitle: Text('${item.status} · ${item.searchedAt.toLocal()}'),
-              trailing: Text('${item.sources.length} 来源'),
             ),
         ],
       ),

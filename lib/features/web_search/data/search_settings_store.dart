@@ -4,6 +4,7 @@ import 'package:hive/hive.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 import '../models/search_provider_config.dart';
+import '../models/search_runtime_settings.dart';
 import '../security/search_endpoint_validator.dart';
 import 'search_credential_repository.dart';
 
@@ -57,6 +58,7 @@ class SearchProviderConfigStore {
   static const String configsKey = 'web_search_provider_configs_v1';
   static const String defaultProviderKey = 'web_search_default_provider_id_v1';
   static const String runtimeSettingsKey = 'web_search_runtime_settings_v2';
+  static const String resultCacheKey = 'web_search_result_cache_v1';
 
   final Box<dynamic> box;
   final SearchCredentialRepository credentials;
@@ -135,6 +137,18 @@ class SearchProviderConfigStore {
     }
     return null;
   }
+
+  SearchRuntimeSettings get runtimeSettings =>
+      SearchRuntimeSettings.fromMap(box.get(runtimeSettingsKey));
+
+  Future<void> saveRuntimeSettings(SearchRuntimeSettings settings) =>
+      box.put(runtimeSettingsKey, settings.toMap());
+
+  /// Clears the persisted cache namespace. In-memory turn caches are owned by
+  /// active chat coordinators and are cleared when their page is recreated;
+  /// this operation also gives future persistent cache implementations one
+  /// stable, backwards-compatible key to invalidate.
+  Future<void> clearSearchCache() => box.delete(resultCacheKey);
 
   Future<SearchProviderConfigSaveResult> save(
     SearchProviderConfig draft, {

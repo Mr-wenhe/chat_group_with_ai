@@ -12,16 +12,30 @@ typedef SearchCacheMarker<T> = T Function(T value);
 /// request among its AI replies without leaking results or futures into a
 /// different test, conversation, or room.
 class SearchTurnCache {
+  static int _globalGeneration = 0;
+
   final DateTime Function() _clock;
   final Map<SearchTurnCacheKey, _CompletedCacheValue> _completed = {};
   final Map<SearchTurnCacheKey, Future<Object?>> _inFlight = {};
+  int _generation;
 
   SearchTurnCache({DateTime Function()? clock})
-      : _clock = clock ?? DateTime.now;
+      : _clock = clock ?? DateTime.now,
+        _generation = _globalGeneration;
 
-  int get completedCount => _completed.length;
+  /// Invalidates completed entries in every active coordinator on the next
+  /// cache access. In-flight requests are intentionally allowed to finish.
+  static void clearAll() => _globalGeneration++;
 
-  int get inFlightCount => _inFlight.length;
+  int get completedCount {
+    _syncGeneration();
+    return _completed.length;
+  }
+
+  int get inFlightCount {
+    _syncGeneration();
+    return _inFlight.length;
+  }
 
   /// Returns a cached value, joins an existing load, or starts one load.
   ///
@@ -36,6 +50,7 @@ class SearchTurnCache {
     SearchCachePredicate<T>? shouldCache,
     SearchCacheMarker<T>? markFromCache,
   }) {
+    _syncGeneration();
     final running = _inFlight[key];
     if (running != null) return running as Future<T>;
 
@@ -61,10 +76,16 @@ class SearchTurnCache {
     return completer.future;
   }
 
-  void invalidate(SearchTurnCacheKey key) => _completed.remove(key);
+  void invalidate(SearchTurnCacheKey key) {
+    _syncGeneration();
+    _completed.remove(key);
+  }
 
   /// Clears completed entries but lets an active request finish normally.
-  void clearCompleted() => _completed.clear();
+  void clearCompleted() {
+    _syncGeneration();
+    _completed.clear();
+  }
 
   /// Clears completed entries and forgets references to active futures.
   ///
@@ -72,8 +93,15 @@ class SearchTurnCache {
   /// should pass a CancelToken to the Provider. Forgetting the reference is
   /// useful when a room is disposed and no later caller should join it.
   void clear() {
+    _syncGeneration();
     _completed.clear();
     _inFlight.clear();
+  }
+
+  void _syncGeneration() {
+    if (_generation == _globalGeneration) return;
+    _completed.clear();
+    _generation = _globalGeneration;
   }
 
   bool _isFresh(_CompletedCacheValue value, Duration ttl) {

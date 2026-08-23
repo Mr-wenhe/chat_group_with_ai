@@ -651,7 +651,7 @@ void main() {
     expect(snapshot?.failure?.type, SearchFailureType.cancelled);
   });
 
-  test('audit stores safe provider diagnostics without credentials', () async {
+  test('audit blocks scanner-detected secrets before the provider', () async {
     const secret = 'sk-live-stage05-secret';
     final provider = _ScriptedProvider(
       SearchProviderKind.brave,
@@ -679,8 +679,9 @@ void main() {
     );
 
     final audit = store.searchAudits.single;
-    expect(audit.provider, 'brave');
-    expect(audit.failureType, SearchFailureType.unauthorized.name);
+    expect(provider.searchCount, 0);
+    expect(audit.provider, 'none');
+    expect(audit.failureType, SearchFailureType.unsafeQuery.name);
     expect(audit.fromCache, isFalse);
     expect(audit.queryPreview, isNot(contains(secret)));
     expect(audit.toMap().toString(), isNot(contains(secret)));

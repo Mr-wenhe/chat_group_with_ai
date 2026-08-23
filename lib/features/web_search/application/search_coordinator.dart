@@ -9,25 +9,38 @@ import '../models/search_failure_factory.dart';
 import '../models/search_models.dart' as domain;
 import '../providers/search_provider.dart';
 import 'search_coordinator_support.dart';
+import 'search_intent_detector.dart';
 import 'search_legacy_executor.dart';
 import 'search_provider_chain.dart';
 import 'search_provider_route.dart';
+import 'search_query_planner.dart';
 import 'search_retry_policy.dart';
 import 'search_run_state.dart';
 import 'search_turn_cache.dart';
+import '../security/search_query_sanitizer.dart';
 
 export 'search_provider_route.dart';
 export 'search_retry_policy.dart';
 export 'search_run_state.dart';
 export 'search_turn_cache.dart';
+export 'search_context_formatter.dart';
+export 'search_intent_detector.dart';
+export 'search_prompts.dart';
+export 'search_query_planner.dart';
+export '../security/search_query_sanitizer.dart';
 
-/// Pure search orchestration: policy gates, turn cache, retry budget, and
-/// Provider failover. Query intent/planning remains outside this class.
+part 'search_coordinator_legacy.dart';
+
+/// Search orchestration: local intent, policy gates, optional planning, turn
+/// cache, retry budget, and Provider failover.
 class SearchCoordinator {
   final GovernancePersistence store;
   final legacy.WebSearchServicePort? service;
   final SearchTurnCache cache;
   final SearchRetryPolicy retryPolicy;
+  final SearchIntentDetector intentDetector;
+  final SearchQuerySanitizer sanitizer;
+  final SearchQueryPlanner? queryPlanner;
   final DateTime Function() _clock;
   final Uuid _uuid;
   final List<SearchProviderRoute> _routes;
@@ -62,6 +75,9 @@ class SearchCoordinator {
     Iterable<SearchProvider>? backupProviders,
     SearchTurnCache? cache,
     SearchRetryPolicy? retryPolicy,
+    SearchIntentDetector? intentDetector,
+    SearchQuerySanitizer? sanitizer,
+    this.queryPlanner,
     SearchRetrySleep sleep = searchRetrySleep,
     DateTime Function()? clock,
     Duration totalBudget = searchRetryBudget,
@@ -75,6 +91,8 @@ class SearchCoordinator {
               clock: clock ?? DateTime.now,
               totalBudget: totalBudget,
             ),
+        intentDetector = intentDetector ?? const SearchIntentDetector(),
+        sanitizer = sanitizer ?? const SearchQuerySanitizer(),
         _routes = _normalizeRoutes([
           ...routes,
           ...?providerRoutes,
@@ -112,41 +130,63 @@ class SearchCoordinator {
     SearchStatusListener? onStatus,
     WebSearchPolicy? policy,
     CancelToken? cancelToken,
+    bool consentAlreadyGranted = false,
   }) async {
-    final prepared = _support.prepareRequest(request, conversationId);
+    final sanitized = sanitizer.sanitize(request.query);
+    final prepared = _support.prepareRequest(
+      request.copyWith(
+        query: sanitized.text,
+        // The coordinator is the final privacy boundary. Callers may provide
+        // an explicit flag, but the local scanner must be authoritative too.
+        isSensitive: request.isSensitive || sanitized.containsSensitiveData,
+      ),
+      conversationId,
+    );
     final effective = _constrainedPolicy(
       configured: effectivePolicy(conversationId),
       requested: policy,
     );
-    if (!await _passPolicyGate(
+    if (effective == WebSearchPolicy.off) {
+      // Keep the disabled audit semantics even when the query is entirely
+      // sensitive and therefore has no safe preview to show.
+      if (!await _passPolicyGate(
+        request: prepared,
+        policy: effective,
+        requestConsent: requestConsent,
+        conversationId: conversationId,
+        onStatus: onStatus,
+        consentAlreadyGranted: consentAlreadyGranted,
+      )) {
+        return null;
+      }
+    } else if (sanitized.blocked ||
+        (prepared.isSensitive && prepared.query.trim().isEmpty)) {
+      // An all-secret query must never reach an ask dialog with an empty
+      // preview or a Provider with an empty query. The explicit-sensitive
+      // branch also protects callers that already redacted their query
+      // before entering this coordinator.
+      return _unsafeSnapshot(
+        request: prepared,
+        conversationId: conversationId,
+        onStatus: onStatus,
+      );
+    } else if (!await _passPolicyGate(
       request: prepared,
       policy: effective,
       requestConsent: requestConsent,
       conversationId: conversationId,
       onStatus: onStatus,
+      consentAlreadyGranted: consentAlreadyGranted,
     )) {
       return null;
     }
 
     if (prepared.isSensitive && effective == WebSearchPolicy.auto) {
-      final snapshot = _support.failureSnapshot(
+      return _unsafeSnapshot(
         request: prepared,
-        provider: 'none',
-        failure: buildSearchFailure(type: SearchFailureType.unsafeQuery),
-      );
-      _emit(
-        onStatus,
-        SearchRunStatus.failed,
-        request: prepared,
-        domainSnapshot: snapshot,
-      );
-      await _support.auditDomain(
         conversationId: conversationId,
-        request: prepared,
-        snapshot: snapshot,
-        status: SearchRunStatus.failed,
+        onStatus: onStatus,
       );
-      return snapshot;
     }
 
     if (_isCancelled(cancelToken)) {
@@ -215,6 +255,31 @@ class SearchCoordinator {
     return snapshot;
   }
 
+  Future<domain.WebSearchSnapshot> _unsafeSnapshot({
+    required domain.SearchRequest request,
+    required String conversationId,
+    required SearchStatusListener? onStatus,
+  }) async {
+    final snapshot = _support.failureSnapshot(
+      request: request,
+      provider: 'none',
+      failure: buildSearchFailure(type: SearchFailureType.unsafeQuery),
+    );
+    _emit(
+      onStatus,
+      SearchRunStatus.failed,
+      request: request,
+      domainSnapshot: snapshot,
+    );
+    await _support.auditDomain(
+      conversationId: conversationId,
+      request: request,
+      snapshot: snapshot,
+      status: SearchRunStatus.failed,
+    );
+    return snapshot;
+  }
+
   Future<domain.WebSearchSnapshot?> searchTurn({
     required domain.SearchRequest request,
     required String conversationId,
@@ -222,6 +287,7 @@ class SearchCoordinator {
     SearchStatusListener? onStatus,
     WebSearchPolicy? policy,
     CancelToken? cancelToken,
+    bool consentAlreadyGranted = false,
   }) =>
       search(
         request: request,
@@ -230,75 +296,8 @@ class SearchCoordinator {
         onStatus: onStatus,
         policy: policy,
         cancelToken: cancelToken,
+        consentAlreadyGranted: consentAlreadyGranted,
       );
-
-  /// Backward-compatible facade used by the current chat room.
-  Future<legacy.WebSearchSnapshot?> searchIfAllowed({
-    required String? text,
-    required String conversationId,
-    required SearchConsent requestConsent,
-    SearchStatusListener? onStatus,
-    String? sourceMessageId,
-    String? turnId,
-    domain.SearchCategory category = domain.SearchCategory.general,
-    domain.SearchFreshness freshness = domain.SearchFreshness.any,
-    String locale = 'zh-CN',
-    String? country,
-    int maxResults = domain.searchDefaultMaxResults,
-    bool safeSearch = true,
-    bool forceRefresh = false,
-    bool isSensitive = false,
-    CancelToken? cancelToken,
-  }) async {
-    final query = text?.trim() ?? '';
-    if (query.isEmpty) return null;
-    if (service != null && !service!.shouldSearch(query)) return null;
-    if (service == null && _routes.isEmpty) return null;
-
-    final prepared = _support.prepareRequest(
-      domain.SearchRequest(
-        requestId: _uuid.v4(),
-        rootRequestId: turnId ?? conversationId,
-        sourceMessageId:
-            sourceMessageId ?? SearchCoordinatorSupport.hash(query),
-        turnId: turnId ?? conversationId,
-        query: query,
-        category: category,
-        freshness: freshness,
-        locale: locale,
-        country: country,
-        maxResults: maxResults,
-        safeSearch: safeSearch,
-        forceRefresh: forceRefresh,
-        isSensitive: isSensitive,
-      ),
-      conversationId,
-    );
-
-    if (_routes.isEmpty && service != null) {
-      return _searchLegacyIfAllowed(
-        request: prepared,
-        conversationId: conversationId,
-        requestConsent: requestConsent,
-        onStatus: onStatus,
-        cancelToken: cancelToken,
-      );
-    }
-
-    final snapshot = await search(
-      request: prepared,
-      conversationId: conversationId,
-      requestConsent: requestConsent,
-      onStatus: onStatus,
-      cancelToken: cancelToken,
-    );
-    return snapshot == null
-        ? null
-        : _support.toLegacySnapshot(prepared.query, snapshot).copyWith(
-              sourceMessageId: prepared.sourceMessageId,
-              turnId: prepared.turnId,
-            );
-  }
 
   Future<domain.WebSearchSnapshot> _searchProvidersCached({
     required domain.SearchRequest request,
@@ -329,6 +328,7 @@ class SearchCoordinator {
     required SearchConsent? requestConsent,
     required String conversationId,
     required SearchStatusListener? onStatus,
+    bool consentAlreadyGranted = false,
   }) async {
     if (policy == WebSearchPolicy.off) {
       _emit(onStatus, SearchRunStatus.disabled, request: request);
@@ -339,7 +339,7 @@ class SearchCoordinator {
       );
       return false;
     }
-    if (policy != WebSearchPolicy.ask) return true;
+    if (policy != WebSearchPolicy.ask || consentAlreadyGranted) return true;
 
     _emit(onStatus, SearchRunStatus.awaitingConsent, request: request);
     final allowed = await requestConsent?.call(request.query) ?? false;
@@ -352,88 +352,6 @@ class SearchCoordinator {
       status: SearchRunStatus.denied,
     );
     return false;
-  }
-
-  Future<legacy.WebSearchSnapshot?> _searchLegacyIfAllowed({
-    required domain.SearchRequest request,
-    required String conversationId,
-    required SearchConsent requestConsent,
-    required SearchStatusListener? onStatus,
-    required CancelToken? cancelToken,
-  }) async {
-    final policy = effectivePolicy(conversationId);
-    if (!await _passPolicyGate(
-      request: request,
-      policy: policy,
-      requestConsent: requestConsent,
-      conversationId: conversationId,
-      onStatus: onStatus,
-    )) {
-      return null;
-    }
-    if (request.isSensitive && policy == WebSearchPolicy.auto) {
-      final snapshot = _support.toLegacySnapshot(
-        request.query,
-        _support.failureSnapshot(
-          request: request,
-          provider: 'none',
-          failure: buildSearchFailure(type: SearchFailureType.unsafeQuery),
-        ),
-      );
-      _emit(onStatus, SearchRunStatus.failed,
-          request: request, snapshot: snapshot);
-      await _support.auditLegacy(
-        conversationId: conversationId,
-        request: request,
-        snapshot: snapshot,
-        status: SearchRunStatus.failed,
-      );
-      return snapshot;
-    }
-    if (_isCancelled(cancelToken)) {
-      final snapshot = _support.toLegacySnapshot(
-        request.query,
-        _support.cancelledSnapshot(
-          request: request,
-          provider: legacy.WebSearchService.providerName,
-        ),
-      );
-      _emit(
-        onStatus,
-        SearchRunStatus.cancelled,
-        request: request,
-        snapshot: snapshot,
-      );
-      await _support.auditLegacy(
-        conversationId: conversationId,
-        request: request,
-        snapshot: snapshot,
-        status: SearchRunStatus.cancelled,
-      );
-      return snapshot;
-    }
-
-    _emit(onStatus, SearchRunStatus.planning, request: request);
-    final snapshot = await _legacyExecutor!.search(
-      request: request,
-      cancelToken: cancelToken,
-      onStatus: onStatus,
-    );
-    _emit(
-      onStatus,
-      SearchRunStatus.evaluating,
-      request: request,
-      snapshot: snapshot,
-    );
-    final status = _support.legacyStatus(snapshot);
-    _emit(onStatus, status, request: request, snapshot: snapshot);
-    await _support.auditLegacy(
-      conversationId: conversationId,
-      request: request,
-      snapshot: snapshot,
-      status: status,
-    );
-    return snapshot;
   }
 
   void _emit(

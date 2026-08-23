@@ -6,6 +6,7 @@ import 'package:uuid/uuid.dart';
 
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/search_failure_classifier.dart';
+import 'package:chat_group/features/web_search/application/search_intent_detector.dart';
 import 'package:chat_group/features/web_search/application/search_snapshot_builder.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart'
     as domain;
@@ -169,48 +170,9 @@ class WebSearchService implements WebSearchServicePort {
 
   static const providerName = SearchAuditEntry.legacyProvider;
 
-  static const _currentInfoTriggers = [
-    '联网',
-    '搜索',
-    '查一下',
-    '查查',
-    '搜一下',
-    '最新',
-    '最近',
-    '今天',
-    '现在',
-    '当前',
-    '新闻',
-    '价格',
-    '汇率',
-    '天气',
-    '政策',
-    '法规',
-    '版本',
-    '发布',
-    'CEO',
-    'ceo',
-    '总统',
-    '主席',
-    '市长',
-    '几点',
-    '日期',
-    '时间',
-  ];
-
   @override
-  bool shouldSearch(String? text) {
-    final value = text?.trim();
-    if (value == null || value.isEmpty) return false;
-    if (_currentInfoTriggers.any(value.contains)) return true;
-    final lower = value.toLowerCase();
-    return lower.contains('latest') ||
-        lower.contains('current') ||
-        lower.contains('today') ||
-        lower.contains('now') ||
-        lower.contains('search') ||
-        lower.contains('web');
-  }
+  bool shouldSearch(String? text) =>
+      const SearchIntentDetector().shouldSearch(text);
 
   @override
   Future<WebSearchSnapshot> search(
@@ -269,6 +231,7 @@ class WebSearchService implements WebSearchServicePort {
       results: snapshot.results
           .map(
             (result) => WebSearchResult(
+              sourceId: result.sourceId,
               title: result.title,
               snippet: result.snippet,
               url: result.url.toString(),

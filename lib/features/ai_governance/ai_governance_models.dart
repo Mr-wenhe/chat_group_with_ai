@@ -6,6 +6,7 @@ enum AiRequestPurpose {
   proactive('主动消息'),
   summary('记忆摘要'),
   agent('工作任务'),
+  searchPlanning('搜索查询规划'),
   retry('重试'),
   connectionTest('连接测试');
 
