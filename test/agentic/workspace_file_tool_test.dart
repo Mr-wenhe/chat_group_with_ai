@@ -12,6 +12,33 @@ void main() {
     expect(WorkspacePathGuard.isSafeRelativePath('/etc/passwd'), isFalse);
   });
 
+  test('runCommand forwards the conversation id to the bridge', () async {
+    Map<String, dynamic>? receivedBody;
+    final server = await HttpServer.bind(InternetAddress.loopbackIPv4, 0);
+    addTearDown(() => server.close(force: true));
+    server.listen((request) async {
+      final bodyText = await utf8.decoder.bind(request).join();
+      receivedBody = jsonDecode(bodyText) as Map<String, dynamic>;
+      request.response.headers.contentType = ContentType.json;
+      request.response.write(jsonEncode({'ok': true, 'exitCode': 0}));
+      await request.response.close();
+    });
+    final tool = WorkspaceFileTool(
+      LocalAgentBridgeClient(
+        baseUrl: 'http://127.0.0.1:${server.port}',
+        token: 'test-token',
+      ),
+      conversationId: 'conv-b',
+    );
+
+    await tool.runCommand('flutter analyze sample.dart');
+
+    expect(receivedBody, {
+      'command': 'flutter analyze sample.dart',
+      'conversationId': 'conv-b',
+    });
+  });
+
   test('write falls back to legacy apply-patch endpoint when write is 404',
       () async {
     final requests = <String>[];

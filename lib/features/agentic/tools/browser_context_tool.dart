@@ -31,9 +31,8 @@ class BrowserContextTool {
       title: data['title'] as String? ?? '',
       selectedText: data['selectedText'] as String? ?? '',
       pageText: data['pageText'] as String? ?? '',
-      capturedAt:
-          DateTime.tryParse(data['capturedAt'] as String? ?? '') ??
-              DateTime.now(),
+      capturedAt: DateTime.tryParse(data['capturedAt'] as String? ?? '') ??
+          DateTime.now(),
     );
   }
 }

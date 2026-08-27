@@ -27,6 +27,8 @@ class _WebSearchRuntimeSettingsCardState
   late final TextEditingController _countryController;
   late int _maxResults;
   late bool _safeSearch;
+  late bool _nativeSearchEnabled;
+  late bool _queryPlanningEnabled;
   bool _saving = false;
   bool _clearing = false;
 
@@ -42,6 +44,8 @@ class _WebSearchRuntimeSettingsCardState
     );
     _maxResults = widget.initialSettings.maxResults;
     _safeSearch = widget.initialSettings.safeSearch;
+    _nativeSearchEnabled = widget.initialSettings.nativeSearchEnabled;
+    _queryPlanningEnabled = widget.initialSettings.queryPlanningEnabled;
   }
 
   @override
@@ -69,6 +73,7 @@ class _WebSearchRuntimeSettingsCardState
             TextField(
               key: const ValueKey('search-runtime-locale'),
               controller: _localeController,
+              maxLength: 16,
               decoration: const InputDecoration(
                 labelText: '地区/语言',
                 hintText: 'zh-CN',
@@ -81,6 +86,7 @@ class _WebSearchRuntimeSettingsCardState
               key: const ValueKey('search-runtime-country'),
               controller: _countryController,
               textCapitalization: TextCapitalization.characters,
+              maxLength: 2,
               decoration: const InputDecoration(
                 labelText: '搜索地区（ISO 国家码，可留空）',
                 hintText: 'CN',
@@ -113,6 +119,24 @@ class _WebSearchRuntimeSettingsCardState
               onChanged: _saving
                   ? null
                   : (value) => setState(() => _safeSearch = value),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('使用模型原生联网搜索'),
+              subtitle: const Text('可能消耗当前会话的模型额度；仅支持明确声明能力的模型'),
+              value: _nativeSearchEnabled,
+              onChanged: _saving
+                  ? null
+                  : (value) => setState(() => _nativeSearchEnabled = value),
+            ),
+            SwitchListTile(
+              contentPadding: EdgeInsets.zero,
+              title: const Text('使用 AI 改写搜索词'),
+              subtitle: const Text('ask 模式会先确认 Planner，再确认最终外发搜索词'),
+              value: _queryPlanningEnabled,
+              onChanged: _saving
+                  ? null
+                  : (value) => setState(() => _queryPlanningEnabled = value),
             ),
             const SizedBox(height: 4),
             Wrap(
@@ -156,6 +180,8 @@ class _WebSearchRuntimeSettingsCardState
         country: _countryController.text,
         maxResults: _maxResults,
         safeSearch: _safeSearch,
+        nativeSearchEnabled: _nativeSearchEnabled,
+        queryPlanningEnabled: _queryPlanningEnabled,
       );
       await widget.onSave(settings);
       if (mounted) {
@@ -163,10 +189,10 @@ class _WebSearchRuntimeSettingsCardState
           const SnackBar(content: Text('搜索参数已保存')),
         );
       }
-    } on Object catch (error) {
+    } on Object {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('保存搜索参数失败：$error')),
+          const SnackBar(content: Text('保存搜索参数失败，请稍后重试')),
         );
       }
     } finally {
@@ -188,10 +214,10 @@ class _WebSearchRuntimeSettingsCardState
           const SnackBar(content: Text('搜索缓存已清除')),
         );
       }
-    } on Object catch (error) {
+    } on Object {
       if (mounted) {
         ScaffoldMessenger.of(context).showSnackBar(
-          SnackBar(content: Text('清除搜索缓存失败：$error')),
+          const SnackBar(content: Text('清除搜索缓存失败，请稍后重试')),
         );
       }
     } finally {

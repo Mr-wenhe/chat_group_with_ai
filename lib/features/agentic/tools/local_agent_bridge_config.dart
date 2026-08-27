@@ -12,6 +12,46 @@ const int kLocalAgentBridgePort = 54263;
 const String kLocalAgentBridgeDefaultBaseUrl =
     'http://127.0.0.1:$kLocalAgentBridgePort';
 
+/// Upper bound for a single JSON request body accepted by the bridge.
+const int kLocalAgentBridgeMaxRequestBytes = 1024 * 1024;
+
+/// Maximum time allowed for reading a request and completing non-process work.
+const Duration kLocalAgentBridgeRequestTimeout = Duration(seconds: 30);
+
+/// Maximum wall-clock time allowed for one allow-listed child process.
+const Duration kLocalAgentBridgeProcessTimeout = Duration(seconds: 30);
+
+/// Client-side transport budget, slightly longer than the server process
+/// budget so a normal 504 response can make it back to the caller.
+const Duration kLocalAgentBridgeClientTimeout = Duration(seconds: 35);
+
+/// Maximum combined stdout/stderr retained for one child process.
+const int kLocalAgentBridgeMaxProcessOutputBytes = 512 * 1024;
+
+/// Maximum file content returned by `/workspace/read`.
+const int kLocalAgentBridgeMaxWorkspaceReadBytes = 512 * 1024;
+
+/// Maximum directory entries returned by `/workspace/list`.
+const int kLocalAgentBridgeMaxWorkspaceEntries = 2000;
+
+/// Maximum encoded JSON response emitted by the local bridge.
+const int kLocalAgentBridgeMaxResponseBytes = 2 * 1024 * 1024;
+
+/// Ownership token for one conversation-to-workspace registration.
+///
+/// A stale asynchronous task may finish after a newer task has registered the
+/// same conversation. Passing this lease to unregister makes cleanup compare
+/// generations instead of accidentally removing the newer task's route.
+class LocalAgentBridgeWorkspaceRegistration {
+  final String conversationId;
+  final int generation;
+
+  const LocalAgentBridgeWorkspaceRegistration({
+    required this.conversationId,
+    required this.generation,
+  });
+}
+
 /// Runtime endpoint of the bridge owned by this app process.
 ///
 /// If the well-known port is occupied by a stale/older bridge, the launcher

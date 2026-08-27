@@ -78,7 +78,8 @@ void main() {
     });
 
     test('removes partial agent_tool tags (closing only)', () {
-      const input = '{"name":"exec","arguments":{"cmd":"ls"}}\n</agent_tool>\nAfter';
+      const input =
+          '{"name":"exec","arguments":{"cmd":"ls"}}\n</agent_tool>\nAfter';
       final result = sanitizeNonAgenticReply(input);
       expect(result, isNot(contains('</agent_tool>')));
       expect(result, isNot(contains('exec')));
@@ -86,7 +87,8 @@ void main() {
     });
 
     test('collapses excessive blank lines left after removal', () {
-      const input = 'Before\n\n\n\n<tool_call>\n{"name":"write_file","arguments":{}}\n'
+      const input =
+          'Before\n\n\n\n<tool_call>\n{"name":"write_file","arguments":{}}\n'
           '</tool_call>\n\n\n\nAfter';
       final result = sanitizeNonAgenticReply(input);
       expect(result, isNot(contains('\n\n\n')));
@@ -209,7 +211,10 @@ void main() {
       final bigCode = '```dart\n${'// line\n' * 80}```'; // ~640 chars of code
       final input = 'Here is the code:\n$bigCode\nLet me know!';
       final result = sanitizeNonAgenticReply(input);
-      expect(result, contains('\u{1F4CE} [\u4EE3\u7801\u5185\u5BB9\u5DF2\u7701\u7565\uFF0C\u8BF7\u67E5\u770B\u9644\u4EF6]'));
+      expect(
+          result,
+          contains(
+              '\u{1F4CE} [\u4EE3\u7801\u5185\u5BB9\u5DF2\u7701\u7565\uFF0C\u8BF7\u67E5\u770B\u9644\u4EF6]'));
       expect(result, isNot(contains('```dart')));
       expect(result, contains('Here is the code:'));
       expect(result, contains('Let me know!'));

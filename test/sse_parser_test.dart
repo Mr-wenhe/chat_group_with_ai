@@ -6,6 +6,46 @@ import 'package:flutter_test/flutter_test.dart';
 
 void main() {
   group('SseParser', () {
+    test('有界 SSE 行转换器拒绝无换行超长帧', () async {
+      final source = Stream<List<int>>.value(List<int>.filled(65, 0x61));
+
+      await expectLater(
+        const BoundedSseLineTransformer(maxLineBytes: 64, maxWireBytes: 1024)
+            .bind(source)
+            .toList(),
+        throwsA(isA<SseInputLimitException>()),
+      );
+    });
+
+    test('有界 SSE 行转换器拒绝累计线缆字节超过上限', () async {
+      final source = Stream<List<int>>.fromIterable([
+        List<int>.filled(40, 0x61),
+        List<int>.filled(40, 0x62),
+      ]);
+
+      await expectLater(
+        const BoundedSseLineTransformer(maxLineBytes: 1024, maxWireBytes: 64)
+            .bind(source)
+            .toList(),
+        throwsA(isA<SseInputLimitException>()),
+      );
+    });
+
+    test('有界 SSE 行转换器支持 LF、CRLF 和跨块 CR 换行', () async {
+      final source = Stream<List<int>>.fromIterable([
+        'first\r\nsecond\r'.codeUnits,
+        '\nthird\rfourth'.codeUnits,
+      ]);
+
+      final lines = await const BoundedSseLineTransformer(
+        maxLineBytes: 1024,
+        maxWireBytes: 1024,
+      ).bind(source).toList();
+
+      expect(lines.map(String.fromCharCodes),
+          ['first', 'second', 'third', 'fourth']);
+    });
+
     test('解析完整 data 行，产出 token 并累计内容', () {
       final p = SseParser();
       final events =
@@ -157,8 +197,8 @@ void main() {
     test('解析器终止后 [DONE] 不产生 done 事件', () {
       // 模拟：解析器先遇到 provider error 终止，然后服务端仍发送 [DONE]
       final p = SseParser();
-      final events = p.ingest(
-          'data: {"error":{"message":"rate limit"}}\ndata: [DONE]\n');
+      final events =
+          p.ingest('data: {"error":{"message":"rate limit"}}\ndata: [DONE]\n');
       // error 事件已产出
       expect(events, hasLength(1));
       expect(events.first.type, ChatStreamEventType.error);

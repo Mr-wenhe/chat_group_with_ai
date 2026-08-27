@@ -12,6 +12,11 @@ class SearchProviderRoute {
   final bool enabled;
   final bool isPrimary;
   final bool isFallback;
+
+  /// Native model search returns full web results even when its independent
+  /// fallback is DuckDuckGo. It must not inherit the fallback's
+  /// knowledge-only routing restriction.
+  final bool isNative;
   final int priority;
   final String? displayName;
 
@@ -22,6 +27,7 @@ class SearchProviderRoute {
     this.enabled = true,
     this.isPrimary = false,
     this.isFallback = false,
+    this.isNative = false,
     this.priority = 0,
     this.displayName,
   });

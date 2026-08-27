@@ -2,18 +2,34 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
-import 'package:chat_group/features/ai_governance/search_coordinator.dart';
 import 'package:chat_group/features/web_search/application/search_snapshot_builder.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/providers/duckduckgo_instant_answer_provider.dart';
 import 'package:chat_group/features/web_search/providers/search_provider.dart';
-import 'package:chat_group/services/web_search_service.dart' as legacy;
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
-import 'helpers/memory_governance_store.dart';
-
 void main() {
+  test('search result URLs reject local and private network destinations', () {
+    for (final rawUrl in [
+      'http://localhost/admin',
+      'http://127.0.0.1/admin',
+      'http://10.0.0.8/admin',
+      'http://169.254.169.254/latest/meta-data',
+      'http://[::1]/admin',
+    ]) {
+      expect(
+        () => validateSearchUrl(Uri.parse(rawUrl)),
+        throwsArgumentError,
+        reason: rawUrl,
+      );
+    }
+    expect(
+      () => validateSearchUrl(Uri.parse('http://public.example/article')),
+      throwsArgumentError,
+    );
+  });
+
   group('DuckDuckGoInstantAnswerProvider JSON branches', () {
     test('parses Abstract fields', () async {
       final response = await _searchFixture('abstract.json');
@@ -143,7 +159,7 @@ void main() {
   });
 
   group('web search domain models', () {
-    test('requires absolute HTTP or HTTPS URLs and derives displayHost', () {
+    test('requires absolute HTTPS URLs and derives displayHost', () {
       final result = WebSearchResult(
         sourceId: 'S1',
         title: ' title ',
@@ -227,6 +243,33 @@ void main() {
       );
     });
 
+    test('normalizes locale and country at the SearchRequest boundary', () {
+      final request = SearchRequest(
+        query: 'locale bounds',
+        locale: ' EN-us ',
+        country: ' cn ',
+      );
+      expect(request.locale, 'en-US');
+      expect(request.country, 'CN');
+
+      expect(
+        SearchRequest(
+          query: 'invalid locale',
+          locale: 'en-US-invalid-locale',
+          country: 'CHN',
+        ).locale,
+        'zh-CN',
+      );
+      expect(
+        SearchRequest(
+          query: 'invalid country',
+          locale: 'fr',
+          country: 'C1',
+        ).country,
+        isNull,
+      );
+    });
+
     test('assigns stable source IDs after deduplication', () {
       final request = SearchRequest(
         requestId: 'req-1',
@@ -274,74 +317,59 @@ void main() {
       expect(snapshot.originalTextHash, 'b' * 64);
       expect(snapshot.statusCode, 207);
     });
-  });
 
-  group('WebSearchService compatibility facade', () {
-    test('keeps the legacy String URL snapshot contract', () async {
-      final snapshot = await legacy.WebSearchService(
-        dio: _fixtureDio(_fixtureData('abstract.json')),
-      ).search('current Dart');
-
-      expect(snapshot, isA<legacy.WebSearchSnapshot>());
-      expect(snapshot.provider, legacy.WebSearchService.providerName);
-      expect(snapshot.results.single.url, 'https://dart.dev/');
-      expect(snapshot.results.single.title, 'Dart');
-      expect(snapshot.requestId, isNotEmpty);
-      expect(snapshot.hasResults, isTrue);
-      expect(snapshot.statusCode, 200);
-      expect(snapshot.degraded, isTrue);
-    });
-
-    test('keeps noResults terminal status compatible with SearchCoordinator',
-        () async {
-      final store = MemoryGovernanceStore(
-        globalSearchPolicy: WebSearchPolicy.auto,
+    test('caps sources from one host and fills from other hosts', () {
+      final request = SearchRequest(
+        requestId: 'req-diversity',
+        rootRequestId: 'root-diversity',
+        turnId: 'turn-diversity',
+        query: 'diverse sources',
+        maxResults: 5,
       );
-      final states = <SearchRunStatus>[];
-      final coordinator = SearchCoordinator(
-        store: store,
-        service: legacy.WebSearchService(
-          dio: _fixtureDio(_fixtureData('no_results.json')),
-        ),
-      );
-
-      final snapshot = await coordinator.searchIfAllowed(
-        text: 'search no results',
-        conversationId: 'group-1',
-        requestConsent: (_) async => true,
-        onStatus: (state) => states.add(state.status),
+      final response = SearchProviderResponse(
+        items: [
+          for (var index = 0; index < 5; index++)
+            SearchProviderItem(
+              title: 'same host $index',
+              snippet: 'same host',
+              url: Uri.parse('https://same.example/$index'),
+            ),
+          SearchProviderItem(
+            title: 'other host 1',
+            snippet: 'other host',
+            url: Uri.parse('https://other.example/1'),
+          ),
+          SearchProviderItem(
+            title: 'other host 2',
+            snippet: 'other host',
+            url: Uri.parse('https://other.example/2'),
+          ),
+          SearchProviderItem(
+            title: 'third host',
+            snippet: 'third host',
+            url: Uri.parse('https://third.example/1'),
+          ),
+        ],
       );
 
-      expect(snapshot?.failureType, SearchFailureType.noResults);
-      expect(snapshot?.hasFailure, isFalse);
-      expect(snapshot?.statusCode, 200);
-      expect(states.last, SearchRunStatus.noResults);
-    });
-
-    test('does not persist the user query inside a fallback source URL',
-        () async {
-      final store = MemoryGovernanceStore(
-        globalSearchPolicy: WebSearchPolicy.auto,
-      );
-      final coordinator = SearchCoordinator(
-        store: store,
-        service: legacy.WebSearchService(
-          dio: _fixtureDio(_fixtureData('answer.json')),
-        ),
+      final snapshot = const SearchSnapshotBuilder().build(
+        request: request,
+        provider: 'test',
+        response: response,
+        searchedAt: DateTime.utc(2026, 8, 25),
+        latencyMs: 5,
       );
 
-      await coordinator.searchIfAllowed(
-        text: 'search private patient Alice 12345',
-        conversationId: 'group-1',
-        requestConsent: (_) async => true,
-      );
-
-      expect(store.searchAudits.single.sources, [
-        'https://duckduckgo.com/?ia=answer',
-      ]);
+      expect(snapshot.results, hasLength(5));
       expect(
-        store.searchAudits.single.sources.single,
-        isNot(contains('private patient Alice 12345')),
+        snapshot.results.map((result) => result.displayHost),
+        [
+          'same.example',
+          'same.example',
+          'other.example',
+          'other.example',
+          'third.example',
+        ],
       );
     });
   });

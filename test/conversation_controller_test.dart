@@ -35,6 +35,22 @@ void main() {
     expect(controller.state.phase, ConversationPhase.idle);
   });
 
+  test('a queued message can be returned to the head when dispatch fails', () {
+    final controller = ConversationController();
+    final first = PendingUserMessage('first', const ['a']);
+    final second = PendingUserMessage('second', const ['b']);
+    controller.enqueue(first);
+    controller.enqueue(second);
+
+    final taken = controller.takeNext();
+    expect(taken, same(first));
+    controller.requeueFirst(taken!);
+
+    expect(controller.state.queuedUserMessageCount, 2);
+    expect(controller.takeNext(), same(first));
+    expect(controller.takeNext(), same(second));
+  });
+
   test('failed and disposed conversations reject new runs', () {
     final controller = ConversationController();
     controller.beginAuto();
@@ -46,5 +62,49 @@ void main() {
     controller.dispose();
     expect(controller.state.phase, ConversationPhase.disposed);
     expect(controller.beginWork(), isNull);
+  });
+
+  test('normal run guard releases the controller exactly once', () {
+    final controller = ConversationController();
+    final guard = controller.beginNormalGuard();
+
+    expect(guard, isNotNull);
+    expect(controller.isBusy, isTrue);
+
+    guard!.finish();
+    guard.finish();
+
+    expect(controller.isBusy, isFalse);
+    expect(controller.state.phase, ConversationPhase.idle);
+  });
+
+  test('automatic run guard releases the controller exactly once', () {
+    final controller = ConversationController();
+    final guard = controller.beginAutoGuard();
+
+    expect(guard, isNotNull);
+    expect(controller.state.phase, ConversationPhase.autoGenerating);
+
+    guard!.finish();
+    guard.finish();
+
+    expect(controller.isBusy, isFalse);
+    expect(controller.state.phase, ConversationPhase.idle);
+  });
+
+  test('an old guard cannot complete a newer run', () {
+    var nextId = 0;
+    final controller = ConversationController(
+      idFactory: () => 'run-${nextId++}',
+    );
+    final first = controller.beginNormalGuard()!;
+    first.finish();
+    final second = controller.beginNormalGuard()!;
+
+    first.finish();
+
+    expect(controller.isBusy, isTrue);
+    second.finish();
+    expect(controller.isBusy, isFalse);
   });
 }

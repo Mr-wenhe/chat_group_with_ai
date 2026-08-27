@@ -136,10 +136,12 @@ void main() {
       test('very long message is handled without crash', () {
         final long = '你' * 10000;
         final result = UserMessageSentimentAnalyzer.analyze(long);
-        expect(result.category, anyOf(
-          UserMessageCategory.offensive,
-          UserMessageCategory.neutral,
-        ));
+        expect(
+            result.category,
+            anyOf(
+              UserMessageCategory.offensive,
+              UserMessageCategory.neutral,
+            ));
       });
 
       test('friendly praise with long text stays respectful', () {

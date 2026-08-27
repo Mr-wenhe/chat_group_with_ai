@@ -5,7 +5,6 @@ import 'package:uuid/uuid.dart';
 
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
-import 'package:chat_group/services/web_search_service.dart' as legacy;
 
 import '../models/search_failure.dart';
 import '../models/search_failure_factory.dart';
@@ -58,21 +57,23 @@ class SearchCoordinatorSupport {
     int retryCount = 0,
     bool degraded = false,
     int latencyMs = 0,
-  }) =>
-      domain.WebSearchSnapshot(
-        requestId: request.requestId,
-        rootRequestId: request.rootRequestId,
-        originalTextHash: request.originalTextHash ?? hash(request.query),
-        executedQueries: [request.query],
-        searchedAt: clock().toUtc(),
-        provider: provider,
-        results: const [],
-        failure: failure,
-        statusCode: failure.statusCode,
-        retryCount: retryCount,
-        degraded: degraded,
-        latencyMs: latencyMs,
-      );
+  }) {
+    final safeFailure = sanitizeSearchFailure(failure);
+    return domain.WebSearchSnapshot(
+      requestId: request.requestId,
+      rootRequestId: request.rootRequestId,
+      originalTextHash: request.originalTextHash ?? hash(request.query),
+      executedQueries: [request.query],
+      searchedAt: clock().toUtc(),
+      provider: provider,
+      results: const [],
+      failure: safeFailure,
+      statusCode: safeFailure.statusCode,
+      retryCount: retryCount,
+      degraded: degraded,
+      latencyMs: latencyMs,
+    );
+  }
 
   domain.WebSearchSnapshot cancelledSnapshot({
     required domain.SearchRequest request,
@@ -84,109 +85,8 @@ class SearchCoordinatorSupport {
         failure: buildSearchFailure(type: SearchFailureType.cancelled),
       );
 
-  domain.WebSearchSnapshot domainFromLegacy(
-    domain.SearchRequest request,
-    legacy.WebSearchSnapshot snapshot,
-  ) {
-    final results = <domain.WebSearchResult>[];
-    for (var index = 0; index < snapshot.results.length; index++) {
-      final result = snapshot.results[index];
-      final uri = Uri.tryParse(result.url);
-      if (uri == null || uri.host.isEmpty) continue;
-      results.add(
-        domain.WebSearchResult(
-          sourceId: result.sourceId.isEmpty ? 'S${index + 1}' : result.sourceId,
-          title: result.title,
-          snippet: result.snippet,
-          url: uri,
-          publishedAt: result.publishedAt,
-          providerScore: result.providerScore,
-          provider:
-              result.provider.isEmpty ? snapshot.provider : result.provider,
-        ),
-      );
-    }
-    final failure = snapshot.failureType == null
-        ? null
-        : SearchFailure(
-            type: snapshot.failureType!,
-            safeMessage: snapshot.safeMessage ?? snapshot.error ?? '',
-            statusCode: snapshot.statusCode,
-            retryable: false,
-          );
-    return domain.WebSearchSnapshot(
-      requestId: snapshot.requestId,
-      rootRequestId: snapshot.rootRequestId.isEmpty
-          ? request.rootRequestId
-          : snapshot.rootRequestId,
-      originalTextHash: snapshot.originalTextHash.isEmpty
-          ? request.originalTextHash ?? hash(request.query)
-          : snapshot.originalTextHash,
-      executedQueries: snapshot.executedQueries.isEmpty
-          ? [request.query]
-          : snapshot.executedQueries,
-      searchedAt: snapshot.searchedAt,
-      provider: snapshot.provider,
-      results: results,
-      failure: failure,
-      statusCode: snapshot.statusCode,
-      fromCache: snapshot.fromCache,
-      degraded: snapshot.degraded,
-      latencyMs: snapshot.latencyMs,
-      retryCount: snapshot.retryCount,
-    );
-  }
-
-  legacy.WebSearchSnapshot toLegacySnapshot(
-    String query,
-    domain.WebSearchSnapshot snapshot,
-  ) {
-    final failure = snapshot.failure;
-    final noResults = failure?.type == SearchFailureType.noResults;
-    return legacy.WebSearchSnapshot(
-      requestId: snapshot.requestId,
-      rootRequestId: snapshot.rootRequestId,
-      originalTextHash: snapshot.originalTextHash,
-      executedQueries: snapshot.executedQueries,
-      query: query,
-      searchedAt: snapshot.searchedAt,
-      provider: snapshot.provider,
-      results: snapshot.results
-          .map(
-            (result) => legacy.WebSearchResult(
-              sourceId: result.sourceId,
-              title: result.title,
-              snippet: result.snippet,
-              url: result.url.toString(),
-              provider: result.provider,
-              publishedAt: result.publishedAt,
-              providerScore: result.providerScore,
-            ),
-          )
-          .toList(growable: false),
-      error: noResults ? null : failure?.safeMessage,
-      failureType: failure?.type,
-      safeMessage: noResults ? null : failure?.safeMessage,
-      statusCode: snapshot.statusCode,
-      latencyMs: snapshot.latencyMs,
-      retryCount: snapshot.retryCount,
-      fromCache: snapshot.fromCache,
-      degraded: snapshot.degraded,
-    );
-  }
-
   SearchRunStatus domainStatus(domain.WebSearchSnapshot snapshot) {
     if (snapshot.failure?.type == SearchFailureType.cancelled) {
-      return SearchRunStatus.cancelled;
-    }
-    if (snapshot.hasFailure) return SearchRunStatus.failed;
-    return snapshot.hasResults
-        ? SearchRunStatus.completed
-        : SearchRunStatus.noResults;
-  }
-
-  SearchRunStatus legacyStatus(legacy.WebSearchSnapshot snapshot) {
-    if (snapshot.failureType == SearchFailureType.cancelled) {
       return SearchRunStatus.cancelled;
     }
     if (snapshot.hasFailure) return SearchRunStatus.failed;
@@ -203,7 +103,12 @@ class SearchCoordinatorSupport {
   }) =>
       store.addSearchAudit(
         SearchAuditEntry(
-          requestId: snapshot.requestId,
+          requestId: snapshot.requestId.isEmpty
+              ? request.requestId
+              : snapshot.requestId,
+          rootRequestId: snapshot.rootRequestId.isEmpty
+              ? request.rootRequestId
+              : snapshot.rootRequestId,
           conversationId: conversationId,
           query: request.query,
           searchedAt: snapshot.searchedAt,
@@ -220,38 +125,17 @@ class SearchCoordinatorSupport {
         ),
       );
 
-  Future<void> auditLegacy({
-    required String conversationId,
-    required domain.SearchRequest request,
-    required legacy.WebSearchSnapshot snapshot,
-    required SearchRunStatus status,
-  }) =>
-      store.addSearchAudit(
-        SearchAuditEntry(
-          requestId: snapshot.requestId,
-          conversationId: conversationId,
-          query: request.query,
-          searchedAt: snapshot.searchedAt,
-          status: status.name,
-          provider: snapshot.provider,
-          failureType: snapshot.failureType?.name,
-          statusCode: snapshot.statusCode,
-          latencyMs: snapshot.latencyMs,
-          retryCount: snapshot.retryCount,
-          fromCache: snapshot.fromCache,
-          sources: snapshot.results.map((result) => result.url),
-        ),
-      );
-
   Future<void> auditSimple({
     required String conversationId,
-    required String query,
+    required domain.SearchRequest request,
     required SearchRunStatus status,
   }) =>
       store.addSearchAudit(
         SearchAuditEntry(
+          requestId: request.requestId,
+          rootRequestId: request.rootRequestId,
           conversationId: conversationId,
-          query: query,
+          query: request.query,
           searchedAt: clock(),
           status: status.name,
           sources: const [],

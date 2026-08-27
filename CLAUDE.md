@@ -73,12 +73,15 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 ### Important Caveats
 
 - `AICharacter` tracks hourly reply counts via `lastReplyTimestamp` and `hourlyReplyCount` directly on the model — these are mutated in `_isEligibleToReply` without re-saving to DB each time, only the limit check is enforced during a round.
-- Non-release runs read Hive directly from the repository `data/` directory, including API keys stored inside `api_configs.hive`.
+- Non-release runs read Hive directly from the repository `data/` directory; the local-only `api_configs.hive` may contain development credentials and is never part of the Git index.
 - Release builds read/write Hive under the user's app support directory and create fresh empty `*.hive` files there on first launch.
 - The `custom` provider requires a manual `baseUrl` input; all others have hardcoded base URLs in `ApiProvider`.
-- Local `data/*.hive` files are intentionally versioned as development-only data.
+- Non-credential `data/*.hive` files are retained as development/Stage 16 fixtures; `data/api_configs.hive` is local-only and ignored.
 - Foreground proactive DMs may call configured LLM APIs while the app is running. Keep cooldowns conservative and never trigger background/offline network generation without an explicit notification/push design.
 - **Dependency overrides 策略**：本项目使用 Flutter 3.24 fork，不支持 `android.flutter` 属性（3.27+ API）。以下包的新版会触发 Android 构建失败，已通过 `dependency_overrides` 锁定：`file_picker`（≥8.0.0 <9.0.0）、`package_info_plus`（≥8.0.0 <9.0.0）、`wakelock_plus`（≥1.0.0 <1.4.0）。新增依赖前需验证 Android build.gradle 是否使用了 `android.flutter`。
+- **已处理的 P1 基线风险（2026-08-26）**：
+  - **Android Release 签名回退**：缺少完整 `android/key.properties` 时，`android/app/build.gradle` 失败关闭；只有权限校验任务显式设置 `ALLOW_DEBUG_SIGNING=true`。
+  - **仓库内 Hive 凭据风险**：`data/api_configs.hive` 已从 Git 索引移除并加入忽略规则；若历史提交曾包含真实凭据，仍需单独轮换并按组织流程清理历史。
 
 ### 代码质量检查清单
 
@@ -108,7 +111,7 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 
 ### High priority — implemented
 
-- ✅ **Agentic character skills (v1.3.2).** Characters can execute multi-step tool tasks via `AgentRuntime` — local file generation, skill creation/download, workspace/browser tools, with 6-step max + 45s timeout guard. Triggered by natural-language requests containing keywords like "生成文件/创建文件/写文档/代码审查".
+- ✅ **Agentic character skills (v1.3.2).** Characters can execute multi-step tool tasks via `AgentRuntime` — local file generation, skill creation/download, workspace/browser tools, with a 12-step max, 120s per-completion timeout, and 5-minute file-generation timeout. Triggered by natural-language requests containing keywords like "生成文件/创建文件/写文档/代码审查".
 - ✅ **Media attachments (v1.3.2).** Chat input bar has an attachment button (`Icons.attach_file_rounded`); supports images and documents via `file_picker`. `desktop_drop` also enabled for desktop drag-and-drop.
 - ✅ **Presence-aware proactive notifications (v1.3.2).** `ConversationPresenceService` tracks which conversation is currently active. Foreground watchers suppress SnackBar notifications when the user is already viewing the target conversation, and auto-mark incoming messages as read.
 - ✅ **Streaming / typewriter replies.** `ChatApiService.streamChatMessage` reads SSE and `ChatRoomPage` renders tokens incrementally with a blinking cursor + "停止生成" button.
@@ -139,4 +142,4 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 
 - Backup/restore covers every Hive box except `ai_governance_ledger` (usage audit trail is intentionally device-local and not portable). `WorkModeWorkspace.workDirPath` is deliberately dropped on import since local paths aren't portable. Backup packages only accept an exact `formatVersion`/`schemaVersion` match — there is no cross-version migration path, so a backup from a future schema is rejected rather than upgraded.
 - Test coverage covers SSE parsing, presets, export safety, mention parsing, activity policy, chat orchestration, and humanized memory/prompt logic. UI-heavy chat room behavior still relies mostly on extracted logic tests.
-- Versioned `data/*.hive` may contain live API keys and chat data, so repository access should be treated as sensitive.
+- Versioned development fixtures may contain chat data; the credential-bearing `data/api_configs.hive` is local-only and ignored, but repository access should still be treated as sensitive.

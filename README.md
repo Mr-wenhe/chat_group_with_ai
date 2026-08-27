@@ -36,6 +36,7 @@
 - **对话导出与分享**：将整组对话导出为 Markdown 或 JSON（**不含任何 API Key / 密钥配置**），保存至本机并可通过系统分享面板发送。
 - **引用回复 / 重新生成**：长按消息可引用回复；AI 消息支持重新生成，并保留原消息作为引用上下文。
 - **人性化聊天引擎**：基于提及、近期发言、角色兴趣、关系状态和分层记忆选择回复意图，让角色更像在群里自然接话。
+- **生产级 AI 联网搜索**：支持 Tavily、Brave 和后端 Gateway，具备查询规划、同轮去重、来源引用、失败诊断、凭据隔离和 Prompt Injection 防护。设计与实施记录见 [`docs/production_web_search_technical_design.md`](docs/production_web_search_technical_design.md) 和 [`docs/production_web_search_implementation_retrospective.md`](docs/production_web_search_implementation_retrospective.md)。
 - **群聊 / 私聊收件箱与主动联系**：群聊和私聊列表都会显示未读数，群聊额外标出 `@我` 提醒；角色、群聊和对应私聊可置顶。App 前台运行时，私聊过的 AI 或群聊里的角色可按冷却规则主动发起私聊，并通过红点、未读数和浮层提示提醒。
 - **主题、语音与用量统计**：设置页支持亮/暗/跟随系统、AI 回复朗读开关，以及按角色/群组累计 token 用量。
 
@@ -349,11 +350,11 @@ refactor: 抽离 ChatApiService 超时配置
 
 ## 安全与隐私
 
-- 开发态会直接读取仓库根目录下的 `data/*.hive`，其中可以包含完整的 `ApiConfig.apiKey`；release 包不会打入这份真实数据，而是在用户目录创建并读取自己全新的 Hive 数据文件。
+- 开发态可读取本机仓库根目录下的 `data/*.hive`；其中 `data/api_configs.hive` 可能包含完整的 `ApiConfig.apiKey`，已移出版本控制并加入忽略规则，禁止重新提交。release 包不会打入本地数据，而是在用户目录创建并读取全新的 Hive 数据文件。
 - 导出的对话文件为明文文本，保存在本机 `ApplicationDocumentsDirectory/chat_group_exports/` 下；导出内容**仅含展示性字段（角色名 / 头像 / 年龄 / 职业 / 性格标签 + 消息内容），绝不含有 API Key / 密钥配置**。但仍请注意本机文件安全，避免对话内容泄露。
 - `custom` 厂商需手动填写 `baseUrl`，其余厂商的 baseUrl 在 `ApiProvider` 中硬编码。
 - 所有应用数据均为本地存储，不会上传到任何第三方服务器（除你配置的 LLM 厂商接口本身）。
-- 仓库中的 `data/*.hive` 仅用于开发态直接读取；release 只打包空模板清单 `assets/release_templates/seed_manifest.json`，首次启动会据此生成空的本地 Hive 文件。
+- 按当前测试约定，仓库中保留的其他 `data/*.hive` 仅作为开发/Stage 16 测试夹具；`data/api_configs.hive` 不纳入版本控制，请勿把凭据写入任何可提交的夹具。release 只打包空模板清单 `assets/release_templates/seed_manifest.json`，首次启动会据此生成空的本地 Hive 文件。
 
 ---
 
@@ -366,15 +367,15 @@ refactor: 抽离 ChatApiService 超时配置
 | **CI** | `.github/workflows/ci.yml` | 推送 / PR 到 `main` | 自动执行 `代码生成 → flutter analyze → flutter test`，作为合并前质量门禁 |
 | **Release** | `.github/workflows/release.yml` | 推送 `v*` tag，或手动在 Actions 页面触发 | **仅由 CI 构建 Windows** 并创建 / 追加到 GitHub Release；**macOS / iOS / Android 由开发者本机通过 `scripts/publish_local.sh` 构建并上传到同一 Release**（详见下方「混合发布」） |
 
-> 前置条件：本机需能跑通 `flutter doctor`（各目标平台工具链齐全）。发布覆盖 Windows（CI）/ macOS / iOS / Android 共 4 个平台；其中 `windows/` 目录为本次发布准备时通过 `flutter create --platforms=windows .` 生成并提交。**Web 端因无安全凭据存储、无法保存 API 配置，已不再作为发布目标。**
+> 前置条件：本机需能跑通 `flutter doctor`（各目标平台工具链齐全）。发布覆盖 Windows（CI）/ macOS / iOS / Android 共 4 个平台；其中 `windows/` 目录为本次发布准备时通过 `flutter create --platforms=windows .` 生成并提交。**Web 端因无安全凭据存储、无法保存 API 配置，已不再作为发布目标；所有 Web 构建也会禁用联网模型与联网搜索请求，避免浏览器 XHR 在应用层限流前完整缓冲响应。**
 
 > **Flutter 版本对齐**：CI 与 Release 工作流已显式钉到 **Flutter 3.24.0 stable**，与你本地自定义 fork（`3.24.0-1.0.pre.538`，同周期、同套旧主题 API）保持代码级一致。因此**同一份代码在你本地和 CI 都能编译**，无需切换你本地的 Flutter 通道。`pubspec.yaml` 的 SDK 约束也已放宽到 `>=3.5.0 <4.0.0` 以同时兼容两端。
 
 ---
 
-### 1. 配置签名 Secrets（可选，但生产发布必需）
+### 1. 配置签名 Secrets（生产发布必需）
 
-GitHub 仓库 → **Settings → Secrets and variables → Actions → New repository secret**，按需添加。未配置时仍可构建「未签名」包用于本地调试。
+GitHub 仓库 → **Settings → Secrets and variables → Actions → New repository secret**，按需添加。Android Release 缺少正式签名时会直接失败，避免把 debug 签名误当作可发布产物。仅 Release 工作流的权限校验任务会显式启用 debug 签名，且不会上传该 APK。
 
 #### Android（发布到应用商店 / 安装 APK 必需）
 
@@ -405,7 +406,7 @@ base64 -i upload-keystore.jks
 | `APPLE_TEAM_ID` | Apple Developer 团队 ID |
 | `APPLE_SIGN_IDENTITY` | 签名身份，如 `Developer ID Application: Your Name (TEAMID)` |
 
-> 未配置上述 Secrets 时：iOS 会回退构建「未签名 .app」（仅可在模拟器 / 越狱设备使用）；macOS 构建未签名的 `.app`（本机可用，但跨设备会触发 Gatekeeper 拦截）。
+> 未配置上述 Secrets 时：iOS 会回退构建「未签名 .app」（仅可在模拟器 / 越狱设备使用）；macOS 构建未签名的 `.app`（本机可用，但跨设备会触发 Gatekeeper 拦截）。Android 不提供发布脚本级别的 debug 回退。
 
 ---
 
@@ -436,12 +437,14 @@ git tag v1.3.8 && git push origin v1.3.8
 > 若你只想手动调某一个平台，也可直接跑对应命令（产物需自行用 `gh release upload vX.Y.Z <文件> --clobber` 上传）：
 >
 > ```bash
-> flutter build apk --release            # build/app/outputs/flutter-apk/app-release.apk
-> flutter build appbundle --release      # build/app/outputs/bundle/release/app-release.aab
+> flutter build apk --release            # 需要 android/key.properties 正式签名
+> flutter build appbundle --release      # 需要 android/key.properties 正式签名
 > flutter build ios --release --no-codesign   # build/ios/Release-iphoneos/*.app（未签名）
 > flutter build macos --release          # build/macos/Build/Products/Release/*.app
 > # Windows 只能在 Windows 上编：flutter build windows --release → build/windows/x64/runner/Release/
 > ```
+
+> 仅做 Android 权限/Manifest 校验时，可在隔离的本地验证命令中临时运行 `ALLOW_DEBUG_SIGNING=true flutter build apk --release`。该产物只能用于测试，不得上传或发布。
 
 ---
 

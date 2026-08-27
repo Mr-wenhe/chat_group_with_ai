@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:chat_group/features/settings/search_provider_config_form_page.dart';
@@ -57,6 +58,16 @@ class _HealthyProvider implements SearchProvider {
   }
 }
 
+class _RecordingNavigatorObserver extends NavigatorObserver {
+  final popped = Completer<void>();
+
+  @override
+  void didPop(Route<dynamic> route, Route<dynamic>? previousRoute) {
+    if (!popped.isCompleted) popped.complete();
+    super.didPop(route, previousRoute);
+  }
+}
+
 void main() {
   late Directory hiveDirectory;
   late Box<dynamic> box;
@@ -81,16 +92,17 @@ void main() {
   });
 
   tearDown(() async {
-    if (Hive.isBoxOpen('app_settings')) {
-      await box.flush();
-    }
-    await closeLifecycleHive(hiveDirectory);
+    await TestWidgetsFlutterBinding.instance.runAsync(() async {
+      await closeLifecycleHive(hiveDirectory);
+    });
   });
 
   testWidgets('new key connection test does not persist before save',
       (tester) async {
+    final navigatorObserver = _RecordingNavigatorObserver();
     await tester.pumpWidget(
       MaterialApp(
+        navigatorObservers: [navigatorObserver],
         home: SearchProviderConfigFormPage(
           store: settings,
           providerFactory: (_) => provider,
@@ -117,13 +129,20 @@ void main() {
     expect(box.get(SearchProviderConfigStore.configsKey), isNull);
 
     await tester.tap(find.text('保存配置').last);
-    await tester.pump();
-    await tester.pump();
+    // Saving persists a durable repair intent and metadata in separate file
+    // operations. Alternate real I/O time with widget frames until the page
+    // reports completion by popping its route.
+    for (var attempt = 0;
+        attempt < 8 && !navigatorObserver.popped.isCompleted;
+        attempt++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 200)),
+      );
+      await tester.pump();
+    }
+    expect(navigatorObserver.popped.isCompleted, isTrue);
     expect(box.get(SearchProviderConfigStore.configsKey), isA<List>());
     expect(secureStore.writeCount, greaterThan(0));
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(seconds: 1)),
-    );
     await tester.runAsync(() => box.flush());
     await tester.pumpWidget(const SizedBox());
     await tester.pump();

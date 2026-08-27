@@ -67,6 +67,22 @@ class ConversationController {
   ConversationRun? beginAuto() => _begin(ConversationRunType.automatic);
   ConversationRun? beginWork() => _begin(ConversationRunType.work);
 
+  /// Starts a normal run with an idempotent completion handle.
+  ///
+  /// The handle is intentionally separate from widget lifecycle so async
+  /// callers can release the controller even when the page is no longer
+  /// active and therefore cannot call `setState`.
+  ConversationRunGuard? beginNormalGuard() {
+    final run = beginNormal();
+    return run == null ? null : ConversationRunGuard._(this, run.id);
+  }
+
+  /// Starts an automatic run with the same lifecycle-safe completion handle.
+  ConversationRunGuard? beginAutoGuard() {
+    final run = beginAuto();
+    return run == null ? null : ConversationRunGuard._(this, run.id);
+  }
+
   bool resumeWork() {
     if (_state.phase != ConversationPhase.waitingForApproval) return false;
     _replace(phase: ConversationPhase.workRunning);
@@ -108,6 +124,21 @@ class ConversationController {
       queuedUserMessageCount: _queue.length,
     );
     return next;
+  }
+
+  /// Puts a previously taken message back at the head of the queue.
+  ///
+  /// Queue ownership is intentionally transactional: callers remove a message
+  /// only when they are ready to dispatch it, and return it here if dispatch
+  /// fails. This prevents a temporary lifecycle/UI failure from silently
+  /// dropping user input.
+  void requeueFirst(PendingUserMessage message) {
+    if (_state.phase == ConversationPhase.disposed) return;
+    _queue.insert(0, message);
+    _state = ConversationViewState(
+      phase: isBusy ? _state.phase : ConversationPhase.userMessageQueued,
+      queuedUserMessageCount: _queue.length,
+    );
   }
 
   bool waitForApproval() {
@@ -168,4 +199,26 @@ class ConversationController {
 
   static String _defaultId() =>
       'run:${DateTime.now().microsecondsSinceEpoch.toRadixString(36)}';
+}
+
+/// Releases one conversation run exactly once.
+///
+/// A run may finish through success, cancellation, an exception, or a page
+/// deactivation. Keeping completion idempotent prevents those paths from
+/// racing and accidentally resetting a newer run.
+class ConversationRunGuard {
+  final ConversationController _controller;
+  final String _runId;
+  bool _finished = false;
+
+  ConversationRunGuard._(this._controller, this._runId);
+
+  bool get isFinished => _finished;
+
+  void finish() {
+    if (_finished) return;
+    _finished = true;
+    if (_controller.state.run?.id != _runId) return;
+    _controller.complete();
+  }
 }

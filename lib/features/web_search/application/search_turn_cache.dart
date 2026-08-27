@@ -12,15 +12,20 @@ typedef SearchCacheMarker<T> = T Function(T value);
 /// request among its AI replies without leaking results or futures into a
 /// different test, conversation, or room.
 class SearchTurnCache {
+  static const int defaultMaxEntries = 128;
   static int _globalGeneration = 0;
 
   final DateTime Function() _clock;
+  final int maxEntries;
   final Map<SearchTurnCacheKey, _CompletedCacheValue> _completed = {};
   final Map<SearchTurnCacheKey, Future<Object?>> _inFlight = {};
   int _generation;
 
-  SearchTurnCache({DateTime Function()? clock})
-      : _clock = clock ?? DateTime.now,
+  SearchTurnCache({
+    DateTime Function()? clock,
+    this.maxEntries = defaultMaxEntries,
+  })  : assert(maxEntries > 0),
+        _clock = clock ?? DateTime.now,
         _generation = _globalGeneration;
 
   /// Invalidates completed entries in every active coordinator on the next
@@ -68,6 +73,7 @@ class SearchTurnCache {
     _inFlight[key] = completer.future;
     _load(
       key: key,
+      generation: _generation,
       ttl: ttl,
       loader: loader,
       completer: completer,
@@ -111,6 +117,7 @@ class SearchTurnCache {
 
   Future<void> _load<T>({
     required SearchTurnCacheKey key,
+    required int generation,
     required Duration ttl,
     required SearchCacheLoader<T> loader,
     required Completer<T> completer,
@@ -118,11 +125,17 @@ class SearchTurnCache {
   }) async {
     try {
       final value = await loader();
-      if (ttl > Duration.zero && (shouldCache?.call(value) ?? true)) {
+      final isCurrentLoad = identical(_inFlight[key], completer.future);
+      final wasNotInvalidated = generation == _globalGeneration;
+      if (ttl > Duration.zero &&
+          isCurrentLoad &&
+          wasNotInvalidated &&
+          (shouldCache?.call(value) ?? true)) {
         _completed[key] = _CompletedCacheValue(
           value: value,
           storedAt: _clock(),
         );
+        _evictOldestIfNeeded();
       }
       completer.complete(value);
     } catch (error, stackTrace) {
@@ -131,6 +144,12 @@ class SearchTurnCache {
       if (identical(_inFlight[key], completer.future)) {
         _inFlight.remove(key);
       }
+    }
+  }
+
+  void _evictOldestIfNeeded() {
+    while (_completed.length > maxEntries) {
+      _completed.remove(_completed.keys.first);
     }
   }
 

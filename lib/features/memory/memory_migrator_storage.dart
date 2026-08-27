@@ -3,6 +3,16 @@ part of 'memory_migrator.dart';
 extension _MemoryMigratorStorage on MemoryMigrator {
   // ---- Storage and diagnostics ----
 
+  Future<T> _runMigrationMutation<T>(Future<T> Function() operation) =>
+      _mutationGate.run(() async {
+        if (_cancelled ||
+            _lateWritesFenced ||
+            !_mutationGate.isCurrent(_migrationEpoch)) {
+          throw const StaleMigrationWrite();
+        }
+        return operation();
+      });
+
   /// 早期迁移没有给“关系”类旧记录写入用户主体，导致私聊范围无法安全识别。
   /// 这里只补主体元数据，不改正文、状态或稳定 ID，也不把自身成长误归给用户。
   Future<int> _repairLegacyUserSubjects() async {
@@ -18,6 +28,9 @@ extension _MemoryMigratorStorage on MemoryMigrator {
       memory.subjectIds = ['user'];
       try {
         await _savePermanentMemory(memory);
+      } on StaleMigrationWrite {
+        memory.subjectIds = previousSubjects;
+        rethrow;
       } on Object {
         memory.subjectIds = previousSubjects;
         failed++;
@@ -27,19 +40,22 @@ extension _MemoryMigratorStorage on MemoryMigrator {
   }
 
   Future<void> _savePermanentMemory(PermanentMemory memory) async {
-    if (savePermanentMemory case final save?) {
-      await save(memory);
-      return;
-    }
-    await memory.save();
+    await _runMigrationMutation(() async {
+      if (savePermanentMemory case final save?) {
+        await save(memory);
+        return;
+      }
+      await memory.save();
+    });
   }
 
-  Future<bool> _putPermanentMemory(PermanentMemory memory) async {
-    final key = _stableMemoryKey(memory);
-    if (_db.permanentMemoryBox.containsKey(key)) return false;
-    await _db.permanentMemoryBox.put(key, memory);
-    return true;
-  }
+  Future<bool> _putPermanentMemory(PermanentMemory memory) =>
+      _runMigrationMutation(() async {
+        final key = _stableMemoryKey(memory);
+        if (_db.permanentMemoryBox.containsKey(key)) return false;
+        await _db.permanentMemoryBox.put(key, memory);
+        return true;
+      });
 
   String _stableMemoryKey(PermanentMemory memory) {
     final contentHash = _uuid.v5(
@@ -71,7 +87,9 @@ extension _MemoryMigratorStorage on MemoryMigrator {
   }
 
   Future<void> _writeMarker(Map<String, dynamic> marker) async {
-    await _db.appSettingsBox.put(_kMemoryMigrationMarkerKey, marker);
+    await _runMigrationMutation(
+      () => _db.appSettingsBox.put(_kMemoryMigrationMarkerKey, marker),
+    );
   }
 
   Future<void> _writeDiagnostic({
@@ -86,21 +104,25 @@ extension _MemoryMigratorStorage on MemoryMigrator {
   }) async {
     try {
       final sortedReasonCodes = reasonCodes.toList()..sort();
-      await _db.appSettingsBox.put(MemoryMigrator.diagnosticKey, {
-        'status': status,
-        'warningCount': warningCount,
-        'reasonCodes': sortedReasonCodes,
-        'updatedAt': DateTime.now().toUtc().toIso8601String(),
-        'stats': {
-          'userProfiles': report?.userProfileCreated ?? userProfileCreated,
-          'permanentMemories':
-              report?.permanentMemoriesCreated ?? permanentMemoriesCreated,
-          'relationshipSnapshots': report?.relationshipSnapshotsCreated ??
-              relationshipSnapshotsCreated,
-          'relationshipEvents':
-              report?.relationshipEventsCreated ?? relationshipEventsCreated,
-        },
-      });
+      await _runMigrationMutation(
+        () => _db.appSettingsBox.put(MemoryMigrator.diagnosticKey, {
+          'status': status,
+          'warningCount': warningCount,
+          'reasonCodes': sortedReasonCodes,
+          'updatedAt': DateTime.now().toUtc().toIso8601String(),
+          'stats': {
+            'userProfiles': report?.userProfileCreated ?? userProfileCreated,
+            'permanentMemories':
+                report?.permanentMemoriesCreated ?? permanentMemoriesCreated,
+            'relationshipSnapshots': report?.relationshipSnapshotsCreated ??
+                relationshipSnapshotsCreated,
+            'relationshipEvents':
+                report?.relationshipEventsCreated ?? relationshipEventsCreated,
+          },
+        }),
+      );
+    } on StaleMigrationWrite {
+      rethrow;
     } on Object {
       // A diagnostic write must never turn a completed migration into a
       // failure, and the original storage error must not be persisted.

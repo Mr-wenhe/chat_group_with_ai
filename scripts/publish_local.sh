@@ -59,6 +59,13 @@ cd "$ROOT"
 command -v gh >/dev/null 2>&1      || { err "未找到 gh CLI，请先安装并登录 (gh auth login)"; exit 1; }
 command -v flutter >/dev/null 2>&1 || { err "未找到 flutter，请确认其已在 PATH 中"; exit 1; }
 
+# 该脚本会上传 Android APK/AAB，必须使用正式签名。权限校验专用的
+# ALLOW_DEBUG_SIGNING=true 只允许在 CI 的验证任务中设置，不能污染发布流程。
+if [ ! -f "$ROOT/android/key.properties" ]; then
+  err "缺少 android/key.properties；Android 生产发布必须提供正式签名配置"
+  exit 1
+fi
+
 # 可选：如需走代理拉取依赖，取消下面这行注释（按你本机代理端口调整）
 # export HTTPS_PROXY=http://127.0.0.1:7897 HTTP_PROXY=http://127.0.0.1:7897
 

@@ -3,13 +3,13 @@ import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 
 /// 模型能力注册表（built-in 快照）。
 ///
-/// 这是随应用发布的厂商文档快照，版本 [_version] = `builtin-2026-07-16`
-/// （[_snapshotDate] = 2026-07-16）。当前为静态硬编码，未来若有在线更新
+/// 这是随应用发布的厂商文档快照，版本 [_version] = `builtin-2026-08-23`
+/// （[_snapshotDate] = 2026-08-23）。当前为静态硬编码，未来若有在线更新
 /// 机制再扩展；更新时请同步 bump 版本与日期，并在 [resolve] 中保留用户声明
 /// 的 [CustomModelCapability] 优先级（见 [ModelCapabilityRegistry.resolve]）。
 class ModelCapabilityRegistry {
-  static final DateTime _snapshotDate = DateTime.utc(2026, 7, 16);
-  static const String _version = 'builtin-2026-07-16';
+  static final DateTime _snapshotDate = DateTime.utc(2026, 8, 23);
+  static const String _version = 'builtin-2026-08-23';
 
   ModelCapability resolve({
     required ApiProvider provider,
@@ -31,6 +31,9 @@ class ModelCapabilityRegistry {
         supportsStreaming: custom.supportsStreaming,
         supportsVision: custom.supportsVision,
         supportsTools: custom.supportsTools,
+        supportsNativeWebSearch: builtin.supportsNativeWebSearch,
+        supportsNativeWebSearchFreshness:
+            builtin.supportsNativeWebSearchFreshness,
         contextWindow: custom.contextWindow > builtin.contextWindow
             ? custom.contextWindow
             : builtin.contextWindow,
@@ -52,6 +55,8 @@ class ModelCapabilityRegistry {
         supportsStreaming: custom.supportsStreaming,
         supportsVision: custom.supportsVision,
         supportsTools: custom.supportsTools,
+        supportsNativeWebSearch: false,
+        supportsNativeWebSearchFreshness: false,
         contextWindow: custom.contextWindow,
         maxOutput: custom.maxOutput,
         price: null,
@@ -70,6 +75,8 @@ class ModelCapabilityRegistry {
       supportsStreaming: false,
       supportsVision: false,
       supportsTools: false,
+      supportsNativeWebSearch: false,
+      supportsNativeWebSearchFreshness: false,
       contextWindow: 8192,
       maxOutput: 2048,
       price: null,
@@ -84,6 +91,8 @@ class ModelCapabilityRegistry {
     required int context,
     int output = 8192,
     bool tools = true,
+    bool nativeWebSearch = false,
+    bool nativeWebSearchFreshness = false,
     ModelPrice? price,
     String source = '随应用发布的厂商文档快照',
   }) {
@@ -94,6 +103,8 @@ class ModelCapabilityRegistry {
           supportsStreaming: true,
           supportsVision: false,
           supportsTools: tools,
+          supportsNativeWebSearch: nativeWebSearch,
+          supportsNativeWebSearchFreshness: nativeWebSearchFreshness,
           contextWindow: context,
           maxOutput: output,
           price: price,
@@ -124,6 +135,8 @@ class ModelCapabilityRegistry {
         supportsStreaming: true,
         supportsVision: true,
         supportsTools: base.supportsTools,
+        supportsNativeWebSearch: base.supportsNativeWebSearch,
+        supportsNativeWebSearchFreshness: base.supportsNativeWebSearchFreshness,
         contextWindow: base.contextWindow,
         maxOutput: base.maxOutput,
         price: base.price,
@@ -199,7 +212,21 @@ class ModelCapabilityRegistry {
       'deepseek-vl2-tiny',
     ])
       'deepseek/$model': _vision(provider: 'deepseek', context: 1000000),
-    for (final model in ['qwen-turbo', 'qwen-plus', 'qwen-max'])
+    // DashScope documents the native generation API's `enable_search` and
+    // `enable_source` response contract for these built-in Qwen models. The
+    // separate native adapter uses that API; this does not imply support for
+    // arbitrary OpenAI-compatible endpoints.
+    'qwen/qwen-plus': _text(
+      provider: 'qwen',
+      context: 131072,
+      nativeWebSearch: true,
+      nativeWebSearchFreshness: true,
+      source: 'DashScope 联网搜索协议快照 2026-08-23',
+    ),
+    // qwen-turbo/qwen-max remain ordinary text models here. They must not be
+    // sent the DashScope source-search parameters without a matching vendor
+    // contract.
+    for (final model in ['qwen-turbo', 'qwen-max'])
       'qwen/$model': _text(provider: 'qwen', context: 131072),
     'qwen/qwen-long': _text(provider: 'qwen', context: 1000000),
     for (final model in [

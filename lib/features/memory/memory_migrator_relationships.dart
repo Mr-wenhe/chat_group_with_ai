@@ -90,7 +90,13 @@ extension _MemoryMigratorRelationships on MemoryMigrator {
           revision: 1,
           updatedAt: DateTime.now(),
         );
-        await _db.relationshipStateBox.put(stableRelationId, snapshot);
+        await _runMigrationMutation(
+          () async {
+            if (!_db.relationshipStateBox.containsKey(stableRelationId)) {
+              await _db.relationshipStateBox.put(stableRelationId, snapshot);
+            }
+          },
+        );
       }
       snapshotsCreated.add(stableRelationId);
 
@@ -135,7 +141,13 @@ extension _MemoryMigratorRelationships on MemoryMigrator {
           createdBy: RelationshipEventCreator.legacyMigration,
         );
 
-        await _db.relationshipEventBox.put(eventId, event);
+        await _runMigrationMutation(
+          () async {
+            if (!_db.relationshipEventBox.containsKey(eventId)) {
+              await _db.relationshipEventBox.put(eventId, event);
+            }
+          },
+        );
         eventsCreated.add(eventId);
       }
     }

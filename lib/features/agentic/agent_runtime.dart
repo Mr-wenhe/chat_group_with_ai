@@ -149,6 +149,11 @@ class AgentRuntime {
   static const Duration completionTimeout = Duration(seconds: 120);
   static const Duration fileGenerationTimeout = Duration(minutes: 5);
 
+  /// Hard ceiling for one tool call, including local bridge I/O. The bridge
+  /// itself has a shorter child-process budget so it can return a structured
+  /// timeout response before this outer guard fires.
+  static const Duration toolExecutionTimeout = Duration(seconds: 40);
+
   final AgentCompletion complete;
   final WorkspaceFileTool? workspaceFileTool;
   final BrowserContextTool? browserContextTool;
@@ -1432,8 +1437,11 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         executedRequests: executedRequests,
         currentStepLabel: callingToolLabel(request.tool.wireName),
       ));
-      toolResult = await _execute(request, character,
-          executedRequests: executedRequests);
+      toolResult = await _execute(
+        request,
+        character,
+        executedRequests: executedRequests,
+      ).timeout(toolExecutionTimeout);
     } catch (e) {
       // 工具执行抛错：上报「步骤失败」，reason 取异常首行（简短中文/英文）。
       await _reportProgress(AgentRuntimeProgress(

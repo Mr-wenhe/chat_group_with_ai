@@ -22,7 +22,7 @@ class AiApiService {
       messages: const [
         {'role': 'user', 'content': 'Hi, reply with "OK" only.'},
       ],
-      maxTokens: 5,
+      maxTokens: 0,
       maxRetries: 0,
       purpose: AiRequestPurpose.connectionTest,
       conversationId: '',

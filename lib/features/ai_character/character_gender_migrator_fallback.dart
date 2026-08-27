@@ -3,6 +3,7 @@ part of 'character_gender_migrator.dart';
 extension _CharacterGenderMigratorFallback on CharacterGenderMigrator {
   void _resetSession() {
     _remoteInferenceCancelled = false;
+    _lateWritesFenced = false;
     _llmCancellation = Completer<void>();
     _sessionCharacters = const [];
     _sessionReplies = const {};
@@ -81,6 +82,8 @@ extension _CharacterGenderMigratorFallback on CharacterGenderMigrator {
           state.decisions.remove(character.id);
           await _tryWriteFallbackState(state, report);
         }
+      } on StaleMigrationWrite {
+        rethrow;
       } on Object {
         report.saveFailures++;
         _sessionReasonCodes.add('character_save_failure');
@@ -90,6 +93,8 @@ extension _CharacterGenderMigratorFallback on CharacterGenderMigrator {
         state.candidateIds.every(state.completedIds.contains)) {
       try {
         await _completeMigration();
+      } on StaleMigrationWrite {
+        rethrow;
       } on Object {
         _sessionReasonCodes.add('state_save_failure');
         report.stateSaveFailures++;
@@ -118,6 +123,8 @@ extension _CharacterGenderMigratorFallback on CharacterGenderMigrator {
               .toList(growable: false),
         ),
       );
+    } on StaleMigrationWrite {
+      rethrow;
     } on Object {
       _sessionReasonCodes.add('state_save_failure');
       return _sessionState;
@@ -130,6 +137,8 @@ extension _CharacterGenderMigratorFallback on CharacterGenderMigrator {
   ) async {
     try {
       await _writeState(state);
+    } on StaleMigrationWrite {
+      rethrow;
     } on Object {
       _sessionReasonCodes.add('state_save_failure');
       report.stateSaveFailures++;

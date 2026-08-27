@@ -44,10 +44,17 @@ extension _MemoryMigratorLegacy on MemoryMigrator {
       avatar: '',
       bio: '',
     );
-    await _db.userProfileBox.put('me', profile);
+    var created = false;
+    await _runMigrationMutation(() async {
+      // Re-check inside the gate so a profile created while the migration was
+      // reading its snapshot is never overwritten by the legacy candidate.
+      if (_db.userProfileBox.get('me') != null) return;
+      await _db.userProfileBox.put('me', profile);
+      created = true;
+    });
 
     return _ProfileResult(
-        created: 1, selectedName: displayName, warning: warning);
+        created: created ? 1 : 0, selectedName: displayName, warning: warning);
   }
 
   // ---- 2. CharacterMemory -> PermanentMemory ----
@@ -174,7 +181,11 @@ extension _MemoryMigratorLegacy on MemoryMigrator {
         }
 
         // 只有该角色的所有记录都写入成功后才落角色 marker。
-        await _db.appSettingsBox.put(charMigratedKey, true);
+        await _runMigrationMutation(
+          () => _db.appSettingsBox.put(charMigratedKey, true),
+        );
+      } on StaleMigrationWrite {
+        rethrow;
       } on Object {
         failedCharacterIds.add(char.id);
       }

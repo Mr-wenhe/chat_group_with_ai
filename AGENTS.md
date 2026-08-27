@@ -66,15 +66,18 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 ### Important Caveats
 
 - `AICharacter` tracks hourly reply counts via `lastReplyTimestamp` and `hourlyReplyCount` directly on the model — these are mutated in `_isEligibleToReply` without re-saving to DB each time, only the limit check is enforced during a round.
-- Non-release runs read Hive directly from the repository `data/` directory, including API keys stored inside `api_configs.hive`.
+- Non-release runs read Hive directly from the repository `data/` directory; the local-only `api_configs.hive` may contain development credentials and is never part of the Git index.
 - Release builds read/write Hive under the user's app support directory and create fresh empty `*.hive` files there on first launch.
 - The `custom` provider requires a manual `baseUrl` input; all others have hardcoded base URLs in `ApiProvider`.
-- Local `data/*.hive` files are intentionally versioned as development-only data.
+- Non-credential `data/*.hive` files are retained as development/Stage 16 fixtures; `data/api_configs.hive` is local-only and ignored.
 - Foreground proactive DMs may call configured LLM APIs while the app is running. Keep cooldowns conservative and never trigger background/offline network generation without an explicit notification/push design.
 - **API Key 连接测试红线**：用户在配置表单中新输入的 Key 必须直接用于本次测试，禁止为测试先临时写入/回读/删除 Keychain/Keystore；只有编辑已有配置且 Key 输入留空时，才通过 `ApiCredentialResolver` 读取已保存凭据。持久化仅能由正式保存流程执行。
 - **macOS Debug 凭据兼容**：非 release 运行时 Keychain 可能因 ad-hoc 签名不可用；安全写入失败后可仅在非 release 保留 `legacyApiKey`，并以 `hasCredential=true` 且 `credentialId=CredentialRepository.developmentHiveCredentialId` 作为开发回退标记。`ApiCredentialResolver` 与删除流程必须识别该标记；Release 严禁读取或写入 Hive 明文 Key。
 - **工作模式连续修改红线**：恢复中的工作任务必须占用会话控制器，新输入只能排队并在旧任务结束后派发，禁止取消旧任务后静默丢弃新请求。中英文“修改同一/相同/当前/上次文件”等明确修订请求必须覆盖原附件路径；只有新建请求发生重名时才允许自动改名。流式通道返回空内容时可对同一请求回退一次非流式调用；标准 `content` 为空时才允许读取兼容字段 `reasoning_content`，两者均为空必须报错。源码附件的本地兜底必须有对应语言的可运行模板，否则应明确失败，禁止把说明文本伪装成 `.py/.js/.ts` 等代码附件。
 - **Dependency overrides 策略**：本项目使用 Flutter 3.24 fork，不支持 `android.flutter` 属性（3.27+ API）。以下包的新版会触发 Android 构建失败，已通过 `dependency_overrides` 锁定：`file_picker`（≥8.0.0 <9.0.0）、`package_info_plus`（≥8.0.0 <9.0.0）、`wakelock_plus`（≥1.0.0 <1.4.0）。新增依赖前需验证 Android build.gradle 是否使用了 `android.flutter`。
+- **已处理的 P1 基线风险（2026-08-26）**：
+  - **Android Release 签名回退**：缺少完整 `android/key.properties` 时，`android/app/build.gradle` 失败关闭；只有权限校验任务显式设置 `ALLOW_DEBUG_SIGNING=true`。
+  - **仓库内 Hive 凭据风险**：`data/api_configs.hive` 已从 Git 索引移除并加入忽略规则；若历史提交曾包含真实凭据，仍需单独轮换并按组织流程清理历史。
 
 ### 代码质量检查清单
 
@@ -127,11 +130,11 @@ All providers live under `lib/features/*/providers/` and are re-exported via `li
 - ✅ **Private chat inbox + foreground proactive contact.** `/direct-chats` lists private histories with unread counts; private chats use `dm:{characterId}`; foreground watcher can create proactive DMs from stale private chats or recent group context.
 - **Cost estimation.** Token usage exists, but provider/model-specific price calculation is not implemented.
 - **Chat history search.**
-- **Import / restore flow.** Export exists, but importing characters/groups/conversations is not yet available.
+- ✅ **Import / restore flow.** `lib/features/backup/` implements versioned `.cgbak` backup and restore from Settings, including conflict strategies, staged verification, rollback on commit failure, media attachments, and cross-entity ID remapping. API keys are excluded and restored API configs require key re-binding.
 - **Offline proactive contact.** Fully closed-app AI generation needs pre-generated local notifications or a server-side push service; current implementation is foreground/local only.
 
 ### Known limitations (current implementation)
 
-- Import for characters/groups/conversations not yet available — only export (added 2026-07-07); data is local-only and easy to lose.
+- Backup/restore intentionally excludes the local `ai_governance_ledger`; non-portable `WorkModeWorkspace.workDirPath` is dropped on import, and packages require an exact format/schema version because cross-version migration is not implemented.
 - Test coverage covers SSE parsing, presets, export safety, mention parsing, activity policy, chat orchestration, and humanized memory/prompt logic. UI-heavy chat room behavior still relies mostly on extracted logic tests.
-- Versioned `data/*.hive` may contain live API keys and chat data, so repository access should be treated as sensitive.
+- Versioned development fixtures may contain chat data; the credential-bearing `data/api_configs.hive` is local-only and ignored, but repository access should still be treated as sensitive.

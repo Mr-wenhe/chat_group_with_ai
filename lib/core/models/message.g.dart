@@ -29,13 +29,14 @@ class MessageAdapter extends TypeAdapter<Message> {
       media: (fields[9] as List?)?.cast<MediaAttachment>(),
       visibleToCharacterIds:
           fields[10] == null ? [] : (fields[10] as List?)?.cast<String>(),
+      webSearchSnapshot: (fields[11] as Map?)?.cast<dynamic, dynamic>(),
     );
   }
 
   @override
   void write(BinaryWriter writer, Message obj) {
     writer
-      ..writeByte(11)
+      ..writeByte(12)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -57,7 +58,9 @@ class MessageAdapter extends TypeAdapter<Message> {
       ..writeByte(9)
       ..write(obj.media)
       ..writeByte(10)
-      ..write(obj.visibleToCharacterIds);
+      ..write(obj.visibleToCharacterIds)
+      ..writeByte(11)
+      ..write(obj.webSearchSnapshot);
   }
 
   @override

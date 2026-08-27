@@ -115,10 +115,10 @@ String agentProgressMessageContent({
 
   final lines = <String>[
     statusHeader(
-      characterName,
-      isFinal: finalResult,
-      failed: stage == AgentRuntimeProgressStage.stepFailed,
-    ) +
+          characterName,
+          isFinal: finalResult,
+          failed: stage == AgentRuntimeProgressStage.stepFailed,
+        ) +
         elapsedSuffix,
   ];
 

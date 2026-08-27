@@ -86,6 +86,41 @@ class _HangingMemoryMigrator extends MemoryMigrator {
       Completer<MemoryMigrationReport>().future;
 }
 
+class _BlockingMemoryMigrator extends MemoryMigrator {
+  final writeStarted = Completer<void>();
+  final releaseWrite = Completer<void>();
+  final cancelled = Completer<void>();
+  Future<MemoryMigrationReport>? _migration;
+
+  _BlockingMemoryMigrator(super.db);
+
+  @override
+  Future<MemoryMigrationReport> migrate({bool force = false}) {
+    return _migration ??= _runBlockingMigration();
+  }
+
+  @override
+  void cancel() {
+    if (!cancelled.isCompleted) cancelled.complete();
+  }
+
+  @override
+  Future<void> waitForCancellationDrain() =>
+      _migration?.then<void>((_) {}) ?? Future<void>.value();
+
+  Future<MemoryMigrationReport> _runBlockingMigration() async {
+    writeStarted.complete();
+    await releaseWrite.future;
+    return const MemoryMigrationReport(
+      alreadyMigrated: false,
+      userProfileCreated: 0,
+      permanentMemoriesCreated: 0,
+      relationshipSnapshotsCreated: 0,
+      relationshipEventsCreated: 0,
+    );
+  }
+}
+
 AICharacter _character({
   required String id,
   String systemPrompt = '',
@@ -148,7 +183,10 @@ void main() {
           await db.aiCharacterBox.put(character.id, character);
         },
       ),
-      timeout: const Duration(milliseconds: 10),
+      // Keep the cancellation much shorter than the 1s fake API delay, while
+      // leaving enough scheduling slack for the migration to reach the API
+      // call when this file runs inside the full Flutter test suite.
+      timeout: const Duration(milliseconds: 250),
     );
 
     expect(api.calls, 1);
@@ -194,6 +232,34 @@ void main() {
     expect(migrator.cancelled, isTrue);
   });
 
+  test('real migration write drain cannot block startup forever', () async {
+    await db.apiConfigBox.put('config-a', _config());
+    await db.aiCharacterBox
+        .put('old-character', _character(id: 'old-character'));
+    final writeStarted = Completer<void>();
+    final releaseWrite = Completer<void>();
+    final api = _CancelableDelayedChatApiService(const Duration(seconds: 1));
+    final migration = runCharacterGenderMigration(
+      db,
+      migrator: CharacterGenderMigrator(
+        db,
+        api: api,
+        credentials: _FakeCredentials(),
+        saveCharacter: (_) async {
+          if (!writeStarted.isCompleted) writeStarted.complete();
+          await releaseWrite.future;
+        },
+      ),
+      timeout: const Duration(milliseconds: 10),
+    );
+    addTearDown(() {
+      if (!releaseWrite.isCompleted) releaseWrite.complete();
+    });
+
+    await migration.timeout(const Duration(seconds: 2));
+    expect(writeStarted.isCompleted, isTrue);
+  });
+
   test('memory startup migration timeout does not block startup forever',
       () async {
     final migrator = _HangingMemoryMigrator(db);
@@ -203,6 +269,25 @@ void main() {
       migrator: migrator,
       timeout: const Duration(milliseconds: 5),
     ).timeout(const Duration(seconds: 1));
+  });
+
+  test('memory startup timeout waits for an active migrator to drain',
+      () async {
+    final migrator = _BlockingMemoryMigrator(db);
+    var helperReturned = false;
+    final migration = runMemoryMigration(
+      db,
+      migrator: migrator,
+      timeout: const Duration(milliseconds: 5),
+    )..then<void>((_) => helperReturned = true);
+
+    await migrator.writeStarted.future;
+    await migrator.cancelled.future;
+    expect(helperReturned, isFalse);
+
+    migrator.releaseWrite.complete();
+    await migration.timeout(const Duration(seconds: 2));
+    expect(helperReturned, isTrue);
   });
 
   test('top-level migration failure keeps a final session gender', () async {

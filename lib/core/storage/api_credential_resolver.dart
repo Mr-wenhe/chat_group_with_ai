@@ -29,7 +29,9 @@ class SecureApiCredentialResolver implements ApiCredentialResolver {
           ? (config.legacyApiKeyForMigration ?? '')
           : null;
     }
-    if (config.credentialId.isEmpty) return null;
+    if (config.credentialId != _credentials.credentialIdFor(config.id)) {
+      return null;
+    }
     final result = await _credentials.read(config.id);
     return result.isAvailable ? result.value : null;
   }

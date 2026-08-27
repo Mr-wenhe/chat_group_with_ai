@@ -10,6 +10,7 @@ import 'package:chat_group/features/web_search/models/search_provider_config.dar
 import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/providers/brave_search_provider.dart';
 import 'package:chat_group/features/web_search/providers/duckduckgo_instant_answer_provider.dart';
+import 'package:chat_group/features/web_search/providers/gateway_search_provider.dart';
 import 'package:chat_group/features/web_search/providers/search_provider.dart';
 import 'package:chat_group/features/web_search/providers/tavily_search_provider.dart';
 import 'package:chat_group/features/web_search/security/search_endpoint_validator.dart';
@@ -107,12 +108,19 @@ class _SearchProviderConfigFormPageState
             TextFormField(
               key: const ValueKey('search-config-name'),
               controller: _nameController,
+              maxLength: SearchProviderConfig.maxNameLength,
               decoration: const InputDecoration(
                 labelText: 'Provider 名称',
                 border: OutlineInputBorder(),
               ),
-              validator: (value) =>
-                  value?.trim().isEmpty == true ? '请输入 Provider 名称' : null,
+              validator: (value) {
+                final name = value?.trim() ?? '';
+                if (name.isEmpty) return '请输入 Provider 名称';
+                if (name.length > SearchProviderConfig.maxNameLength) {
+                  return 'Provider 名称过长';
+                }
+                return null;
+              },
             ),
             const SizedBox(height: 12),
             DropdownButtonFormField<SearchProviderKind>(
@@ -139,25 +147,36 @@ class _SearchProviderConfigFormPageState
               key: const ValueKey('search-config-base-url'),
               controller: _baseUrlController,
               keyboardType: TextInputType.url,
+              maxLength: SearchProviderConfig.maxBaseUrlLength,
               decoration: const InputDecoration(
                 labelText: 'Base URL',
-                hintText: 'https://search.example.com/v1',
+                hintText: 'https://search.example.com',
                 border: OutlineInputBorder(),
               ),
-              validator: (value) => SearchEndpointValidator.errorFor(
-                value ?? '',
-                isRelease: _store.isRelease,
-                allowLocalDevelopmentGateway:
-                    _store.allowLocalDevelopmentGateway,
-              ),
+              validator: (value) {
+                if (_provider == SearchProviderKind.duckDuckGoInstantAnswer) {
+                  return null;
+                }
+                return SearchEndpointValidator.errorFor(
+                  value ?? '',
+                  isRelease: _store.isRelease,
+                  allowLocalDevelopmentGateway:
+                      _provider == SearchProviderKind.gateway &&
+                          _store.allowLocalDevelopmentGateway,
+                );
+              },
             ),
             const SizedBox(height: 12),
             TextFormField(
               key: const ValueKey('search-config-credential'),
               controller: _credentialController,
               obscureText: _obscureCredential,
+              maxLength: SearchProviderConfig.maxCredentialLength,
               decoration: InputDecoration(
-                labelText: editing ? 'API Key（留空保持当前值）' : 'API Key',
+                labelText: _credentialLabel(editing),
+                helperText: _provider == SearchProviderKind.gateway
+                    ? '生产环境需要 Gateway 访问令牌；仅显式开启的本地开发网关可留空。'
+                    : null,
                 border: const OutlineInputBorder(),
                 suffixIcon: IconButton(
                   icon: Icon(_obscureCredential
@@ -169,9 +188,10 @@ class _SearchProviderConfigFormPageState
                 ),
               ),
               validator: (value) {
-                final providerNeedsKey =
-                    _provider == SearchProviderKind.tavily ||
-                        _provider == SearchProviderKind.brave;
+                final providerNeedsKey = searchProviderRequiresCredential(
+                  _provider,
+                  isRelease: _store.isRelease,
+                );
                 final providerChanged =
                     editing && widget.config!.provider != _provider;
                 if (!providerNeedsKey || (editing && !providerChanged)) {
@@ -250,6 +270,10 @@ class _SearchProviderConfigFormPageState
       isDefault: _isDefault,
       credentialId: preserveCredential ? widget.config!.credentialId : '',
       hasCredential: preserveCredential && widget.config!.hasCredential,
+      credentialRequired:
+          preserveCredential && widget.config!.credentialRequired,
+      credentialRevision:
+          preserveCredential ? widget.config!.credentialRevision : '',
     );
   }
 
@@ -323,25 +347,40 @@ class _SearchProviderConfigFormPageState
       SearchProviderKind.tavily => TavilySearchProvider(
           baseUrl: config.baseUrl,
           isRelease: _store.isRelease,
-          allowLocalDevelopmentGateway: _store.allowLocalDevelopmentGateway,
+          allowLocalDevelopmentGateway:
+              config.provider == SearchProviderKind.gateway &&
+                  _store.allowLocalDevelopmentGateway,
         ),
       SearchProviderKind.brave => BraveSearchProvider(
           baseUrl: config.baseUrl,
           isRelease: _store.isRelease,
-          allowLocalDevelopmentGateway: _store.allowLocalDevelopmentGateway,
+          allowLocalDevelopmentGateway:
+              config.provider == SearchProviderKind.gateway &&
+                  _store.allowLocalDevelopmentGateway,
         ),
       SearchProviderKind.duckDuckGoInstantAnswer =>
         DuckDuckGoInstantAnswerProvider(),
-      SearchProviderKind.gateway =>
-        throw UnsupportedError('Backend Gateway 尚未接入连接测试'),
+      SearchProviderKind.gateway => GatewaySearchProvider(
+          baseUrl: config.baseUrl,
+          isRelease: _store.isRelease,
+          allowLocalDevelopmentGateway: _store.allowLocalDevelopmentGateway,
+        ),
     };
   }
 
   bool _supportsConnectionTest(SearchProviderKind provider) =>
       widget.providerFactory != null ||
+      provider == SearchProviderKind.gateway ||
       provider == SearchProviderKind.tavily ||
       provider == SearchProviderKind.brave ||
       provider == SearchProviderKind.duckDuckGoInstantAnswer;
+
+  String _credentialLabel(bool editing) {
+    if (_provider == SearchProviderKind.gateway) {
+      return editing ? 'Gateway 访问令牌（留空保持当前值）' : 'Gateway 访问令牌（本地开发可留空）';
+    }
+    return editing ? 'API Key（留空保持当前值）' : 'API Key';
+  }
 
   String _providerLabel(SearchProviderKind provider) => switch (provider) {
         SearchProviderKind.gateway => 'Backend Gateway',

@@ -16,7 +16,15 @@ class LocalAgentBridgeClient {
     if (!local || (uri.scheme != 'http' && uri.scheme != 'https')) {
       throw ArgumentError('Local agent bridge must use localhost.');
     }
-    _dio = dio ?? Dio(BaseOptions(baseUrl: this.baseUrl));
+    _dio = dio ??
+        Dio(
+          BaseOptions(
+            baseUrl: this.baseUrl,
+            connectTimeout: kLocalAgentBridgeClientTimeout,
+            sendTimeout: kLocalAgentBridgeClientTimeout,
+            receiveTimeout: kLocalAgentBridgeClientTimeout,
+          ),
+        );
   }
 
   final String? _token;

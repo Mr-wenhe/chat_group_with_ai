@@ -13,6 +13,7 @@ class AutoChatScheduler {
   bool _running = false;
   bool _disposed = false;
   bool _stopped = false;
+
   /// Set by [coolDown()] during an active round to suppress the normal
   /// [nextInterval] scheduling in the finally block.
   bool _cooldownRequestedDuringRound = false;

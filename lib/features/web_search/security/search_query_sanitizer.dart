@@ -187,7 +187,7 @@ class SearchQuerySanitizer {
     _SecretPattern(
       SearchSecretType.pemPrivateKey,
       RegExp(
-        r'-----BEGIN(?: [A-Z0-9-]+)* PRIVATE KEY-----[\s\S]*?-----END(?: [A-Z0-9-]+)* PRIVATE KEY-----',
+        r'-----BEGIN [^-]+-----[\s\S]*?-----END [^-]+-----',
         caseSensitive: false,
       ),
     ),
@@ -203,11 +203,21 @@ class SearchQuerySanitizer {
     ),
     _SecretPattern(
       SearchSecretType.apiKey,
-      RegExp(r'\bsk-[A-Za-z0-9][A-Za-z0-9_-]*\b'),
+      RegExp(
+        r'\b(?:sk|pk|tvly|pplx|gsk|xai|hf|r8)-[A-Za-z0-9][A-Za-z0-9_./-]{7,}',
+        caseSensitive: false,
+      ),
     ),
     _SecretPattern(
       SearchSecretType.apiKey,
-      RegExp(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b'),
+      RegExp(r'\b(?:AKIA|ASIA)[0-9A-Z]{16}\b', caseSensitive: false),
+    ),
+    _SecretPattern(
+      SearchSecretType.apiKey,
+      RegExp(
+        r'\bbce-v[23]/[A-Za-z0-9][A-Za-z0-9_./-]{7,}',
+        caseSensitive: false,
+      ),
     ),
     _SecretPattern(
       SearchSecretType.apiKey,
@@ -216,7 +226,7 @@ class SearchQuerySanitizer {
     _SecretPattern(
       SearchSecretType.apiKey,
       RegExp(
-        r'\b(?:api[-_ ]?key|access[-_ ]?token|client[-_ ]?secret|password|authorization|cookie)\s*[:=]\s*(?:bearer\s+)?[^\s,;]+',
+        r'''\b(?:[A-Za-z0-9]+[_-])*(?:api[-_ ]?key|access[-_ ]?key|access[-_ ]?token|client[-_ ]?secret|secret[-_ ]?access[-_ ]?key|session[-_ ]?token|private[-_ ]?key|password|authorization|cookie)\s*[:=]\s*["']?(?:bearer\s+)?[^\s,;"']+''',
         caseSensitive: false,
       ),
     ),

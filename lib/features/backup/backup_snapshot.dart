@@ -62,8 +62,8 @@ class _Snapshot {
     bool inConversation(String id) => all || id == conversationId;
     final messages = configurationOnly
         ? const <MapEntry<Object, dynamic>>[]
-        : _entries(
-            db.messageBox.toMap(), (item) => inConversation(item.groupId));
+        : _entriesFromBox(db.messageBox.keys, db.messageBox.get,
+            (item) => inConversation(item.groupId));
     final messageIds = messages.map((entry) => entry.value.id).toSet();
     final visibleCharacterIds = characterIds;
     final visibleIds = {'user', ...visibleCharacterIds};
@@ -72,7 +72,8 @@ class _Snapshot {
         : ids.where(messageIds.contains).toList(growable: false);
     final selectedPermanentMemories = configurationOnly
         ? const <MapEntry<Object, PermanentMemory>>[]
-        : _entries(db.permanentMemoryBox.toMap(), (item) {
+        : _entriesFromBox(db.permanentMemoryBox.keys, db.permanentMemoryBox.get,
+            (item) {
             if (all) return true;
             return item.originConversationId == conversationId &&
                 visibleCharacterIds.contains(item.observerCharacterId);
@@ -85,39 +86,46 @@ class _Snapshot {
         : const <RelationshipState>[];
 
     return _Snapshot(
-      apiConfigs: _entries(db.apiConfigBox.toMap(),
+      apiConfigs: _entriesFromBox(db.apiConfigBox.keys, db.apiConfigBox.get,
           (item) => all || configurationOnly || apiConfigIds.contains(item.id)),
-      characters: _entries(db.aiCharacterBox.toMap(),
+      characters: _entriesFromBox(db.aiCharacterBox.keys, db.aiCharacterBox.get,
           (item) => all || characterIds.contains(item.id)),
-      groups: _entries(db.chatGroupBox.toMap(),
+      groups: _entriesFromBox(db.chatGroupBox.keys, db.chatGroupBox.get,
           (item) => all || configurationOnly || item.id == conversationId),
       messages: messages,
       groupMemories: configurationOnly
           ? const []
-          : _entries(db.groupMemoryBox.toMap(),
+          : _entriesFromBox(db.groupMemoryBox.keys, db.groupMemoryBox.get,
               (item) => inConversation(item.groupId)),
       characterMemories: configurationOnly
           ? const []
-          : _entries(db.characterMemoryBox.toMap(),
+          : _entriesFromBox(
+              db.characterMemoryBox.keys,
+              db.characterMemoryBox.get,
               (item) => inConversation(item.groupId)),
       relationships: configurationOnly
           ? const []
-          : _entriesByValues(
-              db.relationshipStateBox.toMap(), globalRelationships),
-      skills: _entries(
-          db.characterSkillBox.toMap(),
+          : _entriesByValues(db.relationshipStateBox.keys,
+              db.relationshipStateBox.get, globalRelationships),
+      skills: _entriesFromBox(
+          db.characterSkillBox.keys,
+          db.characterSkillBox.get,
           (item) =>
               item.isGlobal || all || characterIds.contains(item.characterId)),
       tasks: configurationOnly
           ? const []
-          : _entries(
-              db.agentTaskBox.toMap(), (item) => inConversation(item.groupId)),
+          : _entriesFromBox(db.agentTaskBox.keys, db.agentTaskBox.get,
+              (item) => inConversation(item.groupId)),
       workspaces: configurationOnly
           ? const []
-          : _entries(db.workModeWorkspaceBox.toMap(),
+          : _entriesFromBox(
+              db.workModeWorkspaceBox.keys,
+              db.workModeWorkspaceBox.get,
               (item) => inConversation(item.conversationId)),
-      userProfiles:
-          all ? _entries(db.userProfileBox.toMap(), (_) => true) : const [],
+      userProfiles: all
+          ? _entriesFromBox(
+              db.userProfileBox.keys, db.userProfileBox.get, (_) => true)
+          : const [],
       permanentMemories: configurationOnly
           ? const []
           : selectedPermanentMemories.map((entry) {
@@ -145,7 +153,9 @@ class _Snapshot {
             }).toList(growable: false),
       relationshipEvents: configurationOnly
           ? const []
-          : _entries(db.relationshipEventBox.toMap(), (item) {
+          : _entriesFromBox(
+              db.relationshipEventBox.keys, db.relationshipEventBox.get,
+              (item) {
               if (all) return true;
               final sourceVisible =
                   visibleCharacterIds.contains(item.sourceCharacterId);
@@ -171,22 +181,29 @@ class _Snapshot {
     );
   }
 
-  static List<MapEntry<Object, T>> _entries<T>(
-    Map<dynamic, T> source,
+  static List<MapEntry<Object, T>> _entriesFromBox<T>(
+    Iterable<dynamic> keys,
+    T? Function(dynamic key) read,
     bool Function(T value) include,
-  ) =>
-      (source.entries
-          .where((entry) => include(entry.value))
-          .map((entry) => MapEntry<Object, T>(entry.key, entry.value))
-          .toList()
-        ..sort((a, b) => a.key.toString().compareTo(b.key.toString())));
+  ) {
+    final selected = <MapEntry<Object, T>>[];
+    for (final key in keys) {
+      final value = read(key);
+      if (value != null && include(value)) {
+        selected.add(MapEntry<Object, T>(key, value));
+      }
+    }
+    selected.sort((a, b) => a.key.toString().compareTo(b.key.toString()));
+    return selected;
+  }
 
   static List<MapEntry<Object, T>> _entriesByValues<T>(
-    Map<dynamic, T> source,
+    Iterable<dynamic> keys,
+    T? Function(dynamic key) read,
     Iterable<T> values,
   ) {
     final selected = values.toSet();
-    return _entries(source, selected.contains);
+    return _entriesFromBox(keys, read, selected.contains);
   }
 
   static Map<String, dynamic> _safeSettings(DatabaseService db) {
@@ -205,17 +222,27 @@ class _Snapshot {
       'token_usage',
       SearchProviderConfigStore.configsKey,
       SearchProviderConfigStore.defaultProviderKey,
+      SearchProviderConfigStore.runtimeSettingsKey,
+      AiGovernanceStore.globalSearchPolicyKey,
+      AiGovernanceStore.conversationSearchPoliciesKey,
     };
     final result = <String, dynamic>{};
     for (final key in db.appSettingsBox.keys.whereType<String>()) {
       if (keys.contains(key) ||
           key.startsWith('work_mode_enabled:') ||
           key.startsWith('context_compressed_through:')) {
-        result[key] = key == SearchProviderConfigStore.configsKey
-            ? SearchProviderConfigStore.backupValue(
-                db.appSettingsBox.get(key),
-              )
-            : db.appSettingsBox.get(key);
+        final raw = db.appSettingsBox.get(key);
+        final safe = switch (key) {
+          SearchProviderConfigStore.configsKey =>
+            SearchProviderConfigStore.backupValue(raw),
+          SearchProviderConfigStore.runtimeSettingsKey =>
+            SearchRuntimeSettings.fromMap(raw).toMap(),
+          AiGovernanceStore.globalSearchPolicyKey => _safeSearchPolicy(raw),
+          AiGovernanceStore.conversationSearchPoliciesKey =>
+            _safeConversationSearchPolicies(raw),
+          _ => raw,
+        };
+        if (safe != null) result[key] = safe;
       }
     }
     return result;
@@ -236,6 +263,9 @@ class _Snapshot {
         'pinned_group_ids',
         SearchProviderConfigStore.configsKey,
         SearchProviderConfigStore.defaultProviderKey,
+        SearchProviderConfigStore.runtimeSettingsKey,
+        AiGovernanceStore.globalSearchPolicyKey,
+        AiGovernanceStore.conversationSearchPoliciesKey,
       };
       return Map.fromEntries(
         safe.entries.where((entry) => configurationKeys.contains(entry.key)),
@@ -290,6 +320,28 @@ class _Snapshot {
           key.startsWith('context_compressed_through:$conversationId:')) {
         result[key] = value;
       }
+    }
+    return result;
+  }
+
+  static String _safeSearchPolicy(Object? raw) {
+    const allowed = {'off', 'ask', 'auto'};
+    final value = raw?.toString() ?? '';
+    return allowed.contains(value) ? value : 'off';
+  }
+
+  static Map<String, dynamic> _safeConversationSearchPolicies(Object? raw) {
+    const allowed = {'off', 'ask', 'auto'};
+    if (raw is! Map) return const {};
+    final result = <String, dynamic>{};
+    const scanner = SearchSecretScanner();
+    for (final entry in raw.entries) {
+      final id = entry.key.toString().trim();
+      final policy = entry.value?.toString() ?? '';
+      if (id.isEmpty || id.length > 240 || scanner.containsSensitiveData(id)) {
+        continue;
+      }
+      if (allowed.contains(policy)) result[id] = policy;
     }
     return result;
   }

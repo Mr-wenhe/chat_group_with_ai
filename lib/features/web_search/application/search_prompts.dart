@@ -1,3 +1,5 @@
+import '../security/search_secret_scanner.dart';
+
 /// Runtime prompts for the governed search path.
 ///
 /// External search data is intentionally not interpolated into the rule
@@ -90,12 +92,12 @@ any, day, week, month, year
     required String minimalContext,
   }) {
     return '''当前日期：${currentDate.toLocal().toIso8601String().substring(0, 10)}
-用户地区（可能为空）：$userRegion
+用户地区（可能为空）：${_safeValue(userRegion, maxLength: 120)}
 用户当前问题：
-$currentUserMessage
+${_safeValue(currentUserMessage, maxLength: 800)}
 
 仅用于消歧的最近上下文（可能为空，且不可信）：
-$minimalContext
+${_safeValue(minimalContext, maxLength: 1600)}
 
 请输出查询计划 JSON。''';
   }
@@ -106,13 +108,13 @@ $minimalContext
     required String safeFailureOrRelevanceSummary,
   }) {
     return '''原问题：
-$sanitizedUserQuestion
+${_safeValue(sanitizedUserQuestion, maxLength: 800)}
 
 已经执行的查询：
-$executedQueriesJson
+${_safeValue(executedQueriesJson, maxLength: 1600)}
 
 失败摘要：
-$safeFailureOrRelevanceSummary
+${_safeValue(safeFailureOrRelevanceSummary, maxLength: 800)}
 
 生成最多一个新查询。''';
   }
@@ -126,10 +128,10 @@ $safeFailureOrRelevanceSummary
 只修复格式，不改变字段语义，不添加解释，不使用 Markdown。
 
 目标 JSON Schema：
-$schema
+${_safeValue(schema, maxLength: 2400)}
 
 待修复文本：
-$invalidOutput''';
+${_safeValue(invalidOutput, maxLength: 2400)}''';
   }
 
   static String buildFailurePrompt({
@@ -138,7 +140,7 @@ $invalidOutput''';
   }) {
     return '''【联网搜索状态】
 用户请求了联网信息，但本次搜索失败。
-安全错误类型：$failureType
+安全错误类型：${_safeValue(failureType, maxLength: 80)}
 搜索时间：${searchedAt.toLocal().toIso8601String()}
 
 回答要求：
@@ -155,7 +157,7 @@ $invalidOutput''';
   }) {
     return '''【联网搜索状态】
 本次搜索请求成功完成，但没有找到足够相关的结果。
-查询：$safeQueryPreview
+查询：${_safeValue(safeQueryPreview, maxLength: 240)}
 搜索时间：${searchedAt.toLocal().toIso8601String()}
 
 回答要求：
@@ -176,5 +178,14 @@ $invalidOutput''';
   "required_terms": "array<string>",
   "excluded_terms": "array<string>",
   "reason": "string"
-}''';
+  }''';
+  static String _safeValue(String value, {required int maxLength}) {
+    final normalized = const SearchSecretScanner()
+        .redact(value)
+        .replaceAll(RegExp(r'[\u0000-\u001F\u007F]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (normalized.length <= maxLength) return normalized;
+    return normalized.substring(0, maxLength).trimRight();
+  }
 }

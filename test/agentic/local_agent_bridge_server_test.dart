@@ -20,8 +20,16 @@ import 'package:flutter_test/flutter_test.dart';
 /// 避免与运行中的 App 已占用的 54263 端口冲突，使测试可独立运行。
 const _bridgeToken = 'test-session-token-which-is-long-enough-123456';
 
-Future<RunningBridgeServer> _startTestServer(Directory workspace) =>
-    startBridgeServer(workspace: workspace, token: _bridgeToken, port: 0);
+Future<RunningBridgeServer> _startTestServer(
+  Directory workspace, {
+  LocalAgentBridgeLimits limits = const LocalAgentBridgeLimits(),
+}) =>
+    startBridgeServer(
+      workspace: workspace,
+      token: _bridgeToken,
+      port: 0,
+      limits: limits,
+    );
 
 /// 向桥接服务发起 JSON POST 请求，返回 (statusCode, 解码后的 body)。
 Future<({int statusCode, Map<String, dynamic> body})> _postJson(
@@ -134,6 +142,64 @@ void main() {
 
     expect(response.statusCode, HttpStatus.requestEntityTooLarge);
     expect(jsonDecode(body), {'error': 'invalid_request'});
+  });
+
+  test('bridge returns a structured 400 for malformed field types', () async {
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+
+    final result = await _postJson(server.port, '/workspace/write', {
+      'path': 123,
+      'content': 'must not be written',
+    });
+
+    expect(result.statusCode, HttpStatus.badRequest);
+    expect(result.body['error'], 'invalid_field');
+    expect(result.body['field'], 'path');
+    expect(File('${workspace.path}/123').existsSync(), isFalse);
+  });
+
+  test('bridge rejects an empty conversation registration', () async {
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+
+    expect(
+      () => server.registerWorkspace('   ', workspace),
+      throwsArgumentError,
+    );
+  });
+
+  test('workspace read is bounded by the bridge response limit', () async {
+    await File('${workspace.path}/large.txt').writeAsString('123456789');
+    final server = await _startTestServer(
+      workspace,
+      limits: const LocalAgentBridgeLimits(maxWorkspaceReadBytes: 4),
+    );
+    addTearDown(() => server.close(force: true));
+
+    final result = await _postJson(server.port, '/workspace/read', {
+      'path': 'large.txt',
+    });
+
+    expect(result.statusCode, HttpStatus.requestEntityTooLarge);
+    expect(result.body['error'], 'output_too_large');
+  });
+
+  test('command execution is bounded by the bridge process timeout', () async {
+    final server = await _startTestServer(
+      workspace,
+      limits: const LocalAgentBridgeLimits(
+        processTimeout: Duration(microseconds: 1),
+      ),
+    );
+    addTearDown(() => server.close(force: true));
+
+    final result = await _postJson(server.port, '/command/run', {
+      'command': 'flutter analyze',
+    });
+
+    expect(result.statusCode, HttpStatus.gatewayTimeout);
+    expect(result.body['error'], 'process_timeout');
   });
 
   test('bridge allows loopback browser origin and echoes it in CORS', () async {
@@ -359,6 +425,25 @@ void main() {
 
     expect(result.statusCode, 403);
     expect(result.body['error'], 'command_not_allowed');
+  });
+
+  test('unknown non-empty conversation ids do not use the default workspace',
+      () async {
+    await File('${workspace.path}/default-only.txt').writeAsString('default');
+    final server = await _startTestServer(workspace);
+    addTearDown(() => server.close(force: true));
+
+    final result = await _postJson(
+      server.port,
+      '/workspace/read',
+      {
+        'conversationId': 'conversation-that-was-not-registered',
+        'path': 'default-only.txt',
+      },
+    );
+
+    expect(result.statusCode, 404);
+    expect(result.body['error'], 'workspace_not_registered');
   });
 
   test('WorkspaceFileTool.write round-trips through the bridge client',

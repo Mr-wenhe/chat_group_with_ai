@@ -63,6 +63,14 @@ class ModelCapability {
   final bool supportsStreaming;
   final bool supportsVision;
   final bool supportsTools;
+
+  /// True only when this exact model has a documented native web-search
+  /// protocol that yields independently verifiable source URLs.
+  final bool supportsNativeWebSearch;
+
+  /// True only when the native protocol accepts the application's freshness
+  /// parameter for this exact model.
+  final bool supportsNativeWebSearchFreshness;
   final int contextWindow;
   final int maxOutput;
   final ModelPrice? price;
@@ -77,6 +85,8 @@ class ModelCapability {
     required this.supportsStreaming,
     required this.supportsVision,
     required this.supportsTools,
+    this.supportsNativeWebSearch = false,
+    this.supportsNativeWebSearchFreshness = false,
     required this.contextWindow,
     required this.maxOutput,
     required this.price,
@@ -90,6 +100,10 @@ class CustomModelCapability {
   final bool supportsStreaming;
   final bool supportsVision;
   final bool supportsTools;
+
+  /// Custom OpenAI-compatible endpoints are intentionally conservative: a
+  /// user declaration cannot opt an unknown protocol into native search.
+  final bool supportsNativeWebSearch;
   final int contextWindow;
   final int maxOutput;
 
@@ -97,6 +111,7 @@ class CustomModelCapability {
     this.supportsStreaming = false,
     this.supportsVision = false,
     this.supportsTools = false,
+    this.supportsNativeWebSearch = false,
     this.contextWindow = 8192,
     this.maxOutput = 2048,
   });
@@ -106,6 +121,10 @@ class CustomModelCapability {
       supportsStreaming: map['supportsStreaming'] == true,
       supportsVision: map['supportsVision'] == true,
       supportsTools: map['supportsTools'] == true,
+      // Do not deserialize a native-search opt-in. Native search is protocol
+      // specific and must be registered by the application, not inferred from
+      // arbitrary custom endpoint metadata.
+      supportsNativeWebSearch: false,
       contextWindow: (map['contextWindow'] as num?)?.toInt() ?? 8192,
       maxOutput: (map['maxOutput'] as num?)?.toInt() ?? 2048,
     );
@@ -115,6 +134,7 @@ class CustomModelCapability {
         'supportsStreaming': supportsStreaming,
         'supportsVision': supportsVision,
         'supportsTools': supportsTools,
+        'supportsNativeWebSearch': false,
         'contextWindow': contextWindow,
         'maxOutput': maxOutput,
       };

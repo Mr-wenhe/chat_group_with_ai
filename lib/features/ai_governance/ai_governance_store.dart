@@ -1,9 +1,14 @@
+import 'dart:async';
+
+import 'package:chat_group/core/database/database_mutation_gate.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_request_guard.dart';
 import 'package:chat_group/features/ai_governance/model_capability_registry.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:uuid/uuid.dart';
+
+part 'ai_governance_store_helpers.dart';
 
 abstract class GovernancePersistence {
   BudgetSettings get budgetSettings;
@@ -42,18 +47,49 @@ abstract class GovernancePersistence {
   AiRequestGuard get guard;
 }
 
+class _SearchAuditCandidate {
+  final Map<dynamic, dynamic> raw;
+  final DateTime searchedAt;
+  final int sourceIndex;
+
+  const _SearchAuditCandidate({
+    required this.raw,
+    required this.searchedAt,
+    required this.sourceIndex,
+  });
+}
+
+int _compareSearchAuditCandidates(
+  _SearchAuditCandidate left,
+  _SearchAuditCandidate right,
+) {
+  final byTime = left.searchedAt.toUtc().compareTo(right.searchedAt.toUtc());
+  return byTime == 0 ? left.sourceIndex.compareTo(right.sourceIndex) : byTime;
+}
+
 class AiGovernanceStore implements GovernancePersistence {
+  static const globalSearchPolicyKey = 'web_search_policy_v1';
+  static const conversationSearchPoliciesKey =
+      'conversation_web_search_policies_v1';
+  static const searchAuditKey = 'web_search_audit_v1';
+  static const searchConfigurationKeys = {
+    globalSearchPolicyKey,
+    conversationSearchPoliciesKey,
+  };
   static const _budgetKey = 'ai_governance_budget_v1';
   static const _ledgerKey = 'ai_usage_ledger_v1';
   static const _diagnosticsKey = 'ai_request_diagnostics_v1';
-  static const _searchPolicyKey = 'web_search_policy_v1';
-  static const _searchAuditKey = 'web_search_audit_v1';
-  static const _conversationSearchPoliciesKey =
-      'conversation_web_search_policies_v1';
+  static const _searchPolicyKey = globalSearchPolicyKey;
+  static const _searchAuditKey = searchAuditKey;
+  static const _conversationSearchPoliciesKey = conversationSearchPoliciesKey;
   static const _customCapabilitiesKey = 'custom_model_capabilities_v1';
   static const _diagnosticLimit = 200;
   static const _searchAuditLimit = 100;
-  static const _detailRetention = Duration(days: 90);
+  static const _searchAuditRawScanLimit = 10000;
+
+  /// Search audits are retained for at most 30 days and 100 entries, with the
+  /// stricter limit winning.
+  static const _detailRetention = Duration(days: 30);
 
   static final Map<int, AiGovernanceStore> _instances = {};
 
@@ -68,6 +104,10 @@ class AiGovernanceStore implements GovernancePersistence {
   final DatabaseService db;
   bool _legacyLedgerMigrated = false;
   AiRequestGuard? _guard;
+  Future<void>? _searchAuditMaintenance;
+  bool _searchAuditScanWasCapped = false;
+  late final DatabaseMutationGate _mutationGate =
+      DatabaseMutationGate.forBox(db.appSettingsBox);
 
   AiGovernanceStore._(this.db);
 
@@ -186,51 +226,64 @@ class AiGovernanceStore implements GovernancePersistence {
   List<SearchAuditEntry> get searchAudits {
     final raw = db.appSettingsBox.get(_searchAuditKey);
     if (raw is! List) return const [];
-    return raw
-        .whereType<Map>()
-        .map(SearchAuditEntry.fromMap)
-        .toList(growable: false);
+    final values = _retainedSearchAudits(raw);
+    if (!_searchAuditScanWasCapped && _searchAuditNeedsPrune(raw, values)) {
+      _scheduleSearchAuditPrune(values);
+    }
+    return values;
   }
 
   @override
-  Future<void> saveBudgetSettings(BudgetSettings settings) =>
-      db.appSettingsBox.put(_budgetKey, settings.toMap());
+  Future<void> saveBudgetSettings(BudgetSettings settings) => _mutationGate
+      .run(() => db.appSettingsBox.put(_budgetKey, settings.toMap()));
 
   @override
-  Future<void> saveGlobalSearchPolicy(WebSearchPolicy policy) =>
-      db.appSettingsBox.put(_searchPolicyKey, policy.name);
+  Future<void> saveGlobalSearchPolicy(WebSearchPolicy policy) => _mutationGate
+      .run(() => db.appSettingsBox.put(_searchPolicyKey, policy.name));
 
   @override
   Future<void> saveConversationSearchPolicy(
     String conversationId,
     WebSearchPolicy? policy,
-  ) async {
-    final raw = db.appSettingsBox.get(_conversationSearchPoliciesKey);
-    final values =
-        raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
-    if (policy == null) {
-      values.remove(conversationId);
-    } else {
-      values[conversationId] = policy.name;
-    }
-    await db.appSettingsBox.put(_conversationSearchPoliciesKey, values);
-  }
+  ) =>
+      _mutationGate.run(() async {
+        final raw = db.appSettingsBox.get(_conversationSearchPoliciesKey);
+        final values =
+            raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+        if (policy == null) {
+          values.remove(conversationId);
+        } else {
+          values[conversationId] = policy.name;
+        }
+        await db.appSettingsBox.put(_conversationSearchPoliciesKey, values);
+      });
+
+  /// Removes search policy metadata without touching unrelated governance
+  /// settings. Credentials and provider metadata are owned by their stores.
+  Future<void> clearSearchPolicies() => _mutationGate.run(() async {
+        await db.appSettingsBox.delete(_searchPolicyKey);
+        await db.appSettingsBox.delete(_conversationSearchPoliciesKey);
+      });
 
   @override
   Future<void> saveCustomCapability(
     String provider,
     String model,
     CustomModelCapability capability,
-  ) async {
-    final raw = db.appSettingsBox.get(_customCapabilitiesKey);
-    final values =
-        raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
-    values[_modelKey(provider, model)] = capability.toMap();
-    await db.appSettingsBox.put(_customCapabilitiesKey, values);
-  }
+  ) =>
+      _mutationGate.run(() async {
+        final raw = db.appSettingsBox.get(_customCapabilitiesKey);
+        final values =
+            raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
+        values[_modelKey(provider, model)] = capability.toMap();
+        await db.appSettingsBox.put(_customCapabilitiesKey, values);
+      });
 
   @override
-  Future<void> addLedgerEntry(UsageLedgerEntry entry) async {
+  Future<void> addLedgerEntry(UsageLedgerEntry entry) =>
+      _mutationGate.run(() => _addLedgerEntry(entry));
+
+  Future<void> _addLedgerEntry(UsageLedgerEntry entry) async {
     // 防御性打开账本 box（幂等），避免未预开时抛 HiveError。
     final box = await _openLedgerBox();
     _ensureLegacyLedgerMigration(box);
@@ -250,19 +303,22 @@ class AiGovernanceStore implements GovernancePersistence {
   }
 
   @override
-  Future<void> addDiagnostic(AiRequestDiagnostic diagnostic) async {
-    final values = diagnostics.toList()..add(diagnostic);
-    final retained = values.length <= _diagnosticLimit
-        ? values
-        : values.sublist(values.length - _diagnosticLimit);
-    await db.appSettingsBox.put(
-      _diagnosticsKey,
-      retained.map((item) => item.toMap()).toList(growable: false),
-    );
-  }
+  Future<void> addDiagnostic(AiRequestDiagnostic diagnostic) =>
+      _mutationGate.run(() async {
+        final values = diagnostics.toList()..add(diagnostic);
+        final retained = values.length <= _diagnosticLimit
+            ? values
+            : values.sublist(values.length - _diagnosticLimit);
+        await db.appSettingsBox.put(
+          _diagnosticsKey,
+          retained.map((item) => item.toMap()).toList(growable: false),
+        );
+      });
 
   @override
-  Future<void> clearLedger() async {
+  Future<void> clearLedger() => _mutationGate.run(() => _clearLedger());
+
+  Future<void> _clearLedger() async {
     // 防御性打开账本 box（幂等），避免未预开时抛 HiveError。
     final box = await _openLedgerBox();
     await box.clear();
@@ -271,16 +327,25 @@ class AiGovernanceStore implements GovernancePersistence {
   }
 
   @override
-  Future<void> clearDiagnostics() =>
-      db.appSettingsBox.put(_diagnosticsKey, <dynamic>[]);
+  Future<void> clearDiagnostics() => _mutationGate.run(
+        () => db.appSettingsBox.put(_diagnosticsKey, <dynamic>[]),
+      );
 
   @override
-  Future<void> addSearchAudit(SearchAuditEntry entry) async {
+  Future<void> addSearchAudit(SearchAuditEntry entry) =>
+      _mutationGate.run(() => _addSearchAudit(entry));
+
+  Future<void> _addSearchAudit(SearchAuditEntry entry) async {
     final cutoff = DateTime.now().toUtc().subtract(_detailRetention);
-    final values = searchAudits
-        .where((item) => item.searchedAt.toUtc().isAfter(cutoff))
-        .toList()
-      ..add(entry);
+    final raw = db.appSettingsBox.get(_searchAuditKey);
+    final values = raw is List
+        ? _retainedSearchAudits(raw).toList()
+        : <SearchAuditEntry>[];
+    if (!entry.searchedAt.toUtc().isBefore(cutoff)) {
+      values.add(entry);
+      values.sort((left, right) =>
+          left.searchedAt.toUtc().compareTo(right.searchedAt.toUtc()));
+    }
     final retained = values.length <= _searchAuditLimit
         ? values
         : values.sublist(values.length - _searchAuditLimit);
@@ -291,8 +356,105 @@ class AiGovernanceStore implements GovernancePersistence {
   }
 
   @override
-  Future<void> clearSearchAudits() =>
-      db.appSettingsBox.put(_searchAuditKey, <dynamic>[]);
+  Future<void> clearSearchAudits() => _mutationGate.run(() async {
+        await db.appSettingsBox.delete(_searchAuditKey);
+      });
+
+  List<SearchAuditEntry> _retainedSearchAudits(List<dynamic> raw) {
+    final now = DateTime.now().toUtc();
+    final cutoff = now.subtract(_detailRetention);
+    // Hive lists are not a durable ordering guarantee: backup/restore and
+    // older migrations can reorder records. Scan every raw map, but inspect
+    // only its bounded timestamp field; keep the newest 100 candidates and
+    // fully normalize those candidates afterward. No source payload is
+    // materialized during this scan. A damaged list is sampled from both
+    // ends rather than allowing a synchronous settings read to become an
+    // unbounded operation; an oversized list is not pruned by the getter.
+    final candidates = <_SearchAuditCandidate>[];
+    final scanLimit = raw.length > _searchAuditRawScanLimit
+        ? _searchAuditRawScanLimit
+        : raw.length;
+    _searchAuditScanWasCapped = raw.length > scanLimit;
+    final prefixLimit = scanLimit ~/ 2;
+    for (var offset = 0; offset < scanLimit; offset++) {
+      final index = raw.length <= scanLimit || offset < prefixLimit
+          ? offset
+          : raw.length - (scanLimit - offset);
+      final item = raw[index];
+      if (item is! Map) continue;
+      final rawTimestamp = item['searchedAt']?.toString();
+      if (rawTimestamp == null || rawTimestamp.length > 64) continue;
+      final searchedAt = DateTime.tryParse(
+        rawTimestamp,
+      );
+      if (searchedAt == null || searchedAt.toUtc().isBefore(cutoff)) continue;
+      final normalized = SearchAuditEntry.normalizeSearchedAt(
+        searchedAt,
+        now: now,
+      );
+      if (normalized.isBefore(cutoff)) continue;
+      candidates.add(
+        _SearchAuditCandidate(
+          raw: item,
+          searchedAt: normalized,
+          sourceIndex: index,
+        ),
+      );
+      candidates.sort(_compareSearchAuditCandidates);
+      if (candidates.length > _searchAuditLimit) candidates.removeAt(0);
+    }
+    return candidates
+        .map((candidate) => SearchAuditEntry.fromMap(candidate.raw))
+        .toList(growable: false);
+  }
+
+  bool _searchAuditNeedsPrune(
+    List<dynamic> raw,
+    List<SearchAuditEntry> retained,
+  ) {
+    if (raw.length != retained.length) {
+      return true;
+    }
+    for (var index = 0; index < retained.length; index++) {
+      if (!_sameSearchAuditEntry(raw[index], retained[index].toMap())) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  void _scheduleSearchAuditPrune(List<SearchAuditEntry> retained) {
+    if (_searchAuditMaintenance != null) return;
+    final raw = db.appSettingsBox.get(_searchAuditKey);
+    if (raw is! List) return;
+    final rawSnapshot = List<dynamic>.from(raw);
+    final future = _mutationGate.run(() async {
+      // The getter is synchronous, so a lifecycle clear or another writer may
+      // have changed the list before this best-effort prune reaches the gate.
+      // Never write a stale normalized snapshot back over newer data.
+      final current = db.appSettingsBox.get(_searchAuditKey);
+      if (!_sameSearchAuditRaw(current, rawSnapshot)) return;
+      await db.appSettingsBox.put(
+        _searchAuditKey,
+        retained.map((item) => item.toMap()).toList(growable: false),
+      );
+    });
+    _searchAuditMaintenance = future;
+    unawaited(
+      future.then<void>(
+        (_) {
+          if (identical(_searchAuditMaintenance, future)) {
+            _searchAuditMaintenance = null;
+          }
+        },
+        onError: (Object _, StackTrace __) {
+          if (identical(_searchAuditMaintenance, future)) {
+            _searchAuditMaintenance = null;
+          }
+        },
+      ),
+    );
+  }
 
   String _modelKey(String provider, String model) =>
       '${provider.trim().toLowerCase()}/${model.trim().toLowerCase()}';

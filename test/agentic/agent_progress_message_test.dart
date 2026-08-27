@@ -11,7 +11,8 @@ void main() {
     );
   });
 
-  test('agent progress reports the completed tool and file path with a done row',
+  test(
+      'agent progress reports the completed tool and file path with a done row',
       () {
     const request = ToolRequest(
       tool: AgentToolName.workspacePatch,

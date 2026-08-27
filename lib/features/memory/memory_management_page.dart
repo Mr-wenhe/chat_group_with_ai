@@ -14,6 +14,7 @@ import 'package:chat_group/features/memory/memory_detail_page.dart';
 import 'package:chat_group/features/memory/memory_management_widgets.dart';
 import 'package:chat_group/features/memory/memory_migration_diagnostics_page.dart';
 import 'package:chat_group/features/memory/memory_observer_sidebar.dart';
+import 'package:chat_group/features/memory/memory_scroll_restore.dart';
 import 'package:chat_group/features/memory/memory_subject_selector.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
@@ -90,11 +91,16 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
   }
 
   Future<void> _restoreContentScrollOffset(double offset) async {
-    await WidgetsBinding.instance.endOfFrame;
-    if (!mounted || !_contentScrollController.hasClients) return;
-    final position = _contentScrollController.position;
-    final target = offset.clamp(0.0, position.maxScrollExtent).toDouble();
-    position.jumpTo(target);
+    await MemoryScrollRestorer.restore(
+      offset: offset,
+      isMounted: () => mounted,
+      hasClients: () => _contentScrollController.hasClients,
+      maxScrollExtent: () => _contentScrollController.position.maxScrollExtent,
+      pixels: () => _contentScrollController.position.pixels,
+      jumpTo: (value) => _contentScrollController.position.jumpTo(value),
+      endOfFrame: () => WidgetsBinding.instance.endOfFrame,
+      scheduleFrame: WidgetsBinding.instance.scheduleFrame,
+    );
   }
 
   bool _sameScope(MemoryConversationScope left, MemoryConversationScope right) {

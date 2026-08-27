@@ -83,7 +83,8 @@ class WeComPushService {
   Future<String?> _getToken() async {
     if (_cachedToken != null &&
         _tokenExpireAt != null &&
-        _tokenExpireAt!.isAfter(DateTime.now().add(const Duration(minutes: 5)))) {
+        _tokenExpireAt!
+            .isAfter(DateTime.now().add(const Duration(minutes: 5)))) {
       return _cachedToken;
     }
     final cfg = await _loadConfig();

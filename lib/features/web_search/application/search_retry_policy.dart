@@ -16,8 +16,15 @@ const List<Duration> searchRetryDelays = [
 ];
 const Duration searchRetryBudget = Duration(seconds: 20);
 
+/// End-to-end budget for a user-origin search turn, including optional query
+/// planning and Provider execution. Provider retries retain their independent
+/// 20-second safety cap for direct callers, but the facade shares this shorter
+/// deadline across all stages to meet the product latency target.
+const Duration searchEndToEndBudget = Duration(seconds: 8);
+
 typedef SearchRetrySleep = Future<void> Function(Duration delay);
 typedef SearchRetryOperation<T> = Future<T> Function(int attempt);
+typedef SearchRetryTimeoutHandler = void Function();
 
 Future<void> searchRetrySleep(Duration delay) => Future<void>.delayed(delay);
 
@@ -86,6 +93,7 @@ class SearchRetryPolicy {
     DateTime? deadline,
     bool Function()? isCancelled,
     void Function(int retryNumber, Duration delay)? onRetry,
+    SearchRetryTimeoutHandler? onTimeout,
   }) async {
     final actualDeadline = deadline ?? clock().add(totalBudget);
     final retryLimit =
@@ -102,6 +110,7 @@ class SearchRetryPolicy {
 
       final remaining = actualDeadline.difference(clock());
       if (remaining <= Duration.zero) {
+        onTimeout?.call();
         return SearchRetryResult.failure(
           error: const SearchRetryBudgetExceeded(),
           retryCount: retryCount,
@@ -139,6 +148,7 @@ class SearchRetryPolicy {
         }
         retryCount++;
       } catch (error, stackTrace) {
+        if (error is TimeoutException) onTimeout?.call();
         if (isCancelled?.call() == true) {
           return SearchRetryResult.failure(
             error: const SearchCancelledException(),

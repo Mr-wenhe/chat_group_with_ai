@@ -2,14 +2,14 @@ name: Release
 
 # 混合发布工作流（Hybrid Release）
 # ----------------------------------------------------------------------------
-# 设计原则：Windows 只能在 CI（Windows Runner）上交叉编译，其余 4 个平台开发者
+# 设计原则：Windows 只能在 CI（Windows Runner）上交叉编译，其余 3 个原生平台开发者
 # 本机即可构建。因此：
 #
 #   • CI（本工作流）：仅构建 **Windows**，并负责「创建 GitHub Release（若不存在）
 #                      + 上传 Windows 产物」。Release 一旦创建，本地脚本会把其余
-#                      4 个平台产物追加上传到【同一个 Release】。
-#   • 本地（scripts/publish_local.sh）：构建 **Web / macOS / iOS / Android**，
-#                     并以「幂等」方式创建 Release（若 CI 尚未建）+ 上传这 4 个产物。
+#                      3 个原生平台产物追加上传到【同一个 Release】。
+#   • 本地（scripts/publish_local.sh）：构建 **macOS / iOS / Android**，
+#                     并以「幂等」方式创建 Release（若 CI 尚未建）+ 上传这 3 个产物。
 #
 # 无论本地脚本与 CI 哪个先跑，都不会冲突：双方都采用
 #   「if ! gh release view <tag>; then gh release create ...; fi」 + 「gh release upload --clobber」
@@ -20,11 +20,11 @@ name: Release
 #   2) 在 Actions 页面手动触发（workflow_dispatch），指定版本号。
 #
 # 产物：最终聚合成一个 GitHub Release 附件，含
-#        Windows（CI 构建）+ Web / macOS / iOS / Android（本地构建上传）。
+#        Windows（CI 构建）+ macOS / iOS / Android（本地构建上传）。
 #
-# 签名（均为「可选」）：
-#   - Android：设置 ANDROID_KEYSTORE_BASE64 等 secrets 后自动签名；
-#               未设置则构建未签名包（仅可用于本地调试安装）。
+# 签名：
+#   - Android 生产构建：必须设置 ANDROID_KEYSTORE_BASE64 等 secrets 后签名；
+#               只有权限校验任务会显式允许 debug 签名，绝不上传该 APK。
 #   - iOS / macOS：本仓库走 GitHub Release 分发（非 App Store），本地构建时
 #                   若本机有开发者证书会自动签名，否则产出未签名 .app。
 #   详见 README「发布指南」章节中 Secrets 配置说明。
@@ -176,5 +176,8 @@ jobs:
           channel: "stable"
           cache: true
       - run: flutter pub get
-      - run: flutter build apk --release
+      - name: Build verification APK (debug-signed, not publishable)
+        env:
+          ALLOW_DEBUG_SIGNING: "true"
+        run: flutter build apk --release
       - run: bash scripts/verify_android_release_permissions.sh build/app/outputs/flutter-apk/app-release.apk

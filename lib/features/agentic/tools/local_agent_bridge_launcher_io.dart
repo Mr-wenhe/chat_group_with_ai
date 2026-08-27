@@ -40,6 +40,9 @@ class LocalAgentBridgeLauncher {
   static String? _workspacePath;
   static String? _sessionToken;
   static final Map<String, String> _registeredWorkspaces = {};
+  static final Map<String, int> _workspaceGenerations = {};
+  static var _nextWorkspaceGeneration = 0;
+  static Future<void> _lifecycleTail = Future<void>.value();
   final int preferredPort;
 
   LocalAgentBridgeLauncher({this.preferredPort = kLocalAgentBridgePort});
@@ -57,6 +60,12 @@ class LocalAgentBridgeLauncher {
   /// 后续的多对话隔离应由 [registerWorkspace] 完成，**不应**反复 stop/start
   /// 服务——那正是旧实现在切换对话时产生端口竞态、导致 404 的根因。
   Future<void> start({String? workspace}) async {
+    await _withLifecycleLock(
+      () => _startUnlocked(workspace: workspace),
+    );
+  }
+
+  Future<void> _startUnlocked({String? workspace}) async {
     // 仅桌面端自动启动；非桌面端（含 Web/移动端）保持现有手动提示行为。
     if (!_isDesktop) return;
 
@@ -71,7 +80,7 @@ class LocalAgentBridgeLauncher {
       return;
     }
     if (_server != null) {
-      await stop();
+      await _stopUnlocked();
     }
 
     try {
@@ -116,30 +125,76 @@ class LocalAgentBridgeLauncher {
   ///
   /// 若服务尚未启动（例如首次进入工作模式），则以该 workspace 作为默认目录
   /// 拉起服务，再注册 conversationId，行为与旧 [restart] 的首启动一致。
-  Future<void> registerWorkspace({
+  Future<LocalAgentBridgeWorkspaceRegistration?> registerWorkspace({
     required String conversationId,
     required String workspacePath,
   }) async {
-    if (!_isDesktop) return;
-    final workspaceDir = Directory(workspacePath).absolute;
-    if (!await workspaceDir.exists()) {
-      throw ArgumentError('Workspace does not exist');
-    }
-    final previous = _registeredWorkspaces[conversationId];
-    if (previous != null && !_samePath(previous, workspaceDir.path)) {
-      await restart(workspace: workspaceDir.path);
-    }
-    if (_server == null) {
-      await start(workspace: workspaceDir.path);
-    }
-    _server?.registerWorkspace(conversationId, workspaceDir);
-    _registeredWorkspaces[conversationId] = workspaceDir.path;
-    if (kDebugMode) debugPrint('[桥接] 已注册对话工作区');
+    return _withLifecycleLock(() async {
+      if (!_isDesktop) return null;
+      final id = conversationId.trim();
+      if (id.isEmpty) {
+        throw ArgumentError.value(
+          conversationId,
+          'conversationId',
+          'conversationId must not be empty',
+        );
+      }
+      final workspaceDir = Directory(workspacePath).absolute;
+      if (!await workspaceDir.exists()) {
+        throw ArgumentError('Workspace does not exist');
+      }
+      if (_server == null) {
+        await _startUnlocked(workspace: workspaceDir.path);
+      }
+      final server = _server;
+      if (server == null) {
+        throw StateError('Local agent bridge failed to start');
+      }
+      server.registerWorkspace(id, workspaceDir);
+      _registeredWorkspaces[id] = workspaceDir.path;
+      final generation = ++_nextWorkspaceGeneration;
+      _workspaceGenerations[id] = generation;
+      if (kDebugMode) debugPrint('[桥接] 已注册对话工作区');
+      return LocalAgentBridgeWorkspaceRegistration(
+        conversationId: id,
+        generation: generation,
+      );
+    });
+  }
+
+  /// 注销单个对话的 workspace；只有没有任何对话映射时才停止共享服务。
+  ///
+  /// 页面销毁或关闭工作模式时必须使用本方法，不能直接调用全局 [stop]，
+  /// 否则会中断其他对话仍在运行的工作任务。
+  Future<void> unregisterWorkspace({
+    required String conversationId,
+    LocalAgentBridgeWorkspaceRegistration? registration,
+  }) async {
+    await _withLifecycleLock(() async {
+      if (!_isDesktop) return;
+      final id = conversationId.trim();
+      if (id.isEmpty) return;
+      if (registration != null &&
+          (registration.conversationId != id ||
+              _workspaceGenerations[id] != registration.generation)) {
+        // A stale task is only allowed to clean up the route it owns; never
+        // tear down a newer registration for the same conversation.
+        return;
+      }
+      _server?.unregisterWorkspace(id);
+      final wasRegistered = _registeredWorkspaces.remove(id) != null;
+      _workspaceGenerations.remove(id);
+      if (wasRegistered && _registeredWorkspaces.isEmpty) {
+        await _stopUnlocked();
+      }
+    });
   }
 
   Future<void> restart({required String workspace}) async {
-    await stop();
-    await start(workspace: workspace);
+    await _withLifecycleLock(() async {
+      await _stopUnlocked();
+      await _startUnlocked(workspace: workspace);
+    });
   }
 
   /// 解析默认工作区目录：从当前进程工作目录向上逐级查找最近的含 `.git` 的 git 仓库根目录。
@@ -216,11 +271,16 @@ class LocalAgentBridgeLauncher {
 
   /// 停止进程内桥接服务（幂等：未运行则直接返回）。
   Future<void> stop() async {
+    await _withLifecycleLock(_stopUnlocked);
+  }
+
+  Future<void> _stopUnlocked() async {
     final server = _server;
     _server = null;
     _workspacePath = null;
     _sessionToken = null;
     _registeredWorkspaces.clear();
+    _workspaceGenerations.clear();
     LocalAgentBridgeEndpoint.reset();
     if (server == null) return;
     try {
@@ -229,6 +289,30 @@ class LocalAgentBridgeLauncher {
     } catch (_) {
       // 忽略关闭过程中的异常。
     }
+  }
+
+  /// Serialize all start/register/unregister/stop transitions.
+  ///
+  /// Dart isolates execute synchronous sections atomically, but every bridge
+  /// lifecycle operation contains awaits. A small future tail gives those
+  /// operations a process-wide mutex without adding a dependency or risking
+  /// nested-lock deadlocks (internal methods above never acquire it).
+  static Future<T> _withLifecycleLock<T>(Future<T> Function() action) {
+    final completer = Completer<T>();
+    final previous = _lifecycleTail;
+    _lifecycleTail = () async {
+      try {
+        await previous;
+      } catch (_) {
+        // A failed operation must not poison the queue for later cleanup.
+      }
+      try {
+        completer.complete(await action());
+      } catch (error, stackTrace) {
+        completer.completeError(error, stackTrace);
+      }
+    }();
+    return completer.future;
   }
 
   /// 当前桥接服务是否正在运行。

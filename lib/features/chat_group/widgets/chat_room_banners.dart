@@ -111,7 +111,8 @@ class AnnouncementBanner extends StatelessWidget {
       decoration: BoxDecoration(
         color: colorScheme.secondaryContainer.withValues(alpha: 0.32),
         borderRadius: BorderRadius.circular(12),
-        border: Border.all(color: colorScheme.secondary.withValues(alpha: 0.28)),
+        border:
+            Border.all(color: colorScheme.secondary.withValues(alpha: 0.28)),
       ),
       child: Row(
         children: [
@@ -165,7 +166,8 @@ class UserMentionBanner extends StatelessWidget {
             padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 8),
             decoration: BoxDecoration(
               borderRadius: BorderRadius.circular(12),
-              border: Border.all(color: colorScheme.primary.withValues(alpha: 0.32)),
+              border: Border.all(
+                  color: colorScheme.primary.withValues(alpha: 0.32)),
             ),
             child: Row(
               children: [

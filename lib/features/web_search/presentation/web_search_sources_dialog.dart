@@ -1,13 +1,14 @@
 import 'package:flutter/material.dart';
 
-import 'package:chat_group/services/web_search_service.dart' as legacy;
-
 import '../application/search_context_formatter.dart';
+import '../models/search_models.dart' as domain;
+import '../security/search_query_sanitizer.dart';
+import '../../ai_governance/search_failure_classifier.dart';
 
 /// Presents only sources that survived the same formatter used by the AI
 /// prompt, so [Sx] labels cannot point at a hidden or unknown result.
 class SourcesDialog extends StatelessWidget {
-  final legacy.WebSearchSnapshot snapshot;
+  final domain.WebSearchSnapshot snapshot;
   final SearchContextFormatter formatter;
   final ValueChanged<Uri>? onOpenSource;
 
@@ -20,7 +21,7 @@ class SourcesDialog extends StatelessWidget {
 
   static Future<void> show(
     BuildContext context,
-    legacy.WebSearchSnapshot snapshot, {
+    domain.WebSearchSnapshot snapshot, {
     ValueChanged<Uri>? onOpenSource,
   }) {
     return showDialog<void>(
@@ -34,8 +35,11 @@ class SourcesDialog extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final bundle = formatter.formatLegacy(snapshot);
-    final visibleResults = snapshot.results.take(bundle.sourceIds.length);
+    final bundle = formatter.format(snapshot);
+    final visibleResults = snapshot.results
+        .where((result) => _safeUri(result.url) != null)
+        .take(bundle.sourceIds.length)
+        .toList(growable: false);
     return AlertDialog(
       title: const Text('联网搜索来源'),
       content: SizedBox(
@@ -46,9 +50,8 @@ class SourcesDialog extends StatelessWidget {
             Text('查询：${_queryPreview()}'),
             Text('Provider：${snapshot.provider}'),
             Text('时间：${snapshot.searchedAt.toLocal()}'),
-            if (snapshot.failureType != null || snapshot.safeMessage != null)
-              _failureCard(context),
-            if (visibleResults.isEmpty && snapshot.failureType == null)
+            if (snapshot.failure != null) _failureCard(context),
+            if (visibleResults.isEmpty && snapshot.failure == null)
               const Padding(
                 padding: EdgeInsets.only(top: 16),
                 child: Text('没有可展示的来源。'),
@@ -73,6 +76,9 @@ class SourcesDialog extends StatelessWidget {
 
   Widget _failureCard(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
+    final safeMessage = snapshot.failure == null
+        ? '联网搜索失败，请稍后重试'
+        : safeMessageForSearchFailure(snapshot.failure!.type);
     return Card(
       margin: const EdgeInsets.only(top: 12, bottom: 8),
       color: colorScheme.errorContainer.withValues(alpha: 0.45),
@@ -82,11 +88,11 @@ class SourcesDialog extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
             Text(
-              '失败类型：${snapshot.failureType?.name ?? 'unknown'}',
+              '失败类型：${snapshot.failure?.type.name ?? 'unknown'}',
               style: const TextStyle(fontWeight: FontWeight.w600),
             ),
             const SizedBox(height: 4),
-            Text(snapshot.safeMessage ?? '联网搜索失败，请稍后重试'),
+            Text(safeMessage),
             if (snapshot.statusCode != null)
               Text('HTTP 状态码：${snapshot.statusCode}'),
             Text('请求耗时：${snapshot.latencyMs}ms · 重试 ${snapshot.retryCount} 次'),
@@ -99,7 +105,7 @@ class SourcesDialog extends StatelessWidget {
   Widget _sourceTile(
     BuildContext context, {
     required String sourceId,
-    required legacy.WebSearchResult result,
+    required domain.WebSearchResult result,
   }) {
     final uri = _safeUri(result.url);
     final published = result.publishedAt == null
@@ -107,14 +113,29 @@ class SourcesDialog extends StatelessWidget {
         : result.publishedAt!.toLocal().toIso8601String().split('T').first;
     final provider = result.provider.trim().isEmpty
         ? snapshot.provider
-        : result.provider.trim();
+        : domain.sanitizeSearchText(
+            result.provider,
+            maxLength: domain.searchProviderNameMaxLength,
+            fallback: snapshot.provider,
+          );
+    final title = domain.sanitizeSearchText(
+      result.title,
+      maxLength: domain.searchTitleMaxLength,
+      fallback: '搜索结果',
+      redactSecrets: true,
+    );
+    final snippet = domain.sanitizeSearchText(
+      result.snippet,
+      maxLength: domain.searchSnippetMaxLength,
+      redactSecrets: true,
+    );
     return ListTile(
       key: ValueKey('web-search-source-$sourceId'),
       contentPadding: EdgeInsets.zero,
-      title: Text('[$sourceId] ${result.title}'),
+      title: Text('[$sourceId] $title'),
       subtitle: Text(
         '${uri?.host ?? '无有效链接'} · $published · Provider：$provider\n'
-        '${result.snippet}',
+        '$snippet',
       ),
       trailing: uri == null || onOpenSource == null
           ? null
@@ -127,20 +148,15 @@ class SourcesDialog extends StatelessWidget {
   }
 
   String _queryPreview() {
-    final queries = snapshot.executedQueries.isEmpty
-        ? [snapshot.query]
-        : snapshot.executedQueries;
-    return queries.firstWhere(
-      (query) => query.trim().isNotEmpty,
-      orElse: () => '未提供查询',
-    );
+    final queries = snapshot.executedQueries;
+    for (final query in queries) {
+      final safe = const SearchQuerySanitizer().sanitize(query).text;
+      if (safe.isNotEmpty) return safe;
+    }
+    return '未提供查询';
   }
 
-  Uri? _safeUri(String value) {
-    final uri = Uri.tryParse(value.trim());
-    if (uri == null || uri.host.isEmpty) return null;
-    final scheme = uri.scheme.toLowerCase();
-    if (scheme != 'http' && scheme != 'https') return null;
-    return uri;
+  Uri? _safeUri(Uri value) {
+    return domain.tryValidateSearchUrl(value);
   }
 }

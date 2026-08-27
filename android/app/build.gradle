@@ -6,15 +6,30 @@ plugins {
 }
 
 android {
-    // 读取 key.properties（仅当文件存在时启用 release 签名；CI 通过 secrets 注入该文件）
+    // 读取 key.properties；生产 Release 没有完整签名配置时必须失败关闭。
     def keystorePropertiesFile = rootProject.file('key.properties')
     def keystoreProperties = new Properties()
     if (keystorePropertiesFile.exists()) {
         keystoreProperties.load(new FileInputStream(keystorePropertiesFile))
     }
+    def releaseSigningKeys = ['keyAlias', 'keyPassword', 'storeFile', 'storePassword']
+    def hasReleaseSigning = keystorePropertiesFile.exists() &&
+        releaseSigningKeys.every {
+            keystoreProperties[it]?.toString()?.trim()
+        }
+    // This escape hatch is intentionally opt-in and process-local. CI's
+    // permission verification job sets it explicitly; publishing commands
+    // never set it, so a missing production key cannot create a misleading
+    // release artifact signed by the debug key.
+    def allowDebugSigning =
+        System.getenv('ALLOW_DEBUG_SIGNING')?.trim()?.equalsIgnoreCase('true') ||
+        project.findProperty('allowDebugSigning')?.toString()?.trim()?.equalsIgnoreCase('true')
 
     namespace = "com.example.chat_group"
-    compileSdk = flutter.compileSdkVersion
+    // desktop_drop 0.7.x requires API 36. A literal keeps this compatible
+    // with the Flutter 3.24 fork, which does not expose newer android.flutter
+    // Gradle properties used by later plugin releases.
+    compileSdk = 36
     ndkVersion = flutter.ndkVersion
 
     compileOptions {
@@ -37,9 +52,9 @@ android {
         versionName = flutter.versionName
     }
 
-    // 仅当 key.properties 存在时才定义 release 签名配置，避免缺失文件导致构建失败
+    // 仅当 key.properties 完整时才定义 release 签名配置。
     signingConfigs {
-        if (keystorePropertiesFile.exists()) {
+        if (hasReleaseSigning) {
             release {
                 keyAlias keystoreProperties['keyAlias']
                 keyPassword keystoreProperties['keyPassword']
@@ -51,11 +66,15 @@ android {
 
     buildTypes {
         release {
-            if (keystorePropertiesFile.exists()) {
+            if (hasReleaseSigning) {
                 signingConfig = signingConfigs.release
-            } else {
-                // 未配置签名时回退到 debug 密钥，保证本地 `flutter run --release` 可用
+            } else if (allowDebugSigning) {
                 signingConfig = signingConfigs.debug
+            } else {
+                throw new GradleException(
+                    '缺少完整的 Android Release 签名配置。请提供 android/key.properties；' +
+                    '仅用于权限校验时才设置 ALLOW_DEBUG_SIGNING=true。'
+                )
             }
         }
     }

@@ -1,6 +1,9 @@
-import 'package:chat_group/core/database/database_service.dart';
+import 'dart:async';
+
 import 'dart:math';
 
+import 'package:chat_group/core/database/database_mutation_gate.dart';
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
@@ -58,6 +61,10 @@ class MemoryMigrator {
   final Uuid _uuid;
   final int _schemaVersion;
   final Future<void> Function(PermanentMemory memory)? savePermanentMemory;
+  Completer<void>? _migrationCompletion;
+  late int _migrationEpoch;
+  bool _cancelled = false;
+  bool _lateWritesFenced = false;
 
   MemoryMigrator(
     this._db, {
@@ -67,7 +74,63 @@ class MemoryMigrator {
   })  : _uuid = uuid ?? const Uuid(),
         _schemaVersion = schemaVersion ?? _kMemoryMigratorSchemaVersion;
 
+  DatabaseMutationGate get _mutationGate {
+    try {
+      return DatabaseMutationGate.forBox(_db.appSettingsBox);
+    } on Object {
+      // Keep character-memory writes fenced in recovery tests where the
+      // settings box is intentionally unavailable.
+      return DatabaseMutationGate.forBox(_db.permanentMemoryBox);
+    }
+  }
+
+  /// Prevents a timed-out migration from writing its old snapshot later.
+  void cancel() {
+    _cancelled = true;
+    try {
+      _mutationGate.invalidate();
+    } on Object {
+      // The boolean fence still protects the next write when both fallback
+      // boxes are unavailable during database recovery.
+    }
+  }
+
+  /// Prevents a timed-out migration from starting another write after its
+  /// startup snapshot has been superseded. The operation already holding the
+  /// shared gate is allowed to drain; later writes fail closed.
+  void fencePendingWrites() {
+    _lateWritesFenced = true;
+    try {
+      _mutationGate.invalidate();
+    } on Object {
+      // The boolean fence remains effective when recovery has closed both
+      // candidate boxes.
+    }
+  }
+
+  /// Completes when a cancelled migration has left its current gated write.
+  /// Alternate migrators that override [migrate] without using this lifecycle
+  /// return an already-completed future and still preserve the startup bound.
+  Future<void> waitForCancellationDrain() =>
+      _migrationCompletion?.future ?? Future<void>.value();
+
   Future<MemoryMigrationReport> migrate({bool force = false}) async {
+    final completion = Completer<void>();
+    _migrationCompletion = completion;
+    try {
+      return await _migrateInternal(force: force);
+    } finally {
+      if (identical(_migrationCompletion, completion)) {
+        _migrationCompletion = null;
+      }
+      if (!completion.isCompleted) completion.complete();
+    }
+  }
+
+  Future<MemoryMigrationReport> _migrateInternal({required bool force}) async {
+    _cancelled = false;
+    _lateWritesFenced = false;
+    _migrationEpoch = _mutationGate.epoch;
     final marker = _readMarker();
     if (!force && marker != null && _parseVersion(marker) == _schemaVersion) {
       return const MemoryMigrationReport(
@@ -149,6 +212,17 @@ class MemoryMigrator {
         report: report,
       );
       return report;
+    } on StaleMigrationWrite {
+      // A lifecycle mutation or startup cancellation superseded this
+      // snapshot. Its partial work is intentionally left for the next retry.
+      return const MemoryMigrationReport(
+        alreadyMigrated: false,
+        userProfileCreated: 0,
+        permanentMemoriesCreated: 0,
+        relationshipSnapshotsCreated: 0,
+        relationshipEventsCreated: 0,
+        warnings: ['migration_superseded'],
+      );
     } on Object {
       await _writeDiagnostic(
         status: 'failed',

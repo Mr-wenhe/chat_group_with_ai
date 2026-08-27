@@ -19,10 +19,10 @@ import 'features/settings/settings_page.dart';
 import 'providers/providers.dart';
 
 const startupCharacterGenderMigrationTimeout = Duration(seconds: 6);
-// Give cancelled remote inference enough time to finish its local Hive writes
-// under a busy device scheduler, while keeping startup strictly bounded.
-const startupCharacterGenderMigrationDrainTimeout = Duration(milliseconds: 500);
+const startupCharacterGenderMigrationDrainTimeout = Duration(seconds: 1);
 const startupMemoryMigrationTimeout = Duration(seconds: 6);
+const startupMemoryMigrationDrainTimeout = Duration(seconds: 1);
+const startupSearchCredentialRepairTimeout = Duration(seconds: 2);
 
 /// Starts the retryable memory migration with a bounded startup wait.
 ///
@@ -33,13 +33,26 @@ Future<void> runMemoryMigration(
   DatabaseService db, {
   MemoryMigrator? migrator,
   Duration timeout = startupMemoryMigrationTimeout,
+  Duration drainTimeout = startupMemoryMigrationDrainTimeout,
 }) async {
-  final migration = (migrator ?? MemoryMigrator(db)).migrate();
+  final activeMigrator = migrator ?? MemoryMigrator(db);
+  final migration = activeMigrator.migrate();
   try {
     await migration.timeout(timeout);
   } on TimeoutException {
-    // MemoryMigrator has no cancellation contract; its idempotent write pass
-    // may finish in the background while the app opens.
+    activeMigrator.cancel();
+    var lateWriteFenceRequired = true;
+    try {
+      await activeMigrator.waitForCancellationDrain().timeout(drainTimeout);
+      lateWriteFenceRequired = false;
+    } on TimeoutException {
+      // A local Hive write is stuck. Do not allow the migration to resume with
+      // its old snapshot after startup returns.
+    } on Object {
+      // An alternate migrator may not expose a usable drain signal. The
+      // boolean/epoch fence below still protects subsequent writes.
+    }
+    if (lateWriteFenceRequired) activeMigrator.fencePendingWrites();
     unawaited(
       migration.then<void>(
         (_) {},
@@ -58,6 +71,7 @@ Future<void> runCharacterGenderMigration(
   DatabaseService db, {
   CharacterGenderMigrator? migrator,
   Duration timeout = startupCharacterGenderMigrationTimeout,
+  Duration drainTimeout = startupCharacterGenderMigrationDrainTimeout,
 }) async {
   final activeMigrator = migrator ?? CharacterGenderMigrator(db);
   final migration = activeMigrator.migrate();
@@ -65,24 +79,57 @@ Future<void> runCharacterGenderMigration(
     await migration.timeout(timeout);
   } on TimeoutException {
     activeMigrator.cancel();
+    var lateWriteFenceRequired = true;
     try {
-      await migration.timeout(startupCharacterGenderMigrationDrainTimeout);
+      // CharacterGenderMigrator completes this signal after its cancellation
+      // path has applied the local fallback. A test or alternate migrator
+      // without that contract returns an already-completed signal, preserving
+      // the startup bound without guessing a scheduler-dependent delay.
+      await activeMigrator.waitForCancellationDrain().timeout(drainTimeout);
+      lateWriteFenceRequired = false;
     } on TimeoutException {
-      // Cancellation is best effort. Startup must not wait for a stuck local
-      // write; the migration future still owns its eventual completion.
-      unawaited(
-        migration.then<void>(
-          (_) {},
-          onError: (Object _, StackTrace __) {},
-        ),
-      );
+      // A local Hive write is stuck. The migration must not be allowed to
+      // resume with the old snapshot after startup has returned.
     } on Object {
       // The migrator has already applied its local fallback and safe
       // diagnostic before completing or failing this cancellation drain.
     }
+    if (lateWriteFenceRequired) activeMigrator.fencePendingWrites();
+    // Keep the original future observed even when an alternate migrator does
+    // not expose a drain signal and remains stuck after cancellation.
+    unawaited(
+      migration.then<void>(
+        (_) {},
+        onError: (Object _, StackTrace __) {},
+      ),
+    );
   } on Object {
     // The migrator records only safe diagnostic categories; startup remains
     // usable if storage or an unexpected platform error defeats the retry.
+  }
+}
+
+/// Retries durable search-credential deletion intents without making a
+/// damaged secure store an unbounded startup dependency.
+Future<void> runSearchCredentialRepair(
+  DatabaseService db, {
+  SearchProviderConfigStore? store,
+  Duration timeout = startupSearchCredentialRepairTimeout,
+}) async {
+  final repair = (store ?? SearchProviderConfigStore(db: db))
+      .retryPendingCredentialRepairs();
+  try {
+    await repair.timeout(timeout);
+  } on TimeoutException {
+    unawaited(
+      repair.then<void>(
+        (_) {},
+        onError: (Object _, StackTrace __) {},
+      ),
+    );
+  } on Object {
+    // The marker remains durable and is retried from Settings or the next
+    // lifecycle pass when secure storage becomes available again.
   }
 }
 
@@ -99,6 +146,7 @@ void main() async {
     ));
     return;
   }
+  unawaited(runSearchCredentialRepair(db));
   // These migrations are independent: a legacy-memory warning must not skip
   // the gender pass required before the first real character prompt.
   await runMemoryMigration(db);

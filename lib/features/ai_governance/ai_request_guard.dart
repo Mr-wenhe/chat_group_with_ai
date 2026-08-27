@@ -206,11 +206,12 @@ class AiRequestGuard {
           '自动聊天每日预算',
           settings.autoChatDailyHardLimitMicros,
           _spent(
-            entries,
-            now,
-            day: true,
-            originPurpose: AiRequestPurpose.autoChat,
-          ) + (_reservedMicros['global'] ?? 0),
+                entries,
+                now,
+                day: true,
+                originPurpose: AiRequestPurpose.autoChat,
+              ) +
+              (_reservedMicros['global'] ?? 0),
         ),
     ];
     String? warning;

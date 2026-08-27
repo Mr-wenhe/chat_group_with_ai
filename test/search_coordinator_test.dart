@@ -1,61 +1,121 @@
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/search_coordinator.dart';
-import 'package:chat_group/services/web_search_service.dart';
+import 'package:chat_group/features/web_search/models/search_failure.dart';
+import 'package:chat_group/features/web_search/models/search_models.dart';
+import 'package:chat_group/features/web_search/providers/search_provider.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers/memory_governance_store.dart';
 
-class FakeWebSearchService extends WebSearchService {
+class FakeWebSearchProvider implements SearchProvider {
   int searchCount = 0;
 
   @override
-  Future<WebSearchSnapshot> search(
-    String query, {
+  SearchProviderKind get kind => SearchProviderKind.brave;
+
+  @override
+  Future<SearchProviderResponse> search(
+    SearchRequest request, {
+    required String? credential,
     CancelToken? cancelToken,
   }) async {
     searchCount++;
-    return WebSearchSnapshot(
-      query: query,
-      searchedAt: DateTime(2026, 7, 16, 12),
-      results: const [
-        WebSearchResult(
+    return SearchProviderResponse(
+      items: [
+        SearchProviderItem(
           title: 'source',
           snippet: 'result',
-          url: 'https://example.com/source',
+          url: Uri.parse('https://example.com/source'),
         ),
       ],
     );
   }
+
+  @override
+  Future<SearchHealthResult> testConnection({
+    required String? credential,
+    required String probeQuery,
+  }) async =>
+      const SearchHealthResult(isHealthy: true);
 }
 
-class DiagnosticFakeWebSearchService extends WebSearchService {
+class DiagnosticFakeWebSearchProvider implements SearchProvider {
   @override
-  Future<WebSearchSnapshot> search(
-    String query, {
+  SearchProviderKind get kind => SearchProviderKind.brave;
+
+  @override
+  Future<SearchProviderResponse> search(
+    SearchRequest request, {
+    required String? credential,
     CancelToken? cancelToken,
-  }) async {
-    return WebSearchSnapshot(
-      requestId: 'req-diagnostic',
-      query: query,
-      searchedAt: DateTime(2026, 7, 16, 12),
-      provider: 'duckDuckGoInstantAnswer',
-      results: const [],
-      failureType: SearchFailureType.rateLimited,
-      statusCode: 429,
-      latencyMs: 812,
-      retryCount: 2,
-      fromCache: false,
-    );
-  }
+  }) async =>
+      SearchProviderResponse(
+        items: [],
+        statusCode: 429,
+        failure: const SearchFailure(
+          type: SearchFailureType.rateLimited,
+          safeMessage: 'safe',
+          statusCode: 429,
+          retryable: true,
+        ),
+      );
+
+  @override
+  Future<SearchHealthResult> testConnection({
+    required String? credential,
+    required String probeQuery,
+  }) async =>
+      const SearchHealthResult(isHealthy: true);
 }
 
 void main() {
+  test('empty routes produce an explicit configuration failure', () async {
+    final store = MemoryGovernanceStore(
+      globalSearchPolicy: WebSearchPolicy.auto,
+    );
+    final states = <SearchRunStatus>[];
+    final coordinator = SearchCoordinator(store: store, routes: const []);
+
+    final result = await coordinator.searchIfAllowed(
+      text: '今天上海天气',
+      conversationId: 'group-1',
+      requestConsent: (_) async => true,
+      onStatus: (state) => states.add(state.status),
+    );
+
+    expect(result, isNotNull);
+    expect(result!.failure?.type, SearchFailureType.invalidConfiguration);
+    expect(states, contains(SearchRunStatus.failed));
+    expect(store.searchAudits.single.status, 'failed');
+    expect(store.searchAudits.single.provider, 'none');
+  });
+
+  test('empty routes in ask mode fail configuration without fake consent',
+      () async {
+    final store = MemoryGovernanceStore(
+      globalSearchPolicy: WebSearchPolicy.ask,
+    );
+    final coordinator = SearchCoordinator(store: store, routes: const []);
+
+    final result = await coordinator.searchIfAllowed(
+      text: '查找 Flutter 最新版本',
+      conversationId: 'group-1',
+      requestConsent: (_) async => fail('no Provider can receive this query'),
+    );
+
+    expect(result?.failure?.type, SearchFailureType.invalidConfiguration);
+    expect(store.searchAudits.single.status, 'failed');
+  });
+
   test('关闭策略即使命中触发词也产生零搜索请求', () async {
     final store = MemoryGovernanceStore();
-    final service = FakeWebSearchService();
+    final service = FakeWebSearchProvider();
     final states = <SearchRunStatus>[];
-    final coordinator = SearchCoordinator(store: store, service: service);
+    final coordinator = SearchCoordinator(
+      store: store,
+      routes: [SearchProviderRoute(provider: service)],
+    );
 
     final result = await coordinator.searchIfAllowed(
       text: '帮我查今天的最新价格',
@@ -74,8 +134,11 @@ void main() {
     final store = MemoryGovernanceStore(
       globalSearchPolicy: WebSearchPolicy.ask,
     );
-    final service = FakeWebSearchService();
-    final coordinator = SearchCoordinator(store: store, service: service);
+    final service = FakeWebSearchProvider();
+    final coordinator = SearchCoordinator(
+      store: store,
+      routes: [SearchProviderRoute(provider: service)],
+    );
 
     final result = await coordinator.searchIfAllowed(
       text: '今天上海天气',
@@ -91,8 +154,11 @@ void main() {
   test('会话自动策略覆盖全局关闭并记录来源', () async {
     final store = MemoryGovernanceStore();
     store.conversationPolicies['group-1'] = WebSearchPolicy.auto;
-    final service = FakeWebSearchService();
-    final coordinator = SearchCoordinator(store: store, service: service);
+    final service = FakeWebSearchProvider();
+    final coordinator = SearchCoordinator(
+      store: store,
+      routes: [SearchProviderRoute(provider: service)],
+    );
 
     final result = await coordinator.searchIfAllowed(
       text: '今天上海天气',
@@ -110,7 +176,10 @@ void main() {
         MemoryGovernanceStore(globalSearchPolicy: WebSearchPolicy.auto);
     final coordinator = SearchCoordinator(
       store: store,
-      service: DiagnosticFakeWebSearchService(),
+      routes: [
+        SearchProviderRoute(provider: DiagnosticFakeWebSearchProvider()),
+      ],
+      sleep: (_) async {},
     );
 
     final result = await coordinator.searchIfAllowed(
@@ -121,11 +190,11 @@ void main() {
 
     expect(result, isNotNull);
     final audit = store.searchAudits.single;
-    expect(audit.requestId, 'req-diagnostic');
-    expect(audit.provider, 'duckDuckGoInstantAnswer');
+    expect(audit.requestId, isNotEmpty);
+    expect(audit.provider, 'brave');
     expect(audit.failureType, 'rateLimited');
     expect(audit.statusCode, 429);
-    expect(audit.latencyMs, 812);
+    expect(audit.latencyMs, greaterThanOrEqualTo(0));
     expect(audit.retryCount, 2);
     expect(audit.fromCache, isFalse);
     expect(audit.sourceCount, 0);

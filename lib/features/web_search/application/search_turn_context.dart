@@ -1,9 +1,12 @@
-import 'package:chat_group/services/web_search_service.dart' as legacy;
-
 import 'search_coordinator.dart';
 import 'search_coordinator_support.dart';
+import 'package:dio/dio.dart';
 import '../models/search_models.dart'
-    show SearchCategory, SearchFreshness, searchDefaultMaxResults;
+    show
+        SearchCategory,
+        SearchFreshness,
+        WebSearchSnapshot,
+        searchDefaultMaxResults;
 
 /// The immutable search decision shared by every AI reply in one user turn.
 ///
@@ -17,7 +20,7 @@ class SearchTurnContext {
   final String turnId;
   final String query;
   final SearchMessageOrigin origin;
-  final legacy.WebSearchSnapshot? snapshot;
+  final WebSearchSnapshot? snapshot;
   final bool isSuppressed;
   final bool forceRefresh;
 
@@ -52,7 +55,7 @@ class SearchTurnContext {
   bool get hasSources => snapshot?.hasResults == true;
 
   SearchTurnContext copyWith({
-    legacy.WebSearchSnapshot? snapshot,
+    WebSearchSnapshot? snapshot,
     bool clearSnapshot = false,
     bool? isSuppressed,
     bool? forceRefresh,
@@ -76,11 +79,21 @@ class SearchTurnContext {
 /// explicit methods. ChatRoomPage can therefore prepare once before its reply
 /// loop, while regeneration can reuse or explicitly refresh the same context.
 class SearchTurnContextController {
+  static const int defaultMaxTurns = 128;
+  static const int defaultMaxReplyContexts = 256;
+
   final SearchCoordinator coordinator;
+  final int maxTurns;
+  final int maxReplyContexts;
   final Map<String, SearchTurnContext> _turns = {};
   final Map<String, SearchTurnContext> _replyContexts = {};
 
-  SearchTurnContextController({required this.coordinator});
+  SearchTurnContextController({
+    required this.coordinator,
+    this.maxTurns = defaultMaxTurns,
+    this.maxReplyContexts = defaultMaxReplyContexts,
+  })  : assert(maxTurns > 0),
+        assert(maxReplyContexts > 0);
 
   Future<SearchTurnContext> prepareUserTurn({
     required String conversationId,
@@ -99,6 +112,7 @@ class SearchTurnContextController {
     bool forceRefresh = false,
     bool isSensitive = false,
     String minimalContext = '',
+    CancelToken? cancelToken,
   }) async {
     final stableSourceMessageId = _stableSourceMessageId(
       conversationId: conversationId,
@@ -135,6 +149,7 @@ class SearchTurnContextController {
       isSensitive: isSensitive,
       origin: origin,
       minimalContext: minimalContext,
+      cancelToken: cancelToken,
     );
     final context = SearchTurnContext(
       conversationId: conversationId,
@@ -145,14 +160,19 @@ class SearchTurnContextController {
       snapshot: snapshot,
       forceRefresh: forceRefresh,
     );
-    _turns[_turnKey(conversationId, stableSourceMessageId)] = context;
+    _putBounded(
+      _turns,
+      _turnKey(conversationId, stableSourceMessageId),
+      context,
+      maxTurns,
+    );
     return context;
   }
 
   void bindReply(String replyMessageId, SearchTurnContext context) {
     final normalizedId = replyMessageId.trim();
     if (normalizedId.isEmpty || context.snapshot == null) return;
-    _replyContexts[normalizedId] = context;
+    _putBounded(_replyContexts, normalizedId, context, maxReplyContexts);
   }
 
   SearchTurnContext? contextForReply(String replyMessageId) {
@@ -184,6 +204,7 @@ class SearchTurnContextController {
     bool safeSearch = true,
     bool isSensitive = false,
     String minimalContext = '',
+    CancelToken? cancelToken,
   }) async {
     final previous = contextForReply(originalReplyId);
     if (previous == null) return null;
@@ -203,6 +224,7 @@ class SearchTurnContextController {
       safeSearch: safeSearch,
       isSensitive: isSensitive,
       minimalContext: minimalContext,
+      cancelToken: cancelToken,
       forceRefresh: true,
     );
     bindReply(originalReplyId, refreshed);
@@ -237,4 +259,17 @@ class SearchTurnContextController {
 
   static String _turnKey(String conversationId, String sourceMessageId) =>
       '${conversationId.trim()}::${sourceMessageId.trim()}';
+
+  static void _putBounded(
+    Map<String, SearchTurnContext> values,
+    String key,
+    SearchTurnContext value,
+    int maximum,
+  ) {
+    values.remove(key);
+    values[key] = value;
+    while (values.length > maximum) {
+      values.remove(values.keys.first);
+    }
+  }
 }

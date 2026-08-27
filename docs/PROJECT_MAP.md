@@ -10,10 +10,11 @@ AI 群聊模拟器是一个本地优先的 Flutter 应用，用 Hive 存储角�
 |------|------------|-------|
 | App shell and routing | `lib/main.dart`, `lib/core/widgets/app_widgets.dart` | 初始化数据库、主题、底部导航和页面路由。 |
 | Models and storage | `lib/core/models/`, `lib/core/database/database_service.dart` | Hive models and adapters. Model changes require `build_runner`. |
-| API configs and settings | `lib/features/settings/` | API keys are stored in Hive; dev builds read repository `data/`, release builds create brand-new user-local Hive files from an empty template manifest. |
+| API configs and settings | `lib/features/settings/` | Chat API configuration keeps legacy compatibility; web-search Provider credentials use an independent secure-storage namespace. Dev builds read repository `data/`, release builds create brand-new user-local Hive files from an empty template manifest. |
 | Characters | `lib/features/ai_character/`, `lib/core/models/character_presets.dart` | Character CRUD plus preset templates. |
 | Groups and chat room | `lib/features/chat_group/` | Group list/form, chat room UI, AI selection, streaming, quote reply, regenerate, TTS, memory. |
 | LLM calls and streaming | `lib/services/chat_api_service.dart`, `lib/core/streaming/` | Non-streaming and SSE streaming chat completions. |
+| Web search | `lib/features/web_search/`, `gateway/` | Pluggable Tavily/Brave/Gateway providers, query planning, per-turn snapshots, citations, audit, failure diagnostics and security guards. See the [technical design](production_web_search_technical_design.md) and [implementation retrospective](production_web_search_implementation_retrospective.md). |
 | Export | `lib/services/conversation_export_service.dart`, `lib/features/settings/export_page.dart` | Markdown/JSON exports intentionally omit key/config fields. |
 | Tests | `test/` | Covers SSE parsing, export safety, presets, mention parsing, orchestration, humanized chat/memory, activity policy. |
 
@@ -50,6 +51,6 @@ On this machine, Flutter was available at:
   dart run build_runner build --delete-conflicting-outputs
   ```
 - Keep generated `*.g.dart` files in sync with their source models.
-- `data/*.hive` is intentionally versioned as the development dataset only.
+- Non-credential `data/*.hive` files are retained as development fixtures; the credential-bearing `data/api_configs.hive` is local-only and ignored.
 - Before sharing exports, remember they are plaintext conversation files even though key/config fields are filtered out.
-- Treat repository access as sensitive because versioned Hive files may contain API keys and chat history.
+- Treat repository access as sensitive because versioned fixtures may contain chat history; credential-bearing `data/api_configs.hive` remains local-only and ignored.

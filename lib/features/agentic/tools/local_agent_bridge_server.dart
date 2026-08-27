@@ -12,18 +12,45 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_config.dart';
 
+part 'local_agent_bridge_server_support.dart';
+
 /// 最近一次上报的浏览器上下文（由 /browser/update 写入，供 /browser/current-tab 读取）。
 Map<String, dynamic>? _lastBrowserContext;
-const int _maxRequestBytes = 1024 * 1024;
+
+/// Runtime limits for one bridge server.
+///
+/// The defaults are finite so a local client cannot keep a request, a file
+/// read, a directory listing, or a child process alive indefinitely. Tests can
+/// use smaller values to exercise failure paths deterministically.
+class LocalAgentBridgeLimits {
+  final Duration requestTimeout;
+  final Duration processTimeout;
+  final int maxRequestBytes;
+  final int maxResponseBytes;
+  final int maxProcessOutputBytes;
+  final int maxWorkspaceReadBytes;
+  final int maxWorkspaceEntries;
+
+  const LocalAgentBridgeLimits({
+    this.requestTimeout = kLocalAgentBridgeRequestTimeout,
+    this.processTimeout = kLocalAgentBridgeProcessTimeout,
+    this.maxRequestBytes = kLocalAgentBridgeMaxRequestBytes,
+    this.maxResponseBytes = kLocalAgentBridgeMaxResponseBytes,
+    this.maxProcessOutputBytes = kLocalAgentBridgeMaxProcessOutputBytes,
+    this.maxWorkspaceReadBytes = kLocalAgentBridgeMaxWorkspaceReadBytes,
+    this.maxWorkspaceEntries = kLocalAgentBridgeMaxWorkspaceEntries,
+  });
+}
 
 /// 在给定工作区启动本地桥接 HTTP 服务并监听 [port]。
 ///
 /// 返回已绑定的 [HttpServer]，调用方负责在适当时机调用 [HttpServer.close] 释放端口
-/// （例如 App 退出时）。请求处理过程中的异常会被捕获并降级为 500 响应，
-/// 不会让整个服务因单条请求失败而中断。
+/// （例如 App 退出时）。请求处理过程中的异常会被捕获并转换为结构化的 4xx/5xx
+/// 响应，不会让整个服务因单条请求失败而中断。
 /// 运行中的桥接服务句柄：封装 [HttpServer] 与按 conversationId 分区的
 /// workspace 映射。调用方通过 [registerWorkspace] 把「对话 id -> 工作目录」
 /// 注册进来；之后所有 /workspace/* 与 /command/run 请求都会按请求体里的
@@ -39,7 +66,22 @@ class RunningBridgeServer {
 
   /// 注册（或覆盖）某个对话的 workspace 目录。
   void registerWorkspace(String conversationId, Directory dir) {
-    _workspaces[conversationId] = dir.absolute;
+    final id = conversationId.trim();
+    if (id.isEmpty) {
+      throw ArgumentError.value(
+        conversationId,
+        'conversationId',
+        'conversationId must not be empty',
+      );
+    }
+    _workspaces[id] = dir.absolute;
+  }
+
+  /// 删除某个对话的 workspace 映射，不影响默认目录或其他对话。
+  bool unregisterWorkspace(String conversationId) {
+    final id = conversationId.trim();
+    if (id.isEmpty) return false;
+    return _workspaces.remove(id) != null;
   }
 
   Future<void> close({bool force = false}) => server.close(force: force);
@@ -49,20 +91,45 @@ Future<RunningBridgeServer> startBridgeServer({
   required Directory workspace,
   required String token,
   int port = kLocalAgentBridgePort,
+  LocalAgentBridgeLimits limits = const LocalAgentBridgeLimits(),
 }) async {
   if (token.length < 32) {
     throw ArgumentError.value(token, 'token', 'Bridge token is too short');
   }
+  _validateLimits(limits);
   // 以默认空串 key 承载启动时的 workspace，保证未携带 conversationId 的
   // 请求（如单工作区旧调用 / 测试）仍有正确的落盘目录。
   final workspaces = <String, Directory>{'': workspace.absolute};
   final server = await HttpServer.bind(InternetAddress.loopbackIPv4, port);
   server.listen((request) async {
     try {
-      await _route(request, workspaces, token);
+      await _route(request, workspaces, token, limits);
+    } on _BridgeRequestFailure catch (error) {
+      try {
+        await _json(
+          request,
+          error.body,
+          statusCode: error.statusCode,
+          maxResponseBytes: limits.maxResponseBytes,
+        );
+      } catch (_) {}
+    } on FormatException {
+      try {
+        await _json(
+          request,
+          {'error': 'invalid_json'},
+          statusCode: HttpStatus.badRequest,
+          maxResponseBytes: limits.maxResponseBytes,
+        );
+      } catch (_) {}
     } catch (_) {
       try {
-        await _json(request, {'error': 'internal_error'}, statusCode: 500);
+        await _json(
+          request,
+          {'error': 'internal_error'},
+          statusCode: HttpStatus.internalServerError,
+          maxResponseBytes: limits.maxResponseBytes,
+        );
       } catch (_) {}
     }
   });
@@ -73,6 +140,7 @@ Future<void> _route(
   HttpRequest request,
   Map<String, Directory> workspaces,
   String token,
+  LocalAgentBridgeLimits limits,
 ) async {
   final origin = request.headers.value('origin');
   if (origin != null && !_isAllowedBrowserOrigin(origin)) {
@@ -92,80 +160,114 @@ Future<void> _route(
   final isHealth = request.uri.path == '/health';
   if ((isHealth && request.method != 'GET') ||
       (!isHealth && request.method != 'POST')) {
-    await _json(request, {'error': 'method_not_allowed'}, statusCode: 405);
+    await _json(
+      request,
+      {'error': 'method_not_allowed'},
+      statusCode: HttpStatus.methodNotAllowed,
+      maxResponseBytes: limits.maxResponseBytes,
+    );
     return;
   }
   if (request.headers.value(HttpHeaders.authorizationHeader) !=
       'Bearer $token') {
-    await _json(request, {'error': 'unauthorized'}, statusCode: 401);
+    await _json(
+      request,
+      {'error': 'unauthorized'},
+      statusCode: HttpStatus.unauthorized,
+      maxResponseBytes: limits.maxResponseBytes,
+    );
     return;
   }
 
   if (isHealth) {
-    await _json(request, {
-      'ok': true,
-      'session': token.substring(0, 8),
-    });
+    await _json(
+        request,
+        {
+          'ok': true,
+          'session': token.substring(0, 8),
+        },
+        maxResponseBytes: limits.maxResponseBytes);
     return;
   }
 
   if (request.headers.contentType?.mimeType != ContentType.json.mimeType ||
-      request.contentLength > _maxRequestBytes) {
-    await _json(request, {'error': 'invalid_request'}, statusCode: 413);
+      request.contentLength > limits.maxRequestBytes) {
+    await _json(
+      request,
+      {'error': 'invalid_request'},
+      statusCode: HttpStatus.requestEntityTooLarge,
+      maxResponseBytes: limits.maxResponseBytes,
+    );
     return;
   }
 
   // 其余路由都依赖 workspace：从请求体读取 conversationId 做分区路由。
-  Map<String, dynamic> body;
-  try {
-    body = await _readJson(request);
-  } on _RequestBodyTooLarge {
-    await _json(request, {'error': 'invalid_request'}, statusCode: 413);
-    return;
-  } on FormatException {
-    await _json(request, {'error': 'invalid_json'}, statusCode: 400);
+  final body = await _readJson(request, limits);
+  final ws = _workspaceFor(
+    workspaces,
+    _optionalString(body, 'conversationId'),
+  );
+  if (ws == null) {
+    await _json(
+      request,
+      {'error': 'workspace_not_registered'},
+      statusCode: HttpStatus.notFound,
+      maxResponseBytes: limits.maxResponseBytes,
+    );
     return;
   }
-  final ws = _workspaceFor(workspaces, body['conversationId'] as String?);
 
   if (request.uri.path == '/workspace/list') {
-    final relativePath = body['path'] as String? ?? '.';
+    final relativePath = _optionalString(body, 'path') ?? '.';
     final dir = _resolveWorkspaceDir(ws, relativePath);
     if (!dir.existsSync()) {
-      await _json(request, {'error': 'not_found'}, statusCode: 404);
+      await _json(
+        request,
+        {'error': 'not_found'},
+        statusCode: HttpStatus.notFound,
+        maxResponseBytes: limits.maxResponseBytes,
+      );
       return;
     }
-    final entries = dir
-        .listSync()
-        .map((e) => {
-              'name': _fileNameOf(e.path),
-              'path': _relativeToWorkspace(ws, e.path),
-              'type': e is Directory ? 'directory' : 'file',
-            })
-        .toList()
-      ..sort((a, b) => (a['path'] as String).compareTo(b['path'] as String));
-    await _json(request, {'entries': entries});
+    final entries = await _listWorkspaceEntries(dir, ws, limits);
+    await _json(
+      request,
+      {'entries': entries},
+      maxResponseBytes: limits.maxResponseBytes,
+    );
     return;
   }
 
   if (request.uri.path == '/workspace/read') {
-    final path = body['path'] as String? ?? '';
+    final path = _optionalString(body, 'path') ?? '';
     final file = _resolveWorkspaceFile(ws, path);
     if (!file.existsSync()) {
-      await _json(request, {'error': 'not_found'}, statusCode: 404);
+      await _json(
+        request,
+        {'error': 'not_found'},
+        statusCode: HttpStatus.notFound,
+        maxResponseBytes: limits.maxResponseBytes,
+      );
       return;
     }
-    await _json(request, {
-      'path': path,
-      'content': await file.readAsString(),
-    });
+    final content = await _readWorkspaceText(file, limits);
+    await _json(
+      request,
+      {'path': path, 'content': content},
+      maxResponseBytes: limits.maxResponseBytes,
+    );
     return;
   }
 
   if (request.uri.path == '/workspace/apply-patch') {
-    final patch = body['patch'] as String? ?? '';
+    final patch = _optionalString(body, 'patch') ?? '';
     if (patch.trim().isEmpty) {
-      await _json(request, {'error': 'empty_patch'}, statusCode: 400);
+      await _json(
+        request,
+        {'error': 'empty_patch'},
+        statusCode: HttpStatus.badRequest,
+        maxResponseBytes: limits.maxResponseBytes,
+      );
       return;
     }
     final check = await _runProcess(
@@ -173,12 +275,14 @@ Future<void> _route(
       ['apply', '--check'],
       ws,
       stdinText: patch,
+      limits: limits,
     );
     if (check.exitCode != 0) {
       await _json(
         request,
         {'error': 'patch_check_failed', 'stderr': check.stderr},
-        statusCode: 400,
+        statusCode: HttpStatus.badRequest,
+        maxResponseBytes: limits.maxResponseBytes,
       );
       return;
     }
@@ -187,16 +291,19 @@ Future<void> _route(
       ['apply'],
       ws,
       stdinText: patch,
+      limits: limits,
     );
     await _json(
-        request,
-        {
-          'ok': apply.exitCode == 0,
-          'stdout': apply.stdout,
-          'stderr': apply.stderr,
-          'exitCode': apply.exitCode,
-        },
-        statusCode: apply.exitCode == 0 ? 200 : 400);
+      request,
+      {
+        'ok': apply.exitCode == 0,
+        'stdout': apply.stdout,
+        'stderr': apply.stderr,
+        'exitCode': apply.exitCode,
+      },
+      statusCode: apply.exitCode == 0 ? HttpStatus.ok : HttpStatus.badRequest,
+      maxResponseBytes: limits.maxResponseBytes,
+    );
     return;
   }
 
@@ -208,62 +315,94 @@ Future<void> _route(
   // 与 workspace 边界校验），不破坏原有 /workspace/apply-patch 端点。
   // content 允许为空（写入空文件），路径为空或不安全则返回 400。
   if (request.uri.path == '/workspace/write') {
-    final path = body['path'] as String? ?? '';
-    final content = body['content'] as String? ?? '';
+    final path = _optionalString(body, 'path') ?? '';
+    final content = _optionalString(body, 'content') ?? '';
     if (path.trim().isEmpty) {
-      await _json(request, {'error': 'empty_path'}, statusCode: 400);
+      await _json(
+        request,
+        {'error': 'empty_path'},
+        statusCode: HttpStatus.badRequest,
+        maxResponseBytes: limits.maxResponseBytes,
+      );
       return;
     }
     File file;
     try {
       file = _resolveWorkspaceFile(ws, path);
-    } on ArgumentError catch (e) {
+    } on ArgumentError {
       await _json(
         request,
-        {'error': 'unsafe_path', 'message': e.toString()},
-        statusCode: 400,
+        {'error': 'unsafe_path'},
+        statusCode: HttpStatus.badRequest,
+        maxResponseBytes: limits.maxResponseBytes,
       );
       return;
     }
-    await file.parent.create(recursive: true);
-    await file.writeAsString(content);
-    await _json(request, {
-      'ok': true,
-      'path': path,
-      'bytes': content.length,
-    });
+    try {
+      await file.parent.create(recursive: true).timeout(limits.requestTimeout);
+      await file.writeAsString(content).timeout(limits.requestTimeout);
+    } on TimeoutException {
+      throw const _BridgeRequestFailure(
+        'request_timeout',
+        HttpStatus.requestTimeout,
+      );
+    }
+    await _json(
+        request,
+        {
+          'ok': true,
+          'path': path,
+          'bytes': utf8.encode(content).length,
+        },
+        maxResponseBytes: limits.maxResponseBytes);
     return;
   }
 
   if (request.uri.path == '/command/run') {
-    final command = (body['command'] as String? ?? '').trim();
+    final command = (_optionalString(body, 'command') ?? '').trim();
     final args = _allowedCommand(command);
     if (args == null) {
-      await _json(request, {'error': 'command_not_allowed'}, statusCode: 403);
+      await _json(
+        request,
+        {'error': 'command_not_allowed'},
+        statusCode: HttpStatus.forbidden,
+        maxResponseBytes: limits.maxResponseBytes,
+      );
       return;
     }
-    final result = await _runProcess(args.first, args.sublist(1), ws);
+    final result = await _runProcess(
+      args.first,
+      args.sublist(1),
+      ws,
+      limits: limits,
+    );
     await _json(
-        request,
-        {
-          'stdout': result.stdout,
-          'stderr': result.stderr,
-          'exitCode': result.exitCode,
-        },
-        statusCode: result.exitCode == 0 ? 200 : 400);
+      request,
+      {
+        'stdout': result.stdout,
+        'stderr': result.stderr,
+        'exitCode': result.exitCode,
+      },
+      statusCode: result.exitCode == 0 ? HttpStatus.ok : HttpStatus.badRequest,
+      maxResponseBytes: limits.maxResponseBytes,
+    );
     return;
   }
 
   if (request.uri.path == '/browser/update') {
     _lastBrowserContext = {
-      'url': body['url'] as String? ?? '',
-      'title': body['title'] as String? ?? '',
-      'selectedText': body['selectedText'] as String? ?? '',
-      'pageText': body['pageText'] as String? ?? '',
-      'capturedAt': body['capturedAt'] as String? ??
+      'url': _optionalString(body, 'url') ?? '',
+      'title': _optionalString(body, 'title') ?? '',
+      'selectedText': _optionalString(body, 'selectedText') ?? '',
+      'pageText': _optionalString(body, 'pageText') ?? '',
+      'capturedAt': _optionalString(body, 'capturedAt') ??
           DateTime.now().toUtc().toIso8601String(),
     };
-    await _json(request, {'ok': true});
+    await _json(
+      request,
+      {'ok': true},
+      maxResponseBytes: limits.maxResponseBytes,
+    );
     return;
   }
 
@@ -273,249 +412,19 @@ Future<void> _route(
       await _json(
         request,
         {'error': 'browser_context_missing'},
-        statusCode: 409,
+        statusCode: HttpStatus.conflict,
+        maxResponseBytes: limits.maxResponseBytes,
       );
       return;
     }
-    await _json(request, context);
+    await _json(request, context, maxResponseBytes: limits.maxResponseBytes);
     return;
   }
 
-  await _json(request, {'error': 'not_found'}, statusCode: 404);
-}
-
-/// 按请求体里的 conversationId 选择对应 workspace 目录。
-///
-/// - 命中已注册 id 直接返回该目录；
-/// - 未携带 / 未命中时回退默认空串 workspace（启动时注册）；
-/// - 极端情况（默认也不存在）回落到任意第一个已注册目录，避免空指针。
-Directory _workspaceFor(
-    Map<String, Directory> workspaces, String? conversationId) {
-  final id = (conversationId ?? '').trim();
-  return workspaces[id] ?? workspaces[''] ?? workspaces.values.first;
-}
-
-Future<Map<String, dynamic>> _readJson(HttpRequest request) async {
-  final bytes = <int>[];
-  var tooLarge = false;
-  await for (final chunk in request) {
-    if (tooLarge) continue;
-    if (bytes.length + chunk.length > _maxRequestBytes) {
-      // Drain the chunked request before sending 413; otherwise dart:io can
-      // close the connection while the client is still uploading and the
-      // client observes "connection closed before full header".
-      // ponytail: drain until EOF; add an abortable read timeout if this local
-      // bridge ever accepts untrusted clients that can hold a stream open.
-      tooLarge = true;
-      continue;
-    }
-    bytes.addAll(chunk);
-  }
-  if (tooLarge) throw const _RequestBodyTooLarge();
-  final raw = utf8.decode(bytes);
-  if (raw.trim().isEmpty) return {};
-  final decoded = jsonDecode(raw);
-  if (decoded is Map<String, dynamic>) return decoded;
-  throw const FormatException('Expected JSON object');
-}
-
-class _RequestBodyTooLarge implements Exception {
-  const _RequestBodyTooLarge();
-}
-
-String _normalizeWorkspacePath(Directory workspace, String path) {
-  final trimmed = path.trim();
-  if (trimmed.isEmpty) return trimmed;
-  final isAbs = trimmed.startsWith('/') ||
-      trimmed.startsWith('\\') ||
-      RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(trimmed);
-  final normalized = trimmed.replaceAll('\\', '/');
-  if (!isAbs) return normalized; // 已是相对路径
-  final wsPath = workspace.absolute.path.replaceAll('\\', '/');
-  final comparablePath =
-      Platform.isWindows ? normalized.toLowerCase() : normalized;
-  final comparableWorkspace =
-      Platform.isWindows ? wsPath.toLowerCase() : wsPath;
-  if (comparablePath == comparableWorkspace ||
-      comparablePath.startsWith('$comparableWorkspace/')) {
-    final rel = normalized.substring(wsPath.length);
-    return rel.startsWith('/') ? rel.substring(1) : rel;
-  }
-  final segments = normalized.split('/').where((s) => s.isNotEmpty).toList();
-  return segments.isEmpty ? '' : segments.last;
-}
-
-File _resolveWorkspaceFile(Directory workspace, String relativePath) {
-  final normalized = _normalizeWorkspacePath(workspace, relativePath);
-  _rejectUnsafeRelativePath(normalized);
-  final file = File('${workspace.path}/$normalized').absolute;
-  _ensureInsideWorkspace(workspace, file.path);
-  _ensureResolvedInsideWorkspace(workspace, file.path);
-  return file;
-}
-
-Directory _resolveWorkspaceDir(Directory workspace, String relativePath) {
-  final normalized = relativePath == '.'
-      ? ''
-      : _normalizeWorkspacePath(workspace, relativePath);
-  if (normalized.isNotEmpty) _rejectUnsafeRelativePath(normalized);
-  final dir = Directory('${workspace.path}/$normalized').absolute;
-  _ensureInsideWorkspace(workspace, dir.path);
-  _ensureResolvedInsideWorkspace(workspace, dir.path);
-  return dir;
-}
-
-void _rejectUnsafeRelativePath(String path) {
-  if (path.trim().isEmpty ||
-      path.startsWith('/') ||
-      path.startsWith('\\') ||
-      path.split(RegExp(r'[/\\]+')).contains('..')) {
-    throw ArgumentError('Unsafe workspace path: $path');
-  }
-}
-
-void _ensureInsideWorkspace(Directory workspace, String path) {
-  var workspacePath = workspace.absolute.path.replaceAll('\\', '/');
-  var candidatePath = path.replaceAll('\\', '/');
-  if (Platform.isWindows) {
-    workspacePath = workspacePath.toLowerCase();
-    candidatePath = candidatePath.toLowerCase();
-  }
-  if (candidatePath != workspacePath &&
-      !candidatePath.startsWith('$workspacePath/')) {
-    throw ArgumentError('Path escapes workspace: $path');
-  }
-}
-
-/// Rejects paths whose nearest existing ancestor resolves through a symbolic
-/// link outside [workspace]. Lexical `..` checks alone cannot prevent that
-/// escape when a link inside the workspace points elsewhere.
-void _ensureResolvedInsideWorkspace(Directory workspace, String path) {
-  final resolvedWorkspace = workspace.resolveSymbolicLinksSync();
-  var probe = File(path).absolute.path;
-  while (FileSystemEntity.typeSync(probe, followLinks: false) ==
-      FileSystemEntityType.notFound) {
-    final parent = FileSystemEntity.parentOf(probe);
-    if (parent == probe) break;
-    probe = parent;
-  }
-  final resolvedProbe = File(probe).resolveSymbolicLinksSync();
-  _ensureInsideWorkspace(Directory(resolvedWorkspace), resolvedProbe);
-}
-
-List<String>? _allowedCommand(String command) {
-  const allowed = {
-    'flutter analyze': ['flutter', 'analyze'],
-    'flutter test': ['flutter', 'test'],
-    'dart run build_runner build --delete-conflicting-outputs': [
-      'dart',
-      'run',
-      'build_runner',
-      'build',
-      '--delete-conflicting-outputs',
-    ],
-  };
-  final exact = allowed[command];
-  if (exact != null) return exact;
-
-  const analyzePrefix = 'flutter analyze ';
-  if (!command.startsWith(analyzePrefix)) return null;
-  final path = _decodeCommandPath(command.substring(analyzePrefix.length));
-  if (path == null || !path.toLowerCase().endsWith('.dart')) return null;
-  if (RegExp(r'^[a-zA-Z]:[\\/]').hasMatch(path)) return null;
-  try {
-    _rejectUnsafeRelativePath(path);
-  } on ArgumentError {
-    return null;
-  }
-  return ['flutter', 'analyze', path];
-}
-
-String? _decodeCommandPath(String raw) {
-  var path = raw.trim();
-  if (path.startsWith("'") || path.endsWith("'")) {
-    if (!(path.startsWith("'") && path.endsWith("'"))) return null;
-    path = path.substring(1, path.length - 1).replaceAll(r"'\''", "'");
-  }
-  if (path.isEmpty || path.startsWith('-')) return null;
-  if (RegExp(r'''[;&|`$<>\r\n]''').hasMatch(path)) return null;
-  return path;
-}
-
-Future<_ProcessResultText> _runProcess(
-  String executable,
-  List<String> arguments,
-  Directory workspace, {
-  String? stdinText,
-}) async {
-  final process = await Process.start(
-    executable,
-    arguments,
-    workingDirectory: workspace.path,
+  await _json(
+    request,
+    {'error': 'not_found'},
+    statusCode: HttpStatus.notFound,
+    maxResponseBytes: limits.maxResponseBytes,
   );
-  if (stdinText != null) {
-    process.stdin.write(stdinText);
-  }
-  await process.stdin.close();
-  final stdoutText = await utf8.decoder.bind(process.stdout).join();
-  final stderrText = await utf8.decoder.bind(process.stderr).join();
-  final exitCode = await process.exitCode;
-  return _ProcessResultText(stdoutText, stderrText, exitCode);
-}
-
-Future<void> _json(
-  HttpRequest request,
-  Map<String, dynamic> body, {
-  int statusCode = 200,
-}) async {
-  request.response.statusCode = statusCode;
-  request.response.headers.contentType = ContentType.json;
-  _writeCors(request);
-  request.response.write(jsonEncode(body));
-  await request.response.close();
-}
-
-void _writeCors(HttpRequest request) {
-  final origin = request.headers.value('origin');
-  if (origin == null || origin.isEmpty) return;
-  request.response.headers.set('access-control-allow-origin', origin);
-  request.response.headers.set('vary', 'origin');
-  request.response.headers
-      .set('access-control-allow-methods', 'GET, POST, OPTIONS');
-  request.response.headers.set('access-control-allow-headers', 'content-type');
-}
-
-bool _isAllowedBrowserOrigin(String origin) {
-  final uri = Uri.tryParse(origin);
-  if (uri == null || (uri.scheme != 'http' && uri.scheme != 'https')) {
-    return false;
-  }
-  return uri.host == 'localhost' ||
-      uri.host == '127.0.0.1' ||
-      uri.host == '::1';
-}
-
-String _fileNameOf(String path) {
-  final segments = path.split(RegExp(r'[/\\]'));
-  return segments.isEmpty ? path : segments.last;
-}
-
-String _relativeToWorkspace(Directory workspace, String path) {
-  final root = workspace.absolute.path.replaceAll('\\', '/');
-  final candidate = path.replaceAll('\\', '/');
-  final comparableRoot = Platform.isWindows ? root.toLowerCase() : root;
-  final comparableCandidate =
-      Platform.isWindows ? candidate.toLowerCase() : candidate;
-  final prefix = '$comparableRoot/';
-  return comparableCandidate.startsWith(prefix)
-      ? candidate.substring(root.length + 1)
-      : candidate;
-}
-
-class _ProcessResultText {
-  final String stdout;
-  final String stderr;
-  final int exitCode;
-
-  const _ProcessResultText(this.stdout, this.stderr, this.exitCode);
 }

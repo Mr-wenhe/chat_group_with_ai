@@ -42,6 +42,12 @@ class Message extends HiveObject {
   @HiveField(10, defaultValue: <String>[])
   List<String> visibleToCharacterIds;
 
+  /// Normalized, secret-free web-search evidence used by this AI reply.
+  /// Keeping it on the message preserves source panels and regeneration after
+  /// an app restart without introducing a separate lifecycle relation.
+  @HiveField(11)
+  Map<dynamic, dynamic>? webSearchSnapshot;
+
   Message({
     String? id,
     required this.groupId,
@@ -54,6 +60,7 @@ class Message extends HiveObject {
     List<String>? mentionedAiIds,
     this.media,
     List<String>? visibleToCharacterIds,
+    this.webSearchSnapshot,
   })  : id = id ?? const Uuid().v4(),
         timestamp = timestamp ?? DateTime.now(),
         mentionedAiIds = mentionedAiIds ?? const [],

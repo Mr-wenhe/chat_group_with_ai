@@ -1,42 +1,25 @@
+import 'dart:async';
+
 import 'package:flutter/foundation.dart';
 import 'package:hive/hive.dart';
 
+import 'package:chat_group/core/database/database_mutation_gate.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 import '../models/search_provider_config.dart';
+import '../models/search_models.dart';
 import '../models/search_runtime_settings.dart';
 import '../security/search_endpoint_validator.dart';
+import '../security/search_credential_validator.dart';
 import 'search_credential_repository.dart';
+import 'search_provider_config_backup_codec.dart';
+import 'search_provider_config_results.dart';
 
-class SearchProviderConfigSaveResult {
-  final SearchProviderConfig? config;
-  final CredentialFailure? credentialFailure;
-  final String? errorMessage;
-  final bool usedDevelopmentFallback;
+export 'search_provider_config_results.dart';
 
-  const SearchProviderConfigSaveResult.success(
-    this.config, {
-    this.usedDevelopmentFallback = false,
-  })  : credentialFailure = null,
-        errorMessage = null;
-
-  const SearchProviderConfigSaveResult.failure({
-    this.credentialFailure,
-    this.errorMessage,
-  })  : config = null,
-        usedDevelopmentFallback = false;
-
-  bool get isSuccess => config != null && credentialFailure == null;
-}
-
-class SearchProviderConfigDeleteResult {
-  final CredentialFailure? failure;
-
-  const SearchProviderConfigDeleteResult.success() : failure = null;
-  const SearchProviderConfigDeleteResult.failure(this.failure);
-
-  bool get isSuccess => failure == null;
-}
+part 'search_settings_store_credentials.dart';
+part 'search_settings_store_transactions.dart';
+part 'search_settings_store_transaction_helpers.dart';
 
 class _SearchSettingsSnapshot {
   final bool hadConfigs;
@@ -52,6 +35,18 @@ class _SearchSettingsSnapshot {
   });
 }
 
+class _CredentialRepairState {
+  final Map<String, dynamic> repairs;
+  final bool malformed;
+  final List<String> visibleIds;
+
+  const _CredentialRepairState({
+    this.repairs = const {},
+    this.malformed = false,
+    this.visibleIds = const [],
+  });
+}
+
 /// Stores search provider metadata in `app_settings`; no Hive adapter or new
 /// HiveType is involved.
 class SearchProviderConfigStore {
@@ -59,6 +54,7 @@ class SearchProviderConfigStore {
   static const String defaultProviderKey = 'web_search_default_provider_id_v1';
   static const String runtimeSettingsKey = 'web_search_runtime_settings_v2';
   static const String resultCacheKey = 'web_search_result_cache_v1';
+  static const String credentialRepairKey = 'web_search_credential_repairs_v1';
 
   final Box<dynamic> box;
   final SearchCredentialRepository credentials;
@@ -83,11 +79,36 @@ class SearchProviderConfigStore {
   bool get allowLocalDevelopmentGateway =>
       _allowDevelopmentFallback && !isRelease;
 
+  /// Browser transports buffer XHR responses before application-level limits
+  /// can run, and browsers do not provide the native DNS pinning/credential
+  /// boundary used by this feature. Keep every Web build offline until a
+  /// streaming Fetch adapter and an equivalent secure credential design exist.
+  bool get isWebUnsupported => kIsWeb;
+
+  /// Compatibility alias for older callers. Web is unsupported in both debug
+  /// and release builds now, so callers must not key behavior off build mode.
+  bool get isWebReleaseUnsupported => isWebUnsupported;
+
+  bool _hasAmbiguousProviderIds() {
+    final raw = box.get(configsKey);
+    if (raw is! List) return false;
+    final seen = <String>{};
+    for (final item in raw) {
+      if (item is! Map || !item.containsKey('id')) return true;
+      final rawId = item['id'];
+      if (rawId is! String) return true;
+      final canonical = SearchProviderConfig.canonicalizeId(rawId);
+      if (canonical == null || !seen.add(canonical)) return true;
+    }
+    return false;
+  }
+
   List<SearchProviderConfig> get configs {
     final raw = box.get(configsKey);
     if (raw is! List) return const [];
     final requestedDefaultId = box.get(defaultProviderKey)?.toString().trim();
     final result = <SearchProviderConfig>[];
+    final seenIds = <String>{};
     for (final item in raw) {
       if (item is! Map) continue;
       final config = SearchProviderConfig.fromMap(
@@ -95,15 +116,28 @@ class SearchProviderConfigStore {
         allowDevelopmentFallback: _allowDevelopmentFallback && !isRelease,
       );
       if (config.id.trim().isEmpty) continue;
+      // A malformed ID must never be normalized into the same secure-storage
+      // key as a valid record, and duplicate canonical IDs are ambiguous.
+      if (!seenIds.add(config.id)) continue;
+      final requiresCredential = searchProviderRequiresCredential(
+        config.provider,
+        isRelease: isRelease,
+      );
+      final keylessRequiredProvider = requiresCredential &&
+          (!config.hasCredential || config.credentialId.isEmpty);
+      final normalizedConfig = config.copyWith(
+        credentialRequired: config.credentialRequired || requiresCredential,
+        requiresAttention: config.requiresAttention || keylessRequiredProvider,
+      );
       final releaseSafeConfig = isRelease &&
-              config.credentialId ==
+              normalizedConfig.credentialId ==
                   SearchCredentialRepository.developmentHiveCredentialId
-          ? config.copyWith(
+          ? normalizedConfig.copyWith(
               credentialId: '',
               hasCredential: false,
               clearDevelopmentLegacyApiKey: true,
             )
-          : config;
+          : normalizedConfig;
       result.add(releaseSafeConfig);
     }
     if (result.isEmpty) return const [];
@@ -142,174 +176,33 @@ class SearchProviderConfigStore {
       SearchRuntimeSettings.fromMap(box.get(runtimeSettingsKey));
 
   Future<void> saveRuntimeSettings(SearchRuntimeSettings settings) =>
-      box.put(runtimeSettingsKey, settings.toMap());
+      _runSerialized(() => box.put(runtimeSettingsKey, settings.toMap()));
 
-  /// Clears the persisted cache namespace. In-memory turn caches are owned by
-  /// active chat coordinators and are cleared when their page is recreated;
-  /// this operation also gives future persistent cache implementations one
-  /// stable, backwards-compatible key to invalidate.
-  Future<void> clearSearchCache() => box.delete(resultCacheKey);
+  Future<void> clearRuntimeSettings() =>
+      _runSerialized(() => box.delete(runtimeSettingsKey));
 
-  Future<SearchProviderConfigSaveResult> save(
-    SearchProviderConfig draft, {
-    String enteredCredential = '',
-  }) async {
-    final endpoint = SearchEndpointValidator.validate(
-      draft.baseUrl,
-      isRelease: isRelease,
-      allowLocalDevelopmentGateway: allowLocalDevelopmentGateway,
-    );
-    if (!endpoint.isValid) {
-      return SearchProviderConfigSaveResult.failure(
-        errorMessage: endpoint.message,
-      );
-    }
-
-    final existing = findById(draft.id);
-    final entered = enteredCredential.trim();
-    CredentialReadResult? previousCredential;
-    if (entered.isNotEmpty &&
-        existing != null &&
-        existing.hasCredential &&
-        existing.credentialId == credentials.credentialIdFor(existing.id)) {
-      previousCredential = await credentials.read(existing.id);
-      if (!previousCredential.isAvailable &&
-          previousCredential.failure != null) {
-        return SearchProviderConfigSaveResult.failure(
-          credentialFailure: previousCredential.failure,
-          errorMessage: '现有搜索凭据不可读取，未覆盖配置',
-        );
-      }
-    }
-    var next = draft.copyWith(baseUrl: endpoint.uri!.toString());
-    var usedFallback = false;
-
-    if (entered.isNotEmpty) {
-      final result = await credentials.save(draft.id, entered);
-      if (result.isSuccess) {
-        next = next.copyWith(
-          credentialId: credentials.credentialIdFor(draft.id),
-          hasCredential: true,
-          clearDevelopmentLegacyApiKey: true,
-        );
-      } else if (_canUseDevelopmentFallback(result.failure)) {
-        next = next.copyWith(
-          credentialId: SearchCredentialRepository.developmentHiveCredentialId,
-          hasCredential: true,
-          developmentLegacyApiKey: entered,
-        );
-        usedFallback = true;
-      } else {
-        return SearchProviderConfigSaveResult.failure(
-          credentialFailure: result.failure,
-        );
-      }
-    } else if (existing != null) {
-      // Empty input means preserve the existing binding; it never triggers a
-      // write and does not silently erase a credential.
-      next = next.copyWith(
-        credentialId: existing.credentialId,
-        hasCredential: existing.hasCredential,
-        developmentLegacyApiKey: existing.developmentLegacyApiKey,
-      );
-    } else {
-      next = next.copyWith(
-        credentialId: '',
-        hasCredential: false,
-        clearDevelopmentLegacyApiKey: true,
-      );
-    }
-
-    try {
-      await _putConfig(next, includeDevelopmentFallback: usedFallback);
-      return SearchProviderConfigSaveResult.success(
-        next,
-        usedDevelopmentFallback: usedFallback,
-      );
-    } on Object {
-      // Metadata and secure storage are separate systems. If metadata fails
-      // after a credential rotation, restore the old value rather than
-      // deleting the only known credential. No secret enters diagnostics.
-      if (!usedFallback && entered.isNotEmpty) {
-        if (previousCredential?.isAvailable == true) {
-          final restored = await credentials.save(
-            draft.id,
-            previousCredential!.value!,
+  Future<void> setRequiresAttention(String id, bool value) => _runSerialized(
+        () async {
+          final current = configs;
+          if (!current.any((config) => config.id == id)) return;
+          await _writeConfigs(
+            current
+                .map(
+                  (config) => config.id == id
+                      ? config.copyWith(requiresAttention: value)
+                      : config,
+                )
+                .toList(growable: false),
           );
-          if (!restored.isSuccess) await credentials.delete(draft.id);
-        } else {
-          await credentials.delete(draft.id);
-        }
-      }
-      return const SearchProviderConfigSaveResult.failure(
-        credentialFailure: CredentialFailure.systemError,
-        errorMessage: '搜索配置保存失败',
+        },
       );
-    }
+
+  /// Serializes every metadata mutation, including the read-modify-write
+  /// snapshot. The gate is shared with data-lifecycle operations, so a clear
+  /// cannot plan against one config list and delete against another.
+  Future<T> _runSerialized<T>(Future<T> Function() operation) {
+    return DatabaseMutationGate.forBox(box).run(operation);
   }
-
-  Future<SearchProviderConfigDeleteResult> delete(String id) async {
-    final existing = findById(id);
-    if (existing == null) {
-      return const SearchProviderConfigDeleteResult.success();
-    }
-    final secureCredentialBound = existing.credentialId !=
-            SearchCredentialRepository.developmentHiveCredentialId &&
-        existing.hasCredential;
-    final snapshot = _captureSettings();
-    try {
-      final remaining = configs.where((item) => item.id != id).toList();
-      await _writeConfigs(remaining);
-      if (box.get(defaultProviderKey)?.toString() == id) {
-        await box.delete(defaultProviderKey);
-      }
-    } on Object {
-      await _restoreSettings(snapshot);
-      return const SearchProviderConfigDeleteResult.failure(
-        CredentialFailure.systemError,
-      );
-    }
-
-    if (secureCredentialBound) {
-      final result = await credentials.delete(id);
-      if (!result.isSuccess) {
-        await _restoreSettings(snapshot);
-        return SearchProviderConfigDeleteResult.failure(result.failure);
-      }
-    }
-    return const SearchProviderConfigDeleteResult.success();
-  }
-
-  Future<void> _putConfig(
-    SearchProviderConfig config, {
-    required bool includeDevelopmentFallback,
-  }) async {
-    final snapshot = _captureSettings();
-    try {
-      final next = configs
-          .where((item) => item.id != config.id)
-          .map((item) =>
-              config.isDefault ? item.copyWith(isDefault: false) : item)
-          .toList();
-      next.add(config);
-      await _writeConfigs(
-        next,
-        includeDevelopmentFallbackFor:
-            includeDevelopmentFallback ? config.id : null,
-      );
-      if (config.isDefault) {
-        await box.put(defaultProviderKey, config.id);
-      } else if (box.get(defaultProviderKey)?.toString() == config.id) {
-        await box.delete(defaultProviderKey);
-      }
-    } on Object {
-      await _restoreSettings(snapshot);
-      rethrow;
-    }
-  }
-
-  bool _canUseDevelopmentFallback(CredentialFailure? failure) =>
-      !isRelease && _allowDevelopmentFallback && failure != null;
 
   _SearchSettingsSnapshot _captureSettings() => _SearchSettingsSnapshot(
         hadConfigs: box.containsKey(configsKey),
@@ -341,7 +234,8 @@ class SearchProviderConfigStore {
     );
   }
 
-  Future<void> _restoreSettings(_SearchSettingsSnapshot snapshot) async {
+  Future<bool> _restoreSettings(_SearchSettingsSnapshot snapshot) async {
+    var restored = true;
     try {
       if (snapshot.hadConfigs) {
         await box.put(configsKey, snapshot.configs);
@@ -349,7 +243,7 @@ class SearchProviderConfigStore {
         await box.delete(configsKey);
       }
     } catch (_) {
-      // Keep attempting the independent default-key restoration.
+      restored = false;
     }
     try {
       if (snapshot.hadDefaultProvider) {
@@ -358,70 +252,150 @@ class SearchProviderConfigStore {
         await box.delete(defaultProviderKey);
       }
     } catch (_) {
-      // The original operation's typed failure is more useful to callers.
+      restored = false;
+    }
+    return restored;
+  }
+
+  bool _hasUnknownCredentialBinding(SearchProviderConfig config) =>
+      config.invalidCredentialBinding ||
+      (config.hasCredential && config.credentialId.isEmpty) ||
+      (config.credentialId.isNotEmpty &&
+          config.credentialId != credentials.credentialIdFor(config.id) &&
+          config.credentialId !=
+              SearchCredentialRepository.developmentHiveCredentialId);
+
+  _CredentialRepairState _readCredentialRepairState() {
+    final raw = box.get(credentialRepairKey);
+    if (raw == null) return const _CredentialRepairState();
+    if (raw is! Map) {
+      // Keep the raw value untouched and expose only a safe diagnostic.
+      return const _CredentialRepairState(malformed: true);
+    }
+    final repairs = <String, dynamic>{};
+    final visibleIds = <String>[];
+    var malformed = false;
+    for (final entry in raw.entries) {
+      if (entry.key is String && (entry.key as String).isNotEmpty) {
+        visibleIds.add(entry.key as String);
+      } else {
+        malformed = true;
+      }
+      if (entry.key is! String || entry.value is! Map) {
+        malformed = true;
+        continue;
+      }
+      final repair = <String, dynamic>{};
+      for (final item in (entry.value as Map).entries) {
+        if (item.key is! String) {
+          malformed = true;
+          continue;
+        }
+        repair[item.key as String] = item.value;
+      }
+      repairs[entry.key as String] = repair;
+    }
+    return _CredentialRepairState(
+      repairs: repairs,
+      malformed: malformed,
+      visibleIds: visibleIds,
+    );
+  }
+
+  Map<String, dynamic> _pendingCredentialRepairs() =>
+      _readCredentialRepairState().repairs;
+
+  bool get hasMalformedCredentialRepairState =>
+      _readCredentialRepairState().malformed;
+
+  void _ensureRepairStateWritable(_CredentialRepairState state) {
+    if (state.malformed) {
+      throw StateError('search credential repair state is malformed');
+    }
+  }
+
+  Map<String, dynamic>? _pendingCredentialRepair(String configId) {
+    final raw = _pendingCredentialRepairs()[configId];
+    if (raw is! Map) return null;
+    return {
+      for (final entry in raw.entries)
+        if (entry.key is String) entry.key as String: entry.value,
+    };
+  }
+
+  /// Stable, non-secret identifiers for repair operations that survived a
+  /// metadata rollback or restore without their provider config.
+  List<String> get pendingCredentialRepairIds {
+    final ids = _readCredentialRepairState().visibleIds.toList();
+    return List.unmodifiable(ids..sort());
+  }
+
+  Future<void> _markCredentialRepair({
+    required String configId,
+    required String credentialId,
+    String operation = 'delete',
+    String phase = 'cleanup',
+  }) async {
+    if (!credentials.canDeleteBinding(credentialId)) {
+      throw StateError('search credential binding is not repairable');
+    }
+    final state = _readCredentialRepairState();
+    _ensureRepairStateWritable(state);
+    final previous = state.repairs[configId];
+    if (previous is Map &&
+        previous['operation']?.toString() == 'credential_recovery' &&
+        operation != 'credential_recovery') {
+      // Recovery is a terminal safety state until the bound key has been
+      // removed successfully. A later transaction must never downgrade it to
+      // a normal rotation or cleanup intent.
+      throw StateError('search credential recovery is still pending');
+    }
+    final repairs = Map<String, dynamic>.from(state.repairs);
+    repairs[configId] = {
+      'configId': configId,
+      'credentialId': credentialId,
+      'operation': operation,
+      'phase': phase,
+      'createdAt': DateTime.now().toUtc().toIso8601String(),
+    };
+    await box.put(credentialRepairKey, repairs);
+  }
+
+  Future<void> _clearCredentialRepair(String configId) async {
+    final state = _readCredentialRepairState();
+    _ensureRepairStateWritable(state);
+    final repairs = Map<String, dynamic>.from(state.repairs);
+    if (!repairs.containsKey(configId)) return;
+    repairs.remove(configId);
+    if (repairs.isEmpty) {
+      await box.delete(credentialRepairKey);
+    } else {
+      await box.put(credentialRepairKey, repairs);
     }
   }
 
   /// Converts persisted config maps to backup metadata without reading a
   /// plaintext legacy key. Only allowlisted fields are copied.
   static List<Map<String, dynamic>> backupValue(Object? raw) {
-    if (raw is! List) return const [];
-    return raw.whereType<Map>().map((item) {
-      final map = <String, dynamic>{
-        'id': item['id']?.toString() ?? '',
-        'name': item['name']?.toString() ?? '',
-        'provider': item['provider']?.toString() ?? '',
-        'baseUrl': SearchEndpointValidator.sanitizeForBackup(
-          item['baseUrl']?.toString() ?? '',
-        ),
-        'enabled': item['enabled'] != false,
-        'isDefault': item['isDefault'] == true,
-        'credentialRequired': item['hasCredential'] == true ||
-            (item['credentialId']?.toString().isNotEmpty ?? false),
-      };
-      return map;
-    }).toList(growable: false);
+    return SearchProviderConfigBackupCodec.backupValue(raw);
   }
 
   /// Restored configs are deliberately unbound, even if a backup was
   /// produced by a development build containing a fallback marker.
   static List<Map<String, dynamic>> restoreValue(Object? raw) {
-    final values = backupValue(raw);
-    return values
-        .map((item) => {
-              ...item,
-              'credentialRequired': item['credentialRequired'] == true,
-              'credentialId': '',
-              'hasCredential': false,
-            }..remove('credentialRequired'))
-        .toList(growable: false);
+    return SearchProviderConfigBackupCodec.restoreValue(raw);
   }
 
   /// Normalizes records already present on the device before a merge restore
   /// writes the whole list back. Secure credential bindings are retained, but
   /// release builds never copy a legacy Hive plaintext field.
-  static List<Map<String, dynamic>> normalizeExistingValue(Object? raw) {
-    if (raw is! List) return const [];
-    final allowDevelopmentFallback = !kReleaseMode &&
-        !kIsWeb &&
-        defaultTargetPlatform == TargetPlatform.macOS;
-    return raw.whereType<Map>().map((item) {
-      var config = SearchProviderConfig.fromMap(
-        item,
-        allowDevelopmentFallback: allowDevelopmentFallback,
-      );
-      if (kReleaseMode &&
-          config.credentialId ==
-              SearchCredentialRepository.developmentHiveCredentialId) {
-        config = config.copyWith(
-          credentialId: '',
-          hasCredential: false,
-          clearDevelopmentLegacyApiKey: true,
-        );
-      }
-      return config.toMap(
-        includeDevelopmentFallback: allowDevelopmentFallback,
-      );
-    }).toList(growable: false);
+  static List<Map<String, dynamic>> normalizeExistingValue(
+    Object? raw, {
+    bool? isRelease,
+  }) {
+    return SearchProviderConfigBackupCodec.normalizeExistingValue(
+      raw,
+      isRelease: isRelease,
+    );
   }
 }

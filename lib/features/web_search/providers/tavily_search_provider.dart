@@ -1,9 +1,13 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
+import 'package:uuid/uuid.dart';
 
 import 'package:chat_group/features/ai_governance/search_failure_classifier.dart';
 
 import '../models/search_failure.dart';
 import '../models/search_models.dart';
+import '../security/search_secret_scanner.dart';
+import '../security/search_endpoint_dns_guard.dart';
 import 'search_provider.dart';
 import 'search_provider_http_support.dart';
 
@@ -16,30 +20,35 @@ class TavilySearchProvider implements SearchProvider {
   static const Duration receiveTimeout = searchProviderReceiveTimeout;
   static const int defaultMaxResults = searchProviderDefaultMaxResults;
   static const String defaultCountry = 'CN';
+  static const String healthProbeQuery = 'Flutter official documentation';
 
   TavilySearchProvider({
     Dio? dio,
     String baseUrl = defaultBaseUrl,
     bool? isRelease,
     bool allowLocalDevelopmentGateway = false,
-  })  : _dio = dio ??
+  })  : _dio = configureSearchProviderDio(dio ??
             Dio(
               BaseOptions(
                 baseUrl: baseUrl,
                 connectTimeout: connectTimeout,
                 sendTimeout: connectTimeout,
                 receiveTimeout: receiveTimeout,
+                followRedirects: false,
+                maxRedirects: 0,
               ),
-            ),
+            )),
         _endpoint = resolveSearchProviderEndpoint(
           baseUrl,
           searchPath,
           isRelease: isRelease,
           allowLocalDevelopmentGateway: allowLocalDevelopmentGateway,
-        );
+        ),
+        _isRelease = isRelease ?? kReleaseMode;
 
   final Dio _dio;
   final Uri _endpoint;
+  final bool _isRelease;
 
   @override
   SearchProviderKind get kind => SearchProviderKind.tavily;
@@ -50,6 +59,7 @@ class TavilySearchProvider implements SearchProvider {
     required String? credential,
     CancelToken? cancelToken,
   }) async {
+    if (kIsWeb) return webSearchUnsupportedResponse();
     final query = request.query.trim();
     if (query.isEmpty) return _noResults();
 
@@ -57,6 +67,11 @@ class TavilySearchProvider implements SearchProvider {
     if (apiKey == null) return _invalidConfiguration();
 
     try {
+      await prepareSearchEndpointConnection(
+        _dio,
+        _endpoint,
+        isRelease: _isRelease,
+      );
       final response = await _dio.postUri<dynamic>(
         _endpoint,
         data: _requestBody(request),
@@ -73,6 +88,10 @@ class TavilySearchProvider implements SearchProvider {
       return _parseResponse(request, response);
     } on DioException catch (error) {
       return _dioFailure(error);
+    } on SearchEndpointDnsException catch (error) {
+      return _failureResponse(
+        searchFailureTypeFromEndpointDnsException(error),
+      );
     } on ArgumentError {
       return _invalidConfiguration();
     } catch (_) {
@@ -86,19 +105,29 @@ class TavilySearchProvider implements SearchProvider {
     required String probeQuery,
   }) async {
     final stopwatch = Stopwatch()..start();
+    final requestId = const Uuid().v4();
     final response = await search(
       SearchRequest(
-        query: probeQuery.trim().isEmpty ? 'Tavily' : probeQuery,
+        requestId: requestId,
+        rootRequestId: requestId,
+        turnId: requestId,
+        query: _safeProbeQuery(probeQuery),
         maxResults: searchProviderProbeMaxResults,
       ),
       credential: credential,
     );
     return SearchHealthResult(
+      requestId: requestId,
       isHealthy: response.failure == null && response.items.isNotEmpty,
       latencyMs: stopwatch.elapsedMilliseconds,
       failure: response.failure,
       providerRequestId: response.providerRequestId,
     );
+  }
+
+  String _safeProbeQuery(String value) {
+    final safe = const SearchSecretScanner().redact(value).trim();
+    return safe.isEmpty ? healthProbeQuery : safe;
   }
 
   Map<String, dynamic> _requestBody(SearchRequest request) {
@@ -180,7 +209,10 @@ class TavilySearchProvider implements SearchProvider {
   List<SearchProviderItem> _itemsFrom(List rawResults, int maxResults) {
     final items = <SearchProviderItem>[];
     final seenUrls = <String>{};
-    for (final rawResult in rawResults) {
+    for (var index = 0;
+        index < rawResults.length && index < searchProviderMaxResultCandidates;
+        index++) {
+      final rawResult = rawResults[index];
       if (items.length >= maxResults) break;
       if (rawResult is! Map) continue;
       final url = providerUrl(rawResult['url']);

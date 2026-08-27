@@ -22,6 +22,7 @@ class DeletionTargetNames {
   static const sessionIndexes = 'sessionIndexes';
   static const memoryPins = 'memoryPins';
   static const retryRecords = 'retryRecords';
+  static const searchProviderConfigs = 'searchProviderConfigs';
 
   const DeletionTargetNames._();
 }
@@ -151,11 +152,17 @@ class AppSettingsDeletionTargets {
 class DeletionTargets {
   final Map<String, List<dynamic>> boxKeys;
   final List<String> relationshipIds;
+
+  /// Media paths captured during planning. The message may already be gone by
+  /// the time a failed deletion is retried, so rediscovering them from Hive is
+  /// not reliable.
+  final List<String> mediaPaths;
   final AppSettingsDeletionTargets appSettings;
 
   const DeletionTargets({
     this.boxKeys = const {},
     this.relationshipIds = const [],
+    this.mediaPaths = const [],
     this.appSettings = const AppSettingsDeletionTargets(),
   });
 
@@ -168,6 +175,7 @@ class DeletionTargets {
             entry.key: List<dynamic>.from(entry.value),
         },
         'relationshipIds': List<String>.from(relationshipIds),
+        'mediaPaths': List<String>.from(mediaPaths),
         'appSettings': appSettings.toMap(),
       };
 
@@ -188,9 +196,15 @@ class DeletionTargets {
             .map((value) => value.toString())
             .toList(growable: false)
         : const <String>[];
+    final mediaPaths = raw['mediaPaths'] is List
+        ? (raw['mediaPaths'] as List)
+            .whereType<String>()
+            .toList(growable: false)
+        : const <String>[];
     return DeletionTargets(
       boxKeys: boxKeys,
       relationshipIds: relationshipIds,
+      mediaPaths: mediaPaths,
       appSettings: AppSettingsDeletionTargets.fromMap(raw['appSettings']),
     );
   }

@@ -245,22 +245,20 @@ void main() {
 
     test('label formula helpers compose human-readable text', () {
       expect(thinkingLabel('规划任务步骤'), '正在规划任务步骤');
-      expect(callingToolLabel('workspace.patch'),
-          '正在调用工具：workspace.patch');
+      expect(callingToolLabel('workspace.patch'), '正在调用工具：workspace.patch');
       expect(readingFileLabel('a.txt'), '正在读取文件：a.txt');
       expect(writingFileLabel('a.txt'), '正在写入文件：a.txt');
       expect(fileCreatedLabel('a.txt'), '已创建文件：a.txt');
       expect(validatingLabel('a.txt'), '正在校验结果：a.txt');
       expect(stepFailedLabel('路径冲突'), '步骤失败：路径冲突');
       expect(stepRejectedLabel('workspace.patch'), '已取消：workspace.patch');
-      expect(waitingApprovalLabel('workspace.patch'),
-          '等待批准：workspace.patch');
+      expect(waitingApprovalLabel('workspace.patch'), '等待批准：workspace.patch');
       // path 可选：带 path 时输出含「（path）」。
       expect(waitingApprovalLabel('workspace.patch', 'page.html'),
           '等待批准：workspace.patch（page.html）');
       // 空 path 等价于不传，不追加括号。
-      expect(waitingApprovalLabel('workspace.patch', ''),
-          '等待批准：workspace.patch');
+      expect(
+          waitingApprovalLabel('workspace.patch', ''), '等待批准：workspace.patch');
     });
 
     test('stageLabelFallback covers every rendered stage', () {
@@ -274,7 +272,8 @@ void main() {
       // 修复4（删 toolCompleted 死代码）正向断言：stageLabelFallback 必须已移除
       // toolCompleted 条目。若被误加回，chat_room_utils.dart 的 stageLabelFallback[stage]
       // 查找会取到 '步骤完成' 并错误渲染聚合刷新行为前的一行当前行。
-      expect(stageLabelFallback[AgentRuntimeProgressStage.toolCompleted], isNull,
+      expect(
+          stageLabelFallback[AgentRuntimeProgressStage.toolCompleted], isNull,
           reason: 'toolCompleted 不应存在于 stageLabelFallback');
     });
 

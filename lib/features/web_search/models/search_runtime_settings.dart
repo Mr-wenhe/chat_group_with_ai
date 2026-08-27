@@ -13,12 +13,16 @@ class SearchRuntimeSettings {
   final String? country;
   final int maxResults;
   final bool safeSearch;
+  final bool nativeSearchEnabled;
+  final bool queryPlanningEnabled;
 
   const SearchRuntimeSettings({
     this.locale = defaultLocale,
     this.country,
     this.maxResults = defaultMaxResults,
     this.safeSearch = defaultSafeSearch,
+    this.nativeSearchEnabled = false,
+    this.queryPlanningEnabled = false,
   });
 
   factory SearchRuntimeSettings.fromMap(Object? raw) {
@@ -28,6 +32,8 @@ class SearchRuntimeSettings {
       country: _normalizeCountry(raw['country']),
       maxResults: _normalizeMaxResults(raw['maxResults']),
       safeSearch: raw['safeSearch'] != false,
+      nativeSearchEnabled: raw['nativeSearchEnabled'] == true,
+      queryPlanningEnabled: raw['queryPlanningEnabled'] == true,
     );
   }
 
@@ -36,6 +42,8 @@ class SearchRuntimeSettings {
         'country': country,
         'maxResults': maxResults,
         'safeSearch': safeSearch,
+        'nativeSearchEnabled': nativeSearchEnabled,
+        'queryPlanningEnabled': queryPlanningEnabled,
       };
 
   SearchRuntimeSettings copyWith({
@@ -44,23 +52,25 @@ class SearchRuntimeSettings {
     bool clearCountry = false,
     int? maxResults,
     bool? safeSearch,
+    bool? nativeSearchEnabled,
+    bool? queryPlanningEnabled,
   }) {
     return SearchRuntimeSettings(
       locale: _normalizeLocale(locale ?? this.locale),
       country: clearCountry ? null : _normalizeCountry(country ?? this.country),
       maxResults: _normalizeMaxResults(maxResults ?? this.maxResults),
       safeSearch: safeSearch ?? this.safeSearch,
+      nativeSearchEnabled: nativeSearchEnabled ?? this.nativeSearchEnabled,
+      queryPlanningEnabled: queryPlanningEnabled ?? this.queryPlanningEnabled,
     );
   }
 
   static String _normalizeLocale(Object? value) {
-    final normalized = value?.toString().trim() ?? '';
-    return normalized.isEmpty ? defaultLocale : normalized;
+    return normalizeSearchLocale(value?.toString());
   }
 
   static String? _normalizeCountry(Object? value) {
-    final normalized = value?.toString().trim() ?? '';
-    return normalized.isEmpty ? null : normalized.toUpperCase();
+    return normalizeSearchCountry(value?.toString());
   }
 
   static int _normalizeMaxResults(Object? value) {

@@ -169,9 +169,18 @@ class PreparedBackup {
   final BackupPreview preview;
   final Directory stagingDirectory;
 
+  /// The validated staged payload produced during inspection.
+  ///
+  /// Inspection already parses every staged JSON file to build the preview.
+  /// Keeping that object here lets restore reuse the validated payload instead
+  /// of parsing the same files a second time.  The type remains [Object] to
+  /// keep this model independent from the staged-data implementation.
+  final Object? validatedData;
+
   const PreparedBackup({
     required this.preview,
     required this.stagingDirectory,
+    this.validatedData,
   });
 
   BackupManifest get manifest => preview.manifest;

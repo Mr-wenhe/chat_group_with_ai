@@ -13,6 +13,7 @@ class BackupRestoreService {
   final Directory mediaDirectory;
   final Directory tempRoot;
   final CommitWriteHook? onCommitWrite;
+  final AttachmentCopyHook? attachmentCopy;
   final CharacterGenderMigrator? genderMigrator;
 
   const BackupRestoreService({
@@ -20,6 +21,7 @@ class BackupRestoreService {
     required this.mediaDirectory,
     required this.tempRoot,
     this.onCommitWrite,
+    this.attachmentCopy,
     this.genderMigrator,
   });
 
@@ -60,6 +62,7 @@ class BackupRestoreService {
         db: db,
         mediaDirectory: mediaDirectory,
         onCommitWrite: onCommitWrite,
+        attachmentCopy: attachmentCopy,
         genderMigrator: genderMigrator,
       ).restore(prepared, strategy);
 }

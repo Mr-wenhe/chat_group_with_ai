@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:dio/dio.dart';
 
 import 'local_agent_bridge_client.dart';
@@ -67,8 +69,7 @@ class WorkspaceFileTool {
     if (patch.trim().isEmpty) {
       throw ArgumentError('Patch cannot be empty.');
     }
-    return bridge
-        .postJson('/workspace/apply-patch', _body({'patch': patch}));
+    return bridge.postJson('/workspace/apply-patch', _body({'patch': patch}));
   }
 
   /// 直接写文件（方案 A）。
@@ -116,7 +117,7 @@ class WorkspaceFileTool {
       ...result,
       'ok': result['ok'] == true || result['exitCode'] == 0,
       'path': path,
-      'bytes': content.length,
+      'bytes': utf8.encode(content).length,
       'legacyFallback': true,
     };
   }
@@ -171,6 +172,6 @@ class WorkspaceFileTool {
     if (command.trim().isEmpty) {
       throw ArgumentError('Command cannot be empty.');
     }
-    return bridge.postJson('/command/run', {'command': command});
+    return bridge.postJson('/command/run', _body({'command': command}));
   }
 }

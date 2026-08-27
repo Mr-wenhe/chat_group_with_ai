@@ -13,25 +13,31 @@ import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';
 import 'staged_backup_data.dart';
 
 part 'restore_plan.dart';
+part 'restore_plan_validation.dart';
+part 'restore_plan_rewrite.dart';
 
 typedef CommitWriteHook = FutureOr<void> Function(int writeCount);
+typedef AttachmentCopyHook = FutureOr<void> Function(File source, File target);
 
 class RestoreExecutor {
   final DatabaseService db;
   final Directory mediaDirectory;
   final CommitWriteHook? onCommitWrite;
+  final AttachmentCopyHook? attachmentCopy;
   final CharacterGenderMigrator? genderMigrator;
 
   const RestoreExecutor({
     required this.db,
     required this.mediaDirectory,
     this.onCommitWrite,
+    this.attachmentCopy,
     this.genderMigrator,
   });
 
@@ -43,10 +49,12 @@ class RestoreExecutor {
       throw const BackupException('导入临时区已失效，请重新选择备份');
     }
     await _verifyStaging(prepared);
-    final data = await StagedBackupData.load(
-      prepared.stagingDirectory,
-      prepared.manifest,
-    );
+    final data = prepared.validatedData is StagedBackupData
+        ? prepared.validatedData! as StagedBackupData
+        : await StagedBackupData.load(
+            prepared.stagingDirectory,
+            prepared.manifest,
+          );
     if (strategy == RestoreConflictStrategy.emptyOnly && !_coreIsEmpty) {
       throw const BackupException('当前数据库不是空库，请选择其他冲突策略');
     }
@@ -269,7 +277,15 @@ class RestoreExecutor {
           throw BackupException('目标附件内容校验失败：$name');
         }
       } else if (targetType == FileSystemEntityType.notFound) {
-        await source.openRead().pipe(target.openWrite());
+        // Register the staging target before opening the source. A stream can
+        // fail after writing a partial file; rollback must remove that partial
+        // artifact even though the final destination has not been renamed yet.
+        final temporary = File(
+          '${target.path}.restore-${const Uuid().v4()}',
+        );
+        transaction.createdFile(temporary);
+        await (attachmentCopy ?? _copyAttachment)(source, temporary);
+        await temporary.rename(target.path);
         transaction.createdFile(target);
       } else {
         throw BackupException('目标附件路径不是普通文件：$name');
@@ -278,6 +294,9 @@ class RestoreExecutor {
     }
     return paths;
   }
+
+  Future<void> _copyAttachment(File source, File target) =>
+      source.openRead().pipe(target.openWrite());
 
   Future<void> _verifyStaging(PreparedBackup prepared) async {
     for (final entry in prepared.manifest.files.entries) {

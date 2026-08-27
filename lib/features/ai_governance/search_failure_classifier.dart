@@ -100,7 +100,6 @@ bool _looksLikeConfigurationFailure(DioException error) {
   final text = [
     error.message,
     error.error?.toString(),
-    error.response?.data?.toString(),
   ].whereType<String>().join(' ').toLowerCase();
   return RegExp(
     r'(invalid|missing|malformed|unsupported|empty).{0,32}'

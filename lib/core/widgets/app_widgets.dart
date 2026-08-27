@@ -84,8 +84,8 @@ class AppSectionHeader extends StatelessWidget {
         ),
         const SizedBox(width: 12),
         Expanded(
-            child:
-                Divider(color: cs.primary.withValues(alpha: 0.15), thickness: 0.5)),
+            child: Divider(
+                color: cs.primary.withValues(alpha: 0.15), thickness: 0.5)),
       ],
     );
   }
@@ -117,8 +117,8 @@ InputDecoration appInputDecoration(
         : cs.surfaceContainerLowest,
     contentPadding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
     labelStyle: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
-    hintStyle:
-        TextStyle(fontSize: 13, color: cs.onSurfaceVariant.withValues(alpha: 0.5)),
+    hintStyle: TextStyle(
+        fontSize: 13, color: cs.onSurfaceVariant.withValues(alpha: 0.5)),
   );
 }
 

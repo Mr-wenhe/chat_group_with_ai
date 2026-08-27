@@ -12,8 +12,7 @@ void main() {
     });
 
     test('buildUserBody 支持多人 userId', () {
-      final body =
-          WeComPushService.buildUserBody('a|b|c', 'hi', 1);
+      final body = WeComPushService.buildUserBody('a|b|c', 'hi', 1);
       expect(body['touser'], 'a|b|c');
     });
 

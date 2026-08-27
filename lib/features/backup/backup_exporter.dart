@@ -9,12 +9,17 @@ import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:crypto/crypto.dart';
 import 'package:uuid/uuid.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
+import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';
+import 'staged_backup_data.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 
 part 'backup_snapshot.dart';
+part 'backup_exporter_writer.dart';
 
 class BackupExporter {
   static const _dataFiles = <String, String>{
@@ -242,6 +247,7 @@ class BackupExporter {
     Map<String, BackupFileEntry> files,
   ) async {
     final actualPaths = <String>{};
+    final jsonFiles = <File>[];
     await for (final entity in staging.list(recursive: true)) {
       if (entity is File) {
         actualPaths
@@ -261,21 +267,30 @@ class BackupExporter {
       if (!await file.exists() || await file.length() != entry.value.bytes) {
         throw BackupException('备份 staging 文件无效：${entry.key}');
       }
+      if (entry.key.endsWith('.json') || entry.key.endsWith('.jsonl')) {
+        jsonFiles.add(file);
+      }
       if (entry.key.endsWith('.json')) {
-        try {
-          jsonDecode(await file.readAsString());
-        } on Object catch (error) {
-          throw BackupException('备份 JSON 无法解析：${entry.key}：$error');
+        if (entry.key == _dataFiles['settings']) {
+          final fileBytes = await file.length();
+          if (fileBytes > StagedBackupData.maxJsonFileBytes) {
+            throw BackupException('备份数据文件过大：${entry.key}');
+          }
+          StagedBackupData.decodeBoundedJsonText(
+            await file.readAsString(),
+            entry.key,
+            maxBytes: StagedBackupData.maxJsonFileBytes,
+            maxMapEntries: StagedBackupData.maxRecordsPerFile,
+            textAlreadyByteBounded: true,
+          );
+        } else {
+          await StagedBackupData.validateRecordFile(file, entry.key);
         }
       } else if (entry.key.endsWith('.jsonl')) {
-        await for (final line in file
-            .openRead()
-            .transform(utf8.decoder)
-            .transform(const LineSplitter())) {
-          if (line.trim().isNotEmpty) jsonDecode(line);
-        }
+        await StagedBackupData.validateJsonLinesFile(file, entry.key);
       }
     }
+    await StagedBackupData.validateJsonDataAggregate(jsonFiles);
   }
 
   Future<void> _writeMessages(
@@ -288,6 +303,7 @@ class BackupExporter {
     const relativePath = 'data/messages.jsonl';
     final file = await _createFile(staging, relativePath);
     final sink = file.openWrite();
+    final writer = _BoundedJsonFileWriter(sink, relativePath);
     final attachmentsByHash = <String, String>{};
     final missingAttachmentIds = <String>{};
     try {
@@ -315,13 +331,13 @@ class BackupExporter {
           BackupEntityCodec.message(entry.value, media),
         );
         _assertNoSecrets(record);
-        sink.writeln(jsonEncode(record));
+        writer.writeJsonLine(record);
       }
+      if (snapshot.messages.isEmpty) writer.writeText('\n');
     } finally {
       await sink.flush();
       await sink.close();
     }
-    if (snapshot.messages.isEmpty) await file.writeAsString('\n', flush: true);
     files[relativePath] = await _fileEntry(file);
     counts['messages'] = snapshot.messages.length;
     counts['attachments'] = attachmentsByHash.length;
@@ -383,15 +399,26 @@ class BackupExporter {
     Map<String, int> counts,
     String countKey,
   ) async {
-    final records = entries
-        .map(
-            (entry) => BackupEntityCodec.record(entry.key, encode(entry.value)))
-        .toList(growable: false);
-    _assertNoSecrets(records);
     final file = await _createFile(staging, relativePath);
-    await file.writeAsString(jsonEncode(records), flush: true);
+    final sink = file.openWrite();
+    final writer = _BoundedJsonFileWriter(sink, relativePath);
+    var count = 0;
+    try {
+      writer.writeText('[');
+      for (final entry in entries) {
+        final record = BackupEntityCodec.record(entry.key, encode(entry.value));
+        _assertNoSecrets(record);
+        if (count > 0) writer.writeText(',');
+        writer.writeText(jsonEncode(record));
+        count++;
+      }
+      writer.writeText(']');
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
     files[relativePath] = await _fileEntry(file);
-    counts[countKey] = records.length;
+    counts[countKey] = count;
   }
 
   Future<void> _writeSettings(
@@ -403,7 +430,14 @@ class BackupExporter {
     _assertNoSecrets(settings);
     final path = _dataFiles['settings']!;
     final file = await _createFile(staging, path);
-    await file.writeAsString(jsonEncode(settings), flush: true);
+    final sink = file.openWrite();
+    final writer = _BoundedJsonFileWriter(sink, path);
+    try {
+      writer.writeText(jsonEncode(settings));
+      await sink.flush();
+    } finally {
+      await sink.close();
+    }
     files[path] = await _fileEntry(file);
     counts['settings'] = settings.length;
   }
@@ -429,13 +463,20 @@ class BackupExporter {
     'accesstoken',
     'refreshtoken',
     'secret',
+    'cookie',
+    'setcookie',
+    'pem',
+    'privatekey',
+    'jwt',
   };
 
   void _assertNoSecrets(Object? value) {
     if (value is Map) {
       for (final entry in value.entries) {
-        final normalized =
-            entry.key.toString().toLowerCase().replaceAll('_', '');
+        final normalized = entry.key
+            .toString()
+            .toLowerCase()
+            .replaceAll(RegExp(r'[^a-z0-9]'), '');
         if (_secretKeys.contains(normalized)) {
           throw BackupException('备份数据包含禁止字段：${entry.key}');
         }
@@ -445,16 +486,9 @@ class BackupExporter {
       for (final item in value) {
         _assertNoSecrets(item);
       }
+    } else if (value is String &&
+        const SearchSecretScanner().containsSensitiveData(value)) {
+      throw const BackupException('备份数据包含敏感信息');
     }
   }
-
-  String _safeExtension(String name) {
-    final base = _basename(name);
-    final dot = base.lastIndexOf('.');
-    if (dot <= 0 || base.length - dot > 12) return '';
-    final extension = base.substring(dot).toLowerCase();
-    return RegExp(r'^\.[a-z0-9]+$').hasMatch(extension) ? extension : '';
-  }
-
-  String _basename(String path) => path.replaceAll('\\', '/').split('/').last;
 }

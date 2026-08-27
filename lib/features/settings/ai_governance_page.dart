@@ -10,8 +10,11 @@ import 'package:chat_group/features/web_search/presentation/web_search_audit_car
 import 'package:chat_group/features/web_search/presentation/web_search_settings_section.dart';
 import 'package:chat_group/features/web_search/presentation/web_search_runtime_settings_card.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
+part 'ai_governance_page_support.dart';
 
 class AiGovernancePage extends ConsumerStatefulWidget {
   const AiGovernancePage({super.key});
@@ -70,47 +73,7 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(16, 12, 16, 48),
         children: [
-          _title('联网搜索'),
-          Card(
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  SegmentedButton<WebSearchPolicy>(
-                    segments: [
-                      for (final policy in WebSearchPolicy.values)
-                        ButtonSegment(
-                          value: policy,
-                          label: Text(policy.label),
-                        ),
-                    ],
-                    selected: {_searchPolicy},
-                    onSelectionChanged: (values) async {
-                      final policy = values.first;
-                      await _store.saveGlobalSearchPolicy(policy);
-                      if (mounted) setState(() => _searchPolicy = policy);
-                    },
-                  ),
-                  const SizedBox(height: 12),
-                  const Text(
-                    '默认关闭。询问模式每次都需明确同意；启用后，查询会发送给下方配置的 '
-                    'Provider。DuckDuckGo 仅作为百科即时答案兜底，不等同于完整 Web 搜索。',
-                  ),
-                ],
-              ),
-            ),
-          ),
-          const SizedBox(height: 8),
-          WebSearchSettingsSection(
-            store: _searchSettings,
-          ),
-          const SizedBox(height: 8),
-          WebSearchRuntimeSettingsCard(
-            initialSettings: _searchSettings.runtimeSettings,
-            onSave: _searchSettings.saveRuntimeSettings,
-            onClearCache: () => SearchCacheController.clear(_searchSettings),
-          ),
+          _searchControls(),
           _title('预算（USD，留空表示不限）'),
           Card(
             child: Padding(
@@ -184,6 +147,61 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
     );
   }
 
+  Widget _searchControls() {
+    if (kIsWeb) {
+      return const Card(
+        child: ListTile(
+          leading: Icon(Icons.info_outline),
+          title: Text('Web 端不支持联网搜索'),
+          subtitle: Text('请使用 Android、iOS、macOS 或 Windows 版本。'),
+        ),
+      );
+    }
+    return Column(
+      children: [
+        _title('联网搜索'),
+        Card(
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                SegmentedButton<WebSearchPolicy>(
+                  segments: [
+                    for (final policy in WebSearchPolicy.values)
+                      ButtonSegment(
+                        value: policy,
+                        label: Text(policy.label),
+                      ),
+                  ],
+                  selected: {_searchPolicy},
+                  onSelectionChanged: (values) async {
+                    final policy = values.first;
+                    await _store.saveGlobalSearchPolicy(policy);
+                    if (mounted) setState(() => _searchPolicy = policy);
+                  },
+                ),
+                const SizedBox(height: 12),
+                const Text(
+                  '默认关闭。询问模式每次都需明确同意；启用后，查询会发送给下方配置的 '
+                  'Provider。DuckDuckGo 仅作为百科即时答案兜底，不等同于完整 Web 搜索。',
+                ),
+              ],
+            ),
+          ),
+        ),
+        const SizedBox(height: 8),
+        WebSearchSettingsSection(store: _searchSettings),
+        const SizedBox(height: 8),
+        WebSearchRuntimeSettingsCard(
+          initialSettings: _searchSettings.runtimeSettings,
+          onSave: _searchSettings.saveRuntimeSettings,
+          onClearCache: () => SearchCacheController.clear(_searchSettings),
+        ),
+      ],
+    );
+  }
+
   Widget _title(String text) => ListTile(
         contentPadding: const EdgeInsets.fromLTRB(4, 12, 4, 0),
         title: Text(text, style: Theme.of(context).textTheme.titleMedium),
@@ -238,104 +256,6 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
           icon: const Icon(Icons.tune_rounded),
           tooltip: '声明能力',
         ),
-      ),
-    );
-  }
-
-  Widget _usageCard() {
-    final entries = _store.ledgerEntries.reversed.toList(growable: false);
-    final byPurpose = aggregateUsage(entries, (entry) => entry.purpose.label);
-    final totals = <String, int>{};
-    for (final entry in entries) {
-      final cost = entry.estimatedCostMicros;
-      final currency = entry.currency;
-      if (cost != null && currency != null) {
-        totals[currency] = (totals[currency] ?? 0) + cost;
-      }
-    }
-    return Card(
-      child: Column(
-        children: [
-          ListTile(
-            title: Text(entries.isEmpty
-                ? '暂无调用记录'
-                : totals.entries
-                    .map((item) =>
-                        '${item.key} ${MoneyMicros.display(item.value)}')
-                    .join(' · ')),
-            subtitle: Text('${entries.length} 条明细；价格未知时仅显示 Token'),
-            trailing: TextButton(
-              onPressed: entries.isEmpty ? null : _clearUsage,
-              child: const Text('清除'),
-            ),
-          ),
-          if (byPurpose.isNotEmpty)
-            Padding(
-              padding: const EdgeInsets.fromLTRB(16, 0, 16, 8),
-              child: Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: [
-                  for (final item in byPurpose.entries)
-                    Chip(
-                      label: Text(
-                        '${item.key} ${item.value.requestCount} 次 · '
-                        '${item.value.inputTokens + item.value.outputTokens} Token',
-                      ),
-                    ),
-                ],
-              ),
-            ),
-          for (final entry in entries.take(30))
-            ListTile(
-              dense: true,
-              title: Text(
-                '${entry.purpose.label} · ${entry.provider}/${entry.model}',
-              ),
-              subtitle: Text(
-                '${entry.inputTokens} 入 / ${entry.cachedInputTokens} 缓存 / '
-                '${entry.outputTokens} 出 · ${entry.exactUsage ? '精确' : '估算'}',
-              ),
-              trailing: Text(entry.estimatedCostMicros == null
-                  ? '价格未知'
-                  : '${entry.currency} '
-                      '${MoneyMicros.display(entry.estimatedCostMicros!)}'),
-            ),
-        ],
-      ),
-    );
-  }
-
-  Widget _diagnosticsCard() {
-    final items = _store.diagnostics.reversed.toList(growable: false);
-    return Card(
-      child: Column(
-        children: [
-          ListTile(
-            title: Text('${items.length} 条诊断'),
-            subtitle: const Text('不保存 Key、Authorization、提示词或消息正文'),
-            trailing: TextButton(
-              onPressed: items.isEmpty ? null : _clearDiagnostics,
-              child: const Text('清除'),
-            ),
-          ),
-          for (final item in items.take(30))
-            ListTile(
-              dense: true,
-              title: Text('${item.purpose.label} · ${item.status}'),
-              subtitle: Text(
-                '${item.provider}/${item.model} · ${item.latencyMs}ms · '
-                '重试 ${item.retryCount}',
-              ),
-              trailing: IconButton(
-                icon: const Icon(Icons.copy_rounded, size: 18),
-                tooltip: '复制脱敏诊断',
-                onPressed: () => Clipboard.setData(
-                  ClipboardData(text: item.toSafeText()),
-                ),
-              ),
-            ),
-        ],
       ),
     );
   }

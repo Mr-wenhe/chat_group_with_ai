@@ -4,6 +4,8 @@
 // 此处提供与 _io 实现一致的接口，但 start/stop 均为空 no-op，
 // 保持现有“手动启动本地桥接服务”的提示行为不变。
 
+import 'local_agent_bridge_config.dart';
+
 class LocalAgentBridgeLauncher {
   LocalAgentBridgeLauncher({int? preferredPort});
 
@@ -14,9 +16,16 @@ class LocalAgentBridgeLauncher {
   Future<void> stop() async {}
 
   /// 注册：Web / 移动端没有本地桥接服务，保持与桌面端一致的异步接口。
-  Future<void> registerWorkspace({
+  Future<LocalAgentBridgeWorkspaceRegistration?> registerWorkspace({
     required String conversationId,
     required String workspacePath,
+  }) async =>
+      null;
+
+  /// Web / 移动端没有本地桥接服务，注销同样是空操作。
+  Future<void> unregisterWorkspace({
+    required String conversationId,
+    LocalAgentBridgeWorkspaceRegistration? registration,
   }) async {}
 
   Future<void> restart({required String workspace}) async {}

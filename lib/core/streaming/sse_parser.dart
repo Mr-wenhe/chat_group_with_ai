@@ -1,6 +1,75 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
+
+/// Raised when an SSE response exceeds a transport-level safety boundary.
+class SseInputLimitException implements Exception {
+  final String message;
+
+  const SseInputLimitException(this.message);
+
+  @override
+  String toString() => message;
+}
+
+/// Splits an SSE byte stream into complete lines without retaining an
+/// unbounded unterminated frame in memory.
+///
+/// The byte-level boundary is deliberately enforced before UTF-8 decoding and
+/// JSON parsing. A remote endpoint can otherwise send an endless ASCII stream
+/// without a newline and bypass a content-only limit.
+class BoundedSseLineTransformer
+    extends StreamTransformerBase<List<int>, List<int>> {
+  final int maxLineBytes;
+  final int maxWireBytes;
+
+  const BoundedSseLineTransformer({
+    required this.maxLineBytes,
+    required this.maxWireBytes,
+  })  : assert(maxLineBytes > 0),
+        assert(maxWireBytes > 0);
+
+  @override
+  Stream<List<int>> bind(Stream<List<int>> stream) async* {
+    final line = <int>[];
+    var wireBytes = 0;
+    var pendingCarriageReturn = false;
+    await for (final chunk in stream) {
+      if (chunk.length > maxWireBytes - wireBytes) {
+        throw const SseInputLimitException('SSE 响应超过安全大小限制');
+      }
+      wireBytes += chunk.length;
+      for (final byte in chunk) {
+        if (pendingCarriageReturn) {
+          // CRLF is one line ending; a lone CR is also a valid SSE delimiter.
+          yield List<int>.from(line);
+          line.clear();
+          pendingCarriageReturn = false;
+          if (byte == 0x0a) continue;
+        }
+        if (byte == 0x0d) {
+          pendingCarriageReturn = true;
+          continue;
+        }
+        if (byte == 0x0a) {
+          yield List<int>.from(line);
+          line.clear();
+          continue;
+        }
+        if (line.length >= maxLineBytes) {
+          throw const SseInputLimitException('SSE 数据帧超过安全大小限制');
+        }
+        line.add(byte);
+      }
+    }
+    if (pendingCarriageReturn) {
+      yield List<int>.from(line);
+      line.clear();
+    }
+    if (line.isNotEmpty) yield List<int>.from(line);
+  }
+}
 
 /// SSE（Server-Sent Events）行解析器：把 LLM 流式返回的字节流按行切分，
 /// 提取 `data:` 行中的 `choices[0].delta.content` 增量 token，并累计完整内容。
@@ -12,6 +81,8 @@ import 'package:chat_group/core/streaming/chat_stream_event.dart';
 /// 3. 解析 / JSON 异常不抛出，统一产出 [ChatStreamEvent.error]，交由上层决定如何展示。
 class SseParser {
   static const int _maxContentBytes = 2 * 1024 * 1024; // 2 MB
+  static const int _maxLineBytes = 512 * 1024;
+  static const int _maxWireBytes = 8 * 1024 * 1024;
   String _buffer = '';
   String _fullContent = '';
   int _promptTokens = 0;
@@ -19,28 +90,72 @@ class SseParser {
   int _cachedTokens = 0;
   bool _terminated = false;
   int _fullContentBytes = 0;
+  int _bufferBytes = 0;
+  int _wireBytes = 0;
 
   List<ChatStreamEvent> ingest(String chunk) {
     if (_terminated) return const [];
-    _buffer += chunk;
     final events = <ChatStreamEvent>[];
-
     var searchFrom = 0;
-    while (true) {
-      final nl = _buffer.indexOf('\n', searchFrom);
-      if (nl < 0) {
-        _buffer = _buffer.substring(searchFrom);
-        break;
+    while (searchFrom <= chunk.length) {
+      final nl = chunk.indexOf('\n', searchFrom);
+      final end = nl < 0 ? chunk.length : nl;
+      final segment = chunk.substring(searchFrom, end);
+      final segmentBytes = _utf8ByteLength(segment);
+      final wireDelta = segmentBytes + (nl < 0 ? 0 : 1);
+      if (!_acceptWireBytes(wireDelta) ||
+          _bufferBytes + segmentBytes > _maxLineBytes) {
+        return [_limitError()];
       }
-      final line = _buffer.substring(searchFrom, nl);
-      final event = _parseLine(line);
+      _buffer += segment;
+      _bufferBytes += segmentBytes;
+      if (nl < 0) break;
+      final event = _parseLine(_buffer);
       if (event != null) events.add(event);
+      _buffer = '';
+      _bufferBytes = 0;
+      if (_terminated) return events;
       searchFrom = nl + 1;
     }
     return events;
   }
 
-  ChatStreamEvent? ingestLine(String line) => _parseLine(line);
+  ChatStreamEvent? ingestLine(String line) {
+    final lineBytes = _utf8ByteLength(line);
+    if (!_acceptWireBytes(lineBytes) || lineBytes > _maxLineBytes) {
+      return _limitError();
+    }
+    return _parseLine(line);
+  }
+
+  bool _acceptWireBytes(int additionalBytes) {
+    if (additionalBytes < 0 || _wireBytes > _maxWireBytes - additionalBytes) {
+      return false;
+    }
+    _wireBytes += additionalBytes;
+    return true;
+  }
+
+  ChatStreamEvent _limitError() {
+    _terminated = true;
+    return ChatStreamEvent.error('SSE 数据超过安全大小限制');
+  }
+
+  int _utf8ByteLength(String value) {
+    var bytes = 0;
+    for (final rune in value.runes) {
+      if (rune <= 0x7f) {
+        bytes++;
+      } else if (rune <= 0x7ff) {
+        bytes += 2;
+      } else if (rune <= 0xffff) {
+        bytes += 3;
+      } else {
+        bytes += 4;
+      }
+    }
+    return bytes;
+  }
 
   ChatStreamEvent? _parseLine(String rawLine) {
     if (_terminated) return null;
@@ -126,6 +241,8 @@ class SseParser {
     _buffer = '';
     _fullContent = '';
     _fullContentBytes = 0;
+    _bufferBytes = 0;
+    _wireBytes = 0;
     _promptTokens = 0;
     _completionTokens = 0;
     _cachedTokens = 0;

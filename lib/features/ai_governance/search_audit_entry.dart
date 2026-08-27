@@ -3,11 +3,18 @@ import 'dart:convert';
 import 'package:crypto/crypto.dart';
 
 export 'package:chat_group/core/search/search_failure_type.dart';
+import 'package:chat_group/features/web_search/models/search_models.dart'
+    as domain;
+import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 
 class SearchAuditEntry {
   static const legacyProvider = 'duckDuckGoInstantAnswer';
+  static const maxSources = 20;
+  static const maxSourceCandidates = 100;
+  static const maxFutureSkew = Duration(minutes: 5);
 
   final String requestId;
+  final String rootRequestId;
   final String conversationId;
   final String queryPreview;
   final String queryHash;
@@ -32,6 +39,7 @@ class SearchAuditEntry {
   /// them without receiving an unbounded user message.
   factory SearchAuditEntry({
     String requestId = '',
+    String rootRequestId = '',
     required String conversationId,
     required String query,
     required DateTime searchedAt,
@@ -50,14 +58,16 @@ class SearchAuditEntry {
     final safeQuery = _truncateAuditQuery(normalizedQuery);
     final safeSources = _sanitizeAuditSources(sources);
     return SearchAuditEntry._(
-      requestId: requestId,
-      conversationId: conversationId,
+      requestId: _safeAuditLabel(requestId, 128),
+      rootRequestId: _safeAuditLabel(rootRequestId, 128),
+      conversationId: _safeAuditLabel(conversationId, 240),
       queryPreview: safeQuery,
       queryHash: _resolveAuditQueryHash(queryHash, normalizedQuery),
-      searchedAt: searchedAt,
-      status: status,
-      provider: provider,
-      failureType: failureType,
+      searchedAt: normalizeSearchedAt(searchedAt),
+      status: _safeAuditLabel(status, 48),
+      provider: _safeAuditLabel(provider, 120),
+      failureType:
+          failureType == null ? null : _safeAuditLabel(failureType, 80),
       statusCode: statusCode,
       latencyMs: latencyMs,
       retryCount: retryCount,
@@ -69,6 +79,7 @@ class SearchAuditEntry {
 
   SearchAuditEntry._({
     required this.requestId,
+    required this.rootRequestId,
     required this.conversationId,
     required this.queryPreview,
     required this.queryHash,
@@ -87,14 +98,26 @@ class SearchAuditEntry {
   /// Backward-compatible alias used by the pre-V2 settings UI and callers.
   String get query => queryPreview;
 
+  /// Restored audit data is untrusted. Treat a clock-skewed or manipulated
+  /// future timestamp as "now" so it cannot extend the retention window
+  /// indefinitely. The small skew constant documents the accepted clock
+  /// tolerance while all future values are still normalized to now.
+  static DateTime normalizeSearchedAt(
+    DateTime value, {
+    DateTime? now,
+  }) {
+    final current = (now ?? DateTime.now()).toUtc();
+    final timestamp = value.toUtc();
+    if (timestamp.isAfter(current.add(maxFutureSkew))) return current;
+    return timestamp.isAfter(current) ? current : timestamp;
+  }
+
   factory SearchAuditEntry.fromMap(Map<dynamic, dynamic> map) {
-    final rawSources = map['sources'];
-    final sources = rawSources is Iterable
-        ? rawSources.map((item) => item.toString()).toList(growable: false)
-        : const <String>[];
+    final sources = _boundedLegacySources(map['sources']);
     final hasQueryHash = map.containsKey('queryHash');
     return SearchAuditEntry(
       requestId: map['requestId']?.toString() ?? '',
+      rootRequestId: map['rootRequestId']?.toString() ?? '',
       conversationId: map['conversationId']?.toString() ?? '',
       query: map['queryPreview']?.toString() ?? map['query']?.toString() ?? '',
       searchedAt: DateTime.tryParse(map['searchedAt']?.toString() ?? '') ??
@@ -114,6 +137,7 @@ class SearchAuditEntry {
 
   Map<String, dynamic> toMap() => {
         'requestId': requestId,
+        'rootRequestId': rootRequestId,
         'conversationId': conversationId,
         // Keep `query` for old readers; both values are the same safe preview.
         'query': queryPreview,
@@ -221,7 +245,10 @@ String _truncateAuditQuery(String normalized) {
 }
 
 String _redactAuditSecrets(String value) {
-  var sanitized = value;
+  var sanitized = const SearchSecretScanner().redact(
+    value,
+    includeOpaqueTokens: true,
+  );
   for (final item in _auditSecretPatterns) {
     sanitized = sanitized.replaceAll(item.pattern, item.replacement);
   }
@@ -243,53 +270,35 @@ bool _looksLikeOpaqueAuditSecret(String token) {
 
 List<String> _sanitizeAuditSources(Iterable<String> values) {
   final safeSources = <String>[];
+  var candidateCount = 0;
   for (final value in values) {
+    if (safeSources.length >= SearchAuditEntry.maxSources) break;
+    if (candidateCount++ >= SearchAuditEntry.maxSourceCandidates) break;
     final source = value.trim();
     if (source.isEmpty) continue;
-    final uri = Uri.tryParse(source);
-    if (uri == null || uri.host.isEmpty) {
-      if (!_containsAuditSecret(source)) {
-        safeSources.add(
-            source.length <= 2048 ? source : '${source.substring(0, 2045)}...');
-      }
-      continue;
-    }
-    if (uri.scheme != 'http' && uri.scheme != 'https') continue;
-    // Secrets can also be embedded in a provider path. Dropping that source
-    // is safer than trying to reconstruct a URL with a partially redacted
-    // path.
-    if (_containsAuditSecret(uri.host) || _containsAuditSecret(uri.path)) {
-      continue;
-    }
-    final safeParameters = <String, String>{};
-    for (final parameter in uri.queryParameters.entries) {
-      if (_isSensitiveAuditParameter(parameter.key) ||
-          _containsAuditSecret(parameter.value)) {
-        continue;
-      }
-      safeParameters[parameter.key] = parameter.value;
-    }
-    var serialized = uri
-        .replace(
-          userInfo: '',
-          queryParameters: safeParameters,
-        )
-        .toString();
-    if (serialized.endsWith('?')) {
-      serialized = serialized.substring(0, serialized.length - 1);
-    }
-    final fragmentStart = serialized.indexOf('#');
-    if (_containsAuditSecret(serialized)) continue;
-    safeSources.add(
-      fragmentStart < 0 ? serialized : serialized.substring(0, fragmentStart),
-    );
+    final uri = domain.tryValidateSearchUrl(Uri.tryParse(source));
+    if (uri == null) continue;
+    safeSources.add(uri.toString());
   }
   return safeSources.toList(growable: false);
 }
 
-bool _isSensitiveAuditParameter(String value) => RegExp(
-      r'(api[-_ ]?key|access[-_ ]?token|authorization|token|secret|credential|password|client[-_ ]?secret|subscription[-_ ]?key|^key$)',
-      caseSensitive: false,
-    ).hasMatch(value);
+/// Legacy Hive data is untrusted. Do not materialize a malformed, arbitrarily
+/// large iterable before the regular source sanitizer has a chance to bound it.
+Iterable<String> _boundedLegacySources(Object? raw) sync* {
+  if (raw is! Iterable) return;
+  var candidateCount = 0;
+  for (final item in raw) {
+    if (candidateCount++ >= SearchAuditEntry.maxSourceCandidates) return;
+    yield item.toString();
+  }
+}
 
-bool _containsAuditSecret(String value) => _redactAuditSecrets(value) != value;
+String _safeAuditLabel(String value, int maxLength) {
+  final safe = const SearchSecretScanner()
+      .redact(value)
+      .replaceAll(RegExp(r'[\u0000-\u001F\u007F]'), ' ')
+      .replaceAll(RegExp(r'\s+'), ' ')
+      .trim();
+  return safe.length <= maxLength ? safe : safe.substring(0, maxLength);
+}

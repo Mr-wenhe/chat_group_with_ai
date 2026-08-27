@@ -42,7 +42,8 @@ void main() {
   });
 
   // —— 3. run() 时间戳单次捕获、全段一致、不漂移 ——
-  test('run() captures runStartedAtMs once and keeps it identical across all '
+  test(
+      'run() captures runStartedAtMs once and keeps it identical across all '
       'progress reports (idempotent write cannot drift)', () async {
     final character = AICharacter(
       name: '范晓萌',

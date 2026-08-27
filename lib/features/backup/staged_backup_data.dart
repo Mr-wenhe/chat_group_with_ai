@@ -6,8 +6,31 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+
+part 'staged_backup_data_json_guard.dart';
+part 'staged_backup_data_validation.dart';
+part 'staged_backup_data_io.dart';
 
 class StagedBackupData {
+  /// Import limits apply before JSON materialization. Backup files are
+  /// untrusted input, so the archive-level limits alone are not sufficient to
+  /// prevent a large JSON tree or one pathological JSONL record from exhausting
+  /// the app process.
+  static const int maxRecordsPerFile = 100000;
+
+  /// Keep the per-file cap well below the archive entry limit so a malformed
+  /// document cannot consume the mobile process before record validation.
+  static const int maxJsonFileBytes = 32 * 1024 * 1024;
+
+  /// Bound the combined input as well as each individual file. The staged
+  /// model still retains validated records for the restore plan, so this cap
+  /// limits the maximum amount of trusted materialized data as well.
+  static const int maxAggregateJsonBytes = 128 * 1024 * 1024;
+  static const int maxJsonLineBytes = 2 * 1024 * 1024;
+  static const int maxJsonDepth = 32;
+  static const int maxJsonStringCharacters = 4 * 1024 * 1024;
+
   final List<Map<String, dynamic>> apiConfigs;
   final List<Map<String, dynamic>> characters;
   final List<Map<String, dynamic>> groups;
@@ -41,9 +64,12 @@ class StagedBackupData {
   });
 
   static Future<StagedBackupData> load(
-    Directory staging,
-    BackupManifest manifest,
-  ) async {
+      Directory staging, BackupManifest manifest,
+      {int maxAggregateBytes = maxAggregateJsonBytes}) async {
+    if (maxAggregateBytes < 0) {
+      throw ArgumentError.value(maxAggregateBytes, 'maxAggregateBytes');
+    }
+    await _checkAggregateJsonSize(staging, maxAggregateBytes);
     final data = StagedBackupData(
       apiConfigs: await _records(staging, 'data/api_configs.json'),
       characters: await _records(staging, 'data/characters.json'),
@@ -65,7 +91,7 @@ class StagedBackupData {
           await _optionalRecords(staging, 'data/relationship_events.json'),
       settings: await _map(staging, 'data/settings.json'),
     );
-    data._validate(manifest);
+    _validateBackupData(data, manifest);
     return data;
   }
 
@@ -89,208 +115,6 @@ class StagedBackupData {
     return count;
   }
 
-  void _validate(BackupManifest manifest) {
-    _validateRecordKeys();
-    _validateSettingKeys();
-    final ids = <String, Set<String>>{
-      'apiConfigs': _ids(apiConfigs),
-      'characters': _ids(characters),
-      'groups': _ids(groups),
-      'messages': _ids(messages),
-      'characterMemories': _ids(characterMemories),
-      'relationships': _ids(relationships),
-      'skills': _ids(skills),
-      'agentTasks': _ids(tasks),
-      'userProfiles': _ids(userProfiles),
-      'permanentMemories': _ids(permanentMemories),
-      'relationshipEvents': _ids(relationshipEvents),
-    };
-    _expectCounts(manifest);
-    final apiIds = ids['apiConfigs']!;
-    final characterIds = ids['characters']!;
-    final groupIds = ids['groups']!;
-    final messageIds = ids['messages']!;
-    final memoryIds = ids['permanentMemories']!;
-    final eventIds = ids['relationshipEvents']!;
-
-    if (manifest.schemaVersion >= 2 &&
-        manifest.backupKind == BackupKind.conversation &&
-        (userProfiles.isNotEmpty || relationships.isNotEmpty)) {
-      throw const BackupException('会话备份不得包含 UserProfile 或全局关系快照');
-    }
-
-    for (final record in characters) {
-      final value = BackupEntityCodec.value(record);
-      final apiConfigId = value['apiConfigId']?.toString() ?? '';
-      if (apiConfigId.isNotEmpty && !apiIds.contains(apiConfigId)) {
-        throw BackupException('角色引用了不存在的 API 配置：$apiConfigId');
-      }
-      for (final skillId in _strings(value['skillIds'])) {
-        if (!ids['skills']!.contains(skillId)) {
-          throw BackupException('角色引用了不存在的技能：$skillId');
-        }
-      }
-    }
-    for (final record in groups) {
-      for (final characterId
-          in _strings(BackupEntityCodec.value(record)['aiCharacterIds'])) {
-        if (!characterIds.contains(characterId)) {
-          throw BackupException('群聊引用了不存在的角色：$characterId');
-        }
-      }
-    }
-    for (final record in messages) {
-      final value = BackupEntityCodec.value(record);
-      _validateConversation(value['groupId'], groupIds, characterIds);
-      if (value['senderType'] == 'ai' &&
-          !characterIds.contains(value['senderId'])) {
-        throw BackupException('消息引用了不存在的角色：${value['senderId']}');
-      }
-      final replyId = value['replyToMessageId']?.toString();
-      if (replyId != null && !messageIds.contains(replyId)) {
-        throw BackupException('消息引用了不存在的回复：$replyId');
-      }
-      for (final media in value['media'] as List? ?? const []) {
-        final path = Map<String, dynamic>.from(media as Map)['path'].toString();
-        if (!manifest.files.containsKey(path) ||
-            !path.startsWith('attachments/')) {
-          throw BackupException('附件引用无效：$path');
-        }
-      }
-    }
-    for (final record in groupMemories) {
-      _validateConversation(
-        BackupEntityCodec.value(record)['groupId'],
-        groupIds,
-        characterIds,
-      );
-    }
-    for (final record in characterMemories) {
-      final value = BackupEntityCodec.value(record);
-      _validateConversation(value['groupId'], groupIds, characterIds);
-      _require(ids: characterIds, value: value['characterId']);
-    }
-    for (final record in relationships) {
-      final value = BackupEntityCodec.value(record);
-      if (manifest.schemaVersion >= 2 && value['groupId'] != 'global') {
-        throw const BackupException('v2 relationships 必须是全局快照');
-      }
-      if (manifest.schemaVersion < 2) {
-        _validateConversation(value['groupId'], groupIds, characterIds);
-      }
-      _require(ids: characterIds, value: value['sourceCharacterId']);
-      if (value['targetType'] == 'ai') {
-        _require(ids: characterIds, value: value['targetId']);
-      } else if (value['targetType'] == 'user') {
-        if (value['targetId'] != 'user') {
-          throw const BackupException('关系的 user targetId 必须保持 user');
-        }
-      } else {
-        throw BackupException('关系 targetType 无效：${value['targetType']}');
-      }
-      final lastEventId = value['lastEventId']?.toString();
-      if (lastEventId != null &&
-          lastEventId.isNotEmpty &&
-          !eventIds.contains(lastEventId)) {
-        throw BackupException('关系引用了不存在的 lastEventId：$lastEventId');
-      }
-    }
-    for (final record in userProfiles) {
-      if (BackupEntityCodec.key(record) != 'me') {
-        throw const BackupException('user_profile.json 只能包含 me');
-      }
-    }
-    for (final record in permanentMemories) {
-      final value = BackupEntityCodec.value(record);
-      _require(ids: characterIds, value: value['observerCharacterId']);
-      _validateSubjectIds(value['subjectIds'], characterIds);
-      _validateSubjectIds(value['participantIds'], characterIds);
-      _validateSourceMessageIds(
-        value['sourceMessageIds'],
-        messageIds,
-        manifest,
-      );
-      for (final supersedesId in _strings(value['supersedesIds'])) {
-        if (!memoryIds.contains(supersedesId)) {
-          throw BackupException('永久记忆引用了不存在的 supersedes 记录：$supersedesId');
-        }
-      }
-      _validateOriginConversation(
-        value['originConversationId'],
-        manifest,
-        groupIds,
-        characterIds,
-      );
-    }
-    for (final record in relationshipEvents) {
-      final value = BackupEntityCodec.value(record);
-      _require(ids: characterIds, value: value['sourceCharacterId']);
-      if (value['targetType'] == 'ai') {
-        _require(ids: characterIds, value: value['targetId']);
-      } else if (value['targetType'] == 'user') {
-        if (value['targetId'] != 'user') {
-          throw const BackupException('关系事件的 user targetId 必须保持 user');
-        }
-      } else {
-        throw BackupException('关系事件 targetType 无效：${value['targetType']}');
-      }
-      _validateSourceMessageIds(
-        value['sourceMessageIds'],
-        messageIds,
-        manifest,
-      );
-      _validateOriginConversation(
-        value['originConversationId'],
-        manifest,
-        groupIds,
-        characterIds,
-      );
-    }
-    for (final record in skills) {
-      final characterId = BackupEntityCodec.value(record)['characterId'];
-      if (characterId != '' && !characterIds.contains(characterId)) {
-        throw BackupException('技能引用了不存在的角色：$characterId');
-      }
-    }
-    for (final record in tasks) {
-      final value = BackupEntityCodec.value(record);
-      _validateConversation(value['groupId'], groupIds, characterIds);
-      _require(ids: characterIds, value: value['characterId']);
-    }
-    for (final record in workspaces) {
-      _validateConversation(
-        BackupEntityCodec.value(record)['conversationId'],
-        groupIds,
-        characterIds,
-      );
-    }
-  }
-
-  void _expectCounts(BackupManifest manifest) {
-    final actual = {
-      'apiConfigs': apiConfigs.length,
-      'characters': characters.length,
-      'groups': groups.length,
-      'messages': messages.length,
-      'groupMemories': groupMemories.length,
-      'characterMemories': characterMemories.length,
-      'relationships': relationships.length,
-      'skills': skills.length,
-      'agentTasks': tasks.length,
-      'workMode': workspaces.length,
-      'settings': settings.length,
-      'userProfiles': userProfiles.length,
-      'permanentMemories': permanentMemories.length,
-      'relationshipEvents': relationshipEvents.length,
-    };
-    for (final entry in actual.entries) {
-      if (manifest.counts.containsKey(entry.key) &&
-          manifest.counts[entry.key] != entry.value) {
-        throw BackupException('条目计数不一致：${entry.key}');
-      }
-    }
-  }
-
   static void _validateConversation(
     Object? value,
     Set<String> groupIds,
@@ -308,7 +132,7 @@ class StagedBackupData {
   }
 
   static void _validateSubjectIds(Object? value, Set<String> characterIds) {
-    for (final id in _strings(value)) {
+    for (final id in _stagedBackupStrings(value)) {
       if (id != 'user' && !characterIds.contains(id)) {
         throw BackupException('永久数据引用了不存在的角色：$id');
       }
@@ -323,7 +147,7 @@ class StagedBackupData {
     // Deleted conversations intentionally leave auditable evidence IDs in
     // global memories/events; those IDs are external to a later full backup.
     if (manifest.backupKind == BackupKind.full) return;
-    for (final id in _strings(value)) {
+    for (final id in _stagedBackupStrings(value)) {
       _require(ids: messageIds, value: id);
     }
   }
@@ -396,6 +220,9 @@ class StagedBackupData {
       'token_usage',
       SearchProviderConfigStore.configsKey,
       SearchProviderConfigStore.defaultProviderKey,
+      SearchProviderConfigStore.runtimeSettingsKey,
+      AiGovernanceStore.globalSearchPolicyKey,
+      AiGovernanceStore.conversationSearchPoliciesKey,
     };
     for (final key in settings.keys) {
       if (!allowed.contains(key) &&
@@ -416,9 +243,56 @@ class StagedBackupData {
     Directory root,
     String path,
   ) async {
-    final decoded = jsonDecode(await File('${root.path}/$path').readAsString());
-    if (decoded is! List) throw BackupException('数据文件格式无效：$path');
-    return decoded.map(_record).toList(growable: false);
+    final result = <Map<String, dynamic>>[];
+    await for (final text
+        in _jsonArrayRecords(File('${root.path}/$path'), path)) {
+      result.add(
+        _stagedBackupRecord(
+          _decodeBoundedJson(
+            text,
+            path,
+            maxBytes: maxJsonFileBytes,
+          ),
+        ),
+      );
+    }
+    return result;
+  }
+
+  /// Validates a record-array file without reading the whole JSON document.
+  /// Export validation uses this same path so a large backup is never
+  /// materialized twice merely to verify its staging directory.
+  static Future<void> validateRecordFile(File file, String path) async {
+    await for (final text in _jsonArrayRecords(file, path)) {
+      _decodeBoundedJson(text, path, maxBytes: maxJsonFileBytes);
+    }
+  }
+
+  /// Validates a JSONL file with the same byte, record-count, and JSON-shape
+  /// limits used during import. The line splitter operates on raw bytes so a
+  /// malformed or unterminated line cannot grow without bound before the
+  /// limit is checked.
+  static Future<void> validateJsonLinesFile(File file, String path) async {
+    await for (final text in _boundedJsonLines(file, path)) {
+      _decodeBoundedJson(
+        text,
+        path,
+        maxBytes: maxJsonLineBytes,
+        textAlreadyByteBounded: true,
+      );
+    }
+  }
+
+  /// Checks the aggregate size of JSON/JSONL data files before the exporter
+  /// creates a package that the importer would reject later.
+  static Future<void> validateJsonDataAggregate(Iterable<File> files) async {
+    var total = 0;
+    for (final file in files) {
+      total += await file.length();
+      if (total > maxAggregateJsonBytes) {
+        throw const BackupException('备份数据总大小超过限制');
+      }
+    }
   }
 
   static Future<List<Map<String, dynamic>>> _optionalRecords(
@@ -435,31 +309,184 @@ class StagedBackupData {
     String path,
   ) async {
     final result = <Map<String, dynamic>>[];
-    await for (final line in File('${root.path}/$path')
-        .openRead()
-        .transform(utf8.decoder)
-        .transform(const LineSplitter())) {
-      if (line.trim().isNotEmpty) result.add(_record(jsonDecode(line)));
+    final file = File('${root.path}/$path');
+    await for (final line in _boundedJsonLines(file, path)) {
+      result.add(
+        _stagedBackupRecord(
+          _decodeBoundedJson(
+            line,
+            path,
+            maxBytes: maxJsonLineBytes,
+            textAlreadyByteBounded: true,
+          ),
+        ),
+      );
     }
     return result;
+  }
+
+  /// Emits bounded, UTF-8 decoded JSONL records without allowing an
+  /// unterminated byte sequence to accumulate beyond [maxJsonLineBytes].
+  static Stream<String> _boundedJsonLines(File file, String path) async* {
+    final fileBytes = await file.length();
+    if (fileBytes > maxJsonFileBytes) {
+      throw BackupException('备份数据文件过大：$path');
+    }
+
+    final lineBytes = <int>[];
+    var pendingCarriageReturn = false;
+    var recordCount = 0;
+
+    String? decodeLine() {
+      if (lineBytes.isEmpty) return null;
+      try {
+        final decoded = utf8.decode(lineBytes);
+        lineBytes.clear();
+        return decoded;
+      } on FormatException {
+        throw BackupException('备份记录格式无效：$path');
+      }
+    }
+
+    void checkRecordCount(String text) {
+      if (text.trim().isEmpty) return;
+      recordCount++;
+      if (recordCount > maxRecordsPerFile) {
+        throw BackupException('备份记录数量超出限制：$path');
+      }
+    }
+
+    await for (final chunk in file.openRead()) {
+      for (final byte in chunk) {
+        if (pendingCarriageReturn) {
+          final text = decodeLine();
+          if (text != null) {
+            checkRecordCount(text);
+            yield text;
+          }
+          pendingCarriageReturn = false;
+          if (byte == 0x0a) continue;
+        }
+        if (byte == 0x0d) {
+          pendingCarriageReturn = true;
+          continue;
+        }
+        if (byte == 0x0a) {
+          final text = decodeLine();
+          if (text != null) {
+            checkRecordCount(text);
+            yield text;
+          }
+          continue;
+        }
+        if (lineBytes.length >= maxJsonLineBytes) {
+          throw BackupException('备份记录行过长：$path');
+        }
+        lineBytes.add(byte);
+      }
+    }
+
+    if (pendingCarriageReturn) {
+      final text = decodeLine();
+      if (text != null) {
+        checkRecordCount(text);
+        yield text;
+      }
+    } else if (lineBytes.isNotEmpty) {
+      final text = decodeLine();
+      if (text != null) {
+        checkRecordCount(text);
+        yield text;
+      }
+    }
   }
 
   static Future<Map<String, dynamic>> _map(
     Directory root,
     String path,
   ) async {
-    final decoded = jsonDecode(await File('${root.path}/$path').readAsString());
+    final decoded = _decodeBoundedJson(
+      await _readBoundedText(root, path),
+      path,
+      maxMapEntries: maxRecordsPerFile,
+      textAlreadyByteBounded: true,
+    );
     if (decoded is! Map) throw BackupException('数据文件格式无效：$path');
     return Map<String, dynamic>.from(decoded);
   }
 
-  static Map<String, dynamic> _record(Object? value) {
-    if (value is! Map || value['key'] is! String || value['value'] is! Map) {
-      throw const BackupException('备份记录格式无效');
+  static Stream<String> _jsonArrayRecords(File file, String path) async* {
+    final fileBytes = await file.length();
+    if (fileBytes > maxJsonFileBytes) {
+      throw BackupException('备份数据文件过大：$path');
     }
-    return Map<String, dynamic>.from(value);
+    final parser = _BackupJsonArrayStreamParser(
+      path: path,
+      maxRecords: maxRecordsPerFile,
+    );
+    await for (final chunk in file.openRead().transform(utf8.decoder)) {
+      for (final record in parser.add(chunk)) {
+        yield record;
+      }
+    }
+    for (final record in parser.finish()) {
+      yield record;
+    }
   }
 
-  static List<String> _strings(Object? value) =>
-      (value as List? ?? const []).map((item) => item.toString()).toList();
+  static dynamic _decodeBoundedJson(
+    String text,
+    String path, {
+    int maxBytes = maxJsonFileBytes,
+    int? maxArrayItems,
+    int? maxMapEntries,
+    bool textAlreadyByteBounded = false,
+  }) {
+    if (!textAlreadyByteBounded && utf8.encode(text).length > maxBytes) {
+      throw BackupException('备份数据文件过大：$path');
+    }
+    _BackupJsonGuard(
+      text: text,
+      path: path,
+      maxArrayItems: maxArrayItems,
+      maxMapEntries: maxMapEntries,
+    ).validate();
+    try {
+      return jsonDecode(text);
+    } on FormatException {
+      throw BackupException('数据文件格式无效：$path');
+    }
+  }
+
+  /// Decodes a bounded JSON document after the caller has optionally checked
+  /// its file length. [textAlreadyByteBounded] avoids encoding the same large
+  /// string a second time when that length check already happened on disk.
+  static dynamic decodeBoundedJsonText(
+    String text,
+    String path, {
+    int maxBytes = maxJsonFileBytes,
+    int? maxArrayItems,
+    int? maxMapEntries,
+    bool textAlreadyByteBounded = false,
+  }) =>
+      _decodeBoundedJson(
+        text,
+        path,
+        maxBytes: maxBytes,
+        maxArrayItems: maxArrayItems,
+        maxMapEntries: maxMapEntries,
+        textAlreadyByteBounded: textAlreadyByteBounded,
+      );
+
+  static Future<String> _readBoundedText(
+    Directory root,
+    String path,
+  ) async {
+    final file = File('${root.path}/$path');
+    final bytes = await file.length();
+    if (bytes > maxJsonFileBytes) {
+      throw BackupException('备份数据文件过大：$path');
+    }
+    return file.readAsString();
+  }
 }

@@ -4,6 +4,22 @@ All notable changes are documented here, following [Conventional Commits](https:
 
 ---
 
+## Unreleased - 2026-08-27
+
+### 🚀 Features / 新功能
+- (`web-search`) 完成生产级 AI 联网搜索：可插拔 Tavily/Brave/Gateway Provider、查询规划、同轮搜索快照、来源引用、审计和失败诊断。
+- (`gateway`) 新增带 SSRF 防护、限流、配额、熔断、超时和上游错误分类的生产搜索 Gateway。
+- (`agentic`) 加固本地 bridge 和工作模式生命周期，增加请求/进程/输出限制、取消传播、串行租约和竞态保护。
+
+### 🐛 Bug Fixes / 修复
+- (`web-search`) 修复整条聊天消息外发、同轮重复搜索、无结果误导和 Prompt Injection 风险。
+- (`security`) 修复搜索凭据进入业务存储、日志、Prompt 或导出数据的路径，并补齐 endpoint/DNS 校验。
+- (`backup`) 修复超大 JSON/JSONL/ZIP 导致恢复过程资源失控的边界问题。
+
+### 🧪 Tests / 验证
+- Flutter 全量测试 1430 项、Gateway 测试 25 项通过；Web/macOS/iOS Release 构建通过。
+- 详细实施过程、问题与验证记录见 [`docs/production_web_search_implementation_retrospective.md`](docs/production_web_search_implementation_retrospective.md)。
+
 ## v1.5.2 - 2026-07-12
 
 ### 🧪 Tests
@@ -99,4 +115,3 @@ All notable changes are documented here, following [Conventional Commits](https:
 - fix/ui: 修复测试加载对话框、隐藏API Key测试模块、角色模型批量更换与默认自定义优先
 - Merge feat/chat-enhancements: 流式输出/角色预设库/对话导出
 - Initial commit: Flutter chat group app
-

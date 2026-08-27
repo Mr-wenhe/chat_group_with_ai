@@ -11,6 +11,8 @@
 pubspec.lock
 
 data/*.lock
+# The development API-config Hive may contain credentials; never commit it.
+data/api_configs.hive
 
 # Symbolication / obfuscation
 app.*.symbols
@@ -66,6 +68,12 @@ output/
 star.html
 test.html
 release_artifacts/
+
+# Search Gateway local deployment secrets and private TLS material
+gateway/.env*
+!gateway/.env.example
+gateway/*.pem
+gateway/*.key
 
 # Agentic 运行时在本地生成的产物（角色/任务生成的 HTML、脚本、文档等），不应入库
 meteor_shower.html

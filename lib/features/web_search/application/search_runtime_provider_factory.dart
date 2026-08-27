@@ -1,15 +1,20 @@
 import 'package:dio/dio.dart';
+import 'package:flutter/foundation.dart';
 
 import '../data/search_credential_resolver.dart';
 import '../data/search_settings_store.dart';
 import '../models/search_failure.dart';
+import '../models/search_failure_factory.dart';
 import '../models/search_models.dart';
 import '../models/search_provider_config.dart';
 import '../providers/brave_search_provider.dart';
 import '../providers/duckduckgo_instant_answer_provider.dart';
+import '../providers/gateway_search_provider.dart';
+import '../providers/native_web_search_adapter.dart';
 import '../providers/search_provider.dart';
 import '../providers/tavily_search_provider.dart';
 import 'search_provider_route.dart';
+import '../security/search_endpoint_validator.dart';
 
 /// Builds the runtime Provider chain from the settings metadata.
 ///
@@ -29,84 +34,178 @@ class SearchRuntimeProviderFactory {
               isRelease: store.isRelease,
             );
 
-  List<SearchProviderRoute> buildRoutes() {
+  List<SearchProviderRoute> buildRoutes({
+    NativeWebSearchBinding? nativeSearch,
+  }) {
+    // No Web build is a supported search target. Browser XHR may buffer an
+    // entire response before app-level limits run, and it cannot provide the
+    // native DNS pinning/credential boundary used by this feature.
+    if (kIsWeb) return const [];
     final routes = <SearchProviderRoute>[];
-    for (final config in store.configs.where((item) => item.enabled)) {
+    for (final config in store.configs.where(_isRuntimeEligible)) {
       final provider = _createProvider(config);
       routes.add(
         SearchProviderRoute.fromConfig(
           config: config,
-          provider: _CredentialResolvingProvider(
+          provider: CredentialResolvingSearchProvider(
             config: config,
             resolver: credentialResolver,
             delegate: provider,
+            store: store,
           ),
           priority: routes.length,
         ),
       );
     }
-    // Keep the keyless encyclopedia fallback available after any configured
-    // route. When there are no configured routes, the coordinator deliberately
-    // keeps its legacy service path so the existing degraded metadata remains
-    // unchanged; once a user configures a Provider, this route prevents a
-    // transient outage from becoming an avoidable hard failure for stable
-    // general-knowledge queries.
-    if (routes.isNotEmpty &&
-        !routes.any(
-          (route) =>
-              route.kind == SearchProviderKind.duckDuckGoInstantAnswer,
-        )) {
+    // Keep the keyless encyclopedia provider available after configured
+    // routes, and as the only degraded route before configuration. The chain
+    // itself limits it to stable general-knowledge requests, so it can never
+    // masquerade as a source for current news, prices, weather, or policy.
+    if (!routes.any(
+      (route) => route.kind == SearchProviderKind.duckDuckGoInstantAnswer,
+    )) {
       routes.add(
         SearchProviderRoute(
           id: 'builtin-duckduckgo-fallback',
-          provider: DuckDuckGoInstantAnswerProvider(),
+          provider: DuckDuckGoInstantAnswerProvider(isRelease: store.isRelease),
           isFallback: true,
           priority: routes.length,
           displayName: 'DuckDuckGo Instant Answer',
         ),
       );
     }
+    // Add the native route after the independent fallback exists. This keeps
+    // native Qwen search usable even when no separate Brave/Tavily/Gateway
+    // route has been configured for the compatible fallback.
+    _prependNativeRoute(routes, nativeSearch);
     return List.unmodifiable(routes);
+  }
+
+  /// Web has no supported search runtime because it cannot provide the native
+  /// DNS pinning and secure credential storage used by this app.
+  static bool isProviderAllowedForPlatform(
+    SearchProviderKind provider, {
+    required bool isWeb,
+    required bool isRelease,
+  }) =>
+      !isWeb;
+
+  bool _isRuntimeEligible(SearchProviderConfig config) {
+    if (!config.enabled || config.requiresAttention) return false;
+    if (!isProviderAllowedForPlatform(
+      config.provider,
+      isWeb: kIsWeb,
+      isRelease: store.isRelease,
+    )) {
+      return false;
+    }
+    // Restored and hand-edited metadata cannot create a route without the
+    // credential required by the provider. The same rule is applied while
+    // loading and saving settings, so routing cannot bypass that boundary.
+    if (searchProviderRequiresCredential(
+          config.provider,
+          isRelease: store.isRelease,
+        ) &&
+        (!config.hasCredential || config.credentialId.isEmpty)) {
+      return false;
+    }
+    // Preserve the stronger requirement recorded by restored metadata too.
+    // This covers older or hand-edited Gateway records whose provider policy
+    // was stricter than the current platform default.
+    if (config.credentialRequired &&
+        (!config.hasCredential || config.credentialId.isEmpty)) {
+      return false;
+    }
+    return true;
+  }
+
+  void _prependNativeRoute(
+    List<SearchProviderRoute> routes,
+    NativeWebSearchBinding? binding,
+  ) {
+    if (kIsWeb) return;
+    if (binding == null || routes.isEmpty) return;
+    final adapter = NativeWebSearchAdapterRegistry(
+      isRelease: store.isRelease,
+    ).resolve(
+      provider: binding.provider,
+      model: binding.model,
+    );
+    if (adapter == null) return;
+    final fallback = routes.first;
+    routes.insert(
+      0,
+      SearchProviderRoute(
+        id: 'native:${binding.provider.name}:${binding.model}',
+        provider: NativeWebSearchProvider(
+          adapter: adapter,
+          binding: binding,
+          fallback: fallback.provider,
+        ),
+        isPrimary: true,
+        isNative: true,
+        priority: -1,
+        displayName: adapter.providerId,
+      ),
+    );
   }
 
   SearchProvider _createProvider(SearchProviderConfig config) {
     try {
+      // DuckDuckGo has no configurable endpoint. Do not turn an old blank or
+      // hand-edited metadata field into a runtime outage for its built-in
+      // adapter.
+      if (config.provider != SearchProviderKind.duckDuckGoInstantAnswer) {
+        // Validate every persisted endpoint, including Gateway metadata that
+        // is not yet backed by a local adapter. This keeps a legacy or
+        // hand-edited configuration from bypassing the client-side boundary.
+        SearchEndpointValidator.requireValid(
+          config.baseUrl,
+          isRelease: store.isRelease,
+          allowLocalDevelopmentGateway:
+              config.provider == SearchProviderKind.gateway &&
+                  store.allowLocalDevelopmentGateway,
+        );
+      }
       return switch (config.provider) {
         SearchProviderKind.tavily => TavilySearchProvider(
             baseUrl: config.baseUrl,
             isRelease: store.isRelease,
-            allowLocalDevelopmentGateway: store.allowLocalDevelopmentGateway,
+            allowLocalDevelopmentGateway: false,
           ),
         SearchProviderKind.brave => BraveSearchProvider(
             baseUrl: config.baseUrl,
             isRelease: store.isRelease,
-            allowLocalDevelopmentGateway: store.allowLocalDevelopmentGateway,
+            allowLocalDevelopmentGateway: false,
           ),
         SearchProviderKind.duckDuckGoInstantAnswer =>
-          DuckDuckGoInstantAnswerProvider(),
-        SearchProviderKind.gateway => const _UnsupportedSearchProvider(
-            SearchProviderKind.gateway,
-            'Backend Gateway 尚未接入运行时搜索适配器',
+          DuckDuckGoInstantAnswerProvider(isRelease: store.isRelease),
+        SearchProviderKind.gateway => GatewaySearchProvider(
+            baseUrl: config.baseUrl,
+            isRelease: store.isRelease,
+            allowLocalDevelopmentGateway: store.allowLocalDevelopmentGateway,
           ),
       };
-    } on Object catch (error) {
+    } on Object {
       return _UnsupportedSearchProvider(
         config.provider,
-        '搜索 Provider 配置无效：$error',
+        '搜索 Provider 配置无效',
       );
     }
   }
 }
 
-class _CredentialResolvingProvider implements SearchProvider {
+class CredentialResolvingSearchProvider implements SearchProvider {
   final SearchProviderConfig config;
   final SearchCredentialResolver resolver;
   final SearchProvider delegate;
+  final SearchProviderConfigStore store;
 
-  const _CredentialResolvingProvider({
+  const CredentialResolvingSearchProvider({
     required this.config,
     required this.resolver,
     required this.delegate,
+    required this.store,
   });
 
   @override
@@ -118,12 +217,27 @@ class _CredentialResolvingProvider implements SearchProvider {
     required String? credential,
     CancelToken? cancelToken,
   }) async {
-    final resolved = await resolver.resolve(config);
-    return delegate.search(
+    final current = store.findById(config.id);
+    if (current == null || !current.enabled || current.requiresAttention) {
+      return _invalidConfigurationResponse();
+    }
+    final resolvedResult = await resolver.resolveResult(current);
+    if (!resolvedResult.isAvailable && current.credentialRequired) {
+      await store.setRequiresAttention(config.id, true);
+      return _invalidConfigurationResponse();
+    }
+    final resolved = resolvedResult.isAvailable ? resolvedResult.value : null;
+    final response = await delegate.search(
       request,
       credential: resolved,
       cancelToken: cancelToken,
     );
+    final failureType = response.failure?.type;
+    if (failureType == SearchFailureType.unauthorized ||
+        failureType == SearchFailureType.forbidden) {
+      await store.setRequiresAttention(config.id, true);
+    }
+    return response;
   }
 
   @override
@@ -131,12 +245,52 @@ class _CredentialResolvingProvider implements SearchProvider {
     required String? credential,
     required String probeQuery,
   }) async {
-    final resolved = await resolver.resolve(config);
+    final current = store.findById(config.id);
+    if (current == null || !current.enabled || current.requiresAttention) {
+      return SearchHealthResult(
+        isHealthy: false,
+        failure: _invalidConfigurationFailure(),
+      );
+    }
+    final entered = credential?.trim() ?? '';
+    final String? resolved;
+    if (entered.isNotEmpty) {
+      // A form probe may supply a new key that has not been saved yet. It must
+      // take precedence over secure-storage lookup for this single request.
+      resolved = entered;
+    } else {
+      final resolvedResult = await resolver.resolveResult(current);
+      if (!resolvedResult.isAvailable && current.credentialRequired) {
+        // Health checks are probes, not save operations. Keep the durable
+        // routing metadata unchanged; a failed probe is returned to the
+        // caller and only an explicit save may update requiresAttention.
+        return const SearchHealthResult(
+          isHealthy: false,
+          failure: SearchFailure(
+            type: SearchFailureType.invalidConfiguration,
+            safeMessage: '搜索凭据不可用',
+            retryable: false,
+          ),
+        );
+      }
+      resolved = resolvedResult.isAvailable ? resolvedResult.value : null;
+    }
     return delegate.testConnection(
       credential: resolved,
       probeQuery: probeQuery,
     );
   }
+
+  SearchProviderResponse _invalidConfigurationResponse() =>
+      SearchProviderResponse(
+        items: const [],
+        terminal: true,
+        failure: _invalidConfigurationFailure(),
+      );
+
+  SearchFailure _invalidConfigurationFailure() => buildSearchFailure(
+        type: SearchFailureType.invalidConfiguration,
+      );
 }
 
 class _UnsupportedSearchProvider implements SearchProvider {

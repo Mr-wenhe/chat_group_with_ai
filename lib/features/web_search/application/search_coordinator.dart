@@ -3,14 +3,12 @@ import 'package:uuid/uuid.dart';
 
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
-import 'package:chat_group/services/web_search_service.dart' as legacy;
 
 import '../models/search_failure_factory.dart';
 import '../models/search_models.dart' as domain;
 import '../providers/search_provider.dart';
 import 'search_coordinator_support.dart';
 import 'search_intent_detector.dart';
-import 'search_legacy_executor.dart';
 import 'search_provider_chain.dart';
 import 'search_provider_route.dart';
 import 'search_query_planner.dart';
@@ -35,7 +33,6 @@ part 'search_coordinator_legacy.dart';
 /// cache, retry budget, and Provider failover.
 class SearchCoordinator {
   final GovernancePersistence store;
-  final legacy.WebSearchServicePort? service;
   final SearchTurnCache cache;
   final SearchRetryPolicy retryPolicy;
   final SearchIntentDetector intentDetector;
@@ -44,6 +41,7 @@ class SearchCoordinator {
   final DateTime Function() _clock;
   final Uuid _uuid;
   final List<SearchProviderRoute> _routes;
+  final Duration endToEndBudget;
 
   late final SearchCoordinatorSupport _support = SearchCoordinatorSupport(
     store: store,
@@ -55,18 +53,9 @@ class SearchCoordinator {
     retryPolicy: retryPolicy,
     clock: _clock,
   );
-  late final SearchLegacyExecutor? _legacyExecutor = service == null
-      ? null
-      : SearchLegacyExecutor(
-          service: service!,
-          cache: cache,
-          retryPolicy: retryPolicy,
-          clock: _clock,
-        );
 
   SearchCoordinator({
     required this.store,
-    this.service,
     Iterable<SearchProviderRoute> routes = const [],
     Iterable<SearchProviderRoute>? providerRoutes,
     Iterable<SearchProvider>? providers,
@@ -81,6 +70,7 @@ class SearchCoordinator {
     SearchRetrySleep sleep = searchRetrySleep,
     DateTime Function()? clock,
     Duration totalBudget = searchRetryBudget,
+    this.endToEndBudget = searchEndToEndBudget,
     Uuid? uuid,
   })  : _clock = clock ?? DateTime.now,
         _uuid = uuid ?? const Uuid(),
@@ -131,6 +121,7 @@ class SearchCoordinator {
     WebSearchPolicy? policy,
     CancelToken? cancelToken,
     bool consentAlreadyGranted = false,
+    DateTime? deadline,
   }) async {
     final sanitized = sanitizer.sanitize(request.query);
     final prepared = _support.prepareRequest(
@@ -146,6 +137,11 @@ class SearchCoordinator {
       configured: effectivePolicy(conversationId),
       requested: policy,
     );
+    // Direct callers of search()/searchTurn() must receive the same bounded
+    // end-to-end contract as the message facade. When no explicit deadline is
+    // supplied, start the coordinator budget here; the Provider chain will
+    // still take the tighter retry-policy budget if it is configured.
+    var providerDeadline = deadline ?? _clock().add(endToEndBudget);
     if (effective == WebSearchPolicy.off) {
       // Keep the disabled audit semantics even when the query is entirely
       // sensitive and therefore has no safe preview to show.
@@ -170,15 +166,25 @@ class SearchCoordinator {
         conversationId: conversationId,
         onStatus: onStatus,
       );
-    } else if (!await _passPolicyGate(
-      request: prepared,
-      policy: effective,
-      requestConsent: requestConsent,
-      conversationId: conversationId,
-      onStatus: onStatus,
-      consentAlreadyGranted: consentAlreadyGranted,
-    )) {
-      return null;
+    } else {
+      final consentStartedAt = _clock();
+      final allowed = await _passPolicyGate(
+        request: prepared,
+        policy: effective,
+        requestConsent: requestConsent,
+        conversationId: conversationId,
+        onStatus: onStatus,
+        consentAlreadyGranted: consentAlreadyGranted,
+      );
+      if (!allowed) return null;
+      if (effective == WebSearchPolicy.ask && !consentAlreadyGranted) {
+        // Explicit consent is a user interaction, not network work. Extend
+        // the shared deadline by the time spent waiting for that decision so a
+        // slow dialog cannot make the Provider appear to time out immediately.
+        providerDeadline = providerDeadline.add(
+          _positiveElapsed(consentStartedAt),
+        );
+      }
     }
 
     if (prepared.isSensitive && effective == WebSearchPolicy.auto) {
@@ -198,7 +204,7 @@ class SearchCoordinator {
         onStatus,
         SearchRunStatus.cancelled,
         request: prepared,
-        domainSnapshot: snapshot,
+        snapshot: snapshot,
       );
       await _support.auditDomain(
         conversationId: conversationId,
@@ -215,36 +221,28 @@ class SearchCoordinator {
             request: prepared,
             cancelToken: cancelToken,
             onStatus: onStatus,
+            deadline: providerDeadline,
           )
-        : service == null
-            ? _support.failureSnapshot(
-                request: prepared,
-                provider: 'none',
-                failure: buildSearchFailure(
-                  type: SearchFailureType.invalidConfiguration,
-                ),
-              )
-            : _support.domainFromLegacy(
-                prepared,
-                await _legacyExecutor!.search(
-                  request: prepared,
-                  cancelToken: cancelToken,
-                  onStatus: onStatus,
-                ),
-              );
+        : _support.failureSnapshot(
+            request: prepared,
+            provider: 'none',
+            failure: buildSearchFailure(
+              type: SearchFailureType.invalidConfiguration,
+            ),
+          );
 
     _emit(
       onStatus,
       SearchRunStatus.evaluating,
       request: prepared,
-      domainSnapshot: snapshot,
+      snapshot: snapshot,
     );
     final status = _support.domainStatus(snapshot);
     _emit(
       onStatus,
       status,
       request: prepared,
-      domainSnapshot: snapshot,
+      snapshot: snapshot,
     );
     await _support.auditDomain(
       conversationId: conversationId,
@@ -269,7 +267,7 @@ class SearchCoordinator {
       onStatus,
       SearchRunStatus.failed,
       request: request,
-      domainSnapshot: snapshot,
+      snapshot: snapshot,
     );
     await _support.auditDomain(
       conversationId: conversationId,
@@ -288,6 +286,7 @@ class SearchCoordinator {
     WebSearchPolicy? policy,
     CancelToken? cancelToken,
     bool consentAlreadyGranted = false,
+    DateTime? deadline,
   }) =>
       search(
         request: request,
@@ -297,12 +296,14 @@ class SearchCoordinator {
         policy: policy,
         cancelToken: cancelToken,
         consentAlreadyGranted: consentAlreadyGranted,
+        deadline: deadline,
       );
 
   Future<domain.WebSearchSnapshot> _searchProvidersCached({
     required domain.SearchRequest request,
     required CancelToken? cancelToken,
     required SearchStatusListener? onStatus,
+    DateTime? deadline,
   }) {
     final key = SearchTurnCacheKey.fromRequest(
       request: request,
@@ -316,6 +317,7 @@ class SearchCoordinator {
         request: request,
         cancelToken: cancelToken,
         onStatus: onStatus,
+        deadline: deadline,
       ),
       shouldCache: (snapshot) => !snapshot.hasFailure,
       markFromCache: (snapshot) => snapshot.copyWith(fromCache: true),
@@ -329,26 +331,32 @@ class SearchCoordinator {
     required String conversationId,
     required SearchStatusListener? onStatus,
     bool consentAlreadyGranted = false,
+    String? providerOverride,
   }) async {
     if (policy == WebSearchPolicy.off) {
       _emit(onStatus, SearchRunStatus.disabled, request: request);
       await _support.auditSimple(
         conversationId: conversationId,
-        query: request.query,
+        request: request,
         status: SearchRunStatus.disabled,
       );
       return false;
     }
     if (policy != WebSearchPolicy.ask || consentAlreadyGranted) return true;
 
-    _emit(onStatus, SearchRunStatus.awaitingConsent, request: request);
+    _emit(
+      onStatus,
+      SearchRunStatus.awaitingConsent,
+      request: request,
+      provider: providerOverride ?? _providerChain.providerDisclosure(request),
+    );
     final allowed = await requestConsent?.call(request.query) ?? false;
     if (allowed) return true;
 
     _emit(onStatus, SearchRunStatus.denied, request: request);
     await _support.auditSimple(
       conversationId: conversationId,
-      query: request.query,
+      request: request,
       status: SearchRunStatus.denied,
     );
     return false;
@@ -361,23 +369,18 @@ class SearchCoordinator {
     String provider = '',
     int retryNumber = 0,
     Duration? retryDelay,
-    legacy.WebSearchSnapshot? snapshot,
-    domain.WebSearchSnapshot? domainSnapshot,
+    domain.WebSearchSnapshot? snapshot,
   }) {
     listener?.call(
       SearchRunState(
         status,
+        requestId: request.requestId,
+        rootRequestId: request.rootRequestId,
         query: request.query,
-        provider: provider.isEmpty
-            ? domainSnapshot?.provider ?? snapshot?.provider ?? ''
-            : provider,
+        provider: provider.isEmpty ? snapshot?.provider ?? '' : provider,
         retryNumber: retryNumber,
         retryDelay: retryDelay,
-        snapshot: snapshot ??
-            (domainSnapshot == null
-                ? null
-                : _support.toLegacySnapshot(request.query, domainSnapshot)),
-        domainSnapshot: domainSnapshot,
+        snapshot: snapshot,
       ),
     );
   }
@@ -388,6 +391,11 @@ class SearchCoordinator {
       List.unmodifiable(routes);
 
   bool _isCancelled(CancelToken? token) => token?.isCancelled == true;
+
+  Duration _positiveElapsed(DateTime startedAt) {
+    final elapsed = _clock().difference(startedAt);
+    return elapsed.isNegative ? Duration.zero : elapsed;
+  }
 
   /// A caller may narrow governance for one request, but never widen it.
   static WebSearchPolicy _constrainedPolicy({

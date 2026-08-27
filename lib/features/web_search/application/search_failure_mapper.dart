@@ -13,7 +13,7 @@ import 'search_retry_policy.dart';
 /// normalized Provider responses. Exception text and response bodies never
 /// cross this boundary.
 SearchFailure mapSearchFailure(Object error) {
-  if (error is SearchFailure) return error;
+  if (error is SearchFailure) return sanitizeSearchFailure(error);
   if (error is SearchRetryBudgetExceeded) {
     return buildSearchFailure(type: SearchFailureType.connectionTimeout);
   }

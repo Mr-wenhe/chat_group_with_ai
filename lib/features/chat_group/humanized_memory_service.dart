@@ -26,7 +26,8 @@ class HumanizedMemoryService {
   /// 支持 ```json … ```、``` … ``` 等常见格式；无包裹时原样返回。
   static String _stripCodeFence(String text) {
     // 匹配以 ``` 开头、可选 json 标记、任意内容、以 ``` 结尾的模式。
-    final codeFence = RegExp(r'^```(?:json)?\s*\n?(.*?)\n?```\s*$', dotAll: true);
+    final codeFence =
+        RegExp(r'^```(?:json)?\s*\n?(.*?)\n?```\s*$', dotAll: true);
     final match = codeFence.firstMatch(text);
     if (match != null) return match.group(1)!.trim();
     // 也兼容 ```json 不带换行的紧凑格式。

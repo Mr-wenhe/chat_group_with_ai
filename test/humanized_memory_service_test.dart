@@ -189,7 +189,8 @@ void main() {
       expect(memory.personaGrowth.last, '新成长');
     });
 
-    test('global summary merges new facts instead of replacing prior chats', () {
+    test('global summary merges new facts instead of replacing prior chats',
+        () {
       final merged = HumanizedMemoryService.mergeGlobalSummary(
         existing: '【事实】用户住在上海；用户养了一只猫\n【关系】我们聊过搬家',
         update: const LayeredMemoryUpdate(

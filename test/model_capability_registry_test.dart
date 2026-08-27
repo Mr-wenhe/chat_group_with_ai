@@ -126,7 +126,9 @@ void main() {
     }
     // 纯文本模型仍保持不支持视觉，带图应被拦截（既有断言不受影响）。
     expect(
-      registry.resolve(provider: ApiProvider.qwen, modelId: 'qwen-max').supportsVision,
+      registry
+          .resolve(provider: ApiProvider.qwen, modelId: 'qwen-max')
+          .supportsVision,
       isFalse,
     );
     expect(

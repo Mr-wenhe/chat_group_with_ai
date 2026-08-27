@@ -3,9 +3,11 @@ import 'dart:io';
 
 import 'package:archive/archive.dart';
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/backup/backup_restore_service.dart';
 import 'package:chat_group/features/backup/backup_models.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
+import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers/lifecycle_hive.dart';
@@ -52,6 +54,18 @@ void main() {
       SearchProviderConfigStore.defaultProviderKey,
       'search-1',
     );
+    await db.appSettingsBox.put(
+      SearchProviderConfigStore.runtimeSettingsKey,
+      const SearchRuntimeSettings(locale: 'en-US', maxResults: 7).toMap(),
+    );
+    await db.appSettingsBox.put(
+      AiGovernanceStore.globalSearchPolicyKey,
+      'ask',
+    );
+    await db.appSettingsBox.put(
+      AiGovernanceStore.conversationSearchPoliciesKey,
+      {'group-1': 'auto'},
+    );
 
     final backup = File('${root.path}/search.cgbak');
     final service = BackupRestoreService(
@@ -73,6 +87,15 @@ void main() {
     expect(restoredMetadata['legacyApiKey'], isNull);
     expect(restoredMetadata['baseUrl'], 'https://api.example.com/v1');
     expect(restoredMetadata['credentialRequired'], isTrue);
+    expect(
+      settings[SearchProviderConfigStore.runtimeSettingsKey]['locale'],
+      'en-US',
+    );
+    expect(settings[AiGovernanceStore.globalSearchPolicyKey], 'ask');
+    expect(
+      settings[AiGovernanceStore.conversationSearchPoliciesKey]['group-1'],
+      'auto',
+    );
     expect(utf8.decode(settingsFile.content), isNot(contains(secret)));
 
     await closeLifecycleHive(hiveDirectory);
@@ -97,7 +120,22 @@ void main() {
     final restoredConfig = Map<String, dynamic>.from(restored.single as Map);
     expect(restoredConfig['credentialId'], '');
     expect(restoredConfig['hasCredential'], isFalse);
+    expect(restoredConfig['credentialRequired'], isTrue);
+    expect(restoredConfig['requiresAttention'], isTrue);
     expect(restoredConfig, isNot(contains('legacyApiKey')));
+    expect(
+      db.appSettingsBox.get(SearchProviderConfigStore.runtimeSettingsKey),
+      containsPair('locale', 'en-US'),
+    );
+    expect(
+      db.appSettingsBox.get(AiGovernanceStore.globalSearchPolicyKey),
+      'ask',
+    );
+    expect(
+      db.appSettingsBox
+          .get(AiGovernanceStore.conversationSearchPoliciesKey)['group-1'],
+      'auto',
+    );
   });
 
   test('copy restore remaps search config IDs instead of duplicating them',
@@ -166,5 +204,26 @@ void main() {
     final imported = restored.singleWhere((item) => item['name'] == 'Source');
     expect(imported['credentialId'], '');
     expect(imported['hasCredential'], isFalse);
+  });
+
+  test('release merge normalization removes development Hive credentials', () {
+    final normalized = SearchProviderConfigStore.normalizeExistingValue(
+      const [
+        {
+          'id': 'search-1',
+          'name': 'Brave',
+          'provider': 'brave',
+          'baseUrl': 'https://api.example.com',
+          'credentialId': 'development-hive-web-search',
+          'hasCredential': true,
+          'legacyApiKey': 'debug-secret',
+        },
+      ],
+      isRelease: true,
+    );
+
+    expect(normalized.single['credentialId'], '');
+    expect(normalized.single['hasCredential'], isFalse);
+    expect(normalized.single, isNot(contains('legacyApiKey')));
   });
 }

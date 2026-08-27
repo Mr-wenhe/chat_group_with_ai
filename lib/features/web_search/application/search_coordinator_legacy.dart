@@ -1,8 +1,11 @@
 part of 'search_coordinator.dart';
 
-/// Backward-compatible facade used by the current chat room.
-extension SearchCoordinatorLegacyFacade on SearchCoordinator {
-  Future<legacy.WebSearchSnapshot?> searchIfAllowed({
+/// Compatibility entry point for message-origin search orchestration.
+///
+/// It preserves the former call shape while returning the normalized V2
+/// snapshot, so callers never need the retired pre-V2 result model.
+extension SearchCoordinatorMessageSearchFacade on SearchCoordinator {
+  Future<domain.WebSearchSnapshot?> searchIfAllowed({
     required String? text,
     required String conversationId,
     required SearchConsent requestConsent,
@@ -75,12 +78,7 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
         conversationId: conversationId,
         onStatus: onStatus,
       );
-      return _toLegacySearchSnapshot(
-        blockedSnapshot,
-        localRequest.query,
-        sourceMessageId: localRequest.sourceMessageId,
-        turnId: localRequest.turnId,
-      );
+      return blockedSnapshot;
     }
     if (localRequest.isSensitive && effective == WebSearchPolicy.auto) {
       return _runSensitiveSearch(
@@ -89,24 +87,52 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
         requestConsent: requestConsent,
         onStatus: onStatus,
         cancelToken: cancelToken,
+        deadline: _clock().add(endToEndBudget),
       );
     }
     if (sanitized.text.isEmpty) return null;
-    if (service == null && _routes.isEmpty) return null;
+    // Keep an unsupported runtime explicit. Returning null here used to make
+    // a Web search look like an ordinary non-search turn, so the user
+    // received no failure state or audit entry even though search was asked
+    // for. The core coordinator records the invalid configuration without
+    // invoking the optional planner or a Provider.
+    if (_routes.isEmpty) {
+      return search(
+        request: localRequest,
+        conversationId: conversationId,
+        requestConsent: requestConsent,
+        onStatus: onStatus,
+        cancelToken: cancelToken,
+        // No route can perform an outbound request, so an ask-mode consent
+        // dialog would only mislabel a configuration failure as user denial.
+        consentAlreadyGranted: true,
+      );
+    }
 
     final localPlan = _localPlan(decision);
-    // Ask mode must gate the local, sanitized preview before any optional
-    // Planner request. Planner refinement is a post-consent optimization.
+    // The optional Planner is itself an outbound recipient. Ask mode first
+    // authorizes that bounded, sanitized request. The final Provider query is
+    // confirmed separately after planning so the displayed text always equals
+    // the text that will actually leave the app.
+    final plannerWillRun =
+        queryPlanner != null && !decision.mayContainSensitiveData;
     if (effective == WebSearchPolicy.ask &&
+        plannerWillRun &&
         !await _passPolicyGate(
           request: localRequest,
           policy: effective,
           requestConsent: requestConsent,
           conversationId: conversationId,
           onStatus: onStatus,
+          providerOverride: queryPlanner!.disclosureName,
         )) {
       return null;
     }
+
+    // Planner and Provider share one wall-clock deadline. Start it after the
+    // optional Planner consent dialog so waiting for an explicit user decision
+    // does not consume the network latency budget.
+    var deadline = _clock().add(endToEndBudget);
 
     final plan = queryPlanner == null
         ? localPlan
@@ -114,6 +140,8 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
             userMessage: sanitized.text,
             decision: decision,
             minimalContext: minimalContext,
+            cancelToken: cancelToken,
+            deadline: deadline,
           );
     if (plan.blocked) {
       final blockedRequest = localRequest.copyWith(isSensitive: true);
@@ -122,12 +150,7 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
         conversationId: conversationId,
         onStatus: onStatus,
       );
-      return _toLegacySearchSnapshot(
-        blockedSnapshot,
-        blockedRequest.query,
-        sourceMessageId: blockedRequest.sourceMessageId,
-        turnId: blockedRequest.turnId,
-      );
+      return blockedSnapshot;
     }
     final primaryRequest = _plannedRequest(
       localRequest: localRequest,
@@ -136,17 +159,21 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
       fallbackLocale: locale,
     );
     if (primaryRequest == null) return null;
-    if (effective != WebSearchPolicy.ask &&
-        !await _passPolicyGate(
-          request: primaryRequest,
-          policy: effective,
-          requestConsent: requestConsent,
-          conversationId: conversationId,
-          onStatus: onStatus,
-        )) {
+    final providerConsentStartedAt = _clock();
+    if (!await _passPolicyGate(
+      request: primaryRequest,
+      policy: effective,
+      requestConsent: requestConsent,
+      conversationId: conversationId,
+      onStatus: onStatus,
+    )) {
       return null;
     }
-
+    if (effective == WebSearchPolicy.ask) {
+      // The final Provider query is a separate disclosure boundary. Keep the
+      // user decision outside the shared Planner/Provider wall-clock budget.
+      deadline = deadline.add(_positiveElapsed(providerConsentStartedAt));
+    }
     final primary = await search(
       request: primaryRequest,
       conversationId: conversationId,
@@ -154,6 +181,7 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
       onStatus: onStatus,
       cancelToken: cancelToken,
       consentAlreadyGranted: effective == WebSearchPolicy.ask,
+      deadline: deadline,
     );
     if (primary == null) return null;
 
@@ -174,24 +202,21 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
         // In ask mode the fallback query is a new outbound value. Re-run the
         // consent gate so the user can approve the exact second request.
         consentAlreadyGranted: effective != WebSearchPolicy.ask,
+        deadline: deadline,
       );
       if (retry != null) return retry;
     }
 
-    return _toLegacySearchSnapshot(
-      primary,
-      primaryRequest.query,
-      sourceMessageId: primaryRequest.sourceMessageId,
-      turnId: primaryRequest.turnId,
-    );
+    return primary;
   }
 
-  Future<legacy.WebSearchSnapshot?> _runSensitiveSearch({
+  Future<domain.WebSearchSnapshot?> _runSensitiveSearch({
     required domain.SearchRequest request,
     required String conversationId,
     required SearchConsent requestConsent,
     required SearchStatusListener? onStatus,
     required CancelToken? cancelToken,
+    required DateTime deadline,
   }) async {
     final snapshot = await search(
       request: request,
@@ -200,18 +225,12 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
       onStatus: onStatus,
       cancelToken: cancelToken,
       consentAlreadyGranted: true,
+      deadline: deadline,
     );
-    return snapshot == null
-        ? null
-        : _toLegacySearchSnapshot(
-            snapshot,
-            request.query,
-            sourceMessageId: request.sourceMessageId,
-            turnId: request.turnId,
-          );
+    return snapshot;
   }
 
-  Future<legacy.WebSearchSnapshot?> _runFallbackSearch({
+  Future<domain.WebSearchSnapshot?> _runFallbackSearch({
     required domain.SearchRequest request,
     required String fallback,
     required Iterable<String> executedQueries,
@@ -220,6 +239,7 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
     required SearchStatusListener? onStatus,
     required CancelToken? cancelToken,
     required bool consentAlreadyGranted,
+    required DateTime deadline,
   }) async {
     final fallbackRequest = _requestFor(
       query: fallback,
@@ -242,18 +262,14 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
       onStatus: onStatus,
       cancelToken: cancelToken,
       consentAlreadyGranted: consentAlreadyGranted,
+      deadline: deadline,
     );
     if (retry == null) return null;
     final combinedQueries = <String>{
       ...executedQueries,
       ...retry.executedQueries,
     }.toList(growable: false);
-    return _toLegacySearchSnapshot(
-      retry.copyWith(executedQueries: combinedQueries),
-      fallback,
-      sourceMessageId: fallbackRequest.sourceMessageId,
-      turnId: fallbackRequest.turnId,
-    );
+    return retry.copyWith(executedQueries: combinedQueries);
   }
 
   domain.SearchRequest? _plannedRequest({
@@ -325,7 +341,7 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
     domain.SearchCategory requested,
     SearchIntentDecision decision,
   ) {
-    if (_routes.isEmpty || requested != domain.SearchCategory.general) {
+    if (requested != domain.SearchCategory.general) {
       return requested;
     }
     return decision.category;
@@ -335,7 +351,7 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
     domain.SearchFreshness requested,
     SearchIntentDecision decision,
   ) {
-    if (_routes.isEmpty || requested != domain.SearchFreshness.any) {
+    if (requested != domain.SearchFreshness.any) {
       return requested;
     }
     return decision.freshness;
@@ -386,15 +402,4 @@ extension SearchCoordinatorLegacyFacade on SearchCoordinator {
     if (normalized == 'en' || normalized.startsWith('en-')) return 'en-US';
     return fallback;
   }
-
-  legacy.WebSearchSnapshot _toLegacySearchSnapshot(
-    domain.WebSearchSnapshot snapshot,
-    String query, {
-    required String sourceMessageId,
-    required String turnId,
-  }) =>
-      _support.toLegacySnapshot(query, snapshot).copyWith(
-            sourceMessageId: sourceMessageId,
-            turnId: turnId,
-          );
 }

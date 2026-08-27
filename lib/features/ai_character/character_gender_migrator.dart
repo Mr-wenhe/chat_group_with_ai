@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:chat_group/core/database/database_mutation_gate.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
@@ -38,11 +39,14 @@ class CharacterGenderMigrator {
   final _sessionReport = CharacterGenderMigrationReport();
   final _sessionSavedCharacterIds = <String>{};
   Completer<void>? _llmCancellation;
+  Completer<void>? _migrationCompletion;
   List<AICharacter> _sessionCharacters = const [];
   Map<String, List<String>> _sessionReplies = const {};
   CharacterGenderMigrationState? _sessionState;
   bool _sessionCandidateIdsKnown = false;
   bool _remoteInferenceCancelled = false;
+  bool _lateWritesFenced = false;
+  late int _migrationEpoch;
   late final CharacterGenderLlmInference _llmInference;
 
   CharacterGenderMigrator(
@@ -69,17 +73,44 @@ class CharacterGenderMigrator {
     _llmInference.cancel();
   }
 
+  /// Stops a timed-out local fallback from writing after startup has moved on.
+  /// The write currently holding the shared gate is allowed to finish; later
+  /// writes fail with [StaleMigrationWrite] and are retried next run.
+  void fencePendingWrites() {
+    _lateWritesFenced = true;
+    try {
+      _mutationGate.invalidate();
+    } on Object {
+      // The boolean fence remains effective when recovery has closed both
+      // candidate boxes.
+    }
+  }
+
+  /// Completes when a cancelled migration has finished its local fallback.
+  ///
+  /// Custom migrators used by tests or embedders may override [migrate]
+  /// without participating in this signal; in that case there is no local
+  /// drain to wait for and the returned future is already complete.
+  Future<void> waitForCancellationDrain() =>
+      _migrationCompletion?.future ?? Future<void>.value();
+
   Future<int> migrate() async {
+    final completion = Completer<void>();
+    _migrationCompletion = completion;
     _resetSession();
+    _migrationEpoch = _mutationGate.epoch;
     try {
       _sessionCharacters = db.aiCharacterBox.values.toList(growable: false);
       _sessionReplies = _readRepliesSafely(_sessionCharacters);
       return await _migrateSafely(_sessionCharacters, _sessionReplies);
+    } on StaleMigrationWrite {
+      // A lifecycle operation or the startup timeout superseded this
+      // snapshot. Do not apply a second fallback to records the user may
+      // already have deleted or restored.
+      return 0;
     } on Object {
       final fallback = await _applySessionFallback();
-      await writeCharacterGenderDiagnosticSafely(
-        db,
-        diagnosticKey: diagnosticKey,
+      await _writeDiagnostic(
         status: _reportStatus(fallback),
         characterCount: _sessionCharacterCount,
         remoteResolved: fallback.remoteResolved,
@@ -96,6 +127,10 @@ class CharacterGenderMigrator {
       return 0;
     } finally {
       _llmCancellation = null;
+      if (identical(_migrationCompletion, completion)) {
+        _migrationCompletion = null;
+      }
+      if (!completion.isCompleted) completion.complete();
     }
   }
 
@@ -155,9 +190,7 @@ class CharacterGenderMigrator {
     if (report.localFallback > 0 && reasons.isEmpty) {
       reasons.add('local_fallback');
     }
-    await writeCharacterGenderDiagnosticSafely(
-      db,
-      diagnosticKey: diagnosticKey,
+    await _writeDiagnostic(
       status: _reportStatus(report),
       characterCount: state.candidateIds.length,
       remoteResolved: report.remoteResolved,
@@ -176,10 +209,10 @@ class CharacterGenderMigrator {
       };
 
   Future<int> _completeEmptyMigration() async {
-    await db.appSettingsBox.put(migrationKey, true);
-    await writeCharacterGenderDiagnosticSafely(
-      db,
-      diagnosticKey: diagnosticKey,
+    await _runMigrationMutation(
+      () => db.appSettingsBox.put(migrationKey, true),
+    );
+    await _writeDiagnostic(
       status: 'completed',
       characterCount: 0,
     );
@@ -200,7 +233,9 @@ class CharacterGenderMigrator {
         },
       ),
     );
-    await db.appSettingsBox.put(migrationKey, false);
+    await _runMigrationMutation(
+      () => db.appSettingsBox.put(migrationKey, false),
+    );
   }
 
   Future<CharacterGenderMigrationState> _prepareState(
@@ -242,9 +277,7 @@ class CharacterGenderMigrator {
     CharacterGenderMigrationState state,
   ) async {
     await _completeMigration();
-    await writeCharacterGenderDiagnosticSafely(
-      db,
-      diagnosticKey: diagnosticKey,
+    await _writeDiagnostic(
       status: 'completed',
       characterCount: state.candidateIds.length,
     );
@@ -279,6 +312,8 @@ class CharacterGenderMigrator {
       CharacterGenderDecisionPersistenceResult result;
       try {
         result = await _persistDecision(state, character, gender);
+      } on StaleMigrationWrite {
+        rethrow;
       } on Object {
         result = (
           characterSaved: false,
@@ -314,6 +349,8 @@ class CharacterGenderMigrator {
     state.decisions[character.id] = gender;
     try {
       await _writeState(state);
+    } on StaleMigrationWrite {
+      rethrow;
     } on Object {
       return (
         characterSaved: false,
@@ -324,6 +361,8 @@ class CharacterGenderMigrator {
     final resolvedCharacter = character.withGender(gender);
     try {
       await _saveCharacter(resolvedCharacter);
+    } on StaleMigrationWrite {
+      rethrow;
     } on Object {
       return (
         characterSaved: false,
@@ -336,6 +375,8 @@ class CharacterGenderMigrator {
     state.decisions.remove(character.id);
     try {
       await _writeState(state);
+    } on StaleMigrationWrite {
+      rethrow;
     } on Object {
       // The character is already durable; only the progress retry is needed.
       return (
@@ -351,9 +392,11 @@ class CharacterGenderMigrator {
     );
   }
 
-  Future<void> _saveCharacter(AICharacter character) =>
-      saveCharacter?.call(character) ??
-      db.aiCharacterBox.put(character.id, character);
+  Future<void> _saveCharacter(AICharacter character) => _runMigrationMutation(
+        () =>
+            saveCharacter?.call(character) ??
+            db.aiCharacterBox.put(character.id, character),
+      );
 
   Future<CharacterGenderMigrationState> _loadOrCreateState(
     Set<String> characterIds,
@@ -370,12 +413,61 @@ class CharacterGenderMigrator {
   }
 
   Future<void> _writeState(CharacterGenderMigrationState state) =>
-      db.appSettingsBox.put(stateKey, state.toMap());
+      _runMigrationMutation(
+        () => db.appSettingsBox.put(stateKey, state.toMap()),
+      );
 
   Future<void> _completeMigration() async {
-    await db.appSettingsBox.put(migrationKey, true);
-    await db.appSettingsBox.delete(stateKey);
+    await _runMigrationMutation(() async {
+      await db.appSettingsBox.put(migrationKey, true);
+      await db.appSettingsBox.delete(stateKey);
+    });
   }
+
+  DatabaseMutationGate get _mutationGate {
+    try {
+      return DatabaseMutationGate.forBox(db.appSettingsBox);
+    } on Object {
+      // Some recovery paths intentionally close app_settings to exercise the
+      // character fallback. Keep the character write fenced even there.
+      return DatabaseMutationGate.forBox(db.aiCharacterBox);
+    }
+  }
+
+  Future<T> _runMigrationMutation<T>(Future<T> Function() operation) =>
+      _mutationGate.run(() async {
+        if (_lateWritesFenced || !_mutationGate.isCurrent(_migrationEpoch)) {
+          throw const StaleMigrationWrite();
+        }
+        return operation();
+      });
+
+  Future<void> _writeDiagnostic({
+    required String status,
+    required int characterCount,
+    int remoteResolved = 0,
+    int localFallback = 0,
+    int saved = 0,
+    int saveFailures = 0,
+    int stateSaveFailures = 0,
+    int batches = 0,
+    Iterable<String> reasonCodes = const [],
+  }) =>
+      _runMigrationMutation(
+        () => writeCharacterGenderDiagnosticSafely(
+          db,
+          diagnosticKey: diagnosticKey,
+          status: status,
+          characterCount: characterCount,
+          remoteResolved: remoteResolved,
+          localFallback: localFallback,
+          saved: saved,
+          saveFailures: saveFailures,
+          stateSaveFailures: stateSaveFailures,
+          batches: batches,
+          reasonCodes: reasonCodes,
+        ),
+      );
 
   Future<CharacterGenderLlmInferenceReport> _inferWithLlm(
     List<AICharacter> characters,
@@ -391,23 +483,15 @@ class CharacterGenderMigrator {
   }
 
   static List<Map<String, dynamic>> buildInferenceEntries(
-    List<AICharacter> characters,
-    Iterable<Message> messages,
-  ) =>
+          List<AICharacter> characters, Iterable<Message> messages) =>
       CharacterGenderInference.buildInferenceEntries(characters, messages);
 
-  static Map<String, CharacterGender> parseLlmResult(
-    String raw, {
-    required Set<String> knownCharacterIds,
-  }) =>
-      CharacterGenderInference.parseLlmResult(
-        raw,
-        knownCharacterIds: knownCharacterIds,
-      );
+  static Map<String, CharacterGender> parseLlmResult(String raw,
+          {required Set<String> knownCharacterIds}) =>
+      CharacterGenderInference.parseLlmResult(raw,
+          knownCharacterIds: knownCharacterIds);
 
   static CharacterGender inferLocally(
-    AICharacter character,
-    List<String> replies,
-  ) =>
+          AICharacter character, List<String> replies) =>
       CharacterGenderInference.inferLocally(character, replies);
 }

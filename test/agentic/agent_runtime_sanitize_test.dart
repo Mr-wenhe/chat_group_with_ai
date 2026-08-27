@@ -44,8 +44,7 @@ void main() {
       expect(result.message, '这是正常的聊天回复。');
     });
 
-    test('含 XML 工具标记（未知工具）无法解析时返回简洁兜底而非泄漏原始文本',
-        () async {
+    test('含 XML 工具标记（未知工具）无法解析时返回简洁兜底而非泄漏原始文本', () async {
       final result = await runWith(
         '请稍候。<tool_call agent_tool {"tool":"unknown.tool"} </tool_call>好的。',
       );

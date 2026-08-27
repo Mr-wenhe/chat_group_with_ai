@@ -1,14 +1,53 @@
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
+import 'package:chat_group/features/backup/backup_entity_codec.dart';
 import 'package:chat_group/features/web_search/application/search_coordinator.dart';
 import 'package:chat_group/features/web_search/application/search_turn_context.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/providers/search_provider.dart';
+import 'package:chat_group/core/models/message.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers/memory_governance_store.dart';
 
 void main() {
+  test('reply message preserves its search snapshot for restart recovery', () {
+    final dynamic snapshot = WebSearchSnapshot(
+      requestId: 'request-1',
+      rootRequestId: 'user-message-1',
+      executedQueries: const ['Flutter latest release'],
+      searchedAt: DateTime.utc(2026, 8, 24),
+      provider: 'Brave',
+      results: [
+        WebSearchResult(
+          sourceId: 'S1',
+          title: 'Flutter release notes',
+          snippet: 'Official notes',
+          url: Uri.parse('https://docs.flutter.dev/release/notes'),
+          provider: 'Brave',
+        ),
+      ],
+    );
+    final dynamic message = Message(
+      id: 'ai-message-1',
+      groupId: 'group-1',
+      senderId: 'character-1',
+      senderType: 'ai',
+      content: 'See [S1].',
+    );
+
+    message.webSearchSnapshot = snapshot.toMap();
+    final encoded = BackupEntityCodec.message(message, const []);
+    final decoded = BackupEntityCodec.decodeMessage(encoded, (_) => '');
+    final restored = WebSearchSnapshot.fromMap(
+      Map<dynamic, dynamic>.from(decoded.webSearchSnapshot as Map),
+    );
+
+    expect(restored?.rootRequestId, 'user-message-1');
+    expect(restored?.results.single.url,
+        Uri.parse('https://docs.flutter.dev/release/notes'));
+  });
+
   test('one user turn shares one snapshot across two AI replies', () async {
     final provider = _CountingProvider();
     final coordinator = _coordinator(provider);
@@ -26,8 +65,7 @@ void main() {
 
     expect(provider.searchCount, 1);
     expect(provider.requests.single.sourceMessageId, 'user-message-1');
-    expect(turn.snapshot?.sourceMessageId, 'user-message-1');
-    expect(turn.snapshot?.turnId, 'user-message-1');
+    expect(turn.snapshot?.rootRequestId, 'user-message-1');
     expect(controller.contextForReply('ai-message-1')?.snapshot,
         same(turn.snapshot));
     expect(controller.contextForReply('ai-message-2')?.snapshot,
@@ -184,6 +222,44 @@ void main() {
       ),
       'result-2',
     );
+  });
+
+  test('turn context controller bounds retained turn and reply associations',
+      () async {
+    final provider = _CountingProvider();
+    final controller = SearchTurnContextController(
+      coordinator: _coordinator(provider),
+      maxTurns: 2,
+      maxReplyContexts: 2,
+    );
+
+    final contexts = <SearchTurnContext>[];
+    for (var index = 0; index < 3; index++) {
+      final context = await controller.prepareUserTurn(
+        conversationId: 'group-1',
+        sourceMessageId: 'turn-$index',
+        turnId: 'turn-$index',
+        userMessage: '查一下 Flutter $index',
+        requestConsent: (_) async => true,
+      );
+      contexts.add(context);
+      controller.bindReply('reply-$index', context);
+    }
+
+    expect(
+        controller.contextForTurn(
+          conversationId: 'group-1',
+          sourceMessageId: 'turn-0',
+        ),
+        isNull);
+    expect(
+        controller.contextForTurn(
+          conversationId: 'group-1',
+          sourceMessageId: 'turn-2',
+        ),
+        same(contexts.last));
+    expect(controller.contextForReply('reply-0'), isNull);
+    expect(controller.contextForReply('reply-2'), same(contexts.last));
   });
 }
 

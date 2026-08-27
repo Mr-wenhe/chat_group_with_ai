@@ -1,5 +1,3 @@
-import 'package:chat_group/services/web_search_service.dart' as legacy;
-
 import '../models/search_models.dart' as domain;
 
 enum SearchRunStatus {
@@ -33,25 +31,26 @@ extension SearchRunStatusExt on SearchRunStatus {
 
 class SearchRunState {
   final SearchRunStatus status;
+  final String requestId;
+  final String rootRequestId;
   final String query;
   final String provider;
   final int retryNumber;
   final Duration? retryDelay;
-  final legacy.WebSearchSnapshot? snapshot;
-  final domain.WebSearchSnapshot? domainSnapshot;
+  final domain.WebSearchSnapshot? snapshot;
 
   const SearchRunState(
     this.status, {
+    this.requestId = '',
+    this.rootRequestId = '',
     this.query = '',
     this.provider = '',
     this.retryNumber = 0,
     this.retryDelay,
     this.snapshot,
-    this.domainSnapshot,
   });
 
-  bool get fromCache =>
-      snapshot?.fromCache ?? domainSnapshot?.fromCache ?? false;
+  bool get fromCache => snapshot?.fromCache ?? false;
 }
 
 typedef SearchConsent = Future<bool> Function(String query);

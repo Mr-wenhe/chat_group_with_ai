@@ -1,9 +1,8 @@
 import 'dart:convert';
 
-import 'package:chat_group/services/web_search_service.dart' as legacy;
-
 import '../models/search_models.dart' as domain;
 import '../security/search_query_sanitizer.dart';
+import '../security/search_secret_scanner.dart';
 import 'search_prompts.dart';
 
 class SearchContextBundle {
@@ -89,78 +88,14 @@ class SearchContextFormatter {
     );
   }
 
-  SearchContextBundle formatLegacy(legacy.WebSearchSnapshot snapshot) {
-    if (snapshot.hasFailure) {
-      return SearchContextBundle(
-        evidenceJson: _emptyLegacyEvidenceJson(snapshot),
-        prompt: SearchPrompts.buildFailurePrompt(
-          failureType: snapshot.failureType?.name ?? 'unknown',
-          searchedAt: snapshot.searchedAt,
-        ),
-        sourceIds: const [],
-      );
-    }
-    if (!snapshot.hasResults) {
-      return SearchContextBundle(
-        evidenceJson: _emptyLegacyEvidenceJson(snapshot),
-        prompt: SearchPrompts.buildNoResultsPrompt(
-          safeQueryPreview: _queryPreview(
-            snapshot.executedQueries.isEmpty
-                ? [snapshot.query]
-                : snapshot.executedQueries,
-          ),
-          searchedAt: snapshot.searchedAt,
-        ),
-        sourceIds: const [],
-      );
-    }
-
-    final evidence = _fitEvidence(
-      searchedAt: snapshot.searchedAt,
-      queries: snapshot.executedQueries.isEmpty
-          ? [snapshot.query]
-          : snapshot.executedQueries,
-      provider: snapshot.provider,
-      results: snapshot.results
-          .map(
-            (result) => _EvidenceResult(
-              title: result.title,
-              url: result.url,
-              publishedAt: result.publishedAt,
-              snippet: result.snippet,
-              displayHost: Uri.tryParse(result.url)?.host ?? '',
-            ),
-          )
-          .toList(growable: false),
-    );
-    return SearchContextBundle(
-      evidenceJson: evidence.json,
-      prompt: _promptWithEvidence(evidence.json),
-      sourceIds: evidence.sourceIds,
-    );
-  }
-
   String formatEvidenceJson(domain.WebSearchSnapshot snapshot) =>
       format(snapshot).evidenceJson;
-
-  String formatLegacyEvidenceJson(legacy.WebSearchSnapshot snapshot) =>
-      formatLegacy(snapshot).evidenceJson;
 
   String formatPrompt(domain.WebSearchSnapshot snapshot) =>
       format(snapshot).prompt;
 
-  String formatLegacyPrompt(legacy.WebSearchSnapshot snapshot) =>
-      formatLegacy(snapshot).prompt;
-
   List<Map<String, dynamic>> formatMessages(domain.WebSearchSnapshot snapshot) {
     final bundle = format(snapshot);
-    return _messagesFor(bundle);
-  }
-
-  List<Map<String, dynamic>> formatLegacyMessages(
-    legacy.WebSearchSnapshot snapshot,
-  ) {
-    final bundle = formatLegacy(snapshot);
     return _messagesFor(bundle);
   }
 
@@ -169,12 +104,6 @@ class SearchContextFormatter {
     domain.WebSearchSnapshot snapshot,
   ) =>
       _sanitizeCitations(answer, format(snapshot).sourceIds.toSet());
-
-  String sanitizeLegacyCitations(
-    String answer,
-    legacy.WebSearchSnapshot snapshot,
-  ) =>
-      _sanitizeCitations(answer, formatLegacy(snapshot).sourceIds.toSet());
 
   /// Removes citation markers when no snapshot can authorize them.
   ///
@@ -197,7 +126,9 @@ class SearchContextFormatter {
       // cannot become part of the rule text.
       {'role': 'system', 'content': SearchPrompts.promptD},
       {
-        'role': 'system',
+        // Search results are untrusted evidence, not instructions. A user-role
+        // block keeps provider text from inheriting system authority.
+        'role': 'user',
         'content': 'WEB_SEARCH_EVIDENCE_DATA_BEGIN\n'
             '${bundle.evidenceJson}\n'
             'WEB_SEARCH_EVIDENCE_DATA_END',
@@ -329,15 +260,6 @@ class SearchContextFormatter {
         provider: snapshot.provider,
       ).json;
 
-  String _emptyLegacyEvidenceJson(legacy.WebSearchSnapshot snapshot) =>
-      _boundedEmptyEvidence(
-        searchedAt: snapshot.searchedAt,
-        queries: snapshot.executedQueries.isEmpty
-            ? [snapshot.query]
-            : snapshot.executedQueries,
-        provider: snapshot.provider,
-      ).json;
-
   _FittedEvidence _boundedEmptyEvidence({
     required DateTime searchedAt,
     required Iterable<String> queries,
@@ -378,15 +300,14 @@ class SearchContextFormatter {
         .replaceAll(RegExp(r'[\u0000-\u001F\u007F]'), ' ')
         .replaceAll(RegExp(r'\s+'), ' ')
         .trim();
-    if (normalized.length <= maxLength) return normalized;
-    return normalized.substring(0, maxLength).trimRight();
+    final secretSafe = const SearchSecretScanner().redact(normalized);
+    if (secretSafe.length <= maxLength) return secretSafe;
+    return secretSafe.substring(0, maxLength).trimRight();
   }
 
   static String _sanitizeCitations(String answer, Set<String> allowed) {
-    final allowedIds = allowed
-        .map(_canonicalCitationId)
-        .where((id) => id.isNotEmpty)
-        .toSet();
+    final allowedIds =
+        allowed.map(_canonicalCitationId).where((id) => id.isNotEmpty).toSet();
     return answer.replaceAllMapped(_citationCandidatePattern, (match) {
       final raw = match.group(0)!;
       final candidate = raw.substring(1, raw.length - 1).trim();
@@ -401,11 +322,12 @@ class SearchContextFormatter {
       return '';
     }
     final suffix = normalized.substring(1);
-    if (!RegExp(r'^[A-Za-z0-9_-]+$').hasMatch(suffix)) return '';
+    if (!RegExp(r'^\d+$').hasMatch(suffix)) return '';
     return 'S$suffix';
   }
 
-  static final _citationCandidatePattern = RegExp(r'\[\s*[sS][^\]]*\]');
+  static final _citationCandidatePattern =
+      RegExp(r'\[\s*[sS](?:\d+|\s[^\]]*)?\s*\]');
 }
 
 class _EvidenceResult {
