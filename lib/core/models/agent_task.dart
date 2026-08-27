@@ -21,6 +21,12 @@ enum AgentTaskStatus {
   cancelled,
   @HiveField(6)
   partiallyCompleted,
+  @HiveField(7)
+  queued,
+  @HiveField(8)
+  paused,
+  @HiveField(9)
+  interrupted,
 }
 
 @HiveType(typeId: 13)
@@ -70,6 +76,44 @@ class AgentTask extends HiveObject {
   @HiveField(14, defaultValue: false)
   final bool workModeTask;
 
+  @HiveField(15, defaultValue: <String>[])
+  List<String> queuedUserRequests;
+
+  @HiveField(16, defaultValue: '')
+  String contextSummary;
+
+  @HiveField(17, defaultValue: <String>[])
+  List<String> assignedCharacterIds;
+
+  @HiveField(18)
+  DateTime? startedAt;
+
+  @HiveField(19, defaultValue: 0)
+  int actionCount;
+
+  @HiveField(20, defaultValue: false)
+  bool softLimitReached;
+
+  @HiveField(21, defaultValue: false)
+  bool resumeRequired;
+
+  @HiveField(22, defaultValue: '')
+  String executionStateJson;
+
+  @HiveField(23, defaultValue: <String>[])
+  List<String> lastArtifactPaths;
+
+  @HiveField(24, defaultValue: defaultActionLimit)
+  int actionLimit;
+
+  @HiveField(25, defaultValue: defaultSoftTimeLimitMinutes)
+  int softTimeLimitMinutes;
+
+  static const int defaultActionLimit = 100;
+  static const int defaultSoftTimeLimitMinutes = 60;
+  static const Duration defaultSoftTimeLimit =
+      Duration(minutes: defaultSoftTimeLimitMinutes);
+
   AgentTask({
     String? id,
     required this.groupId,
@@ -86,9 +130,28 @@ class AgentTask extends HiveObject {
     DateTime? updatedAt,
     this.lastError = '',
     this.workModeTask = false,
+    List<String>? queuedUserRequests,
+    this.contextSummary = '',
+    List<String>? assignedCharacterIds,
+    this.startedAt,
+    this.actionCount = 0,
+    this.softLimitReached = false,
+    this.resumeRequired = false,
+    this.executionStateJson = '',
+    List<String>? lastArtifactPaths,
+    this.actionLimit = defaultActionLimit,
+    this.softTimeLimitMinutes = defaultSoftTimeLimitMinutes,
   })  : id = id ?? const Uuid().v4(),
-        requestedPermissions = requestedPermissions ?? const [],
-        completedOperations = completedOperations ?? [],
+        requestedPermissions = List<ToolPermission>.from(
+          requestedPermissions ?? const [],
+        ),
+        completedOperations =
+            List<String>.from(completedOperations ?? const []),
+        queuedUserRequests = List<String>.from(queuedUserRequests ?? const []),
+        assignedCharacterIds = List<String>.from(
+          assignedCharacterIds ?? const [],
+        ),
+        lastArtifactPaths = List<String>.from(lastArtifactPaths ?? const []),
         createdAt = createdAt ?? DateTime.now(),
         updatedAt = updatedAt ?? DateTime.now();
 
@@ -97,6 +160,11 @@ class AgentTask extends HiveObject {
       status != AgentTaskStatus.cancelled;
 
   bool get canResumeInWorkMode => workModeTask && canResume;
+
+  bool get requiresUserResume =>
+      status == AgentTaskStatus.interrupted && resumeRequired;
+
+  Duration get softTimeLimit => Duration(minutes: softTimeLimitMinutes);
 
   /// 非持久化派生：任务是否已处于任一终态（成功 / 失败 / 取消 / 部分完成）。
   /// 仅供 UI 生命周期判断，不写入 Hive。
@@ -115,6 +183,8 @@ class AgentTask extends HiveObject {
     currentStep = step;
     completedOperations = List<String>.from(operations);
     pendingToolRequestJson = pendingToolJson;
+    startedAt ??= DateTime.now();
+    resumeRequired = false;
     status = pendingToolJson.isEmpty
         ? AgentTaskStatus.runningTool
         : AgentTaskStatus.waitingForApproval;
@@ -125,6 +195,14 @@ class AgentTask extends HiveObject {
     status = AgentTaskStatus.partiallyCompleted;
     lastError = error;
     resultSummary = '已完成 ${completedOperations.length} 个工具操作；$error';
+    updatedAt = DateTime.now();
+  }
+
+  void markInterrupted({required String reason}) {
+    if (isTerminal || status == AgentTaskStatus.paused) return;
+    status = AgentTaskStatus.interrupted;
+    resumeRequired = true;
+    lastError = reason;
     updatedAt = DateTime.now();
   }
 }

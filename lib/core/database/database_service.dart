@@ -29,6 +29,7 @@ import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_event.dart';
+import 'package:chat_group/features/work_mode/work_mode_v1_migrator.dart';
 
 /// Indicates that an existing Hive box could not be opened safely.
 ///
@@ -213,6 +214,13 @@ class DatabaseService {
     await _openBoxSafely<PermanentMemory>(_permanentMemoryBox);
     await _openBoxSafely<RelationshipEvent>(_relationshipEventBox);
     await _migrateApiConfigCredentials();
+    final workModeMigrator = WorkModeV1Migrator(
+      taskBox: agentTaskBox,
+      workspaceBox: workModeWorkspaceBox,
+      appSettingsBox: appSettingsBox,
+    );
+    await workModeMigrator.migrate();
+    await workModeMigrator.markInFlightWorkTasksInterrupted();
   }
 
   /// Never clears a legacy value until the new secure entry can be read back.

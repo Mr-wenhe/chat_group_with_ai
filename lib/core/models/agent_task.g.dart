@@ -33,13 +33,27 @@ class AgentTaskAdapter extends TypeAdapter<AgentTask> {
       updatedAt: fields[12] as DateTime?,
       lastError: fields[13] == null ? '' : fields[13] as String,
       workModeTask: fields[14] == null ? false : fields[14] as bool,
+      queuedUserRequests:
+          fields[15] == null ? [] : (fields[15] as List?)?.cast<String>(),
+      contextSummary: fields[16] == null ? '' : fields[16] as String,
+      assignedCharacterIds:
+          fields[17] == null ? [] : (fields[17] as List?)?.cast<String>(),
+      startedAt: fields[18] as DateTime?,
+      actionCount: fields[19] == null ? 0 : fields[19] as int,
+      softLimitReached: fields[20] == null ? false : fields[20] as bool,
+      resumeRequired: fields[21] == null ? false : fields[21] as bool,
+      executionStateJson: fields[22] == null ? '' : fields[22] as String,
+      lastArtifactPaths:
+          fields[23] == null ? [] : (fields[23] as List?)?.cast<String>(),
+      actionLimit: fields[24] == null ? 100 : fields[24] as int,
+      softTimeLimitMinutes: fields[25] == null ? 60 : fields[25] as int,
     );
   }
 
   @override
   void write(BinaryWriter writer, AgentTask obj) {
     writer
-      ..writeByte(15)
+      ..writeByte(26)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -69,7 +83,29 @@ class AgentTaskAdapter extends TypeAdapter<AgentTask> {
       ..writeByte(13)
       ..write(obj.lastError)
       ..writeByte(14)
-      ..write(obj.workModeTask);
+      ..write(obj.workModeTask)
+      ..writeByte(15)
+      ..write(obj.queuedUserRequests)
+      ..writeByte(16)
+      ..write(obj.contextSummary)
+      ..writeByte(17)
+      ..write(obj.assignedCharacterIds)
+      ..writeByte(18)
+      ..write(obj.startedAt)
+      ..writeByte(19)
+      ..write(obj.actionCount)
+      ..writeByte(20)
+      ..write(obj.softLimitReached)
+      ..writeByte(21)
+      ..write(obj.resumeRequired)
+      ..writeByte(22)
+      ..write(obj.executionStateJson)
+      ..writeByte(23)
+      ..write(obj.lastArtifactPaths)
+      ..writeByte(24)
+      ..write(obj.actionLimit)
+      ..writeByte(25)
+      ..write(obj.softTimeLimitMinutes);
   }
 
   @override
@@ -104,6 +140,12 @@ class AgentTaskStatusAdapter extends TypeAdapter<AgentTaskStatus> {
         return AgentTaskStatus.cancelled;
       case 6:
         return AgentTaskStatus.partiallyCompleted;
+      case 7:
+        return AgentTaskStatus.queued;
+      case 8:
+        return AgentTaskStatus.paused;
+      case 9:
+        return AgentTaskStatus.interrupted;
       default:
         return AgentTaskStatus.planning;
     }
@@ -132,6 +174,15 @@ class AgentTaskStatusAdapter extends TypeAdapter<AgentTaskStatus> {
         break;
       case AgentTaskStatus.partiallyCompleted:
         writer.writeByte(6);
+        break;
+      case AgentTaskStatus.queued:
+        writer.writeByte(7);
+        break;
+      case AgentTaskStatus.paused:
+        writer.writeByte(8);
+        break;
+      case AgentTaskStatus.interrupted:
+        writer.writeByte(9);
         break;
     }
   }

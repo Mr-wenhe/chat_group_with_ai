@@ -281,6 +281,17 @@ class _BackupEntityMemoryCodec {
         'updatedAt': item.updatedAt?.toIso8601String(),
         'lastError': item.lastError,
         'workModeTask': item.workModeTask,
+        'queuedUserRequests': item.queuedUserRequests,
+        'contextSummary': item.contextSummary,
+        'assignedCharacterIds': item.assignedCharacterIds,
+        'startedAt': item.startedAt?.toIso8601String(),
+        'actionCount': item.actionCount,
+        'softLimitReached': item.softLimitReached,
+        'resumeRequired': item.resumeRequired,
+        'executionStateJson': item.executionStateJson,
+        'lastArtifactPaths': item.lastArtifactPaths,
+        'actionLimit': item.actionLimit,
+        'softTimeLimitMinutes': item.softTimeLimitMinutes,
       };
 
   static AgentTask decodeTask(Map<String, dynamic> json) => AgentTask(
@@ -301,6 +312,19 @@ class _BackupEntityMemoryCodec {
         updatedAt: _optionalDate(json['updatedAt']),
         lastError: json['lastError']?.toString() ?? '',
         workModeTask: json['workModeTask'] as bool? ?? false,
+        queuedUserRequests: _strings(json['queuedUserRequests']),
+        contextSummary: json['contextSummary']?.toString() ?? '',
+        assignedCharacterIds: _strings(json['assignedCharacterIds']),
+        startedAt: _optionalDate(json['startedAt']),
+        actionCount: (json['actionCount'] as num?)?.toInt() ?? 0,
+        softLimitReached: json['softLimitReached'] as bool? ?? false,
+        resumeRequired: json['resumeRequired'] as bool? ?? false,
+        executionStateJson: json['executionStateJson']?.toString() ?? '',
+        lastArtifactPaths: _strings(json['lastArtifactPaths']),
+        actionLimit: (json['actionLimit'] as num?)?.toInt() ??
+            AgentTask.defaultActionLimit,
+        softTimeLimitMinutes: (json['softTimeLimitMinutes'] as num?)?.toInt() ??
+            AgentTask.defaultSoftTimeLimitMinutes,
       );
 
   static Map<String, dynamic> workspace(WorkModeWorkspace item) => {
