@@ -10,6 +10,7 @@ export 'package:chat_group/features/web_search/models/search_provider_config.dar
 export 'package:chat_group/features/web_search/data/search_credential_repository.dart';
 export 'package:chat_group/features/web_search/data/search_settings_store.dart';
 export 'package:chat_group/features/web_search/security/search_endpoint_validator.dart';
+export 'package:chat_group/features/work_mode/providers/work_task_providers.dart';
 
 final databaseServiceProvider = Provider<DatabaseService>((ref) {
   return DatabaseService();
