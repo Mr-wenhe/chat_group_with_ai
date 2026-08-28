@@ -1,10 +1,10 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/database/database_service_provider.dart';
+import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
-import 'package:chat_group/providers/providers.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 /// Stores public task progress beside the app's Hive data, not in a chat page.
@@ -21,11 +21,14 @@ final workTaskEventStoreProvider = Provider<WorkTaskEventStore>((ref) {
   return store;
 });
 
-/// Stage 04 can exist before the continuous Agent loop is installed in Task 14.
-/// The coordinator stays usable for recovery and UI subscription, while an
-/// accidental production submit fails visibly instead of pretending to run.
+/// App-scoped production runner. It resolves each task's character/API config
+/// at execution time and drives the existing AgentRuntime tool loop.
 final workTaskRunnerProvider = Provider<WorkTaskRunner>((ref) {
-  return const _UnavailableWorkTaskRunner();
+  final database = ref.watch(databaseServiceProvider);
+  return DefaultWorkTaskRunner(
+    database: database,
+    eventStore: ref.watch(workTaskEventStoreProvider),
+  );
 });
 
 /// App-scoped coordinator. This is deliberately a normal [Provider], not an
@@ -40,17 +43,3 @@ final workTaskCoordinatorProvider = Provider<WorkTaskCoordinator>((ref) {
   ref.onDispose(coordinator.dispose);
   return coordinator;
 });
-
-class _UnavailableWorkTaskRunner implements WorkTaskRunner {
-  const _UnavailableWorkTaskRunner();
-
-  @override
-  Future<void> run(
-    AgentTask task,
-    WorkTaskCancellation cancellation,
-  ) {
-    return Future<void>.error(
-      StateError('连续工作 Agent 尚未接入。'),
-    );
-  }
-}

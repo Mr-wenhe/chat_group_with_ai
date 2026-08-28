@@ -401,27 +401,6 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     return const [];
   }
 
-  /// 把最近的对话记录转换成 LLM 消息格式，供 AgentRuntime 调用时携带上下文，
-  /// 修复“追问时 AI 失忆”的问题。
-  ///
-  /// - 取最近 12 条，排除当前请求对应的用户消息（已在 userRequest 中，避免重复）。
-  /// - user 消息 → role 'user'，ai 消息 → role 'assistant'。
-  /// - 附件会保留文件名、跨平台本地路径；安全的小型文本文件还会内联内容。
-  Future<List<Map<String, dynamic>>> _agenticHistory(
-    String userMessage, {
-    required String characterId,
-    List<Message>? messages,
-  }) {
-    final visibleMessages = _visibleContextForCharacter(
-      characterId,
-      messages ?? _recentMessagesForContext(),
-    );
-    return AgentAttachmentContext.buildHistory(
-      messages: visibleMessages,
-      currentUserRequest: userMessage,
-    );
-  }
-
   /// 上一条 AI 消息的发送者 id（用于避免同一角色连续发言）。
   ///
   /// 从后往前扫，遇到用户消息就返回 null——用户已经开口，

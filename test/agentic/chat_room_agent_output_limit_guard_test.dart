@@ -1,30 +1,39 @@
-import 'dart:io';
-
+import 'package:chat_group/core/models/agent_task.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('work mode caps generation limits to the selected model capability', () {
-    final source = [
-      File('lib/features/chat_group/chat_room_agentic_generation_support.dart')
-          .readAsStringSync(),
-      File('lib/features/chat_group/chat_room_agentic_approval_support.dart')
-          .readAsStringSync(),
-    ].join('\n');
-    final start = source.indexOf('AgentRuntime _agentRuntimeFor');
-    final end = source.indexOf(
-        'Future<Map<String, dynamic>> _saveGeneratedSkillFromArgs', start);
-    expect(start, isNonNegative);
-    expect(end, greaterThan(start));
-
-    final runtimeFactory = source.substring(start, end);
-    expect(
-        runtimeFactory, contains('final capability = _aiGateway.capability'));
-    expect(
-      runtimeFactory,
-      contains(
-          'min(AgentRuntime.preferredMaxOutputTokens, capability.maxOutput)'),
+  test('work tasks use the documented 100-action and 60-minute soft limits',
+      () {
+    final task = AgentTask(
+      groupId: 'group',
+      characterId: 'worker',
+      userRequest: '生成报告',
+      workModeTask: true,
     );
-    expect(runtimeFactory, contains('maxTokens: agentMaxTokens'));
-    expect(runtimeFactory, contains('maxTokens: summaryMaxTokens'));
+
+    expect(task.actionLimit, 100);
+    expect(task.softTimeLimit, const Duration(minutes: 60));
+  });
+
+  test('progress checkpoints switch between running and approval states', () {
+    final task = AgentTask(
+      groupId: 'group',
+      characterId: 'worker',
+      userRequest: '修改文件',
+      workModeTask: true,
+    );
+
+    task.markProgress(step: 1, operations: const ['read']);
+    expect(task.status, AgentTaskStatus.runningTool);
+    expect(task.currentStep, 1);
+    expect(task.resumeRequired, isFalse);
+
+    task.markProgress(
+      step: 1,
+      operations: const ['read'],
+      pendingToolJson: '{"tool":"workspace.patch"}',
+    );
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    expect(task.pendingToolRequestJson, contains('workspace.patch'));
   });
 }

@@ -109,6 +109,13 @@ class AgentTask extends HiveObject {
   @HiveField(25, defaultValue: defaultSoftTimeLimitMinutes)
   int softTimeLimitMinutes;
 
+  /// Whether one or more public progress events failed to persist.
+  ///
+  /// A task may complete successfully while its diagnostic timeline is
+  /// incomplete, so this is separate from [lastError].
+  @HiveField(26, defaultValue: false)
+  bool eventLogIncomplete;
+
   static const int defaultActionLimit = 100;
   static const int defaultSoftTimeLimitMinutes = 60;
   static const Duration defaultSoftTimeLimit =
@@ -141,6 +148,7 @@ class AgentTask extends HiveObject {
     List<String>? lastArtifactPaths,
     this.actionLimit = defaultActionLimit,
     this.softTimeLimitMinutes = defaultSoftTimeLimitMinutes,
+    this.eventLogIncomplete = false,
   })  : id = id ?? const Uuid().v4(),
         requestedPermissions = List<ToolPermission>.from(
           requestedPermissions ?? const [],
@@ -155,11 +163,15 @@ class AgentTask extends HiveObject {
         createdAt = createdAt ?? DateTime.now(),
         updatedAt = updatedAt ?? DateTime.now();
 
-  bool get canResume =>
-      status != AgentTaskStatus.completed &&
-      status != AgentTaskStatus.cancelled;
+  /// Legacy agentic recovery still treats failed/partially-completed tasks as
+  /// resumable. Work-mode tasks use terminal checkpoints only through the
+  /// explicit follow-up coordinator path.
+  bool get canResume => workModeTask
+      ? canResumeInWorkMode
+      : status != AgentTaskStatus.completed &&
+          status != AgentTaskStatus.cancelled;
 
-  bool get canResumeInWorkMode => workModeTask && canResume;
+  bool get canResumeInWorkMode => workModeTask && !isTerminal;
 
   bool get requiresUserResume =>
       status == AgentTaskStatus.interrupted && resumeRequired;
@@ -180,6 +192,9 @@ class AgentTask extends HiveObject {
     required List<String> operations,
     String pendingToolJson = '',
   }) {
+    // A late progress callback must not resurrect a completed/failed/cancelled
+    // task after the coordinator has already committed its terminal state.
+    if (isTerminal) return;
     currentStep = step;
     completedOperations = List<String>.from(operations);
     pendingToolRequestJson = pendingToolJson;

@@ -70,6 +70,9 @@ class AgentRuntimeProgress {
   /// 当前进行中步骤的人类可读文案；为 null 时由 stage 兜底（stageLabelFallback）。
   final String? currentStepLabel;
 
+  /// 仅用于公开执行动态的安全摘要；不得包含文件正文、命令或模型思维。
+  final String? publicDetail;
+
   // —— P2 新增：运行时态、非持久化字段 ——
   /// run() 启动时刻（ms 时间戳），整段任务仅捕获一次，构造时默认 null 以兼容旧调用。
   final int? runStartedAtMs;
@@ -82,6 +85,7 @@ class AgentRuntimeProgress {
     required this.executedRequests,
     this.pendingRequest,
     this.currentStepLabel,
+    this.publicDetail,
     this.runStartedAtMs,
     this.currentStepStartedAtMs,
   });
@@ -170,10 +174,15 @@ class AgentRuntime {
   final Set<ToolPermission>? grantedPermissions;
   final bool Function()? shouldCancel;
 
+  /// Work-mode tasks can provide their durable action budget (normally 100);
+  /// ordinary agentic chat retains the historical 12-step default.
+  final int toolStepLimit;
+
   /// 进度上报去抖状态：仅当 stage 或 currentStepLabel 变化时，才真正触发一次
   /// 气泡重写，避免续写循环等高频 thinking 上报导致的视觉抖动。
   AgentRuntimeProgressStage? _lastReportedStage;
   String? _lastReportedLabel;
+  int? _lastReportedExecutedCount;
 
   /// P2：run() 起点捕获的整段任务启动时刻（ms 时间戳），透传给进度上报；
   /// 仅运行时态，不写入 Hive。
@@ -195,7 +204,8 @@ class AgentRuntime {
     this.approvalPolicy = AgentRuntime.requiresApproval,
     this.grantedPermissions,
     this.shouldCancel,
-  });
+    int? toolStepLimit,
+  }) : toolStepLimit = toolStepLimit ?? maxToolSteps;
 
   /// 清洗可能泄露到聊天文本中的内部工具调用协议标记。
   ///
@@ -749,7 +759,7 @@ class AgentRuntime {
         request: _skillCreationRequest(character, userRequest),
         userRequest: userRequest,
         approved: approved,
-        remainingSteps: maxToolSteps,
+        remainingSteps: toolStepLimit,
         executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
       );
@@ -763,7 +773,7 @@ class AgentRuntime {
         request: localRequest,
         userRequest: userRequest,
         approved: approved,
-        remainingSteps: maxToolSteps,
+        remainingSteps: toolStepLimit,
         executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
       );
@@ -789,7 +799,7 @@ class AgentRuntime {
             request: directFileRequest,
             userRequest: userRequest,
             approved: approved,
-            remainingSteps: maxToolSteps,
+            remainingSteps: toolStepLimit,
             executedRequests: priorExecutedRequests,
             conversationHistory: conversationHistory,
           );
@@ -803,7 +813,7 @@ class AgentRuntime {
             request: fallbackRequest,
             userRequest: userRequest,
             approved: approved,
-            remainingSteps: maxToolSteps,
+            remainingSteps: toolStepLimit,
             executedRequests: priorExecutedRequests,
             conversationHistory: conversationHistory,
           );
@@ -822,7 +832,7 @@ class AgentRuntime {
             request: fallbackRequest,
             userRequest: userRequest,
             approved: approved,
-            remainingSteps: maxToolSteps,
+            remainingSteps: toolStepLimit,
             executedRequests: priorExecutedRequests,
             conversationHistory: conversationHistory,
           );
@@ -866,7 +876,7 @@ class AgentRuntime {
           request: fallbackRequest,
           userRequest: userRequest,
           approved: approved,
-          remainingSteps: maxToolSteps,
+          remainingSteps: toolStepLimit,
           executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
         );
@@ -897,7 +907,7 @@ class AgentRuntime {
           request: localRequest,
           userRequest: userRequest,
           approved: approved,
-          remainingSteps: maxToolSteps,
+          remainingSteps: toolStepLimit,
           executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
         );
@@ -916,7 +926,7 @@ class AgentRuntime {
         request: request,
         userRequest: userRequest,
         approved: approved,
-        remainingSteps: maxToolSteps,
+        remainingSteps: toolStepLimit,
         executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
       );
@@ -930,7 +940,7 @@ class AgentRuntime {
         request: recoveredFileRequest,
         userRequest: userRequest,
         approved: approved,
-        remainingSteps: maxToolSteps,
+        remainingSteps: toolStepLimit,
         executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
       );
@@ -951,7 +961,7 @@ class AgentRuntime {
           request: looseRequest,
           userRequest: userRequest,
           approved: approved,
-          remainingSteps: maxToolSteps,
+          remainingSteps: toolStepLimit,
           executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
         );
@@ -978,7 +988,7 @@ class AgentRuntime {
           request: repromptResult,
           userRequest: userRequest,
           approved: approved,
-          remainingSteps: maxToolSteps,
+          remainingSteps: toolStepLimit,
           executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
         );
@@ -996,7 +1006,7 @@ class AgentRuntime {
           request: fallbackRequest,
           userRequest: userRequest,
           approved: approved,
-          remainingSteps: maxToolSteps,
+          remainingSteps: toolStepLimit,
           executedRequests: priorExecutedRequests,
           conversationHistory: conversationHistory,
         );
@@ -1466,6 +1476,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     await _reportProgress(AgentRuntimeProgress(
       stage: AgentRuntimeProgressStage.toolCompleted,
       executedRequests: nextExecutedRequests,
+      publicDetail: _toolResultPublicDetail(toolResult),
     ));
     if (shouldCancel?.call() == true) {
       return AgentRuntimeResult(
@@ -1488,12 +1499,15 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
   }
 
   Future<void> _reportProgress(AgentRuntimeProgress progress) async {
+    if (shouldCancel?.call() == true) return;
     // 去抖：连续同 stage 且同 label 的上报只保留一次气泡重写，
     // 避免生成文件续写循环等高频 thinking 上报引发的视觉抖动。
     final sameAsLast = _lastReportedStage == progress.stage &&
-        _lastReportedLabel == progress.currentStepLabel;
+        _lastReportedLabel == progress.currentStepLabel &&
+        _lastReportedExecutedCount == progress.executedRequests.length;
     _lastReportedStage = progress.stage;
     _lastReportedLabel = progress.currentStepLabel;
+    _lastReportedExecutedCount = progress.executedRequests.length;
     if (sameAsLast) return;
 
     // P2：仅在步切换（stage/label 变化）时，为本次上报注入时间戳，
@@ -1505,6 +1519,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       executedRequests: progress.executedRequests,
       pendingRequest: progress.pendingRequest,
       currentStepLabel: progress.currentStepLabel,
+      publicDetail: progress.publicDetail,
       runStartedAtMs: _runStartedAtMs,
       currentStepStartedAtMs: DateTime.now().millisecondsSinceEpoch,
     );
@@ -1516,6 +1531,35 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     } catch (_) {
       // 检查点失败不能抹掉已经完成的本地工具结果。
     }
+  }
+
+  String? _toolResultPublicDetail(Map<String, dynamic> result) {
+    final path = result['path'];
+    final pathText = path is String ? path.trim() : '';
+    if (result['ok'] == true) {
+      if (pathText.isNotEmpty) return '工具已完成：${_shortToolPath(pathText)}';
+      final validation = result['validation'];
+      if (validation is Map && validation['valid'] == true) {
+        return '工具已完成，校验通过。';
+      }
+      return '工具已完成。';
+    }
+    final exitCode = result['exitCode'];
+    if (exitCode is num) return '工具返回退出码 ${exitCode.toInt()}。';
+    final errorCode = result['error']?.toString().trim();
+    if (errorCode != null && errorCode.isNotEmpty) {
+      return '工具未完成：${errorCode.length <= 120 ? errorCode : '${errorCode.substring(0, 119)}…'}';
+    }
+    return null;
+  }
+
+  String _shortToolPath(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    if (normalized.startsWith('/') ||
+        RegExp(r'^[A-Za-z]:/').hasMatch(normalized)) {
+      return normalized.split('/').last;
+    }
+    return normalized;
   }
 
   Future<AgentRuntimeResult> _continueAfterToolResult({
@@ -1782,7 +1826,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       request: request,
       userRequest: userRequest,
       approved: true,
-      remainingSteps: maxToolSteps,
+      remainingSteps: toolStepLimit,
       executedRequests: priorExecutedRequests,
       conversationHistory: conversationHistory,
     );
@@ -1808,7 +1852,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
           'skipped': true,
           'reason': '用户拒绝了该敏感操作',
         },
-        remainingSteps: maxToolSteps - 1,
+        remainingSteps: toolStepLimit - 1,
         executedRequests: priorExecutedRequests,
         conversationHistory: conversationHistory,
       );

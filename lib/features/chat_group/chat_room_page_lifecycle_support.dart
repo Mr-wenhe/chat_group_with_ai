@@ -75,15 +75,9 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
       unawaited(_cleanupMediaPaths(_pendingAttachments));
     }
     _pendingAttachments.clear();
-    _workModeSession.requestStop('页面已关闭');
     _documentProcessingToken?.cancel();
     _conversationController.dispose();
     _autoChatScheduler.dispose();
-    unawaited(
-      LocalAgentBridgeLauncher().unregisterWorkspace(
-        conversationId: widget.groupId,
-      ),
-    );
     final streamingSession = _streamingSession;
     _streamingSession = null;
     if (streamingSession != null) unawaited(streamingSession.dispose());

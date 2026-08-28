@@ -1,14 +1,15 @@
 part of 'chat_room_page.dart';
 
 extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
-  /// 查找本会话中"可在工作模式下恢复"的 agentic 任务，取最近一条询问用户。
+  /// 查找本会话中必须由用户明确继续的任务。
   ///
-  /// 仅工作模式生效；用户选择继续则续跑，否则标记为放弃并清理。
+  /// 恢复由全局协调器执行：聊天页只展示选择，不重建 runtime、workspace 或
+  /// bridge，因此离开当前页面不会改变任务所有权。
   Future<void> _offerAgentTaskRecovery() async {
     if (!_workModeEnabled) return;
     final tasks = _db.agentTaskBox.values
-        .where((task) =>
-            task.groupId == widget.groupId && task.canResumeInWorkMode)
+        .where(
+            (task) => task.groupId == widget.groupId && task.requiresUserResume)
         .toList()
       // 按最后更新时间倒序，优先恢复最近中断的那个任务。
       ..sort((a, b) =>
@@ -25,100 +26,12 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
         onContinue: () => Navigator.pop(dialogContext, true),
       ),
     );
+    final coordinator = ref.read(workTaskCoordinatorProvider);
     if (continueTask == true) {
-      await _resumeAgentTask(task);
+      await coordinator.resumeByUser(task.id);
     } else {
-      await _cancelAgentTask(task, reason: '用户放弃恢复任务。');
+      await coordinator.stop(task.id, reason: '用户放弃恢复任务。');
     }
-  }
-
-  /// 恢复一个中断的 agentic 任务。
-  ///
-  /// 两种恢复路径：
-  /// 1. 任务卡在"等待工具审批"→ 重建审批项并再次弹给用户确认；
-  /// 2. 否则从已完成的操作列表继续跑 agentic 循环。
-  Future<void> _resumeAgentTask(AgentTask task) async {
-    if (!_workModeEnabled || !task.workModeTask) return;
-    final character = _db.aiCharacterBox.get(task.characterId);
-    if (character == null) return;
-    final config = _resolveApiConfig(character);
-    if (config == null) return;
-    final provider = ApiProvider.values.firstWhere(
-      (value) => value.name == config.provider,
-      orElse: () => ApiProvider.deepseek,
-    );
-    final workspace = await WorkModeWorkspaceService(db: _db).loadOrCreate(
-      conversationId: widget.groupId,
-      isDirectChat: _isDirectChat,
-    );
-    // 每个 await 之后都要复检：期间用户可能已退出页面或关闭工作模式。
-    if (!_canTouchUi || !_workModeEnabled) return;
-    final registration = await LocalAgentBridgeLauncher().registerWorkspace(
-      conversationId: widget.groupId,
-      workspacePath: workspace.workDirPath,
-    );
-    if (!_canTouchUi || !_workModeEnabled) {
-      await LocalAgentBridgeLauncher().unregisterWorkspace(
-        conversationId: widget.groupId,
-        registration: registration,
-      );
-      return;
-    }
-    final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
-    if (pending != null) {
-      // 路径 1：中断点正好停在待审批的工具调用上。
-      final approval = PendingAgentToolApproval(
-        character: character,
-        config: config,
-        provider: provider,
-        userRequest: task.userRequest,
-        request: pending,
-        priorExecutedRequests: _restoredExecutedRequests(task),
-        task: task,
-      );
-      await _presentPendingAgentApproval(approval);
-      return;
-    }
-    // 路径 2：直接续跑 agentic 循环。
-    if (_conversationController.beginWork() == null) {
-      // Another run owns this conversation. Do not leave this resume attempt's
-      // route behind (and let the lease protect a newer registration).
-      await LocalAgentBridgeLauncher().unregisterWorkspace(
-        conversationId: widget.groupId,
-        registration: registration,
-      );
-      return;
-    }
-    if (_canTouchUi) _setUiState(() {});
-    final workModeRun = _workModeSession.beginRun();
-    final cancelToken = workModeRun.token;
-    try {
-      await _generateAgenticReply(
-        character: character,
-        config: config,
-        provider: provider,
-        userMessage: task.userRequest,
-        context: _recentMessagesForContext(),
-        resumeTask: task,
-        workMode: true,
-        cancelToken: cancelToken,
-        workModeRun: workModeRun,
-      );
-    } finally {
-      _workModeSession.finishRun(workModeRun);
-      await _finishWorkActivityAndDispatchNext();
-    }
-  }
-
-  /// 把任务里以 JSON 字符串保存的"已执行操作"还原成 [ToolRequest] 列表。
-  ///
-  /// 解析失败的条目会被 [Iterable.whereType] 静默丢弃——历史数据格式变化时
-  /// 不应阻断整个任务恢复。
-  List<ToolRequest> _restoredExecutedRequests(AgentTask task) {
-    return task.completedOperations
-        .map(ToolRequest.fromJsonString)
-        .whereType<ToolRequest>()
-        .toList();
   }
 
   /// 启动空闲自动聊天调度器（首次延迟带随机抖动）。

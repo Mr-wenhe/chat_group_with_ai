@@ -2,9 +2,12 @@ import 'dart:async';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
+import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
+import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:flutter/material.dart';
 
 typedef WorkTaskEventStream = Stream<WorkTaskEvent> Function(String taskId);
+typedef WorkTaskAction = FutureOr<void> Function(String taskId);
 
 /// Displays public task state without owning task execution or navigation.
 ///
@@ -15,11 +18,14 @@ class WorkTaskPanel extends StatefulWidget {
   final String? selectedTaskId;
   final WorkTaskEventStream eventStreamFor;
   final ValueChanged<String> onSelectTask;
-  final ValueChanged<String> onStop;
-  final ValueChanged<String> onContinue;
+  final WorkTaskAction onStop;
+  final WorkTaskAction onContinue;
+  final WorkTaskAction? onApprove;
+  final WorkTaskAction? onReject;
   final ValueChanged<String> onOpenConversation;
   final VoidCallback onCollapse;
   final VoidCallback onClose;
+  final String Function(String characterId)? characterNameFor;
   final DateTime Function() clock;
 
   const WorkTaskPanel({
@@ -33,6 +39,9 @@ class WorkTaskPanel extends StatefulWidget {
     required this.onCollapse,
     required this.onClose,
     this.selectedTaskId,
+    this.onApprove,
+    this.onReject,
+    this.characterNameFor,
     DateTime Function()? clock,
   }) : clock = clock ?? DateTime.now;
 
@@ -47,6 +56,8 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   final Map<String, WorkTaskEvent> _latestToolEvents =
       <String, WorkTaskEvent>{};
   Timer? _durationTicker;
+  bool _actionInFlight = false;
+  String? _actionError;
 
   @override
   void initState() {
@@ -78,12 +89,8 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
     if (task == null) return const SizedBox.shrink();
     final latestEvent = _latestEvents[task.id];
     final latestAction = _latestActionEvents[task.id] ?? latestEvent;
-    final continueReason = _continueUnavailableReason(task);
-    final stopReason = task.isTerminal ? '任务已结束，无法停止。' : null;
     final toolName =
         _toolName(latestEvent) ?? _toolName(_latestToolEvents[task.id]);
-    final approvalText =
-        task.status == AgentTaskStatus.waitingForApproval ? '等待你批准当前操作。' : null;
 
     return Material(
       key: const Key('work-task-panel'),
@@ -109,120 +116,49 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               ),
               const SizedBox(height: 14),
               Expanded(
-                child: SingleChildScrollView(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Text(
-                        task.userRequest,
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      const SizedBox(height: 4),
-                      Text('执行角色：${task.characterId}'),
-                      const SizedBox(height: 4),
-                      Text('步骤 ${task.currentStep} / ${task.actionLimit}'),
-                      const SizedBox(height: 4),
-                      Text(_durationLabel(task, widget.clock())),
-                      const SizedBox(height: 12),
-                      _PublicDetail(
-                        title: '计划摘要',
-                        text:
-                            task.plan.trim().isEmpty ? '尚未生成公开计划。' : task.plan,
-                      ),
-                      const SizedBox(height: 8),
-                      _PublicDetail(
-                        title: '当前动作',
-                        text: latestAction == null
-                            ? _statusLabel(task.status)
-                            : latestAction.title,
-                        inline: true,
-                      ),
-                      if (toolName != null) ...<Widget>[
-                        const SizedBox(height: 8),
-                        _PublicDetail(
-                          title: '工具',
-                          text: toolName,
-                          inline: true,
-                        ),
-                      ],
-                      if (approvalText != null) ...<Widget>[
-                        const SizedBox(height: 8),
-                        _PublicDetail(
-                          title: '审批',
-                          text: approvalText,
-                          inline: true,
-                        ),
-                      ],
-                      if (task.resultSummary.trim().isNotEmpty) ...<Widget>[
-                        const SizedBox(height: 8),
-                        _PublicDetail(title: '结论', text: task.resultSummary),
-                      ],
-                      const SizedBox(height: 14),
-                      Text('执行动态',
-                          style: Theme.of(context).textTheme.titleSmall),
-                      const SizedBox(height: 6),
-                      SizedBox(
-                        height: 180,
-                        child: _TaskEventTimeline(
-                          key: ValueKey<String>(task.id),
-                          taskId: task.id,
-                          eventStreamFor: widget.eventStreamFor,
-                          onLatestEvent: _rememberLatestEvent,
-                        ),
-                      ),
-                    ],
-                  ),
+                child: _TaskDetails(
+                  task: task,
+                  latestAction: latestAction,
+                  toolName: toolName,
+                  actionError: _actionError,
+                  characterNameFor: widget.characterNameFor,
+                  eventStreamFor: widget.eventStreamFor,
+                  onLatestEvent: _rememberLatestEvent,
+                  clock: widget.clock,
                 ),
               ),
               const SizedBox(height: 12),
-              Wrap(
-                spacing: 8,
-                runSpacing: 8,
-                children: <Widget>[
-                  OutlinedButton.icon(
-                    key: const Key('work-task-open-conversation'),
-                    onPressed: () => widget.onOpenConversation(task.groupId),
-                    icon: const Icon(Icons.forum_outlined),
-                    label: const Text('回到对话'),
-                  ),
-                  Tooltip(
-                    message: stopReason ?? '停止当前任务。',
-                    child: OutlinedButton.icon(
-                      key: const Key('work-task-stop'),
-                      onPressed: stopReason == null
-                          ? () => widget.onStop(task.id)
-                          : null,
-                      icon: const Icon(Icons.stop_circle_outlined),
-                      label: const Text('停止'),
-                    ),
-                  ),
-                  Tooltip(
-                    message: continueReason ?? '继续当前任务。',
-                    child: FilledButton.icon(
-                      key: const Key('work-task-continue'),
-                      onPressed: continueReason == null
-                          ? () => widget.onContinue(task.id)
-                          : null,
-                      icon: const Icon(Icons.play_arrow_rounded),
-                      label: const Text('继续'),
-                    ),
-                  ),
-                  Tooltip(
-                    message: '撤销将在任务快照完成后可用。',
-                    child: OutlinedButton.icon(
-                      key: const Key('work-task-undo'),
-                      onPressed: null,
-                      icon: const Icon(Icons.undo_rounded),
-                      label: const Text('撤销'),
-                    ),
-                  ),
-                ],
+              _TaskActions(
+                task: task,
+                actionInFlight: _actionInFlight,
+                onOpenConversation: widget.onOpenConversation,
+                onApprove: widget.onApprove,
+                onReject: widget.onReject,
+                onStop: widget.onStop,
+                onContinue: widget.onContinue,
+                runAction: (action) => _runAction(action, task.id),
               ),
             ],
           ),
         ),
       ),
     );
+  }
+
+  Future<void> _runAction(WorkTaskAction action, String taskId) async {
+    if (_actionInFlight) return;
+    setState(() {
+      _actionInFlight = true;
+      _actionError = null;
+    });
+    try {
+      await action(taskId);
+    } on Object catch (error) {
+      if (!mounted) return;
+      setState(() => _actionError = sanitizeWorkTaskError(error));
+    } finally {
+      if (mounted) setState(() => _actionInFlight = false);
+    }
   }
 
   void _rememberLatestEvent(WorkTaskEvent event) {
@@ -247,23 +183,213 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
         event.kind == WorkTaskEventKind.paused;
   }
 
-  String? _continueUnavailableReason(AgentTask task) {
-    if (task.softLimitReached) return null;
-    if (task.status == AgentTaskStatus.interrupted ||
-        task.status == AgentTaskStatus.paused) {
-      return null;
-    }
-    if (task.status == AgentTaskStatus.waitingForApproval) {
-      return '请先批准当前操作。';
-    }
-    if (task.isTerminal) return '任务已结束，无需继续。';
-    return '任务正在执行，无需继续。';
-  }
-
   String? _toolName(WorkTaskEvent? event) {
     if (event == null) return null;
     final tool = event.safeMetadata['tool'];
     return tool is String && tool.trim().isNotEmpty ? tool : null;
+  }
+}
+
+class _TaskDetails extends StatelessWidget {
+  final AgentTask task;
+  final WorkTaskEvent? latestAction;
+  final String? toolName;
+  final String? actionError;
+  final String Function(String characterId)? characterNameFor;
+  final WorkTaskEventStream eventStreamFor;
+  final ValueChanged<WorkTaskEvent> onLatestEvent;
+  final DateTime Function() clock;
+
+  const _TaskDetails({
+    required this.task,
+    required this.latestAction,
+    required this.toolName,
+    required this.actionError,
+    required this.characterNameFor,
+    required this.eventStreamFor,
+    required this.onLatestEvent,
+    required this.clock,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final approvalText =
+        task.status == AgentTaskStatus.waitingForApproval ? '等待你批准当前操作。' : null;
+    final characterName = characterNameFor?.call(task.characterId).trim();
+    return SingleChildScrollView(
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: <Widget>[
+          Text(
+            _safePanelText(task.userRequest),
+            style: Theme.of(context).textTheme.titleMedium,
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '执行角色：${characterName == null || characterName.isEmpty ? task.characterId : characterName}',
+          ),
+          const SizedBox(height: 4),
+          Text('步骤 ${task.currentStep} / ${task.actionLimit}'),
+          const SizedBox(height: 4),
+          Text(_durationLabel(task, clock())),
+          const SizedBox(height: 12),
+          _PublicDetail(
+            title: '计划摘要',
+            text: task.plan.trim().isEmpty
+                ? '尚未生成公开计划。'
+                : _safePanelText(task.plan),
+          ),
+          const SizedBox(height: 8),
+          _PublicDetail(
+            title: '当前动作',
+            text: latestAction == null
+                ? _statusLabel(task.status)
+                : _safePanelText(latestAction!.title),
+            inline: true,
+          ),
+          if (toolName != null) ...<Widget>[
+            const SizedBox(height: 8),
+            _PublicDetail(
+              title: '工具',
+              text: _safePanelText(toolName!),
+              inline: true,
+            ),
+          ],
+          if (approvalText != null) ...<Widget>[
+            const SizedBox(height: 8),
+            _PublicDetail(
+              title: '审批',
+              text: _safePanelText(approvalText),
+              inline: true,
+            ),
+          ],
+          if (task.resultSummary.trim().isNotEmpty) ...<Widget>[
+            const SizedBox(height: 8),
+            _PublicDetail(
+              title: '结论',
+              text: _safePanelText(task.resultSummary),
+            ),
+          ],
+          if (task.eventLogIncomplete) ...<Widget>[
+            const SizedBox(height: 8),
+            const _PublicDetail(
+              title: '日志',
+              text: '部分执行动态保存失败，以上日志可能不完整。',
+            ),
+          ],
+          if (actionError != null) ...<Widget>[
+            const SizedBox(height: 8),
+            _PublicDetail(title: '操作失败', text: _safePanelText(actionError!)),
+          ],
+          const SizedBox(height: 14),
+          Text('执行动态', style: Theme.of(context).textTheme.titleSmall),
+          const SizedBox(height: 6),
+          SizedBox(
+            height: 180,
+            child: _TaskEventTimeline(
+              key: ValueKey<String>(task.id),
+              taskId: task.id,
+              eventStreamFor: eventStreamFor,
+              onLatestEvent: onLatestEvent,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
+class _TaskActions extends StatelessWidget {
+  final AgentTask task;
+  final bool actionInFlight;
+  final ValueChanged<String> onOpenConversation;
+  final WorkTaskAction? onApprove;
+  final WorkTaskAction? onReject;
+  final WorkTaskAction onStop;
+  final WorkTaskAction onContinue;
+  final Future<void> Function(WorkTaskAction action) runAction;
+
+  const _TaskActions({
+    required this.task,
+    required this.actionInFlight,
+    required this.onOpenConversation,
+    required this.onApprove,
+    required this.onReject,
+    required this.onStop,
+    required this.onContinue,
+    required this.runAction,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final continueReason = _continueUnavailableReasonForPanel(task);
+    final stopReason = task.isTerminal ? '任务已结束，无法停止。' : null;
+    return Wrap(
+      spacing: 8,
+      runSpacing: 8,
+      children: <Widget>[
+        OutlinedButton.icon(
+          key: const Key('work-task-open-conversation'),
+          onPressed: () => onOpenConversation(task.groupId),
+          icon: const Icon(Icons.forum_outlined),
+          label: const Text('回到对话'),
+        ),
+        if (task.status == AgentTaskStatus.waitingForApproval &&
+            onApprove != null &&
+            onReject != null) ...<Widget>[
+          Tooltip(
+            message: '批准当前列出的工具操作。',
+            child: FilledButton.icon(
+              key: const Key('work-task-approve'),
+              onPressed: actionInFlight ? null : () => runAction(onApprove!),
+              icon: const Icon(Icons.check_rounded),
+              label: const Text('批准'),
+            ),
+          ),
+          Tooltip(
+            message: '拒绝当前操作，并让任务尝试安全路径。',
+            child: OutlinedButton.icon(
+              key: const Key('work-task-reject'),
+              onPressed: actionInFlight ? null : () => runAction(onReject!),
+              icon: const Icon(Icons.block_rounded),
+              label: const Text('拒绝'),
+            ),
+          ),
+        ],
+        Tooltip(
+          message: stopReason ?? '停止当前任务。',
+          child: OutlinedButton.icon(
+            key: const Key('work-task-stop'),
+            onPressed: stopReason == null && !actionInFlight
+                ? () => runAction(onStop)
+                : null,
+            icon: const Icon(Icons.stop_circle_outlined),
+            label: const Text('停止'),
+          ),
+        ),
+        if (task.status != AgentTaskStatus.waitingForApproval)
+          Tooltip(
+            message: continueReason ?? '继续当前任务。',
+            child: FilledButton.icon(
+              key: const Key('work-task-continue'),
+              onPressed: continueReason == null && !actionInFlight
+                  ? () => runAction(onContinue)
+                  : null,
+              icon: const Icon(Icons.play_arrow_rounded),
+              label: const Text('继续'),
+            ),
+          ),
+        Tooltip(
+          message: '撤销将在任务快照完成后可用。',
+          child: OutlinedButton.icon(
+            key: const Key('work-task-undo'),
+            onPressed: null,
+            icon: const Icon(Icons.undo_rounded),
+            label: const Text('撤销'),
+          ),
+        ),
+      ],
+    );
   }
 }
 
@@ -373,6 +499,7 @@ class _TaskEventTimeline extends StatefulWidget {
 class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   final List<WorkTaskEvent> _events = <WorkTaskEvent>[];
   StreamSubscription<WorkTaskEvent>? _subscription;
+  String? _streamError;
 
   @override
   void initState() {
@@ -385,13 +512,14 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.taskId == widget.taskId) return;
     _events.clear();
-    _subscription?.cancel();
+    _streamError = null;
+    unawaited(_subscription?.cancel());
     _listen();
   }
 
   @override
   void dispose() {
-    _subscription?.cancel();
+    unawaited(_subscription?.cancel());
     super.dispose();
   }
 
@@ -412,12 +540,29 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
           if (mounted) widget.onLatestEvent(event);
         });
       },
+      onError: (Object error, StackTrace stackTrace) {
+        if (!mounted) return;
+        setState(() {
+          _streamError = sanitizeWorkTaskError(error);
+        });
+      },
     );
+  }
+
+  void _retry() {
+    unawaited(_subscription?.cancel());
+    if (!mounted) return;
+    setState(() {
+      _events.clear();
+      _streamError = null;
+    });
+    _listen();
   }
 
   @override
   Widget build(BuildContext context) {
-    if (_events.isEmpty) {
+    final error = _streamError;
+    if (_events.isEmpty && error == null) {
       return const Align(
         alignment: Alignment.centerLeft,
         child: Text('等待公开执行动态…'),
@@ -427,34 +572,90 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
       key: const Key('work-task-event-timeline'),
       child: Column(
         crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: _events
-            .expand<Widget>((event) => <Widget>[
-                  DecoratedBox(
-                    decoration: BoxDecoration(
-                      color:
-                          Theme.of(context).colorScheme.surfaceContainerHighest,
-                      borderRadius: BorderRadius.circular(10),
+        children: <Widget>[
+          if (error != null)
+            DecoratedBox(
+              decoration: BoxDecoration(
+                color: Theme.of(context).colorScheme.errorContainer,
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: Padding(
+                padding: const EdgeInsets.all(8),
+                child: Row(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: <Widget>[
+                    Expanded(
+                      child: Text('执行动态读取失败：${_safePanelText(error)}'),
                     ),
-                    child: Padding(
-                      padding: const EdgeInsets.all(8),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: <Widget>[
-                          Text(event.title),
-                          if (event.detail.isNotEmpty) ...<Widget>[
-                            const SizedBox(height: 2),
-                            Text(event.detail),
-                          ],
+                    TextButton(
+                      key: const Key('work-task-event-retry'),
+                      onPressed: _retry,
+                      child: const Text('重试'),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          if (error != null && _events.isNotEmpty) const SizedBox(height: 6),
+          ..._events.expand<Widget>((event) => <Widget>[
+                DecoratedBox(
+                  decoration: BoxDecoration(
+                    color:
+                        Theme.of(context).colorScheme.surfaceContainerHighest,
+                    borderRadius: BorderRadius.circular(10),
+                  ),
+                  child: Padding(
+                    padding: const EdgeInsets.all(8),
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: <Widget>[
+                        Text(_safePanelText(event.title)),
+                        if (event.detail.isNotEmpty) ...<Widget>[
+                          const SizedBox(height: 2),
+                          Text(_safePanelText(event.detail)),
                         ],
-                      ),
+                      ],
                     ),
                   ),
-                  const SizedBox(height: 6),
-                ])
-            .toList(growable: false),
+                ),
+                const SizedBox(height: 6),
+              ]),
+        ],
       ),
     );
   }
+}
+
+String _safePanelText(String value) {
+  var safe = const SearchSecretScanner().redact(
+    value.trim(),
+    includeOpaqueTokens: true,
+  );
+  safe = safe.replaceAll(RegExp(r'https?://[^\s,;）)]+'), '[外部地址]');
+  safe = safe.replaceAll(
+    RegExp(
+      r'(?:(?:[A-Za-z]:[\\/])|/(?:Users|home|Volumes|private|tmp)/)[^\s,;）)]*',
+    ),
+    '[本地路径]',
+  );
+  return safe.length <= 4000 ? safe : '${safe.substring(0, 3999)}…';
+}
+
+String? _continueUnavailableReasonForPanel(AgentTask task) {
+  if (task.isTerminal) return '任务已结束，无需继续。';
+  if (task.softLimitReached &&
+      (task.status == AgentTaskStatus.paused ||
+          task.status == AgentTaskStatus.interrupted)) {
+    return null;
+  }
+  if (task.status == AgentTaskStatus.interrupted ||
+      task.status == AgentTaskStatus.paused) {
+    return null;
+  }
+  if (task.status == AgentTaskStatus.waitingForApproval) {
+    return '请先批准当前操作。';
+  }
+  return '任务正在执行，无需继续。';
 }
 
 String _durationLabel(AgentTask task, DateTime now) {

@@ -146,6 +146,87 @@ void main() {
       expect(find.text('执行角色：developer'), findsOneWidget);
       expect(find.text('整理需求'), findsNothing);
     });
+
+    testWidgets('shows approval controls, role names, and safe public text',
+        (tester) async {
+      final task = _task(
+        id: 'approval-task',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+        plan: '读取 /Users/alice/project.md；https://private.example/token',
+        resultSummary: 'https://private.example/result?token=secret',
+      )..status = AgentTaskStatus.waitingForApproval;
+      var approved = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onApprove: (_) async {
+              approved = true;
+              throw StateError('https://private.example/api?token=secret');
+            },
+            onReject: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+            characterNameFor: (_) => '产品经理',
+          ),
+        ),
+      ));
+
+      expect(find.text('执行角色：产品经理'), findsOneWidget);
+      expect(find.text('执行角色：worker-id'), findsNothing);
+      expect(find.byKey(const Key('work-task-approve')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-reject')), findsOneWidget);
+      expect(find.textContaining('https://'), findsNothing);
+      expect(find.textContaining('secret'), findsNothing);
+
+      await tester.tap(find.byKey(const Key('work-task-approve')));
+      await tester.pump();
+      await tester.pump();
+
+      expect(approved, isTrue);
+      expect(find.text('操作失败'), findsOneWidget);
+      expect(find.textContaining('https://'), findsNothing);
+      expect(find.textContaining('secret'), findsNothing);
+    });
+
+    testWidgets('shows a retryable error when the event stream fails',
+        (tester) async {
+      final task = _task(
+        id: 'stream-error-task',
+        conversationId: 'group-one',
+        characterId: 'developer',
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => Stream<WorkTaskEvent>.error(
+              StateError('读取 https://private.example/log 失败'),
+            ),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.textContaining('执行动态读取失败'), findsOneWidget);
+      expect(find.byKey(const Key('work-task-event-retry')), findsOneWidget);
+      expect(find.textContaining('https://'), findsNothing);
+    });
   });
 
   group('WorkTaskOverlayHost', () {
@@ -269,6 +350,43 @@ void main() {
 
       expect(find.byKey(const Key('work-task-panel-bottom')), findsOneWidget);
       expect(find.byKey(const Key('work-task-panel-wide')), findsNothing);
+    });
+
+    testWidgets('keeps both active execution slots visible', (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final first = _task(
+        id: 'active-one',
+        conversationId: 'group-one',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.runningTool;
+      final second = _task(
+        id: 'active-two',
+        conversationId: 'group-two',
+        characterId: 'tester',
+      )..status = AgentTaskStatus.planning;
+      final newerQueued = _task(
+        id: 'newer-queued',
+        conversationId: 'group-three',
+        characterId: 'product',
+      )..status = AgentTaskStatus.queued;
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[newerQueued, first, second]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byKey(const Key('work-task-tab-active-one')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-tab-active-two')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-tab-newer-queued')), findsNothing);
     });
   });
 }

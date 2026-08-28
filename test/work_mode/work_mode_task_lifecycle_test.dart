@@ -3,29 +3,7 @@ import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('dismissed approval cancels instead of leaving a pending task', () {
-    expect(
-      WorkModeTaskLifecycle.actionForDialogDecision(null),
-      WorkModeApprovalAction.cancelPending,
-    );
-  });
-
-  test('new input cancels the old approval before becoming a new task', () {
-    expect(
-      WorkModeTaskLifecycle.actionForInput('另外再生成一份 PDF'),
-      WorkModeApprovalAction.cancelPending,
-    );
-    expect(
-      WorkModeTaskLifecycle.actionForInput('批准'),
-      WorkModeApprovalAction.approve,
-    );
-    expect(
-      WorkModeTaskLifecycle.actionForInput('拒绝'),
-      WorkModeApprovalAction.reject,
-    );
-  });
-
-  test('cancelling a pending approval clears its resumable checkpoint', () {
+  test('explicit task cancellation clears its resumable checkpoint', () {
     final task = AgentTask(
       groupId: 'group',
       characterId: 'worker',
@@ -35,11 +13,11 @@ void main() {
       workModeTask: true,
     );
 
-    WorkModeTaskLifecycle.cancelTask(task, reason: '用户开始了新任务');
+    WorkModeTaskLifecycle.cancelTask(task, reason: '用户明确停止任务');
 
     expect(task.status, AgentTaskStatus.cancelled);
     expect(task.pendingToolRequestJson, isEmpty);
-    expect(task.lastError, '用户开始了新任务');
+    expect(task.lastError, '用户明确停止任务');
     expect(task.canResumeInWorkMode, isFalse);
   });
 

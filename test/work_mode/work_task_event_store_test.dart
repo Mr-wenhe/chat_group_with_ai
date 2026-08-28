@@ -125,6 +125,28 @@ void main() {
     expect(replay.issues.single.message, isNot(contains('{"sequence"')));
   });
 
+  test('watch surfaces replay issues after valid events for panel recovery',
+      () async {
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    await store.append(
+      taskId: 'task-watch-issue',
+      kind: WorkTaskEventKind.stepStarted,
+      title: '开始读取',
+    );
+    await store.eventFileFor('task-watch-issue').writeAsString(
+          '{"sequence":2',
+          mode: FileMode.append,
+        );
+
+    await expectLater(
+      store.watch('task-watch-issue'),
+      emitsInOrder(<Object>[
+        isA<WorkTaskEvent>(),
+        emitsError(isA<StateError>()),
+      ]),
+    );
+  });
+
   test('bounds and redacts persisted public details and metadata', () async {
     final store = WorkTaskEventStore(
       appSupportDirectory: appSupportDirectory,
@@ -152,5 +174,16 @@ void main() {
     expect(event.safeMetadata['token'], '[REDACTED]');
     expect(persisted, isNot(contains(secret)));
     expect(persisted, contains('[REDACTED]'));
+  });
+
+  test('closing the store completes idle watchers and is idempotent', () async {
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    final watchFuture = store.watch('task-close').toList();
+
+    final firstClose = store.close();
+    final secondClose = store.close();
+    expect(identical(firstClose, secondClose), isTrue);
+    await firstClose;
+    expect(await watchFuture, isEmpty);
   });
 }

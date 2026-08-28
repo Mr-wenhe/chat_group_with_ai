@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
+
 enum AgentToolName {
   workspaceList('workspace.list'),
   workspaceRead('workspace.read'),
@@ -220,4 +222,107 @@ class ToolRequest {
     }
     return null;
   }
+}
+
+/// Returns a durable checkpoint that describes a tool operation without
+/// persisting private file contents, shell commands, or other opaque payloads.
+///
+/// The full [ToolRequest] remains in memory while an approval dialog is open;
+/// this representation is intended only for Hive, backup files, and recovery.
+String safeToolRequestCheckpoint(ToolRequest request) {
+  return jsonEncode(<String, dynamic>{
+    'tool': request.tool.wireName,
+    'reason': _safeCheckpointReason(request),
+    'args': _safeCheckpointArgs(request.args),
+  });
+}
+
+/// Sanitizes a legacy/raw JSON checkpoint before it crosses a durable
+/// persistence boundary. Invalid input becomes an empty checkpoint.
+String safeToolRequestCheckpointJson(String raw) {
+  if (raw.trim().isEmpty) return '';
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) return '';
+    final tool = AgentToolName.fromWire(decoded['tool']?.toString() ?? '');
+    if (tool == null) return '';
+    final args = decoded['args'];
+    return jsonEncode(<String, dynamic>{
+      'tool': tool.wireName,
+      'reason': _safeCheckpointReasonFromArgs(tool, args),
+      'args': _safeCheckpointArgs(
+        args is Map ? Map<String, dynamic>.from(args) : const {},
+      ),
+    });
+  } on Object {
+    return '';
+  }
+}
+
+String _safeCheckpointReason(ToolRequest request) =>
+    _safeCheckpointReasonFromArgs(request.tool, request.args);
+
+String _safeCheckpointReasonFromArgs(
+  AgentToolName tool,
+  Object? rawArgs,
+) {
+  final args = rawArgs is Map ? Map<String, dynamic>.from(rawArgs) : const {};
+  final path = args['path'];
+  if (path is String && path.trim().isNotEmpty) {
+    return '需要批准 ${tool.wireName}：${_safeCheckpointPath(path)}';
+  }
+  return '需要批准 ${tool.wireName}';
+}
+
+Map<String, dynamic> _safeCheckpointArgs(Map<String, dynamic> args) {
+  final safe = <String, dynamic>{};
+  final path = args['path'];
+  if (path is String && path.trim().isNotEmpty) {
+    safe['path'] = _safeCheckpointPath(path);
+  }
+  final overwrite = args['overwrite'];
+  if (overwrite is bool) safe['overwrite'] = overwrite;
+  for (final key in <String>['templateId', 'id', 'name', 'domain']) {
+    final value = args[key];
+    if (value is String && value.trim().isNotEmpty) {
+      safe[key] = _safeCheckpointText(value);
+    }
+  }
+  final content = args['content'];
+  if (content is String) safe['contentLength'] = content.length;
+  final command = args['command'];
+  if (command is String && command.trim().isNotEmpty) {
+    safe['commandPresent'] = true;
+  }
+  final permissions = args['permissions'];
+  if (permissions is List) {
+    safe['permissionCount'] = permissions.length;
+  }
+  if (args['url'] is String) safe['urlPresent'] = true;
+  return safe;
+}
+
+String _safeCheckpointPath(String raw) {
+  final normalized = raw.trim().replaceAll('\\', '/');
+  if (normalized.startsWith('/') ||
+      RegExp(r'^[A-Za-z]:/').hasMatch(normalized)) {
+    final segments = normalized.split('/').where((item) => item.isNotEmpty);
+    return segments.isEmpty ? '' : segments.last;
+  }
+  return normalized.contains('..') ? normalized.split('/').last : normalized;
+}
+
+String _safeCheckpointText(String raw) {
+  var value = const SearchSecretScanner().redact(
+    raw.trim(),
+    includeOpaqueTokens: true,
+  );
+  value = value.replaceAll(RegExp(r'https?://[^\s,;）)]+'), '[外部地址]');
+  value = value.replaceAll(
+    RegExp(
+      r'(?:(?:[A-Za-z]:[\\/])|/(?:Users|home|Volumes|private|tmp)/)[^\s,;）)]*',
+    ),
+    '[本地路径]',
+  );
+  return value.length <= 512 ? value : '${value.substring(0, 511)}…';
 }

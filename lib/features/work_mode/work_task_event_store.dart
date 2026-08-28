@@ -50,6 +50,11 @@ class WorkTaskEventStore {
   static const int defaultMaxMetadataStringCharacters = 512;
   static const int _maxMetadataEntries = 32;
   static const int _maxMetadataDepth = 4;
+  static final RegExp _urlPattern =
+      RegExp(r'https?://[^\s,;）)]+', caseSensitive: false);
+  static final RegExp _localPathPattern = RegExp(
+    r'(?:(?:[A-Za-z]:[\\/])|/(?:Users|home|Volumes|private|tmp)/)[^\s,;）)]*',
+  );
 
   final Directory appSupportDirectory;
   final int maxTitleCharacters;
@@ -60,6 +65,8 @@ class WorkTaskEventStore {
       StreamController<WorkTaskEvent>.broadcast();
   final Map<String, Future<void>> _writeChains = {};
   final Map<String, int> _lastSequences = {};
+  Future<void>? _closeFuture;
+  bool _closed = false;
 
   WorkTaskEventStore({
     required this.appSupportDirectory,
@@ -91,9 +98,15 @@ class WorkTaskEventStore {
     Map<String, Object?>? safeMetadata,
     DateTime? timestamp,
   }) {
+    if (_closed) {
+      return Future<WorkTaskEvent>.error(
+        StateError('工作任务事件存储已关闭。'),
+      );
+    }
     _validateTaskId(taskId);
     final previous = _writeChains[taskId] ?? Future<void>.value();
-    final operation = previous.catchError((Object _) {}).then(
+    late final Future<WorkTaskEvent> operation;
+    operation = previous.catchError((Object _) {}).then(
           (_) => _appendInternal(
             taskId: taskId,
             kind: kind,
@@ -105,15 +118,23 @@ class WorkTaskEventStore {
             timestamp: timestamp,
           ),
         );
-    _writeChains[taskId] = operation.then<void>(
-      (_) {},
-      onError: (Object _, StackTrace __) {},
+    late final Future<void> tracked;
+    tracked = operation.then<void>(
+      (_) => _finishWrite(taskId, tracked),
+      onError: (Object _, StackTrace __) => _finishWrite(taskId, tracked),
     );
+    _writeChains[taskId] = tracked;
     return operation;
   }
 
   Future<WorkTaskEventReadResult> read(String taskId) async {
     _validateTaskId(taskId);
+    final pending = _writeChains[taskId];
+    if (pending != null) await pending;
+    return _readPersisted(taskId);
+  }
+
+  Future<WorkTaskEventReadResult> _readPersisted(String taskId) async {
     final file = eventFileFor(taskId);
     if (!await file.exists()) {
       return WorkTaskEventReadResult(events: const [], issues: const []);
@@ -168,9 +189,12 @@ class WorkTaskEventStore {
   Stream<WorkTaskEvent> watch(String taskId) async* {
     _validateTaskId(taskId);
     final buffered = StreamController<WorkTaskEvent>();
-    final subscription = _liveEvents.stream
-        .where((event) => event.taskId == taskId)
-        .listen(buffered.add, onError: buffered.addError);
+    final subscription =
+        _liveEvents.stream.where((event) => event.taskId == taskId).listen(
+              buffered.add,
+              onError: buffered.addError,
+              onDone: () => unawaited(buffered.close()),
+            );
     var lastSequence = 0;
     try {
       final replay = await read(taskId);
@@ -179,6 +203,12 @@ class WorkTaskEventStore {
           lastSequence = event.sequence;
           yield event;
         }
+      }
+      if (replay.issues.isNotEmpty) {
+        // Replay remains useful, but the UI must not silently present a
+        // partial timeline as complete. Throw only after valid events have
+        // been yielded so the panel can show an actionable retry state.
+        throw StateError('任务日志部分记录无法读取，请重试。');
       }
       await for (final event in buffered.stream) {
         if (event.sequence > lastSequence) {
@@ -194,7 +224,17 @@ class WorkTaskEventStore {
     }
   }
 
-  Future<void> close() => _liveEvents.close();
+  Future<void> close() {
+    final existing = _closeFuture;
+    if (existing != null) return existing;
+    _closed = true;
+    final pending = List<Future<void>>.from(_writeChains.values);
+    final closing = Future.wait<void>(pending, eagerError: false).then<void>(
+      (_) => _liveEvents.close(),
+    );
+    _closeFuture = closing;
+    return closing;
+  }
 
   Future<WorkTaskEvent> _appendInternal({
     required String taskId,
@@ -220,12 +260,12 @@ class WorkTaskEventStore {
     );
     final file = eventFileFor(taskId);
     await file.parent.create(recursive: true);
-    final sink = file.openSync(mode: FileMode.append);
+    final handle = await file.open(mode: FileMode.append);
     try {
-      sink.writeStringSync('${jsonEncode(event.toJson())}\n');
-      sink.flushSync();
+      await handle.writeString('${jsonEncode(event.toJson())}\n');
+      await handle.flush();
     } finally {
-      sink.closeSync();
+      await handle.close();
     }
     _lastSequences[taskId] = sequence;
     _liveEvents.add(event);
@@ -235,14 +275,23 @@ class WorkTaskEventStore {
   Future<int> _nextSequence(String taskId) async {
     final known = _lastSequences[taskId];
     if (known != null) return known;
-    final replay = await read(taskId);
+    final replay = await _readPersisted(taskId);
     final sequence = replay.events.isEmpty ? 0 : replay.events.last.sequence;
     _lastSequences[taskId] = sequence;
     return sequence;
   }
 
+  void _finishWrite(String taskId, Future<void> operation) {
+    final tracked = _writeChains[taskId];
+    if (tracked == null || tracked != operation) return;
+    _writeChains.remove(taskId);
+    _lastSequences.remove(taskId);
+  }
+
   String _safeText(String value, int maximum) {
-    final redacted = _secretScanner.redact(value, includeOpaqueTokens: true);
+    var redacted = _secretScanner.redact(value, includeOpaqueTokens: true);
+    redacted = redacted.replaceAll(_urlPattern, '[外部地址]');
+    redacted = redacted.replaceAll(_localPathPattern, '[本地路径]');
     if (redacted.length <= maximum) return redacted;
     return maximum == 1 ? '…' : '${redacted.substring(0, maximum - 1)}…';
   }

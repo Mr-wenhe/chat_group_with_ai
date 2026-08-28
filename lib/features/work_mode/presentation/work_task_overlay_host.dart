@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:chat_group/core/database/database_service_provider.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
 import 'package:chat_group/features/work_mode/providers/work_task_providers.dart';
@@ -21,6 +22,9 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
   final WorkTaskEventStream? eventStreamFor;
   final Future<void> Function(String taskId)? onStopTask;
   final Future<void> Function(String taskId)? onContinueTask;
+  final Future<void> Function(String taskId)? onApproveTask;
+  final Future<void> Function(String taskId)? onRejectTask;
+  final String Function(String characterId)? characterNameFor;
 
   const WorkTaskOverlayHost({
     super.key,
@@ -32,6 +36,9 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
     this.eventStreamFor,
     this.onStopTask,
     this.onContinueTask,
+    this.onApproveTask,
+    this.onRejectTask,
+    this.characterNameFor,
   });
 
   @override
@@ -99,7 +106,10 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
                   setState(() => _selectedTaskId = taskId),
               onStop: _stopTask,
               onContinue: _continueTask,
+              onApprove: _approveTask,
+              onReject: _rejectTask,
               onOpenConversation: _openConversation,
+              characterNameFor: widget.characterNameFor ?? _characterName,
               onCollapse: () => setState(() => _isCollapsed = true),
               onClose: () => setState(() => _isVisible = false),
             ),
@@ -167,9 +177,22 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
           left.updatedAt ?? left.createdAt,
         ),
       );
-    final active = sorted.where((task) => !task.isTerminal);
-    final terminal = sorted.where((task) => task.isTerminal);
-    return <AgentTask>[...active, ...terminal].take(2).toList(growable: false);
+    // A newer queued task must not hide an older task that is actively
+    // executing. Keep both global execution slots visible, then fill the
+    // remaining panel slot with the newest other checkpoint.
+    final active = sorted
+        .where((task) => _isVisibleActiveStatus(task.status))
+        .toList(growable: false);
+    final remaining = sorted
+        .where((task) => !active.any((item) => item.id == task.id))
+        .toList(growable: false);
+    return <AgentTask>[...active, ...remaining].take(2).toList(growable: false);
+  }
+
+  bool _isVisibleActiveStatus(AgentTaskStatus status) {
+    return status == AgentTaskStatus.planning ||
+        status == AgentTaskStatus.waitingForApproval ||
+        status == AgentTaskStatus.runningTool;
   }
 
   Future<void> _stopTask(String taskId) {
@@ -191,6 +214,26 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       return _coordinator!.continueAfterSoftLimit(taskId);
     }
     return _coordinator!.resumeByUser(taskId);
+  }
+
+  Future<void> _approveTask(String taskId) {
+    final callback = widget.onApproveTask;
+    return callback?.call(taskId) ?? _coordinator!.approve(taskId);
+  }
+
+  Future<void> _rejectTask(String taskId) {
+    final callback = widget.onRejectTask;
+    return callback?.call(taskId) ?? _coordinator!.reject(taskId);
+  }
+
+  String _characterName(String characterId) {
+    try {
+      final database = ref.read(databaseServiceProvider);
+      return database.aiCharacterBox.get(characterId)?.name ?? characterId;
+    } on Object {
+      // Embedded/widget tests may provide a task stream without opening Hive.
+      return characterId;
+    }
   }
 
   void _openConversation(String conversationId) {

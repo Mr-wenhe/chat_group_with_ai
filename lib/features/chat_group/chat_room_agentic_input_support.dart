@@ -12,8 +12,8 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
 
   /// 发送用户消息的主入口。
   ///
-  /// 顺序：收起 @ 弹窗 → 解析 @ 列表 → 拦截工具审批指令 → 构造并落库消息
-  /// → 私聊标记来源/已读 → 清理引用与附件 → 派发 AI 回复（或排队）。
+  /// 顺序：收起 @ 弹窗 → 解析 @ 列表 → 构造并落库消息 → 私聊标记来源/已读
+  /// → 清理引用与附件 → 派发 AI 回复或全局工作任务。
   Future<void> _sendMessage() async {
     _hideMentionOverlay();
     final text = _textController.text.trim();
@@ -27,15 +27,6 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       if (!_pendingMentionedIds.contains(id)) {
         _pendingMentionedIds.add(id);
       }
-    }
-
-    // 审批词（「批准」「取消」等）不应作为普通用户消息落库。
-    if (await _handlePendingAgentApproval(text)) {
-      // 发送后清空待发送附件（即使审批消息本身不展示）。
-      if (hasAttachments && mounted) {
-        _setUiState(() => _pendingAttachments.clear());
-      }
-      return;
     }
 
     // 构造带媒体附件的用户消息（媒体为不可变快照，避免后续清空影响已落库消息）。
@@ -73,6 +64,16 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       return;
     }
 
+    // 工作任务由全局协调器串行化。即使普通聊天页仍在处理旧回合，新的
+    // 工作指令也必须立即进入持久任务队列，不能被页面队列或取消逻辑吞掉。
+    if (_workModeEnabled) {
+      await _runWorkModeTask(
+        text: text,
+        mentionedIds: mentionedIds,
+      );
+      return;
+    }
+
     if (_isAiReplying) {
       // AI 正在回复中，排队等待当前回合结束后再处理。
       _conversationController.enqueue(PendingUserMessage(
@@ -100,7 +101,6 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       await _runWorkModeTask(
         text: text,
         mentionedIds: mentionedIds,
-        userMessage: userMessage,
       );
       return;
     }
@@ -143,15 +143,19 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     }
   }
 
-  /// 工作模式：选出唯一执行者，准备工作区，然后跑 agentic 工具循环。
-  ///
-  /// 与普通群聊不同，工作模式只让一个角色执行（避免多角色并发写同一工作区），
-  /// 且必须是启用了 Agentic 能力的活跃角色。
+  /// 页面只负责把用户已落库的消息提交给全局协调器；它不创建取消令牌、
+  /// workspace bridge 或 AgentRuntime。后续追问复用同一任务的持久上下文。
   Future<void> _runWorkModeTask({
     required String text,
     required List<String> mentionedIds,
-    Message? userMessage,
   }) async {
+    final coordinator = ref.read(workTaskCoordinatorProvider);
+    final activeTask = _latestWorkTaskForConversation();
+    if (activeTask != null) {
+      await coordinator.enqueueFollowUp(activeTask.id, text);
+      return;
+    }
+
     final executor = WorkModePolicy.selectExecutor(
       characters: _characters,
       mentionedIds: mentionedIds,
@@ -173,78 +177,28 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     )) {
       return;
     }
-    final config = _resolveApiConfig(executor);
-    if (config == null) {
-      await _appendMessage(Message(
-        groupId: widget.groupId,
-        senderId: executor.id,
-        senderType: 'ai',
-        content: '[${executor.name} 未配置 API，无法执行工作任务]',
-      ));
-      return;
-    }
-    // 配置里存的是 provider 名字符串，找不到时兜底为 deepseek。
-    final provider = ApiProvider.values.firstWhere(
-      (p) => p.name == config.provider,
-      orElse: () => ApiProvider.deepseek,
+    final task = AgentTask(
+      groupId: widget.groupId,
+      characterId: executor.id,
+      userRequest: text,
+      requestedPermissions: executor.toolPermissions,
+      assignedCharacterIds: <String>[executor.id],
+      workModeTask: true,
     );
-    if (_conversationController.beginWork() == null) return;
-    // 空 setState 用于让"正在执行"相关的按钮态立即刷新。
-    if (_canTouchUi) _setUiState(() {});
-    final workModeRun = _workModeSession.beginRun();
-    final cancelToken = workModeRun.token;
-    try {
-      // 为本会话准备（或复用）独立工作目录，并注册给本地 agent 桥接进程。
-      final workspace = await WorkModeWorkspaceService(db: _db).loadOrCreate(
-        conversationId: widget.groupId,
-        isDirectChat: _isDirectChat,
-      );
-      // Workspace discovery is asynchronous. During that await the user may
-      // leave the page, disable work mode, or cancel this run; in all three
-      // cases do not register a bridge route or start a tool loop.
-      if (!_canTouchUi || !_workModeEnabled || workModeRun.isRequestedStop) {
-        return;
-      }
-      final registration = await LocalAgentBridgeLauncher().registerWorkspace(
-        conversationId: widget.groupId,
-        workspacePath: workspace.workDirPath,
-      );
-      // Registration is asynchronous as well. If work mode was disabled
-      // while the bridge was starting, immediately remove the route that was
-      // just created before returning to the normal chat lifecycle.
-      if (!_canTouchUi || !_workModeEnabled || workModeRun.isRequestedStop) {
-        await LocalAgentBridgeLauncher().unregisterWorkspace(
-          conversationId: widget.groupId,
-          registration: registration,
-        );
-        return;
-      }
-      await _generateAgenticReply(
-        character: executor,
-        config: config,
-        provider: provider,
-        userMessage: text,
-        media: userMessage?.media,
-        context: _recentMessagesForContext(),
-        workMode: true,
-        cancelToken: cancelToken,
-        workModeRun: workModeRun,
-      );
-    } finally {
-      _workModeSession.finishRun(workModeRun);
-      await _finishWorkActivityAndDispatchNext();
-    }
+    await coordinator.submit(task);
   }
 
-  /// 结束工作活动状态，并在没有待审批项时继续处理排队的用户消息。
-  ///
-  /// 有待审批工具时故意不取队列——必须等用户先决定批准或取消。
-  Future<void> _finishWorkActivityAndDispatchNext() async {
-    _finishWorkActivity();
-    if (!_canTouchUi || _pendingAgentApproval != null) return;
-    final next = _conversationController.takeNext();
-    if (next == null) return;
-    await _dispatchQueuedUserMessage(next);
+  AgentTask? _latestWorkTaskForConversation() {
+    final tasks = _db.agentTaskBox.values
+        .where((task) =>
+            task.workModeTask &&
+            task.groupId == widget.groupId &&
+            task.status != AgentTaskStatus.cancelled)
+        .toList()
+      ..sort((left, right) => (right.updatedAt ?? right.createdAt).compareTo(
+            left.updatedAt ?? left.createdAt,
+          ));
+    return tasks.isEmpty ? null : tasks.first;
   }
 
   /// 执行一轮普通群聊 / 私聊的 AI 回复。

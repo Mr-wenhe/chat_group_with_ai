@@ -80,6 +80,31 @@ void main() {
     expect(interrupted.canResumeInWorkMode, isTrue);
   });
 
+  test('terminal tasks cannot be revived by generic recovery or late progress',
+      () {
+    for (final status in <AgentTaskStatus>[
+      AgentTaskStatus.completed,
+      AgentTaskStatus.failed,
+      AgentTaskStatus.partiallyCompleted,
+      AgentTaskStatus.cancelled,
+    ]) {
+      final task = AgentTask(
+        groupId: 'group',
+        characterId: 'worker',
+        userRequest: '终态任务',
+        workModeTask: true,
+        status: status,
+      );
+
+      expect(task.canResumeInWorkMode, isFalse, reason: status.name);
+      expect(task.canResume, isFalse, reason: status.name);
+      task.markProgress(step: 2, operations: const ['late']);
+      expect(task.status, status, reason: status.name);
+      expect(task.currentStep, 0, reason: status.name);
+      expect(task.completedOperations, isEmpty, reason: status.name);
+    }
+  });
+
   test('backup round trip keeps resumable V1 task metadata', () {
     final original = AgentTask(
       id: 'task-v1',
@@ -112,8 +137,28 @@ void main() {
     expect(restored.softLimitReached, isTrue);
     expect(restored.resumeRequired, isTrue);
     expect(restored.executionStateJson, original.executionStateJson);
-    expect(restored.lastArtifactPaths, original.lastArtifactPaths);
+    expect(restored.lastArtifactPaths, ['summary.md']);
     expect(restored.actionLimit, AgentTask.defaultActionLimit);
     expect(restored.softTimeLimit, AgentTask.defaultSoftTimeLimit);
+  });
+
+  test('backup import strips unsafe artifact paths from legacy payloads', () {
+    final restored = BackupEntityCodec.decodeTask({
+      'id': 'unsafe-task',
+      'groupId': 'group',
+      'characterId': 'worker',
+      'userRequest': '恢复',
+      'status': AgentTaskStatus.completed.name,
+      'createdAt': DateTime.utc(2026, 8, 27).toIso8601String(),
+      'lastArtifactPaths': [
+        '/Users/alice/private/report.md',
+        r'C:\Users\alice\private\result.txt',
+        '../outside.txt',
+        'docs/ok.md',
+      ],
+    });
+
+    expect(
+        restored.lastArtifactPaths, ['report.md', 'result.txt', 'docs/ok.md']);
   });
 }

@@ -72,9 +72,22 @@ class CharacterSkillResolver {
 
     if (_containsAny(
       text,
-      const ['代码', 'code', 'flutter', 'review', 'debug', 'bug'],
+      const [
+        '代码',
+        '编程',
+        '开发',
+        'code',
+        'flutter',
+        'review',
+        'debug',
+        'bug',
+        '重构',
+        '修复',
+      ],
     )) {
       skills.addAll(_codingSkills(character.id));
+      final ponytail = ExpertSkillCatalog.findById('coding.ponytail');
+      if (ponytail != null) skills.add(ponytail.instantiateFor(character.id));
       permissions.addAll(const [
         ToolPermission.workspaceRead,
         ToolPermission.workspacePatch,

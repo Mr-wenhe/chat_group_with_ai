@@ -3,15 +3,23 @@ import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('目录包含三个 Agentic 基础工作流模板', () {
+  test('目录包含基础、元技能、Ponytail 和文档工作流模板', () {
     final ids = ExpertSkillCatalog.templates.map((template) => template.id);
 
     expect(
         ids,
         containsAll(const [
           'meta.create-skills',
+          'meta.find-skills',
+          'meta.grill-me',
+          'coding.ponytail',
           'general.superpowers',
           'planning.planning-with-files',
+          'document.markdown-artifact',
+          'document.word',
+          'document.pdf',
+          'document.presentations',
+          'document.spreadsheets',
         ]));
     final planning =
         ExpertSkillCatalog.findById('planning.planning-with-files')!;
@@ -51,5 +59,43 @@ void main() {
       ExpertSkillCatalog.recommendForText('生成 Java 命令行程序').first.id,
       'coding.flutter-reviewer',
     );
+  });
+
+  test('元技能和文档格式都能直接命中对应模板', () {
+    expect(
+      ExpertSkillCatalog.recommendForText('帮我 find skill').first.id,
+      'meta.find-skills',
+    );
+    expect(
+      ExpertSkillCatalog.recommendForText('grill me on this plan').first.id,
+      'meta.grill-me',
+    );
+    expect(
+      ExpertSkillCatalog.recommendForText('请用 ponytail 做最小实现').first.id,
+      'coding.ponytail',
+    );
+
+    const documentRequests = <String, String>{
+      '生成一份 Word DOCX 文档': 'document.word',
+      '生成一份 PDF 报告': 'document.pdf',
+      '生成 PPTX 演示文稿': 'document.presentations',
+      '生成一个 Excel XLSX 表格': 'document.spreadsheets',
+    };
+    for (final entry in documentRequests.entries) {
+      expect(
+        ExpertSkillCatalog.recommendForText(entry.key).first.id,
+        entry.value,
+        reason: entry.key,
+      );
+    }
+  });
+
+  test('Ponytail 会自动附带到代码请求', () {
+    final ids = ExpertSkillCatalog.recommendForText('修复 Dart bug').map(
+      (template) => template.id,
+    );
+
+    expect(ids, contains('coding.flutter-reviewer'));
+    expect(ids, contains('coding.ponytail'));
   });
 }

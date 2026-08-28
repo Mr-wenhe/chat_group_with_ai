@@ -117,7 +117,7 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                 : ChatMessageList(
                     messages: _messages,
                     characters: _allGroupCharacters,
-                    progressStartTimes: _progressStartTimes,
+                    progressStartTimes: const <String, int>{},
                     messageIndex: messageIndex,
                     characterIndex: characterIndex,
                     scrollController: _scrollController,

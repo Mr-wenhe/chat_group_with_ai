@@ -19,6 +19,7 @@ void main() {
     final bundle = CharacterSkillResolver.defaultsFor(character);
 
     expect(bundle.skills.map((s) => s.name), contains('Code Review'));
+    expect(bundle.skills.map((s) => s.name), contains('Ponytail'));
     expect(bundle.permissions, contains(ToolPermission.workspaceRead));
     expect(bundle.permissions, contains(ToolPermission.workspacePatch));
     expect(bundle.permissions, contains(ToolPermission.commandRun));
@@ -187,6 +188,58 @@ void main() {
       expect(coding.needsSkillCreation, isFalse, reason: request);
       expect(coding.permissions, contains(ToolPermission.workspacePatch),
           reason: request);
+    }
+  });
+
+  test('Word PDF PPTX XLSX 请求分别注入对应文档 Skill', () {
+    final character = AICharacter(
+      name: '通用助理',
+      avatar: '🤖',
+      age: 25,
+      role: '助理',
+      personalityTags: const [],
+      systemPrompt: '帮助用户完成任务。',
+      apiKey: 'k',
+      apiProvider: 'deepseek',
+    );
+
+    const requests = <String, String>{
+      '生成一份 Word DOCX 文档': 'document.word',
+      '分析这个 PDF 文件': 'document.pdf',
+      '制作 PPTX 演示文稿': 'document.presentations',
+      '整理 Excel XLSX 表格': 'document.spreadsheets',
+    };
+    for (final entry in requests.entries) {
+      final bundle = CharacterSkillResolver.resolveFor(character, entry.key);
+      expect(
+        bundle.skills.map((skill) => skill.id),
+        contains(entry.value),
+        reason: entry.key,
+      );
+      expect(bundle.needsSkillCreation, isFalse, reason: entry.key);
+    }
+  });
+
+  test('Find Skills 和 Grill Me 请求不会被误判为需要创建新 Skill', () {
+    final character = AICharacter(
+      name: '通用助理',
+      avatar: '🤖',
+      age: 25,
+      role: '助理',
+      personalityTags: const [],
+      systemPrompt: '帮助用户完成任务。',
+      apiKey: 'k',
+      apiProvider: 'deepseek',
+    );
+
+    const requests = <String, String>{
+      'find skill for document work': 'meta.find-skills',
+      'grill me on this plan': 'meta.grill-me',
+    };
+    for (final entry in requests.entries) {
+      final bundle = CharacterSkillResolver.resolveFor(character, entry.key);
+      expect(bundle.skills.map((skill) => skill.id), contains(entry.value));
+      expect(bundle.needsSkillCreation, isFalse, reason: entry.key);
     }
   });
 

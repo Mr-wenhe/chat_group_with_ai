@@ -276,22 +276,35 @@ class _BackupEntityMemoryCodec {
         'resultSummary': item.resultSummary,
         'createdAt': _date(item.createdAt),
         'currentStep': item.currentStep,
-        'completedOperations': item.completedOperations,
-        'pendingToolRequestJson': item.pendingToolRequestJson,
+        // Tool checkpoints are intentionally redacted before backup. File
+        // contents and shell commands must never leave the durable boundary.
+        'completedOperations': item.completedOperations
+            .map(safeToolRequestCheckpointJson)
+            .where((value) => value.isNotEmpty)
+            .toList(growable: false),
+        'pendingToolRequestJson':
+            safeToolRequestCheckpointJson(item.pendingToolRequestJson),
         'updatedAt': item.updatedAt?.toIso8601String(),
         'lastError': item.lastError,
         'workModeTask': item.workModeTask,
         'queuedUserRequests': item.queuedUserRequests,
-        'contextSummary': item.contextSummary,
+        'contextSummary': _safeTaskContextSummary(item.contextSummary),
         'assignedCharacterIds': item.assignedCharacterIds,
         'startedAt': item.startedAt?.toIso8601String(),
         'actionCount': item.actionCount,
         'softLimitReached': item.softLimitReached,
         'resumeRequired': item.resumeRequired,
         'executionStateJson': item.executionStateJson,
-        'lastArtifactPaths': item.lastArtifactPaths,
+        // Artifact paths are portable workspace-relative names. Never export
+        // a machine-specific absolute path (which would leak usernames and
+        // cannot be resolved on another device).
+        'lastArtifactPaths': item.lastArtifactPaths
+            .map(_portableArtifactPath)
+            .where((path) => path.isNotEmpty)
+            .toList(growable: false),
         'actionLimit': item.actionLimit,
         'softTimeLimitMinutes': item.softTimeLimitMinutes,
+        'eventLogIncomplete': item.eventLogIncomplete,
       };
 
   static AgentTask decodeTask(Map<String, dynamic> json) => AgentTask(
@@ -320,11 +333,18 @@ class _BackupEntityMemoryCodec {
         softLimitReached: json['softLimitReached'] as bool? ?? false,
         resumeRequired: json['resumeRequired'] as bool? ?? false,
         executionStateJson: json['executionStateJson']?.toString() ?? '',
-        lastArtifactPaths: _strings(json['lastArtifactPaths']),
+        // Backups may come from an older build or an untrusted file. Apply
+        // the same portability boundary on import as on export so an
+        // absolute path cannot be reintroduced into a restored task.
+        lastArtifactPaths: _strings(json['lastArtifactPaths'])
+            .map(_portableArtifactPath)
+            .where((path) => path.isNotEmpty)
+            .toList(growable: false),
         actionLimit: (json['actionLimit'] as num?)?.toInt() ??
             AgentTask.defaultActionLimit,
         softTimeLimitMinutes: (json['softTimeLimitMinutes'] as num?)?.toInt() ??
             AgentTask.defaultSoftTimeLimitMinutes,
+        eventLogIncomplete: json['eventLogIncomplete'] as bool? ?? false,
       );
 
   static Map<String, dynamic> workspace(WorkModeWorkspace item) => {
@@ -343,6 +363,34 @@ class _BackupEntityMemoryCodec {
         workDirPath: '',
         updatedAt: _dateTime(json, 'updatedAt'),
       );
+}
+
+String _portableArtifactPath(String raw) {
+  final normalized = raw.trim().replaceAll('\\', '/');
+  if (normalized.isEmpty) return '';
+  final absolute =
+      normalized.startsWith('/') || RegExp(r'^[A-Za-z]:/').hasMatch(normalized);
+  if (absolute) {
+    final segments = normalized.split('/').where((part) => part.isNotEmpty);
+    return segments.isEmpty ? '' : segments.last;
+  }
+  if (normalized.split('/').contains('..')) return '';
+  return normalized;
+}
+
+String _safeTaskContextSummary(String raw) {
+  var safe = const SearchSecretScanner().redact(
+    raw.trim(),
+    includeOpaqueTokens: true,
+  );
+  safe = safe.replaceAll(RegExp(r'https?://[^\s,;）)]+'), '[外部地址]');
+  safe = safe.replaceAll(
+    RegExp(
+      r'(?:(?:[A-Za-z]:[\\/])|/(?:Users|home|Volumes|private|tmp)/)[^\s,;）)]*',
+    ),
+    '[本地路径]',
+  );
+  return safe.length <= 4000 ? safe : '${safe.substring(0, 3999)}…';
 }
 
 String _string(Map<String, dynamic> json, String key) {

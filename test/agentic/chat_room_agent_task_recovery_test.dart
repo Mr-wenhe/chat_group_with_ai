@@ -1,81 +1,55 @@
-import 'dart:io';
-
+import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+AgentTask _task(AgentTaskStatus status) => AgentTask(
+      id: 'recovery-task-${status.name}',
+      groupId: 'group',
+      characterId: 'worker',
+      userRequest: '继续工作',
+      workModeTask: true,
+      status: status,
+      pendingToolRequestJson: '{"tool":"workspace.read"}',
+      lastError: '旧错误',
+    );
+
 void main() {
-  test('task recovery registers its workspace before either resume branch', () {
-    final source = File(
-      'lib/features/chat_group/chat_room_agentic_support.dart',
-    ).readAsStringSync();
-    final start = source.indexOf('Future<void> _resumeAgentTask');
-    final end = source.indexOf(
-      'List<ToolRequest> _restoredExecutedRequests',
-      start,
-    );
-    expect(start, isNonNegative);
-    expect(end, greaterThan(start));
+  test('cancelTask clears only resumable state and sanitizes the reason', () {
+    final task = _task(AgentTaskStatus.waitingForApproval);
 
-    final resumeBody = source.substring(start, end);
-    final workModeGuard = resumeBody.indexOf(
-      'if (!_workModeEnabled || !task.workModeTask) return;',
-    );
-    final loadWorkspace = resumeBody.indexOf(
-      'WorkModeWorkspaceService(db: _db).loadOrCreate(',
-    );
-    final registerWorkspace = resumeBody.indexOf(
-      'LocalAgentBridgeLauncher().registerWorkspace(',
-    );
-    final pendingBranch = resumeBody.indexOf(
-      'ToolRequest.fromJsonString(task.pendingToolRequestJson)',
-    );
-    final beginConversationWork = resumeBody.indexOf(
-      '_conversationController.beginWork()',
-    );
-    final beginRun = resumeBody.indexOf('_workModeSession.beginRun()');
-    final finishAndDispatch = resumeBody.indexOf(
-      '_finishWorkActivityAndDispatchNext()',
+    WorkModeTaskLifecycle.cancelTask(
+      task,
+      reason: 'https://secret.example/token?key=abc',
     );
 
-    expect(workModeGuard, inInclusiveRange(0, loadWorkspace - 1));
-    expect(loadWorkspace, inInclusiveRange(0, registerWorkspace - 1));
-    expect(registerWorkspace, inInclusiveRange(0, pendingBranch - 1));
-    expect(pendingBranch, inInclusiveRange(0, beginConversationWork - 1));
-    expect(beginConversationWork, inInclusiveRange(0, beginRun - 1));
-    expect(finishAndDispatch, greaterThan(beginRun));
+    expect(task.status, AgentTaskStatus.cancelled);
+    expect(task.pendingToolRequestJson, isEmpty);
+    expect(task.lastError, isNot(contains('https://')));
+    expect(task.lastError, isNot(contains('abc')));
   });
 
-  test('work mode rechecks lifecycle after every workspace await', () {
-    final source = File(
-      'lib/features/chat_group/chat_room_agentic_input_support.dart',
-    ).readAsStringSync();
-    final start = source.indexOf('Future<void> _runWorkModeTask');
-    final end = source.indexOf(
-      'Future<void> _finishWorkActivityAndDispatchNext',
-      start,
+  test('terminal task progress is retained instead of being removed', () {
+    expect(
+      WorkModeTaskLifecycle.shouldRemoveProgress(AgentTaskStatus.cancelled),
+      isTrue,
     );
-    expect(start, isNonNegative);
-    expect(end, greaterThan(start));
+    for (final status in <AgentTaskStatus>[
+      AgentTaskStatus.completed,
+      AgentTaskStatus.failed,
+      AgentTaskStatus.partiallyCompleted,
+    ]) {
+      expect(WorkModeTaskLifecycle.shouldRemoveProgress(status), isFalse);
+    }
+  });
 
-    final body = source.substring(start, end);
-    final loadWorkspace = body.indexOf(
-      'WorkModeWorkspaceService(db: _db).loadOrCreate(',
-    );
-    final firstLifecycleGuard = body.indexOf(
-      'if (!_canTouchUi || !_workModeEnabled || workModeRun.isRequestedStop)',
-      loadWorkspace,
-    );
-    final registerWorkspace = body.indexOf(
-      'LocalAgentBridgeLauncher().registerWorkspace(',
-    );
-    final secondLifecycleGuard = body.indexOf(
-      'if (!_canTouchUi || !_workModeEnabled || workModeRun.isRequestedStop)',
-      registerWorkspace,
-    );
-    final generateReply = body.indexOf('_generateAgenticReply(');
+  test('markInterrupted never revives a terminal or paused task', () {
+    final completed = _task(AgentTaskStatus.completed);
+    final paused = _task(AgentTaskStatus.paused);
 
-    expect(firstLifecycleGuard,
-        inInclusiveRange(loadWorkspace, registerWorkspace - 1));
-    expect(secondLifecycleGuard,
-        inInclusiveRange(registerWorkspace, generateReply - 1));
+    completed.markInterrupted(reason: '进程关闭');
+    paused.markInterrupted(reason: '进程关闭');
+
+    expect(completed.status, AgentTaskStatus.completed);
+    expect(paused.status, AgentTaskStatus.paused);
   });
 }

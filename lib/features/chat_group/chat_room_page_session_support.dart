@@ -288,7 +288,7 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
   /// 切换工作模式（持久化到本会话配置）。
   ///
   /// 开启：中断进行中的自动发言流式输出并停掉调度器，再检查可恢复的任务。
-  /// 关闭：停掉本地 agent 桥接进程、取消尚未审批的工具调用，恢复自动发言。
+  /// 关闭：只关闭本会话的 UI 开关；全局工作任务仍由执行面板控制。
   Future<void> _toggleWorkMode(bool enabled) async {
     await WorkModeConfigService(db: _db).setWorkMode(widget.groupId, enabled);
     _workModeSession.setEnabled(enabled);
@@ -306,18 +306,6 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
         _discardCurrentStream = false;
       }
       _stopAutoChat();
-    } else {
-      await LocalAgentBridgeLauncher().unregisterWorkspace(
-        conversationId: widget.groupId,
-      );
-      final pending = _workModeSession.takePendingApproval();
-      if (pending != null) {
-        await _cancelAgentTask(
-          pending.task,
-          reason: '工作模式已关闭，待审批任务已取消。',
-        );
-      }
-      _conversationController.complete();
     }
     if (_canTouchUi) {
       setState(() {});

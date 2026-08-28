@@ -1,41 +1,34 @@
-import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/features/agentic/document_skill_templates.dart';
+import 'package:chat_group/features/agentic/expert_skill_template.dart';
 
-class ExpertSkillTemplate {
-  final String id;
-  final String name;
-  final String domain;
-  final String description;
-  final List<String> keywords;
-  final List<String> instructions;
-  final List<ToolPermission> requiredPermissions;
-  final String source;
-
-  const ExpertSkillTemplate({
-    required this.id,
-    required this.name,
-    required this.domain,
-    required this.description,
-    required this.keywords,
-    required this.instructions,
-    required this.requiredPermissions,
-    this.source = 'built-in-expert-catalog',
-  });
-
-  CharacterSkill instantiateFor(String characterId) {
-    return CharacterSkill(
-      id: id,
-      characterId: characterId,
-      name: name,
-      domain: domain,
-      description: '$description\n来源：$source/$id',
-      instructions: instructions,
-      requiredPermissions: requiredPermissions,
-    );
-  }
-}
+export 'package:chat_group/features/agentic/expert_skill_template.dart';
 
 class ExpertSkillCatalog {
+  static const _codingRequestKeywords = [
+    '代码',
+    '编程',
+    '开发',
+    'code',
+    'coding',
+    'dart',
+    'flutter',
+    'java',
+    'kotlin',
+    'swift',
+    'python',
+    'javascript',
+    'typescript',
+    'c++',
+    'cpp',
+    'bug',
+    'debug',
+    'review',
+    'refactor',
+    '重构',
+    '修复',
+  ];
+
   static const List<ExpertSkillTemplate> templates = [
     ExpertSkillTemplate(
       id: 'meta.create-skills',
@@ -59,6 +52,92 @@ class ExpertSkillCatalog {
       requiredPermissions: [
         ToolPermission.skillCreate,
         ToolPermission.skillDownload,
+      ],
+    ),
+    ExpertSkillTemplate(
+      id: 'meta.find-skills',
+      name: 'Find Skills',
+      domain: 'meta',
+      description: '在当前内置目录和角色已安装技能中查找最匹配的可复用能力。',
+      keywords: [
+        '查找技能',
+        '找技能',
+        '搜索技能',
+        '发现技能',
+        '技能目录',
+        '可用技能',
+        '查找 skill',
+        'find skill',
+        'find skills',
+        'skill finder',
+        'skill discovery',
+        'skill search',
+      ],
+      instructions: [
+        '先查看本轮已经注入的内置技能和角色已安装技能，不要假设存在未列出的能力。',
+        '根据用户意图、领域和关键词选择最具体的匹配项，并说明匹配理由。',
+        '找到内置模板后使用 skill.download 和准确的 templateId 安装；没有匹配项才使用 skill.create。',
+        '只有工具返回成功后才能声称技能已安装，随后在当前任务中实际遵循它。',
+      ],
+      requiredPermissions: [
+        ToolPermission.skillCreate,
+        ToolPermission.skillDownload,
+      ],
+    ),
+    ExpertSkillTemplate(
+      id: 'meta.grill-me',
+      name: 'Grill Me',
+      domain: 'planning',
+      description: '逐层质询计划或设计，暴露隐含假设并逐个解决决策分支。',
+      keywords: [
+        'grill me',
+        'grill-me',
+        'grilling',
+        '拷问我',
+        '质询我',
+        '挑战我的方案',
+        '压力测试方案',
+        '逐个提问',
+        '严厉提问',
+      ],
+      instructions: [
+        '围绕目标、范围、依赖、失败路径和验收标准逐层追问，不接受含糊的默认前提。',
+        '一次只问一个关键问题，并同时给出你推荐的答案或选择方向。',
+        '如果答案可以通过读取代码或现有资料确认，先读取证据，不要把可验证事实变成问题。',
+        '在关键分支达成共识前不要擅自实施会改变结果的方案。',
+      ],
+      requiredPermissions: [ToolPermission.workspaceRead],
+    ),
+    ExpertSkillTemplate(
+      id: 'coding.ponytail',
+      name: 'Ponytail',
+      domain: 'coding',
+      description: '以 YAGNI 和最小可行改动约束代码任务，优先复用现有能力和标准方案。',
+      keywords: [
+        'ponytail',
+        'be lazy',
+        'lazy mode',
+        'simplest solution',
+        'minimal solution',
+        'yagni',
+        'do less',
+        '最简单方案',
+        '最小实现',
+        '不要过度设计',
+        '少写代码',
+        '避免过度工程化',
+      ],
+      appliesToCodingRequests: true,
+      instructions: [
+        '先读懂任务和受影响的完整调用链，再选择最小且正确的实现，不用“偷懒”代替理解。',
+        '优先复用现有代码，其次使用标准库、平台能力和已安装依赖，避免新增抽象和依赖。',
+        '不得省略输入校验、错误处理、安全措施、无障碍基础或用户明确要求的完整能力。',
+        '非平凡逻辑留下一个最小可运行验证；发现简化有明确上限时说明升级条件。',
+      ],
+      requiredPermissions: [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+        ToolPermission.commandRun,
       ],
     ),
     ExpertSkillTemplate(
@@ -132,6 +211,10 @@ class ExpertSkillCatalog {
         'review',
         'debug',
         'bug',
+        '修复',
+        '重构',
+        '开发',
+        '编程',
         '工程师'
       ],
       instructions: [
@@ -177,33 +260,7 @@ class ExpertSkillCatalog {
         ToolPermission.workspacePatch,
       ],
     ),
-    ExpertSkillTemplate(
-      id: 'document.markdown-artifact',
-      name: 'Markdown Document Artifact Expert',
-      domain: 'writing',
-      description: '生成结构完整、可直接交付的 Markdown 文档，并以真实文件写入和读回验证作为完成依据。',
-      keywords: [
-        'markdown',
-        'md 文档',
-        'md文档',
-        '技术文档',
-        '项目文档',
-        '需求文档',
-        '文档',
-        '报告',
-        'readme',
-      ],
-      instructions: [
-        '确认文档的受众、用途、结构、必备事实和可观察的完成标准。',
-        '生成完整 Markdown，保持标题层级合理，不用空占位和未实现的承诺充数。',
-        '调用 workspace.patch 写入 .md 文件，不得只在聊天正文中粘贴或口头声称完成。',
-        '读回文件并检查内容非空、标题层级和交付路径，再作为附件发送。',
-      ],
-      requiredPermissions: [
-        ToolPermission.workspaceRead,
-        ToolPermission.workspacePatch,
-      ],
-    ),
+    ...documentExpertSkillTemplates,
     ExpertSkillTemplate(
       id: 'product.strategy-partner',
       name: 'Product Strategy Expert',
@@ -300,8 +357,17 @@ class ExpertSkillCatalog {
         (keyword) =>
             keyword.isNotEmpty && lower.contains(keyword.toLowerCase()),
       );
-    }).toList()
-      ..sort((a, b) => _matchScore(b, lower).compareTo(_matchScore(a, lower)));
+    }).toList();
+    if (_isCodingRequest(lower)) {
+      for (final template in templates) {
+        if (template.appliesToCodingRequests && !matched.contains(template)) {
+          matched.add(template);
+        }
+      }
+    }
+    matched.sort(
+      (a, b) => _matchScore(b, lower).compareTo(_matchScore(a, lower)),
+    );
     if (matched.isEmpty) {
       return [
         templates.firstWhere(
@@ -311,6 +377,10 @@ class ExpertSkillCatalog {
     }
     return matched;
   }
+
+  static bool _isCodingRequest(String lower) => _codingRequestKeywords.any(
+        (keyword) => lower.contains(keyword),
+      );
 
   static int _matchScore(ExpertSkillTemplate template, String lower) {
     return template.keywords

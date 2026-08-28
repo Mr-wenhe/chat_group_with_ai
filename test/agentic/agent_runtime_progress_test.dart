@@ -30,6 +30,15 @@ void main() {
     expect(progress.currentStepStartedAtMs, isNull);
   });
 
+  test('publicDetail is an optional safe execution-output field', () {
+    const progress = AgentRuntimeProgress(
+      stage: AgentRuntimeProgressStage.toolCompleted,
+      executedRequests: [],
+      publicDetail: '工具已完成：report.md',
+    );
+    expect(progress.publicDetail, '工具已完成：report.md');
+  });
+
   // (3) run() 进度上报注入时间戳：onProgress 收到的 progress 携带非空
   // runStartedAtMs 与 currentStepStartedAtMs（P2 注入，不依赖具体工具执行）。
   test('run() injects runStartedAtMs and currentStepStartedAtMs on progress',
@@ -67,5 +76,34 @@ void main() {
       expect(progress.runStartedAtMs, isNotNull);
       expect(progress.currentStepStartedAtMs, isNotNull);
     }
+  });
+
+  test('cancelled runtime does not emit a late progress checkpoint', () async {
+    var progressCount = 0;
+    final runtime = AgentRuntime(
+      complete: (_) async => {'success': true, 'message': '不会执行'},
+      onProgress: (_) async => progressCount += 1,
+      shouldCancel: () => true,
+    );
+    final character = AICharacter(
+      name: '取消测试角色',
+      avatar: '',
+      age: 18,
+      role: '',
+      personalityTags: const [],
+      systemPrompt: '',
+      apiKey: '',
+      apiProvider: 'deepseek',
+      toolPermissions: const [],
+    );
+
+    final result = await runtime.run(
+      character: character,
+      skills: const [],
+      userRequest: '取消这次任务',
+    );
+
+    expect(result.status, AgentRuntimeStatus.failed);
+    expect(progressCount, 0);
   });
 }

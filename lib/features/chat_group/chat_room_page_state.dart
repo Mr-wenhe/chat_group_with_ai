@@ -114,9 +114,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 角色之间的有向关系状态（好感 / 熟悉度等），影响发言意图选择。
   List<RelationshipState> _relationshipStates = [];
 
-  /// 工作模式会话状态：是否启用、待用户审批的工具调用、停止请求等。
-  final WorkModeSession<PendingAgentToolApproval> _workModeSession =
-      WorkModeSession<PendingAgentToolApproval>();
+  /// 工作模式仅在页面保存开关；任务执行、取消和审批都归全局协调器。
+  final WorkModeSession _workModeSession = WorkModeSession();
 
   /// 本轮已为各角色决策好但尚未消费的发言意图：characterId -> 意图。
   final Map<String, ReplyIntent> _pendingReplyIntents = {};
@@ -126,12 +125,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 是否处于工作模式（工作模式下禁用空闲自动聊天）。
   bool get _workModeEnabled => _workModeSession.enabled;
-
-  /// 当前等待用户确认的 agentic 工具调用（为空表示无待审批项）。
-  PendingAgentToolApproval? get _pendingAgentApproval =>
-      _workModeSession.pendingApproval;
-  set _pendingAgentApproval(PendingAgentToolApproval? value) =>
-      _workModeSession.pendingApproval = value;
 
   /// 首屏数据是否仍在加载。
   bool _isLoading = true;
@@ -309,12 +302,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 高亮自动取消定时器。
   Timer? _mentionHighlightTimer;
-
-  /// 记录 agent 任务最近一次进度；仅保留运行时态，不写入 Hive。
-  final Map<String, AgentRuntimeProgress> _lastAgentProgress = {};
-
-  /// 记录 agent 任务的运行起点，用于进度气泡显示耗时。
-  final Map<String, int> _progressStartTimes = {};
 
   /// 统一保护异步回调，避免页面离开后继续写入 State。
   bool get _canTouchUi => mounted && !_disposed && _pageActive;
