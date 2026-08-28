@@ -16,6 +16,7 @@ import 'features/direct_chat/direct_chat_session.dart';
 import 'features/memory/memory_migrator.dart';
 import 'features/memory/observation_entry.dart';
 import 'features/settings/settings_page.dart';
+import 'features/work_mode/presentation/work_task_overlay_host.dart';
 import 'providers/providers.dart';
 
 const startupCharacterGenderMigrationTimeout = Duration(seconds: 6);
@@ -212,7 +213,10 @@ class MyApp extends ConsumerWidget {
           db: db,
           scaffoldMessengerKey: scaffoldMessengerKey,
           navigatorKey: navigatorKey,
-          child: child ?? const SizedBox.shrink(),
+          child: WorkTaskOverlayHost(
+            navigatorKey: navigatorKey,
+            child: child ?? const SizedBox.shrink(),
+          ),
         );
       },
       routes: {
