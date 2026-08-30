@@ -46,7 +46,7 @@ class FileValidator {
       return _validateMarkdown(content);
     }
     if (extension == 'dart') {
-      return _validateDart(path, commandRunner);
+      return _validateDart(path, content, commandRunner);
     }
     if (extension == 'java') {
       return _validateJava(content);
@@ -199,15 +199,16 @@ class FileValidator {
 
   static Future<FileValidationResult> _validateDart(
     String path,
+    String content,
     ValidationCommandRunner? commandRunner,
   ) async {
     if (commandRunner == null) {
-      return const FileValidationResult(
-        isValid: false,
-        message: 'Dart 验证未执行：command.run 不可用。',
-      );
+      return _validateDartLightweight(content: content);
     }
     final result = await commandRunner('flutter analyze ${_quote(path)}');
+    if (result['error'] == 'command_not_available_in_stage02') {
+      return _validateDartLightweight(content: content);
+    }
     final exitCode = result['exitCode'];
     final valid = result['ok'] == true || exitCode == 0;
     final output =
@@ -220,8 +221,115 @@ class FileValidator {
     );
   }
 
+  static FileValidationResult _validateDartLightweight({
+    required String content,
+  }) {
+    final stack = <String>[];
+    var quote = '';
+    var escaped = false;
+    var lineComment = false;
+    var blockComment = false;
+    for (var index = 0; index < content.length; index++) {
+      final character = content[index];
+      final next = index + 1 < content.length ? content[index + 1] : '';
+      if (lineComment) {
+        if (character == '\n') lineComment = false;
+        continue;
+      }
+      if (blockComment) {
+        if (character == '*' && next == '/') {
+          blockComment = false;
+          index++;
+        }
+        continue;
+      }
+      if (quote.isNotEmpty) {
+        if (escaped) {
+          escaped = false;
+        } else if (character == '\\') {
+          escaped = true;
+        } else if (content.startsWith(quote, index)) {
+          final delimiterLength = quote.length;
+          quote = '';
+          index += delimiterLength - 1;
+        }
+        continue;
+      }
+      if (character == '/' && next == '/') {
+        lineComment = true;
+        index++;
+        continue;
+      }
+      if (character == '/' && next == '*') {
+        blockComment = true;
+        index++;
+        continue;
+      }
+      if (character == '\'' || character == '"') {
+        final third = index + 2 < content.length ? content[index + 2] : '';
+        quote = next == character && third == character
+            ? '$character$character$character'
+            : character;
+        if (quote.length == 3) index += 2;
+        continue;
+      }
+      if (character == '{' || character == '[' || character == '(') {
+        stack.add(character);
+        continue;
+      }
+      if (character == '}' || character == ']' || character == ')') {
+        if (stack.isEmpty ||
+            !_matchingDelimiter(stack.removeLast(), character)) {
+          return const FileValidationResult(
+            isValid: false,
+            message: 'Dart 轻量验证失败：括号结构不匹配。',
+          );
+        }
+      }
+    }
+    if (quote.isNotEmpty || blockComment || stack.isNotEmpty) {
+      return const FileValidationResult(
+        isValid: false,
+        message: 'Dart 轻量验证失败：字符串、注释或括号未闭合。',
+      );
+    }
+    if (!_hasDartSourceStructure(content)) {
+      return const FileValidationResult(
+        isValid: false,
+        message: 'Dart 轻量验证失败：未找到常见 Dart 结构。',
+      );
+    }
+    return const FileValidationResult(
+      isValid: true,
+      message: 'Dart 轻量验证通过：已检查基本结构；未执行 flutter analyze。',
+    );
+  }
+
+  static bool _hasDartSourceStructure(String content) {
+    // Keep this intentionally permissive: this is a fallback when the
+    // command runner is unavailable, so rejecting valid declarations such as
+    // `String title = ...` or a top-level `main()` would block safe writes.
+    return RegExp(
+      r'\b(import|export|library|part|class|enum|mixin|extension|typedef|'
+      r'void|final|const|var|late|return|if|for|while|switch|try|throw|'
+      r'(?:String|bool|int|double|num|dynamic|Object|List|Map|Set|Future|'
+      r'Stream|Widget))\b|'
+      r'\b[A-Za-z_$][\w$]*(?:<[^;{}()]+>)?\s+[A-Za-z_$][\w$]*\s*=|'
+      r'\b[A-Za-z_$][\w$]*(?:<[^;{}()]+>)?\s+[A-Za-z_$][\w$]*\s*\([^;]*\)\s*\{|'
+      r'\bmain\s*\([^;{}]*\)\s*\{',
+    ).hasMatch(content);
+  }
+
+  static bool _matchingDelimiter(String opening, String closing) =>
+      (opening == '{' && closing == '}') ||
+      (opening == '[' && closing == ']') ||
+      (opening == '(' && closing == ')');
+
   static String _quote(String path) {
-    if (!RegExp(r'''[\s'"]''').hasMatch(path)) return path;
+    // Keep shell metacharacters inside the quoted argument even when a path
+    // has no whitespace. The validator may call a legacy bridge command
+    // runner, so a filename such as `a;rm -rf` must never become two commands.
+    if (RegExp(r'^[A-Za-z0-9_./\\:-]+$').hasMatch(path)) return path;
     return "'${path.replaceAll("'", "'\\''")}'";
   }
 }

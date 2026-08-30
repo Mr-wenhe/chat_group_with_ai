@@ -226,13 +226,17 @@ extension DataLifecyclePlannerClear on DataLifecyclePlanner {
             'theme_mode',
             'app_skin_mode',
             'tts_enabled',
-            'ai_processing_dir'
+            'ai_processing_dir',
+            'work_mode_folder_grants_v1',
+            'work_mode_agent_settings_v1',
           }
         : const {
             'theme_mode',
             'app_skin_mode',
             'tts_enabled',
-            'ai_processing_dir'
+            'ai_processing_dir',
+            'work_mode_folder_grants_v1',
+            'work_mode_agent_settings_v1',
           };
     return db.appSettingsBox.keys
         .where((key) => !preserved.contains(key.toString()))

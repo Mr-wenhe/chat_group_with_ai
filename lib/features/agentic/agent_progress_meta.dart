@@ -92,8 +92,14 @@ String completedStepLabel(ToolRequest request) {
   switch (request.tool) {
     case AgentToolName.workspaceRead:
       return '读取文件：$subject';
+    case AgentToolName.workspaceSearch:
+      return '搜索工作区：$subject';
     case AgentToolName.workspacePatch:
       return '已创建文件：$subject';
+    case AgentToolName.workspaceRename:
+      return '重命名文件：$subject';
+    case AgentToolName.workspaceDelete:
+      return '删除文件：$subject';
     case AgentToolName.workspaceList:
       return '列出工作区：$subject';
     case AgentToolName.commandRun:

@@ -685,6 +685,136 @@ void main() {
         AgentToolName.workspacePatch);
   });
 
+  test(
+      'runtime rejects a redacted write checkpoint instead of writing empty content',
+      () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: const {'ok': true, 'path': 'missing-content.txt'},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => const {'success': true, 'message': '不应调用总结'},
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.executeApprovedTool(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      request: const ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '恢复写入',
+        args: {
+          'path': 'missing-content.txt',
+          'contentLength': 42,
+        },
+      ),
+      userRequest: '继续上次写入',
+    );
+
+    expect(result.status, AgentRuntimeStatus.failed);
+    expect(result.message, contains('缺少完整内容'));
+    expect(fakeTool.lastWriteContent, isNull);
+  });
+
+  test('runtime routes an exact patch through the workspace patch adapter',
+      () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: const {'ok': true, 'path': 'note.txt'},
+      readResult: const {
+        'path': 'note.txt',
+        'content': 'after',
+      },
+      allowReadBeforeWrite: true,
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => const {'success': true, 'message': '不应调用总结'},
+      workspaceFileTool: fakeTool,
+    );
+    const sha =
+        '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef';
+
+    final result = await runtime.executeApprovedTool(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      request: const ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '精确修改',
+        args: {
+          'path': 'note.txt',
+          'expectedSha256': sha,
+          'expectedFragment': 'before',
+          'replacement': 'after',
+        },
+      ),
+      userRequest: '修改 note.txt',
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWriteContent, isNull);
+    expect(fakeTool.lastPatch, isNotNull);
+    expect(fakeTool.lastPatch, contains('expectedSha256'));
+  });
+
+  test('sensitive writes never echo readback content or create an attachment',
+      () async {
+    const secret = 'TOKEN=do-not-echo';
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: const {'ok': true, 'path': '.env'},
+      sensitivePaths: const {'.env'},
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => const {'success': true, 'message': '不应调用总结'},
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.executeApprovedTool(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      request: const ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '更新配置',
+        args: {'path': '.env', 'content': secret},
+      ),
+      userRequest: '更新 .env',
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(result.toolResult?['sensitive'], isTrue);
+    expect(result.toolResult?['readbackContent'], isNull);
+    expect(result.message, isNot(contains(secret)));
+  });
+
+  test('sensitive writes fail closed when local readback cannot be verified',
+      () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      patchResult: const {'ok': true, 'path': '.env'},
+      sensitivePaths: const {'.env'},
+      throwOnRead: true,
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => const {'success': true, 'message': '不应调用总结'},
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.executeApprovedTool(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      request: const ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '更新配置',
+        args: {'path': '.env', 'content': 'TOKEN=secret'},
+      ),
+      userRequest: '更新 .env',
+    );
+
+    expect(result.toolResult?['ok'], isFalse);
+    expect(result.toolResult?['error'], 'readback_unverified');
+    expect(result.toolResult?['readbackContent'], isNull);
+  });
+
   test('runtime executes approved skill create tool', () async {
     var toolCalled = false;
     final runtime = AgentRuntime(
@@ -1486,6 +1616,57 @@ void main() {
     expect(result.status, isNot(AgentRuntimeStatus.failed));
     expect(result.message, isNot(contains('未能生成文件')));
     expect(result.message, isNot(contains('未能写入')));
+  });
+
+  test('failed workspace rename/delete cannot be reported as completed',
+      () async {
+    final cases = <({AgentToolName tool, Map<String, dynamic> args})>[
+      (
+        tool: AgentToolName.workspaceRename,
+        args: {'path': 'old.txt', 'destinationPath': 'new.txt'},
+      ),
+      (
+        tool: AgentToolName.workspaceDelete,
+        args: {'path': 'old.txt'},
+      ),
+    ];
+
+    for (final scenario in cases) {
+      final runtime = AgentRuntime(
+        complete: (_) async => {
+          'success': true,
+          'message': '操作已完成。',
+        },
+        workspaceFileTool: _FakeWorkspaceFileTool(
+          renameResult: {
+            'ok': false,
+            'exitCode': 0,
+            'error': 'mutation_failed',
+          },
+          deleteResult: {
+            'ok': false,
+            'exitCode': 0,
+            'error': 'mutation_failed',
+          },
+        ),
+      );
+
+      final result = await runtime.executeApprovedTool(
+        character: _character(
+          toolPermissions: const [ToolPermission.workspacePatch],
+        ),
+        request: ToolRequest(
+          tool: scenario.tool,
+          reason: '执行文件变更',
+          args: scenario.args,
+        ),
+        userRequest: '整理工作区文件',
+      );
+
+      expect(result.status, AgentRuntimeStatus.failed,
+          reason: scenario.tool.wireName);
+      expect(result.message, contains('变更未成功'), reason: scenario.tool.wireName);
+    }
   });
 
   test('runtime executes approved skill download tool', () async {
@@ -2991,21 +3172,31 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
   final Map<String, dynamic> patchResult;
   final Map<String, dynamic> commandResult;
   final Map<String, dynamic> listResult;
+  final Map<String, dynamic> renameResult;
+  final Map<String, dynamic> deleteResult;
   final Map<String, String> existingFiles;
+  final Set<String> sensitivePaths;
   final bool throwOnRead;
   final bool allowReadBeforeWrite;
   String? lastWritePath;
   String? lastWriteContent;
+  String? lastPatch;
 
   _FakeWorkspaceFileTool({
     this.readResult = const {},
     this.patchResult = const {},
     this.commandResult = const {},
     this.listResult = const {},
+    this.renameResult = const {},
+    this.deleteResult = const {},
     this.existingFiles = const {},
+    this.sensitivePaths = const {},
     this.throwOnRead = false,
     this.allowReadBeforeWrite = false,
   }) : super(LocalAgentBridgeClient());
+
+  @override
+  bool isSensitivePath(String path) => sensitivePaths.contains(path);
 
   @override
   Future<Map<String, dynamic>> read(String path) async {
@@ -3027,6 +3218,7 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
 
   @override
   Future<Map<String, dynamic>> applyPatch(String patch) async {
+    lastPatch = patch;
     return patchResult;
   }
 
@@ -3049,6 +3241,19 @@ class _FakeWorkspaceFileTool extends WorkspaceFileTool {
   @override
   Future<Map<String, dynamic>> list({String path = '.'}) async {
     return listResult;
+  }
+
+  @override
+  Future<Map<String, dynamic>> rename(
+    String path,
+    String destinationPath,
+  ) async {
+    return renameResult;
+  }
+
+  @override
+  Future<Map<String, dynamic>> delete(String path) async {
+    return deleteResult;
   }
 }
 

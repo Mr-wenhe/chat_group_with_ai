@@ -32,13 +32,18 @@ class WorkModePolicy {
     return null;
   }
 
-  /// Reading local/browser data and mutating or executing on the host always
-  /// needs an explicit decision. Skill metadata operations are sandboxed to
-  /// the app database and can proceed without a second toggle.
+  /// Conservative default used by callers that do not have the app-wide
+  /// folder-grant context. The production work-mode runner overrides ordinary
+  /// reads/searches per request once a grant has been verified; keeping this
+  /// default strict preserves the old approval boundary for standalone users.
   static bool requiresApproval(AgentToolName tool) => switch (tool) {
         AgentToolName.workspaceList ||
         AgentToolName.workspaceRead ||
+        AgentToolName.workspaceSearch =>
+          true,
         AgentToolName.workspacePatch ||
+        AgentToolName.workspaceRename ||
+        AgentToolName.workspaceDelete ||
         AgentToolName.commandRun ||
         AgentToolName.browserContext =>
           true,
@@ -48,7 +53,10 @@ class WorkModePolicy {
   static String approvalSummary(ToolRequest request) => switch (request.tool) {
         AgentToolName.workspaceList => '列出目录：${request.args['path'] ?? '.'}',
         AgentToolName.workspaceRead => '读取文件：${request.args['path'] ?? ''}',
+        AgentToolName.workspaceSearch => '搜索路径：${request.args['path'] ?? '.'}',
         AgentToolName.workspacePatch => '写入文件：${request.args['path'] ?? ''}',
+        AgentToolName.workspaceRename => '重命名文件：${request.args['path'] ?? ''}',
+        AgentToolName.workspaceDelete => '删除文件：${request.args['path'] ?? ''}',
         AgentToolName.commandRun => '执行命令：${request.args['command'] ?? ''}',
         AgentToolName.browserContext => '读取当前浏览器页面上下文',
         AgentToolName.skillCreate => '创建应用内技能元数据',
@@ -64,7 +72,7 @@ class WorkModePolicy {
 你正处于显式工作模式。本轮输入是工作指令或对之前任务的补充，不得改走普通闲聊。
 必须选择并遵循至少一个已注入的 SKILL；只有在现有技能确实不足时才创建或安装新技能。
 如果任务需要可交付文件，必须通过 workspace.patch 生成完整文件并在获得用户写入批准后执行。
-工作区读取、浏览器上下文、文件写入和命令执行均会由应用暂停并请求用户确认；不得尝试绕过。
+普通工作区读取/搜索会在既有目录授权内自动执行；敏感读取、写入、删除、重命名、浏览器上下文和命令执行会由应用暂停并请求用户确认；不得尝试绕过。
 ''';
 
   static List<CharacterSkill> resolveSkills({

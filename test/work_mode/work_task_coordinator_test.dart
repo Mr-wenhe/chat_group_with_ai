@@ -4,6 +4,8 @@ import 'dart:io';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
+import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
+import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -14,6 +16,7 @@ import 'package:hive/hive.dart';
 class _FakeWorkTaskRunner implements WorkTaskRunner {
   final List<String> startedTaskIds = <String>[];
   final List<String> cancelledTaskIds = <String>[];
+  final Set<String> throwTaskIds = <String>{};
   final Map<String, Completer<void>> _completions = <String, Completer<void>>{};
   final Map<String, int> _activeByConversation = <String, int>{};
 
@@ -23,6 +26,10 @@ class _FakeWorkTaskRunner implements WorkTaskRunner {
 
   @override
   Future<void> run(AgentTask task, WorkTaskCancellation cancellation) async {
+    if (throwTaskIds.contains(task.id)) {
+      startedTaskIds.add(task.id);
+      throw StateError('runner failed');
+    }
     final completion = Completer<void>();
     _completions[task.id] = completion;
     startedTaskIds.add(task.id);
@@ -117,6 +124,16 @@ Future<void> _settle() async {
   // listeners receive instead of relying on a scheduler-specific microtask
   // count (which flakes when the full suite is under load).
   for (var index = 0; index < 10; index++) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+}
+
+Future<void> _waitForLockCount(
+  WorkResourceLockManager manager,
+  int expected,
+) async {
+  for (var index = 0; index < 200; index++) {
+    if (manager.activeLockCount == expected) return;
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
 }
@@ -343,6 +360,44 @@ void main() {
     expect(taskBox.get(task.id)?.userRequest, '修改刚才的结果');
   });
 
+  test('follow-up recalculates resource locks for its new request', () async {
+    final manager = WorkResourceLockManager(isWindows: false);
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      resourceLockManager: manager,
+      resourceLockPlan: (task) => [
+        WorkResourceLockRequest.write(
+          task.userRequest.contains('新目标')
+              ? '/workspace/new-target.txt'
+              : '/workspace/old-target.txt',
+        ),
+      ],
+    );
+    addTearDown(localCoordinator.dispose);
+
+    final task = _task(id: 'lock-follow-up', conversationId: 'group-lock');
+    await localCoordinator.submit(task);
+    expect(
+      taskBox.get(task.id)?.executionStateJson,
+      contains('/workspace/old-target.txt'),
+    );
+    runner.complete(task.id);
+    await _settle();
+
+    await localCoordinator.enqueueFollowUp(task.id, '改写到新目标');
+    expect(
+      taskBox.get(task.id)?.executionStateJson,
+      contains('/workspace/new-target.txt'),
+    );
+    expect(
+      taskBox.get(task.id)?.executionStateJson,
+      isNot(contains('/workspace/old-target.txt')),
+    );
+    runner.complete(task.id);
+  });
+
   test('dispose drains cancellation before the task database can close',
       () async {
     await coordinator.submit(_task(id: 'in-flight', conversationId: 'group-a'));
@@ -404,6 +459,290 @@ void main() {
 
     final tasks = await coordinator.watchAllTasks().first;
     expect(tasks.map((task) => task.id), contains('interrupted'));
+    expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('persists explicit resource lock plans for a later coordinator',
+      () async {
+    final manager = WorkResourceLockManager(isWindows: false);
+    final first = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      resourceLockManager: manager,
+    );
+    final task = _task(id: 'persisted-lock', conversationId: 'group-lock');
+    await first.submit(
+      task,
+      resourceLocks: const [
+        WorkResourceLockRequest.treeWrite('/workspace/project'),
+      ],
+    );
+    expect(taskBox.get(task.id)?.executionStateJson, contains('resourceLocks'));
+    await first.dispose();
+
+    final second = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      resourceLockManager: manager,
+    );
+    addTearDown(second.dispose);
+    await second.restore();
+    expect(taskBox.get(task.id)?.status, AgentTaskStatus.interrupted);
+    await second.resumeByUser(task.id);
+    expect(runner.startedTaskIds, contains(task.id));
+    runner.complete(task.id);
+  });
+
+  test('persists a runner-derived resource lock plan before execution',
+      () async {
+    final manager = WorkResourceLockManager(isWindows: false);
+    final local = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      resourceLockManager: manager,
+      resourceLockPlan: (_) => [
+        const WorkResourceLockRequest.treeWrite('/workspace/conversation'),
+      ],
+    );
+    addTearDown(local.dispose);
+
+    final task = _task(id: 'derived-lock', conversationId: 'group-derived');
+    await local.submit(task);
+
+    final stored = taskBox.get(task.id)!;
+    expect(stored.executionStateJson, contains('resourceLocks'));
+    expect(stored.executionStateJson, contains('/workspace/conversation'));
+    expect(runner.startedTaskIds, contains(task.id));
+
+    runner.complete(task.id);
+    await _settle();
+  });
+
+  test('fails closed when a required folder grant service is unavailable',
+      () async {
+    final guarded = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      requireFolderGrant: true,
+    );
+    addTearDown(guarded.dispose);
+    final task = _task(id: 'missing-grant', conversationId: 'group-grant');
+    await guarded.submit(task);
+    await _settle();
+
+    expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+    expect(taskBox.get(task.id)?.resumeRequired, isTrue);
+    expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('releases the conversation reservation after initial folder denial',
+      () async {
+    final settingsBox = await Hive.openBox<dynamic>('app_settings');
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      isWindows: false,
+      directoryValidator: (_) async => false,
+    );
+    final guarded = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: () async => null,
+    );
+    addTearDown(guarded.dispose);
+
+    final first =
+        _task(id: 'folder-denied-first', conversationId: 'folder-group');
+    final second =
+        _task(id: 'folder-denied-second', conversationId: 'folder-group');
+    await guarded.submit(first);
+    await guarded.submit(second);
+    await _settle();
+
+    expect(taskBox.get(first.id)?.status, AgentTaskStatus.paused);
+    expect(taskBox.get(second.id)?.status, AgentTaskStatus.paused);
+    expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('a native folder picker does not block another conversation submission',
+      () async {
+    final settingsBox = await Hive.openBox<dynamic>('app_settings-picker');
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      isWindows: false,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+    );
+    final pickerGate = Completer<String?>();
+    final guarded = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: () => pickerGate.future,
+      folderGrantConsent: (_) async => true,
+    );
+    addTearDown(() async {
+      if (!pickerGate.isCompleted) pickerGate.complete(null);
+      await guarded.dispose();
+    });
+
+    final first = await guarded.submit(
+      _task(id: 'picker-first', conversationId: 'picker-a'),
+    );
+    final second = await guarded.submit(
+      _task(id: 'picker-second', conversationId: 'picker-b'),
+    );
+
+    expect(first.status, AgentTaskStatus.waitingForApproval);
+    expect(second.status, AgentTaskStatus.waitingForApproval);
+    expect(runner.startedTaskIds, isEmpty);
+
+    pickerGate.complete(directory.path);
+    await _settle();
+    expect(
+        runner.startedTaskIds,
+        containsAll(<String>[
+          'picker-first',
+          'picker-second',
+        ]));
+  });
+
+  test('queues a conflicting resource and starts it after release', () async {
+    final manager = WorkResourceLockManager(isWindows: false);
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      resourceLockManager: manager,
+      resourceLockPlan: (_) => [
+        const WorkResourceLockRequest.write('/workspace/shared.txt'),
+      ],
+    );
+    addTearDown(localCoordinator.dispose);
+
+    await localCoordinator.submit(_task(id: 'lock-first', conversationId: 'a'));
+    await localCoordinator
+        .submit(_task(id: 'lock-second', conversationId: 'b'));
+    expect(taskBox.get('lock-second')?.status, AgentTaskStatus.queued);
+    expect(taskBox.get('lock-second')?.actionCount, 0);
+
+    final waitingEvents = await eventStore.read('lock-second');
+    expect(
+      waitingEvents.events.any(
+        (event) =>
+            event.title.contains('shared.txt') ||
+            event.detail.contains('shared.txt'),
+      ),
+      isTrue,
+    );
+
+    runner.complete('lock-first');
+    await _settle();
+    expect(runner.startedTaskIds, ['lock-first', 'lock-second']);
+    runner.complete('lock-second');
+  });
+
+  test('a lock waiter does not consume the second global execution slot',
+      () async {
+    final manager = WorkResourceLockManager(isWindows: false);
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      resourceLockManager: manager,
+      resourceLockPlan: (task) => [
+        if (task.id != 'unrelated')
+          const WorkResourceLockRequest.write('/workspace/shared.txt'),
+      ],
+    );
+    addTearDown(localCoordinator.dispose);
+
+    await localCoordinator
+        .submit(_task(id: 'lock-holder', conversationId: 'a'));
+    await localCoordinator
+        .submit(_task(id: 'lock-waiter', conversationId: 'b'));
+    await localCoordinator.submit(_task(id: 'unrelated', conversationId: 'c'));
+
+    expect(runner.startedTaskIds, ['lock-holder', 'unrelated']);
+    expect(taskBox.get('lock-waiter')?.status, AgentTaskStatus.queued);
+    expect(localCoordinator.runningTaskCount, 2);
+
+    runner.complete('lock-holder');
+    runner.complete('unrelated');
+    await _settle();
+    expect(runner.startedTaskIds, ['lock-holder', 'unrelated', 'lock-waiter']);
+    runner.complete('lock-waiter');
+  });
+
+  test('runner failure releases its resource lease for the next task',
+      () async {
+    final manager = WorkResourceLockManager(isWindows: false);
+    runner.throwTaskIds.add('lock-error');
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      resourceLockManager: manager,
+      resourceLockPlan: (_) => [
+        const WorkResourceLockRequest.write('/workspace/shared.txt'),
+      ],
+    );
+    addTearDown(localCoordinator.dispose);
+
+    await localCoordinator.submit(_task(id: 'lock-error', conversationId: 'a'));
+    await localCoordinator
+        .submit(_task(id: 'after-error', conversationId: 'b'));
+    await _settle();
+
+    expect(taskBox.get('lock-error')?.status, AgentTaskStatus.failed);
+    expect(runner.startedTaskIds, ['lock-error', 'after-error']);
+    runner.complete('after-error');
+    await _settle();
+    await _waitForLockCount(manager, 0);
+    expect(manager.activeLockCount, 0);
+  });
+
+  test('stopping a lock waiter removes it without starting the runner',
+      () async {
+    final manager = WorkResourceLockManager(isWindows: false);
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      resourceLockManager: manager,
+      resourceLockPlan: (_) => [
+        const WorkResourceLockRequest.write('/workspace/shared.txt'),
+      ],
+    );
+    addTearDown(localCoordinator.dispose);
+
+    await localCoordinator.submit(_task(id: 'holder', conversationId: 'a'));
+    await localCoordinator
+        .submit(_task(id: 'cancel-waiter', conversationId: 'b'));
+    await localCoordinator.stop('cancel-waiter');
+    expect(taskBox.get('cancel-waiter')?.status, AgentTaskStatus.cancelled);
+    expect(manager.waitingOwnerIds, isNot(contains('cancel-waiter')));
+
+    runner.complete('holder');
+    await _settle();
+    expect(runner.startedTaskIds, ['holder']);
+  });
+
+  test('restore marks an orphaned running task interrupted', () async {
+    final orphaned = _task(id: 'orphaned', conversationId: 'group-a')
+      ..status = AgentTaskStatus.runningTool;
+    await taskBox.put(orphaned.id, orphaned);
+
+    await coordinator.restore();
+
+    expect(taskBox.get(orphaned.id)?.status, AgentTaskStatus.interrupted);
+    expect(taskBox.get(orphaned.id)?.resumeRequired, isTrue);
     expect(runner.startedTaskIds, isEmpty);
   });
 

@@ -7,6 +7,7 @@ import 'local_agent_bridge_client.dart';
 class WorkspacePathGuard {
   static bool isSafeRelativePath(String path) {
     if (path.trim().isEmpty) return false;
+    if (RegExp(r'[\u0000-\u001f\u007f]').hasMatch(path)) return false;
     if (path.startsWith('/') || path.startsWith('\\')) return false;
     final segments = path.split(RegExp(r'[/\\]+'));
     return !segments.contains('..');
@@ -31,7 +32,18 @@ class WorkspacePathGuard {
 }
 
 class WorkspaceFileTool {
-  final LocalAgentBridgeClient bridge;
+  final LocalAgentBridgeClient? bridge;
+
+  /// Whether the backing tool can authorize and resolve absolute paths on its
+  /// own. The legacy bridge intentionally receives only workspace-relative
+  /// basenames; in-process Stage 02 services override this so an explicitly
+  /// authorized absolute path is not silently rewritten to another file.
+  bool get acceptsAbsolutePaths => false;
+
+  /// Filename classification is optional for the legacy bridge. Stage 02
+  /// overrides it so the runtime can avoid echoing sensitive file contents
+  /// during post-write verification.
+  bool isSensitivePath(String path) => false;
 
   /// 当前工具实例归属的对话 id；发出的每个桥接请求都会带上它，
   /// 使服务端能按 conversationId 路由到正确的 workspace 目录。
@@ -42,6 +54,8 @@ class WorkspaceFileTool {
     this.bridge, {
     this.conversationId = '',
   });
+
+  WorkspaceFileTool.withoutBridge({this.conversationId = ''}) : bridge = null;
 
   /// 把 conversationId 并入请求体（空串时省略，保持旧接口兼容）。
   Map<String, dynamic> _body(Map<String, dynamic> body) {
@@ -54,22 +68,61 @@ class WorkspaceFileTool {
     if (path != '.' && !WorkspacePathGuard.isSafeRelativePath(safe)) {
       throw ArgumentError('Unsafe workspace path: $path');
     }
-    return bridge.postJson('/workspace/list', _body({'path': safe}));
+    return _requireBridge().postJson('/workspace/list', _body({'path': safe}));
   }
+
+  Future<Map<String, dynamic>> listWithOptions({
+    String path = '.',
+    int page = 0,
+    int pageSize = 200,
+    bool recursive = false,
+  }) =>
+      list(path: path);
 
   Future<Map<String, dynamic>> read(String path) {
     final safe = WorkspacePathGuard.normalizeToRelative(path);
     if (!WorkspacePathGuard.isSafeRelativePath(safe)) {
       throw ArgumentError('Unsafe workspace path: $path');
     }
-    return bridge.postJson('/workspace/read', _body({'path': safe}));
+    return _requireBridge().postJson('/workspace/read', _body({'path': safe}));
+  }
+
+  Future<Map<String, dynamic>> readWithOptions(
+    String path, {
+    int startByte = 0,
+    int? byteLength,
+    bool allowSensitive = false,
+  }) =>
+      read(path);
+
+  Future<Map<String, dynamic>> search(
+    String path,
+    String query, {
+    bool recursive = false,
+    bool caseSensitive = true,
+    bool allowSensitive = false,
+  }) {
+    final safe = WorkspacePathGuard.normalizeToRelative(path);
+    if (!WorkspacePathGuard.isSafeRelativePath(safe)) {
+      throw ArgumentError('Unsafe workspace path: $path');
+    }
+    return _requireBridge().postJson(
+        '/workspace/search',
+        _body({
+          'path': safe,
+          'query': query,
+          'recursive': recursive,
+          'caseSensitive': caseSensitive,
+          'allowSensitive': allowSensitive,
+        }));
   }
 
   Future<Map<String, dynamic>> applyPatch(String patch) {
     if (patch.trim().isEmpty) {
       throw ArgumentError('Patch cannot be empty.');
     }
-    return bridge.postJson('/workspace/apply-patch', _body({'patch': patch}));
+    return _requireBridge()
+        .postJson('/workspace/apply-patch', _body({'patch': patch}));
   }
 
   /// 直接写文件（方案 A）。
@@ -83,7 +136,7 @@ class WorkspaceFileTool {
       throw ArgumentError('Unsafe workspace path: $path');
     }
     try {
-      return await bridge.postJson(
+      return await _requireBridge().postJson(
         '/workspace/write',
         _body({'path': safe, 'content': content}),
       );
@@ -172,6 +225,41 @@ class WorkspaceFileTool {
     if (command.trim().isEmpty) {
       throw ArgumentError('Command cannot be empty.');
     }
-    return bridge.postJson('/command/run', _body({'command': command}));
+    return _requireBridge()
+        .postJson('/command/run', _body({'command': command}));
   }
+
+  Future<Map<String, dynamic>> rename(
+    String path,
+    String destinationPath,
+  ) {
+    final safePath = WorkspacePathGuard.normalizeToRelative(path);
+    final safeDestination =
+        WorkspacePathGuard.normalizeToRelative(destinationPath);
+    if (!WorkspacePathGuard.isSafeRelativePath(safePath) ||
+        !WorkspacePathGuard.isSafeRelativePath(safeDestination)) {
+      throw ArgumentError('Unsafe workspace rename path.');
+    }
+    return _requireBridge().postJson(
+      '/workspace/rename',
+      _body({
+        'path': safePath,
+        'destinationPath': safeDestination,
+      }),
+    );
+  }
+
+  Future<Map<String, dynamic>> delete(String path) {
+    final safePath = WorkspacePathGuard.normalizeToRelative(path);
+    if (!WorkspacePathGuard.isSafeRelativePath(safePath)) {
+      throw ArgumentError('Unsafe workspace path: $path');
+    }
+    return _requireBridge().postJson(
+      '/workspace/delete',
+      _body({'path': safePath}),
+    );
+  }
+
+  LocalAgentBridgeClient _requireBridge() =>
+      bridge ?? (throw StateError('Workspace bridge is not configured.'));
 }

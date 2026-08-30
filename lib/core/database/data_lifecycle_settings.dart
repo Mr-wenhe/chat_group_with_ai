@@ -436,6 +436,8 @@ class DataLifecycleSettings {
         DatabaseService.appSkinModeKey,
         'tts_enabled',
         'ai_processing_dir',
+        'work_mode_folder_grants_v1',
+        'work_mode_agent_settings_v1',
       }.contains(key);
 
   /// Search settings own secure-credential deletion and must not be swept by

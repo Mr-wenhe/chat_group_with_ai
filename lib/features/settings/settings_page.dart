@@ -15,6 +15,7 @@ import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/settings/backup_restore_page.dart';
 import 'package:chat_group/features/settings/user_profile_page.dart';
 import 'package:chat_group/features/settings/ai_governance_page.dart';
+import 'package:chat_group/features/settings/work_mode_agent_settings_section.dart';
 import 'package:chat_group/features/memory/relationship_audit_page.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:chat_group/features/search/global_search_page.dart';
@@ -33,6 +34,8 @@ import 'package:chat_group/core/widgets/data_lifecycle_result_dialog.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
+import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
+import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 
 part 'settings_page_build.dart';
 part 'settings_page_config_support.dart';
@@ -161,6 +164,7 @@ class SettingsPage extends ConsumerStatefulWidget {
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
   late final AiApiService _apiService;
+  late final WorkFolderGrantService _workFolderGrantService;
   final _credentialResolver = SecureApiCredentialResolver();
   AppSkinMode _currentSkinMode = AppSkinMode.dark;
   bool _isTtsEnabled = true;
@@ -170,6 +174,18 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _hasPendingDeletion = false;
   bool _isCleaningMedia = false;
 
+  /// Settings can be rendered by lightweight callers before DatabaseService
+  /// has completed its normal startup initialization. The work-mode settings
+  /// remain useful without undo controls in that state; production startup
+  /// still supplies the durable snapshot service once the database is ready.
+  WorkSnapshotService? _tryReadWorkSnapshotService() {
+    try {
+      return ref.read(workSnapshotServiceProvider);
+    } on Object {
+      return null;
+    }
+  }
+
   @override
   void initState() {
     super.initState();
@@ -177,6 +193,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _apiService = AiApiService(
       AiRequestGateway(store: AiGovernanceStore.forDatabase(db)),
     );
+    _workFolderGrantService = ref.read(workFolderGrantServiceProvider);
     _currentSkinMode = db.savedAppSkinMode;
     _isTtsEnabled = db.isTtsEnabled;
     _tokenUsage = db.getTokenUsage();

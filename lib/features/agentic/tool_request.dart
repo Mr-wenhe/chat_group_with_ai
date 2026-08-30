@@ -5,7 +5,10 @@ import 'package:chat_group/features/web_search/security/search_secret_scanner.da
 enum AgentToolName {
   workspaceList('workspace.list'),
   workspaceRead('workspace.read'),
+  workspaceSearch('workspace.search'),
   workspacePatch('workspace.patch'),
+  workspaceRename('workspace.rename'),
+  workspaceDelete('workspace.delete'),
   commandRun('command.run'),
   browserContext('browser.context'),
   skillCreate('skill.create'),
@@ -299,6 +302,22 @@ Map<String, dynamic> _safeCheckpointArgs(Map<String, dynamic> args) {
     safe['permissionCount'] = permissions.length;
   }
   if (args['url'] is String) safe['urlPresent'] = true;
+  final startByte = args['startByte'];
+  if (startByte is num) safe['startByte'] = startByte.toInt().clamp(0, 1 << 31);
+  final byteLength = args['byteLength'];
+  if (byteLength is num) {
+    safe['byteLength'] = byteLength.toInt().clamp(0, 1 << 31);
+  }
+  final recursive = args['recursive'];
+  if (recursive is bool) safe['recursive'] = recursive;
+  final query = args['query'];
+  if (query is String && query.trim().isNotEmpty) {
+    safe['query'] = _safeCheckpointText(query);
+  }
+  final destination = args['destinationPath'];
+  if (destination is String && destination.trim().isNotEmpty) {
+    safe['destinationPath'] = _safeCheckpointPath(destination);
+  }
   return safe;
 }
 
@@ -320,7 +339,7 @@ String _safeCheckpointText(String raw) {
   value = value.replaceAll(RegExp(r'https?://[^\s,;）)]+'), '[外部地址]');
   value = value.replaceAll(
     RegExp(
-      r'(?:(?:[A-Za-z]:[\\/])|/(?:Users|home|Volumes|private|tmp)/)[^\s,;）)]*',
+      r'(?:(?:[A-Za-z]:[\\/])|(?:\\\\|//)|/(?:Users|home|Volumes|private|tmp|var|etc|usr|opt|bin|sbin|Applications|System|Library|Desktop|Documents|Downloads)/)[^\s,;）)]*',
     ),
     '[本地路径]',
   );

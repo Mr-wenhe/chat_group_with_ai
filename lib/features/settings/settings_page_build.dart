@@ -306,6 +306,13 @@ extension _SettingsPageBuild on _SettingsPageState {
             ],
           ),
           const SizedBox(height: 28),
+          _SectionHeader(title: '工作模式 AI Agent', cs: cs),
+          const SizedBox(height: 12),
+          WorkModeAgentSettingsSection(
+            service: _workFolderGrantService,
+            snapshotService: _tryReadWorkSnapshotService(),
+          ),
+          const SizedBox(height: 28),
           _buildTokenSection(cs),
           const SizedBox(height: 28),
           _SectionHeader(title: '数据管理', cs: cs),

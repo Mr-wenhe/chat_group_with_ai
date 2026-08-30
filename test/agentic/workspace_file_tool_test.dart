@@ -10,6 +10,7 @@ void main() {
     expect(WorkspacePathGuard.isSafeRelativePath('lib/main.dart'), isTrue);
     expect(WorkspacePathGuard.isSafeRelativePath('../secret.txt'), isFalse);
     expect(WorkspacePathGuard.isSafeRelativePath('/etc/passwd'), isFalse);
+    expect(WorkspacePathGuard.isSafeRelativePath('lib/a\n.dart'), isFalse);
   });
 
   test('runCommand forwards the conversation id to the bridge', () async {

@@ -48,7 +48,10 @@ WorkBuddy 工作方式（严格按顺序在内部执行，不要泄露思维过�
 可用工具名：
 - workspace.list
 - workspace.read
+- workspace.search
 - workspace.patch
+- workspace.rename
+- workspace.delete
 - command.run
 - browser.context
 - skill.create

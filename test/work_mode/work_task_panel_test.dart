@@ -1,9 +1,13 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_host.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
+import 'package:chat_group/features/work_mode/work_change_plan.dart';
+import 'package:chat_group/features/work_mode/work_change_policy.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
+import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -155,7 +159,9 @@ void main() {
         characterId: 'worker-id',
         plan: '读取 /Users/alice/project.md；https://private.example/token',
         resultSummary: 'https://private.example/result?token=secret',
-      )..status = AgentTaskStatus.waitingForApproval;
+      )
+        ..status = AgentTaskStatus.waitingForApproval
+        ..pendingToolRequestJson = '{"tool":"command.run","args":{}}';
       var approved = false;
 
       await tester.pumpWidget(MaterialApp(
@@ -196,6 +202,140 @@ void main() {
       expect(find.textContaining('secret'), findsNothing);
     });
 
+    testWidgets('shows only folder authorization while a grant is pending',
+        (tester) async {
+      final task = _task(
+        id: 'folder-pending-task',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.waitingForApproval
+        ..pendingToolRequestJson = '{"tool":"command.run","args":{}}'
+        ..executionStateJson = jsonEncode({
+          'folderGrantPending': true,
+          'folderRequestPath': '/tmp/project',
+        });
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+            onApprove: (_) async {},
+            onReject: (_) {},
+            onRequestFolder: (_) async {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-add-folder')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-approve')), findsNothing);
+      expect(find.byKey(const Key('work-task-reject')), findsNothing);
+    });
+
+    testWidgets('shows the durable change plan before approving a mutation',
+        (tester) async {
+      final plan = WorkChangePlan(
+        taskId: 'planned-approval-task',
+        actionType: WorkChangeActionType.modify,
+        exactPaths: const ['/workspace/report.md'],
+        knownAffectedDirectories: const ['/workspace'],
+        estimatedBytes: 128,
+        snapshotAvailable: true,
+        reversible: true,
+        riskReason: '需要更新周报并保留可撤销快照。',
+      );
+      final task = _task(
+        id: plan.taskId,
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.waitingForApproval
+        ..pendingToolRequestJson =
+            '{"tool":"workspace.patch","args":{"path":"report.md"}}'
+        ..executionStateJson = jsonEncode({
+          'approvalPlan': plan.toJson(),
+          'approvalScope': WorkApprovalScope.fromPlan(plan).toJson(),
+        });
+      var approved = false;
+      var rejected = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onApprove: (_) async => approved = true,
+            onReject: (_) async => rejected = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      await tester.tap(find.byKey(const Key('work-task-approve')));
+      await tester.pumpAndSettle();
+
+      expect(find.text('任务变更需要审批'), findsOneWidget);
+      expect(find.text('/workspace/report.md'), findsOneWidget);
+      expect(find.text('需要更新周报并保留可撤销快照。'), findsOneWidget);
+      expect(approved, isFalse);
+
+      await tester.tap(find.text('允许本次范围'));
+      await tester.pumpAndSettle();
+
+      expect(approved, isTrue);
+      expect(rejected, isFalse);
+    });
+
+    testWidgets('fails closed when a file approval plan cannot be read',
+        (tester) async {
+      final task = _task(
+        id: 'missing-approval-plan',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.waitingForApproval
+        ..pendingToolRequestJson =
+            '{"tool":"workspace.patch","args":{"path":"report.md"}}';
+      var approved = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onApprove: (_) async => approved = true,
+            onReject: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      final approve = find.byKey(const Key('work-task-approve'));
+      expect(approve, findsOneWidget);
+      final button = tester.widget<FilledButton>(approve);
+      expect(button.onPressed, isNull);
+      expect(find.byKey(const Key('work-task-approve-without-undo')),
+          findsNothing);
+      expect(approved, isFalse);
+    });
+
     testWidgets('shows a retryable error when the event stream fails',
         (tester) async {
       final task = _task(
@@ -226,6 +366,58 @@ void main() {
       expect(find.textContaining('执行动态读取失败'), findsOneWidget);
       expect(find.byKey(const Key('work-task-event-retry')), findsOneWidget);
       expect(find.textContaining('https://'), findsNothing);
+    });
+
+    testWidgets('offers a confirmed undo action for a completed task',
+        (tester) async {
+      final task = _task(
+        id: 'undo-task',
+        conversationId: 'group-one',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.completed;
+      var undone = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onUndo: (_) async => undone = true,
+            undoPreviewFor: (_) => const <WorkSnapshotUndoItem>[
+              WorkSnapshotUndoItem(
+                sequence: 1,
+                operation: '恢复',
+                path: '/Volumes/project/report.md',
+              ),
+              WorkSnapshotUndoItem(
+                sequence: 2,
+                operation: '删除',
+                path: '/Volumes/project/new.md',
+              ),
+            ],
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      final undoButton = tester.widget<OutlinedButton>(
+        find.byKey(const Key('work-task-undo')),
+      );
+      expect(undoButton.onPressed, isNotNull);
+      await tester.tap(find.byKey(const Key('work-task-undo')));
+      await tester.pumpAndSettle();
+      expect(find.text('撤销本任务改动'), findsOneWidget);
+      expect(find.text('恢复：/Volumes/project/report.md'), findsOneWidget);
+      expect(find.text('删除：/Volumes/project/new.md'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('work-task-undo-confirm')));
+      await tester.pumpAndSettle();
+      expect(undone, isTrue);
     });
   });
 

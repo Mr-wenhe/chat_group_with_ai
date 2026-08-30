@@ -34,7 +34,7 @@ String sanitizeWorkTaskError(Object? error) {
   );
   safe = safe.replaceAll(
     RegExp(
-      r'(?:(?:[A-Za-z]:[\\/])|/(?:Users|home|Volumes|private|tmp)/)[^\s,;）)]*',
+      r'(?:(?:[A-Za-z]:[\\/])|(?:\\\\|//)|/(?:Users|home|Volumes|private|tmp|var|etc|usr|opt|bin|sbin|Applications|System|Library|Desktop|Documents|Downloads)/)[^\s,;）)]*',
     ),
     '[本地路径]',
   );

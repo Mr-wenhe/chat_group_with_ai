@@ -1,13 +1,21 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/features/agentic/tool_request.dart';
+import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
+import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
+import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
+import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:flutter/material.dart';
 
 typedef WorkTaskEventStream = Stream<WorkTaskEvent> Function(String taskId);
 typedef WorkTaskAction = FutureOr<void> Function(String taskId);
+typedef WorkTaskUndoPreview = FutureOr<List<WorkSnapshotUndoItem>> Function(
+    String taskId);
 
 /// Displays public task state without owning task execution or navigation.
 ///
@@ -15,13 +23,18 @@ typedef WorkTaskAction = FutureOr<void> Function(String taskId);
 /// only the app-scoped coordinator can stop a task.
 class WorkTaskPanel extends StatefulWidget {
   final List<AgentTask> tasks;
+  final int hiddenTaskCount;
   final String? selectedTaskId;
   final WorkTaskEventStream eventStreamFor;
   final ValueChanged<String> onSelectTask;
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
   final WorkTaskAction? onApprove;
+  final WorkTaskAction? onApproveWithoutUndo;
   final WorkTaskAction? onReject;
+  final WorkTaskAction? onRequestFolder;
+  final WorkTaskAction? onUndo;
+  final WorkTaskUndoPreview? undoPreviewFor;
   final ValueChanged<String> onOpenConversation;
   final VoidCallback onCollapse;
   final VoidCallback onClose;
@@ -31,6 +44,7 @@ class WorkTaskPanel extends StatefulWidget {
   const WorkTaskPanel({
     super.key,
     required this.tasks,
+    this.hiddenTaskCount = 0,
     required this.eventStreamFor,
     required this.onSelectTask,
     required this.onStop,
@@ -40,7 +54,11 @@ class WorkTaskPanel extends StatefulWidget {
     required this.onClose,
     this.selectedTaskId,
     this.onApprove,
+    this.onApproveWithoutUndo,
     this.onReject,
+    this.onRequestFolder,
+    this.onUndo,
+    this.undoPreviewFor,
     this.characterNameFor,
     DateTime Function()? clock,
   }) : clock = clock ?? DateTime.now;
@@ -114,6 +132,16 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
                 selectedTaskId: task.id,
                 onSelectTask: widget.onSelectTask,
               ),
+              if (widget.hiddenTaskCount > 0) ...<Widget>[
+                const SizedBox(height: 6),
+                Text(
+                  '还有 ${widget.hiddenTaskCount} 个任务在队列中，当前面板优先显示执行中的任务。',
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+                  ),
+                ),
+              ],
               const SizedBox(height: 14),
               Expanded(
                 child: _TaskDetails(
@@ -133,7 +161,11 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
                 actionInFlight: _actionInFlight,
                 onOpenConversation: widget.onOpenConversation,
                 onApprove: widget.onApprove,
+                onApproveWithoutUndo: widget.onApproveWithoutUndo,
                 onReject: widget.onReject,
+                onRequestFolder: widget.onRequestFolder,
+                onUndo: widget.onUndo,
+                undoPreviewFor: widget.undoPreviewFor,
                 onStop: widget.onStop,
                 onContinue: widget.onContinue,
                 runAction: (action) => _runAction(action, task.id),
@@ -304,7 +336,11 @@ class _TaskActions extends StatelessWidget {
   final bool actionInFlight;
   final ValueChanged<String> onOpenConversation;
   final WorkTaskAction? onApprove;
+  final WorkTaskAction? onApproveWithoutUndo;
   final WorkTaskAction? onReject;
+  final WorkTaskAction? onRequestFolder;
+  final WorkTaskAction? onUndo;
+  final WorkTaskUndoPreview? undoPreviewFor;
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
   final Future<void> Function(WorkTaskAction action) runAction;
@@ -314,7 +350,11 @@ class _TaskActions extends StatelessWidget {
     required this.actionInFlight,
     required this.onOpenConversation,
     required this.onApprove,
+    required this.onApproveWithoutUndo,
     required this.onReject,
+    required this.onRequestFolder,
+    required this.onUndo,
+    required this.undoPreviewFor,
     required this.onStop,
     required this.onContinue,
     required this.runAction,
@@ -324,6 +364,10 @@ class _TaskActions extends StatelessWidget {
   Widget build(BuildContext context) {
     final continueReason = _continueUnavailableReasonForPanel(task);
     final stopReason = task.isTerminal ? '任务已结束，无法停止。' : null;
+    final approvalPlan = approvalPlanForTask(task);
+    final requiresPlan = _pendingToolRequiresPlan(task);
+    final approvalPlanUnavailable = requiresPlan && approvalPlan == null;
+    final needsFolder = _taskNeedsFolderGrant(task);
     return Wrap(
       spacing: 8,
       runSpacing: 8,
@@ -334,18 +378,41 @@ class _TaskActions extends StatelessWidget {
           icon: const Icon(Icons.forum_outlined),
           label: const Text('回到对话'),
         ),
-        if (task.status == AgentTaskStatus.waitingForApproval &&
+        if (!needsFolder &&
+            task.status == AgentTaskStatus.waitingForApproval &&
+            task.pendingToolRequestJson.trim().isNotEmpty &&
             onApprove != null &&
             onReject != null) ...<Widget>[
           Tooltip(
-            message: '批准当前列出的工具操作。',
+            message: approvalPlanUnavailable
+                ? '审批计划无法读取，已阻止文件变更；请让任务重新规划。'
+                : '批准当前列出的工具操作。',
             child: FilledButton.icon(
               key: const Key('work-task-approve'),
-              onPressed: actionInFlight ? null : () => runAction(onApprove!),
+              onPressed: actionInFlight || approvalPlanUnavailable
+                  ? null
+                  : () => _approveWithConfirmation(context, approvalPlan),
               icon: const Icon(Icons.check_rounded),
               label: const Text('批准'),
             ),
           ),
+          if (onApproveWithoutUndo != null &&
+              approvalPlan != null &&
+              (!approvalPlan.snapshotAvailable || !approvalPlan.reversible))
+            Tooltip(
+              message: '仅在你确认无法撤销时使用；不会因为设置开关而自动启用。',
+              child: OutlinedButton.icon(
+                key: const Key('work-task-approve-without-undo'),
+                onPressed: actionInFlight
+                    ? null
+                    : () => _approveWithoutUndoWithConfirmation(
+                          context,
+                          approvalPlan,
+                        ),
+                icon: const Icon(Icons.warning_amber_rounded),
+                label: const Text('无撤销执行'),
+              ),
+            ),
           Tooltip(
             message: '拒绝当前操作，并让任务尝试安全路径。',
             child: OutlinedButton.icon(
@@ -356,6 +423,14 @@ class _TaskActions extends StatelessWidget {
             ),
           ),
         ],
+        if (needsFolder && onRequestFolder != null)
+          OutlinedButton.icon(
+            key: const Key('work-task-add-folder'),
+            onPressed:
+                actionInFlight ? null : () => runAction(onRequestFolder!),
+            icon: const Icon(Icons.folder_shared_outlined),
+            label: const Text('授权目录'),
+          ),
         Tooltip(
           message: stopReason ?? '停止当前任务。',
           child: OutlinedButton.icon(
@@ -380,16 +455,126 @@ class _TaskActions extends StatelessWidget {
             ),
           ),
         Tooltip(
-          message: '撤销将在任务快照完成后可用。',
+          message:
+              task.isTerminal && onUndo != null ? '撤销本任务改动。' : '撤销将在任务快照完成后可用。',
           child: OutlinedButton.icon(
             key: const Key('work-task-undo'),
-            onPressed: null,
+            onPressed: task.isTerminal && onUndo != null && !actionInFlight
+                ? () => _confirmUndo(context)
+                : null,
             icon: const Icon(Icons.undo_rounded),
             label: const Text('撤销'),
           ),
         ),
       ],
     );
+  }
+
+  Future<void> _approveWithConfirmation(
+    BuildContext context,
+    WorkChangePlan? approvalPlan,
+  ) async {
+    final approve = onApprove;
+    if (approve == null) return;
+    if (_pendingToolRequiresPlan(task) && approvalPlan == null) return;
+    if (approvalPlan == null) {
+      await runAction(approve);
+      return;
+    }
+    final decision = await WorkChangeApprovalDialog.show(
+      context,
+      plan: approvalPlan,
+    );
+    if (decision == WorkChangeApprovalDecision.approved) {
+      await runAction(approve);
+    } else if (decision == WorkChangeApprovalDecision.rejected &&
+        onReject != null) {
+      await runAction(onReject!);
+    }
+  }
+
+  Future<void> _approveWithoutUndoWithConfirmation(
+    BuildContext context,
+    WorkChangePlan? approvalPlan,
+  ) async {
+    final approveWithoutUndo = onApproveWithoutUndo;
+    if (approveWithoutUndo == null) return;
+    if (_pendingToolRequiresPlan(task) && approvalPlan == null) return;
+    if (approvalPlan == null) {
+      await runAction(approveWithoutUndo);
+      return;
+    }
+    final decision = await WorkChangeApprovalDialog.show(
+      context,
+      plan: approvalPlan,
+    );
+    if (decision == WorkChangeApprovalDecision.approvedWithoutUndo) {
+      await runAction(approveWithoutUndo);
+    } else if (decision == WorkChangeApprovalDecision.rejected &&
+        onReject != null) {
+      await runAction(onReject!);
+    }
+  }
+
+  Future<void> _confirmUndo(BuildContext context) async {
+    final preview = undoPreviewFor;
+    List<WorkSnapshotUndoItem> items = const [];
+    var previewFailed = false;
+    if (preview != null) {
+      try {
+        items = await preview(task.id);
+      } on Object {
+        // Never execute an unknown undo scope. The user can retry after the
+        // manifest becomes readable again.
+        previewFailed = true;
+      }
+    }
+    if (!context.mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      barrierDismissible: true,
+      builder: (dialogContext) => AlertDialog(
+        key: const Key('work-task-undo-dialog'),
+        title: const Text('撤销本任务改动'),
+        content: ConstrainedBox(
+          constraints: const BoxConstraints(maxWidth: 520, maxHeight: 360),
+          child: previewFailed
+              ? const Text('无法读取任务快照，未执行撤销。请稍后重试。')
+              : items.isEmpty
+                  ? const Text('没有可撤销的已完成文件改动。')
+                  : SingleChildScrollView(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        mainAxisSize: MainAxisSize.min,
+                        children: items
+                            .map(
+                              (item) => Padding(
+                                padding:
+                                    const EdgeInsets.symmetric(vertical: 4),
+                                child: Text(_safeUndoItemText(item.label)),
+                              ),
+                            )
+                            .toList(growable: false),
+                      ),
+                    ),
+        ),
+        actions: [
+          TextButton(
+            key: const Key('work-task-undo-cancel'),
+            onPressed: () => Navigator.of(dialogContext).pop(false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            key: const Key('work-task-undo-confirm'),
+            onPressed: previewFailed
+                ? null
+                : () => Navigator.of(dialogContext).pop(true),
+            child: const Text('确认撤销'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed == true) await runAction(onUndo!);
   }
 }
 
@@ -634,11 +819,38 @@ String _safePanelText(String value) {
   safe = safe.replaceAll(RegExp(r'https?://[^\s,;）)]+'), '[外部地址]');
   safe = safe.replaceAll(
     RegExp(
-      r'(?:(?:[A-Za-z]:[\\/])|/(?:Users|home|Volumes|private|tmp)/)[^\s,;）)]*',
+      r'(?:(?:[A-Za-z]:[\\/])|(?:\\\\|//)|/(?:Users|home|Volumes|private|tmp|var|etc|usr|opt|bin|sbin|Applications|System|Library|Desktop|Documents|Downloads)/)[^\s,;）)]*',
     ),
     '[本地路径]',
   );
   return safe.length <= 4000 ? safe : '${safe.substring(0, 3999)}…';
+}
+
+/// Undo confirmation must retain exact local paths so the user can verify the
+/// restore/delete scope; only credential-like tokens are redacted here.
+String _safeUndoItemText(String value) {
+  var safe = const SearchSecretScanner().redact(
+    value.trim(),
+    includeOpaqueTokens: true,
+  );
+  return safe.length <= 4000 ? safe : '${safe.substring(0, 3999)}…';
+}
+
+bool _pendingToolRequiresPlan(AgentTask task) {
+  final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
+  return pending?.tool == AgentToolName.workspacePatch ||
+      pending?.tool == AgentToolName.workspaceRename ||
+      pending?.tool == AgentToolName.workspaceDelete;
+}
+
+bool _taskNeedsFolderGrant(AgentTask task) {
+  if (task.status != AgentTaskStatus.waitingForApproval) return false;
+  try {
+    final decoded = jsonDecode(task.executionStateJson);
+    return decoded is Map && decoded['folderRequestPath'] is String;
+  } on Object {
+    return false;
+  }
 }
 
 String? _continueUnavailableReasonForPanel(AgentTask task) {

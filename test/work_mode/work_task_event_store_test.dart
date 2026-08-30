@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:chat_group/features/work_mode/work_task_event.dart';
@@ -174,6 +175,36 @@ void main() {
     expect(event.safeMetadata['token'], '[REDACTED]');
     expect(persisted, isNot(contains(secret)));
     expect(persisted, contains('[REDACTED]'));
+  });
+
+  test('re-sanitizes legacy persisted events before exposing them', () async {
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    final file = store.eventFileFor('task-legacy');
+    await file.parent.create(recursive: true);
+    await file.writeAsString(
+      '${jsonEncode({
+            'taskId': 'task-legacy',
+            'sequence': 1,
+            'timestamp': DateTime.utc(2026, 8, 30).toIso8601String(),
+            'kind': WorkTaskEventKind.toolOutput.name,
+            'title': '读取 /Users/alice/project.md',
+            'detail': '输出 /tmp/private.txt',
+            'safeMetadata': {
+              'path': '/Users/alice/project.md',
+              'token': 'sk-legacy-secret',
+            },
+          })}\n',
+    );
+
+    final replay = await store.read('task-legacy');
+
+    expect(replay.events, hasLength(1));
+    final event = replay.events.single;
+    expect(event.title, contains('[本地路径]'));
+    expect(event.detail, contains('[本地路径]'));
+    expect(event.safeMetadata['path'], '[本地路径]');
+    expect(event.safeMetadata['token'], '[REDACTED]');
+    expect(event.toJson().toString(), isNot(contains('sk-legacy-secret')));
   });
 
   test('closing the store completes idle watchers and is idempotent', () async {

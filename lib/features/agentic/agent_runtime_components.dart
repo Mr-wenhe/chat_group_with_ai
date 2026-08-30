@@ -133,16 +133,40 @@ class AgentToolExecutor {
     ToolRequest request, {
     required AgentWorkspacePatchHandler patchWorkspace,
     required AgentReadStartedHandler onReadStarted,
+    bool allowSensitiveRead = false,
   }) async {
     return switch (request.tool) {
-      AgentToolName.workspaceList =>
-        _workspace.list(path: request.args['path'] as String? ?? '.'),
+      AgentToolName.workspaceList => _workspace.listWithOptions(
+          path: request.args['path'] as String? ?? '.',
+          page: (request.args['page'] as num?)?.toInt() ?? 0,
+          pageSize: (request.args['pageSize'] as num?)?.toInt() ?? 200,
+          recursive: request.args['recursive'] == true,
+        ),
       AgentToolName.workspaceRead => await () async {
           final path = request.args['path'] as String? ?? '';
           await onReadStarted(path);
-          return _workspace.read(path);
+          return _workspace.readWithOptions(
+            path,
+            startByte: (request.args['startByte'] as num?)?.toInt() ?? 0,
+            byteLength: (request.args['byteLength'] as num?)?.toInt(),
+            allowSensitive: allowSensitiveRead,
+          );
         }(),
+      AgentToolName.workspaceSearch => _workspace.search(
+          request.args['path'] as String? ?? '.',
+          request.args['query'] as String? ?? '',
+          recursive: request.args['recursive'] == true,
+          caseSensitive: request.args['caseSensitive'] != false,
+          allowSensitive: allowSensitiveRead,
+        ),
       AgentToolName.workspacePatch => patchWorkspace(),
+      AgentToolName.workspaceRename => _workspace.rename(
+          request.args['path'] as String? ?? '',
+          request.args['destinationPath'] as String? ?? '',
+        ),
+      AgentToolName.workspaceDelete => _workspace.delete(
+          request.args['path'] as String? ?? '',
+        ),
       AgentToolName.commandRun =>
         _workspace.runCommand(request.args['command'] as String? ?? ''),
       AgentToolName.browserContext =>

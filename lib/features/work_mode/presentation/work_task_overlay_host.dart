@@ -4,8 +4,12 @@ import 'package:chat_group/core/database/database_service_provider.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
 import 'package:chat_group/features/work_mode/providers/work_task_providers.dart';
+import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
+import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
+import 'package:chat_group/features/work_mode/presentation/work_folder_grant_consent_dialog.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -23,7 +27,12 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
   final Future<void> Function(String taskId)? onStopTask;
   final Future<void> Function(String taskId)? onContinueTask;
   final Future<void> Function(String taskId)? onApproveTask;
+  final Future<void> Function(String taskId)? onApproveWithoutUndoTask;
   final Future<void> Function(String taskId)? onRejectTask;
+  final Future<void> Function(String taskId)? onRequestFolderTask;
+  final Future<void> Function(String taskId)? onUndoTask;
+  final WorkTaskUndoPreview? undoPreviewFor;
+  final WorkSnapshotService? snapshotService;
   final String Function(String characterId)? characterNameFor;
 
   const WorkTaskOverlayHost({
@@ -37,7 +46,12 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
     this.onStopTask,
     this.onContinueTask,
     this.onApproveTask,
+    this.onApproveWithoutUndoTask,
     this.onRejectTask,
+    this.onRequestFolderTask,
+    this.onUndoTask,
+    this.undoPreviewFor,
+    this.snapshotService,
     this.characterNameFor,
   });
 
@@ -51,9 +65,11 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   WorkTaskCoordinator? _coordinator;
   WorkTaskEventStore? _eventStore;
   List<AgentTask> _tasks = const <AgentTask>[];
+  int _hiddenTaskCount = 0;
   String? _selectedTaskId;
   bool _isVisible = true;
   bool _isCollapsed = false;
+  WorkSnapshotService? _snapshotService;
 
   @override
   void initState() {
@@ -66,15 +82,29 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     } else {
       _coordinator = widget.coordinator;
     }
+    _coordinator?.setFolderGrantConsent(_confirmFolderGrant);
     _eventStore = widget.eventStore ??
         (widget.eventStreamFor == null
             ? ref.read(workTaskEventStoreProvider)
             : null);
+    _snapshotService = widget.snapshotService;
+    if (_snapshotService == null &&
+        widget.onUndoTask == null &&
+        widget.undoPreviewFor == null) {
+      try {
+        _snapshotService = ref.read(workSnapshotServiceProvider);
+      } on Object {
+        // Lightweight widget tests may not initialize DatabaseService; the
+        // undo control remains disabled until a production service is wired.
+      }
+    }
     final taskStream = widget.taskStream ?? _coordinator!.watchAllTasks();
     _tasksSubscription = taskStream.listen((tasks) {
       if (!mounted) return;
+      final visibleTasks = _visibleTasks(tasks);
       setState(() {
-        _tasks = _visibleTasks(tasks);
+        _tasks = visibleTasks;
+        _hiddenTaskCount = tasks.length - visibleTasks.length;
         if (_tasks.every((task) => task.id != _selectedTaskId)) {
           _selectedTaskId = _tasks.isEmpty ? null : _tasks.first.id;
         }
@@ -84,6 +114,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   @override
   void dispose() {
+    _coordinator?.setFolderGrantConsent(null);
     _tasksSubscription?.cancel();
     super.dispose();
   }
@@ -100,6 +131,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
             isWide: isWide,
             child: WorkTaskPanel(
               tasks: _tasks,
+              hiddenTaskCount: _hiddenTaskCount,
               selectedTaskId: _selectedTaskId,
               eventStreamFor: widget.eventStreamFor ?? _eventStore!.watch,
               onSelectTask: (taskId) =>
@@ -107,7 +139,13 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               onStop: _stopTask,
               onContinue: _continueTask,
               onApprove: _approveTask,
+              onApproveWithoutUndo: _approveWithoutUndoTask,
               onReject: _rejectTask,
+              onRequestFolder: _requestFolder,
+              onUndo: widget.onUndoTask ??
+                  (_snapshotService == null ? null : _undoTask),
+              undoPreviewFor: widget.undoPreviewFor ??
+                  (_snapshotService == null ? null : _undoPreview),
               onOpenConversation: _openConversation,
               characterNameFor: widget.characterNameFor ?? _characterName,
               onCollapse: () => setState(() => _isCollapsed = true),
@@ -118,7 +156,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
           _positionedMiniBar(
             isWide: isWide,
             child: _WorkTaskMiniBar(
-              taskCount: _tasks.length,
+              taskCount: _tasks.length + _hiddenTaskCount,
               onExpand: () => setState(() => _isCollapsed = false),
             ),
           ),
@@ -186,7 +224,15 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     final remaining = sorted
         .where((task) => !active.any((item) => item.id == task.id))
         .toList(growable: false);
-    return <AgentTask>[...active, ...remaining].take(2).toList(growable: false);
+    // The coordinator has two global execution slots. Keep both active tasks
+    // visible; only show queued/history tabs when an execution slot is free.
+    const executionSlotCount = 2;
+    final visibleActive =
+        active.take(executionSlotCount).toList(growable: false);
+    if (visibleActive.length >= executionSlotCount) return visibleActive;
+    return <AgentTask>[...visibleActive, ...remaining]
+        .take(4)
+        .toList(growable: false);
   }
 
   bool _isVisibleActiveStatus(AgentTaskStatus status) {
@@ -221,9 +267,53 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     return callback?.call(taskId) ?? _coordinator!.approve(taskId);
   }
 
+  Future<void> _requestFolder(String taskId) {
+    return widget.onRequestFolderTask?.call(taskId) ??
+        _coordinator!.requestFolderForTask(taskId);
+  }
+
+  Future<bool> _confirmFolderGrant(WorkFolderGrant grant) {
+    if (!mounted) return Future.value(false);
+    final navigatorContext = widget.navigatorKey?.currentContext ?? context;
+    return showWorkFolderGrantConsent(navigatorContext, grant);
+  }
+
   Future<void> _rejectTask(String taskId) {
     final callback = widget.onRejectTask;
     return callback?.call(taskId) ?? _coordinator!.reject(taskId);
+  }
+
+  Future<void> _approveWithoutUndoTask(String taskId) {
+    final callback = widget.onApproveWithoutUndoTask;
+    return callback?.call(taskId) ?? _coordinator!.approveWithoutUndo(taskId);
+  }
+
+  Future<void> _undoTask(String taskId) async {
+    final service = _snapshotService;
+    if (service == null) throw StateError('当前没有可用的任务快照。');
+    final result = await service.undo(taskId);
+    if (!result.succeeded) {
+      final conflicts = result.conflicts
+          .map(
+            (conflict) =>
+                '${_shortConflictPath(conflict.path)}：${sanitizeWorkTaskError(conflict.reason)}',
+          )
+          .join('；');
+      final suffix = conflicts.isEmpty ? '' : ' 具体冲突：$conflicts';
+      throw StateError('${sanitizeWorkTaskError(result.reason)}$suffix');
+    }
+  }
+
+  Future<List<WorkSnapshotUndoItem>> _undoPreview(String taskId) {
+    final service = _snapshotService;
+    if (service == null) return Future.value(const []);
+    return service.previewUndo(taskId);
+  }
+
+  String _shortConflictPath(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final slash = normalized.lastIndexOf('/');
+    return slash < 0 ? normalized : normalized.substring(slash + 1);
   }
 
   String _characterName(String characterId) {

@@ -53,7 +53,7 @@ class WorkTaskEventStore {
   static final RegExp _urlPattern =
       RegExp(r'https?://[^\s,;）)]+', caseSensitive: false);
   static final RegExp _localPathPattern = RegExp(
-    r'(?:(?:[A-Za-z]:[\\/])|/(?:Users|home|Volumes|private|tmp)/)[^\s,;）)]*',
+    r'(?:(?:[A-Za-z]:[\\/])|(?:\\\\|//)|/)[^\s,;）)]+',
   );
 
   final Directory appSupportDirectory;
@@ -134,6 +134,38 @@ class WorkTaskEventStore {
     return _readPersisted(taskId);
   }
 
+  /// Removes old JSONL files without touching active tasks. Event files are
+  /// diagnostics only, so a failed deletion is ignored and the task remains
+  /// authoritative in Hive.
+  Future<int> cleanup({
+    Duration retention = const Duration(days: 30),
+    bool Function(String taskId)? isTaskActive,
+  }) async {
+    if (retention <= Duration.zero || !await _eventsDirectory.exists()) {
+      return 0;
+    }
+    final cutoff = DateTime.now().subtract(retention);
+    var removed = 0;
+    await for (final entity in _eventsDirectory.list(followLinks: false)) {
+      if (entity is! File || !entity.path.endsWith('.jsonl')) continue;
+      final taskId = entity.uri.pathSegments.last.replaceFirst('.jsonl', '');
+      if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(taskId) ||
+          isTaskActive?.call(taskId) == true) {
+        continue;
+      }
+      try {
+        final modified = (await entity.stat()).modified;
+        if (modified.isBefore(cutoff)) {
+          await entity.delete();
+          removed++;
+        }
+      } on Object {
+        // Cleanup is best effort; diagnostics must never interrupt tasks.
+      }
+    }
+    return removed;
+  }
+
   Future<WorkTaskEventReadResult> _readPersisted(String taskId) async {
     final file = eventFileFor(taskId);
     if (!await file.exists()) {
@@ -157,7 +189,8 @@ class WorkTaskEventStore {
         final decoded = jsonDecode(line);
         if (decoded is! Map) throw const FormatException('任务事件不是对象');
         event = WorkTaskEvent.fromJson(Map<String, dynamic>.from(decoded));
-      } on FormatException {
+        event = _sanitizePersistedEvent(event);
+      } on Object {
         issues.add(
           WorkTaskEventReadIssue(
             kind: index == lastNonEmptyIndex && hasUnterminatedFinalLine
@@ -183,6 +216,23 @@ class WorkTaskEventStore {
       lastSequence = event.sequence;
     }
     return WorkTaskEventReadResult(events: events, issues: issues);
+  }
+
+  /// Older JSONL files may predate the public-event sanitizer (or may have
+  /// been edited by another process). Re-sanitize on read so persisted data
+  /// cannot bypass the current secret/path redaction policy.
+  WorkTaskEvent _sanitizePersistedEvent(WorkTaskEvent event) {
+    return WorkTaskEvent(
+      taskId: event.taskId,
+      sequence: event.sequence,
+      timestamp: event.timestamp,
+      kind: event.kind,
+      title: _safeText(event.title, maxTitleCharacters),
+      detail: _safeText(event.detail, maxDetailCharacters),
+      progressCurrent: event.progressCurrent,
+      progressTotal: event.progressTotal,
+      safeMetadata: _safeMetadata(event.safeMetadata),
+    );
   }
 
   /// Replays durable events first, then emits later appends for this task.

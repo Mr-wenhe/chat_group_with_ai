@@ -73,6 +73,62 @@ void main() {
     expect(result.message, contains('No issues found'));
   });
 
+  test('Dart 验证命令会保护 shell 元字符路径', () async {
+    String? command;
+    await FileValidator.validate(
+      'lib/a;echo injected.dart',
+      'void main() {}',
+      commandRunner: (value) async {
+        command = value;
+        return {'ok': true, 'exitCode': 0};
+      },
+    );
+
+    expect(command, "flutter analyze 'lib/a;echo injected.dart'");
+  });
+
+  test('没有命令执行器时，Dart 使用轻量结构校验而不是误报失败', () async {
+    final valid = await FileValidator.validate(
+      'main.dart',
+      'void main() { final message = "ok"; print(message); }',
+    );
+    final invalid = await FileValidator.validate(
+      'broken.dart',
+      'void main() { print("missing");',
+    );
+
+    expect(valid.isValid, isTrue);
+    expect(valid.message, contains('轻量验证'));
+    final bareMain = await FileValidator.validate('bare.dart', 'main() {}');
+    expect(invalid.isValid, isFalse);
+    expect(invalid.message, contains('括号'));
+    expect(bareMain.isValid, isTrue);
+  });
+
+  test('轻量 Dart 校验支持三引号字符串和普通类型声明', () async {
+    final result = await FileValidator.validate(
+      'messages.dart',
+      "const title = '''第一行\n第二行''';\nString label = \"ok\";",
+    );
+
+    expect(result.isValid, isTrue);
+    expect(result.message, contains('轻量验证'));
+  });
+
+  test('Stage 02 不提供 command.run 时仍保留轻量 Dart 验证', () async {
+    final result = await FileValidator.validate(
+      'main.dart',
+      'void main() {}',
+      commandRunner: (_) async => {
+        'ok': false,
+        'error': 'command_not_available_in_stage02',
+      },
+    );
+
+    expect(result.isValid, isTrue);
+    expect(result.message, contains('未执行 flutter analyze'));
+  });
+
   test('其他类型拒绝空文件和异常大的文件', () async {
     expect((await FileValidator.validate('empty.txt', '')).isValid, isFalse);
     expect(

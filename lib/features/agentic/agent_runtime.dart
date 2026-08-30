@@ -99,6 +99,9 @@ typedef AgentContextSummaryHandler = Future<void> Function(
   ContextSummary summary,
 );
 typedef AgentToolApprovalPolicy = bool Function(AgentToolName tool);
+typedef AgentToolRequestApprovalPolicy = Future<bool> Function(
+  ToolRequest request,
+);
 
 enum AgentRuntimeStatus {
   completed,
@@ -171,8 +174,16 @@ class AgentRuntime {
   final AgentContextSummaryHandler? onContextSummary;
   final bool contextIsDirectChat;
   final AgentToolApprovalPolicy approvalPolicy;
+  final AgentToolRequestApprovalPolicy? requestApprovalPolicy;
   final Set<ToolPermission>? grantedPermissions;
   final bool Function()? shouldCancel;
+
+  /// Optional task-level gate for the post-write command validator. A null
+  /// value preserves the historical permission-only behaviour used by
+  /// ordinary agentic chats; work-mode tasks set this explicitly so a
+  /// lightweight validation is the default unless the user asked to test,
+  /// build, or analyse the result.
+  final bool? allowCommandValidation;
 
   /// Work-mode tasks can provide their durable action budget (normally 100);
   /// ordinary agentic chat retains the historical 12-step default.
@@ -202,8 +213,10 @@ class AgentRuntime {
     this.onContextSummary,
     this.contextIsDirectChat = false,
     this.approvalPolicy = AgentRuntime.requiresApproval,
+    this.requestApprovalPolicy,
     this.grantedPermissions,
     this.shouldCancel,
+    this.allowCommandValidation,
     int? toolStepLimit,
   }) : toolStepLimit = toolStepLimit ?? maxToolSteps;
 
@@ -275,7 +288,14 @@ class AgentRuntime {
     String message,
     Map<String, dynamic> toolResult,
   ) {
-    if (toolResult['ok'] != true) return message;
+    // Sensitive writes deliberately omit readbackContent. Keep this guard at
+    // the presentation boundary too, so a future adapter cannot accidentally
+    // turn an approved secret readback into a chat attachment or size preview.
+    if (toolResult['ok'] != true ||
+        toolResult['sensitive'] == true ||
+        toolResult['redacted'] == true) {
+      return message;
+    }
     final content = toolResult['readbackContent'] as String?;
     // 没有读回内容时不追加任何信息（降级静默）。
     if (content == null || content.isEmpty) return message;
@@ -1325,7 +1345,10 @@ ${character.rolePlaySystemPrompt}
       for (final s in skills) s.name,
       'workspace.list',
       'workspace.read',
+      'workspace.search',
       'workspace.patch',
+      'workspace.rename',
+      'workspace.delete',
       'command.run',
       'browser.context',
       'skill.create',
@@ -1421,7 +1444,10 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       );
     }
 
-    if (approvalPolicy(request.tool) && !approved) {
+    final requiresApproval = requestApprovalPolicy == null
+        ? approvalPolicy(request.tool)
+        : await requestApprovalPolicy!(request);
+    if (requiresApproval && !approved) {
       await _reportProgress(AgentRuntimeProgress(
         stage: AgentRuntimeProgressStage.waitingForApproval,
         executedRequests: executedRequests,
@@ -1450,6 +1476,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       toolResult = await _execute(
         request,
         character,
+        allowSensitiveRead: approved,
         executedRequests: executedRequests,
       ).timeout(toolExecutionTimeout);
     } catch (e) {
@@ -1485,6 +1512,30 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         toolResult: toolResult,
         executedToolRequests: nextExecutedRequests,
         message: '工作模式已关闭，任务已在当前工具完成后安全中止。',
+      );
+    }
+    // A path grant or sensitive-read checkpoint is a distinct user boundary.
+    // Keep the original request pending so the coordinator can resume it with
+    // the same conversation context after the user completes that boundary.
+    if (toolResult['requiresApproval'] == true ||
+        toolResult['requiresFolderGrant'] == true) {
+      await _reportProgress(AgentRuntimeProgress(
+        stage: AgentRuntimeProgressStage.waitingForApproval,
+        executedRequests: executedRequests,
+        pendingRequest: request,
+        currentStepLabel: waitingApprovalLabel(
+          request.tool.wireName,
+          request.args['path']?.toString(),
+        ),
+      ));
+      return AgentRuntimeResult(
+        status: AgentRuntimeStatus.waitingForApproval,
+        pendingToolRequest: request,
+        toolResult: toolResult,
+        executedToolRequests: executedRequests,
+        message: toolResult['requiresFolderGrant'] == true
+            ? '需要先授权请求的工作目录，授权后将继续当前步骤。'
+            : '该读取涉及敏感文件，需要你批准后继续。',
       );
     }
     return _continueAfterToolResult(
@@ -1590,6 +1641,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     }
     if (request.tool == AgentToolName.workspacePatch &&
         toolResult['ok'] == true &&
+        _toolResultValidated(toolResult) &&
         !_requiresPostWriteTool(userRequest)) {
       final completed = _completedFallbackForExecutedTool(
         character: character,
@@ -1667,10 +1719,16 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
 
     final content = finalResponse['message']?.toString() ??
         '${character.name} 已完成工具调用，但整理结果失败。';
-    final currentFileWriteSucceeded =
-        toolResult['ok'] == true || toolResult['exitCode'] == 0;
-    if (request.tool == AgentToolName.workspacePatch &&
-        !currentFileWriteSucceeded &&
+    // The legacy bridge reports command-style exitCode=0 for full-file writes,
+    // but Stage 02 rename/delete responses are authoritative only through
+    // their boolean `ok` field. Never let a contradictory exitCode mask a
+    // failed destructive mutation.
+    final currentMutationSucceeded =
+        request.tool == AgentToolName.workspacePatch
+            ? toolResult['ok'] == true || toolResult['exitCode'] == 0
+            : toolResult['ok'] == true;
+    if (_isWorkspaceMutationTool(request.tool) &&
+        !currentMutationSucceeded &&
         // 用户明确拒绝（skipped）不算写失败。
         toolResult['skipped'] != true) {
       final detail = toolResult['message']?.toString().trim().isNotEmpty == true
@@ -1683,7 +1741,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         pendingToolRequest: request,
         toolResult: toolResult,
         executedToolRequests: executedRequests,
-        message: '${character.name} 未能生成文件：$detail。'
+        message: '${character.name} 文件变更未成功：$detail。'
             '工具写入未成功，因此没有可交付附件。',
       );
     }
@@ -1705,7 +1763,6 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         // 静默吞掉重复写文件请求，视为已完成。
         return AgentRuntimeResult(
           status: AgentRuntimeStatus.completed,
-          pendingToolRequest: request,
           toolResult: toolResult,
           executedToolRequests: executedRequests,
           message: _appendFilePreview(
@@ -1787,18 +1844,29 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     final finalMessage = _appendFilePreview(guarded, toolResult);
     return AgentRuntimeResult(
       status: AgentRuntimeStatus.completed,
-      pendingToolRequest: request,
       toolResult: toolResult,
       executedToolRequests: executedRequests,
       message: finalMessage,
     );
   }
 
+  bool _isWorkspaceMutationTool(AgentToolName tool) =>
+      tool == AgentToolName.workspacePatch ||
+      tool == AgentToolName.workspaceRename ||
+      tool == AgentToolName.workspaceDelete;
+
   static bool _requiresPostWriteTool(String userRequest) {
     final lower = userRequest.toLowerCase();
-    return RegExp(
+    final hasValidationIntent = RegExp(
       r'(运行|执行|测试|验证|检查|构建|编译|flutter\s+(?:test|analyze|build)|'
       r'\btest\b|\banalyze\b|\bbuild\b|command\.run|terminal)',
+      caseSensitive: false,
+    ).hasMatch(lower);
+    if (!hasValidationIntent) return false;
+    return !RegExp(
+      r'(?:不要|无需|不需要|不用|不必|不运行|不执行|不做|先不)\s*'
+      r'(?:再|去|进行|执行|跑|运行)?\s*(?:flutter\s+)?'
+      r'(?:test|build|analyze|compile|测试|构建|编译|检查|验证)',
       caseSensitive: false,
     ).hasMatch(lower);
   }
@@ -1826,6 +1894,28 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       request: request,
       userRequest: userRequest,
       approved: true,
+      remainingSteps: toolStepLimit,
+      executedRequests: priorExecutedRequests,
+      conversationHistory: conversationHistory,
+    );
+  }
+
+  /// Replays a tool that was paused only because its requested folder was not
+  /// authorized. Folder consent is narrower than ordinary tool approval, so
+  /// the request re-enters the normal approval policy: non-sensitive reads can
+  /// continue immediately, while sensitive reads and mutations still pause.
+  Future<AgentRuntimeResult> resumeAfterFolderGrant({
+    required AICharacter character,
+    required ToolRequest request,
+    required String userRequest,
+    List<ToolRequest> priorExecutedRequests = const [],
+    List<Map<String, dynamic>>? conversationHistory,
+  }) {
+    return _handleToolRequest(
+      character: character,
+      request: request,
+      userRequest: userRequest,
+      approved: false,
       remainingSteps: toolStepLimit,
       executedRequests: priorExecutedRequests,
       conversationHistory: conversationHistory,
@@ -1861,7 +1951,10 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     return switch (tool) {
       AgentToolName.workspaceList => ToolPermission.workspaceRead,
       AgentToolName.workspaceRead => ToolPermission.workspaceRead,
+      AgentToolName.workspaceSearch => ToolPermission.workspaceRead,
       AgentToolName.workspacePatch => ToolPermission.workspacePatch,
+      AgentToolName.workspaceRename => ToolPermission.workspacePatch,
+      AgentToolName.workspaceDelete => ToolPermission.workspacePatch,
       AgentToolName.commandRun => ToolPermission.commandRun,
       AgentToolName.browserContext => ToolPermission.browserContext,
       AgentToolName.skillCreate => ToolPermission.skillCreate,
@@ -1877,7 +1970,10 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     return switch (tool) {
       AgentToolName.workspaceList => false,
       AgentToolName.workspaceRead => false,
+      AgentToolName.workspaceSearch => false,
       AgentToolName.workspacePatch => true,
+      AgentToolName.workspaceRename => true,
+      AgentToolName.workspaceDelete => true,
       AgentToolName.commandRun => true,
       AgentToolName.browserContext => true,
       AgentToolName.skillCreate => true,
@@ -1888,6 +1984,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
   Future<Map<String, dynamic>> _execute(
     ToolRequest request,
     AICharacter character, {
+    bool allowSensitiveRead = false,
     List<ToolRequest> executedRequests = const [],
   }) async {
     final executor = AgentToolExecutor(
@@ -1898,9 +1995,10 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     );
     return executor.execute(
       request,
+      allowSensitiveRead: allowSensitiveRead,
       patchWorkspace: () => _executeWorkspacePatch(
         request,
-        allowCommandValidation:
+        allowCommandValidation: (allowCommandValidation ?? true) &&
             _hasPermission(character, ToolPermission.commandRun),
         executedRequests: executedRequests,
       ),
@@ -1927,17 +2025,33 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     List<ToolRequest> executedRequests = const [],
   }) async {
     final rawPath = request.args['path'] as String? ?? '';
-    var path = WorkspacePathGuard.normalizeToRelative(rawPath);
+    var path = _normalizeWorkspaceWritePath(rawPath);
     if (path.isEmpty) {
       return {'ok': false, 'error': 'empty_path', 'message': '缺少有效的文件路径'};
     }
+    final hasPatchField = request.args['expectedSha256'] != null ||
+        request.args['expectedFragment'] != null ||
+        request.args['replacement'] != null;
+    final isExactPatch = request.args['expectedSha256'] is String &&
+        request.args['expectedFragment'] is String &&
+        request.args['replacement'] is String;
+    if (hasPatchField && !isExactPatch) {
+      return {
+        'ok': false,
+        'error': 'invalid_patch',
+        'message': '补丁请求缺少原 SHA-256、原文片段或替换文本。',
+      };
+    }
     String? binaryDowngradedFrom;
-    if (_requiresBinaryArtifactWriter(path)) {
+    if (!isExactPatch && _requiresBinaryArtifactWriter(path)) {
       // 系统只能写文本文件，无法直接生成 PDF/Word 等二进制文档。
       // 优雅降级：把二进制扩展名改写为 .md 继续落盘（内容以 Markdown 文本保存），
       // 避免「用户要一份 PDF 报告」的任务整体 failed。改写后仍是一次成功的文本
       // 写入，文件交付门禁得以正常通过，并会在交付信息里标注降级来源。
-      final mdPath = _rewriteBinaryPathToMarkdown(path);
+      final mdPath = _rewriteBinaryPathToMarkdown(
+        path,
+        allowAbsolutePath: workspaceFileTool?.acceptsAbsolutePaths == true,
+      );
       if (mdPath == null) {
         return {
           'ok': false,
@@ -1950,11 +2064,16 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       binaryDowngradedFrom = path;
       path = mdPath;
     }
-    // 新建文件已存在时自动改用递增后缀；显式修复则原地覆盖。
+    // 旧桥接器没有任务级变更计划，生成文件冲突时自动改用递增后缀；
+    // Stage 02 则必须保留精确路径，让已批准的 create/modify 计划决定结果。
     //   a) 静默覆盖导致用户丢失之前的内容
     //   b) 直接拒绝导致工具执行失败、LLM 回退到代码泄漏路径
     // 改名格式：page.html → page_2.html
-    if (request.args['overwrite'] != true && await _workspaceFileExists(path)) {
+    final stage02FileTool = workspaceFileTool?.acceptsAbsolutePaths == true;
+    if (!isExactPatch &&
+        !stage02FileTool &&
+        request.args['overwrite'] != true &&
+        await _workspaceFileExists(path)) {
       path = await _nextAvailableWorkspacePath(path);
     }
     if (path.isEmpty) {
@@ -1970,10 +2089,16 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       executedRequests: executedRequests,
       currentStepLabel: writingFileLabel(path),
     ));
-    final writeResult = await _workspaceFileTool.write(
-      path,
-      request.args['content'] as String? ?? '',
-    );
+    final writeResult = isExactPatch
+        ? await _workspaceFileTool.applyPatch(
+            jsonEncode({
+              'path': path,
+              'expectedSha256': request.args['expectedSha256'],
+              'expectedFragment': request.args['expectedFragment'],
+              'replacement': request.args['replacement'],
+            }),
+          )
+        : await _writeWorkspaceContent(request, path);
     if (writeResult['ok'] != true) return writeResult;
     // 写成功后上报「已创建文件」。
     await _reportProgress(AgentRuntimeProgress(
@@ -1982,6 +2107,52 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       currentStepLabel: fileCreatedLabel(path),
     ));
     try {
+      final persistedPath = writeResult['path'] is String &&
+              (writeResult['path'] as String).trim().isNotEmpty
+          ? (writeResult['path'] as String).trim()
+          : path;
+      // A successful write to a sensitive filename must not be echoed back to
+      // the cloud model during the normal readback/validation pass. The
+      // mutation itself is already covered by the write approval; reporting a
+      // local success marker preserves delivery evidence without disclosing
+      // the file body or creating an automatic chat attachment.
+      final sensitiveWrite = writeResult['sensitive'] == true ||
+          workspaceFileTool?.isSensitivePath(persistedPath) == true;
+      if (sensitiveWrite) {
+        await _reportProgress(AgentRuntimeProgress(
+          stage: AgentRuntimeProgressStage.validating,
+          executedRequests: executedRequests,
+          currentStepLabel: validatingLabel(persistedPath),
+        ));
+        // FR-03 still requires a post-write check for sensitive files. Read
+        // the file only inside the local adapter and discard the body before
+        // constructing the tool result, so the cloud model never receives a
+        // secret while the app still has concrete delivery evidence.
+        final readbackVerified = await _verifySensitiveWrite(persistedPath);
+        if (!readbackVerified) {
+          return {
+            ...writeResult,
+            'ok': false,
+            'sensitive': true,
+            'readbackVerified': false,
+            'error': 'readback_unverified',
+            'validation': {
+              'valid': false,
+              'message': '敏感文件已写入，但无法在本地重新读取验证。',
+            },
+            'message': '敏感文件已写入，但无法在本地重新读取验证；任务不会静默标记完成。',
+          };
+        }
+        return {
+          ...writeResult,
+          'sensitive': true,
+          'readbackVerified': true,
+          'validation': {
+            'valid': true,
+            'message': '敏感文件已写入并完成本地回读校验；正文未回传模型。',
+          },
+        };
+      }
       // 读回刚写入的文件前，先上报「读取文件中」阶段，避免用户看到
       // fileCreated → validating 的跳变。该 stage 与 fileCreated 不同，去抖不会吞掉。
       await _reportProgress(AgentRuntimeProgress(
@@ -1989,9 +2160,22 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         executedRequests: executedRequests,
         currentStepLabel: readingFileLabel(path),
       ));
-      final readResult = await _workspaceFileTool.read(path);
+      final readResult = await _workspaceFileTool.readWithOptions(
+        path,
+        allowSensitive: true,
+      );
       final content = readResult['content'] as String?;
-      if (content == null) return writeResult;
+      if (content == null) {
+        if (!stage02FileTool) {
+          return {...writeResult, 'readbackVerified': false};
+        }
+        return {
+          ...writeResult,
+          'ok': false,
+          'error': 'readback_unverified',
+          'message': '文件已写入，但无法读回验证；任务不会静默标记完成。',
+        };
+      }
       final enriched = Map<String, dynamic>.from(writeResult);
       enriched['readbackContent'] = content;
       if (binaryDowngradedFrom != null) {
@@ -2010,10 +2194,60 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
             allowCommandValidation ? _workspaceFileTool.runCommand : null,
       );
       enriched['validation'] = validation.toJson();
+      if (!validation.isValid) {
+        enriched['ok'] = false;
+        enriched['error'] = 'validation_failed';
+        enriched['message'] = validation.message;
+      }
       return enriched;
-    } catch (_) {
-      return writeResult;
+    } catch (error) {
+      if (!stage02FileTool) {
+        return {...writeResult, 'readbackVerified': false};
+      }
+      return {
+        ...writeResult,
+        'ok': false,
+        'error': 'readback_unverified',
+        'message': '文件已写入，但读取或校验失败：${error.toString().split('\n').first}',
+      };
     }
+  }
+
+  Future<Map<String, dynamic>> _writeWorkspaceContent(
+    ToolRequest request,
+    String path,
+  ) async {
+    final content = request.args['content'];
+    if (content is! String) {
+      return {
+        'ok': false,
+        'error': 'missing_content',
+        'message': '写文件请求缺少完整内容，未执行写入。',
+      };
+    }
+    return _workspaceFileTool.write(path, content);
+  }
+
+  Future<bool> _verifySensitiveWrite(String path) async {
+    try {
+      final readback = await _workspaceFileTool.readWithOptions(
+        path,
+        allowSensitive: true,
+      );
+      if (readback['ok'] == false) return false;
+      return readback['ok'] == true || readback['content'] is String;
+    } on Object {
+      return false;
+    }
+  }
+
+  bool _toolResultValidated(Map<String, dynamic> result) {
+    final validation = result['validation'];
+    if (validation is Map) return validation['valid'] == true;
+    // Compatibility responses from the localhost bridge predate structured
+    // validation. Stage 02 always includes validation and therefore never
+    // reaches this fallback.
+    return workspaceFileTool?.acceptsAbsolutePaths != true;
   }
 
   Future<String> _nextAvailableWorkspacePath(String path) async {
@@ -2025,10 +2259,30 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     final ext = dotIndex > 0 ? fileName.substring(dotIndex) : '';
     for (var i = 2; i <= 999; i++) {
       final candidate = '$dir${base}_$i$ext';
-      if (!WorkspacePathGuard.isSafeRelativePath(candidate)) return '';
+      // The legacy bridge accepts only workspace-relative paths, while the
+      // Stage 02 in-process adapter deliberately preserves an explicitly
+      // authorized absolute path. Do not reject a safe sibling candidate just
+      // because the compatibility guard cannot classify absolute paths.
+      final acceptsAbsolute = workspaceFileTool?.acceptsAbsolutePaths == true;
+      if (!acceptsAbsolute &&
+          !WorkspacePathGuard.isSafeRelativePath(candidate)) {
+        return '';
+      }
       if (!await _workspaceFileExists(candidate)) return candidate;
     }
     return '';
+  }
+
+  String _normalizeWorkspaceWritePath(String rawPath) {
+    final tool = workspaceFileTool;
+    if (tool?.acceptsAbsolutePaths == true) {
+      // Stage 02 performs the final lexical, symlink and grant checks. Keep an
+      // explicitly supplied absolute path intact so the model cannot be
+      // redirected to a same-named file at the conversation root merely by
+      // crossing the legacy bridge compatibility boundary.
+      return rawPath.trim().replaceAll('\\', '/');
+    }
+    return WorkspacePathGuard.normalizeToRelative(rawPath);
   }
 
   static bool _requiresBinaryArtifactWriter(String path) {
@@ -2051,14 +2305,19 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
   /// 把二进制文档路径改写为等效的 Markdown 文本路径（优雅降级用）。
   /// 例：`report.pdf` → `report.md`、`docs/summary.docx` → `docs/summary.md`。
   /// 改写结果仍须是安全相对路径，否则返回 null（交由上层按不支持处理）。
-  static String? _rewriteBinaryPathToMarkdown(String path) {
+  static String? _rewriteBinaryPathToMarkdown(
+    String path, {
+    bool allowAbsolutePath = false,
+  }) {
     final slashIndex = path.lastIndexOf('/');
     final dir = slashIndex >= 0 ? path.substring(0, slashIndex + 1) : '';
     final fileName = slashIndex >= 0 ? path.substring(slashIndex + 1) : path;
     final dotIndex = fileName.lastIndexOf('.');
     final base = dotIndex > 0 ? fileName.substring(0, dotIndex) : fileName;
     final md = '$dir$base.md';
-    return WorkspacePathGuard.isSafeRelativePath(md) ? md : null;
+    return allowAbsolutePath || WorkspacePathGuard.isSafeRelativePath(md)
+        ? md
+        : null;
   }
 
   Future<bool> _workspaceFileExists(String path) async {
@@ -2584,7 +2843,8 @@ $userRequest
     required List<ToolRequest> executedRequests,
   }) {
     if (request.tool != AgentToolName.workspacePatch) return null;
-    final ok = toolResult['ok'] == true || toolResult['exitCode'] == 0;
+    final ok = (toolResult['ok'] == true || toolResult['exitCode'] == 0) &&
+        _toolResultValidated(toolResult);
     if (!ok) return null;
     final path = toolResult['path'] as String?;
     final summary = path == null || path.isEmpty
@@ -2593,7 +2853,6 @@ $userRequest
     // 写文件成功后，把「文件已生成」简洁确认信息追加到兜底消息（内容不回写文本）。
     return AgentRuntimeResult(
       status: AgentRuntimeStatus.completed,
-      pendingToolRequest: request,
       toolResult: toolResult,
       executedToolRequests: executedRequests,
       message: _appendFilePreview(summary, toolResult),
