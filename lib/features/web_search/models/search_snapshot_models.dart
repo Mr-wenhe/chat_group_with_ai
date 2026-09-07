@@ -11,6 +11,11 @@ class WebSearchResult {
   final String provider;
   final String? language;
 
+  /// True only for the visible-browser fallback, which supports public HTTP
+  /// pages in addition to HTTPS. Persist this bit so a restored snapshot can
+  /// be validated with the same policy as the live result.
+  final bool allowInsecureHttp;
+
   WebSearchResult({
     required String sourceId,
     required String title,
@@ -21,6 +26,7 @@ class WebSearchResult {
     double? providerScore,
     required String provider,
     String? language,
+    bool allowInsecureHttp = false,
   })  : sourceId = _requiredText(sourceId, 'sourceId'),
         title = sanitizeSearchText(
           title,
@@ -35,7 +41,17 @@ class WebSearchResult {
           redactSecrets: true,
           redactOpaqueTokens: true,
         ),
-        url = validateSearchUrl(url),
+        // Only the explicit visible-browser provider may carry a public HTTP
+        // result.  Keep the policy tied to the normalized provider identity
+        // so a custom/provider route cannot opt into insecure evidence merely
+        // by setting a boolean flag.
+        allowInsecureHttp =
+            allowInsecureHttp && provider.trim() == 'visibleBrowser',
+        url = validateSearchUrl(
+          url,
+          allowInsecureHttp:
+              allowInsecureHttp && provider.trim() == 'visibleBrowser',
+        ),
         displayHost = _deriveDisplayHost(url, displayHost),
         providerScore = _finiteScore(providerScore),
         provider = sanitizeSearchText(
@@ -54,6 +70,7 @@ class WebSearchResult {
         'providerScore': providerScore,
         'provider': provider,
         'language': language,
+        if (allowInsecureHttp) 'allowInsecureHttp': true,
       };
 }
 
@@ -75,7 +92,7 @@ class WebSearchSnapshot {
   WebSearchSnapshot({
     String requestId = '',
     String rootRequestId = '',
-    this.originalTextHash = '',
+    String originalTextHash = '',
     Iterable<String> executedQueries = const [],
     required this.searchedAt,
     required String provider,
@@ -88,6 +105,7 @@ class WebSearchSnapshot {
     int retryCount = 0,
   })  : requestId = normalizeSearchCorrelationId(requestId),
         rootRequestId = normalizeSearchCorrelationId(rootRequestId),
+        originalTextHash = _normalizeSnapshotHash(originalTextHash),
         executedQueries = List.unmodifiable(
           executedQueries
               .take(searchMaxExecutedQueries)
@@ -189,6 +207,11 @@ class WebSearchSnapshot {
         final url = Uri.tryParse(raw['url']?.toString() ?? '');
         if (url == null) continue;
         try {
+          final provider = raw['provider']?.toString() ?? '';
+          // Do not let arbitrary persisted providers opt into HTTP. The flag
+          // is accepted only for the internal visible-browser provider.
+          final allowInsecureHttp =
+              provider == 'visibleBrowser' && raw['allowInsecureHttp'] == true;
           results.add(
             WebSearchResult(
               sourceId: raw['sourceId']?.toString() ?? '',
@@ -201,8 +224,9 @@ class WebSearchSnapshot {
               providerScore: raw['providerScore'] is num
                   ? (raw['providerScore'] as num).toDouble()
                   : null,
-              provider: raw['provider']?.toString() ?? '',
+              provider: provider,
               language: raw['language']?.toString(),
+              allowInsecureHttp: allowInsecureHttp,
             ),
           );
         } on ArgumentError {
@@ -223,14 +247,15 @@ class WebSearchSnapshot {
         if (type != null) {
           failure = SearchFailure(
             type: type,
-            safeMessage: sanitizeSearchText(
-              failureMap['safeMessage']?.toString() ?? '',
-              maxLength: searchSnippetMaxLength,
-            ),
+            // Rebuild presentation and retry policy from the enum. Persisted
+            // maps are untrusted and must not smuggle provider text or a
+            // caller-controlled retry flag into a portable message backup.
+            safeMessage: safeMessageForSearchFailure(type),
             statusCode: (failureMap['statusCode'] as num?)?.toInt(),
-            retryable: failureMap['retryable'] == true,
-            providerRequestId: _normalizeOptionalText(
-                failureMap['providerRequestId']?.toString()),
+            retryable: searchFailureIsRetryable(type),
+            providerRequestId: _normalizedRestoredRequestId(
+              failureMap['providerRequestId']?.toString(),
+            ),
           );
         }
       }
@@ -254,5 +279,10 @@ class WebSearchSnapshot {
     } on Object {
       return null;
     }
+  }
+
+  static String? _normalizedRestoredRequestId(String? value) {
+    final normalized = normalizeSearchCorrelationId(value);
+    return normalized.isEmpty ? null : normalized;
   }
 }

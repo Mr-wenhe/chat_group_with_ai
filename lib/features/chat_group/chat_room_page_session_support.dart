@@ -58,6 +58,15 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
         _isLoading = false;
       });
 
+      // A global work-task overlay can mount in the same frame as the room.
+      // Re-assert desktop input focus after that frame so opening a room from
+      // the task panel does not leave keyboard input on the app root.
+      if (_isDesktop) {
+        WidgetsBinding.instance.addPostFrameCallback((_) {
+          if (_canTouchUi) _inputFocusNode.requestFocus();
+        });
+      }
+
       // The initial coordinator is created before group members are loaded.
       // Rebuild once member API configs are known; optional Planner/native
       // capabilities still remain gated by their explicit runtime switches.

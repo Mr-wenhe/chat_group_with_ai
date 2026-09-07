@@ -2503,6 +2503,45 @@ void main() {
     expect(result.message, isNot(contains('目标文件已存在')));
   });
 
+  test('new-file collision policy overrides a model overwrite flag', () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      existingFiles: const {'report.md': 'existing report'},
+      patchResult: const {
+        'ok': true,
+        'path': 'report_2.md',
+        'bytes': 12,
+      },
+    );
+    final runtime = AgentRuntime(
+      complete: (_) async => const {
+        'success': true,
+        'message': '文件已生成，请查看附件。',
+      },
+      workspaceFileTool: fakeTool,
+      autoRenameIfExists: true,
+    );
+
+    final result = await runtime.executeApprovedTool(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      request: const ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '新建报告',
+        args: {
+          'path': 'report.md',
+          'content': '# new report',
+          'overwrite': true,
+        },
+      ),
+      userRequest: '新建一个报告',
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, isNotNull);
+    expect(fakeTool.lastWritePath, isNot('report.md'));
+  });
+
   test('修复上一个附件时原地覆盖并写入修复内容', () async {
     final fakeTool = _FakeWorkspaceFileTool(
       existingFiles: const {'page_6.html': '<html>无法点击</html>'},
@@ -2655,6 +2694,44 @@ void main() {
     );
     expect(fakeTool.lastWritePath, 'interactive_counter.html');
     expect(fakeTool.lastWriteContent, contains('+10'));
+  });
+
+  test('structured revision path overrides a model-provided new path',
+      () async {
+    final fakeTool = _FakeWorkspaceFileTool(
+      existingFiles: const {'original.html': '<html>old</html>'},
+      patchResult: const {
+        'ok': true,
+        'path': 'original.html',
+        'bytes': 32,
+      },
+    );
+    final runtime = AgentRuntime(
+      revisionTargetPath: 'original.html',
+      complete: (_) async => const {
+        'success': true,
+        'message': '已完成修改。',
+      },
+      workspaceFileTool: fakeTool,
+    );
+
+    final result = await runtime.executeApprovedTool(
+      character: _character(
+        toolPermissions: const [ToolPermission.workspacePatch],
+      ),
+      request: const ToolRequest(
+        tool: AgentToolName.workspacePatch,
+        reason: '模型尝试修改另一个文件',
+        args: {
+          'path': 'model-selected.html',
+          'content': '<html>new</html>',
+        },
+      ),
+      userRequest: '请修改当前文件',
+    );
+
+    expect(result.status, AgentRuntimeStatus.completed);
+    expect(fakeTool.lastWritePath, 'original.html');
   });
 
   test('direct file generation keeps the current request as the last turn',

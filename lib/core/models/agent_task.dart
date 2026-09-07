@@ -38,7 +38,11 @@ class AgentTask extends HiveObject {
   final String groupId;
 
   @HiveField(2)
-  final String characterId;
+
+  /// The current role owner. It is mutable because a multi-role work task
+  /// hands the same durable conversation checkpoint to the next role without
+  /// creating a new task or losing its follow-up queue.
+  String characterId;
 
   @HiveField(3)
   String userRequest;

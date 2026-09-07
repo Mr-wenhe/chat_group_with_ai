@@ -11,6 +11,7 @@ import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/providers/brave_search_provider.dart';
 import 'package:chat_group/features/web_search/providers/duckduckgo_instant_answer_provider.dart';
 import 'package:chat_group/features/web_search/providers/gateway_search_provider.dart';
+import 'package:chat_group/features/web_search/providers/keyless_html_search_provider.dart';
 import 'package:chat_group/features/web_search/providers/search_provider.dart';
 import 'package:chat_group/features/web_search/providers/tavily_search_provider.dart';
 import 'package:chat_group/features/web_search/security/search_endpoint_validator.dart';
@@ -154,7 +155,7 @@ class _SearchProviderConfigFormPageState
                 border: OutlineInputBorder(),
               ),
               validator: (value) {
-                if (_provider == SearchProviderKind.duckDuckGoInstantAnswer) {
+                if (searchProviderUsesFixedEndpoint(_provider)) {
                   return null;
                 }
                 return SearchEndpointValidator.errorFor(
@@ -279,8 +280,10 @@ class _SearchProviderConfigFormPageState
 
   List<SearchProviderKind> get _providerOptions {
     final options = <SearchProviderKind>{..._configurableProviders};
-    if (widget.config?.provider == SearchProviderKind.duckDuckGoInstantAnswer) {
-      options.add(SearchProviderKind.duckDuckGoInstantAnswer);
+    final existingProvider = widget.config?.provider;
+    if (existingProvider == SearchProviderKind.duckDuckGoInstantAnswer ||
+        existingProvider == SearchProviderKind.keylessHtml) {
+      options.add(existingProvider!);
     }
     return options.toList(growable: false);
   }
@@ -360,6 +363,7 @@ class _SearchProviderConfigFormPageState
         ),
       SearchProviderKind.duckDuckGoInstantAnswer =>
         DuckDuckGoInstantAnswerProvider(),
+      SearchProviderKind.keylessHtml => KeylessHtmlSearchProvider(),
       SearchProviderKind.gateway => GatewaySearchProvider(
           baseUrl: config.baseUrl,
           isRelease: _store.isRelease,
@@ -373,7 +377,8 @@ class _SearchProviderConfigFormPageState
       provider == SearchProviderKind.gateway ||
       provider == SearchProviderKind.tavily ||
       provider == SearchProviderKind.brave ||
-      provider == SearchProviderKind.duckDuckGoInstantAnswer;
+      provider == SearchProviderKind.duckDuckGoInstantAnswer ||
+      provider == SearchProviderKind.keylessHtml;
 
   String _credentialLabel(bool editing) {
     if (_provider == SearchProviderKind.gateway) {
@@ -387,5 +392,6 @@ class _SearchProviderConfigFormPageState
         SearchProviderKind.tavily => 'Tavily',
         SearchProviderKind.brave => 'Brave',
         SearchProviderKind.duckDuckGoInstantAnswer => 'DuckDuckGo 百科即时答案',
+        SearchProviderKind.keylessHtml => 'DuckDuckGo HTML（无 Key）',
       };
 }

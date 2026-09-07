@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
@@ -6,6 +7,8 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
+import 'package:chat_group/features/work_mode/work_context_builder.dart';
+import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -13,7 +16,8 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive/hive.dart';
 
-class _FakeWorkTaskRunner implements WorkTaskRunner {
+class _FakeWorkTaskRunner
+    implements WorkTaskRunner, WorkTaskVisionModelValidator {
   final List<String> startedTaskIds = <String>[];
   final List<String> cancelledTaskIds = <String>[];
   final Set<String> throwTaskIds = <String>{};
@@ -23,6 +27,14 @@ class _FakeWorkTaskRunner implements WorkTaskRunner {
   int activeCount = 0;
   int maximumActiveCount = 0;
   int maximumActiveForOneConversation = 0;
+  bool visionModelAvailable = true;
+
+  @override
+  bool supportsVisionModel(String characterId) => visionModelAvailable;
+
+  @override
+  bool supportsVisionModelForTask(AgentTask task, String characterId) =>
+      visionModelAvailable;
 
   @override
   Future<void> run(AgentTask task, WorkTaskCancellation cancellation) async {
@@ -108,11 +120,15 @@ class _GateWorkTaskRunner implements WorkTaskRunner {
   }
 }
 
-AgentTask _task({required String id, required String conversationId}) {
+AgentTask _task({
+  required String id,
+  required String conversationId,
+  String characterId = 'worker',
+}) {
   return AgentTask(
     id: id,
     groupId: conversationId,
-    characterId: 'worker',
+    characterId: characterId,
     userRequest: '执行 $id',
     workModeTask: true,
   );
@@ -128,12 +144,35 @@ Future<void> _settle() async {
   }
 }
 
+Future<void> _waitForTaskState(
+  Box<AgentTask> taskBox,
+  String taskId,
+  bool Function(AgentTask task) predicate,
+) async {
+  for (var attempt = 0; attempt < 200; attempt++) {
+    final task = taskBox.get(taskId);
+    if (task != null && predicate(task)) return;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  fail('任务未在限定时间内达到预期状态：$taskId');
+}
+
 Future<void> _waitForLockCount(
   WorkResourceLockManager manager,
   int expected,
 ) async {
   for (var index = 0; index < 200; index++) {
     if (manager.activeLockCount == expected) return;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+}
+
+Future<void> _waitForStartedCount(
+  _FakeWorkTaskRunner runner,
+  int expected,
+) async {
+  for (var index = 0; index < 200; index++) {
+    if (runner.startedTaskIds.length >= expected) return;
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
 }
@@ -206,6 +245,64 @@ void main() {
     expect(runner.maximumActiveForOneConversation, 1);
   });
 
+  test('releases the previous role before starting the next handoff role',
+      () async {
+    final product = _task(
+      id: 'handoff-product',
+      conversationId: 'handoff-conversation',
+      characterId: 'product',
+    );
+    final developer = _task(
+      id: 'handoff-developer',
+      conversationId: 'handoff-conversation',
+      characterId: 'developer',
+    );
+
+    await coordinator.submit(product);
+    await coordinator.submit(developer);
+
+    expect(runner.startedTaskIds, ['handoff-product']);
+    expect(runner.maximumActiveForOneConversation, 1);
+
+    runner.complete(product.id);
+    await _waitForStartedCount(runner, 2);
+
+    expect(runner.startedTaskIds, ['handoff-product', 'handoff-developer']);
+    expect(runner.maximumActiveForOneConversation, 1);
+    runner.complete(developer.id);
+  });
+
+  test('100 same-conversation role handoffs never overlap active roles',
+      () async {
+    final tasks = List<AgentTask>.generate(
+      100,
+      (index) => _task(
+        id: 'pressure-$index',
+        conversationId: 'pressure-conversation',
+        characterId: switch (index % 3) {
+          0 => 'product',
+          1 => 'developer',
+          _ => 'tester',
+        },
+      ),
+    );
+    for (final task in tasks) {
+      await coordinator.submit(task);
+    }
+
+    expect(runner.startedTaskIds, ['pressure-0']);
+    for (var index = 0; index < tasks.length; index++) {
+      runner.complete(tasks[index].id);
+      if (index + 1 < tasks.length) {
+        await _waitForStartedCount(runner, index + 2);
+      }
+    }
+    await _settle();
+
+    expect(runner.startedTaskIds.length, 100);
+    expect(runner.maximumActiveForOneConversation, 1);
+  });
+
   test('queues follow-up text on its task without cancelling the run',
       () async {
     await coordinator.submit(_task(id: 'active', conversationId: 'group-a'));
@@ -217,6 +314,296 @@ void main() {
     expect(stored.queuedUserRequests, <String>['请把结论改成表格', '再检查一次错误']);
     expect(runner.cancelledTaskIds, isEmpty);
     expect(runner.startedTaskIds, <String>['active']);
+  });
+
+  test('keeps three running follow-ups FIFO and starts the first on finish',
+      () async {
+    final task = _task(id: 'fifo-three', conversationId: 'group-fifo');
+    await coordinator.submit(task);
+    await coordinator.enqueueFollowUp(task.id, '第一条追问');
+    await coordinator.enqueueFollowUp(task.id, '第二条追问');
+    await coordinator.enqueueFollowUp(task.id, '第三条追问');
+
+    expect(taskBox.get(task.id)?.queuedUserRequests, <String>[
+      '第一条追问',
+      '第二条追问',
+      '第三条追问',
+    ]);
+    expect(runner.startedTaskIds, ['fifo-three']);
+
+    runner.complete(task.id);
+    // The coordinator persists the next request before it crosses the
+    // runner boundary. Wait for the runner's observable start rather than
+    // treating that intermediate durable state as an active completion gate.
+    await _waitForStartedCount(runner, 2);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) =>
+          value.userRequest == '第一条追问' && value.queuedUserRequests.length == 2,
+    );
+    expect(taskBox.get(task.id)?.userRequest, '第一条追问');
+    expect(taskBox.get(task.id)?.queuedUserRequests, <String>[
+      '第二条追问',
+      '第三条追问',
+    ]);
+    expect(runner.startedTaskIds, ['fifo-three', 'fifo-three']);
+
+    runner.complete(task.id);
+    await _waitForStartedCount(runner, 3);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) =>
+          value.userRequest == '第二条追问' && value.queuedUserRequests.length == 1,
+    );
+    expect(taskBox.get(task.id)?.userRequest, '第二条追问');
+    expect(taskBox.get(task.id)?.queuedUserRequests, ['第三条追问']);
+    runner.complete(task.id);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) =>
+          value.userRequest == '第三条追问' && value.queuedUserRequests.isEmpty,
+    );
+    expect(taskBox.get(task.id)?.userRequest, '第三条追问');
+    expect(taskBox.get(task.id)?.queuedUserRequests, isEmpty);
+  });
+
+  test('records an explicit revision target without enabling collision rename',
+      () async {
+    final task =
+        _task(id: 'revision-follow-up', conversationId: 'group-revision')
+          ..status = AgentTaskStatus.completed
+          ..lastArtifactPaths = ['/workspace/report.md'];
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '请修改当前文件');
+
+    final stored = taskBox.get(task.id)!;
+    expect(stored.userRequest, '请修改当前文件');
+    expect(stored.executionStateJson, contains('revisionTargetPath'));
+    expect(stored.executionStateJson, contains('/workspace/report.md'));
+    expect(stored.executionStateJson, contains('"autoRenameIfExists":false'));
+    runner.complete(task.id);
+  });
+
+  test('clears stale tool results when promoting a terminal follow-up',
+      () async {
+    final task =
+        _task(id: 'fresh-follow-up-context', conversationId: 'group-doc')
+          ..status = AgentTaskStatus.completed
+          ..resultSummary = '上一轮已完成 README 解析。'
+          ..contextSummary = const WorkContextBuilder().build(
+            conversationId: 'group-doc',
+            target: '解析 README.md',
+            completedSummaries: ['上一轮已完成 README 解析。'],
+            recentToolResults: [
+              {
+                'tool': 'workspace.document',
+                'path': '/tmp/README.md',
+                'summary': '旧解析结果',
+              },
+            ],
+          ).toJsonString();
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '改为解析 sample.pdf');
+
+    final stored = taskBox.get(task.id)!;
+    final context = jsonDecode(stored.contextSummary) as Map<String, dynamic>;
+    expect(stored.userRequest, '改为解析 sample.pdf');
+    expect(context['recentToolResults'], isEmpty);
+    expect(context['completedSummaries'], contains('上一轮已完成 README 解析。'));
+    expect(runner.startedTaskIds, [task.id]);
+  });
+
+  test('explicit validation follow-up resumes the paused task checkpoint',
+      () async {
+    final task = _task(id: 'explicit-validation', conversationId: 'group-test')
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..lastError = '默认不运行测试或构建；请由用户明确要求后再执行。'
+      ..executionStateJson = jsonEncode({
+        'explicitCommandRequestRequired': true,
+        'approvalPlan': {'taskId': 'explicit-validation'},
+      });
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '请运行 flutter test');
+
+    final resumed = taskBox.get(task.id)!;
+    expect(resumed.status, AgentTaskStatus.planning);
+    expect(resumed.userRequest, contains('请运行 flutter test'));
+    expect(resumed.pendingToolRequestJson, isEmpty);
+    expect(resumed.executionStateJson,
+        isNot(contains('explicitCommandRequestRequired')));
+    expect(runner.startedTaskIds, [task.id]);
+    runner.complete(task.id);
+  });
+
+  test('generic resume remains blocked for an explicit validation checkpoint',
+      () async {
+    final task = _task(id: 'explicit-generic', conversationId: 'group-test')
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..executionStateJson =
+          jsonEncode({'explicitCommandRequestRequired': true});
+    await taskBox.put(task.id, task);
+
+    await expectLater(
+      coordinator.resumeByUser(task.id),
+      throwsStateError,
+    );
+    expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('generic resume remains blocked until a visual model is selected',
+      () async {
+    final task = _task(id: 'vision-generic', conversationId: 'group-test')
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..executionStateJson = jsonEncode({'visionModelRequired': true});
+    await taskBox.put(task.id, task);
+
+    await expectLater(
+      coordinator.resumeByUser(task.id),
+      throwsStateError,
+    );
+    expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('vision model selection validates the pause state and capability',
+      () async {
+    final task = _task(id: 'vision-select', conversationId: 'group-test')
+      ..status = AgentTaskStatus.paused
+      ..executionStateJson = jsonEncode({'visionModelRequired': true});
+    await taskBox.put(task.id, task);
+
+    runner.visionModelAvailable = false;
+    await expectLater(
+      coordinator.selectVisionModel(task.id, 'vision-character'),
+      throwsStateError,
+    );
+    expect(taskBox.get(task.id)?.characterId, 'worker');
+
+    runner.visionModelAvailable = true;
+    await coordinator.selectVisionModel(task.id, 'vision-character');
+    expect(taskBox.get(task.id)?.characterId, 'vision-character');
+    expect(
+      taskBox.get(task.id)?.status,
+      anyOf(AgentTaskStatus.queued, AgentTaskStatus.planning),
+    );
+    runner.complete(task.id);
+    await _settle();
+
+    final unrelated =
+        _task(id: 'vision-unrelated', conversationId: 'group-test')
+          ..status = AgentTaskStatus.paused;
+    await taskBox.put(unrelated.id, unrelated);
+    await expectLater(
+      coordinator.selectVisionModel(unrelated.id, 'vision-character'),
+      throwsStateError,
+    );
+  });
+
+  test('handoff keeps the cumulative action budget and start time', () async {
+    final startedAt = DateTime.utc(2026, 8, 31, 8);
+    final task = _task(
+      id: 'handoff-budget',
+      conversationId: 'handoff-budget-group',
+      characterId: 'product',
+    )
+      ..actionCount = 37
+      ..startedAt = startedAt;
+    WorkHandoffState.persistToTask(
+      task,
+      WorkHandoffState.initial(
+        conversationId: task.groupId,
+        stages: [
+          WorkHandoffStage(id: 'product', label: '产品', roleId: 'product'),
+          WorkHandoffStage(id: 'development', label: '开发', roleId: 'developer'),
+        ],
+      ),
+    );
+
+    await coordinator.submit(task);
+    final completed = taskBox.get(task.id)!;
+    completed
+      ..status = AgentTaskStatus.completed
+      ..resultSummary = '产品阶段完成';
+    await taskBox.put(task.id, completed);
+    runner.complete(task.id);
+    await _waitForStartedCount(runner, 2);
+
+    final next = taskBox.get(task.id)!;
+    expect(next.characterId, 'developer');
+    expect(next.actionCount, 37);
+    expect(next.startedAt, startedAt);
+    runner.complete(task.id);
+  });
+
+  test('pauses one ambiguous revision question and keeps it in the FIFO',
+      () async {
+    final task =
+        _task(id: 'ambiguous-follow-up', conversationId: 'group-ambiguous')
+          ..status = AgentTaskStatus.completed
+          ..lastArtifactPaths = [
+            '/workspace/report.md',
+            '/workspace/summary.md',
+          ];
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '请修改当前文件');
+
+    final stored = taskBox.get(task.id)!;
+    expect(stored.status, AgentTaskStatus.paused);
+    expect(stored.queuedUserRequests, ['请修改当前文件']);
+    expect(stored.lastError.split('？').length - 1, 1);
+    expect(runner.startedTaskIds, isEmpty);
+    await expectLater(
+      coordinator.resumeByUser(task.id),
+      throwsStateError,
+    );
+  });
+
+  test('rejects a persisted checkpoint from another conversation', () async {
+    final task = _task(id: 'foreign-context', conversationId: 'dm:a')
+      ..contextSummary = const WorkContextBuilder()
+          .build(
+            conversationId: 'dm:b',
+            target: 'B_ONLY_PRIVATE_CONTENT',
+          )
+          .toJsonString();
+
+    await coordinator.submit(task);
+
+    final stored = taskBox.get(task.id)!;
+    expect(stored.contextSummary, isNot(contains('B_ONLY_PRIVATE_CONTENT')));
+    expect(stored.contextSummary, contains('"conversationId":"dm:a"'));
+  });
+
+  test('a clarification answer resumes the queued revision without dropping it',
+      () async {
+    final task =
+        _task(id: 'clarification-answer', conversationId: 'group-clarify')
+          ..status = AgentTaskStatus.completed
+          ..lastArtifactPaths = [
+            '/workspace/report.md',
+            '/workspace/summary.md',
+          ];
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '请修改当前文件');
+    expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+
+    await coordinator.enqueueFollowUp(task.id, 'report.md');
+
+    final resumed = taskBox.get(task.id)!;
+    expect(resumed.status, AgentTaskStatus.planning);
+    expect(resumed.queuedUserRequests, isEmpty);
+    expect(resumed.executionStateJson, contains('/workspace/report.md'));
+    expect(runner.startedTaskIds, ['clarification-answer']);
   });
 
   test('keeps an approval checkpoint after its runner releases the slot',
@@ -460,6 +847,28 @@ void main() {
     final tasks = await coordinator.watchAllTasks().first;
     expect(tasks.map((task) => task.id), contains('interrupted'));
     expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('manual restart clears a redacted approval request before re-planning',
+      () async {
+    final waiting = _task(id: 'restart-approval', conversationId: 'group-a')
+      ..status = AgentTaskStatus.waitingForApproval
+      ..resumeRequired = true
+      ..pendingToolRequestJson =
+          '{"tool":"workspace.patch","reason":"写入","args":{"path":"report.md"}}';
+    await taskBox.put(waiting.id, waiting);
+
+    await coordinator.restore();
+    expect(taskBox.get(waiting.id)?.status, AgentTaskStatus.interrupted);
+
+    await coordinator.resumeByUser(waiting.id);
+    final resumed = taskBox.get(waiting.id)!;
+    // The coordinator persists planning immediately when it starts the fresh
+    // run; the important boundary is that the redacted request is gone.
+    expect(resumed.status, AgentTaskStatus.planning);
+    expect(resumed.pendingToolRequestJson, isEmpty);
+    expect(runner.startedTaskIds, contains(waiting.id));
+    runner.complete(waiting.id);
   });
 
   test('persists explicit resource lock plans for a later coordinator',

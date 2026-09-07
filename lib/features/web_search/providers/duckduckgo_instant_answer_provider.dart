@@ -93,6 +93,14 @@ class DuckDuckGoInstantAnswerProvider implements SearchProvider {
         statusCode: error.response?.statusCode,
         providerRequestId: _providerRequestId(error.response),
       );
+    } on SearchEndpointDnsException catch (error) {
+      return _failureResponse(
+        type: searchFailureTypeFromEndpointDnsException(error),
+      );
+    } on SearchResponseTooLargeException {
+      return _failureResponse(type: SearchFailureType.invalidResponse);
+    } on SearchResponseStructureException {
+      return _failureResponse(type: SearchFailureType.invalidResponse);
     } on FormatException {
       return _failureResponse(
         type: SearchFailureType.invalidResponse,

@@ -56,7 +56,16 @@ class BackupInspector {
         assert(expandedByteLimit > 0 && expandedByteLimit <= maxExpandedBytes);
 
   Future<PreparedBackup> inspect(File package) async {
-    if (!await package.exists()) throw const BackupException('备份文件不存在');
+    final packageType = await FileSystemEntity.type(
+      package.path,
+      followLinks: false,
+    );
+    if (packageType == FileSystemEntityType.notFound) {
+      throw const BackupException('备份文件不存在');
+    }
+    if (packageType != FileSystemEntityType.file) {
+      throw const BackupException('备份文件不是安全的普通文件');
+    }
     final packageBytes = await package.length();
     if (packageBytes <= 0 || packageBytes > maxPackageBytes) {
       throw const BackupException('备份文件大小超出限制');
@@ -72,7 +81,7 @@ class BackupInspector {
       _validateEntries(archive, packageBytes);
       await _extract(archive, staging);
       final manifestFile = File('${staging.path}/manifest.json');
-      if (!await manifestFile.exists()) {
+      if (!await _isRegularFile(manifestFile)) {
         throw const BackupException('备份缺少 manifest.json');
       }
       final manifest =
@@ -114,7 +123,7 @@ class BackupInspector {
       rethrow;
     } on Object catch (error) {
       await _delete(staging);
-      throw BackupException('备份校验失败：$error');
+      throw BackupException('备份校验失败：${sanitizeBackupError(error)}');
     } finally {
       if (archive != null) {
         for (final entry in archive) {
@@ -126,6 +135,12 @@ class BackupInspector {
   }
 
   Future<Map<String, dynamic>> _readManifest(File manifestFile) async {
+    // The staging directory is temporary, but it is still an untrusted
+    // boundary while inspection is in progress. Never follow a replacement
+    // symlink between extraction and JSON decoding.
+    if (!await _isRegularFile(manifestFile)) {
+      throw const BackupException('manifest.json 不是安全的普通文件');
+    }
     final bytes = await manifestFile.length();
     if (bytes > maxManifestBytes) {
       throw const BackupException('manifest.json 文件过大');
@@ -212,11 +227,14 @@ class BackupInspector {
   }
 
   Future<void> _extract(Archive archive, Directory staging) async {
+    if (await FileSystemEntity.type(staging.path, followLinks: false) !=
+        FileSystemEntityType.directory) {
+      throw const BackupException('备份 staging 目录不是安全目录');
+    }
     final budget = _BackupOutputBudget();
     for (final entry in archive) {
       if (entry.isDirectory) continue;
-      final target = File('${staging.path}/${entry.name}');
-      await target.parent.create(recursive: true);
+      final target = await _prepareExtractionTarget(staging, entry.name);
       final output = OutputFileStream(target.path);
       final boundedOutput = _LimitedBackupOutputStream(
         output,
@@ -243,6 +261,50 @@ class BackupInspector {
     }
   }
 
+  Future<File> _prepareExtractionTarget(
+    Directory staging,
+    String entryName,
+  ) async {
+    final parts = entryName.split('/');
+    var parent = staging;
+    for (final segment in parts.take(parts.length - 1)) {
+      parent = Directory(
+        '${parent.path}${Platform.pathSeparator}$segment',
+      );
+      final type = await FileSystemEntity.type(
+        parent.path,
+        followLinks: false,
+      );
+      if (type == FileSystemEntityType.link ||
+          (type != FileSystemEntityType.notFound &&
+              type != FileSystemEntityType.directory)) {
+        throw const BackupException('备份 staging 路径不是安全目录');
+      }
+      if (type == FileSystemEntityType.notFound) {
+        await parent.create();
+        if (await FileSystemEntity.type(
+              parent.path,
+              followLinks: false,
+            ) !=
+            FileSystemEntityType.directory) {
+          throw const BackupException('备份 staging 路径创建失败');
+        }
+      }
+    }
+    final target = File(
+      '${parent.path}${Platform.pathSeparator}${parts.last}',
+    );
+    if (await FileSystemEntity.type(target.path, followLinks: false) !=
+        FileSystemEntityType.notFound) {
+      throw const BackupException('备份 staging 目标已存在');
+    }
+    return target;
+  }
+
+  Future<bool> _isRegularFile(File file) async =>
+      await FileSystemEntity.type(file.path, followLinks: false) ==
+      FileSystemEntityType.file;
+
   Future<void> _validateManifestFiles(
     Directory staging,
     BackupManifest manifest,
@@ -258,6 +320,13 @@ class BackupInspector {
     }
     for (final entry in manifest.files.entries) {
       final file = File('${staging.path}/${entry.key}');
+      final fileType = await FileSystemEntity.type(
+        file.path,
+        followLinks: false,
+      );
+      if (fileType != FileSystemEntityType.file) {
+        throw BackupException('文件不是安全的普通文件：${entry.key}');
+      }
       if (!await file.exists() || await file.length() != entry.value.bytes) {
         throw BackupException('文件大小校验失败：${entry.key}');
       }
@@ -340,7 +409,20 @@ class BackupInspector {
   }
 
   Future<void> _delete(Directory directory) async {
-    if (await directory.exists()) await directory.delete(recursive: true);
+    await _deleteTreeNoFollow(directory);
+  }
+
+  Future<void> _deleteTreeNoFollow(FileSystemEntity entity) async {
+    final type = await FileSystemEntity.type(entity.path, followLinks: false);
+    if (type == FileSystemEntityType.notFound) return;
+    if (type != FileSystemEntityType.directory) {
+      await entity.delete();
+      return;
+    }
+    await for (final child in Directory(entity.path).list(followLinks: false)) {
+      await _deleteTreeNoFollow(child);
+    }
+    await entity.delete();
   }
 }
 

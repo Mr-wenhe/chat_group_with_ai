@@ -54,6 +54,20 @@ void main() {
     );
   });
 
+  test('预检拒绝作为备份源文件的文件系统符号链接', () async {
+    final target = File('${root.path}/target.zip');
+    await target.writeAsBytes(
+      _zipBytes([const _Entry('data/settings.json', data: '{}')]),
+    );
+    final link = Link('${root.path}/source.zip');
+    await link.create(target.path);
+
+    await expectLater(
+      ZipPreflight.validate(File(link.path), maxEntries: 10),
+      throwsA(isA<BackupException>()),
+    );
+  }, skip: Platform.isWindows ? 'symlink privileges vary on Windows' : null);
+
   test('普通中央目录通过预检', () async {
     final fixture = File('${root.path}/valid.zip');
     await fixture.writeAsBytes(

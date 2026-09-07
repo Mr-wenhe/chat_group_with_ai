@@ -10,8 +10,15 @@ import 'package:chat_group/features/ai_governance/search_coordinator.dart';
 import 'package:chat_group/features/web_search/application/search_runtime_provider_factory.dart';
 import 'package:chat_group/features/web_search/application/search_turn_context.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
+import 'package:chat_group/features/web_search/models/search_failure_factory.dart';
+import 'package:chat_group/features/web_search/models/search_failure.dart';
+import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
 import 'package:chat_group/features/web_search/providers/native_web_search_adapter.dart';
+import 'package:chat_group/features/web_search/providers/search_provider.dart';
+import 'package:chat_group/features/work_mode/visible_browser_service.dart';
+import 'package:crypto/crypto.dart';
+import 'package:dio/dio.dart';
 
 typedef ChatRoomApiConfigResolver = ApiConfig? Function(AICharacter character);
 
@@ -28,6 +35,7 @@ class ChatRoomSearchRuntimeController {
   final ApiCredentialResolver credentialResolver;
   final Iterable<AICharacter> Function() allCharacters;
   final ChatRoomApiConfigResolver resolveApiConfig;
+  final VisibleBrowserService? visibleBrowserService;
 
   late SearchCoordinator coordinator;
   late SearchTurnContextController turnController;
@@ -43,6 +51,7 @@ class ChatRoomSearchRuntimeController {
     required this.credentialResolver,
     required this.allCharacters,
     required this.resolveApiConfig,
+    this.visibleBrowserService,
   });
 
   String get runtimeFingerprint => _runtimeFingerprint;
@@ -90,6 +99,8 @@ class ChatRoomSearchRuntimeController {
       store: governanceStore,
       routes: SearchRuntimeProviderFactory(store: settings).buildRoutes(
         nativeSearch: _nativeSearchBinding(),
+        visibleBrowserSearch:
+            visibleBrowserService == null ? null : _searchWithVisibleBrowser,
       ),
       queryPlanner: _searchQueryPlanner(),
     );
@@ -100,7 +111,11 @@ class ChatRoomSearchRuntimeController {
     final candidates = <String, ApiConfig>{};
     for (final character in allCharacters()) {
       final config = resolveApiConfig(character);
-      if (config == null || config.provider != ApiProvider.qwen.name) continue;
+      if (config == null ||
+          config.provider != ApiProvider.qwen.name ||
+          (!config.hasCredential && !config.hasApiKey)) {
+        continue;
+      }
       candidates[config.id] = config;
     }
     if (candidates.length != 1) return null;
@@ -181,6 +196,153 @@ class ChatRoomSearchRuntimeController {
       'characters': characterBindings,
       'runtime': settings.runtimeSettings.toMap(),
     });
+  }
+
+  /// Converts the visible-browser handoff into the same normalized search
+  /// response used by the bounded providers. The browser remains open and
+  /// waits for the user when a login/CAPTCHA/paywall is detected; clicking
+  /// Continue resolves this Future and resumes the original search turn.
+  Future<SearchProviderResponse> _searchWithVisibleBrowser(
+    SearchRequest request, {
+    CancelToken? cancelToken,
+  }) async {
+    final service = visibleBrowserService;
+    if (service == null) {
+      return SearchProviderResponse(
+        items: const [],
+        sourceProvider: 'visibleBrowser',
+        failure: buildSearchFailure(
+          type: SearchFailureType.invalidConfiguration,
+        ),
+      );
+    }
+    final taskId = _browserTaskId(request);
+    final url = Uri.https(
+      'html.duckduckgo.com',
+      '/html/',
+      <String, String>{'q': request.query},
+    ).toString();
+    try {
+      final opened = await service.open(taskId: taskId, url: url);
+      final session = await service.waitForReadablePage(
+        opened.id,
+        cancelToken: cancelToken,
+      );
+      if (session == null) {
+        return SearchProviderResponse(
+          items: const [],
+          sourceProvider: 'visibleBrowser',
+          failure: buildSearchFailure(type: SearchFailureType.cancelled),
+        );
+      }
+      if (session.status == VisibleBrowserStatus.failed) {
+        return SearchProviderResponse(
+          items: const [],
+          sourceProvider: 'visibleBrowser',
+          failure: buildSearchFailure(
+            type: SearchFailureType.providerUnavailable,
+          ),
+        );
+      }
+      final pageUri = tryValidateSearchUrl(
+        Uri.tryParse(session.url),
+        allowInsecureHttp: true,
+      );
+      if (pageUri == null || session.pageText.trim().isEmpty) {
+        return SearchProviderResponse(
+          items: const [],
+          sourceProvider: 'visibleBrowser',
+          failure: buildSearchFailure(type: SearchFailureType.noResults),
+        );
+      }
+      final title = sanitizeSearchText(
+        session.title,
+        maxLength: searchTitleMaxLength,
+        fallback: '公开网页结果',
+        redactSecrets: true,
+        redactOpaqueTokens: true,
+      );
+      final snippet = sanitizeSearchText(
+        session.pageText,
+        maxLength: searchSnippetMaxLength,
+        redactSecrets: true,
+        redactOpaqueTokens: true,
+      );
+      if (snippet.isEmpty) {
+        return SearchProviderResponse(
+          items: const [],
+          sourceProvider: 'visibleBrowser',
+          failure: buildSearchFailure(type: SearchFailureType.noResults),
+        );
+      }
+      return SearchProviderResponse(
+        items: <SearchProviderItem>[
+          SearchProviderItem(
+            title: title,
+            snippet: snippet,
+            url: pageUri,
+            allowInsecureHttp: true,
+          ),
+        ],
+        sourceProvider: 'visibleBrowser',
+        moreResultsAvailable: true,
+        degraded: true,
+      );
+    } on DioException catch (error) {
+      if (cancelToken?.isCancelled == true ||
+          error.type == DioExceptionType.cancel) {
+        return SearchProviderResponse(
+          items: const [],
+          sourceProvider: 'visibleBrowser',
+          failure: buildSearchFailure(type: SearchFailureType.cancelled),
+        );
+      }
+      return SearchProviderResponse(
+        items: const [],
+        sourceProvider: 'visibleBrowser',
+        failure:
+            buildSearchFailure(type: SearchFailureType.providerUnavailable),
+      );
+    } on Object {
+      return SearchProviderResponse(
+        items: const [],
+        sourceProvider: 'visibleBrowser',
+        failure:
+            buildSearchFailure(type: SearchFailureType.providerUnavailable),
+      );
+    }
+  }
+
+  String _browserTaskId(SearchRequest request) {
+    for (final value in <String>[
+      request.requestId,
+      request.sourceMessageId,
+      request.turnId,
+      request.rootRequestId,
+      'browser-search',
+    ]) {
+      final raw = value.trim();
+      if (raw.isEmpty) continue;
+      var normalized = raw.replaceAll(
+        RegExp(r'[^A-Za-z0-9_-]'),
+        '_',
+      );
+      normalized = normalized.replaceFirst(RegExp(r'^_+'), '');
+      if (normalized.isEmpty) continue;
+      if (!RegExp(r'^[A-Za-z0-9]').hasMatch(normalized)) {
+        normalized = 'browser_$normalized';
+      }
+      if (normalized.length <= 128 && normalized == raw) return normalized;
+      // Replacing punctuation alone makes `a:b` and `a/b` share one browser
+      // task and can merge their audit events. Keep a short readable prefix,
+      // then add a non-reversible digest whenever normalization changed it.
+      final digest = sha256.convert(utf8.encode(raw)).toString();
+      final suffix = '-${digest.substring(0, 16)}';
+      final prefixLength = (128 - suffix.length).clamp(1, 128).toInt();
+      normalized = normalized.substring(0, prefixLength);
+      return '$normalized$suffix';
+    }
+    return 'browser-search';
   }
 
   Map<String, Object?>? _apiConfigSignature(ApiConfig? config) {

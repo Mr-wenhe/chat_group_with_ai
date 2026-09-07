@@ -161,6 +161,7 @@ OPENAI_API_KEY=opaque-secret-value
       'https://198.51.100.1/search',
       'https://203.0.113.1/search',
       'https://[::ffff:7f00:1]/search',
+      'https://[fe80::1%25en0]/search',
       'https://service.127.0.0.1.nip.io/search',
       'https://user:pass@example.com/search',
     ];
@@ -193,6 +194,12 @@ OPENAI_API_KEY=opaque-secret-value
         const ['2606:4700:4700::1111'],
       ),
       isTrue,
+    );
+    expect(
+      SearchEndpointValidator.areResolvedAddressesPublic(
+        const ['fe80::1%en0'],
+      ),
+      isFalse,
     );
   });
 
@@ -395,6 +402,27 @@ OPENAI_API_KEY=opaque-secret-value
     expect(restored, isNotNull);
     expect(restored!.results, hasLength(searchMaxResultsLimit));
     expect(restored.executedQueries, hasLength(5));
+  });
+
+  test('restored snapshot failures and hashes do not trust persisted metadata',
+      () {
+    final restored = WebSearchSnapshot.fromMap({
+      'searchedAt': DateTime.utc(2026, 8, 23).toIso8601String(),
+      'originalTextHash': '/Users/fengye/project/secret-token',
+      'failure': {
+        'type': SearchFailureType.rateLimited.name,
+        'safeMessage': 'Authorization: Bearer persisted-secret',
+        'retryable': false,
+        'providerRequestId': 'Authorization: Bearer request-secret',
+      },
+    });
+
+    expect(restored, isNotNull);
+    expect(restored!.originalTextHash, isEmpty);
+    expect(restored.failure!.safeMessage,
+        safeMessageForSearchFailure(SearchFailureType.rateLimited));
+    expect(restored.failure!.retryable, isTrue);
+    expect(restored.failure!.providerRequestId, isNull);
   });
 
   test('citation sanitizer preserves ordinary bracketed prose', () {

@@ -268,36 +268,47 @@ class _BackupEntityMemoryCodec {
         'id': item.id,
         'groupId': item.groupId,
         'characterId': item.characterId,
-        'userRequest': item.userRequest,
+        'userRequest': _safeTaskText(item.userRequest),
         'status': item.status.name,
         'requestedPermissions':
             item.requestedPermissions.map((item) => item.name).toList(),
-        'plan': item.plan,
-        'resultSummary': item.resultSummary,
+        'plan': _safeTaskText(item.plan),
+        'resultSummary': _safeTaskText(item.resultSummary),
         'createdAt': _date(item.createdAt),
         'currentStep': item.currentStep,
         // Tool checkpoints are intentionally redacted before backup. File
         // contents and shell commands must never leave the durable boundary.
         'completedOperations': item.completedOperations
-            .map(safeToolRequestCheckpointJson)
+            .map(_portableCompletedOperation)
             .where((value) => value.isNotEmpty)
             .toList(growable: false),
+        // A pending approval is an in-process capability. Keep only a
+        // display-safe tool marker; the original path, command and payload
+        // must be re-planned after import on the destination device.
         'pendingToolRequestJson':
-            safeToolRequestCheckpointJson(item.pendingToolRequestJson),
+            _portableToolCheckpoint(item.pendingToolRequestJson),
         'updatedAt': item.updatedAt?.toIso8601String(),
-        'lastError': item.lastError,
+        'lastError': _safeTaskText(item.lastError),
         'workModeTask': item.workModeTask,
-        'queuedUserRequests': item.queuedUserRequests,
+        'queuedUserRequests': item.queuedUserRequests
+            .map((request) => _safeTaskText(request))
+            .where((request) => request.isNotEmpty)
+            .toList(growable: false),
         'contextSummary': _safeTaskContextSummary(item.contextSummary),
         'assignedCharacterIds': item.assignedCharacterIds,
         'startedAt': item.startedAt?.toIso8601String(),
         'actionCount': item.actionCount,
         'softLimitReached': item.softLimitReached,
         'resumeRequired': item.resumeRequired,
-        'executionStateJson': item.executionStateJson,
-        // Artifact paths are portable workspace-relative names. Never export
-        // a machine-specific absolute path (which would leak usernames and
-        // cannot be resolved on another device).
+        // Only restart-safe display state is portable. Approval scopes,
+        // resource locks, snapshots, tool results and committed operation
+        // keys are capabilities or local evidence and must never cross the
+        // backup boundary.
+        'executionStateJson': _safeExecutionStateJson(item.executionStateJson),
+        // Artifact paths are portable workspace-relative names. Absolute and
+        // traversal paths are discarded rather than reduced to a basename;
+        // a basename can still disclose a private filename and is not a
+        // resolvable portable target.
         'lastArtifactPaths': item.lastArtifactPaths
             .map(_portableArtifactPath)
             .where((path) => path.isNotEmpty)
@@ -311,31 +322,43 @@ class _BackupEntityMemoryCodec {
         id: _string(json, 'id'),
         groupId: _string(json, 'groupId'),
         characterId: _string(json, 'characterId'),
-        userRequest: _string(json, 'userRequest'),
+        userRequest: _safeTaskText(_string(json, 'userRequest')),
         status: _enum(json, 'status', AgentTaskStatus.values),
         requestedPermissions:
             _enums(json['requestedPermissions'], ToolPermission.values),
-        plan: json['plan']?.toString() ?? '',
-        resultSummary: json['resultSummary']?.toString() ?? '',
+        plan: _safeTaskText(json['plan']?.toString() ?? ''),
+        resultSummary: _safeTaskText(json['resultSummary']?.toString() ?? ''),
         createdAt: _dateTime(json, 'createdAt'),
         currentStep: (json['currentStep'] as num?)?.toInt() ?? 0,
-        completedOperations: _strings(json['completedOperations']),
-        pendingToolRequestJson:
-            json['pendingToolRequestJson']?.toString() ?? '',
+        completedOperations: _strings(json['completedOperations'])
+            .map(_portableCompletedOperation)
+            .where((value) => value.isNotEmpty)
+            .toList(growable: false),
+        pendingToolRequestJson: _portableToolCheckpoint(
+          json['pendingToolRequestJson']?.toString() ?? '',
+        ),
         updatedAt: _optionalDate(json['updatedAt']),
-        lastError: json['lastError']?.toString() ?? '',
+        lastError: _safeTaskText(json['lastError']?.toString() ?? ''),
         workModeTask: json['workModeTask'] as bool? ?? false,
-        queuedUserRequests: _strings(json['queuedUserRequests']),
-        contextSummary: json['contextSummary']?.toString() ?? '',
+        queuedUserRequests: _strings(json['queuedUserRequests'])
+            .map(_safeTaskText)
+            .where((request) => request.isNotEmpty)
+            .toList(growable: false),
+        contextSummary: _safeTaskContextSummary(
+          json['contextSummary']?.toString() ?? '',
+        ),
         assignedCharacterIds: _strings(json['assignedCharacterIds']),
         startedAt: _optionalDate(json['startedAt']),
         actionCount: (json['actionCount'] as num?)?.toInt() ?? 0,
         softLimitReached: json['softLimitReached'] as bool? ?? false,
         resumeRequired: json['resumeRequired'] as bool? ?? false,
-        executionStateJson: json['executionStateJson']?.toString() ?? '',
         // Backups may come from an older build or an untrusted file. Apply
-        // the same portability boundary on import as on export so an
-        // absolute path cannot be reintroduced into a restored task.
+        // the same capability and portability boundary on import as on
+        // export, so a crafted archive cannot reintroduce a stale approval,
+        // local path or tool result into a restored task.
+        executionStateJson: _safeExecutionStateJson(
+          json['executionStateJson']?.toString() ?? '',
+        ),
         lastArtifactPaths: _strings(json['lastArtifactPaths'])
             .map(_portableArtifactPath)
             .where((path) => path.isNotEmpty)
@@ -368,29 +391,212 @@ class _BackupEntityMemoryCodec {
 String _portableArtifactPath(String raw) {
   final normalized = raw.trim().replaceAll('\\', '/');
   if (normalized.isEmpty) return '';
-  final absolute =
-      normalized.startsWith('/') || RegExp(r'^[A-Za-z]:/').hasMatch(normalized);
-  if (absolute) {
-    final segments = normalized.split('/').where((part) => part.isNotEmpty);
-    return segments.isEmpty ? '' : segments.last;
+  // Treat every drive-qualified value as device-local, including Windows
+  // drive-relative `C:foo` paths. Reject dot/empty segments and URI-like
+  // first components so a future restore cannot reinterpret a display value
+  // as an absolute or external target.
+  if (normalized.startsWith('/') ||
+      RegExp(r'^[A-Za-z]:').hasMatch(normalized)) {
+    return '';
   }
-  if (normalized.split('/').contains('..')) return '';
+  final segments = normalized.split('/');
+  if (segments
+      .any((segment) => segment.isEmpty || segment == '.' || segment == '..')) {
+    return '';
+  }
+  if (RegExp(r'^[A-Za-z][A-Za-z0-9+.-]*:').hasMatch(normalized) ||
+      normalized.contains('\u0000')) {
+    return '';
+  }
   return normalized;
 }
 
+String _portableCompletedOperation(String raw) {
+  final checkpoint = _portableToolCheckpoint(raw);
+  if (checkpoint.isNotEmpty) return checkpoint;
+  // Opaque legacy operation strings may contain command output, file content,
+  // credentials, or device paths. They are local evidence rather than
+  // restart state, so keep only a redacted marker across the portable boundary.
+  return '{"kind":"legacyOperation","redacted":true}';
+}
+
+String _portableToolCheckpoint(String raw) {
+  if (raw.trim().isEmpty) return '';
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) return '';
+    final tool = AgentToolName.fromWire(decoded['tool']?.toString() ?? '');
+    if (tool == null) return '';
+    final args = decoded['args'];
+    final safeArgs = <String, dynamic>{};
+    if (args is Map) {
+      final map = Map<String, dynamic>.from(args);
+      final content = map['content'];
+      if (content is String) safeArgs['contentLength'] = content.length;
+      if (map['command'] is String &&
+          (map['command'] as String).trim().isNotEmpty) {
+        safeArgs['commandPresent'] = true;
+      }
+      if (map['overwrite'] is bool) safeArgs['overwrite'] = map['overwrite'];
+      if (map['recursive'] is bool) safeArgs['recursive'] = map['recursive'];
+      if (map['permissions'] is List) {
+        safeArgs['permissionCount'] = (map['permissions'] as List).length;
+      }
+      if (map['url'] is String) safeArgs['urlPresent'] = true;
+      for (final key in const ['startByte', 'byteLength']) {
+        final value = map[key];
+        if (value is num) safeArgs[key] = value.toInt().clamp(0, 1 << 31);
+      }
+    }
+    return jsonEncode(<String, dynamic>{
+      'tool': tool.wireName,
+      'reason': '已记录 ${tool.wireName} 操作',
+      'args': safeArgs,
+    });
+  } on Object {
+    return '';
+  }
+}
+
 String _safeTaskContextSummary(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return '';
+  try {
+    final decoded = jsonDecode(trimmed);
+    if (decoded is Map) {
+      final safe = _safeContextMap(Map<String, dynamic>.from(decoded), 0);
+      return _boundedJson(safe, 4000);
+    }
+  } on Object {
+    // Legacy summaries were plain text. Fall through to the same redaction
+    // used for task prose instead of rejecting an otherwise restorable task.
+  }
+  return _safeTaskText(trimmed, maximum: 4000);
+}
+
+const _portableExecutionKeys = <String>{
+  'phase',
+  'followupkind',
+  'followupreason',
+  'clarificationquestion',
+  'autorenameifexists',
+  'foldergrantpending',
+  'folderrequireswritable',
+  'explicitcommandrequestrequired',
+  'visionmodelrequired',
+  'visionmodelprovider',
+  'visionmodel',
+};
+
+// Kept separate from safeToolRequestCheckpointJson: that helper is the
+// in-app restart checkpoint and intentionally retains display-only fields.
+// Portable backups need a stricter allow-list because they are transportable
+// outside the trusted app-support directory.
+String _safeExecutionStateJson(String raw) {
+  final trimmed = raw.trim();
+  if (trimmed.isEmpty) return '';
+  try {
+    final decoded = jsonDecode(trimmed);
+    if (decoded is! Map) return '';
+    final result = <String, dynamic>{};
+    for (final entry in decoded.entries) {
+      final key = entry.key.toString();
+      final normalized = key.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+      if (!_portableExecutionKeys.contains(normalized)) continue;
+      final value = entry.value;
+      if (value is bool || value is num) {
+        result[key] = value;
+      } else if (value is String) {
+        result[key] = _safeTaskText(value, maximum: 512);
+      }
+    }
+    return result.isEmpty ? '' : jsonEncode(result);
+  } on Object {
+    return '';
+  }
+}
+
+const _nonPortableContextKeys = <String>{
+  'approvalscope',
+  'artifactpaths',
+  'artifacts',
+  'recenttoolresults',
+  'rolehandoff',
+  'handoff',
+  'workingdirectory',
+  'snapshot',
+  'snapshotpath',
+  'eventlog',
+  'governance',
+  'path',
+  'paths',
+  'targetpath',
+  'originalpath',
+  'command',
+  'content',
+  'body',
+  'stdout',
+  'stderr',
+  'response',
+  'data',
+};
+
+dynamic _safeContextValue(Object? value, int depth) {
+  if (depth > 3) return null;
+  if (value == null || value is bool || value is num) return value;
+  if (value is String) return _safeTaskText(value, maximum: 512);
+  if (value is Iterable) {
+    return value
+        .take(32)
+        .map((item) => _safeContextValue(item, depth + 1))
+        .where((item) => item != null)
+        .toList(growable: false);
+  }
+  if (value is Map) {
+    return _safeContextMap(Map<String, dynamic>.from(value), depth + 1);
+  }
+  return null;
+}
+
+Map<String, dynamic> _safeContextMap(Map<String, dynamic> source, int depth) {
+  final result = <String, dynamic>{};
+  if (depth > 3) return result;
+  for (final entry in source.entries.take(32)) {
+    final rawKey = entry.key.toString();
+    final normalized =
+        rawKey.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+    if (_nonPortableContextKeys.contains(normalized)) continue;
+    // Context keys are untrusted legacy/model data too. Keep ordinary field
+    // names intact, but redact a path, URL, or token if one was used as a key.
+    final key = _safeTaskText(rawKey, maximum: 128);
+    if (key.isEmpty) continue;
+    final safeValue = _safeContextValue(entry.value, depth);
+    if (safeValue != null) result[key] = safeValue;
+  }
+  return result;
+}
+
+String _boundedJson(Object value, int maximum) {
+  final encoded = jsonEncode(value);
+  return encoded.length <= maximum
+      ? encoded
+      : '${encoded.substring(0, maximum - 1)}…';
+}
+
+String _safeTaskText(String raw, {int maximum = 2048}) {
   var safe = const SearchSecretScanner().redact(
     raw.trim(),
     includeOpaqueTokens: true,
   );
-  safe = safe.replaceAll(RegExp(r'https?://[^\s,;）)]+'), '[外部地址]');
+  safe = safe.replaceAll(
+      RegExp(r'https?://[^\s,;）)]+', caseSensitive: false), '[外部地址]');
   safe = safe.replaceAll(
     RegExp(
-      r'(?:(?:[A-Za-z]:[\\/])|/(?:Users|home|Volumes|private|tmp)/)[^\s,;）)]*',
+      r'(?:(?:[A-Za-z]:[\\/])|(?:\\\\|//)|/)[^\s,;）)]*',
     ),
     '[本地路径]',
   );
-  return safe.length <= 4000 ? safe : '${safe.substring(0, 3999)}…';
+  return safe.length <= maximum ? safe : '${safe.substring(0, maximum - 1)}…';
 }
 
 String _string(Map<String, dynamic> json, String key) {

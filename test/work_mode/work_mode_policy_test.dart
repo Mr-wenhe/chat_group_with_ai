@@ -81,9 +81,9 @@ void main() {
       expect(WorkModePolicy.requiresApproval(AgentToolName.browserContext),
           isTrue);
       expect(
-          WorkModePolicy.requiresApproval(AgentToolName.skillCreate), isFalse);
-      expect(WorkModePolicy.requiresApproval(AgentToolName.skillDownload),
-          isFalse);
+          WorkModePolicy.requiresApproval(AgentToolName.skillCreate), isTrue);
+      expect(
+          WorkModePolicy.requiresApproval(AgentToolName.skillDownload), isTrue);
     });
 
     test('approval summary names the exact affected path or command', () {

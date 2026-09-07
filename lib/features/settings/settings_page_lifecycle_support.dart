@@ -1,6 +1,41 @@
 part of 'settings_page.dart';
 
 extension _SettingsPageLifecycleSupport on _SettingsPageState {
+  DataLifecycleService _workModeDataLifecycleService() {
+    final db = ref.read(databaseServiceProvider);
+    // Once the persistent directory exists, silently falling back would make
+    // a clear operation delete Hive data without quiescing its event/snapshot
+    // stores. Only the pre-initialization test/startup state may use the
+    // lightweight service.
+    final persistentDataReady = db.dataDirPath?.isNotEmpty == true;
+    try {
+      final coordinator = ref.read(workTaskCoordinatorProvider);
+      final eventStore = ref.read(workTaskEventStoreProvider);
+      final snapshots = ref.read(workSnapshotServiceProvider);
+      return DataLifecycleService(
+        db: db,
+        stopWorkModeTasks: coordinator.stopAllForDataClear,
+        clearWorkModeArtifacts: () async {
+          await eventStore.clearAll();
+          await snapshots.clearAll();
+        },
+        resumeWorkModeTasks: coordinator.resumeAfterDataClear,
+      );
+    } on StateError {
+      if (persistentDataReady) rethrow;
+      // Lightweight settings callers may render before the database has a
+      // persistent data directory. Keep ordinary data clearing available, but
+      // do not invent a work-mode storage path or bypass its lifecycle gate.
+      return DataLifecycleService(db: db);
+    } on HiveError {
+      if (persistentDataReady) rethrow;
+      // The app-settings box can be unopened during the same lightweight
+      // startup window. Wait for normal app initialization before wiring the
+      // work-mode artifact callbacks.
+      return DataLifecycleService(db: db);
+    }
+  }
+
   Future<void> _chooseAiProcessingDir() async {
     try {
       final selected = await FilePicker.platform.getDirectoryPath(
@@ -21,7 +56,11 @@ extension _SettingsPageLifecycleSupport on _SettingsPageState {
       AppToast.show(context, 'AI 工作根目录已更新', icon: Icons.folder_open_rounded);
     } catch (e) {
       if (!mounted) return;
-      AppToast.show(context, '选择目录失败：$e', icon: Icons.error_outline_rounded);
+      AppToast.show(
+        context,
+        '选择目录失败：${sanitizeWorkTaskError(e)}',
+        icon: Icons.error_outline_rounded,
+      );
     }
   }
 
@@ -88,21 +127,21 @@ extension _SettingsPageLifecycleSupport on _SettingsPageState {
     DataClearScope scope,
   ) async {
     final cs = Theme.of(context).colorScheme;
-    final service = DataLifecycleService(db: ref.read(databaseServiceProvider));
+    final service = _workModeDataLifecycleService();
     final plan = await service.previewClear(scope);
     if (!context.mounted) return;
     final (title, description) = switch (scope) {
       DataClearScope.chatContent => (
           '清除聊天内容？',
-          '将永久删除消息、附件、记忆、关系、任务、工作区记录和会话状态。角色、群聊、API 配置、主题、TTS 和目录偏好会保留。',
+          '将永久删除消息、附件、记忆、关系、任务、工作区记录和会话状态。角色、群聊、API 配置、主题、TTS 和目录偏好会保留。仅清理 App 内工作模式事件日志和撤销快照，不会删除授权目录中的项目真实文件。',
         ),
       DataClearScope.userContent => (
           '清除全部用户内容？',
-          '将永久删除聊天内容、角色、群聊、技能、API 配置及安全凭据。主题、TTS 和目录偏好会保留。',
+          '将永久删除聊天内容、角色、群聊、技能、API 配置及安全凭据。主题、TTS 和目录偏好会保留。仅清理 App 内工作模式事件日志和撤销快照，不会删除授权目录中的项目真实文件。',
         ),
       DataClearScope.factoryReset => (
           '恢复出厂设置？',
-          '将永久删除全部用户内容及安全凭据，并重置主题、TTS、目录等所有偏好。',
+          '将永久删除全部用户内容及安全凭据，并重置主题、TTS、目录等所有偏好。仅清理 App 内工作模式事件日志和撤销快照，不会删除授权目录中的项目真实文件。',
         ),
     };
     final confirm = await showDialog<bool>(
@@ -176,7 +215,7 @@ extension _SettingsPageLifecycleSupport on _SettingsPageState {
   String _clearCountSummary(DeletionPlan plan, DataClearScope scope) {
     final entries = <String>[
       '${plan.count('messages')} 条消息',
-      '${plan.count('attachments')} 个附件',
+      '${plan.count('attachments')} 个 App 管理附件',
       '${plan.count('groupMemories') + plan.count('characterMemories')} 条场合记忆',
       '${plan.count('relationshipStates')} 条关系快照',
       '${plan.count('relationshipEvents')} 条关系事件',
@@ -202,6 +241,7 @@ extension _SettingsPageLifecycleSupport on _SettingsPageState {
       '会话索引 ${plan.count('sessionIndexes')} 项',
       '记忆 pin ${plan.count('memoryPins')} 个',
       '重试记录 ${plan.count('retryRecords')} 条',
+      '工作模式事件/撤销快照：仅清理 App 内记录',
     ];
     if (scope != DataClearScope.chatContent) {
       entries.addAll([
@@ -261,9 +301,8 @@ extension _SettingsPageLifecycleSupport on _SettingsPageState {
   }
 
   Future<void> _retryPendingDeletion() async {
-    final result = await DataLifecycleService(
-      db: ref.read(databaseServiceProvider),
-    ).retryPendingOperation();
+    final result =
+        await _workModeDataLifecycleService().retryPendingOperation();
     ref.invalidate(apiConfigsProvider);
     ref.invalidate(aiCharactersProvider);
     ref.invalidate(chatGroupsProvider);

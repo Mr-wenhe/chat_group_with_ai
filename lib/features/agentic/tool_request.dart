@@ -6,6 +6,7 @@ enum AgentToolName {
   workspaceList('workspace.list'),
   workspaceRead('workspace.read'),
   workspaceSearch('workspace.search'),
+  workspaceDocument('workspace.document'),
   workspacePatch('workspace.patch'),
   workspaceRename('workspace.rename'),
   workspaceDelete('workspace.delete'),
@@ -18,6 +19,9 @@ enum AgentToolName {
   const AgentToolName(this.wireName);
 
   static AgentToolName? fromWire(String value) {
+    // Accept the early Task 22 spelling while emitting the canonical
+    // workspace namespace in every new checkpoint/request.
+    if (value == 'document.analyze') return AgentToolName.workspaceDocument;
     for (final name in values) {
       if (name.wireName == value) return name;
     }
@@ -297,6 +301,37 @@ Map<String, dynamic> _safeCheckpointArgs(Map<String, dynamic> args) {
   if (command is String && command.trim().isNotEmpty) {
     safe['commandPresent'] = true;
   }
+  // command.run is a structured operation, not a shell string. Retain only
+  // its bounded, scalar fields so a paused missing-tool task can offer the
+  // explicit install action even after the task has crossed a Hive boundary.
+  // The command is revalidated against the current authorization roots before
+  // it is ever executed; no arbitrary environment or stdin is persisted.
+  final executable = args['executable'];
+  final workingDirectory = args['workingDirectory'];
+  final rawArguments = args['arguments'];
+  final declaredImpact = args['declaredImpact'];
+  if (executable is String && executable.trim().isNotEmpty) {
+    safe['executable'] = _safeCheckpointCommandText(executable, maximum: 512);
+  }
+  if (workingDirectory is String && workingDirectory.trim().isNotEmpty) {
+    safe['workingDirectory'] = _safeCheckpointCommandText(
+      workingDirectory,
+      maximum: 2048,
+    );
+  }
+  if (rawArguments is List && rawArguments.every((item) => item is String)) {
+    safe['arguments'] = _safeCheckpointCommandArguments(
+      rawArguments.whereType<String>(),
+    );
+  }
+  if (declaredImpact is List &&
+      declaredImpact.every((item) => item is String)) {
+    safe['declaredImpact'] = declaredImpact
+        .whereType<String>()
+        .take(64)
+        .map((item) => _safeCheckpointCommandText(item, maximum: 2048))
+        .toList(growable: false);
+  }
   final permissions = args['permissions'];
   if (permissions is List) {
     safe['permissionCount'] = permissions.length;
@@ -344,4 +379,82 @@ String _safeCheckpointText(String raw) {
     '[本地路径]',
   );
   return value.length <= 512 ? value : '${value.substring(0, 511)}…';
+}
+
+String _safeCheckpointCommandText(String raw, {required int maximum}) {
+  var value = const SearchSecretScanner().redact(
+    raw.trim(),
+    includeOpaqueTokens: true,
+  );
+  value = value.replaceAll(RegExp(r'[\u0000-\u001f\u007f]'), ' ');
+  return value.length <= maximum
+      ? value
+      : '${value.substring(0, maximum - 1)}…';
+}
+
+/// Redacts option values that commonly carry credentials before command
+/// arguments cross a durable boundary. The in-memory request remains intact
+/// for the current approval flow; a restarted task must re-plan instead of
+/// recovering a secret from Hive or a backup file.
+List<String> _safeCheckpointCommandArguments(Iterable<String> rawArguments) {
+  final safe = <String>[];
+  var redactNext = false;
+  for (final raw in rawArguments.take(64)) {
+    final value = _safeCheckpointCommandText(raw, maximum: 2048);
+    if (redactNext) {
+      safe.add(SearchSecretScanner.redaction);
+      redactNext = false;
+      continue;
+    }
+
+    final inline = _redactInlineCredentialOption(value);
+    safe.add(inline.value);
+    if (inline.redactNext) redactNext = true;
+  }
+  return List<String>.unmodifiable(safe);
+}
+
+({String value, bool redactNext}) _redactInlineCredentialOption(String value) {
+  final equals = value.indexOf('=');
+  final rawName = equals < 0 ? value : value.substring(0, equals);
+  final name = rawName.replaceFirst(RegExp(r'^-{1,2}'), '').toLowerCase();
+  if (!_isCredentialOptionName(name)) {
+    return (value: value, redactNext: false);
+  }
+  if (equals >= 0) {
+    return (
+      value:
+          '${value.substring(0, equals + 1)}${SearchSecretScanner.redaction}',
+      redactNext: false,
+    );
+  }
+  return (value: value, redactNext: true);
+}
+
+bool _isCredentialOptionName(String name) {
+  final normalized = name.replaceAll(RegExp(r'[^a-z0-9]'), '');
+  if (normalized.isEmpty) return false;
+  return normalized == 'p' ||
+      normalized == 'u' ||
+      normalized == 'h' ||
+      normalized == 'd' ||
+      normalized == 'password' ||
+      normalized == 'passwd' ||
+      normalized == 'passphrase' ||
+      normalized == 'token' ||
+      normalized == 'secret' ||
+      normalized == 'apikey' ||
+      normalized == 'authorization' ||
+      normalized == 'proxyauthorization' ||
+      normalized == 'proxyuser' ||
+      normalized == 'bearer' ||
+      normalized == 'cookie' ||
+      normalized == 'setcookie' ||
+      normalized == 'credential' ||
+      normalized == 'clientsecret' ||
+      normalized == 'accesstoken' ||
+      normalized == 'accesskey' ||
+      normalized == 'privatekey' ||
+      normalized == 'header' ||
+      normalized == 'data';
 }

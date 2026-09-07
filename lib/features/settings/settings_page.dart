@@ -28,6 +28,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:hive/hive.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/data_lifecycle_result_dialog.dart';
@@ -36,6 +37,7 @@ import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
+import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 
 part 'settings_page_build.dart';
 part 'settings_page_config_support.dart';

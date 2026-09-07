@@ -208,11 +208,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   // 被重复触发（极端情况下的重入会产生重复消息 / 重复文件）。
   final Set<String> _agenticRunningCharacterIds = {};
 
-  /// 输入框是否为空（缓存以避免每次输入都全量 rebuild）。
-  bool _isInputEmpty = true;
-
-  /// 是否允许发送：文案非空 或 有待发送附件。
-  bool get _canSend => !_isInputEmpty || _pendingAttachments.isNotEmpty;
+  /// 是否允许发送：文案非空或有待发送附件。
+  ///
+  /// 发送按钮在 composer 内监听控制器，因此输入字符不会触发整页重建。
+  bool get _canSend =>
+      _textController.text.trim().isNotEmpty || _pendingAttachments.isNotEmpty;
 
   // —— 待发送附件（图片多选 / 视频单选），发送后清空 ——
   final List<MediaAttachment> _pendingAttachments = [];
@@ -393,13 +393,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       engine: FlutterTtsSpeechEngine(),
       onStateChanged: _handleSpeechState,
     );
-    // 仅在"空/非空"状态翻转时 setState，避免每敲一个字都重建整页。
-    _textController.addListener(() {
-      final isEmpty = _textController.text.trim().isEmpty;
-      if (isEmpty != _isInputEmpty) {
-        setState(() => _isInputEmpty = isEmpty);
-      }
-    });
     // 触顶时加载更早的历史消息。
     _scrollController.addListener(_handleMessageScroll);
     _loadData();

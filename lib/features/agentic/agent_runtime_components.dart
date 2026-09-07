@@ -4,6 +4,10 @@ import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/agentic/tools/browser_context_tool.dart';
 import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 
+/// Parser owner: the legacy/ordinary agentic compatibility facade.
+///
+/// Production work mode uses [AgentDecisionParser] through [WorkAgentLoop]
+/// and must not route decisions through this loose XML/regex parser.
 class AgentProtocolParser {
   static ToolRequest? parse(String content) =>
       parseStrict(content) ?? parseLoose(content);
@@ -114,8 +118,11 @@ typedef AgentSkillHandler = Future<Map<String, dynamic>> Function(
   Map<String, dynamic> args,
 );
 
-/// Executes already-authorized tools. Planning and permission checks remain in
-/// the thin [AgentRuntime] facade.
+/// Executes already-authorized tools for ordinary agentic callers.
+///
+/// Planning and permission checks remain in the thin [AgentRuntime] facade.
+/// Production work mode owns its in-process tools and mutation gates in
+/// `WorkToolRegistry`; it never instantiates this executor.
 class AgentToolExecutor {
   final WorkspaceFileTool? workspace;
   final BrowserContextTool? browser;
@@ -159,6 +166,11 @@ class AgentToolExecutor {
           caseSensitive: request.args['caseSensitive'] != false,
           allowSensitive: allowSensitiveRead,
         ),
+      AgentToolName.workspaceDocument => {
+          'ok': false,
+          'error': 'toolUnsupported',
+          'message': '文档解析由工作模式提供。',
+        },
       AgentToolName.workspacePatch => patchWorkspace(),
       AgentToolName.workspaceRename => _workspace.rename(
           request.args['path'] as String? ?? '',

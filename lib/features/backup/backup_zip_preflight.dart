@@ -30,6 +30,10 @@ class ZipPreflight {
     if (maxEntries <= 0) {
       throw const BackupException('压缩包条目限制无效');
     }
+    if (await FileSystemEntity.type(package.path, followLinks: false) !=
+        FileSystemEntityType.file) {
+      throw const BackupException('备份文件不是安全的普通文件');
+    }
     final length = await package.length();
     if (length < 22) {
       throw const BackupException('压缩包中央目录无效');

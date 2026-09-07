@@ -40,7 +40,7 @@ extension SearchProviderConfigStoreTransactions on SearchProviderConfigStore {
       );
     }
     SearchEndpointValidationResult? endpoint;
-    if (draft.provider != SearchProviderKind.duckDuckGoInstantAnswer) {
+    if (!searchProviderUsesFixedEndpoint(draft.provider)) {
       endpoint = SearchEndpointValidator.validate(
         draft.baseUrl,
         isRelease: isRelease,

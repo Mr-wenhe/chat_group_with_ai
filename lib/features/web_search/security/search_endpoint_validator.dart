@@ -177,8 +177,14 @@ class SearchEndpointValidator {
   /// Shared host safety check for both configured endpoints and untrusted
   /// result links. DNS resolution remains the responsibility of the network
   /// boundary, but literal/local destinations must never pass validation.
-  static bool isPrivateOrLocalHost(String host) =>
-      _isLocalHost(host.toLowerCase().replaceAll(RegExp(r'\.$'), ''));
+  static bool isPrivateOrLocalHost(String host) {
+    final normalized = host.toLowerCase().replaceAll(RegExp(r'\.$'), '');
+    // Zone identifiers and backslashes are not part of a public DNS host.
+    // Reject them before IPv6 parsing so an encoded link-local address such as
+    // `[fe80::1%25en0]` cannot be treated as an unknown public hostname.
+    if (normalized.contains('%') || normalized.contains('\\')) return true;
+    return _isLocalHost(normalized);
+  }
 
   /// Applies the same private-range policy to addresses returned by DNS.
   /// An empty answer is not a valid public endpoint.
@@ -186,7 +192,13 @@ class SearchEndpointValidator {
     var found = false;
     for (final address in addresses) {
       found = true;
-      if (_isLocalHost(address.toLowerCase().trim())) return false;
+      final normalized = address.toLowerCase().trim();
+      // Scoped IPv6 answers (for example `fe80::1%en0`) and escaped forms
+      // are interface-local, not public routable destinations. Reject them
+      // before the generic parser so a zone identifier cannot turn a
+      // link-local answer into an apparently unknown hostname.
+      if (normalized.contains('%') || normalized.contains('\\')) return false;
+      if (_isLocalHost(normalized)) return false;
     }
     return found;
   }

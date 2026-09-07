@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
@@ -94,6 +95,10 @@ class AgentAttachmentContext {
       }
       try {
         final raw = await reader(attachment.localPath);
+        if (raw.length > maxInlineFileBytes ||
+            utf8.encode(raw).length > maxInlineFileBytes) {
+          throw const FormatException('附件超过上下文读取上限');
+        }
         final clipped = raw.length <= maxInlineCharsPerFile
             ? raw
             : '${raw.substring(0, maxInlineCharsPerFile)}\n…（附件内容已截断）';
@@ -148,9 +153,20 @@ class AgentAttachmentContext {
   }
 
   static Future<String> _readTextAttachment(String path) async {
-    final data = decodeAttachmentDataUri(path);
+    final data = decodeAttachmentDataUriBounded(
+      path,
+      maxBytes: maxInlineFileBytes,
+      message: '附件超过上下文读取上限',
+    );
     if (data != null) return utf8.decode(data.bytes, allowMalformed: true);
-    return File(path).readAsString();
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in File(path).openRead(0, maxInlineFileBytes + 1)) {
+      builder.add(chunk);
+      if (builder.length > maxInlineFileBytes) {
+        throw const FileSystemException('附件超过上下文读取上限');
+      }
+    }
+    return utf8.decode(builder.takeBytes(), allowMalformed: true);
   }
 
   static String _basename(String path) {

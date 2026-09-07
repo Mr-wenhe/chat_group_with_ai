@@ -1,6 +1,8 @@
 import 'package:dio/dio.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_config.dart';
 
+/// Legacy ordinary-agentic transport. Work mode never creates this client;
+/// it remains for browser/file integrations that still use AgentRuntime.
 class LocalAgentBridgeClient {
   final String baseUrl;
   late final Dio _dio;

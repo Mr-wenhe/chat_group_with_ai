@@ -10,9 +10,11 @@ import '../models/search_provider_config.dart';
 import '../providers/brave_search_provider.dart';
 import '../providers/duckduckgo_instant_answer_provider.dart';
 import '../providers/gateway_search_provider.dart';
+import '../providers/keyless_html_search_provider.dart';
 import '../providers/native_web_search_adapter.dart';
 import '../providers/search_provider.dart';
 import '../providers/tavily_search_provider.dart';
+import '../providers/visible_browser_search_provider.dart';
 import 'search_provider_route.dart';
 import '../security/search_endpoint_validator.dart';
 
@@ -36,6 +38,7 @@ class SearchRuntimeProviderFactory {
 
   List<SearchProviderRoute> buildRoutes({
     NativeWebSearchBinding? nativeSearch,
+    VisibleBrowserSearchHandler? visibleBrowserSearch,
   }) {
     // No Web build is a supported search target. Browser XHR may buffer an
     // entire response before app-level limits run, and it cannot provide the
@@ -57,10 +60,10 @@ class SearchRuntimeProviderFactory {
         ),
       );
     }
-    // Keep the keyless encyclopedia provider available after configured
-    // routes, and as the only degraded route before configuration. The chain
-    // itself limits it to stable general-knowledge requests, so it can never
-    // masquerade as a source for current news, prices, weather, or policy.
+    // Keep the keyless providers available after configured routes. The chain
+    // itself limits Instant Answer to stable general-knowledge requests, so it
+    // can never masquerade as a source for current news, prices, weather, or
+    // policy; HTML remains the broader public-page fallback.
     if (!routes.any(
       (route) => route.kind == SearchProviderKind.duckDuckGoInstantAnswer,
     )) {
@@ -71,6 +74,30 @@ class SearchRuntimeProviderFactory {
           isFallback: true,
           priority: routes.length,
           displayName: 'DuckDuckGo Instant Answer',
+        ),
+      );
+    }
+    if (!routes.any((route) => route.kind == SearchProviderKind.keylessHtml)) {
+      routes.add(
+        SearchProviderRoute(
+          id: 'builtin-keyless-html',
+          provider: KeylessHtmlSearchProvider(isRelease: store.isRelease),
+          isFallback: true,
+          priority: routes.length,
+          displayName: 'DuckDuckGo HTML（无 Key）',
+        ),
+      );
+    }
+    if (visibleBrowserSearch != null &&
+        !routes.any((route) => route.isVisibleBrowser)) {
+      routes.add(
+        SearchProviderRoute(
+          id: 'builtin-visible-browser',
+          provider: VisibleBrowserSearchProvider(visibleBrowserSearch),
+          isFallback: true,
+          isVisibleBrowser: true,
+          priority: routes.length,
+          displayName: '可见浏览器接管',
         ),
       );
     }
@@ -155,7 +182,7 @@ class SearchRuntimeProviderFactory {
       // DuckDuckGo has no configurable endpoint. Do not turn an old blank or
       // hand-edited metadata field into a runtime outage for its built-in
       // adapter.
-      if (config.provider != SearchProviderKind.duckDuckGoInstantAnswer) {
+      if (!searchProviderUsesFixedEndpoint(config.provider)) {
         // Validate every persisted endpoint, including Gateway metadata that
         // is not yet backed by a local adapter. This keeps a legacy or
         // hand-edited configuration from bypassing the client-side boundary.
@@ -180,6 +207,8 @@ class SearchRuntimeProviderFactory {
           ),
         SearchProviderKind.duckDuckGoInstantAnswer =>
           DuckDuckGoInstantAnswerProvider(isRelease: store.isRelease),
+        SearchProviderKind.keylessHtml =>
+          KeylessHtmlSearchProvider(isRelease: store.isRelease),
         SearchProviderKind.gateway => GatewaySearchProvider(
             baseUrl: config.baseUrl,
             isRelease: store.isRelease,

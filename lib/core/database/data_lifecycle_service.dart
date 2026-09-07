@@ -41,6 +41,14 @@ class DataLifecycleService {
   final CredentialRepository credentials;
   final SearchProviderConfigStore? searchProviderConfigStore;
   final Future<void> Function() clearExternalSettings;
+
+  /// Work-mode services are app-scoped and therefore must be quiesced before
+  /// a global clear removes their event/snapshot directories. These callbacks
+  /// are optional so focused lifecycle operations and non-work-mode callers do
+  /// not need to construct the coordinator graph.
+  final Future<void> Function()? stopWorkModeTasks;
+  final Future<void> Function()? clearWorkModeArtifacts;
+  final Future<void> Function()? resumeWorkModeTasks;
   final Future<DataLifecycleResult> Function(Iterable<String> paths)?
       cleanupMediaPathsOverride;
   late final DataLifecycleSettings _settings = DataLifecycleSettings(db);
@@ -71,6 +79,9 @@ class DataLifecycleService {
     Directory? managedMediaDirectory,
     CredentialRepository? credentials,
     Future<void> Function()? clearExternalSettings,
+    this.stopWorkModeTasks,
+    this.clearWorkModeArtifacts,
+    this.resumeWorkModeTasks,
     this.searchProviderConfigStore,
     this.cleanupMediaPathsOverride,
   })  : managedMediaDirectory = managedMediaDirectory ??

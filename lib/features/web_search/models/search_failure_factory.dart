@@ -31,14 +31,5 @@ SearchFailure sanitizeSearchFailure(SearchFailure failure) =>
       providerRequestId: failure.providerRequestId,
     );
 
-bool isRetryableSearchFailure(SearchFailureType type) => switch (type) {
-      SearchFailureType.offline ||
-      SearchFailureType.connection ||
-      SearchFailureType.dns ||
-      SearchFailureType.connectionTimeout ||
-      SearchFailureType.receiveTimeout ||
-      SearchFailureType.providerUnavailable ||
-      SearchFailureType.rateLimited =>
-        true,
-      _ => false,
-    };
+bool isRetryableSearchFailure(SearchFailureType type) =>
+    searchFailureIsRetryable(type);

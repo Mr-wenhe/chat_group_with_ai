@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/backup/backup_entity_codec.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -137,7 +139,7 @@ void main() {
     expect(restored.softLimitReached, isTrue);
     expect(restored.resumeRequired, isTrue);
     expect(restored.executionStateJson, original.executionStateJson);
-    expect(restored.lastArtifactPaths, ['summary.md']);
+    expect(restored.lastArtifactPaths, isEmpty);
     expect(restored.actionLimit, AgentTask.defaultActionLimit);
     expect(restored.softTimeLimit, AgentTask.defaultSoftTimeLimit);
   });
@@ -153,12 +155,142 @@ void main() {
       'lastArtifactPaths': [
         '/Users/alice/private/report.md',
         r'C:\Users\alice\private\result.txt',
+        r'C:relative.txt',
         '../outside.txt',
+        './dot.txt',
+        'docs:external.txt',
         'docs/ok.md',
       ],
     });
 
+    expect(restored.lastArtifactPaths, ['docs/ok.md']);
+  });
+
+  test('portable task backup drops capability state and local paths', () {
+    final task = AgentTask(
+      id: 'portable-boundary',
+      groupId: 'group',
+      characterId: 'worker',
+      userRequest: '审查 /Users/alice/project',
+      workModeTask: true,
+      status: AgentTaskStatus.paused,
+      executionStateJson: jsonEncode({
+        'phase': 'paused',
+        'approvalScope': {
+          'paths': ['/Users/alice/project/private.txt'],
+        },
+        'resourceLocks': [
+          {'path': '/Users/alice/project'},
+        ],
+        'lastToolResult': {
+          'content': 'PRIVATE_FILE_BODY',
+          'token': 'sk-live-secret-token',
+        },
+        'revisionTargetPath': '/Users/alice/project/private.txt',
+      }),
+      completedOperations: [
+        jsonEncode({
+          'tool': 'command.run',
+          'reason': '执行 /Users/alice/project/private.sh',
+          'args': {
+            'workingDirectory': '/Users/alice/project',
+            'declaredImpact': ['/Users/alice/project/private.txt'],
+            'command': 'cat sk-live-secret-token',
+            'content': 'PRIVATE_FILE_BODY',
+          },
+        }),
+      ],
+      pendingToolRequestJson: jsonEncode({
+        'tool': 'workspace.patch',
+        'reason': '写入 /Users/alice/project/private.txt',
+        'args': {
+          'path': '/Users/alice/project/private.txt',
+          'content': 'PRIVATE_FILE_BODY',
+        },
+      }),
+      contextSummary: jsonEncode({
+        'conversationId': 'group',
+        'target': '继续 /Users/alice/project',
+        'approvalScope': {
+          'paths': ['/Users/alice/project']
+        },
+        'artifactPaths': ['/Users/alice/project/report.md'],
+        'recentToolResults': [
+          {'content': 'PRIVATE_FILE_BODY'},
+        ],
+      }),
+      lastArtifactPaths: const ['/Users/alice/project/report.md'],
+    );
+
+    final encoded = BackupEntityCodec.task(task);
+    expect(encoded['executionStateJson'], '{"phase":"paused"}');
+    expect(encoded['lastArtifactPaths'], isEmpty);
     expect(
-        restored.lastArtifactPaths, ['report.md', 'result.txt', 'docs/ok.md']);
+      encoded['completedOperations'].toString(),
+      isNot(contains('/Users/alice/project')),
+    );
+    expect(
+      encoded['pendingToolRequestJson'].toString(),
+      isNot(contains('/Users/alice/project')),
+    );
+    expect(encoded['contextSummary'].toString(), contains('继续'));
+    expect(encoded.toString(), isNot(contains('PRIVATE_FILE_BODY')));
+    expect(encoded.toString(), isNot(contains('sk-live-secret-token')));
+    expect(encoded.toString(), isNot(contains('/Users/alice/project')));
+
+    final restored = BackupEntityCodec.decodeTask(encoded);
+    expect(restored.executionStateJson, '{"phase":"paused"}');
+    expect(restored.lastArtifactPaths, isEmpty);
+    expect(restored.completedOperations.single, contains('command.run'));
+    expect(restored.pendingToolRequestJson, contains('workspace.patch'));
+    expect(restored.pendingToolRequestJson, isNot(contains('private.txt')));
+    expect(restored.contextSummary, isNot(contains('approvalScope')));
+  });
+
+  test('portable task backup redacts opaque legacy operation text', () {
+    final encoded = BackupEntityCodec.task(
+      AgentTask(
+        id: 'opaque-operation',
+        groupId: 'group',
+        characterId: 'worker',
+        userRequest: '恢复',
+        workModeTask: true,
+        completedOperations: const [
+          '命令输出: PRIVATE_FILE_BODY /Users/alice/project sk-live-secret-token',
+        ],
+      ),
+    );
+
+    final serialized = jsonEncode(encoded);
+    expect(serialized, isNot(contains('PRIVATE_FILE_BODY')));
+    expect(serialized, isNot(contains('/Users/alice/project')));
+    expect(serialized, isNot(contains('sk-live-secret-token')));
+    expect(
+      encoded['completedOperations'],
+      ['{"kind":"legacyOperation","redacted":true}'],
+    );
+  });
+
+  test('portable task backup redacts unsafe context keys as well as values',
+      () {
+    final encoded = BackupEntityCodec.task(
+      AgentTask(
+        id: 'unsafe-context-key',
+        groupId: 'group',
+        characterId: 'worker',
+        userRequest: '恢复',
+        workModeTask: true,
+        contextSummary: jsonEncode({
+          '/Users/alice/private.txt': 'safe metadata',
+          'ordinaryField': '/Users/alice/private.txt',
+        }),
+      ),
+    );
+
+    final serialized = jsonEncode(encoded);
+    expect(serialized, isNot(contains('/Users/alice/private.txt')));
+    final context = jsonDecode(encoded['contextSummary'] as String) as Map;
+    expect(context.keys, contains('[本地路径]'));
+    expect(context['ordinaryField'], '[本地路径]');
   });
 }

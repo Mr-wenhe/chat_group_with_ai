@@ -14,6 +14,12 @@ import 'work_resource_lock_manager.dart';
 import 'work_snapshot_manifest.dart';
 import 'work_approval_decision.dart';
 import 'work_change_plan.dart';
+import 'work_command_runner.dart';
+import 'work_context_builder.dart';
+import 'work_follow_up_policy.dart';
+import 'work_handoff_state.dart';
+import 'work_failure.dart';
+import 'work_tool_registry.dart';
 
 typedef WorkTaskSnapshotStatusUpdater = Future<void> Function(
     String taskId, WorkSnapshotTaskStatus status);
@@ -36,6 +42,19 @@ abstract interface class WorkTaskRunner {
   Future<void> run(AgentTask task, WorkTaskCancellation cancellation);
 }
 
+/// Optional capability used at the durable task boundary. The panel may list
+/// a candidate, but the coordinator must re-check the selected character
+/// before changing the task's execution identity.
+abstract interface class WorkTaskVisionModelValidator {
+  bool supportsVisionModel(String characterId);
+
+  /// Applies the same capability check while preserving the conversation
+  /// boundary. Runners that do not need task-scoped membership can inherit the
+  /// character-only default.
+  bool supportsVisionModelForTask(AgentTask task, String characterId) =>
+      supportsVisionModel(characterId);
+}
+
 /// Optional capability for runners that persist checkpoints themselves.
 ///
 /// The coordinator remains the owner of the task stream, while a production
@@ -45,6 +64,13 @@ abstract interface class WorkTaskProgressReporter {
   void setTaskUpdateSink(void Function(AgentTask task) sink);
 }
 
+/// Optional capability for runners that need the coordinator to persist every
+/// loop checkpoint. The UI update sink above remains intentionally synchronous;
+/// checkpoint persistence may await Hive/file I/O.
+abstract interface class WorkTaskCheckpointReporter {
+  void setTaskCheckpointSink(Future<void> Function(AgentTask task) sink);
+}
+
 /// Computes the complete resource plan before a task starts executing.
 typedef WorkTaskResourceLockPlan = Iterable<WorkResourceLockRequest> Function(
     AgentTask task);
@@ -52,6 +78,16 @@ typedef WorkTaskResourceLockPlan = Iterable<WorkResourceLockRequest> Function(
 /// Optional runner capability for a production loop that owns its plan.
 abstract interface class WorkTaskResourceLockPlanner {
   Iterable<WorkResourceLockRequest> planResourceLocks(AgentTask task);
+}
+
+/// Optional capability used by the execution panel when a command depends on
+/// a missing, known tool. The handler owns the process boundary; the
+/// coordinator only persists the user's explicit install decision.
+abstract interface class WorkTaskInstallHandler {
+  Future<WorkCommandResult> installMissingTool(
+    AgentTask task,
+    WorkTaskCancellation cancellation,
+  );
 }
 
 class _RunningTask {
@@ -86,6 +122,8 @@ class WorkTaskCoordinator {
   final WorkTaskSnapshotStatusUpdater? _snapshotStatusUpdater;
   final WorkResourceLockManager _resourceLockManager;
   final WorkTaskResourceLockPlan? _resourceLockPlan;
+  final WorkContextBuilder _contextBuilder;
+  final WorkFollowUpPolicy _followUpPolicy;
   final DateTime Function() _clock;
   final StreamController<AgentTask> _taskUpdates =
       StreamController<AgentTask>.broadcast(sync: true);
@@ -102,6 +140,7 @@ class WorkTaskCoordinator {
   final Map<String, WorkTaskCancellation> _folderWaiters =
       <String, WorkTaskCancellation>{};
   final Set<String> _conversationReservations = <String>{};
+  final Set<String> _handoffsAwaitingLease = <String>{};
   final Set<String> _startingTaskIds = <String>{};
   final Queue<Completer<void>> _slotWaiters = Queue<Completer<void>>();
   Future<WorkFolderRequestResult>? _folderRequest;
@@ -109,6 +148,7 @@ class WorkTaskCoordinator {
   Future<void> _operations = Future<void>.value();
   Future<void>? _disposeFuture;
   bool _disposed = false;
+  bool _dataClearInProgress = false;
 
   WorkTaskCoordinator({
     required Box<AgentTask> taskBox,
@@ -121,6 +161,8 @@ class WorkTaskCoordinator {
     WorkTaskSnapshotStatusUpdater? snapshotStatusUpdater,
     WorkResourceLockManager? resourceLockManager,
     WorkTaskResourceLockPlan? resourceLockPlan,
+    WorkContextBuilder? contextBuilder,
+    WorkFollowUpPolicy? followUpPolicy,
     DateTime Function()? clock,
   })  : _taskBox = taskBox,
         _eventStore = eventStore,
@@ -132,13 +174,79 @@ class WorkTaskCoordinator {
         _snapshotStatusUpdater = snapshotStatusUpdater,
         _resourceLockManager = resourceLockManager ?? WorkResourceLockManager(),
         _resourceLockPlan = resourceLockPlan,
+        _contextBuilder = contextBuilder ?? const WorkContextBuilder(),
+        _followUpPolicy = followUpPolicy ?? const WorkFollowUpPolicy(),
         _clock = clock ?? DateTime.now {
     if (runner case final WorkTaskProgressReporter reporter) {
       reporter.setTaskUpdateSink(_publish);
     }
+    if (runner case final WorkTaskCheckpointReporter reporter) {
+      reporter.setTaskCheckpointSink(_checkpointFromRunner);
+    }
   }
 
   int get runningTaskCount => _running.length;
+
+  /// Quiesces every work task before the app-wide data lifecycle service
+  /// removes event logs and snapshots. Active runners are cancelled
+  /// cooperatively, while their finalizers are drained outside [_serialize]
+  /// to avoid the runner's own completion checkpoint deadlocking the queue.
+  Future<void> stopAllForDataClear() async {
+    var activeRuns = <Future<void>>[];
+    await _serialize(() async {
+      if (_disposed) return;
+      _dataClearInProgress = true;
+      _eventStore.suspendAppendsForDataClear();
+      activeRuns = List<Future<void>>.from(_activeRuns.values);
+      for (final task in _allWorkTasks()) {
+        if (task.isTerminal) continue;
+        _removeQueuedTask(task);
+        _running[task.id]?.cancellation.cancel();
+        _folderWaiters.remove(task.id)?.cancel();
+        final waiting = _waitingForResources.remove(task.id);
+        waiting?.cancellation.cancel();
+        final lease = waiting?.lease;
+        if (lease != null) unawaited(lease.release());
+        _conversationReservations.remove(task.groupId);
+        _handoffsAwaitingLease.remove(task.id);
+        _taskLockPlans.remove(task.id);
+        task
+          ..status = AgentTaskStatus.cancelled
+          ..resumeRequired = false
+          ..pendingToolRequestJson = ''
+          ..queuedUserRequests = <String>[]
+          ..lastError = sanitizeWorkTaskError('App 数据清除前已停止工作任务。')
+          ..updatedAt = _clock();
+        await _save(task);
+        await _markSnapshotStatus(task);
+        unawaited(
+          _record(task, WorkTaskEventKind.failed, 'App 数据清除前已停止任务'),
+        );
+      }
+      _readyConversations.clear();
+      _readyConversationIds.clear();
+      _conversationQueues.clear();
+      _notifySlotAvailable();
+    });
+    if (activeRuns.isNotEmpty) {
+      await Future.wait<void>(activeRuns, eagerError: false);
+    }
+    // Wait for runner finalizers and any cancellation callbacks queued behind
+    // the first serialized operation before the event/snapshot trees are
+    // deleted. The no-op also makes this method a durable barrier for callers.
+    await _serialize(() async {});
+  }
+
+  /// Reopens scheduling after a clear attempt has finished. The coordinator
+  /// instance remains app-scoped; clearing data must not dispose it.
+  Future<void> resumeAfterDataClear() {
+    return _serialize(() async {
+      if (_disposed) return;
+      _dataClearInProgress = false;
+      _eventStore.resumeAppendsAfterDataClear();
+      await _schedule();
+    });
+  }
 
   /// Lets the app-level overlay provide the one-time cloud-disclosure dialog
   /// without coupling the scheduler to a particular [BuildContext].
@@ -174,6 +282,7 @@ class WorkTaskCoordinator {
         ..status = AgentTaskStatus.queued
         ..resumeRequired = false
         ..updatedAt = _clock();
+      _refreshTaskContext(task);
       await _save(task);
       _enqueueTask(task);
       unawaited(_record(task, WorkTaskEventKind.queued, '任务已排队'));
@@ -192,24 +301,83 @@ class WorkTaskCoordinator {
       if (task.status == AgentTaskStatus.cancelled) {
         throw StateError('已停止的任务不能继续追问，请创建新的工作任务。');
       }
-      task.queuedUserRequests = <String>[
-        ...task.queuedUserRequests,
-        normalized,
-      ];
+      // A command/test/build proposal pauses with an explicit authorization
+      // marker rather than a replayable tool checkpoint.  Treat the user's
+      // concrete validation request as an authorization/re-plan for this
+      // same durable task; placing it in the ordinary follow-up FIFO would
+      // leave the marker in place and make both “继续” and the follow-up
+      // loop forever.
+      if (_requiresExplicitCommandRequest(task) &&
+          (task.status == AgentTaskStatus.paused ||
+              task.status == AgentTaskStatus.interrupted) &&
+          isExplicitWorkValidationRequest(normalized)) {
+        await _authorizeExplicitValidation(task, normalized);
+        await _schedule();
+        return;
+      }
+      final answeringClarification = task.status == AgentTaskStatus.paused &&
+          _isFollowUpClarification(task) &&
+          task.queuedUserRequests.isNotEmpty;
+      task.queuedUserRequests = answeringClarification
+          ? <String>[
+              '${task.queuedUserRequests.first}\n用户明确目标：$normalized',
+              ...task.queuedUserRequests.skip(1),
+            ]
+          : <String>[...task.queuedUserRequests, normalized];
+      _refreshTaskContext(
+        task,
+        nextStep: '当前任务完成后处理第 ${task.queuedUserRequests.length} 条追问。',
+      );
 
       // A completed/failed/partially-completed task is a durable conversation
       // checkpoint. Promote its first follow-up immediately so the same task
       // id, artifacts, completed operations and context summary are reused.
       // Active tasks keep the queue and are promoted only after their current
       // run releases the slot.
-      if (task.isTerminal) {
-        await _promoteQueuedFollowUp(task, resetRunBudget: true);
+      if (task.isTerminal || answeringClarification) {
+        await _promoteQueuedFollowUp(
+          task,
+          resetRunBudget: true,
+          allowPausedClarification: answeringClarification,
+        );
         await _schedule();
         return;
       }
       await _save(task);
       unawaited(_record(task, WorkTaskEventKind.queued, '已排队新的追问'));
     });
+  }
+
+  Future<void> _authorizeExplicitValidation(
+    AgentTask task,
+    String request,
+  ) async {
+    final original = task.userRequest.trim();
+    final mergedRequest = original.isEmpty || original == request
+        ? request
+        : '$original\n用户明确要求：$request';
+    final execution = _decodeExecutionMap(
+      _withoutApprovalCheckpoint(task.executionStateJson),
+    )..remove('explicitCommandRequestRequired');
+    task
+      ..userRequest = mergedRequest
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false
+      ..pendingToolRequestJson = ''
+      ..lastError = ''
+      ..executionStateJson = execution.isEmpty ? '' : jsonEncode(execution)
+      ..updatedAt = _clock();
+    _conversationReservations.remove(task.groupId);
+    await _save(task);
+    _enqueueTask(task);
+    unawaited(
+      _record(
+        task,
+        WorkTaskEventKind.queued,
+        '用户已明确授权测试、构建或分析，继续原任务',
+        detail: request,
+      ),
+    );
   }
 
   /// Persists a tool-approval checkpoint without requiring a chat page to
@@ -272,6 +440,74 @@ class WorkTaskCoordinator {
   Future<void> approveTaskWithoutUndo(String taskId) =>
       approveWithoutUndo(taskId);
 
+  /// Runs a trusted package-manager suggestion only after the user chooses the
+  /// install action in the execution panel. The original pending tool request
+  /// remains intact so a successful install resumes the same loop turn.
+  Future<void> installMissingTool(String taskId) async {
+    if (_runner is! WorkTaskInstallHandler) {
+      throw StateError('当前执行器不支持应用内安装工具。');
+    }
+    final handler = _runner as WorkTaskInstallHandler;
+    final task = await _serialize(() async {
+      _ensureOpen();
+      final current = _requireWorkTask(taskId);
+      if (current.status != AgentTaskStatus.paused ||
+          current.pendingToolRequestJson.trim().isEmpty) {
+        throw StateError('当前任务没有等待安装的缺失工具。');
+      }
+      return current;
+    });
+    final cancellation = WorkTaskCancellation();
+    final result = await handler.installMissingTool(task, cancellation);
+    await _serialize(() async {
+      if (_disposed) return;
+      final stored = _taskBox.get(taskId);
+      if (stored == null || stored.isTerminal) return;
+      if (result.succeeded) {
+        stored
+          ..status = AgentTaskStatus.queued
+          ..resumeRequired = false
+          ..lastError = ''
+          ..updatedAt = _clock();
+        _conversationReservations.remove(stored.groupId);
+        await _save(stored);
+        _enqueueTask(stored);
+        unawaited(_record(
+          stored,
+          WorkTaskEventKind.queued,
+          '缺失工具安装完成，继续原任务',
+        ));
+        await _schedule();
+      } else {
+        final failure = WorkFailure.fromToolResult(
+          WorkToolResult(
+            status: result.status == WorkCommandRunStatus.toolMissing
+                ? WorkToolResultStatus.paused
+                : WorkToolResultStatus.failed,
+            message: result.message,
+            failureCode: result.status == WorkCommandRunStatus.toolMissing
+                ? 'toolMissing'
+                : 'commandFailed',
+          ),
+          completedContent: _completedContentForTask(stored),
+        );
+        _applyFailure(
+          stored,
+          failure,
+          status: AgentTaskStatus.paused,
+          clearPendingTool: false,
+        );
+        await _save(stored);
+        unawaited(_record(
+          stored,
+          WorkTaskEventKind.paused,
+          '缺失工具安装未完成',
+          detail: failure.technicalDetail,
+        ));
+      }
+    });
+  }
+
   /// Opens the app-level picker from the execution panel and requeues the
   /// waiting task when the selected directory covers its requested path.
   Future<void> requestFolderForTask(String taskId) {
@@ -283,14 +519,87 @@ class WorkTaskCoordinator {
         throw StateError('当前没有可用的工作目录选择器。');
       }
       final task = _requireWorkTask(taskId);
-      final result = await grantService.requestFolder(
-        picker: picker,
-        requestedPath: _requestedFolderPath(task),
-        forcePicker: true,
-        requireWritable: _requiresWritableFolder(task),
-        consent: _folderGrantConsent,
-      );
-      if (!result.granted) throw StateError(result.reason);
+      // The coordinator may already be awaiting the native picker started by
+      // the initial run. Reuse that future instead of opening a second picker
+      // when the panel renders its durable authorization action concurrently.
+      final existingRequest = _folderRequest;
+      if (existingRequest != null) {
+        final sharedResult = await existingRequest;
+        final requestedPath = _requestedFolderPath(task);
+        final requiresWritable = _requiresWritableFolder(task);
+        final grant = sharedResult.grant;
+        final covered = sharedResult.granted &&
+            (requestedPath == null || requestedPath.trim().isEmpty
+                ? grant != null && (!requiresWritable || grant.writable)
+                : requiresWritable
+                    ? await grantService.isPathWritableResolved(requestedPath)
+                    : await grantService
+                        .isPathAuthorizedResolved(requestedPath));
+        if (covered) {
+          // The initial runner will persist/requeue its own task.  If this
+          // panel request belongs to that same task, there is nothing else to
+          // do; returning avoids a duplicate native picker.
+          return;
+        }
+        // A different waiting task may have consumed the shared result.  The
+        // picker is closed now, so continue below and request this task's
+        // concrete capability instead of incorrectly marking it authorized.
+      }
+      WorkFolderRequestResult result;
+      try {
+        result = await grantService.requestFolder(
+          picker: picker,
+          requestedPath: _requestedFolderPath(task),
+          forcePicker: true,
+          requireWritable: _requiresWritableFolder(task),
+          consent: _folderGrantConsent,
+        );
+      } on Object catch (error) {
+        final failure = WorkFailure.fromError(
+          error,
+          scope: 'authorization',
+          completedContent: _completedContentForTask(task),
+        );
+        _applyFailure(
+          task,
+          WorkFailure.fromToolFailure(
+            code: 'authorizationLost',
+            message: '工作目录授权请求失败，请重新选择目录。',
+            completedContent: failure.completedContent,
+          ),
+          status: AgentTaskStatus.paused,
+          clearPendingTool: false,
+        );
+        await _save(task);
+        await _record(
+          task,
+          WorkTaskEventKind.paused,
+          '等待工作目录授权',
+          detail: failure.technicalDetail,
+        );
+        return;
+      }
+      if (!result.granted) {
+        final failure = WorkFailure.fromToolFailure(
+          code: 'authorizationLost',
+          message: result.reason.isEmpty ? '未完成工作目录授权。' : result.reason,
+          completedContent: _completedContentForTask(task),
+        );
+        _applyFailure(
+          task,
+          failure,
+          status: AgentTaskStatus.paused,
+          clearPendingTool: false,
+        );
+        await _save(task);
+        await _record(
+          task,
+          WorkTaskEventKind.paused,
+          '等待工作目录授权',
+          detail: failure.technicalDetail,
+        );
+        return;
+      }
       _conversationReservations.remove(task.groupId);
       task
         ..status = AgentTaskStatus.queued
@@ -386,10 +695,28 @@ class WorkTaskCoordinator {
           task.status != AgentTaskStatus.paused) {
         throw StateError('当前任务不需要手动继续。');
       }
+      if (task.status == AgentTaskStatus.paused &&
+          _isFollowUpClarification(task)) {
+        // A clarification pause is waiting for the user's target answer, not
+        // a generic task restart. Resuming it would run the old request while
+        // leaving the ambiguous FIFO head untouched.
+        throw StateError('请先明确要修改的文件路径，再继续任务。');
+      }
+      if (_requiresExplicitCommandRequest(task)) {
+        throw StateError('请发送明确的测试、构建或分析请求后再继续任务。');
+      }
+      if (_requiresVisionModelSelection(task)) {
+        throw StateError('请先选择支持图片的视觉模型后再继续任务。');
+      }
       task
         ..status = AgentTaskStatus.queued
         ..resumeRequired = false
         ..lastError = ''
+        // The durable request is redacted and may contain stale paths or
+        // content. A manual restart always asks the model to re-plan against
+        // current state; only the in-process approval continuation can replay
+        // its full request.
+        ..pendingToolRequestJson = ''
         // A pending request payload is intentionally not persisted in full.
         // A manual restart must re-plan against the current filesystem and
         // grant state; never reuse a stale path scope.
@@ -401,6 +728,102 @@ class WorkTaskCoordinator {
       await _save(task);
       _enqueueTask(task);
       unawaited(_record(task, WorkTaskEventKind.queued, '用户已继续任务'));
+      await _schedule();
+    });
+  }
+
+  /// Retries a classified failure from the last durable checkpoint.
+  ///
+  /// The failure marker is intentionally kept while the task is queued so the
+  /// panel can still explain why it stopped. [WorkAgentLoop] removes it only
+  /// when a new attempt actually starts. Completed operation keys and artifact
+  /// paths are never reset, so a committed mutation cannot be replayed.
+  Future<void> retry(String taskId) {
+    return _serialize(() async {
+      _ensureOpen();
+      final task = _requireWorkTask(taskId);
+      if (_running.containsKey(taskId) || _startingTaskIds.contains(taskId)) {
+        throw StateError('任务正在执行，不能同时重试。');
+      }
+      if (task.status == AgentTaskStatus.cancelled ||
+          task.status == AgentTaskStatus.completed) {
+        throw StateError('已停止或已完成的任务不能重试。');
+      }
+      final failure = task.workFailure;
+      if (failure == null) {
+        throw StateError('当前任务没有可重试的结构化失败。');
+      }
+      if (!failure.retryable) {
+        throw StateError(failure.suggestedAction);
+      }
+      _removeQueuedTask(task);
+      _waitingForResources.remove(taskId)?.cancellation.cancel();
+      _folderWaiters.remove(taskId)?.cancel();
+      _conversationReservations.remove(task.groupId);
+      task
+        ..status = AgentTaskStatus.queued
+        ..resumeRequired = false
+        ..pendingToolRequestJson = ''
+        ..updatedAt = _clock();
+      _refreshTaskContext(
+        task,
+        nextStep: '已请求重试：${failure.suggestedAction}',
+        extraErrors: [failure.reason],
+      );
+      await _save(task);
+      _enqueueTask(task);
+      await _record(
+        task,
+        WorkTaskEventKind.queued,
+        '已请求重试，继续最近安全检查点',
+        detail: failure.reason,
+      );
+      await _schedule();
+    });
+  }
+
+  Future<void> retryTask(String taskId) => retry(taskId);
+
+  /// Switches the current task to a user-selected visual character and
+  /// resumes the same durable task. Production runners implement the optional
+  /// validator so a caller cannot bypass the panel's capability list.
+  Future<void> selectVisionModel(String taskId, String characterId) {
+    return _serialize(() async {
+      _ensureOpen();
+      final normalized = characterId.trim();
+      if (normalized.isEmpty) {
+        throw ArgumentError.value(characterId, 'characterId');
+      }
+      final task = _requireWorkTask(taskId);
+      if (!_requiresVisionModelSelection(task)) {
+        throw StateError('当前任务不在等待视觉模型选择的状态。');
+      }
+      if (task.status != AgentTaskStatus.paused &&
+          task.status != AgentTaskStatus.interrupted) {
+        throw StateError('当前任务不在等待视觉模型选择的状态。');
+      }
+      if (_runner case final WorkTaskVisionModelValidator validator) {
+        if (!validator.supportsVisionModelForTask(task, normalized)) {
+          throw StateError('所选角色不是可用的视觉模型。');
+        }
+      } else {
+        throw StateError('当前执行器无法验证视觉模型，已阻止继续。');
+      }
+      final execution = _decodeExecutionMap(task.executionStateJson)
+        ..['visionModelRequired'] = false
+        ..['visionModelCharacterId'] = normalized;
+      task
+        ..characterId = normalized
+        ..status = AgentTaskStatus.queued
+        ..resumeRequired = false
+        ..lastError = ''
+        ..pendingToolRequestJson = ''
+        ..executionStateJson = jsonEncode(execution)
+        ..updatedAt = _clock();
+      _conversationReservations.remove(task.groupId);
+      await _save(task);
+      _enqueueTask(task);
+      unawaited(_record(task, WorkTaskEventKind.queued, '已选择视觉模型并继续任务'));
       await _schedule();
     });
   }
@@ -450,8 +873,23 @@ class WorkTaskCoordinator {
             !task.isTerminal &&
             task.status != AgentTaskStatus.paused &&
             task.status != AgentTaskStatus.interrupted) {
-          task.markInterrupted(reason: '应用已关闭，请由用户手动继续任务。');
+          _applyFailure(
+            task,
+            WorkFailure.fromSignalsForUserAction(
+              '应用已关闭，请由用户手动继续任务。',
+              completedContent: _completedContentForTask(task),
+            ),
+            status: AgentTaskStatus.interrupted,
+            clearPendingTool: false,
+          );
           await _save(task);
+        }
+        if (task.status == AgentTaskStatus.paused &&
+            _isFollowUpClarification(task)) {
+          // An unanswered target question still owns this conversation. A
+          // second task must not bypass it while the user is deciding which
+          // artifact the queued revision may overwrite.
+          _conversationReservations.add(task.groupId);
         }
         _publish(task);
       }
@@ -491,6 +929,7 @@ class WorkTaskCoordinator {
     _folderWaiters.clear();
     _waitingForResources.clear();
     _conversationReservations.clear();
+    _handoffsAwaitingLease.clear();
     _taskLockPlans.clear();
     _notifySlotAvailable();
     _readyConversations.clear();
@@ -514,8 +953,9 @@ class WorkTaskCoordinator {
   }
 
   Future<void> _schedule() async {
-    if (_disposed) return;
+    if (_disposed || _dataClearInProgress) return;
     while (!_disposed &&
+        !_dataClearInProgress &&
         _running.length + _startingTaskIds.length < maximumConcurrentTasks) {
       final task = _takeNextTask();
       if (task == null) return;
@@ -542,7 +982,7 @@ class WorkTaskCoordinator {
         },
       ).whenComplete(() {
         _startingTaskIds.remove(task.id);
-        if (!_disposed) unawaited(_schedule());
+        if (!_disposed && !_dataClearInProgress) unawaited(_schedule());
       }),
     );
   }
@@ -555,17 +995,19 @@ class WorkTaskCoordinator {
         _conversationReservations.remove(task.groupId);
         final stored = _taskBox.get(task.id);
         if (stored != null && !stored.isTerminal) {
-          stored
-            ..status = AgentTaskStatus.failed
-            ..lastError = sanitizeWorkTaskError(error)
-            ..updatedAt = _clock();
+          final failure = WorkFailure.fromError(
+            error,
+            scope: 'start',
+            completedContent: _completedContentForTask(stored),
+          );
+          _applyFailure(stored, failure);
           await _save(stored);
           unawaited(
             _record(
               stored,
               WorkTaskEventKind.failed,
               '任务启动失败',
-              detail: stored.lastError,
+              detail: failure.technicalDetail,
             ),
           );
         }
@@ -601,7 +1043,7 @@ class WorkTaskCoordinator {
   }
 
   Future<void> _start(AgentTask task) async {
-    if (_disposed) return;
+    if (_disposed || _dataClearInProgress) return;
     final cancellation = WorkTaskCancellation();
     _conversationReservations.add(task.groupId);
     _folderWaiters[task.id] = cancellation;
@@ -622,6 +1064,12 @@ class WorkTaskCoordinator {
       return;
     }
     _folderWaiters.remove(task.id);
+    if (_disposed || _dataClearInProgress || cancellation.isCancelled) {
+      cancellation.cancel();
+      _conversationReservations.remove(task.groupId);
+      _makeConversationReady(task.groupId);
+      return;
+    }
     late final List<WorkResourceLockRequest> locks;
     try {
       locks = _resourceLocksFor(task);
@@ -651,10 +1099,14 @@ class WorkTaskCoordinator {
 
   Future<void> _failInvalidResourcePlan(AgentTask task, Object error) async {
     _conversationReservations.remove(task.groupId);
-    task
-      ..status = AgentTaskStatus.failed
-      ..lastError = sanitizeWorkTaskError(error)
-      ..updatedAt = _clock();
+    _applyFailure(
+      task,
+      WorkFailure.fromError(
+        error,
+        scope: 'resource',
+        completedContent: _completedContentForTask(task),
+      ),
+    );
     await _save(task);
     unawaited(_record(task, WorkTaskEventKind.failed, '资源锁计划无效'));
     _makeConversationReady(task.groupId);
@@ -666,7 +1118,7 @@ class WorkTaskCoordinator {
     WorkTaskCancellation cancellation,
     WorkResourceLockLease? lease,
   ) async {
-    if (_disposed) {
+    if (_disposed || _dataClearInProgress) {
       cancellation.cancel();
       _conversationReservations.remove(task.groupId);
       if (lease != null) await lease.release();
@@ -681,7 +1133,7 @@ class WorkTaskCoordinator {
         ..updatedAt = _clock();
       await _save(task);
       await _markSnapshotStatus(task);
-      if (_disposed) {
+      if (_disposed || _dataClearInProgress || cancellation.isCancelled) {
         cancellation.cancel();
         return;
       }
@@ -784,6 +1236,7 @@ class WorkTaskCoordinator {
       );
       if (!_isWaiting(waiting) ||
           _disposed ||
+          _dataClearInProgress ||
           waiting.cancellation.isCancelled ||
           _taskBox.get(task.id)?.status != AgentTaskStatus.queued) {
         await lease.release();
@@ -800,6 +1253,7 @@ class WorkTaskCoordinator {
       }
       if (!_isWaiting(waiting) ||
           _disposed ||
+          _dataClearInProgress ||
           waiting.cancellation.isCancelled ||
           _taskBox.get(task.id)?.status != AgentTaskStatus.queued) {
         await lease.release();
@@ -824,14 +1278,18 @@ class WorkTaskCoordinator {
     Object error,
   ) async {
     await _serialize(() async {
-      if (!_isWaiting(waiting) || _disposed) return;
+      if (!_isWaiting(waiting) || _disposed || _dataClearInProgress) return;
       _dropWaiting(waiting);
       final stored = _taskBox.get(waiting.task.id);
       if (stored == null || stored.isTerminal) return;
-      stored
-        ..status = AgentTaskStatus.failed
-        ..lastError = sanitizeWorkTaskError(error)
-        ..updatedAt = _clock();
+      _applyFailure(
+        stored,
+        WorkFailure.fromError(
+          error,
+          scope: 'resource',
+          completedContent: _completedContentForTask(stored),
+        ),
+      );
       await _save(stored);
       unawaited(
         _record(stored, WorkTaskEventKind.failed, '资源锁等待失败'),
@@ -859,8 +1317,28 @@ class WorkTaskCoordinator {
     try {
       await _run(task, cancellation);
     } finally {
-      if (lease != null) await lease.release();
+      try {
+        if (lease != null) await lease.release();
+      } finally {
+        await _releaseHandoffAfterLease(task);
+      }
     }
+  }
+
+  Future<void> _releaseHandoffAfterLease(AgentTask task) async {
+    if (!_handoffsAwaitingLease.contains(task.id)) return;
+    if (_disposed || _dataClearInProgress) {
+      _handoffsAwaitingLease.remove(task.id);
+      _conversationReservations.remove(task.groupId);
+      return;
+    }
+    await _serialize(() async {
+      if (!_handoffsAwaitingLease.remove(task.id)) return;
+      _conversationReservations.remove(task.groupId);
+      if (_disposed || _dataClearInProgress) return;
+      _makeConversationReady(task.groupId);
+      await _schedule();
+    });
   }
 
   Future<void> _run(
@@ -916,19 +1394,19 @@ class WorkTaskCoordinator {
         return;
       }
 
-      if (error != null &&
-          !stored.isTerminal &&
-          stored.status != AgentTaskStatus.queued) {
-        stored
-          ..status = AgentTaskStatus.failed
-          ..lastError = sanitizeWorkTaskError(error)
-          ..updatedAt = _clock();
+      if (error != null && !stored.isTerminal) {
+        final failure = WorkFailure.fromError(
+          error,
+          scope: 'runner',
+          completedContent: _completedContentForTask(stored),
+        );
+        _applyFailure(stored, failure);
         await _save(stored);
         unawaited(_record(
           stored,
           WorkTaskEventKind.failed,
           '任务执行失败',
-          detail: sanitizeWorkTaskError(error),
+          detail: failure.technicalDetail,
         ));
       } else if (!stored.isTerminal &&
           stored.status != AgentTaskStatus.queued &&
@@ -944,14 +1422,35 @@ class WorkTaskCoordinator {
         );
       }
 
-      await _promoteQueuedFollowUp(stored);
+      // Fake and production runners may finish on different persistence
+      // boundaries. Refresh the canonical Task 15 summary after the terminal
+      // status is known so a result/error is still recoverable when a runner
+      // did not publish its own checkpoint callback.
+      final handedOff = _advanceCompletedHandoff(stored);
+      _refreshTaskContext(
+        stored,
+        nextStep: handedOff
+            ? '当前阶段已完成，下一角色将在释放资源后接手。'
+            : stored.isTerminal
+                ? '已完成，可继续追问。'
+                : null,
+      );
+      await _save(stored);
+
+      // A follow-up is promoted only after a successful stage. Failures and
+      // pauses must leave the FIFO untouched so the recovery action can resume
+      // the same checkpoint before any later request changes the task context.
+      if (!handedOff && stored.status == AgentTaskStatus.completed) {
+        await _promoteQueuedFollowUp(stored);
+      }
       await _markSnapshotStatus(stored);
 
-      final holdConversation = !stored.isTerminal &&
+      final holdConversation = !handedOff &&
+          !stored.isTerminal &&
           (stored.status == AgentTaskStatus.waitingForApproval ||
               stored.status == AgentTaskStatus.paused ||
               stored.status == AgentTaskStatus.interrupted);
-      if (!holdConversation) {
+      if (!holdConversation && !handedOff) {
         _conversationReservations.remove(task.groupId);
       }
       _folderWaiters.remove(task.id);
@@ -960,9 +1459,82 @@ class WorkTaskCoordinator {
         // The public event only contains the error message; stack traces stay
         // out of persisted task output and can be surfaced by a future logger.
       }
-      _makeConversationReady(task.groupId);
+      if (handedOff) {
+        // Keep the conversation reservation until _runWithLease releases the
+        // previous role's resource lease. This remains serial even when a
+        // stage has no explicit file lock plan (for example a skill-only
+        // stage), so the next role cannot start in the same microtask.
+        _handoffsAwaitingLease.add(task.id);
+        _enqueueTask(stored);
+        unawaited(_record(
+          stored,
+          WorkTaskEventKind.queued,
+          '当前阶段完成，已排队下一角色接手',
+          detail: stored.characterId,
+        ));
+      } else {
+        _makeConversationReady(task.groupId);
+      }
       await _schedule();
     });
+  }
+
+  /// Promotes a routed task to its next role after the current runner returns.
+  /// Keeping this transition in the coordinator guarantees that one
+  /// conversation never runs two assigned roles at the same time.
+  bool _advanceCompletedHandoff(AgentTask task) {
+    // A failed, cancelled or partially-completed stage must remain terminal;
+    // only an actual successful stage completion may release the next role.
+    if (!task.workModeTask || task.status != AgentTaskStatus.completed) {
+      return false;
+    }
+    final state = WorkHandoffState.fromTask(task);
+    if (state == null || state.isComplete) return false;
+    try {
+      if (!state.needsHandoff) {
+        // Persist the terminal marker for the last stage as well. This keeps
+        // a restarted task from looking as if it could still be handed off.
+        WorkHandoffState.persistToTask(
+          task,
+          state.advance(
+            previousRoleReleased: true,
+            deliveredArtifacts: task.lastArtifactPaths,
+            summary: task.resultSummary,
+          ),
+        );
+        return false;
+      }
+      final waiting = state.advance(
+        previousRoleReleased: true,
+        deliveredArtifacts: task.lastArtifactPaths,
+        summary: task.resultSummary,
+      );
+      final active = waiting.activateReceiver();
+      task
+        ..characterId = active.currentRoleId
+        ..status = AgentTaskStatus.queued
+        ..resumeRequired = false
+        ..pendingToolRequestJson = ''
+        ..resultSummary = ''
+        ..lastError = ''
+        // The action/time budget belongs to the durable task, not to an
+        // individual role.  A handoff must not reset it and thereby let a
+        // product→developer→tester chain exceed the global 100/60-minute
+        // safety boundary.
+        ..softLimitReached = false;
+      WorkHandoffState.persistToTask(task, active);
+      return true;
+    } on Object catch (error) {
+      _applyFailure(
+        task,
+        WorkFailure.fromError(
+          error,
+          scope: 'handoff',
+          completedContent: _completedContentForTask(task),
+        ),
+      );
+      return false;
+    }
   }
 
   Future<bool> _ensureFolderGrant(
@@ -972,50 +1544,86 @@ class WorkTaskCoordinator {
     final grantService = _folderGrantService;
     if (grantService == null) {
       if (!_requireFolderGrant) return true;
-      task
-        ..status = AgentTaskStatus.paused
-        ..resumeRequired = true
-        ..lastError = '工作目录授权服务不可用，请检查应用设置后重试。'
-        ..updatedAt = _clock();
+      final failure = WorkFailure.fromToolFailure(
+        code: 'authorizationLost',
+        message: '工作目录授权服务不可用，请检查应用设置后重试。',
+        completedContent: _completedContentForTask(task),
+      );
+      _applyFailure(
+        task,
+        failure,
+        status: AgentTaskStatus.paused,
+        clearPendingTool: false,
+      );
       await _save(task);
       await _record(
         task,
         WorkTaskEventKind.paused,
         '工作目录授权不可用',
-        detail: task.lastError,
+        detail: failure.technicalDetail,
       );
       return false;
     }
     try {
       await grantService.load();
     } on Object catch (error) {
-      task
-        ..status = AgentTaskStatus.paused
-        ..resumeRequired = true
-        ..lastError = '工作目录授权校验失败，请重试。'
-        ..updatedAt = _clock();
+      final failure = WorkFailure.fromError(
+        error,
+        scope: 'authorization',
+        completedContent: _completedContentForTask(task),
+      );
+      _applyFailure(
+        task,
+        failure.type == WorkFailureType.internal
+            ? WorkFailure.fromToolFailure(
+                code: 'authorizationLost',
+                message: '工作目录授权校验失败，请重新授权。',
+                completedContent: _completedContentForTask(task),
+              )
+            : failure,
+        status: AgentTaskStatus.paused,
+        clearPendingTool: false,
+      );
       await _save(task);
       await _record(
         task,
         WorkTaskEventKind.paused,
         '工作目录授权校验失败',
-        detail: sanitizeWorkTaskError(error),
+        detail:
+            task.workFailure?.technicalDetail ?? sanitizeWorkTaskError(error),
       );
       return false;
     }
-    if (_disposed || cancellation.isCancelled) return false;
+    if (_disposed || _dataClearInProgress || cancellation.isCancelled) {
+      return false;
+    }
     final requestedPath = _requestedFolderPath(task);
     final requiresWritable = _requiresWritableFolder(task);
     if (requestedPath == null &&
         (requiresWritable
             ? grantService.hasConfirmedWritableGrant()
             : grantService.hasConfirmedAvailableGrant())) {
+      if (requiresWritable) {
+        // Keep the workspace capability requirement for the runner even when
+        // an already-authorized writable root satisfies this task. A prior
+        // read-only conversation workspace must still be replaced before a
+        // write is attempted.
+        task.executionStateJson = _withWritableRequirementMarker(
+          task.executionStateJson,
+        );
+        await _save(task);
+      }
       return true;
     }
     if (requestedPath != null &&
         (requiresWritable
             ? await grantService.isPathWritableResolved(requestedPath)
             : await grantService.isPathAuthorizedResolved(requestedPath))) {
+      if (requiresWritable) {
+        task.executionStateJson = _withWritableRequirementMarker(
+          task.executionStateJson,
+        );
+      }
       task.executionStateJson = _withoutFolderRequest(task.executionStateJson);
       await _save(task);
       return true;
@@ -1024,6 +1632,14 @@ class WorkTaskCoordinator {
     task
       ..status = AgentTaskStatus.waitingForApproval
       ..resumeRequired = false
+      // Keep a durable UI marker even when the first request has no concrete
+      // path yet. The execution panel must expose the folder picker instead
+      // of rendering an approval/continue action that cannot succeed.
+      ..executionStateJson = _withFolderGrantPending(
+        task.executionStateJson,
+        requestedPath,
+        requiresWritable: requiresWritable,
+      )
       ..updatedAt = _clock();
     await _save(task);
     await _record(
@@ -1034,14 +1650,18 @@ class WorkTaskCoordinator {
           ? '首次执行工作模式前，需要选择一个 App 级工作目录。'
           : '请求路径未被现有授权覆盖，需要选择其所在目录。',
     );
-    if (_disposed || cancellation.isCancelled) return false;
+    if (_disposed || _dataClearInProgress || cancellation.isCancelled) {
+      return false;
+    }
 
     final requestResult = await _requestFolder(
       grantService,
       task: task,
       requestedPath: requestedPath,
     );
-    if (_disposed || cancellation.isCancelled) return false;
+    if (_disposed || _dataClearInProgress || cancellation.isCancelled) {
+      return false;
+    }
     if (requestResult.granted) {
       task
         ..status = AgentTaskStatus.planning
@@ -1053,13 +1673,32 @@ class WorkTaskCoordinator {
       return true;
     }
 
+    // The execution panel can finish a second, explicit picker request while
+    // this initial request is unwinding from a cancellation.  In that case
+    // the panel has already persisted a queued task and removed the durable
+    // folder-pending marker.  Do not let this stale cancellation overwrite
+    // the newly authorized state with a paused error; the panel-owned queue
+    // will start the task with the confirmed grant.
+    final currentState = _decodeExecutionMap(task.executionStateJson);
+    if (task.status == AgentTaskStatus.queued &&
+        currentState['folderGrantPending'] != true &&
+        _requestedFolderPath(task) == null) {
+      return false;
+    }
+
     final reason =
         requestResult.reason.isEmpty ? '未完成工作目录授权。' : requestResult.reason;
-    task
-      ..status = AgentTaskStatus.paused
-      ..resumeRequired = true
-      ..lastError = reason
-      ..updatedAt = _clock();
+    final failure = WorkFailure.fromToolFailure(
+      code: 'authorizationLost',
+      message: reason,
+      completedContent: _completedContentForTask(task),
+    );
+    _applyFailure(
+      task,
+      failure,
+      status: AgentTaskStatus.paused,
+      clearPendingTool: false,
+    );
     await _save(task);
     await _record(task, WorkTaskEventKind.paused, '等待工作目录授权', detail: reason);
     return false;
@@ -1071,7 +1710,27 @@ class WorkTaskCoordinator {
     String? requestedPath,
   }) async {
     final existing = _folderRequest;
-    if (existing != null) return existing;
+    if (existing != null) {
+      // A native picker is process-global, but its result is not necessarily
+      // suitable for every waiting task.  One task may be asking for a
+      // read-only root while another is waiting for a different writable
+      // path.  Reuse the in-flight result only when it actually covers this
+      // request; otherwise open a second picker after the first one closes.
+      final sharedResult = await existing;
+      if (!sharedResult.granted) return sharedResult;
+      final requested = requestedPath?.trim();
+      final requiresWritable = _requiresWritableFolder(task);
+      final grant = sharedResult.grant;
+      final covers = requested == null || requested.isEmpty
+          ? grant != null && (!requiresWritable || grant.writable)
+          : requiresWritable
+              ? await grantService.isPathWritableResolved(requested)
+              : await grantService.isPathAuthorizedResolved(requested);
+      if (covers) return sharedResult;
+      // The selected directory belongs to another task's request.  Falling
+      // through is intentional: the picker future has completed, so this is
+      // no longer a concurrent native dialog.
+    }
     final request = _folderPicker == null
         ? Future<WorkFolderRequestResult>.value(
             const WorkFolderRequestResult(
@@ -1160,6 +1819,200 @@ class WorkTaskCoordinator {
     _publish(task);
   }
 
+  void _applyFailure(
+    AgentTask task,
+    WorkFailure failure, {
+    AgentTaskStatus status = AgentTaskStatus.failed,
+    bool clearPendingTool = true,
+  }) {
+    task
+      ..status = status
+      ..resumeRequired = status == AgentTaskStatus.failed
+          ? failure.retryable || task.completedOperations.isNotEmpty
+          : true
+      ..lastError = failure.reason
+      ..updatedAt = _clock();
+    if (clearPendingTool) task.pendingToolRequestJson = '';
+    WorkFailure.persistOnTask(task, failure);
+    _refreshTaskContext(
+      task,
+      nextStep: failure.suggestedAction,
+      extraErrors: [failure.reason],
+    );
+  }
+
+  List<String> _completedContentForTask(AgentTask task) {
+    final values = <String>[
+      ...task.completedOperations,
+      if (task.resultSummary.trim().isNotEmpty) task.resultSummary,
+      ...task.lastArtifactPaths.map((path) => '产物：$path'),
+    ];
+    final seen = <String>{};
+    return values
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty && seen.add(value))
+        .take(32)
+        .toList(growable: false);
+  }
+
+  Future<void> _checkpointFromRunner(AgentTask task) async {
+    if (_disposed || _dataClearInProgress) return;
+    await _serialize(() async {
+      if (!_disposed && !_dataClearInProgress) await _save(task);
+    });
+  }
+
+  void _refreshTaskContext(
+    AgentTask task, {
+    String? nextStep,
+    Iterable<String> extraErrors = const [],
+    bool clearRecentToolResults = false,
+  }) {
+    final raw = task.contextSummary.trim();
+    if (raw.isNotEmpty && !_isTask15Context(raw, task.groupId)) {
+      if (_hasForeignConversationContext(raw, task.groupId)) {
+        // A checkpoint carrying another conversation id is never a legacy
+        // summary. Drop it before publishing the task so a malformed import
+        // cannot expose a different DM (or steer this task's revision).
+        task.contextSummary = _contextBuilder
+            .build(
+              conversationId: task.groupId,
+              target: task.userRequest,
+              pendingFollowUps: task.queuedUserRequests,
+              completedSummaries: task.resultSummary.trim().isEmpty
+                  ? const []
+                  : [task.resultSummary],
+              artifactPaths: task.lastArtifactPaths,
+              errors:
+                  task.lastError.trim().isEmpty ? const [] : [task.lastError],
+              nextStep: nextStep ?? '',
+            )
+            .toJsonString();
+      }
+      // Keep older Stage 02 summaries byte-for-byte compatible. The durable
+      // AgentTask queue/artifact fields still carry the new state, and a
+      // subsequent Task 15 checkpoint will migrate it through the builder.
+      return;
+    }
+    final previous = raw.isEmpty
+        ? WorkContextSnapshot(conversationId: task.groupId)
+        : _contextBuilder.fromTask(task);
+    final errors = _uniqueStrings(<String>[
+      ...previous.errors,
+      ...extraErrors,
+      if (task.lastError.trim().isNotEmpty) task.lastError,
+    ]);
+    final completed = _uniqueStrings(<String>[
+      ...previous.completedSummaries,
+      if (task.resultSummary.trim().isNotEmpty) task.resultSummary,
+    ]);
+    final execution = _decodeExecutionMap(task.executionStateJson);
+    final approvalScope = previous.approvalScope ??
+        (execution['approvalScope'] is Map
+            ? Map<String, dynamic>.from(execution['approvalScope'] as Map)
+            : null);
+    task.contextSummary = _contextBuilder
+        .build(
+          conversationId: task.groupId,
+          target: previous.target.isEmpty ? task.userRequest : previous.target,
+          pendingFollowUps: task.queuedUserRequests,
+          completedSummaries: completed,
+          // Tool results describe the previous execution run. Keep the
+          // durable summary/artifacts for continuity, but do not let a
+          // follow-up satisfy a new tool request with stale output.
+          recentToolResults:
+              clearRecentToolResults ? const [] : previous.recentToolResults,
+          approvalScope: approvalScope,
+          artifactPaths: <String>[
+            ...previous.artifactPaths,
+            ...task.lastArtifactPaths
+          ],
+          roleHandoff: previous.roleHandoff,
+          errors: errors,
+          nextStep: nextStep ?? previous.nextStep,
+        )
+        .toJsonString();
+  }
+
+  List<String> _uniqueStrings(Iterable<String> values) {
+    final seen = <String>{};
+    return values
+        .map((value) => value.trim())
+        .where((value) => value.isNotEmpty && seen.add(value))
+        .toList(growable: false);
+  }
+
+  bool _isTask15Context(String raw, String conversationId) {
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map &&
+          decoded['conversationId'] == conversationId &&
+          decoded.containsKey('pendingFollowUps');
+    } on Object {
+      return false;
+    }
+  }
+
+  bool _hasForeignConversationContext(String raw, String conversationId) {
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map &&
+          decoded['conversationId'] is String &&
+          decoded['conversationId'] != conversationId;
+    } on Object {
+      return false;
+    }
+  }
+
+  bool _isFollowUpClarification(AgentTask task) {
+    final execution = _decodeExecutionMap(task.executionStateJson);
+    return execution['followUpKind'] == WorkFollowUpKind.clarification.name &&
+        execution['clarificationQuestion'] is String;
+  }
+
+  bool _requiresExplicitCommandRequest(AgentTask task) {
+    return _decodeExecutionMap(
+            task.executionStateJson)['explicitCommandRequestRequired'] ==
+        true;
+  }
+
+  bool _requiresVisionModelSelection(AgentTask task) {
+    return _decodeExecutionMap(
+            task.executionStateJson)['visionModelRequired'] ==
+        true;
+  }
+
+  Map<String, dynamic> _decodeExecutionMap(String raw) {
+    if (raw.trim().isEmpty) return <String, dynamic>{};
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map ? Map<String, dynamic>.from(decoded) : {};
+    } on Object {
+      return <String, dynamic>{};
+    }
+  }
+
+  String _withFollowUpDecision(
+    String raw,
+    WorkFollowUpDecision decision,
+  ) {
+    final metadata = _decodeExecutionMap(raw)
+      ..['followUpKind'] = decision.kind.name
+      ..['followUpReason'] = decision.reason;
+    if (decision.artifactPath != null) {
+      metadata['revisionTargetPath'] = decision.artifactPath;
+    } else {
+      metadata.remove('revisionTargetPath');
+    }
+    metadata['autoRenameIfExists'] = decision.autoRenameIfExists;
+    if (decision.clarificationQuestion != null) {
+      metadata['clarificationQuestion'] = decision.clarificationQuestion;
+    } else {
+      metadata.remove('clarificationQuestion');
+    }
+    return jsonEncode(metadata);
+  }
+
   void _publish(AgentTask task) {
     if (!_disposed) _taskUpdates.add(task);
   }
@@ -1176,7 +2029,9 @@ class WorkTaskCoordinator {
     String title, {
     String detail = '',
   }) async {
-    if (_disposed) return;
+    // Data clear owns a hard lifecycle barrier. Late runner callbacks must not
+    // recreate event files after the clear has removed the app-managed tree.
+    if (_disposed || _dataClearInProgress) return;
     try {
       await _eventStore.append(
         taskId: task.id,
@@ -1188,7 +2043,12 @@ class WorkTaskCoordinator {
       // Event persistence is diagnostic only; never replace a valid task
       // outcome with a logging exception. The durable flag tells the panel
       // that the timeline may have gaps.
-      if (_disposed || task.eventLogIncomplete) return;
+      if (_disposed ||
+          _dataClearInProgress ||
+          _eventStore.appendsSuspendedForDataClear ||
+          task.eventLogIncomplete) {
+        return;
+      }
       task.eventLogIncomplete = true;
       if (task.lastError.isEmpty) {
         task.lastError = '任务日志保存不完整：${sanitizeWorkTaskError(error)}';
@@ -1204,6 +2064,7 @@ class WorkTaskCoordinator {
   }
 
   Future<void> _markSnapshotStatus(AgentTask task) async {
+    if (_dataClearInProgress) return;
     final updater = _snapshotStatusUpdater;
     if (updater == null) return;
     final status = switch (task.status) {
@@ -1225,19 +2086,58 @@ class WorkTaskCoordinator {
   Future<void> _promoteQueuedFollowUp(
     AgentTask task, {
     bool resetRunBudget = false,
+    bool allowPausedClarification = false,
   }) async {
-    if (!task.isTerminal ||
+    final canPromotePausedClarification =
+        allowPausedClarification && _isFollowUpClarification(task);
+    if ((!task.isTerminal && !canPromotePausedClarification) ||
         task.status == AgentTaskStatus.cancelled ||
         task.queuedUserRequests.isEmpty ||
         _disposed) {
       return;
     }
     final nextRequest = task.queuedUserRequests.first.trim();
-    task.queuedUserRequests = task.queuedUserRequests.skip(1).toList();
     if (nextRequest.isEmpty) {
+      task.queuedUserRequests = task.queuedUserRequests.skip(1).toList();
       await _promoteQueuedFollowUp(task);
       return;
     }
+    final decision = _followUpPolicy.resolve(
+      request: nextRequest,
+      // The model/result runner writes the structured field first. A
+      // canonical Task 15 summary is a recovery fallback for tasks imported
+      // between field writes; no chat-history or global-file lookup is used.
+      lastArtifactPaths: _followUpArtifactPaths(task),
+    );
+    if (decision.isClarification) {
+      // Keep the original request at the head of the durable FIFO. A later
+      // user answer can therefore resolve it without losing any following
+      // requests. No runner is started while the target is ambiguous.
+      task
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = false
+        ..lastError = decision.clarificationQuestion ?? '请明确要修改的文件路径。'
+        ..executionStateJson = _withFollowUpDecision(
+          task.executionStateJson,
+          decision,
+        )
+        ..updatedAt = _clock();
+      _conversationReservations.add(task.groupId);
+      _refreshTaskContext(
+        task,
+        nextStep: task.lastError,
+        extraErrors: [task.lastError],
+      );
+      await _save(task);
+      await _record(
+        task,
+        WorkTaskEventKind.paused,
+        '需要明确修订目标',
+        detail: task.lastError,
+      );
+      return;
+    }
+    task.queuedUserRequests = task.queuedUserRequests.skip(1).toList();
     // A follow-up is a new execution run under the same conversation/task
     // identity.  Do not reuse the previous run's in-memory lock plan: the
     // new request may target a different file, and a stale plan could either
@@ -1255,11 +2155,32 @@ class WorkTaskCoordinator {
       ..actionCount = resetRunBudget ? 0 : task.actionCount
       ..startedAt = resetRunBudget ? _clock() : task.startedAt
       ..updatedAt = _clock();
+    task.executionStateJson = _withFollowUpDecision(
+      task.executionStateJson,
+      decision,
+    );
+    // A clarification pause intentionally held the conversation reservation;
+    // the user's answer now makes the target runnable again.
+    _conversationReservations.remove(task.groupId);
+    _refreshTaskContext(
+      task,
+      nextStep: '开始处理已排队的追问。',
+      clearRecentToolResults: true,
+    );
     await _save(task);
     _enqueueTask(task);
     unawaited(
       _record(task, WorkTaskEventKind.queued, '开始处理已排队的追问'),
     );
+  }
+
+  List<String> _followUpArtifactPaths(AgentTask task) {
+    if (task.lastArtifactPaths.isNotEmpty) {
+      return List<String>.from(task.lastArtifactPaths);
+    }
+    final raw = task.contextSummary.trim();
+    if (raw.isEmpty || !_isTask15Context(raw, task.groupId)) return const [];
+    return _contextBuilder.fromTask(task).artifactPaths;
   }
 
   void _removeActiveRun(String taskId, Future<void> run) {
@@ -1273,6 +2194,16 @@ class WorkTaskCoordinator {
         final copy = Map<String, dynamic>.from(decoded)
           ..['approvalDecision'] = decision;
         final parsedDecision = WorkChangeApprovalDecision.fromWire(decision);
+        if (parsedDecision?.permitsExecution == true) {
+          // A new approval authorizes exactly the checkpoint that prompted it;
+          // the runner consumes high-risk approvals on their first attempt.
+          copy.remove('approvalConsumed');
+        } else {
+          copy
+            ..remove('approvalCapability')
+            ..remove('approvalOperationFingerprint')
+            ..remove('approvalConsumed');
+        }
         final rawPlan = copy['approvalPlan'];
         if (parsedDecision?.permitsExecution == true && rawPlan is Map) {
           try {
@@ -1307,7 +2238,10 @@ class WorkTaskCoordinator {
         final copy = Map<String, dynamic>.from(decoded)
           ..remove('approvalDecision')
           ..remove('approvalScope')
-          ..remove('approvalPlan');
+          ..remove('approvalPlan')
+          ..remove('approvalCapability')
+          ..remove('approvalOperationFingerprint')
+          ..remove('approvalConsumed');
         return copy.isEmpty ? '' : jsonEncode(copy);
       }
     } on Object {
@@ -1338,15 +2272,223 @@ class WorkTaskCoordinator {
   }
 
   bool _requiresWritableFolder(AgentTask task) {
+    final execution = _decodeExecutionMap(task.executionStateJson);
+    // A concrete command can discover a local write only after the model
+    // turn. The tool boundary records this marker before pausing so a resumed
+    // task selects a writable workspace instead of retrying the old read root.
+    if (execution['folderRequiresWritable'] == true) return true;
     final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
     if (pending == null) {
-      // The runner creates a conversation workspace before the first model
-      // read, so an initial grant must be able to create that directory.
-      return true;
+      // The first model turn may only inspect a read-only grant. Request a
+      // writable capability up front only when the user's wording clearly
+      // requires a mutation; an ambiguous request is revalidated when the
+      // concrete tool call exposes its exact path.
+      return _requestLikelyMutates(task.userRequest);
+    }
+    if (pending.tool == AgentToolName.commandRun) {
+      // The checkpoint already contains the structured command fields. Make a
+      // conservative preflight classification here so a resumed local
+      // mutation asks for a writable grant before the runner resolves its
+      // workspace. The runner still performs the authoritative policy check;
+      // this only decides which capability the native picker should request.
+      return _pendingCommandNeedsWritable(pending.args);
     }
     return pending.tool == AgentToolName.workspacePatch ||
         pending.tool == AgentToolName.workspaceRename ||
         pending.tool == AgentToolName.workspaceDelete;
+  }
+
+  bool _pendingCommandNeedsWritable(Map<String, dynamic> args) {
+    final executable = (args['executable'] ?? '').toString().toLowerCase();
+    final base = executable.replaceAll('\\', '/').split('/').last;
+    final rawArguments = args['arguments'] ?? args['args'];
+    final rawArgumentList = rawArguments is List
+        ? rawArguments.map((item) => item.toString()).toList()
+        : const <String>[];
+    final arguments = rawArgumentList
+        .map((item) => item.toLowerCase())
+        .toList(growable: false);
+    final rawImpact = args['declaredImpact'];
+    final impactPaths =
+        rawImpact is List ? rawImpact.whereType<String>() : const <String>[];
+    if (impactPaths.any(_isAbsoluteWorkPath)) return true;
+    // Shell redirection is rejected by the structured command policy as a
+    // local mutation. Keep the folder preflight aligned with that policy so a
+    // resumed `ls > report.txt` cannot start on a read-only workspace and only
+    // discover the missing write capability after the process boundary.
+    if (arguments.any(_isLocalRedirectArgument)) return true;
+    if (const {
+      'pwd',
+      'ls',
+      'dir',
+      'rg',
+      'ripgrep',
+      'grep',
+      'egrep',
+      'fgrep',
+      'cat',
+      'head',
+      'tail',
+      'wc',
+      'file',
+      'stat',
+      'which',
+      'where',
+      'whoami',
+      'uname',
+    }.contains(base)) {
+      return false;
+    }
+    if (base == 'find' || base == 'fd') {
+      return arguments.any(
+        (argument) => {'-delete', '-exec', '-execdir', '-ok', '-okdir'}
+            .contains(argument),
+      );
+    }
+    if (base == 'git' && arguments.isNotEmpty) {
+      return !const {
+        'status',
+        'diff',
+        'log',
+        'show',
+        'branch',
+        'rev-parse',
+        'ls-files',
+        'push',
+      }.contains(arguments.first);
+    }
+    if (base == 'flutter' || base == 'dart') {
+      final first = arguments.isEmpty ? '' : arguments.first;
+      return first != 'analyze' && first != '--version' && first != '--help';
+    }
+    if (base == 'curl' || base == 'wget') {
+      // A network write does not require a writable local folder unless the
+      // impact list explicitly includes an absolute local path. Local output
+      // flags do require the capability; upload/data flags only read local
+      // inputs and therefore remain valid with a read-only grant.
+      return rawArgumentList.any(
+        (raw) {
+          final argument = raw.toLowerCase();
+          final curlShortOutput = base == 'curl' &&
+              (raw == '-D' ||
+                  raw.startsWith('-D') && raw.length > 2 ||
+                  raw == '-c' ||
+                  raw.startsWith('-c') && raw.length > 2);
+          return curlShortOutput ||
+              argument == '-o' ||
+              argument == '--output' ||
+              argument.startsWith('--output=') ||
+              argument == '--output-dir' ||
+              argument.startsWith('--output-dir=') ||
+              argument == '--output-document' ||
+              argument.startsWith('--output-document=') ||
+              argument == '--dump-header' ||
+              argument.startsWith('--dump-header=') ||
+              argument == '--cookie-jar' ||
+              argument.startsWith('--cookie-jar=') ||
+              argument == '--trace' ||
+              argument.startsWith('--trace=') ||
+              argument == '--trace-ascii' ||
+              argument.startsWith('--trace-ascii=') ||
+              argument == '--stderr' ||
+              argument.startsWith('--stderr=') ||
+              argument == '--hsts' ||
+              argument.startsWith('--hsts=') ||
+              argument == '--etag-save' ||
+              argument.startsWith('--etag-save=') ||
+              argument.startsWith('-o') && argument.length > 2;
+        },
+      );
+    }
+    return true;
+  }
+
+  bool _isAbsoluteWorkPath(String value) {
+    final path = value.trim();
+    return path.startsWith('/') ||
+        path.startsWith('\\') ||
+        RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path);
+  }
+
+  bool _isLocalRedirectArgument(String argument) {
+    return argument == '>' ||
+        argument == '>>' ||
+        argument == '<' ||
+        argument == '2>' ||
+        argument.startsWith('>') ||
+        argument.startsWith('<') ||
+        argument.startsWith('2>');
+  }
+
+  bool _requestLikelyMutates(String request) {
+    final lower = request.toLowerCase();
+    // A task starts before the first structured tool call, so a read-only
+    // command such as “运行 pwd” must not be blocked merely because the
+    // request contains the generic verb “运行/执行”.  Keep this check
+    // intentionally narrow: only well-known inspection commands qualify, and
+    // any explicit write/test/build/install intent keeps the conservative
+    // writable-folder requirement.
+    if (_requestClearlyReadOnly(lower)) return false;
+    return RegExp(
+      r'(写|写入|修改|改写|创建|生成|删除|移除|重命名|替换|保存|覆盖|安装|提交|推送|'
+      r'运行|执行|编译|构建|测试|开发|修复|实现|'
+      r'\b(?:write|create|generate|modify|edit|delete|remove|rename|replace|save|overwrite|'
+      r'install|commit|push|run|compile|build|test|develop|fix|implement)\b)',
+      caseSensitive: false,
+    ).hasMatch(lower);
+  }
+
+  bool _requestClearlyReadOnly(String lower) {
+    // Merely mentioning an inspection command is not enough to classify the
+    // whole request as read-only.  Shell separators, redirects and common
+    // mutating subcommands make the intent compound/uncertain; request a
+    // writable capability up front and let the structured command policy make
+    // the final decision.
+    if (RegExp(r'[|;]|&&|(?:>>?|<|2>)').hasMatch(lower) ||
+        RegExp(
+          r'(?<![a-z0-9_-])(?:rm|rmdir|del|erase|unlink|mv|move|copy|cp|touch|'
+          r'mkdir|install|tee|chmod|chown|truncate|dd|sed|perl)(?![a-z0-9_-])',
+          caseSensitive: false,
+        ).hasMatch(lower) ||
+        RegExp(
+          r'(?<![a-z0-9_-])(?:find|fd)\b[^\n]*\s(?:-delete|-exec(?:dir)?|-ok(?:dir)?)\b',
+          caseSensitive: false,
+        ).hasMatch(lower) ||
+        RegExp(
+          r'(?<![a-z0-9_-])git\s+(?:commit|push|pull|merge|rebase|checkout|switch|tag|clean|reset)\b',
+          caseSensitive: false,
+        ).hasMatch(lower) ||
+        RegExp(
+          r'(?<![a-z0-9_-])(?:curl|wget)\b[^\n]*(?:--?data|--?upload-file|--?output|--?post|--?request[= ](?:post|put|patch|delete)|--?method[= ](?:post|put|patch|delete))',
+          caseSensitive: false,
+        ).hasMatch(lower)) {
+      return false;
+    }
+    final hasInspectionCommand = RegExp(
+      r'(?<![a-z0-9_-])(?:pwd|ls|dir|find|fd|rg|ripgrep|grep|egrep|fgrep|'
+      r'cat|head|tail|wc|file|stat|which|where|whoami|uname)(?![a-z0-9_-])',
+      caseSensitive: false,
+    ).hasMatch(lower);
+    if (!hasInspectionCommand) {
+      final hasReadOnlyGit = RegExp(
+        r'(?<![a-z0-9_-])git\s+(?:status|diff|log|show|branch|rev-parse|ls-files)'
+        r'(?![a-z0-9_-])',
+        caseSensitive: false,
+      ).hasMatch(lower);
+      final hasReadOnlySdk = RegExp(
+        r'(?<![a-z0-9_-])(?:flutter|dart)\s+(?:analyze|--version|--help)'
+        r'(?![a-z0-9_-])',
+        caseSensitive: false,
+      ).hasMatch(lower);
+      if (!hasReadOnlyGit && !hasReadOnlySdk) return false;
+    }
+    return !RegExp(
+      r'(写|写入|修改|改写|创建|生成|删除|移除|重命名|替换|保存|覆盖|安装|提交|推送|'
+      r'编译|构建|测试|开发|修复|实现|发布|部署|'
+      r'\b(?:write|create|generate|modify|edit|delete|remove|rename|replace|save|overwrite|'
+      r'install|commit|push|compile|build|test|develop|fix|implement|deploy|publish)\b)',
+      caseSensitive: false,
+    ).hasMatch(lower);
   }
 
   String _withoutFolderRequest(String raw) {
@@ -1354,13 +2496,40 @@ class WorkTaskCoordinator {
       final decoded = jsonDecode(raw);
       if (decoded is Map) {
         final copy = Map<String, dynamic>.from(decoded)
-          ..remove('folderRequestPath');
+          ..remove('folderRequestPath')
+          ..remove('folderGrantPending');
         return copy.isEmpty ? '' : jsonEncode(copy);
       }
     } on Object {
       return '';
     }
     return raw;
+  }
+
+  String _withFolderGrantPending(
+    String raw,
+    String? requestedPath, {
+    required bool requiresWritable,
+  }) {
+    final metadata = _decodeExecutionMap(raw)..['folderGrantPending'] = true;
+    if (requiresWritable) {
+      metadata['folderRequiresWritable'] = true;
+    } else {
+      metadata.remove('folderRequiresWritable');
+    }
+    final path = requestedPath?.trim();
+    if (path == null || path.isEmpty) {
+      metadata.remove('folderRequestPath');
+    } else {
+      metadata['folderRequestPath'] = path;
+    }
+    return jsonEncode(metadata);
+  }
+
+  String _withWritableRequirementMarker(String raw) {
+    final metadata = _decodeExecutionMap(raw)
+      ..['folderRequiresWritable'] = true;
+    return jsonEncode(metadata);
   }
 
   String _withResourceLockPlan(
@@ -1422,5 +2591,8 @@ class WorkTaskCoordinator {
 
   void _ensureOpen() {
     if (_disposed) throw StateError('工作任务调度器已关闭。');
+    if (_dataClearInProgress) {
+      throw StateError('正在清除 App 数据，请稍后重试。');
+    }
   }
 }

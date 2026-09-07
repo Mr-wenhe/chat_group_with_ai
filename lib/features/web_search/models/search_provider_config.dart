@@ -9,7 +9,7 @@ const String searchDevelopmentFallbackCredentialId =
 
 /// Whether a configured provider must have a credential before it can be
 /// saved or routed. The local development Gateway is intentionally the only
-/// configurable exception; DuckDuckGo is always keyless.
+/// configurable exception; DuckDuckGo's built-in routes are keyless.
 bool searchProviderRequiresCredential(
   SearchProviderKind provider, {
   required bool isRelease,
@@ -17,8 +17,17 @@ bool searchProviderRequiresCredential(
     switch (provider) {
       SearchProviderKind.gateway => isRelease,
       SearchProviderKind.tavily || SearchProviderKind.brave => true,
-      SearchProviderKind.duckDuckGoInstantAnswer => false,
+      SearchProviderKind.duckDuckGoInstantAnswer ||
+      SearchProviderKind.keylessHtml =>
+        false,
     };
+
+/// Built-in keyless providers have a fixed public endpoint. Keeping this
+/// predicate beside credential policy avoids accidentally validating an empty
+/// base URL as if it were a saved endpoint.
+bool searchProviderUsesFixedEndpoint(SearchProviderKind provider) =>
+    provider == SearchProviderKind.duckDuckGoInstantAnswer ||
+    provider == SearchProviderKind.keylessHtml;
 
 /// Search provider metadata persisted in Hive's heterogeneous app-settings
 /// box. Secrets are never part of the normal serialized representation.

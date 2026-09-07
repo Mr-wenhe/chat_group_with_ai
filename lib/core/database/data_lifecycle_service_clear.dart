@@ -6,6 +6,21 @@ extension _DataLifecycleServiceClear on DataLifecycleService {
     DeletionTargets targets,
   ) async {
     final incomplete = <String>[];
+    var workModeStopped = true;
+    final stopWorkMode = stopWorkModeTasks;
+    if (stopWorkMode != null) {
+      workModeStopped = await _runner.attempt(
+        '工作任务停止失败',
+        incomplete,
+        stopWorkMode,
+      );
+      if (!workModeStopped) {
+        // Do not partially clear Hive while a runner may still publish a
+        // checkpoint or mutate an authorized project. The pending operation
+        // remains for an explicit retry after the coordinator is quiesced.
+        return _finish(incomplete);
+      }
+    }
     await _deleteTargetKeys(
       '消息清理失败',
       db.messageBox,
@@ -113,6 +128,29 @@ extension _DataLifecycleServiceClear on DataLifecycleService {
     }
 
     await _clearSearchData(scope, incomplete, targets: targets);
+
+    final clearArtifacts = clearWorkModeArtifacts;
+    if (clearArtifacts != null && workModeStopped) {
+      await _runner.attempt(
+        '工作模式事件和撤销快照清理失败',
+        incomplete,
+        clearArtifacts,
+      );
+    } else if (clearArtifacts != null) {
+      incomplete.add('工作模式事件和撤销快照未清理：任务未能安全停止');
+    }
+
+    // A failed artifact cleanup should still release the coordinator's
+    // quiesce barrier so the user can retry from Settings without leaving all
+    // future work-mode submissions permanently blocked.
+    final resumeWorkMode = resumeWorkModeTasks;
+    if (resumeWorkMode != null && workModeStopped) {
+      await _runner.attempt(
+        '工作任务恢复失败',
+        incomplete,
+        resumeWorkMode,
+      );
+    }
 
     await _runner.attempt('设置清理失败', incomplete, () async {
       switch (scope) {

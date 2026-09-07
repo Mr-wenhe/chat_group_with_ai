@@ -57,16 +57,15 @@ class SearchProviderConfigService {
         errorMessage: 'Web 端不支持联网搜索',
       );
     }
-    final endpoint =
-        config.provider == SearchProviderKind.duckDuckGoInstantAnswer
-            ? null
-            : SearchEndpointValidator.validate(
-                config.baseUrl,
-                isRelease: store.isRelease,
-                allowLocalDevelopmentGateway:
-                    config.provider == SearchProviderKind.gateway &&
-                        store.allowLocalDevelopmentGateway,
-              );
+    final endpoint = searchProviderUsesFixedEndpoint(config.provider)
+        ? null
+        : SearchEndpointValidator.validate(
+            config.baseUrl,
+            isRelease: store.isRelease,
+            allowLocalDevelopmentGateway:
+                config.provider == SearchProviderKind.gateway &&
+                    store.allowLocalDevelopmentGateway,
+          );
     if (endpoint != null && !endpoint.isValid) {
       return SearchConnectionTestResult.failure(errorMessage: endpoint.message);
     }

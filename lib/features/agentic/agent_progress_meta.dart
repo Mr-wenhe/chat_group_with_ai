@@ -94,6 +94,8 @@ String completedStepLabel(ToolRequest request) {
       return '读取文件：$subject';
     case AgentToolName.workspaceSearch:
       return '搜索工作区：$subject';
+    case AgentToolName.workspaceDocument:
+      return '读取并分析文档：$subject';
     case AgentToolName.workspacePatch:
       return '已创建文件：$subject';
     case AgentToolName.workspaceRename:

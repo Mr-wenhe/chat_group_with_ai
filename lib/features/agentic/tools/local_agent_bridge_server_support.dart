@@ -299,6 +299,9 @@ Future<_ProcessResultText> _runProcess(
     executable,
     arguments,
     workingDirectory: workspace.path,
+    // Keep the legacy compatibility bridge parameterized; never invoke a
+    // user-controlled command through a shell.
+    runInShell: false,
   );
   try {
     process = await startFuture.timeout(limits.processTimeout);

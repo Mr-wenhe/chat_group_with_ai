@@ -26,6 +26,8 @@ Map<String, dynamic>? _lastBrowserContext;
 /// The defaults are finite so a local client cannot keep a request, a file
 /// read, a directory listing, or a child process alive indefinitely. Tests can
 /// use smaller values to exercise failure paths deterministically.
+/// Limits for the legacy ordinary-agentic localhost service. Production work
+/// mode uses in-process services and never starts this server.
 class LocalAgentBridgeLimits {
   final Duration requestTimeout;
   final Duration processTimeout;

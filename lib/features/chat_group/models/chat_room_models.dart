@@ -6,16 +6,12 @@
 library;
 
 import 'package:chat_group/core/models/ai_character.dart';
-import 'package:chat_group/core/models/api_config.dart';
-import 'package:chat_group/core/models/api_provider.dart';
-import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/user_profile.dart';
-import 'package:chat_group/features/agentic/tool_request.dart';
 
 /// A user message queued during an AI reply round.
 ///
@@ -27,29 +23,6 @@ class PendingUserMessage {
   final Message? message;
 
   PendingUserMessage(this.text, this.mentionedIds, {this.message});
-}
-
-/// A pending agent tool approval awaiting user decision.
-class PendingAgentToolApproval {
-  final AICharacter character;
-  final ApiConfig config;
-  final ApiProvider provider;
-  final String userRequest;
-  final ToolRequest request;
-  final List<ToolRequest> priorExecutedRequests;
-  final List<Map<String, dynamic>> conversationHistory;
-  final AgentTask task;
-
-  const PendingAgentToolApproval({
-    required this.character,
-    required this.config,
-    required this.provider,
-    required this.userRequest,
-    required this.request,
-    this.priorExecutedRequests = const [],
-    this.conversationHistory = const [],
-    required this.task,
-  });
 }
 
 /// Complete immutable result of loading either a group or direct conversation.

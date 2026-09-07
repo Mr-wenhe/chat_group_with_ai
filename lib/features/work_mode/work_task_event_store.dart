@@ -65,8 +65,14 @@ class WorkTaskEventStore {
       StreamController<WorkTaskEvent>.broadcast();
   final Map<String, Future<void>> _writeChains = {};
   final Map<String, int> _lastSequences = {};
+  // Global maintenance (data clear/retention) is serialized with per-task
+  // appends. A clear captures only writes that existed when it started, so a
+  // new task created after the barrier may append normally without deadlocking
+  // the maintenance operation.
+  Future<void> _maintenance = Future<void>.value();
   Future<void>? _closeFuture;
   bool _closed = false;
+  bool _appendsSuspendedForDataClear = false;
 
   WorkTaskEventStore({
     required this.appSupportDirectory,
@@ -78,6 +84,22 @@ class WorkTaskEventStore {
         assert(maxDetailCharacters > 0),
         assert(maxMetadataStringCharacters > 0),
         _secretScanner = secretScanner;
+
+  /// Reports whether late diagnostic callbacks must be rejected while the
+  /// app-wide data lifecycle owns the event-tree clear barrier.
+  bool get appendsSuspendedForDataClear => _appendsSuspendedForDataClear;
+
+  /// Suspends new event writes before a data clear. Existing writes are still
+  /// drained by [clearAll], while late callbacks fail closed at [append].
+  void suspendAppendsForDataClear() {
+    _appendsSuspendedForDataClear = true;
+  }
+
+  /// Re-enables diagnostic writes after the data lifecycle has completed (or
+  /// safely aborted) the event/snapshot clear operation.
+  void resumeAppendsAfterDataClear() {
+    _appendsSuspendedForDataClear = false;
+  }
 
   Directory get _eventsDirectory =>
       Directory('${appSupportDirectory.path}/work_mode_agent/events');
@@ -103,21 +125,28 @@ class WorkTaskEventStore {
         StateError('工作任务事件存储已关闭。'),
       );
     }
+    if (_appendsSuspendedForDataClear) {
+      return Future<WorkTaskEvent>.error(
+        StateError('工作模式事件记录已暂停清理。'),
+      );
+    }
     _validateTaskId(taskId);
     final previous = _writeChains[taskId] ?? Future<void>.value();
+    final maintenance = _maintenance;
     late final Future<WorkTaskEvent> operation;
-    operation = previous.catchError((Object _) {}).then(
-          (_) => _appendInternal(
-            taskId: taskId,
-            kind: kind,
-            title: title,
-            detail: detail,
-            progressCurrent: progressCurrent,
-            progressTotal: progressTotal,
-            safeMetadata: safeMetadata,
-            timestamp: timestamp,
-          ),
-        );
+    operation =
+        previous.catchError((Object _) {}).then((_) => maintenance).then(
+              (_) => _appendInternal(
+                taskId: taskId,
+                kind: kind,
+                title: title,
+                detail: detail,
+                progressCurrent: progressCurrent,
+                progressTotal: progressTotal,
+                safeMetadata: safeMetadata,
+                timestamp: timestamp,
+              ),
+            );
     late final Future<void> tracked;
     tracked = operation.then<void>(
       (_) => _finishWrite(taskId, tracked),
@@ -129,6 +158,7 @@ class WorkTaskEventStore {
 
   Future<WorkTaskEventReadResult> read(String taskId) async {
     _validateTaskId(taskId);
+    await _maintenance;
     final pending = _writeChains[taskId];
     if (pending != null) await pending;
     return _readPersisted(taskId);
@@ -141,35 +171,66 @@ class WorkTaskEventStore {
     Duration retention = const Duration(days: 30),
     bool Function(String taskId)? isTaskActive,
   }) async {
-    if (retention <= Duration.zero || !await _eventsDirectory.exists()) {
-      return 0;
-    }
-    final cutoff = DateTime.now().subtract(retention);
-    var removed = 0;
-    await for (final entity in _eventsDirectory.list(followLinks: false)) {
-      if (entity is! File || !entity.path.endsWith('.jsonl')) continue;
-      final taskId = entity.uri.pathSegments.last.replaceFirst('.jsonl', '');
-      if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(taskId) ||
-          isTaskActive?.call(taskId) == true) {
-        continue;
+    return _scheduleMaintenance(() async {
+      if (retention <= Duration.zero ||
+          !await _ensureEventsDirectory(create: false)) {
+        return 0;
       }
-      try {
-        final modified = (await entity.stat()).modified;
-        if (modified.isBefore(cutoff)) {
-          await entity.delete();
-          removed++;
+      final cutoff = DateTime.now().subtract(retention);
+      var removed = 0;
+      await for (final entity in _eventsDirectory.list(followLinks: false)) {
+        if (entity is! File || !entity.path.endsWith('.jsonl')) continue;
+        final taskId = entity.uri.pathSegments.last.replaceFirst('.jsonl', '');
+        if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(taskId) ||
+            isTaskActive?.call(taskId) == true) {
+          continue;
         }
-      } on Object {
-        // Cleanup is best effort; diagnostics must never interrupt tasks.
+        try {
+          final modified = (await entity.stat()).modified;
+          if (modified.isBefore(cutoff)) {
+            await entity.delete();
+            removed++;
+          }
+        } on Object {
+          // Cleanup is best effort; diagnostics must never interrupt tasks.
+        }
       }
-    }
-    return removed;
+      return removed;
+    });
+  }
+
+  /// Deletes only the app-managed work-mode event tree. Symlink roots and
+  /// descendants are removed as links, never traversed, so a clear operation
+  /// cannot touch a user project directory.
+  Future<int> clearAll() {
+    final pending = Map<String, Future<void>>.from(_writeChains);
+    return _scheduleMaintenance(() async {
+      if (!await _ensureManagedParents(create: false)) return 0;
+      final removed = await _deleteTreeNoFollow(_eventsDirectory);
+      for (final entry in pending.entries) {
+        if (identical(_writeChains[entry.key], entry.value)) {
+          _writeChains.remove(entry.key);
+          _lastSequences.remove(entry.key);
+        }
+      }
+      return removed;
+    });
   }
 
   Future<WorkTaskEventReadResult> _readPersisted(String taskId) async {
-    final file = eventFileFor(taskId);
-    if (!await file.exists()) {
+    if (!await _ensureEventsDirectory(create: false)) {
       return WorkTaskEventReadResult(events: const [], issues: const []);
+    }
+    final file = eventFileFor(taskId);
+    final fileType = await FileSystemEntity.type(
+      file.path,
+      followLinks: false,
+    );
+    if (fileType == FileSystemEntityType.notFound) {
+      return WorkTaskEventReadResult(events: const [], issues: const []);
+    }
+    if (fileType != FileSystemEntityType.file) {
+      throw StateError('任务日志文件不是受信任的普通文件。');
     }
 
     final text = await file.readAsString();
@@ -279,9 +340,11 @@ class WorkTaskEventStore {
     if (existing != null) return existing;
     _closed = true;
     final pending = List<Future<void>>.from(_writeChains.values);
-    final closing = Future.wait<void>(pending, eagerError: false).then<void>(
-      (_) => _liveEvents.close(),
-    );
+    final closing = Future.wait<void>([
+      _maintenance,
+      ...pending,
+    ], eagerError: false)
+        .then<void>((_) => _liveEvents.close());
     _closeFuture = closing;
     return closing;
   }
@@ -296,6 +359,7 @@ class WorkTaskEventStore {
     required Map<String, Object?>? safeMetadata,
     required DateTime? timestamp,
   }) async {
+    await _ensureEventsDirectory(create: true);
     final sequence = await _nextSequence(taskId) + 1;
     final event = WorkTaskEvent(
       taskId: taskId,
@@ -309,7 +373,14 @@ class WorkTaskEventStore {
       safeMetadata: _safeMetadata(safeMetadata),
     );
     final file = eventFileFor(taskId);
-    await file.parent.create(recursive: true);
+    final fileType = await FileSystemEntity.type(
+      file.path,
+      followLinks: false,
+    );
+    if (fileType != FileSystemEntityType.notFound &&
+        fileType != FileSystemEntityType.file) {
+      throw StateError('任务日志文件不是受信任的普通文件。');
+    }
     final handle = await file.open(mode: FileMode.append);
     try {
       await handle.writeString('${jsonEncode(event.toJson())}\n');
@@ -336,6 +407,94 @@ class WorkTaskEventStore {
     if (tracked == null || tracked != operation) return;
     _writeChains.remove(taskId);
     _lastSequences.remove(taskId);
+  }
+
+  Future<T> _scheduleMaintenance<T>(Future<T> Function() operation) {
+    final previous = _maintenance;
+    final pendingWrites = List<Future<void>>.from(_writeChains.values);
+    late final Future<T> scheduled;
+    scheduled = previous
+        .catchError((Object _) {})
+        .then((_) => Future.wait<void>(pendingWrites, eagerError: false))
+        .then((_) => operation());
+    _maintenance = scheduled.then<void>(
+      (_) {},
+      onError: (Object _, StackTrace __) {},
+    );
+    return scheduled;
+  }
+
+  Future<int> _deleteTreeNoFollow(FileSystemEntity entity) async {
+    final type = await FileSystemEntity.type(entity.path, followLinks: false);
+    if (type == FileSystemEntityType.notFound) return 0;
+    if (type != FileSystemEntityType.directory) {
+      await entity.delete();
+      return 1;
+    }
+    var removed = 0;
+    await for (final child in Directory(entity.path).list(followLinks: false)) {
+      removed += await _deleteTreeNoFollow(child);
+    }
+    await entity.delete();
+    return removed + 1;
+  }
+
+  /// Validates the app-managed parent chain before any operation can create or
+  /// read a child. `FileSystemEntity.type(..., followLinks: false)` only
+  /// protects the final path component; checking these parents prevents a
+  /// malicious `work_mode_agent` link from redirecting JSONL I/O elsewhere.
+  Future<bool> _ensureEventsDirectory({required bool create}) async {
+    if (!await _ensureManagedParents(create: create)) return false;
+
+    final eventsType = await FileSystemEntity.type(
+      _eventsDirectory.path,
+      followLinks: false,
+    );
+    if (eventsType == FileSystemEntityType.link) {
+      // A clear operation may safely remove this link itself, but reads and
+      // writes must fail closed instead of following it to a user path.
+      if (!create) return false;
+      throw StateError('工作模式事件目录不是受信任目录。');
+    }
+    if (eventsType == FileSystemEntityType.notFound) {
+      if (!create) return false;
+      await _eventsDirectory.create(recursive: false);
+    } else if (eventsType != FileSystemEntityType.directory) {
+      throw StateError('工作模式事件目录不是普通目录。');
+    }
+    return true;
+  }
+
+  Future<bool> _ensureManagedParents({required bool create}) async {
+    final appSupportType = await FileSystemEntity.type(
+      appSupportDirectory.path,
+      followLinks: false,
+    );
+    if (appSupportType == FileSystemEntityType.link) {
+      throw StateError('工作模式事件目录的应用数据根不是受信任目录。');
+    }
+    if (appSupportType == FileSystemEntityType.notFound) {
+      if (!create) return false;
+      await appSupportDirectory.create(recursive: true);
+    } else if (appSupportType != FileSystemEntityType.directory) {
+      throw StateError('工作模式事件目录的应用数据根不是普通目录。');
+    }
+
+    final container = Directory('${appSupportDirectory.path}/work_mode_agent');
+    final containerType = await FileSystemEntity.type(
+      container.path,
+      followLinks: false,
+    );
+    if (containerType == FileSystemEntityType.link) {
+      throw StateError('工作模式事件目录不是受信任目录。');
+    }
+    if (containerType == FileSystemEntityType.notFound) {
+      if (!create) return false;
+      await container.create(recursive: false);
+    } else if (containerType != FileSystemEntityType.directory) {
+      throw StateError('工作模式事件目录不是普通目录。');
+    }
+    return true;
   }
 
   String _safeText(String value, int maximum) {

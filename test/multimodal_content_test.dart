@@ -43,6 +43,36 @@ void main() {
           'data:image/png;base64,${base64Encode([1, 2, 3])}');
     });
 
+    test('prepared oversized data URI is rejected without throwing', () {
+      final message = Message(
+        groupId: 'g1',
+        senderId: 'user',
+        senderType: 'user',
+        content: '图片',
+        media: [
+          MediaAttachment(
+            id: 'oversized-prepared',
+            type: 'image',
+            localPath: '/tmp/oversized.png',
+            mimeType: 'image/png',
+          ),
+        ],
+      );
+
+      final result = buildUserMessageContent(
+        message,
+        supportsVision: true,
+        preparedImageDataUris: {
+          '/tmp/oversized.png':
+              'data:image/png;base64,${base64Encode(Uint8List(defaultMaxInlineImageBytes + 1))}',
+        },
+      );
+
+      expect(result, isA<String>());
+      expect(result, contains('体积限制'));
+      expect(result, isNot(contains('image_url')));
+    });
+
     test('无媒体 → 返回 String 文案', () {
       final message = Message(
         groupId: 'g1',

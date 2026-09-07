@@ -155,6 +155,24 @@ void _registerBackupRestoreServiceTestPart1() {
     expect(await File(restoredMedia.localPath).readAsBytes(), [1, 2, 3, 4]);
   });
 
+  test('inspection rejects a filesystem symlink used as the backup source',
+      () async {
+    final backup = File('${testRoot.path}/regular.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(destination: backup);
+    final link = Link('${testRoot.path}/source-link.cgbak');
+    await link.create(backup.path);
+
+    await expectLater(
+      service.inspect(File(link.path)),
+      throwsA(isA<BackupException>()),
+    );
+  }, skip: Platform.isWindows ? 'symlink privileges vary on Windows' : null);
+
   test('backup round-trip preserves both gender values', () async {
     final attachment = File('${mediaDirectory.path}/gender.txt');
     await attachment.writeAsString('gender');

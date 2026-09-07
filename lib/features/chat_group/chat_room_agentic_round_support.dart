@@ -26,9 +26,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     }
     // 并发兜底：同一角色正在执行 agentic 任务时，auto-chat / 其他并发路径
     // 不得触发同一角色的普通 LLM 回复，否则会出现「agentic 兜底文案 + 普通
-    // LLM 泄漏代码」两条消息的 Bug（auto-chat 传 userMessage=null 会绕过 agentic
-    // 分支直接走流式路径，而 _agenticRunningCharacterIds 此前仅在 _generateAgenticReply
-    // 入口检查，覆盖不到这里）。
+    // LLM 泄漏代码」两条消息的 Bug（auto-chat 传 userMessage=null 会绕过工作任务
+    // 分支直接走流式路径，因此这里也必须检查角色执行锁）。
     if (_agenticRunningCharacterIds.contains(character.id)) {
       return '';
     }
@@ -338,16 +337,6 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       icon: Icons.account_balance_wallet_outlined,
     );
   }
-
-  /// 生成 agentic（工具调用）回复：跑 [AgentRuntime] 多步循环并落库结果。
-  ///
-  /// [resumeTask] 非空表示从检查点恢复；[workMode] 表示工作模式（更强的规划上下文
-  /// 与工作区支持）；[cancelToken] / [workModeRun] 用于中途取消。
-  ///
-  /// 三种结束路径：
-  /// - 等待工具审批 → 弹审批 UI，任务挂起；
-  /// - 未完成（超步数/超时/出错）→ 写部分完成报告，并提示可恢复；
-  /// - 完成 → 写最终消息（可能带生成的文件附件），更新用量与记忆。
 }
 
 /// Converts provider-controlled failures into a short, persistence-safe label.

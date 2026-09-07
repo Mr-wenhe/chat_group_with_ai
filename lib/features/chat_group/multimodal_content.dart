@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/attachment_data_uri.dart';
@@ -84,9 +85,54 @@ dynamic buildUserMessageContent(
       }
       final preparedDataUri = preparedImageDataUris[image.localPath];
       Uint8List? bytes;
-      if (preparedDataUri == null) {
+      if (preparedDataUri != null) {
+        // Prepared data is still an untrusted boundary when this helper is
+        // called by an alternate adapter. Validate the encoded URI instead of
+        // trusting the map to have come from our own preparation loop.
         try {
-          bytes = readBytes(image.localPath);
+          final prepared = decodeAttachmentDataUriBounded(
+            preparedDataUri,
+            maxBytes: maxInlineImageBytes,
+            message: '图片超过内联上限',
+          );
+          if (prepared == null || !_isImageMimeType(prepared.mimeType)) {
+            unreadableImageCount++;
+            continue;
+          }
+        } on AttachmentDataUriTooLargeException {
+          // An alternate adapter must not be able to bypass the same
+          // decoded-byte budget used by the normal preparation path.
+          skippedImageCount++;
+          continue;
+        } on Object {
+          unreadableImageCount++;
+          continue;
+        }
+      } else {
+        try {
+          // Inline data is already a complete payload. Decode it here rather
+          // than letting an injected reader reinterpret a malformed or
+          // non-image `data:` URI as a local file.
+          final inline = decodeAttachmentDataUriBounded(
+            image.localPath,
+            maxBytes: maxInlineImageBytes,
+            message: '图片超过内联上限',
+          );
+          if (inline != null) {
+            if (!_isImageMimeType(inline.mimeType)) {
+              unreadableImageCount++;
+              continue;
+            }
+            bytes = inline.bytes;
+          } else if (image.localPath.trim().toLowerCase().startsWith('data:')) {
+            unreadableImageCount++;
+            continue;
+          } else {
+            bytes = readBytes(image.localPath);
+          }
+        } on AttachmentDataUriTooLargeException {
+          skippedImageCount++;
+          continue;
         } catch (_) {
           unreadableImageCount++;
           continue;
@@ -193,11 +239,19 @@ Future<dynamic> prepareUserMessageContent(
       continue;
     }
     try {
-      final data = decodeAttachmentDataUri(image.localPath);
-      if (data != null) {
+      final data = decodeAttachmentDataUriBounded(
+        image.localPath,
+        maxBytes: maxInlineImageBytes,
+        message: '图片超过内联上限',
+      );
+      if (data != null && _isImageMimeType(data.mimeType)) {
         prepared[image.localPath] = image.localPath;
         continue;
       }
+      // A syntactically valid non-image data URI must not fall through to an
+      // injected filesystem reader and be re-labelled as an image.
+      if (data != null) continue;
+      if (image.localPath.trim().toLowerCase().startsWith('data:')) continue;
       final bytes = await readBytes(image.localPath);
       if (bytes.lengthInBytes > maxInlineImageBytes) continue;
       final encoded = await compute(_encodeBase64, bytes);
@@ -211,8 +265,17 @@ Future<dynamic> prepareUserMessageContent(
     preparedMessage,
     supportsVision: supportsVision,
     fileReader: (path) {
-      final data = decodeAttachmentDataUri(path);
-      if (data != null) return data.bytes;
+      final data = decodeAttachmentDataUriBounded(
+        path,
+        maxBytes: maxInlineImageBytes,
+        message: '图片超过内联上限',
+      );
+      if (data != null) {
+        if (!_isImageMimeType(data.mimeType)) {
+          throw const FileSystemException('内联附件不是图片');
+        }
+        return data.bytes;
+      }
       throw FileSystemException('Image was not prepared', path);
     },
     maxVisionImages: maxVisionImages,
@@ -224,18 +287,50 @@ Future<dynamic> prepareUserMessageContent(
 String _encodeBase64(Uint8List bytes) => base64Encode(bytes);
 
 Future<Uint8List> _defaultAsyncFileReader(String path) async {
-  final data = decodeAttachmentDataUri(path);
-  if (data != null) return data.bytes;
-  return File(path).readAsBytes();
+  final data = decodeAttachmentDataUriBounded(
+    path,
+    maxBytes: defaultMaxInlineImageBytes,
+    message: '图片超过内联上限',
+  );
+  if (data != null) {
+    if (!_isImageMimeType(data.mimeType)) {
+      throw const FileSystemException('内联附件不是图片');
+    }
+    return data.bytes;
+  }
+  // The attachment metadata is advisory and can change after it was
+  // persisted. Read through a bounded stream so a replaced local image cannot
+  // turn the multimodal path into an unbounded allocation.
+  final builder = BytesBuilder(copy: false);
+  await for (final chunk
+      in File(path).openRead(0, defaultMaxInlineImageBytes + 1)) {
+    builder.add(chunk);
+    if (builder.length > defaultMaxInlineImageBytes) {
+      throw const FileSystemException('图片超过内联上限');
+    }
+  }
+  return builder.takeBytes();
 }
 
 /// Legacy synchronous entry point only supports already-inline data URIs.
 Uint8List _defaultFileReader(String path) {
-  final data = decodeAttachmentDataUri(path);
-  if (data != null) return data.bytes;
+  final data = decodeAttachmentDataUriBounded(
+    path,
+    maxBytes: defaultMaxInlineImageBytes,
+    message: '图片超过内联上限',
+  );
+  if (data != null) {
+    if (!_isImageMimeType(data.mimeType)) {
+      throw const FileSystemException('内联附件不是图片');
+    }
+    return data.bytes;
+  }
   throw FileSystemException(
       'Use prepareUserMessageContent for local files', path);
 }
+
+bool _isImageMimeType(String mimeType) =>
+    mimeType.trim().toLowerCase().startsWith('image/');
 
 String _unreadableImageHint(int count) {
   if (count <= 0) return '';

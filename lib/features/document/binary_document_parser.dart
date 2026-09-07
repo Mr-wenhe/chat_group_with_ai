@@ -28,6 +28,7 @@ class BinaryDocumentParser {
   static const int maxPdfPages = 80;
   static const int maxArchiveEntries = 2048;
   static const int maxExpandedBytes = 32 * 1024 * 1024;
+  static const int maxArchiveEntryReadBytes = 8 * 1024 * 1024;
   static const int maxExtractedChars = 1024 * 1024;
   static const int maxSpreadsheetRows = 10000;
   static const int _maxSectionChars = 1200;
@@ -176,24 +177,90 @@ class BinaryDocumentParser {
     if (bytes.length < 4 || bytes[0] != 0x50 || bytes[1] != 0x4b) {
       throw const FormatException('Open XML 文件签名无效');
     }
-    final archive = ZipDecoder().decodeBytes(bytes, verify: true);
+    // Inspect the central directory before handing bytes to archive. The
+    // package eagerly expands Unix symlink entries while decoding metadata;
+    // rejecting those entries here prevents that path from bypassing the
+    // bounded output stream below. The same preflight also catches obviously
+    // invalid declared sizes before any decompressor is started.
+    _preflightArchiveDirectory(bytes);
+    // archive 4.0.x currently comments out its verify=true CRC branch. Decode
+    // metadata first, then verify only the bounded entries we actually read.
+    final archive = ZipDecoder().decodeBytes(bytes, verify: false);
     if (archive.length > maxArchiveEntries) {
       throw const FormatException('压缩包条目过多');
     }
-    final expandedBytes = archive.files.fold<int>(
-      0,
-      (total, file) => total + (file.isFile ? file.size : 0),
-    );
+    var expandedBytes = 0;
+    for (final file in archive.files) {
+      if (!file.isFile) continue;
+      if (file.size < 0 || file.size > maxExpandedBytes) {
+        throw const FormatException('压缩包条目展开后超过 32 MB 上限');
+      }
+      expandedBytes += file.size;
+      if (expandedBytes > maxExpandedBytes) {
+        throw const FormatException('压缩包展开后超过 32 MB 上限');
+      }
+    }
     if (expandedBytes > maxExpandedBytes) {
       throw const FormatException('压缩包展开后超过 32 MB 上限');
     }
     return archive;
   }
 
+  static void _preflightArchiveDirectory(Uint8List bytes) {
+    final directory = ZipDirectory();
+    directory.read(InputMemoryStream(bytes));
+    if (directory.fileHeaders.length > maxArchiveEntries) {
+      throw const FormatException('压缩包条目过多');
+    }
+    var expandedBytes = 0;
+    for (final header in directory.fileHeaders) {
+      final file = header.file;
+      if (file == null) continue;
+      if (_isUnixSymlink(header)) {
+        // DOCX/XLSX never need archive links. Rejecting them also avoids the
+        // archive package's eager, unbounded symlink read during decode.
+        throw const FormatException('压缩包不支持符号链接条目');
+      }
+      final uncompressed = header.uncompressedSize;
+      final compressed = header.compressedSize;
+      if (uncompressed < 0 ||
+          uncompressed > maxExpandedBytes ||
+          compressed < 0 ||
+          compressed > bytes.length) {
+        throw const FormatException('压缩包条目展开后超过 32 MB 上限');
+      }
+      expandedBytes += uncompressed;
+      if (expandedBytes > maxExpandedBytes) {
+        throw const FormatException('压缩包展开后超过 32 MB 上限');
+      }
+    }
+  }
+
+  static bool _isUnixSymlink(ZipFileHeader header) {
+    final madeByUnix = header.versionMadeBy >> 8 == 3;
+    final fileType = (header.externalFileAttributes >> 16) & 0xf000;
+    return madeByUnix && fileType == 0xa000;
+  }
+
   static XmlDocument _xml(ArchiveFile file) {
-    final bytes = file.readBytes();
-    if (bytes == null) throw const FormatException('XML 内容无法读取');
+    final bytes = _readArchiveBytes(file, maxArchiveEntryReadBytes);
     return XmlDocument.parse(utf8.decode(bytes, allowMalformed: false));
+  }
+
+  /// Decompresses an entry into a bounded sink. Calling ArchiveFile.readBytes
+  /// would first materialize the complete expansion, making the ZIP header's
+  /// declared size the only practical guard against a decompression bomb.
+  static Uint8List _readArchiveBytes(ArchiveFile file, int limit) {
+    if (!file.isFile || file.size < 0 || file.size > limit) {
+      throw const FormatException('压缩包条目超过读取上限');
+    }
+    final output = _BoundedArchiveOutputStream(limit);
+    file.decompress(output);
+    final bytes = output.toBytes();
+    if (file.crc32 != null && getCrc32(bytes) != file.crc32) {
+      throw const FormatException('压缩包条目校验失败');
+    }
+    return bytes;
   }
 
   static Iterable<XmlElement> _elements(XmlNode node, String localName) =>
@@ -278,4 +345,57 @@ class BinaryDocumentParser {
       throw const FormatException('提取文本超过 1 MB 上限');
     }
   }
+}
+
+/// Minimal streaming sink used by [BinaryDocumentParser] to enforce an
+/// actual post-decompression byte limit without allocating an untrusted size.
+class _BoundedArchiveOutputStream extends OutputStream {
+  final int _limit;
+  final BytesBuilder _chunks = BytesBuilder(copy: false);
+  var _length = 0;
+
+  _BoundedArchiveOutputStream(this._limit)
+      : super(byteOrder: ByteOrder.littleEndian);
+
+  @override
+  int get length => _length;
+
+  @override
+  void clear() {
+    _chunks.clear();
+    _length = 0;
+  }
+
+  @override
+  void flush() {}
+
+  @override
+  void writeByte(int value) => writeBytes(<int>[value]);
+
+  @override
+  void writeBytes(List<int> bytes, {int? length}) {
+    final count = length ?? bytes.length;
+    if (count < 0 || count > bytes.length || _length + count > _limit) {
+      throw const FormatException('压缩包实际展开内容超过读取上限');
+    }
+    if (count == 0) return;
+    _chunks.add(bytes is Uint8List
+        ? bytes.sublist(0, count)
+        : bytes.take(count).toList());
+    _length += count;
+  }
+
+  @override
+  void writeStream(InputStream stream) {
+    while (!stream.isEOS) {
+      final count = stream.length.clamp(0, 8192).toInt();
+      if (count == 0) break;
+      writeBytes(stream.readBytes(count).toUint8List());
+    }
+  }
+
+  @override
+  Uint8List subset(int start, [int? end]) => toBytes().sublist(start, end);
+
+  Uint8List toBytes() => _chunks.takeBytes();
 }

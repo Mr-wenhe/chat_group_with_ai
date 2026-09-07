@@ -1,5 +1,7 @@
 import 'dart:io';
 
+import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
+
 enum BackupScope { all, configurationOnly, conversation }
 
 enum BackupKind { full, conversation }
@@ -186,10 +188,21 @@ class PreparedBackup {
   BackupManifest get manifest => preview.manifest;
 
   Future<void> dispose() async {
-    if (await stagingDirectory.exists()) {
-      await stagingDirectory.delete(recursive: true);
-    }
+    await _deleteTreeNoFollow(stagingDirectory);
   }
+}
+
+Future<void> _deleteTreeNoFollow(FileSystemEntity entity) async {
+  final type = await FileSystemEntity.type(entity.path, followLinks: false);
+  if (type == FileSystemEntityType.notFound) return;
+  if (type != FileSystemEntityType.directory) {
+    await entity.delete();
+    return;
+  }
+  await for (final child in Directory(entity.path).list(followLinks: false)) {
+    await _deleteTreeNoFollow(child);
+  }
+  await entity.delete();
 }
 
 class BackupExportResult {
@@ -234,4 +247,29 @@ class BackupException implements Exception {
 
   @override
   String toString() => message;
+}
+
+/// Keeps OS/provider error details useful without persisting credentials,
+/// URLs, or device-local paths in a backup/restore diagnostic.
+String sanitizeBackupError(Object? error) {
+  final raw = error?.toString().trim() ?? '';
+  if (raw.isEmpty) return '备份操作失败';
+  var safe = const SearchSecretScanner().redact(
+    raw,
+    includeOpaqueTokens: true,
+  );
+  safe = safe.replaceAll(
+    RegExp(r'https?://[^\s,;）)]+', caseSensitive: false),
+    '[外部地址]',
+  );
+  safe = safe.replaceAll(
+    RegExp(
+      r'(?:(?:[A-Za-z]:[\\/])|(?:\\\\|//)|/)[^\s,;）)]*',
+    ),
+    '[本地路径]',
+  );
+  safe = safe.replaceAll(RegExp(r'\s+'), ' ').trim();
+  if (safe.isEmpty) return '备份操作失败';
+  const maximum = 600;
+  return safe.length <= maximum ? safe : '${safe.substring(0, maximum - 1)}…';
 }

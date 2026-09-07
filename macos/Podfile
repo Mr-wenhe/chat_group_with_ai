@@ -40,4 +40,99 @@ post_install do |installer|
   installer.pods_project.targets.each do |target|
     flutter_additional_macos_build_settings(target)
   end
+
+  # desktop_webview_window 0.3.0 invokes the Dart URL callback but always
+  # returns WKNavigationActionPolicy.allow on macOS.  The visible-browser
+  # boundary must fail closed before a file:// URL can load, so patch the
+  # pinned plugin source at pod-install time.  Keep this check strict: a
+  # future plugin change must not silently remove the native security gate.
+  webview_sources = Dir[
+    File.expand_path(
+      'Flutter/ephemeral/.symlinks/plugins/desktop_webview_window/macos/**/WebViewLayoutController.swift',
+      __dir__,
+    ),
+  ]
+  if webview_sources.empty?
+    raise 'desktop_webview_window navigation controller source not found'
+  end
+  navigation_guard = 'guard ["http", "https", "file"].contains(url.scheme?.lowercased() ?? "") else {'
+  secure_navigation_guard = 'guard ["http", "https"].contains(url.scheme?.lowercased() ?? "") else {'
+  webview_sources.each do |source_path|
+    source = File.read(source_path)
+    if source.include?(navigation_guard)
+      source = source.sub(navigation_guard, secure_navigation_guard)
+    elsif !source.include?(secure_navigation_guard)
+      raise "desktop_webview_window navigation guard was not found: #{source_path}"
+    end
+    # The plugin callback is also invoked for iframe navigations. A child
+    # frame must not be allowed to replace the task's main-page URL (or load a
+    # private endpoint) through the Dart callback, so reject non-main frames at
+    # the native decision boundary.
+    main_frame_guard = [
+      '    guard navigationAction.targetFrame?.isMainFrame ?? true else {',
+      '      decisionHandler(.cancel)',
+      '      return',
+      '    }',
+      '',
+    ].join("\n")
+    if source.include?(main_frame_guard)
+      # Already patched; keep pod install idempotent.
+    elsif source.include?(secure_navigation_guard)
+      source = source.sub(
+        "#{secure_navigation_guard}\n      decisionHandler(.cancel)\n      return\n    }\n\n",
+        "#{secure_navigation_guard}\n      decisionHandler(.cancel)\n      return\n    }\n\n#{main_frame_guard}",
+      )
+    else
+      raise "desktop_webview_window secure navigation guard body was not found: #{source_path}"
+    end
+    # desktop_webview_window 0.3.0 ignores the Dart callback result on macOS
+    # and unconditionally allows every http(s) navigation. Use the plugin's
+    # existing method-channel result to make the Dart public-URL validator the
+    # native decision boundary too; otherwise a blocked URL would still load.
+    original_callback = [
+      '    methodChannel.invokeMethod("onUrlRequested", arguments: [',
+      '      "id": viewId,',
+      '      "url": url.absoluteString,',
+      '    ] as [String: Any])',
+      '',
+      '    decisionHandler(.allow)',
+      '',
+    ].join("\n")
+    guarded_callback = [
+      '    methodChannel.invokeMethod("onUrlRequested", arguments: [',
+      '      "id": viewId,',
+      '      "url": url.absoluteString,',
+      '    ] as [String: Any]) { result in',
+      '      let allow = (result as? NSNumber)?.boolValue == true',
+      '      decisionHandler(allow ? .allow : .cancel)',
+      '    }',
+      '',
+    ].join("\n")
+    if source.include?(original_callback)
+      source = source.sub(original_callback, guarded_callback)
+    elsif !source.include?(guarded_callback)
+      raise "desktop_webview_window URL callback body was not found: #{source_path}"
+    end
+    # WKUIDelegate's default plugin implementation loads target=_blank
+    # requests directly and bypasses decidePolicyFor navigationAction. Block
+    # such popups instead of giving them a second, unvalidated navigation
+    # channel; the user can follow a normal in-page link after review.
+    popup_loading = [
+      '    if !(navigationAction.targetFrame?.isMainFrame ?? false) {',
+      '      webView.load(navigationAction.request)',
+      '    }',
+      '    return nil',
+    ].join("\n")
+    popup_blocked = [
+      '    // Popups are blocked so every navigation crosses the main-frame',
+      '    // URL callback and public-endpoint validator.',
+      '    return nil',
+    ].join("\n")
+    if source.include?(popup_loading)
+      source = source.sub(popup_loading, popup_blocked)
+    elsif !source.include?(popup_blocked)
+      raise "desktop_webview_window popup navigation body was not found: #{source_path}"
+    end
+    File.write(source_path, source)
+  end
 end

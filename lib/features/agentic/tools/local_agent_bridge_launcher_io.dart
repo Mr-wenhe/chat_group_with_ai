@@ -34,6 +34,8 @@ import 'package:flutter/foundation.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_config.dart';
 import 'package:chat_group/features/agentic/tools/local_agent_bridge_server.dart';
 
+/// Legacy ordinary-agentic launcher. The production work-mode provider does
+/// not call this launcher or start a localhost service.
 class LocalAgentBridgeLauncher {
   /// 当前进程内持有的桥接服务器；为 null 表示未运行。
   static RunningBridgeServer? _server;

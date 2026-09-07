@@ -127,10 +127,17 @@
 
 ### 4.3 事件与快照文件
 
-- 事件：App Support 下 `work_mode/tasks/<taskId>/events.jsonl`，逐条追加，不保存文件全文和密钥。
-- 快照：`work_mode/snapshots/<taskId>/`，包含 manifest、被覆盖/删除文件副本和新建文件记录。
+- 事件：App Support 下 `work_mode_agent/events/<taskId>.jsonl`，逐条追加，不保存文件全文和密钥。
+- 快照：App Support 下 `work_mode_agent/snapshots/<taskId>/`，包含 manifest、被覆盖/删除文件副本和新建文件记录。
 - 任务终态后 30 天清理；总量超过 2 GB 时先清理最旧已完成任务。
 - 写事件失败不能撤销已发生工具结果，但必须把任务标记为“日志不完整”；写快照失败则在写操作前阻止或要求单独确认无撤销继续。
+
+### 4.4 Task 24 安全生命周期实现差异
+
+- 全局“清除 App 数据”先让 `WorkTaskCoordinator` 进入维护态、暂停新的事件追加、停止并等待任务落盘；仅在停止成功后清理 App Support 下的事件和撤销快照，并在结束时恢复调度。事件/快照目录和每层父目录均拒绝符号链接；任何维护前校验失败都会保守失败并保留可重试状态。授权目录中的真实项目文件不在清理范围内。
+- 可移植备份对 `AgentTask` 使用严格 allowlist 和导入后二次净化：只保留请求、状态、进度和可重算上下文；授权绝对路径、快照/治理日志、审批/锁、工具结果和非便携路径全部丢弃。API Key、凭据标识和搜索授权也不进入备份；恢复后必须重新规划并重新审批。
+- 备份源文件、staging、检查、恢复和快照删除均采用不跟随链接的类型检查、锁、预条件哈希和复制后校验；旧版不透明操作文本跨备份边界只保留脱敏标记。Dart IO 无法提供跨进程原子 no-clobber，V1 将该残余 TOCTOU 风险记录为 P2，并以独占临时文件、路径锁及失败即停降低影响。
+- 备份/命令/设置错误展示统一经过路径、URL、令牌脱敏；撤销授权文案明确“只停止 App 访问，不会删除目录或文件”，与清除 App 数据的“仅清理 App 管理事件/快照”语义分开。
 
 ## 5. Agent 循环
 
@@ -140,23 +147,33 @@
 
 ```json
 {
-  "type": "tool | clarify | handoff | final",
-  "summary": "展示给用户的当前动作摘要",
-  "tool": "workspace.read",
-  "args": {},
-  "next": []
+  "action": "plan | tool | clarify | handoff | finish",
+  "public_update": "正在读取项目配置",
+  "tool": {
+    "name": "workspace.read",
+    "arguments": {"path": "pubspec.yaml"}
+  },
+  "completion": null
 }
 ```
 
 解析规则：
 
 1. 流式接收模型输出，面板只展示安全的动作状态，不展示私有思维链。
-2. 只解析一个顶层 JSON object；允许外层 JSON code fence，不兼容任意 XML。
-3. 解析失败时用同一角色模型做一次短 JSON 修复。
-4. 流式通道为空时，对同一请求回退一次非流式调用。
+2. 只解析一个顶层 JSON object；禁止 Markdown code fence、XML 和额外前后文本。
+   `action`、`public_update`、`tool`、`completion` 的组合必须符合对应的
+   `AgentDecision` 类型；工具名和参数先经过注册表 schema 校验。
+3. 解析失败时用同一角色模型做一次短 JSON 修复；修复请求只能携带原始响应这一
+   数据，不得把隐藏思维链写入事件或检查点。
+4. 流式通道为空时，对同一请求回退一次非流式调用；标准 `content` 为空才读取
+   兼容字段 `reasoning_content`，两者均为空必须报错。
 5. 两次均失败则进入可恢复错误态，说明具体原因；不得用硬编码伪产物冒充成功。
 
-标准 function/tool calling 可在后续按 Provider 能力逐个接入，但不是 V1 正确性的前提。DeepSeek、通义、智谱、Moonshot、百度和自定义 OpenAI-compatible 配置都先走这条统一文本 JSON 路径，且比当前多正则协议更容易测试。
+标准 function/tool calling 可在后续按 Provider 能力逐个接入，但不是 V1 正确性的前提。
+DeepSeek、通义、智谱、Moonshot、百度和自定义 OpenAI-compatible 配置都先走这条
+统一文本 JSON 路径，且比当前多正则协议更容易测试。旧的
+`buildToolPlanningPrompt` 仅供普通 AgentRuntime 的兼容入口，工作模式不会再解析
+其旧 `type/summary/args/next` 方言。
 
 ### 5.2 循环伪代码
 
@@ -258,15 +275,21 @@ while 未完成:
 ```json
 {
   "executable": "flutter",
-  "args": ["analyze", "lib/foo.dart"],
-  "cwd": "/authorized/project",
-  "impactPaths": ["/authorized/project/lib/foo.dart"],
-  "network": false,
-  "mutating": false
+  "arguments": ["analyze", "lib/foo.dart"],
+  "workingDirectory": "/authorized/project",
+  "declaredImpact": ["/authorized/project/lib/foo.dart"]
 }
 ```
 
-优先 `Process.start(..., runInShell: false)`，避免 shell 注入；确实需要 shell 时必须作为高风险命令单独确认。可执行文件解析、cwd 和路径参数都经过应用级策略校验。
+优先 `Process.start(..., runInShell: false)`，避免 shell 注入；shell 可执行文件和
+管道/重定向只能作为高风险命令单独确认。启动前解析可执行文件到规范绝对路径，
+并用 `WorkspacePathPolicy` 对 cwd、所有参数路径和 `declaredImpact` 做真实路径校验，
+符号链接越出授权目录即拒绝。curl/wget 只接受明确的 HTTP(S) 公网目标；主机名先做
+DNS 地址校验，curl 禁止跟随重定向，wget 强制 `--no-config` 和
+`--max-redirect=0`（重复声明也必须全部为 0），代理、DoH/DNS、Unix socket、URL 查询
+文件等路由覆盖一律阻止，URL 不得携带用户名或密码；curl `@文件` 引用也要经过授权
+路径校验。子进程不继承 HOME 等隐式用户配置环境。默认 OS 进程启动器
+若未注入路径解析器也会拒绝执行，避免调用方绕过真实路径/符号链接校验。
 
 ### 9.2 生命周期
 
@@ -389,7 +412,7 @@ DuckDuckGo Instant Answer 只保留为稳定百科补充，不再承担通用无
 | 敏感文件 | `.env`、PEM、证书、凭据文件拦截与任务级确认 |
 | 调度 | 同会话 FIFO、全局 2、第三任务排队、停止/失败释放槽位、目录锁 |
 | 持久化 | 崩溃检查点、重启手动恢复、30 天清理、损坏 JSONL/检查点降级 |
-| Agent 协议 | 合法 JSON、code fence、非法格式修复、空流回退、两路为空失败 |
+| Agent 协议 | 合法 JSON、code fence 拒绝、非法格式修复、空流回退、两路为空失败 |
 | 上下文 | 群共享、私聊隔离、修订原路径、压缩后保留批准范围与副作用 |
 | 角色 | @ 指定、无 @ 自动选择、多阶段接力、角色 API 不可用、未知角色 ID |
 | 文件 | 新建/修改/补丁/重命名/删除、外部修改冲突、读回验证 |

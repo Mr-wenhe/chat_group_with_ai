@@ -1,4 +1,5 @@
 import 'search_failure.dart';
+import 'package:chat_group/features/ai_governance/search_failure_classifier.dart';
 import '../security/search_endpoint_validator.dart';
 import '../security/search_secret_scanner.dart';
 
@@ -28,6 +29,7 @@ enum SearchProviderKind {
   tavily,
   brave,
   duckDuckGoInstantAnswer,
+  keylessHtml,
 }
 
 enum SearchCategory {
@@ -246,10 +248,14 @@ String? _normalizeHash(String? value) {
   return normalized.toLowerCase();
 }
 
-String? _normalizeOptionalText(String? value) {
-  if (value == null) return null;
-  final normalized = value.trim();
-  return normalized.isEmpty ? null : normalized;
+/// Snapshots can be restored from older or user-edited message maps. Invalid
+/// hashes are discarded instead of rejecting an otherwise usable snapshot.
+String _normalizeSnapshotHash(String value) {
+  try {
+    return _normalizeHash(value) ?? '';
+  } on ArgumentError {
+    return '';
+  }
 }
 
 /// Provider language metadata is untrusted display/snapshot data. Keep it

@@ -19,6 +19,8 @@ class BrowserContextSnapshot {
       pageText.length <= 12000 ? pageText : pageText.substring(0, 12000);
 }
 
+/// Browser context adapter owned by ordinary/compatibility agentic callers.
+/// Production work mode does not route browser actions through this adapter.
 class BrowserContextTool {
   final LocalAgentBridgeClient bridge;
 

@@ -235,9 +235,9 @@ class BackupExporter {
     } on BackupException {
       rethrow;
     } on Object catch (error) {
-      throw BackupException('创建备份失败：$error');
+      throw BackupException('创建备份失败：${sanitizeBackupError(error)}');
     } finally {
-      if (await staging.exists()) await staging.delete(recursive: true);
+      await _deleteTreeNoFollow(staging);
       if (await partial.exists()) await partial.delete();
     }
   }
@@ -248,13 +248,23 @@ class BackupExporter {
   ) async {
     final actualPaths = <String>{};
     final jsonFiles = <File>[];
-    await for (final entity in staging.list(recursive: true)) {
-      if (entity is File) {
+    await for (final entity in staging.list(
+      recursive: true,
+      followLinks: false,
+    )) {
+      final entityType = await FileSystemEntity.type(
+        entity.path,
+        followLinks: false,
+      );
+      if (entity is File && entityType == FileSystemEntityType.file) {
         actualPaths
             .add(entity.path.substring(staging.path.length + 1).replaceAll(
                   Platform.pathSeparator,
                   '/',
                 ));
+      } else if (entityType == FileSystemEntityType.link) {
+        // Do not expose the temporary staging path in a user-visible error.
+        throw const BackupException('备份 staging 包含符号链接');
       }
     }
     actualPaths.remove('manifest.json');
@@ -264,7 +274,10 @@ class BackupExporter {
     }
     for (final entry in files.entries) {
       final file = File('${staging.path}/${entry.key}');
-      if (!await file.exists() || await file.length() != entry.value.bytes) {
+      if (await FileSystemEntity.type(file.path, followLinks: false) !=
+              FileSystemEntityType.file ||
+          !await file.exists() ||
+          await file.length() != entry.value.bytes) {
         throw BackupException('备份 staging 文件无效：${entry.key}');
       }
       if (entry.key.endsWith('.json') || entry.key.endsWith('.jsonl')) {
@@ -358,6 +371,11 @@ class BackupExporter {
     final bytes = isAttachmentDataUri(attachment.localPath)
         ? decodeAttachmentDataUri(attachment.localPath)?.bytes
         : null;
+    if (isAttachmentDataUri(attachment.localPath) && bytes == null) {
+      // Keep estimate/create semantics aligned: malformed inline media is a
+      // missing attachment, never a filesystem path to hash or open.
+      return null;
+    }
     final digest = bytes == null
         ? await sha256.bind(source.openRead()).first
         : sha256.convert(bytes);
@@ -371,6 +389,12 @@ class BackupExporter {
     } else {
       await source.openRead().pipe(target.openWrite());
     }
+    final copiedDigest =
+        (await sha256.bind(target.openRead()).first).toString();
+    if (copiedDigest != digest.toString()) {
+      await target.delete();
+      throw const BackupException('附件在导出期间发生变化，请重试');
+    }
     files[relativePath] = await _fileEntry(target);
     attachmentsByHash[digest.toString()] = relativePath;
     return relativePath;
@@ -380,10 +404,16 @@ class BackupExporter {
     try {
       final root = await mediaDirectory.resolveSymbolicLinks();
       final resolved = await file.resolveSymbolicLinks();
-      final rootPrefix = root.endsWith(Platform.pathSeparator)
-          ? root
-          : '$root${Platform.pathSeparator}';
-      return resolved.startsWith(rootPrefix) &&
+      final normalizedRoot = root.replaceAll('\\', '/');
+      final normalizedResolved = resolved.replaceAll('\\', '/');
+      final comparableRoot =
+          Platform.isWindows ? normalizedRoot.toLowerCase() : normalizedRoot;
+      final comparableResolved = Platform.isWindows
+          ? normalizedResolved.toLowerCase()
+          : normalizedResolved;
+      final rootPrefix =
+          comparableRoot.endsWith('/') ? comparableRoot : '$comparableRoot/';
+      return comparableResolved.startsWith(rootPrefix) &&
           (await File(resolved).stat()).type == FileSystemEntityType.file;
     } on Object {
       return false;
@@ -446,6 +476,19 @@ class BackupExporter {
     final file = File('${root.path}/$relativePath');
     await file.parent.create(recursive: true);
     return file;
+  }
+
+  Future<void> _deleteTreeNoFollow(FileSystemEntity entity) async {
+    final type = await FileSystemEntity.type(entity.path, followLinks: false);
+    if (type == FileSystemEntityType.notFound) return;
+    if (type != FileSystemEntityType.directory) {
+      await entity.delete();
+      return;
+    }
+    await for (final child in Directory(entity.path).list(followLinks: false)) {
+      await _deleteTreeNoFollow(child);
+    }
+    await entity.delete();
   }
 
   Future<BackupFileEntry> _fileEntry(File file) async => BackupFileEntry(

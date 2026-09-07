@@ -31,6 +31,10 @@ class WorkspacePathGuard {
   }
 }
 
+/// Legacy workspace tool owned by ordinary/compatibility agentic callers.
+///
+/// Production work mode uses the grant-backed Stage 02 tool directly and does
+/// not instantiate this bridge-backed type.
 class WorkspaceFileTool {
   final LocalAgentBridgeClient? bridge;
 

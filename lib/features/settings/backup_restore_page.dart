@@ -224,7 +224,7 @@ class _BackupRestorePageState extends ConsumerState<BackupRestorePage> {
       final estimate = await (await _service()).estimate(_selection);
       if (mounted) setState(() => _estimate = estimate);
     } on Object catch (error) {
-      if (mounted) _toast('无法估算备份：$error');
+      if (mounted) _toast('无法估算备份：${sanitizeBackupError(error)}');
     }
   }
 
@@ -262,7 +262,7 @@ class _BackupRestorePageState extends ConsumerState<BackupRestorePage> {
             '备份已完成：${result.file.path}（${_formatBytes(await result.file.length())}）');
       }
     } on Object catch (error) {
-      if (mounted) _toast('备份失败：$error');
+      if (mounted) _toast('备份失败：${sanitizeBackupError(error)}');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -282,7 +282,7 @@ class _BackupRestorePageState extends ConsumerState<BackupRestorePage> {
       await _prepared?.dispose();
       if (mounted) setState(() => _prepared = prepared);
     } on Object catch (error) {
-      if (mounted) _toast('备份不可用：$error');
+      if (mounted) _toast('备份不可用：${sanitizeBackupError(error)}');
     } finally {
       if (mounted) setState(() => _busy = false);
     }
@@ -327,7 +327,7 @@ class _BackupRestorePageState extends ConsumerState<BackupRestorePage> {
         if (mounted) Navigator.pop(context, true);
       }
     } on Object catch (error) {
-      if (mounted) _toast('恢复失败：$error');
+      if (mounted) _toast('恢复失败：${sanitizeBackupError(error)}');
     } finally {
       if (mounted) setState(() => _busy = false);
     }

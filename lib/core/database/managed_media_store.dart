@@ -154,14 +154,21 @@ class ManagedMediaStore {
       final rootName = root!.absolute.uri.pathSegments
           .where((segment) => segment.isNotEmpty)
           .last;
-      return rootPath == '$parentPath${Platform.pathSeparator}$rootName'
-          ? rootPath
-          : null;
+      final expectedRoot = '$parentPath${Platform.pathSeparator}$rootName';
+      final comparableRoot = _comparablePath(rootPath);
+      final comparableExpected = _comparablePath(expectedRoot);
+      return comparableRoot == comparableExpected ? rootPath : null;
     } on Object {
       return null;
     }
   }
 
   bool _isInside(String rootPath, String path) =>
-      path == rootPath || path.startsWith('$rootPath${Platform.pathSeparator}');
+      _comparablePath(path) == _comparablePath(rootPath) ||
+      _comparablePath(path).startsWith('${_comparablePath(rootPath)}/');
+
+  String _comparablePath(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    return Platform.isWindows ? normalized.toLowerCase() : normalized;
+  }
 }

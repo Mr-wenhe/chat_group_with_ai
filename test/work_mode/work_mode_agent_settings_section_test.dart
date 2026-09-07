@@ -56,6 +56,7 @@ void main() {
     expect(find.textContaining('100 步'), findsOneWidget);
     expect(find.textContaining('60 分钟'), findsOneWidget);
     expect(find.textContaining('删除文件和不可撤销覆盖始终需要确认'), findsOneWidget);
+    expect(find.textContaining('移除授权只停止 App 访问'), findsOneWidget);
     expect(find.byKey(const Key('work-folder-confirm-writes')), findsOneWidget);
     expect(find.byKey(Key('work-folder-remove:${service.grants.single.path}')),
         findsOneWidget);

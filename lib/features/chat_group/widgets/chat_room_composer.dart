@@ -130,6 +130,10 @@ class ChatRoomComposer extends StatelessWidget {
                         key: inputFieldKey,
                         controller: textController,
                         focusNode: focusNode,
+                        // Desktop automation and keyboard users need a real
+                        // native focus target as soon as the room mounts;
+                        // mobile keeps the keyboard opt-in by design.
+                        autofocus: isDesktop,
                         decoration: InputDecoration(
                           hintText: _hintText,
                           suffixIcon: quotedMessage == null
@@ -178,21 +182,33 @@ class ChatRoomComposer extends StatelessWidget {
                     ),
                     const SizedBox(width: 4),
                   ],
-                  IconButton(
-                    icon: const Icon(Icons.send_rounded, size: 22),
-                    style: IconButton.styleFrom(
-                      backgroundColor: canSend
-                          ? WeComChatTokens.lightSelfBubble
-                          : WeComChatTokens.divider(context),
-                      foregroundColor: canSend
-                          ? WeComChatTokens.lightText
-                          : colorScheme.onSurfaceVariant.withValues(alpha: 0.5),
-                      shape: RoundedRectangleBorder(
-                        borderRadius: BorderRadius.circular(4),
-                      ),
-                    ),
-                    onPressed: canSend ? onSend : null,
-                    tooltip: '发送',
+                  ValueListenableBuilder<TextEditingValue>(
+                    valueListenable: textController,
+                    builder: (context, value, _) {
+                      // Keep the parent page stable while typing; the
+                      // controller is the smallest reactive boundary for the
+                      // send affordance.
+                      final canSendNow = canSend ||
+                          value.text.trim().isNotEmpty ||
+                          attachments.isNotEmpty;
+                      return IconButton(
+                        icon: const Icon(Icons.send_rounded, size: 22),
+                        style: IconButton.styleFrom(
+                          backgroundColor: canSendNow
+                              ? WeComChatTokens.lightSelfBubble
+                              : WeComChatTokens.divider(context),
+                          foregroundColor: canSendNow
+                              ? WeComChatTokens.lightText
+                              : colorScheme.onSurfaceVariant
+                                  .withValues(alpha: 0.5),
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(4),
+                          ),
+                        ),
+                        onPressed: canSendNow ? onSend : null,
+                        tooltip: '发送',
+                      );
+                    },
                   ),
                 ],
               ),

@@ -144,7 +144,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
   }
 
   /// 页面只负责把用户已落库的消息提交给全局协调器；它不创建取消令牌、
-  /// workspace bridge 或 AgentRuntime。后续追问复用同一任务的持久上下文。
+  /// 工作区跨进程层或旧的聊天代理循环。后续追问复用同一任务的持久上下文。
   Future<void> _runWorkModeTask({
     required String text,
     required List<String> mentionedIds,
@@ -156,16 +156,104 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       return;
     }
 
-    final executor = WorkModePolicy.selectExecutor(
-      characters: _characters,
-      mentionedIds: mentionedIds,
+    // Route against the complete group membership so an explicit @ can
+    // produce a useful unavailable/ambiguous diagnostic instead of silently
+    // falling back to the first active character. The router also creates the
+    // durable product → development → testing stage plan used by the
+    // coordinator for serial role handoff.
+    final groupCharacters =
+        _allGroupCharacters.isEmpty ? _characters : _allGroupCharacters;
+    // Automatic routing must not ask a model to choose a role that cannot
+    // actually run. Explicit @ and DM routes retain the full list so their
+    // unavailable-role diagnostics remain precise.
+    final routableCharacters = mentionedIds.isNotEmpty || _isDirectChat
+        ? groupCharacters
+        : await _charactersWithUsableCredentials(groupCharacters);
+    final routeSelector = WorkRoleModelSelectorService(
+      characters: routableCharacters,
+      credentials: _credentialResolver,
+      resolveApiConfig: _resolveApiConfig,
+      complete: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required messages,
+        required timeout,
+      }) =>
+          _aiGateway.sendChatMessageWithResponseLimit(
+        apiKey: apiKey,
+        provider: provider,
+        customBaseUrl: config.customBaseUrl,
+        model: config.modelName,
+        messages: messages,
+        maxTokens: 256,
+        receiveTimeout: timeout,
+        maxRetries: 0,
+        purpose: AiRequestPurpose.agent,
+        conversationId: widget.groupId,
+        characterId: 'work-role-router',
+        requiresTools: false,
+        userInitiated: true,
+        maxResponseBytes: WorkRoleModelSelectorService.maxResponseBytes,
+      ),
     );
+    final route =
+        await WorkRoleRouter(modelSelector: routeSelector.select).route(
+      request: text,
+      characters: routableCharacters,
+      conversationId: widget.groupId,
+      isDirectChat: _isDirectChat,
+      directCharacterId: _directCharacterId,
+      skills: _db.characterSkillBox.values,
+    );
+    if (!route.isSuccess) {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'ai',
+        content: '工作模式角色路由未完成：${route.reason}',
+      ));
+      return;
+    }
+    final charactersById = <String, AICharacter>{
+      for (final character in _allGroupCharacters) character.id: character,
+      for (final character in _characters) character.id: character,
+    };
+    final executor = charactersById[route.characterId];
     if (executor == null) {
       await _appendMessage(Message(
         groupId: widget.groupId,
         senderId: 'system',
         senderType: 'ai',
-        content: '工作模式需要至少一个已启用 Agentic 的活跃角色。',
+        content: '工作模式角色路由未完成：找不到选中的执行角色。',
+      ));
+      return;
+    }
+    final stageRoleIds = route.stages.isEmpty
+        ? <String>[executor.id]
+        : route.stages.map((stage) => stage.roleId).toSet().toList();
+    // Re-check the concrete secure credential for every planned stage, not
+    // only ApiConfig.hasCredential. The latter is persisted metadata and can
+    // be stale after rotation/revocation; starting a later stage with a stale
+    // flag would make the task fail after the user already approved routing.
+    final stageCharacters = stageRoleIds
+        .map((characterId) => charactersById[characterId])
+        .whereType<AICharacter>()
+        .toList(growable: false);
+    final usableStageCharacters =
+        await _charactersWithUsableCredentials(stageCharacters);
+    final usableStageIds = usableStageCharacters.map((item) => item.id).toSet();
+    final unavailableRoles = stageCharacters
+        .where((character) => !usableStageIds.contains(character.id))
+        .map((character) => character.name)
+        .toList(growable: false);
+    if (unavailableRoles.isNotEmpty) {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'ai',
+        content: '工作模式角色路由未完成：${unavailableRoles.join('、')}尚未配置可用模型凭据，未启动任务。',
       ));
       return;
     }
@@ -177,15 +265,53 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     )) {
       return;
     }
+    final requestedPermissions = <ToolPermission>{};
+    for (final characterId in stageRoleIds) {
+      requestedPermissions.addAll(
+        charactersById[characterId]?.toolPermissions ?? const [],
+      );
+    }
+    if (requestedPermissions.isEmpty) {
+      requestedPermissions.addAll(executor.toolPermissions);
+    }
     final task = AgentTask(
       groupId: widget.groupId,
       characterId: executor.id,
       userRequest: text,
-      requestedPermissions: executor.toolPermissions,
-      assignedCharacterIds: <String>[executor.id],
+      requestedPermissions: requestedPermissions.toList(growable: false),
+      assignedCharacterIds: stageRoleIds,
+      plan: '角色路由：${route.reason}',
       workModeTask: true,
     );
+    final handoff = route.handoffState;
+    if (handoff != null) WorkHandoffState.persistToTask(task, handoff);
+    await _appendMessage(Message(
+      groupId: widget.groupId,
+      senderId: 'system',
+      senderType: 'ai',
+      content: '工作模式角色路由：${route.reason}',
+    ));
     await coordinator.submit(task);
+  }
+
+  Future<List<AICharacter>> _charactersWithUsableCredentials(
+    Iterable<AICharacter> characters,
+  ) async {
+    final result = <AICharacter>[];
+    for (final character in characters) {
+      final config = _resolveApiConfig(character);
+      if (config == null) continue;
+      try {
+        final key = await _credentialResolver
+            .resolve(config)
+            .timeout(WorkRoleModelSelectorService.defaultTimeout);
+        if (key != null && key.trim().isNotEmpty) result.add(character);
+      } on Object {
+        // A broken credential entry is unavailable for automatic routing;
+        // the explicit route/preflight still reports the affected role.
+      }
+    }
+    return result;
   }
 
   AgentTask? _latestWorkTaskForConversation() {

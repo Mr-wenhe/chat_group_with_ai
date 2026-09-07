@@ -58,6 +58,9 @@ dependencies:
   desktop_drop: ^0.7.1
   open_filex: ^4.7.0
   url_launcher: ^6.3.1
+  desktop_webview_window: 0.3.0
+  # Direct DOM parsing dependency for the keyless HTML search provider.
+  html: 0.15.6
   archive: ^4.0.9
   # 纯 Dart PDF 文本提取；27.2.5 兼容 Dart 2.17+，避免新版 Flutter SDK 下限。
   # 正式发布前须确认项目满足 Syncfusion Community 或 Commercial 授权条件。

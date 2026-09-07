@@ -12,6 +12,10 @@ class SearchProviderItem {
   final double? providerScore;
   final String? language;
 
+  /// Interactive browser pages may legitimately remain on public HTTP. All
+  /// network providers keep the secure HTTPS default.
+  final bool allowInsecureHttp;
+
   SearchProviderItem({
     required String title,
     required String snippet,
@@ -19,6 +23,7 @@ class SearchProviderItem {
     this.publishedAt,
     double? providerScore,
     String? language,
+    this.allowInsecureHttp = false,
   })  : title = sanitizeSearchText(
           title,
           maxLength: searchTitleMaxLength,
@@ -32,7 +37,7 @@ class SearchProviderItem {
           redactSecrets: true,
           redactOpaqueTokens: true,
         ),
-        url = validateSearchUrl(url),
+        url = validateSearchUrl(url, allowInsecureHttp: allowInsecureHttp),
         providerScore = providerScore?.isFinite == true ? providerScore : null,
         language = normalizeSearchLanguage(language);
 }

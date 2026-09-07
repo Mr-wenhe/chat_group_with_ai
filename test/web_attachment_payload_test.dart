@@ -111,6 +111,17 @@ void main() {
     expect(identical(first!.bytes, second!.bytes), isTrue);
   });
 
+  test('UI data URI cache rejects oversized inline payloads without throwing',
+      () {
+    final uri = encodeAttachmentDataUri(
+      Uint8List.fromList(List<int>.filled(33, 7)),
+      'image/png',
+    );
+    final cache = AttachmentDataUriCache(maxEntries: 2, maxBytes: 32);
+
+    expect(cache.decode(uri), isNull);
+  });
+
   test('data URI image is sent to a vision model without filesystem IO', () {
     final uri = encodeAttachmentDataUri(
       Uint8List.fromList([1, 2, 3]),

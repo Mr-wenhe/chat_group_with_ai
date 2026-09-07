@@ -95,6 +95,21 @@ String safeMessageForSearchFailure(SearchFailureType type) => switch (type) {
       SearchFailureType.unknown => '联网搜索暂时失败，请稍后重试',
     };
 
+/// Retryability is part of the stable failure contract, not provider-owned
+/// metadata. Keeping the policy beside the public failure classification lets
+/// restored snapshots rebuild it without trusting persisted booleans.
+bool searchFailureIsRetryable(SearchFailureType type) => switch (type) {
+      SearchFailureType.offline ||
+      SearchFailureType.connection ||
+      SearchFailureType.dns ||
+      SearchFailureType.connectionTimeout ||
+      SearchFailureType.receiveTimeout ||
+      SearchFailureType.providerUnavailable ||
+      SearchFailureType.rateLimited =>
+        true,
+      _ => false,
+    };
+
 bool _looksLikeConfigurationFailure(DioException error) {
   if (error.error is ArgumentError || error.error is StateError) return true;
   final text = [

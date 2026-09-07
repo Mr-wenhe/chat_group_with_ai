@@ -153,6 +153,25 @@ void main() {
     expect(result.error, '解析已取消');
   });
 
+  test('bounds text returned by an injected reader before chunking', () async {
+    final attachment = MediaAttachment(
+      type: 'file',
+      localPath: '/tmp/injected-large.txt',
+      fileName: 'injected-large.txt',
+      fileSize: 1,
+    );
+    final result = await DocumentUnderstandingService.parse(
+      attachment,
+      readText: (_) async => List.filled(
+        DocumentUnderstandingService.maxDocumentBytes + 1,
+        'x',
+      ).join(),
+    );
+
+    expect(result.status, DocumentParseStatus.tooLarge);
+    expect(result.error, contains('超过解析上限'));
+  });
+
   test('rejects oversized and damaged binary documents safely', () async {
     final tooLarge = MediaAttachment(
       type: 'file',

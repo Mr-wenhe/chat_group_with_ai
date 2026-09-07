@@ -8,6 +8,16 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
   }
 
   void _initializeSearchRuntime() {
+    VisibleBrowserService? visibleBrowserService;
+    try {
+      // Lightweight chat-room tests and embedded callers can provide a
+      // DatabaseService before its release data directory is initialized. A
+      // missing event store disables only the interactive browser fallback;
+      // bounded search routes and ordinary chat must remain usable.
+      visibleBrowserService = ref.read(visibleBrowserServiceProvider);
+    } on Object {
+      visibleBrowserService = null;
+    }
     _searchRuntime = ChatRoomSearchRuntimeController(
       conversationId: widget.groupId,
       governanceStore: _governanceStore,
@@ -15,6 +25,7 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
       credentialResolver: _credentialResolver,
       allCharacters: _searchRuntimeCharacters,
       resolveApiConfig: _resolveApiConfig,
+      visibleBrowserService: visibleBrowserService,
     );
     _searchRuntime.initialize();
   }

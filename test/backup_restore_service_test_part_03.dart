@@ -147,6 +147,44 @@ void _registerBackupRestoreServiceTestPart3() {
     expect(prepared.preview.attachmentCount, 0);
   });
 
+  test(
+      'malformed inline attachment is reported as missing without filesystem access',
+      () async {
+    final attachment = File('${mediaDirectory.path}/valid.txt');
+    await attachment.writeAsString('valid');
+    await _seedCoreData(db, attachment);
+    await db.messageBox.put(
+      'invalid-inline-message',
+      Message(
+        id: 'invalid-inline-message',
+        groupId: 'group-1',
+        senderId: 'user',
+        senderType: 'user',
+        content: 'invalid inline',
+        media: [
+          MediaAttachment(
+            id: 'invalid-inline-attachment',
+            type: 'file',
+            localPath: 'data:text/plain;base64,%%%not-base64%%%',
+            fileName: 'invalid.txt',
+          ),
+        ],
+      ),
+    );
+    final backup = File('${testRoot.path}/invalid-inline.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+
+    final estimate = await service.estimate(const BackupSelection.all());
+    final result = await service.createBackup(destination: backup);
+
+    expect(estimate.missingAttachments, 1);
+    expect(result.manifest.missingAttachments, contains('invalid.txt'));
+  });
+
   test('unknown schema and staging tampering are rejected before commit',
       () async {
     final unknown = File('${testRoot.path}/unknown.cgbak');

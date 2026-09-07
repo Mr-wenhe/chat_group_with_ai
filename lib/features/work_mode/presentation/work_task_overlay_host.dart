@@ -1,9 +1,16 @@
 import 'dart:async';
 
 import 'package:chat_group/core/database/database_service_provider.dart';
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/api_config.dart';
+import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
+import 'package:chat_group/features/work_mode/presentation/visible_browser_panel.dart';
 import 'package:chat_group/features/work_mode/providers/work_task_providers.dart';
+import 'package:chat_group/features/work_mode/visible_browser_service.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
@@ -30,10 +37,16 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
   final Future<void> Function(String taskId)? onApproveWithoutUndoTask;
   final Future<void> Function(String taskId)? onRejectTask;
   final Future<void> Function(String taskId)? onRequestFolderTask;
+  final Future<void> Function(String taskId)? onInstallToolTask;
+  final Future<void> Function(String taskId)? onSelectVisionModelTask;
+  final Future<void> Function(String taskId)? onRetryTask;
+  final Future<void> Function(String taskId)? onReauthorizeTask;
+  final Future<void> Function(String taskId)? onViewConflictTask;
   final Future<void> Function(String taskId)? onUndoTask;
   final WorkTaskUndoPreview? undoPreviewFor;
   final WorkSnapshotService? snapshotService;
   final String Function(String characterId)? characterNameFor;
+  final VisibleBrowserService? browserService;
 
   const WorkTaskOverlayHost({
     super.key,
@@ -49,10 +62,16 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
     this.onApproveWithoutUndoTask,
     this.onRejectTask,
     this.onRequestFolderTask,
+    this.onInstallToolTask,
+    this.onSelectVisionModelTask,
+    this.onRetryTask,
+    this.onReauthorizeTask,
+    this.onViewConflictTask,
     this.onUndoTask,
     this.undoPreviewFor,
     this.snapshotService,
     this.characterNameFor,
+    this.browserService,
   });
 
   @override
@@ -61,7 +80,14 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
 }
 
 class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
+  // Keep the global reopen control above the chat composer. The host overlays
+  // the whole Navigator and cannot measure a route's variable-height footer.
+  // This clearance covers the normal composer row plus a small visual gap;
+  // attachment/quote previews remain a known ceiling for this global host.
+  static const _reopenButtonBottomClearance = 84.0;
+
   StreamSubscription<List<AgentTask>>? _tasksSubscription;
+  StreamSubscription<List<VisibleBrowserSession>>? _browserSubscription;
   WorkTaskCoordinator? _coordinator;
   WorkTaskEventStore? _eventStore;
   List<AgentTask> _tasks = const <AgentTask>[];
@@ -70,6 +96,10 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   bool _isVisible = true;
   bool _isCollapsed = false;
   WorkSnapshotService? _snapshotService;
+  VisibleBrowserService? _browserService;
+  List<VisibleBrowserSession> _browserSessions =
+      const <VisibleBrowserSession>[];
+  String? _selectedBrowserSessionId;
 
   @override
   void initState() {
@@ -98,6 +128,31 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         // undo control remains disabled until a production service is wired.
       }
     }
+    _browserService = widget.browserService;
+    if (_browserService == null) {
+      try {
+        _browserService = ref.read(visibleBrowserServiceProvider);
+      } on Object {
+        // A lightweight host can omit the app-scoped browser service.
+      }
+    }
+    final browserService = _browserService;
+    if (browserService != null) {
+      _browserSessions = browserService.sessions;
+      _selectedBrowserSessionId =
+          _browserSessions.isEmpty ? null : _browserSessions.last.id;
+      _browserSubscription = browserService.watchSessions().listen((sessions) {
+        if (!mounted) return;
+        setState(() {
+          _browserSessions = sessions;
+          if (_browserSessions
+              .every((session) => session.id != _selectedBrowserSessionId)) {
+            _selectedBrowserSessionId =
+                _browserSessions.isEmpty ? null : _browserSessions.last.id;
+          }
+        });
+      });
+    }
     final taskStream = widget.taskStream ?? _coordinator!.watchAllTasks();
     _tasksSubscription = taskStream.listen((tasks) {
       if (!mounted) return;
@@ -116,19 +171,39 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   void dispose() {
     _coordinator?.setFolderGrantConsent(null);
     _tasksSubscription?.cancel();
+    _browserSubscription?.cancel();
     super.dispose();
   }
 
   @override
   Widget build(BuildContext context) {
     final hasTasks = _tasks.isNotEmpty;
-    final isWide = MediaQuery.sizeOf(context).width >= 800;
+    final viewport = MediaQuery.sizeOf(context);
+    final isWide = viewport.width >= 800;
     return Stack(
       children: <Widget>[
         Positioned.fill(child: widget.child),
+        if (_browserSessions.isNotEmpty)
+          _positionedBrowserPanel(
+            isWide: isWide,
+            availableWidth: viewport.width,
+            availableHeight: viewport.height,
+            child: VisibleBrowserPanel(
+              sessions: _browserSessions,
+              selectedSessionId: _selectedBrowserSessionId,
+              onSelectSession: (sessionId) =>
+                  setState(() => _selectedBrowserSessionId = sessionId),
+              onContinue: _continueBrowser,
+              onClose: _closeBrowser,
+              onBringToForeground: _focusBrowser,
+              onInstallRuntime: _installBrowserRuntime,
+            ),
+          ),
         if (hasTasks && _isVisible && !_isCollapsed)
           _positionedPanel(
             isWide: isWide,
+            availableHeight: viewport.height,
+            splitForBrowser: _browserSessions.isNotEmpty,
             child: WorkTaskPanel(
               tasks: _tasks,
               hiddenTaskCount: _hiddenTaskCount,
@@ -142,12 +217,22 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               onApproveWithoutUndo: _approveWithoutUndoTask,
               onReject: _rejectTask,
               onRequestFolder: _requestFolder,
+              onInstallTool: _installTool,
+              onSelectVisionModel: _selectVisionModel,
+              onRetry: widget.onRetryTask ??
+                  (_coordinator == null ? null : _retryTask),
+              onReauthorize: widget.onReauthorizeTask ??
+                  (widget.onRequestFolderTask != null || _coordinator != null
+                      ? _reauthorizeTask
+                      : null),
+              onViewConflict: _viewConflictTask,
               onUndo: widget.onUndoTask ??
                   (_snapshotService == null ? null : _undoTask),
               undoPreviewFor: widget.undoPreviewFor ??
                   (_snapshotService == null ? null : _undoPreview),
               onOpenConversation: _openConversation,
               characterNameFor: widget.characterNameFor ?? _characterName,
+              dialogContext: widget.navigatorKey?.currentContext,
               onCollapse: () => setState(() => _isCollapsed = true),
               onClose: () => setState(() => _isVisible = false),
             ),
@@ -163,7 +248,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         if (hasTasks && !_isVisible)
           Positioned(
             right: 16,
-            bottom: 16,
+            bottom: _reopenButtonBottomClearance,
             child: FloatingActionButton.small(
               key: const Key('work-task-reopen'),
               tooltip: '显示执行面板（任务仍在继续）',
@@ -178,7 +263,12 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     );
   }
 
-  Widget _positionedPanel({required bool isWide, required Widget child}) {
+  Widget _positionedPanel({
+    required bool isWide,
+    required double availableHeight,
+    required bool splitForBrowser,
+    required Widget child,
+  }) {
     if (isWide) {
       return Positioned(
         key: const Key('work-task-panel-wide'),
@@ -194,9 +284,42 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       left: 12,
       right: 12,
       bottom: 12,
-      height: 470,
+      height: splitForBrowser ? _splitPanelHeight(availableHeight) : 470,
       child: child,
     );
+  }
+
+  Widget _positionedBrowserPanel({
+    required bool isWide,
+    required double availableWidth,
+    required double availableHeight,
+    required Widget child,
+  }) {
+    if (isWide) {
+      // Keep the two non-modal panels side by side even at the default
+      // 800px widget-test/desktop width; neither panel may absorb the other.
+      final width = (availableWidth - 468).clamp(300.0, 420.0);
+      return Positioned(
+        key: const Key('visible-browser-panel-wide'),
+        left: 16,
+        top: 72,
+        bottom: 16,
+        width: width,
+        child: child,
+      );
+    }
+    return Positioned(
+      key: const Key('visible-browser-panel-top'),
+      left: 12,
+      right: 12,
+      top: 12,
+      height: _splitPanelHeight(availableHeight),
+      child: child,
+    );
+  }
+
+  double _splitPanelHeight(double availableHeight) {
+    return ((availableHeight - 36) / 2).clamp(180.0, 470.0);
   }
 
   Widget _positionedMiniBar({required bool isWide, required Widget child}) {
@@ -245,6 +368,27 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     return widget.onStopTask?.call(taskId) ?? _coordinator!.stop(taskId);
   }
 
+  Future<void> _continueBrowser(String sessionId) async {
+    await _browserService?.continueSession(sessionId);
+  }
+
+  Future<void> _closeBrowser(String sessionId) async {
+    await _browserService?.closeSession(sessionId);
+  }
+
+  Future<void> _focusBrowser(String sessionId) async {
+    await _browserService?.bringToForeground(sessionId);
+  }
+
+  Future<void> _installBrowserRuntime() async {
+    final installed = await _browserService?.openRuntimeInstallFlow() ?? false;
+    if (!installed && mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('无法打开官方 WebView 运行时安装流程。')),
+      );
+    }
+  }
+
   Future<void> _continueTask(String taskId) {
     final callback = widget.onContinueTask;
     if (callback != null) return callback(taskId);
@@ -262,6 +406,29 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     return _coordinator!.resumeByUser(taskId);
   }
 
+  Future<void> _retryTask(String taskId) {
+    final callback = widget.onRetryTask;
+    return callback?.call(taskId) ?? _coordinator!.retry(taskId);
+  }
+
+  Future<void> _reauthorizeTask(String taskId) {
+    final callback = widget.onReauthorizeTask ?? widget.onRequestFolderTask;
+    return callback?.call(taskId) ?? _coordinator!.requestFolderForTask(taskId);
+  }
+
+  Future<void> _viewConflictTask(String taskId) async {
+    final callback = widget.onViewConflictTask;
+    if (callback != null) {
+      await callback(taskId);
+      return;
+    }
+    // The default host has no conflict viewer of its own. Returning to the
+    // task conversation still exposes the preserved checkpoint and lets the
+    // user request a re-plan without inventing a destructive merge action.
+    final task = _tasks.where((item) => item.id == taskId).firstOrNull;
+    if (task != null) _openConversation(task.groupId);
+  }
+
   Future<void> _approveTask(String taskId) {
     final callback = widget.onApproveTask;
     return callback?.call(taskId) ?? _coordinator!.approve(taskId);
@@ -270,6 +437,111 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   Future<void> _requestFolder(String taskId) {
     return widget.onRequestFolderTask?.call(taskId) ??
         _coordinator!.requestFolderForTask(taskId);
+  }
+
+  Future<void> _installTool(String taskId) {
+    return widget.onInstallToolTask?.call(taskId) ??
+        _coordinator!.installMissingTool(taskId);
+  }
+
+  Future<void> _selectVisionModel(String taskId) async {
+    final custom = widget.onSelectVisionModelTask;
+    if (custom != null) {
+      await custom(taskId);
+      return;
+    }
+    final coordinator = _coordinator;
+    if (coordinator == null) return;
+    final task = _tasks.where((item) => item.id == taskId).firstOrNull;
+    if (task == null) return;
+    final candidates = _visionCandidates(task);
+    if (candidates.isEmpty) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          const SnackBar(content: Text('没有找到已配置且支持图片的视觉模型。')),
+        );
+      }
+      return;
+    }
+    final selected = await showDialog<String>(
+      context: widget.navigatorKey?.currentContext ?? context,
+      builder: (dialogContext) => AlertDialog(
+        key: const Key('work-task-vision-model-dialog'),
+        title: const Text('选择视觉模型'),
+        content: SizedBox(
+          width: 420,
+          child: ListView.builder(
+            shrinkWrap: true,
+            itemCount: candidates.length,
+            itemBuilder: (context, index) {
+              final candidate = candidates[index];
+              return ListTile(
+                key: Key('work-task-vision-model-${candidate.character.id}'),
+                title: Text(candidate.character.name),
+                subtitle: Text(
+                  '${candidate.config.provider} / ${candidate.config.modelName}',
+                ),
+                onTap: () => Navigator.of(dialogContext).pop(
+                  candidate.character.id,
+                ),
+              );
+            },
+          ),
+        ),
+        actions: <Widget>[
+          TextButton(
+            key: const Key('work-task-vision-model-cancel'),
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('取消'),
+          ),
+        ],
+      ),
+    );
+    if (selected == null || selected == task.characterId) return;
+    await coordinator.selectVisionModel(taskId, selected);
+  }
+
+  List<_VisionCandidate> _visionCandidates(AgentTask task) {
+    try {
+      final database = ref.read(databaseServiceProvider);
+      final governance = AiGovernanceStore.forDatabase(database);
+      final allowedCharacterIds = _visionCharacterIdsForTask(database, task);
+      final candidates = <_VisionCandidate>[];
+      for (final character in database.aiCharacterBox.values) {
+        if (!allowedCharacterIds.contains(character.id)) continue;
+        if (!character.isActive || !character.agenticEnabled) continue;
+        final config = database.apiConfigBox.get(character.apiConfigId);
+        if (config == null || (!config.hasCredential && !config.hasApiKey)) {
+          continue;
+        }
+        final provider = ApiProvider.values.where(
+          (item) => item.name == config.provider,
+        );
+        if (provider.isEmpty) continue;
+        final capability = governance.guard.capability(
+          provider.single,
+          config.modelName,
+        );
+        if (capability.supportsVision) {
+          candidates
+              .add(_VisionCandidate(character: character, config: config));
+        }
+      }
+      return candidates;
+    } on Object {
+      return const <_VisionCandidate>[];
+    }
+  }
+
+  Set<String> _visionCharacterIdsForTask(
+    DatabaseService database,
+    AgentTask task,
+  ) {
+    if (task.groupId.startsWith('dm:')) {
+      return {task.groupId.substring(3)};
+    }
+    final group = database.chatGroupBox.get(task.groupId);
+    return group == null ? const <String>{} : group.aiCharacterIds.toSet();
   }
 
   Future<bool> _confirmFolderGrant(WorkFolderGrant grant) {
@@ -371,4 +643,11 @@ class _WorkTaskMiniBar extends StatelessWidget {
       ),
     );
   }
+}
+
+class _VisionCandidate {
+  final AICharacter character;
+  final ApiConfig config;
+
+  const _VisionCandidate({required this.character, required this.config});
 }

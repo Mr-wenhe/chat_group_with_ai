@@ -17,6 +17,7 @@ AgentTask _task({
   required String characterId,
   String request = '整理发布说明',
   int currentStep = 3,
+  int actionCount = 3,
   int actionLimit = 8,
   DateTime? startedAt,
   String plan = '先读取项目结构，再整理发布说明。',
@@ -28,6 +29,7 @@ AgentTask _task({
     characterId: characterId,
     userRequest: request,
     currentStep: currentStep,
+    actionCount: actionCount,
     actionLimit: actionLimit,
     startedAt: startedAt ?? DateTime.utc(2026, 8, 28, 10),
     plan: plan,
@@ -104,6 +106,35 @@ void main() {
         tester.getTopLeft(find.text('正在读取项目配置')).dy,
         lessThan(tester.getTopLeft(find.text('已读取 pubspec.yaml')).dy),
       );
+    });
+
+    testWidgets('shows the budgeted action count rather than a tool index',
+        (tester) async {
+      final task = _task(
+        id: 'count-task',
+        conversationId: 'group-one',
+        characterId: 'developer',
+        currentStep: 99,
+        actionCount: 2,
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.text('步骤 2 / 8'), findsOneWidget);
+      expect(find.text('步骤 99 / 8'), findsNothing);
     });
 
     testWidgets('switches between two tasks and keeps task details isolated',
@@ -237,6 +268,77 @@ void main() {
       expect(find.byKey(const Key('work-task-add-folder')), findsOneWidget);
       expect(find.byKey(const Key('work-task-approve')), findsNothing);
       expect(find.byKey(const Key('work-task-reject')), findsNothing);
+    });
+
+    testWidgets('requires a visual model choice before generic continue',
+        (tester) async {
+      final task = _task(
+        id: 'vision-model-task',
+        conversationId: 'group-one',
+        characterId: 'text-only',
+      )
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = true
+        ..executionStateJson = jsonEncode({'visionModelRequired': true})
+        ..lastError = '当前模型不支持图片输入，请选择视觉模型。';
+      var selected = false;
+      var continued = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) => continued = true,
+            onSelectVisionModel: (_) => selected = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-select-vision-model')),
+          findsOneWidget);
+      final continueButton = tester.widget<FilledButton>(
+        find.byKey(const Key('work-task-continue')),
+      );
+      expect(continueButton.onPressed, isNull);
+      await tester.tap(find.byKey(const Key('work-task-select-vision-model')));
+      expect(selected, isTrue);
+      expect(continued, isFalse);
+    });
+
+    testWidgets('shows the folder picker for an initial grant without a path',
+        (tester) async {
+      final task = _task(
+        id: 'initial-folder-pending-task',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.waitingForApproval
+        ..executionStateJson = jsonEncode({'folderGrantPending': true});
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+            onRequestFolder: (_) async {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-add-folder')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-approve')), findsNothing);
     });
 
     testWidgets('shows the durable change plan before approving a mutation',

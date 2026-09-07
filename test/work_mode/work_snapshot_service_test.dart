@@ -101,6 +101,20 @@ void main() {
     expect(sha256.convert(await file.readAsBytes()).toString(), oldHash);
   });
 
+  test(
+      'availability probe allows the first snapshot before its directory exists',
+      () async {
+    final file =
+        await File('${root.path}/first-probe.txt').writeAsString('old');
+    final plan =
+        planFor('first-probe-task', WorkChangeActionType.modify, [file.path]);
+
+    expect(
+      await snapshots.canReserve(plan: plan, paths: plan.exactPaths),
+      isTrue,
+    );
+  });
+
   test('backs up a deleted file and restores it on undo', () async {
     final file = await File('${root.path}/remove.txt').writeAsString('keep me');
     final plan =
@@ -542,6 +556,89 @@ void main() {
     expect(
         await snapshots.snapshotDirectoryFor('active-task').exists(), isTrue);
   });
+
+  test('clearAll removes snapshots but never project files', () async {
+    final file =
+        await File('${root.path}/clear-boundary.txt').writeAsString('before');
+    final plan =
+        planFor('clear-boundary', WorkChangeActionType.modify, [file.path]);
+    expect(
+      (await mutation().execute(
+        plan: plan,
+        approvalScope: approvalFor(plan),
+        request: WorkspaceMutationRequest.text(
+          path: file.path,
+          contents: 'after',
+        ),
+      ))
+          .succeeded,
+      isTrue,
+    );
+
+    final removed = await snapshots.clearAll();
+
+    expect(removed, greaterThan(0));
+    expect(await snapshots.snapshotsDirectory.exists(), isFalse);
+    expect(await file.readAsString(), 'after');
+  });
+
+  test('clearAll removes a symlink root without following its target',
+      () async {
+    final target = Directory('${sandbox.path}/snapshot-project')..createSync();
+    final targetFile = File('${target.path}/keep.txt')
+      ..writeAsStringSync('keep');
+    final rootLink = snapshots.snapshotsDirectory;
+    await rootLink.parent.create(recursive: true);
+    final link = Link(rootLink.path);
+    await link.create(target.path);
+
+    await snapshots.clearAll();
+
+    expect(await link.exists(), isFalse);
+    expect(await targetFile.readAsString(), 'keep');
+  }, skip: Platform.isWindows ? 'symlink privileges vary on Windows' : null);
+
+  test('snapshot reads and reservations reject symlinked task paths', () async {
+    final target = Directory('${sandbox.path}/snapshot-task-target')
+      ..createSync();
+    final targetManifest = File('${target.path}/manifest.json')
+      ..writeAsStringSync('{"taskId":"outside"}');
+    final taskLink = snapshots.snapshotDirectoryFor('linked-task');
+    await snapshots.snapshotsDirectory.create(recursive: true);
+    final link = Link(taskLink.path);
+    await link.create(target.path);
+
+    expect(await snapshots.readManifest('linked-task'), isNull);
+    final source = await File('${root.path}/linked.txt').writeAsString('old');
+    final plan = planFor(
+      'linked-task',
+      WorkChangeActionType.modify,
+      [source.path],
+    );
+    final reservation = await snapshots.reserve(
+      plan: plan,
+      paths: [source.path],
+    );
+
+    expect(reservation.available, isFalse);
+    expect(await targetManifest.readAsString(), '{"taskId":"outside"}');
+  }, skip: Platform.isWindows ? 'symlink privileges vary on Windows' : null);
+
+  test('clearAll fails closed when the app-managed parent is a symlink',
+      () async {
+    final target = Directory('${sandbox.path}/snapshot-parent-target')
+      ..createSync();
+    final targetFile = File('${target.path}/keep.bin')
+      ..writeAsStringSync('keep');
+    final parent = Directory('${appSupport.path}/work_mode_agent');
+    await parent.parent.create(recursive: true);
+    final link = Link(parent.path);
+    await link.create(target.path);
+
+    await expectLater(snapshots.clearAll(), throwsA(isA<StateError>()));
+    expect(await targetFile.readAsString(), 'keep');
+    expect(await link.exists(), isTrue);
+  }, skip: Platform.isWindows ? 'symlink privileges vary on Windows' : null);
 }
 
 class _FailingSnapshotPort implements WorkspaceMutationSnapshotPort {

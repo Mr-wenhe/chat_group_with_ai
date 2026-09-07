@@ -73,4 +73,23 @@ void main() {
 
     expect(result, ['c2', 'c1', 'c3']);
   });
+
+  test('an email address is not reported as an explicit role mention', () {
+    final result = analyzeMentionedCharacterIds(
+      '请联系 dev@example.com',
+      [...characters, _character('domain', 'example.com')],
+    );
+
+    expect(result.hasExplicitMention, isFalse);
+    expect(result.unknownNames, isEmpty);
+    expect(result.characterIds, isEmpty);
+  });
+
+  test('an unknown mention is diagnosable even when there are no characters',
+      () {
+    final result = analyzeMentionedCharacterIds('@不存在 请处理', const []);
+
+    expect(result.hasExplicitMention, isTrue);
+    expect(result.unknownNames, ['不存在']);
+  });
 }

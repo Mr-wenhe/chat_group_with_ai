@@ -6,6 +6,7 @@ import 'dart:typed_data';
 import 'package:chat_group/features/ai_governance/search_audit_entry.dart';
 import 'package:chat_group/features/web_search/application/search_context_formatter.dart';
 import 'package:chat_group/features/web_search/application/search_failure_mapper.dart';
+import 'package:chat_group/features/ai_governance/search_failure_classifier.dart';
 import 'package:chat_group/features/web_search/application/search_run_state.dart';
 import 'package:chat_group/features/web_search/application/search_turn_cache.dart';
 import 'package:chat_group/features/web_search/models/search_failure.dart';

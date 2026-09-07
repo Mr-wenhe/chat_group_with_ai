@@ -1,0 +1,13 @@
+<!doctype html>
+<html><body>
+  <div class="result"><h2><a class="result__a" href="javascript:alert(1)">Bad script URL</a></h2>
+    <div class="result__snippet">Must be ignored.</div></div>
+  <div class="result"><h2><a class="result__a" href="data:text/html,blocked">Bad data URL</a></h2>
+    <div class="result__snippet">Must be ignored.</div></div>
+  <div class="result"><h2><a class="result__a" href="http://example.com/insecure">Bad insecure URL</a></h2>
+    <div class="result__snippet">Must be ignored.</div></div>
+  <div class="result"><h2><a class="result__a" href="https://127.0.0.1/private">Bad private URL</a></h2>
+    <div class="result__snippet">Must be ignored.</div></div>
+  <div class="result"><h2><a class="result__a" href="https://example.com/good">Good result</a></h2>
+    <div class="result__snippet">Accepted public result.</div></div>
+</body></html>

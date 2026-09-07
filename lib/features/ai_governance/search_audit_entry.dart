@@ -56,7 +56,11 @@ class SearchAuditEntry {
   }) {
     final normalizedQuery = _normalizeAuditQuery(query);
     final safeQuery = _truncateAuditQuery(normalizedQuery);
-    final safeSources = _sanitizeAuditSources(sources);
+    final normalizedProvider = _safeAuditLabel(provider, 120);
+    final safeSources = _sanitizeAuditSources(
+      sources,
+      allowInsecureHttp: normalizedProvider == 'visibleBrowser',
+    );
     return SearchAuditEntry._(
       requestId: _safeAuditLabel(requestId, 128),
       rootRequestId: _safeAuditLabel(rootRequestId, 128),
@@ -65,7 +69,7 @@ class SearchAuditEntry {
       queryHash: _resolveAuditQueryHash(queryHash, normalizedQuery),
       searchedAt: normalizeSearchedAt(searchedAt),
       status: _safeAuditLabel(status, 48),
-      provider: _safeAuditLabel(provider, 120),
+      provider: normalizedProvider,
       failureType:
           failureType == null ? null : _safeAuditLabel(failureType, 80),
       statusCode: statusCode,
@@ -268,7 +272,10 @@ bool _looksLikeOpaqueAuditSecret(String token) {
   return token.length >= 24 && characterClasses >= 3;
 }
 
-List<String> _sanitizeAuditSources(Iterable<String> values) {
+List<String> _sanitizeAuditSources(
+  Iterable<String> values, {
+  bool allowInsecureHttp = false,
+}) {
   final safeSources = <String>[];
   var candidateCount = 0;
   for (final value in values) {
@@ -276,7 +283,10 @@ List<String> _sanitizeAuditSources(Iterable<String> values) {
     if (candidateCount++ >= SearchAuditEntry.maxSourceCandidates) break;
     final source = value.trim();
     if (source.isEmpty) continue;
-    final uri = domain.tryValidateSearchUrl(Uri.tryParse(source));
+    final uri = domain.tryValidateSearchUrl(
+      Uri.tryParse(source),
+      allowInsecureHttp: allowInsecureHttp,
+    );
     if (uri == null) continue;
     safeSources.add(uri.toString());
   }

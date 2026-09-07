@@ -2,8 +2,8 @@ import 'dart:convert';
 import 'dart:io';
 
 import 'package:chat_group/core/models/agent_task.dart';
-import 'package:chat_group/features/agentic/tools/workspace_file_tool.dart';
 import 'package:chat_group/features/work_mode/work_approval_decision.dart';
+import 'package:chat_group/features/work_mode/work_approval_fingerprint.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
@@ -11,10 +11,10 @@ import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:crypto/crypto.dart';
 
-/// In-process Stage 02 tool boundary. No localhost bridge is created here:
-/// every path is resolved against the configured grant and every mutation is
-/// checked against a task-scoped approval scope.
-class Stage02WorkspaceFileTool extends WorkspaceFileTool {
+/// In-process Stage 02 tool boundary. No cross-process service is created
+/// here: every path is resolved against the configured grant and every
+/// mutation is checked against a task-scoped approval scope.
+class Stage02WorkspaceFileTool {
   final WorkspaceFileService files;
   final WorkspaceMutationService mutations;
   final WorkspacePathPolicy pathPolicy;
@@ -22,6 +22,11 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
   final String workspaceRoot;
   final WorkApprovalScope? approvalScope;
   final WorkChangeApprovalDecision? approvalDecision;
+
+  /// Exact sensitive-read operation approved for this task. A general
+  /// mutation decision is deliberately not accepted as a substitute.
+  final String? approvedSensitiveOperation;
+  final String? approvalCapability;
   final bool allowImplicitScope;
   final bool allowWithoutUndo;
   final WorkResourceLockManager? resourceLockManager;
@@ -35,23 +40,44 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
     required this.workspaceRoot,
     this.approvalScope,
     this.approvalDecision,
+    this.approvedSensitiveOperation,
+    this.approvalCapability,
     this.allowImplicitScope = false,
     this.allowWithoutUndo = false,
     this.resourceLockManager,
     this.onSensitiveRead,
-  }) : super.withoutBridge(conversationId: task.groupId);
+  });
 
-  @override
   bool get acceptsAbsolutePaths => true;
 
-  @override
   bool isSensitivePath(String path) => files.isSensitivePath(path);
 
-  @override
+  /// Returns the token the runner stores when a sensitive read is paused.
+  /// Resolution happens before hashing so relative and absolute spellings of
+  /// the same authorized path cannot accidentally create two approvals.
+  String sensitiveReadFingerprint({
+    required String operation,
+    required String path,
+    int startByte = 0,
+    int? byteLength,
+    String? query,
+    bool recursive = false,
+    bool caseSensitive = true,
+  }) {
+    return WorkApprovalFingerprint.sensitiveRead(
+      operation: operation,
+      path: _absolutePath(path),
+      startByte: startByte,
+      byteLength: byteLength,
+      query: query,
+      recursive: recursive,
+      caseSensitive: caseSensitive,
+    );
+  }
+
   Future<Map<String, dynamic>> list({String path = '.'}) =>
       listWithOptions(path: path);
 
-  @override
   Future<Map<String, dynamic>> listWithOptions({
     String path = '.',
     int page = 0,
@@ -99,10 +125,8 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
     }
   }
 
-  @override
   Future<Map<String, dynamic>> read(String path) => readWithOptions(path);
 
-  @override
   Future<Map<String, dynamic>> readWithOptions(
     String path, {
     int startByte = 0,
@@ -119,8 +143,17 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
       final sensitivePath = resolved.isFile &&
           (files.isSensitivePath(absolutePath) ||
               files.isSensitivePath(resolved.path));
-      final sensitiveReadAllowed =
-          allowSensitive && approvalDecision?.permitsExecution == true;
+      final sensitiveReadAllowed = allowSensitive &&
+          approvalDecision?.permitsExecution == true &&
+          approvalCapability == WorkApprovalCapability.sensitiveRead &&
+          !resolved.isDirectory &&
+          approvedSensitiveOperation ==
+              sensitiveReadFingerprint(
+                operation: 'readTextRange',
+                path: path,
+                startByte: startByte,
+                byteLength: byteLength,
+              );
       if (!sensitiveReadAllowed && resolved.isFile && sensitivePath) {
         onSensitiveRead?.call(resolved.path, 'readTextRange');
         return {
@@ -172,7 +205,6 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
     }
   }
 
-  @override
   Future<Map<String, dynamic>> search(
     String path,
     String query, {
@@ -186,8 +218,21 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
       final sensitivePath = resolved.isFile &&
           (files.isSensitivePath(absolutePath) ||
               files.isSensitivePath(resolved.path));
-      final sensitiveReadAllowed =
-          allowSensitive && approvalDecision?.permitsExecution == true;
+      // Directory searches never inherit a sensitive-file approval: the
+      // exact file is unknown until after scanning. Only a direct file search
+      // with the matching operation token may return sensitive snippets.
+      final sensitiveReadAllowed = allowSensitive &&
+          approvalDecision?.permitsExecution == true &&
+          approvalCapability == WorkApprovalCapability.sensitiveRead &&
+          resolved.isFile &&
+          approvedSensitiveOperation ==
+              sensitiveReadFingerprint(
+                operation: 'search',
+                path: path,
+                query: query,
+                recursive: recursive,
+                caseSensitive: caseSensitive,
+              );
       if (!sensitiveReadAllowed && resolved.isFile && sensitivePath) {
         return {
           'ok': false,
@@ -256,7 +301,6 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
     }
   }
 
-  @override
   Future<Map<String, dynamic>> write(String path, String content) async {
     try {
       final absolute = _absolutePath(path);
@@ -272,15 +316,34 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
           'path': resolved.path,
         };
       }
-      final expectedSha = action == WorkChangeActionType.modify
-          ? await _hashFile(File(resolved.path))
-          : null;
+      final sensitive = files.isSensitivePath(absolute) ||
+          files.isSensitivePath(resolved.path);
       final plan = _filePlan(
         action: action,
         path: resolved.path,
         directory: resolved.authorizedRoot,
         bytes: utf8.encode(content).length,
       );
+      // Do not hash a sensitive file until the task carries both an explicit
+      // approval and an exact scope covering this concrete plan. Hashing reads
+      // old contents before the mutation boundary can return its redacted
+      // approval response, so the scope check must precede it.
+      final sensitiveApproved = approvalDecision?.permitsExecution == true &&
+          approvalScope?.allows(plan) == true;
+      if (sensitive && !sensitiveApproved) {
+        return {
+          'ok': false,
+          'error': 'sensitive_mutation_requires_approval',
+          'requiresApproval': true,
+          'sensitive': true,
+          'redacted': true,
+          'message': '修改、重命名或删除敏感文件必须再次确认。',
+          'path': resolved.path,
+        };
+      }
+      final expectedSha = action == WorkChangeActionType.modify
+          ? await _hashFile(File(resolved.path))
+          : null;
       return _execute(
         plan,
         WorkspaceMutationRequest(
@@ -289,8 +352,7 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
           expectedSha256: expectedSha,
           approvalDecision: approvalDecision,
         ),
-        sensitivePath: files.isSensitivePath(absolute) ||
-            files.isSensitivePath(resolved.path),
+        sensitivePath: sensitive,
       );
     } on WorkspacePathException catch (error) {
       return _pathError(error, path);
@@ -299,7 +361,6 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
     }
   }
 
-  @override
   Future<Map<String, dynamic>> applyPatch(String patch) async {
     // A diff is always a multi-file/overwrite operation; unlike a simple
     // create in a fixture, it needs a task scope unless the user has
@@ -357,7 +418,6 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
     }
   }
 
-  @override
   Future<Map<String, dynamic>> rename(
     String path,
     String destinationPath,
@@ -397,7 +457,6 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
     }
   }
 
-  @override
   Future<Map<String, dynamic>> delete(String path) async {
     try {
       final resolved = await pathPolicy.resolveExisting(_absolutePath(path));
@@ -418,7 +477,6 @@ class Stage02WorkspaceFileTool extends WorkspaceFileTool {
     }
   }
 
-  @override
   Future<Map<String, dynamic>> runCommand(String command) async => {
         'ok': false,
         'error': 'command_not_available_in_stage02',

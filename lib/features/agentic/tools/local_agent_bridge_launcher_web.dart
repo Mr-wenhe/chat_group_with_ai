@@ -6,6 +6,8 @@
 
 import 'local_agent_bridge_config.dart';
 
+/// Compatibility launcher for ordinary agentic callers on web builds. Work
+/// mode runs only through its in-process Dart services.
 class LocalAgentBridgeLauncher {
   LocalAgentBridgeLauncher({int? preferredPort});
 

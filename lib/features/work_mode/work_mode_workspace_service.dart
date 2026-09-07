@@ -21,6 +21,7 @@ class WorkModeWorkspaceService {
   Future<WorkModeWorkspace> loadOrCreate({
     required String conversationId,
     required bool isDirectChat,
+    bool requireWritable = false,
   }) async {
     final existing = db.workModeWorkspaceBox.get(conversationId);
     final folder = directories.conversationFolderName(
@@ -33,6 +34,7 @@ class WorkModeWorkspaceService {
             existing: existing,
             conversationId: conversationId,
             isDirectChat: isDirectChat,
+            requireWritable: requireWritable,
           );
     final conversationType = isDirectChat ? 'direct' : 'group';
     if (existing != null &&
@@ -57,13 +59,38 @@ class WorkModeWorkspaceService {
     required WorkModeWorkspace? existing,
     required String conversationId,
     required bool isDirectChat,
+    required bool requireWritable,
   }) async {
     final persistedPath = existing?.workDirPath.trim();
     if (persistedPath != null && persistedPath.isNotEmpty) {
       final persistedDirectory = Directory(persistedPath);
       if (await _isPersistedWorkspaceAuthorized(persistedPath)) {
+        if (requireWritable &&
+            grantService != null &&
+            !await grantService!.isPathWritableResolved(persistedPath)) {
+          // A read-only grant is sufficient for inspection, but it must not
+          // remain the workspace after a later write approval. Resolve a new
+          // conversation directory under a confirmed writable grant so the
+          // resumed task cannot loop on the old read-only path.
+          final writableRoot = await _workspaceRoot(requireWritable: true);
+          return (await directories.conversationDir(
+            root: writableRoot,
+            conversationId: conversationId,
+            isDirectChat: isDirectChat,
+          ))
+              .path;
+        }
         if (!await persistedDirectory.exists()) {
-          await persistedDirectory.create(recursive: true);
+          final canCreate = grantService == null ||
+              await grantService!.isPathWritableResolved(persistedPath);
+          if (canCreate) {
+            await persistedDirectory.create(recursive: true);
+          } else {
+            // The old conversation directory may have disappeared while the
+            // app only has a read grant. Fall back to the existing granted
+            // root instead of creating anything under a read-only capability.
+            return (await _workspaceRoot()).path;
+          }
         } else if (await FileSystemEntity.type(
               persistedPath,
               followLinks: true,
@@ -85,7 +112,7 @@ class WorkModeWorkspaceService {
       // their historical recovery behavior; production work-mode wiring always
       // supplies a grant service and therefore takes the fail-closed branch.
       if (grantService == null) {
-        final root = await _workspaceRoot();
+        final root = await _workspaceRoot(requireWritable: requireWritable);
         return (await directories.conversationDir(
           root: root,
           conversationId: conversationId,
@@ -103,7 +130,16 @@ class WorkModeWorkspaceService {
       );
     }
 
-    final root = await _workspaceRoot();
+    final root = await _workspaceRoot(requireWritable: requireWritable);
+    // A read-only grant is a valid capability for inspection commands. Do not
+    // create an app-owned conversation directory under it; using the granted
+    // directory itself keeps `pwd`, listing and search usable without turning
+    // a read grant into an implicit write request.
+    if (grantService != null &&
+        !requireWritable &&
+        !grantService!.hasConfirmedWritableGrant()) {
+      return root.path;
+    }
     return (await directories.conversationDir(
       root: root,
       conversationId: conversationId,
@@ -130,27 +166,34 @@ class WorkModeWorkspaceService {
     );
   }
 
-  Future<Directory> _workspaceRoot() async {
+  Future<Directory> _workspaceRoot({bool requireWritable = false}) async {
     final grants = grantService;
     if (grants != null) {
       await grants.load();
-      final writable = grants.grants.where(
+      final confirmed = grants.grants.where(
         (grant) =>
             grant.available &&
-            grant.writable &&
-            grant.cloudDisclosureConfirmedAt != null,
+            grant.cloudDisclosureConfirmedAt != null &&
+            (!requireWritable || grant.writable),
       );
-      final first = writable.isEmpty ? null : writable.first;
+      final first = confirmed.isEmpty
+          ? null
+          : (requireWritable
+              ? confirmed.first
+              : confirmed.firstWhere(
+                  (grant) => grant.writable,
+                  orElse: () => confirmed.first,
+                ));
       if (first != null) {
         final directory = Directory(first.path);
-        if (!await directory.exists()) {
+        if (first.writable && !await directory.exists()) {
           await directory.create(recursive: true);
         }
         return directory;
       }
       throw const WorkspacePathException(
         WorkspacePathErrorKind.notAuthorized,
-        '工作模式需要至少一个可写的已授权目录。',
+        '工作模式需要至少一个已确认且可访问的授权目录。',
       );
     }
     return db.aiProcessingDir;

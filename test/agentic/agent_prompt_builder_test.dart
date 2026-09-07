@@ -34,6 +34,22 @@ void main() {
     expect(prompt, contains('先给结论'));
   });
 
+  test('Stage 03 prompt describes one strict JSON decision object', () {
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '读取并检查 lib/main.dart',
+    );
+
+    expect(prompt, contains('固定顶层字段'));
+    expect(prompt, contains('action 只能是 plan、tool、clarify、handoff、finish'));
+    expect(prompt, contains('public_update'));
+    expect(prompt, contains('只写用户可见的动作、依据或结论'));
+    expect(prompt, contains('workspace.read'));
+    expect(prompt, isNot(contains('```agent_tool')));
+    expect(prompt, isNot(contains('<tool_call>')));
+  });
+
   test('result prompt requires evidence-led delivery and self-check', () {
     final prompt = AgentPromptBuilder.buildToolResultPrompt(
       rolePlaySystemPrompt: '你是工作助手，30岁，性别女，身份是助理。\n保持专业。',

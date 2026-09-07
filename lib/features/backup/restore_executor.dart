@@ -45,8 +45,15 @@ class RestoreExecutor {
     PreparedBackup prepared,
     RestoreConflictStrategy strategy,
   ) async {
-    if (!await prepared.stagingDirectory.exists()) {
+    final stagingType = await FileSystemEntity.type(
+      prepared.stagingDirectory.path,
+      followLinks: false,
+    );
+    if (stagingType == FileSystemEntityType.notFound) {
       throw const BackupException('导入临时区已失效，请重新选择备份');
+    }
+    if (stagingType != FileSystemEntityType.directory) {
+      throw const BackupException('导入临时区不是安全目录');
     }
     await _verifyStaging(prepared);
     final data = prepared.validatedData is StagedBackupData
@@ -224,7 +231,9 @@ class RestoreExecutor {
       }
       final suffix =
           rollbackErrors.isEmpty ? '' : '；但有 ${rollbackErrors.length} 个回滚步骤失败';
-      throw BackupException('恢复失败，已回滚：$error$suffix');
+      throw BackupException(
+        '恢复失败，已回滚：${sanitizeBackupError(error)}$suffix',
+      );
     }
   }
 
@@ -268,6 +277,13 @@ class RestoreExecutor {
     for (final archivePath in plan.attachmentPaths) {
       final name = archivePath.split('/').last;
       final source = File('${staging.path}/$archivePath');
+      final sourceType = await FileSystemEntity.type(
+        source.path,
+        followLinks: false,
+      );
+      if (sourceType != FileSystemEntityType.file) {
+        throw BackupException('暂存附件不是安全的普通文件：$name');
+      }
       final target = File('${mediaDirectory.path}/$name');
       final targetType =
           await FileSystemEntity.type(target.path, followLinks: false);
@@ -285,6 +301,12 @@ class RestoreExecutor {
         );
         transaction.createdFile(temporary);
         await (attachmentCopy ?? _copyAttachment)(source, temporary);
+        await _verifyFile(
+          temporary,
+          manifest.files[archivePath] ??
+              (throw BackupException('附件缺少校验清单：$name')),
+          '暂存附件',
+        );
         await temporary.rename(target.path);
         transaction.createdFile(target);
       } else {
@@ -301,13 +323,28 @@ class RestoreExecutor {
   Future<void> _verifyStaging(PreparedBackup prepared) async {
     for (final entry in prepared.manifest.files.entries) {
       final file = File('${prepared.stagingDirectory.path}/${entry.key}');
-      if (!await file.exists() || await file.length() != entry.value.bytes) {
-        throw BackupException('提交前文件大小校验失败：${entry.key}');
-      }
-      final digest = (await sha256.bind(file.openRead()).first).toString();
-      if (digest != entry.value.sha256) {
-        throw BackupException('提交前文件校验和失败：${entry.key}');
-      }
+      await _verifyFile(file, entry.value, '提交前文件');
+    }
+  }
+
+  Future<void> _verifyFile(
+    File file,
+    BackupFileEntry expected,
+    String label,
+  ) async {
+    final type = await FileSystemEntity.type(
+      file.path,
+      followLinks: false,
+    );
+    if (type != FileSystemEntityType.file) {
+      throw BackupException('$label不是安全的普通文件');
+    }
+    if (!await file.exists() || await file.length() != expected.bytes) {
+      throw BackupException('$label大小校验失败');
+    }
+    final digest = (await sha256.bind(file.openRead()).first).toString();
+    if (digest != expected.sha256) {
+      throw BackupException('$label校验和失败');
     }
   }
 

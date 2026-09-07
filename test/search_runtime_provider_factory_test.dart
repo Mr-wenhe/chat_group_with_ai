@@ -129,10 +129,11 @@ void main() {
       [
         SearchProviderKind.brave,
         SearchProviderKind.duckDuckGoInstantAnswer,
+        SearchProviderKind.keylessHtml,
       ],
     );
     expect(routes.last.isFallback, isTrue);
-    expect(routes.last.id, 'builtin-duckduckgo-fallback');
+    expect(routes.last.id, 'builtin-keyless-html');
   });
 
   test('uses the built-in DuckDuckGo route when no Provider is configured', () {
@@ -140,9 +141,27 @@ void main() {
       store: SearchProviderConfigStore(box: box, isRelease: true),
     ).buildRoutes();
 
-    expect(routes, hasLength(1));
-    expect(routes.single.kind, SearchProviderKind.duckDuckGoInstantAnswer);
-    expect(routes.single.isFallback, isTrue);
+    expect(routes, hasLength(2));
+    expect(routes.first.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes.first.isFallback, isTrue);
+    expect(routes.last.kind, SearchProviderKind.keylessHtml);
+    expect(routes.last.isFallback, isTrue);
+  });
+
+  test('adds visible browser only as the final fallback when supplied', () {
+    final routes = SearchRuntimeProviderFactory(
+      store: SearchProviderConfigStore(box: box, isRelease: true),
+    ).buildRoutes(
+      visibleBrowserSearch: (request, {cancelToken}) async =>
+          SearchProviderResponse(
+              items: const [], sourceProvider: 'visibleBrowser'),
+    );
+
+    expect(routes, hasLength(3));
+    expect(routes[0].kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes[1].kind, SearchProviderKind.keylessHtml);
+    expect(routes.last.isVisibleBrowser, isTrue);
+    expect(routes.last.id, 'builtin-visible-browser');
   });
 
   test('excludes a Provider whose credential requires attention', () async {
@@ -161,8 +180,9 @@ void main() {
       store: SearchProviderConfigStore(box: box, isRelease: true),
     ).buildRoutes();
 
-    expect(routes, hasLength(1));
-    expect(routes.single.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes, hasLength(2));
+    expect(routes.first.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes.last.kind, SearchProviderKind.keylessHtml);
   });
 
   test('a route marked requiresAttention stops dispatching on the same page',
@@ -244,8 +264,36 @@ void main() {
       store: SearchProviderConfigStore(box: box, isRelease: true),
     ).buildRoutes();
 
-    expect(routes, hasLength(1));
-    expect(routes.single.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes, hasLength(2));
+    expect(routes.first.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes.last.kind, SearchProviderKind.keylessHtml);
+  });
+
+  test('does not duplicate an explicitly configured keyless HTML route',
+      () async {
+    const config = SearchProviderConfig(
+      id: 'duck-html',
+      name: 'DuckDuckGo HTML',
+      provider: SearchProviderKind.keylessHtml,
+      baseUrl: '',
+      enabled: true,
+    );
+    await box.put(SearchProviderConfigStore.configsKey, [config.toMap()]);
+
+    final routes = SearchRuntimeProviderFactory(
+      store: SearchProviderConfigStore(box: box, isRelease: true),
+    ).buildRoutes();
+
+    expect(
+      routes.map((route) => route.kind),
+      [
+        SearchProviderKind.keylessHtml,
+        SearchProviderKind.duckDuckGoInstantAnswer,
+      ],
+    );
+    expect(
+        routes.where((route) => route.kind == SearchProviderKind.keylessHtml),
+        hasLength(1));
   });
 
   test('uses the built-in DuckDuckGo route when legacy metadata has no URL',
@@ -263,8 +311,9 @@ void main() {
       store: SearchProviderConfigStore(box: box, isRelease: true),
     ).buildRoutes();
 
-    expect(routes, hasLength(1));
-    expect(routes.single.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes, hasLength(2));
+    expect(routes.first.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes.last.kind, SearchProviderKind.keylessHtml);
   });
 
   test('builds the configured Gateway route instead of a disabled placeholder',
@@ -306,8 +355,9 @@ void main() {
       store: SearchProviderConfigStore(box: box, isRelease: true),
     ).buildRoutes();
 
-    expect(routes, hasLength(1));
-    expect(routes.single.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes, hasLength(2));
+    expect(routes.first.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes.last.kind, SearchProviderKind.keylessHtml);
   });
 
   test('does not route a keyless Gateway in release metadata', () async {
@@ -324,8 +374,9 @@ void main() {
       store: SearchProviderConfigStore(box: box, isRelease: true),
     ).buildRoutes();
 
-    expect(routes, hasLength(1));
-    expect(routes.single.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes, hasLength(2));
+    expect(routes.first.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes.last.kind, SearchProviderKind.keylessHtml);
   });
 
   test('marks a bound provider for attention when secure storage loses its key',
@@ -493,7 +544,8 @@ void main() {
 
     expect(routes.first.provider, isA<NativeWebSearchProvider>());
     expect(routes.first.isPrimary, isTrue);
-    expect(routes.last.kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes[1].kind, SearchProviderKind.duckDuckGoInstantAnswer);
+    expect(routes.last.kind, SearchProviderKind.keylessHtml);
     expect(routes.last.isFallback, isTrue);
   });
 }

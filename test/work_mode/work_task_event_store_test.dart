@@ -217,4 +217,123 @@ void main() {
     await firstClose;
     expect(await watchFuture, isEmpty);
   });
+
+  test('clearAll removes only app events and leaves a project untouched',
+      () async {
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    await store.append(
+      taskId: 'task-clear',
+      kind: WorkTaskEventKind.queued,
+      title: '待清理',
+    );
+    final project = Directory('${appSupportDirectory.path}-project')
+      ..createSync();
+    final projectFile = File('${project.path}/important.txt')
+      ..writeAsStringSync('keep');
+    addTearDown(() async {
+      if (await project.exists()) await project.delete(recursive: true);
+    });
+
+    final removed = await store.clearAll();
+
+    expect(removed, greaterThan(0));
+    expect(await store.eventFileFor('task-clear').exists(), isFalse);
+    expect(await projectFile.readAsString(), 'keep');
+    final next = await store.append(
+      taskId: 'task-after-clear',
+      kind: WorkTaskEventKind.completed,
+      title: '清理后仍可用',
+    );
+    expect(next.sequence, 1);
+  });
+
+  test('data-clear suspension rejects late appends and resumes explicitly',
+      () async {
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+
+    store.suspendAppendsForDataClear();
+    expect(
+      store.append(
+        taskId: 'task-suspended',
+        kind: WorkTaskEventKind.toolOutput,
+        title: '不应在清理期间写入',
+      ),
+      throwsA(isA<StateError>()),
+    );
+
+    store.resumeAppendsAfterDataClear();
+    final event = await store.append(
+      taskId: 'task-suspended',
+      kind: WorkTaskEventKind.completed,
+      title: '清理后可写入',
+    );
+    expect(event.sequence, 1);
+  });
+
+  test('clearAll removes a symlink root without following its target',
+      () async {
+    final root =
+        Directory('${appSupportDirectory.path}/work_mode_agent/events');
+    final project = Directory('${appSupportDirectory.path}-linked-project')
+      ..createSync();
+    final projectFile = File('${project.path}/important.txt')
+      ..writeAsStringSync('keep');
+    addTearDown(() async {
+      if (await project.exists()) await project.delete(recursive: true);
+    });
+    await root.parent.create(recursive: true);
+    final link = Link(root.path);
+    await link.create(project.path);
+
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    await store.clearAll();
+
+    expect(await link.exists(), isFalse);
+    expect(await projectFile.readAsString(), 'keep');
+  }, skip: Platform.isWindows ? 'symlink privileges vary on Windows' : null);
+
+  test('read and append reject a symlinked event file', () async {
+    final target = File('${appSupportDirectory.path}-event-target.jsonl')
+      ..writeAsStringSync('{"outside":true}\n');
+    final events = Directory(
+      '${appSupportDirectory.path}/work_mode_agent/events',
+    );
+    await events.create(recursive: true);
+    final link = Link('${events.path}/task-link.jsonl');
+    await link.create(target.path);
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+
+    await expectLater(
+      store.read('task-link'),
+      throwsA(isA<StateError>()),
+    );
+    await expectLater(
+      store.append(
+        taskId: 'task-link',
+        kind: WorkTaskEventKind.queued,
+        title: '不应写入链接目标',
+      ),
+      throwsA(isA<StateError>()),
+    );
+    expect(await target.readAsString(), '{"outside":true}\n');
+  }, skip: Platform.isWindows ? 'symlink privileges vary on Windows' : null);
+
+  test('clearAll fails closed when the app-managed parent is a symlink',
+      () async {
+    final target = Directory('${appSupportDirectory.path}-parent-target')
+      ..createSync();
+    final targetFile = File('${target.path}/keep.jsonl')
+      ..writeAsStringSync('keep');
+    final parent = Directory(
+      '${appSupportDirectory.path}/work_mode_agent',
+    );
+    await parent.parent.create(recursive: true);
+    final link = Link(parent.path);
+    await link.create(target.path);
+
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    await expectLater(store.clearAll(), throwsA(isA<StateError>()));
+    expect(await targetFile.readAsString(), 'keep');
+    expect(await link.exists(), isTrue);
+  }, skip: Platform.isWindows ? 'symlink privileges vary on Windows' : null);
 }

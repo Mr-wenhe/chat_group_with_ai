@@ -259,6 +259,7 @@ class WorkFolderGrantService {
       final refreshed = await _validatedGrant(current);
       _grants[existingIndex] = refreshed;
       await _persistGrants();
+      _loadFuture = null;
       return refreshed;
     }
 
@@ -290,6 +291,7 @@ class WorkFolderGrantService {
     ];
     _grants.sort((left, right) => left.path.compareTo(right.path));
     await _persistGrants();
+    _loadFuture = null;
     return created;
   }
 
@@ -301,6 +303,7 @@ class WorkFolderGrantService {
         .toList(growable: false);
     if (_grants.length == oldLength) return false;
     await _persistGrants();
+    _loadFuture = null;
     return true;
   }
 
@@ -731,6 +734,7 @@ class WorkFolderGrantService {
     if (existingIndex >= 0) {
       _grants[existingIndex] = confirmed;
       await _persistGrants();
+      _loadFuture = null;
       return confirmed;
     }
     final coveringGrant = _grants.cast<WorkFolderGrant?>().firstWhere(
@@ -749,6 +753,7 @@ class WorkFolderGrantService {
         if (index >= 0) {
           _grants[index] = confirmedCovering;
           await _persistGrants();
+          _loadFuture = null;
           return confirmedCovering;
         }
       }
@@ -760,6 +765,7 @@ class WorkFolderGrantService {
     ];
     _grants.sort((left, right) => left.path.compareTo(right.path));
     await _persistGrants();
+    _loadFuture = null;
     return confirmed;
   }
 

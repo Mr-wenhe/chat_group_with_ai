@@ -45,4 +45,60 @@ void main() {
     expect(serialized, contains('contentLength'));
     expect(serialized, contains('commandPresent'));
   });
+
+  test('durable command checkpoint keeps bounded structured retry fields', () {
+    const request = ToolRequest(
+      tool: AgentToolName.commandRun,
+      reason: '检查仓库状态',
+      args: <String, dynamic>{
+        'executable': 'git',
+        'arguments': ['status', '--short'],
+        'workingDirectory': '/workspace/project',
+        'declaredImpact': ['/workspace/project'],
+      },
+    );
+
+    final decoded = jsonDecode(safeToolRequestCheckpoint(request)) as Map;
+    final args = decoded['args'] as Map;
+    expect(args['executable'], 'git');
+    expect(args['arguments'], ['status', '--short']);
+    expect(args['workingDirectory'], '/workspace/project');
+    expect(args['declaredImpact'], ['/workspace/project']);
+  });
+
+  test('durable command checkpoint redacts credential option values', () {
+    const request = ToolRequest(
+      tool: AgentToolName.commandRun,
+      reason: '提交远程请求',
+      args: <String, dynamic>{
+        'executable': 'curl',
+        'arguments': [
+          '--password',
+          'hunter2',
+          '--header',
+          'Authorization: Bearer super-secret-token',
+          '--output',
+          'report.json',
+          '--data=opaque-body',
+        ],
+      },
+    );
+
+    final checkpoint = safeToolRequestCheckpoint(request);
+    final decoded = jsonDecode(checkpoint) as Map;
+    final args = decoded['args'] as Map;
+    final arguments = (args['arguments'] as List).cast<String>();
+    expect(arguments, [
+      '--password',
+      '[REDACTED]',
+      '--header',
+      '[REDACTED]',
+      '--output',
+      'report.json',
+      '--data=[REDACTED]',
+    ]);
+    expect(checkpoint, isNot(contains('hunter2')));
+    expect(checkpoint, isNot(contains('super-secret-token')));
+    expect(checkpoint, isNot(contains('opaque-body')));
+  });
 }

@@ -196,16 +196,46 @@ class WorkSnapshotService
   }
 
   Future<int> currentUsageBytes() async {
-    if (!await snapshotsDirectory.exists()) return 0;
+    if (!await _ensureSnapshotsDirectory(create: false)) return 0;
     return _sizeResolver(snapshotsDirectory);
   }
+
+  /// Deletes only the app-managed snapshot tree. The no-follow walk removes a
+  /// symlink itself instead of traversing its target, so clearing App data can
+  /// never delete a file from an authorized user project directory.
+  Future<int> clearAll() => _serializeStorage(() async {
+        _reservations.clear();
+        if (!await _ensureManagedParents(create: false)) return 0;
+        return _deleteTreeNoFollow(snapshotsDirectory);
+      });
 
   File manifestFileFor(String taskId) =>
       File('${snapshotDirectoryFor(taskId).path}/$_manifestName');
 
   Future<WorkSnapshotManifest?> readManifest(String taskId) async {
     final file = manifestFileFor(taskId);
-    if (!await file.exists()) return null;
+    try {
+      if (!await _ensureManagedParents(create: false)) return null;
+      final rootType = await FileSystemEntity.type(
+        snapshotsDirectory.path,
+        followLinks: false,
+      );
+      if (rootType != FileSystemEntityType.directory) return null;
+      final taskDirectory = snapshotDirectoryFor(taskId);
+      final taskType = await FileSystemEntity.type(
+        taskDirectory.path,
+        followLinks: false,
+      );
+      if (taskType != FileSystemEntityType.directory) return null;
+      final fileType = await FileSystemEntity.type(
+        file.path,
+        followLinks: false,
+      );
+      if (fileType != FileSystemEntityType.file) return null;
+    } on Object {
+      // A missing or untrusted app-support path is never read as a snapshot.
+      return null;
+    }
     try {
       final manifest =
           WorkSnapshotManifest.fromJsonString(await file.readAsString());
@@ -242,6 +272,11 @@ class WorkSnapshotService
         return false;
       }
       try {
+        // The first mutation has no snapshot directory yet. Creating this
+        // empty App-managed directory is safe and keeps the availability
+        // probe from falsely forcing an irreversible approval on every new
+        // task; symlinked or non-directory parents still fail closed.
+        if (!await _ensureSnapshotsDirectory(create: true)) return false;
         final captured = await _capture(plan, paths);
         final current = await _sizeResolver(snapshotsDirectory);
         return current + (captured.bytes?.length ?? 0) <= snapshotLimitBytes;
@@ -268,8 +303,20 @@ class WorkSnapshotService
     }
     File? backup;
     try {
+      await _ensureSnapshotsDirectory(create: true);
       final directory = snapshotDirectoryFor(plan.taskId);
-      await directory.create(recursive: true);
+      final directoryType = await FileSystemEntity.type(
+        directory.path,
+        followLinks: false,
+      );
+      if (directoryType == FileSystemEntityType.link ||
+          (directoryType != FileSystemEntityType.notFound &&
+              directoryType != FileSystemEntityType.directory)) {
+        throw StateError('任务快照目录不是普通目录');
+      }
+      if (directoryType == FileSystemEntityType.notFound) {
+        await directory.create(recursive: false);
+      }
       final manifestFile = manifestFileFor(plan.taskId);
       final current =
           await _readManifestForReservation(manifestFile, plan.taskId);
@@ -352,9 +399,14 @@ class WorkSnapshotService
     File manifestFile,
     String taskId,
   ) async {
-    if (!await manifestFile.exists()) {
+    final fileType = await FileSystemEntity.type(
+      manifestFile.path,
+      followLinks: false,
+    );
+    if (fileType == FileSystemEntityType.notFound) {
       return WorkSnapshotManifest.empty(taskId, clock());
     }
+    if (fileType != FileSystemEntityType.file) return null;
     try {
       final manifest = WorkSnapshotManifest.fromJsonString(
         await manifestFile.readAsString(),
@@ -410,7 +462,7 @@ class WorkSnapshotService
       post = await _postCondition(plan, paths);
     } on Object catch (error) {
       post = const _CapturedState();
-      completionFailure = '完成后状态无法读取：$error';
+      completionFailure = '完成后状态无法读取：${sanitizeWorkTaskError(error)}';
     }
     final actionIndex = manifest.actions.indexWhere(
       (item) => item.sequence == pending.sequence,
@@ -470,7 +522,7 @@ class WorkSnapshotService
     if (actionIndex < 0) return;
     final actions = List<WorkSnapshotAction>.from(manifest.actions);
     actions[actionIndex] = actions[actionIndex].copyWith(
-      failureReason: result.reason,
+      failureReason: sanitizeWorkTaskError(result.reason),
       // A committed mutation whose completion bookkeeping failed must remain
       // visible to undo. Its post-condition is intentionally unknown, so a
       // later undo will fail closed with a conflict rather than overwrite an
@@ -510,7 +562,34 @@ class WorkSnapshotService
 
   List<WorkSnapshotUndoItem> previewUndoSync(String taskId) {
     final file = manifestFileFor(taskId);
-    if (!file.existsSync()) return const [];
+    if (FileSystemEntity.typeSync(
+          appSupportDirectory.path,
+          followLinks: false,
+        ) !=
+        FileSystemEntityType.directory) {
+      return const [];
+    }
+    final container = Directory(
+      '${appSupportDirectory.path}/work_mode_agent',
+    );
+    if (FileSystemEntity.typeSync(container.path, followLinks: false) !=
+        FileSystemEntityType.directory) {
+      return const [];
+    }
+    final snapshotsType = FileSystemEntity.typeSync(
+      snapshotsDirectory.path,
+      followLinks: false,
+    );
+    if (snapshotsType != FileSystemEntityType.directory) return const [];
+    final taskType = FileSystemEntity.typeSync(
+      snapshotDirectoryFor(taskId).path,
+      followLinks: false,
+    );
+    if (taskType != FileSystemEntityType.directory ||
+        FileSystemEntity.typeSync(file.path, followLinks: false) !=
+            FileSystemEntityType.file) {
+      return const [];
+    }
     try {
       final manifest =
           WorkSnapshotManifest.fromJsonString(file.readAsStringSync());
@@ -527,7 +606,7 @@ class WorkSnapshotService
     final manifestFile = manifestFileFor(taskId);
     final manifest = await readManifest(taskId);
     if (manifest == null) {
-      if (await manifestFile.exists()) {
+      if (await _isRegularFile(manifestFile)) {
         throw StateError('任务快照损坏，无法读取撤销范围，请重试或清理该任务快照。');
       }
       return const [];
@@ -542,12 +621,13 @@ class WorkSnapshotService
     final manifestFile = manifestFileFor(taskId);
     final manifest = await readManifest(taskId);
     if (manifest == null) {
+      final manifestPresent = await _isRegularFile(manifestFile);
       return WorkSnapshotUndoResult(
         taskId: taskId,
-        status: await manifestFile.exists()
+        status: manifestPresent
             ? WorkSnapshotUndoStatus.unavailable
             : WorkSnapshotUndoStatus.notFound,
-        reason: await manifestFile.exists() ? '任务快照损坏，未执行撤销。' : '找不到该任务的快照。',
+        reason: manifestPresent ? '任务快照损坏，未执行撤销。' : '找不到该任务的快照。',
       );
     }
     final activeResolver = _activityResolver;
@@ -747,7 +827,7 @@ class WorkSnapshotService
     if (retention <= 0 || limit <= 0) {
       throw ArgumentError('清理阈值必须为正数');
     }
-    if (!await snapshotsDirectory.exists()) {
+    if (!await _ensureSnapshotsDirectory(create: false)) {
       return const WorkSnapshotCleanupResult();
     }
     final corruptedTaskIds = <String>[];
@@ -796,7 +876,11 @@ class WorkSnapshotService
   }) async {
     final records = <_SnapshotTaskRecord>[];
     await for (final entity in snapshotsDirectory.list(followLinks: false)) {
-      if (entity is! Directory) continue;
+      if (entity is! Directory ||
+          await FileSystemEntity.type(entity.path, followLinks: false) !=
+              FileSystemEntityType.directory) {
+        continue;
+      }
       final normalizedEntityPath = entity.path.replaceAll('\\', '/');
       final taskId = normalizedEntityPath.substring(
         normalizedEntityPath.lastIndexOf('/') + 1,
@@ -808,7 +892,11 @@ class WorkSnapshotService
         // safe to ignore. A present-but-invalid manifest is different: keep
         // it on disk and report it so callers cannot silently lose undo
         // visibility after a restart or partial write.
-        if (await manifestFileFor(taskId).exists()) {
+        if (await FileSystemEntity.type(
+              manifestFileFor(taskId).path,
+              followLinks: false,
+            ) !=
+            FileSystemEntityType.notFound) {
           corruptedTaskIds?.add(taskId);
         }
         continue;
@@ -961,6 +1049,17 @@ class WorkSnapshotService
   }
 
   Future<List<int>> _readBackup(String taskId, String relative) async {
+    if (!await _ensureSnapshotsDirectory(create: false)) {
+      throw StateError('快照备份目录不是受信任目录');
+    }
+    final taskDirectory = snapshotDirectoryFor(taskId);
+    if (await FileSystemEntity.type(
+          taskDirectory.path,
+          followLinks: false,
+        ) !=
+        FileSystemEntityType.directory) {
+      throw StateError('任务快照目录不是受信任目录');
+    }
     final normalized = relative.replaceAll('\\', '/');
     final segments = normalized.split('/');
     if (normalized.startsWith('/') ||
@@ -985,6 +1084,10 @@ class WorkSnapshotService
     }
     return file.readAsBytes();
   }
+
+  Future<bool> _isRegularFile(File file) async =>
+      await FileSystemEntity.type(file.path, followLinks: false) ==
+      FileSystemEntityType.file;
 
   Future<void> _restoreBytes(
     String path,
@@ -1120,7 +1223,19 @@ class WorkSnapshotService
     Directory directory,
     WorkSnapshotManifest manifest,
   ) async {
-    await directory.create(recursive: true);
+    await _ensureSnapshotsDirectory(create: true);
+    final directoryType = await FileSystemEntity.type(
+      directory.path,
+      followLinks: false,
+    );
+    if (directoryType == FileSystemEntityType.link ||
+        (directoryType != FileSystemEntityType.notFound &&
+            directoryType != FileSystemEntityType.directory)) {
+      throw StateError('任务快照目录不是普通目录');
+    }
+    if (directoryType == FileSystemEntityType.notFound) {
+      await directory.create(recursive: false);
+    }
     final temp = _temporarySibling(
       File('${directory.path}/$_manifestName'),
       'manifest',
@@ -1129,7 +1244,15 @@ class WorkSnapshotService
       await _writeFlushed(temp, utf8.encode(manifest.toJsonString()));
       final target = File('${directory.path}/$_manifestName');
       final isWindows = pathPolicy?.isWindows ?? Platform.isWindows;
-      if (isWindows && await target.exists()) {
+      final targetType = await FileSystemEntity.type(
+        target.path,
+        followLinks: false,
+      );
+      if (targetType != FileSystemEntityType.notFound &&
+          targetType != FileSystemEntityType.file) {
+        throw StateError('任务快照 manifest 不是普通文件');
+      }
+      if (isWindows && targetType == FileSystemEntityType.file) {
         await _replaceManifestOnWindows(temp, target, directory);
         return;
       }
@@ -1203,6 +1326,60 @@ class WorkSnapshotService
     }
   }
 
+  /// Validates the app-managed parent chain before snapshot reads/writes.
+  /// Final-component no-follow checks are not enough when an intermediate
+  /// `work_mode_agent` directory is replaced with a symlink.
+  Future<bool> _ensureSnapshotsDirectory({required bool create}) async {
+    if (!await _ensureManagedParents(create: create)) return false;
+    final type = await FileSystemEntity.type(
+      snapshotsDirectory.path,
+      followLinks: false,
+    );
+    if (type == FileSystemEntityType.link) {
+      if (!create) return false;
+      throw StateError('工作模式快照目录不是受信任目录');
+    }
+    if (type == FileSystemEntityType.notFound) {
+      if (!create) return false;
+      await snapshotsDirectory.create(recursive: false);
+    } else if (type != FileSystemEntityType.directory) {
+      throw StateError('工作模式快照目录不是普通目录');
+    }
+    return true;
+  }
+
+  Future<bool> _ensureManagedParents({required bool create}) async {
+    final appSupportType = await FileSystemEntity.type(
+      appSupportDirectory.path,
+      followLinks: false,
+    );
+    if (appSupportType == FileSystemEntityType.link) {
+      throw StateError('工作模式快照的应用数据根不是受信任目录');
+    }
+    if (appSupportType == FileSystemEntityType.notFound) {
+      if (!create) return false;
+      await appSupportDirectory.create(recursive: true);
+    } else if (appSupportType != FileSystemEntityType.directory) {
+      throw StateError('工作模式快照的应用数据根不是普通目录');
+    }
+
+    final container = Directory('${appSupportDirectory.path}/work_mode_agent');
+    final containerType = await FileSystemEntity.type(
+      container.path,
+      followLinks: false,
+    );
+    if (containerType == FileSystemEntityType.link) {
+      throw StateError('工作模式快照目录不是受信任目录');
+    }
+    if (containerType == FileSystemEntityType.notFound) {
+      if (!create) return false;
+      await container.create(recursive: false);
+    } else if (containerType != FileSystemEntityType.directory) {
+      throw StateError('工作模式快照目录不是普通目录');
+    }
+    return true;
+  }
+
   Future<T> _serializeStorage<T>(Future<T> Function() operation) {
     final previous = _storageQueue;
     late final Future<T> scheduled;
@@ -1236,9 +1413,22 @@ class WorkSnapshotService
   }
 
   Future<void> _deleteRecord(_SnapshotTaskRecord record) async {
-    if (await record.directory.exists()) {
-      await record.directory.delete(recursive: true);
+    await _deleteTreeNoFollow(record.directory);
+  }
+
+  Future<int> _deleteTreeNoFollow(FileSystemEntity entity) async {
+    final type = await FileSystemEntity.type(entity.path, followLinks: false);
+    if (type == FileSystemEntityType.notFound) return 0;
+    if (type != FileSystemEntityType.directory) {
+      await entity.delete();
+      return 1;
     }
+    var removed = 0;
+    await for (final child in Directory(entity.path).list(followLinks: false)) {
+      removed += await _deleteTreeNoFollow(child);
+    }
+    await entity.delete();
+    return removed + 1;
   }
 
   Future<void> _recordUndoEvents({
@@ -1329,13 +1519,27 @@ class WorkSnapshotService
   }
 
   static Future<int> _directorySize(Directory directory) async {
-    if (!await directory.exists()) return 0;
+    final directoryType = await FileSystemEntity.type(
+      directory.path,
+      followLinks: false,
+    );
+    if (directoryType == FileSystemEntityType.notFound) return 0;
+    if (directoryType != FileSystemEntityType.directory) {
+      throw StateError('快照目录不是受信任目录');
+    }
     var total = 0;
     await for (final entity
         in directory.list(followLinks: false, recursive: true)) {
-      if (entity is File) {
+      final entityType = await FileSystemEntity.type(
+        entity.path,
+        followLinks: false,
+      );
+      if (entityType == FileSystemEntityType.link) {
+        throw StateError('快照目录包含符号链接');
+      }
+      if (entityType == FileSystemEntityType.file) {
         try {
-          total += await entity.length();
+          total += await File(entity.path).length();
         } on Object {
           // Under-counting an unreadable file could let a new snapshot exceed
           // the configured quota. Fail closed so callers can retry or surface

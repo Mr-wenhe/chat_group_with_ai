@@ -13,6 +13,31 @@ import 'package:chat_group/features/agentic/agent_runtime.dart';
 // Mention parsing
 // ---------------------------------------------------------------------------
 
+/// The shared mention parser's diagnostic result.
+///
+/// Work-mode routing needs to distinguish an unknown name from an ambiguous
+/// duplicate name. Keeping that information beside the existing parser avoids
+/// a second, subtly different mention regular expression.
+class MentionParseResult {
+  final List<String> characterIds;
+  final List<String> unknownNames;
+  final List<String> ambiguousNames;
+  final bool mentionsAll;
+
+  const MentionParseResult({
+    required this.characterIds,
+    this.unknownNames = const [],
+    this.ambiguousNames = const [],
+    this.mentionsAll = false,
+  });
+
+  bool get hasExplicitMention =>
+      mentionsAll ||
+      characterIds.isNotEmpty ||
+      unknownNames.isNotEmpty ||
+      ambiguousNames.isNotEmpty;
+}
+
 /// Parses `@name` mentions in [content] against the given [characters].
 ///
 /// Supports Chinese and English names, `@all` / `@everyone` / `@所有人` /
@@ -21,15 +46,38 @@ import 'package:chat_group/features/agentic/agent_runtime.dart';
 List<String> parseMentionedCharacterIds(
   String content,
   List<AICharacter> characters,
+) =>
+    analyzeMentionedCharacterIds(content, characters).characterIds;
+
+/// Parses mentions once and exposes routing diagnostics to callers that need
+/// to explain unknown or duplicate names to the user.
+MentionParseResult analyzeMentionedCharacterIds(
+  String content,
+  List<AICharacter> characters,
 ) {
   final mentionedIds = <String>[];
-  if (characters.isEmpty || content.isEmpty) return mentionedIds;
+  final unknownNames = <String>[];
+  final ambiguousNames = <String>[];
+  var mentionsAll = false;
+  if (content.isEmpty) {
+    return const MentionParseResult(characterIds: []);
+  }
 
-  final byName = {for (final c in characters) c.name: c.id};
+  final byName = <String, List<String>>{};
+  for (final character in characters) {
+    byName.putIfAbsent(character.name, () => <String>[]).add(character.id);
+  }
   final mentionPattern = RegExp(r'@([^@\s，。！？!?、；;：:,.]+)');
   for (final match in mentionPattern.allMatches(content)) {
+    // An email/domain is not a role mention. Keep this boundary in the shared
+    // parser so every caller has the same behavior instead of adding a
+    // work-mode-only regex exception.
+    if (match.start > 0 && _isMentionTokenCharacter(content[match.start - 1])) {
+      continue;
+    }
     final name = match.group(1);
     if (name != null && isMentionAllToken(name)) {
+      mentionsAll = true;
       for (final character in characters) {
         if (!mentionedIds.contains(character.id)) {
           mentionedIds.add(character.id);
@@ -37,13 +85,27 @@ List<String> parseMentionedCharacterIds(
       }
       continue;
     }
-    final id = name == null ? null : byName[name];
-    if (id != null && !mentionedIds.contains(id)) {
-      mentionedIds.add(id);
+    if (name == null) continue;
+    final ids = byName[name] ?? const <String>[];
+    if (ids.length > 1) {
+      if (!ambiguousNames.contains(name)) ambiguousNames.add(name);
+    } else if (ids.length == 1) {
+      final id = ids.single;
+      if (!mentionedIds.contains(id)) mentionedIds.add(id);
+    } else if (!unknownNames.contains(name)) {
+      unknownNames.add(name);
     }
   }
-  return mentionedIds;
+  return MentionParseResult(
+    characterIds: List.unmodifiable(mentionedIds),
+    unknownNames: List.unmodifiable(unknownNames),
+    ambiguousNames: List.unmodifiable(ambiguousNames),
+    mentionsAll: mentionsAll,
+  );
 }
+
+bool _isMentionTokenCharacter(String value) =>
+    RegExp(r'^[A-Za-z0-9_./%+\-]$').hasMatch(value);
 
 /// Returns `true` when [token] is one of the recognised "mention everyone"
 /// keywords: `all`, `everyone`, `所有人`, `全部`.

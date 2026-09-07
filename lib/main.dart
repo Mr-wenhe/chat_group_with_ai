@@ -1,5 +1,6 @@
 import 'dart:async';
 
+import 'package:desktop_webview_window/desktop_webview_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'core/binding/dedup_key_event_binding.dart';
@@ -134,8 +135,9 @@ Future<void> runSearchCredentialRepair(
   }
 }
 
-void main() async {
+void main(List<String> args) async {
   DedupKeyEventBinding.ensureInitialized();
+  if (runWebViewTitleBarWidget(args)) return;
 
   final db = DatabaseService();
   try {
@@ -209,14 +211,24 @@ class MyApp extends ConsumerWidget {
       navigatorKey: navigatorKey,
       scaffoldMessengerKey: scaffoldMessengerKey,
       builder: (context, child) {
-        return DirectChatForegroundWatcher(
-          db: db,
-          scaffoldMessengerKey: scaffoldMessengerKey,
-          navigatorKey: navigatorKey,
-          child: WorkTaskOverlayHost(
-            navigatorKey: navigatorKey,
-            child: child ?? const SizedBox.shrink(),
-          ),
+        // MaterialApp.builder runs above the Navigator's Overlay. The
+        // app-scoped work panel contains Tooltip and dialog actions, so give
+        // the host a real Overlay ancestor instead of relying on the nested
+        // route Navigator's private overlay.
+        return Overlay(
+          initialEntries: [
+            OverlayEntry(
+              builder: (_) => DirectChatForegroundWatcher(
+                db: db,
+                scaffoldMessengerKey: scaffoldMessengerKey,
+                navigatorKey: navigatorKey,
+                child: WorkTaskOverlayHost(
+                  navigatorKey: navigatorKey,
+                  child: child ?? const SizedBox.shrink(),
+                ),
+              ),
+            ),
+          ],
         );
       },
       routes: {

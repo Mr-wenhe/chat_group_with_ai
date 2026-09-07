@@ -301,6 +301,11 @@ class _WorkModeAgentSettingsSectionState
                     color: grant.available ? cs.secondary : cs.error,
                   ),
                 ),
+                const SizedBox(height: 2),
+                Text(
+                  '移除授权只停止 App 访问，不会删除目录或文件。',
+                  style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant),
+                ),
               ],
             ),
           ),
@@ -312,7 +317,7 @@ class _WorkModeAgentSettingsSectionState
           ),
           IconButton(
             key: Key('work-folder-remove:${grant.path}'),
-            tooltip: '移除授权',
+            tooltip: '移除授权（不删除目录或文件）',
             onPressed: busy ? null : () => _remove(grant),
             icon: const Icon(Icons.remove_circle_outline, size: 19),
           ),

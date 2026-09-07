@@ -147,18 +147,21 @@ class BridgeErrorKind {
         statusCode = null;
 }
 
+/// Legacy/ordinary agentic compatibility runtime.
+///
+/// Work mode is owned by `WorkAgentLoop` and is deliberately not dispatched
+/// through this facade. The legacy protocol and limits below remain only for
+/// ordinary agentic integrations that still depend on this API.
 class AgentRuntime {
-  /// 12 步可容纳“读取 → 修改 → 验证”等逐次审批流水线，同时继续限制模型/工具
-  /// 循环。每次模型请求另有独立超时，因此这里是步骤预算，不是无限重试次数。
+  /// Legacy ordinary-agentic budget for the compatibility protocol.
   static const int maxToolSteps = 12;
   static const int preferredMaxOutputTokens = 8192;
   static const int preferredSummaryOutputTokens = 2048;
   static const Duration completionTimeout = Duration(seconds: 120);
   static const Duration fileGenerationTimeout = Duration(minutes: 5);
 
-  /// Hard ceiling for one tool call, including local bridge I/O. The bridge
-  /// itself has a shorter child-process budget so it can return a structured
-  /// timeout response before this outer guard fires.
+  /// Legacy ordinary-agentic ceiling for one compatibility tool call,
+  /// including any bridge I/O used by those callers.
   static const Duration toolExecutionTimeout = Duration(seconds: 40);
 
   final AgentCompletion complete;
@@ -189,6 +192,16 @@ class AgentRuntime {
   /// ordinary agentic chat retains the historical 12-step default.
   final int toolStepLimit;
 
+  /// A follow-up coordinator may resolve an explicit revision target from its
+  /// structured `lastArtifactPaths`. When present, this path wins over the
+  /// legacy conversation-history heuristic.
+  final String? revisionTargetPath;
+
+  /// New-file follow-ups may choose an available sibling when the requested
+  /// name is occupied. Revision follow-ups leave this false and overwrite the
+  /// resolved original path instead.
+  final bool autoRenameIfExists;
+
   /// 进度上报去抖状态：仅当 stage 或 currentStepLabel 变化时，才真正触发一次
   /// 气泡重写，避免续写循环等高频 thinking 上报导致的视觉抖动。
   AgentRuntimeProgressStage? _lastReportedStage;
@@ -217,6 +230,8 @@ class AgentRuntime {
     this.grantedPermissions,
     this.shouldCancel,
     this.allowCommandValidation,
+    this.revisionTargetPath,
+    this.autoRenameIfExists = false,
     int? toolStepLimit,
   }) : toolStepLimit = toolStepLimit ?? maxToolSteps;
 
@@ -429,10 +444,10 @@ class AgentRuntime {
   /// 此时把模型已经生成好的完整内容恢复成 workspace.patch 请求，避免正文泄漏到
   /// 聊天气泡，也避免再次调用模型造成内容丢失。
   static ToolRequest? _recoverGeneratedFileRequest(
-    String userRequest,
-    String modelOutput,
-  ) {
-    final path = _inferGeneratedFilePath(userRequest);
+      String userRequest, String modelOutput,
+      [String? structuredArtifactPath]) {
+    final path =
+        _inferGeneratedFilePath(userRequest, null, structuredArtifactPath);
     if (path == null) return null;
     final content = _extractGeneratedFileContent(modelOutput);
     if (content == null || content.trim().isEmpty) return null;
@@ -454,9 +469,20 @@ class AgentRuntime {
   static String? _inferGeneratedFilePath(
     String request, [
     List<Map<String, dynamic>>? conversationHistory,
+    String? structuredArtifactPath,
   ]) {
     final requestText = _requestBody(request);
     final lower = requestText.toLowerCase();
+    final structured = structuredArtifactPath?.trim();
+    if (structured != null &&
+        structured.isNotEmpty &&
+        !RegExp(r'[\u0000-\u001f\u007f]').hasMatch(structured) &&
+        !structured.split(RegExp(r'[/\\]+')).contains('..')) {
+      // The coordinator already proved this path against the task's durable
+      // artifact list and authorization boundary. Do not guess another file
+      // from unrelated messages in the conversation.
+      return structured.replaceAll('\\', '/');
+    }
     String? previousArtifactPath;
     if (conversationHistory != null) {
       for (final message in conversationHistory.reversed) {
@@ -595,13 +621,13 @@ class AgentRuntime {
   static bool _isArtifactRevisionRequest(String request) {
     final body = _requestBody(request).toLowerCase();
     final editVerb = RegExp(
-      r'(修改|修复|改写|改成|调整|优化|完善|'
+      r'(修改|修复|改写|改成|改|调整|优化|完善|'
       r'fix|modify|edit|revise|update|change)',
       caseSensitive: false,
     ).hasMatch(body);
     final artifactReference = RegExp(
       r'(它|这个(?:页面|文件|代码)|该(?:页面|文件|代码)|附件|上一个|上次|'
-      r'刚才|之前|现有|当前|'
+      r'刚才|之前|现有|当前|同一(?:个)?文件|相同(?:的)?(?:个)?文件|'
       r'\bsame\b|\bthis\b|\bthat\b|\bprevious\b|\blast\b|'
       r'\bexisting\b|\bcurrent\b|\battachment\b)',
       caseSensitive: false,
@@ -609,19 +635,43 @@ class AgentRuntime {
     return editVerb && artifactReference;
   }
 
+  String? _generatedFilePath(
+    String request, [
+    List<Map<String, dynamic>>? conversationHistory,
+  ]) =>
+      _inferGeneratedFilePath(
+        request,
+        conversationHistory,
+        revisionTargetPath,
+      );
+
   static ToolRequest _normalizeRevisionPatch(
     ToolRequest request,
-    String userRequest,
-  ) {
+    String userRequest, {
+    bool forceRevision = false,
+    String? revisionTargetPath,
+  }) {
     if (request.tool != AgentToolName.workspacePatch ||
-        !_isArtifactRevisionRequest(userRequest) ||
-        request.args['overwrite'] == true) {
+        (!forceRevision && !_isArtifactRevisionRequest(userRequest))) {
       return request;
+    }
+    final args = <String, dynamic>{...request.args};
+    if (forceRevision && revisionTargetPath != null) {
+      // The coordinator resolved this path from durable lastArtifactPaths. A
+      // model-provided replacement path must not turn a revision into a new
+      // file or escape the original approval scope.
+      args['path'] = revisionTargetPath;
+    }
+    if (args['overwrite'] == true &&
+        (!forceRevision || args['path'] == request.args['path'])) {
+      return forceRevision && args['path'] != request.args['path']
+          ? ToolRequest(tool: request.tool, reason: request.reason, args: args)
+          : request;
     }
     return ToolRequest(
       tool: request.tool,
       reason: request.reason,
-      args: {...request.args, 'overwrite': true},
+      args: {...args, 'overwrite': true},
     );
   }
 
@@ -803,12 +853,13 @@ class AgentRuntime {
     // 先生成一份“包含完整文件内容的工具计划 JSON”。对大型 HTML 来说，
     // JSON 转义会放大输出并在 120 秒总时限处被截断。直接请求文件正文，
     // 然后由运行时本地包装成 workspace.patch，可以避免冗余规划与误报超时。
-    if (_canGenerateNewFileDirectly(userRequest, conversationHistory)) {
+    if (_canGenerateNewFileDirectly(
+        userRequest, conversationHistory, revisionTargetPath)) {
       try {
         final directFileRequest = await _generateFileContentRequest(
           character: character,
           userRequest: userRequest,
-          path: _inferGeneratedFilePath(userRequest, conversationHistory)!,
+          path: _generatedFilePath(userRequest, conversationHistory)!,
           conversationHistory: conversationHistory,
           executedRequests: priorExecutedRequests,
           throwOnFailure: true,
@@ -952,8 +1003,11 @@ class AgentRuntime {
       );
     }
 
-    final recoveredFileRequest =
-        _recoverGeneratedFileRequest(userRequest, content);
+    final recoveredFileRequest = _recoverGeneratedFileRequest(
+      userRequest,
+      content,
+      revisionTargetPath,
+    );
     if (recoveredFileRequest != null) {
       return _handleToolRequest(
         character: character,
@@ -970,7 +1024,7 @@ class AgentRuntime {
     // （如「我直接现在就为你写入文件…」）原样当作用户可见消息返回——那会
     // 泄漏内部意图并产生多余的「第一条」消息（Bug B-b1）。
     final hasExplicitFileIntent =
-        _inferGeneratedFilePath(userRequest, conversationHistory) != null;
+        _generatedFilePath(userRequest, conversationHistory) != null;
     if (_containsToolCallTrace(content) || hasExplicitFileIntent) {
       // 文本含有工具调用痕迹但 tryParse 解析失败：尝试用更宽松的方式兜底提取
       // 工具请求并执行；提取失败才退化为简洁提示，绝不泄露原始规划文本。
@@ -1135,10 +1189,11 @@ class AgentRuntime {
     List<Map<String, dynamic>>? conversationHistory,
     List<ToolRequest> executedRequests = const [],
   }) async {
-    if (!_canGenerateNewFileDirectly(userRequest, conversationHistory)) {
+    if (!_canGenerateNewFileDirectly(
+        userRequest, conversationHistory, revisionTargetPath)) {
       return null;
     }
-    final path = _inferGeneratedFilePath(userRequest, conversationHistory);
+    final path = _generatedFilePath(userRequest, conversationHistory);
     if (path == null) return null;
 
     final modelRequest = await _generateFileContentRequest(
@@ -1164,6 +1219,7 @@ class AgentRuntime {
   static bool _canGenerateNewFileDirectly(
     String userRequest, [
     List<Map<String, dynamic>>? conversationHistory,
+    String? structuredArtifactPath,
   ]) {
     final lower = userRequest.toLowerCase();
     if (RegExp(
@@ -1173,7 +1229,12 @@ class AgentRuntime {
     ).hasMatch(lower)) {
       return false;
     }
-    return _inferGeneratedFilePath(userRequest, conversationHistory) != null;
+    return _inferGeneratedFilePath(
+          userRequest,
+          conversationHistory,
+          structuredArtifactPath,
+        ) !=
+        null;
   }
 
   Future<ToolRequest?> _generateFileContentRequest({
@@ -1357,7 +1418,7 @@ ${character.rolePlaySystemPrompt}
 
     // 极简 re-prompt：明确告诉模型上次输出格式不对、这次必须只输出 JSON 块。
     final originalFilePath =
-        _inferGeneratedFilePath(userRequest, conversationHistory);
+        _generatedFilePath(userRequest, conversationHistory);
     final pathHint = originalFilePath != null
         ? '注意：用户要求修改的文件是 `$originalFilePath`，不要创建新文件，直接对已有文件发起 workspace.patch 写入修改后的完整内容。\n'
         : '';
@@ -1423,7 +1484,12 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         message: '工作模式已关闭，任务已安全中止。',
       );
     }
-    request = _normalizeRevisionPatch(request, userRequest);
+    request = _normalizeRevisionPatch(
+      request,
+      userRequest,
+      forceRevision: revisionTargetPath != null,
+      revisionTargetPath: revisionTargetPath,
+    );
     if (remainingSteps <= 0) {
       return AgentRuntimeResult(
         status: AgentRuntimeStatus.failed,
@@ -1749,7 +1815,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     // 吐出裸 HTML/代码。与首轮规划保持同一恢复策略，把现成内容继续转换为
     // workspace.patch，不能只用“请查看附件”护栏吞掉正文却没有真正创建文件。
     final nextRequest = AgentProtocolParser.parse(content) ??
-        _recoverGeneratedFileRequest(userRequest, content);
+        _recoverGeneratedFileRequest(userRequest, content, revisionTargetPath);
     if (nextRequest != null) {
       // 第二层防御：已成功写入过文件后，禁止 LLM 再发起写文件请求。
       // 原因：即使第一层防御（_handleToolResult 中 workspace.patch 成功后直接 fallback）
@@ -1786,7 +1852,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     // 典型反例：skill.create 成功后，模型直接说“页面已生成，
     // 请查看附件”，但实际从未写文件。此时尝试恢复出真实写入
     // 请求；无法恢复时明确失败，绝不用口头承诺冒充交付。
-    final expectedFilePath = _inferGeneratedFilePath(userRequest);
+    final expectedFilePath = _generatedFilePath(userRequest);
     final hasExecutedFileWrite = executedRequests.any(
       (executed) => executed.tool == AgentToolName.workspacePatch,
     );
@@ -1952,6 +2018,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       AgentToolName.workspaceList => ToolPermission.workspaceRead,
       AgentToolName.workspaceRead => ToolPermission.workspaceRead,
       AgentToolName.workspaceSearch => ToolPermission.workspaceRead,
+      AgentToolName.workspaceDocument => ToolPermission.workspaceRead,
       AgentToolName.workspacePatch => ToolPermission.workspacePatch,
       AgentToolName.workspaceRename => ToolPermission.workspacePatch,
       AgentToolName.workspaceDelete => ToolPermission.workspacePatch,
@@ -1971,6 +2038,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       AgentToolName.workspaceList => false,
       AgentToolName.workspaceRead => false,
       AgentToolName.workspaceSearch => false,
+      AgentToolName.workspaceDocument => false,
       AgentToolName.workspacePatch => true,
       AgentToolName.workspaceRename => true,
       AgentToolName.workspaceDelete => true,
@@ -2064,16 +2132,20 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       binaryDowngradedFrom = path;
       path = mdPath;
     }
-    // 旧桥接器没有任务级变更计划，生成文件冲突时自动改用递增后缀；
-    // Stage 02 则必须保留精确路径，让已批准的 create/modify 计划决定结果。
+    // 旧桥接器以及明确的新建追问在文件冲突时自动改用递增后缀；
+    // 普通 Stage 02 修订则必须保留精确路径，让批准的 create/modify
+    // 计划决定结果。
     //   a) 静默覆盖导致用户丢失之前的内容
     //   b) 直接拒绝导致工具执行失败、LLM 回退到代码泄漏路径
     // 改名格式：page.html → page_2.html
     final stage02FileTool = workspaceFileTool?.acceptsAbsolutePaths == true;
+    final modelRequestedOverwrite = request.args['overwrite'] == true;
     if (!isExactPatch &&
-        !stage02FileTool &&
-        request.args['overwrite'] != true &&
+        (!stage02FileTool || autoRenameIfExists) &&
+        (!modelRequestedOverwrite || autoRenameIfExists) &&
         await _workspaceFileExists(path)) {
+      // A new-file follow-up owns the collision policy; a model cannot turn
+      // that explicit request into a silent overwrite by setting overwrite.
       path = await _nextAvailableWorkspacePath(path);
     }
     if (path.isEmpty) {

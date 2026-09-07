@@ -6,6 +6,7 @@ import 'package:chat_group/features/work_mode/stage02_workspace_file_tool.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_approval_decision.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
+import 'package:chat_group/features/work_mode/work_approval_fingerprint.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
@@ -61,6 +62,7 @@ void main() {
     void Function(String path, String operation)? onSensitiveRead,
     bool allowWithoutUndo = false,
     WorkChangeApprovalDecision? approvalDecision,
+    String? approvedSensitiveOperation,
   }) {
     return Stage02WorkspaceFileTool(
       files: files,
@@ -72,6 +74,10 @@ void main() {
       // root. Production tasks always provide a durable approval scope.
       allowImplicitScope: true,
       approvalDecision: approvalDecision,
+      approvedSensitiveOperation: approvedSensitiveOperation,
+      approvalCapability: approvedSensitiveOperation == null
+          ? null
+          : WorkApprovalCapability.sensitiveRead,
       onSensitiveRead: onSensitiveRead,
       allowWithoutUndo: allowWithoutUndo,
       resourceLockManager: resourceLocks,
@@ -186,6 +192,40 @@ void main() {
     expect(await target.readAsString(), 'changed');
   });
 
+  test('does not hash a sensitive file when the approval scope misses it',
+      () async {
+    final current = task('stage02-sensitive-scope-mismatch');
+    final sensitiveFile =
+        await File('${root.path}/.env').writeAsString('TOKEN=scope-secret');
+    final unrelatedPlan = WorkChangePlan(
+      taskId: current.id,
+      actionType: WorkChangeActionType.modify,
+      exactPaths: ['${root.path}/other.txt'],
+      knownAffectedDirectories: [root.path],
+      estimatedBytes: 4,
+      snapshotAvailable: true,
+      reversible: true,
+      riskReason: 'scope mismatch fixture',
+    );
+    final tool = Stage02WorkspaceFileTool(
+      files: files,
+      mutations: mutations,
+      pathPolicy: pathPolicy,
+      task: current,
+      workspaceRoot: root.path,
+      approvalDecision: WorkChangeApprovalDecision.approved,
+      approvalScope: WorkApprovalScope.fromPlan(unrelatedPlan),
+    );
+
+    final result = await tool.write(sensitiveFile.path, 'TOKEN=changed');
+
+    expect(result['ok'], isFalse);
+    expect(result['error'], 'sensitive_mutation_requires_approval');
+    expect(result['requiresApproval'], isTrue);
+    expect(result['redacted'], isTrue);
+    expect(await sensitiveFile.readAsString(), 'TOKEN=scope-secret');
+  });
+
   test('skips sensitive files during directory search and gates direct access',
       () async {
     final current = task('stage02-sensitive-search');
@@ -214,14 +254,53 @@ void main() {
       current,
       approvalDecision: WorkChangeApprovalDecision.approved,
     );
-    final approved = await approvedTool.search(
-      root.path,
+    // A mutation approval alone cannot reveal a sensitive file. The caller
+    // must approve this exact file + query operation.
+    final exactOperation = approvedTool.sensitiveReadFingerprint(
+      operation: 'search',
+      path: '${root.path}/.env',
+      query: 'TOKEN',
+    );
+    final exactTool = toolFor(
+      current,
+      approvalDecision: WorkChangeApprovalDecision.approved,
+      approvedSensitiveOperation: exactOperation,
+    );
+    final approved = await exactTool.search(
+      '${root.path}/.env',
       'TOKEN',
       allowSensitive: true,
     );
     expect(approved['ok'], isTrue);
     expect(approved['matches'], isNotEmpty);
     expect(approved['matches'].single['snippet'], contains('search-secret'));
+  });
+
+  test('does not treat a mutation capability as a sensitive-read grant',
+      () async {
+    final current = task('stage02-capability-isolation');
+    await File('${root.path}/.env').writeAsString('TOKEN=isolated');
+    final exactOperation = toolFor(current).sensitiveReadFingerprint(
+      operation: 'readTextRange',
+      path: '${root.path}/.env',
+    );
+    final tool = Stage02WorkspaceFileTool(
+      files: files,
+      mutations: mutations,
+      pathPolicy: pathPolicy,
+      task: current,
+      workspaceRoot: root.path,
+      allowImplicitScope: true,
+      approvalDecision: WorkChangeApprovalDecision.approved,
+      approvalCapability: WorkApprovalCapability.mutation,
+      approvedSensitiveOperation: exactOperation,
+      resourceLockManager: resourceLocks,
+    );
+
+    final result = await tool.readWithOptions('.env', allowSensitive: true);
+    expect(result['requiresApproval'], isTrue);
+    expect(result['redacted'], isTrue);
+    expect(result['content'], isNot(contains('isolated')));
   });
 
   test('ordinary-write setting can apply a narrow patch without a prompt',
