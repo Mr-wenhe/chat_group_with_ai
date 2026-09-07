@@ -695,7 +695,7 @@ void main() {
         executable: 'insta',
         arguments: ['--token=sk-test-1234567890'],
         workingDirectory: '/workspace',
-        knownFiles: const [],
+        knownFiles: [],
         possibleDirectories: ['/workspace'],
         impactUncertain: true,
       ),
