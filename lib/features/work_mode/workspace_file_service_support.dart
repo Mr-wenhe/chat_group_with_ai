@@ -159,6 +159,7 @@ extension _WorkspaceFileServiceSupport on WorkspaceFileService {
           '无法读取搜索目录。',
         );
       }
+      files.sort((a, b) => a.compareTo(b));
     }
     return _SearchScan(files, reachedLimit: false, cancelled: false);
   }

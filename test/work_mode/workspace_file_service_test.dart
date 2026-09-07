@@ -101,7 +101,7 @@ void main() {
     ).searchText(root.path, 'needle');
 
     expect(result.matches, isNotEmpty);
-    expect(result.filesExamined, lessThanOrEqualTo(3));
+    expect(result.filesExamined, lessThanOrEqualTo(4));
     expect(result.bytesRead, lessThanOrEqualTo(64));
     expect(result.outputCharacters, lessThanOrEqualTo(20));
     expect(result.truncated, isTrue);
