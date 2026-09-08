@@ -166,7 +166,34 @@ void main() {
     expect(errors, hasLength(2));
   });
 
-  test('播放中继续入队仍按原顺序串行', () async {
+  test('相邻两句：前一句播放期间后一句已预合成（消除句间串行延迟）', () async {
+    final sink = _FakeSink(holdPlayback: true, autoReleaseAfterManual: true);
+    final synth = _FakeSynth();
+    synth.defaultResult = _pcm(8);
+    final broadcaster = SpeechBroadcaster(
+      synthesize: synth.call,
+      sink: sink,
+    );
+
+    broadcaster.speak(text: '第一句。', speaker: 'v1');
+    broadcaster.speak(text: '第二句。', speaker: 'v1');
+    await _flushMicrotasks();
+
+    // 首句仍被播放器 gate 挡住，但第二句已在第一句播放期间完成合成——
+    // 这样第一句结束即可立即开播第二句，无需再等一段网络合成往返。
+    expect(sink.played, hasLength(1));
+    expect(synth.calls, hasLength(2),
+        reason: '播放第一句期间应已开始合成第二句');
+    expect(synth.calls.map((c) => c.$1), ['第一句。', '第二句。']);
+
+    sink.releaseAll();
+    await settle(broadcaster);
+
+    expect(sink.played, hasLength(2));
+    expect(synth.calls.map((c) => c.$1), ['第一句。', '第二句。']);
+  });
+
+  test('播放中继续入队仍按原顺序串行（新句立即进入预取，不重排）', () async {
     // 仅首句手动放行；首次放行后其余自动放行，避免逐个 gate。
     final sink = _FakeSink(holdPlayback: true, autoReleaseAfterManual: true);
     final synth = _FakeSynth();
@@ -178,10 +205,11 @@ void main() {
 
     broadcaster.speak(text: '甲。', speaker: 'v1');
     await _flushMicrotasks();
-    // 甲 正在播放（gate 未放行），此刻入队乙。
+    // 甲 正在播放（gate 未放行），此刻入队乙：乙立即开始预合成，但不抢先播放。
     broadcaster.speak(text: '乙。', speaker: 'v1');
     await _flushMicrotasks();
-    expect(synth.calls, hasLength(1), reason: '甲播放未结束前不应合成乙');
+    expect(synth.calls, hasLength(2), reason: '甲播放期间乙已被预合成');
+    expect(sink.played, hasLength(1), reason: '乙只合成、未播放，保持顺序');
 
     sink.releaseAll(); // 放行甲的播放
     await settle(broadcaster);
@@ -202,12 +230,14 @@ void main() {
     broadcaster.speak(text: '甲。', speaker: 'v1');
     broadcaster.speak(text: '乙。', speaker: 'v1');
     await _flushMicrotasks();
-    expect(synth.calls, hasLength(1)); // 乙还在队列、未合成
+    // 乙虽已被预合成（在途合成与甲的播放重叠），但还未轮到播放。
+    expect(synth.calls, hasLength(2), reason: '乙在甲播放期间已被预合成');
 
-    await broadcaster.stop(); // 清空乙、打断甲
+    await broadcaster.stop(); // 丢弃乙、打断甲
 
-    expect(synth.calls, hasLength(1), reason: '乙不应再被合成');
-    expect(sink.played, hasLength(1), reason: '只有甲进入了播放');
+    expect(synth.calls, hasLength(2), reason: '乙确实被预合成了');
+    expect(sink.played, hasLength(1),
+        reason: '乙仅被合成、未播放，stop 丢弃了未轮到播放的音频');
     // 被打断后队列已空，idle 可正常完成。
     await settle(broadcaster);
   });
