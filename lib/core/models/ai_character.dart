@@ -97,6 +97,11 @@ class AICharacter extends HiveObject {
   @HiveField(22, defaultValue: false)
   final bool hasKnownGender;
 
+  /// 角色朗读回复用的音色 id（见 `voice.md` / [VoicePreset]）。
+  /// 为空表示未指定：群聊语音播报时回落到语音服务配置的“默认音色”。
+  @HiveField(23, defaultValue: '')
+  String voiceId;
+
   AICharacter({
     String? id,
     required this.name,
@@ -121,6 +126,7 @@ class AICharacter extends HiveObject {
     List<ToolPermission>? toolPermissions,
     this.gender = CharacterGender.female,
     this.hasKnownGender = true,
+    this.voiceId = '',
   })  : id = id ?? const Uuid().v4(),
         modelName = modelName ?? ApiProvider.defaultModels[apiProvider] ?? '',
         createdAt = createdAt ?? DateTime.now(),
@@ -159,6 +165,7 @@ class AICharacter extends HiveObject {
       toolPermissions: List<ToolPermission>.from(toolPermissions),
       gender: value,
       hasKnownGender: hasKnownGender,
+      voiceId: voiceId,
     );
   }
 

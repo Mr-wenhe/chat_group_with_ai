@@ -8,6 +8,12 @@
       "deviceId": "macos"
     },
     {
+      "name": "chat_group (windows)",
+      "request": "launch",
+      "type": "dart",
+      "deviceId": "windows"
+    },
+    {
       "name": "chat_group (Chrome)",
       "request": "launch",
       "type": "dart",

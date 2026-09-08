@@ -292,6 +292,8 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       });
       _scrollToBottom();
 
+      // 开启流式语音播报时，为这条回复新建切句缓冲（无音色则整条不朗读）。
+      _beginVoiceReply(character);
       session = StreamingReplySession();
       _streamingSession = session;
       if (_canTouchUi) _setUiState(() {});
@@ -311,6 +313,8 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
           temp!.content = draft;
           _conversationController.updateStreamingDraft(draft);
           _flushStreamingUi();
+          // 语音播报：把新增的增量喂给切句器，完整句即时入队朗读。
+          _feedVoiceReplyDraft(draft);
         },
       );
       if (_disposed) return;
@@ -334,6 +338,8 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
             '[${character.name} 重新生成失败: ${_safeChatFailureMessage(result.error)}]';
         temp.content = fullContent;
         _flushStreamingUi();
+        // 流式过程已失败：丢弃切句残缓冲，避免把失败尾巴当流式朗读。
+        _cancelVoiceReply();
       }
       if (_canTouchUi) _setUiState(() {});
 
@@ -398,6 +404,8 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       // 指回原消息，保留"这条是对哪条的重写"的可追溯关系。
       temp.replyToMessageId = original.id;
       if (!failed) {
+        // 语音播报收尾：重新生成成功，把缓冲里的最后一句读完。
+        _flushVoiceReply();
         await _appendMessage(temp);
         if (searchTurnContext != null) {
           _searchTurnController.bindReply(temp.id, searchTurnContext);
@@ -418,6 +426,8 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
         });
       }
     } finally {
+      // 丢弃/失败/提前返回路径的兜底：清掉切句缓冲（成功路径已 flush，幂等无害）。
+      _cancelVoiceReply();
       if (session != null && identical(_streamingSession, session)) {
         _streamingSession = null;
       }

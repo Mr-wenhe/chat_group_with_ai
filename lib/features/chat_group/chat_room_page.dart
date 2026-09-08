@@ -2,6 +2,15 @@ import 'dart:async';
 import 'dart:io';
 import 'dart:math';
 
+import 'package:chat_group/core/audio/audioplayers_voice_sink.dart';
+import 'package:chat_group/core/audio/sentence_segmenter.dart';
+import 'package:chat_group/core/audio/voice_broadcaster.dart';
+import 'package:chat_group/core/audio/voice_input_controller.dart';
+import 'package:chat_group/core/audio/voice_mic_record.dart';
+import 'package:chat_group/core/audio/voice_service_config.dart';
+import 'package:chat_group/core/audio/volcengine_asr.dart';
+import 'package:chat_group/core/audio/volcengine_tts.dart';
+import 'package:chat_group/core/audio/volcengine_ws.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
@@ -116,6 +125,7 @@ part 'chat_room_page_state.dart';
 part 'chat_room_page_lifecycle_support.dart';
 part 'chat_room_page_session_support.dart';
 part 'chat_room_page_build_support.dart';
+part 'chat_room_voice_support.dart';
 
 /// 空闲自动聊天（idle auto-chat）的对外可见状态，用于顶部状态条展示。
 ///

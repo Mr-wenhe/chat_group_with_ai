@@ -29,6 +29,18 @@ class ChatRoomComposer extends StatelessWidget {
   final VoidCallback onStopStreaming;
   final VoidCallback onSend;
 
+  /// 是否显示“语音输入”麦克风按钮（原生平台显示，Web 无 ASR 不显示）。
+  final bool showVoiceInput;
+
+  /// 语音服务是否已配置 ASR 可用；为 false 且非聆听中时按钮置灰。
+  final bool voiceInputUsable;
+
+  /// 是否正在语音输入（聆听中显示停止样式的麦克风，输入框转为只读）。
+  final bool voiceInputActive;
+
+  /// 点按麦克风：空闲时开始聆听，聆听中则结束聆听。
+  final VoidCallback? onToggleVoiceInput;
+
   const ChatRoomComposer({
     super.key,
     required this.textController,
@@ -53,6 +65,10 @@ class ChatRoomComposer extends StatelessWidget {
     required this.onRemoveAttachment,
     required this.onStopStreaming,
     required this.onSend,
+    this.showVoiceInput = false,
+    this.voiceInputUsable = false,
+    this.voiceInputActive = false,
+    this.onToggleVoiceInput,
   });
 
   @override
@@ -161,6 +177,8 @@ class ChatRoomComposer extends StatelessWidget {
                         keyboardType: TextInputType.multiline,
                         textInputAction: TextInputAction.newline,
                         maxLines: null,
+                        // 语音输入时实时写入识别文本，锁定输入以免编辑与识别互相覆盖。
+                        readOnly: voiceInputActive,
                         onChanged: onTextChanged,
                         contextMenuBuilder: (context, editableTextState) {
                           return AdaptiveTextSelectionToolbar.buttonItems(
@@ -173,6 +191,29 @@ class ChatRoomComposer extends StatelessWidget {
                     ),
                   ),
                   const SizedBox(width: 8),
+                  if (showVoiceInput) ...[
+                    IconButton(
+                      key: const Key('voice-input-toggle'),
+                      icon: Icon(
+                        voiceInputActive
+                            ? Icons.mic_rounded
+                            : Icons.mic_none_rounded,
+                        size: 24,
+                      ),
+                      color: voiceInputActive
+                          ? colorScheme.error
+                          : colorScheme.onSurfaceVariant,
+                      onPressed: (voiceInputUsable || voiceInputActive)
+                          ? onToggleVoiceInput
+                          : null,
+                      tooltip: voiceInputActive
+                          ? '结束语音输入'
+                          : (voiceInputUsable
+                              ? '语音输入（点击开始，说完再点结束）'
+                              : '语音输入：请先到 设置 → API 配置 → 语音服务 绑定 Key'),
+                    ),
+                    const SizedBox(width: 4),
+                  ],
                   if (isStreaming) ...[
                     IconButton(
                       icon: const Icon(Icons.stop_rounded, size: 24),
@@ -220,6 +261,7 @@ class ChatRoomComposer extends StatelessWidget {
   }
 
   String get _hintText {
+    if (voiceInputActive) return '正在聆听，请说话… 点击麦克风结束';
     if (quotedMessage != null) return '回复 $quotedSenderName...';
     if (isDirectChat) return '输入私聊消息…';
     if (isDesktop) return '输入消息，回车发送，Shift+回车换行，@ 提到角色…';

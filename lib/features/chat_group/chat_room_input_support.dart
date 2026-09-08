@@ -39,7 +39,8 @@ extension _ChatRoomInputSupport on _ChatRoomPageState {
         final isShiftPressed = HardwareKeyboard.instance.isShiftPressed;
         if (!isShiftPressed) {
           if (_canSend) {
-            _sendMessage();
+            // 语音输入中回车 = 先结束聆听落定文本，再发送。
+            unawaited(_sendAfterVoiceInput());
           }
           return KeyEventResult.handled; // 阻止插入换行
         }
@@ -79,7 +80,12 @@ extension _ChatRoomInputSupport on _ChatRoomPageState {
       onCancelQuote: _cancelQuote,
       onRemoveAttachment: _removeAttachment,
       onStopStreaming: _stopStreaming,
-      onSend: _sendMessage,
+      // 语音输入：仅原生平台显示麦克风；发送前若仍在聆听先落定文本。
+      showVoiceInput: !kIsWeb,
+      voiceInputUsable: _asrUsable,
+      voiceInputActive: _voiceInputActive,
+      onToggleVoiceInput: () => unawaited(_toggleVoiceInput()),
+      onSend: () => unawaited(_sendAfterVoiceInput()),
     );
   }
 
