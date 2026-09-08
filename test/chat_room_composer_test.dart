@@ -88,6 +88,86 @@ void main() {
     await tester.tap(find.byTooltip('取消引用').first);
     expect(cancelled, isTrue);
   });
+
+  testWidgets('voice input mic hidden when not enabled for platform',
+      (tester) async {
+    await tester.pumpWidget(_composer());
+    expect(find.byKey(const Key('voice-input-toggle')), findsNothing);
+  });
+
+  testWidgets('voice input mic shown when ASR usable and forwards toggle',
+      (tester) async {
+    var toggles = 0;
+    await tester.pumpWidget(_composer(
+      showVoiceInput: true,
+      voiceInputUsable: true,
+      onToggleVoiceInput: () => toggles++,
+    ));
+
+    expect(find.byKey(const Key('voice-input-toggle')), findsOneWidget);
+    expect(find.byTooltip('语音输入（点击开始，说完再点结束）'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('voice-input-toggle')));
+    expect(toggles, 1);
+  });
+
+  testWidgets('while listening the field is read-only and mic becomes stop',
+      (tester) async {
+    var toggles = 0;
+    await tester.pumpWidget(_composer(
+      showVoiceInput: true,
+      voiceInputUsable: false,
+      voiceInputActive: true,
+      onToggleVoiceInput: () => toggles++,
+    ));
+
+    // 聆听中即使 ASR 不可用（配置中途被移除）也保持可用：用于结束聆听。
+    expect(find.byTooltip('结束语音输入'), findsOneWidget);
+    expect(tester.widget<TextField>(find.byType(TextField)).readOnly, isTrue);
+    await tester.tap(find.byKey(const Key('voice-input-toggle')));
+    expect(toggles, 1);
+  });
+}
+
+/// 用默认值构造一个可局部覆盖的 [ChatRoomComposer] 测试宿主。
+Widget _composer({
+  bool showVoiceInput = false,
+  bool voiceInputUsable = false,
+  bool voiceInputActive = false,
+  VoidCallback? onToggleVoiceInput,
+  VoidCallback? onSend,
+}) {
+  return MaterialApp(
+    home: Scaffold(
+      body: ChatRoomComposer(
+        textController: TextEditingController(),
+        focusNode: FocusNode(),
+        inputFieldKey: GlobalKey(),
+        quotedMessage: null,
+        quotedSenderName: '',
+        attachments: const [],
+        isDraggingFiles: false,
+        isStreaming: false,
+        canSend: false,
+        isDirectChat: false,
+        isDesktop: false,
+        onKeyEvent: (_) => KeyEventResult.ignored,
+        onTextChanged: (_) {},
+        onDragStateChanged: (_) {},
+        onDroppedPaths: (_) {},
+        onShowAttachmentMenu: () {},
+        onPasteAttachments: () {},
+        onShowEmojiPanel: () {},
+        onCancelQuote: () {},
+        onRemoveAttachment: (_) {},
+        onStopStreaming: () {},
+        onSend: onSend ?? () {},
+        showVoiceInput: showVoiceInput,
+        voiceInputUsable: voiceInputUsable,
+        voiceInputActive: voiceInputActive,
+        onToggleVoiceInput: onToggleVoiceInput,
+      ),
+    ),
+  );
 }
 
 class MessageFixture {

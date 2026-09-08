@@ -9,6 +9,7 @@ import 'package:hive_flutter/hive_flutter.dart';
 import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
+import 'package:chat_group/core/audio/voice_service_config.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/core/storage/legacy_api_credential_migrator.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
@@ -1156,6 +1157,7 @@ class DatabaseService {
       'group_chat_last_proactive_at';
   static const String _pinnedCharacterIdsKey = 'pinned_character_ids';
   static const String _pinnedGroupIdsKey = 'pinned_group_ids';
+  static const String _voiceBroadcastGroupIdsKey = 'voice_broadcast_group_ids';
 
   Map<String, DateTime> directChatReadAtByConversation() {
     return _dateTimeMapFromSettings(_directChatReadAtKey);
@@ -1318,6 +1320,26 @@ class DatabaseService {
     await _toggleStringSetValue(_pinnedGroupIdsKey, id);
   }
 
+  /// 开启了流式语音播报的会话 id 集合（默认为空 → 群聊播报默认关闭）。
+  Set<String> voiceBroadcastGroupIds() =>
+      _stringSetFromSettings(_voiceBroadcastGroupIdsKey);
+
+  /// 当前会话是否开启流式语音播报。
+  bool voiceBroadcastEnabled(String groupId) =>
+      voiceBroadcastGroupIds().contains(groupId);
+
+  /// 开关某个会话的流式语音播报（与会话模型解耦，只存 app_settings）。
+  Future<void> setVoiceBroadcastEnabled(String groupId, bool enabled) async {
+    final values = voiceBroadcastGroupIds();
+    if (enabled) {
+      values.add(groupId);
+    } else {
+      values.remove(groupId);
+    }
+    await appSettingsBox.put(_voiceBroadcastGroupIdsKey,
+        values.toList()..sort());
+  }
+
   Set<String> _stringSetFromSettings(String key) {
     final raw = appSettingsBox.get(key);
     if (raw is! List) return <String>{};
@@ -1474,6 +1496,58 @@ class DatabaseService {
 
   Future<void> saveTtsEnabled(bool enabled) async {
     await appSettingsBox.put(_ttsEnabledKey, enabled);
+  }
+
+  /// 全局语音服务配置（火山 TTS/ASR）。见 [voiceServiceSettingsKey]。
+  ///
+  /// API Key 不在此处：`apiKeyBound` 仅表示已绑定；密钥本尊在安全存储
+  /// （经 CredentialRepository 以 [volcVoiceCredentialId] 存取）。
+  VoiceServiceConfig get voiceServiceConfig {
+    return VoiceServiceConfig.fromMap(
+      appSettingsBox.get(voiceServiceSettingsKey),
+    );
+  }
+
+  Future<void> saveVoiceServiceConfig(VoiceServiceConfig config) async {
+    await appSettingsBox.put(voiceServiceSettingsKey, config.toMap());
+  }
+
+  /// 从安全存储读取语音 API Key；未绑定/不可用时返回 null。
+  Future<String?> readVoiceApiKey() async {
+    final result =
+        await CredentialRepository().read(volcVoiceCredentialId);
+    return result.isAvailable ? result.value : null;
+  }
+
+  /// 绑定语音 API Key 到安全存储，并刷新 [VoiceServiceConfig.apiKeyBound]。
+  ///
+  /// 返回 null 表示成功；否则为失败原因文案（由调用方展示）。
+  Future<String?> bindVoiceApiKey(String apiKey) async {
+    if (kIsWeb) return 'Web 端不支持语音服务（依赖系统二进制协议）。';
+    final result = await CredentialRepository().save(
+      volcVoiceCredentialId,
+      apiKey.trim(),
+    );
+    if (result.isSuccess) {
+      await saveVoiceServiceConfig(
+        voiceServiceConfig.copyWith(apiKeyBound: true),
+      );
+      return null;
+    }
+    return switch (result.failure) {
+      CredentialFailure.permissionDenied => '系统拒绝保存凭据（权限/锁定）',
+      CredentialFailure.unavailable => '当前环境无可用安全存储',
+      _ => '凭据保存失败，请重试',
+    };
+  }
+
+  /// 从安全存储移除语音 API Key，并更新 [VoiceServiceConfig.apiKeyBound]。
+  Future<String?> unbindVoiceApiKey() async {
+    await CredentialRepository().delete(volcVoiceCredentialId);
+    await saveVoiceServiceConfig(
+      voiceServiceConfig.copyWith(apiKeyBound: false),
+    );
+    return null;
   }
 
   /// Cancel pending token-usage flush timer. Must be called in test

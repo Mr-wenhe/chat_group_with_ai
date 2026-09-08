@@ -105,6 +105,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     }
     _scrollToBottom();
 
+    // 开启流式语音播报时，为这条回复新建切句缓冲（无音色则整条不朗读）。
+    _beginVoiceReply(character);
     final session = StreamingReplySession();
     _streamingSession = session;
     if (_canTouchUi) _setUiState(() {});
@@ -126,6 +128,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
         temp.content = draft;
         _conversationController.updateStreamingDraft(draft);
         _flushStreamingUi();
+        // 语音播报：把新增的增量喂给切句器，完整句即时入队朗读。
+        _feedVoiceReplyDraft(draft);
       },
     );
     if (_disposed) return '';
@@ -136,6 +140,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       fullContent =
           '[${character.name} 回复失败: ${_safeChatFailureMessage(result.error)}]';
       temp.content = fullContent;
+      // 流式过程已失败：丢弃切句残缓冲，避免把失败尾巴或重试内容当流式朗读。
+      _cancelVoiceReply();
       if (_canTouchUi) {
         _setUiState(() => _autoChatStatus = AutoChatStatus.error);
       }
@@ -249,6 +255,12 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     }
     // media 置空：AI 流式回复不携带附件，清掉以免残留脏数据落库。
     temp.media = null;
+    // 语音播报收尾：成功回复把缓冲的最后一句读完；失败/占位则放弃残句。
+    if (failed) {
+      _cancelVoiceReply();
+    } else {
+      _flushVoiceReply();
+    }
     await _appendMessage(temp);
     if (searchTurnContext != null) {
       _searchTurnController.bindReply(temp.id, searchTurnContext);

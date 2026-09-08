@@ -1,7 +1,10 @@
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
-    <!-- 相册图片/视频读取权限（image_picker） -->
+    <!-- 网络访问（LLM / 火山语音 WebSocket） -->
     <uses-permission android:name="android.permission.INTERNET" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
+    <!-- 语音输入（record 插件流式采集麦克风，需 API 23+ 运行时权限） -->
+    <uses-permission android:name="android.permission.RECORD_AUDIO" />
+    <!-- 相册图片/视频读取权限（image_picker） -->
     <uses-permission android:name="android.permission.READ_MEDIA_IMAGES" />
     <uses-permission android:name="android.permission.READ_MEDIA_VIDEO" />
     <uses-permission android:name="android.permission.READ_EXTERNAL_STORAGE" />

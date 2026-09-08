@@ -65,6 +65,10 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
     _autoChatStartTimer?.cancel();
     _autoChatStartTimer = null;
     _autoChatScheduler.stop();
+    // 页面被路由遮挡时停止语音播报（不清空开关，恢复后继续播后续回复）。
+    unawaited(_stopVoiceBroadcast());
+    // 同样立刻停下麦克风与 ASR（已识别的文本保留在输入框）。
+    unawaited(_disposeVoiceInput());
   }
 
   void _activatePage() {
@@ -103,6 +107,8 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
     _hideMentionOverlay();
     _mentionSearchController.dispose();
     unawaited(_speech.dispose());
+    unawaited(_disposeVoiceBroadcast());
+    unawaited(_disposeVoiceInput());
   }
 
   void _handleAppLifecycleState(AppLifecycleState state) {

@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:chat_group/core/audio/voice_catalog.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
@@ -44,6 +45,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   bool _isEditing = false;
   String? _existingCharacterId;
   String _selectedApiConfigId = '';
+  String _selectedVoiceId = '';
   CharacterGender? _selectedGender;
   bool _isSaving = false;
   bool _agenticEnabled = true;
@@ -70,6 +72,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         TextEditingController(text: (c?.hourlyReplyLimit ?? 60).toString());
 
     _selectedApiConfigId = c?.apiConfigId ?? '';
+    _selectedVoiceId = c?.voiceId ?? '';
     _selectedGender = c != null && c.hasKnownGender ? c.gender : null;
     _agenticEnabled = c?.agenticEnabled ?? true;
     _selectedSkillTemplateIds =
@@ -397,6 +400,29 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                       Icons.psychology_outlined, cs),
                   onChanged: (_) => setState(() {}),
                 ),
+                const SizedBox(height: 14),
+                // 朗读音色：音色 id 来自 voice.md / VoicePreset；空 = 未指定，
+                // 播报时使用语音服务配置里的全局默认音色。
+                DropdownButtonFormField<String>(
+                  value: _selectedVoiceId.isEmpty ? null : _selectedVoiceId,
+                  hint: const Text('未指定（播报时用语音服务的默认音色）'),
+                  decoration: appInputDecoration(
+                      '朗读音色',
+                      '在“设置 → 语音服务”配置 API Key 后，群聊开启语音播报会朗读',
+                      Icons.record_voice_over_outlined,
+                      cs),
+                  isExpanded: true,
+                  items: voicePresets
+                      .map((preset) => DropdownMenuItem(
+                            value: preset.id,
+                            child: Text('${preset.name} · ${preset.id}',
+                                overflow: TextOverflow.ellipsis,
+                                style: const TextStyle(fontSize: 14)),
+                          ))
+                      .toList(growable: false),
+                  onChanged: (voiceId) =>
+                      setState(() => _selectedVoiceId = voiceId ?? ''),
+                ),
               ],
             ),
             const SizedBox(height: 24),
@@ -649,6 +675,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
             _agenticEnabled ? _normalizedToolPermissions() : const [],
         createdAt: widget.character?.createdAt ?? DateTime.now(),
         gender: _isEditing ? widget.character!.gender : _selectedGender!,
+        voiceId: _selectedVoiceId,
       );
 
       if (_isEditing) {
