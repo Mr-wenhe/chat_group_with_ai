@@ -326,10 +326,12 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
     }
   }
 
-  /// 构建 AppBar 下方的会话控件（自动发言 / 工作模式两个开关）。
+  /// 构建 AppBar 下方的会话控件（自动发言 / 语音播报 / 工作模式开关）。
   ///
-  /// 私聊不展示自动发言开关（私聊的主动联系由前台守护服务统一管控）。
+  /// 私聊只展示工作模式；流式语音播报属于群聊特性，默认关闭。语音服务未
+  /// 配置时按钮置灰（Tooltip 引导去设置页绑定 Key）。
   Widget _buildConversationControls(ColorScheme cs) {
+    final usable = _voiceBroadcastUsable;
     return CompactConversationControls(
       showAutoChat: !_isDirectChat,
       autoChatEnabled: _isAutoChatEnabled && _hasAnyApiConfig,
@@ -339,6 +341,16 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       workModeTooltip: _workModeEnabled ? '工作模式已开启 · 敏感操作需确认' : '工作模式已关闭',
       onAutoChatChanged: _toggleAutoChat,
       onWorkModeChanged: _toggleWorkMode,
+      showVoiceBroadcast: !_isDirectChat && !kIsWeb,
+      voiceBroadcastEnabled: _voiceBroadcastEnabled,
+      voiceBroadcastAvailable: usable,
+      voiceBroadcastTooltip: _voiceBroadcastEnabled
+          ? '流式语音播报已开启 · AI 回复将逐句朗读'
+          : (usable
+              ? '开启流式语音播报（AI 回复逐句朗读）'
+              : '语音服务未配置，请到 设置 → API 配置 → 语音服务 绑定 Key'),
+      onVoiceBroadcastChanged: (enabled) =>
+          unawaited(_setVoiceBroadcastEnabled(enabled)),
     );
   }
 

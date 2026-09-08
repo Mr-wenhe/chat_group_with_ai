@@ -323,6 +323,29 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 正在被朗读的消息 id（用于把按钮切成“停止朗读”）。
   String? _speakingMessageId;
 
+  // —— 流式语音播报（群聊回复逐句 TTS） ——
+  /// 当前会话是否开启流式语音播报（默认关闭；按会话持久化在 app_settings）。
+  bool _voiceBroadcastEnabled = false;
+
+  /// 逐句串行播报队列；按需创建（开启播报且拿到可用配置后）。
+  SpeechBroadcaster? _voiceBroadcaster;
+
+  /// 当前这条流式回复使用的音色 id（为空则该回复不朗读）。
+  String? _voiceActiveSpeaker;
+
+  /// 当前这条流式回复已喂给切句器的累计文本长度（用于计算增量）。
+  String _voiceFedTail = '';
+
+  /// 当前这条流式回复的切句器（每收到一个流式回复重新创建）。
+  SentenceSegmenter? _voiceSegmenter;
+
+  // —— 语音输入（麦克风 → 流式 ASR → 输入框文本，默认文字输入）——
+  /// 是否正在聆听（说话）中；为 true 时输入框只读并实时显示识别文本。
+  bool _voiceInputActive = false;
+
+  /// 当前语音输入会话；结束 / 出错即置空并释放（下次会话按需新建）。
+  VoiceInputController? _voiceInputController;
+
   /// Stable test and feature boundary for building a character prompt.
   /// The implementation lives in the message-context part file.
   Future<List<Map<String, dynamic>>> buildPromptMessages({
@@ -355,6 +378,8 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     // 登记"当前正在查看该会话"，让主动私聊的通知逻辑不打扰当前界面。
     ConversationPresenceService.instance.enter(widget.groupId);
     _db = ref.read(databaseServiceProvider);
+    // 读取本会话此前保存过的流式语音播报开关（默认关闭）。
+    _voiceBroadcastEnabled = _db.voiceBroadcastEnabled(widget.groupId);
     _credentialResolver =
         widget.credentialResolver ?? SecureApiCredentialResolver();
     _governanceStore = AiGovernanceStore.forDatabase(_db);

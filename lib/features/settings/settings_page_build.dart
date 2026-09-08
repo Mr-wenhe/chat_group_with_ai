@@ -170,6 +170,20 @@ extension _SettingsPageBuild on _SettingsPageState {
                   MaterialPageRoute(builder: (_) => const AiGovernancePage()),
                 ),
               ),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              _SettingTile(
+                cs: cs,
+                icon: Icons.record_voice_over_outlined,
+                iconColor: cs.primary,
+                title: '语音服务 · 火山引擎',
+                subtitle: '流式语音播报（TTS）与语音输入（ASR）的 Key、资源 ID 与默认音色',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const VoiceServiceSettingsPage(),
+                  ),
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 28),

@@ -25,6 +25,8 @@ dependencies:
 
   # 网络请求
   dio: ^5.4.0
+  # 火山语音 WebSocket 二进制协议（流式 TTS/ASR）
+  web_socket_channel: ^3.0.3
 
   # 媒体选择 / 播放（图片视频附件）
   # 注意：chewie 1.8.x 使用了 Flutter 3.27 才引入的 Color.withValues，
@@ -69,6 +71,8 @@ dependencies:
   xml: 6.5.0
   crypto: ^3.0.7
   package_info_plus: ">=8.0.0 <9.0.0"
+  record: ^6.2.1
+  audioplayers: ^6.6.0
 
 # ===== 依赖覆盖：强制降级使用 android.flutter 属性（3.27+ API）的传递依赖 =====
 # 这些包在 9.x+ 版本更新了 Android build.gradle 使用 android.flutter.compileSdkVersion，

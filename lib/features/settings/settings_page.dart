@@ -15,6 +15,7 @@ import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/settings/backup_restore_page.dart';
 import 'package:chat_group/features/settings/user_profile_page.dart';
 import 'package:chat_group/features/settings/ai_governance_page.dart';
+import 'package:chat_group/features/settings/voice_service_settings_page.dart';
 import 'package:chat_group/features/settings/work_mode_agent_settings_section.dart';
 import 'package:chat_group/features/memory/relationship_audit_page.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
