@@ -193,7 +193,7 @@ void main() {
 
     test('gzip 压缩的 JSON 结果帧被自动解压', () {
       final json = utf8.encode('{"code":0,"result":{"text":"压缩内容"}}');
-      final gzipped = Uint8List.fromList(GZipEncoder().encode(json));
+      final gzipped = Uint8List.fromList(const GZipEncoder().encode(json));
       final raw = _craftAsrServerFrame(
         msgType: volcMsgJsonServer,
         flags: 0x3,
