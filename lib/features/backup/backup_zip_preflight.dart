@@ -170,6 +170,11 @@ class ZipPreflight {
       position += variableLength;
       final nameBytes = variable.sublist(0, nameLength);
       final name = utf8.decode(nameBytes, allowMalformed: true);
+      if (name.contains('\\') ||
+          name.startsWith('/') ||
+          name.split('/').contains('..')) {
+        throw BackupException('压缩包包含不安全路径：$name');
+      }
       if (!names.add(name)) {
         throw BackupException('压缩包包含重复条目：$name');
       }
