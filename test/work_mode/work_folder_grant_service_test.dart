@@ -36,6 +36,19 @@ Future<void> _waitForTaskStatus(
   }
 }
 
+Future<void> _waitForTaskEvent(
+  WorkTaskEventStore eventStore,
+  String taskId,
+  WorkTaskEventKind expected,
+) async {
+  for (var index = 0; index < 100; index++) {
+    final result = await eventStore.read(taskId);
+    if (result.events.any((e) => e.kind == expected)) return;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  fail('事件 $expected 在限定时间内未出现：$taskId');
+}
+
 void main() {
   late Directory hiveDirectory;
   late Box<dynamic> settingsBox;
@@ -314,12 +327,15 @@ void main() {
       workModeTask: true,
     );
     await coordinator.submit(task);
-    await _settle();
     await _waitForTaskStatus(taskBox, task.id, AgentTaskStatus.paused);
 
     expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
     expect(taskBox.get(task.id)?.lastError, contains('目录'));
     expect(runner.runCount, 0);
+    // Event persistence is an async file write that may lag on slow CI.
+    // Poll until the paused event appears before asserting the event list.
+    await _waitForTaskEvent(
+      eventStore, task.id, WorkTaskEventKind.paused);
     final events = await eventStore.read(task.id);
     expect(
         events.events.map((event) => event.kind),

@@ -1,5 +1,57 @@
 part of 'backup_restore_service_test.dart';
 
+/// Writes a minimal stored (uncompressed) ZIP whose central-directory entry
+/// name is [entryName], bypassing the `archive` package encoder. The encoder
+/// normalises `../` path segments on some platforms (notably the GitHub
+/// Actions Linux runner), which would strip the traversal payload before
+/// [ZipPreflight] can see it. Building the raw ZIP bytes directly guarantees
+/// the entry name reaches the validator verbatim on every platform.
+Future<void> _writeRawZip(
+  File target, {
+  required String entryName,
+  required String content,
+}) async {
+  final nameBytes = utf8.encode(entryName);
+  final contentBytes = utf8.encode(content);
+  final crc = getCrc32(contentBytes);
+  final size = contentBytes.length;
+
+  final local = <int>[
+    ..._u32le(0x04034b50), // local file header signature
+    ..._u16le(20), ..._u16le(0), ..._u16le(0), // version, flags, stored
+    ..._u16le(0), ..._u16le(0x0021), // mod time, mod date
+    ..._u32le(crc), ..._u32le(size), ..._u32le(size), // crc, sizes
+    ..._u16le(nameBytes.length), ..._u16le(0), // name len, extra len
+    ...nameBytes, ...contentBytes,
+  ];
+  final cd = <int>[
+    ..._u32le(0x02014b50), // central directory header signature
+    ..._u16le(20), ..._u16le(20), ..._u16le(0), ..._u16le(0), // versions, flags, stored
+    ..._u16le(0), ..._u16le(0x0021), // mod time, mod date
+    ..._u32le(crc), ..._u32le(size), ..._u32le(size), // crc, sizes
+    ..._u16le(nameBytes.length), ..._u16le(0), ..._u16le(0), // name, extra, comment
+    ..._u16le(0), ..._u16le(0), ..._u32le(0), ..._u32le(0), // disk, attrs, local offset
+    ...nameBytes,
+  ];
+  final eocd = <int>[
+    ..._u32le(0x06054b50), // EOCD signature
+    ..._u16le(0), ..._u16le(0), // disk numbers
+    ..._u16le(1), ..._u16le(1), // cd record counts
+    ..._u32le(cd.length), ..._u32le(local.length), // cd size, cd offset
+    ..._u16le(0), // comment length
+  ];
+  await target.writeAsBytes(Uint8List.fromList([...local, ...cd, ...eocd]));
+}
+
+List<int> _u16le(int value) => [value & 0xff, (value >> 8) & 0xff];
+
+List<int> _u32le(int value) => [
+      value & 0xff,
+      (value >> 8) & 0xff,
+      (value >> 16) & 0xff,
+      (value >> 24) & 0xff,
+    ];
+
 void _registerBackupRestoreServiceTestPart1() {
   test('validates record arrays incrementally across input chunks', () async {
     final payload = List.filled(100000, 'x').join();
@@ -323,10 +375,15 @@ void _registerBackupRestoreServiceTestPart1() {
 
   test('rejects malicious paths and checksum corruption before writes',
       () async {
+    // Build a raw ZIP with a traversal entry name (`../outside.txt`) so the
+    // payload reaches ZipPreflight regardless of how the `archive` encoder
+    // normalises path segments on the current platform.
     final malicious = File('${testRoot.path}/malicious.cgbak');
-    final archive = Archive()
-      ..addFile(ArchiveFile.string('../outside.txt', 'escape'));
-    await malicious.writeAsBytes(ZipEncoder().encodeBytes(archive));
+    await _writeRawZip(
+      malicious,
+      entryName: '../outside.txt',
+      content: 'escape',
+    );
     final service = BackupRestoreService(
       db: db,
       mediaDirectory: mediaDirectory,

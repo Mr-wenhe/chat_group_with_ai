@@ -986,7 +986,10 @@ void main() {
         _task(id: 'folder-denied-second', conversationId: 'folder-group');
     await guarded.submit(first);
     await guarded.submit(second);
-    await _settle();
+    await _waitForTaskState(taskBox, first.id,
+        (task) => task.status == AgentTaskStatus.paused);
+    await _waitForTaskState(taskBox, second.id,
+        (task) => task.status == AgentTaskStatus.paused);
 
     expect(taskBox.get(first.id)?.status, AgentTaskStatus.paused);
     expect(taskBox.get(second.id)?.status, AgentTaskStatus.paused);
