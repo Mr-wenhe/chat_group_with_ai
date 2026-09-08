@@ -46,6 +46,11 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
         origin: origin,
       );
     }
+    final followUp = _latestSourceFollowUpContext(
+      query: query,
+      sourceMessageId: sourceMessageId,
+    );
+    if (followUp != null) return followUp;
     return _withSearchCancellation(
       (cancelToken) => _searchTurnController.prepareUserTurn(
         conversationId: widget.groupId,
@@ -61,6 +66,36 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
         cancelToken: cancelToken,
       ),
     );
+  }
+
+  SearchTurnContext? _latestSourceFollowUpContext({
+    required String query,
+    required String sourceMessageId,
+  }) {
+    if (!const SearchIntentDetector().isSourceLinkRequest(query)) return null;
+    final currentIndex = _messages.indexWhere(
+      (message) => message.id == sourceMessageId,
+    );
+    if (currentIndex < 0) return null;
+    for (var index = currentIndex - 1; index >= 0; index--) {
+      final candidate = _messages[index];
+      if (candidate.groupId != widget.groupId ||
+          candidate.senderType == 'user') {
+        continue;
+      }
+      final context = _searchTurnController.contextForReply(candidate.id) ??
+          _persistedSearchContext(candidate);
+      final snapshot = context?.snapshot;
+      if (snapshot?.hasResults != true) continue;
+      return _searchTurnController.reuseSourcesForFollowUp(
+        conversationId: widget.groupId,
+        sourceMessageId: sourceMessageId,
+        turnId: sourceMessageId,
+        query: query,
+        snapshot: snapshot!,
+      );
+    }
+    return null;
   }
 
   /// 当前生效的联网搜索策略：会话级覆盖优先于全局设置。
@@ -289,14 +324,16 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
 
   /// 把搜索规则与 JSON evidence 数据作为隔离的消息注入请求。
   List<Map<String, dynamic>> _withWebSearchContext(
-    List<Map<String, dynamic>> messages,
-    web_search.WebSearchSnapshot? snapshot,
-  ) {
+      List<Map<String, dynamic>> messages,
+      web_search.WebSearchSnapshot? snapshot,
+      {bool allowSourceLinks = false}) {
     if (snapshot == null) return messages;
     final next = List<Map<String, dynamic>>.from(messages);
     final insertAt = next.indexWhere((message) => message['role'] != 'system');
-    final contextMessages =
-        _chatRoomSearchContextFormatter.formatMessages(snapshot);
+    final contextMessages = _chatRoomSearchContextFormatter.formatMessages(
+      snapshot,
+      allowSourceLinks: allowSourceLinks,
+    );
     final target = insertAt < 0 ? next.length : insertAt;
     next.insertAll(target, contextMessages);
     return next;

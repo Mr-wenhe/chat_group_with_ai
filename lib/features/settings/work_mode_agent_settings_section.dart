@@ -1,6 +1,7 @@
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/presentation/work_folder_grant_consent_dialog.dart';
+import 'package:chat_group/features/settings/work_folder_batch_picker_dialog.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:file_picker/file_picker.dart';
@@ -10,12 +11,14 @@ import 'package:flutter/material.dart';
 class WorkModeAgentSettingsSection extends StatefulWidget {
   final WorkFolderGrantService service;
   final WorkFolderPicker? pickDirectory;
+  final Future<List<String>?> Function()? pickDirectories;
   final WorkSnapshotService? snapshotService;
 
   const WorkModeAgentSettingsSection({
     super.key,
     required this.service,
     this.pickDirectory,
+    this.pickDirectories,
     this.snapshotService,
   });
 
@@ -63,8 +66,43 @@ class _WorkModeAgentSettingsSectionState
   }
 
   Future<void> _addDirectory() async {
-    final selected = await _pickDirectorySafely();
-    if (selected == null || selected.trim().isEmpty) return;
+    final batchPicker = widget.pickDirectories;
+    if (batchPicker != null) {
+      final selected = await _pickDirectoriesSafely(batchPicker);
+      if (selected == null || selected.isEmpty) return;
+      await _runBusy('batch', () async {
+        final grants = await widget.service.authorizeDirectories(
+          selected,
+          consent: (candidates) =>
+              showWorkFolderGrantBatchConsent(context, candidates),
+        );
+        if (grants == null || grants.isEmpty) return;
+        await _load();
+      });
+      return;
+    }
+    // Tests and embedders can still provide the original single-directory
+    // callback. The desktop default uses the batch flow below.
+    if (widget.pickDirectory != null) {
+      final selected = await _pickDirectorySafely();
+      if (selected == null || selected.trim().isEmpty) return;
+      await _authorizeSingleDirectory(selected);
+      return;
+    }
+    final selected = await _pickDirectoriesSafely(_showBatchPicker);
+    if (selected == null || selected.isEmpty) return;
+    await _runBusy('batch', () async {
+      final grants = await widget.service.authorizeDirectories(
+        selected,
+        consent: (candidates) =>
+            showWorkFolderGrantBatchConsent(context, candidates),
+      );
+      if (grants == null || grants.isEmpty) return;
+      await _load();
+    });
+  }
+
+  Future<void> _authorizeSingleDirectory(String selected) async {
     await _runBusy(selected, () async {
       final grant = await widget.service.authorizeDirectory(
         selected,
@@ -131,6 +169,33 @@ class _WorkModeAgentSettingsSectionState
       }
       return null;
     }
+  }
+
+  Future<List<String>?> _pickDirectoriesSafely(
+    Future<List<String>?> Function() picker,
+  ) async {
+    try {
+      return await picker();
+    } on Object catch (error) {
+      if (mounted) {
+        ScaffoldMessenger.of(context).showSnackBar(
+          SnackBar(
+            content: Text('无法打开目录选择器：${sanitizeWorkTaskError(error)}'),
+          ),
+        );
+      }
+      return null;
+    }
+  }
+
+  Future<List<String>?> _showBatchPicker() async {
+    return showDialog<List<String>>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => WorkFolderBatchPickerDialog(
+        pickDirectory: _pickDirectory,
+      ),
+    );
   }
 
   @override

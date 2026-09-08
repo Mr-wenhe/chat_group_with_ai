@@ -128,6 +128,17 @@ void main() {
       }
     });
 
+    test('classifies a stale saved workspace as reauthorization', () {
+      final failure = WorkFailure.fromError(
+        StateError('WorkspacePathException: 已保存的工作目录不再受授权覆盖，请重新选择目录。'),
+        scope: 'runner',
+      );
+
+      expect(failure.type, WorkFailureType.authorizationLost);
+      expect(failure.canReauthorize, isTrue);
+      expect(failure.suggestedAction, contains('重新授权'));
+    });
+
     test('classifies model 429, 5xx, timeout, empty stream and protocol errors',
         () async {
       final cases = <String, Object>{

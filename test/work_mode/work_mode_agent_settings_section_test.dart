@@ -92,6 +92,9 @@ void main() {
     await tester.runAsync(
       () => tester.tap(find.byKey(const Key('work-folder-add'))),
     );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
     await tester.pump(const Duration(milliseconds: 100));
     expect(
       find.byKey(const Key('work-folder-grant-consent-dialog')),
@@ -111,5 +114,69 @@ void main() {
     );
     await tester.pump(const Duration(milliseconds: 100));
     expect(service.settings.ordinaryWriteConfirmation, isFalse);
+  });
+
+  testWidgets('authorizes multiple picked directories from one confirmation',
+      (tester) async {
+    final first = await tester.runAsync(
+      () => Directory('${hiveDirectory.path}/first').create(),
+    );
+    final second = await tester.runAsync(
+      () => Directory('${hiveDirectory.path}/second').create(),
+    );
+    final firstDirectory = first!;
+    final secondDirectory = second!;
+    final service = WorkFolderGrantService(
+      box: settingsBox,
+      isWindows: false,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+    );
+    await tester.runAsync(() => service.load());
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: WorkModeAgentSettingsSection(
+            service: service,
+            pickDirectories: () async => <String>[
+              firstDirectory.path,
+              secondDirectory.path,
+            ],
+          ),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.runAsync(() async {});
+    await tester.pump(const Duration(milliseconds: 100));
+
+    await tester.runAsync(
+      () => tester.tap(find.byKey(const Key('work-folder-add'))),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(
+      find.byKey(const Key('work-folder-grant-batch-consent-dialog')),
+      findsOneWidget,
+    );
+    expect(find.text(firstDirectory.path), findsOneWidget);
+    expect(find.text(secondDirectory.path), findsOneWidget);
+
+    await tester.runAsync(
+      () => tester.tap(
+        find.byKey(const Key('work-folder-grant-batch-consent-confirm')),
+      ),
+    );
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 300)),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(service.grants, hasLength(2));
+    expect(
+      service.grants.every((grant) => grant.cloudDisclosureConfirmedAt != null),
+      isTrue,
+    );
   });
 }

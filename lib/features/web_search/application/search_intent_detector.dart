@@ -110,6 +110,14 @@ class SearchIntentDetector {
   }) =>
       detect(message, origin: origin, now: now).shouldSearch;
 
+  /// A source/link follow-up has no factual subject of its own. The chat room
+  /// reuses the preceding evidence snapshot instead of issuing another query.
+  bool isSourceLinkRequest(String? message) {
+    final value = message?.trim() ?? '';
+    return value.isNotEmpty &&
+        _containsAny(value, value.toLowerCase(), _sourceLinkTerms);
+  }
+
   SearchIntentDecision _decision({
     required SearchMessageOrigin origin,
     required String reasonCode,
@@ -309,5 +317,19 @@ class SearchIntentDetector {
     'job',
     'ceo',
     'president',
+  ];
+
+  static const _sourceLinkTerms = [
+    '链接',
+    '来源',
+    '网址',
+    '网页地址',
+    '原文',
+    'link',
+    'links',
+    'url',
+    'urls',
+    'source',
+    'sources',
   ];
 }

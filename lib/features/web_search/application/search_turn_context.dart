@@ -24,6 +24,9 @@ class SearchTurnContext {
   final bool isSuppressed;
   final bool forceRefresh;
 
+  /// Only an explicit source/link follow-up may expose raw result URLs.
+  final bool allowSourceLinks;
+
   const SearchTurnContext({
     required this.conversationId,
     required this.sourceMessageId,
@@ -33,6 +36,7 @@ class SearchTurnContext {
     this.snapshot,
     this.isSuppressed = false,
     this.forceRefresh = false,
+    this.allowSourceLinks = false,
   });
 
   const SearchTurnContext.suppressed({
@@ -59,6 +63,7 @@ class SearchTurnContext {
     bool clearSnapshot = false,
     bool? isSuppressed,
     bool? forceRefresh,
+    bool? allowSourceLinks,
   }) {
     return SearchTurnContext(
       conversationId: conversationId,
@@ -69,6 +74,7 @@ class SearchTurnContext {
       snapshot: clearSnapshot ? null : snapshot ?? this.snapshot,
       isSuppressed: isSuppressed ?? this.isSuppressed,
       forceRefresh: forceRefresh ?? this.forceRefresh,
+      allowSourceLinks: allowSourceLinks ?? this.allowSourceLinks,
     );
   }
 }
@@ -184,6 +190,40 @@ class SearchTurnContextController {
     required String sourceMessageId,
   }) {
     return _turns[_turnKey(conversationId, sourceMessageId)];
+  }
+
+  /// Reuses existing evidence for an explicit source-link follow-up. Keeping
+  /// this in the controller makes the no-second-request boundary testable.
+  SearchTurnContext reuseSourcesForFollowUp({
+    required String conversationId,
+    required String sourceMessageId,
+    required String turnId,
+    required String query,
+    required WebSearchSnapshot snapshot,
+  }) {
+    final stableSourceMessageId = _stableSourceMessageId(
+      conversationId: conversationId,
+      sourceMessageId: sourceMessageId,
+      turnId: turnId,
+      query: query,
+    );
+    final stableTurnId = turnId.trim().isEmpty ? stableSourceMessageId : turnId;
+    final context = SearchTurnContext(
+      conversationId: conversationId,
+      sourceMessageId: stableSourceMessageId,
+      turnId: stableTurnId,
+      query: query.trim(),
+      origin: SearchMessageOrigin.user,
+      snapshot: snapshot,
+      allowSourceLinks: true,
+    );
+    _putBounded(
+      _turns,
+      _turnKey(conversationId, stableSourceMessageId),
+      context,
+      maxTurns,
+    );
+    return context;
   }
 
   /// Returns the original snapshot synchronously; no refresh is implicit.

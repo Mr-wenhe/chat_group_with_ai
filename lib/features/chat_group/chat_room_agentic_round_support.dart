@@ -82,6 +82,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
         transientContextSummary: compactedContext.summary,
       ),
       webSearch,
+      allowSourceLinks: searchTurnContext?.allowSourceLinks == true,
     );
     // 上面的 await 期间用户可能切到工作模式，此时放弃这次自动聊天回复。
     if (isAutoChat && _workModeEnabled) {
@@ -212,6 +213,12 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
           ? const <String>[]
           : _chatRoomSearchContextFormatter.format(webSearch).sourceIds,
     );
+    if (webSearch != null) {
+      fullContent = _chatRoomSearchContextFormatter.sanitizeAnswerLinks(
+        fullContent,
+        allowLinks: searchTurnContext?.allowSourceLinks == true,
+      );
+    }
     // 防御：非 agentic 路径下 LLM 可能自发输出 tool_call 协议标签文本
     // （尤其使用过 agentic 能力的角色，system prompt 里可能残留工具说明）。
     // 在落库与返回前清洗之，避免协议泄漏被当作普通聊天贴出来。

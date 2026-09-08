@@ -48,6 +48,8 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
   }
 
   Map<String, dynamic>? _loadHandoff(AgentTask task) {
+    final persisted = WorkHandoffState.fromTask(task);
+    if (persisted != null) return persisted.toJson();
     final summary = _safeExistingMap(task.contextSummary);
     final value = summary['roleHandoff'] ?? summary['handoff'];
     if (value is! Map) return null;

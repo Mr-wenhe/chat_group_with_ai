@@ -7,6 +7,7 @@ import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/work_mode/work_agent_loop.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
+import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
@@ -128,6 +129,23 @@ Map<String, dynamic> _finishDecision([String summary = '任务完成。']) => {
         'completion': {
           'summary': summary,
           'evidence': ['Fake tool result'],
+        },
+      }),
+    };
+
+Map<String, dynamic> _handoffDecision({
+  String target = 'receiver',
+  String summary = '当前阶段完成。',
+}) =>
+    {
+      'success': true,
+      'content': jsonEncode({
+        'action': 'handoff',
+        'public_update': '已完成当前阶段，交给下一角色。',
+        'tool': null,
+        'completion': {
+          'target': target,
+          'summary': summary,
         },
       }),
     };
@@ -651,6 +669,37 @@ void main() {
     expect(task.status, AgentTaskStatus.completed);
     expect(task.resultSummary, '自动完成');
     expect(task.resumeRequired, isFalse);
+  });
+
+  test('restores handoff state from execution checkpoint', () async {
+    final model = _FakeModel()
+      ..responses.add(_handoffDecision(target: 'receiver'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+    final task = _task(id: 'handoff-execution-fallback');
+    final handoff = WorkHandoffState(
+      conversationId: task.groupId,
+      stages: [
+        WorkHandoffStage(
+          id: 'product',
+          label: '产品需求',
+          roleId: task.characterId,
+        ),
+        WorkHandoffStage(
+          id: 'development',
+          label: '开发实现',
+          roleId: 'receiver',
+        ),
+      ],
+    );
+    WorkHandoffState.persistToTask(task, handoff);
+    task.contextSummary = jsonEncode({'conversationId': task.groupId});
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(task.status, AgentTaskStatus.completed);
+    expect(task.lastError, isEmpty);
+    expect(model.requests, hasLength(1));
   });
 
   test('checkpoint JSON never mirrors file bodies from a tool result',

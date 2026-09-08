@@ -275,6 +275,7 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
               _aiGateway.capability(provider, config.modelName).supportsVision,
         ),
         webSearch,
+        allowSourceLinks: searchTurnContext?.allowSourceLinks == true,
       );
       if (!_pageActive || _disposed) return;
 
@@ -380,6 +381,12 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
             ? const <String>[]
             : _chatRoomSearchContextFormatter.format(webSearch).sourceIds,
       );
+      if (webSearch != null) {
+        fullContent = _chatRoomSearchContextFormatter.sanitizeAnswerLinks(
+          fullContent,
+          allowLinks: searchTurnContext?.allowSourceLinks == true,
+        );
+      }
       temp.content = fullContent;
       temp.isMention = mentionedIds.isNotEmpty;
       temp.mentionedAiIds = mentionedIds;

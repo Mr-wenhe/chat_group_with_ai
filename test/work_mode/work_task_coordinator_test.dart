@@ -473,6 +473,21 @@ void main() {
     expect(runner.startedTaskIds, isEmpty);
   });
 
+  test('generic resume remains blocked at a missing-tool boundary', () async {
+    final task = _task(id: 'missing-tool-generic', conversationId: 'group-test')
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..pendingToolRequestJson = '{"tool":"command.run","args":{}}'
+      ..executionStateJson = jsonEncode({'toolMissing': true});
+    await taskBox.put(task.id, task);
+
+    await expectLater(
+      coordinator.resumeByUser(task.id),
+      throwsStateError,
+    );
+    expect(runner.startedTaskIds, isEmpty);
+  });
+
   test('vision model selection validates the pause state and capability',
       () async {
     final task = _task(id: 'vision-select', conversationId: 'group-test')

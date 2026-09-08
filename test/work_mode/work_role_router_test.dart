@@ -272,6 +272,46 @@ void main() {
     expect(result.needsHandoff, isTrue);
   });
 
+  test('falls back to local role skills when the short router request fails',
+      () async {
+    final routed = WorkRoleRouter(
+      modelSelector: (_) async {
+        throw StateError('router unavailable');
+      },
+    );
+    final result = await routed.route(
+      request: '请写一份产品需求文档',
+      conversationId: 'group:router-fallback',
+      characters: characters,
+      skills: skills,
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.characterId, product.id);
+    expect(result.source, WorkRoleRouteSource.deterministicFallback);
+    expect(result.publicReason, contains('模型角色路由暂时不可用'));
+    expect(result.publicReason, contains('产品需求'));
+  });
+
+  test('falls back when the short router returns malformed structured data',
+      () async {
+    final routed = WorkRoleRouter(
+      modelSelector: (_) => <String, dynamic>{'analysis': '暂时无法解析'},
+    );
+    final result = await routed.route(
+      request: '请写一份产品需求文档',
+      conversationId: 'group:router-malformed',
+      characters: characters,
+      skills: skills,
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.characterId, product.id);
+    expect(result.source, WorkRoleRouteSource.deterministicFallback);
+    expect(result.publicReason, contains('格式无效'));
+    expect(result.publicReason, contains('产品需求'));
+  });
+
   test('rejects an unknown model role without deterministic substitution',
       () async {
     final routed = WorkRoleRouter(

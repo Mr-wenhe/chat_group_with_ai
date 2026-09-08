@@ -228,7 +228,10 @@ extension _ChatRoomInputAttachmentSupport on _ChatRoomPageState {
   /// 按优先级依次尝试：文件路径 → 图片位图 → 纯文本。
   /// 每种尝试都各自 try/catch：某个平台不支持某种剪贴板类型是常态，
   /// 不应因此中断后续回退路径。[_isPastingAttachments] 防止重复触发。
-  Future<void> _pasteClipboardAttachments({bool showEmptyHint = false}) async {
+  Future<void> _pasteClipboardAttachments({
+    bool showEmptyHint = false,
+    bool includeText = true,
+  }) async {
     if (_isPastingAttachments) return;
     _isPastingAttachments = true;
     try {
@@ -252,7 +255,7 @@ extension _ChatRoomInputAttachmentSupport on _ChatRoomPageState {
         }
       } catch (_) {}
 
-      if (attachments.isEmpty) {
+      if (attachments.isEmpty && includeText) {
         // 优先级 2：剪贴板位图（如系统截图），落盘成带时间戳的 png。
         try {
           final image = await Pasteboard.image;

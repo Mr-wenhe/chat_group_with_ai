@@ -160,6 +160,41 @@ void main() {
     expect(service.grants.single.cloudDisclosureConfirmedAt, isNotNull);
   });
 
+  test('authorizes several directories with one batch consent decision',
+      () async {
+    final first = await Directory('${hiveDirectory.path}/first').create();
+    final second = await Directory('${hiveDirectory.path}/second').create();
+    final service = WorkFolderGrantService(
+      box: settingsBox,
+      isWindows: false,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+    );
+    var consentCalls = 0;
+    List<WorkFolderGrant>? proposed;
+
+    final granted = await service.authorizeDirectories(
+      <String>[first.path, second.path, '${first.path}/.'],
+      consent: (candidates) async {
+        consentCalls += 1;
+        proposed = candidates;
+        return true;
+      },
+    );
+
+    expect(consentCalls, 1);
+    expect(proposed, hasLength(2));
+    expect(granted, hasLength(2));
+    expect(
+      service.grants.map((grant) => grant.path),
+      containsAll(<String>[first.path, second.path]),
+    );
+    expect(
+      service.grants.every((grant) => grant.cloudDisclosureConfirmedAt != null),
+      isTrue,
+    );
+  });
+
   test('legacy grants require disclosure before first work-mode use', () async {
     final root =
         await Directory('${hiveDirectory.path}/legacy-consent').create();

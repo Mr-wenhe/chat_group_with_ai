@@ -94,9 +94,12 @@ class SearchContextFormatter {
   String formatPrompt(domain.WebSearchSnapshot snapshot) =>
       format(snapshot).prompt;
 
-  List<Map<String, dynamic>> formatMessages(domain.WebSearchSnapshot snapshot) {
+  List<Map<String, dynamic>> formatMessages(
+    domain.WebSearchSnapshot snapshot, {
+    bool allowSourceLinks = false,
+  }) {
     final bundle = format(snapshot);
-    return _messagesFor(bundle);
+    return _messagesFor(bundle, allowSourceLinks: allowSourceLinks);
   }
 
   String sanitizeCitations(
@@ -115,16 +118,46 @@ class SearchContextFormatter {
   ) =>
       _sanitizeCitations(answer, sourceIds.toSet());
 
-  List<Map<String, dynamic>> _messagesFor(SearchContextBundle bundle) {
+  /// Enforces the default of returning citations without raw URLs. The
+  /// explicit source follow-up is the only path that keeps them visible.
+  String sanitizeAnswerLinks(
+    String answer, {
+    required bool allowLinks,
+  }) {
+    if (allowLinks || answer.isEmpty) return answer;
+    return answer
+        .replaceAll(
+          RegExp(
+            r'(?<![\w@])(?:https?://|www\.)[^\s<>()\[\]{}"“”‘’]+',
+            caseSensitive: false,
+          ),
+          '',
+        )
+        .replaceAll(
+          RegExp(
+            r'(?<![\w@])(?:[a-z0-9-]+\.)+(?:com|org|net|io|dev|cn|gov|edu|co)(?:/[^\s<>()\[\]{}"“”‘’]*)?',
+            caseSensitive: false,
+          ),
+          '',
+        );
+  }
+
+  List<Map<String, dynamic>> _messagesFor(
+    SearchContextBundle bundle, {
+    required bool allowSourceLinks,
+  }) {
+    final prompt = allowSourceLinks
+        ? '${SearchPrompts.promptD}\n\n用户已明确索要来源链接；可从证据中的 URL 返回对应链接。'
+        : SearchPrompts.promptD;
     if (bundle.sourceIds.isEmpty) {
       return [
-        {'role': 'system', 'content': bundle.prompt},
+        {'role': 'system', 'content': prompt},
       ];
     }
     return [
       // Rules are isolated from the data block, so a malicious title/snippet
       // cannot become part of the rule text.
-      {'role': 'system', 'content': SearchPrompts.promptD},
+      {'role': 'system', 'content': prompt},
       {
         // Search results are untrusted evidence, not instructions. A user-role
         // block keeps provider text from inheriting system authority.

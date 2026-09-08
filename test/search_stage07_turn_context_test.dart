@@ -160,6 +160,50 @@ void main() {
     expect(provider.requests.last.forceRefresh, isTrue);
   });
 
+  test('source follow-up reuses evidence without a second provider request',
+      () {
+    final provider = _CountingProvider();
+    final controller = SearchTurnContextController(
+      coordinator: _coordinator(provider),
+    );
+    final snapshot = WebSearchSnapshot(
+      requestId: 'request-1',
+      rootRequestId: 'turn-1',
+      executedQueries: const ['Flutter latest'],
+      searchedAt: DateTime.utc(2026, 8, 24),
+      provider: 'keyless-html',
+      results: [
+        WebSearchResult(
+          sourceId: 'S1',
+          title: 'Flutter',
+          snippet: 'release',
+          url: Uri.parse('https://docs.flutter.dev'),
+          provider: 'keyless-html',
+        ),
+      ],
+    );
+
+    final followUp = controller.reuseSourcesForFollowUp(
+      conversationId: 'group-1',
+      sourceMessageId: 'user-message-2',
+      turnId: 'user-message-2',
+      query: '给我来源链接',
+      snapshot: snapshot,
+    );
+
+    expect(const SearchIntentDetector().isSourceLinkRequest('给我来源链接'), isTrue);
+    expect(followUp.allowSourceLinks, isTrue);
+    expect(followUp.snapshot, same(snapshot));
+    expect(provider.searchCount, 0);
+    expect(
+      controller.contextForTurn(
+        conversationId: 'group-1',
+        sourceMessageId: 'user-message-2',
+      ),
+      same(followUp),
+    );
+  });
+
   test('autoChat and proactive origins do not call a third-party provider',
       () async {
     final provider = _CountingProvider();

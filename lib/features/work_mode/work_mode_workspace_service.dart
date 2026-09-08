@@ -55,6 +55,35 @@ class WorkModeWorkspaceService {
     return workspace;
   }
 
+  /// Rebinds a conversation to the directory explicitly selected during
+  /// reauthorization.
+  ///
+  /// A stale path must not be silently redirected by [loadOrCreate], and an
+  /// empty workspace must not pick an unrelated alphabetically-first grant.
+  /// The coordinator calls this only after the native picker and disclosure
+  /// consent both succeed, so the selected capability becomes the durable
+  /// workspace while all other restart/retry paths remain fail-closed.
+  Future<void> rebindConversationWorkspace({
+    required String conversationId,
+    required bool isDirectChat,
+    required String grantedPath,
+  }) async {
+    final existing = db.workModeWorkspaceBox.get(conversationId);
+    final expectedType = isDirectChat ? 'direct' : 'group';
+    final normalizedPath = grantedPath.trim();
+    if (normalizedPath.isEmpty) return;
+    final workspace = existing?.conversationType == expectedType
+        ? existing!
+        : WorkModeWorkspace(
+            conversationId: conversationId,
+            conversationType: expectedType,
+          );
+    workspace
+      ..workDirPath = normalizedPath
+      ..updatedAt = DateTime.now();
+    await db.workModeWorkspaceBox.put(conversationId, workspace);
+  }
+
   Future<String> _resolveWorkspacePath({
     required WorkModeWorkspace? existing,
     required String conversationId,

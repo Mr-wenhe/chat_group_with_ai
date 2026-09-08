@@ -7,6 +7,9 @@ import 'package:hive/hive.dart';
 typedef WorkFolderDirectoryValidator = Future<bool> Function(String path);
 typedef WorkFolderPicker = Future<String?> Function();
 typedef WorkFolderGrantConsent = Future<bool> Function(WorkFolderGrant grant);
+typedef WorkFolderBatchGrantConsent = Future<bool> Function(
+  List<WorkFolderGrant> grants,
+);
 
 enum WorkFolderRequestStatus { granted, cancelled, unavailable }
 
@@ -324,6 +327,53 @@ class WorkFolderGrantService {
     return replacement;
   }
 
+  /// Validates and commits several directories under one disclosure decision.
+  ///
+  /// Native directory panels differ across macOS and Windows and do not all
+  /// expose multi-directory selection. Keeping the batch boundary here lets
+  /// the UI collect paths with a platform-safe flow while still presenting one
+  /// app-wide authorization action and one atomic consent decision.
+  Future<List<WorkFolderGrant>?> authorizeDirectories(
+    Iterable<String> rawPaths, {
+    WorkFolderBatchGrantConsent? consent,
+  }) async {
+    // Serialize with the initial settings load so a late validation refresh
+    // cannot overwrite newly committed grants with the stale Hive snapshot.
+    await load();
+    final normalized = <String>[];
+    final seen = <String>{};
+    for (final rawPath in rawPaths) {
+      try {
+        final path = normalizePath(rawPath, isWindows: isWindows);
+        if (seen.add(_comparisonKey(path))) normalized.add(path);
+      } on Object {
+        return null;
+      }
+    }
+    if (normalized.isEmpty) return null;
+
+    final previews = <WorkFolderGrant>[];
+    for (final path in normalized) {
+      final preview = await previewDirectory(path);
+      if (!preview.available) return null;
+      previews.add(preview);
+    }
+    if (consent == null || !await consent(List.unmodifiable(previews))) {
+      return null;
+    }
+    final committed = <WorkFolderGrant>[];
+    for (final preview in previews) {
+      committed.add(
+        await _commitGrant(
+          preview,
+          cloudDisclosureConfirmedAt:
+              preview.cloudDisclosureConfirmedAt ?? clock(),
+        ),
+      );
+    }
+    return List.unmodifiable(committed);
+  }
+
   bool isPathAuthorized(String rawPath) {
     String normalized;
     try {
@@ -524,6 +574,7 @@ class WorkFolderGrantService {
     WorkFolderGrantConsent? consent,
   }) async {
     try {
+      await load();
       final preview = await previewDirectory(rawPath);
       if (!preview.available) return null;
       final confirmed = await _confirmCloudDisclosure(preview, consent);

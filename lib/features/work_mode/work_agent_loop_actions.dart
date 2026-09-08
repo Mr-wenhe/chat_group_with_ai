@@ -238,6 +238,14 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       task.actionCount = task.actionCount > 0 ? task.actionCount - 1 : 0;
     }
     if (_toolNeedsUserAction(toolResult)) {
+      if (toolResult.failureCode == 'toolMissing') {
+        // The command approval only authorizes the attempted probe. A missing
+        // executable did not run, so do not leave that approval reusable when
+        // the user later continues or restarts the task; doing so would replay
+        // the same command approval forever instead of showing the install or
+        // manual-guidance boundary.
+        _markMissingToolCheckpoint(task);
+      }
       return _pauseForToolAction(state, operation, toolResult, call);
     }
     if (!toolResult.succeeded) {
@@ -274,6 +282,18 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     );
     if (state.cancellation.isCancelled) return _interrupt(state);
     return null;
+  }
+
+  void _markMissingToolCheckpoint(AgentTask task) {
+    final checkpoint = _decodeMap(task.executionStateJson)
+      ..remove('approvalDecision')
+      ..remove('approvalPlan')
+      ..remove('approvalScope')
+      ..remove('approvalCapability')
+      ..remove('approvalOperationFingerprint')
+      ..remove('approvalConsumed')
+      ..['toolMissing'] = true;
+    task.executionStateJson = jsonEncode(checkpoint);
   }
 
   void _recordCommittedMutationFailure(

@@ -570,7 +570,11 @@ class WorkFailure {
         normalized.contains('invalid folder') ||
         normalized.contains('目录不存在') ||
         normalized.contains('目录失效') ||
-        normalized.contains('path is no longer available')) {
+        normalized.contains('path is no longer available') ||
+        normalized.contains('workspacepathexception') ||
+        normalized.contains('已保存的工作目录') ||
+        normalized.contains('工作目录不再受授权覆盖') ||
+        normalized.contains('work directory is no longer authorized')) {
       return WorkFailureType.authorizationLost;
     }
     if (normalizedCode == 'permissiondenied' ||

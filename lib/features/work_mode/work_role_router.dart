@@ -134,17 +134,43 @@ class WorkRoleRouter {
       try {
         rawDecision = await selector(context);
       } on Object catch (error) {
-        return _failure(
-          WorkRoleRouteSource.model,
-          '模型角色路由失败：${_safeError(error)}；未自动切换模型或角色。',
+        // A short routing request is an optimization, not the execution
+        // authority.  When the configured router model is temporarily
+        // unavailable, keep the conversation usable by applying the same
+        // local role/skill heuristic used when no selector is configured.
+        // The public reason names the degraded path so the user can decide
+        // whether to fix the model configuration before the next task.
+        final fallback = _routeDeterministically(
+          normalizedRequest,
+          conversation,
+          inferredStages,
+          candidates,
+          availableSkills,
+          fallbackDetail:
+              '模型角色路由暂时不可用（${_safeError(error)}），已改用本地角色职业与 Skill 判断。',
         );
+        return fallback.isSuccess
+            ? fallback
+            : _failure(
+                WorkRoleRouteSource.model,
+                '模型角色路由失败：${_safeError(error)}；本地角色判断也无法完成：${fallback.reason}',
+              );
       }
       if (rawDecision != null) {
         final decision = _coerceDecision(rawDecision);
         if (decision == null) {
-          return _failure(
-            WorkRoleRouteSource.model,
-            '模型角色路由结果格式无效（需要角色 ID、公开理由、置信度和接力标记）。',
+          // A malformed router response is equivalent to a temporary router
+          // outage.  It must not make an otherwise routable conversation
+          // unusable, and it must not silently choose a different API/model.
+          // Reuse the local role/skill heuristic and tell the user why the
+          // degraded path was selected.
+          return _routeDeterministically(
+            normalizedRequest,
+            conversation,
+            inferredStages,
+            candidates,
+            availableSkills,
+            fallbackDetail: '模型角色路由结果格式无效，已改用本地角色职业与 Skill 判断。',
           );
         }
         return _routeModel(
@@ -375,8 +401,9 @@ class WorkRoleRouter {
     String conversationId,
     List<WorkRoleStageKind> kinds,
     List<AICharacter> candidates,
-    List<CharacterSkill> skills,
-  ) {
+    List<CharacterSkill> skills, {
+    String? fallbackDetail,
+  }) {
     final plan = _stagePlan(request, kinds, candidates, skills);
     if (!plan.isSuccess) {
       return _failure(WorkRoleRouteSource.deterministicFallback, plan.failure!);
@@ -390,9 +417,12 @@ class WorkRoleRouter {
     }
     final stageName = plan.stages.first.label;
     final specialized = kinds.first != WorkRoleStageKind.general;
-    final reason = specialized
+    final heuristicReason = specialized
         ? '未使用 @；根据角色职业、persona 和 Skill 判断，这是「$stageName」任务，因此选择「${first.name}」。'
         : '未使用 @ 且任务未指明专业阶段，按活跃角色列表顺序选择「${first.name}」作为通用执行者。';
+    final reason = fallbackDetail == null
+        ? heuristicReason
+        : '$fallbackDetail $heuristicReason';
     return _success(
       first.id,
       WorkRoleRouteSource.deterministicFallback,

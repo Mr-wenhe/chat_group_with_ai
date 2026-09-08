@@ -59,6 +59,7 @@ class DefaultWorkTaskRunner
         WorkTaskCheckpointReporter,
         WorkTaskResourceLockPlanner,
         WorkTaskInstallHandler,
+        WorkTaskWorkspaceRebinder,
         WorkTaskVisionModelValidator {
   final DatabaseService database;
   final WorkTaskEventStore eventStore;
@@ -116,6 +117,16 @@ class DefaultWorkTaskRunner
   @override
   void setTaskCheckpointSink(Future<void> Function(AgentTask task) sink) {
     _taskCheckpointSink = sink;
+  }
+
+  @override
+  Future<void> rebindWorkspace(AgentTask task, String grantedPath) async {
+    if (grantedPath.trim().isEmpty) return;
+    await workspaceService.rebindConversationWorkspace(
+      conversationId: task.groupId,
+      isDirectChat: task.groupId.startsWith('dm:'),
+      grantedPath: grantedPath,
+    );
   }
 
   @override

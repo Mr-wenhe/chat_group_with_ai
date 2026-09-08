@@ -90,6 +90,14 @@ abstract interface class WorkTaskInstallHandler {
   );
 }
 
+/// Optional runner capability used after an explicit folder reauthorization.
+/// The coordinator owns the consent boundary; the runner owns its workspace
+/// persistence and therefore must clear the stale conversation path before a
+/// retry can resolve the newly granted root.
+abstract interface class WorkTaskWorkspaceRebinder {
+  Future<void> rebindWorkspace(AgentTask task, String grantedPath);
+}
+
 class _RunningTask {
   final AgentTask task;
   final WorkTaskCancellation cancellation;
@@ -464,10 +472,13 @@ class WorkTaskCoordinator {
       final stored = _taskBox.get(taskId);
       if (stored == null || stored.isTerminal) return;
       if (result.succeeded) {
+        final execution = _decodeExecutionMap(stored.executionStateJson)
+          ..remove('toolMissing');
         stored
           ..status = AgentTaskStatus.queued
           ..resumeRequired = false
           ..lastError = ''
+          ..executionStateJson = execution.isEmpty ? '' : jsonEncode(execution)
           ..updatedAt = _clock();
         _conversationReservations.remove(stored.groupId);
         await _save(stored);
@@ -600,6 +611,7 @@ class WorkTaskCoordinator {
         );
         return;
       }
+      await _rebindWorkspaceAfterGrant(task, result.grant);
       _conversationReservations.remove(task.groupId);
       task
         ..status = AgentTaskStatus.queued
@@ -704,6 +716,11 @@ class WorkTaskCoordinator {
       }
       if (_requiresExplicitCommandRequest(task)) {
         throw StateError('请发送明确的测试、构建或分析请求后再继续任务。');
+      }
+      if (_requiresMissingToolAction(task)) {
+        throw StateError(
+          '当前任务依赖的工具尚未安装；请先处理安装提示，或改用已存在的工具后重新发起任务。',
+        );
       }
       if (_requiresVisionModelSelection(task)) {
         throw StateError('请先选择支持图片的视觉模型后再继续任务。');
@@ -1663,6 +1680,7 @@ class WorkTaskCoordinator {
       return false;
     }
     if (requestResult.granted) {
+      await _rebindWorkspaceAfterGrant(task, requestResult.grant);
       task
         ..status = AgentTaskStatus.planning
         ..resumeRequired = false
@@ -1702,6 +1720,16 @@ class WorkTaskCoordinator {
     await _save(task);
     await _record(task, WorkTaskEventKind.paused, '等待工作目录授权', detail: reason);
     return false;
+  }
+
+  Future<void> _rebindWorkspaceAfterGrant(
+    AgentTask task,
+    WorkFolderGrant? grant,
+  ) async {
+    final path = grant?.path.trim() ?? '';
+    final runner = _runner;
+    if (path.isEmpty || runner is! WorkTaskWorkspaceRebinder) return;
+    await (runner as WorkTaskWorkspaceRebinder).rebindWorkspace(task, path);
   }
 
   Future<WorkFolderRequestResult> _requestFolder(
@@ -1974,6 +2002,10 @@ class WorkTaskCoordinator {
     return _decodeExecutionMap(
             task.executionStateJson)['explicitCommandRequestRequired'] ==
         true;
+  }
+
+  bool _requiresMissingToolAction(AgentTask task) {
+    return _decodeExecutionMap(task.executionStateJson)['toolMissing'] == true;
   }
 
   bool _requiresVisionModelSelection(AgentTask task) {

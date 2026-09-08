@@ -98,4 +98,56 @@ void main() {
     expect(writable.workDirPath, startsWith(writeRoot.path));
     expect(writable.workDirPath, isNot(readRoot.path));
   });
+
+  test('explicit reauthorization clears a stale conversation workspace',
+      () async {
+    final hiveDir = await Directory.systemTemp.createTemp('work-mode-hive-');
+    final oldRoot = await Directory.systemTemp.createTemp('work-mode-old-');
+    final newRoot = await Directory.systemTemp.createTemp('work-mode-new-');
+    addTearDown(() async {
+      await Hive.close();
+      for (final directory in [hiveDir, oldRoot, newRoot]) {
+        if (await directory.exists()) await directory.delete(recursive: true);
+      }
+    });
+
+    Hive.init(hiveDir.path);
+    if (!Hive.isAdapterRegistered(16)) {
+      Hive.registerAdapter(WorkModeWorkspaceAdapter());
+    }
+    await Hive.openBox<dynamic>('app_settings');
+    await Hive.openBox<WorkModeWorkspace>(
+      DatabaseService.workModeWorkspaceBoxName,
+    );
+    final db = DatabaseService();
+    final grants = WorkFolderGrantService(
+      box: db.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(oldRoot.path, consent: (_) async => true);
+    await db.workModeWorkspaceBox.put(
+      'group-rebind',
+      WorkModeWorkspace(
+        conversationId: 'group-rebind',
+        conversationType: 'group',
+        workDirPath: oldRoot.path,
+      ),
+    );
+    final service = WorkModeWorkspaceService(db: db, grantService: grants);
+
+    await grants.authorizeDirectory(newRoot.path, consent: (_) async => true);
+    await service.rebindConversationWorkspace(
+      conversationId: 'group-rebind',
+      isDirectChat: false,
+      grantedPath: newRoot.path,
+    );
+    final rebound = await service.loadOrCreate(
+      conversationId: 'group-rebind',
+      isDirectChat: false,
+    );
+
+    expect(rebound.workDirPath, newRoot.path);
+  });
 }

@@ -396,6 +396,26 @@ void _registerSearchStage06TestPart2() {
       expect(bundle.evidenceJson, isNot(contains('<script>')));
       expect(formatter.sanitizeCitations('ok [S1] bad [S9]', snapshot),
           'ok [S1] bad ');
+      expect(
+        formatter.sanitizeAnswerLinks(
+          '结论 [S1] https://docs.flutter.dev/release/notes 与 docs.flutter.dev',
+          allowLinks: false,
+        ),
+        '结论 [S1]  与 ',
+      );
+      expect(
+        formatter.sanitizeAnswerLinks(
+          '来源：https://docs.flutter.dev/release/notes',
+          allowLinks: true,
+        ),
+        '来源：https://docs.flutter.dev/release/notes',
+      );
+      expect(
+        formatter
+            .formatMessages(snapshot, allowSourceLinks: true)
+            .first['content'],
+        contains('用户已明确索要来源链接'),
+      );
     });
 
     test('uses Prompt G for no results and transport failure', () {

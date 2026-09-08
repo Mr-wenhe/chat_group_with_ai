@@ -21,13 +21,16 @@ extension _ChatRoomInputSupport on _ChatRoomPageState {
     // @ 弹窗键盘导航优先（↑↓ 选择、回车插入、Esc 关闭）
     if (_showMentionPopup) return _handleMentionKeyEvent(event);
     final key = event.logicalKey;
-    // Ctrl/Cmd+V：自行处理剪贴板（可能含图片），不走 TextField 默认粘贴。
+    // Ctrl/Cmd+V：附件检测异步执行；纯文本仍交给 TextField 原生粘贴，
+    // 否则桌面输入法/自动化注入会被吞掉，导致普通文本无法进入控制器。
     if (key == LogicalKeyboardKey.keyV &&
         (HardwareKeyboard.instance.isControlPressed ||
             HardwareKeyboard.instance.isMetaPressed)) {
-      unawaited(_pasteClipboardAttachments(showEmptyHint: false));
-      // 阻止 Flutter 默认粘贴行为，避免手动插入与 TextField 原生粘贴重复。
-      return KeyEventResult.handled;
+      unawaited(_pasteClipboardAttachments(
+        showEmptyHint: false,
+        includeText: false,
+      ));
+      return KeyEventResult.ignored;
     }
     // 桌面端：Enter 发送、Shift+Enter 换行
     if (_isDesktop) {
