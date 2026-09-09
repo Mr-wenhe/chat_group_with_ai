@@ -5,7 +5,7 @@ publish_to: 'none'
 version: 1.1.0+1
 
 environment:
-  # 兼容本地自定义 fork（Dart 3.6.0-134.0.dev）与 CI 用的 3.24.0 stable（Dart 3.5.0）
+  # 兼容本地与 CI 使用的 Flutter 3.27.1 stable（Dart 3.6.0）。
   sdk: ">=3.5.0 <4.0.0"
 
 dependencies:

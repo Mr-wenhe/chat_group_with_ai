@@ -369,7 +369,7 @@ refactor: 抽离 ChatApiService 超时配置
 
 > 前置条件：本机需能跑通 `flutter doctor`（各目标平台工具链齐全）。发布覆盖 Windows（CI）/ macOS / iOS / Android 共 4 个平台；其中 `windows/` 目录为本次发布准备时通过 `flutter create --platforms=windows .` 生成并提交。**Web 端因无安全凭据存储、无法保存 API 配置，已不再作为发布目标；所有 Web 构建也会禁用联网模型与联网搜索请求，避免浏览器 XHR 在应用层限流前完整缓冲响应。**
 
-> **Flutter 版本对齐**：CI 与 Release 工作流已显式钉到 **Flutter 3.24.0 stable**，与你本地自定义 fork（`3.24.0-1.0.pre.538`，同周期、同套旧主题 API）保持代码级一致。因此**同一份代码在你本地和 CI 都能编译**，无需切换你本地的 Flutter 通道。`pubspec.yaml` 的 SDK 约束也已放宽到 `>=3.5.0 <4.0.0` 以同时兼容两端。
+> **Flutter 版本对齐**：CI 与 Release 工作流已显式钉到 **Flutter 3.27.1 stable（Dart 3.6.0）**，与你当前本地环境保持一致。因此**同一份代码在你本地和 CI 都能编译**，无需切换 Flutter 通道。`pubspec.yaml` 的 SDK 约束仍兼容 `>=3.5.0 <4.0.0`。
 
 ---
 

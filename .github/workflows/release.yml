@@ -64,6 +64,9 @@ jobs:
           set -euo pipefail
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             RAW_VERSION="${{ github.event.inputs.version }}"
+            # 文档要求不带 v，但手动触发时也兼容用户填写 v1.2.3，
+            # 避免最终生成错误的 vv1.2.3 标签。
+            RAW_VERSION="${RAW_VERSION#v}"
           else
             # 由 tag 触发，GITHUB_REF_NAME 形如 v1.2.3
             RAW_VERSION="${GITHUB_REF_NAME#v}"
@@ -90,11 +93,9 @@ jobs:
   windows:
     name: Build Windows (CI 发布)
     needs: prepare
-    # 必须用 windows-2022：该镜像同时预装 VS2019 与 VS2022。
-    # Flutter 3.24 的 Windows 构建硬编码使用 "Visual Studio 16 2019" CMake 生成器
-    # （内部显式传 -G，CMAKE_GENERATOR 环境变量无法覆盖），而 windows-latest
-    # 现指向 Server 2025 镜像、仅含 VS2022，会报 "could not find any instance of
-    # Visual Studio"。windows-2022 上的 VS2019 实例正好满足 Flutter 3.24 的需求。
+    # 必须用 windows-2022：该镜像同时预装 VS2019 与 VS2022，兼容当前
+    # Flutter 3.27.1 的 Windows CMake 工具链；windows-latest 的镜像变更
+    # 可能导致 Flutter 找不到所需的 Visual Studio 实例。
     runs-on: windows-2022
     # 创建 / 上传 Release 需要写权限
     permissions:
@@ -119,7 +120,7 @@ jobs:
 
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.24.0"
+          flutter-version: "3.27.1"
           channel: "stable"
           cache: true
       - run: flutter config --enable-windows-desktop
@@ -172,7 +173,7 @@ jobs:
       - uses: actions/checkout@v4
       - uses: subosito/flutter-action@v2
         with:
-          flutter-version: "3.24.0"
+          flutter-version: "3.27.1"
           channel: "stable"
           cache: true
       - run: flutter pub get
