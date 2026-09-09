@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:dio/dio.dart';
@@ -16,6 +17,7 @@ class CapturingChatApiService extends ChatApiService {
   Future<Map<String, dynamic>> sendChatMessage({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -34,6 +36,7 @@ class CapturingChatApiService extends ChatApiService {
   Stream<ChatStreamEvent> streamChatMessage({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,

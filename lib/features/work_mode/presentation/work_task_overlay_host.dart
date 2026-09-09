@@ -8,6 +8,10 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
+import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
+import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
+import 'package:chat_group/features/work_mode/work_mode_policy.dart';
+import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/presentation/visible_browser_panel.dart';
 import 'package:chat_group/features/work_mode/providers/work_task_providers.dart';
 import 'package:chat_group/features/work_mode/visible_browser_service.dart';
@@ -100,6 +104,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   List<VisibleBrowserSession> _browserSessions =
       const <VisibleBrowserSession>[];
   String? _selectedBrowserSessionId;
+  final Set<String> _approvalPromptInFlight = <String>{};
 
   @override
   void initState() {
@@ -164,6 +169,10 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
           _selectedTaskId = _tasks.isEmpty ? null : _tasks.first.id;
         }
       });
+      // Approval prompts are independent from panel pagination. A waiting
+      // task hidden behind the compact list still needs one host-level modal;
+      // the panel remains the durable fallback after the prompt is dismissed.
+      _scheduleApprovalPrompt(tasks);
     });
   }
 
@@ -433,6 +442,119 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   Future<void> _approveTask(String taskId) {
     final callback = widget.onApproveTask;
     return callback?.call(taskId) ?? _coordinator!.approve(taskId);
+  }
+
+  void _scheduleApprovalPrompt(List<AgentTask> tasks) {
+    final candidates = tasks
+        .where((task) =>
+            task.status == AgentTaskStatus.waitingForApproval &&
+            task.pendingToolRequestJson.trim().isNotEmpty &&
+            !_approvalPromptInFlight.contains(task.id))
+        .toList(growable: false);
+    if (candidates.isEmpty) return;
+    final coordinator = _coordinator;
+    if (coordinator == null) return;
+    final candidateIds = candidates.map((task) => task.id).toSet();
+    _approvalPromptInFlight.addAll(candidateIds);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      AgentTask? taskToShow;
+      String? markerTaskId;
+      try {
+        // A task may already have been presented (or dismissed) while
+        // another task was waiting. Walk the snapshot until the coordinator
+        // grants one fresh marker instead of letting the first task suppress
+        // every later approval checkpoint.
+        for (final candidate in candidates) {
+          if (!mounted) return;
+          final shouldShow = await coordinator.markApprovalPromptShown(
+            candidate.id,
+          );
+          if (!shouldShow) continue;
+          taskToShow = candidate;
+          markerTaskId = candidate.id;
+          break;
+        }
+        final task = taskToShow;
+        if (task == null) return;
+        if (!mounted) {
+          await coordinator.resetApprovalPromptShown(task.id);
+          return;
+        }
+        await _showApprovalPrompt(task);
+      } on Object {
+        // The task panel remains the durable fallback when a navigator or a
+        // lightweight test host cannot present a modal prompt.
+        final markerId = markerTaskId;
+        if (markerId != null) {
+          try {
+            await coordinator.resetApprovalPromptShown(markerId);
+          } on Object {
+            // Keep the original presentation failure as the visible outcome.
+          }
+        }
+      } finally {
+        _approvalPromptInFlight.removeAll(candidateIds);
+      }
+    });
+  }
+
+  Future<void> _showApprovalPrompt(AgentTask task) async {
+    final plan = approvalPlanForTask(task);
+    final navigatorContext = widget.navigatorKey?.currentContext ?? context;
+    final wasVisible = _isVisible;
+    final wasCollapsed = _isCollapsed;
+    if (wasVisible) setState(() => _isVisible = false);
+    WorkChangeApprovalDecision? decision;
+    try {
+      if (plan != null) {
+        decision = await WorkChangeApprovalDialog.show(
+          navigatorContext,
+          plan: plan,
+        );
+      } else {
+        final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
+        decision = await showDialog<WorkChangeApprovalDecision>(
+          context: navigatorContext,
+          barrierDismissible: true,
+          builder: (dialogContext) => AlertDialog(
+            key: const Key('work-generic-approval-dialog'),
+            title: const Text('工作任务需要审批'),
+            content: Text(
+              pending == null
+                  ? '任务准备执行一项需要确认的操作。'
+                  : WorkModePolicy.approvalSummary(pending),
+            ),
+            actions: <Widget>[
+              TextButton(
+                onPressed: () => Navigator.of(dialogContext)
+                    .pop(WorkChangeApprovalDecision.rejected),
+                child: const Text('拒绝并暂停'),
+              ),
+              FilledButton(
+                onPressed: () => Navigator.of(dialogContext)
+                    .pop(WorkChangeApprovalDecision.approved),
+                child: const Text('允许本次操作'),
+              ),
+            ],
+          ),
+        );
+      }
+    } finally {
+      if (mounted && wasVisible) {
+        setState(() {
+          _isVisible = true;
+          _isCollapsed = wasCollapsed;
+        });
+      }
+    }
+    if (decision == null || !mounted) return;
+    if (decision == WorkChangeApprovalDecision.approved) {
+      await _approveTask(task.id);
+    } else if (decision == WorkChangeApprovalDecision.approvedWithoutUndo) {
+      await _approveWithoutUndoTask(task.id);
+    } else {
+      await _rejectTask(task.id);
+    }
   }
 
   Future<void> _requestFolder(String taskId) {

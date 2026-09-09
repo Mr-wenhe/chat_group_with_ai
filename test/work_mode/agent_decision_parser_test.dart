@@ -1,11 +1,14 @@
 import 'dart:convert';
 
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/work_mode/agent_decision_parser.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  const parser = AgentDecisionParser();
+  const parser = AgentDecisionParser(
+    defaultCommandWorkingDirectory: '/Users/test/.chat_group',
+  );
 
   group('Stage 03 AgentDecision strict protocol', () {
     final validCases = <({
@@ -123,14 +126,14 @@ void main() {
         detail: 'public_update',
       ),
       (
-        name: 'markdown fence',
-        raw: '```json\n${_json({
+        name: 'markdown fence with surrounding prose',
+        raw: '模型输出如下：\n```json\n${_json({
               'action': 'finish',
               'public_update': '已完成。',
               'tool': null,
               'completion': {'summary': '完成'},
             })}\n```',
-        detail: 'Markdown',
+        detail: '单个合法 JSON',
       ),
       (
         name: 'multiple JSON objects',
@@ -208,6 +211,15 @@ void main() {
         expect(result.repairAttempted, isFalse);
       });
     }
+  });
+
+  test('accepts one markdown json fence around a decision object', () async {
+    final result = await parser.parse(
+      '```json\n${_validFinishJson()}\n```',
+    );
+
+    expect(result.isSuccess, isTrue, reason: result.detail);
+    expect(result.decision, isA<AgentFinishDecision>());
   });
 
   test('uses reasoning_content only when standard content is empty', () async {
@@ -337,6 +349,82 @@ void main() {
 
     expect(result.isSuccess, isTrue, reason: result.detail);
     expect(result.decision, isA<AgentToolDecision>());
+  });
+
+  test('resolves a blank command working directory to the configured default',
+      () async {
+    final result = await parser.parse(_json({
+      'action': 'tool',
+      'public_update': '检查缺失命令。',
+      'tool': {
+        'name': 'command.run',
+        'arguments': {
+          'executable': 'insta',
+          'arguments': <String>[],
+          'workingDirectory': '',
+          'declaredImpact': ['.'],
+        },
+      },
+      'completion': null,
+    }));
+
+    expect(result.isSuccess, isTrue, reason: result.detail);
+    final decision = result.decision! as AgentToolDecision;
+    expect(
+      decision.tool.arguments['workingDirectory'],
+      '/Users/test/.chat_group',
+    );
+  });
+
+  test('resolves a blank command working directory to the user-home default',
+      () async {
+    final result = await const AgentDecisionParser().parse(_json({
+      'action': 'tool',
+      'public_update': '检查缺失命令。',
+      'tool': {
+        'name': 'command.run',
+        'arguments': {
+          'executable': 'insta',
+          'arguments': <String>[],
+          'workingDirectory': '',
+          'declaredImpact': ['.'],
+        },
+      },
+      'completion': null,
+    }));
+
+    expect(result.isSuccess, isTrue, reason: result.detail);
+    final decision = result.decision! as AgentToolDecision;
+    expect(
+      decision.tool.arguments['workingDirectory'],
+      DatabaseService.defaultAiProcessingDirectoryPath(),
+    );
+    expect(decision.tool.arguments['workingDirectory'], isNot('.'));
+  });
+
+  test('repair-empty detail preserves the first protocol validation error',
+      () async {
+    final result = await parser.parse(
+      _json({
+        'action': 'tool',
+        'public_update': '检查缺失命令。',
+        'tool': {
+          'name': 'command.run',
+          'arguments': {
+            'executable': 'insta',
+            'arguments': <String>[],
+            'workingDirectory': '',
+            'declaredImpact': <String>[],
+          },
+        },
+        'completion': null,
+      }),
+      repair: (_) => null,
+    );
+
+    expect(result.failure, AgentDecisionParseFailure.modelProtocol);
+    expect(result.detail, contains('declaredImpact'));
+    expect(result.detail, contains('修复响应为空'));
   });
 
   test('toJson emits the fixed four top-level fields', () async {

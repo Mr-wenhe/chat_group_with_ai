@@ -6,6 +6,7 @@ import 'package:chat_group/features/work_mode/presentation/work_task_overlay_hos
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_change_policy.dart';
+import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:flutter/material.dart';
@@ -309,6 +310,85 @@ void main() {
       await tester.tap(find.byKey(const Key('work-task-select-vision-model')));
       expect(selected, isTrue);
       expect(continued, isFalse);
+    });
+
+    testWidgets(
+        'shows continue for a soft-limit pause despite stale retry data',
+        (tester) async {
+      final task = _task(
+        id: 'soft-limit-stale-failure',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..softLimitReached = true
+        ..resumeRequired = true;
+      WorkFailure.persistOnTask(
+        task,
+        WorkFailure.defaults(WorkFailureType.modelProtocol),
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) async {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-continue')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-retry')), findsNothing);
+    });
+
+    testWidgets('hides stale pause details while a resumed task is running',
+        (tester) async {
+      final events = StreamController<WorkTaskEvent>.broadcast();
+      addTearDown(events.close);
+      final task = _task(
+        id: 'resuming-task',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )..status = AgentTaskStatus.planning;
+      WorkFailure.persistOnTask(
+        task,
+        WorkFailure.defaults(WorkFailureType.userActionRequired),
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => events.stream,
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) async {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+      events.add(WorkTaskEvent(
+        taskId: task.id,
+        sequence: 1,
+        timestamp: DateTime.utc(2026, 9, 9, 10),
+        kind: WorkTaskEventKind.paused,
+        title: '已暂停：达到执行软上限。',
+      ));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('当前动作：正在规划下一步。'), findsOneWidget);
+      expect(find.byKey(const Key('work-task-failure')), findsNothing);
+      expect(find.byKey(const Key('work-task-continue')), findsNothing);
+      expect(find.byKey(const Key('work-task-stop')), findsOneWidget);
     });
 
     testWidgets('shows the folder picker for an initial grant without a path',

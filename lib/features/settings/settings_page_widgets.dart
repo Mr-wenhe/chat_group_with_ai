@@ -84,6 +84,16 @@ class _ApiConfigCard extends StatelessWidget {
                   ],
                 ),
                 const SizedBox(height: 3),
+                Text(
+                  '${config.modelName} · ${config.protocol.label}',
+                  maxLines: 1,
+                  overflow: TextOverflow.ellipsis,
+                  style: TextStyle(
+                    fontSize: 12,
+                    color: cs.onSurfaceVariant,
+                  ),
+                ),
+                const SizedBox(height: 2),
                 Text(maskedKey,
                     style: TextStyle(
                         fontSize: 12,

@@ -99,6 +99,7 @@ extension ObservationEntryRetry on ObservationEntry {
       final result = await gateway.sendChatMessage(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: config.protocol,
         customBaseUrl: config.customBaseUrl,
         model: config.modelName,
         messages: prompt,

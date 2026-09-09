@@ -274,7 +274,9 @@ class _TaskDetails extends StatelessWidget {
   Widget build(BuildContext context) {
     final approvalText =
         task.status == AgentTaskStatus.waitingForApproval ? '等待你批准当前操作。' : null;
-    final failure = task.workFailure;
+    final failure = _visibleWorkFailure(task);
+    final displayAction =
+        _isStaleRecoveryAction(task, latestAction) ? null : latestAction;
     final characterName = characterNameFor?.call(task.characterId).trim();
     return SingleChildScrollView(
       child: Column(
@@ -305,9 +307,9 @@ class _TaskDetails extends StatelessWidget {
           const SizedBox(height: 8),
           _PublicDetail(
             title: '当前动作',
-            text: latestAction == null
+            text: displayAction == null
                 ? _statusLabel(task.status)
-                : _safePanelText(latestAction!.title),
+                : _safePanelText(displayAction.title),
             inline: true,
           ),
           if (toolName != null) ...<Widget>[
@@ -463,7 +465,7 @@ class _TaskActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    final failure = task.workFailure;
+    final failure = _visibleWorkFailure(task);
     final continueReason = _continueUnavailableReasonForPanel(task);
     final stopReason = task.isTerminal ? '任务已结束，无法停止。' : null;
     final approvalPlan = approvalPlanForTask(task);
@@ -473,13 +475,15 @@ class _TaskActions extends StatelessWidget {
     final needsFolder = _taskNeedsFolderGrant(task);
     final hasInstallSuggestion = _taskHasInstallSuggestion(task);
     final needsVisionModel = _taskNeedsVisionModel(task);
+    final isSoftLimitPause =
+        task.softLimitReached && _isPausedStatus(task.status);
     // Recovery controls are meaningful only at a user-resumable boundary. A
     // terminal failure may still expose retry/reauthorize/conflict actions,
     // but must not also present a misleading generic Continue button.
     final canShowContinue = !task.isTerminal &&
         (task.status == AgentTaskStatus.paused ||
             task.status == AgentTaskStatus.interrupted) &&
-        (failure == null || failure.canContinue);
+        (isSoftLimitPause || failure == null || failure.canContinue);
     return Wrap(
       spacing: 8,
       runSpacing: 8,
@@ -563,7 +567,7 @@ class _TaskActions extends StatelessWidget {
             icon: const Icon(Icons.image_search_outlined),
             label: const Text('选择视觉模型'),
           ),
-        if (failure?.canRetry == true && onRetry != null)
+        if (!isSoftLimitPause && failure?.canRetry == true && onRetry != null)
           FilledButton.icon(
             key: const Key('work-task-retry'),
             onPressed: actionInFlight ? null : () => runAction(onRetry!),
@@ -1073,6 +1077,29 @@ String _safeUndoItemText(String value) {
   return safe.length <= 4000 ? safe : '${safe.substring(0, 3999)}…';
 }
 
+bool _isPausedStatus(AgentTaskStatus status) {
+  return status == AgentTaskStatus.paused ||
+      status == AgentTaskStatus.interrupted;
+}
+
+bool _isActiveExecutionStatus(AgentTaskStatus status) {
+  return status == AgentTaskStatus.queued ||
+      status == AgentTaskStatus.planning ||
+      status == AgentTaskStatus.runningTool;
+}
+
+WorkFailure? _visibleWorkFailure(AgentTask task) {
+  // A queued retry intentionally retains its old failure checkpoint until the
+  // runner starts. Do not render that stale diagnostic as a current blocker.
+  if (_isActiveExecutionStatus(task.status)) return null;
+  return task.workFailure;
+}
+
+bool _isStaleRecoveryAction(AgentTask task, WorkTaskEvent? event) {
+  return event?.kind == WorkTaskEventKind.paused &&
+      _isActiveExecutionStatus(task.status);
+}
+
 bool _pendingToolRequiresPlan(AgentTask task) {
   final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
   return pending?.tool == AgentToolName.workspacePatch ||
@@ -1150,22 +1177,22 @@ bool _taskNeedsVisionModel(AgentTask task) {
 
 String? _continueUnavailableReasonForPanel(AgentTask task) {
   if (task.isTerminal) return '任务已结束，无需继续。';
-  final failure = task.workFailure;
-  if (failure != null) {
-    if (failure.canReauthorize) return failure.suggestedAction;
-    if (failure.canViewConflict) return failure.suggestedAction;
-    if (failure.canRetry) return '请先点击“重试”从安全检查点继续。';
-    if (failure.canContinue) return null;
-  }
+  final isSoftLimitPause =
+      task.softLimitReached && _isPausedStatus(task.status);
   if (_taskNeedsVisionModel(task)) return '请先选择支持图片的视觉模型。';
   if (_requiresExplicitCommandRequest(task)) {
     return '请发送明确的测试、构建或分析请求后继续。';
   }
-  if (task.softLimitReached &&
-      (task.status == AgentTaskStatus.paused ||
-          task.status == AgentTaskStatus.interrupted)) {
-    return null;
+  final failure = _visibleWorkFailure(task);
+  if (failure != null) {
+    if (failure.canReauthorize) return failure.suggestedAction;
+    if (failure.canViewConflict) return failure.suggestedAction;
+    if (!isSoftLimitPause && failure.canRetry) {
+      return '请先点击“重试”从安全检查点继续。';
+    }
+    if (failure.canContinue) return null;
   }
+  if (isSoftLimitPause) return null;
   if (task.status == AgentTaskStatus.interrupted ||
       task.status == AgentTaskStatus.paused) {
     return null;

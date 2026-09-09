@@ -5,6 +5,7 @@ enum ApiProvider {
   moonshot('Moonshot', 'https://api.moonshot.cn/v1'),
   baidu('百度文心', 'https://qianfan.baidubce.com/v2'),
   xfyun('讯飞星火', 'https://spark-api-open.xf-yun.com/v1'),
+  sensenova('商汤 SenseNova', 'https://token.sensenova.cn/v1'),
   custom('自定义', '');
 
   final String label;
@@ -14,6 +15,8 @@ enum ApiProvider {
 
   String get apiPath => '/chat/completions';
 
+  /// Selection hints for built-in providers. Custom endpoint model IDs are
+  /// entered by the user and are intentionally not constrained by this map.
   static const Map<String, List<String>> providerModels = {
     'deepseek': [
       'deepseek-chat',
@@ -38,9 +41,15 @@ enum ApiProvider {
       'ernie-lite-8k',
     ],
     'xfyun': ['spark-lite', 'spark-plus', 'spark-pro', 'spark-ultra'],
+    'sensenova': [
+      'sensenova-6.8-flash-lite',
+      'sensenova-6.7-flash-lite',
+    ],
     'custom': [],
   };
 
+  /// Defaults used only when a built-in provider has no stored model yet.
+  /// Custom configurations never fall back to one of these values.
   static const Map<String, String> defaultModels = {
     'deepseek': 'deepseek-chat',
     'qwen': 'qwen-plus',
@@ -48,6 +57,7 @@ enum ApiProvider {
     'moonshot': 'moonshot-v1-32k',
     'baidu': 'ernie-4.0-turbo-8k',
     'xfyun': 'spark-lite',
+    'sensenova': 'sensenova-6.8-flash-lite',
   };
 
   static String getBaseUrl(String providerName) {

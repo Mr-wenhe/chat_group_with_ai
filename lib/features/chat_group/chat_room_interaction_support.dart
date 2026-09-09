@@ -266,16 +266,27 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       final provider = ApiProvider.values.firstWhere(
           (p) => p.name == config.provider,
           orElse: () => ApiProvider.deepseek);
+      final capability = _aiGateway.capability(provider, config.modelName);
       final apiMessages = _withWebSearchContext(
         await _buildApiMessages(
           character,
           _regenerateContext,
           null,
-          supportsVision:
-              _aiGateway.capability(provider, config.modelName).supportsVision,
+          supportsVision: capability.supportsVision,
         ),
         webSearch,
         allowSourceLinks: searchTurnContext?.allowSourceLinks == true,
+      );
+      final outputLimit = max(1, capability.contextWindow);
+      final outputTokens =
+          capability.maxOutput.clamp(1, min(1024, outputLimit)).toInt();
+      final inputBudget = ContextWindowManager.inputBudget(
+        contextWindow: capability.contextWindow,
+        maxOutput: outputTokens,
+      );
+      final boundedApiMessages = ContextWindowManager.fitToTokenBudget(
+        apiMessages,
+        maxTokens: inputBudget,
       );
       if (!_pageActive || _disposed) return;
 
@@ -301,9 +312,11 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
         _aiGateway.streamChatMessage(
           apiKey: apiKey,
           provider: provider,
+          apiProtocol: config.protocol,
           customBaseUrl: config.customBaseUrl,
           model: config.modelName,
-          messages: apiMessages,
+          messages: boundedApiMessages,
+          maxTokens: outputTokens,
           purpose: AiRequestPurpose.reply,
           conversationId: widget.groupId,
           characterId: character.id,
@@ -348,7 +361,8 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
           character: character,
           config: config,
           provider: provider,
-          apiMessages: apiMessages,
+          apiMessages: boundedApiMessages,
+          maxTokens: outputTokens,
           userInitiated: true,
         );
         if (retryContent != null && retryContent.trim().isNotEmpty) {

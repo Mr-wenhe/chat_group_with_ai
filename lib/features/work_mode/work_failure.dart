@@ -396,7 +396,7 @@ class WorkFailure {
           technicalDetail: '命令进程没有返回成功状态。',
           completedContent: <String>[],
           retryable: false,
-          suggestedAction: '检查命令和工作目录后点击“重试”；若命令需要登录，请先在外部终端处理。',
+          suggestedAction: '请检查命令和工作目录后重新规划或重新发起任务；若命令需要登录，请先在外部终端处理。',
         ),
       WorkFailureType.userActionRequired => const WorkFailure(
           type: WorkFailureType.userActionRequired,

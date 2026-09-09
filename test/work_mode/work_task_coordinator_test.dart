@@ -677,6 +677,47 @@ void main() {
     );
   });
 
+  test('marks the first approval prompt once and survives repeated snapshots',
+      () async {
+    await coordinator
+        .submit(_task(id: 'approval-once', conversationId: 'group-a'));
+    await coordinator.pauseForApproval(
+      'approval-once',
+      pendingToolRequestJson: '{"tool":"workspace.patch"}',
+    );
+
+    expect(await coordinator.markApprovalPromptShown('approval-once'), isTrue);
+    expect(await coordinator.markApprovalPromptShown('approval-once'), isFalse);
+    expect(
+      taskBox.get('approval-once')?.executionStateJson,
+      contains('"approvalPromptShown":true'),
+    );
+    await coordinator.approve('approval-once');
+    expect(
+      taskBox.get('approval-once')?.executionStateJson,
+      isNot(contains('"approvalPromptShown":true')),
+    );
+  });
+
+  test('resets an approval prompt marker after host presentation failure',
+      () async {
+    await coordinator
+        .submit(_task(id: 'approval-reset', conversationId: 'group-a'));
+    await coordinator.pauseForApproval(
+      'approval-reset',
+      pendingToolRequestJson: '{"tool":"workspace.patch"}',
+    );
+
+    expect(await coordinator.markApprovalPromptShown('approval-reset'), isTrue);
+    await coordinator.resetApprovalPromptShown('approval-reset');
+
+    expect(
+      taskBox.get('approval-reset')?.executionStateJson,
+      isNot(contains('"approvalPromptShown":true')),
+    );
+    expect(await coordinator.markApprovalPromptShown('approval-reset'), isTrue);
+  });
+
   test('approval decision queues the same task and is durable', () async {
     await coordinator.submit(_task(id: 'approval', conversationId: 'group-a'));
     await coordinator.pauseForApproval(

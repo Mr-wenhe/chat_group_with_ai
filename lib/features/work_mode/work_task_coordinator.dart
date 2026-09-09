@@ -437,6 +437,51 @@ class WorkTaskCoordinator {
     });
   }
 
+  /// Records that the app-level approval prompt has been presented for this
+  /// checkpoint. The marker prevents route rebuilds or app restarts from
+  /// repeatedly interrupting the user while the task panel remains available.
+  Future<bool> markApprovalPromptShown(String taskId) {
+    return _serialize(() async {
+      _ensureOpen();
+      final task = _requireWorkTask(taskId);
+      if (task.status != AgentTaskStatus.waitingForApproval ||
+          task.pendingToolRequestJson.trim().isEmpty) {
+        return false;
+      }
+      final metadata = _decodeExecutionMap(task.executionStateJson);
+      if (metadata['approvalPromptShown'] == true) return false;
+      metadata['approvalPromptShown'] = true;
+      task
+        ..executionStateJson = jsonEncode(metadata)
+        ..updatedAt = _clock();
+      await _save(task);
+      return true;
+    });
+  }
+
+  /// Clears a prompt marker when the host failed before presenting the dialog.
+  ///
+  /// Presentation failures are recoverable (for example, a route can be
+  /// rebuilt between the post-frame callback and [showDialog]). Keeping the
+  /// marker in that case would suppress every later automatic retry and leave
+  /// only the manual task panel as a workaround.
+  Future<void> resetApprovalPromptShown(String taskId) {
+    return _serialize(() async {
+      _ensureOpen();
+      final task = _requireWorkTask(taskId);
+      if (task.status != AgentTaskStatus.waitingForApproval ||
+          task.pendingToolRequestJson.trim().isEmpty) {
+        return;
+      }
+      final metadata = _decodeExecutionMap(task.executionStateJson);
+      if (metadata.remove('approvalPromptShown') == null) return;
+      task
+        ..executionStateJson = metadata.isEmpty ? '' : jsonEncode(metadata)
+        ..updatedAt = _clock();
+      await _save(task);
+    });
+  }
+
   /// Approves the pending tool request and queues the same durable task.
   ///
   /// The decision is stored in the task checkpoint so a runner can consume it
@@ -2315,7 +2360,11 @@ class WorkTaskCoordinator {
       final decoded = jsonDecode(raw);
       if (decoded is Map) {
         final copy = Map<String, dynamic>.from(decoded)
-          ..['approvalDecision'] = decision;
+          ..['approvalDecision'] = decision
+          // A decision closes this exact prompt. If the resumed loop reaches
+          // another mutation checkpoint, the host must be allowed to present
+          // a fresh dialog for that new operation.
+          ..remove('approvalPromptShown');
         final parsedDecision = WorkChangeApprovalDecision.fromWire(decision);
         if (parsedDecision?.permitsExecution == true) {
           // A new approval authorizes exactly the checkpoint that prompted it;

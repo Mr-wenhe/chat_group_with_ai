@@ -76,6 +76,15 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       return;
     }
 
+    if (WorkModePolicy.looksLikeWorkRequest(text)) {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'ai',
+        content: WorkModePolicy.workModeHint,
+      ));
+    }
+
     if (_isAiReplying) {
       // AI 正在回复中，排队等待当前回合结束后再处理。
       _conversationController.enqueue(PendingUserMessage(
@@ -198,6 +207,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
           _aiGateway.sendChatMessageWithResponseLimit(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: config.protocol,
         customBaseUrl: config.customBaseUrl,
         model: config.modelName,
         messages: messages,
@@ -242,6 +252,15 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         senderId: 'system',
         senderType: 'ai',
         content: '工作模式角色路由未完成：找不到选中的执行角色。',
+      ));
+      return;
+    }
+    if (_workModeEnabled && !executor.agenticEnabled) {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'ai',
+        content: '工作模式未启动：${executor.name}未启用工作能力，请在角色设置中开启“允许工作模式”，或选择其他工作角色。',
       ));
       return;
     }
@@ -293,6 +312,48 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     final taskRequest = text.trim().isEmpty && hasAttachments
         ? WorkModePolicy.attachmentOnlyRequest
         : text;
+    final requiredByIntent = CharacterSkillResolver.resolveFor(
+      executor,
+      taskRequest,
+    ).permissions.toSet();
+    final asksForSkillManagement = RegExp(
+      r'技能|skill|template|模板',
+      caseSensitive: false,
+    ).hasMatch(taskRequest);
+    final asksForMutation = RegExp(
+      r'写入|修改|创建|生成|保存|导出|实现|修复|更新|重构|删除|重命名|patch|write|create|generate|edit|save|export|implement|fix|update|refactor|delete|rename',
+      caseSensitive: false,
+    ).hasMatch(taskRequest);
+    final asksForCommand = RegExp(
+      r'运行|执行|测试|构建|编译|验证|命令|run|execute|test|build|compile|verify|command',
+      caseSensitive: false,
+    ).hasMatch(taskRequest);
+    final asksForBrowser = RegExp(
+      r'网页|浏览器|页面|browser|web page|website',
+      caseSensitive: false,
+    ).hasMatch(taskRequest);
+    final missingPermissions = requiredByIntent
+        .where((permission) => switch (permission) {
+              ToolPermission.skillCreate ||
+              ToolPermission.skillDownload =>
+                asksForSkillManagement,
+              ToolPermission.workspacePatch => asksForMutation,
+              ToolPermission.commandRun => asksForCommand,
+              ToolPermission.browserContext => asksForBrowser,
+              _ => true,
+            })
+        .where((permission) => !requestedPermissions.contains(permission))
+        .toSet();
+    if (missingPermissions.isNotEmpty) {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'ai',
+        content:
+            '工作模式未启动：角色「${executor.name}」缺少当前任务所需工具权限：${missingPermissions.map((item) => item.name).join('、')}。请在角色设置中授予权限或选择其他工作角色。',
+      ));
+      return;
+    }
     final task = AgentTask(
       groupId: widget.groupId,
       characterId: executor.id,

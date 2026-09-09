@@ -144,6 +144,7 @@ class ChatRoomSearchRuntimeController {
       gateway: aiGateway,
       config: SearchPlannerConfig(
         provider: provider,
+        apiProtocol: config.protocol,
         model: config.modelName,
         customBaseUrl: config.customBaseUrl,
         conversationId: conversationId,

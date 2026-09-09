@@ -33,35 +33,37 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
     }
     task.executionStateJson = jsonEncode(execution);
 
-    const contextBuilder = WorkContextBuilder();
     final previous = contextBuilder.fromTask(task);
     final completed = <String>[
       ...previous.completedSummaries,
       if (task.resultSummary.trim().isNotEmpty) _publicText(task.resultSummary),
     ];
-    task.contextSummary = contextBuilder
-        .build(
-          conversationId: task.groupId,
-          target: previous.target.isEmpty ? task.userRequest : previous.target,
-          pendingFollowUps: task.queuedUserRequests,
-          completedSummaries: completed,
-          recentToolResults: state.recentResults.takeLast(8),
-          approvalScope: previous.approvalScope,
-          artifactPaths: task.lastArtifactPaths,
-          roleHandoff: state.handoff,
-          errors: [
-            ...previous.errors,
-            if (task.lastError.trim().isNotEmpty) _publicText(task.lastError),
-            if (state.failure != null)
-              _publicText(
-                '${state.failure!.title}：${state.failure!.reason} 下一步：${state.failure!.suggestedAction}',
-              ),
-          ],
-          nextStep: task.pendingToolRequestJson.trim().isNotEmpty
-              ? '等待当前工具审批或恢复。'
-              : state.failure?.suggestedAction ?? '继续执行下一步。',
-        )
-        .toJsonString();
+    final checkpoint = contextBuilder.build(
+      conversationId: task.groupId,
+      target: previous.target.isEmpty ? task.userRequest : previous.target,
+      pendingFollowUps: task.queuedUserRequests,
+      completedSummaries: completed,
+      recentToolResults: state.recentResults.takeLast(8),
+      approvalScope: previous.approvalScope,
+      artifactPaths: task.lastArtifactPaths,
+      roleHandoff: state.handoff,
+      errors: [
+        ...previous.errors,
+        if (task.lastError.trim().isNotEmpty) _publicText(task.lastError),
+        if (state.failure != null)
+          _publicText(
+            '${state.failure!.title}：${state.failure!.reason} 下一步：${state.failure!.suggestedAction}',
+          ),
+      ],
+      nextStep: task.pendingToolRequestJson.trim().isNotEmpty
+          ? '等待当前工具审批或恢复。'
+          : state.failure?.suggestedAction ?? '继续执行下一步。',
+    );
+    final compressed = await contextBuilder.compressIfNeeded(
+      checkpoint,
+      model: contextCompressionModel,
+    );
+    task.contextSummary = compressed.toJsonString();
     task.updatedAt = clock();
     final sink = _taskCheckpointSink ?? onCheckpoint;
     if (sink != null) await sink(task);
@@ -217,7 +219,7 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
     final messages = <Map<String, dynamic>>[
       {
         'role': 'system',
-        'content': '${systemPrompt.trim()}\n'
+        'content': '${(systemPromptBuilder?.call() ?? systemPrompt).trim()}\n'
             '工作模式只允许输出一个严格 AgentDecision JSON object；'
             'public_update 只能描述公开动作、依据或结论，不得输出思维链。',
       },

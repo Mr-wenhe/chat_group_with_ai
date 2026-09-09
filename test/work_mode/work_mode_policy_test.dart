@@ -58,6 +58,12 @@ void main() {
       );
     });
 
+    test('detects work intent without enabling work mode', () {
+      expect(WorkModePolicy.looksLikeWorkRequest('请修改 lib/main.dart'), isTrue);
+      expect(WorkModePolicy.looksLikeWorkRequest('帮我闲聊一下今天的天气'), isFalse);
+      expect(WorkModePolicy.workModeHint, contains('工作模式'));
+    });
+
     test('selects mentioned capable worker before the first capable worker',
         () {
       final first = _character(id: 'first');
@@ -125,14 +131,24 @@ void main() {
       expect(context, contains(character.promptIdentity));
       expect(context, contains('weekly-report'));
       expect(context, contains('工作区读取'));
+      expect(context, contains('meta.find-skills'));
       // memorySummary is no longer injected; global memory is provided by MemoryContextSelector.
       expect(context, isNot(contains('用户偏好简洁周报')));
     });
 
-    test('resolved work skills include every installed character skill', () {
+    test('injects all role-bound skill bodies and exposes all metadata', () {
       final character = _character(id: 'worker')
         ..skillIds = const ['installed-a', 'installed-b'];
       final installed = [
+        CharacterSkill(
+          id: 'global-skill',
+          characterId: '',
+          name: 'Global skill',
+          domain: 'general',
+          description: 'Available to every role',
+          instructions: const ['Global instruction'],
+          requiredPermissions: const [],
+        ),
         CharacterSkill(
           id: 'installed-a',
           characterId: character.id,
@@ -155,12 +171,39 @@ void main() {
 
       final skills = WorkModePolicy.resolveSkills(
         character: character,
-        userRequest: '继续上一轮工作',
+        userRequest: '请使用 global-skill 的 Global instruction',
         installedSkills: installed,
       );
 
-      expect(skills.map((item) => item.id),
-          containsAll(['installed-a', 'installed-b']));
+      expect(skills.map((item) => item.id), contains('global-skill'));
+      expect(
+        skills.map((item) => item.id),
+        containsAll(['installed-a', 'installed-b']),
+      );
+
+      final discoverable = WorkModePolicy.discoverableSkills(
+        character: character,
+        installedSkills: installed,
+        resolvedSkills: [
+          CharacterSkill(
+            id: 'profession-default',
+            characterId: character.id,
+            name: '职业默认能力',
+            domain: 'general',
+            description: '角色默认技能元数据',
+            instructions: const ['只用于元数据测试'],
+            requiredPermissions: const [],
+          ),
+        ],
+      );
+      expect(
+          discoverable.map((item) => item.id),
+          containsAll([
+            'global-skill',
+            'installed-a',
+            'installed-b',
+            'profession-default',
+          ]));
     });
   });
 }

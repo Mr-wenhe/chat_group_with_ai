@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
@@ -17,6 +18,7 @@ class FakeCompletionClient extends ChatApiService {
   Future<Map<String, dynamic>> sendChatMessage({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -36,6 +38,28 @@ class FakeCompletionClient extends ChatApiService {
           'cachedTokens': 20,
           'completionTokens': 10,
         };
+  }
+}
+
+class FakeStreamingErrorClient extends ChatApiService {
+  final String errorMessage;
+
+  FakeStreamingErrorClient(this.errorMessage);
+
+  @override
+  Stream<ChatStreamEvent> streamChatMessage({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    CancelToken? cancelToken,
+  }) async* {
+    yield ChatStreamEvent.error(errorMessage);
   }
 }
 
@@ -330,5 +354,27 @@ void main() {
     // 后续同类请求会被错误拦截。
     expect(gateway.guard.reservedMicrosTotal, 0,
         reason: '被拦截的流式请求应释放预留，避免预算计数泄漏');
+  });
+
+  test('流式 HTTP 错误遥测保留状态码', () async {
+    final store = MemoryGovernanceStore();
+    final gateway = AiRequestGateway(
+      store: store,
+      client: FakeStreamingErrorClient('HTTP 503 请求失败'),
+    );
+
+    await gateway
+        .streamChatMessage(
+          apiKey: 'secret',
+          provider: ApiProvider.deepseek,
+          model: 'deepseek-chat',
+          messages: messages,
+          purpose: AiRequestPurpose.reply,
+          conversationId: 'group-1',
+          characterId: 'char-1',
+        )
+        .toList();
+
+    expect(store.diagnostics.last.failureType, 'http_503');
   });
 }

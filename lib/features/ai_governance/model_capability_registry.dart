@@ -266,5 +266,17 @@ class ModelCapabilityRegistry {
     'xfyun/spark-plus': _text(provider: 'xfyun', context: 32768),
     'xfyun/spark-pro': _text(provider: 'xfyun', context: 131072),
     'xfyun/spark-ultra': _text(provider: 'xfyun', context: 131072),
+    'sensenova/sensenova-6.8-flash-lite': _vision(
+      provider: 'sensenova',
+      context: 131072,
+      output: 8192,
+      tools: true,
+    ),
+    'sensenova/sensenova-6.7-flash-lite': _vision(
+      provider: 'sensenova',
+      context: 131072,
+      output: 8192,
+      tools: true,
+    ),
   };
 }

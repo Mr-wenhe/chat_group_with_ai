@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:dio/dio.dart';
 
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 
@@ -18,6 +19,7 @@ class SearchPlannerConfig {
   final String apiKey;
   final Future<String?> Function()? resolveApiKey;
   final ApiProvider provider;
+  final ApiProtocol apiProtocol;
   final String model;
   final String? customBaseUrl;
   final String conversationId;
@@ -27,6 +29,7 @@ class SearchPlannerConfig {
     this.apiKey = '',
     this.resolveApiKey,
     required this.provider,
+    this.apiProtocol = ApiProtocol.defaultValue,
     required this.model,
     this.customBaseUrl,
     required this.conversationId,
@@ -243,6 +246,7 @@ class SearchQueryPlanner {
           .sendChatMessageWithResponseLimit(
             apiKey: apiKey,
             provider: config.provider,
+            apiProtocol: config.apiProtocol,
             customBaseUrl: config.customBaseUrl,
             model: config.model,
             messages: [

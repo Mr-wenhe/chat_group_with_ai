@@ -59,6 +59,7 @@ class _PlannerClient extends ChatApiService {
   Future<Map<String, dynamic>> sendChatMessage({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -102,6 +103,7 @@ class _PlannerClient extends ChatApiService {
   Future<Map<String, dynamic>> sendChatMessageWithResponseLimit({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -117,6 +119,7 @@ class _PlannerClient extends ChatApiService {
     return sendChatMessage(
       apiKey: apiKey,
       provider: provider,
+      apiProtocol: apiProtocol,
       customBaseUrl: customBaseUrl,
       model: model,
       messages: messages,
@@ -132,6 +135,7 @@ class _PlannerClient extends ChatApiService {
   Stream<ChatStreamEvent> streamChatMessage({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     double temperature = 0.85,

@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/retry_handler.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
@@ -43,6 +44,7 @@ class AiRequestGateway {
   Future<Map<String, dynamic>> sendChatMessage({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -73,6 +75,7 @@ class AiRequestGateway {
       operation: (attempt) => client.sendChatMessage(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: apiProtocol,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -92,6 +95,7 @@ class AiRequestGateway {
   Future<Map<String, dynamic>> sendChatMessageWithResponseLimit({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -123,6 +127,7 @@ class AiRequestGateway {
       operation: (attempt) => client.sendChatMessageWithResponseLimit(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: apiProtocol,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -139,6 +144,7 @@ class AiRequestGateway {
   Future<Map<String, dynamic>> sendChatMessageStreamed({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -152,6 +158,7 @@ class AiRequestGateway {
     CancelToken? cancelToken,
     bool requiresTools = false,
     bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
   }) async {
     await store.ensureLedgerBox();
     return _sendWithRetries(
@@ -169,6 +176,7 @@ class AiRequestGateway {
       operation: (attempt) => client.sendChatMessageStreamed(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: apiProtocol,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -177,6 +185,7 @@ class AiRequestGateway {
         receiveTimeout: receiveTimeout,
         maxRetries: 0,
         cancelToken: cancelToken,
+        onEvent: onEvent,
       ),
     );
   }
@@ -184,6 +193,7 @@ class AiRequestGateway {
   Stream<ChatStreamEvent> streamChatMessage({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -239,6 +249,7 @@ class AiRequestGateway {
       await for (final event in client.streamChatMessage(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: apiProtocol,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -318,6 +329,10 @@ class AiRequestGateway {
   ]) {
     if (result?['statusCode'] case final int code) return 'http_$code';
     final value = message?.toLowerCase() ?? '';
+    final status = RegExp(r'\bhttp\s+(\d{3})\b', caseSensitive: false)
+        .firstMatch(value)
+        ?.group(1);
+    if (status != null) return 'http_$status';
     if (value.contains('取消')) return 'cancelled';
     if (value.contains('超时') || value.contains('timeout')) return 'timeout';
     if (value.contains('网络') || value.contains('connection')) {

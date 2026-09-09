@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
 
@@ -57,10 +58,12 @@ class AgentDecisionParseResult {
 
 /// Strict parser for the Stage 03 decision protocol.
 ///
-/// This parser deliberately does not extract JSON from surrounding text and
-/// does not understand XML or Markdown fences. A malformed non-empty response
-/// may be sent to the same model once through [AgentDecisionRepair]; the
-/// caller owns that model identity and the parser never retries it itself.
+/// This parser deliberately does not extract JSON from surrounding text. It
+/// accepts either bare JSON or one exact Markdown fence containing only JSON;
+/// XML, surrounding prose, and multiple objects remain invalid. A malformed
+/// non-empty response may be sent to the same model once through
+/// [AgentDecisionRepair]; the caller owns that model identity and the parser
+/// never retries it itself.
 class AgentDecisionParser {
   static const Set<String> _topLevelFields = {
     'action',
@@ -89,7 +92,11 @@ class AgentDecisionParser {
     AgentToolName.skillDownload,
   };
 
-  const AgentDecisionParser();
+  /// Optional injection keeps parser tests deterministic. Production work
+  /// mode passes the resolved processing directory for the current task.
+  final String? defaultCommandWorkingDirectory;
+
+  const AgentDecisionParser({this.defaultCommandWorkingDirectory});
 
   /// Parses the response body using `content` first. `reasoningContent` is
   /// considered only when [content] is null/blank, matching ChatApiService's
@@ -123,9 +130,10 @@ class AgentDecisionParser {
       repaired = null;
     }
     if (repaired == null || repaired.trim().isEmpty) {
+      final firstDetail = first.detail ?? '模型 JSON 校验失败。';
       return AgentDecisionParseResult.failure(
         failure: AgentDecisionParseFailure.modelProtocol,
-        detail: '模型 JSON 修复失败：修复响应为空。',
+        detail: '模型 JSON 修复失败：修复响应为空。首次校验失败：$firstDetail',
         usedReasoningContent: selected.usedReasoningContent,
         repairAttempted: true,
       );
@@ -187,13 +195,15 @@ class AgentDecisionParser {
     if (trimmed.isEmpty) {
       return _protocolFailure('JSON 响应不能为空。');
     }
-    if (trimmed.startsWith('```') || trimmed.endsWith('```')) {
-      return _protocolFailure('不接受 Markdown code fence，只接受裸 JSON object。');
+    final fencedJson = _extractSingleJsonCodeFence(trimmed);
+    if (trimmed.startsWith('```') && fencedJson == null) {
+      return _protocolFailure('Markdown code fence 必须只包裹一个 JSON object。');
     }
+    final jsonText = fencedJson ?? trimmed;
 
     Object? decoded;
     try {
-      decoded = jsonDecode(trimmed);
+      decoded = jsonDecode(jsonText);
     } on FormatException {
       return _protocolFailure('响应不是单个合法 JSON object。');
     }
@@ -226,6 +236,19 @@ class AgentDecisionParser {
       AgentDecisionAction.handoff => _parseHandoff(publicUpdate, object),
       AgentDecisionAction.finish => _parseFinish(publicUpdate, object),
     };
+  }
+
+  /// Unwraps only a complete outer fence. Returning null for any other shape
+  /// prevents the parser from accidentally extracting JSON from prose or from
+  /// accepting a partial/multiple Markdown response.
+  String? _extractSingleJsonCodeFence(String trimmed) {
+    if (!trimmed.startsWith('```')) return null;
+    final lines = trimmed.split('\n');
+    if (lines.length < 3 || lines.last.trim() != '```') return null;
+    final language = lines.first.substring(3).trim().toLowerCase();
+    if (language.isNotEmpty && language != 'json') return null;
+    final body = lines.sublist(1, lines.length - 1).join('\n').trim();
+    return body.isEmpty ? null : body;
   }
 
   _ResponseContent _selectResponseContent(
@@ -290,10 +313,11 @@ class AgentDecisionParser {
     if (!_stage03Tools.contains(name)) {
       return _protocolFailure('tool.name 尚未接入 Stage 03 WorkAgentLoop。');
     }
-    final arguments = _stringMap(toolObject['arguments']);
-    if (arguments == null) {
+    final rawArguments = _stringMap(toolObject['arguments']);
+    if (rawArguments == null) {
       return _protocolFailure('tool.arguments 必须是 JSON object。');
     }
+    final arguments = _normaliseToolArguments(name, rawArguments);
     final argumentError = _validateArguments(name, arguments);
     if (argumentError != null) return _protocolFailure(argumentError);
     return AgentDecisionParseResult.success(
@@ -465,6 +489,23 @@ class AgentDecisionParser {
           'source': _ArgumentType.string,
         });
     }
+  }
+
+  Map<String, dynamic> _normaliseToolArguments(
+    AgentToolName name,
+    Map<String, dynamic> arguments,
+  ) {
+    if (name != AgentToolName.commandRun) return arguments;
+    final normalised = Map<String, dynamic>.from(arguments);
+    final workingDirectory = normalised['workingDirectory'];
+    if (workingDirectory is String && workingDirectory.trim().isEmpty) {
+      final configured = defaultCommandWorkingDirectory?.trim();
+      normalised['workingDirectory'] =
+          configured != null && configured.isNotEmpty
+              ? configured
+              : DatabaseService.defaultAiProcessingDirectoryPath();
+    }
+    return normalised;
   }
 
   String? _validateSkillCreateArguments(Map<String, dynamic> args) {

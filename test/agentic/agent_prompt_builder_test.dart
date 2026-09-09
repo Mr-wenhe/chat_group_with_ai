@@ -50,6 +50,22 @@ void main() {
     expect(prompt, isNot(contains('<tool_call>')));
   });
 
+  test(
+      'Stage 03 prompt explains the user-home command working directory default',
+      () {
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '检查一个本机命令是否可用',
+    );
+
+    expect(prompt, contains('command.run'));
+    expect(prompt, contains('workingDirectory'));
+    expect(prompt, contains('~/.chat_group'));
+    expect(prompt, isNot(contains('默认使用 "."')));
+    expect(prompt, contains('declaredImpact'));
+  });
+
   test('result prompt requires evidence-led delivery and self-check', () {
     final prompt = AgentPromptBuilder.buildToolResultPrompt(
       rolePlaySystemPrompt: '你是工作助手，30岁，性别女，身份是助理。\n保持专业。',

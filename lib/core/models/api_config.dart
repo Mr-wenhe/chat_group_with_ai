@@ -1,6 +1,7 @@
 import 'package:hive/hive.dart';
 import 'package:uuid/uuid.dart';
 import 'api_provider.dart';
+import 'api_protocol.dart';
 import '../storage/credential_repository.dart';
 
 part 'api_config.g.dart';
@@ -34,8 +35,17 @@ class ApiConfig extends HiveObject {
   @HiveField(8, defaultValue: false)
   bool hasCredential;
 
+  /// Wire protocol used by the configured upstream endpoint.
+  ///
+  /// Stored as a string rather than a Hive enum so old records and future
+  /// protocol additions remain readable without changing existing field ids.
+  @HiveField(9, defaultValue: 'openAiChatCompletions')
+  String apiProtocol;
+
   /// Runtime-only compatibility accessor. It never exposes the legacy Hive key.
   String get apiKey => CredentialRepository.cached(id) ?? '';
+
+  ApiProtocol get protocol => ApiProtocol.fromName(apiProtocol);
 
   /// Returns true when a non-empty credential is configured.
   bool get hasApiKey =>
@@ -61,6 +71,10 @@ class ApiConfig extends HiveObject {
     DateTime? createdAt,
     this.credentialId = '',
     this.hasCredential = false,
+    // Enum `.name` is not a const expression on the project's Flutter fork;
+    // keep this literal aligned with ApiProtocol.defaultValue and the Hive
+    // field default so old records remain backwards compatible.
+    this.apiProtocol = 'openAiChatCompletions',
   })  : id = id ?? const Uuid().v4(),
         _legacyApiKey = apiKey,
         modelName = modelName ?? ApiProvider.defaultModels[provider] ?? '',

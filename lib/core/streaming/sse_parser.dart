@@ -73,6 +73,7 @@ class BoundedSseLineTransformer
 
 /// SSE（Server-Sent Events）行解析器：把 LLM 流式返回的字节流按行切分，
 /// 提取 `data:` 行中的 `choices[0].delta.content` 增量 token，并累计完整内容。
+/// 当标准 content 为空时，兼容使用 reasoning_content 作为完整响应回退。
 ///
 /// 设计要点（与架构一致）：
 /// 1. 纯函数式、无副作用、可单测，不依赖 Dio / Flutter。
@@ -85,11 +86,13 @@ class SseParser {
   static const int _maxWireBytes = 8 * 1024 * 1024;
   String _buffer = '';
   String _fullContent = '';
+  String _fullReasoningContent = '';
   int _promptTokens = 0;
   int _completionTokens = 0;
   int _cachedTokens = 0;
   bool _terminated = false;
   int _fullContentBytes = 0;
+  int _fullReasoningContentBytes = 0;
   int _bufferBytes = 0;
   int _wireBytes = 0;
 
@@ -194,29 +197,40 @@ class SseParser {
       final delta = firstChoice['delta'];
       if (delta is! Map<String, dynamic>) return null;
       final content = delta['content'];
-      if (content == null || content is! String || content.isEmpty) {
-        if ((firstChoice['finish_reason'] ?? '').toString() == 'error') {
-          final nestedErr = firstChoice['error'];
-          final errMsg = (nestedErr is Map)
-              ? (nestedErr['message']?.toString() ??
-                  (json['error'] is Map
-                      ? (json['error'] as Map)['message']?.toString()
-                      : null))
-              : null;
+      if (content is String && content.isNotEmpty) {
+        final contentBytes = utf8.encode(content).length;
+        _fullContentBytes += contentBytes;
+        if (_fullContentBytes > _maxContentBytes) {
           _terminated = true;
-          return ChatStreamEvent.error(errMsg ?? '模型生成失败');
+          return ChatStreamEvent.error(
+              '回复内容超过 ${_maxContentBytes ~/ 1024} KB 上限，已截断');
         }
-        return null;
+        _fullContent += content;
+        return ChatStreamEvent.token(content);
       }
-      final contentBytes = utf8.encode(content).length;
-      _fullContentBytes += contentBytes;
-      if (_fullContentBytes > _maxContentBytes) {
+      final reasoningContent = delta['reasoning_content'];
+      if (reasoningContent is String && reasoningContent.isNotEmpty) {
+        final reasoningBytes = utf8.encode(reasoningContent).length;
+        _fullReasoningContentBytes += reasoningBytes;
+        if (_fullReasoningContentBytes > _maxContentBytes) {
+          _terminated = true;
+          return ChatStreamEvent.error(
+              '回复内容超过 ${_maxContentBytes ~/ 1024} KB 上限，已截断');
+        }
+        _fullReasoningContent += reasoningContent;
+      }
+      if ((firstChoice['finish_reason'] ?? '').toString() == 'error') {
+        final nestedErr = firstChoice['error'];
+        final errMsg = (nestedErr is Map)
+            ? (nestedErr['message']?.toString() ??
+                (json['error'] is Map
+                    ? (json['error'] as Map)['message']?.toString()
+                    : null))
+            : null;
         _terminated = true;
-        return ChatStreamEvent.error(
-            '回复内容超过 ${_maxContentBytes ~/ 1024} KB 上限，已截断');
+        return ChatStreamEvent.error(errMsg ?? '模型生成失败');
       }
-      _fullContent += content;
-      return ChatStreamEvent.token(content);
+      return null;
     } catch (_) {
       _terminated = true;
       // 解析失败不应中断流，也不应把模型正文或供应商错误原文写入日志。
@@ -225,7 +239,11 @@ class SseParser {
   }
 
   ChatStreamEvent doneEvent() => ChatStreamEvent.done(
-      _fullContent, null, _promptTokens, _completionTokens, _cachedTokens);
+      _fullContent.trim().isNotEmpty ? _fullContent : _fullReasoningContent,
+      null,
+      _promptTokens,
+      _completionTokens,
+      _cachedTokens);
 
   int get promptTokens => _promptTokens;
   int get completionTokens => _completionTokens;
@@ -240,7 +258,9 @@ class SseParser {
   void reset() {
     _buffer = '';
     _fullContent = '';
+    _fullReasoningContent = '';
     _fullContentBytes = 0;
+    _fullReasoningContentBytes = 0;
     _bufferBytes = 0;
     _wireBytes = 0;
     _promptTokens = 0;

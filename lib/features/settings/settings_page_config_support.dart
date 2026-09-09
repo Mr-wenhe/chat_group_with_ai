@@ -163,6 +163,7 @@ extension _SettingsPageConfigSupport on _SettingsPageState {
     final result = await _apiService.testApiKey(
       apiKey: apiKey,
       provider: provider,
+      apiProtocol: config.protocol,
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
     );

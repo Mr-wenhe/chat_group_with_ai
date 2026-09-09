@@ -84,6 +84,21 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       webSearch,
       allowSourceLinks: searchTurnContext?.allowSourceLinks == true,
     );
+    // The context compressor runs before persona, memory, document and search
+    // prompts are assembled. Fit the final request as a second deterministic
+    // boundary so a large attachment/system prompt cannot make the gateway
+    // reject an otherwise valid reply on small custom model windows.
+    final replyOutputLimit = max(1, capability.contextWindow);
+    final replyOutputTokens =
+        capability.maxOutput.clamp(1, min(1024, replyOutputLimit)).toInt();
+    final replyInputBudget = ContextWindowManager.inputBudget(
+      contextWindow: capability.contextWindow,
+      maxOutput: replyOutputTokens,
+    );
+    final boundedApiMessages = ContextWindowManager.fitToTokenBudget(
+      apiMessages,
+      maxTokens: replyInputBudget,
+    );
     // 上面的 await 期间用户可能切到工作模式，此时放弃这次自动聊天回复。
     if (isAutoChat && _workModeEnabled) {
       _discardCurrentStream = false;
@@ -115,9 +130,11 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       _aiGateway.streamChatMessage(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: config.protocol,
         customBaseUrl: config.customBaseUrl,
         model: config.modelName,
-        messages: apiMessages,
+        messages: boundedApiMessages,
+        maxTokens: replyOutputTokens,
         purpose:
             isAutoChat ? AiRequestPurpose.autoChat : AiRequestPurpose.reply,
         conversationId: widget.groupId,
@@ -189,7 +206,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
         character: character,
         config: config,
         provider: provider,
-        apiMessages: apiMessages,
+        apiMessages: boundedApiMessages,
+        maxTokens: replyOutputTokens,
         userInitiated: !isAutoChat,
       );
       if (retryContent != null && retryContent.trim().isNotEmpty) {
@@ -324,6 +342,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     required ApiConfig config,
     required ApiProvider provider,
     required List<Map<String, dynamic>> apiMessages,
+    required int maxTokens,
     required bool userInitiated,
   }) async {
     final apiKey = await _credentialResolver.resolve(config);
@@ -331,6 +350,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     final result = await _aiGateway.sendChatMessageStreamed(
       apiKey: apiKey,
       provider: provider,
+      apiProtocol: config.protocol,
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
       messages: apiMessages,
@@ -338,6 +358,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       purpose: AiRequestPurpose.retry,
       conversationId: widget.groupId,
       characterId: character.id,
+      maxTokens: maxTokens,
       userInitiated: userInitiated,
     );
     if (result['success'] == true) {

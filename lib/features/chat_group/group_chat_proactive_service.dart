@@ -124,6 +124,7 @@ class GroupChatProactiveService {
         (provider) => provider.name == config.provider,
         orElse: () => ApiProvider.deepseek,
       ),
+      apiProtocol: config.protocol,
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
       messages: messages,

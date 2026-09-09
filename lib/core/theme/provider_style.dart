@@ -15,6 +15,7 @@ class ProviderStyle {
     'moonshot': Color(0xFFF472B6),
     'baidu': Color(0xFF6E7BFF),
     'xfyun': Color(0xFF0066FF),
+    'sensenova': Color(0xFF00A88F),
     'custom': Color(0xFFF59E0B),
   };
 

@@ -132,11 +132,20 @@ class WorkContextSnapshot {
 /// Builds and restores bounded, public work checkpoints.
 class WorkContextBuilder {
   static const int defaultMaxCharacters = 12000;
+  static const double defaultCompressionTriggerRatio = 0.8;
 
   final int maxCharacters;
 
   const WorkContextBuilder({this.maxCharacters = defaultMaxCharacters})
       : assert(maxCharacters > 0);
+
+  /// Semantic compression is only attempted when the bounded checkpoint is
+  /// close to its budget. Small checkpoints stay byte-for-byte deterministic
+  /// and do not spend another model request.
+  bool shouldCompress(WorkContextSnapshot snapshot) {
+    return _encodedLength(_normalise(snapshot)) >=
+        (maxCharacters * defaultCompressionTriggerRatio).ceil();
+  }
 
   WorkContextSnapshot build({
     required String conversationId,
@@ -275,6 +284,15 @@ class WorkContextBuilder {
     return _clip(safe);
   }
 
+  Future<WorkContextSnapshot> compressIfNeeded(
+    WorkContextSnapshot snapshot, {
+    WorkContextCompressionModel? model,
+  }) async {
+    final safe = _normalise(snapshot);
+    if (!shouldCompress(safe)) return safe;
+    return compress(safe, model: model);
+  }
+
   WorkContextSnapshot _normalise(WorkContextSnapshot snapshot) => build(
         conversationId: snapshot.conversationId,
         target: snapshot.target,
@@ -346,8 +364,7 @@ class WorkContextBuilder {
     while (_encodedLength(result) > maxCharacters &&
         result.artifactPaths.length > 1) {
       result = result.copyWith(
-        artifactPaths:
-            result.artifactPaths.take(result.artifactPaths.length - 1),
+        artifactPaths: result.artifactPaths.skip(1),
       );
     }
     if (_encodedLength(result) > maxCharacters) {

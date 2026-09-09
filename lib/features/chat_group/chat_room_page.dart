@@ -89,6 +89,7 @@ import 'package:chat_group/features/memory/relationship_private_detail_page.dart
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
+import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/work_mode/work_mode_session.dart';
 import 'package:chat_group/features/work_mode/visible_browser_service.dart';
 import 'package:chat_group/providers/providers.dart';

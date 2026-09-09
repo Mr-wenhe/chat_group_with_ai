@@ -4,6 +4,7 @@ extension _ChatApiServiceSupport on ChatApiService {
   Future<Map<String, dynamic>> _collectStreamedOnce({
     required String apiKey,
     required ApiProvider provider,
+    required ApiProtocol apiProtocol,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -11,6 +12,7 @@ extension _ChatApiServiceSupport on ChatApiService {
     required int maxTokens,
     required Duration receiveTimeout,
     CancelToken? cancelToken,
+    void Function(ChatStreamEvent event)? onEvent,
   }) async {
     String content = '';
     int? promptTokens;
@@ -20,6 +22,7 @@ extension _ChatApiServiceSupport on ChatApiService {
       await for (final event in streamChatMessage(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: apiProtocol,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -28,6 +31,7 @@ extension _ChatApiServiceSupport on ChatApiService {
         receiveTimeout: receiveTimeout,
         cancelToken: cancelToken,
       )) {
+        onEvent?.call(event);
         switch (event.type) {
           case ChatStreamEventType.token:
             content += event.delta ?? '';
@@ -41,14 +45,21 @@ extension _ChatApiServiceSupport on ChatApiService {
           case ChatStreamEventType.error:
             // The stream parser may receive a provider-controlled error body.
             // Never promote that body into the result consumed by the chat UI.
+            final statusCode = _streamStatusCode(event.message);
             return {
               'success': false,
               'message': _safeStreamErrorMessage(event.message),
+              if (statusCode != null) 'statusCode': statusCode,
             };
         }
       }
     } on DioException catch (e) {
-      return {'success': false, 'message': _dioErrorMessage(e)};
+      final statusCode = e.response?.statusCode;
+      return {
+        'success': false,
+        'message': _dioErrorMessage(e),
+        if (statusCode != null) 'statusCode': statusCode,
+      };
     } catch (e) {
       return {'success': false, 'message': '流式请求失败'};
     }
@@ -58,6 +69,7 @@ extension _ChatApiServiceSupport on ChatApiService {
       return _sendChatMessageOnce(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: apiProtocol,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -81,10 +93,15 @@ extension _ChatApiServiceSupport on ChatApiService {
       statusCode == null ? '请求失败' : 'HTTP $statusCode 请求失败';
 
   String _safeStreamErrorMessage(String? message) {
+    final statusCode = _streamStatusCode(message);
+    return statusCode == null ? '流式请求失败' : 'HTTP $statusCode 请求失败';
+  }
+
+  int? _streamStatusCode(String? message) {
     final status = RegExp(r'\bHTTP\s+(\d{3})\b', caseSensitive: false)
         .firstMatch(message ?? '')
         ?.group(1);
-    return status == null ? '流式请求失败' : 'HTTP ${int.parse(status)} 请求失败';
+    return status == null ? null : int.tryParse(status);
   }
 
   /// 把 DioException 转换为统一的人类可读错误信息。
@@ -101,22 +118,5 @@ extension _ChatApiServiceSupport on ChatApiService {
     } else {
       return '请求失败';
     }
-  }
-
-  int _extractCachedTokens(Map<String, dynamic> usage) {
-    var total = 0;
-    final promptDetails = usage['prompt_tokens_details'];
-    if (promptDetails is Map) {
-      total += (promptDetails['cached_tokens'] as int? ?? 0);
-    }
-    final inputDetails = usage['input_tokens_details'];
-    if (inputDetails is Map) {
-      total += (inputDetails['cached_tokens'] as int? ?? 0);
-      total += (inputDetails['cache_read'] as int? ?? 0);
-    }
-    total += (usage['cached_tokens'] as int? ?? 0);
-    total += (usage['prompt_cache_hit_tokens'] as int? ?? 0);
-    total += (usage['cache_read_input_tokens'] as int? ?? 0);
-    return total;
   }
 }

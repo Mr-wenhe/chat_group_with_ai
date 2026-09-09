@@ -208,6 +208,23 @@ void main() {
     expect(compressed.roleHandoff, isNull);
   });
 
+  test('compact checkpoints evict the oldest artifact before the newest', () {
+    const compact = WorkContextBuilder(maxCharacters: 520);
+    final snapshot = compact.build(
+      conversationId: 'group-artifacts',
+      target: '交付项目',
+      artifactPaths: [
+        '/workspace/old/${List.filled(120, 'a').join()}.txt',
+        '/workspace/middle/${List.filled(120, 'b').join()}.txt',
+        '/workspace/newest/${List.filled(120, 'c').join()}.txt',
+      ],
+      completedSummaries: const ['完成目录扫描'],
+    );
+
+    expect(snapshot.artifactPaths.last, contains('/workspace/newest/'));
+    expect(snapshot.artifactPaths, isNot(contains('/workspace/old/')));
+  });
+
   test('restoring with a different conversation id fails closed', () {
     final raw = builder.build(
       conversationId: 'dm:a',

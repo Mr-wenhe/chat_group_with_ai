@@ -82,6 +82,7 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
       apiKey: apiKey,
       provider: ApiProvider.values.firstWhere((p) => p.name == config.provider,
           orElse: () => ApiProvider.deepseek),
+      apiProtocol: config.protocol,
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
       messages: msgs,
@@ -338,6 +339,14 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
             'content': message.content,
           }),
     ];
+    final capability = _aiGateway.capability(provider, config.modelName);
+    final summaryOutputLimit = max(1, capability.contextWindow);
+    final summaryOutputTokens =
+        capability.maxOutput.clamp(1, min(2048, summaryOutputLimit)).toInt();
+    final summaryInputBudget = ContextWindowManager.inputBudget(
+      contextWindow: capability.contextWindow,
+      maxOutput: summaryOutputTokens,
+    );
     final manager = ContextWindowManager(
       maxRetries: 0,
       complete: (messages) async {
@@ -348,21 +357,19 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
         return _aiGateway.sendChatMessage(
           apiKey: apiKey,
           provider: provider,
+          apiProtocol: config.protocol,
           customBaseUrl: config.customBaseUrl,
           model: config.modelName,
           messages: messages,
           temperature: 0.3,
-          maxTokens: 2048,
+          maxTokens: summaryOutputTokens,
           purpose: AiRequestPurpose.summary,
           conversationId: widget.groupId,
           characterId: character.id,
         );
       },
       thresholdTokens:
-          (_aiGateway.capability(provider, config.modelName).contextWindow -
-                  2048)
-              .clamp(4096, kContextCompressThresholdTokens)
-              .toInt(),
+          summaryInputBudget.clamp(1, kContextCompressThresholdTokens).toInt(),
     );
     // 没超过阈值就不压缩，省下一次 LLM 调用。
     if (!manager.shouldSummarize(apiHistory)) {
@@ -370,8 +377,12 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     }
 
     try {
-      final summary = await manager.summarize(
+      final boundedHistory = ContextWindowManager.fitToTokenBudget(
         apiHistory,
+        maxTokens: summaryInputBudget,
+      );
+      final summary = await manager.summarize(
+        boundedHistory,
         isDirectChat: _isDirectChat,
       );
       // ponytail: transient-only compression, restore durable summaries if

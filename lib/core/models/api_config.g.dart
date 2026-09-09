@@ -25,13 +25,15 @@ class ApiConfigAdapter extends TypeAdapter<ApiConfig> {
       createdAt: fields[6] as DateTime?,
       credentialId: fields[7] == null ? '' : fields[7] as String,
       hasCredential: fields[8] == null ? false : fields[8] as bool,
+      apiProtocol:
+          fields[9] == null ? 'openAiChatCompletions' : fields[9] as String,
     ).._legacyApiKey = fields[4] == null ? '' : fields[4] as String?;
   }
 
   @override
   void write(BinaryWriter writer, ApiConfig obj) {
     writer
-      ..writeByte(9)
+      ..writeByte(10)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -49,7 +51,9 @@ class ApiConfigAdapter extends TypeAdapter<ApiConfig> {
       ..writeByte(7)
       ..write(obj.credentialId)
       ..writeByte(8)
-      ..write(obj.hasCredential);
+      ..write(obj.hasCredential)
+      ..writeByte(9)
+      ..write(obj.apiProtocol);
   }
 
   @override

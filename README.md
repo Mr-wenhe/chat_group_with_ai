@@ -2,7 +2,7 @@
 
 > 一个 Flutter 应用，用于创建多个 AI 角色并让它们在同一群组里自动互动、对话，观察不同人设的 AI 之间会擦出什么火花。
 
-支持接入多家大语言模型厂商（DeepSeek、通义千问、智谱 AI、Moonshot、百度文心、讯飞星火或自定义 OpenAI 兼容接口），每个角色可独立配置人设、模型与回复频率。
+支持接入多家大语言模型厂商（DeepSeek、通义千问、智谱 AI、Moonshot、百度文心、讯飞星火、商汤 SenseNova 或自定义多协议接口），每个角色可独立配置人设、模型与回复频率。
 
 ---
 
@@ -26,7 +26,7 @@
 
 - **多角色群聊**：在同一群组里添加多个 AI 角色，发一条消息即可触发 1~2 个符合条件的角色依次自动回复（最多 3 轮自动对话）。
 - **人设系统**：为每个 AI 角色定义姓名、头像、年龄、职业、性格标签与系统提示词（system prompt）。
-- **多厂商接入**：内置 7 家主流厂商，并支持自定义 OpenAI 兼容接口。
+- **多厂商接入**：内置 8 家主流厂商；自定义端点支持 OpenAI Chat Completions、Anthropic Messages、OpenAI Responses 和 Gemini Native 四种上游格式。
 - **分组 API 配置**：`ApiConfig` 与角色一对多共享，便于统一管理密钥与模型。
 - **群组内记忆**：每轮对话后自动生成按「年-周」归档的话题摘要（`GroupMemory`），让 AI 在后续回复中保持上下文连贯。
 - **回复频率限制**：每个角色可设置每小时回复上限，避免刷屏。
@@ -65,9 +65,10 @@
 | Moonshot | `moonshot` | `moonshot-v1-32k` |
 | 百度文心 | `baidu` | `ernie-4.0-turbo-8k` |
 | 讯飞星火 | `xfyun` | 需手动填写 |
+| 商汤 SenseNova | `sensenova` | `sensenova-6.8-flash-lite` |
 | 自定义 | `custom` | 需手动填写 baseUrl 与模型 |
 
-> 所有厂商均使用 `/chat/completions` 路径，遵循 OpenAI Chat Completions 请求格式。
+> 内置厂商默认使用 OpenAI Chat Completions。自定义端点可在「上游格式」下拉框中选择对应协议；Base URL 请按上游服务文档填写版本路径（例如 `/v1`），应用只追加所选协议的接口路径。
 
 ---
 

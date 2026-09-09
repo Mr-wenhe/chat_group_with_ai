@@ -126,6 +126,7 @@ class WorkAgentLoop
   static const int defaultMaxActions = AgentTask.defaultActionLimit;
   static const Duration defaultSoftTimeLimit = AgentTask.defaultSoftTimeLimit;
   static const int defaultMaxModelRetries = 2;
+  static const int defaultMaxProtocolRetries = 1;
   static const int defaultMaxToolRetries = 1;
   static const int maxRetryCountCap = 5;
   static const List<Duration> defaultRetryDelays = [
@@ -157,9 +158,13 @@ class WorkAgentLoop
   final WorkAgentEventSink? onEvent;
   final WorkAgentCheckpointSink? onCheckpoint;
   final WorkAgentCompletionGuard? completionGuard;
+  final WorkContextBuilder contextBuilder;
+  final WorkContextCompressionModel? contextCompressionModel;
+  final String Function()? systemPromptBuilder;
   final int maxActions;
   final Duration softTimeLimit;
   final int maxModelRetries;
+  final int maxProtocolRetries;
   final int maxToolRetries;
   final String systemPrompt;
   void Function(AgentTask task)? _taskUpdateSink;
@@ -176,18 +181,26 @@ class WorkAgentLoop
     this.onEvent,
     this.onCheckpoint,
     this.completionGuard,
+    WorkContextBuilder? contextBuilder,
+    this.contextCompressionModel,
+    this.systemPromptBuilder,
     int? maxActions,
     Duration? softTimeLimit,
     int? maxModelRetries,
+    int? maxProtocolRetries,
     int? maxToolRetries,
     this.systemPrompt = '',
   })  : parser = parser ?? const AgentDecisionParser(),
+        contextBuilder = contextBuilder ?? const WorkContextBuilder(),
         clock = clock ?? DateTime.now,
         sleep = sleep ?? Future<void>.delayed,
         maxActions = maxActions ?? defaultMaxActions,
         softTimeLimit = softTimeLimit ?? defaultSoftTimeLimit,
         maxModelRetries = _boundRetryCount(
           maxModelRetries ?? defaultMaxModelRetries,
+        ),
+        maxProtocolRetries = _boundRetryCount(
+          maxProtocolRetries ?? defaultMaxProtocolRetries,
         ),
         maxToolRetries = _boundRetryCount(
           maxToolRetries ?? defaultMaxToolRetries,
@@ -265,6 +278,7 @@ class WorkAgentLoop
     task.startedAt ??= clock();
 
     try {
+      var protocolRetryCount = 0;
       if (canResumeApprovedTool) {
         // The coordinator changes a waiting task back to queued after approval.
         // Replaying the exact in-memory request keeps the same model turn and
@@ -345,6 +359,20 @@ class WorkAgentLoop
         );
         if (parsed.repairAttempted) state.protocolRepairAttempts++;
         if (!parsed.isSuccess) {
+          if (protocolRetryCount < maxProtocolRetries) {
+            protocolRetryCount++;
+            await _emit(
+              state,
+              WorkTaskEventKind.toolOutput,
+              '模型返回格式无效，正在自动重试。',
+              detail: '第 $protocolRetryCount 次协议重试',
+              safeMetadata: {
+                'scope': 'modelProtocol',
+                'retry': protocolRetryCount,
+              },
+            );
+            continue;
+          }
           return await _fail(
             state,
             parsed.detail ?? '模型返回的 AgentDecision 无法解析。',
@@ -354,6 +382,7 @@ class WorkAgentLoop
             ),
           );
         }
+        protocolRetryCount = 0;
         final decision = parsed.decision!;
         // `raw` is intentionally discarded here. Only public_update and
         // validated tool data can cross the event/checkpoint boundary.

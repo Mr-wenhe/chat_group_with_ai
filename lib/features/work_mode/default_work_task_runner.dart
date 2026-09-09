@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive_io.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -11,10 +12,12 @@ import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/agentic/agent_attachment_context.dart';
 import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
+import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:chat_group/features/agentic/skill_download_service.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -22,12 +25,14 @@ import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
+import 'package:chat_group/features/work_mode/agent_decision_parser.dart';
 import 'package:chat_group/features/work_mode/work_agent_loop.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
 import 'package:chat_group/features/work_mode/work_approval_decision.dart';
 import 'package:chat_group/features/work_mode/work_approval_fingerprint.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
+import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
@@ -71,6 +76,11 @@ class DefaultWorkTaskRunner
   final WorkspaceMutationService? mutationService;
   final WorkResourceLockManager? resourceLockManager;
   final WorkCommandRunner? commandRunner;
+  final Future<MediaAttachment> Function(
+    File source,
+    String type, {
+    String? fileName,
+  })? mediaCopier;
   final DateTime Function() clock;
 
   void Function(AgentTask task)? _taskUpdateSink;
@@ -96,6 +106,7 @@ class DefaultWorkTaskRunner
     this.mutationService,
     this.resourceLockManager,
     this.commandRunner,
+    this.mediaCopier,
     DateTime Function()? clock,
   })  : credentials = credentials ?? SecureApiCredentialResolver(),
         gateway = gateway ??
@@ -219,6 +230,8 @@ class DefaultWorkTaskRunner
     final provider = _providerFor(config);
     final history = await _conversationHistory(task);
     final requestText = await _requestWithAttachmentContext(task);
+    final defaultCommandWorkingDirectory = database.aiProcessingDirPath ??
+        DatabaseService.defaultAiProcessingDirectoryPath();
     final decision = _approvalDecision(task.executionStateJson);
     final scope = _approvalScope(task.executionStateJson);
     final cancellationToken = CancelToken();
@@ -243,7 +256,12 @@ class DefaultWorkTaskRunner
         rolePlaySystemPrompt: character.rolePlaySystemPrompt,
         skills: skills,
         userRequest: requestText,
-        workModeContext: _workModeContext(task, character, registry),
+        workModeContext: _workModeContext(
+          task,
+          character,
+          registry,
+          workspaceRoot: workspace.workDirPath,
+        ),
       );
       final loop = WorkAgentLoop(
         model: (request) => _completeModelTurn(
@@ -255,13 +273,38 @@ class DefaultWorkTaskRunner
           requestText: requestText,
           cancellationToken: cancellationToken,
           capabilityMaxOutput: capability.maxOutput,
+          capabilityContextWindow: capability.contextWindow,
         ),
         registry: registry,
+        parser: AgentDecisionParser(
+          defaultCommandWorkingDirectory: defaultCommandWorkingDirectory,
+        ),
         eventStore: eventStore,
         clock: clock,
         onCheckpoint: _persistCheckpoint,
         completionGuard: _validateCompletion,
+        contextCompressionModel: (snapshot) => _compressWorkContext(
+          snapshot,
+          task: task,
+          provider: provider,
+          config: config,
+          apiKey: apiKey,
+        ),
         systemPrompt: systemPrompt,
+        // Skill creation/download is a normal in-task mutation. Rebuild the
+        // prompt before every model turn so the next turn can use the newly
+        // persisted skill without injecting the entire skill library up front.
+        systemPromptBuilder: () => AgentPromptBuilder.buildAgentDecisionPrompt(
+          rolePlaySystemPrompt: character.rolePlaySystemPrompt,
+          skills: _skillsFor(character, requestText),
+          userRequest: requestText,
+          workModeContext: _workModeContext(
+            task,
+            character,
+            registry,
+            workspaceRoot: workspace.workDirPath,
+          ),
+        ),
         maxActions: task.actionLimit,
         softTimeLimit: task.softTimeLimit,
       );
@@ -305,13 +348,14 @@ class DefaultWorkTaskRunner
     required String requestText,
     required CancelToken cancellationToken,
     required int capabilityMaxOutput,
+    required int capabilityContextWindow,
   }) async {
     final messages = request.messages.map((message) {
       if (message['role'] == 'user' && message['content'] == task.userRequest) {
         return <String, dynamic>{...message, 'content': requestText};
       }
       return Map<String, dynamic>.from(message);
-    }).toList(growable: false);
+    }).toList(growable: true);
     if (request.isRepair && request.malformedResponse != null) {
       // The repair attempt must show the same model the exact malformed body
       // as data. It is bounded and sent only in-memory; it is never copied to
@@ -325,13 +369,31 @@ class DefaultWorkTaskRunner
             '$boundedRaw',
       });
     }
-    return gateway.sendChatMessageStreamed(
+    final contextWindow =
+        capabilityContextWindow < 1 ? 1 : capabilityContextWindow;
+    final outputUpperBound = capabilityMaxOutput < contextWindow
+        ? capabilityMaxOutput
+        : contextWindow;
+    final outputTokens = outputUpperBound.clamp(1, 8192).toInt();
+    final inputBudget = ContextWindowManager.inputBudget(
+      contextWindow: contextWindow,
+      maxOutput: outputTokens,
+    );
+    final boundedMessages = ContextWindowManager.fitToTokenBudget(
+      messages,
+      maxTokens: inputBudget,
+    );
+    var streamedCharacters = 0;
+    var lastProgressAt = DateTime.fromMillisecondsSinceEpoch(0);
+    var progressWrites = Future<void>.value();
+    final response = await gateway.sendChatMessageStreamed(
       apiKey: apiKey,
       provider: provider,
+      apiProtocol: config.protocol,
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
-      messages: messages,
-      maxTokens: capabilityMaxOutput.clamp(1, 8192).toInt(),
+      messages: boundedMessages,
+      maxTokens: outputTokens,
       receiveTimeout: const Duration(seconds: 120),
       maxRetries: 0,
       cancelToken: cancellationToken,
@@ -340,7 +402,134 @@ class DefaultWorkTaskRunner
       characterId: task.characterId,
       requiresTools: true,
       userInitiated: true,
+      onEvent: (event) {
+        if (event.type != ChatStreamEventType.token) return;
+        streamedCharacters += event.delta?.length ?? 0;
+        final now = clock();
+        if (streamedCharacters == 0 ||
+            (streamedCharacters < 160 &&
+                now.difference(lastProgressAt) <
+                    const Duration(milliseconds: 500))) {
+          return;
+        }
+        lastProgressAt = now;
+        final characters = streamedCharacters;
+        progressWrites = progressWrites.then<void>((_) async {
+          await _record(
+            task,
+            WorkTaskEventKind.toolOutput,
+            '模型仍在生成工作决策',
+            detail: '已接收约 $characters 个字符（协议内容不会直接展示）。',
+            safeMetadata: {'stream': 'model', 'characters': characters},
+          );
+        });
+      },
     );
+    // Do not let a throttled model-progress event race the next tool/finish
+    // event. Waiting for this short diagnostic queue preserves the durable
+    // event order while keeping raw protocol content private.
+    await progressWrites;
+    return response;
+  }
+
+  Future<WorkContextSnapshot?> _compressWorkContext(
+    WorkContextSnapshot snapshot, {
+    required AgentTask task,
+    required ApiProvider provider,
+    required ApiConfig config,
+    required String apiKey,
+  }) async {
+    final capability = gateway.capability(provider, config.modelName);
+    final contextWindow =
+        capability.contextWindow < 1 ? 1 : capability.contextWindow;
+    final outputUpperBound = capability.maxOutput < contextWindow
+        ? capability.maxOutput
+        : contextWindow;
+    final outputTokens = outputUpperBound.clamp(1, 768).toInt();
+    final inputBudget = ContextWindowManager.inputBudget(
+      contextWindow: contextWindow,
+      maxOutput: outputTokens,
+    );
+    final response = await gateway.sendChatMessage(
+      apiKey: apiKey,
+      provider: provider,
+      apiProtocol: config.protocol,
+      customBaseUrl: config.customBaseUrl,
+      model: config.modelName,
+      messages: ContextWindowManager.fitToTokenBudget(
+        [
+          {
+            'role': 'system',
+            'content': '你是工作任务检查点压缩器。只输出严格 JSON object，字段为 '
+                'completedSummaries（字符串数组）和 recentToolResults（安全诊断对象数组）。'
+                '只总结公开进度，不得输出文件正文、私有 reasoning、凭据、原始响应或会话消息。',
+          },
+          {'role': 'user', 'content': snapshot.toJsonString()},
+        ],
+        maxTokens: inputBudget,
+      ),
+      purpose: AiRequestPurpose.summary,
+      conversationId: task.groupId,
+      characterId: task.characterId,
+      temperature: 0.2,
+      maxTokens: outputTokens,
+      receiveTimeout: const Duration(seconds: 30),
+      maxRetries: 0,
+      requiresTools: false,
+      userInitiated: false,
+    );
+    if (response['success'] != true) return null;
+    final raw = response['message'] ?? response['content'];
+    if (raw is! String || raw.trim().isEmpty) return null;
+    final jsonText = _extractJsonObject(raw);
+    if (jsonText == null) return null;
+    try {
+      final decoded = jsonDecode(jsonText);
+      if (decoded is! Map) return null;
+      final summaries = _stringList(decoded['completedSummaries']);
+      final summary = decoded['summary'];
+      if (summaries.isEmpty && summary is String && summary.trim().isNotEmpty) {
+        summaries.add(summary.trim());
+      }
+      final results = <Map<String, dynamic>>[];
+      final rawResults = decoded['recentToolResults'];
+      if (rawResults is List) {
+        for (final item in rawResults) {
+          if (item is Map) results.add(Map<String, dynamic>.from(item));
+        }
+      }
+      return snapshot.copyWith(
+        completedSummaries: summaries,
+        recentToolResults: results,
+      );
+    } on Object {
+      return null;
+    }
+  }
+
+  String? _extractJsonObject(String raw) {
+    final trimmed = raw.trim();
+    final fenced = RegExp(r'```(?:json)?\s*([\s\S]*?)```', caseSensitive: false)
+        .firstMatch(trimmed)
+        ?.group(1)
+        ?.trim();
+    final candidate = fenced ?? trimmed;
+    try {
+      final decoded = jsonDecode(candidate);
+      return decoded is Map ? candidate : null;
+    } on Object {
+      return null;
+    }
+  }
+
+  List<String> _stringList(Object? value) {
+    if (value is! List) return <String>[];
+    return value
+        .whereType<String>()
+        .map((item) => item.trim())
+        .where((item) => item.isNotEmpty)
+        .take(16)
+        .toList(growable: true);
   }
 
   @override
@@ -2149,11 +2338,20 @@ class DefaultWorkTaskRunner
   }
 
   String _workModeContext(
-    AgentTask task,
-    AICharacter character,
-    WorkToolRegistry registry,
-  ) {
+      AgentTask task, AICharacter character, WorkToolRegistry registry,
+      {required String workspaceRoot}) {
     final base = WorkModePolicy.planningContext(character);
+    final discoverable = WorkModePolicy.discoverableSkills(
+      character: character,
+      installedSkills: database.characterSkillBox.values,
+      resolvedSkills: CharacterSkillResolver.resolveFor(
+        character,
+        task.userRequest,
+      ).skills,
+    );
+    final skillCatalog = discoverable.isEmpty
+        ? '无（需要时可通过 meta.find-skills 查找或安装）'
+        : discoverable.map(_compactSkillCatalogEntry).join('\n');
     final tools = registry.definitions
         .map((definition) =>
             '${definition.name.wireName}(${definition.access.name})')
@@ -2162,7 +2360,9 @@ class DefaultWorkTaskRunner
     final handoff = WorkHandoffState.fromTask(task);
     return [
       base,
+      '角色可发现技能目录（全局技能按需加载；角色已绑定技能正文会注入；权限仍需通过角色授权与工具策略交集校验）：\n$skillCatalog',
       '当前生产 WorkAgentLoop 已注册工具：$tools。',
+      '当前授权工作区绝对路径：$workspaceRoot。command.run 的 workingDirectory 为空时会自动解析为用户默认工作目录 ~/.chat_group；不要填写 "."，也禁止填写工作区外路径。',
       if (task.plan.trim().isNotEmpty) '公开角色路由计划：${task.plan.trim()}',
       if (handoff != null)
         '当前接力阶段：${handoff.stageLabel}；交付物：${handoff.deliverables.join('、')}；完成标准：${handoff.completionCriteria.join('、')}。',
@@ -2172,10 +2372,20 @@ class DefaultWorkTaskRunner
     ].join('\n');
   }
 
+  String _compactSkillCatalogEntry(CharacterSkill skill) {
+    final description =
+        skill.description.trim().replaceAll(RegExp(r'\s+'), ' ');
+    final clipped = description.length <= 180
+        ? description
+        : '${description.substring(0, 179)}…';
+    return '- ${skill.id}｜${skill.domain}｜${skill.name}：$clipped';
+  }
+
   List<CharacterSkill> _skillsFor(AICharacter character, String request) {
     final resolution = CharacterSkillResolver.resolveFor(character, request);
     final installed = database.characterSkillBox.values.where(
       (skill) =>
+          skill.isGlobal ||
           skill.characterId == character.id ||
           character.skillIds.contains(skill.id),
     );
@@ -2260,29 +2470,139 @@ class DefaultWorkTaskRunner
     final text = content.trim();
     if (text.isEmpty) return;
     List<MediaAttachment>? media;
-    final artifact = await _safeArtifactForAttachment(task);
-    if (artifact != null) {
-      try {
-        final stat = await artifact.stat();
-        if (stat.type == FileSystemEntityType.file &&
-            stat.size <= 50 * 1024 * 1024) {
-          media = [
-            await database.copyToMedia(
-              artifact,
-              'file',
-              fileName: _basename(artifact.path),
-            ),
-          ];
+    File? temporaryBundle;
+    final selection = await _safeArtifactsForAttachment(task);
+    final files = selection.files;
+    final attachmentSkippedNames = <String>[];
+    final deliveredArchivePaths = <String>[];
+    final bundledSkippedNames = <String>[];
+    try {
+      final totalBytes = files.fold<int>(0, (sum, file) {
+        try {
+          return sum + file.lengthSync();
+        } on Object {
+          return sum;
         }
-      } on Object {
-        // The public text remains authoritative when attachment copying fails.
+      });
+      // A message must expose one attachment when it contains several
+      // generated files.  Bundling only projects made ordinary requests such
+      // as “生成 a.md 和 b.md” leak multiple attachments and makes follow-up
+      // downloads ambiguous.  Size/count limits remain defensive guards for
+      // the single-file and large-project paths.
+      final needsBundle = files.length > 1 ||
+          files.length > _maxArtifactAttachments ||
+          totalBytes > _maxAttachedArtifactBytes;
+      await _recordArtifactProgress(
+        task,
+        processedFiles: 0,
+        totalFiles: files.length,
+        processedBytes: 0,
+        totalBytes: totalBytes,
+      );
+      final deliveryFiles = <File>[];
+      if (needsBundle && files.isNotEmpty) {
+        temporaryBundle = await _createArtifactBundle(
+          task,
+          selection.entries,
+          skippedNames: bundledSkippedNames,
+          includedArchivePaths: deliveredArchivePaths,
+          onFileProcessed: (processedFiles, processedBytes) =>
+              _recordArtifactProgress(
+            task,
+            processedFiles: processedFiles,
+            totalFiles: files.length,
+            processedBytes: processedBytes,
+            totalBytes: totalBytes,
+          ),
+        );
+        if (temporaryBundle != null) deliveryFiles.add(temporaryBundle);
+      } else {
+        deliveryFiles.addAll(files);
+      }
+      final attachments = <MediaAttachment>[];
+      var processedArtifactFiles = 0;
+      var processedArtifactBytes = 0;
+      for (final file in deliveryFiles) {
+        var processedBytes = 0;
+        try {
+          final stat = await file.stat();
+          processedBytes = stat.size;
+          final sizeLimit = identical(file, temporaryBundle)
+              ? _maxArtifactBundleBytes
+              : _maxAttachedArtifactBytes;
+          if (stat.type != FileSystemEntityType.file || stat.size > sizeLimit) {
+            attachmentSkippedNames.add(_basename(file.path));
+            continue;
+          }
+          final copied = await (mediaCopier == null
+              ? database.copyToMedia(
+                  file,
+                  'file',
+                  fileName: _basename(file.path),
+                )
+              : mediaCopier!(
+                  file,
+                  'file',
+                  fileName: _basename(file.path),
+                ));
+          attachments.add(copied);
+          if (temporaryBundle == null) {
+            final entry =
+                selection.entries.cast<_ArtifactFileEntry?>().firstWhere(
+                      (item) => item?.file.path == file.path,
+                      orElse: () => null,
+                    );
+            if (entry != null) deliveredArchivePaths.add(entry.archivePath);
+          }
+        } on Object {
+          // Continue delivering other verified artifacts when one copy fails.
+          attachmentSkippedNames.add(_basename(file.path));
+        } finally {
+          if (temporaryBundle == null) {
+            processedArtifactFiles++;
+            processedArtifactBytes += processedBytes;
+            await _recordArtifactProgress(
+              task,
+              processedFiles: processedArtifactFiles,
+              totalFiles: files.length,
+              processedBytes: processedArtifactBytes,
+              totalBytes: totalBytes,
+            );
+          }
+        }
+      }
+      if (attachments.isNotEmpty) media = attachments;
+      await _recordArtifactProgress(
+        task,
+        processedFiles: files.length,
+        totalFiles: files.length,
+        processedBytes: totalBytes,
+        totalBytes: totalBytes,
+      );
+    } finally {
+      if (temporaryBundle != null) {
+        try {
+          if (await temporaryBundle.exists()) await temporaryBundle.delete();
+        } on Object {
+          // The copied media attachment remains authoritative if cleanup fails.
+        }
       }
     }
+    final deliveryNote = _artifactDeliveryNote(
+      selection,
+      bundled: temporaryBundle != null,
+      attachedCount: media?.length ?? 0,
+      deliveredArchivePaths: deliveredArchivePaths,
+      skippedNames: [
+        ...bundledSkippedNames,
+        ...attachmentSkippedNames,
+      ],
+    );
     await database.persistMessage(Message(
       groupId: task.groupId,
       senderId: character.id,
       senderType: 'ai',
-      content: text,
+      content: deliveryNote.isEmpty ? text : '$text\n\n$deliveryNote',
       media: media,
     ));
   }
@@ -2295,27 +2615,208 @@ class DefaultWorkTaskRunner
     AgentTask task,
     AgentFinishCompletion _,
   ) async {
-    final artifact = await _safeArtifactForAttachment(task);
+    final artifact = await _safeArtifactsForAttachment(task);
     return WorkArtifactDeliveryGuard.failureFor(
       request: task.userRequest,
-      hasReadableArtifact: artifact != null,
+      hasReadableArtifact: artifact.files.isNotEmpty,
     );
   }
 
-  Future<File?> _safeArtifactForAttachment(AgentTask task) async {
+  static const int _maxArtifactAttachments = 12;
+  static const int _maxAttachedArtifactBytes = 50 * 1024 * 1024;
+  static const int _maxArtifactBundleBytes = 200 * 1024 * 1024;
+
+  Future<_ArtifactAttachmentSelection> _safeArtifactsForAttachment(
+    AgentTask task,
+  ) async {
     final files = workspaceFileService;
-    if (files == null || task.lastArtifactPaths.isEmpty) return null;
-    for (final raw in task.lastArtifactPaths.reversed) {
+    if (files == null || task.lastArtifactPaths.isEmpty) {
+      return const _ArtifactAttachmentSelection();
+    }
+    final entries = <_ArtifactFileEntry>[];
+    final skipped = <String>[];
+    for (final raw in task.lastArtifactPaths) {
       try {
         final resolved = await files.pathPolicy.resolveExisting(raw);
-        if (resolved.isFile && !resolved.wasSymbolicLink) {
-          return File(resolved.path);
+        // `wasSymbolicLink` also reports harmless platform aliases such as
+        // macOS /var -> /private/var. Reject only an explicitly linked final
+        // component; the path policy has already resolved and authorized the
+        // complete path before this check.
+        final requestedType = await FileSystemEntity.type(
+          raw,
+          followLinks: false,
+        );
+        if (!resolved.isFile || requestedType == FileSystemEntityType.link) {
+          skipped.add(_basename(raw));
+          continue;
+        }
+        final file = File(resolved.path);
+        final stat = await file.stat();
+        if (stat.size > _maxAttachedArtifactBytes) {
+          skipped.add(_basename(raw));
+          continue;
+        }
+        if (entries.every((item) => item.file.path != file.path)) {
+          entries.add(_ArtifactFileEntry(
+            file: file,
+            archivePath: _archiveRelativePath(
+              resolved.authorizedRoot,
+              resolved.path,
+            ),
+          ));
         }
       } on Object {
-        // Try the next recorded artifact; no guessed path is attached.
+        skipped.add(_basename(raw));
       }
     }
-    return null;
+    return _ArtifactAttachmentSelection(
+      entries: List<_ArtifactFileEntry>.unmodifiable(entries),
+      skippedNames: List<String>.unmodifiable(skipped),
+    );
+  }
+
+  Future<File?> _createArtifactBundle(
+    AgentTask task,
+    List<_ArtifactFileEntry> entries, {
+    required List<String> skippedNames,
+    required List<String> includedArchivePaths,
+    Future<void> Function(int processedFiles, int processedBytes)?
+        onFileProcessed,
+  }) async {
+    final root = await database.aiProcessingDir;
+    final safeTaskId = task.id.replaceAll(RegExp(r'[^A-Za-z0-9._-]'), '_');
+    final staging = Directory('${root.path}/work-artifacts-$safeTaskId');
+    final archive = File('${root.path}/work-artifacts-$safeTaskId.zip');
+    try {
+      await staging.create(recursive: true);
+      var total = 0;
+      var index = 0;
+      var processedBytesTotal = 0;
+      for (var entryIndex = 0; entryIndex < entries.length; entryIndex++) {
+        final entry = entries[entryIndex];
+        final file = entry.file;
+        var processedBytes = 0;
+        try {
+          final stat = await file.stat();
+          processedBytes = stat.size;
+          if (stat.size > _maxArtifactBundleBytes - total) {
+            skippedNames.add(_basename(file.path));
+            continue;
+          }
+          final name =
+              '${index.toString().padLeft(3, '0')}_${entry.archivePath}';
+          final target = File('${staging.path}/$name');
+          await target.parent.create(recursive: true);
+          await file.copy(target.path);
+          total += stat.size;
+          includedArchivePaths.add(entry.archivePath);
+          index++;
+        } on Object {
+          skippedNames.add(_basename(file.path));
+        } finally {
+          processedBytesTotal += processedBytes;
+          if (onFileProcessed != null) {
+            await onFileProcessed(
+              entryIndex + 1,
+              processedBytesTotal,
+            );
+          }
+        }
+      }
+      if (index == 0) return null;
+      await ZipFileEncoder().zipDirectory(
+        staging,
+        filename: archive.path,
+        followLinks: false,
+      );
+      return archive;
+    } on Object {
+      try {
+        if (await archive.exists()) await archive.delete();
+      } on Object {
+        // Best-effort cleanup only; the project files are never touched.
+      }
+      return null;
+    } finally {
+      try {
+        if (await staging.exists()) await staging.delete(recursive: true);
+      } on Object {
+        // Best-effort cleanup only; the generated archive remains bounded.
+      }
+    }
+  }
+
+  Future<void> _recordArtifactProgress(
+    AgentTask task, {
+    required int processedFiles,
+    required int totalFiles,
+    required int processedBytes,
+    required int totalBytes,
+  }) {
+    return _record(
+      task,
+      WorkTaskEventKind.toolOutput,
+      '文件交付进度',
+      detail:
+          '已处理 $processedFiles/$totalFiles 个文件，$processedBytes/$totalBytes 字节。',
+      safeMetadata: {
+        'phase': 'artifact_delivery',
+        'filesProcessed': processedFiles,
+        'filesTotal': totalFiles,
+        'bytesProcessed': processedBytes,
+        'bytesTotal': totalBytes,
+      },
+    );
+  }
+
+  String _artifactDeliveryNote(
+    _ArtifactAttachmentSelection selection, {
+    required bool bundled,
+    required int attachedCount,
+    Iterable<String> deliveredArchivePaths = const <String>[],
+    Iterable<String> skippedNames = const <String>[],
+  }) {
+    if (attachedCount == 0 &&
+        selection.skippedNames.isEmpty &&
+        selection.files.isEmpty) {
+      return '';
+    }
+    final deliveredPaths = deliveredArchivePaths.toList(growable: false);
+    final delivered = bundled
+        ? '已将 ${deliveredPaths.length} 个产物打包为 ZIP 附件。'
+        : attachedCount > 0
+            ? '已附加 $attachedCount 个产物。'
+            : '产物已生成，但暂时无法复制为聊天附件。';
+    final listed = deliveredPaths.take(6).join('、');
+    final listSuffix = deliveredPaths.length > 6 ? ' 等' : '';
+    final withPaths =
+        listed.isEmpty ? delivered : '$delivered 包含：$listed$listSuffix。';
+    final allSkipped = <String>{
+      ...selection.skippedNames,
+      ...skippedNames,
+    };
+    if (allSkipped.isEmpty) return withPaths;
+    final names = allSkipped.take(6).join('、');
+    final suffix = allSkipped.length > 6 ? ' 等' : '';
+    return '$withPaths 未附加：$names$suffix（文件不存在、超出大小限制或无法安全读取）。';
+  }
+
+  String _archiveRelativePath(String root, String path) {
+    final normalizedRoot =
+        root.replaceAll('\\', '/').replaceFirst(RegExp(r'/+$'), '');
+    final normalizedPath = path.replaceAll('\\', '/');
+    final prefix = '$normalizedRoot/';
+    final relative = normalizedPath.startsWith(prefix)
+        ? normalizedPath.substring(prefix.length)
+        : _basename(path);
+    final safeSegments = relative
+        .split('/')
+        .where((segment) =>
+            segment.isNotEmpty && segment != '.' && segment != '..')
+        .map((segment) => segment.replaceAll(RegExp(r'[^A-Za-z0-9._ -]'), '_'))
+        .where((segment) => segment.isNotEmpty)
+        .toList(growable: false);
+    return safeSegments.isEmpty ? 'artifact' : safeSegments.join('/');
   }
 
   Future<void> _persistCheckpoint(AgentTask task) async {
@@ -2373,4 +2874,27 @@ class DefaultWorkTaskRunner
         : plan.exactPaths;
     return paths.map(_basename).join('、');
   }
+}
+
+class _ArtifactAttachmentSelection {
+  final List<_ArtifactFileEntry> entries;
+  final List<String> skippedNames;
+
+  const _ArtifactAttachmentSelection({
+    this.entries = const <_ArtifactFileEntry>[],
+    this.skippedNames = const <String>[],
+  });
+
+  List<File> get files =>
+      entries.map((entry) => entry.file).toList(growable: false);
+
+  List<String> get archivePaths =>
+      entries.map((entry) => entry.archivePath).toList(growable: false);
+}
+
+class _ArtifactFileEntry {
+  final File file;
+  final String archivePath;
+
+  const _ArtifactFileEntry({required this.file, required this.archivePath});
 }

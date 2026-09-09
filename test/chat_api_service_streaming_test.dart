@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'dart:typed_data';
 
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:dio/dio.dart';
@@ -35,6 +36,7 @@ void main() {
       },
     ));
     final service = ChatApiService(dio: dio);
+    final events = <ChatStreamEvent>[];
 
     final result = await service.sendChatMessageStreamed(
       apiKey: 'test-key',
@@ -46,6 +48,7 @@ void main() {
       ],
       maxTokens: 4096,
       receiveTimeout: const Duration(seconds: 60),
+      onEvent: events.add,
     );
 
     expect(result['success'], isTrue);
@@ -53,6 +56,11 @@ void main() {
     expect((captured.data as Map<String, dynamic>)['stream'], isTrue);
     expect((captured.data as Map<String, dynamic>)['max_tokens'], 4096);
     expect(captured.receiveTimeout, const Duration(seconds: 60));
+    expect(
+      events.where((event) => event.type == ChatStreamEventType.token).length,
+      3,
+    );
+    expect(events.last.type, ChatStreamEventType.done);
   });
 
   test('streamed completion rejects an unterminated oversized frame', () async {
@@ -334,6 +342,27 @@ void main() {
     expect(result['message'], contains('流式请求失败'));
   });
 
+  test('streamed HTTP failures preserve status codes for work-mode recovery',
+      () async {
+    for (final statusCode in const [401, 429, 503]) {
+      final result =
+          await _StatusStreamChatApiService(statusCode).sendChatMessageStreamed(
+        apiKey: 'test-key',
+        provider: ApiProvider.custom,
+        customBaseUrl: 'http://127.0.0.1:12345',
+        model: 'test-model',
+        messages: const [
+          {'role': 'user', 'content': '继续工作'}
+        ],
+        maxRetries: 0,
+      );
+
+      expect(result['success'], isFalse, reason: '$statusCode');
+      expect(result['statusCode'], statusCode, reason: '$statusCode');
+      expect(result['message'], 'HTTP $statusCode 请求失败');
+    }
+  });
+
   test('streamed completion falls back to non-stream on fifth retry', () async {
     late RequestOptions fallbackRequest;
     final dio = Dio();
@@ -421,6 +450,7 @@ class _ThrowingStreamChatApiService extends ChatApiService {
   Stream<ChatStreamEvent> streamChatMessage({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -443,6 +473,7 @@ class _AlwaysFailingStreamService extends ChatApiService {
   Stream<ChatStreamEvent> streamChatMessage({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -453,5 +484,28 @@ class _AlwaysFailingStreamService extends ChatApiService {
   }) async* {
     streamCalls++;
     yield ChatStreamEvent.error('HTTP 503: busy');
+  }
+}
+
+class _StatusStreamChatApiService extends ChatApiService {
+  final int statusCode;
+
+  _StatusStreamChatApiService(this.statusCode)
+      : super(retrySleep: (_) async {});
+
+  @override
+  Stream<ChatStreamEvent> streamChatMessage({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    CancelToken? cancelToken,
+  }) async* {
+    yield ChatStreamEvent.error('HTTP $statusCode: provider failure');
   }
 }

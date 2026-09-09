@@ -7,6 +7,7 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/chat_group.dart';
@@ -16,6 +17,7 @@ import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/models/work_mode_workspace.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
@@ -213,6 +215,7 @@ class _RouteApi extends ChatApiService {
   Future<Map<String, dynamic>> sendChatMessageWithResponseLimit({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -223,6 +226,7 @@ class _RouteApi extends ChatApiService {
     CancelToken? cancelToken,
     bool requiresTools = false,
     bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
     required int maxResponseBytes,
   }) async {
     calls++;
@@ -251,6 +255,7 @@ class _UiWorkGateway extends AiRequestGateway {
   Future<Map<String, dynamic>> sendChatMessageStreamed({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -264,6 +269,7 @@ class _UiWorkGateway extends AiRequestGateway {
     CancelToken? cancelToken,
     bool requiresTools = false,
     bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
     final decision = calls == 1

@@ -7,6 +7,7 @@ import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/chat_group/attachment_opener.dart';
+import 'package:chat_group/features/chat_group/attachment_path_actions.dart';
 import 'package:chat_group/features/chat_group/attachment_utils.dart';
 import 'package:chat_group/features/agentic/agent_progress_meta.dart';
 import 'package:chat_group/features/chat_group/widgets/blinking_cursor.dart';
@@ -15,6 +16,7 @@ import 'package:chat_group/features/chat_group/widgets/video_bubble.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 
 part 'progress_log_bubble.dart';
@@ -261,7 +263,9 @@ class ChatMessageBubble extends StatelessWidget {
       BuildContext context, MediaAttachment att, ColorScheme cs) {
     final data = uiAttachmentDataUriCache.decode(att.localPath);
     return GestureDetector(
-      onTap: () => _openImageFullscreen(context, att.localPath),
+      onTap: () => unawaited(_openImageFullscreen(context, att.localPath)),
+      onLongPress: () => _showAttachmentActions(context, att),
+      onSecondaryTap: () => _showAttachmentActions(context, att),
       child: ClipRRect(
         borderRadius: BorderRadius.circular(10),
         child: data == null
@@ -282,9 +286,20 @@ class ChatMessageBubble extends StatelessWidget {
   }
 
   /// Fullscreen image preview: black background + InteractiveViewer for pinch-zoom.
-  void _openImageFullscreen(BuildContext context, String path) {
+  Future<void> _openImageFullscreen(BuildContext context, String path) async {
+    if (uiAttachmentDataUriCache.decode(path) == null) {
+      final inspected = await inspectAttachmentPath(path);
+      if (!inspected.success) {
+        if (context.mounted) {
+          AppToast.show(context, inspected.message,
+              icon: Icons.error_outline_rounded);
+        }
+        return;
+      }
+    }
+    if (!context.mounted) return;
     final data = uiAttachmentDataUriCache.decode(path);
-    showDialog(
+    await showDialog(
       context: context,
       builder: (_) => Dialog(
         backgroundColor: Colors.black,
@@ -324,6 +339,8 @@ class ChatMessageBubble extends StatelessWidget {
         : WeComChatTokens.chatBackground(context).withValues(alpha: 0.7);
     return InkWell(
       onTap: () => _openAttachment(context, att),
+      onLongPress: () => _showAttachmentActions(context, att),
+      onSecondaryTap: () => _showAttachmentActions(context, att),
       borderRadius: BorderRadius.circular(8),
       child: Container(
         width: 240,
@@ -384,6 +401,14 @@ class ChatMessageBubble extends StatelessWidget {
         }
         return;
       }
+      final inspected = await inspectAttachmentPath(att.localPath);
+      if (!inspected.success) {
+        if (context.mounted) {
+          AppToast.show(context, inspected.message,
+              icon: Icons.error_outline_rounded);
+        }
+        return;
+      }
       final result = await OpenFilex.open(att.localPath, type: att.mimeType);
       if (result.type.name != 'done' && context.mounted) {
         AppToast.show(context, '打开失败：${result.message}',
@@ -393,6 +418,65 @@ class ChatMessageBubble extends StatelessWidget {
       if (context.mounted) {
         AppToast.show(context, '打开失败：$e', icon: Icons.error_outline_rounded);
       }
+    }
+  }
+
+  Future<void> _showAttachmentActions(
+      BuildContext context, MediaAttachment att) async {
+    final action = await showModalBottomSheet<String>(
+      context: context,
+      builder: (sheetContext) => SafeArea(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            ListTile(
+              leading: const Icon(Icons.open_in_new_rounded),
+              title: const Text('打开文件'),
+              onTap: () => Navigator.of(sheetContext).pop('open'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.folder_open_rounded),
+              title: const Text('在 Finder/资源管理器中显示'),
+              onTap: () => Navigator.of(sheetContext).pop('reveal'),
+            ),
+            ListTile(
+              leading: const Icon(Icons.copy_rounded),
+              title: const Text('复制绝对路径'),
+              onTap: () => Navigator.of(sheetContext).pop('copy'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (!context.mounted || action == null) return;
+    switch (action) {
+      case 'open':
+        await _openAttachment(context, att);
+      case 'reveal':
+        final result = await revealAttachmentPath(att.localPath);
+        if (context.mounted && !result.success) {
+          AppToast.show(context, result.message,
+              icon: Icons.error_outline_rounded);
+        }
+      case 'copy':
+        final result = await inspectAttachmentPath(att.localPath);
+        if (!context.mounted) return;
+        if (!result.success || result.absolutePath == null) {
+          AppToast.show(context, result.message,
+              icon: Icons.error_outline_rounded);
+          return;
+        }
+        try {
+          await Clipboard.setData(ClipboardData(text: result.absolutePath!));
+          if (context.mounted) {
+            AppToast.show(context, '已复制附件绝对路径', icon: Icons.check_rounded);
+          }
+        } on Object {
+          if (context.mounted) {
+            AppToast.show(context, '系统未能复制附件路径，请稍后重试。',
+                icon: Icons.error_outline_rounded);
+          }
+        }
     }
   }
 

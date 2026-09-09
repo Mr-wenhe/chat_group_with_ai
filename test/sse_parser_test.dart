@@ -105,6 +105,26 @@ void main() {
       expect(events, isEmpty);
     });
 
+    test('标准 content 为空时使用 reasoning_content，标准 content 优先', () {
+      final reasoningOnly = SseParser();
+      expect(
+        reasoningOnly.ingest(
+          'data: {"choices":[{"delta":{"reasoning_content":"兼容结果"}}]}\n',
+        ),
+        isEmpty,
+      );
+      expect(reasoningOnly.doneEvent().content, '兼容结果');
+
+      final mixed = SseParser();
+      mixed.ingest(
+        'data: {"choices":[{"delta":{"reasoning_content":"内部片段"}}]}\n',
+      );
+      mixed.ingest(
+        'data: {"choices":[{"delta":{"content":"标准结果"}}]}\n',
+      );
+      expect(mixed.doneEvent().content, '标准结果');
+    });
+
     test('非法 JSON 的 data 行产出 error 事件且已解析内容保留', () {
       final p = SseParser();
       p.ingest('data: {"choices":[{"delta":{"content":"OK"}}]}\n');

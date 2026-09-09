@@ -208,6 +208,53 @@ void main() {
       }
     });
 
+    test('recovers retryable streamed HTTP failures and pauses on 401',
+        () async {
+      for (final statusCode in const [429, 503]) {
+        final model = _ModelQueue()
+          ..responses.add(<String, dynamic>{
+            'success': false,
+            'statusCode': statusCode,
+            'message': 'HTTP $statusCode 请求失败',
+          })
+          ..responses.add(_finishDecision());
+        final task = _task('stream-$statusCode');
+        final loop = WorkAgentLoop(
+          model: model.call,
+          registry: WorkToolRegistry(),
+          maxModelRetries: 1,
+          maxToolRetries: 0,
+          sleep: (_) async {},
+        );
+
+        final result = await loop.execute(task);
+
+        expect(result.failure, isNull, reason: '$statusCode');
+        expect(task.status, AgentTaskStatus.completed, reason: '$statusCode');
+        expect(task.resultSummary, contains('恢复完成'), reason: '$statusCode');
+      }
+
+      final unauthorizedModel = _ModelQueue()
+        ..responses.add(<String, dynamic>{
+          'success': false,
+          'statusCode': 401,
+          'message': 'HTTP 401 请求失败',
+        });
+      final unauthorizedTask = _task('stream-401');
+      final unauthorizedResult = await WorkAgentLoop(
+        model: unauthorizedModel.call,
+        registry: WorkToolRegistry(),
+        maxModelRetries: 1,
+        maxToolRetries: 0,
+        sleep: (_) async {},
+      ).execute(unauthorizedTask);
+
+      expect(
+          unauthorizedResult.failure?.type, WorkFailureType.authorizationLost);
+      expect(unauthorizedTask.status, AgentTaskStatus.paused);
+      expect(unauthorizedTask.resultSummary, '已完成读取项目结构。');
+    });
+
     test('keeps command exit codes out of the HTTP retry category', () {
       final commandFailure = WorkFailure.fromError(
         StateError('process exited with code 500'),

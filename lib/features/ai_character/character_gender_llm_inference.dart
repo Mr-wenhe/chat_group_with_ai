@@ -275,6 +275,7 @@ class CharacterGenderLlmInference {
           (provider) => provider.name == config.provider,
           orElse: () => ApiProvider.custom,
         ),
+        apiProtocol: config.protocol,
         customBaseUrl: config.customBaseUrl,
         model: config.modelName,
         temperature: 0,

@@ -1,11 +1,15 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
@@ -53,6 +57,7 @@ class _SequencedGateway extends AiRequestGateway {
   Future<Map<String, dynamic>> sendChatMessageStreamed({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -66,6 +71,7 @@ class _SequencedGateway extends AiRequestGateway {
     CancelToken? cancelToken,
     bool requiresTools = false,
     bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
     final returnsTool = repeatToolOnSecondModelCall ? calls <= 2 : calls == 1;
@@ -97,17 +103,22 @@ class _SequencedGateway extends AiRequestGateway {
   }
 }
 
-class _CommandGateway extends AiRequestGateway {
-  _CommandGateway()
+class _MultiPatchGateway extends AiRequestGateway {
+  final List<Map<String, String>> patches;
+
+  _MultiPatchGateway(this.patches)
       : super(
           store: MemoryGovernanceStore(),
           client: _UnusedClient(),
         );
 
+  int calls = 0;
+
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -121,6 +132,62 @@ class _CommandGateway extends AiRequestGateway {
     CancelToken? cancelToken,
     bool requiresTools = false,
     bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) async {
+    calls++;
+    final patchIndex = calls - 1;
+    final message = patchIndex < patches.length
+        ? jsonEncode({
+            'action': 'tool',
+            'public_update': '准备生成第 ${patchIndex + 1} 个项目文件。',
+            'tool': {
+              'name': 'workspace.patch',
+              'arguments': {
+                'path': patches[patchIndex]['path'],
+                'content': patches[patchIndex]['content'],
+              },
+            },
+            'completion': null,
+          })
+        : jsonEncode({
+            'action': 'finish',
+            'public_update': '项目文件已生成并核对。',
+            'tool': null,
+            'completion': {
+              'summary': '已生成全部项目文件。',
+              'evidence': ['每个文件均已重新读取'],
+            },
+          });
+    return {'success': true, 'message': message};
+  }
+}
+
+class _CommandGateway extends AiRequestGateway {
+  _CommandGateway()
+      : super(
+          store: MemoryGovernanceStore(),
+          client: _UnusedClient(),
+        );
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required AiRequestPurpose purpose,
+    required String conversationId,
+    required String characterId,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    bool requiresTools = false,
+    bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
   }) async {
     return {
       'success': true,
@@ -155,6 +222,7 @@ class _MissingMutationCommandGateway extends AiRequestGateway {
   Future<Map<String, dynamic>> sendChatMessageStreamed({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -168,6 +236,7 @@ class _MissingMutationCommandGateway extends AiRequestGateway {
     CancelToken? cancelToken,
     bool requiresTools = false,
     bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
     final content = calls == 1
@@ -211,6 +280,7 @@ class _ReadOnlyCommandGateway extends AiRequestGateway {
   Future<Map<String, dynamic>> sendChatMessageStreamed({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -224,6 +294,7 @@ class _ReadOnlyCommandGateway extends AiRequestGateway {
     CancelToken? cancelToken,
     bool requiresTools = false,
     bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
     final content = calls == 1
@@ -269,6 +340,7 @@ class _SensitiveGateway extends AiRequestGateway {
   Future<Map<String, dynamic>> sendChatMessageStreamed({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -282,6 +354,7 @@ class _SensitiveGateway extends AiRequestGateway {
     CancelToken? cancelToken,
     bool requiresTools = false,
     bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
     return {
@@ -448,6 +521,186 @@ void main() {
         isTrue);
     expect((await snapshots.undo(task.id)).succeeded, isTrue);
     expect(await output.exists(), isFalse);
+  });
+
+  test('production runner records every workspace.patch in one project ZIP',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    expect(
+      await grants.authorizeDirectory(
+        authorizedDirectory.path,
+        consent: (_) async => true,
+      ),
+      isNotNull,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final snapshots = WorkSnapshotService(
+      appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+      pathPolicy: pathPolicy,
+      eventStore: eventStore,
+    );
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: snapshots,
+      eventStore: eventStore,
+    );
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    final workspace = await workspaceService.loadOrCreate(
+      conversationId: 'stage02-project',
+      isDirectChat: false,
+      requireWritable: true,
+    );
+    await database.saveAiProcessingDirPath(
+      '${hiveDirectory.path}/ai-processing',
+    );
+    final mediaDirectory =
+        await Directory('${hiveDirectory.path}/media').create(recursive: true);
+    var mediaCopyIndex = 0;
+
+    const projectFiles = <Map<String, String>>[
+      {
+        'path': 'project/lib/main.dart',
+        'content': 'void main() => print("hello");',
+      },
+      {
+        'path': 'project/test/main_test.dart',
+        'content': 'void main() {}',
+      },
+      {
+        'path': 'project/assets/config.json',
+        'content': '{"name":"demo"}',
+      },
+    ];
+    final gateway = _MultiPatchGateway(projectFiles);
+    final config = ApiConfig(
+      id: 'stage02-project-config',
+      name: 'Stage02 project test config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'stage02-project-character',
+      name: '项目执行角色',
+      avatar: 'P',
+      age: 30,
+      role: '项目生成测试角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      mediaCopier: (source, type, {fileName}) async {
+        final target = File(
+          '${mediaDirectory.path}/${mediaCopyIndex++}-${fileName ?? 'attachment'}',
+        );
+        await source.copy(target.path);
+        return MediaAttachment(
+          type: type,
+          localPath: target.path,
+          fileName: fileName,
+          fileSize: await target.length(),
+        );
+      },
+    );
+    final task = AgentTask(
+      id: 'stage02-project-task',
+      groupId: 'stage02-project',
+      characterId: character.id,
+      userRequest: '生成项目源码并交付全部文件',
+      workModeTask: true,
+    );
+
+    var approvalRounds = 0;
+    while (task.status != AgentTaskStatus.completed) {
+      await runner.run(task, WorkTaskCancellation());
+      if (task.status != AgentTaskStatus.waitingForApproval) break;
+      approvalRounds++;
+      expect(approvalRounds, lessThanOrEqualTo(projectFiles.length));
+      expect(task.pendingToolRequestJson, contains('workspace.patch'));
+      final checkpoint = jsonDecode(task.executionStateJson) as Map;
+      task
+        ..executionStateJson = jsonEncode({
+          ...checkpoint,
+          'approvalDecision': 'approved',
+        })
+        ..status = AgentTaskStatus.queued;
+      await database.agentTaskBox.put(task.id, task);
+    }
+
+    expect(task.status, AgentTaskStatus.completed,
+        reason: '${task.lastError}; ${task.resultSummary}');
+    expect(gateway.calls, projectFiles.length + 1);
+    final expectedPaths = projectFiles
+        .map((file) => '${workspace.workDirPath}/${file['path']}')
+        .toList(growable: false);
+    final canonicalPaths = <String>[];
+    for (var index = 0; index < projectFiles.length; index++) {
+      final canonicalPath =
+          await File(expectedPaths[index]).resolveSymbolicLinks();
+      final canonical = File(canonicalPath);
+      canonicalPaths.add(canonicalPath);
+      expect(
+        await canonical.readAsString(),
+        projectFiles[index]['content'],
+      );
+    }
+    // macOS may expose the temporary directory through /var while the
+    // resolved path returned by the tool uses its /private/var spelling.
+    expect(task.lastArtifactPaths, containsAll(canonicalPaths));
+
+    final message = database.messageBox.values
+        .where((item) =>
+            item.groupId == task.groupId && item.senderId == character.id)
+        .last;
+    expect(
+      message.media,
+      hasLength(1),
+      reason:
+          'content=${message.content}; paths=${task.lastArtifactPaths}; root=${workspace.workDirPath}',
+    );
+    expect(message.content, contains('3 个产物打包为 ZIP'));
+    final archive = ZipDecoder().decodeBytes(
+      await File(message.media!.single.localPath).readAsBytes(),
+    );
+    final names = archive.files.map((entry) => entry.name).toList();
+    expect(
+        names.any((name) => name.endsWith('/project/lib/main.dart')), isTrue);
+    expect(names.any((name) => name.endsWith('/project/test/main_test.dart')),
+        isTrue);
+    expect(names.any((name) => name.endsWith('/project/assets/config.json')),
+        isTrue);
+    final events = await eventStore.read(task.id);
+    final progress = events.events
+        .where((event) => event.title == '文件交付进度')
+        .toList(growable: false);
+    expect(progress.last.safeMetadata['filesProcessed'], 3);
   });
 
   test('production command cannot use task permissions to bypass role grant',

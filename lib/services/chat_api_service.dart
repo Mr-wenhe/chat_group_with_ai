@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:typed_data';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/retry_handler.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/streaming/sse_parser.dart';
@@ -9,6 +10,7 @@ import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
 part 'chat_api_service_support.dart';
+part 'chat_api_protocol_support.dart';
 
 class ChatApiService {
   static const String _emptyCompletionMessage = '模型返回了空内容';
@@ -25,8 +27,8 @@ class ChatApiService {
         _dio = dio ??
             Dio(BaseOptions(
               connectTimeout: const Duration(seconds: 15),
-              // 部分推理模型（商汤 SenseNova 等）需要先完成 thinking 过程，
-              // 回复耗时可达 30-60s 甚至更长。30s 的默认值经常误杀正常请求。
+              // 部分推理模型需要先完成 thinking 过程，回复耗时可达 30-60s；
+              // 30s 的默认值经常误杀正常请求。
               receiveTimeout: const Duration(seconds: 120),
             ));
 
@@ -36,6 +38,7 @@ class ChatApiService {
   Future<Map<String, dynamic>> sendChatMessage({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -55,6 +58,7 @@ class ChatApiService {
       operation: (attempt) => _sendChatMessageOnce(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: apiProtocol,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -79,6 +83,7 @@ class ChatApiService {
   Future<Map<String, dynamic>> sendChatMessageWithResponseLimit({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -102,6 +107,7 @@ class ChatApiService {
       operation: (attempt) => _sendChatMessageOnce(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: apiProtocol,
         customBaseUrl: customBaseUrl,
         model: model,
         messages: messages,
@@ -127,6 +133,9 @@ class ChatApiService {
   String _resolveCompletionUrl({
     required String? customBaseUrl,
     required ApiProvider provider,
+    required ApiProtocol apiProtocol,
+    required String model,
+    bool streaming = false,
   }) {
     final raw =
         (provider == ApiProvider.custom ? customBaseUrl : provider.baseUrl)
@@ -136,24 +145,66 @@ class ChatApiService {
 
     final parsed = Uri.tryParse(raw);
     if (parsed != null && parsed.isAbsolute && parsed.host.isNotEmpty) {
-      final path = parsed.path.replaceAll(RegExp(r'/+$'), '');
-      final isCompleteEndpoint =
-          path.endsWith('/chat/completions') || path.endsWith('/completions');
-      return parsed
-          .replace(path: isCompleteEndpoint ? path : '$path${provider.apiPath}')
-          .toString();
+      var path = parsed.path.replaceAll(RegExp(r'/+$'), '');
+      final isCompleteEndpoint = switch (apiProtocol) {
+        ApiProtocol.anthropicMessages => path.endsWith('/messages'),
+        ApiProtocol.openAiChatCompletions =>
+          path.endsWith('/chat/completions') || path.endsWith('/completions'),
+        ApiProtocol.openAiResponses => path.endsWith('/responses'),
+        ApiProtocol.geminiGenerateContent =>
+          path.endsWith(':generateContent') ||
+              path.endsWith(':streamGenerateContent'),
+      };
+      final nextPath = isCompleteEndpoint
+          ? (apiProtocol == ApiProtocol.geminiGenerateContent &&
+                  streaming &&
+                  path.endsWith(':generateContent')
+              ? '${path.substring(0, path.length - ':generateContent'.length)}'
+                  ':streamGenerateContent'
+              : path)
+          : _appendProtocolPath(
+              path: path,
+              protocol: apiProtocol,
+              model: model,
+              streaming: streaming,
+            );
+      var resolved = parsed.replace(path: nextPath);
+      if (apiProtocol == ApiProtocol.geminiGenerateContent &&
+          streaming &&
+          !resolved.queryParameters.containsKey('alt')) {
+        // Gemini's stream endpoint uses SSE only when explicitly requested.
+        resolved = resolved.replace(
+          queryParameters: {
+            ...resolved.queryParameters,
+            'alt': 'sse',
+          },
+        );
+      }
+      return resolved.toString();
     }
 
     final base = raw.replaceAll(RegExp(r'/*$'), '');
-    if (base.endsWith('/chat/completions') || base.endsWith('/completions')) {
-      return base;
-    }
-    return '$base${provider.apiPath}';
+    final completeEndpoint = switch (apiProtocol) {
+      ApiProtocol.anthropicMessages => base.endsWith('/messages'),
+      ApiProtocol.openAiChatCompletions =>
+        base.endsWith('/chat/completions') || base.endsWith('/completions'),
+      ApiProtocol.openAiResponses => base.endsWith('/responses'),
+      ApiProtocol.geminiGenerateContent => base.endsWith(':generateContent') ||
+          base.endsWith(':streamGenerateContent'),
+    };
+    if (completeEndpoint) return base;
+    return _appendProtocolPath(
+      path: base,
+      protocol: apiProtocol,
+      model: model,
+      streaming: streaming,
+    );
   }
 
   Future<Map<String, dynamic>> _sendChatMessageOnce({
     required String apiKey,
     required ApiProvider provider,
+    required ApiProtocol apiProtocol,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -172,10 +223,10 @@ class ChatApiService {
     final url = _resolveCompletionUrl(
       customBaseUrl: customBaseUrl,
       provider: provider,
+      apiProtocol: apiProtocol,
+      model: model,
     );
-    final modelName = model.isEmpty
-        ? (ApiProvider.defaultModels[provider.name] ?? '')
-        : model;
+    final modelName = _resolveModelName(provider: provider, model: model);
 
     if (url.isEmpty) {
       return {'success': false, 'message': 'Base URL 不能为空'};
@@ -184,23 +235,19 @@ class ChatApiService {
       return {'success': false, 'message': '模型名称不能为空'};
     }
 
-    final headers = <String, String>{
-      'Content-Type': 'application/json',
-      'Authorization': 'Bearer $apiKey',
-    };
+    final headers = _requestHeaders(apiKey: apiKey, apiProtocol: apiProtocol);
 
     try {
       final response = await _dio.post(
         url,
-        data: {
-          'model': modelName,
-          'messages': messages,
-          'temperature': temperature,
-          // Forward the caller's explicit budget for every OpenAI-compatible
-          // route; agentic callers rely on this cap for both built-in and
-          // custom endpoints.
-          if (maxTokens > 0) 'max_tokens': maxTokens,
-        },
+        data: _requestBody(
+          apiProtocol: apiProtocol,
+          model: modelName,
+          messages: messages,
+          temperature: temperature,
+          maxTokens: maxTokens,
+          streaming: false,
+        ),
         options: Options(
           headers: headers,
           receiveTimeout: receiveTimeout,
@@ -217,33 +264,30 @@ class ChatApiService {
           : await _readBoundedResponseData(response.data, maxResponseBytes);
 
       if (response.statusCode == 200) {
-        final data = responseData as Map<String, dynamic>;
-        final message = data['choices']?[0]?['message'];
-        final standardReply = message?['content']?.toString() ?? '';
-        // 推理模型的 OpenAI 兼容层可能只填 reasoning_content。
-        // 标准 content 仍优先，仅它为空时才使用兼容字段。
-        final reasoningReply = message?['reasoning_content']?.toString() ?? '';
-        final reply =
-            standardReply.trim().isNotEmpty ? standardReply : reasoningReply;
+        final data = _asJsonMap(responseData);
+        if (data == null) {
+          return {'success': false, 'message': '响应格式无效'};
+        }
+        final reply = _responseText(data, apiProtocol);
         if (reply.trim().isEmpty) {
           return {'success': false, 'message': _emptyCompletionMessage};
         }
-        final usage = data['usage'];
+        final usage = _usageFields(data, apiProtocol);
         return {
           'success': true,
           'message': reply,
-          'model': data['model'] ?? modelName,
-          if (usage is Map<String, dynamic>) ...{
-            'promptTokens': usage['prompt_tokens'] as int? ?? 0,
-            'completionTokens': usage['completion_tokens'] as int? ?? 0,
-            'cachedTokens': _extractCachedTokens(usage),
-          }
+          'model': _responseModel(data, apiProtocol) ?? modelName,
+          if (usage != null) ...usage,
         };
       } else {
+        final providerError = _safeProviderErrorDetail(responseData);
         return {
           'success': false,
           'statusCode': response.statusCode,
           'message': _safeHttpErrorMessage(response.statusCode),
+          'requestPath': _requestPath(url),
+          'requestModel': modelName,
+          if (providerError != null) 'providerError': providerError,
         };
       }
     } on _ChatResponseTooLargeException {
@@ -258,10 +302,16 @@ class ChatApiService {
       } else if (e.type == DioExceptionType.connectionError) {
         return {'success': false, 'message': '网络连接失败：无法连接到服务器'};
       } else if (e.response != null) {
+        final providerError = _safeProviderErrorDetail(e.response!.data);
         return {
           'success': false,
           'statusCode': e.response!.statusCode,
           'message': _safeHttpErrorMessage(e.response!.statusCode),
+          'requestPath': _requestPath(
+            e.response!.requestOptions.uri.toString(),
+          ),
+          'requestModel': modelName,
+          if (providerError != null) 'providerError': providerError,
         };
       } else {
         return {'success': false, 'message': '请求失败'};
@@ -278,6 +328,7 @@ class ChatApiService {
   Future<Map<String, dynamic>> sendChatMessageStreamed({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -286,6 +337,7 @@ class ChatApiService {
     Duration receiveTimeout = const Duration(seconds: 120),
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
+    void Function(ChatStreamEvent event)? onEvent,
   }) async {
     if (kIsWeb) {
       return {
@@ -300,6 +352,7 @@ class ChatApiService {
           return _sendChatMessageOnce(
             apiKey: apiKey,
             provider: provider,
+            apiProtocol: apiProtocol,
             customBaseUrl: customBaseUrl,
             model: model,
             messages: messages,
@@ -313,6 +366,7 @@ class ChatApiService {
         return _collectStreamedOnce(
           apiKey: apiKey,
           provider: provider,
+          apiProtocol: apiProtocol,
           customBaseUrl: customBaseUrl,
           model: model,
           messages: messages,
@@ -320,6 +374,7 @@ class ChatApiService {
           maxTokens: maxTokens,
           receiveTimeout: receiveTimeout,
           cancelToken: cancelToken,
+          onEvent: onEvent,
         );
       },
       shouldRetryResult: RetryHandler.isTransientResult,
@@ -381,6 +436,7 @@ class ChatApiService {
   Stream<ChatStreamEvent> streamChatMessage({
     required String apiKey,
     required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
     String? customBaseUrl,
     required String model,
     required List<Map<String, dynamic>> messages,
@@ -397,10 +453,11 @@ class ChatApiService {
     final url = _resolveCompletionUrl(
       customBaseUrl: customBaseUrl,
       provider: provider,
+      apiProtocol: apiProtocol,
+      model: model,
+      streaming: true,
     );
-    final modelName = model.isEmpty
-        ? (ApiProvider.defaultModels[provider.name] ?? '')
-        : model;
+    final modelName = _resolveModelName(provider: provider, model: model);
 
     if (url.isEmpty) {
       yield ChatStreamEvent.error('Base URL 不能为空');
@@ -412,20 +469,22 @@ class ChatApiService {
     }
 
     final headers = <String, String>{
-      'Content-Type': 'application/json; charset=utf-8',
-      'Authorization': 'Bearer $apiKey',
+      ..._requestHeaders(apiKey: apiKey, apiProtocol: apiProtocol),
       'Accept': 'text/event-stream',
     };
-    final data = {
-      'model': modelName,
-      'messages': messages,
-      'temperature': temperature,
-      if (maxTokens > 0) 'max_tokens': maxTokens,
-      'stream': true, // 开启 SSE 流式返回
-      'stream_options': {'include_usage': true},
-    };
+    final data = _requestBody(
+      apiProtocol: apiProtocol,
+      model: modelName,
+      messages: messages,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      streaming: true,
+    );
 
     final parser = SseParser();
+    final protocolParser = apiProtocol == ApiProtocol.openAiChatCompletions
+        ? null
+        : _ProtocolStreamParser(apiProtocol);
     try {
       final response = await _dio.post<ResponseBody>(
         url,
@@ -460,7 +519,8 @@ class ChatApiService {
 
       // 逐行交给 SseParser，把产出的事件透传给调用方。
       await for (final line in stream) {
-        if (RegExp(r'^data:\s*\[DONE\]\s*$').hasMatch(line.trim())) {
+        if (apiProtocol == ApiProtocol.openAiChatCompletions &&
+            RegExp(r'^data:\s*\[DONE\]\s*$').hasMatch(line.trim())) {
           // 仅当解析器未被终止（错误/超限）时才产生 done 事件，
           // 避免错误后服务端仍然发送 [DONE] 导致误判为成功。
           if (!parser.terminated) {
@@ -468,18 +528,22 @@ class ChatApiService {
           }
           return;
         }
-        final event = parser.ingestLine(line);
+        final event = apiProtocol == ApiProtocol.openAiChatCompletions
+            ? parser.ingestLine(line)
+            : protocolParser!.ingestLine(line);
         if (event != null) {
           yield event.type == ChatStreamEventType.error
               ? ChatStreamEvent.error(_safeStreamErrorMessage(event.message))
               : event;
-          if (parser.terminated) return;
+          if (parser.terminated || protocolParser?.terminated == true) return;
         }
       }
       // 流正常结束，仅当解析器未被终止（非 [DONE] 路径）时产出 done 事件，
       // 避免把 error/超限终止误报为成功。
-      if (!parser.terminated) {
-        yield parser.doneEvent();
+      if (apiProtocol == ApiProtocol.openAiChatCompletions) {
+        if (!parser.terminated) yield parser.doneEvent();
+      } else if (!protocolParser!.terminated) {
+        yield protocolParser.doneEvent();
       }
     } on SseInputLimitException {
       yield ChatStreamEvent.error('流式响应超过安全大小限制');

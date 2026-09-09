@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'dart:math' as math;
 
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_memory.dart';
@@ -35,6 +36,130 @@ class ContextSummary {
 
 /// 在上下文达到阈值时提炼核心内容，并沉淀为跨会话角色记忆。
 class ContextWindowManager {
+  /// Computes the input portion of a model window after reserving output and
+  /// a small framing margin. The result is always within the model window,
+  /// including for deliberately tiny custom capabilities.
+  static int inputBudget({
+    required int contextWindow,
+    required int maxOutput,
+    int reservedTokens = 256,
+  }) {
+    final context = math.max(1, contextWindow);
+    final output = maxOutput.clamp(1, context).toInt();
+    final available = math.max(0, context - output);
+    final reserve = math.min(math.max(0, reservedTokens), available);
+    return math.max(0, available - reserve);
+  }
+
+  /// A conservative request estimator used when a caller must fit a complete
+  /// prompt before it reaches the provider guard. The guard uses roughly four
+  /// characters per token; three keeps JSON keys and message framing from
+  /// pushing an already bounded request back over the provider limit.
+  static int estimateRequestTokens(List<Map<String, dynamic>> messages) {
+    int characters(Object? value) {
+      if (value is String) return value.length;
+      if (value is List) {
+        return value.fold<int>(0, (sum, item) => sum + characters(item));
+      }
+      if (value is Map) {
+        return value.entries.fold<int>(
+          0,
+          (sum, entry) => sum + characters(entry.key) + characters(entry.value),
+        );
+      }
+      return value?.toString().length ?? 0;
+    }
+
+    final count = messages.fold<int>(
+      0,
+      (sum, message) => sum + characters(message),
+    );
+    return (count / 3).ceil();
+  }
+
+  /// Fits a provider prompt without relying on another model call.
+  ///
+  /// The oldest dialogue entries are removed first, while system messages and
+  /// the newest dialogue entry are retained. If system text or the newest
+  /// entry is itself too large, text is clipped (or a multimodal payload is
+  /// replaced with a safe marker) until the conservative estimate fits.
+  static List<Map<String, dynamic>> fitToTokenBudget(
+    List<Map<String, dynamic>> messages, {
+    required int maxTokens,
+  }) {
+    if (messages.isEmpty || maxTokens <= 0) return const [];
+    final candidate = messages
+        .map((message) => Map<String, dynamic>.from(message))
+        .toList(growable: true);
+    if (estimateRequestTokens(candidate) <= maxTokens) {
+      return List<Map<String, dynamic>>.unmodifiable(candidate);
+    }
+
+    bool isDialogue(Map<String, dynamic> message) =>
+        message['role'] != 'system';
+    int dialogueCount() => candidate.where(isDialogue).length;
+
+    // Keep the newest user/assistant exchange. Dropping only the oldest
+    // dialogue entries preserves the latest user request even when all system
+    // instructions must remain in the prompt.
+    while (
+        estimateRequestTokens(candidate) > maxTokens && dialogueCount() > 1) {
+      final oldestDialogue = candidate.indexWhere(isDialogue);
+      if (oldestDialogue < 0) break;
+      candidate.removeAt(oldestDialogue);
+    }
+
+    var iterations = 0;
+    while (estimateRequestTokens(candidate) > maxTokens &&
+        candidate.isNotEmpty &&
+        iterations++ < 128) {
+      final index = _largestPromptEntry(candidate);
+      if (index < 0) break;
+      final message = candidate[index];
+      final content = message['content'];
+      if (content is String && content.length > 32) {
+        final targetLength =
+            (content.length * 0.75).floor().clamp(32, content.length - 1);
+        candidate[index] = <String, dynamic>{
+          ...message,
+          'content': _clipPromptText(content, targetLength),
+        };
+        continue;
+      }
+      if (content is List || content is Map) {
+        candidate[index] = <String, dynamic>{
+          ...message,
+          'content': '【内容已按模型上下文上限省略】',
+        };
+        continue;
+      }
+      // A tiny scalar can still be larger than an unusually small budget due
+      // to message keys. Drop an old dialogue entry if one remains; system
+      // constraints and the newest dialogue entry are never removed merely
+      // to satisfy a pathological custom window.
+      final oldestDialogue = candidate.indexWhere(isDialogue);
+      if (oldestDialogue >= 0 && dialogueCount() > 1) {
+        candidate.removeAt(oldestDialogue);
+        continue;
+      }
+      if (content is String && content.isNotEmpty) {
+        candidate[index] = <String, dynamic>{...message, 'content': ''};
+        continue;
+      }
+      break;
+    }
+
+    // The normal model windows are much larger than message framing. This
+    // final guard handles pathological custom windows without returning an
+    // unbounded prompt; the newest message is the last item by construction.
+    while (estimateRequestTokens(candidate) > maxTokens) {
+      final oldestDialogue = candidate.indexWhere(isDialogue);
+      if (oldestDialogue < 0 || dialogueCount() <= 1) break;
+      candidate.removeAt(oldestDialogue);
+    }
+    return List<Map<String, dynamic>>.unmodifiable(candidate);
+  }
+
   final ContextCompletion complete;
   final int thresholdTokens;
   final RetrySleep? retrySleep;
@@ -165,4 +290,45 @@ class ContextWindowManager {
   }
 
   static Future<void> _defaultSleep(Duration delay) => Future.delayed(delay);
+
+  static int _largestPromptEntry(List<Map<String, dynamic>> messages) {
+    var largestIndex = -1;
+    var largestLength = 0;
+    for (var index = 0; index < messages.length; index++) {
+      final length = _promptValueLength(messages[index]['content']);
+      if (length > largestLength) {
+        largestLength = length;
+        largestIndex = index;
+      }
+    }
+    return largestIndex;
+  }
+
+  static int _promptValueLength(Object? value) {
+    if (value is String) return value.length;
+    if (value is List) {
+      return value.fold<int>(0, (sum, item) => sum + _promptValueLength(item));
+    }
+    if (value is Map) {
+      return value.entries.fold<int>(
+        0,
+        (sum, entry) =>
+            sum +
+            _promptValueLength(entry.key) +
+            _promptValueLength(entry.value),
+      );
+    }
+    return value?.toString().length ?? 0;
+  }
+
+  static String _clipPromptText(String text, int maximum) {
+    if (text.length <= maximum) return text;
+    const marker = '\n…【上下文已裁剪】…\n';
+    if (maximum <= marker.length + 2) return text.substring(0, maximum);
+    final available = maximum - marker.length;
+    final prefixLength = (available / 2).ceil();
+    final suffixLength = available - prefixLength;
+    return '${text.substring(0, prefixLength)}$marker'
+        '${text.substring(text.length - suffixLength)}';
+  }
 }

@@ -121,6 +121,7 @@ class ConversationSummaryRecord {
 }
 
 class DatabaseService {
+  static const String defaultAiProcessingDirectoryName = '.chat_group';
   static const String _aiCharacterBox = 'ai_characters';
   static const String _apiConfigBox = 'api_configs';
   static const String _chatGroupBox = 'chat_groups';
@@ -154,6 +155,27 @@ class DatabaseService {
     'permanent_memories.hive',
     'relationship_events.hive',
   ];
+
+  /// Optional override keeps the default workspace deterministic in tests.
+  /// Production callers use the current user's home directory automatically.
+  final String? _userHomePathOverride;
+
+  DatabaseService({String? userHomePath})
+      : _userHomePathOverride = userHomePath;
+
+  /// Resolves the default workspace path without touching the file system.
+  /// Callers that need the directory to exist should use [aiProcessingDir].
+  static String defaultAiProcessingDirectoryPath({String? userHomePath}) {
+    final configured = userHomePath?.trim();
+    final homePath = configured != null && configured.isNotEmpty
+        ? configured
+        : _platformUserHomePath();
+    if (homePath == null) {
+      throw StateError('无法确定用户主目录，不能解析默认 AI 工作目录');
+    }
+    return '${Directory(homePath).absolute.path}/'
+        '$defaultAiProcessingDirectoryName';
+  }
 
   Directory? _dataDir;
   Timer? _tokenUsageFlushTimer;
@@ -446,59 +468,43 @@ class DatabaseService {
     return dir;
   }
 
+  /// Returns the default AI workspace at `$HOME/.chat_group` (or the
+  /// platform's user documents directory when a home environment variable is
+  /// unavailable). The directory is created on first access.
   Future<Directory> get defaultAiProcessingDir async {
     final base = _dataDir;
     if (base == null) {
       throw StateError('DatabaseService 尚未初始化，无法访问 AI 处理目录');
     }
-    final dir =
-        _debugProjectAgentOutputDir() ?? Directory('${base.path}/ai_files');
+    final homePath = _userHomePathOverride?.trim().isNotEmpty == true
+        ? _userHomePathOverride!.trim()
+        : _platformUserHomePath();
+    final dir = homePath == null
+        ? Directory(
+            '${(await getApplicationDocumentsDirectory()).path}/'
+            '$defaultAiProcessingDirectoryName',
+          )
+        : Directory(defaultAiProcessingDirectoryPath(userHomePath: homePath));
     if (!await dir.exists()) {
       await dir.create(recursive: true);
     }
     return dir;
   }
 
-  Directory? _debugProjectAgentOutputDir() {
-    if (kReleaseMode) return null;
-    Directory? findGitRoot(Directory start) {
-      var dir = start.absolute;
-      while (true) {
-        if (Directory('${dir.path}/.git').existsSync()) return dir;
-        final parent = dir.parent;
-        if (parent.path == dir.path) break;
-        dir = parent;
-      }
-      return null;
-    }
-
-    final cwdRoot = findGitRoot(Directory.current);
-    if (cwdRoot != null) {
-      return Directory('${cwdRoot.path}/agentic_output');
-    }
-
-    final executable = File(Platform.resolvedExecutable);
-    final executableRoot = findGitRoot(executable.parent);
-    if (executableRoot != null) {
-      return Directory('${executableRoot.path}/agentic_output');
-    }
-
-    final script = Platform.script;
-    if (script.isScheme('file')) {
-      final scriptRoot = findGitRoot(File.fromUri(script).parent);
-      if (scriptRoot != null) {
-        return Directory('${scriptRoot.path}/agentic_output');
+  static String? _platformUserHomePath() {
+    for (final key in const ['HOME', 'USERPROFILE']) {
+      final value = Platform.environment[key]?.trim();
+      if (value != null && value.isNotEmpty) {
+        return value;
       }
     }
-
-    var dir = Directory.current.absolute;
-    while (true) {
-      if (Directory('${dir.path}/.git').existsSync()) {
-        return Directory('${dir.path}/agentic_output');
-      }
-      final parent = dir.parent;
-      if (parent.path == dir.path) break;
-      dir = parent;
+    final homeDrive = Platform.environment['HOMEDRIVE']?.trim();
+    final homePath = Platform.environment['HOMEPATH']?.trim();
+    if (homeDrive != null &&
+        homeDrive.isNotEmpty &&
+        homePath != null &&
+        homePath.isNotEmpty) {
+      return '$homeDrive$homePath';
     }
     return null;
   }

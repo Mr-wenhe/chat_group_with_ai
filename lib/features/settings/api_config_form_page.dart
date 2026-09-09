@@ -2,6 +2,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
@@ -29,6 +30,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   late TextEditingController _apiKeyController;
   late TextEditingController _baseUrlController;
   ApiProvider _selectedProvider = ApiProvider.deepseek;
+  ApiProtocol _selectedProtocol = ApiProtocol.defaultValue;
   String _selectedModel = '';
   bool _obscureApiKey = true;
   bool _isSaving = false;
@@ -48,6 +50,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     _apiKeyController = TextEditingController();
     _baseUrlController = TextEditingController(text: c?.customBaseUrl ?? '');
     _selectedProvider = _parseProvider(c?.provider);
+    _selectedProtocol = ApiProtocol.fromName(c?.apiProtocol);
     _selectedModel =
         c?.modelName ?? ApiProvider.defaultModels[_selectedProvider.name] ?? '';
     if (_selectedProvider != ApiProvider.custom) {
@@ -62,6 +65,17 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     } catch (_) {
       return ApiProvider.deepseek;
     }
+  }
+
+  /// Custom providers use the text field as the source of truth. In
+  /// particular, an edited existing config must not reuse its old model ID.
+  String get _configuredModelName {
+    if (_selectedProvider == ApiProvider.custom) {
+      return _modelController.text.trim();
+    }
+    return _selectedModel.isNotEmpty
+        ? _selectedModel
+        : _modelController.text.trim();
   }
 
   @override
@@ -131,6 +145,9 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                     if (v != null) {
                       setState(() {
                         _selectedProvider = v;
+                        if (v != ApiProvider.custom) {
+                          _selectedProtocol = ApiProtocol.defaultValue;
+                        }
                         if (v == ApiProvider.custom) {
                           _selectedModel = '';
                           _modelController.text = '';
@@ -145,19 +162,65 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                 ),
                 const SizedBox(height: 14),
                 if (isCustom) ...[
+                  DropdownButtonFormField<ApiProtocol>(
+                    value: _selectedProtocol,
+                    isExpanded: true,
+                    decoration: appInputDecoration(
+                      '上游格式 *',
+                      null,
+                      Icons.alt_route_rounded,
+                      cs,
+                    ),
+                    items: ApiProtocol.values
+                        .map((protocol) => DropdownMenuItem(
+                              value: protocol,
+                              child: Text(
+                                protocol.label,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ))
+                        .toList(),
+                    onChanged: (v) {
+                      if (v != null) setState(() => _selectedProtocol = v);
+                    },
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 6),
+                    child: Text(
+                      _selectedProtocol.description,
+                      style:
+                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                    ),
+                  ),
+                  Padding(
+                    padding: const EdgeInsets.only(top: 4),
+                    child: Text(
+                      '请选择与 Base URL 对应的上游协议；本应用不会自动开启或依赖本地路由。',
+                      style: TextStyle(
+                        fontSize: 11,
+                        color: cs.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  const SizedBox(height: 14),
                   TextFormField(
                     controller: _baseUrlController,
-                    decoration: appInputDecoration('Base URL *',
-                        'https://your-api.com/v1', Icons.link_rounded, cs),
+                    decoration: appInputDecoration(
+                      'Base URL *',
+                      _selectedProtocol.baseUrlHint,
+                      Icons.link_rounded,
+                      cs,
+                    ),
                     validator: (v) =>
-                        v?.isEmpty ?? true ? '请输入 Base URL' : null,
+                        v?.trim().isEmpty ?? true ? '请输入 Base URL' : null,
                   ),
                   const SizedBox(height: 14),
                   TextFormField(
                     controller: _modelController,
                     decoration: appInputDecoration(
                         '模型名称 *', '输入模型 ID', Icons.model_training_outlined, cs),
-                    validator: (v) => v?.isEmpty ?? true ? '请输入模型名称' : null,
+                    validator: (v) =>
+                        v?.trim().isEmpty ?? true ? '请输入模型名称' : null,
                   ),
                 ] else ...[
                   DropdownButtonFormField<String>(
@@ -248,8 +311,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     if (!_formKey.currentState!.validate() || _isTesting) return;
     setState(() => _isTesting = true);
     final provider = _selectedProvider;
-    final model =
-        _selectedModel.isEmpty ? _modelController.text.trim() : _selectedModel;
+    final model = _configuredModelName;
     try {
       final enteredApiKey = _apiKeyController.text.trim();
       final apiKey = enteredApiKey.isNotEmpty
@@ -265,6 +327,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
       final result = await _apiService.testApiKey(
         apiKey: apiKey,
         provider: provider,
+        apiProtocol: _selectedProtocol,
         customBaseUrl: _baseUrlController.text.trim(),
         model: model,
       );
@@ -296,9 +359,8 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
         id: widget.config?.id,
         name: _nameController.text.trim(),
         provider: _selectedProvider.name,
-        modelName: _selectedModel.isEmpty
-            ? _modelController.text.trim()
-            : _selectedModel,
+        apiProtocol: _selectedProtocol.name,
+        modelName: _configuredModelName,
         apiKey: _apiKeyController.text.trim(),
         customBaseUrl: _baseUrlController.text.trim(),
         createdAt: widget.config?.createdAt,

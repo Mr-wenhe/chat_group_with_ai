@@ -413,6 +413,29 @@ void main() {
     expect(task.contextSummary, isNot(contains('不是 JSON')));
   });
 
+  test('retries a fresh model decision when protocol repair is empty',
+      () async {
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'content': '不是 JSON，也不是公开进度。',
+      })
+      ..responses.add({
+        'success': true,
+        'content': '',
+      })
+      ..responses.add(_finishDecision('自动协议重试后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final result = await loop.execute(_task(id: 'repair-empty-retry'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(result.protocolRepairAttempts, 1);
+    expect(model.requests, hasLength(3));
+    expect(model.requests[1].isRepair, isTrue);
+    expect(model.requests[2].isRepair, isFalse);
+  });
+
   test('stop before model creates an interrupted checkpoint', () async {
     final model = _FakeModel()..responses.add(_finishDecision());
     final cancellation = WorkTaskCancellation()..cancel();
