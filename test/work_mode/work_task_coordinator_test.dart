@@ -1068,7 +1068,10 @@ void main() {
     expect(runner.startedTaskIds, isEmpty);
 
     pickerGate.complete(directory.path);
-    await _settle();
+    // Completing the native picker only schedules the remaining async grant
+    // and task-start chain; observe the runner boundary rather than relying
+    // on a fixed 100ms delay under CI load.
+    await _waitForStartedCount(runner, 2);
     expect(
         runner.startedTaskIds,
         containsAll(<String>[

@@ -169,10 +169,15 @@ void main() {
         find.byKey(const Key('work-folder-grant-batch-consent-confirm')),
       ),
     );
-    await tester.runAsync(
-      () => Future<void>.delayed(const Duration(milliseconds: 300)),
-    );
+    final committed = await tester.runAsync(() async {
+      for (var index = 0; index < 200; index++) {
+        if (service.grants.length >= 2) return true;
+        await Future<void>.delayed(const Duration(milliseconds: 10));
+      }
+      return false;
+    });
     await tester.pump(const Duration(milliseconds: 100));
+    expect(committed, isTrue, reason: '批量授权未在限定时间内完成持久化');
     expect(service.grants, hasLength(2));
     expect(
       service.grants.every((grant) => grant.cloudDisclosureConfirmedAt != null),

@@ -19,12 +19,6 @@ class _IdleRunner implements WorkTaskRunner {
   }
 }
 
-Future<void> _settle() async {
-  for (var index = 0; index < 8; index++) {
-    await Future<void>.delayed(const Duration(milliseconds: 10));
-  }
-}
-
 Future<void> _waitForTaskStatus(
   Box<AgentTask> taskBox,
   String taskId,
@@ -34,6 +28,14 @@ Future<void> _waitForTaskStatus(
     if (taskBox.get(taskId)?.status == expected) return;
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
+}
+
+Future<void> _waitForRunCount(_IdleRunner runner, int expected) async {
+  for (var index = 0; index < 200; index++) {
+    if (runner.runCount >= expected) return;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  fail('运行器未在限定时间内启动：期望至少 $expected 次，实际 ${runner.runCount} 次');
 }
 
 Future<void> _waitForTaskEvent(
@@ -334,8 +336,7 @@ void main() {
     expect(runner.runCount, 0);
     // Event persistence is an async file write that may lag on slow CI.
     // Poll until the paused event appears before asserting the event list.
-    await _waitForTaskEvent(
-      eventStore, task.id, WorkTaskEventKind.paused);
+    await _waitForTaskEvent(eventStore, task.id, WorkTaskEventKind.paused);
     final events = await eventStore.read(task.id);
     expect(
         events.events.map((event) => event.kind),
@@ -393,7 +394,11 @@ void main() {
       workModeTask: true,
     );
     await coordinator.submit(task);
-    await _settle();
+    // Folder authorization crosses several asynchronous Hive/filesystem
+    // boundaries. Wait for the runner boundary instead of assuming a fixed
+    // wall-clock delay is long enough on every CI runner.
+    await _waitForRunCount(runner, 1);
+    await _waitForTaskStatus(taskBox, task.id, AgentTaskStatus.completed);
 
     expect(runner.runCount, 1);
     expect(taskBox.get(task.id)?.status, AgentTaskStatus.completed);
