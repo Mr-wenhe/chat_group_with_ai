@@ -31,7 +31,8 @@ class FakeVolcSocket implements VolcWsSocket {
 
 /// 记录每次 open 的 (headers, socket)。
 class OpenRecorder {
-  final opened = <({String url, Map<String, String> headers, FakeVolcSocket socket})>[];
+  final opened =
+      <({String url, Map<String, String> headers, FakeVolcSocket socket})>[];
 
   Future<VolcWsSocket> Function(String, Map<String, String>) get opener =>
       (url, headers) async {
@@ -143,16 +144,15 @@ void main() {
       expect((startedJson['req_params'] as Map)['speaker'],
           'zh_female_meilinvyou_moon_bigtts');
       expect(
-          ((startedJson['req_params'] as Map)['audio_params'] as Map)[
-              'sample_rate'],
+          ((startedJson['req_params'] as Map)['audio_params']
+              as Map)['sample_rate'],
           24000);
 
       // ③ SessionStarted → 提交文本（200）与结束会话（102）。
       s.push(_serverEventFrame(
           event: 150, sessionId: 'sess-1', payload: utf8.encode('{}')));
       await _flush();
-      final events =
-          s.sent.map(parseVolcTtsFrame).map((f) => f.event).toList();
+      final events = s.sent.map(parseVolcTtsFrame).map((f) => f.event).toList();
       expect(events, containsAll([200, 102]));
       final submit =
           s.sent.map(parseVolcTtsFrame).firstWhere((f) => f.event == 200);
@@ -266,8 +266,8 @@ void main() {
       expect(ended, isTrue);
       expect(error, isNull);
       // 最后一帧是结束帧（event=2）。
-      final finishJson =
-          jsonDecode(utf8.decode(s.sent.last.sublist(8))) as Map<String, dynamic>;
+      final finishJson = jsonDecode(utf8.decode(s.sent.last.sublist(8)))
+          as Map<String, dynamic>;
       expect(finishJson['event'], 2);
       expect(s.closed, isTrue);
     });

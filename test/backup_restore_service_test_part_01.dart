@@ -26,11 +26,14 @@ Future<void> _writeRawZip(
   ];
   final cd = <int>[
     ..._u32le(0x02014b50), // central directory header signature
-    ..._u16le(20), ..._u16le(20), ..._u16le(0), ..._u16le(0), // versions, flags, stored
+    ..._u16le(20), ..._u16le(20), ..._u16le(0),
+    ..._u16le(0), // versions, flags, stored
     ..._u16le(0), ..._u16le(0x0021), // mod time, mod date
     ..._u32le(crc), ..._u32le(size), ..._u32le(size), // crc, sizes
-    ..._u16le(nameBytes.length), ..._u16le(0), ..._u16le(0), // name, extra, comment
-    ..._u16le(0), ..._u16le(0), ..._u32le(0), ..._u32le(0), // disk, attrs, local offset
+    ..._u16le(nameBytes.length), ..._u16le(0),
+    ..._u16le(0), // name, extra, comment
+    ..._u16le(0), ..._u16le(0), ..._u32le(0),
+    ..._u32le(0), // disk, attrs, local offset
     ...nameBytes,
   ];
   final eocd = <int>[

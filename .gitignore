@@ -96,3 +96,4 @@ scripts/
 !scripts/
 scripts/*
 !scripts/verify_android_release_permissions.sh
+!scripts/package_macos_dmg.sh

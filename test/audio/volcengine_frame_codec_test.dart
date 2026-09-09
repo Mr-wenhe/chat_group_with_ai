@@ -90,7 +90,10 @@ void main() {
       final frame = buildVolcSessionFrame(
         event: 100,
         sessionId: 'sess-abcd1234',
-        payload: {'user': {'uid': 'demo-user'}, 'req_params': {'speaker': 'x'}},
+        payload: {
+          'user': {'uid': 'demo-user'},
+          'req_params': {'speaker': 'x'}
+        },
       );
       final parsed = parseVolcTtsFrame(frame);
       expect(parsed.event, 100);
@@ -128,8 +131,9 @@ void main() {
       final parsed = parseVolcTtsFrame(raw);
       expect(parsed.event, 351);
       expect(parsed.sessionId, 'sess-xyz');
-      expect(jsonDecode(utf8.decode(parsed.payload)),
-          {'res_params': {'words': []}});
+      expect(jsonDecode(utf8.decode(parsed.payload)), {
+        'res_params': {'words': []}
+      });
     });
 
     test('音频帧 msgType=0xB，payload 为裸 PCM', () {
@@ -177,8 +181,8 @@ void main() {
     });
 
     test('JSON 结果帧（msgType=0x9）带 sequence，payload 可解', () {
-      final resultPayload = utf8.encode(
-          '{"code":0,"result":{"text":"你好","utterances":[]}}');
+      final resultPayload =
+          utf8.encode('{"code":0,"result":{"text":"你好","utterances":[]}}');
       final raw = _craftAsrServerFrame(
         msgType: volcMsgJsonServer,
         flags: 0x1,
@@ -203,8 +207,7 @@ void main() {
       );
       final parsed = parseVolcAsrFrame(raw);
       expect(parsed.compression, volcCompGzip);
-      expect(jsonDecode(utf8.decode(parsed.payload))['result']['text'],
-          '压缩内容');
+      expect(jsonDecode(utf8.decode(parsed.payload))['result']['text'], '压缩内容');
     });
 
     test('错误帧（0xF）携带 errorCode 与文本', () {

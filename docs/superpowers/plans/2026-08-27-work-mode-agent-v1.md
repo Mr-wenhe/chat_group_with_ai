@@ -751,7 +751,7 @@ flutter test test/work_mode/visible_browser_service_test.dart test/work_mode/wor
 - [ ] 6. 跑测试。
 
 ```bash
-flutter test test/work_mode/work_document_tool_test.dart test/document
+flutter test test/work_mode/work_document_tool_test.dart test/document_understanding_service_test.dart test/model_capability_registry_test.dart test/multimodal_content_boundary_test.dart test/multimodal_content_test.dart
 ```
 
 **完成条件：** 所有支持格式均走现有解析能力；视觉模型切换只由用户决定；音视频没有假支持。
@@ -854,7 +854,7 @@ git diff --check
 
 ```bash
 flutter test test/work_mode
-flutter test test/agentic test/web_search test/document
+flutter test test/agentic test/web_search test/document_understanding_service_test.dart test/model_capability_registry_test.dart test/multimodal_content_boundary_test.dart test/multimodal_content_test.dart test/work_mode/work_document_tool_test.dart
 flutter test test/chat_room_page_lifecycle_test.dart test/agentic/chat_room_agent_task_recovery_test.dart
 ```
 
@@ -1276,7 +1276,7 @@ WorkFailure 类型固定为 retryableNetwork/modelProtocol/permissionDenied/auth
 ```text
 你现在只执行 Stage 05 / Task 25：完成自动化测试、静态分析和 macOS debug 构建验证，并生成完整测试报告。除修复真实缺陷外不要新增功能。
 
-先读取 AGENTS.md、Ponytail、Task 25 和前一安全审查报告。记录 git status 和环境版本。依次执行 dart format --output=none --set-exit-if-changed lib test、flutter analyze、git diff --check、flutter test test/work_mode、flutter test test/agentic test/web_search test/document、两个关键 lifecycle/recovery 测试、flutter test 全量、flutter build macos --debug。
+先读取 AGENTS.md、Ponytail、Task 25 和前一安全审查报告。记录 git status 和环境版本。依次执行 dart format --output=none --set-exit-if-changed lib test、flutter analyze、git diff --check、flutter test test/work_mode、flutter test test/agentic test/web_search test/document_understanding_service_test.dart test/model_capability_registry_test.dart test/multimodal_content_boundary_test.dart test/multimodal_content_test.dart test/work_mode/work_document_tool_test.dart、两个关键 lifecycle/recovery 测试、flutter test 全量、flutter build macos --debug。
 
 某条失败时记录完整证据，并继续运行不依赖它的其他检查；集中列出全部失败后定位根因，用最小改动修复，再重跑相关项及最终核心套件。不得删测试、加 skip、放宽断言或把环境失败伪称通过。构建被本计划明确授权用于插件和 entitlement 验证。
 

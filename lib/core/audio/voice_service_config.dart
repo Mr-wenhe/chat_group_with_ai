@@ -83,9 +83,8 @@ class VoiceServiceConfig {
       };
 
   factory VoiceServiceConfig.fromMap(Object? raw) {
-    final map = raw is Map
-        ? Map<String, dynamic>.from(raw)
-        : const <String, dynamic>{};
+    final map =
+        raw is Map ? Map<String, dynamic>.from(raw) : const <String, dynamic>{};
     final tts = map['ttsResourceId']?.toString().trim() ?? '';
     final asr = map['asrResourceId']?.toString().trim() ?? '';
     final voice = map['defaultVoiceId']?.toString().trim();

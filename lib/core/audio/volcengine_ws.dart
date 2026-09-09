@@ -1,5 +1,5 @@
-import 'volcengine_ws_io.dart'
-    if (dart.library.html) 'volcengine_ws_stub.dart' as impl;
+import 'volcengine_ws_io.dart' if (dart.library.html) 'volcengine_ws_stub.dart'
+    as impl;
 import 'volcengine_ws_types.dart';
 
 export 'volcengine_ws_types.dart' show VolcWsSocket, VolcSocketOpener;

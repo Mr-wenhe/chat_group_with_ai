@@ -87,8 +87,7 @@ String stripMarkdownForSpeech(String text) {
   out = out.replaceAll('`', '');
   // 图片 ![alt](url) 整体去掉；链接 [text](url) 保留文字。
   out = out.replaceAll(RegExp(r'!\[[^\]]*\]\([^)]*\)'), '');
-  out = out.replaceAllMapped(
-      RegExp(r'\[([^\]]+)\]\([^)]*\)'), (m) => m[1]!);
+  out = out.replaceAllMapped(RegExp(r'\[([^\]]+)\]\([^)]*\)'), (m) => m[1]!);
   // 行首标题 #。
   out = out.replaceAll(RegExp(r'^#+\s*', multiLine: true), '');
   // 成对的加粗/斜体/删除线标记。

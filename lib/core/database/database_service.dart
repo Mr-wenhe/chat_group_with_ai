@@ -1336,8 +1336,8 @@ class DatabaseService {
     } else {
       values.remove(groupId);
     }
-    await appSettingsBox.put(_voiceBroadcastGroupIdsKey,
-        values.toList()..sort());
+    await appSettingsBox.put(
+        _voiceBroadcastGroupIdsKey, values.toList()..sort());
   }
 
   Set<String> _stringSetFromSettings(String key) {
@@ -1514,8 +1514,7 @@ class DatabaseService {
 
   /// 从安全存储读取语音 API Key；未绑定/不可用时返回 null。
   Future<String?> readVoiceApiKey() async {
-    final result =
-        await CredentialRepository().read(volcVoiceCredentialId);
+    final result = await CredentialRepository().read(volcVoiceCredentialId);
     return result.isAvailable ? result.value : null;
   }
 

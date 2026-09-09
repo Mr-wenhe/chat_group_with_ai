@@ -81,8 +81,8 @@ class CompactConversationControls extends StatelessWidget {
                     icon: voiceBroadcastEnabled
                         ? Icons.record_voice_over_rounded
                         : Icons.record_voice_over_outlined,
-                    onPressed: () => onVoiceBroadcastChanged?.call(
-                        !voiceBroadcastEnabled),
+                    onPressed: () =>
+                        onVoiceBroadcastChanged?.call(!voiceBroadcastEnabled),
                     cs: cs,
                   ),
                   const SizedBox(width: 2),

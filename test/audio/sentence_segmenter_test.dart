@@ -79,14 +79,12 @@ void main() {
     });
 
     test('链接保留文字、图片整体去掉', () {
-      expect(
-          stripMarkdownForSpeech('[标题](https://x.com)内容'), '标题内容');
+      expect(stripMarkdownForSpeech('[标题](https://x.com)内容'), '标题内容');
       expect(stripMarkdownForSpeech('![图](a.png)继续'), '继续');
     });
 
     test('去掉行首标题号与成对装饰符', () {
-      expect(stripMarkdownForSpeech('## 章节\n**加粗**和~~删除~~'),
-          '章节\n加粗和删除');
+      expect(stripMarkdownForSpeech('## 章节\n**加粗**和~~删除~~'), '章节\n加粗和删除');
       expect(stripMarkdownForSpeech('_斜_体'), '斜体');
     });
   });

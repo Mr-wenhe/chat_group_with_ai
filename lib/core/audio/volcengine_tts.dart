@@ -61,7 +61,8 @@ class VolcengineTtsClient {
     if (text.trim().isEmpty) return Uint8List(0);
     final now = DateTime.now().microsecondsSinceEpoch;
     final cid = connectId ?? 'tts-$now';
-    final sid = sessionId ?? 'sess-${now.toString().substring(now.toString().length - 8)}';
+    final sid = sessionId ??
+        'sess-${now.toString().substring(now.toString().length - 8)}';
 
     final VolcWsSocket socket;
     try {

@@ -86,12 +86,12 @@ class _VoiceServiceSettingsPageState
             children: [
               Row(
                 children: [
-                  Icon(_apiKeyBound
-                      ? Icons.verified_user_outlined
-                      : Icons.key_off_outlined,
+                  Icon(
+                      _apiKeyBound
+                          ? Icons.verified_user_outlined
+                          : Icons.key_off_outlined,
                       size: 20,
-                      color:
-                          _apiKeyBound ? cs.primary : cs.onSurfaceVariant),
+                      color: _apiKeyBound ? cs.primary : cs.onSurfaceVariant),
                   const SizedBox(width: 10),
                   Expanded(
                     child: Column(
@@ -147,16 +147,14 @@ class _VoiceServiceSettingsPageState
               const SizedBox(height: 14),
               TextFormField(
                 controller: _ttsResourceController,
-                decoration: appInputDecoration(
-                    'TTS 资源 ID', volcTtsDefaultResourceId,
-                    Icons.graphic_eq_rounded, cs),
+                decoration: appInputDecoration('TTS 资源 ID',
+                    volcTtsDefaultResourceId, Icons.graphic_eq_rounded, cs),
               ),
               const SizedBox(height: 12),
               TextFormField(
                 controller: _asrResourceController,
-                decoration: appInputDecoration(
-                    'ASR 资源 ID', volcAsrDefaultResourceId,
-                    Icons.mic_rounded, cs),
+                decoration: appInputDecoration('ASR 资源 ID',
+                    volcAsrDefaultResourceId, Icons.mic_rounded, cs),
               ),
             ],
           ),
@@ -177,8 +175,8 @@ class _VoiceServiceSettingsPageState
                 key: const Key('default-voice-dropdown'),
                 value: _defaultVoiceId,
                 isExpanded: true,
-                decoration:
-                    appInputDecoration('默认音色', null, Icons.person_pin_rounded, cs),
+                decoration: appInputDecoration(
+                    '默认音色', null, Icons.person_pin_rounded, cs),
                 items: [
                   const DropdownMenuItem<String>(
                     value: null,
@@ -190,8 +188,7 @@ class _VoiceServiceSettingsPageState
                             overflow: TextOverflow.ellipsis),
                       )),
                 ],
-                onChanged: (value) =>
-                    setState(() => _defaultVoiceId = value),
+                onChanged: (value) => setState(() => _defaultVoiceId = value),
               ),
             ],
           ),
@@ -223,12 +220,13 @@ class _VoiceServiceSettingsPageState
             obscureText: show,
             autofocus: true,
             decoration: appInputDecoration(
-                '火山引擎 API Key', '粘贴 AppKey', Icons.key_outlined, cs)
+                    '火山引擎 API Key', '粘贴 AppKey', Icons.key_outlined, cs)
                 .copyWith(
               suffixIcon: IconButton(
-                icon: Icon(show
-                    ? Icons.visibility_off_outlined
-                    : Icons.visibility_outlined,
+                icon: Icon(
+                    show
+                        ? Icons.visibility_off_outlined
+                        : Icons.visibility_outlined,
                     size: 18),
                 onPressed: () => obscure.value = !obscure.value,
               ),

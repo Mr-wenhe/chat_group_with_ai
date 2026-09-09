@@ -133,8 +133,8 @@ void main() {
       // interim → display 只含候补；final → 定稿进 committed。
       socket.push(_resultFrame(flags: 0x1, sequence: 2, text: '你'));
       await _flush();
-      socket.push(_resultFrame(
-          flags: 0x3, sequence: 3, text: '你好世界', definite: true));
+      socket.push(
+          _resultFrame(flags: 0x3, sequence: 3, text: '你好世界', definite: true));
       await _flush();
       expect(displayHistory.last, '你好世界');
       expect(controller.committedText, '你好世界');
@@ -143,8 +143,8 @@ void main() {
       mic._stream.add(Uint8List.fromList(List<int>.filled(3200, 0)));
       await _flush();
       final sentBeforeStop = socket.sent.map(parseVolcAsrFrame).toList();
-      expect(
-          sentBeforeStop.where((f) => f.msgType == volcMsgAudioOnly), isNotEmpty);
+      expect(sentBeforeStop.where((f) => f.msgType == volcMsgAudioOnly),
+          isNotEmpty);
 
       await controller.stop();
       await _flush();
@@ -155,10 +155,11 @@ void main() {
 
       // 收尾帧链：最后一帧是结束帧（event=2），其前是带末包标记的音频帧。
       final sent = socket.sent.map(parseVolcAsrFrame).toList();
-      final finishJson =
-          jsonDecode(utf8.decode(socket.sent.last.sublist(8))) as Map<String, dynamic>;
+      final finishJson = jsonDecode(utf8.decode(socket.sent.last.sublist(8)))
+          as Map<String, dynamic>;
       expect(finishJson['event'], 2);
-      expect(sent.where((f) =>
+      expect(
+          sent.where((f) =>
               f.msgType == volcMsgAudioOnly && (f.flags & volcFlagLast) != 0),
           hasLength(1));
     });
@@ -186,8 +187,8 @@ void main() {
       );
       await controller.start();
       final socket = rec.last!;
-      socket.push(_resultFrame(
-          flags: 0x3, sequence: 2, text: '已识别内容', definite: true));
+      socket.push(
+          _resultFrame(flags: 0x3, sequence: 2, text: '已识别内容', definite: true));
       await _flush();
 
       await controller.cancel();
@@ -211,10 +212,9 @@ void main() {
       final errPayload = utf8.encode('waiting data timeout');
       final frame = BytesBuilder(copy: false)
         ..add(Uint8List.fromList([0x11, volcMsgError << 4, 0, 0]));
-      frame.add(Uint8List.sublistView(
-          ByteData(4)..setUint32(0, 45000081)));
-      frame.add(Uint8List.sublistView(
-          ByteData(4)..setUint32(0, errPayload.length)));
+      frame.add(Uint8List.sublistView(ByteData(4)..setUint32(0, 45000081)));
+      frame.add(
+          Uint8List.sublistView(ByteData(4)..setUint32(0, errPayload.length)));
       frame.add(errPayload);
       socket.push(frame.toBytes());
       await _flush();

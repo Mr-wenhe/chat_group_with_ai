@@ -25,10 +25,10 @@ Uint8List pcmToWav(
   final out = BytesBuilder(copy: false);
 
   void writeAscii(String s) => out.add(s.codeUnits);
-  void writeU32(int v) =>
-      out.add(Uint8List.sublistView(ByteData(4)..setUint32(0, v, Endian.little)));
-  void writeU16(int v) =>
-      out.add(Uint8List.sublistView(ByteData(2)..setUint16(0, v, Endian.little)));
+  void writeU32(int v) => out
+      .add(Uint8List.sublistView(ByteData(4)..setUint32(0, v, Endian.little)));
+  void writeU16(int v) => out
+      .add(Uint8List.sublistView(ByteData(2)..setUint16(0, v, Endian.little)));
 
   writeAscii('RIFF');
   writeU32(36 + dataLen); // 文件长度 - 8。

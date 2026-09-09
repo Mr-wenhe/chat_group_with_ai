@@ -30,8 +30,7 @@ void main() {
     });
 
     test('voicePresetById 能反查存在的音色并返回 null 于未知 id', () {
-      expect(voicePresetById('zh_female_meilinvyou_moon_bigtts')?.name,
-          '魅力女友');
+      expect(voicePresetById('zh_female_meilinvyou_moon_bigtts')?.name, '魅力女友');
       expect(voicePresetById('not-a-real-voice'), isNull);
     });
   });

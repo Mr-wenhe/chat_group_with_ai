@@ -100,7 +100,12 @@ class VolcengineAsrSession {
     // 连接建立即发送 JSON 启动帧。
     socket.send(buildVolcAsrStartFrame({
       'user': {'uid': _uid},
-      'audio': {'format': 'pcm', 'sample_rate': 16000, 'channel': 1, 'bits': 16},
+      'audio': {
+        'format': 'pcm',
+        'sample_rate': 16000,
+        'channel': 1,
+        'bits': 16
+      },
       'request': {
         'reqid': _connectId,
         'sequence': 1,

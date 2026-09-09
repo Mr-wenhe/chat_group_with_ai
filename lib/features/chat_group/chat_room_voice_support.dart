@@ -82,8 +82,7 @@ extension _ChatRoomVoiceSupport on _ChatRoomPageState {
 
   void _onVoiceBroadcastError(String message) {
     if (!_canTouchUi) return;
-    AppToast.show(context, '语音播报失败：$message',
-        icon: Icons.volume_off_rounded);
+    AppToast.show(context, '语音播报失败：$message', icon: Icons.volume_off_rounded);
   }
 
   /// 开启一条新的流式回复：重置切句缓冲。角色没有可用音色时整条不朗读。
@@ -106,7 +105,8 @@ extension _ChatRoomVoiceSupport on _ChatRoomPageState {
     // 流式 onDraft 携带累计全文；取本次新增部分，避免重复成句。
     final previous = _voiceFedTail;
     String delta;
-    if (previous.isNotEmpty && draft.length >= previous.length &&
+    if (previous.isNotEmpty &&
+        draft.length >= previous.length &&
         draft.startsWith(previous)) {
       delta = draft.substring(previous.length);
     } else {

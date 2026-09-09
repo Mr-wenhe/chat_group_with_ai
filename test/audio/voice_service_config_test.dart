@@ -33,13 +33,12 @@ void main() {
       expect(empty.ttsResourceId, volcTtsDefaultResourceId);
       expect(empty.apiKeyBound, isFalse);
 
-      final partial =
-          VoiceServiceConfig.fromMap(const {'apiKeyBound': true});
+      final partial = VoiceServiceConfig.fromMap(const {'apiKeyBound': true});
       expect(partial.ttsResourceId, volcTtsDefaultResourceId);
       expect(partial.apiKeyBound, isTrue);
 
-      final blankVoice = VoiceServiceConfig.fromMap(
-          const {'defaultVoiceId': ''});
+      final blankVoice =
+          VoiceServiceConfig.fromMap(const {'defaultVoiceId': ''});
       expect(blankVoice.defaultVoiceId, isNull);
     });
 

@@ -1,0 +1,74 @@
+<style>
+  .concept-grid { display:grid; grid-template-columns:repeat(3,minmax(0,1fr)); gap:18px; margin-top:24px; }
+  .concept { border:1px solid var(--border); border-radius:22px; overflow:hidden; background:var(--surface); cursor:pointer; transition:.2s ease; }
+  .concept:hover { transform:translateY(-3px); box-shadow:0 14px 35px rgba(0,0,0,.12); }
+  .concept.selected { outline:3px solid var(--accent); }
+  .phone { min-height:410px; padding:18px; color:#fff; position:relative; overflow:hidden; }
+  .phone.a { background:linear-gradient(160deg,#1c1f2b,#29233f); }
+  .phone.b { background:radial-gradient(circle at 50% 45%,#443064 0,#171321 62%); }
+  .phone.c { background:linear-gradient(rgba(8,10,20,.18),rgba(8,10,20,.82)),linear-gradient(135deg,#25465c,#795c73 55%,#c68c69); }
+  .top { display:flex; align-items:center; justify-content:space-between; font-size:12px; opacity:.92; }
+  .avatars { display:flex; gap:8px; margin:18px 0; }
+  .avatar { width:42px; height:42px; border-radius:50%; display:grid; place-items:center; font-size:22px; background:rgba(255,255,255,.14); border:2px solid rgba(255,255,255,.3); position:relative; }
+  .avatar.talk { box-shadow:0 0 0 4px #7cf5c8,0 0 24px #63e6be; }
+  .dot { position:absolute; right:-2px; bottom:-2px; font-size:12px; }
+  .bubble { max-width:82%; padding:10px 12px; border-radius:15px; margin:10px 0; font-size:12px; line-height:1.5; background:rgba(255,255,255,.12); backdrop-filter:blur(10px); }
+  .bubble.me { margin-left:auto; background:#6d55e8; }
+  .wave { height:34px; display:flex; gap:3px; align-items:center; justify-content:center; }
+  .wave i { width:4px; border-radius:5px; background:#7cf5c8; display:block; }
+  .wave i:nth-child(1),.wave i:nth-child(7){height:8px}.wave i:nth-child(2),.wave i:nth-child(6){height:18px}.wave i:nth-child(3),.wave i:nth-child(5){height:28px}.wave i:nth-child(4){height:34px}
+  .voice-stage { margin:26px auto 10px; width:210px; height:210px; border-radius:50%; border:1px solid rgba(255,255,255,.15); position:relative; display:grid; place-items:center; background:radial-gradient(circle,rgba(124,245,200,.18),transparent 67%); }
+  .voice-stage .avatar { position:absolute; width:56px; height:56px; font-size:28px; }
+  .voice-stage .one { top:-10px; left:76px }.voice-stage .two { left:-9px; top:93px }.voice-stage .three { right:-9px; top:93px }
+  .mic { width:68px; height:68px; border-radius:50%; display:grid; place-items:center; background:#7c5cff; font-size:30px; box-shadow:0 0 35px rgba(124,92,255,.65); }
+  .scene-people { display:flex; align-items:flex-end; justify-content:center; gap:6px; height:205px; margin-top:20px; }
+  .portrait { width:82px; height:155px; border-radius:42px 42px 15px 15px; display:grid; place-items:center; font-size:54px; background:linear-gradient(rgba(255,255,255,.28),rgba(255,255,255,.06)); border:1px solid rgba(255,255,255,.25); position:relative; }
+  .portrait.speaking { height:184px; box-shadow:0 0 30px rgba(255,219,165,.65); }
+  .caption { background:rgba(11,12,22,.72); border:1px solid rgba(255,255,255,.18); border-radius:16px; padding:12px; font-size:12px; line-height:1.5; backdrop-filter:blur(12px); }
+  .concept-copy { padding:17px; }
+  .concept-copy h3 { margin:0 0 7px; }
+  .concept-copy p { margin:0; color:var(--text-muted); font-size:14px; line-height:1.5; }
+  .tag { display:inline-block; margin-top:10px; padding:4px 8px; border-radius:999px; background:var(--accent-soft); color:var(--accent); font-size:12px; }
+  @media(max-width:900px){.concept-grid{grid-template-columns:1fr}.phone{min-height:360px}}
+</style>
+
+<h2>AI 群聊可以长成哪种“沉浸形态”？</h2>
+<p class="subtitle">先选主体验方向；具体功能可以混搭。点击最吸引你的一个，也可以在聊天里说想组合哪些部分。</p>
+
+<div class="concept-grid">
+  <div class="concept" data-choice="a" onclick="toggleSelect(this)">
+    <div class="phone a">
+      <div class="top"><span>脑暴小分队</span><span>☾  ···</span></div>
+      <div class="avatars"><div class="avatar talk">🧠<span class="dot">✨</span></div><div class="avatar">🎨<span class="dot">😊</span></div><div class="avatar">🦊<span class="dot">☕</span></div></div>
+      <div class="bubble">我把刚才三个想法整理成了一张任务卡。</div>
+      <div class="bubble me">先别工作，聊聊哪个更有趣 😄</div>
+      <div class="bubble">那我投“会随剧情变化的背景”一票。</div>
+      <div style="position:absolute;left:18px;right:18px;bottom:18px;padding:12px;border-radius:18px;background:rgba(255,255,255,.1);font-size:12px">＋　发消息…　　　　　　　　　🎙️</div>
+    </div>
+    <div class="concept-copy"><h3>A · 活的聊天软件</h3><p>保留高效消息流，用动态头像、情绪、语音片段和轻背景增强生命感。</p><span class="tag">实用与沉浸最均衡</span></div>
+  </div>
+
+  <div class="concept" data-choice="b" onclick="toggleSelect(this)">
+    <div class="phone b">
+      <div class="top"><span>深夜语音房</span><span>3 人在线</span></div>
+      <div class="voice-stage">
+        <div class="avatar one talk">🧠</div><div class="avatar two">🎨</div><div class="avatar three">🦊</div>
+        <div class="mic">🎙️</div>
+      </div>
+      <div style="text-align:center;font-size:13px">诸葛小亮正在说话</div>
+      <div class="wave"><i></i><i></i><i></i><i></i><i></i><i></i><i></i></div>
+      <div style="display:flex;justify-content:space-around;margin-top:22px;font-size:24px"><span>🔇</span><span>✋</span><span>💬</span><span>☎️</span></div>
+    </div>
+    <div class="concept-copy"><h3>B · AI 语音房</h3><p>角色轮流开口、可打断、举手、私语；头像根据音量和情绪实时变化。</p><span class="tag">陪伴感最强</span></div>
+  </div>
+
+  <div class="concept" data-choice="c" onclick="toggleSelect(this)">
+    <div class="phone c">
+      <div class="top"><span>场景：雨夜咖啡馆</span><span>📷  🎵</span></div>
+      <div class="scene-people"><div class="portrait">🧠</div><div class="portrait speaking">🎨</div><div class="portrait">🦊</div></div>
+      <div class="caption"><b>小画家 · 若有所思</b><br>“窗外的雨声刚好。我们把这个故事继续写下去吧。”</div>
+      <div style="text-align:center;margin-top:11px;font-size:11px;opacity:.8">背景随时间、地点与剧情自动变化</div>
+    </div>
+    <div class="concept-copy"><h3>C · 沉浸式场景房</h3><p>动态立绘、情绪动作、环境音和剧情背景，把聊天变成轻量互动剧场。</p><span class="tag">最有视觉记忆点</span></div>
+  </div>
+</div>

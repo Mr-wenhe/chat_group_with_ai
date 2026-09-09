@@ -13,27 +13,34 @@ import 'package:archive/archive.dart' show GZipDecoder;
 
 /// 帧消息类型：全客户端 JSON 请求（TTS 事件帧 / ASR 启动帧）。
 const int volcMsgFullClient = 0x1;
+
 /// 帧消息类型：ASR 裸 PCM 音频帧。
 const int volcMsgAudioOnly = 0x2;
+
 /// 帧消息类型：ASR 服务端 JSON 结果帧。
 const int volcMsgJsonServer = 0x9;
+
 /// 帧消息类型：TTS 音频数据帧（服务端→客户端）。
 const int volcMsgAudioOnlyServer = 0xB;
+
 /// 帧消息类型：错误帧。
 const int volcMsgError = 0xF;
 
 /// 帧 flags：TTS event 帧携带。
 const int volcFlagEvent = 0x4;
+
 /// 帧 flags：ASR 末包（无序列）。
 const int volcFlagLast = 0x2;
 
 /// 帧序列化：JSON。
 const int volcSerJson = 0x1;
+
 /// 帧序列化：裸字节。
 const int volcSerRaw = 0x0;
 
 /// 帧压缩：无。
 const int volcCompNone = 0x0;
+
 /// 帧压缩：gzip（SAUC 服务端 JSON 帧可能压缩）。
 const int volcCompGzip = 0x1;
 
@@ -114,8 +121,7 @@ String _decodeText(Uint8List data, int start, int length) =>
     String.fromCharCodes(data.sublist(start, start + length));
 
 Uint8List _header(int msgType, int flags, int ser, int comp) =>
-    Uint8List.fromList(
-        [0x11, (msgType << 4) | flags, (ser << 4) | comp, 0x00]);
+    Uint8List.fromList([0x11, (msgType << 4) | flags, (ser << 4) | comp, 0x00]);
 
 Uint8List _makeU32(int value) =>
     Uint8List.sublistView(ByteData(4)..setUint32(0, value, Endian.big));
@@ -299,8 +305,7 @@ VolcFrame _finishParse(
   var payload = data.sublist(offset, offset + payloadSize);
   if (compression == volcCompGzip) {
     try {
-      payload =
-          Uint8List.fromList(const GZipDecoder().decodeBytes(payload));
+      payload = Uint8List.fromList(const GZipDecoder().decodeBytes(payload));
     } catch (e) {
       throw VolcFrameException('$what gzip 解压失败: $e');
     }
