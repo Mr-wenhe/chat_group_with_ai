@@ -9,6 +9,7 @@ import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
+import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -314,6 +315,42 @@ void main() {
     expect(stored.queuedUserRequests, <String>['请把结论改成表格', '再检查一次错误']);
     expect(runner.cancelledTaskIds, isEmpty);
     expect(runner.startedTaskIds, <String>['active']);
+  });
+
+  test('keeps attachment-only follow-ups paired with their message IDs',
+      () async {
+    final task = _task(id: 'attachment-fifo', conversationId: 'group-a');
+    await coordinator.submit(task);
+
+    await coordinator.enqueueFollowUp(
+      task.id,
+      WorkModePolicy.attachmentOnlyRequest,
+      attachmentMessageId: 'attachment-a',
+    );
+    await coordinator.enqueueFollowUp(
+      task.id,
+      WorkModePolicy.attachmentOnlyRequest,
+      attachmentMessageId: 'attachment-b',
+    );
+
+    final queued = jsonDecode(taskBox.get(task.id)!.executionStateJson)
+        as Map<String, dynamic>;
+    expect(
+        queued['queuedAttachmentMessageIds'], ['attachment-a', 'attachment-b']);
+
+    runner.complete(task.id);
+    await _waitForStartedCount(runner, 2);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.queuedUserRequests.length == 1,
+    );
+    final first = jsonDecode(taskBox.get(task.id)!.executionStateJson)
+        as Map<String, dynamic>;
+    expect(first['attachmentMessageId'], 'attachment-a');
+    expect(first['queuedAttachmentMessageIds'], ['attachment-b']);
+
+    runner.complete(task.id);
   });
 
   test('keeps three running follow-ups FIFO and starts the first on finish',
@@ -986,10 +1023,10 @@ void main() {
         _task(id: 'folder-denied-second', conversationId: 'folder-group');
     await guarded.submit(first);
     await guarded.submit(second);
-    await _waitForTaskState(taskBox, first.id,
-        (task) => task.status == AgentTaskStatus.paused);
-    await _waitForTaskState(taskBox, second.id,
-        (task) => task.status == AgentTaskStatus.paused);
+    await _waitForTaskState(
+        taskBox, first.id, (task) => task.status == AgentTaskStatus.paused);
+    await _waitForTaskState(
+        taskBox, second.id, (task) => task.status == AgentTaskStatus.paused);
 
     expect(taskBox.get(first.id)?.status, AgentTaskStatus.paused);
     expect(taskBox.get(second.id)?.status, AgentTaskStatus.paused);

@@ -1102,10 +1102,12 @@ WorkCommand _sleepingShellCommand(String workingDirectory, String pidPath) {
 
 Future<void> _waitForFile(File file) async {
   for (var attempt = 0; attempt < 100; attempt++) {
-    if (await file.exists()) return;
+    if (await file.exists() && (await file.readAsLines()).length >= 2) {
+      return;
+    }
     await Future<void>.delayed(const Duration(milliseconds: 10));
   }
-  fail('子进程未在期限内写入 PID 文件：${file.path}');
+  fail('父子进程未在期限内写入完整 PID 文件：${file.path}');
 }
 
 Future<void> _expectPidsGone(List<String> lines) async {

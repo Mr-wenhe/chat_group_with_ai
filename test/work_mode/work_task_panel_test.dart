@@ -367,6 +367,7 @@ void main() {
         });
       var approved = false;
       var rejected = false;
+      final modalVisibility = <bool>[];
 
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
@@ -381,6 +382,7 @@ void main() {
             onOpenConversation: (_) {},
             onCollapse: () {},
             onClose: () {},
+            onModalVisibilityChanged: modalVisibility.add,
           ),
         ),
       ));
@@ -392,12 +394,14 @@ void main() {
       expect(find.text('/workspace/report.md'), findsOneWidget);
       expect(find.text('需要更新周报并保留可撤销快照。'), findsOneWidget);
       expect(approved, isFalse);
+      expect(modalVisibility, <bool>[false]);
 
       await tester.tap(find.text('允许本次范围'));
       await tester.pumpAndSettle();
 
       expect(approved, isTrue);
       expect(rejected, isFalse);
+      expect(modalVisibility, <bool>[false, true]);
     });
 
     testWidgets('fails closed when a file approval plan cannot be read',

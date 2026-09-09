@@ -253,6 +253,32 @@ void main() {
     expect(result.data['content'], isNull);
   });
 
+  test('allows only the exact referenced chat attachment outside workspace',
+      () async {
+    final outside =
+        await Directory.systemTemp.createTemp('work-document-attachment-');
+    addTearDown(() async {
+      if (await outside.exists()) await outside.delete(recursive: true);
+    });
+    final imagePath = '${outside.path}/upload.png';
+    await File(imagePath).writeAsBytes([137, 80, 78, 71]);
+    final attachmentTool = WorkDocumentTool(
+      pathPolicy: pathPolicy,
+      modelCapability: capabilities.resolve(
+        provider: ApiProvider.qwen,
+        modelId: 'qwen-vl-max',
+      ),
+      attachmentPaths: {imagePath},
+    );
+
+    final result = await runTool(attachmentTool, imagePath, query: '分析上传图片');
+    expect(result.status, WorkToolResultStatus.success);
+    expect(result.data['content'], isA<List>());
+
+    final unlisted = await runTool(attachmentTool, '${outside.path}/other.png');
+    expect(unlisted.status, WorkToolResultStatus.pathRejected);
+  });
+
   test('blocks sensitive files until the exact read is approved', () async {
     final path = '${root.path}/.env';
     await File(path).writeAsString('TOKEN=must-not-leak');

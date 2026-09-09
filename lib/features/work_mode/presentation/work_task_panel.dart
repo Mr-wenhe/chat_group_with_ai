@@ -44,6 +44,7 @@ class WorkTaskPanel extends StatefulWidget {
   final ValueChanged<String> onOpenConversation;
   final VoidCallback onCollapse;
   final VoidCallback onClose;
+  final ValueChanged<bool>? onModalVisibilityChanged;
   final BuildContext? dialogContext;
   final String Function(String characterId)? characterNameFor;
   final DateTime Function() clock;
@@ -59,6 +60,7 @@ class WorkTaskPanel extends StatefulWidget {
     required this.onOpenConversation,
     required this.onCollapse,
     required this.onClose,
+    this.onModalVisibilityChanged,
     this.dialogContext,
     this.selectedTaskId,
     this.onApprove,
@@ -186,6 +188,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
                 undoPreviewFor: widget.undoPreviewFor,
                 onStop: widget.onStop,
                 onContinue: widget.onContinue,
+                onModalVisibilityChanged: widget.onModalVisibilityChanged,
                 dialogContext: widget.dialogContext,
                 runAction: (action) => _runAction(action, task.id),
               ),
@@ -432,6 +435,7 @@ class _TaskActions extends StatelessWidget {
   final WorkTaskUndoPreview? undoPreviewFor;
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
+  final ValueChanged<bool>? onModalVisibilityChanged;
   final BuildContext? dialogContext;
   final Future<void> Function(WorkTaskAction action) runAction;
 
@@ -452,6 +456,7 @@ class _TaskActions extends StatelessWidget {
     required this.undoPreviewFor,
     required this.onStop,
     required this.onContinue,
+    this.onModalVisibilityChanged,
     this.dialogContext,
     required this.runAction,
   });
@@ -631,9 +636,11 @@ class _TaskActions extends StatelessWidget {
       await runAction(approve);
       return;
     }
-    final decision = await WorkChangeApprovalDialog.show(
-      dialogContext ?? context,
-      plan: approvalPlan,
+    final decision = await _showTaskModal<WorkChangeApprovalDecision>(
+      () => WorkChangeApprovalDialog.show(
+        dialogContext ?? context,
+        plan: approvalPlan,
+      ),
     );
     if (decision == WorkChangeApprovalDecision.approved) {
       await runAction(approve);
@@ -655,9 +662,11 @@ class _TaskActions extends StatelessWidget {
       if (confirmed) await runAction(approveWithoutUndo);
       return;
     }
-    final decision = await WorkChangeApprovalDialog.show(
-      dialogContext ?? context,
-      plan: approvalPlan,
+    final decision = await _showTaskModal<WorkChangeApprovalDecision>(
+      () => WorkChangeApprovalDialog.show(
+        dialogContext ?? context,
+        plan: approvalPlan,
+      ),
     );
     if (decision == WorkChangeApprovalDecision.approvedWithoutUndo) {
       await runAction(approveWithoutUndo);
@@ -668,28 +677,30 @@ class _TaskActions extends StatelessWidget {
   }
 
   Future<bool> _confirmNoUndoMutation(BuildContext context) async {
-    final confirmed = await showDialog<bool>(
-      context: dialogContext ?? context,
-      barrierDismissible: true,
-      builder: (dialogContext) => AlertDialog(
-        key: const Key('work-task-no-undo-dialog'),
-        title: const Text('确认无撤销执行'),
-        content: Text(
-          '${_safePanelText(task.lastError)}\n\n'
-          '该应用内配置没有文件快照，执行后不能通过任务撤销恢复。是否继续？',
+    final confirmed = await _showTaskModal<bool>(
+      () => showDialog<bool>(
+        context: dialogContext ?? context,
+        barrierDismissible: true,
+        builder: (dialogContext) => AlertDialog(
+          key: const Key('work-task-no-undo-dialog'),
+          title: const Text('确认无撤销执行'),
+          content: Text(
+            '${_safePanelText(task.lastError)}\n\n'
+            '该应用内配置没有文件快照，执行后不能通过任务撤销恢复。是否继续？',
+          ),
+          actions: [
+            TextButton(
+              key: const Key('work-task-no-undo-cancel'),
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              key: const Key('work-task-no-undo-confirm'),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('确认执行'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            key: const Key('work-task-no-undo-cancel'),
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            key: const Key('work-task-no-undo-confirm'),
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('确认执行'),
-          ),
-        ],
       ),
     );
     return confirmed == true;
@@ -709,48 +720,51 @@ class _TaskActions extends StatelessWidget {
       }
     }
     if (!context.mounted) return;
-    final confirmed = await showDialog<bool>(
-      context: dialogContext ?? context,
-      barrierDismissible: true,
-      builder: (dialogContext) => AlertDialog(
-        key: const Key('work-task-undo-dialog'),
-        title: const Text('撤销本任务改动'),
-        content: ConstrainedBox(
-          constraints: const BoxConstraints(maxWidth: 520, maxHeight: 360),
-          child: previewFailed
-              ? const Text('无法读取任务快照，未执行撤销。请稍后重试。')
-              : items.isEmpty
-                  ? const Text('没有可撤销的已完成文件改动。')
-                  : SingleChildScrollView(
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        mainAxisSize: MainAxisSize.min,
-                        children: items
-                            .map(
-                              (item) => Padding(
-                                padding:
-                                    const EdgeInsets.symmetric(vertical: 4),
-                                child: Text(_safeUndoItemText(item.label)),
-                              ),
-                            )
-                            .toList(growable: false),
+    final confirmed = await _showTaskModal<bool>(
+      () => showDialog<bool>(
+        context: dialogContext ?? context,
+        barrierDismissible: true,
+        builder: (dialogContext) => AlertDialog(
+          key: const Key('work-task-undo-dialog'),
+          title: const Text('撤销本任务改动'),
+          content: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 520, maxHeight: 360),
+            child: previewFailed
+                ? const Text('无法读取任务快照，未执行撤销。请稍后重试。')
+                : items.isEmpty
+                    ? const Text('没有可撤销的已完成文件改动。')
+                    : SingleChildScrollView(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          mainAxisSize: MainAxisSize.min,
+                          children: items
+                              .map(
+                                (item) => Padding(
+                                  padding: const EdgeInsets.symmetric(
+                                    vertical: 4,
+                                  ),
+                                  child: Text(_safeUndoItemText(item.label)),
+                                ),
+                              )
+                              .toList(growable: false),
+                        ),
                       ),
-                    ),
+          ),
+          actions: [
+            TextButton(
+              key: const Key('work-task-undo-cancel'),
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              key: const Key('work-task-undo-confirm'),
+              onPressed: previewFailed
+                  ? null
+                  : () => Navigator.of(dialogContext).pop(true),
+              child: const Text('确认撤销'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            key: const Key('work-task-undo-cancel'),
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            key: const Key('work-task-undo-confirm'),
-            onPressed: previewFailed
-                ? null
-                : () => Navigator.of(dialogContext).pop(true),
-            child: const Text('确认撤销'),
-          ),
-        ],
       ),
     );
     if (confirmed == true) await runAction(onUndo!);
@@ -759,31 +773,45 @@ class _TaskActions extends StatelessWidget {
   Future<void> _confirmInstallTool(BuildContext context) async {
     final install = onInstallTool;
     if (install == null) return;
-    final confirmed = await showDialog<bool>(
-      context: dialogContext ?? context,
-      barrierDismissible: true,
-      builder: (dialogContext) => AlertDialog(
-        key: const Key('work-task-install-tool-dialog'),
-        title: const Text('安装缺失工具？'),
-        content: Text(
-          '${_safePanelText(task.lastError)}\n\n'
-          '仅执行应用识别的可信安装命令；不会加入永久授权。安装完成后将继续原任务。',
+    final confirmed = await _showTaskModal<bool>(
+      () => showDialog<bool>(
+        context: dialogContext ?? context,
+        barrierDismissible: true,
+        builder: (dialogContext) => AlertDialog(
+          key: const Key('work-task-install-tool-dialog'),
+          title: const Text('安装缺失工具？'),
+          content: Text(
+            '${_safePanelText(task.lastError)}\n\n'
+            '仅执行应用识别的可信安装命令；不会加入永久授权。安装完成后将继续原任务。',
+          ),
+          actions: [
+            TextButton(
+              key: const Key('work-task-install-tool-cancel'),
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('取消'),
+            ),
+            FilledButton(
+              key: const Key('work-task-install-tool-confirm'),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('确认安装'),
+            ),
+          ],
         ),
-        actions: [
-          TextButton(
-            key: const Key('work-task-install-tool-cancel'),
-            onPressed: () => Navigator.of(dialogContext).pop(false),
-            child: const Text('取消'),
-          ),
-          FilledButton(
-            key: const Key('work-task-install-tool-confirm'),
-            onPressed: () => Navigator.of(dialogContext).pop(true),
-            child: const Text('确认安装'),
-          ),
-        ],
       ),
     );
     if (confirmed == true) await runAction(install);
+  }
+
+  /// The app-scoped panel is painted above the route Navigator. Hide it while
+  /// any task modal is open so approval, cancellation, and undo controls stay
+  /// reachable in narrow windows as well as wide windows.
+  Future<T?> _showTaskModal<T>(Future<T?> Function() show) async {
+    onModalVisibilityChanged?.call(false);
+    try {
+      return await show();
+    } finally {
+      onModalVisibilityChanged?.call(true);
+    }
   }
 }
 

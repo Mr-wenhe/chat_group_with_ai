@@ -25,6 +25,10 @@ class WorkDocumentTool {
   final WorkspacePathPolicy pathPolicy;
   final String? workspaceRoot;
   final ModelCapability modelCapability;
+
+  /// Exact chat-attachment paths explicitly referenced by this task. These
+  /// are not workspace roots and never broaden access to arbitrary paths.
+  final Set<String> attachmentPaths;
   final DocumentTextReader? readText;
   final AsyncFileBytesReader? readBytes;
   final bool Function(String path)? isSensitivePath;
@@ -35,6 +39,7 @@ class WorkDocumentTool {
     required this.pathPolicy,
     this.workspaceRoot,
     required this.modelCapability,
+    this.attachmentPaths = const <String>{},
     this.readText,
     this.readBytes,
     this.isSensitivePath,
@@ -47,6 +52,7 @@ class WorkDocumentTool {
     required WorkspacePathPolicy pathPolicy,
     String? workspaceRoot,
     required ModelCapability modelCapability,
+    Iterable<String> attachmentPaths = const <String>[],
     DocumentTextReader? readText,
     AsyncFileBytesReader? readBytes,
     bool Function(String path)? isSensitivePath,
@@ -57,6 +63,7 @@ class WorkDocumentTool {
       pathPolicy: pathPolicy,
       workspaceRoot: workspaceRoot,
       modelCapability: modelCapability,
+      attachmentPaths: attachmentPaths.toSet(),
       readText: readText,
       readBytes: readBytes,
       isSensitivePath: isSensitivePath,
@@ -130,6 +137,8 @@ class WorkDocumentTool {
     try {
       // This is deliberately the first filesystem operation. The parser and
       // image builder receive only the canonical path after this gate passes.
+      final attachment = await _resolveExplicitAttachment(rawPath);
+      if (attachment != null) return (path: attachment, error: null);
       final resolved = await _cancellable(
         pathPolicy.resolveExisting(_effectivePath(rawPath)),
         invocation,
@@ -148,6 +157,65 @@ class WorkDocumentTool {
       );
     } on Object {
       return (path: null, error: _pathRejected(rawPath, '路径校验失败。'));
+    }
+  }
+
+  Future<WorkspaceResolvedPath?> _resolveExplicitAttachment(
+      String rawPath) async {
+    final normalized = WorkspacePathPolicy.normalizePath(
+      rawPath,
+      isWindows: pathPolicy.isWindows,
+    );
+    final allowed = attachmentPaths.any((path) {
+      try {
+        return WorkspacePathPolicy.normalizePath(
+              path,
+              isWindows: pathPolicy.isWindows,
+            ) ==
+            normalized;
+      } on Object {
+        return false;
+      }
+    });
+    if (!allowed) return null;
+    try {
+      final file = File(normalized);
+      final canonical = WorkspacePathPolicy.normalizePath(
+        await file.resolveSymbolicLinks(),
+        isWindows: pathPolicy.isWindows,
+      );
+      // The picker may return a platform alias such as /var -> /private/var.
+      // Compare canonical paths while keeping the original attachment path
+      // as the allow-list key; arbitrary unlisted paths still fail above.
+      var canonicalAllowed = false;
+      for (final path in attachmentPaths) {
+        try {
+          final candidate = WorkspacePathPolicy.normalizePath(
+            await File(path).resolveSymbolicLinks(),
+            isWindows: pathPolicy.isWindows,
+          );
+          if (candidate == canonical) {
+            canonicalAllowed = true;
+            break;
+          }
+        } on Object {
+          // Ignore stale attachment entries and keep checking the rest.
+        }
+      }
+      if (!canonicalAllowed) return null;
+      final stat = await file.stat();
+      if (stat.type != FileSystemEntityType.file) return null;
+      return WorkspaceResolvedPath(
+        requestedPath: rawPath,
+        path: canonical,
+        type: stat.type,
+        exists: true,
+        wasSymbolicLink: false,
+        nearestExistingParent: normalized,
+        authorizedRoot: normalized,
+      );
+    } on Object {
+      return null;
     }
   }
 

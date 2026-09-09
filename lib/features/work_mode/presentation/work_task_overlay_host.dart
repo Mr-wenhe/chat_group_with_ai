@@ -232,6 +232,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
                   (_snapshotService == null ? null : _undoPreview),
               onOpenConversation: _openConversation,
               characterNameFor: widget.characterNameFor ?? _characterName,
+              onModalVisibilityChanged: _setPanelModalVisibility,
               dialogContext: widget.navigatorKey?.currentContext,
               onCollapse: () => setState(() => _isCollapsed = true),
               onClose: () => setState(() => _isVisible = false),
@@ -463,40 +464,55 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       }
       return;
     }
-    final selected = await showDialog<String>(
-      context: widget.navigatorKey?.currentContext ?? context,
-      builder: (dialogContext) => AlertDialog(
-        key: const Key('work-task-vision-model-dialog'),
-        title: const Text('选择视觉模型'),
-        content: SizedBox(
-          width: 420,
-          child: ListView.builder(
-            shrinkWrap: true,
-            itemCount: candidates.length,
-            itemBuilder: (context, index) {
-              final candidate = candidates[index];
-              return ListTile(
-                key: Key('work-task-vision-model-${candidate.character.id}'),
-                title: Text(candidate.character.name),
-                subtitle: Text(
-                  '${candidate.config.provider} / ${candidate.config.modelName}',
-                ),
-                onTap: () => Navigator.of(dialogContext).pop(
-                  candidate.character.id,
-                ),
-              );
-            },
+    // ponytail: the global task panel otherwise covers this Navigator modal;
+    // temporarily remove it so the model list and cancel action are usable.
+    final wasVisible = _isVisible;
+    final wasCollapsed = _isCollapsed;
+    if (wasVisible) setState(() => _isVisible = false);
+    String? selected;
+    try {
+      selected = await showDialog<String>(
+        context: widget.navigatorKey?.currentContext ?? context,
+        builder: (dialogContext) => AlertDialog(
+          key: const Key('work-task-vision-model-dialog'),
+          title: const Text('选择视觉模型'),
+          content: SizedBox(
+            width: 420,
+            child: ListView.builder(
+              shrinkWrap: true,
+              itemCount: candidates.length,
+              itemBuilder: (context, index) {
+                final candidate = candidates[index];
+                return ListTile(
+                  key: Key('work-task-vision-model-${candidate.character.id}'),
+                  title: Text(candidate.character.name),
+                  subtitle: Text(
+                    '${candidate.config.provider} / ${candidate.config.modelName}',
+                  ),
+                  onTap: () => Navigator.of(dialogContext).pop(
+                    candidate.character.id,
+                  ),
+                );
+              },
+            ),
           ),
+          actions: <Widget>[
+            TextButton(
+              key: const Key('work-task-vision-model-cancel'),
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('取消'),
+            ),
+          ],
         ),
-        actions: <Widget>[
-          TextButton(
-            key: const Key('work-task-vision-model-cancel'),
-            onPressed: () => Navigator.of(dialogContext).pop(),
-            child: const Text('取消'),
-          ),
-        ],
-      ),
-    );
+      );
+    } finally {
+      if (mounted && wasVisible) {
+        setState(() {
+          _isVisible = true;
+          _isCollapsed = wasCollapsed;
+        });
+      }
+    }
     if (selected == null || selected == task.characterId) return;
     await coordinator.selectVisionModel(taskId, selected);
   }
@@ -547,7 +563,30 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   Future<bool> _confirmFolderGrant(WorkFolderGrant grant) {
     if (!mounted) return Future.value(false);
     final navigatorContext = widget.navigatorKey?.currentContext ?? context;
-    return showWorkFolderGrantConsent(navigatorContext, grant);
+    // ponytail: the app-scoped panel sits above the route Navigator; hide it
+    // for the modal consent so its action buttons cannot be covered by the
+    // very panel that triggered the authorization request.
+    final wasVisible = _isVisible;
+    final wasCollapsed = _isCollapsed;
+    if (wasVisible) {
+      setState(() => _isVisible = false);
+    }
+    return showWorkFolderGrantConsent(navigatorContext, grant).whenComplete(() {
+      if (mounted && wasVisible) {
+        setState(() {
+          _isVisible = true;
+          _isCollapsed = wasCollapsed;
+        });
+      }
+    });
+  }
+
+  void _setPanelModalVisibility(bool visible) {
+    if (!mounted) return;
+    setState(() {
+      _isVisible = visible;
+      if (visible) _isCollapsed = false;
+    });
   }
 
   Future<void> _rejectTask(String taskId) {

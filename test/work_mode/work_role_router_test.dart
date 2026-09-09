@@ -192,6 +192,22 @@ void main() {
     );
   });
 
+  test('routes an attachment-only request with an internal routing label',
+      () async {
+    final result = await router.route(
+      request: '   ',
+      hasAttachments: true,
+      conversationId: 'group:image-only',
+      characters: characters,
+      skills: skills,
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.characterId, product.id);
+    expect(result.source, WorkRoleRouteSource.deterministicFallback);
+    expect(result.publicReason, contains('通用'));
+  });
+
   test('reports capability insufficiency instead of falling back silently',
       () async {
     final result = await router.route(

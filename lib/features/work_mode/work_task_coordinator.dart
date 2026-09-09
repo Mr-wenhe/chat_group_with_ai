@@ -300,7 +300,11 @@ class WorkTaskCoordinator {
   }
 
   /// Adds user input to the same durable task instead of replacing its run.
-  Future<void> enqueueFollowUp(String taskId, String request) {
+  Future<void> enqueueFollowUp(
+    String taskId,
+    String request, {
+    String? attachmentMessageId,
+  }) {
     return _serialize(() async {
       _ensureOpen();
       final normalized = request.trim();
@@ -326,12 +330,30 @@ class WorkTaskCoordinator {
       final answeringClarification = task.status == AgentTaskStatus.paused &&
           _isFollowUpClarification(task) &&
           task.queuedUserRequests.isNotEmpty;
+      final attachmentId = attachmentMessageId?.trim();
+      final queuedAttachmentIds = _queuedAttachmentMessageIds(
+        task.executionStateJson,
+        expectedLength: task.queuedUserRequests.length,
+      );
       task.queuedUserRequests = answeringClarification
           ? <String>[
               '${task.queuedUserRequests.first}\n用户明确目标：$normalized',
               ...task.queuedUserRequests.skip(1),
             ]
           : <String>[...task.queuedUserRequests, normalized];
+      if (answeringClarification) {
+        if (attachmentId != null && attachmentId.isNotEmpty) {
+          queuedAttachmentIds[0] = attachmentId;
+        }
+      } else {
+        queuedAttachmentIds.add(
+          attachmentId == null || attachmentId.isEmpty ? '' : attachmentId,
+        );
+      }
+      task.executionStateJson = _withQueuedAttachmentMessageIds(
+        task.executionStateJson,
+        queuedAttachmentIds,
+      );
       _refreshTaskContext(
         task,
         nextStep: '当前任务完成后处理第 ${task.queuedUserRequests.length} 条追问。',
@@ -2024,6 +2046,58 @@ class WorkTaskCoordinator {
     }
   }
 
+  List<String> _queuedAttachmentMessageIds(
+    String raw, {
+    required int expectedLength,
+  }) {
+    final value = _decodeExecutionMap(raw)['queuedAttachmentMessageIds'];
+    final ids = value is List
+        ? value
+            .map((item) => item is String ? item.trim() : '')
+            .toList(growable: true)
+        : <String>[];
+    if (ids.length > expectedLength) {
+      ids.removeRange(expectedLength, ids.length);
+    }
+    while (ids.length < expectedLength) {
+      ids.add('');
+    }
+    return ids;
+  }
+
+  String _withQueuedAttachmentMessageIds(
+    String raw,
+    List<String> ids,
+  ) {
+    final metadata = _decodeExecutionMap(raw);
+    final normalized = ids.map((id) => id.trim()).toList(growable: false);
+    if (normalized.any((id) => id.isNotEmpty)) {
+      metadata['queuedAttachmentMessageIds'] = normalized;
+    } else {
+      metadata.remove('queuedAttachmentMessageIds');
+    }
+    return metadata.isEmpty ? '' : jsonEncode(metadata);
+  }
+
+  void _persistAttachmentQueueMetadata(
+    AgentTask task,
+    List<String> queuedIds, {
+    required String? currentAttachmentId,
+  }) {
+    final metadata = _decodeExecutionMap(task.executionStateJson)
+      ..remove('attachmentMessageId')
+      ..remove('queuedAttachmentMessageIds');
+    final current = currentAttachmentId?.trim();
+    if (current != null && current.isNotEmpty) {
+      metadata['attachmentMessageId'] = current;
+    }
+    final normalized = queuedIds.map((id) => id.trim()).toList(growable: false);
+    if (normalized.any((id) => id.isNotEmpty)) {
+      metadata['queuedAttachmentMessageIds'] = normalized;
+    }
+    task.executionStateJson = metadata.isEmpty ? '' : jsonEncode(metadata);
+  }
+
   String _withFollowUpDecision(
     String raw,
     WorkFollowUpDecision decision,
@@ -2129,8 +2203,19 @@ class WorkTaskCoordinator {
       return;
     }
     final nextRequest = task.queuedUserRequests.first.trim();
+    final queuedAttachmentIds = _queuedAttachmentMessageIds(
+      task.executionStateJson,
+      expectedLength: task.queuedUserRequests.length,
+    );
+    final nextAttachmentId =
+        queuedAttachmentIds.isEmpty ? null : queuedAttachmentIds.first.trim();
     if (nextRequest.isEmpty) {
       task.queuedUserRequests = task.queuedUserRequests.skip(1).toList();
+      _persistAttachmentQueueMetadata(
+        task,
+        queuedAttachmentIds.skip(1).toList(),
+        currentAttachmentId: null,
+      );
       await _promoteQueuedFollowUp(task);
       return;
     }
@@ -2170,6 +2255,7 @@ class WorkTaskCoordinator {
       return;
     }
     task.queuedUserRequests = task.queuedUserRequests.skip(1).toList();
+    final remainingAttachmentIds = queuedAttachmentIds.skip(1).toList();
     // A follow-up is a new execution run under the same conversation/task
     // identity.  Do not reuse the previous run's in-memory lock plan: the
     // new request may target a different file, and a stale plan could either
@@ -2187,6 +2273,11 @@ class WorkTaskCoordinator {
       ..actionCount = resetRunBudget ? 0 : task.actionCount
       ..startedAt = resetRunBudget ? _clock() : task.startedAt
       ..updatedAt = _clock();
+    _persistAttachmentQueueMetadata(
+      task,
+      remainingAttachmentIds,
+      currentAttachmentId: nextAttachmentId,
+    );
     task.executionStateJson = _withFollowUpDecision(
       task.executionStateJson,
       decision,

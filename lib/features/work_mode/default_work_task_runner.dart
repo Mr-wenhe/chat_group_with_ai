@@ -402,16 +402,31 @@ class DefaultWorkTaskRunner
     // character's own permissions; a stale first-role list must never grant
     // the next role extra tools.
     final permissions = _permissionsForTask(task, character);
+    final attachmentPaths = _attachmentPathsForTask(task);
     WorkToolResult permission(ToolPermission required) =>
         permissions.contains(required)
             ? const WorkToolResult.success()
             : WorkToolResult.permissionDenied(
                 message: '角色未授予 ${required.name} 工具权限。',
               );
+    bool attachmentDocumentPermission(WorkToolInvocation invocation) {
+      if (permissions.contains(ToolPermission.workspaceRead)) return true;
+      final path = invocation.arguments['path'];
+      // ponytail: exact user attachments are the smallest safe exception;
+      // arbitrary workspace reads still require the explicit role capability.
+      return path is String &&
+          _isReferencedAttachmentPath(
+            path,
+            attachmentPaths,
+            isWindows: files.pathPolicy.isWindows,
+          );
+    }
+
     final documentDefinition = WorkDocumentTool.definition(
       pathPolicy: files.pathPolicy,
       workspaceRoot: workspaceRoot,
       modelCapability: modelCapability,
+      attachmentPaths: attachmentPaths,
       isSensitivePath: files.isSensitivePath,
       allowSensitivePath: (path) => _sensitiveReadAllowed(
         task,
@@ -578,8 +593,9 @@ class DefaultWorkTaskRunner
         access: documentDefinition.access,
         schema: documentDefinition.schema,
         handler: (invocation) async {
-          final denied = permission(ToolPermission.workspaceRead);
-          if (!denied.succeeded) return denied;
+          if (!attachmentDocumentPermission(invocation)) {
+            return permission(ToolPermission.workspaceRead);
+          }
           final result = await documentDefinition.handler(invocation);
           if (_approvalDecision(task.executionStateJson) ==
                   WorkChangeApprovalDecision.rejected &&
@@ -2036,17 +2052,100 @@ class DefaultWorkTaskRunner
   }
 
   Future<String> _requestWithAttachmentContext(AgentTask task) async {
-    final candidates = database.messageBox.values
-        .where((message) =>
-            message.groupId == task.groupId &&
-            message.senderType == 'user' &&
-            message.content.trim() == task.userRequest.trim())
-        .toList()
-      ..sort((left, right) => right.timestamp.compareTo(left.timestamp));
+    final sourceId = _attachmentMessageId(task.executionStateJson);
+    Message? source;
+    if (sourceId != null) {
+      final candidate = database.messageBox.get(sourceId);
+      if (candidate != null &&
+          candidate.groupId == task.groupId &&
+          candidate.senderType == 'user' &&
+          candidate.media?.isNotEmpty == true) {
+        source = candidate;
+      }
+    }
+    if (source == null) {
+      final candidates = database.messageBox.values
+          .where((message) =>
+              message.groupId == task.groupId &&
+              message.senderType == 'user' &&
+              message.content.trim() == task.userRequest.trim())
+          .toList()
+        ..sort((left, right) => right.timestamp.compareTo(left.timestamp));
+      source = candidates.isEmpty ? null : candidates.first;
+    }
+    if (source == null &&
+        task.userRequest.trim() == WorkModePolicy.attachmentOnlyRequest) {
+      // Attachment-only follow-ups use an internal label because the durable
+      // queue cannot store an empty request. Resolve that label to the newest
+      // user attachment without changing the original message content.
+      final messages = database.messageBox.values
+          .where((message) =>
+              message.groupId == task.groupId &&
+              message.senderType == 'user' &&
+              message.media?.isNotEmpty == true)
+          .toList()
+        ..sort((left, right) => right.timestamp.compareTo(left.timestamp));
+      source = messages.isEmpty ? null : messages.first;
+    }
     return AgentAttachmentContext.enhanceCurrentRequest(
       userRequest: task.userRequest,
-      media: candidates.isEmpty ? null : candidates.first.media,
+      media: source?.media,
     );
+  }
+
+  String? _attachmentMessageId(String rawExecutionState) {
+    try {
+      final decoded = jsonDecode(rawExecutionState);
+      final value = decoded is Map ? decoded['attachmentMessageId'] : null;
+      return value is String && value.trim().isNotEmpty ? value.trim() : null;
+    } on Object {
+      return null;
+    }
+  }
+
+  Set<String> _attachmentPathsForTask(AgentTask task) {
+    final metadata = _decodeMap(task.executionStateJson);
+    final ids = <String>{
+      if (metadata['attachmentMessageId'] is String)
+        metadata['attachmentMessageId'] as String,
+      if (metadata['queuedAttachmentMessageIds'] is List)
+        ...(metadata['queuedAttachmentMessageIds'] as List).whereType<String>(),
+    };
+    final paths = <String>{};
+    for (final id in ids) {
+      final message = database.messageBox.get(id.trim());
+      if (message?.groupId != task.groupId || message?.senderType != 'user') {
+        continue;
+      }
+      for (final attachment in message?.media ?? const []) {
+        final path = attachment.localPath.trim();
+        if (path.isNotEmpty) paths.add(path);
+      }
+    }
+    return paths;
+  }
+
+  bool _isReferencedAttachmentPath(
+    String rawPath,
+    Iterable<String> attachmentPaths, {
+    required bool isWindows,
+  }) {
+    try {
+      final normalized = WorkspacePathPolicy.normalizePath(
+        rawPath,
+        isWindows: isWindows,
+      );
+      return attachmentPaths.any(
+        (path) =>
+            WorkspacePathPolicy.normalizePath(
+              path,
+              isWindows: isWindows,
+            ) ==
+            normalized,
+      );
+    } on Object {
+      return false;
+    }
   }
 
   String _workModeContext(

@@ -5,6 +5,7 @@ import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 
 import 'work_handoff_state.dart';
+import 'work_mode_policy.dart';
 import 'work_task_error_sanitizer.dart';
 
 part 'work_role_router_models.dart';
@@ -18,6 +19,7 @@ class WorkRoleRouter {
 
   Future<WorkRoleRouteResult> route({
     required String request,
+    bool hasAttachments = false,
     required List<AICharacter> characters,
     String? conversationId,
     bool isDirectChat = false,
@@ -25,7 +27,12 @@ class WorkRoleRouter {
     WorkHandoffState? handoff,
     Iterable<CharacterSkill> skills = const [],
   }) async {
-    final normalizedRequest = request.trim();
+    final rawRequest = request.trim();
+    // ponytail: attachments are a complete work input even when the composer
+    // has no text; keep a small internal routing label instead of rejecting it.
+    final normalizedRequest = rawRequest.isEmpty && hasAttachments
+        ? WorkModePolicy.attachmentOnlyRequest
+        : rawRequest;
     final conversation = conversationId?.trim() ?? '';
     if (normalizedRequest.isEmpty) {
       return _failure(

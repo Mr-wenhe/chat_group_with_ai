@@ -70,6 +70,8 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       await _runWorkModeTask(
         text: text,
         mentionedIds: mentionedIds,
+        hasAttachments: hasAttachments,
+        attachmentMessageId: hasAttachments ? userMessage.id : null,
       );
       return;
     }
@@ -101,6 +103,9 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       await _runWorkModeTask(
         text: text,
         mentionedIds: mentionedIds,
+        hasAttachments: userMessage?.media?.isNotEmpty == true,
+        attachmentMessageId:
+            userMessage?.media?.isNotEmpty == true ? userMessage?.id : null,
       );
       return;
     }
@@ -148,11 +153,20 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
   Future<void> _runWorkModeTask({
     required String text,
     required List<String> mentionedIds,
+    bool hasAttachments = false,
+    String? attachmentMessageId,
   }) async {
     final coordinator = ref.read(workTaskCoordinatorProvider);
     final activeTask = _latestWorkTaskForConversation();
     if (activeTask != null) {
-      await coordinator.enqueueFollowUp(activeTask.id, text);
+      final followUpRequest = text.trim().isEmpty && hasAttachments
+          ? WorkModePolicy.attachmentOnlyRequest
+          : text;
+      await coordinator.enqueueFollowUp(
+        activeTask.id,
+        followUpRequest,
+        attachmentMessageId: hasAttachments ? attachmentMessageId : null,
+      );
       return;
     }
 
@@ -201,6 +215,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     final route =
         await WorkRoleRouter(modelSelector: routeSelector.select).route(
       request: text,
+      hasAttachments: hasAttachments,
       characters: routableCharacters,
       conversationId: widget.groupId,
       isDirectChat: _isDirectChat,
@@ -262,6 +277,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       enabled: _workModeEnabled,
       character: executor,
       userRequest: text,
+      hasAttachments: hasAttachments,
     )) {
       return;
     }
@@ -274,15 +290,26 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     if (requestedPermissions.isEmpty) {
       requestedPermissions.addAll(executor.toolPermissions);
     }
+    final taskRequest = text.trim().isEmpty && hasAttachments
+        ? WorkModePolicy.attachmentOnlyRequest
+        : text;
     final task = AgentTask(
       groupId: widget.groupId,
       characterId: executor.id,
-      userRequest: text,
+      // Keep the chat message's original empty text, but give the durable
+      // task a stable goal so checkpoints, skills and the execution panel do
+      // not lose an attachment-only request.
+      userRequest: taskRequest,
       requestedPermissions: requestedPermissions.toList(growable: false),
       assignedCharacterIds: stageRoleIds,
       plan: '角色路由：${route.reason}',
       workModeTask: true,
     );
+    if (attachmentMessageId != null && attachmentMessageId.trim().isNotEmpty) {
+      task.executionStateJson = jsonEncode({
+        'attachmentMessageId': attachmentMessageId.trim(),
+      });
+    }
     final handoff = route.handoffState;
     if (handoff != null) WorkHandoffState.persistToTask(task, handoff);
     await _appendMessage(Message(

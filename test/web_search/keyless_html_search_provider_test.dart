@@ -60,6 +60,37 @@ void main() {
       expect(response.failure?.retryable, isFalse);
     });
 
+    test('falls back to Bing HTML when DuckDuckGo returns a challenge',
+        () async {
+      late RequestOptions bingRequest;
+      final provider = KeylessHtmlSearchProvider(
+        dio: _fixtureDio(_fixture('challenge.html')),
+        bingDio: _fixtureDio(
+          '''
+          <html><body><ol id="b_results">
+            <li class="b_algo"><h2><a href="https://docs.flutter.dev/">Flutter docs</a></h2>
+              <div class="b_caption"><p>Official Flutter documentation.</p></div>
+            </li>
+          </ol></body></html>
+          ''',
+          onRequest: (options) => bingRequest = options,
+        ),
+        isRelease: false,
+      );
+
+      final result = await provider.search(
+        _request('Flutter official documentation'),
+        credential: null,
+      );
+
+      expect(bingRequest.uri.host, 'www.bing.com');
+      expect(bingRequest.uri.path, KeylessHtmlSearchProvider.bingSearchPath);
+      expect(result.failure, isNull);
+      expect(result.degraded, isTrue);
+      expect(result.sourceProvider, 'Bing HTML（无 Key）');
+      expect(result.items.single.url, Uri.parse('https://docs.flutter.dev/'));
+    });
+
     test('tolerates a small result markup change and decodes entities',
         () async {
       final response = await _provider('structure_changed.html').search(
@@ -112,6 +143,11 @@ void main() {
           statusCode: 429,
           responseHeaders: const {'retry-after': '30'},
         ),
+        bingDio: _fixtureDio(
+          _fixture('empty.html'),
+          statusCode: 429,
+          responseHeaders: const {'retry-after': '30'},
+        ),
         isRelease: false,
       ).search(_request('rate limited'), credential: null);
 
@@ -149,6 +185,7 @@ void main() {
     test('maps transport timeout to the shared failure contract', () async {
       final response = await KeylessHtmlSearchProvider(
         dio: _failureDio(DioExceptionType.receiveTimeout),
+        bingDio: _failureDio(DioExceptionType.receiveTimeout),
         isRelease: false,
       ).search(_request('timeout'), credential: null);
 
@@ -160,6 +197,7 @@ void main() {
     test('maps connection timeout to the shared failure contract', () async {
       final response = await KeylessHtmlSearchProvider(
         dio: _failureDio(DioExceptionType.connectionTimeout),
+        bingDio: _failureDio(DioExceptionType.connectionTimeout),
         isRelease: false,
       ).search(_request('connection timeout'), credential: null);
 
@@ -387,6 +425,7 @@ void main() {
 KeylessHtmlSearchProvider _provider(String fixture) =>
     KeylessHtmlSearchProvider(
       dio: _fixtureDio(_fixture(fixture)),
+      bingDio: _fixtureDio(_fixture(fixture)),
       isRelease: false,
     );
 

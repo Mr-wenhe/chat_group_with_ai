@@ -23,6 +23,8 @@ import 'search_provider_http_support.dart';
 class KeylessHtmlSearchProvider implements SearchProvider {
   static const String endpoint = 'https://html.duckduckgo.com/html/';
   static const String searchPath = '/html/';
+  static const String bingEndpoint = 'https://www.bing.com/search';
+  static const String bingSearchPath = '/search';
   static const String userAgent = 'chat_group/1.1.0 (keyless-search)';
   static const Duration connectTimeout = searchProviderConnectTimeout;
   static const Duration receiveTimeout = searchProviderReceiveTimeout;
@@ -32,9 +34,20 @@ class KeylessHtmlSearchProvider implements SearchProvider {
 
   KeylessHtmlSearchProvider({
     Dio? dio,
+    Dio? bingDio,
     Uuid? uuid,
     bool? isRelease,
   })  : _dio = configureSearchProviderDio(dio ??
+            Dio(
+              BaseOptions(
+                connectTimeout: connectTimeout,
+                sendTimeout: connectTimeout,
+                receiveTimeout: receiveTimeout,
+                followRedirects: false,
+                maxRedirects: 0,
+              ),
+            )),
+        _bingDio = configureSearchProviderDio(bingDio ??
             Dio(
               BaseOptions(
                 connectTimeout: connectTimeout,
@@ -48,6 +61,7 @@ class KeylessHtmlSearchProvider implements SearchProvider {
         _isRelease = isRelease ?? kReleaseMode;
 
   final Dio _dio;
+  final Dio _bingDio;
   final Uuid _uuid;
   final bool _isRelease;
   static final Uri _endpoint = Uri.parse(endpoint);
@@ -65,14 +79,57 @@ class KeylessHtmlSearchProvider implements SearchProvider {
     final query = request.query.trim();
     if (query.isEmpty) return _noResults();
 
+    final primary = await _searchEndpoint(
+      dio: _dio,
+      endpoint: _endpoint,
+      request: request,
+      query: query,
+      cancelToken: cancelToken,
+    );
+    if (primary.failure == null || cancelToken?.isCancelled == true) {
+      return primary;
+    }
+
+    // ponytail: one public HTML fallback covers regional/challenge responses;
+    // a dedicated Dio keeps release DNS pinning scoped to one origin.
+    final bing = await _searchEndpoint(
+      dio: _bingDio,
+      endpoint: Uri.parse(bingEndpoint),
+      request: request,
+      query: query,
+      cancelToken: cancelToken,
+      isBing: true,
+    );
+    if (bing.items.isNotEmpty) {
+      return SearchProviderResponse(
+        items: bing.items,
+        providerRequestId: bing.providerRequestId,
+        sourceProvider: 'Bing HTML（无 Key）',
+        correctedQuery: bing.correctedQuery,
+        moreResultsAvailable: bing.moreResultsAvailable,
+        degraded: true,
+        statusCode: bing.statusCode,
+      );
+    }
+    return bing;
+  }
+
+  Future<SearchProviderResponse> _searchEndpoint({
+    required Dio dio,
+    required Uri endpoint,
+    required SearchRequest request,
+    required String query,
+    required CancelToken? cancelToken,
+    bool isBing = false,
+  }) async {
     try {
       await prepareSearchEndpointConnection(
-        _dio,
-        _endpoint,
+        dio,
+        endpoint,
         isRelease: _isRelease,
       );
-      final response = await _dio.getUri<dynamic>(
-        _endpoint.replace(queryParameters: {'q': query}),
+      final response = await dio.getUri<dynamic>(
+        endpoint.replace(queryParameters: {'q': query}),
         options: Options(
           responseType: ResponseType.plain,
           followRedirects: false,
@@ -88,7 +145,7 @@ class KeylessHtmlSearchProvider implements SearchProvider {
         ),
         cancelToken: cancelToken,
       );
-      return _parseResponse(request, response);
+      return _parseResponse(request, response, isBing: isBing);
     } on DioException catch (error) {
       return _dioFailure(error);
     } on SearchEndpointDnsException catch (error) {
@@ -130,8 +187,9 @@ class KeylessHtmlSearchProvider implements SearchProvider {
 
   SearchProviderResponse _parseResponse(
     SearchRequest request,
-    Response<dynamic> response,
-  ) {
+    Response<dynamic> response, {
+    bool isBing = false,
+  }) {
     final requestId = providerRequestId(response: response);
     final statusCode = response.statusCode;
     if (statusCode == null || statusCode < 200 || statusCode >= 300) {
@@ -159,7 +217,7 @@ class KeylessHtmlSearchProvider implements SearchProvider {
       );
     }
 
-    final items = _itemsFrom(document, request.maxResults);
+    final items = _itemsFrom(document, request.maxResults, isBing: isBing);
     if (items.isEmpty) {
       return SearchProviderResponse(
         items: const [],
@@ -175,14 +233,20 @@ class KeylessHtmlSearchProvider implements SearchProvider {
     return SearchProviderResponse(
       items: items,
       providerRequestId: requestId,
-      moreResultsAvailable: _hasMoreResults(document, request.maxResults),
+      moreResultsAvailable:
+          _hasMoreResults(document, request.maxResults, isBing: isBing),
+      sourceProvider: isBing ? 'Bing HTML（无 Key）' : null,
       statusCode: statusCode,
     );
   }
 
-  List<SearchProviderItem> _itemsFrom(Document document, int requestedMax) {
+  List<SearchProviderItem> _itemsFrom(
+    Document document,
+    int requestedMax, {
+    required bool isBing,
+  }) {
     final maxResults = boundedSearchProviderMaxResults(requestedMax);
-    final nodes = _resultNodes(document);
+    final nodes = _resultNodes(document, isBing: isBing);
     final items = <SearchProviderItem>[];
     final seenUrls = <String>{};
     for (var index = 0;
@@ -190,11 +254,11 @@ class KeylessHtmlSearchProvider implements SearchProvider {
         index++) {
       if (items.length >= maxResults) break;
       final node = nodes[index];
-      final titleLink = _titleLink(node);
+      final titleLink = _titleLink(node, isBing: isBing);
       final url = _resolveResultUrl(titleLink?.attributes['href']);
       if (url == null || !seenUrls.add(canonicalProviderUrl(url))) continue;
       final title = _cleanText(titleLink?.text ?? '');
-      final snippet = _cleanText(_snippet(node)?.text ?? '');
+      final snippet = _cleanText(_snippet(node, isBing: isBing)?.text ?? '');
       if (title.isEmpty && snippet.isEmpty) continue;
       items.add(
         SearchProviderItem(
@@ -207,7 +271,10 @@ class KeylessHtmlSearchProvider implements SearchProvider {
     return items;
   }
 
-  List<Element> _resultNodes(Document document) {
+  List<Element> _resultNodes(Document document, {required bool isBing}) {
+    if (isBing) {
+      return document.querySelectorAll('li.b_algo');
+    }
     final known = document.querySelectorAll('.result');
     if (known.isNotEmpty) return known;
     final dataTestResults = document.querySelectorAll('[data-testid="result"]');
@@ -238,19 +305,25 @@ class KeylessHtmlSearchProvider implements SearchProvider {
     return null;
   }
 
-  Element? _titleLink(Element node) =>
-      node.querySelector('a.result__a') ??
-      node.querySelector('a[data-testid="result-title-a"]') ??
-      node.querySelector('h2 a');
+  Element? _titleLink(Element node, {required bool isBing}) => isBing
+      ? node.querySelector('h2 a')
+      : node.querySelector('a.result__a') ??
+          node.querySelector('a[data-testid="result-title-a"]') ??
+          node.querySelector('h2 a');
 
-  Element? _snippet(Element node) =>
-      node.querySelector('.result__snippet') ??
-      node.querySelector('[data-testid="result-snippet"]') ??
-      node.querySelector('p');
+  Element? _snippet(Element node, {required bool isBing}) => isBing
+      ? node.querySelector('.b_caption p') ?? node.querySelector('p')
+      : node.querySelector('.result__snippet') ??
+          node.querySelector('[data-testid="result-snippet"]') ??
+          node.querySelector('p');
 
-  bool _hasMoreResults(Document document, int requestedMax) {
+  bool _hasMoreResults(
+    Document document,
+    int requestedMax, {
+    required bool isBing,
+  }) {
     final maxResults = boundedSearchProviderMaxResults(requestedMax);
-    return _resultNodes(document).length > maxResults;
+    return _resultNodes(document, isBing: isBing).length > maxResults;
   }
 
   bool _isChallengePage(Document document) {

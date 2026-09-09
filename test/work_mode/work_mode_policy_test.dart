@@ -34,6 +34,15 @@ void main() {
         ),
         isFalse,
       );
+      expect(
+        WorkModePolicy.shouldRun(
+          enabled: true,
+          character: character,
+          userRequest: '   ',
+          hasAttachments: true,
+        ),
+        isTrue,
+      );
     });
 
     test('does not run for a character without agentic capability', () {

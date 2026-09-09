@@ -135,4 +135,78 @@ post_install do |installer|
     end
     File.write(source_path, source)
   end
+
+  # ponytail: keep the adapter's foreground request compatible with the
+  # pinned macOS plugin, whose Dart API exposes this method but whose native
+  # switch was missing it in 0.3.0. A missing method used to close the window
+  # immediately and turn a valid login/CAPTCHA handoff into a false failure.
+  plugin_sources = Dir[
+    File.expand_path(
+      'Flutter/ephemeral/.symlinks/plugins/desktop_webview_window/macos/**/DesktopWebviewWindowPlugin.swift',
+      __dir__,
+    ),
+  ]
+  controller_sources = Dir[
+    File.expand_path(
+      'Flutter/ephemeral/.symlinks/plugins/desktop_webview_window/macos/**/WebviewWindowController.swift',
+      __dir__,
+    ),
+  ]
+  if plugin_sources.empty? || controller_sources.empty?
+    raise 'desktop_webview_window foreground source not found'
+  end
+
+  foreground_case = [
+    '    case "bringToForeground":',
+    '      guard let argument = call.arguments as? [String: Any?] else {',
+    '        result(FlutterError(code: "0", message: "arg is not map", details: nil))',
+    '        return',
+    '      }',
+    '      guard let viewId = argument["viewId"] as? Int64 else {',
+    '        result(FlutterError(code: "0", message: "param viewId not found", details: nil))',
+    '        return',
+    '      }',
+    '      guard let wc = webviews[viewId] else {',
+    '        result(FlutterError(code: "0", message: "can not find webview for id: \\(viewId)", details: nil))',
+    '        return',
+    '      }',
+    '      wc.bringToForeground(maximized: argument["maximized"] as? Bool ?? false)',
+    '      result(nil)',
+    '      break',
+  ].join("\n") + "\n"
+  plugin_sources.each do |source_path|
+    source = File.read(source_path)
+    unless source.include?('case "bringToForeground":')
+      marker = '    case "stop":'
+      unless source.include?(marker)
+        raise "desktop_webview_window foreground switch marker was not found: #{source_path}"
+      end
+      source = source.sub(marker, "#{foreground_case}#{marker}")
+      File.write(source_path, source)
+    end
+  end
+
+  foreground_method = [
+    '',
+    '  func bringToForeground(maximized: Bool) {',
+    '    guard let window = window else { return }',
+    '    if maximized && !window.isZoomed {',
+    '      window.zoom(nil)',
+    '    }',
+    '    NSApp.activate(ignoringOtherApps: true)',
+    '    window.makeKeyAndOrderFront(nil)',
+    '    window.orderFrontRegardless()',
+    '  }',
+  ].join("\n") + "\n"
+  controller_sources.each do |source_path|
+    source = File.read(source_path)
+    unless source.include?('func bringToForeground(maximized: Bool)')
+      marker = '  func setAppearance(brightness: Int) {'
+      unless source.include?(marker)
+        raise "desktop_webview_window foreground method marker was not found: #{source_path}"
+      end
+      source = source.sub(marker, "#{foreground_method}#{marker}")
+      File.write(source_path, source)
+    end
+  end
 end

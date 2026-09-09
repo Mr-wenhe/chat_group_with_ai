@@ -7,12 +7,23 @@ import 'package:chat_group/features/agentic/tool_request.dart';
 class WorkModePolicy {
   const WorkModePolicy._();
 
+  /// Durable label used when a user sends an attachment without text.
+  ///
+  /// The label is internal routing context; the original message remains the
+  /// source of truth for the attachment payload.
+  static const String attachmentOnlyRequest = '请分析刚刚发送的附件。';
+
   static bool shouldRun({
     required bool enabled,
     required AICharacter character,
     required String userRequest,
-  }) =>
-      enabled && character.agenticEnabled && userRequest.trim().isNotEmpty;
+    bool hasAttachments = false,
+  }) {
+    // ponytail: an attachment-only request is actionable even without text.
+    return enabled &&
+        character.agenticEnabled &&
+        (userRequest.trim().isNotEmpty || hasAttachments);
+  }
 
   /// Deterministic group ownership: an explicitly mentioned capable member
   /// wins; otherwise the first active capable member owns the work item.
