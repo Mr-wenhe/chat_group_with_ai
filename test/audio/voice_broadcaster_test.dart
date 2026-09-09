@@ -177,13 +177,14 @@ void main() {
 
     broadcaster.speak(text: '第一句。', speaker: 'v1');
     broadcaster.speak(text: '第二句。', speaker: 'v1');
-    await _flushMicrotasks();
-
     // 首句仍被播放器 gate 挡住，但第二句已在第一句播放期间完成合成——
     // 这样第一句结束即可立即开播第二句，无需再等一段网络合成往返。
+    await _waitFor(
+      () => sink.played.length == 1 && synth.calls.length == 2,
+      reason: '播放第一句期间应已开始合成第二句',
+    );
     expect(sink.played, hasLength(1));
-    expect(synth.calls, hasLength(2),
-        reason: '播放第一句期间应已开始合成第二句');
+    expect(synth.calls, hasLength(2), reason: '播放第一句期间应已开始合成第二句');
     expect(synth.calls.map((c) => c.$1), ['第一句。', '第二句。']);
 
     sink.releaseAll();
@@ -204,10 +205,16 @@ void main() {
     );
 
     broadcaster.speak(text: '甲。', speaker: 'v1');
-    await _flushMicrotasks();
+    await _waitFor(
+      () => sink.played.length == 1,
+      reason: '甲应已进入播放状态',
+    );
     // 甲 正在播放（gate 未放行），此刻入队乙：乙立即开始预合成，但不抢先播放。
     broadcaster.speak(text: '乙。', speaker: 'v1');
-    await _flushMicrotasks();
+    await _waitFor(
+      () => sink.played.length == 1 && synth.calls.length == 2,
+      reason: '甲播放期间乙应已被预合成',
+    );
     expect(synth.calls, hasLength(2), reason: '甲播放期间乙已被预合成');
     expect(sink.played, hasLength(1), reason: '乙只合成、未播放，保持顺序');
 
@@ -229,15 +236,17 @@ void main() {
 
     broadcaster.speak(text: '甲。', speaker: 'v1');
     broadcaster.speak(text: '乙。', speaker: 'v1');
-    await _flushMicrotasks();
     // 乙虽已被预合成（在途合成与甲的播放重叠），但还未轮到播放。
+    await _waitFor(
+      () => sink.played.length == 1 && synth.calls.length == 2,
+      reason: '乙在甲播放期间应已被预合成',
+    );
     expect(synth.calls, hasLength(2), reason: '乙在甲播放期间已被预合成');
 
     await broadcaster.stop(); // 丢弃乙、打断甲
 
     expect(synth.calls, hasLength(2), reason: '乙确实被预合成了');
-    expect(sink.played, hasLength(1),
-        reason: '乙仅被合成、未播放，stop 丢弃了未轮到播放的音频');
+    expect(sink.played, hasLength(1), reason: '乙仅被合成、未播放，stop 丢弃了未轮到播放的音频');
     // 被打断后队列已空，idle 可正常完成。
     await settle(broadcaster);
   });
@@ -261,3 +270,16 @@ void main() {
 }
 
 Future<void> _flushMicrotasks() => Future<void>.delayed(Duration.zero);
+
+Future<void> _waitFor(
+  bool Function() condition, {
+  required String reason,
+  Duration timeout = const Duration(seconds: 5),
+}) async {
+  final stopwatch = Stopwatch()..start();
+  while (stopwatch.elapsed < timeout) {
+    if (condition()) return;
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+  fail('Timed out waiting for $reason');
+}
