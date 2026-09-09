@@ -215,6 +215,13 @@ void main() {
           onRequest: (options) => requestOptions = options,
           responseHeaders: const {'location': 'https://example.com/next'},
         ),
+        // Keep the fallback inside the fixture boundary. Otherwise a failed
+        // primary response can make this unit test depend on CI network state.
+        bingDio: _fixtureDio(
+          _fixture('success.html'),
+          statusCode: 302,
+          responseHeaders: const {'location': 'https://example.com/next'},
+        ),
         isRelease: false,
       ).search(_request('redirect'), credential: null);
 
@@ -232,6 +239,9 @@ void main() {
       ).join()}</body></html>';
       final response = await KeylessHtmlSearchProvider(
         dio: _fixtureDio(oversized),
+        // The provider intentionally tries the Bing fallback after a primary
+        // failure; keep that second request deterministic and offline.
+        bingDio: _fixtureDio(oversized),
         isRelease: false,
       ).search(_request('oversized'), credential: null);
 

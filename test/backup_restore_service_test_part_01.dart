@@ -52,6 +52,51 @@ List<int> _u32le(int value) => [
       (value >> 24) & 0xff,
     ];
 
+/// Flips an entry byte without updating its ZIP headers. Re-encoding an
+/// [Archive] recalculates CRC values on some platforms, which would turn the
+/// intended corrupt fixture back into a valid archive on the CI runner.
+Future<void> _corruptZipEntryData(
+  File target, {
+  required String entryName,
+}) async {
+  final bytes = await target.readAsBytes();
+  const localHeaderSignature = 0x04034b50;
+  for (var offset = 0; offset + 30 <= bytes.length; offset++) {
+    if (_readU32le(bytes, offset) != localHeaderSignature) continue;
+
+    final nameLength = _readU16le(bytes, offset + 26);
+    final extraLength = _readU16le(bytes, offset + 28);
+    final nameStart = offset + 30;
+    final dataStart = nameStart + nameLength + extraLength;
+    if (dataStart > bytes.length || nameStart + nameLength > bytes.length) {
+      continue;
+    }
+    final name = utf8.decode(
+      bytes.sublist(nameStart, nameStart + nameLength),
+      allowMalformed: true,
+    );
+    if (name != entryName) continue;
+
+    final compressedSize = _readU32le(bytes, offset + 18);
+    if (compressedSize <= 0 || dataStart + compressedSize > bytes.length) {
+      throw StateError('ZIP entry has no mutable data: $entryName');
+    }
+    bytes[dataStart] ^= 0xff;
+    await target.writeAsBytes(bytes);
+    return;
+  }
+  throw StateError('ZIP entry not found: $entryName');
+}
+
+int _readU16le(Uint8List bytes, int offset) =>
+    bytes[offset] | (bytes[offset + 1] << 8);
+
+int _readU32le(Uint8List bytes, int offset) =>
+    bytes[offset] |
+    (bytes[offset + 1] << 8) |
+    (bytes[offset + 2] << 16) |
+    (bytes[offset + 3] << 24);
+
 void _registerBackupRestoreServiceTestPart1() {
   test('validates record arrays incrementally across input chunks', () async {
     final payload = List.filled(100000, 'x').join();
@@ -400,11 +445,9 @@ void _registerBackupRestoreServiceTestPart1() {
     await _seedCoreData(db, attachment);
     final valid = File('${testRoot.path}/valid.cgbak');
     await service.createBackup(destination: valid);
-    final decoded = ZipDecoder().decodeBytes(await valid.readAsBytes());
-    final groups = decoded.findFile('data/groups.json')!;
-    groups.content[0] ^= 0xff;
     final corrupt = File('${testRoot.path}/corrupt.cgbak');
-    await corrupt.writeAsBytes(ZipEncoder().encodeBytes(decoded));
+    await valid.copy(corrupt.path);
+    await _corruptZipEntryData(corrupt, entryName: 'data/groups.json');
 
     await expectLater(
         service.inspect(corrupt), throwsA(isA<BackupException>()));
