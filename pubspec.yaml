@@ -2,7 +2,7 @@ name: chat_group
 description: "AI群聊模拟器 - 创建AI角色群聊，观察AI自动互动"
 publish_to: 'none'
 
-version: 1.1.0+1
+version: 2.1.0+225
 
 environment:
   # 兼容本地与 CI 使用的 Flutter 3.27.1 stable（Dart 3.6.0）。
