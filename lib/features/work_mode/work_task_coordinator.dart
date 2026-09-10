@@ -19,6 +19,7 @@ import 'work_context_builder.dart';
 import 'work_follow_up_policy.dart';
 import 'work_handoff_state.dart';
 import 'work_failure.dart';
+import 'work_mode_directory_service.dart';
 import 'work_tool_registry.dart';
 
 typedef WorkTaskSnapshotStatusUpdater = Future<void> Function(
@@ -2499,7 +2500,9 @@ class WorkTaskCoordinator {
     } on Object {
       // Malformed execution metadata cannot safely identify a requested path.
     }
-    return null;
+    return const WorkModeDirectoryService().requestedDesktopPath(
+      task.userRequest,
+    );
   }
 
   bool _requiresWritableFolder(AgentTask task) {

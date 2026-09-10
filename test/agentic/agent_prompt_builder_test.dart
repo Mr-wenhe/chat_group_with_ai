@@ -51,7 +51,7 @@ void main() {
   });
 
   test(
-      'Stage 03 prompt explains the user-home command working directory default',
+      'Stage 03 prompt explains the authorized command working directory default',
       () {
     final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
       rolePlaySystemPrompt: '你是工作助手。',
@@ -61,7 +61,7 @@ void main() {
 
     expect(prompt, contains('command.run'));
     expect(prompt, contains('workingDirectory'));
-    expect(prompt, contains('~/.chat_group'));
+    expect(prompt, contains('当前授权工作区根目录'));
     expect(prompt, isNot(contains('默认使用 "."')));
     expect(prompt, contains('declaredImpact'));
   });

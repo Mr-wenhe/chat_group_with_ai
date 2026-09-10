@@ -53,7 +53,9 @@ class WorkTaskEventStore {
   static final RegExp _urlPattern =
       RegExp(r'https?://[^\s,;）)]+', caseSensitive: false);
   static final RegExp _localPathPattern = RegExp(
-    r'(?:(?:[A-Za-z]:[\\/])|(?:\\\\|//)|/)[^\s,;）)]+',
+    // Require a path-like first segment and a token boundary. A bare slash
+    // in progress values such as `0/1` is not a local path.
+    r'(?:(?<![\w/])(?:[A-Za-z]:[\\/]|\\\\|//|/(?:[A-Za-z_~][A-Za-z0-9._~-]*))[^\s,;）)]+)',
   );
 
   final Directory appSupportDirectory;

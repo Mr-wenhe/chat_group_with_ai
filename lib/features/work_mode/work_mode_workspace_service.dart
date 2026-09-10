@@ -22,6 +22,7 @@ class WorkModeWorkspaceService {
     required String conversationId,
     required bool isDirectChat,
     bool requireWritable = false,
+    String? preferredRootPath,
   }) async {
     final existing = db.workModeWorkspaceBox.get(conversationId);
     final folder = directories.conversationFolderName(
@@ -30,12 +31,17 @@ class WorkModeWorkspaceService {
     );
     final path = kIsWeb
         ? 'browser://agentic_output/conversations/$folder'
-        : await _resolveWorkspacePath(
-            existing: existing,
-            conversationId: conversationId,
-            isDirectChat: isDirectChat,
-            requireWritable: requireWritable,
-          );
+        : preferredRootPath?.trim().isNotEmpty == true
+            ? await _resolvePreferredRoot(
+                preferredRootPath!.trim(),
+                requireWritable: requireWritable,
+              )
+            : await _resolveWorkspacePath(
+                existing: existing,
+                conversationId: conversationId,
+                isDirectChat: isDirectChat,
+                requireWritable: requireWritable,
+              );
     final conversationType = isDirectChat ? 'direct' : 'group';
     if (existing != null &&
         existing.workDirPath == path &&
@@ -53,6 +59,42 @@ class WorkModeWorkspaceService {
       ..updatedAt = DateTime.now();
     await db.workModeWorkspaceBox.put(conversationId, workspace);
     return workspace;
+  }
+
+  Future<String> _resolvePreferredRoot(
+    String rawPath, {
+    required bool requireWritable,
+  }) async {
+    final grants = grantService;
+    final isWindows = grants?.isWindows ?? Platform.isWindows;
+    final path = WorkFolderGrantService.normalizePath(
+      rawPath,
+      isWindows: isWindows,
+    );
+    if (grants != null) {
+      await grants.load();
+      final authorized = requireWritable
+          ? await grants.isPathWritableResolved(path)
+          : await grants.isPathAuthorizedResolved(path);
+      if (!authorized) {
+        throw WorkspacePathException(
+          WorkspacePathErrorKind.notAuthorized,
+          requireWritable ? '桌面目录未获得可写授权。' : '桌面目录未获得授权。',
+          path: path,
+        );
+      }
+    } else if (!WorkspacePathPolicy.isWithinRoot(
+        (await db.aiProcessingDir).path, path,
+        isWindows: isWindows)) {
+      throw WorkspacePathException(
+        WorkspacePathErrorKind.notAuthorized,
+        '目标目录不在工作模式授权范围内。',
+        path: path,
+      );
+    }
+    final directory = Directory(path);
+    if (!await directory.exists()) await directory.create(recursive: true);
+    return directory.absolute.path;
   }
 
   /// Rebinds a conversation to the directory explicitly selected during

@@ -177,6 +177,26 @@ void main() {
     expect(persisted, contains('[REDACTED]'));
   });
 
+  test('does not redact slash-separated progress counters as paths', () async {
+    final store = WorkTaskEventStore(
+      appSupportDirectory: appSupportDirectory,
+    );
+
+    final event = await store.append(
+      taskId: 'task-progress-ratio',
+      kind: WorkTaskEventKind.toolOutput,
+      title: '文件交付进度',
+      detail: '已处理 0/1 个文件，3583/3583 字节。',
+    );
+
+    expect(event.detail, '已处理 0/1 个文件，3583/3583 字节。');
+    final replay = await store.read('task-progress-ratio');
+    expect(
+      replay.events.single.detail,
+      '已处理 0/1 个文件，3583/3583 字节。',
+    );
+  });
+
   test('re-sanitizes legacy persisted events before exposing them', () async {
     final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
     final file = store.eventFileFor('task-legacy');

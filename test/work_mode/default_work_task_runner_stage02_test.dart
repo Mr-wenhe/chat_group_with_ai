@@ -19,6 +19,7 @@ import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
@@ -477,6 +478,23 @@ void main() {
     await runner.run(task, WorkTaskCancellation());
 
     expect(task.status, AgentTaskStatus.waitingForApproval);
+    final publicEvents = (await eventStore.read(task.id)).events;
+    expect(
+      publicEvents.any(
+        (event) =>
+            event.kind == WorkTaskEventKind.toolOutput &&
+            event.safeMetadata['pending'] == true,
+      ),
+      isTrue,
+    );
+    expect(
+      publicEvents.any(
+        (event) =>
+            event.kind == WorkTaskEventKind.modelOutput &&
+            event.detail == '准备写入授权目录文件。',
+      ),
+      isTrue,
+    );
     // The pending request is held in the runner while the task checkpoint is
     // persisted; this assertion also proves the first model turn was parsed.
     expect(task.pendingToolRequestJson, contains('workspace.patch'));

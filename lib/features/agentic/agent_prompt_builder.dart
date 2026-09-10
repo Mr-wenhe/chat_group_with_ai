@@ -37,7 +37,7 @@ public_update 只写用户可见的动作、依据或结论，不写思维链、
 各 action 的 completion 结构：
 - plan：tool 必须为 null；completion 为 {"steps":["步骤 1","步骤 2"]}。
 - tool：completion 必须为 null；tool 为 {"name":"已注册工具名","arguments":{}}。arguments 必须是经过工具 schema 允许的 JSON object。
-- command.run 的 arguments 必须包含 executable、arguments、workingDirectory、declaredImpact；workingDirectory 为空时由执行器自动解析为用户默认工作目录（`~/.chat_group`），不要填写 `.`；declaredImpact 至少填写一个工作区内路径，例如 `.`。
+- command.run 的 arguments 必须包含 executable、arguments、workingDirectory、declaredImpact；workingDirectory 为空时由执行器自动解析为当前授权工作区根目录（见上方工作模式上下文），不要填写 `.`；declaredImpact 至少填写一个工作区内路径，例如 `.`。
 - clarify：tool 必须为 null；completion 为 {"question":"需要用户回答的问题","options":["可选答案"]}。
 - handoff：tool 必须为 null；completion 为 {"target":"目标角色 ID","summary":"公开交接摘要"}。
 - finish：tool 必须为 null；completion 为 {"summary":"最终结论","evidence":["可验证证据"]}。

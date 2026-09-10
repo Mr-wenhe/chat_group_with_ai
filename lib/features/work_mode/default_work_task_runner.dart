@@ -36,6 +36,7 @@ import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
+import 'package:chat_group/features/work_mode/work_mode_directory_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_document_tool.dart';
 import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
@@ -223,6 +224,9 @@ class DefaultWorkTaskRunner
       conversationId: task.groupId,
       isDirectChat: task.groupId.startsWith('dm:'),
       requireWritable: requiresWritableWorkspace,
+      preferredRootPath: const WorkModeDirectoryService().requestedDesktopPath(
+        task.userRequest,
+      ),
     );
     if (requiresWritableWorkspace && _hasWritableWorkspaceMarker(task)) {
       _consumeWritableWorkspaceMarker(task);
@@ -231,8 +235,11 @@ class DefaultWorkTaskRunner
     final provider = _providerFor(config);
     final history = await _conversationHistory(task);
     final requestText = await _requestWithAttachmentContext(task);
-    final defaultCommandWorkingDirectory = database.aiProcessingDirPath ??
-        DatabaseService.defaultAiProcessingDirectoryPath();
+    // Commands without an explicit workingDirectory must follow the same
+    // authorized root as workspace.patch/read. Using the app's private
+    // processing directory here made a request for “桌面” silently write to
+    // ~/.chat_group instead.
+    final defaultCommandWorkingDirectory = workspace.workDirPath;
     final decision = _approvalDecision(task.executionStateJson);
     final scope = _approvalScope(task.executionStateJson);
     final cancellationToken = CancelToken();
@@ -390,6 +397,17 @@ class DefaultWorkTaskRunner
     var lastPublicUpdateAt = DateTime.fromMillisecondsSinceEpoch(0);
     var lastPublishedPublicUpdate = '';
     var progressWrites = Future<void>.value();
+    await _record(
+      task,
+      WorkTaskEventKind.toolOutput,
+      'AI 正在生成公开进度',
+      detail: '已连接模型，正在等待第一段公开进度…',
+      safeMetadata: {
+        'stream': 'model',
+        'pending': true,
+        'pendingText': '已连接模型，正在等待第一段公开进度…',
+      },
+    );
     final response = await gateway.sendChatMessageStreamed(
       apiKey: apiKey,
       provider: provider,
@@ -474,11 +492,20 @@ class DefaultWorkTaskRunner
     // A short final delta may not pass the live-update throttle before the
     // stream closes. Flush the decoded public field so the durable timeline
     // contains the complete user-facing content, not only an earlier prefix.
-    final finalPublicUpdate = WorkPublicUpdateStream.sanitize(
+    var finalPublicUpdate = WorkPublicUpdateStream.sanitize(
       publicUpdateStream.add(''),
     );
+    if (finalPublicUpdate.isEmpty) {
+      // Some OpenAI-compatible providers emit the JSON protocol through
+      // `reasoning_content` or only attach it to the final SSE event. The
+      // gateway intentionally returns that field only as a compatibility
+      // fallback; extract only its public_update field here so the panel does
+      // not remain blank after a successful model turn.
+      finalPublicUpdate = _publicUpdateFromResponse(response);
+    }
     if (finalPublicUpdate.isNotEmpty &&
         finalPublicUpdate != lastPublishedPublicUpdate) {
+      lastPublishedPublicUpdate = finalPublicUpdate;
       final characters = streamedCharacters;
       progressWrites = progressWrites.then<void>((_) async {
         await _record(
@@ -490,6 +517,7 @@ class DefaultWorkTaskRunner
             'stream': 'public_update',
             'publicDraft': finalPublicUpdate,
             'characters': characters,
+            if (streamedCharacters == 0) 'source': 'stream_fallback',
           },
         );
       });
@@ -500,6 +528,13 @@ class DefaultWorkTaskRunner
     // explicitly user-facing public_update field is recorded for the panel.
     await progressWrites;
     return response;
+  }
+
+  String _publicUpdateFromResponse(Map<String, dynamic> response) {
+    final raw = response['message'];
+    if (raw is! String || raw.trim().isEmpty) return '';
+    final stream = WorkPublicUpdateStream();
+    return WorkPublicUpdateStream.sanitize(stream.add(raw));
   }
 
   Future<WorkContextSnapshot?> _compressWorkContext(
@@ -2428,11 +2463,15 @@ class DefaultWorkTaskRunner
         .join('、');
     final summary = task.contextSummary.trim();
     final handoff = WorkHandoffState.fromTask(task);
+    final targetsDesktop =
+        WorkModeDirectoryService.requestTargetsDesktop(task.userRequest);
     return [
       base,
       '角色可发现技能目录（全局技能按需加载；角色已绑定技能正文会注入；权限仍需通过角色授权与工具策略交集校验）：\n$skillCatalog',
       '当前生产 WorkAgentLoop 已注册工具：$tools。',
-      '当前授权工作区绝对路径：$workspaceRoot。command.run 的 workingDirectory 为空时会自动解析为用户默认工作目录 ~/.chat_group；不要填写 "."，也禁止填写工作区外路径。',
+      '当前授权工作区绝对路径：$workspaceRoot。command.run 的 workingDirectory 为空时会自动解析为当前授权工作区；不要填写 "."，也禁止填写工作区外路径。',
+      if (targetsDesktop)
+        '用户明确指定“桌面”：当前工作区已绑定到授权的桌面根目录；请直接使用相对文件名，不要再添加 Desktop/ 或 conversations/ 前缀。',
       if (task.plan.trim().isNotEmpty) '公开角色路由计划：${task.plan.trim()}',
       if (handoff != null)
         '当前接力阶段：${handoff.stageLabel}；交付物：${handoff.deliverables.join('、')}；完成标准：${handoff.completionCriteria.join('、')}。',

@@ -150,4 +150,51 @@ void main() {
 
     expect(rebound.workDirPath, newRoot.path);
   });
+
+  test(
+      'uses the explicitly requested desktop root instead of a conversation subdirectory',
+      () async {
+    final hiveDir = await Directory.systemTemp.createTemp('work-mode-hive-');
+    final grantRoot = await Directory.systemTemp.createTemp('work-mode-root-');
+    final desktop = await Directory('${grantRoot.path}/Desktop').create();
+    addTearDown(() async {
+      await Hive.close();
+      if (await hiveDir.exists()) await hiveDir.delete(recursive: true);
+      if (await grantRoot.exists()) await grantRoot.delete(recursive: true);
+    });
+
+    Hive.init(hiveDir.path);
+    if (!Hive.isAdapterRegistered(16)) {
+      Hive.registerAdapter(WorkModeWorkspaceAdapter());
+    }
+    await Hive.openBox<dynamic>('app_settings');
+    await Hive.openBox<WorkModeWorkspace>(
+      DatabaseService.workModeWorkspaceBoxName,
+    );
+    final db = DatabaseService();
+    final grants = WorkFolderGrantService(
+      box: db.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      grantRoot.path,
+      consent: (_) async => true,
+    );
+    final service = WorkModeWorkspaceService(db: db, grantService: grants);
+
+    final workspace = await service.loadOrCreate(
+      conversationId: 'dm:desktop-task',
+      isDirectChat: true,
+      requireWritable: true,
+      preferredRootPath: desktop.path,
+    );
+
+    expect(workspace.workDirPath, desktop.path);
+    expect(
+      await Directory('${desktop.path}/conversations').exists(),
+      isFalse,
+    );
+  });
 }

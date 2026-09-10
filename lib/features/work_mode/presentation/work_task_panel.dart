@@ -133,7 +133,10 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
       borderRadius: BorderRadius.circular(20),
       color: Theme.of(context).colorScheme.surface,
       child: ConstrainedBox(
-        constraints: const BoxConstraints(maxHeight: 520),
+        // Desktop overlays have enough vertical room for a readable live
+        // transcript. The details section keeps its own scrollbar, so a
+        // taller panel does not make the action buttons unreachable.
+        constraints: const BoxConstraints(maxHeight: 720),
         child: ScrollConfiguration(
           // Material's desktop ScrollBehavior adds a scrollbar to every
           // ScrollView. The task panel deliberately owns two independent
@@ -310,9 +313,11 @@ class _TaskDetailsState extends State<_TaskDetails> {
         // Keep the live execution viewport fully inside the panel. Previously
         // it was nested in the summary scroll view, so its lower scrollbar
         // could be clipped by the outer viewport and become unclickable.
-        final timelineHeight = constraints.maxHeight < 260
-            ? (constraints.maxHeight * 0.45).clamp(96.0, 180.0).toDouble()
-            : 180.0;
+        final availableHeight =
+            constraints.maxHeight.isFinite ? constraints.maxHeight : 560.0;
+        final timelineHeight = availableHeight < 300
+            ? (availableHeight * 0.5).clamp(120.0, 220.0).toDouble()
+            : (availableHeight * 0.46).clamp(220.0, 360.0).toDouble();
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
@@ -383,6 +388,13 @@ class _TaskDetailsState extends State<_TaskDetails> {
                         _PublicDetail(
                           title: '结论',
                           text: _safePanelText(widget.task.resultSummary),
+                        ),
+                      ],
+                      if (widget.task.lastArtifactPaths.isNotEmpty) ...<Widget>[
+                        const SizedBox(height: 8),
+                        _PublicDetail(
+                          title: '已生成文件',
+                          text: _artifactNames(widget.task.lastArtifactPaths),
                         ),
                       ],
                       if (failure != null) ...<Widget>[
@@ -997,6 +1009,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   String? _livePublicDraft;
   WorkTaskEvent? _livePublicEvent;
   bool _modelOutputPending = false;
+  String _modelOutputPendingText = 'AI 正在整理公开进度…';
 
   @override
   void initState() {
@@ -1014,6 +1027,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     _livePublicDraft = null;
     _livePublicEvent = null;
     _modelOutputPending = false;
+    _modelOutputPendingText = 'AI 正在整理公开进度…';
     unawaited(_subscription?.cancel());
     _listen();
   }
@@ -1044,6 +1058,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
             _livePublicDraft = liveDraft.isEmpty ? null : liveDraft;
             _livePublicEvent = liveDraft.isEmpty ? null : event;
             _modelOutputPending = false;
+            _modelOutputPendingText = 'AI 正在整理公开进度…';
           } else if (isModelProgress) {
             // The transport event is only a liveness signal. It must not
             // become a character-count-only card in the public timeline.
@@ -1065,13 +1080,23 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
                   'publicDraft': liveDraft,
                 },
               );
+              _modelOutputPendingText = 'AI 正在整理公开进度…';
             } else if (_livePublicDraft == null) {
               _modelOutputPending = true;
+              _modelOutputPendingText = _pendingTextFromEvent(event);
             }
           } else {
-            _commitLivePublicEvent();
+            if (_eventRepeatsLiveDraft(event)) {
+              // Terminal/action events often repeat the latest public update
+              // as their title. Keep one copy instead of showing the live
+              // card, its historical card, and the terminal summary together.
+              _livePublicEvent = null;
+            } else {
+              _commitLivePublicEvent();
+            }
             _livePublicDraft = null;
             _modelOutputPending = false;
+            _modelOutputPendingText = 'AI 正在整理公开进度…';
             _events.add(event);
             _events.sort(
               (left, right) => left.sequence.compareTo(right.sequence),
@@ -1101,6 +1126,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
       _livePublicDraft = null;
       _livePublicEvent = null;
       _modelOutputPending = false;
+      _modelOutputPendingText = 'AI 正在整理公开进度…';
     });
     _listen();
   }
@@ -1108,6 +1134,22 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   bool _isModelProgressEvent(WorkTaskEvent event) {
     return event.kind == WorkTaskEventKind.toolOutput &&
         event.safeMetadata['stream'] == 'model';
+  }
+
+  String _pendingTextFromEvent(WorkTaskEvent event) {
+    final value = event.safeMetadata['pendingText'];
+    if (value is String && value.trim().isNotEmpty) {
+      return _safePanelText(value);
+    }
+    return 'AI 正在整理公开进度…';
+  }
+
+  bool _eventRepeatsLiveDraft(WorkTaskEvent event) {
+    final draft = _livePublicDraft?.trim();
+    if (draft == null || draft.isEmpty) return false;
+    final title = event.title.trim();
+    final detail = event.detail.trim();
+    return title == draft || detail == draft;
   }
 
   void _commitLivePublicEvent() {
@@ -1152,7 +1194,9 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     }
     if (_modelOutputPending) {
       if (remaining == 0) {
-        return const _TimelineItemPadding(child: _PendingPublicOutput());
+        return _TimelineItemPadding(
+          child: _PendingPublicOutput(text: _modelOutputPendingText),
+        );
       }
       remaining--;
     }
@@ -1242,7 +1286,9 @@ class _EventStreamError extends StatelessWidget {
 }
 
 class _PendingPublicOutput extends StatelessWidget {
-  const _PendingPublicOutput();
+  final String text;
+
+  const _PendingPublicOutput({this.text = 'AI 正在整理公开进度…'});
 
   @override
   Widget build(BuildContext context) {
@@ -1253,9 +1299,9 @@ class _PendingPublicOutput extends StatelessWidget {
         color: colorScheme.surfaceContainerHighest,
         borderRadius: BorderRadius.circular(10),
       ),
-      child: const Padding(
-        padding: EdgeInsets.all(8),
-        child: Text('AI 正在整理公开进度…'),
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Text(text),
       ),
     );
   }
@@ -1268,6 +1314,8 @@ class _EventCard extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final title = _safePanelText(event.title);
+    final detail = _safePanelText(event.detail);
     return DecoratedBox(
       decoration: BoxDecoration(
         color: Theme.of(context).colorScheme.surfaceContainerHighest,
@@ -1278,10 +1326,10 @@ class _EventCard extends StatelessWidget {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: <Widget>[
-            Text(_safePanelText(event.title)),
-            if (event.detail.isNotEmpty) ...<Widget>[
+            Text(title),
+            if (detail.isNotEmpty && detail != title) ...<Widget>[
               const SizedBox(height: 2),
-              Text(_safePanelText(event.detail)),
+              Text(detail),
             ],
           ],
         ),
@@ -1361,6 +1409,18 @@ String _safePanelText(String value) {
     '[本地路径]',
   );
   return safe.length <= 4000 ? safe : '${safe.substring(0, 3999)}…';
+}
+
+String _artifactNames(Iterable<String> paths) {
+  final names = paths
+      .map((path) => path.replaceAll('\\', '/').split('/').last.trim())
+      .where((name) => name.isNotEmpty)
+      .toSet()
+      .take(8)
+      .toList(growable: false);
+  if (names.isEmpty) return '已生成文件（名称不可用）。';
+  final suffix = paths.length > names.length ? ' 等' : '';
+  return '${names.join('、')}$suffix（位于当前授权工作目录）';
 }
 
 /// Undo confirmation must retain exact local paths so the user can verify the
