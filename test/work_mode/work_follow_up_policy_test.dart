@@ -55,6 +55,16 @@ void main() {
     expect(revision.autoRenameIfExists, isFalse);
   });
 
+  test('design-and-implement wording is recognized as a new artifact', () {
+    final decision = policy.resolve(
+      request: '设计并实现一个 html 教师节贺卡',
+      lastArtifactPaths: const ['/workspace/flight-chess.html'],
+    );
+
+    expect(decision.kind, WorkFollowUpKind.newArtifact);
+    expect(decision.autoRenameIfExists, isTrue);
+  });
+
   test('relative and resolved copies of one artifact are not ambiguous', () {
     final decision = policy.resolve(
       request: '请修改当前文件',

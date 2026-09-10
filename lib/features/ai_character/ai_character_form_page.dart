@@ -57,7 +57,10 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     super.initState();
     _isEditing = widget.character != null;
     _existingCharacterId = widget.character?.id;
-    final c = widget.character;
+    // A caller can keep an old character object after returning from this
+    // page (for example, an inbox summary). Read the persisted record again
+    // so the form never overwrites newer permissions with stale UI state.
+    final c = _latestPersistedCharacter();
 
     _nameController = TextEditingController(text: c?.name ?? '');
     _avatarController = TextEditingController(text: c?.avatar ?? '');
@@ -106,6 +109,15 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       _agenticEnabled = true;
       _toolPermissions = bundle.permissions;
     }
+  }
+
+  AICharacter? _latestPersistedCharacter() {
+    final incoming = widget.character;
+    if (incoming == null) return null;
+    return ref
+            .read(aiCharactersProvider.notifier)
+            .getCharacterById(incoming.id) ??
+        incoming;
   }
 
   /// 用预设填充表单控制器（仅展示字段，绝不写入 API Key / 配置）。

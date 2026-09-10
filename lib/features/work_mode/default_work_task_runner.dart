@@ -50,6 +50,7 @@ import 'package:chat_group/features/work_mode/workspace_file_service.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 import 'package:chat_group/features/work_mode/stage02_workspace_file_tool.dart';
+import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:dio/dio.dart';
 
 /// App-scoped adapter between durable work tasks and the one production loop.
@@ -205,11 +206,12 @@ class DefaultWorkTaskRunner
     }
     if (cancellation.isCancelled || task.isTerminal) return;
 
-    // An in-process approval continuation keeps the full request in memory.
-    // The durable checkpoint is intentionally redacted, so it is suitable for
-    // capability preflight only and must never be passed to the loop as an
-    // executable request after a process restart. Re-planning from the model
-    // is the only safe way to reconstruct omitted content/command arguments.
+    // An in-process approval continuation normally keeps the full request in
+    // memory. The durable checkpoint is intentionally redacted, so it is only
+    // promoted back into this map by installMissingTool after a trusted
+    // installer succeeds and the structured command still matches the saved
+    // checkpoint. All other post-restart checkpoints are re-planned by the
+    // model because they may omit content or command arguments.
     final hasPendingCheckpoint = task.pendingToolRequestJson.trim().isNotEmpty;
     final persistedPending = hasPendingCheckpoint
         ? ToolRequest.fromJsonString(task.pendingToolRequestJson)
@@ -321,7 +323,9 @@ class DefaultWorkTaskRunner
         cancellation: cancellation,
         conversationHistory: history,
         // Only a full in-memory request may be replayed. A persisted request
-        // is a display-safe checkpoint and may omit sensitive payloads.
+        // is a display-safe checkpoint and may omit sensitive payloads; the
+        // install recovery path can populate this map only for a complete,
+        // sanitized command.run checkpoint after the installer succeeds.
         approvedPendingTool: inMemoryPending,
       );
       if (cancellation.isCancelled) return;
@@ -1973,6 +1977,7 @@ class DefaultWorkTaskRunner
     final suggestion = WorkCommandInstallSuggestion.forExecutable(
       original.executable,
       isWindows: Platform.isWindows,
+      isMacOS: Platform.isMacOS,
       workingDirectory: original.workingDirectory,
       declaredImpact: original.declaredImpact,
     );
@@ -1996,15 +2001,42 @@ class DefaultWorkTaskRunner
     // Clicking the panel action is the explicit user confirmation for this
     // one-shot package-manager command; it never changes the task's ordinary
     // write-confirmation setting or grants a permanent system capability.
-    return runner.run(
+    final result = await runner.run(
       install,
       taskId: '${task.id}:install',
       approvalGranted: true,
       userExplicitlyRequested: true,
+      includeUserHome: true,
       cancellation: cancellation.whenCancelled,
       isCancelled: () => cancellation.isCancelled,
     );
+    if (result.succeeded &&
+        task.pendingToolRequestJson == safeToolRequestCheckpoint(pending) &&
+        _isReplayableInstalledCommand(original)) {
+      // The checkpoint contains only structured command fields. Promote it
+      // after the trusted installer succeeds so the coordinator can resume
+      // the exact operation; _runCommand still performs the current policy,
+      // path and approval checks before spawning anything.
+      _pendingRequests[task.id] = pending;
+    }
+    return result;
   }
+
+  bool _isReplayableInstalledCommand(WorkCommand command) {
+    if (_containsCheckpointRedaction(command.executable) ||
+        _containsCheckpointRedaction(command.workingDirectory)) {
+      return false;
+    }
+    return command.arguments.every(
+          (argument) => !_containsCheckpointRedaction(argument),
+        ) &&
+        command.declaredImpact.every(
+          (path) => !_containsCheckpointRedaction(path),
+        );
+  }
+
+  bool _containsCheckpointRedaction(String value) =>
+      value.contains(SearchSecretScanner.redaction);
 
   WorkToolResult _mapFileResult(Map<String, dynamic> result) =>
       _mapFileResultToTool(result);
@@ -2477,8 +2509,35 @@ class DefaultWorkTaskRunner
         '当前接力阶段：${handoff.stageLabel}；交付物：${handoff.deliverables.join('、')}；完成标准：${handoff.completionCriteria.join('、')}。',
       if (handoff?.lastSummary.trim().isNotEmpty == true)
         '上一阶段公开摘要：${handoff!.lastSummary}',
+      _runtimeToolAvailabilityContext(),
       if (summary.isNotEmpty) '持久化任务上下文（公开摘要）：$summary',
     ].join('\n');
+  }
+
+  String _runtimeToolAvailabilityContext() {
+    final pathEntries = (Platform.environment['PATH'] ?? '')
+        .split(Platform.isWindows ? ';' : ':')
+        .where((entry) => entry.trim().isNotEmpty);
+    final available = <String>[];
+    for (final executable in const ['pandoc', 'tectonic']) {
+      final found = pathEntries.any((directory) {
+        final names = Platform.isWindows
+            ? <String>[executable, '$executable.exe']
+            : <String>[executable];
+        return names.any((name) {
+          final candidate = File(
+            '${directory.trim()}${Platform.pathSeparator}$name',
+          );
+          return FileSystemEntity.typeSync(candidate.path) ==
+              FileSystemEntityType.file;
+        });
+      });
+      if (found) available.add(executable);
+    }
+    if (available.isEmpty) {
+      return '当前运行时未检测到 pandoc/tectonic；只有在 command.run 实际返回缺失工具后，才能说明工具缺失。';
+    }
+    return '当前运行时已检测到可执行工具：${available.join('、')}。持久化上下文中旧的“缺少工具”提示可能已过期；不得据此再次声称工具缺失，必须优先按原目标调用 command.run 并根据真实输出继续。';
   }
 
   String _compactSkillCatalogEntry(CharacterSkill skill) {
@@ -2578,142 +2637,155 @@ class DefaultWorkTaskRunner
   ) async {
     final text = content.trim();
     if (text.isEmpty) return;
-    List<MediaAttachment>? media;
-    File? temporaryBundle;
-    final selection = await _safeArtifactsForAttachment(task);
-    final files = selection.files;
-    final attachmentSkippedNames = <String>[];
-    final deliveredArchivePaths = <String>[];
-    final bundledSkippedNames = <String>[];
-    try {
-      final totalBytes = files.fold<int>(0, (sum, file) {
-        try {
-          return sum + file.lengthSync();
-        } on Object {
-          return sum;
-        }
-      });
-      // A message must expose one attachment when it contains several
-      // generated files.  Bundling only projects made ordinary requests such
-      // as “生成 a.md 和 b.md” leak multiple attachments and makes follow-up
-      // downloads ambiguous.  Size/count limits remain defensive guards for
-      // the single-file and large-project paths.
-      final needsBundle = files.length > 1 ||
-          files.length > _maxArtifactAttachments ||
-          totalBytes > _maxAttachedArtifactBytes;
-      await _recordArtifactProgress(
-        task,
-        processedFiles: 0,
-        totalFiles: files.length,
-        processedBytes: 0,
-        totalBytes: totalBytes,
-      );
-      final deliveryFiles = <File>[];
-      if (needsBundle && files.isNotEmpty) {
-        temporaryBundle = await _createArtifactBundle(
-          task,
-          selection.entries,
-          skippedNames: bundledSkippedNames,
-          includedArchivePaths: deliveredArchivePaths,
-          onFileProcessed: (processedFiles, processedBytes) =>
-              _recordArtifactProgress(
-            task,
-            processedFiles: processedFiles,
-            totalFiles: files.length,
-            processedBytes: processedBytes,
-            totalBytes: totalBytes,
-          ),
-        );
-        if (temporaryBundle != null) deliveryFiles.add(temporaryBundle);
-      } else {
-        deliveryFiles.addAll(files);
-      }
-      final attachments = <MediaAttachment>[];
-      var processedArtifactFiles = 0;
-      var processedArtifactBytes = 0;
-      for (final file in deliveryFiles) {
-        var processedBytes = 0;
-        try {
-          final stat = await file.stat();
-          processedBytes = stat.size;
-          final sizeLimit = identical(file, temporaryBundle)
-              ? _maxArtifactBundleBytes
-              : _maxAttachedArtifactBytes;
-          if (stat.type != FileSystemEntityType.file || stat.size > sizeLimit) {
-            attachmentSkippedNames.add(_basename(file.path));
-            continue;
-          }
-          final copied = await (mediaCopier == null
-              ? database.copyToMedia(
-                  file,
-                  'file',
-                  fileName: _basename(file.path),
-                )
-              : mediaCopier!(
-                  file,
-                  'file',
-                  fileName: _basename(file.path),
-                ));
-          attachments.add(copied);
-          if (temporaryBundle == null) {
-            final entry =
-                selection.entries.cast<_ArtifactFileEntry?>().firstWhere(
-                      (item) => item?.file.path == file.path,
-                      orElse: () => null,
-                    );
-            if (entry != null) deliveredArchivePaths.add(entry.archivePath);
-          }
-        } on Object {
-          // Continue delivering other verified artifacts when one copy fails.
-          attachmentSkippedNames.add(_basename(file.path));
-        } finally {
-          if (temporaryBundle == null) {
-            processedArtifactFiles++;
-            processedArtifactBytes += processedBytes;
-            await _recordArtifactProgress(
-              task,
-              processedFiles: processedArtifactFiles,
-              totalFiles: files.length,
-              processedBytes: processedArtifactBytes,
-              totalBytes: totalBytes,
-            );
-          }
-        }
-      }
-      if (attachments.isNotEmpty) media = attachments;
-      await _recordArtifactProgress(
-        task,
-        processedFiles: files.length,
-        totalFiles: files.length,
-        processedBytes: totalBytes,
-        totalBytes: totalBytes,
-      );
-    } finally {
-      if (temporaryBundle != null) {
-        try {
-          if (await temporaryBundle.exists()) await temporaryBundle.delete();
-        } on Object {
-          // The copied media attachment remains authoritative if cleanup fails.
-        }
-      }
-    }
-    final deliveryNote = _artifactDeliveryNote(
-      selection,
-      bundled: temporaryBundle != null,
-      attachedCount: media?.length ?? 0,
-      deliveredArchivePaths: deliveredArchivePaths,
-      skippedNames: [
-        ...bundledSkippedNames,
-        ...attachmentSkippedNames,
-      ],
-    );
-    await database.persistMessage(Message(
+
+    // The model's final response is the chat reply. Persist it before the
+    // optional artifact-copy phase so a slow or failed attachment delivery
+    // can never hide the conclusion from the conversation.
+    final message = Message(
       groupId: task.groupId,
       senderId: character.id,
       senderType: 'ai',
-      content: deliveryNote.isEmpty ? text : '$text\n\n$deliveryNote',
-      media: media,
-    ));
+      content: text,
+    );
+    await database.persistMessage(message);
+
+    List<MediaAttachment>? media;
+    File? temporaryBundle;
+    try {
+      try {
+        final selection = await _safeArtifactsForAttachment(task);
+        final files = selection.files;
+        final attachmentSkippedNames = <String>[];
+        final deliveredArchivePaths = <String>[];
+        final bundledSkippedNames = <String>[];
+        final totalBytes = files.fold<int>(0, (sum, file) {
+          try {
+            return sum + file.lengthSync();
+          } on Object {
+            return sum;
+          }
+        });
+        // Keep ordinary artifacts as individual file cards so the chat shows
+        // exactly which files this run produced or modified. Bundle only when
+        // the count/size would make individual delivery impractical.
+        final needsBundle = files.length > _maxArtifactAttachments ||
+            totalBytes > _maxAttachedArtifactBytes;
+        await _recordArtifactProgress(
+          task,
+          processedFiles: 0,
+          totalFiles: files.length,
+          processedBytes: 0,
+          totalBytes: totalBytes,
+        );
+        final deliveryFiles = <File>[];
+        if (needsBundle && files.isNotEmpty) {
+          temporaryBundle = await _createArtifactBundle(
+            task,
+            selection.entries,
+            skippedNames: bundledSkippedNames,
+            includedArchivePaths: deliveredArchivePaths,
+            onFileProcessed: (processedFiles, processedBytes) =>
+                _recordArtifactProgress(
+              task,
+              processedFiles: processedFiles,
+              totalFiles: files.length,
+              processedBytes: processedBytes,
+              totalBytes: totalBytes,
+            ),
+          );
+          if (temporaryBundle != null) deliveryFiles.add(temporaryBundle);
+        } else {
+          deliveryFiles.addAll(files);
+        }
+        final attachments = <MediaAttachment>[];
+        var processedArtifactFiles = 0;
+        var processedArtifactBytes = 0;
+        for (final file in deliveryFiles) {
+          var processedBytes = 0;
+          try {
+            final stat = await file.stat();
+            processedBytes = stat.size;
+            final sizeLimit = identical(file, temporaryBundle)
+                ? _maxArtifactBundleBytes
+                : _maxAttachedArtifactBytes;
+            if (stat.type != FileSystemEntityType.file ||
+                stat.size > sizeLimit) {
+              attachmentSkippedNames.add(_basename(file.path));
+              continue;
+            }
+            final copied = await (mediaCopier == null
+                ? database.copyToMedia(
+                    file,
+                    'file',
+                    fileName: _basename(file.path),
+                  )
+                : mediaCopier!(
+                    file,
+                    'file',
+                    fileName: _basename(file.path),
+                  ));
+            attachments.add(copied);
+            if (temporaryBundle == null) {
+              final entry =
+                  selection.entries.cast<_ArtifactFileEntry?>().firstWhere(
+                        (item) => item?.file.path == file.path,
+                        orElse: () => null,
+                      );
+              if (entry != null) deliveredArchivePaths.add(entry.archivePath);
+            }
+          } on Object {
+            // Continue delivering other verified artifacts when one copy fails.
+            attachmentSkippedNames.add(_basename(file.path));
+          } finally {
+            if (temporaryBundle == null) {
+              processedArtifactFiles++;
+              processedArtifactBytes += processedBytes;
+              await _recordArtifactProgress(
+                task,
+                processedFiles: processedArtifactFiles,
+                totalFiles: files.length,
+                processedBytes: processedArtifactBytes,
+                totalBytes: totalBytes,
+              );
+            }
+          }
+        }
+        if (attachments.isNotEmpty) media = attachments;
+        await _recordArtifactProgress(
+          task,
+          processedFiles: files.length,
+          totalFiles: files.length,
+          processedBytes: totalBytes,
+          totalBytes: totalBytes,
+        );
+        final deliveryNote = _artifactDeliveryNote(
+          selection,
+          bundled: temporaryBundle != null,
+          attachedCount: media?.length ?? 0,
+          deliveredArchivePaths: deliveredArchivePaths,
+          skippedNames: [
+            ...bundledSkippedNames,
+            ...attachmentSkippedNames,
+          ],
+        );
+        if (deliveryNote.isNotEmpty) {
+          message.content = '$text\n\n$deliveryNote';
+        }
+        message.media = media;
+        await database.updateMessage(message);
+      } finally {
+        if (temporaryBundle != null) {
+          try {
+            if (await temporaryBundle.exists()) await temporaryBundle.delete();
+          } on Object {
+            // The copied media attachment remains authoritative if cleanup fails.
+          }
+        }
+      }
+    } on Object {
+      // The text reply is already durable. Artifact delivery is best effort
+      // and must not turn a completed model response into a failed task.
+    }
   }
 
   /// A source-code request is successful only when a real readable file was

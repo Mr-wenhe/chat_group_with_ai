@@ -547,8 +547,7 @@ class WorkTaskCoordinator {
     final task = await _serialize(() async {
       _ensureOpen();
       final current = _requireWorkTask(taskId);
-      if (current.status != AgentTaskStatus.paused ||
-          current.pendingToolRequestJson.trim().isEmpty) {
+      if (!WorkFailure.hasInstallableMissingTool(current)) {
         throw StateError('当前任务没有等待安装的缺失工具。');
       }
       return current;
@@ -996,8 +995,13 @@ class WorkTaskCoordinator {
           task.executionStateJson,
         )
         ..updatedAt = _clock();
+      // A paused soft-limit task still owns its conversation reservation so a
+      // later request cannot bypass the checkpoint. Continuing is the explicit
+      // handoff that releases that reservation and makes the queued task
+      // visible to the scheduler again.
+      _conversationReservations.remove(task.groupId);
       await _save(task);
-      _enqueueTask(task);
+      _enqueueTask(task, prioritize: true);
       unawaited(
         _record(task, WorkTaskEventKind.queued, '用户已继续超限任务'),
       );
@@ -1908,9 +1912,14 @@ class WorkTaskCoordinator {
     }
   }
 
-  void _enqueueTask(AgentTask task) {
+  void _enqueueTask(AgentTask task, {bool prioritize = false}) {
     final queue = _conversationQueues.putIfAbsent(task.groupId, Queue.new);
-    if (!queue.contains(task.id)) queue.addLast(task.id);
+    if (queue.contains(task.id)) queue.remove(task.id);
+    if (prioritize) {
+      queue.addFirst(task.id);
+    } else {
+      queue.addLast(task.id);
+    }
     if (!_hasRunningConversation(task.groupId)) {
       _makeConversationReady(task.groupId);
     }
@@ -2022,13 +2031,16 @@ class WorkTaskCoordinator {
     String? nextStep,
     Iterable<String> extraErrors = const [],
     bool clearRecentToolResults = false,
+    bool resetTargetAndArtifacts = false,
   }) {
     final raw = task.contextSummary.trim();
     if (raw.isNotEmpty && !_isTask15Context(raw, task.groupId)) {
-      if (_hasForeignConversationContext(raw, task.groupId)) {
+      if (_hasForeignConversationContext(raw, task.groupId) ||
+          resetTargetAndArtifacts) {
         // A checkpoint carrying another conversation id is never a legacy
-        // summary. Drop it before publishing the task so a malformed import
-        // cannot expose a different DM (or steer this task's revision).
+        // summary. A new artifact also needs a fresh target even when the
+        // legacy summary belongs to this conversation; otherwise its old
+        // target can steer the new run back to the previous file.
         task.contextSummary = _contextBuilder
             .build(
               conversationId: task.groupId,
@@ -2069,7 +2081,9 @@ class WorkTaskCoordinator {
     task.contextSummary = _contextBuilder
         .build(
           conversationId: task.groupId,
-          target: previous.target.isEmpty ? task.userRequest : previous.target,
+          target: resetTargetAndArtifacts || previous.target.isEmpty
+              ? task.userRequest
+              : previous.target,
           pendingFollowUps: task.queuedUserRequests,
           completedSummaries: completed,
           // Tool results describe the previous execution run. Keep the
@@ -2078,10 +2092,9 @@ class WorkTaskCoordinator {
           recentToolResults:
               clearRecentToolResults ? const [] : previous.recentToolResults,
           approvalScope: approvalScope,
-          artifactPaths: <String>[
-            ...previous.artifactPaths,
-            ...task.lastArtifactPaths
-          ],
+          artifactPaths: resetTargetAndArtifacts
+              ? task.lastArtifactPaths
+              : <String>[...previous.artifactPaths, ...task.lastArtifactPaths],
           roleHandoff: previous.roleHandoff,
           errors: errors,
           nextStep: nextStep ?? previous.nextStep,
@@ -2331,6 +2344,9 @@ class WorkTaskCoordinator {
       // between field writes; no chat-history or global-file lookup is used.
       lastArtifactPaths: _followUpArtifactPaths(task),
     );
+    final startsNewArtifact = decision.kind == WorkFollowUpKind.newArtifact;
+    final resetFreshContext = startsNewArtifact &&
+        _isTask15Context(task.contextSummary, task.groupId);
     if (decision.isClarification) {
       // Keep the original request at the head of the durable FIFO. A later
       // user answer can therefore resolve it without losing any following
@@ -2366,15 +2382,28 @@ class WorkTaskCoordinator {
     // new request may target a different file, and a stale plan could either
     // block unrelated work or fail to serialize the new target.
     _taskLockPlans.remove(task.id);
+    final artifactPathsForRun = startsNewArtifact
+        ? <String>[]
+        : decision.isRevision && decision.artifactPath != null
+            ? <String>[decision.artifactPath!]
+            : List<String>.from(task.lastArtifactPaths);
     task
       ..userRequest = nextRequest
       ..status = AgentTaskStatus.queued
+      // A new artifact needs a fresh plan. Keeping the previous plan can
+      // force an unrelated request to follow stale instructions (for example,
+      // a new greeting card continuing an older board-game plan).
+      ..plan = startsNewArtifact ? '' : task.plan
       ..resumeRequired = false
       ..softLimitReached = false
       ..pendingToolRequestJson = ''
       ..executionStateJson = ''
       ..lastError = ''
       ..resultSummary = ''
+      // Delivery must describe this run, not every artifact ever produced by
+      // the durable conversation. A revision keeps only its explicit target;
+      // a new artifact starts with no inherited files.
+      ..lastArtifactPaths = artifactPathsForRun
       ..actionCount = resetRunBudget ? 0 : task.actionCount
       ..startedAt = resetRunBudget ? _clock() : task.startedAt
       ..updatedAt = _clock();
@@ -2394,6 +2423,7 @@ class WorkTaskCoordinator {
       task,
       nextStep: '开始处理已排队的追问。',
       clearRecentToolResults: true,
+      resetTargetAndArtifacts: resetFreshContext,
     );
     await _save(task);
     _enqueueTask(task);

@@ -1,9 +1,11 @@
 import 'dart:convert';
 
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 
 import 'work_task_error_sanitizer.dart';
+import 'work_command_policy.dart';
 import 'work_tool_registry.dart';
 
 /// The only failure categories that may cross the work-mode task boundary.
@@ -117,20 +119,42 @@ class WorkFailure {
       final failure = WorkFailure.fromJson(
         Map<String, dynamic>.from(decoded['workFailure'] as Map),
       );
-      // Older checkpoints persisted the generic install CTA before the
-      // runner knew whether a trusted installer actually existed. Read the
-      // bounded recent result metadata to keep a restored panel aligned with
-      // the safety rule used for newly-created failures.
-      if (failure.type == WorkFailureType.toolMissing &&
-          !_contextHasInstallCommand(decoded) &&
-          !_contextSummaryHasInstallCommand(task.contextSummary)) {
-        return _manualToolGuidance(failure);
+      if (failure.type == WorkFailureType.toolMissing) {
+        final hasTrustedInstaller = _hasInstallableMissingTool(task, decoded);
+        return hasTrustedInstaller
+            ? _installToolGuidance(failure)
+            : _manualToolGuidance(failure);
       }
       return failure;
     } on Object {
       // A malformed optional diagnostic must never erase the task itself.
       return null;
     }
+  }
+
+  /// Returns whether the current paused checkpoint, rather than an older tool
+  /// result, authorizes the one-shot trusted installer action.
+  static bool hasInstallableMissingTool(AgentTask task) {
+    if (task.status != AgentTaskStatus.paused) return false;
+    return _hasInstallableMissingTool(
+      task,
+      _decodeMetadata(task.executionStateJson),
+    );
+  }
+
+  static bool _hasInstallableMissingTool(
+    AgentTask task,
+    Map<dynamic, dynamic> metadata,
+  ) {
+    if (task.status != AgentTaskStatus.paused ||
+        task.pendingToolRequestJson.trim().isEmpty) {
+      return false;
+    }
+    final failure = metadata['workFailure'];
+    final hasMissingToolBoundary = metadata['toolMissing'] == true ||
+        failure is Map && failure['type'] == WorkFailureType.toolMissing.name;
+    return hasMissingToolBoundary &&
+        _pendingHasTrustedInstaller(task.pendingToolRequestJson);
   }
 
   /// Stores a redacted failure while preserving every other checkpoint key.
@@ -269,28 +293,6 @@ class WorkFailure {
     return rawSuggestion['installCommand'] is Map;
   }
 
-  static bool _contextHasInstallCommand(Map<dynamic, dynamic> context) {
-    final rawResults = context['recentToolResults'];
-    if (rawResults is! List) return false;
-    for (final rawResult in rawResults.whereType<Map>()) {
-      final data = rawResult['data'];
-      if (data is Map && _hasInstallCommand(data['installSuggestion'])) {
-        return true;
-      }
-    }
-    return false;
-  }
-
-  static bool _contextSummaryHasInstallCommand(String summary) {
-    if (summary.trim().isEmpty) return false;
-    try {
-      final decoded = jsonDecode(summary);
-      return decoded is Map && _contextHasInstallCommand(decoded);
-    } on Object {
-      return false;
-    }
-  }
-
   static WorkFailure _manualToolGuidance(WorkFailure failure) {
     return WorkFailure(
       type: failure.type,
@@ -301,6 +303,36 @@ class WorkFailure {
       retryable: failure.retryable,
       suggestedAction: '请按上方可信来源的官方文档手动安装，或改用已存在的工具。',
     );
+  }
+
+  static WorkFailure _installToolGuidance(WorkFailure failure) {
+    return WorkFailure(
+      type: failure.type,
+      title: failure.title,
+      reason: failure.reason,
+      technicalDetail: failure.technicalDetail,
+      completedContent: failure.completedContent,
+      retryable: failure.retryable,
+      suggestedAction: '点击“帮助安装工具”完成一次性安装，或改用已存在的工具。',
+    );
+  }
+
+  static bool _pendingHasTrustedInstaller(String raw) {
+    if (raw.trim().isEmpty) return false;
+    try {
+      final decoded = jsonDecode(raw);
+      if (decoded is! Map ||
+          AgentToolName.fromWire(decoded['tool']?.toString() ?? '') !=
+              AgentToolName.commandRun) {
+        return false;
+      }
+      final args = decoded['args'];
+      final executable = args is Map ? args['executable'] : null;
+      return executable is String &&
+          WorkCommandInstallSuggestion.hasTrustedInstaller(executable);
+    } on Object {
+      return false;
+    }
   }
 
   /// Converts an exception at a named boundary into a public failure.

@@ -63,6 +63,7 @@ void main() {
       policy: _policy(),
       parentEnvironment: const {
         'PATH': '/bin',
+        'HOME': '/Users/test-user',
         'APP_API_KEY': 'should-not-pass',
         'LANG': 'en_US.UTF-8',
         'NODE_OPTIONS': '--require=malicious.js',
@@ -96,10 +97,43 @@ void main() {
             [WorkCommandOutputStream.stdout, WorkCommandOutputStream.stderr]));
     expect(runInShell, isFalse);
     expect(environment, containsPair('LANG', 'en_US.UTF-8'));
+    expect(environment!.containsKey('HOME'), isFalse);
     expect(environment!.containsKey('SAFE_VALUE'), isFalse);
     expect(environment!.containsKey('NODE_OPTIONS'), isFalse);
     expect(environment!.keys.any((key) => key.contains('API_KEY')), isFalse);
     expect(environment!.containsKey('UNSAFE_VALUE'), isFalse);
+  });
+
+  test('forwards HOME only for an explicitly requested installer run',
+      () async {
+    final process = _FakeProcess();
+    Map<String, String>? environment;
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      parentEnvironment: const {
+        'PATH': '/bin',
+        'HOME': '/Users/test-user',
+      },
+      processStarter: (_, {required env, required shell}) async {
+        environment = env;
+        return process.asProcess();
+      },
+    );
+
+    final future = runner.run(
+      _command(executable: 'brew', arguments: ['install', 'pandoc']),
+      taskId: 'task-installer-environment',
+      approvalGranted: true,
+      includeUserHome: true,
+    );
+    await process.stdoutController.close();
+    await process.stderrController.close();
+    process.exitCompleter.complete(0);
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.completed);
+    expect(environment, containsPair('HOME', '/Users/test-user'));
+    await process.close();
   });
 
   test('does not execute a mutation before approval and returns its plan',

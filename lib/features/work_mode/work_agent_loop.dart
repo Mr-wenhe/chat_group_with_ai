@@ -284,7 +284,10 @@ class WorkAgentLoop
         // Replaying the exact in-memory request keeps the same model turn and
         // prevents a second planning response from duplicating a write. A
         // redacted request after process restart is intentionally not passed
-        // here; the caller must re-plan it instead of guessing its payload.
+        // here by default. Missing-tool recovery is the exception: it may
+        // provide a complete structured command checkpoint only after a
+        // trusted installer succeeds; the normal tool handler still
+        // revalidates current policy, path and approval boundaries.
         final publicUpdate = _publicText(approvedPendingTool.reason);
         await _emit(
           state,

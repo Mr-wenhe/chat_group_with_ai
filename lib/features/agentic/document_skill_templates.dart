@@ -69,7 +69,8 @@ const List<ExpertSkillTemplate> documentExpertSkillTemplates = [
     instructions: [
       '阅读 PDF 时按页码或章节定位证据，区分原文事实、总结和推断。',
       '生成报告时先组织标题、摘要、正文、引用和附录，再检查内容完整性。',
-      '生成 PDF 前确认当前运行时是否配置 PDF 写入/渲染工具；没有时如实交付 Markdown 或 HTML。',
+      '生成 PDF 前确认当前运行时是否配置 PDF 写入/渲染工具；本机已检测到 pandoc/tectonic 时必须实际调用 command.run，不得依据旧上下文声称工具缺失。',
+      '中文 PDF 使用 tectonic 时显式配置 xeCJK 与可用中文字体，并在交付前重新读取或检查 PDF，确认中文没有丢失或被裁切。',
       '不得把文本文件改名为 PDF，也不得把未执行的渲染或校验写成已完成。',
     ],
     requiredPermissions: [

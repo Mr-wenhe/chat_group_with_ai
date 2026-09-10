@@ -12,6 +12,7 @@ import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/group_memory.dart';
+import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_event.dart';
@@ -24,6 +25,7 @@ import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
+import 'package:chat_group/features/chat_group/widgets/message_selectable_text.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_host.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
@@ -568,6 +570,46 @@ void main() {
     expect(routeApi.calls, 1);
     expect(pickerCalls, 2);
     expect(gateway.calls, 2);
+
+    // The model's final response is a chat message even when the task only
+    // read files. The work panel remains the progress/status surface; the
+    // conversation must contain the user-visible conclusion.
+    final finalReplyFinder = find.byWidgetPredicate(
+      (widget) =>
+          widget is MessageSelectableText &&
+          widget.content == '已通过聊天入口读取并核对授权目录。',
+    );
+    await _pumpUntil(tester, finalReplyFinder);
+    expect(finalReplyFinder, findsOneWidget);
+    expect(
+      database.messageBox.values.any(
+        (message) => message.content == '已通过聊天入口读取并核对授权目录。',
+      ),
+      isTrue,
+    );
+
+    final externalMessage = Message(
+      groupId: groupId,
+      senderId: character.id,
+      senderType: 'ai',
+      content: '教师节贺卡已完成。',
+      media: [
+        MediaAttachment(
+          type: 'file',
+          localPath: '${hiveDirectory.path}/teacher-card.html',
+          fileName: 'teacher-card.html',
+          fileSize: 24,
+          mimeType: 'text/html',
+        ),
+      ],
+    );
+    // DefaultWorkTaskRunner persists public messages outside the page.
+    await tester.runAsync(
+      () => database.messageBox.put(externalMessage.id, externalMessage),
+    );
+    await tester.pump();
+    expect(find.text('教师节贺卡已完成。'), findsOneWidget);
+    expect(find.text('teacher-card.html'), findsOneWidget);
 
     await tester.pumpWidget(const SizedBox.shrink());
     await tester.pump();

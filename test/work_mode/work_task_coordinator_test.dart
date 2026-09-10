@@ -10,6 +10,7 @@ import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
+import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -18,7 +19,10 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive/hive.dart';
 
 class _FakeWorkTaskRunner
-    implements WorkTaskRunner, WorkTaskVisionModelValidator {
+    implements
+        WorkTaskRunner,
+        WorkTaskVisionModelValidator,
+        WorkTaskInstallHandler {
   final List<String> startedTaskIds = <String>[];
   final List<String> cancelledTaskIds = <String>[];
   final Set<String> throwTaskIds = <String>{};
@@ -29,6 +33,7 @@ class _FakeWorkTaskRunner
   int maximumActiveCount = 0;
   int maximumActiveForOneConversation = 0;
   bool visionModelAvailable = true;
+  int installCalls = 0;
 
   @override
   bool supportsVisionModel(String characterId) => visionModelAvailable;
@@ -78,6 +83,15 @@ class _FakeWorkTaskRunner
       throw StateError('任务尚未开始：$taskId');
     }
     completion.complete();
+  }
+
+  @override
+  Future<WorkCommandResult> installMissingTool(
+    AgentTask task,
+    WorkTaskCancellation cancellation,
+  ) async {
+    installCalls++;
+    throw StateError('测试不应执行工具安装');
   }
 
   Future<void> finishAll() async {
@@ -455,6 +469,31 @@ void main() {
     expect(runner.startedTaskIds, [task.id]);
   });
 
+  test('clears the previous plan when promoting a new-artifact follow-up',
+      () async {
+    final task = _task(id: 'fresh-artifact-plan', conversationId: 'group-doc')
+      ..status = AgentTaskStatus.completed
+      ..plan = '旧飞行棋计划'
+      ..contextSummary = const WorkContextBuilder().build(
+        conversationId: 'group-doc',
+        target: '继续修改飞行棋页面',
+        artifactPaths: ['/workspace/flight-chess.html'],
+      ).toJsonString()
+      ..lastArtifactPaths = <String>['/workspace/flight-chess.html'];
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '设计并实现一个 html 教师节贺卡');
+
+    final stored = taskBox.get(task.id)!;
+    expect(stored.userRequest, '设计并实现一个 html 教师节贺卡');
+    expect(stored.plan, isEmpty);
+    expect(stored.lastArtifactPaths, isEmpty);
+    final context = jsonDecode(stored.contextSummary) as Map<String, dynamic>;
+    expect(context['target'], '设计并实现一个 html 教师节贺卡');
+    expect(context['artifactPaths'], isEmpty);
+    expect(runner.startedTaskIds, [task.id]);
+  });
+
   test('explicit validation follow-up resumes the paused task checkpoint',
       () async {
     final task = _task(id: 'explicit-validation', conversationId: 'group-test')
@@ -523,6 +562,22 @@ void main() {
       throwsStateError,
     );
     expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('install action requires a current missing-tool checkpoint', () async {
+    final task = _task(id: 'install-gate', conversationId: 'group-test')
+      ..status = AgentTaskStatus.paused
+      ..pendingToolRequestJson = jsonEncode({
+        'tool': 'command.run',
+        'args': {'executable': 'pandoc'},
+      });
+    await taskBox.put(task.id, task);
+
+    await expectLater(
+      coordinator.installMissingTool(task.id),
+      throwsStateError,
+    );
+    expect(runner.installCalls, 0);
   });
 
   test('vision model selection validates the pause state and capability',
@@ -813,6 +868,47 @@ void main() {
     gate.release.complete();
     await _settle();
     expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+  });
+
+  test(
+      'soft-limit continuation releases the conversation for the resumed task and its queued successor',
+      () async {
+    final first = _task(id: 'soft-limit-first', conversationId: 'dm-character');
+    await coordinator.submit(first);
+    await _waitForStartedCount(runner, 1);
+
+    // Model the runner's durable soft-limit checkpoint. The runner returns
+    // only after publishing the pause, so the coordinator keeps the
+    // conversation reservation until an explicit continuation releases it.
+    first
+      ..status = AgentTaskStatus.paused
+      ..softLimitReached = true;
+    await taskBox.put(first.id, first);
+    runner.complete(first.id);
+    await _waitForTaskState(
+      taskBox,
+      first.id,
+      (task) => task.status == AgentTaskStatus.paused,
+    );
+
+    final successor = _task(
+      id: 'soft-limit-successor',
+      conversationId: first.groupId,
+    );
+    await coordinator.submit(successor);
+    expect(runner.startedTaskIds, ['soft-limit-first']);
+
+    await coordinator.continueAfterSoftLimit(first.id);
+    await _waitForStartedCount(runner, 2);
+    expect(runner.startedTaskIds, ['soft-limit-first', 'soft-limit-first']);
+
+    runner.complete(first.id);
+    await _waitForStartedCount(runner, 3);
+    expect(
+      runner.startedTaskIds,
+      ['soft-limit-first', 'soft-limit-first', 'soft-limit-successor'],
+    );
+    runner.complete(successor.id);
   });
 
   test('follow-up queued at terminal boundary starts after old run releases',

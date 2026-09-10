@@ -16,6 +16,16 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
   /// 加载失败（会话已被删除等）时弹提示并退出页面。
   Future<void> _loadData() async {
     try {
+      // Capture membership before subscribing so a put that arrives during
+      // the initial load is still distinguishable from an update of an older
+      // message outside the visible page.
+      final knownMessageIds =
+          await _db.messageIdsForConversation(widget.groupId);
+      if (!_canTouchUi) return;
+      _knownConversationMessageIds
+        ..clear()
+        ..addAll(knownMessageIds);
+      _startMessageSubscription();
       final loaded = await _loader.load(widget.groupId);
       var initialMessages = loaded.messages;
       var hasOlderMessages = loaded.hasOlderMessages;
@@ -57,6 +67,8 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
             : null;
         _isLoading = false;
       });
+      _flushPendingMessageChanges();
+      unawaited(_reconcileMessageMembership());
 
       // A global work-task overlay can mount in the same frame as the room.
       // Re-assert desktop input focus after that frame so opening a room from
@@ -172,6 +184,109 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
   void _scheduleAgentTaskRecovery() {
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_canTouchUi) unawaited(_offerAgentTaskRecovery());
+    });
+  }
+
+  /// Starts the cross-component message bridge once the database is available.
+  ///
+  /// The work-mode runner is app-scoped and intentionally does not call back
+  /// into a chat-room widget. Hive is the shared persistence boundary, so its
+  /// box events are the durable source for live message updates.
+  void _startMessageSubscription() {
+    _messageSubscription ??= _db.messageBox.watch().listen(
+          _handleMessageBoxEvent,
+        );
+  }
+
+  void _handleMessageBoxEvent(BoxEvent event) {
+    if (event.deleted) {
+      final id = event.value is Message
+          ? (event.value as Message).id
+          : event.key?.toString();
+      if (id == null || id.isEmpty) return;
+      if (!_canTouchUi || _isLoading) {
+        _pendingDeletedMessageIds.add(id);
+        _pendingExternalMessages.remove(id);
+        return;
+      }
+      _removeExternalMessage(id);
+      return;
+    }
+
+    final message = event.value;
+    if (message is! Message || message.groupId != widget.groupId) return;
+    if (!_canTouchUi || _isLoading) {
+      _pendingExternalMessages[message.id] = message;
+      _pendingDeletedMessageIds.remove(message.id);
+      return;
+    }
+    _mergeExternalMessage(message);
+  }
+
+  /// Applies all changes received while the room was loading or covered by
+  /// another route. The latest value per message id wins.
+  void _flushPendingMessageChanges() {
+    if (!_canTouchUi || _isLoading) return;
+    final deleted = List<String>.from(_pendingDeletedMessageIds);
+    final messages = List<Message>.from(_pendingExternalMessages.values);
+    _pendingDeletedMessageIds.clear();
+    _pendingExternalMessages.clear();
+    for (final id in deleted) {
+      _removeExternalMessage(id);
+    }
+    for (final message in messages) {
+      _mergeExternalMessage(message);
+    }
+  }
+
+  Future<void> _reconcileMessageMembership() async {
+    try {
+      final ids = await _db.messageIdsForConversation(widget.groupId);
+      if (!_canTouchUi) return;
+      _knownConversationMessageIds
+        ..clear()
+        ..addAll(ids);
+      _setUiState(() => _totalMessageCount = ids.length);
+    } on Object {
+      // The initial page and its event deltas remain usable if the optional
+      // index refresh cannot complete during database recovery.
+    }
+  }
+
+  void _mergeExternalMessage(Message message) {
+    if (!_canTouchUi || message.groupId != widget.groupId) return;
+    final isNewMessage = _knownConversationMessageIds.add(message.id);
+    final existingIndex =
+        _messages.indexWhere((existing) => existing.id == message.id);
+    if (existingIndex >= 0) {
+      _setUiState(() {
+        _messages = List<Message>.from(_messages)..[existingIndex] = message;
+      });
+    } else if (isNewMessage) {
+      _setUiState(() {
+        _messages = [..._messages, message]
+          ..sort((left, right) => left.timestamp.compareTo(right.timestamp));
+        _totalMessageCount++;
+      });
+      _scrollToBottom();
+    }
+    if (message.senderType == 'ai') {
+      // A globally persisted reply is already authoritative; only advance the
+      // read marker here so a visible completion does not create an unread dot.
+      unawaited(_markCurrentConversationRead(throughMessage: message));
+    }
+  }
+
+  void _removeExternalMessage(String messageId) {
+    final wasKnownMessage = _knownConversationMessageIds.remove(messageId);
+    if (!wasKnownMessage) return;
+    final existingIndex =
+        _messages.indexWhere((message) => message.id == messageId);
+    _setUiState(() {
+      if (existingIndex >= 0) {
+        _messages = List<Message>.from(_messages)..removeAt(existingIndex);
+      }
+      if (_totalMessageCount > 0) _totalMessageCount--;
     });
   }
 

@@ -228,6 +228,8 @@ extension _ChatRoomInputAttachmentSupport on _ChatRoomPageState {
   /// 按优先级依次尝试：文件路径 → 图片位图 → 纯文本。
   /// 每种尝试都各自 try/catch：某个平台不支持某种剪贴板类型是常态，
   /// 不应因此中断后续回退路径。[_isPastingAttachments] 防止重复触发。
+  /// [includeText] 只控制纯文本回退；快捷键仍可检测文件和截图，纯文本
+  /// 则交给 TextField 原生粘贴，避免两条路径同时插入。
   Future<void> _pasteClipboardAttachments({
     bool showEmptyHint = false,
     bool includeText = true,
@@ -255,7 +257,7 @@ extension _ChatRoomInputAttachmentSupport on _ChatRoomPageState {
         }
       } catch (_) {}
 
-      if (attachments.isEmpty && includeText) {
+      if (attachments.isEmpty) {
         // 优先级 2：剪贴板位图（如系统截图），落盘成带时间戳的 png。
         try {
           final image = await Pasteboard.image;
@@ -275,7 +277,7 @@ extension _ChatRoomInputAttachmentSupport on _ChatRoomPageState {
         } catch (_) {}
       }
 
-      if (attachments.isEmpty) {
+      if (attachments.isEmpty && includeText) {
         // 优先级 3：纯文本，直接插入输入框。
         String? clipboardText;
         try {

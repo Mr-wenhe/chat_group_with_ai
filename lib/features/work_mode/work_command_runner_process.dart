@@ -363,14 +363,24 @@ extension _WorkCommandRunnerProcess on WorkCommandRunner {
     if (detector.add(bytes)) stop.request(_StopReason.prompt);
   }
 
-  Map<String, String> _safeEnvironment([WorkCommand? command]) {
+  Map<String, String> _safeEnvironment({
+    WorkCommand? command,
+    bool includeUserHome = false,
+  }) {
     final result = <String, String>{};
+    final executable = command == null
+        ? ''
+        : _commandBasename(command.executable).toLowerCase();
+    final canIncludeUserHome =
+        includeUserHome && (executable == 'brew' || executable == 'winget');
     for (final entry in parentEnvironment.entries) {
       final key = entry.key;
       final normalisedKey = key.toUpperCase();
-      final allowed = WorkCommandRunner._safeEnvironmentKeys.any(
-        (candidate) => candidate.toUpperCase() == normalisedKey,
-      );
+      final allowed = normalisedKey == 'HOME'
+          ? canIncludeUserHome
+          : WorkCommandRunner._safeEnvironmentKeys.any(
+              (candidate) => candidate.toUpperCase() == normalisedKey,
+            );
       if (!allowed) continue;
       if (_isSensitiveEnvironmentName(entry.key)) continue;
       if (_hasControl(entry.key) || _hasControl(entry.value)) continue;
@@ -385,9 +395,6 @@ extension _WorkCommandRunnerProcess on WorkCommandRunner {
     if (command != null && _isPathLikeExecutable(command.executable)) {
       result['PATH'] = _trustedChildPath(command.executable);
     }
-    final executable = command == null
-        ? ''
-        : _commandBasename(command.executable).toLowerCase();
     if (executable == 'git') {
       // Do not inherit machine-wide or user-global git configuration. Local
       // repository config remains visible for normal project semantics.
@@ -455,6 +462,7 @@ extension _WorkCommandRunnerProcess on WorkCommandRunner {
     final suggestion = WorkCommandInstallSuggestion.forExecutable(
       command.executable,
       isWindows: policy.isWindows,
+      isMacOS: policy.isMacOS,
       workingDirectory: command.workingDirectory,
       declaredImpact: command.declaredImpact,
     );

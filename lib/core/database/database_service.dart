@@ -858,6 +858,18 @@ class DatabaseService {
     return _pageFromIds(ids, start, ids.length);
   }
 
+  /// Returns the authoritative message ids for a conversation.
+  ///
+  /// Chat pages keep only one or more visible pagination windows in memory;
+  /// callers that mirror box events need this full-id set to distinguish an
+  /// update of an older message from a newly inserted message.
+  Future<Set<String>> messageIdsForConversation(String groupId) async {
+    await ensureMessageIndex();
+    return Set<String>.unmodifiable(
+      (_messageIdsForGroup(groupId) ?? const <String>[]).toSet(),
+    );
+  }
+
   Future<MessagePage> loadMessagesBefore(
     String groupId, {
     required String beforeMessageId,

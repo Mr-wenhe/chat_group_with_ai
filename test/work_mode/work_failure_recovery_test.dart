@@ -387,9 +387,14 @@ void main() {
       expect(task.workFailure!.suggestedAction, isNot(contains('帮助安装工具')));
     });
 
-    test('restored known missing-tool checkpoints keep the install CTA', () {
+    test('restored known missing-tool checkpoints require a current command',
+        () {
       final task = _task('known-missing-tool')
         ..status = AgentTaskStatus.paused
+        ..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+          'tool': AgentToolName.commandRun.wireName,
+          'args': <String, dynamic>{'executable': 'rg'},
+        })
         ..contextSummary = jsonEncode(<String, dynamic>{
           'recentToolResults': <Map<String, dynamic>>[
             <String, dynamic>{
@@ -410,7 +415,83 @@ void main() {
         WorkFailure.defaults(WorkFailureType.toolMissing),
       );
 
-      expect(task.workFailure!.suggestedAction, contains('帮助安装工具'));
+      if (Platform.isMacOS || Platform.isWindows) {
+        expect(task.workFailure!.suggestedAction, contains('帮助安装工具'));
+      } else {
+        expect(task.workFailure!.suggestedAction, contains('官方文档'));
+      }
+    });
+
+    test(
+        'restored pandoc checkpoints gain the install CTA after mapping update',
+        () {
+      final task = _task('legacy-pandoc-missing-tool')
+        ..status = AgentTaskStatus.paused
+        ..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+          'tool': AgentToolName.commandRun.wireName,
+          'args': <String, dynamic>{'executable': 'pandoc'},
+        })
+        ..contextSummary = jsonEncode(<String, dynamic>{
+          'recentToolResults': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'data': <String, dynamic>{
+                'installSuggestion': <String, dynamic>{
+                  'executable': 'pandoc',
+                  'trustedSource': 'https://pandoc.org/installing.html',
+                },
+              },
+            },
+          ],
+        });
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.toolMissing,
+          title: '缺少执行工具',
+          reason: '缺少 pandoc。',
+          technicalDetail: '旧任务检查点没有安装命令。',
+          completedContent: [],
+          retryable: false,
+          suggestedAction: '请按官方文档手动安装。',
+        ),
+      );
+
+      if (Platform.isMacOS || Platform.isWindows) {
+        expect(task.workFailure!.suggestedAction, contains('帮助安装工具'));
+      } else {
+        expect(task.workFailure!.suggestedAction, contains('官方文档'));
+      }
+    });
+
+    test('historical installer metadata cannot authorize another command', () {
+      final task = _task('mismatched-missing-tool')
+        ..status = AgentTaskStatus.paused
+        ..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+          'tool': AgentToolName.commandRun.wireName,
+          'args': <String, dynamic>{'executable': 'python'},
+        })
+        ..contextSummary = jsonEncode(<String, dynamic>{
+          'recentToolResults': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'data': <String, dynamic>{
+                'installSuggestion': <String, dynamic>{
+                  'executable': 'rg',
+                  'installCommand': <String, dynamic>{
+                    'executable': 'brew',
+                    'arguments': <String>['install', 'ripgrep'],
+                  },
+                },
+              },
+            },
+          ],
+        });
+      WorkFailure.persistOnTask(
+        task,
+        WorkFailure.defaults(WorkFailureType.toolMissing),
+      );
+
+      expect(task.workFailure!.suggestedAction, contains('官方文档'));
+      expect(task.workFailure!.suggestedAction, isNot(contains('帮助安装工具')));
     });
 
     test('retries from a checkpoint without repeating a committed mutation',

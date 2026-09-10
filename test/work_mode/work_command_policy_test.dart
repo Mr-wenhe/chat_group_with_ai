@@ -538,6 +538,7 @@ void main() {
     final suggestion = WorkCommandInstallSuggestion.forExecutable(
       'rg',
       isWindows: false,
+      isMacOS: true,
       workingDirectory: '/workspace',
       declaredImpact: const ['/workspace'],
     );
@@ -551,6 +552,76 @@ void main() {
     expect(suggestion.message, contains('仅在你确认后'));
     expect(suggestion.message, contains('系统包管理器目录'));
     expect(suggestion.message, contains('不会加入永久授权'));
+  });
+
+  test('missing pandoc suggestion offers a verified package-manager command',
+      () {
+    final macSuggestion = WorkCommandInstallSuggestion.forExecutable(
+      'pandoc',
+      isWindows: false,
+      isMacOS: true,
+      workingDirectory: '/workspace',
+      declaredImpact: const ['/workspace/report.pdf'],
+    );
+    final windowsSuggestion = WorkCommandInstallSuggestion.forExecutable(
+      'pandoc',
+      isWindows: true,
+      workingDirectory: r'C:\workspace',
+      declaredImpact: const [r'C:\workspace\report.pdf'],
+    );
+
+    expect(macSuggestion.purpose, contains('PDF'));
+    expect(macSuggestion.trustedSource, 'https://pandoc.org/installing.html');
+    expect(macSuggestion.installCommand?.executable, 'brew');
+    expect(
+        macSuggestion.installCommand?.arguments, <String>['install', 'pandoc']);
+    expect(windowsSuggestion.installCommand?.executable, 'winget');
+    expect(windowsSuggestion.installCommand?.arguments, <String>[
+      'install',
+      '--source',
+      'winget',
+      '--exact',
+      '--id',
+      'JohnMacFarlane.Pandoc',
+    ]);
+    expect(macSuggestion.message, contains('仅在你确认后'));
+  });
+
+  test('normalizes Windows executable names and avoids a fake Linux installer',
+      () {
+    final windowsSuggestion = WorkCommandInstallSuggestion.forExecutable(
+      r'pandoc.exe',
+      isWindows: true,
+      isMacOS: false,
+      workingDirectory: r'C:\workspace',
+      declaredImpact: const [r'C:\workspace\report.pdf'],
+    );
+    final linuxSuggestion = WorkCommandInstallSuggestion.forExecutable(
+      'pandoc',
+      isWindows: false,
+      isMacOS: false,
+      workingDirectory: '/workspace',
+      declaredImpact: const ['/workspace/report.pdf'],
+    );
+
+    expect(windowsSuggestion.installCommand?.executable, 'winget');
+    expect(linuxSuggestion.installCommand, isNull);
+    expect(
+      WorkCommandInstallSuggestion.hasTrustedInstaller(
+        r'pandoc.exe',
+        isWindows: true,
+        isMacOS: false,
+      ),
+      isTrue,
+    );
+    expect(
+      WorkCommandInstallSuggestion.hasTrustedInstaller(
+        'pandoc',
+        isWindows: false,
+        isMacOS: false,
+      ),
+      isFalse,
+    );
   });
 
   test('unknown missing tools produce guidance without an invented installer',

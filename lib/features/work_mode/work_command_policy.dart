@@ -169,6 +169,22 @@ class WorkCommandInstallSuggestion {
 
   bool get canInstall => installCommand != null;
 
+  /// Returns whether a persisted checkpoint can be upgraded to a trusted
+  /// installer suggestion after the app learns a new package mapping.
+  static bool hasTrustedInstaller(
+    String rawExecutable, {
+    bool? isWindows,
+    bool? isMacOS,
+  }) {
+    final executable = _normaliseExecutable(rawExecutable);
+    final knownTool =
+        const {'rg', 'ripgrep', 'git', 'pandoc'}.contains(executable);
+    if (!knownTool) return false;
+    final windows = isWindows ?? Platform.isWindows;
+    final macOS = isMacOS ?? Platform.isMacOS;
+    return windows || macOS;
+  }
+
   String get message {
     final command = installCommand?.displayCommand ?? '请在外部终端按官方文档安装';
     final impact = impactPaths.isEmpty ? '未声明' : impactPaths.join('、');
@@ -194,10 +210,12 @@ class WorkCommandInstallSuggestion {
   static WorkCommandInstallSuggestion forExecutable(
     String rawExecutable, {
     required bool isWindows,
+    bool? isMacOS,
     required String workingDirectory,
     required List<String> declaredImpact,
   }) {
-    final executable = _basename(rawExecutable);
+    final executable = _normaliseExecutable(rawExecutable);
+    final macOS = isMacOS ?? Platform.isMacOS;
     final impact = List<String>.unmodifiable(declaredImpact);
     WorkCommand? install;
     String purpose;
@@ -207,25 +225,69 @@ class WorkCommandInstallSuggestion {
       case 'ripgrep':
         purpose = 'search text quickly with ripgrep';
         source = 'https://github.com/BurntSushi/ripgrep';
-        install = WorkCommand(
-          executable: isWindows ? 'winget' : 'brew',
-          arguments: isWindows
-              ? const ['install', '--id', 'BurntSushi.ripgrep.MSVC', '--exact']
-              : const ['install', 'ripgrep'],
-          workingDirectory: workingDirectory,
-          declaredImpact: impact,
-        );
+        install = isWindows
+            ? WorkCommand(
+                executable: 'winget',
+                arguments: const [
+                  'install',
+                  '--id',
+                  'BurntSushi.ripgrep.MSVC',
+                  '--exact',
+                ],
+                workingDirectory: workingDirectory,
+                declaredImpact: impact,
+              )
+            : macOS
+                ? WorkCommand(
+                    executable: 'brew',
+                    arguments: const ['install', 'ripgrep'],
+                    workingDirectory: workingDirectory,
+                    declaredImpact: impact,
+                  )
+                : null;
       case 'git':
         purpose = '版本控制和读取仓库状态';
         source = 'https://git-scm.com/downloads';
-        install = WorkCommand(
-          executable: isWindows ? 'winget' : 'brew',
-          arguments: isWindows
-              ? const ['install', '--id', 'Git.Git', '--exact']
-              : const ['install', 'git'],
-          workingDirectory: workingDirectory,
-          declaredImpact: impact,
-        );
+        install = isWindows
+            ? WorkCommand(
+                executable: 'winget',
+                arguments: const ['install', '--id', 'Git.Git', '--exact'],
+                workingDirectory: workingDirectory,
+                declaredImpact: impact,
+              )
+            : macOS
+                ? WorkCommand(
+                    executable: 'brew',
+                    arguments: const ['install', 'git'],
+                    workingDirectory: workingDirectory,
+                    declaredImpact: impact,
+                  )
+                : null;
+      case 'pandoc':
+        purpose = 'Markdown、HTML、DOCX 等文档转换和 PDF 报告生成';
+        source = 'https://pandoc.org/installing.html';
+        install = isWindows
+            ? WorkCommand(
+                executable: 'winget',
+                arguments: const [
+                  'install',
+                  '--source',
+                  'winget',
+                  '--exact',
+                  '--id',
+                  'JohnMacFarlane.Pandoc',
+                ],
+                workingDirectory: workingDirectory,
+                declaredImpact: impact,
+              )
+            : macOS
+                ? WorkCommand(
+                    executable: 'brew',
+                    arguments: const ['install', 'pandoc'],
+                    workingDirectory: workingDirectory,
+                    declaredImpact: impact,
+                  )
+                : null;
       case 'flutter':
       case 'dart':
         purpose = 'Dart/Flutter 静态检查和项目工具';
@@ -252,15 +314,25 @@ class WorkCommandInstallSuggestion {
   }
 }
 
+String _normaliseExecutable(String rawExecutable) {
+  final executable = _basename(rawExecutable).toLowerCase();
+  return executable.endsWith('.exe')
+      ? executable.substring(0, executable.length - 4)
+      : executable;
+}
+
 /// Static command classifier and authorization-boundary validator.
 class WorkCommandPolicy {
   final List<String> authorizedRoots;
   final bool isWindows;
+  final bool isMacOS;
 
   WorkCommandPolicy({
     required Iterable<String> authorizedRoots,
     bool? isWindows,
+    bool? isMacOS,
   })  : isWindows = isWindows ?? Platform.isWindows,
+        isMacOS = isMacOS ?? Platform.isMacOS,
         authorizedRoots = List<String>.unmodifiable(
           _normalizeAuthorizedRoots(authorizedRoots),
         );

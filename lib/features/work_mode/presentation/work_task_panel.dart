@@ -124,8 +124,12 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
     if (task == null) return const SizedBox.shrink();
     final latestEvent = _latestEvents[task.id];
     final latestAction = _latestActionEvents[task.id] ?? latestEvent;
-    final toolName =
-        _toolName(latestEvent) ?? _toolName(_latestToolEvents[task.id]);
+    // Tool/action fields describe the active step. Once the durable task is
+    // terminal, leave the detailed event in the timeline but let the summary
+    // section show the terminal status instead of a stale tool label.
+    final toolName = task.isTerminal
+        ? null
+        : _toolName(latestEvent) ?? _toolName(_latestToolEvents[task.id]);
 
     return Material(
       key: const Key('work-task-panel'),
@@ -302,8 +306,12 @@ class _TaskDetailsState extends State<_TaskDetails> {
             ? '等待你批准当前操作。'
             : null;
     final failure = _visibleWorkFailure(widget.task);
-    final displayAction =
-        _isStaleRecoveryAction(widget.task, widget.latestAction)
+    // A terminal task may retain the last stepStarted event for its timeline.
+    // Do not present that historical action as if it were still running after
+    // the durable task status has already become completed/failed/cancelled.
+    final displayAction = widget.task.isTerminal
+        ? null
+        : _isStaleRecoveryAction(widget.task, widget.latestAction)
             ? null
             : widget.latestAction;
     final characterName =
@@ -1493,27 +1501,7 @@ bool _taskNeedsFolderGrant(AgentTask task) {
 }
 
 bool _taskHasInstallSuggestion(AgentTask task) {
-  if (task.status != AgentTaskStatus.paused) return false;
-  try {
-    final decoded = jsonDecode(task.contextSummary);
-    if (decoded is! Map) return false;
-    final results = decoded['recentToolResults'];
-    if (results is! List) return false;
-    for (final result in results.whereType<Map>()) {
-      final data = result['data'];
-      final suggestion = data is Map ? data['installSuggestion'] : null;
-      // Only expose the in-app CTA when the runner supplied a concrete,
-      // trusted install command. Some executables (for example flutter/dart)
-      // can be diagnosed but intentionally have no automatic installer.
-      if (suggestion is Map && suggestion['installCommand'] is Map) {
-        return true;
-      }
-    }
-  } on Object {
-    // A malformed checkpoint must not expose an install action. The runner
-    // will publish a fresh redacted checkpoint before the panel can retry.
-  }
-  return false;
+  return WorkFailure.hasInstallableMissingTool(task);
 }
 
 bool _taskNeedsVisionModel(AgentTask task) {

@@ -256,7 +256,7 @@ class WorkFollowUpPolicy {
       ).hasMatch(request);
 
   bool _hasNewFileIntent(String request) => RegExp(
-        r'(新建|创建|生成(?:一个|一份)?|写一个|做一个|制作一个|另存为|'
+        r'(新建|创建|生成(?:一个|一份)?|写一个|做一个|制作一个|实现(?:一个|一份)|另存为|'
         r'\b(?:new|create|generate|make)\b)',
         caseSensitive: false,
       ).hasMatch(request);

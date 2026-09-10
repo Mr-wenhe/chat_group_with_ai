@@ -86,6 +86,19 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 当前已加载到内存的消息（按时间升序，仅当前分页窗口）。
   List<Message> _messages = [];
 
+  /// 工作模式等全局服务可绕过页面直接落库；监听消息盒子让这些消息
+  /// （尤其是带生成文件附件的完成消息）无需重新进入会话即可显示。
+  StreamSubscription<BoxEvent>? _messageSubscription;
+
+  /// Full conversation membership captured before live box events are merged.
+  /// It prevents an update outside the visible pagination window from being
+  /// counted as a new message.
+  final Set<String> _knownConversationMessageIds = <String>{};
+
+  /// 首屏加载或页面不可见期间收到的消息变更，恢复可见后再合并。
+  final Map<String, Message> _pendingExternalMessages = {};
+  final Set<String> _pendingDeletedMessageIds = {};
+
   /// 完整历史中是否存在当前成员不可共同查看的消息。
   bool _hasRestrictedHistory = false;
 

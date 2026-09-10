@@ -76,10 +76,10 @@ class WorkCommandRunner {
   static const int defaultMaxOutputBytes = 512 * 1024;
 
   // Keep the child process hermetic. In particular, do not forward arbitrary
-  // user/application variables: dynamic-loader, language-runtime and socket
-  // variables can change what an otherwise trusted executable runs or where
-  // it sends data. The explicit utility installers below use their own even
-  // smaller environment.
+  // user/application variables: dynamic-loader, language-runtime, socket and
+  // home-directory variables can change what an otherwise trusted executable
+  // runs or expose user configuration. Explicit package-manager installs opt
+  // into the narrowly-scoped home-directory exception below.
   static const Set<String> _safeEnvironmentKeys = <String>{
     'PATH',
     'USER',
@@ -166,6 +166,7 @@ class WorkCommandRunner {
     bool? approved,
     bool userExplicitlyRequested = false,
     bool acceptancePlanAuthorized = false,
+    bool includeUserHome = false,
     Future<void>? cancellation,
     bool Function()? isCancelled,
   }) async {
@@ -207,6 +208,7 @@ class WorkCommandRunner {
       command,
       policyResult,
       userExplicitlyRequested: userExplicitlyRequested,
+      includeUserHome: includeUserHome,
     );
     final startResult = start.result;
     if (startResult != null) return startResult;
@@ -274,6 +276,7 @@ class WorkCommandRunner {
     WorkCommand command,
     WorkCommandPolicyResult policyResult, {
     required bool userExplicitlyRequested,
+    required bool includeUserHome,
   }) async {
     late final WorkCommand commandForSpawn;
     try {
@@ -309,7 +312,10 @@ class WorkCommandRunner {
     final startFuture = Future<WorkCommandProcess>.sync(
       () => processStarter(
         commandForSpawn,
-        env: _safeEnvironment(commandForSpawn),
+        env: _safeEnvironment(
+          command: commandForSpawn,
+          includeUserHome: includeUserHome,
+        ),
         shell: false,
       ),
     );

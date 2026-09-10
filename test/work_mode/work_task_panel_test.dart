@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:io';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_host.dart';
@@ -107,6 +108,49 @@ void main() {
         tester.getTopLeft(find.text('正在读取项目配置')).dy,
         lessThan(tester.getTopLeft(find.text('已读取 pubspec.yaml')).dy),
       );
+    });
+
+    testWidgets('shows terminal status instead of a stale last action',
+        (tester) async {
+      final events = StreamController<WorkTaskEvent>.broadcast();
+      addTearDown(events.close);
+      final task = _task(
+        id: 'completed-task',
+        conversationId: 'group-one',
+        characterId: 'developer',
+        resultSummary: '项目分析结论已整理完成。',
+      )..status = AgentTaskStatus.completed;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => events.stream,
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      events.add(WorkTaskEvent(
+        taskId: task.id,
+        sequence: 1,
+        timestamp: DateTime.utc(2026, 8, 28, 10, 1),
+        kind: WorkTaskEventKind.stepStarted,
+        title: '已读取项目关键文件',
+        safeMetadata: const <String, Object?>{'tool': 'workspace.read'},
+      ));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('当前动作：任务已完成。'), findsOneWidget);
+      expect(find.text('当前动作：已读取项目关键文件'), findsNothing);
+      expect(find.text('工具：workspace.read'), findsNothing);
+      expect(find.text('项目分析结论已整理完成。'), findsOneWidget);
     });
 
     testWidgets('shows the budgeted action count rather than a tool index',
@@ -425,6 +469,67 @@ void main() {
       expect(find.byKey(const Key('work-task-add-folder')), findsOneWidget);
       expect(find.byKey(const Key('work-task-approve')), findsNothing);
       expect(find.byKey(const Key('work-task-reject')), findsNothing);
+    });
+
+    testWidgets('offers install consent for a legacy pandoc checkpoint',
+        (tester) async {
+      final task = _task(
+        id: 'legacy-pandoc-panel-task',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..lastError = '缺少工具：pandoc。'
+        ..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+          'tool': 'command.run',
+          'args': <String, dynamic>{'executable': 'pandoc'},
+        })
+        ..executionStateJson = jsonEncode(<String, dynamic>{
+          'toolMissing': true,
+        })
+        ..contextSummary = jsonEncode(<String, dynamic>{
+          'recentToolResults': <Map<String, dynamic>>[
+            <String, dynamic>{
+              'data': <String, dynamic>{
+                'installSuggestion': <String, dynamic>{
+                  'executable': 'pandoc',
+                },
+              },
+            },
+          ],
+        });
+      var installRequested = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+            onInstallTool: (_) async => installRequested = true,
+          ),
+        ),
+      ));
+
+      if (!Platform.isMacOS && !Platform.isWindows) {
+        expect(find.byKey(const Key('work-task-install-tool')), findsNothing);
+        return;
+      }
+
+      expect(find.byKey(const Key('work-task-install-tool')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('work-task-install-tool')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('work-task-install-tool-dialog')),
+          findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('work-task-install-tool-confirm')));
+      await tester.pumpAndSettle();
+      expect(installRequested, isTrue);
     });
 
     testWidgets('requires a visual model choice before generic continue',

@@ -48,6 +48,16 @@ class PromptTestDatabaseService extends DatabaseService {
   }
 
   @override
+  Future<Set<String>> messageIdsForConversation(String groupId) {
+    return Future.value(
+      historyMessages
+          .where((message) => message.groupId == groupId)
+          .map((message) => message.id)
+          .toSet(),
+    );
+  }
+
+  @override
   Future<void> markGroupChatRead(String groupId, {DateTime? readAt}) async {}
 
   @override

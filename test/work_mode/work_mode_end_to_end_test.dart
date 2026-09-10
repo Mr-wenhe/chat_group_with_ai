@@ -2,7 +2,6 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:collection';
 
-import 'package:archive/archive.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -401,7 +400,7 @@ void main() {
     );
 
     // Project delivery keeps every real artifact in task order, including
-    // nested directories, instead of publishing only the last generated file.
+    // nested directories, as separate chat file cards.
     final projectFiles = <File>[
       File('${workspace.workDirPath}/project/lib/main.dart'),
       File('${workspace.workDirPath}/project/test/main_test.dart'),
@@ -440,31 +439,19 @@ void main() {
       (message) => message.content.contains('项目文件'),
       orElse: () => projectMessages.last,
     );
-    expect(projectMessage.media, hasLength(1),
+    expect(projectMessage.media, hasLength(3),
         reason: projectMessages
             .map((message) => '${message.content} media=${message.media}')
             .join('\n'));
-    expect(projectMessage.content, contains('3 个产物打包为 ZIP'));
-    final projectArchive = ZipDecoder().decodeBytes(
-      await File(projectMessage.media!.single.localPath).readAsBytes(),
+    expect(projectMessage.content, contains('已附加 3 个产物'));
+    final projectAttachmentNames =
+        projectMessage.media!.map((attachment) => attachment.fileName).toSet();
+    expect(
+      projectAttachmentNames,
+      containsAll(<String>['main.dart', 'main_test.dart', 'config.json']),
     );
-    final projectEntryNames =
-        projectArchive.files.map((entry) => entry.name).toList();
-    expect(
-        projectEntryNames
-            .any((name) => name.endsWith('/project/lib/main.dart')),
-        isTrue);
-    expect(
-        projectEntryNames
-            .any((name) => name.endsWith('/project/test/main_test.dart')),
-        isTrue);
-    expect(
-        projectEntryNames
-            .any((name) => name.endsWith('/project/assets/config.json')),
-        isTrue);
 
-    // Multiple ordinary files are also one ZIP attachment; this is separate
-    // from the project wording so the generic delivery contract cannot regress.
+    // Ordinary multiple files follow the same separate-card delivery contract.
     final ordinaryFiles = <File>[
       File('${workspace.workDirPath}/a.md'),
       File('${workspace.workDirPath}/b.md'),
@@ -494,15 +481,11 @@ void main() {
       (message) => message.content.contains('普通多文件'),
       orElse: () => ordinaryMessages.last,
     );
-    expect(ordinaryMessage.media, hasLength(1));
-    expect(ordinaryMessage.content, contains('2 个产物打包为 ZIP'));
-    final ordinaryArchive = ZipDecoder().decodeBytes(
-      await File(ordinaryMessage.media!.single.localPath).readAsBytes(),
-    );
-    final ordinaryEntryNames =
-        ordinaryArchive.files.map((entry) => entry.name).toList();
-    expect(ordinaryEntryNames.any((name) => name.endsWith('/a.md')), isTrue);
-    expect(ordinaryEntryNames.any((name) => name.endsWith('/b.md')), isTrue);
+    expect(ordinaryMessage.media, hasLength(2));
+    expect(ordinaryMessage.content, contains('已附加 2 个产物'));
+    final ordinaryAttachmentNames =
+        ordinaryMessage.media!.map((attachment) => attachment.fileName).toSet();
+    expect(ordinaryAttachmentNames, containsAll(<String>['a.md', 'b.md']));
     final projectEvents = await eventStore.read(projectTask.id);
     final deliveryProgress = projectEvents.events
         .where((event) => event.title == '文件交付进度')

@@ -129,6 +129,81 @@ void main() {
     expect(send.onPressed, isNotNull);
   });
 
+  testWidgets(
+      'external updates outside the visible message page do not add a duplicate',
+      (tester) async {
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
+    const conversationId = 'g1';
+    final messageTime = DateTime(2026, 8, 13, 13);
+    await tester.runAsync(() async {
+      for (var index = 0; index < 100; index++) {
+        await db.messageBox.put(
+          'page-message-$index',
+          Message(
+            id: 'page-message-$index',
+            groupId: conversationId,
+            senderId: 'user',
+            senderType: 'user',
+            content: '历史消息 $index',
+            timestamp: messageTime.add(Duration(minutes: index)),
+          ),
+        );
+      }
+    });
+
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [databaseServiceProvider.overrideWithValue(db)],
+          child: const MaterialApp(
+            home: ChatRoomPage(groupId: conversationId),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump(const Duration(milliseconds: 100));
+    await pumpUntilTextField(tester);
+
+    final messageList = find.byType(ChatMessageList);
+    final before = tester.widget<ChatMessageList>(messageList).messages.length;
+    expect(before, 80);
+
+    await tester.runAsync(() async {
+      await db.messageBox.put(
+        'page-message-0',
+        Message(
+          id: 'page-message-0',
+          groupId: conversationId,
+          senderId: 'user',
+          senderType: 'user',
+          content: '窗口外消息被更新',
+          timestamp: messageTime,
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pump();
+
+    final afterUpdate =
+        tester.widget<ChatMessageList>(messageList).messages.length;
+    expect(afterUpdate, before);
+    expect(find.text('窗口外消息被更新'), findsNothing);
+
+    await tester.runAsync(() async {
+      await db.messageBox.delete('page-message-1');
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pump();
+    expect(
+      tester.widget<ChatMessageList>(messageList).messages.length,
+      before,
+    );
+  });
+
   testWidgets('group memory entry opens a read-only scoped detail page',
       (tester) async {
     addTearDown(() async {

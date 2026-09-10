@@ -1,7 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
 
-import 'package:archive/archive.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
@@ -211,7 +210,9 @@ class _CommandGateway extends AiRequestGateway {
 }
 
 class _MissingMutationCommandGateway extends AiRequestGateway {
-  _MissingMutationCommandGateway()
+  final String executable;
+
+  _MissingMutationCommandGateway({this.executable = 'insta'})
       : super(
           store: MemoryGovernanceStore(),
           client: _UnusedClient(),
@@ -247,7 +248,7 @@ class _MissingMutationCommandGateway extends AiRequestGateway {
             'tool': {
               'name': 'command.run',
               'arguments': {
-                'executable': 'insta',
+                'executable': executable,
                 'arguments': <String>[],
                 'workingDirectory': '.',
                 'declaredImpact': <String>['.'],
@@ -541,7 +542,7 @@ void main() {
     expect(await output.exists(), isFalse);
   });
 
-  test('production runner records every workspace.patch in one project ZIP',
+  test('production runner delivers every workspace.patch as a file card',
       () async {
     final grants = WorkFolderGrantService(
       box: database.appSettingsBox,
@@ -699,21 +700,20 @@ void main() {
         .last;
     expect(
       message.media,
-      hasLength(1),
+      hasLength(3),
       reason:
           'content=${message.content}; paths=${task.lastArtifactPaths}; root=${workspace.workDirPath}',
     );
-    expect(message.content, contains('3 个产物打包为 ZIP'));
-    final archive = ZipDecoder().decodeBytes(
-      await File(message.media!.single.localPath).readAsBytes(),
-    );
-    final names = archive.files.map((entry) => entry.name).toList();
+    expect(message.content, contains('已附加 3 个产物'));
+    final names =
+        message.media!.map((attachment) => attachment.fileName).toSet();
     expect(
-        names.any((name) => name.endsWith('/project/lib/main.dart')), isTrue);
-    expect(names.any((name) => name.endsWith('/project/test/main_test.dart')),
-        isTrue);
-    expect(names.any((name) => name.endsWith('/project/assets/config.json')),
-        isTrue);
+        names,
+        containsAll(<String>[
+          'main.dart',
+          'main_test.dart',
+          'config.json',
+        ]));
     final events = await eventStore.read(task.id);
     final progress = events.events
         .where((event) => event.title == '文件交付进度')
@@ -917,6 +917,159 @@ void main() {
     expect(processStarts, 1);
   });
 
+  test(
+      'successful missing-tool install rehydrates the pending command after restart',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final mutations = WorkspaceMutationService(pathPolicy: pathPolicy);
+    final config = ApiConfig(
+      id: 'restart-install-config',
+      name: 'Restart install test',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'restart-install-character',
+      name: '安装恢复角色',
+      avatar: 'IR',
+      age: 30,
+      role: '测试执行角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.commandRun,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    var installed = false;
+    var processStarts = 0;
+    final commandRunner = WorkCommandRunner(
+      policy: WorkCommandPolicy(
+        authorizedRoots: [authorizedDirectory.path],
+        isWindows: false,
+      ),
+      pathPolicy: pathPolicy,
+      processStarter: (command, {required env, required shell}) async {
+        processStarts++;
+        if (command.executable == 'pandoc' && !installed) {
+          throw const ProcessException(
+            'pandoc',
+            [],
+            'No such file or directory',
+            2,
+          );
+        }
+        if (command.executable == 'brew') installed = true;
+        return WorkCommandProcess(
+          pid: processStarts,
+          stdout: const Stream<List<int>>.empty(),
+          stderr: const Stream<List<int>>.empty(),
+          exitCode: Future<int>.value(0),
+          terminateTree: ({bool force = false}) async {},
+        );
+      },
+    );
+    final gateway = _MissingMutationCommandGateway(executable: 'pandoc');
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    final firstRunner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      resourceLockManager: WorkResourceLockManager(isWindows: false),
+      commandRunner: commandRunner,
+    );
+    final task = AgentTask(
+      id: 'restart-install-task',
+      groupId: 'restart-install-group',
+      characterId: character.id,
+      userRequest: '生成 PDF',
+      requestedPermissions: character.toolPermissions,
+      assignedCharacterIds: const ['restart-install-character'],
+      workModeTask: true,
+    );
+
+    await firstRunner.run(task, WorkTaskCancellation());
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    final approved = Map<String, dynamic>.from(
+      jsonDecode(task.executionStateJson) as Map,
+    )..['approvalDecision'] = 'approvedWithoutUndo';
+    task
+      ..executionStateJson = jsonEncode(approved)
+      ..status = AgentTaskStatus.queued;
+    await firstRunner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.paused);
+    expect(task.lastError, contains('缺少工具'));
+    expect(task.pendingToolRequestJson, contains('pandoc'));
+
+    // The install button is handled by a fresh runner after a process
+    // restart. A successful install must rehydrate only this sanitized,
+    // structured command checkpoint so the exact command can be revalidated
+    // and executed without asking the model to invent it again.
+    final restartedRunner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      resourceLockManager: WorkResourceLockManager(isWindows: false),
+      commandRunner: commandRunner,
+    );
+    final install = await restartedRunner.installMissingTool(
+      task,
+      WorkTaskCancellation(),
+    );
+    expect(install.succeeded, isTrue);
+    expect(installed, isTrue);
+
+    final resumedExecution = Map<String, dynamic>.from(
+      jsonDecode(task.executionStateJson) as Map,
+    )..remove('toolMissing');
+    task
+      ..executionStateJson =
+          resumedExecution.isEmpty ? '' : jsonEncode(resumedExecution)
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false;
+    await restartedRunner.run(task, WorkTaskCancellation());
+
+    // Missing-tool recovery must replay the command boundary first. The
+    // missing executable path is a mutation-shaped command, so its original
+    // approval was intentionally consumed by the failed probe and the
+    // resumed task asks for a fresh approval rather than silently reusing it.
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    expect(gateway.calls, 1);
+    expect(processStarts, 2);
+  });
+
   test('production read-only command runs with a read-only folder grant',
       () async {
     final grants = WorkFolderGrantService(
@@ -1006,6 +1159,15 @@ void main() {
     expect(task.status, AgentTaskStatus.completed);
     expect(task.lastError, isEmpty);
     expect(processStarts, 1);
+
+    final persistedReplies = database.messageBox.values
+        .where((message) =>
+            message.groupId == task.groupId &&
+            message.senderId == character.id &&
+            message.senderType == 'ai')
+        .toList(growable: false);
+    expect(persistedReplies, hasLength(1));
+    expect(persistedReplies.single.content, contains('当前工作目录已读取。'));
   });
 
   test(

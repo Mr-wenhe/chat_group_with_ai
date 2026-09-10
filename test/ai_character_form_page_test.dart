@@ -223,11 +223,73 @@ void main() {
     expect(returned?.id, saved.id);
     expect(returned?.toolPermissions, contains(ToolPermission.workspaceRead));
     expect(returned?.toolPermissions, contains(ToolPermission.workspacePatch));
-    expect(db.aiCharacterBox.get(saved.id)!.toolPermissions,
+    expect(
+        db.aiCharacterBox.get(saved.id)!.toolPermissions,
         containsAll(<ToolPermission>[
-      ToolPermission.workspaceRead,
-      ToolPermission.workspacePatch,
-    ]));
+          ToolPermission.workspaceRead,
+          ToolPermission.workspacePatch,
+        ]));
+  });
+
+  testWidgets(
+      'edit form reloads persisted permissions when given a stale character',
+      (tester) async {
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final saved = character();
+    await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: providerContainer,
+        child: MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: ElevatedButton(
+                onPressed: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => AICharacterFormPage(character: saved),
+                  ),
+                ),
+                child: const Text('打开设置'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开设置'));
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('读工作区'));
+    await tester.tap(find.text('改文件'));
+    await tester.pump();
+
+    await tester.runAsync(() async {
+      await tester.tap(find.text('更新').first);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(
+        db.aiCharacterBox.get(saved.id)!.toolPermissions,
+        containsAll(<ToolPermission>[
+          ToolPermission.workspaceRead,
+          ToolPermission.workspacePatch,
+        ]));
+
+    // The caller may still hold the object it used to open the first form.
+    await tester.pumpAndSettle();
+    await tester.tap(find.text('打开设置'));
+    await tester.pumpAndSettle();
+
+    final permissionChips = find.byType(FilterChip);
+    expect(permissionChips, findsNWidgets(ToolPermission.values.length));
+    // ToolPermission.values starts with workspaceRead/workspacePatch.
+    expect(tester.widget<FilterChip>(permissionChips.at(0)).selected, isTrue);
+    expect(tester.widget<FilterChip>(permissionChips.at(1)).selected, isTrue);
   });
 
   testWidgets('edit form keeps a legacy unknown gender visibly unresolved',

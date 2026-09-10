@@ -74,6 +74,7 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
   void _activatePage() {
     _pageActive = true;
     ConversationPresenceService.instance.enter(widget.groupId);
+    _flushPendingMessageChanges();
     _reloadSearchRuntimeIfChanged();
     if (!_isLoading && !_workModeEnabled) {
       _startAutoChat();
@@ -83,6 +84,11 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
 
   void _disposePage() {
     _disposed = true;
+    unawaited(_messageSubscription?.cancel());
+    _messageSubscription = null;
+    _pendingExternalMessages.clear();
+    _pendingDeletedMessageIds.clear();
+    _knownConversationMessageIds.clear();
     _cancelActiveSearch();
     ConversationPresenceService.instance.leave(widget.groupId);
     WidgetsBinding.instance.removeObserver(this);
