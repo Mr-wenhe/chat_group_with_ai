@@ -38,6 +38,7 @@ import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_document_tool.dart';
+import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
@@ -383,8 +384,11 @@ class DefaultWorkTaskRunner
       messages,
       maxTokens: inputBudget,
     );
+    final publicUpdateStream = WorkPublicUpdateStream();
     var streamedCharacters = 0;
     var lastProgressAt = DateTime.fromMillisecondsSinceEpoch(0);
+    var lastPublicUpdateAt = DateTime.fromMillisecondsSinceEpoch(0);
+    var lastPublishedPublicUpdate = '';
     var progressWrites = Future<void>.value();
     final response = await gateway.sendChatMessageStreamed(
       apiKey: apiKey,
@@ -393,6 +397,9 @@ class DefaultWorkTaskRunner
       customBaseUrl: config.customBaseUrl,
       model: config.modelName,
       messages: boundedMessages,
+      // Deterministic sampling reduces protocol drift; JSON mode is selected
+      // by AiRequestGateway for this agent/tool request.
+      temperature: 0.2,
       maxTokens: outputTokens,
       receiveTimeout: const Duration(seconds: 120),
       maxRetries: 0,
@@ -404,8 +411,40 @@ class DefaultWorkTaskRunner
       userInitiated: true,
       onEvent: (event) {
         if (event.type != ChatStreamEventType.token) return;
-        streamedCharacters += event.delta?.length ?? 0;
+        final delta = event.delta ?? '';
+        streamedCharacters += delta.length;
         final now = clock();
+
+        final publicUpdate = WorkPublicUpdateStream.sanitize(
+          publicUpdateStream.add(delta),
+        );
+        final publicUpdateChanged = publicUpdate.isNotEmpty &&
+            publicUpdate != lastPublishedPublicUpdate;
+        final shouldPublishPublicUpdate = publicUpdateChanged &&
+            (lastPublishedPublicUpdate.isEmpty ||
+                publicUpdate.length - lastPublishedPublicUpdate.length >= 24 ||
+                now.difference(lastPublicUpdateAt) >=
+                    const Duration(milliseconds: 250));
+        if (shouldPublishPublicUpdate) {
+          lastPublishedPublicUpdate = publicUpdate;
+          lastPublicUpdateAt = now;
+          final draft = publicUpdate;
+          final characters = streamedCharacters;
+          progressWrites = progressWrites.then<void>((_) async {
+            await _record(
+              task,
+              WorkTaskEventKind.modelOutput,
+              'AI 正在输出公开进度',
+              detail: draft,
+              safeMetadata: {
+                'stream': 'public_update',
+                'publicDraft': draft,
+                'characters': characters,
+              },
+            );
+          });
+        }
+
         if (streamedCharacters == 0 ||
             (streamedCharacters < 160 &&
                 now.difference(lastProgressAt) <
@@ -415,19 +454,50 @@ class DefaultWorkTaskRunner
         lastProgressAt = now;
         final characters = streamedCharacters;
         progressWrites = progressWrites.then<void>((_) async {
+          final safeMetadata = <String, Object?>{
+            'stream': 'model',
+            'characters': characters,
+          };
+          if (publicUpdate.isNotEmpty) {
+            safeMetadata['publicDraft'] = publicUpdate;
+          }
           await _record(
             task,
             WorkTaskEventKind.toolOutput,
-            '模型仍在生成工作决策',
-            detail: '已接收约 $characters 个字符（协议内容不会直接展示）。',
-            safeMetadata: {'stream': 'model', 'characters': characters},
+            publicUpdate.isEmpty ? 'AI 正在整理公开进度' : 'AI 公开进度',
+            detail: publicUpdate.isEmpty ? '正在等待可公开的执行内容。' : publicUpdate,
+            safeMetadata: safeMetadata,
           );
         });
       },
     );
+    // A short final delta may not pass the live-update throttle before the
+    // stream closes. Flush the decoded public field so the durable timeline
+    // contains the complete user-facing content, not only an earlier prefix.
+    final finalPublicUpdate = WorkPublicUpdateStream.sanitize(
+      publicUpdateStream.add(''),
+    );
+    if (finalPublicUpdate.isNotEmpty &&
+        finalPublicUpdate != lastPublishedPublicUpdate) {
+      final characters = streamedCharacters;
+      progressWrites = progressWrites.then<void>((_) async {
+        await _record(
+          task,
+          WorkTaskEventKind.modelOutput,
+          'AI 正在输出公开进度',
+          detail: finalPublicUpdate,
+          safeMetadata: {
+            'stream': 'public_update',
+            'publicDraft': finalPublicUpdate,
+            'characters': characters,
+          },
+        );
+      });
+    }
     // Do not let a throttled model-progress event race the next tool/finish
     // event. Waiting for this short diagnostic queue preserves the durable
-    // event order while keeping raw protocol content private.
+    // event order while keeping raw protocol content private. Only the
+    // explicitly user-facing public_update field is recorded for the panel.
     await progressWrites;
     return response;
   }

@@ -929,6 +929,50 @@ void main() {
     expect(taskBox.get('unaffected')?.status, isNot(AgentTaskStatus.cancelled));
   });
 
+  test('restarts a user-stopped task only when no mutation was committed',
+      () async {
+    final task = _task(id: 'restart-from-zero', conversationId: 'group-a')
+      ..status = AgentTaskStatus.cancelled
+      ..lastError = '用户已停止任务。'
+      ..plan = '旧计划'
+      ..resultSummary = '旧结果'
+      ..currentStep = 4
+      ..actionCount = 9
+      ..completedOperations = <String>[
+        '{"tool":"workspace.list","args":{"path":"."}}',
+      ]
+      ..executionStateJson = jsonEncode(<String, dynamic>{
+        'committedActionKeys': <String>[],
+      });
+    await taskBox.put(task.id, task);
+
+    await coordinator.retry(task.id);
+
+    final restarted = taskBox.get(task.id)!;
+    expect(restarted.status, AgentTaskStatus.planning);
+    expect(restarted.actionCount, 0);
+    expect(restarted.currentStep, 0);
+    expect(restarted.plan, isEmpty);
+    expect(restarted.resultSummary, isEmpty);
+    expect(restarted.completedOperations, isEmpty);
+    expect(restarted.executionStateJson, isEmpty);
+    expect(restarted.startedAt, isNotNull);
+    expect(runner.startedTaskIds, contains(task.id));
+    runner.complete(task.id);
+
+    final committed = _task(id: 'committed-stop', conversationId: 'group-a')
+      ..status = AgentTaskStatus.cancelled
+      ..lastError = '用户已停止任务。'
+      ..lastArtifactPaths = <String>['/workspace/report.md']
+      ..executionStateJson = jsonEncode(<String, dynamic>{
+        'committedActionKeys': <String>['committed-operation'],
+      });
+    await taskBox.put(committed.id, committed);
+
+    await expectLater(coordinator.retry(committed.id), throwsStateError);
+    expect(taskBox.get(committed.id)?.status, AgentTaskStatus.cancelled);
+  });
+
   test('restore publishes interrupted tasks without running them', () async {
     final interrupted = _task(id: 'interrupted', conversationId: 'group-a')
       ..status = AgentTaskStatus.interrupted

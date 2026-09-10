@@ -9,6 +9,7 @@ enum WorkTaskEventKind {
   failed,
   completed,
   undoCompleted,
+  modelOutput,
 }
 
 /// A public, persisted task update. It intentionally has no field for model

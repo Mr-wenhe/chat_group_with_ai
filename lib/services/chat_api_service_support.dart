@@ -11,6 +11,7 @@ extension _ChatApiServiceSupport on ChatApiService {
     required double temperature,
     required int maxTokens,
     required Duration receiveTimeout,
+    required bool structuredJson,
     CancelToken? cancelToken,
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
@@ -19,18 +20,36 @@ extension _ChatApiServiceSupport on ChatApiService {
     int? completionTokens;
     int? cachedTokens;
     try {
-      await for (final event in streamChatMessage(
-        apiKey: apiKey,
-        provider: provider,
-        apiProtocol: apiProtocol,
-        customBaseUrl: customBaseUrl,
-        model: model,
-        messages: messages,
-        temperature: temperature,
-        maxTokens: maxTokens,
-        receiveTimeout: receiveTimeout,
-        cancelToken: cancelToken,
-      )) {
+      // Keep the legacy public stream as the extension point for existing
+      // clients/tests. The internal path is used only for structured agent
+      // requests because it carries the extra JSON-mode flag.
+      final responseStream = structuredJson
+          ? _streamChatMessageInternal(
+              apiKey: apiKey,
+              provider: provider,
+              apiProtocol: apiProtocol,
+              customBaseUrl: customBaseUrl,
+              model: model,
+              messages: messages,
+              temperature: temperature,
+              maxTokens: maxTokens,
+              receiveTimeout: receiveTimeout,
+              structuredJson: true,
+              cancelToken: cancelToken,
+            )
+          : streamChatMessage(
+              apiKey: apiKey,
+              provider: provider,
+              apiProtocol: apiProtocol,
+              customBaseUrl: customBaseUrl,
+              model: model,
+              messages: messages,
+              temperature: temperature,
+              maxTokens: maxTokens,
+              receiveTimeout: receiveTimeout,
+              cancelToken: cancelToken,
+            );
+      await for (final event in responseStream) {
         onEvent?.call(event);
         switch (event.type) {
           case ChatStreamEventType.token:
@@ -77,6 +96,7 @@ extension _ChatApiServiceSupport on ChatApiService {
         maxTokens: maxTokens,
         receiveTimeout: receiveTimeout,
         cancelToken: cancelToken,
+        structuredJson: structuredJson,
         maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
       );
     }

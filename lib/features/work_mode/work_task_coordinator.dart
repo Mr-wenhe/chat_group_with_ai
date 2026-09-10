@@ -120,6 +120,26 @@ class _WaitingResourceTask {
 class WorkTaskCoordinator {
   static const int maximumConcurrentTasks = 2;
 
+  /// A user stop is terminal by design, but a task that has not committed a
+  /// mutation can safely be restarted from zero.  This narrow predicate keeps
+  /// the recovery affordance from replaying a task after a real file change.
+  static bool canRestartAfterUserStop(AgentTask task) {
+    if (task.status != AgentTaskStatus.cancelled ||
+        task.lastError.trim() != '用户已停止任务。' ||
+        task.lastArtifactPaths.isNotEmpty) {
+      return false;
+    }
+    if (task.completedOperations.isEmpty) return true;
+    try {
+      final decoded = jsonDecode(task.executionStateJson);
+      if (decoded is! Map) return false;
+      final committed = decoded['committedActionKeys'];
+      return committed is List && committed.isEmpty;
+    } on Object {
+      return false;
+    }
+  }
+
   final Box<AgentTask> _taskBox;
   final WorkTaskEventStore _eventStore;
   final WorkTaskRunner _runner;
@@ -829,10 +849,49 @@ class WorkTaskCoordinator {
       if (_running.containsKey(taskId) || _startingTaskIds.contains(taskId)) {
         throw StateError('任务正在执行，不能同时重试。');
       }
-      if (task.status == AgentTaskStatus.cancelled ||
+      final restartFromBeginning = canRestartAfterUserStop(task);
+      if ((task.status == AgentTaskStatus.cancelled && !restartFromBeginning) ||
           task.status == AgentTaskStatus.completed) {
         throw StateError('已停止或已完成的任务不能重试。');
       }
+
+      if (restartFromBeginning) {
+        _removeQueuedTask(task);
+        _waitingForResources.remove(taskId)?.cancellation.cancel();
+        _folderWaiters.remove(taskId)?.cancel();
+        _conversationReservations.remove(task.groupId);
+        _taskLockPlans.remove(taskId);
+        task
+          ..status = AgentTaskStatus.queued
+          ..resumeRequired = false
+          ..plan = ''
+          ..resultSummary = ''
+          ..currentStep = 0
+          ..completedOperations = <String>[]
+          ..pendingToolRequestJson = ''
+          ..queuedUserRequests = <String>[]
+          ..contextSummary = ''
+          ..lastError = ''
+          ..startedAt = _clock()
+          ..actionCount = 0
+          ..softLimitReached = false
+          ..executionStateJson = ''
+          ..lastArtifactPaths = <String>[]
+          ..eventLogIncomplete = false
+          ..updatedAt = _clock();
+        await _save(task);
+        await _markSnapshotStatus(task);
+        _enqueueTask(task);
+        await _record(
+          task,
+          WorkTaskEventKind.queued,
+          '已请求从头开始执行',
+          detail: '上次停止前未提交文件变更，已清空运行检查点。',
+        );
+        await _schedule();
+        return;
+      }
+
       final failure = task.workFailure;
       if (failure == null) {
         throw StateError('当前任务没有可重试的结构化失败。');

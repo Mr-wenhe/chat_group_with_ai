@@ -120,6 +120,18 @@ Map<String, dynamic> _toolDecision({
   };
 }
 
+Map<String, dynamic> _planDecision() => {
+      'success': true,
+      'content': jsonEncode({
+        'action': 'plan',
+        'public_update': '已确认执行计划。',
+        'tool': null,
+        'completion': {
+          'steps': ['先读取工作区，再完成任务。'],
+        },
+      }),
+    };
+
 Map<String, dynamic> _finishDecision([String summary = '任务完成。']) => {
       'success': true,
       'content': jsonEncode({
@@ -196,6 +208,31 @@ WorkAgentLoop _loop({
 }
 
 void main() {
+  test('requires execution after a plan has been accepted', () async {
+    final model = _FakeModel()
+      ..responses.add(_planDecision())
+      ..responses.add(_toolDecision())
+      ..responses.add(_finishDecision());
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, _FakeTool())],
+      ),
+    );
+
+    final result = await loop.execute(_task(id: 'plan-then-execute'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(model.requests, hasLength(3));
+    final secondSystemMessage = model.requests[1].messages.firstWhere(
+      (message) => message['role'] == 'system',
+    );
+    expect(
+      secondSystemMessage['content'],
+      contains('禁止再次返回 action=plan'),
+    );
+  });
+
   test('runs a 20+ step trace, emits every step, then finish completes',
       () async {
     final model = _FakeModel();

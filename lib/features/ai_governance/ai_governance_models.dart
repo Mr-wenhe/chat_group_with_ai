@@ -116,6 +116,25 @@ class CustomModelCapability {
     this.maxOutput = 2048,
   });
 
+  CustomModelCapability copyWith({
+    bool? supportsStreaming,
+    bool? supportsVision,
+    bool? supportsTools,
+    bool? supportsNativeWebSearch,
+    int? contextWindow,
+    int? maxOutput,
+  }) {
+    return CustomModelCapability(
+      supportsStreaming: supportsStreaming ?? this.supportsStreaming,
+      supportsVision: supportsVision ?? this.supportsVision,
+      supportsTools: supportsTools ?? this.supportsTools,
+      supportsNativeWebSearch:
+          supportsNativeWebSearch ?? this.supportsNativeWebSearch,
+      contextWindow: contextWindow ?? this.contextWindow,
+      maxOutput: maxOutput ?? this.maxOutput,
+    );
+  }
+
   factory CustomModelCapability.fromMap(Map<dynamic, dynamic> map) {
     return CustomModelCapability(
       supportsStreaming: map['supportsStreaming'] == true,

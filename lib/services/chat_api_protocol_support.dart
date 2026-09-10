@@ -104,6 +104,7 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
     required double temperature,
     required int maxTokens,
     required bool streaming,
+    bool structuredJson = false,
   }) {
     return switch (apiProtocol) {
       ApiProtocol.anthropicMessages => _anthropicRequestBody(
@@ -120,6 +121,7 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
           if (maxTokens > 0) 'max_tokens': maxTokens,
           if (streaming) 'stream': true,
           if (streaming) 'stream_options': {'include_usage': true},
+          if (structuredJson) 'response_format': {'type': 'json_object'},
         },
       ApiProtocol.openAiResponses => <String, dynamic>{
           'model': model,

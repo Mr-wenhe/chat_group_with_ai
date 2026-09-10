@@ -63,6 +63,46 @@ void main() {
     expect(events.last.type, ChatStreamEventType.done);
   });
 
+  test('structured streamed completion enables JSON mode for OpenAI protocol',
+      () async {
+    late RequestOptions captured;
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        captured = options;
+        final sse = [
+          Uint8List.fromList(utf8.encode(
+            'data: {"choices":[{"delta":{"content":"{\\"action\\":\\"finish\\"}"}}]}\n',
+          )),
+          Uint8List.fromList(utf8.encode('data: [DONE]\n')),
+        ];
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 200,
+          data: ResponseBody(Stream.fromIterable(sse), 200),
+        ));
+      },
+    ));
+
+    final result =
+        await ChatApiService(dio: dio).sendStructuredChatMessageStreamed(
+      apiKey: 'test-key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'test-model',
+      messages: const [
+        {'role': 'system', 'content': '只输出 JSON'},
+      ],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isTrue);
+    expect(
+      (captured.data as Map<String, dynamic>)['response_format'],
+      {'type': 'json_object'},
+    );
+  });
+
   test('streamed completion rejects an unterminated oversized frame', () async {
     final dio = Dio();
     dio.interceptors.add(InterceptorsWrapper(

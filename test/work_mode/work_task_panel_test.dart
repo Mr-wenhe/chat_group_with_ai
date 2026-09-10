@@ -138,6 +138,162 @@ void main() {
       expect(find.text('步骤 99 / 8'), findsNothing);
     });
 
+    testWidgets(
+        'shows public model content instead of transport character counts',
+        (tester) async {
+      final events = StreamController<WorkTaskEvent>.broadcast();
+      addTearDown(events.close);
+      final task = _task(
+        id: 'public-output-task',
+        conversationId: 'group-one',
+        characterId: 'developer',
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => events.stream,
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      events.add(WorkTaskEvent(
+        taskId: task.id,
+        sequence: 1,
+        timestamp: DateTime.utc(2026, 8, 28, 10, 1),
+        kind: WorkTaskEventKind.modelOutput,
+        title: 'AI 正在输出公开进度',
+        detail: '正在检查授权目录并准备写入文件。',
+        safeMetadata: const <String, Object?>{
+          'stream': 'public_update',
+          'publicDraft': '正在检查授权目录并准备写入文件。',
+        },
+      ));
+      events.add(WorkTaskEvent(
+        taskId: task.id,
+        sequence: 2,
+        timestamp: DateTime.utc(2026, 8, 28, 10, 1, 1),
+        kind: WorkTaskEventKind.toolOutput,
+        title: '模型仍在生成工作决策',
+        detail: '已接收约 128 个字符（协议内容不会直接展示）。',
+        safeMetadata: const <String, Object?>{
+          'stream': 'model',
+          'characters': 128,
+        },
+      ));
+      await tester.pump();
+
+      expect(find.text('正在检查授权目录并准备写入文件。'), findsOneWidget);
+      expect(find.textContaining('已接收约'), findsNothing);
+      expect(find.text('AI 正在整理公开进度…'), findsNothing);
+
+      events.add(WorkTaskEvent(
+        taskId: task.id,
+        sequence: 3,
+        timestamp: DateTime.utc(2026, 8, 28, 10, 1, 2),
+        kind: WorkTaskEventKind.stepStarted,
+        title: '正在执行文件写入',
+      ));
+      await tester.pump();
+
+      expect(find.byKey(const Key('work-task-live-output')), findsNothing);
+      expect(find.text('正在检查授权目录并准备写入文件。'), findsOneWidget);
+      expect(find.text('正在执行文件写入'), findsOneWidget);
+
+      events.add(WorkTaskEvent(
+        taskId: task.id,
+        sequence: 4,
+        timestamp: DateTime.utc(2026, 8, 28, 10, 1, 3),
+        kind: WorkTaskEventKind.toolOutput,
+        title: '模型仍在生成工作决策',
+        detail: '已接收约 256 个字符。',
+        safeMetadata: const <String, Object?>{
+          'stream': 'model',
+          'characters': 256,
+          'publicDraft': '正在复核文件内容。',
+        },
+      ));
+      await tester.pump();
+
+      expect(find.text('正在复核文件内容。'), findsOneWidget);
+      expect(find.textContaining('已接收约'), findsNothing);
+    });
+
+    testWidgets('keeps task and event scrollbars independently draggable',
+        (tester) async {
+      tester.view.physicalSize = const Size(800, 900);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final events = StreamController<WorkTaskEvent>.broadcast();
+      addTearDown(events.close);
+      final task = _task(
+        id: 'scrollable-task',
+        conversationId: 'group-one',
+        characterId: 'developer',
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => events.stream,
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      for (var sequence = 1; sequence <= 24; sequence++) {
+        events.add(WorkTaskEvent(
+          taskId: task.id,
+          sequence: sequence,
+          timestamp: DateTime.utc(2026, 8, 28, 10, 1, sequence),
+          kind: WorkTaskEventKind.toolOutput,
+          title: '执行动态 $sequence',
+          detail: '已完成第 $sequence 个公开检查。',
+        ));
+      }
+      await tester.pump();
+
+      final detailsScrollbar = tester.widget<Scrollbar>(
+        find.byKey(const Key('work-task-details-scrollbar')),
+      );
+      final eventScrollbar = tester.widget<Scrollbar>(
+        find.byKey(const Key('work-task-event-scrollbar')),
+      );
+      expect(detailsScrollbar.interactive, isTrue);
+      expect(detailsScrollbar.thumbVisibility, isTrue);
+      expect(eventScrollbar.interactive, isTrue);
+      expect(eventScrollbar.thumbVisibility, isTrue);
+      expect(find.byType(Scrollbar), findsNWidgets(2));
+
+      final timeline = find.byKey(const Key('work-task-event-timeline'));
+      final innerScrollable = find.descendant(
+        of: timeline,
+        matching: find.byType(Scrollable),
+      );
+      expect(innerScrollable, findsOneWidget);
+      final before =
+          tester.state<ScrollableState>(innerScrollable).position.pixels;
+      await tester.drag(timeline, const Offset(0, -120));
+      await tester.pump();
+      final after =
+          tester.state<ScrollableState>(innerScrollable).position.pixels;
+      expect(after, greaterThan(before));
+    });
+
     testWidgets('switches between two tasks and keeps task details isolated',
         (tester) async {
       final taskOne = _task(
@@ -345,6 +501,40 @@ void main() {
 
       expect(find.byKey(const Key('work-task-continue')), findsOneWidget);
       expect(find.byKey(const Key('work-task-retry')), findsNothing);
+    });
+
+    testWidgets('offers a fresh restart for a stopped task without writes',
+        (tester) async {
+      var restarted = false;
+      final task = _task(
+        id: 'stopped-without-write',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = '用户已停止任务。'
+        ..executionStateJson = '{"committedActionKeys":[]}';
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onRetry: (_) async => restarted = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-retry')), findsOneWidget);
+      expect(find.text('从头开始'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('work-task-retry')));
+      expect(restarted, isTrue);
     });
 
     testWidgets('hides stale pause details while a resumed task is running',

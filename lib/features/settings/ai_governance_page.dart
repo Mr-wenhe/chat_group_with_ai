@@ -292,104 +292,13 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
     String model,
     CustomModelCapability? current,
   ) async {
-    var value = current ?? const CustomModelCapability();
-    final contextController =
-        TextEditingController(text: value.contextWindow.toString());
-    final outputController =
-        TextEditingController(text: value.maxOutput.toString());
     final saved = await showDialog<CustomModelCapability>(
       context: context,
-      builder: (dialogContext) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: Text('声明 $model 能力'),
-          content: SingleChildScrollView(
-            child: Column(
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                SwitchListTile(
-                  title: const Text('流式'),
-                  value: value.supportsStreaming,
-                  onChanged: (next) =>
-                      setDialogState(() => value = CustomModelCapability(
-                            supportsStreaming: next,
-                            supportsVision: value.supportsVision,
-                            supportsTools: value.supportsTools,
-                            contextWindow: value.contextWindow,
-                            maxOutput: value.maxOutput,
-                          )),
-                ),
-                SwitchListTile(
-                  title: const Text('视觉'),
-                  value: value.supportsVision,
-                  onChanged: (next) =>
-                      setDialogState(() => value = CustomModelCapability(
-                            supportsStreaming: value.supportsStreaming,
-                            supportsVision: next,
-                            supportsTools: value.supportsTools,
-                            contextWindow: value.contextWindow,
-                            maxOutput: value.maxOutput,
-                          )),
-                ),
-                SwitchListTile(
-                  title: const Text('工具'),
-                  value: value.supportsTools,
-                  onChanged: (next) =>
-                      setDialogState(() => value = CustomModelCapability(
-                            supportsStreaming: value.supportsStreaming,
-                            supportsVision: value.supportsVision,
-                            supportsTools: next,
-                            contextWindow: value.contextWindow,
-                            maxOutput: value.maxOutput,
-                          )),
-                ),
-                TextField(
-                  controller: contextController,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: '上下文 Token'),
-                ),
-                TextField(
-                  controller: outputController,
-                  keyboardType: TextInputType.number,
-                  decoration: const InputDecoration(labelText: '最大输出 Token'),
-                ),
-              ],
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              onPressed: () {
-                final contextWindow = int.tryParse(contextController.text);
-                final maxOutput = int.tryParse(outputController.text);
-                if (contextWindow == null ||
-                    maxOutput == null ||
-                    contextWindow <= 0 ||
-                    maxOutput <= 0 ||
-                    maxOutput > contextWindow) {
-                  return;
-                }
-                Navigator.pop(
-                  dialogContext,
-                  CustomModelCapability(
-                    supportsStreaming: value.supportsStreaming,
-                    supportsVision: value.supportsVision,
-                    supportsTools: value.supportsTools,
-                    contextWindow: contextWindow,
-                    maxOutput: maxOutput,
-                  ),
-                );
-              },
-              child: const Text('保存'),
-            ),
-          ],
-        ),
+      builder: (_) => _CustomModelCapabilityDialog(
+        model: model,
+        initialValue: current ?? const CustomModelCapability(),
       ),
     );
-    contextController.dispose();
-    outputController.dispose();
     if (saved == null) return;
     await _store.saveCustomCapability(provider.name, model, saved);
     if (mounted) setState(() {});
@@ -411,4 +320,110 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
   }
 
   static String _yes(bool value) => value ? '支持' : '不支持';
+}
+
+/// Owns its text controllers so they stay alive until the dialog route has
+/// fully removed the widget, including the reverse transition after a pop.
+class _CustomModelCapabilityDialog extends StatefulWidget {
+  final String model;
+  final CustomModelCapability initialValue;
+
+  const _CustomModelCapabilityDialog({
+    required this.model,
+    required this.initialValue,
+  });
+
+  @override
+  State<_CustomModelCapabilityDialog> createState() =>
+      _CustomModelCapabilityDialogState();
+}
+
+class _CustomModelCapabilityDialogState
+    extends State<_CustomModelCapabilityDialog> {
+  late CustomModelCapability _value = widget.initialValue;
+  late final TextEditingController _contextController =
+      TextEditingController(text: _value.contextWindow.toString());
+  late final TextEditingController _outputController =
+      TextEditingController(text: _value.maxOutput.toString());
+
+  @override
+  void dispose() {
+    _contextController.dispose();
+    _outputController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AlertDialog(
+      title: Text('声明 ${widget.model} 能力'),
+      content: SingleChildScrollView(
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            SwitchListTile(
+              title: const Text('流式'),
+              value: _value.supportsStreaming,
+              onChanged: (next) => setState(() {
+                _value = _value.copyWith(supportsStreaming: next);
+              }),
+            ),
+            SwitchListTile(
+              title: const Text('视觉'),
+              value: _value.supportsVision,
+              onChanged: (next) => setState(() {
+                _value = _value.copyWith(supportsVision: next);
+              }),
+            ),
+            SwitchListTile(
+              title: const Text('工具'),
+              value: _value.supportsTools,
+              onChanged: (next) => setState(() {
+                _value = _value.copyWith(supportsTools: next);
+              }),
+            ),
+            TextField(
+              controller: _contextController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: '上下文 Token'),
+            ),
+            TextField(
+              controller: _outputController,
+              keyboardType: TextInputType.number,
+              decoration: const InputDecoration(labelText: '最大输出 Token'),
+            ),
+          ],
+        ),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          onPressed: _save,
+          child: const Text('保存'),
+        ),
+      ],
+    );
+  }
+
+  void _save() {
+    final contextWindow = int.tryParse(_contextController.text);
+    final maxOutput = int.tryParse(_outputController.text);
+    if (contextWindow == null ||
+        maxOutput == null ||
+        contextWindow <= 0 ||
+        maxOutput <= 0 ||
+        maxOutput > contextWindow) {
+      return;
+    }
+    Navigator.pop(
+      context,
+      _value.copyWith(
+        contextWindow: contextWindow,
+        maxOutput: maxOutput,
+      ),
+    );
+  }
 }

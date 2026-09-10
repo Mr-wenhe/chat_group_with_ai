@@ -216,12 +216,18 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
     final imageParts = _nativeImageParts(context);
     final promptContext =
         imageParts == null ? context : _replaceImagePayloadsWithMarker(context);
+    final rawPlan = context['plan'];
+    final plan = rawPlan is String ? _publicText(rawPlan).trim() : '';
+    final planningInstruction = plan.isEmpty
+        ? '当前 plan 为空时先返回 action=plan；计划被接受后必须执行工具，不得重复规划。'
+        : '当前已有已确认计划：$plan。禁止再次返回 action=plan；下一次决策必须返回 action=tool 调用一个已注册工具，或在已有证据足够时返回 action=finish、action=clarify 或 action=handoff。';
     final messages = <Map<String, dynamic>>[
       {
         'role': 'system',
         'content': '${(systemPromptBuilder?.call() ?? systemPrompt).trim()}\n'
             '工作模式只允许输出一个严格 AgentDecision JSON object；'
-            'public_update 只能描述公开动作、依据或结论，不得输出思维链。',
+            'public_update 只能描述公开动作、依据或结论，不得输出思维链。\n'
+            '$planningInstruction',
       },
       {'role': 'user', 'content': _publicText(task.userRequest)},
       {

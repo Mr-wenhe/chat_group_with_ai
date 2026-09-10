@@ -3,9 +3,10 @@ import 'dart:async';
 import 'package:desktop_webview_window/desktop_webview_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+
 import 'core/binding/dedup_key_event_binding.dart';
-import 'core/database/database_service.dart';
 import 'core/database/database_recovery_page.dart';
+import 'core/database/database_service.dart';
 import 'core/theme/app_theme.dart';
 import 'features/ai_character/ai_character_list_page.dart';
 import 'features/ai_character/character_gender_migrator.dart';

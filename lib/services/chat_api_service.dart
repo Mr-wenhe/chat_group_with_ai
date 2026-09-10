@@ -213,6 +213,7 @@ class ChatApiService {
     Duration? receiveTimeout,
     CancelToken? cancelToken,
     required int? maxResponseBytes,
+    bool structuredJson = false,
   }) async {
     if (kIsWeb) {
       return {
@@ -247,6 +248,7 @@ class ChatApiService {
           temperature: temperature,
           maxTokens: maxTokens,
           streaming: false,
+          structuredJson: structuredJson,
         ),
         options: Options(
           headers: headers,
@@ -338,6 +340,73 @@ class ChatApiService {
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
     void Function(ChatStreamEvent event)? onEvent,
+  }) {
+    return _sendChatMessageStreamedInternal(
+      apiKey: apiKey,
+      provider: provider,
+      apiProtocol: apiProtocol,
+      customBaseUrl: customBaseUrl,
+      model: model,
+      messages: messages,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      receiveTimeout: receiveTimeout,
+      maxRetries: maxRetries,
+      cancelToken: cancelToken,
+      structuredJson: false,
+      onEvent: onEvent,
+    );
+  }
+
+  /// Sends a streamed completion with the provider's JSON mode enabled when
+  /// the selected protocol supports it. Work-mode decisions use this path so
+  /// the strict AgentDecision parser receives a JSON response instead of a
+  /// free-form explanation or legacy tool block.
+  Future<Map<String, dynamic>> sendStructuredChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = RetryHandler.defaultMaxRetries,
+    CancelToken? cancelToken,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) {
+    return _sendChatMessageStreamedInternal(
+      apiKey: apiKey,
+      provider: provider,
+      apiProtocol: apiProtocol,
+      customBaseUrl: customBaseUrl,
+      model: model,
+      messages: messages,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      receiveTimeout: receiveTimeout,
+      maxRetries: maxRetries,
+      cancelToken: cancelToken,
+      structuredJson: true,
+      onEvent: onEvent,
+    );
+  }
+
+  Future<Map<String, dynamic>> _sendChatMessageStreamedInternal({
+    required String apiKey,
+    required ApiProvider provider,
+    required ApiProtocol apiProtocol,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required double temperature,
+    required int maxTokens,
+    required Duration receiveTimeout,
+    required int maxRetries,
+    CancelToken? cancelToken,
+    required bool structuredJson,
+    void Function(ChatStreamEvent event)? onEvent,
   }) async {
     if (kIsWeb) {
       return {
@@ -360,6 +429,7 @@ class ChatApiService {
             maxTokens: maxTokens,
             receiveTimeout: receiveTimeout,
             cancelToken: cancelToken,
+            structuredJson: structuredJson,
             maxResponseBytes: defaultMaxResponseBytes,
           );
         }
@@ -374,6 +444,7 @@ class ChatApiService {
           maxTokens: maxTokens,
           receiveTimeout: receiveTimeout,
           cancelToken: cancelToken,
+          structuredJson: structuredJson,
           onEvent: onEvent,
         );
       },
@@ -444,6 +515,34 @@ class ChatApiService {
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
     CancelToken? cancelToken,
+  }) {
+    return _streamChatMessageInternal(
+      apiKey: apiKey,
+      provider: provider,
+      apiProtocol: apiProtocol,
+      customBaseUrl: customBaseUrl,
+      model: model,
+      messages: messages,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      receiveTimeout: receiveTimeout,
+      cancelToken: cancelToken,
+      structuredJson: false,
+    );
+  }
+
+  Stream<ChatStreamEvent> _streamChatMessageInternal({
+    required String apiKey,
+    required ApiProvider provider,
+    required ApiProtocol apiProtocol,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required double temperature,
+    required int maxTokens,
+    required Duration receiveTimeout,
+    CancelToken? cancelToken,
+    required bool structuredJson,
   }) async* {
     if (kIsWeb) {
       yield ChatStreamEvent.error(_webNetworkUnsupportedMessage);
@@ -479,6 +578,7 @@ class ChatApiService {
       temperature: temperature,
       maxTokens: maxTokens,
       streaming: true,
+      structuredJson: structuredJson,
     );
 
     final parser = SseParser();

@@ -7,9 +7,11 @@ import 'package:chat_group/features/work_mode/presentation/work_change_approval_
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
+import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
+import 'package:chat_group/features/chat_group/widgets/blinking_cursor.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:flutter/material.dart';
 
@@ -132,67 +134,74 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
       color: Theme.of(context).colorScheme.surface,
       child: ConstrainedBox(
         constraints: const BoxConstraints(maxHeight: 520),
-        child: Padding(
-          padding: const EdgeInsets.all(16),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              _PanelHeader(
-                onCollapse: widget.onCollapse,
-                onClose: widget.onClose,
-              ),
-              const SizedBox(height: 10),
-              _TaskTabs(
-                tasks: widget.tasks,
-                selectedTaskId: task.id,
-                onSelectTask: widget.onSelectTask,
-              ),
-              if (widget.hiddenTaskCount > 0) ...<Widget>[
-                const SizedBox(height: 6),
-                Text(
-                  '还有 ${widget.hiddenTaskCount} 个任务在队列中，当前面板优先显示执行中的任务。',
-                  style: TextStyle(
-                    fontSize: 12,
-                    color: Theme.of(context).colorScheme.onSurfaceVariant,
+        child: ScrollConfiguration(
+          // Material's desktop ScrollBehavior adds a scrollbar to every
+          // ScrollView. The task panel deliberately owns two independent
+          // scroll regions, so automatic scrollbars would overlap and make
+          // the inner thumb impossible to drag.
+          behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
+          child: Padding(
+            padding: const EdgeInsets.all(16),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                _PanelHeader(
+                  onCollapse: widget.onCollapse,
+                  onClose: widget.onClose,
+                ),
+                const SizedBox(height: 10),
+                _TaskTabs(
+                  tasks: widget.tasks,
+                  selectedTaskId: task.id,
+                  onSelectTask: widget.onSelectTask,
+                ),
+                if (widget.hiddenTaskCount > 0) ...<Widget>[
+                  const SizedBox(height: 6),
+                  Text(
+                    '还有 ${widget.hiddenTaskCount} 个任务在队列中，当前面板优先显示执行中的任务。',
+                    style: TextStyle(
+                      fontSize: 12,
+                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+                    ),
+                  ),
+                ],
+                const SizedBox(height: 14),
+                Expanded(
+                  child: _TaskDetails(
+                    task: task,
+                    latestAction: latestAction,
+                    toolName: toolName,
+                    actionError: _actionError,
+                    characterNameFor: widget.characterNameFor,
+                    eventStreamFor: widget.eventStreamFor,
+                    onLatestEvent: _rememberLatestEvent,
+                    clock: widget.clock,
                   ),
                 ),
-              ],
-              const SizedBox(height: 14),
-              Expanded(
-                child: _TaskDetails(
+                const SizedBox(height: 12),
+                _TaskActions(
                   task: task,
-                  latestAction: latestAction,
-                  toolName: toolName,
-                  actionError: _actionError,
-                  characterNameFor: widget.characterNameFor,
-                  eventStreamFor: widget.eventStreamFor,
-                  onLatestEvent: _rememberLatestEvent,
-                  clock: widget.clock,
+                  actionInFlight: _actionInFlight,
+                  onOpenConversation: widget.onOpenConversation,
+                  onApprove: widget.onApprove,
+                  onApproveWithoutUndo: widget.onApproveWithoutUndo,
+                  onReject: widget.onReject,
+                  onRequestFolder: widget.onRequestFolder,
+                  onInstallTool: widget.onInstallTool,
+                  onSelectVisionModel: widget.onSelectVisionModel,
+                  onRetry: widget.onRetry,
+                  onReauthorize: widget.onReauthorize,
+                  onViewConflict: widget.onViewConflict,
+                  onUndo: widget.onUndo,
+                  undoPreviewFor: widget.undoPreviewFor,
+                  onStop: widget.onStop,
+                  onContinue: widget.onContinue,
+                  onModalVisibilityChanged: widget.onModalVisibilityChanged,
+                  dialogContext: widget.dialogContext,
+                  runAction: (action) => _runAction(action, task.id),
                 ),
-              ),
-              const SizedBox(height: 12),
-              _TaskActions(
-                task: task,
-                actionInFlight: _actionInFlight,
-                onOpenConversation: widget.onOpenConversation,
-                onApprove: widget.onApprove,
-                onApproveWithoutUndo: widget.onApproveWithoutUndo,
-                onReject: widget.onReject,
-                onRequestFolder: widget.onRequestFolder,
-                onInstallTool: widget.onInstallTool,
-                onSelectVisionModel: widget.onSelectVisionModel,
-                onRetry: widget.onRetry,
-                onReauthorize: widget.onReauthorize,
-                onViewConflict: widget.onViewConflict,
-                onUndo: widget.onUndo,
-                undoPreviewFor: widget.undoPreviewFor,
-                onStop: widget.onStop,
-                onContinue: widget.onContinue,
-                onModalVisibilityChanged: widget.onModalVisibilityChanged,
-                dialogContext: widget.dialogContext,
-                runAction: (action) => _runAction(action, task.id),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -249,7 +258,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   }
 }
 
-class _TaskDetails extends StatelessWidget {
+class _TaskDetails extends StatefulWidget {
   final AgentTask task;
   final WorkTaskEvent? latestAction;
   final String? toolName;
@@ -271,99 +280,152 @@ class _TaskDetails extends StatelessWidget {
   });
 
   @override
+  State<_TaskDetails> createState() => _TaskDetailsState();
+}
+
+class _TaskDetailsState extends State<_TaskDetails> {
+  final ScrollController _detailsScrollController = ScrollController();
+
+  @override
+  void dispose() {
+    _detailsScrollController.dispose();
+    super.dispose();
+  }
+
+  @override
   Widget build(BuildContext context) {
     final approvalText =
-        task.status == AgentTaskStatus.waitingForApproval ? '等待你批准当前操作。' : null;
-    final failure = _visibleWorkFailure(task);
+        widget.task.status == AgentTaskStatus.waitingForApproval
+            ? '等待你批准当前操作。'
+            : null;
+    final failure = _visibleWorkFailure(widget.task);
     final displayAction =
-        _isStaleRecoveryAction(task, latestAction) ? null : latestAction;
-    final characterName = characterNameFor?.call(task.characterId).trim();
-    return SingleChildScrollView(
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.start,
-        children: <Widget>[
-          Text(
-            _safePanelText(task.userRequest),
-            style: Theme.of(context).textTheme.titleMedium,
-          ),
-          const SizedBox(height: 4),
-          Text(
-            '执行角色：${characterName == null || characterName.isEmpty ? task.characterId : characterName}',
-          ),
-          const SizedBox(height: 4),
-          // currentStep is the index of the current tool operation and may
-          // intentionally lag behind model decisions. The user-facing budget
-          // must reflect every counted agent action.
-          Text('步骤 ${task.actionCount} / ${task.actionLimit}'),
-          const SizedBox(height: 4),
-          Text(_durationLabel(task, clock())),
-          const SizedBox(height: 12),
-          _PublicDetail(
-            title: '计划摘要',
-            text: task.plan.trim().isEmpty
-                ? '尚未生成公开计划。'
-                : _safePanelText(task.plan),
-          ),
-          const SizedBox(height: 8),
-          _PublicDetail(
-            title: '当前动作',
-            text: displayAction == null
-                ? _statusLabel(task.status)
-                : _safePanelText(displayAction.title),
-            inline: true,
-          ),
-          if (toolName != null) ...<Widget>[
-            const SizedBox(height: 8),
-            _PublicDetail(
-              title: '工具',
-              text: _safePanelText(toolName!),
-              inline: true,
+        _isStaleRecoveryAction(widget.task, widget.latestAction)
+            ? null
+            : widget.latestAction;
+    final characterName =
+        widget.characterNameFor?.call(widget.task.characterId).trim();
+    return LayoutBuilder(
+      builder: (context, constraints) {
+        // Keep the live execution viewport fully inside the panel. Previously
+        // it was nested in the summary scroll view, so its lower scrollbar
+        // could be clipped by the outer viewport and become unclickable.
+        final timelineHeight = constraints.maxHeight < 260
+            ? (constraints.maxHeight * 0.45).clamp(96.0, 180.0).toDouble()
+            : 180.0;
+        return Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Expanded(
+              child: Scrollbar(
+                key: const Key('work-task-details-scrollbar'),
+                controller: _detailsScrollController,
+                thumbVisibility: true,
+                interactive: true,
+                child: SingleChildScrollView(
+                  controller: _detailsScrollController,
+                  primary: false,
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: <Widget>[
+                      Text(
+                        _safePanelText(widget.task.userRequest),
+                        style: Theme.of(context).textTheme.titleMedium,
+                      ),
+                      const SizedBox(height: 4),
+                      Text(
+                        '执行角色：${characterName == null || characterName.isEmpty ? widget.task.characterId : characterName}',
+                      ),
+                      const SizedBox(height: 4),
+                      // currentStep is the index of the current tool operation
+                      // and may intentionally lag behind model decisions. The
+                      // user-facing budget must reflect every counted action.
+                      Text(
+                        '步骤 ${widget.task.actionCount} / ${widget.task.actionLimit}',
+                      ),
+                      const SizedBox(height: 4),
+                      Text(_durationLabel(widget.task, widget.clock())),
+                      const SizedBox(height: 12),
+                      _PublicDetail(
+                        title: '计划摘要',
+                        text: widget.task.plan.trim().isEmpty
+                            ? '尚未生成公开计划。'
+                            : _safePanelText(widget.task.plan),
+                      ),
+                      const SizedBox(height: 8),
+                      _PublicDetail(
+                        title: '当前动作',
+                        text: displayAction == null
+                            ? _statusLabel(widget.task.status)
+                            : _safePanelText(displayAction.title),
+                        inline: true,
+                      ),
+                      if (widget.toolName != null) ...<Widget>[
+                        const SizedBox(height: 8),
+                        _PublicDetail(
+                          title: '工具',
+                          text: _safePanelText(widget.toolName!),
+                          inline: true,
+                        ),
+                      ],
+                      if (approvalText != null) ...<Widget>[
+                        const SizedBox(height: 8),
+                        _PublicDetail(
+                          title: '审批',
+                          text: _safePanelText(approvalText),
+                          inline: true,
+                        ),
+                      ],
+                      if (widget.task.resultSummary
+                          .trim()
+                          .isNotEmpty) ...<Widget>[
+                        const SizedBox(height: 8),
+                        _PublicDetail(
+                          title: '结论',
+                          text: _safePanelText(widget.task.resultSummary),
+                        ),
+                      ],
+                      if (failure != null) ...<Widget>[
+                        const SizedBox(height: 10),
+                        _FailureDetails(failure: failure),
+                      ],
+                      if (widget.task.eventLogIncomplete) ...<Widget>[
+                        const SizedBox(height: 8),
+                        const _PublicDetail(
+                          title: '日志',
+                          text: '部分执行动态保存失败，以上日志可能不完整。',
+                        ),
+                      ],
+                      if (widget.actionError != null) ...<Widget>[
+                        const SizedBox(height: 8),
+                        _PublicDetail(
+                          title: '操作失败',
+                          text: _safePanelText(widget.actionError!),
+                        ),
+                      ],
+                    ],
+                  ),
+                ),
+              ),
+            ),
+            const SizedBox(height: 14),
+            Text(
+              '执行动态 · 实时公开输出',
+              style: Theme.of(context).textTheme.titleSmall,
+            ),
+            const SizedBox(height: 6),
+            SizedBox(
+              height: timelineHeight,
+              child: _TaskEventTimeline(
+                key: ValueKey<String>(widget.task.id),
+                taskId: widget.task.id,
+                eventStreamFor: widget.eventStreamFor,
+                onLatestEvent: widget.onLatestEvent,
+              ),
             ),
           ],
-          if (approvalText != null) ...<Widget>[
-            const SizedBox(height: 8),
-            _PublicDetail(
-              title: '审批',
-              text: _safePanelText(approvalText),
-              inline: true,
-            ),
-          ],
-          if (task.resultSummary.trim().isNotEmpty) ...<Widget>[
-            const SizedBox(height: 8),
-            _PublicDetail(
-              title: '结论',
-              text: _safePanelText(task.resultSummary),
-            ),
-          ],
-          if (failure != null) ...<Widget>[
-            const SizedBox(height: 10),
-            _FailureDetails(failure: failure),
-          ],
-          if (task.eventLogIncomplete) ...<Widget>[
-            const SizedBox(height: 8),
-            const _PublicDetail(
-              title: '日志',
-              text: '部分执行动态保存失败，以上日志可能不完整。',
-            ),
-          ],
-          if (actionError != null) ...<Widget>[
-            const SizedBox(height: 8),
-            _PublicDetail(title: '操作失败', text: _safePanelText(actionError!)),
-          ],
-          const SizedBox(height: 14),
-          Text('执行动态', style: Theme.of(context).textTheme.titleSmall),
-          const SizedBox(height: 6),
-          SizedBox(
-            height: 180,
-            child: _TaskEventTimeline(
-              key: ValueKey<String>(task.id),
-              taskId: task.id,
-              eventStreamFor: eventStreamFor,
-              onLatestEvent: onLatestEvent,
-            ),
-          ),
-        ],
-      ),
+        );
+      },
     );
   }
 }
@@ -475,6 +537,8 @@ class _TaskActions extends StatelessWidget {
     final needsFolder = _taskNeedsFolderGrant(task);
     final hasInstallSuggestion = _taskHasInstallSuggestion(task);
     final needsVisionModel = _taskNeedsVisionModel(task);
+    final canRestartFromBeginning =
+        WorkTaskCoordinator.canRestartAfterUserStop(task);
     final isSoftLimitPause =
         task.softLimitReached && _isPausedStatus(task.status);
     // Recovery controls are meaningful only at a user-resumable boundary. A
@@ -567,12 +631,14 @@ class _TaskActions extends StatelessWidget {
             icon: const Icon(Icons.image_search_outlined),
             label: const Text('选择视觉模型'),
           ),
-        if (!isSoftLimitPause && failure?.canRetry == true && onRetry != null)
+        if (onRetry != null &&
+            (canRestartFromBeginning ||
+                !isSoftLimitPause && failure?.canRetry == true))
           FilledButton.icon(
             key: const Key('work-task-retry'),
             onPressed: actionInFlight ? null : () => runAction(onRetry!),
             icon: const Icon(Icons.refresh_rounded),
-            label: const Text('重试'),
+            label: Text(canRestartFromBeginning ? '从头开始' : '重试'),
           ),
         if (failure?.canReauthorize == true &&
             (onReauthorize != null || onRequestFolder != null))
@@ -924,8 +990,13 @@ class _TaskEventTimeline extends StatefulWidget {
 
 class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   final List<WorkTaskEvent> _events = <WorkTaskEvent>[];
+  final Set<int> _seenSequences = <int>{};
+  final ScrollController _eventScrollController = ScrollController();
   StreamSubscription<WorkTaskEvent>? _subscription;
   String? _streamError;
+  String? _livePublicDraft;
+  WorkTaskEvent? _livePublicEvent;
+  bool _modelOutputPending = false;
 
   @override
   void initState() {
@@ -938,7 +1009,11 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     super.didUpdateWidget(oldWidget);
     if (oldWidget.taskId == widget.taskId) return;
     _events.clear();
+    _seenSequences.clear();
     _streamError = null;
+    _livePublicDraft = null;
+    _livePublicEvent = null;
+    _modelOutputPending = false;
     unawaited(_subscription?.cancel());
     _listen();
   }
@@ -946,6 +1021,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   @override
   void dispose() {
     unawaited(_subscription?.cancel());
+    _eventScrollController.dispose();
     super.dispose();
   }
 
@@ -953,14 +1029,54 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     _subscription = widget.eventStreamFor(widget.taskId).listen(
       (event) {
         if (event.taskId != widget.taskId ||
-            _events.any((item) => item.sequence == event.sequence)) {
+            _seenSequences.contains(event.sequence)) {
           return;
         }
         if (!mounted) return;
+        final isModelOutput = event.kind == WorkTaskEventKind.modelOutput;
+        final isModelProgress = _isModelProgressEvent(event);
+        final liveDraft = _safePanelText(
+          _publicDraftFromEvent(event),
+        ).trim();
         setState(() {
-          _events.add(event);
-          _events
-              .sort((left, right) => left.sequence.compareTo(right.sequence));
+          _seenSequences.add(event.sequence);
+          if (isModelOutput) {
+            _livePublicDraft = liveDraft.isEmpty ? null : liveDraft;
+            _livePublicEvent = liveDraft.isEmpty ? null : event;
+            _modelOutputPending = false;
+          } else if (isModelProgress) {
+            // The transport event is only a liveness signal. It must not
+            // become a character-count-only card in the public timeline.
+            // A public_update event, when available, is rendered separately.
+            if (liveDraft.isNotEmpty) {
+              _livePublicDraft = liveDraft;
+              // Newer runners also attach the safe draft to the liveness
+              // event. Keep that value as the historical card if the model
+              // output event is unavailable or arrives later than it.
+              _livePublicEvent = WorkTaskEvent(
+                taskId: event.taskId,
+                sequence: event.sequence,
+                timestamp: event.timestamp,
+                kind: WorkTaskEventKind.modelOutput,
+                title: 'AI 正在输出公开进度',
+                detail: liveDraft,
+                safeMetadata: <String, Object?>{
+                  'stream': 'public_update',
+                  'publicDraft': liveDraft,
+                },
+              );
+            } else if (_livePublicDraft == null) {
+              _modelOutputPending = true;
+            }
+          } else {
+            _commitLivePublicEvent();
+            _livePublicDraft = null;
+            _modelOutputPending = false;
+            _events.add(event);
+            _events.sort(
+              (left, right) => left.sequence.compareTo(right.sequence),
+            );
+          }
         });
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) widget.onLatestEvent(event);
@@ -980,73 +1096,253 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     if (!mounted) return;
     setState(() {
       _events.clear();
+      _seenSequences.clear();
       _streamError = null;
+      _livePublicDraft = null;
+      _livePublicEvent = null;
+      _modelOutputPending = false;
     });
     _listen();
+  }
+
+  bool _isModelProgressEvent(WorkTaskEvent event) {
+    return event.kind == WorkTaskEventKind.toolOutput &&
+        event.safeMetadata['stream'] == 'model';
+  }
+
+  void _commitLivePublicEvent() {
+    final event = _livePublicEvent;
+    if (event == null ||
+        _events.any((candidate) => candidate.sequence == event.sequence)) {
+      _livePublicEvent = null;
+      return;
+    }
+    _events.add(event);
+    _events.sort(
+      (left, right) => left.sequence.compareTo(right.sequence),
+    );
+    _livePublicEvent = null;
+  }
+
+  int get _timelineItemCount {
+    var count = _events.length;
+    if (_streamError != null) count++;
+    if (_livePublicDraft != null) count++;
+    if (_modelOutputPending) count++;
+    return count;
+  }
+
+  Widget _buildTimelineItem(BuildContext context, int index) {
+    var remaining = index;
+    final error = _streamError;
+    if (error != null) {
+      if (remaining == 0) {
+        return _TimelineItemPadding(
+          child: _EventStreamError(error: error, onRetry: _retry),
+        );
+      }
+      remaining--;
+    }
+    final liveDraft = _livePublicDraft;
+    if (liveDraft != null) {
+      if (remaining == 0) {
+        return _TimelineItemPadding(child: _LivePublicOutput(text: liveDraft));
+      }
+      remaining--;
+    }
+    if (_modelOutputPending) {
+      if (remaining == 0) {
+        return const _TimelineItemPadding(child: _PendingPublicOutput());
+      }
+      remaining--;
+    }
+    final event = _events[remaining];
+    return _TimelineItemPadding(child: _EventCard(event: event));
   }
 
   @override
   Widget build(BuildContext context) {
     final error = _streamError;
-    if (_events.isEmpty && error == null) {
+    final liveDraft = _livePublicDraft;
+    if (_events.isEmpty &&
+        liveDraft == null &&
+        !_modelOutputPending &&
+        error == null) {
       return const Align(
         alignment: Alignment.centerLeft,
         child: Text('等待公开执行动态…'),
       );
     }
-    return SingleChildScrollView(
-      key: const Key('work-task-event-timeline'),
-      child: Column(
-        crossAxisAlignment: CrossAxisAlignment.stretch,
-        children: <Widget>[
-          if (error != null)
-            DecoratedBox(
-              decoration: BoxDecoration(
-                color: Theme.of(context).colorScheme.errorContainer,
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(8),
-                child: Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: <Widget>[
-                    Expanded(
-                      child: Text('执行动态读取失败：${_safePanelText(error)}'),
-                    ),
-                    TextButton(
-                      key: const Key('work-task-event-retry'),
-                      onPressed: _retry,
-                      child: const Text('重试'),
-                    ),
-                  ],
-                ),
-              ),
+    return Padding(
+      // Keep the event scrollbar in its own hit-test lane. The outer details
+      // scrollbar lives at the panel edge; this inset prevents the two thumbs
+      // from covering one another while preserving wheel and drag scrolling.
+      padding: const EdgeInsets.only(right: 12),
+      child: Scrollbar(
+        key: const Key('work-task-event-scrollbar'),
+        controller: _eventScrollController,
+        thumbVisibility: true,
+        interactive: true,
+        child: ListView.builder(
+          key: const Key('work-task-event-timeline'),
+          controller: _eventScrollController,
+          primary: false,
+          padding: EdgeInsets.zero,
+          itemCount: _timelineItemCount,
+          itemBuilder: _buildTimelineItem,
+        ),
+      ),
+    );
+  }
+}
+
+class _TimelineItemPadding extends StatelessWidget {
+  final Widget child;
+
+  const _TimelineItemPadding({required this.child});
+
+  @override
+  Widget build(BuildContext context) {
+    return Padding(
+      padding: const EdgeInsets.only(bottom: 6),
+      child: child,
+    );
+  }
+}
+
+class _EventStreamError extends StatelessWidget {
+  final String error;
+  final VoidCallback onRetry;
+
+  const _EventStreamError({required this.error, required this.onRetry});
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.errorContainer,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Row(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Expanded(child: Text('执行动态读取失败：${_safePanelText(error)}')),
+            TextButton(
+              key: const Key('work-task-event-retry'),
+              onPressed: onRetry,
+              child: const Text('重试'),
             ),
-          if (error != null && _events.isNotEmpty) const SizedBox(height: 6),
-          ..._events.expand<Widget>((event) => <Widget>[
-                DecoratedBox(
-                  decoration: BoxDecoration(
-                    color:
-                        Theme.of(context).colorScheme.surfaceContainerHighest,
-                    borderRadius: BorderRadius.circular(10),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _PendingPublicOutput extends StatelessWidget {
+  const _PendingPublicOutput();
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      key: const Key('work-task-public-output-pending'),
+      decoration: BoxDecoration(
+        color: colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: const Padding(
+        padding: EdgeInsets.all(8),
+        child: Text('AI 正在整理公开进度…'),
+      ),
+    );
+  }
+}
+
+class _EventCard extends StatelessWidget {
+  final WorkTaskEvent event;
+
+  const _EventCard({required this.event});
+
+  @override
+  Widget build(BuildContext context) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: Theme.of(context).colorScheme.surfaceContainerHighest,
+        borderRadius: BorderRadius.circular(10),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(8),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(_safePanelText(event.title)),
+            if (event.detail.isNotEmpty) ...<Widget>[
+              const SizedBox(height: 2),
+              Text(_safePanelText(event.detail)),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+String _publicDraftFromEvent(WorkTaskEvent event) {
+  final metadataDraft = event.safeMetadata['publicDraft'];
+  if (metadataDraft is String && metadataDraft.trim().isNotEmpty) {
+    return metadataDraft;
+  }
+  // Only model-output events are allowed to use their detail as a draft.
+  // Transport diagnostics may carry character counts or other non-display
+  // text, which must never replace the public progress card.
+  return event.kind == WorkTaskEventKind.modelOutput ? event.detail : '';
+}
+
+class _LivePublicOutput extends StatelessWidget {
+  final String text;
+
+  const _LivePublicOutput({required this.text});
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      key: const Key('work-task-live-output'),
+      decoration: BoxDecoration(
+        color: colorScheme.primaryContainer,
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: colorScheme.primary.withValues(alpha: 0.35)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: <Widget>[
+            Text(
+              'AI 正在输出公开进度',
+              style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                    color: colorScheme.onPrimaryContainer,
                   ),
-                  child: Padding(
-                    padding: const EdgeInsets.all(8),
-                    child: Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      children: <Widget>[
-                        Text(_safePanelText(event.title)),
-                        if (event.detail.isNotEmpty) ...<Widget>[
-                          const SizedBox(height: 2),
-                          Text(_safePanelText(event.detail)),
-                        ],
-                      ],
-                    ),
+            ),
+            const SizedBox(height: 4),
+            Row(
+              crossAxisAlignment: CrossAxisAlignment.end,
+              children: <Widget>[
+                Expanded(
+                  child: SelectableText(
+                    text,
+                    style: TextStyle(color: colorScheme.onPrimaryContainer),
                   ),
                 ),
-                const SizedBox(height: 6),
-              ]),
-        ],
+                const SizedBox(width: 2),
+                BlinkingCursor(color: colorScheme.onPrimaryContainer),
+              ],
+            ),
+          ],
+        ),
       ),
     );
   }

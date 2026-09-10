@@ -173,20 +173,42 @@ class AiRequestGateway {
       streaming: true,
       requiresTools: requiresTools,
       userInitiated: userInitiated,
-      operation: (attempt) => client.sendChatMessageStreamed(
-        apiKey: apiKey,
-        provider: provider,
-        apiProtocol: apiProtocol,
-        customBaseUrl: customBaseUrl,
-        model: model,
-        messages: messages,
-        temperature: attempt.temperatureFor(temperature),
-        maxTokens: maxTokens,
-        receiveTimeout: receiveTimeout,
-        maxRetries: 0,
-        cancelToken: cancelToken,
-        onEvent: onEvent,
-      ),
+      operation: (attempt) {
+        final requestTemperature = attempt.temperatureFor(temperature);
+        // Work-mode decisions are a strict JSON protocol. Keep ordinary
+        // streamed chat unchanged, while using JSON mode for agent calls that
+        // have already opted into the tool-capability gate.
+        if (requiresTools && purpose == AiRequestPurpose.agent) {
+          return client.sendStructuredChatMessageStreamed(
+            apiKey: apiKey,
+            provider: provider,
+            apiProtocol: apiProtocol,
+            customBaseUrl: customBaseUrl,
+            model: model,
+            messages: messages,
+            temperature: requestTemperature,
+            maxTokens: maxTokens,
+            receiveTimeout: receiveTimeout,
+            maxRetries: 0,
+            cancelToken: cancelToken,
+            onEvent: onEvent,
+          );
+        }
+        return client.sendChatMessageStreamed(
+          apiKey: apiKey,
+          provider: provider,
+          apiProtocol: apiProtocol,
+          customBaseUrl: customBaseUrl,
+          model: model,
+          messages: messages,
+          temperature: requestTemperature,
+          maxTokens: maxTokens,
+          receiveTimeout: receiveTimeout,
+          maxRetries: 0,
+          cancelToken: cancelToken,
+          onEvent: onEvent,
+        );
+      },
     );
   }
 
