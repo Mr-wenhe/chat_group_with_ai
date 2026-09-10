@@ -130,6 +130,8 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                     readUserMessageIds: readUserMessageIds,
                     ownerName: _ownerMentionName,
                     unknownCharacter: _unknownCharacter(),
+                    editableSenderIds:
+                        _characters.map((character) => character.id).toSet(),
                     senderColor: _senderColor,
                     senderNameById: _senderNameById,
                     onLongPress: _showMessageActionSheet,

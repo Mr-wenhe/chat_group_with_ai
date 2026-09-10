@@ -256,10 +256,40 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
   }
 
   /// 跳转到角色编辑页。
-  void _openCharacterSettings(AICharacter character) {
-    Navigator.of(context).push(
+  Future<void> _openCharacterSettings(AICharacter character) async {
+    final updatedCharacter = await Navigator.of(context).push<AICharacter>(
       MaterialPageRoute(
           builder: (_) => AICharacterFormPage(character: character)),
     );
+    if (!_canTouchUi || updatedCharacter == null) return;
+
+    List<AICharacter> replaceCharacter(List<AICharacter> characters) {
+      return [
+        for (final current in characters)
+          current.id == updatedCharacter.id ? updatedCharacter : current,
+      ];
+    }
+
+    _setUiState(() {
+      _characters = replaceCharacter(_characters);
+      _allGroupCharacters = replaceCharacter(_allGroupCharacters);
+      _hasAnyApiConfig = _characters.any(
+        (current) => _resolveApiConfig(current)?.hasCredential == true,
+      );
+      if (_isDirectChat && _group != null) {
+        _group = ChatRoomLoadContext.directDisplayGroup(
+          conversationId: widget.groupId,
+          character: updatedCharacter,
+        );
+        _lastReplyBlockReason = updatedCharacter.isActive &&
+                _resolveApiConfig(updatedCharacter)?.hasCredential == true
+            ? null
+            : _blockReasonFor(updatedCharacter);
+      }
+    });
+    // Search/planner routes read character bindings through this controller;
+    // refresh it after the form returns instead of waiting for a full room
+    // navigation cycle. The idle-only guard also preserves an in-flight turn.
+    _reloadSearchRuntimeIfChanged();
   }
 }

@@ -27,6 +27,10 @@ class ChatMessageList extends StatelessWidget {
   final Set<String> readUserMessageIds;
   final String ownerName;
   final AICharacter unknownCharacter;
+  /// IDs of current, editable characters. Deleted/history snapshots and
+  /// synthetic system senders can still be displayed, but must not open the
+  /// character editor or be used for @/regenerate actions.
+  final Set<String> editableSenderIds;
   final Color Function(AICharacter character) senderColor;
   final String Function(String senderId) senderNameById;
   final void Function(Message message, AICharacter? sender) onLongPress;
@@ -53,6 +57,7 @@ class ChatMessageList extends StatelessWidget {
     required this.readUserMessageIds,
     required this.ownerName,
     required this.unknownCharacter,
+    this.editableSenderIds = const <String>{},
     required this.senderColor,
     required this.senderNameById,
     required this.onLongPress,
@@ -71,9 +76,14 @@ class ChatMessageList extends StatelessWidget {
       itemCount: messages.length,
       itemBuilder: (context, index) {
         final message = messages[index];
-        final sender = message.senderType == 'user'
+        final resolvedSender = message.senderType == 'user'
             ? null
             : characterIndex[message.senderId] ?? unknownCharacter;
+        final sender = resolvedSender;
+        final actionSender = resolvedSender != null &&
+                editableSenderIds.contains(resolvedSender.id)
+            ? resolvedSender
+            : null;
         final quotedMessage = message.replyToMessageId == null
             ? null
             : messageIndex[message.replyToMessageId];
@@ -105,11 +115,14 @@ class ChatMessageList extends StatelessWidget {
                 isStreaming: streamingMessageId == message.id,
                 isRegenerating: regeneratingMessageId == message.id,
                 isHighlightedMention: highlightedMentionMessageId == message.id,
-                onLongPress: () => onLongPress(message, sender),
+                onLongPress: () => onLongPress(message, actionSender),
                 senderColor: senderColor,
-                onSenderTap: sender == null ? null : () => onSenderTap(sender),
-                onMentionSender:
-                    sender == null ? null : () => onMentionSender(sender),
+                onSenderTap: actionSender == null
+                    ? null
+                    : () => onSenderTap(actionSender),
+                onMentionSender: actionSender == null
+                    ? null
+                    : () => onMentionSender(actionSender),
                 quotedMessage: quotedMessage,
                 quotedSenderName: quotedMessage == null
                     ? null

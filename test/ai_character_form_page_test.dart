@@ -4,6 +4,7 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
+import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -169,6 +170,64 @@ void main() {
       () => Future<void>.delayed(const Duration(milliseconds: 100)),
     );
     await tester.pump(const Duration(seconds: 4));
+  });
+
+  testWidgets('edit form returns the persisted permissions to its caller',
+      (tester) async {
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    final saved = character();
+    await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+    AICharacter? returned;
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: providerContainer,
+        child: MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: ElevatedButton(
+                onPressed: () async {
+                  returned = await Navigator.of(context).push<AICharacter>(
+                    MaterialPageRoute(
+                      builder: (_) => AICharacterFormPage(character: saved),
+                    ),
+                  );
+                },
+                child: const Text('打开设置'),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开设置'));
+    await tester.pumpAndSettle();
+
+    final readWorkspace = find.text('读工作区');
+    final patchWorkspace = find.text('改文件');
+    await tester.pump();
+    await tester.tap(readWorkspace);
+    await tester.tap(patchWorkspace);
+    await tester.pump();
+
+    await tester.runAsync(() async {
+      await tester.tap(find.text('更新').first);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(returned?.id, saved.id);
+    expect(returned?.toolPermissions, contains(ToolPermission.workspaceRead));
+    expect(returned?.toolPermissions, contains(ToolPermission.workspacePatch));
+    expect(db.aiCharacterBox.get(saved.id)!.toolPermissions,
+        containsAll(<ToolPermission>[
+      ToolPermission.workspaceRead,
+      ToolPermission.workspacePatch,
+    ]));
   });
 
   testWidgets('edit form keeps a legacy unknown gender visibly unresolved',

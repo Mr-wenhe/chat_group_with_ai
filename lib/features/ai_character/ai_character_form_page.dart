@@ -689,7 +689,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       if (mounted) {
         AppToast.show(context, _isEditing ? '角色已更新' : '角色已创建',
             icon: Icons.check_circle_outline_rounded);
-        Navigator.pop(context);
+        // Return the exact object that was persisted so an already-mounted
+        // chat room can replace its stale in-memory character binding.
+        Navigator.pop(context, character);
       }
     } catch (e) {
       if (mounted) {
