@@ -17,6 +17,14 @@ const Set<String> _sensitiveOperationKeys = {
 // A 5 MB image becomes less than 7 MB after base64 encoding. This bound is
 // ephemeral (model context only); persisted/checkpoint views still redact it.
 const int _maxModelImageDataUriChars = 7 * 1024 * 1024;
+const int _commandFailureHistoryLimit = 128;
+final RegExp _userActionDiagnostic = RegExp(
+  r'权限|permission|access\s+denied|operation\s+not\s+permitted|'
+  r'not\s+authorized|unauthorized|administrator|sudo|登录|登入|密码|'
+  r'验证码|付费墙|付款|授权|需要确认|需要判断|captcha|login|paywall|'
+  r'payment|authorization|password|passphrase',
+  caseSensitive: false,
+);
 
 extension _WorkAgentLoopSafety on WorkAgentLoop {
   Set<String> _loadCommittedActionKeys(AgentTask task) {
@@ -54,6 +62,88 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     final value = summary['roleHandoff'] ?? summary['handoff'];
     if (value is! Map) return null;
     return Map<String, dynamic>.from(value);
+  }
+
+  List<String> _loadCommandFailureKeys(AgentTask task) {
+    final value =
+        _safeExistingMap(task.executionStateJson)['commandFailureKeys'];
+    if (value is! List) return const <String>[];
+    final filtered = value
+        .whereType<String>()
+        .where(
+          (key) =>
+              RegExp(r'^[a-f0-9]{64}$', caseSensitive: false).hasMatch(key),
+        )
+        .toList(growable: false);
+    return filtered
+        .skip(
+          filtered.length > _commandFailureHistoryLimit
+              ? filtered.length - _commandFailureHistoryLimit
+              : 0,
+        )
+        .toList(growable: false);
+  }
+
+  /// Returns true only when this exact command/diagnostic state was already
+  /// seen in the current progress segment. A successful mutation clears the
+  /// segment, so a compiler can legitimately report the same error again
+  /// after the model has changed the input.
+  bool _isCommandFailureLoop(
+    _LoopState state,
+    AgentToolCall call,
+    WorkToolResult result,
+  ) {
+    final fingerprint = _commandFailureFingerprint(call, result);
+    if (state.commandFailureKeys.contains(fingerprint)) return true;
+    state.commandFailureKeys.add(fingerprint);
+    if (state.commandFailureKeys.length > _commandFailureHistoryLimit) {
+      state.commandFailureKeys.removeRange(
+        0,
+        state.commandFailureKeys.length - _commandFailureHistoryLimit,
+      );
+    }
+    return false;
+  }
+
+  String _commandFailureFingerprint(
+    AgentToolCall call,
+    WorkToolResult result,
+  ) {
+    final payload = <String, dynamic>{
+      'operation': _operationKey(call),
+      'failureCode': result.failureCode ?? '',
+      'runStatus': result.data['runStatus']?.toString() ?? result.status.name,
+      'exitCode': result.data['exitCode']?.toString() ?? '',
+      'message': _diagnosticText(result.message),
+      'stderr': _diagnosticText(result.data['stderr']),
+      'stdout': _diagnosticText(result.data['stdout']),
+    };
+    return sha256
+        .convert(utf8.encode(jsonEncode(_canonical(payload))))
+        .toString();
+  }
+
+  String _diagnosticText(Object? value) {
+    if (value == null) return '';
+    final text = value.toString().replaceAll('\r\n', '\n').trim();
+    if (text.length <= 4096) return text;
+    return '${text.substring(0, 2048)}…${text.substring(text.length - 2048)}';
+  }
+
+  void _clearCommandFailureHistory(_LoopState state) {
+    state.commandFailureKeys.clear();
+  }
+
+  bool _isBlockedCommandFailure(WorkToolResult result) =>
+      result.failureCode == 'commandFailed' &&
+      result.data['runStatus'] == WorkCommandRunStatus.blockedByDefault.name;
+
+  bool _isAutomaticallyRepairableCommandFailure(WorkToolResult result) {
+    if (result.failureCode != 'commandFailed' || result.committed) return false;
+    final runStatus = result.data['runStatus'];
+    return runStatus == WorkCommandRunStatus.failed.name ||
+        runStatus == WorkCommandRunStatus.timedOut.name ||
+        runStatus == WorkCommandRunStatus.outputLimitExceeded.name;
   }
 
   Map<String, dynamic> _safeResult(
@@ -342,6 +432,7 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
 
   bool _toolNeedsUserAction(WorkToolResult result) {
     if (result.status == WorkToolResultStatus.pathRejected) return false;
+    if (_isBlockedCommandFailure(result)) return true;
     if (result.requiresUserAction ||
         result.status == WorkToolResultStatus.permissionDenied) {
       return true;
@@ -350,10 +441,12 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     if (code != null && WorkAgentLoop._userActionFailureCodes.contains(code)) {
       return true;
     }
-    return RegExp(
-      r'权限|permission|access\s+denied|登录|登入|验证码|付费墙|付款|授权|需要确认|需要判断|captcha|login|paywall|payment|authorization',
-      caseSensitive: false,
-    ).hasMatch(result.message);
+    final diagnostic = <String>[
+      result.message,
+      for (final key in const ['stderr', 'stdout'])
+        if (result.data[key] != null) _diagnosticText(result.data[key]),
+    ].join('\n');
+    return _userActionDiagnostic.hasMatch(diagnostic);
   }
 
   /// Publicly completed work is deliberately compact. The list is persisted
@@ -585,6 +678,7 @@ class _LoopState {
   int toolRetryCount = 0;
   int protocolRepairAttempts = 0;
   int invalidCommandRepairCount = 0;
+  final List<String> commandFailureKeys = <String>[];
 
   _LoopState({
     required this.task,

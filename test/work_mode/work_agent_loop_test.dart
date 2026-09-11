@@ -387,6 +387,177 @@ void main() {
     expect(delays, [WorkAgentLoop.defaultRetryDelays[0]]);
   });
 
+  test('replans a failed command from diagnostics before surfacing failure',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision())
+      ..responses.add(_toolDecision(update: '已根据错误修正命令，继续生成。'))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool();
+    var calls = 0;
+    tool.behavior = (_) {
+      calls++;
+      if (calls == 1) {
+        return const WorkToolResult.failed(
+          message: '命令退出码为 47。',
+          data: {
+            'runStatus': 'failed',
+            'stderr': "'pdflatex' not found",
+          },
+          failureCode: 'commandFailed',
+        );
+      }
+      return const WorkToolResult.success(message: 'PDF 已生成。');
+    };
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final task = _task(id: 'command-diagnostic-repair');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(calls, 2);
+    expect(model.requests, hasLength(3));
+    expect(
+      model.requests[1].messages.map((message) => message['content']).join(),
+      contains("'pdflatex' not found"),
+    );
+    expect(task.executionStateJson, contains('commandFailureKeys'));
+  });
+
+  test('continues command repair beyond two failures until command succeeds',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(path: 'attempt-1.txt'))
+      ..responses.add(_toolDecision(path: 'attempt-2.txt'))
+      ..responses.add(_toolDecision(path: 'attempt-3.txt'))
+      ..responses.add(_toolDecision(path: 'attempt-4.txt'))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool();
+    var calls = 0;
+    tool.behavior = (_) {
+      calls++;
+      if (calls < 4) {
+        return WorkToolResult.failed(
+          message: '命令退出码为 1。',
+          data: {
+            'runStatus': 'failed',
+            'stderr': '第 $calls 次诊断仍待修复',
+          },
+          failureCode: 'commandFailed',
+        );
+      }
+      return const WorkToolResult.success(message: '命令已修复并完成。');
+    };
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final task = _task(id: 'command-repair-beyond-two');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(tool.calls, 4, reason: '自动修复不应被固定为两次');
+    expect(model.requests, hasLength(5));
+  });
+
+  test('continues command repair after a timeout', () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision())
+      ..responses.add(_toolDecision(update: '已调整超时命令，继续执行。'))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool();
+    var calls = 0;
+    tool.behavior = (_) {
+      calls++;
+      if (calls == 1) {
+        return const WorkToolResult.failed(
+          message: '命令执行超时。',
+          data: {'runStatus': 'timedOut'},
+          failureCode: 'commandFailed',
+        );
+      }
+      return const WorkToolResult.success(message: '命令已完成。');
+    };
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final result = await loop.execute(_task(id: 'command-timeout-repair'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(tool.calls, 2);
+    expect(model.requests, hasLength(3));
+  });
+
+  test('pauses when command repair repeats the same failure without progress',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision())
+      ..responses.add(_toolDecision())
+      ..responses.add(_toolDecision());
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.failed(
+            message: '命令退出码为 1。',
+            data: {
+              'runStatus': 'failed',
+              'stderr': '相同错误：没有取得进展',
+            },
+            failureCode: 'commandFailed',
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final task = _task(id: 'command-repair-loop');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(tool.calls, 2);
+    expect(model.requests, hasLength(2));
+    expect(task.status, AgentTaskStatus.paused);
+    expect(task.resumeRequired, isTrue);
+    expect(task.lastError, contains('反复出现'));
+  });
+
+  test('pauses command failures that require permission', () async {
+    final model = _FakeModel()..responses.add(_toolDecision());
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.failed(
+            message: '命令退出码为 1。',
+            data: {
+              'runStatus': 'failed',
+              'stderr': 'operation not permitted',
+            },
+            failureCode: 'commandFailed',
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final result = await loop.execute(_task(id: 'command-permission'));
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(tool.calls, 1);
+    expect(model.requests, hasLength(1));
+  });
+
   test('permission and path failures are not retried', () async {
     for (final failure in <WorkToolResult>[
       const WorkToolResult.permissionDenied(message: '没有权限'),

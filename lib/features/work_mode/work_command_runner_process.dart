@@ -46,8 +46,9 @@ class _ExitSignal {
 class _ProcessStartOutcome {
   final WorkCommandProcess? process;
   final WorkCommandResult? result;
+  final WorkCommand? command;
 
-  const _ProcessStartOutcome({this.process, this.result});
+  const _ProcessStartOutcome({this.process, this.result, this.command});
 }
 
 class _ProcessWaitOutcome {
@@ -110,6 +111,7 @@ extension _WorkCommandRunnerProcess on WorkCommandRunner {
       scanner: secretScanner,
       sink: onOutput,
       requestStop: stop.request,
+      terminateOnLimit: !_canContinueAfterOutputLimit(command),
     );
     final promptDetector = _PromptDetector(WorkCommandRunner._credentialPrompt);
     final stdoutDone = Completer<void>();

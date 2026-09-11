@@ -286,6 +286,29 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         await _checkpoint(state);
         return null;
       }
+      if (_isAutomaticallyRepairableCommandFailure(toolResult)) {
+        if (_isCommandFailureLoop(state, call, toolResult)) {
+          const loopMessage =
+              '检测到命令和错误反复出现，自动修复没有取得进展，已暂停。请检查权限、依赖或补充新的处理信息后继续。';
+          return _pauseForUserAction(
+            state,
+            loopMessage,
+            failure: WorkFailure.fromSignalsForUserAction(
+              loopMessage,
+              completedContent: _completedContent(state),
+            ),
+          );
+        }
+        await _emit(
+          state,
+          WorkTaskEventKind.toolOutput,
+          '命令执行失败，正在根据错误自动修复并继续。',
+          detail: message,
+          safeMetadata: {'scope': 'command', 'automaticRepair': true},
+        );
+        await _checkpoint(state);
+        return null;
+      }
       return _fail(
         state,
         message,
@@ -480,6 +503,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         safeToolRequestCheckpoint(operation),
       ];
     if (isMutation && !rejected) {
+      _clearCommandFailureHistory(state);
       state.committedActionKeys.add(operationKey);
       task.lastArtifactPaths = _updatedArtifactPaths(
         task,

@@ -10,6 +10,13 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
     execution['schemaVersion'] = 1;
     execution['committedActionKeys'] =
         state.committedActionKeys.take(128).toList(growable: false);
+    execution['commandFailureKeys'] = state.commandFailureKeys
+        .takeLast(_commandFailureHistoryLimit)
+        .toList(growable: false);
+    // The previous implementation persisted a fixed command-retry counter.
+    // Drop it when an old task reaches a new checkpoint; loop detection now
+    // uses progress-aware failure fingerprints instead of a retry quota.
+    execution.remove('commandRepairCount');
     // Do not carry a raw/legacy tool result forward. The same allow-list used
     // by WorkContextBuilder is the persistence boundary for this diagnostic
     // mirror as well; file bodies are re-read on demand from artifactPaths.

@@ -25,6 +25,7 @@ class _OutputCollector {
   final SearchSecretScanner scanner;
   final WorkCommandOutputSink? sink;
   final void Function(_StopReason reason) requestStop;
+  final bool terminateOnLimit;
   int usedBytes = 0;
   bool truncated = false;
   String stdout = '';
@@ -39,6 +40,7 @@ class _OutputCollector {
     required this.scanner,
     required this.sink,
     required this.requestStop,
+    required this.terminateOnLimit,
   });
 
   void add(WorkCommandOutputStream stream, List<int> bytes) {
@@ -61,7 +63,7 @@ class _OutputCollector {
     }
     if (acceptedLength < bytes.length) {
       truncated = true;
-      requestStop(_StopReason.outputLimit);
+      if (terminateOnLimit) requestStop(_StopReason.outputLimit);
     }
   }
 

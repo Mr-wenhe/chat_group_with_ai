@@ -199,6 +199,107 @@ void main() {
     expect(result.outputTruncated, isTrue);
   });
 
+  test('drains a bounded PDF generator after the retained output limit',
+      () async {
+    final process = _FakeProcess();
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      maxOutputBytes: 8,
+      continueAfterOutputLimit: true,
+      processStarter: (_, {required env, required shell}) async =>
+          process.asProcess(),
+    );
+
+    final future = runner.run(
+      _command(
+        executable: 'tectonic',
+        arguments: const ['guide.tex'],
+        declaredImpact: const ['/workspace/guide.pdf'],
+      ),
+      taskId: 'task-pdf-output-limit',
+      approvalGranted: true,
+    );
+    process.stdoutController.add(utf8.encode('123456789'));
+    await process.stdoutController.close();
+    await process.stderrController.close();
+    process.exitCompleter.complete(0);
+
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.completed);
+    expect(result.outputTruncated, isTrue);
+    expect(process.terminated, isFalse);
+    await process.close();
+  });
+
+  test('keeps the output-limit termination guard for ordinary commands',
+      () async {
+    final process = _FakeProcess();
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      maxOutputBytes: 8,
+      continueAfterOutputLimit: true,
+      processStarter: (_, {required env, required shell}) async =>
+          process.asProcess(),
+    );
+
+    final future = runner.run(_command(), taskId: 'task-output-limit-guard');
+    process.stdoutController.add(utf8.encode('123456789'));
+    final result = await future;
+    await process.close();
+
+    expect(result.status, WorkCommandRunStatus.outputLimitExceeded);
+    expect(process.terminated, isTrue);
+    expect(process.forceKilled, isTrue);
+  });
+
+  test(
+      'selects tectonic when a Pandoc PDF command has no usable default engine',
+      () async {
+    final bin = await Directory.systemTemp.createTemp('work-command-engine-');
+    addTearDown(() async {
+      if (await bin.exists()) await bin.delete(recursive: true);
+    });
+    await File('${bin.path}/tectonic').writeAsString('test executable');
+
+    final process = _FakeProcess();
+    final launched = <WorkCommand>[];
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      parentEnvironment: {'PATH': bin.path},
+      preferTectonicForPandoc: true,
+      processStarter: (command, {required env, required shell}) async {
+        launched.add(command);
+        return process.asProcess();
+      },
+    );
+
+    final future = runner.run(
+      _command(
+        executable: 'pandoc',
+        arguments: const ['guide.md', '-o', 'guide.pdf', '--'],
+        declaredImpact: const ['/workspace/guide.pdf'],
+      ),
+      taskId: 'task-pandoc-engine-fallback',
+      approvalGranted: true,
+    );
+    await process.stdoutController.close();
+    await process.stderrController.close();
+    process.exitCompleter.complete(0);
+
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.completed);
+    expect(launched, hasLength(1));
+    expect(launched.single.arguments, contains('--pdf-engine=tectonic'));
+    expect(
+      launched.single.arguments.indexOf('--pdf-engine=tectonic'),
+      lessThan(launched.single.arguments.indexOf('--')),
+    );
+    expect(result.command.arguments, contains('--pdf-engine=tectonic'));
+    await process.close();
+  });
+
   test('timeout terminates the process tree', () async {
     final process = _FakeProcess();
     final runner = WorkCommandRunner(

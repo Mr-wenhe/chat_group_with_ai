@@ -119,6 +119,22 @@ class WorkCommandRunner {
   final Duration timeout;
   final Duration terminationGrace;
   final int maxOutputBytes;
+
+  /// Enables draining output after the retention cap for finite PDF
+  /// generators.
+  ///
+  /// Most commands must keep the hard cap and be terminated to prevent an
+  /// unbounded or hostile process from consuming the task. The narrow
+  /// exception is enforced in the runner itself: only Pandoc/Tectonic
+  /// commands with a declared or explicit PDF output can drain after the cap.
+  /// This option therefore arms the capability without widening it to an
+  /// arbitrary command.
+  final bool continueAfterOutputLimit;
+
+  /// Selects Tectonic when a Pandoc PDF command has no explicit engine and
+  /// pdflatex is unavailable. The command's executable and output scope are
+  /// unchanged; this only repairs a known local engine mismatch.
+  final bool preferTectonicForPandoc;
   final SearchSecretScanner secretScanner;
   final WorkCommandDnsResolver dnsResolver;
   final bool _usesDefaultProcessStarter;
@@ -133,6 +149,8 @@ class WorkCommandRunner {
     this.timeout = defaultTimeout,
     this.terminationGrace = defaultTerminationGrace,
     this.maxOutputBytes = defaultMaxOutputBytes,
+    this.continueAfterOutputLimit = false,
+    this.preferTectonicForPandoc = false,
     this.secretScanner = const SearchSecretScanner(),
     WorkCommandDnsResolver? dnsResolver,
   })  : processStarter = processStarter ?? _startProcess,
@@ -213,7 +231,7 @@ class WorkCommandRunner {
     final startResult = start.result;
     if (startResult != null) return startResult;
     return _executeProcess(
-      command,
+      start.command ?? command,
       policyResult,
       start.process!,
       cancellation: cancellation,
@@ -321,7 +339,10 @@ class WorkCommandRunner {
     );
     try {
       final process = await startFuture.timeout(timeout);
-      return _ProcessStartOutcome(process: process);
+      return _ProcessStartOutcome(
+        process: process,
+        command: commandForSpawn,
+      );
     } on TimeoutException {
       _terminateLateProcess(startFuture);
       return _ProcessStartOutcome(

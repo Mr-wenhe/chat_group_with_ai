@@ -1976,6 +1976,8 @@ class DefaultWorkTaskRunner
         WorkCommandRunner(
           policy: commandPolicy,
           pathPolicy: workspaceFileService?.pathPolicy,
+          continueAfterOutputLimit: true,
+          preferTectonicForPandoc: true,
           onOutput: (chunk) => _record(
             task,
             WorkTaskEventKind.toolOutput,
@@ -2016,9 +2018,12 @@ class DefaultWorkTaskRunner
     final artifactPaths = await _existingCommandArtifactPaths(command);
     final data = <String, dynamic>{
       'commandDisplay': _safeCommandDisplay(command),
+      'runStatus': result.status.name,
       if (result.exitCode != null) 'exitCode': result.exitCode,
       'elapsedMs': result.elapsed.inMilliseconds,
       'outputTruncated': result.outputTruncated,
+      if (result.command.displayCommand != command.displayCommand)
+        'executedCommandDisplay': _safeCommandDisplay(result.command),
       if (artifactPaths.isNotEmpty) 'artifactPaths': artifactPaths,
       if (result.stdout.isNotEmpty) 'stdout': result.stdout,
       if (result.stderr.isNotEmpty) 'stderr': result.stderr,
@@ -2766,7 +2771,7 @@ class DefaultWorkTaskRunner
         .split(Platform.isWindows ? ';' : ':')
         .where((entry) => entry.trim().isNotEmpty);
     final available = <String>[];
-    for (final executable in const ['pandoc', 'tectonic']) {
+    for (final executable in const ['pandoc', 'tectonic', 'pdflatex']) {
       final found = pathEntries.any((directory) {
         final names = Platform.isWindows
             ? <String>[executable, '$executable.exe']
@@ -2782,9 +2787,14 @@ class DefaultWorkTaskRunner
       if (found) available.add(executable);
     }
     if (available.isEmpty) {
-      return '当前运行时未检测到 pandoc/tectonic；只有在 command.run 实际返回缺失工具后，才能说明工具缺失。';
+      return '当前运行时未检测到 pandoc/tectonic/pdflatex；只有在 command.run 实际返回缺失工具后，才能说明工具缺失。';
     }
-    return '当前运行时已检测到可执行工具：${available.join('、')}。持久化上下文中旧的“缺少工具”提示可能已过期；不得据此再次声称工具缺失，必须优先按原目标调用 command.run 并根据真实输出继续。';
+    final pdfHint = available.contains('pandoc') &&
+            available.contains('tectonic') &&
+            !available.contains('pdflatex')
+        ? ' 未检测到 pdflatex，生成 PDF 时应使用 --pdf-engine=tectonic；应用也会在未显式指定引擎时自动修复。'
+        : '';
+    return '当前运行时已检测到可执行工具：${available.join('、')}。$pdfHint 持久化上下文中旧的“缺少工具”提示可能已过期；不得据此再次声称工具缺失，必须优先按原目标调用 command.run 并根据真实输出继续。';
   }
 
   String _compactSkillCatalogEntry(CharacterSkill skill) {
