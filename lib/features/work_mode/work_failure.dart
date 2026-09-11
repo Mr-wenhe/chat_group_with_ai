@@ -25,6 +25,8 @@ enum WorkFailureType {
   internal,
 }
 
+const _retryFromCheckpointAction = '点击“重试”，从最近安全检查点继续；已提交的写入不会重复执行。';
+
 /// A public, durable description of one failed or paused work-mode attempt.
 ///
 /// Raw model responses, command output, credentials and full file contents are
@@ -144,6 +146,7 @@ class WorkFailure {
           Map<String, dynamic>.from(decoded['workFailure'] as Map),
         ),
       );
+      failure = _migrateLegacyTransientCommandFailure(task, failure);
       final inferredTarget =
           failure.failureTargetPath ?? _inferFailureTargetPath(task, failure);
       if (inferredTarget != null && failure.failureTargetPath == null) {
@@ -190,6 +193,32 @@ class WorkFailure {
       scope: 'model',
       completedContent: failure.completedContent,
       retryableHint: true,
+    );
+  }
+
+  /// Older checkpoints stored transient network command failures as terminal
+  /// command failures because the command result did not carry a retry hint.
+  /// Upgrade only diagnostics that clearly identify a transient network issue;
+  /// ordinary non-zero script exits must remain non-retryable.
+  static WorkFailure _migrateLegacyTransientCommandFailure(
+    AgentTask task,
+    WorkFailure failure,
+  ) {
+    if (failure.type != WorkFailureType.commandFailed || failure.retryable) {
+      return failure;
+    }
+    final text =
+        '${failure.reason} ${failure.technicalDetail} ${task.lastError}';
+    if (!_isTransientCommandFailure(text)) return failure;
+    return WorkFailure(
+      type: failure.type,
+      title: failure.title,
+      reason: failure.reason,
+      technicalDetail: failure.technicalDetail,
+      completedContent: failure.completedContent,
+      retryable: true,
+      suggestedAction: _retryFromCheckpointAction,
+      failureTargetPath: failure.failureTargetPath,
     );
   }
 
@@ -504,7 +533,7 @@ class WorkFailure {
           technicalDetail: '网络请求失败或服务暂时不可用。',
           completedContent: <String>[],
           retryable: true,
-          suggestedAction: '点击“重试”，从最近安全检查点继续；已提交的写入不会重复执行。',
+          suggestedAction: _retryFromCheckpointAction,
         ),
       WorkFailureType.modelProtocol => const WorkFailure(
           type: WorkFailureType.modelProtocol,
@@ -634,7 +663,7 @@ class WorkFailure {
               (type == WorkFailureType.commandFailed ||
                   type == WorkFailureType.snapshotUnavailable ||
                   type == WorkFailureType.internal)
-          ? '点击“重试”，从最近安全检查点继续；已提交的写入不会重复执行。'
+          ? _retryFromCheckpointAction
           : defaults.suggestedAction,
       failureTargetPath: _safeArtifactPath(failureTargetPath),
     );
@@ -818,12 +847,7 @@ class WorkFailure {
       return true;
     }
     if (type == WorkFailureType.commandFailed) {
-      final text = '${code ?? ''} $message'.toLowerCase();
-      return text.contains('timeout') ||
-          text.contains('timed out') ||
-          text.contains('超时') ||
-          text.contains('temporar') ||
-          text.contains('暂时');
+      return _isTransientCommandFailure('${code ?? ''} $message');
     }
     if (type == WorkFailureType.snapshotUnavailable) {
       final text = '${code ?? ''} $message'.toLowerCase();
@@ -834,6 +858,54 @@ class WorkFailure {
           text.contains('磁盘满');
     }
     return false;
+  }
+
+  static bool _isTransientCommandFailure(String value) {
+    final text = value.toLowerCase();
+    final chineseConnectionFailure = text.contains('网络连接') &&
+            (text.contains('失败') ||
+                text.contains('错误') ||
+                text.contains('超时') ||
+                text.contains('中断')) ||
+        text.contains('连接失败') ||
+        text.contains('连接错误') ||
+        text.contains('连接被拒绝') ||
+        text.contains('连接重置') ||
+        text.contains('无法连接') ||
+        text.contains('网络不可达');
+    final englishConnectionFailure = text.contains('failed to connect') ||
+        text.contains('connection refused') ||
+        text.contains('connection reset') ||
+        text.contains('connection error') ||
+        text.contains('connection timeout') ||
+        text.contains('connection failed') ||
+        text.contains('connection failure') ||
+        text.contains('connection lost') ||
+        text.contains('network error') ||
+        text.contains('network failure') ||
+        text.contains('network is unreachable') ||
+        text.contains('network unreachable');
+    final dnsFailure = text.contains('dns') &&
+        (text.contains('fail') ||
+            text.contains('error') ||
+            text.contains('resolve') ||
+            text.contains('unavailable'));
+    final socketFailure = text.contains('socketexception') ||
+        text.contains('socket error') ||
+        text.contains('socket failure') ||
+        text.contains('socket connection');
+    return text.contains('timeout') ||
+        text.contains('timed out') ||
+        text.contains('超时') ||
+        text.contains('temporar') ||
+        text.contains('暂时') ||
+        chineseConnectionFailure ||
+        englishConnectionFailure ||
+        dnsFailure ||
+        socketFailure ||
+        text.contains('无法解析主机') ||
+        text.contains('could not resolve host') ||
+        text.contains('name or service not known');
   }
 
   static int? _statusCode(Object? value) {

@@ -264,6 +264,60 @@ void main() {
       expect(commandFailure.retryable, isFalse);
     });
 
+    test('allows retrying a command that failed with a transient network error',
+        () {
+      final networkFailure = WorkFailure.fromToolResult(
+        const WorkToolResult.failed(
+          message: '任务网络连接失败',
+          data: <String, dynamic>{
+            'commandDisplay': 'curl https://weather.example/location',
+          },
+          failureCode: 'commandFailed',
+        ),
+      );
+
+      expect(networkFailure.type, WorkFailureType.commandFailed);
+      expect(networkFailure.retryable, isTrue);
+      expect(networkFailure.suggestedAction, contains('重试'));
+    });
+
+    test('does not retry a command blocked by network policy', () {
+      final blockedFailure = WorkFailure.fromToolResult(
+        const WorkToolResult.failed(
+          message: '网络目标 URL 无效或不是 HTTP(S)，已阻止执行。',
+          failureCode: 'commandFailed',
+        ),
+      );
+
+      expect(blockedFailure.type, WorkFailureType.commandFailed);
+      expect(blockedFailure.retryable, isFalse);
+    });
+
+    test(
+        'upgrades persisted network command failures to a resumable checkpoint',
+        () {
+      final task = _task('legacy-network-command')
+        ..status = AgentTaskStatus.failed;
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.commandFailed,
+          title: '命令执行未完成',
+          reason: '任务网络连接失败',
+          technicalDetail: '命令：curl https://weather.example/location',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '请检查命令和工作目录后重新规划。',
+        ),
+      );
+
+      final restored = task.workFailure;
+
+      expect(restored, isNotNull);
+      expect(restored!.canRetry, isTrue);
+      expect(restored.suggestedAction, contains('重试'));
+    });
+
     test('keeps safe command diagnostics for a nonzero exit', () {
       final failure = WorkFailure.fromToolResult(
         const WorkToolResult.failed(
@@ -801,6 +855,31 @@ void main() {
       expect(find.byKey(const Key('work-task-reauthorize')), findsNothing);
       expect(find.byKey(const Key('work-task-view-conflict')), findsNothing);
       expect(find.byKey(const Key('work-task-continue')), findsNothing);
+      await tester.tap(find.byKey(const Key('work-task-retry')));
+      expect(retries, 1);
+    });
+
+    testWidgets('shows retry for a persisted network command checkpoint',
+        (tester) async {
+      var retries = 0;
+      final task = _task('panel-network-command')
+        ..status = AgentTaskStatus.failed;
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.commandFailed,
+          title: '命令执行未完成',
+          reason: '任务网络连接失败',
+          technicalDetail: '命令：curl https://weather.example/location',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '请检查命令和工作目录后重新规划。',
+        ),
+      );
+
+      await pumpPanel(tester, task, onRetry: (_) async => retries++);
+
+      expect(find.byKey(const Key('work-task-retry')), findsOneWidget);
       await tester.tap(find.byKey(const Key('work-task-retry')));
       expect(retries, 1);
     });
