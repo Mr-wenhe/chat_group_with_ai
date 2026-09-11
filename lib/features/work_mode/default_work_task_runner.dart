@@ -1974,17 +1974,6 @@ class DefaultWorkTaskRunner
       workspace.workDirPath,
     );
     if (original == null) throw StateError('缺失命令检查点格式无效。');
-    final suggestion = WorkCommandInstallSuggestion.forExecutable(
-      original.executable,
-      isWindows: Platform.isWindows,
-      isMacOS: Platform.isMacOS,
-      workingDirectory: original.workingDirectory,
-      declaredImpact: original.declaredImpact,
-    );
-    final install = suggestion.installCommand;
-    if (install == null) {
-      throw StateError('该工具没有可安全自动安装的受信命令。');
-    }
     final policy = _commandPolicyFor(character, workspace.workDirPath);
     final runner = commandRunner ??
         WorkCommandRunner(
@@ -1998,6 +1987,21 @@ class DefaultWorkTaskRunner
             safeMetadata: {'stream': chunk.stream.name, 'install': true},
           ),
         );
+    // Use the runner's policy when a caller injects one. This keeps the
+    // installer branch deterministic in tests and makes the suggested
+    // package manager match the policy that will actually execute it.
+    final installerPolicy = commandRunner?.policy ?? policy;
+    final suggestion = WorkCommandInstallSuggestion.forExecutable(
+      original.executable,
+      isWindows: installerPolicy.isWindows,
+      isMacOS: installerPolicy.isMacOS,
+      workingDirectory: original.workingDirectory,
+      declaredImpact: original.declaredImpact,
+    );
+    final install = suggestion.installCommand;
+    if (install == null) {
+      throw StateError('该工具没有可安全自动安装的受信命令。');
+    }
     // Clicking the panel action is the explicit user confirmation for this
     // one-shot package-manager command; it never changes the task's ordinary
     // write-confirmation setting or grants a permanent system capability.

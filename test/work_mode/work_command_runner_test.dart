@@ -47,9 +47,10 @@ WorkCommand _command({
   );
 }
 
-WorkCommandPolicy _policy() => WorkCommandPolicy(
+WorkCommandPolicy _policy({bool? isMacOS}) => WorkCommandPolicy(
       authorizedRoots: const ['/workspace'],
       isWindows: false,
+      isMacOS: isMacOS,
     );
 
 void main() {
@@ -330,7 +331,9 @@ void main() {
       () async {
     var starts = 0;
     final runner = WorkCommandRunner(
-      policy: _policy(),
+      // The assertion covers the trusted Homebrew suggestion. Explicitly
+      // emulate macOS so this test does not depend on the CI host OS.
+      policy: _policy(isMacOS: true),
       processStarter: (_, {required env, required shell}) async {
         starts++;
         throw const ProcessException(

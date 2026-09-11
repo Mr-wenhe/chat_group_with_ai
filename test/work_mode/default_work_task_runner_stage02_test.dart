@@ -965,6 +965,8 @@ void main() {
       policy: WorkCommandPolicy(
         authorizedRoots: [authorizedDirectory.path],
         isWindows: false,
+        // The fake installer models the trusted Homebrew path on every CI OS.
+        isMacOS: true,
       ),
       pathPolicy: pathPolicy,
       processStarter: (command, {required env, required shell}) async {
