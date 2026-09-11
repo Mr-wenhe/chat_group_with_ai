@@ -34,6 +34,23 @@ void main() {
     );
   });
 
+  test('Markdown document creation without a real artifact fails explicitly',
+      () {
+    const request = '帮我生成一份MD文档，记录未来7天的天气';
+
+    expect(
+      WorkArtifactDeliveryGuard.requiresFileArtifact(request),
+      isTrue,
+    );
+    expect(
+      WorkArtifactDeliveryGuard.failureFor(
+        request: request,
+        hasReadableArtifact: false,
+      ),
+      WorkArtifactDeliveryGuard.missingArtifactMessage,
+    );
+  });
+
   test('a readable source artifact allows completion', () {
     const request = '请把这个 TypeScript 文件修复并保存';
 

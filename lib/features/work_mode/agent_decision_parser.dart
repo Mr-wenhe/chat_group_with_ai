@@ -84,6 +84,7 @@ class AgentDecisionParser {
     AgentToolName.workspaceRead,
     AgentToolName.workspaceSearch,
     AgentToolName.workspaceDocument,
+    AgentToolName.weatherForecast,
     AgentToolName.workspacePatch,
     AgentToolName.workspaceRename,
     AgentToolName.workspaceDelete,
@@ -457,6 +458,17 @@ class AgentDecisionParser {
         }, const {
           'path'
         });
+      case AgentToolName.weatherForecast:
+        final error = _validateFields(args, const {
+          'location': _ArgumentType.string,
+          'days': _ArgumentType.integer,
+        });
+        if (error != null) return error;
+        final days = args['days'];
+        if (days is int && (days < 1 || days > 7)) {
+          return 'tool.arguments.days 必须是 1 到 7 之间的整数。';
+        }
+        return null;
       case AgentToolName.workspacePatch:
         return _validateWorkspacePatchArguments(args);
       case AgentToolName.workspaceRename:

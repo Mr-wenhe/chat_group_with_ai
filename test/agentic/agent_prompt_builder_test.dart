@@ -34,6 +34,16 @@ void main() {
     expect(prompt, contains('先给结论'));
   });
 
+  test('legacy tool prompt does not advertise the Stage 03 weather tool', () {
+    final prompt = AgentPromptBuilder.buildToolPlanningPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '检查项目代码',
+    );
+
+    expect(prompt, isNot(contains('weather.forecast')));
+  });
+
   test('Stage 03 prompt describes one strict JSON decision object', () {
     final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
       rolePlaySystemPrompt: '你是工作助手。',
@@ -54,6 +64,20 @@ void main() {
     expect(prompt, contains('"declaredImpact":["reports/economy.xlsx"]'));
     expect(prompt, isNot(contains('```agent_tool')));
     expect(prompt, isNot(contains('<tool_call>')));
+  });
+
+  test('Stage 03 weather tasks use the structured forecast tool', () {
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '帮我生成一份MD文档，记录未来7天的天气',
+    );
+
+    expect(prompt, contains('weather.forecast'));
+    expect(prompt, contains('不要读取 weather_location.json'));
+    expect(prompt, contains('没有城市时使用默认查询地点'));
+    expect(prompt, contains('未指定文件名时使用 未来7天天气.md'));
+    expect(prompt, contains('禁止使用 MD7.md'));
   });
 
   test(

@@ -2022,6 +2022,9 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       AgentToolName.workspacePatch => ToolPermission.workspacePatch,
       AgentToolName.workspaceRename => ToolPermission.workspacePatch,
       AgentToolName.workspaceDelete => ToolPermission.workspacePatch,
+      // Weather is a read-only network lookup. Reuse the existing read
+      // permission until a dedicated weather permission is introduced.
+      AgentToolName.weatherForecast => ToolPermission.workspaceRead,
       AgentToolName.commandRun => ToolPermission.commandRun,
       AgentToolName.browserContext => ToolPermission.browserContext,
       AgentToolName.skillCreate => ToolPermission.skillCreate,
@@ -2039,6 +2042,9 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       AgentToolName.workspaceRead => false,
       AgentToolName.workspaceSearch => false,
       AgentToolName.workspaceDocument => false,
+      // The ordinary runtime currently has no weather service injection, so a
+      // parsed weather request must remain behind the normal approval gate.
+      AgentToolName.weatherForecast => true,
       AgentToolName.workspacePatch => true,
       AgentToolName.workspaceRename => true,
       AgentToolName.workspaceDelete => true,

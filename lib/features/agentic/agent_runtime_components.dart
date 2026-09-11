@@ -171,6 +171,11 @@ class AgentToolExecutor {
           'error': 'toolUnsupported',
           'message': '文档解析由工作模式提供。',
         },
+      AgentToolName.weatherForecast => {
+          'ok': false,
+          'error': 'toolUnsupported',
+          'message': '天气查询尚未接入当前 AgentRuntime。',
+        },
       AgentToolName.workspacePatch => patchWorkspace(),
       AgentToolName.workspaceRename => _workspace.rename(
           request.args['path'] as String? ?? '',

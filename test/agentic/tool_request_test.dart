@@ -30,6 +30,19 @@ void main() {
     expect(parsed.args['path'], 'lib/main.dart');
   });
 
+  test('parses the dedicated weather forecast tool request', () {
+    final parsed = ToolRequest.tryParse('''
+```agent_tool
+{"tool":"weather.forecast","reason":"获取未来7天天气","args":{"location":"上海","days":7}}
+```
+''');
+
+    expect(parsed, isNotNull);
+    expect(parsed!.tool, AgentToolName.weatherForecast);
+    expect(parsed.args['location'], '上海');
+    expect(parsed.args['days'], 7);
+  });
+
   test('rejects unknown tool names', () {
     expect(
       ToolRequest.tryParse('```agent_tool\n{"tool":"shell.rm","args":{}}\n```'),

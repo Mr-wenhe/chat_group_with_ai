@@ -95,6 +95,39 @@ void main() {
       });
     }
 
+    test('accepts weather forecast tool with a bounded day count', () async {
+      final result = await parser.parse(_json({
+        'action': 'tool',
+        'public_update': '正在查询未来七天天气。',
+        'tool': {
+          'name': 'weather.forecast',
+          'arguments': {'location': '上海', 'days': 7},
+        },
+        'completion': null,
+      }));
+
+      expect(result.isSuccess, isTrue, reason: result.detail);
+      final decision = result.decision! as AgentToolDecision;
+      expect(decision.tool.name.wireName, 'weather.forecast');
+      expect(decision.tool.arguments, {'location': '上海', 'days': 7});
+    });
+
+    test('rejects weather forecast tool with an unsupported day count',
+        () async {
+      final result = await parser.parse(_json({
+        'action': 'tool',
+        'public_update': '正在查询天气。',
+        'tool': {
+          'name': 'weather.forecast',
+          'arguments': {'days': 8},
+        },
+        'completion': null,
+      }));
+
+      expect(result.isFailure, isTrue);
+      expect(result.detail, contains('1 到 7'));
+    });
+
     final invalidCases = <({String name, String raw, String detail})>[
       (
         name: 'unknown action',

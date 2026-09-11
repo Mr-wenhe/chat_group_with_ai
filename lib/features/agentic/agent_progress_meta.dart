@@ -104,6 +104,8 @@ String completedStepLabel(ToolRequest request) {
       return '删除文件：$subject';
     case AgentToolName.workspaceList:
       return '列出工作区：$subject';
+    case AgentToolName.weatherForecast:
+      return '查询天气：$subject';
     case AgentToolName.commandRun:
       return '执行命令：$subject';
     case AgentToolName.browserContext:

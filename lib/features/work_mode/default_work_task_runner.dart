@@ -52,6 +52,7 @@ import 'package:chat_group/features/work_mode/workspace_file_service.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 import 'package:chat_group/features/work_mode/stage02_workspace_file_tool.dart';
+import 'package:chat_group/features/work_mode/weather_forecast_service.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:dio/dio.dart';
 
@@ -82,6 +83,7 @@ class DefaultWorkTaskRunner
   final WorkspaceMutationService? mutationService;
   final WorkResourceLockManager? resourceLockManager;
   final WorkCommandRunner? commandRunner;
+  final WeatherForecastService? weatherForecastService;
   final Future<MediaAttachment> Function(
     File source,
     String type, {
@@ -112,6 +114,7 @@ class DefaultWorkTaskRunner
     this.mutationService,
     this.resourceLockManager,
     this.commandRunner,
+    this.weatherForecastService,
     this.mediaCopier,
     DateTime Function()? clock,
   })  : credentials = credentials ?? SecureApiCredentialResolver(),
@@ -272,6 +275,7 @@ class DefaultWorkTaskRunner
         workspaceRoot: workspace.workDirPath,
         files: files,
         mutations: mutations,
+        cancellationToken: cancellationToken,
         approvalDecision: decision,
         approvalScope: scope,
         modelCapability: capability,
@@ -690,6 +694,7 @@ class DefaultWorkTaskRunner
     required String workspaceRoot,
     required WorkspaceFileService files,
     required WorkspaceMutationService mutations,
+    required CancelToken cancellationToken,
     required WorkChangeApprovalDecision? approvalDecision,
     required WorkApprovalScope? approvalScope,
     required ModelCapability modelCapability,
@@ -790,6 +795,59 @@ class DefaultWorkTaskRunner
     }
 
     final definitions = <WorkToolDefinition>[
+      WorkToolDefinition(
+        name: AgentToolName.weatherForecast,
+        access: WorkToolAccess.readOnly,
+        schema: const WorkToolSchema(
+          fields: {
+            'location': WorkToolValueType.string,
+            'days': WorkToolValueType.integer,
+          },
+        ),
+        handler: (invocation) async {
+          final rawDays = invocation.arguments['days'];
+          if (rawDays != null && rawDays is! int) {
+            return const WorkToolResult.failed(
+              message: '天气查询天数必须是整数。',
+              failureCode: 'modelProtocol',
+            );
+          }
+          final days = rawDays as int? ?? WeatherForecastService.maxDays;
+          final rawLocation = invocation.arguments['location'];
+          final location = rawLocation is String ? rawLocation : null;
+          final service = weatherForecastService ??
+              WeatherForecastService(
+                defaultLocation: _defaultWeatherLocation(),
+              );
+          try {
+            final forecast = await service.fetch(
+              location: location,
+              days: days,
+              cancelToken: cancellationToken,
+            );
+            return WorkToolResult.success(
+              message:
+                  '已获取${forecast.location}未来${forecast.days.length}天的真实天气数据。',
+              data: {
+                ...forecast.toMap(),
+                'recommendedFileName': forecast.recommendedFileName,
+              },
+            );
+          } on WeatherForecastException catch (error) {
+            return error.retryable
+                ? WorkToolResult.retryableFailure(message: error.message)
+                : WorkToolResult.failed(
+                    message: error.message,
+                    failureCode: 'weatherDataInvalid',
+                  );
+          } on ArgumentError catch (error) {
+            return WorkToolResult.failed(
+              message: error.message ?? '天气查询参数无效。',
+              failureCode: 'modelProtocol',
+            );
+          }
+        },
+      ),
       WorkToolDefinition(
         name: AgentToolName.workspaceList,
         access: WorkToolAccess.readOnly,
@@ -2506,6 +2564,27 @@ class DefaultWorkTaskRunner
 
   int _intArgument(Object? value, int fallback) =>
       value is int && value >= 0 ? value : fallback;
+
+  String _defaultWeatherLocation() {
+    try {
+      final profile = database.userProfileBox.get('me');
+      final clues = <String>[
+        if (profile != null) ...profile.importantBackground,
+        if (profile != null) profile.bio,
+      ];
+      final locationPattern = RegExp(
+        r'(?:住在|来自|位于|所在地(?:是)?)[：:\s]*([\u4e00-\u9fffA-Za-z·-]{2,24})',
+      );
+      for (final clue in clues) {
+        final match = locationPattern.firstMatch(clue);
+        final location = match?.group(1)?.trim();
+        if (location != null && location.isNotEmpty) return location;
+      }
+    } on Object {
+      // A missing profile must not prevent a safe built-in default forecast.
+    }
+    return WeatherForecastService.defaultLocation;
+  }
 
   int? _nullableInt(Object? value) => value is int && value >= 0 ? value : null;
 

@@ -38,6 +38,7 @@ public_update 只写用户可见的动作、依据或结论，不写思维链、
 - plan：tool 必须为 null；completion 为 {"steps":["步骤 1","步骤 2"]}。
 - tool：completion 必须为 null；tool 为 {"name":"已注册工具名","arguments":{}}。arguments 必须是经过工具 schema 允许的 JSON object。
 - workspace.read 仅适用于 UTF-8 文本或代码；遇到 PDF、DOCX、XLSX 等二进制文档必须使用 workspace.document，不得直接用 workspace.read。workspace.document 会返回有界内容和来源位置。
+- weather.forecast 是天气任务的专用只读工具，arguments 可包含 location 和 days（days 最大为 7）；没有城市时使用默认查询地点。天气任务必须先调用它获取真实数据，不要读取 weather_location.json，也不要用 command.run 拼接天气 URL。未指定文件名时使用 未来7天天气.md，禁止使用 MD7.md。
 - command.run 的 arguments 必须包含 executable、arguments、workingDirectory、declaredImpact；其中 arguments 必须是 JSON 字符串数组，即使只有一个参数也必须写成 ["test"]，禁止写成 "test" 或 "test --no-pub"；declaredImpact 也必须是非空字符串数组。生成或修改文件时，declaredImpact 要填写具体输出文件相对路径，不能只写 `.`，这样执行器才能核对并交付产物。workingDirectory 为空时由执行器自动解析为当前授权工作区根目录（见上方工作模式上下文），不要填写 `.`。
   完整示例（生成文件时）：{"name":"command.run","arguments":{"executable":"python3","arguments":["generate_report.py"],"workingDirectory":"","declaredImpact":["reports/economy.xlsx"]}}。
 - clarify：tool 必须为 null；completion 为 {"question":"需要用户回答的问题","options":["可选答案"]}。
