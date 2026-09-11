@@ -105,6 +105,56 @@ class _SequencedGateway extends AiRequestGateway {
   }
 }
 
+class _FloodingProgressGateway extends AiRequestGateway {
+  static const int tokenCount = 2000;
+
+  _FloodingProgressGateway()
+      : super(
+          store: MemoryGovernanceStore(),
+          client: _UnusedClient(),
+        );
+
+  int calls = 0;
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required AiRequestPurpose purpose,
+    required String conversationId,
+    required String characterId,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    bool requiresTools = false,
+    bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) async {
+    calls++;
+    for (var index = 0; index < tokenCount; index++) {
+      onEvent?.call(ChatStreamEvent.token('x'));
+    }
+    return {
+      'success': true,
+      'message': jsonEncode({
+        'action': 'finish',
+        'public_update': '检查已完成。',
+        'tool': null,
+        'completion': {
+          'summary': '检查已完成。',
+          'evidence': ['已收到完整模型响应'],
+        },
+      }),
+    };
+  }
+}
+
 class _MultiPatchGateway extends AiRequestGateway {
   final List<Map<String, String>> patches;
 
@@ -601,6 +651,89 @@ void main() {
         isTrue);
     expect((await snapshots.undo(task.id)).succeeded, isTrue);
     expect(await output.exists(), isFalse);
+  });
+
+  test('samples token-level model progress before persisting it', () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    expect(
+      await grants.authorizeDirectory(
+        authorizedDirectory.path,
+        consent: (_) async => true,
+      ),
+      isNotNull,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final snapshots = WorkSnapshotService(
+      appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+      pathPolicy: pathPolicy,
+    );
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: snapshots,
+    );
+    final config = ApiConfig(
+      id: 'progress-throttle-config',
+      name: 'Progress throttle test config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'progress-throttle-character',
+      name: 'Progress throttle character',
+      avatar: 'T',
+      age: 30,
+      role: '测试进度角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final gateway = _FloodingProgressGateway();
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+    );
+    final task = AgentTask(
+      id: 'progress-throttle-task',
+      groupId: 'progress-throttle-group',
+      characterId: character.id,
+      userRequest: '检查当前任务状态',
+      workModeTask: true,
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.completed);
+    expect(gateway.calls, 1);
+    final events = (await eventStore.read(task.id)).events;
+    final modelProgressEvents = events.where(
+      (event) =>
+          event.title == 'AI 公开进度' && event.safeMetadata['stream'] == 'model',
+    );
+    expect(
+      modelProgressEvents.length,
+      lessThan(20),
+      reason: '每个 token 都落盘会阻塞任务推进',
+    );
   });
 
   test('production runner delivers every workspace.patch as a file card',

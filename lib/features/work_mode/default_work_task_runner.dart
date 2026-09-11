@@ -47,6 +47,7 @@ import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
+import 'package:chat_group/features/work_mode/work_model_progress_throttle.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
@@ -410,9 +411,9 @@ class DefaultWorkTaskRunner
     );
     final publicUpdateStream = WorkPublicUpdateStream();
     var streamedCharacters = 0;
-    var lastProgressAt = DateTime.fromMillisecondsSinceEpoch(0);
     var lastPublicUpdateAt = DateTime.fromMillisecondsSinceEpoch(0);
     var lastPublishedPublicUpdate = '';
+    final progressThrottle = WorkModelProgressThrottle();
     var progressWrites = Future<void>.value();
     await _record(
       task,
@@ -445,6 +446,10 @@ class DefaultWorkTaskRunner
       requiresTools: true,
       userInitiated: true,
       onEvent: (event) {
+        // Dio cancellation can race with the last bytes already buffered by
+        // the provider. Ignore those late callbacks so a stopped task cannot
+        // keep extending its durable event queue.
+        if (cancellationToken.isCancelled) return;
         if (event.type != ChatStreamEventType.token) return;
         final delta = event.delta ?? '';
         streamedCharacters += delta.length;
@@ -480,13 +485,12 @@ class DefaultWorkTaskRunner
           });
         }
 
-        if (streamedCharacters == 0 ||
-            (streamedCharacters < 160 &&
-                now.difference(lastProgressAt) <
-                    const Duration(milliseconds: 500))) {
+        if (!progressThrottle.shouldPublish(
+          streamedCharacters: streamedCharacters,
+          now: now,
+        )) {
           return;
         }
-        lastProgressAt = now;
         final characters = streamedCharacters;
         progressWrites = progressWrites.then<void>((_) async {
           final safeMetadata = <String, Object?>{

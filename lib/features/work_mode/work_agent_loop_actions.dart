@@ -355,6 +355,10 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     final task = state.task;
     const skipped = WorkToolResult.alreadyCommitted();
     state.recentResults.add(_safeResult(skipped, call));
+    // Keep the current-process model view in sync with the durable result.
+    // Without this, _buildContext prefers modelResults and the model never
+    // sees that its repeated mutation was already committed.
+    state.modelResults.add(_modelResult(skipped, call));
     await _emit(
       state,
       WorkTaskEventKind.toolOutput,

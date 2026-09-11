@@ -742,6 +742,43 @@ void main() {
     expect(task.completedOperations, hasLength(1));
   });
 
+  test('same-run duplicate mutation result reaches the next model turn',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        path: 'result.txt',
+      ))
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        path: 'result.txt',
+      ))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _definition(
+            AgentToolName.workspacePatch,
+            tool,
+            access: WorkToolAccess.mutation,
+            pipeline: _recordingPipeline(<String>[]),
+          ),
+        ],
+      ),
+    );
+
+    final result = await loop.execute(_task(id: 'same-run-duplicate'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(tool.calls, 1);
+    final thirdTurn = model.requests[2].messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(thirdTurn, contains('已跳过重复执行'));
+  });
+
   test('does not replay an approved request that mismatches its checkpoint',
       () async {
     final model = _FakeModel()..responses.add(_finishDecision('重新规划完成。'));
