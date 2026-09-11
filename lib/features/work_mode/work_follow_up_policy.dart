@@ -33,13 +33,15 @@ class WorkFollowUpDecision {
 
 /// Decides whether a follow-up continues, revises an existing artifact, or
 /// creates a new one. It intentionally has no access to message history: the
-/// structured artifact list is the only source for an implicit old-file path.
+/// structured artifact list and a validated failed-command target are the only
+/// sources for an implicit old-file path.
 class WorkFollowUpPolicy {
   const WorkFollowUpPolicy();
 
   WorkFollowUpDecision resolve({
     required String request,
     Iterable<String> lastArtifactPaths = const [],
+    String? failedArtifactPath,
   }) {
     final normalizedRequest = request.trim();
     if (normalizedRequest.isEmpty) {
@@ -118,6 +120,18 @@ class WorkFollowUpPolicy {
         request: normalizedRequest,
         artifactPath: explicitPath,
         reason: '用户明确给出了修订路径。',
+      );
+    }
+    final failedTarget = _preferredArtifactPath(
+      failedArtifactPath,
+      artifacts,
+    );
+    if (edit && !newFile && failedTarget != null) {
+      return WorkFollowUpDecision(
+        kind: WorkFollowUpKind.reviseArtifact,
+        request: normalizedRequest,
+        artifactPath: failedTarget,
+        reason: '沿用上一次失败命令定位到的脚本原路径进行修复。',
       );
     }
     // “改写到新目标” (and similar ordinary continuation wording) does not
@@ -214,6 +228,46 @@ class WorkFollowUpPolicy {
       return List<String>.from(artifacts);
     }
     return matches;
+  }
+
+  String? _preferredArtifactPath(
+    String? rawPath,
+    List<String> artifacts,
+  ) {
+    final normalized = rawPath?.replaceAll('\\', '/').trim();
+    if (normalized == null ||
+        normalized.isEmpty ||
+        _hasControl(normalized) ||
+        normalized.split('/').contains('..') ||
+        normalized.contains('://')) {
+      return null;
+    }
+    final equivalentMatches = artifacts
+        .where((artifact) => _equivalentPath(artifact, normalized))
+        .toList(growable: false);
+    if (equivalentMatches.length == 1) {
+      return equivalentMatches.single;
+    }
+    if (equivalentMatches.length > 1) {
+      // A relative failure marker can map to multiple absolute scripts with
+      // the same basename; do not silently select the first directory.
+      return null;
+    }
+    final basename = normalized.split('/').last.toLowerCase();
+    final basenameMatches = artifacts
+        .where(
+          (artifact) => artifact.split('/').last.toLowerCase() == basename,
+        )
+        .toList(growable: false);
+    if (basenameMatches.length == 1) {
+      return basenameMatches.single;
+    }
+    if (basenameMatches.length > 1) {
+      // A basename-only failure marker is not enough to choose between two
+      // directories; keep the normal clarification boundary in that case.
+      return null;
+    }
+    return normalized;
   }
 
   String? _explicitPath(String request) {

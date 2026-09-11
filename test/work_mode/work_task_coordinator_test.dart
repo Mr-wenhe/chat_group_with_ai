@@ -12,8 +12,10 @@ import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
+import 'package:chat_group/features/work_mode/work_follow_up_policy.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -466,6 +468,87 @@ void main() {
     expect(stored.executionStateJson, contains('/workspace/report.md'));
     expect(stored.executionStateJson, contains('"autoRenameIfExists":false'));
     runner.complete(task.id);
+  });
+
+  test('repairs the script named by a prior command failure without pausing',
+      () async {
+    final task = _task(id: 'failed-ppt-conversion', conversationId: 'group-ppt')
+      ..status = AgentTaskStatus.failed
+      ..lastArtifactPaths = [
+        '/workspace/催眠心理学报告.md',
+        '/workspace/create_lucid_dream_ppt.py',
+      ];
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolResult(
+        const WorkToolResult.failed(
+          message: '命令退出码为 1。',
+          data: <String, dynamic>{
+            'commandDisplay': 'python3 create_lucid_dream_ppt.py',
+            'artifactPaths': <String>[
+              '/workspace/催眠心理学报告.md',
+              '/workspace/create_lucid_dream_ppt.py',
+            ],
+            'stderr': 'SyntaxError: invalid syntax',
+          },
+          failureCode: 'commandFailed',
+        ),
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '请修复之前的 PPT 转换问题');
+
+    final resumed = taskBox.get(task.id)!;
+    expect(resumed.status, AgentTaskStatus.planning);
+    expect(resumed.queuedUserRequests, isEmpty);
+    expect(resumed.executionStateJson,
+        contains('/workspace/create_lucid_dream_ppt.py'));
+    expect(resumed.executionStateJson, contains('"autoRenameIfExists":false'));
+    expect(runner.startedTaskIds, [task.id]);
+  });
+
+  test('recovers an already-paused repair clarification from its checkpoint',
+      () async {
+    final task = _task(
+      id: 'paused-failed-ppt-conversion',
+      conversationId: 'group-paused-ppt',
+    )
+      ..status = AgentTaskStatus.paused
+      ..lastError = '请明确要修改的文件路径。'
+      ..queuedUserRequests = ['请修复之前的 PPT 转换问题']
+      ..lastArtifactPaths = [
+        '/workspace/催眠心理学报告.md',
+        '/workspace/create_lucid_dream_ppt.py',
+      ];
+    WorkFailure.persistOnTask(
+      task,
+      const WorkFailure(
+        type: WorkFailureType.commandFailed,
+        title: '命令执行未完成',
+        reason: '命令退出码为 1。',
+        technicalDetail:
+            '命令：python3 create_lucid_dream_ppt.py；退出码：1；stderr：SyntaxError',
+        completedContent: <String>[],
+        retryable: false,
+        suggestedAction: '请检查命令和工作目录后重新规划。',
+      ),
+    );
+    task.executionStateJson = jsonEncode({
+      ...jsonDecode(task.executionStateJson) as Map<String, dynamic>,
+      'followUpKind': WorkFollowUpKind.clarification.name,
+      'clarificationQuestion': '请明确要修改的文件路径。',
+    });
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '请修复之前的 PPT 转换问题');
+
+    final resumed = taskBox.get(task.id)!;
+    expect(resumed.status, AgentTaskStatus.planning);
+    expect(resumed.queuedUserRequests, isEmpty);
+    expect(resumed.executionStateJson,
+        contains('/workspace/create_lucid_dream_ppt.py'));
+    expect(runner.startedTaskIds, [task.id]);
   });
 
   test('clears stale tool results when promoting a terminal follow-up',

@@ -95,6 +95,37 @@ void main() {
     expect(decision.artifactPath, '/workspace/report.md');
   });
 
+  test('uses the failed command script for an unambiguous repair follow-up',
+      () {
+    final decision = policy.resolve(
+      request: '请修复之前的 PPT 转换问题',
+      lastArtifactPaths: const [
+        '/workspace/催眠心理学报告.md',
+        '/workspace/create_lucid_dream_ppt.py',
+      ],
+      failedArtifactPath: '/workspace/create_lucid_dream_ppt.py',
+    );
+
+    expect(decision.kind, WorkFollowUpKind.reviseArtifact);
+    expect(decision.artifactPath, '/workspace/create_lucid_dream_ppt.py');
+    expect(decision.autoRenameIfExists, isFalse);
+  });
+
+  test('does not guess between same-named failed command scripts', () {
+    final decision = policy.resolve(
+      request: '请修复之前的转换问题',
+      lastArtifactPaths: const [
+        '/workspace/first/create_ppt.py',
+        '/workspace/second/create_ppt.py',
+      ],
+      failedArtifactPath: 'create_ppt.py',
+    );
+
+    expect(decision.kind, WorkFollowUpKind.clarification);
+    expect(decision.artifactPath, isNull);
+    expect(decision.clarificationQuestion, contains('文件路径'));
+  });
+
   test('ambiguous target asks one precise question and pauses', () {
     final decision = policy.resolve(
       request: '请修改当前文件',

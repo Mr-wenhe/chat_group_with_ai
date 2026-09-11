@@ -40,6 +40,11 @@ class WorkFailure {
   final bool retryable;
   final String suggestedAction;
 
+  /// The safe source file implicated by a failed command, when the command
+  /// result identified one. This is intentionally separate from
+  /// [technicalDetail], whose path-bearing text is sanitized for display.
+  final String? failureTargetPath;
+
   const WorkFailure({
     required this.type,
     required this.title,
@@ -48,6 +53,7 @@ class WorkFailure {
     required this.completedContent,
     required this.retryable,
     required this.suggestedAction,
+    this.failureTargetPath,
   });
 
   /// Alias used by callers that describe the field as the concrete reason.
@@ -61,6 +67,17 @@ class WorkFailure {
 
   bool get canRetry => retryable;
 
+  WorkFailure copyWith({String? failureTargetPath}) => WorkFailure(
+        type: type,
+        title: title,
+        reason: reason,
+        technicalDetail: technicalDetail,
+        completedContent: completedContent,
+        retryable: retryable,
+        suggestedAction: suggestedAction,
+        failureTargetPath: failureTargetPath ?? this.failureTargetPath,
+      );
+
   bool get canContinue => type == WorkFailureType.userActionRequired;
 
   bool get canReauthorize =>
@@ -69,15 +86,19 @@ class WorkFailure {
 
   bool get canViewConflict => type == WorkFailureType.fileConflict;
 
-  Map<String, dynamic> toJson() => <String, dynamic>{
-        'type': type.name,
-        'title': title,
-        'reason': reason,
-        'technicalDetail': technicalDetail,
-        'completedContent': completedContent,
-        'retryable': retryable,
-        'suggestedAction': suggestedAction,
-      };
+  Map<String, dynamic> toJson() {
+    final safeTarget = _safeArtifactPath(failureTargetPath);
+    return <String, dynamic>{
+      'type': type.name,
+      'title': title,
+      'reason': reason,
+      'technicalDetail': technicalDetail,
+      'completedContent': completedContent,
+      'retryable': retryable,
+      'suggestedAction': suggestedAction,
+      if (safeTarget != null) 'failureTargetPath': safeTarget,
+    };
+  }
 
   String toJsonString() => jsonEncode(toJson());
 
@@ -106,6 +127,7 @@ class WorkFailure {
         json['suggestedAction'] ?? json['nextAction'],
         fallback: defaults.suggestedAction,
       ),
+      failureTargetPath: _safeArtifactPath(json['failureTargetPath']),
     );
   }
 
@@ -116,12 +138,17 @@ class WorkFailure {
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map || decoded['workFailure'] is! Map) return null;
-      final failure = _migrateLegacyInvalidCommandFailure(
+      var failure = _migrateLegacyInvalidCommandFailure(
         task,
         WorkFailure.fromJson(
           Map<String, dynamic>.from(decoded['workFailure'] as Map),
         ),
       );
+      final inferredTarget =
+          failure.failureTargetPath ?? _inferFailureTargetPath(task, failure);
+      if (inferredTarget != null && failure.failureTargetPath == null) {
+        failure = failure.copyWith(failureTargetPath: inferredTarget);
+      }
       if (failure.type == WorkFailureType.toolMissing) {
         final hasTrustedInstaller = _hasInstallableMissingTool(task, decoded);
         return hasTrustedInstaller
@@ -300,6 +327,7 @@ class WorkFailure {
       technicalDetail: technicalDetail,
       scope: scope,
       completedContent: completedContent,
+      failureTargetPath: _failureTargetPathFromToolResult(result),
       // Snapshot completion can fail after the file write has already
       // committed. It is safe to retry the loop because the committed action
       // key is persisted and the mutation will be skipped on replay; the
@@ -342,6 +370,61 @@ class WorkFailure {
     return details.join('；');
   }
 
+  static String? _failureTargetPathFromToolResult(WorkToolResult result) {
+    if (result.failureCode != 'commandFailed') return null;
+    final explicit = _safeArtifactPath(result.data['failureTargetPath']);
+    if (explicit != null) return explicit;
+    final rawPaths = result.data['artifactPaths'];
+    if (rawPaths is! Iterable) return null;
+    final paths = rawPaths
+        .whereType<String>()
+        .map(_safeArtifactPath)
+        .whereType<String>()
+        .toList(growable: false);
+    final sourcePaths = paths.where(_looksLikeSourceArtifact).toList();
+    if (sourcePaths.isEmpty) return null;
+    final command =
+        (_string(result.data['commandDisplay']) ?? '').toLowerCase();
+    final commandMatches = <String>[];
+    for (final path in sourcePaths) {
+      final basename = path.replaceAll('\\', '/').split('/').last.toLowerCase();
+      if (basename.isNotEmpty && command.contains(basename)) {
+        commandMatches.add(path);
+      }
+    }
+    if (commandMatches.length == 1) return commandMatches.single;
+    return sourcePaths.length == 1 ? sourcePaths.single : null;
+  }
+
+  static String? _inferFailureTargetPath(
+    AgentTask task,
+    WorkFailure failure,
+  ) {
+    if (failure.type != WorkFailureType.commandFailed) return null;
+    final paths = task.lastArtifactPaths
+        .map(_safeArtifactPath)
+        .whereType<String>()
+        .toList(growable: false);
+    final sourcePaths = paths.where(_looksLikeSourceArtifact).toList();
+    if (sourcePaths.isEmpty) return null;
+    final diagnostics =
+        '${failure.technicalDetail} ${failure.reason}'.toLowerCase();
+    final diagnosticMatches = <String>[];
+    for (final path in sourcePaths) {
+      final basename = path.replaceAll('\\', '/').split('/').last.toLowerCase();
+      if (basename.isNotEmpty && diagnostics.contains(basename)) {
+        diagnosticMatches.add(path);
+      }
+    }
+    if (diagnosticMatches.length == 1) return diagnosticMatches.single;
+    return sourcePaths.length == 1 ? sourcePaths.single : null;
+  }
+
+  static bool _looksLikeSourceArtifact(String path) => RegExp(
+        r'\.(?:py|pyw|js|mjs|cjs|ts|tsx|jsx|dart|sh|bash|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp)$',
+        caseSensitive: false,
+      ).hasMatch(path.replaceAll('\\', '/'));
+
   static bool _hasInstallCommand(Object? rawSuggestion) {
     if (rawSuggestion is! Map) return false;
     return rawSuggestion['installCommand'] is Map;
@@ -356,6 +439,7 @@ class WorkFailure {
       completedContent: failure.completedContent,
       retryable: failure.retryable,
       suggestedAction: '请按上方可信来源的官方文档手动安装，或改用已存在的工具。',
+      failureTargetPath: failure.failureTargetPath,
     );
   }
 
@@ -368,6 +452,7 @@ class WorkFailure {
       completedContent: failure.completedContent,
       retryable: failure.retryable,
       suggestedAction: '点击“帮助安装工具”完成一次性安装，或改用已存在的工具。',
+      failureTargetPath: failure.failureTargetPath,
     );
   }
 
@@ -513,6 +598,7 @@ class WorkFailure {
     String scope = '',
     Iterable<String> completedContent = const <String>[],
     bool? retryableHint,
+    String? failureTargetPath,
   }) {
     final type = _typeFor(
       code: code,
@@ -550,6 +636,7 @@ class WorkFailure {
                   type == WorkFailureType.internal)
           ? '点击“重试”，从最近安全检查点继续；已提交的写入不会重复执行。'
           : defaults.suggestedAction,
+      failureTargetPath: _safeArtifactPath(failureTargetPath),
     );
   }
 
@@ -819,6 +906,21 @@ class WorkFailure {
     if (safe.isEmpty) return fallback;
     const maximum = 1200;
     return safe.length <= maximum ? safe : '${safe.substring(0, maximum - 1)}…';
+  }
+
+  static String? _safeArtifactPath(Object? value) {
+    if (value is! String) return null;
+    final normalized = value.replaceAll('\\', '/').trim();
+    if (normalized.isEmpty ||
+        normalized.contains(RegExp(r'[\u0000-\u001f\u007f]')) ||
+        normalized.split('/').contains('..') ||
+        normalized.contains('://')) {
+      return null;
+    }
+    const maximum = 1000;
+    return normalized.length <= maximum
+        ? normalized
+        : '${normalized.substring(0, maximum - 1)}…';
   }
 
   static List<String> _cleanList(Object? value) {

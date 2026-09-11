@@ -2400,12 +2400,14 @@ class WorkTaskCoordinator {
       await _promoteQueuedFollowUp(task);
       return;
     }
+    final previousFailure = task.workFailure;
     final decision = _followUpPolicy.resolve(
       request: nextRequest,
       // The model/result runner writes the structured field first. A
       // canonical Task 15 summary is a recovery fallback for tasks imported
       // between field writes; no chat-history or global-file lookup is used.
       lastArtifactPaths: _followUpArtifactPaths(task),
+      failedArtifactPath: previousFailure?.failureTargetPath,
     );
     final startsNewArtifact = decision.kind == WorkFollowUpKind.newArtifact;
     final resetFreshContext = startsNewArtifact &&

@@ -1959,6 +1959,13 @@ class DefaultWorkTaskRunner
       if (result.installSuggestion != null)
         'installSuggestion': result.installSuggestion!.toJson(),
     };
+    if (!result.succeeded) {
+      final failureTargetPath =
+          _commandFailureTargetPath(command, artifactPaths);
+      if (failureTargetPath != null) {
+        data['failureTargetPath'] = failureTargetPath;
+      }
+    }
     if (result.succeeded) {
       return WorkToolResult.success(message: result.message, data: data);
     }
@@ -2037,6 +2044,46 @@ class DefaultWorkTaskRunner
     }
     return paths.toList(growable: false);
   }
+
+  String? _commandFailureTargetPath(
+    WorkCommand command,
+    Iterable<String> existingArtifactPaths,
+  ) {
+    final sourcePaths = existingArtifactPaths
+        .where(_looksLikeSourceArtifact)
+        .toList(growable: false);
+    final display = command.displayCommand.toLowerCase();
+    final fullPathMatches = sourcePaths
+        .where((path) =>
+            display.contains(path.replaceAll('\\', '/').toLowerCase()))
+        .toList(growable: false);
+    if (fullPathMatches.length == 1) return fullPathMatches.single;
+    final basenameMatches = sourcePaths.where((path) {
+      final basename = path.replaceAll('\\', '/').split('/').last.toLowerCase();
+      return basename.isNotEmpty && display.contains(basename);
+    }).toList(growable: false);
+    if (basenameMatches.length == 1) {
+      return basenameMatches.single;
+    }
+    if (sourcePaths.length == 1) return sourcePaths.single;
+
+    // A script can be the failing input without being listed in
+    // declaredImpact. The command policy has already validated argument paths;
+    // retain only a source-looking argument and never persist inline code or
+    // an option as a repair target.
+    final argumentMatches = <String>[];
+    for (final argument in command.arguments) {
+      final candidate = argument.trim();
+      if (candidate.isEmpty || candidate.startsWith('-')) continue;
+      if (_looksLikeSourceArtifact(candidate)) argumentMatches.add(candidate);
+    }
+    return argumentMatches.length == 1 ? argumentMatches.single : null;
+  }
+
+  bool _looksLikeSourceArtifact(String path) => RegExp(
+        r'\.(?:py|pyw|js|mjs|cjs|ts|tsx|jsx|dart|sh|bash|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp)$',
+        caseSensitive: false,
+      ).hasMatch(path.replaceAll('\\', '/'));
 
   @override
   Future<WorkCommandResult> installMissingTool(

@@ -269,20 +269,56 @@ void main() {
         const WorkToolResult.failed(
           message: '命令退出码为 1。',
           data: <String, dynamic>{
-            'commandDisplay': 'clang --version',
+            'commandDisplay': 'python3 create_lucid_dream_ppt.py',
             'exitCode': 1,
             'stdout': '[Clang 17.0.0]',
-            'stderr': 'compiler failed',
+            'stderr': 'create_lucid_dream_ppt.py line 217: invalid syntax',
+            'artifactPaths': <String>[
+              '/workspace/催眠心理学报告.md',
+              '/workspace/create_lucid_dream_ppt.py',
+            ],
           },
           failureCode: 'commandFailed',
         ),
       );
 
       expect(failure.type, WorkFailureType.commandFailed);
-      expect(failure.technicalDetail, contains('命令：clang --version'));
+      expect(failure.technicalDetail,
+          contains('命令：python3 create_lucid_dream_ppt.py'));
       expect(failure.technicalDetail, contains('退出码：1'));
-      expect(failure.technicalDetail, contains('stderr：compiler failed'));
+      expect(
+          failure.technicalDetail,
+          contains(
+              'stderr：create_lucid_dream_ppt.py line 217: invalid syntax'));
       expect(failure.technicalDetail, contains('stdout：[Clang 17.0.0]'));
+      expect(failure.failureTargetPath, '/workspace/create_lucid_dream_ppt.py');
+    });
+
+    test('infers the repair script for a legacy command-failure checkpoint',
+        () {
+      final task = _task('legacy-ppt-command-failure')
+        ..lastArtifactPaths = <String>[
+          '/workspace/催眠心理学报告.md',
+          '/workspace/create_lucid_dream_ppt.py',
+        ];
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.commandFailed,
+          title: '命令执行未完成',
+          reason: '命令退出码为 1。',
+          technicalDetail:
+              '命令：python3 create_lucid_dream_ppt.py；退出码：1；stderr：SyntaxError',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '请检查命令和工作目录后重新规划。',
+        ),
+      );
+
+      expect(
+        task.workFailure?.failureTargetPath,
+        '/workspace/create_lucid_dream_ppt.py',
+      );
     });
 
     test('automatically replans an invalid command before showing recovery UI',
