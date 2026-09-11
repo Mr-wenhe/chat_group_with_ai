@@ -155,6 +155,52 @@ class _FloodingProgressGateway extends AiRequestGateway {
   }
 }
 
+class _CancelsBeforeFinalProgressGateway extends AiRequestGateway {
+  _CancelsBeforeFinalProgressGateway()
+      : super(
+          store: MemoryGovernanceStore(),
+          client: _UnusedClient(),
+        );
+
+  int calls = 0;
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required AiRequestPurpose purpose,
+    required String conversationId,
+    required String characterId,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    bool requiresTools = false,
+    bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) async {
+    calls++;
+    cancelToken?.cancel('模拟流结束时的取消竞态');
+    return {
+      'success': true,
+      'message': jsonEncode({
+        'action': 'finish',
+        'public_update': '不应写入的迟到进度。',
+        'tool': null,
+        'completion': {
+          'summary': '已完成。',
+          'evidence': ['已验证取消后的尾部进度不会入队'],
+        },
+      }),
+    };
+  }
+}
+
 class _MultiPatchGateway extends AiRequestGateway {
   final List<Map<String, String>> patches;
 
@@ -733,6 +779,77 @@ void main() {
       modelProgressEvents.length,
       lessThan(20),
       reason: '每个 token 都落盘会阻塞任务推进',
+    );
+  });
+
+  test('drops final model progress after the gateway is cancelled', () async {
+    final config = ApiConfig(
+      id: 'cancelled-progress-config',
+      name: 'Cancelled progress test config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'cancelled-progress-character',
+      name: 'Cancelled progress character',
+      avatar: 'C',
+      age: 30,
+      role: '测试取消角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    expect(
+      await grants.authorizeDirectory(
+        authorizedDirectory.path,
+        consent: (_) async => true,
+      ),
+      isNotNull,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final gateway = _CancelsBeforeFinalProgressGateway();
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: WorkspaceFileService(pathPolicy: pathPolicy),
+      mutationService: WorkspaceMutationService(pathPolicy: pathPolicy),
+    );
+    final task = AgentTask(
+      id: 'cancelled-progress-task',
+      groupId: 'cancelled-progress-group',
+      characterId: character.id,
+      userRequest: '检查当前任务状态',
+      workModeTask: true,
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.completed);
+    expect(gateway.calls, 1);
+    expect(
+      (await eventStore.read(task.id))
+          .events
+          .where((event) => event.detail == '不应写入的迟到进度。'),
+      isEmpty,
     );
   });
 

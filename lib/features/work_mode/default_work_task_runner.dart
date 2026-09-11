@@ -471,6 +471,7 @@ class DefaultWorkTaskRunner
           final draft = publicUpdate;
           final characters = streamedCharacters;
           progressWrites = progressWrites.then<void>((_) async {
+            if (cancellationToken.isCancelled) return;
             await _record(
               task,
               WorkTaskEventKind.modelOutput,
@@ -493,6 +494,7 @@ class DefaultWorkTaskRunner
         }
         final characters = streamedCharacters;
         progressWrites = progressWrites.then<void>((_) async {
+          if (cancellationToken.isCancelled) return;
           final safeMetadata = <String, Object?>{
             'stream': 'model',
             'characters': characters,
@@ -524,7 +526,8 @@ class DefaultWorkTaskRunner
       // not remain blank after a successful model turn.
       finalPublicUpdate = _publicUpdateFromResponse(response);
     }
-    if (finalPublicUpdate.isNotEmpty &&
+    if (!cancellationToken.isCancelled &&
+        finalPublicUpdate.isNotEmpty &&
         finalPublicUpdate != lastPublishedPublicUpdate) {
       lastPublishedPublicUpdate = finalPublicUpdate;
       final characters = streamedCharacters;
