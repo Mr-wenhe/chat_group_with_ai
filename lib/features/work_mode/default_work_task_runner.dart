@@ -532,6 +532,7 @@ class DefaultWorkTaskRunner
       lastPublishedPublicUpdate = finalPublicUpdate;
       final characters = streamedCharacters;
       progressWrites = progressWrites.then<void>((_) async {
+        if (cancellationToken.isCancelled) return;
         await _record(
           task,
           WorkTaskEventKind.modelOutput,
