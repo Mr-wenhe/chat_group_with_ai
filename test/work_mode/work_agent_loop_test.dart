@@ -474,6 +474,13 @@ void main() {
     expect(result.status, WorkAgentLoopStatus.completed);
     expect(result.protocolRepairAttempts, 1);
     expect(model.requests.where((request) => request.isRepair), hasLength(1));
+    final repairPrompt = model.requests
+        .firstWhere((request) => request.isRepair)
+        .messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(repairPrompt, contains('command.run'));
+    expect(repairPrompt, contains('arguments 必须是 JSON 字符串数组'));
     expect(task.contextSummary, isNot(contains('不是 JSON')));
   });
 
@@ -498,6 +505,30 @@ void main() {
     expect(model.requests, hasLength(3));
     expect(model.requests[1].isRepair, isTrue);
     expect(model.requests[2].isRepair, isFalse);
+  });
+
+  test('automatically retries a second fresh protocol decision', () async {
+    final invalidResponse = <String, dynamic>{
+      'success': true,
+      'content': '仍然不是合法 AgentDecision。',
+    };
+    final model = _FakeModel()
+      ..responses.add(invalidResponse)
+      ..responses.add(invalidResponse)
+      ..responses.add(invalidResponse)
+      ..responses.add(invalidResponse)
+      ..responses.add(_finishDecision('自动协议重试后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final result = await loop.execute(_task(id: 'protocol-retry-twice'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(result.protocolRepairAttempts, 2);
+    expect(model.requests, hasLength(5));
+    expect(model.requests[1].isRepair, isTrue);
+    expect(model.requests[2].isRepair, isFalse);
+    expect(model.requests[3].isRepair, isTrue);
+    expect(model.requests[4].isRepair, isFalse);
   });
 
   test('stop before model creates an interrupted checkpoint', () async {

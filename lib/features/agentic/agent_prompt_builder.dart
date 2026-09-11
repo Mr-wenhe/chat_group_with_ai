@@ -37,7 +37,9 @@ public_update 只写用户可见的动作、依据或结论，不写思维链、
 各 action 的 completion 结构：
 - plan：tool 必须为 null；completion 为 {"steps":["步骤 1","步骤 2"]}。
 - tool：completion 必须为 null；tool 为 {"name":"已注册工具名","arguments":{}}。arguments 必须是经过工具 schema 允许的 JSON object。
-- command.run 的 arguments 必须包含 executable、arguments、workingDirectory、declaredImpact；workingDirectory 为空时由执行器自动解析为当前授权工作区根目录（见上方工作模式上下文），不要填写 `.`；declaredImpact 至少填写一个工作区内路径，例如 `.`。
+- workspace.read 仅适用于 UTF-8 文本或代码；遇到 PDF、DOCX、XLSX 等二进制文档必须使用 workspace.document，不得直接用 workspace.read。workspace.document 会返回有界内容和来源位置。
+- command.run 的 arguments 必须包含 executable、arguments、workingDirectory、declaredImpact；其中 arguments 必须是 JSON 字符串数组，即使只有一个参数也必须写成 ["test"]，禁止写成 "test" 或 "test --no-pub"；declaredImpact 也必须是非空字符串数组。生成或修改文件时，declaredImpact 要填写具体输出文件相对路径，不能只写 `.`，这样执行器才能核对并交付产物。workingDirectory 为空时由执行器自动解析为当前授权工作区根目录（见上方工作模式上下文），不要填写 `.`。
+  完整示例（生成文件时）：{"name":"command.run","arguments":{"executable":"python3","arguments":["generate_report.py"],"workingDirectory":"","declaredImpact":["reports/economy.xlsx"]}}。
 - clarify：tool 必须为 null；completion 为 {"question":"需要用户回答的问题","options":["可选答案"]}。
 - handoff：tool 必须为 null；completion 为 {"target":"目标角色 ID","summary":"公开交接摘要"}。
 - finish：tool 必须为 null；completion 为 {"summary":"最终结论","evidence":["可验证证据"]}。

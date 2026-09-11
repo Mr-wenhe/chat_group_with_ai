@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:archive/archive.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
@@ -14,6 +15,7 @@ import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
+import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
@@ -206,6 +208,63 @@ class _CommandGateway extends AiRequestGateway {
         'completion': null,
       }),
     };
+  }
+}
+
+class _BinaryReadGateway extends AiRequestGateway {
+  final String path;
+
+  _BinaryReadGateway(this.path)
+      : super(
+          store: MemoryGovernanceStore(),
+          client: _UnusedClient(),
+        );
+
+  int calls = 0;
+  List<Map<String, dynamic>> lastMessages = const [];
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required AiRequestPurpose purpose,
+    required String conversationId,
+    required String characterId,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    bool requiresTools = false,
+    bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) async {
+    calls++;
+    lastMessages = messages;
+    final content = calls == 1
+        ? {
+            'action': 'tool',
+            'public_update': '读取生成的 Excel 文件。',
+            'tool': {
+              'name': 'workspace.read',
+              'arguments': {'path': path},
+            },
+            'completion': null,
+          }
+        : {
+            'action': 'finish',
+            'public_update': 'Excel 已读取并核对。',
+            'tool': null,
+            'completion': {
+              'summary': 'Excel 已读取并核对。',
+              'evidence': ['已获得工作表和单元格内容'],
+            },
+          };
+    return {'success': true, 'message': jsonEncode(content)};
   }
 }
 
@@ -1172,6 +1231,141 @@ void main() {
     expect(persistedReplies.single.content, contains('当前工作目录已读取。'));
   });
 
+  test('routes an accidental workspace.read on XLSX through document parsing',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final mutations = WorkspaceMutationService(pathPolicy: pathPolicy);
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    final workspace = await workspaceService.loadOrCreate(
+      conversationId: 'binary-read-group',
+      isDirectChat: false,
+    );
+    final xlsxPath = '${workspace.workDirPath}/budget.xlsx';
+    await File(xlsxPath).writeAsBytes(_xlsxBytes());
+
+    final config = ApiConfig(
+      id: 'binary-read-config',
+      name: 'Binary read test',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'binary-read-character',
+      name: '文档读取角色',
+      avatar: 'BR',
+      age: 30,
+      role: '文档分析角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [ToolPermission.workspaceRead],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final gateway = _BinaryReadGateway('budget.xlsx');
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+    );
+    final task = AgentTask(
+      id: 'binary-read-task',
+      groupId: 'binary-read-group',
+      characterId: character.id,
+      userRequest: '读取并核对 budget.xlsx',
+      requestedPermissions: character.toolPermissions,
+      assignedCharacterIds: [character.id],
+      workModeTask: true,
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.completed, reason: task.lastError);
+    expect(gateway.calls, 2);
+    expect(gateway.lastMessages.toString(), contains('A1: 设计 | B1: 1200'));
+  });
+
+  test('publishes a terminal failure to the conversation with file status',
+      () async {
+    final config = ApiConfig(
+      id: 'failure-reply-config',
+      name: 'Failure reply test',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'failure-reply-character',
+      name: '失败回复角色',
+      avatar: 'FR',
+      age: 30,
+      role: '测试执行角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [ToolPermission.workspaceRead],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+    );
+    final task = AgentTask(
+      id: 'failure-reply-task',
+      groupId: 'failure-reply-group',
+      characterId: character.id,
+      userRequest: '整理 Excel 文档',
+      status: AgentTaskStatus.failed,
+      workModeTask: true,
+    );
+    final failure = WorkFailure.fromToolFailure(
+      code: 'documentParseFailed',
+      message: 'budget.xlsx 无法解析：文件不是有效的 UTF-8 文本。',
+      completedContent: const ['已生成 budget.xlsx'],
+    );
+
+    await runner.reportFailure(task, failure);
+
+    final replies = database.messageBox.values
+        .where((message) =>
+            message.groupId == task.groupId &&
+            message.senderId == character.id &&
+            message.senderType == 'ai')
+        .toList(growable: false);
+    expect(replies, hasLength(1));
+    expect(replies.single.content, contains('任务未完成'));
+    expect(replies.single.content, contains('budget.xlsx'));
+    expect(replies.single.content, contains('文件不是有效的 UTF-8 文本'));
+    expect(replies.single.content, contains('下一步'));
+  });
+
   test(
       'sensitive mutation still asks for approval when ordinary prompts are off',
       () async {
@@ -1374,4 +1568,34 @@ void main() {
     expect(task.executionStateJson, isNot(contains('approvalDecision')));
     expect(task.contextSummary, isNot(contains('do-not-expose')));
   });
+}
+
+List<int> _xlsxBytes() {
+  final archive = Archive()
+    ..addFile(
+      ArchiveFile.string(
+        'xl/workbook.xml',
+        '<workbook xmlns:r="rel"><sheets><sheet name="预算" '
+            'r:id="rId1"/></sheets></workbook>',
+      ),
+    )
+    ..addFile(
+      ArchiveFile.string(
+        'xl/_rels/workbook.xml.rels',
+        '<Relationships><Relationship Id="rId1" '
+            'Target="worksheets/sheet1.xml"/></Relationships>',
+      ),
+    )
+    ..addFile(
+      ArchiveFile.string(
+          'xl/sharedStrings.xml', '<sst><si><t>设计</t></si></sst>'),
+    )
+    ..addFile(
+      ArchiveFile.string(
+        'xl/worksheets/sheet1.xml',
+        '<worksheet><sheetData><row r="1"><c r="A1" t="s"><v>0</v>'
+            '</c><c r="B1"><v>1200</v></c></row></sheetData></worksheet>',
+      ),
+    );
+  return ZipEncoder().encode(archive);
 }

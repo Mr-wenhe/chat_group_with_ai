@@ -497,6 +497,13 @@ class AgentDecisionParser {
   ) {
     if (name != AgentToolName.commandRun) return arguments;
     final normalised = Map<String, dynamic>.from(arguments);
+    final encodedArguments = normalised['arguments'];
+    final decodedArguments = encodedArguments is String
+        ? _normaliseCommandArgumentList(encodedArguments)
+        : null;
+    if (decodedArguments != null) {
+      normalised['arguments'] = decodedArguments;
+    }
     final workingDirectory = normalised['workingDirectory'];
     if (workingDirectory is String && workingDirectory.trim().isEmpty) {
       final configured = defaultCommandWorkingDirectory?.trim();
@@ -506,6 +513,23 @@ class AgentDecisionParser {
               : DatabaseService.defaultAiProcessingDirectoryPath();
     }
     return normalised;
+  }
+
+  List<String>? _normaliseCommandArgumentList(String raw) {
+    final trimmed = raw.trim();
+    if (trimmed.isEmpty) return const <String>[];
+    try {
+      final encoded = _stringList(jsonDecode(trimmed));
+      if (encoded != null) return encoded;
+    } on FormatException {
+      // Fall through to the deliberately limited argv compatibility path.
+    }
+    // The command runner uses shell=false. Split only plain whitespace; never
+    // interpret quotes, pipes, redirects, or control syntax as shell input.
+    if (RegExp(r'''["'&|;<>\u0000-\u001f]''').hasMatch(trimmed)) {
+      return null;
+    }
+    return trimmed.split(RegExp(r'\s+'));
   }
 
   String? _validateSkillCreateArguments(Map<String, dynamic> args) {

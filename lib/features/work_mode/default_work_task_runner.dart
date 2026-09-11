@@ -39,6 +39,7 @@ import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_mode_directory_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_document_tool.dart';
+import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
@@ -68,7 +69,8 @@ class DefaultWorkTaskRunner
         WorkTaskResourceLockPlanner,
         WorkTaskInstallHandler,
         WorkTaskWorkspaceRebinder,
-        WorkTaskVisionModelValidator {
+        WorkTaskVisionModelValidator,
+        WorkTaskFailureReporter {
   final DatabaseService database;
   final WorkTaskEventStore eventStore;
   final ApiCredentialResolver credentials;
@@ -140,6 +142,17 @@ class DefaultWorkTaskRunner
       conversationId: task.groupId,
       isDirectChat: task.groupId.startsWith('dm:'),
       grantedPath: grantedPath,
+    );
+  }
+
+  @override
+  Future<void> reportFailure(AgentTask task, WorkFailure failure) async {
+    final character = database.aiCharacterBox.get(task.characterId);
+    if (character == null) return;
+    await _appendPublicMessage(
+      task,
+      character,
+      await _failureReply(task, failure),
     );
   }
 
@@ -740,6 +753,34 @@ class DefaultWorkTaskRunner
         path: path,
       ),
     );
+    Future<WorkToolResult> documentHandler(
+      WorkToolInvocation invocation,
+    ) async {
+      if (!attachmentDocumentPermission(invocation)) {
+        return permission(ToolPermission.workspaceRead);
+      }
+      final result = await documentDefinition.handler(invocation);
+      if (_approvalDecision(task.executionStateJson) ==
+              WorkChangeApprovalDecision.rejected &&
+          result.data['requiresApproval'] == true &&
+          result.data['sensitive'] == true) {
+        task.executionStateJson = _withoutApprovalCheckpoint(
+          task.executionStateJson,
+        );
+        return const WorkToolResult.success(
+          message: '用户拒绝读取敏感文件，已跳过本次文档分析。',
+          data: {'rejected': true, 'skipped': true, 'sensitive': true},
+        );
+      }
+      if (_approvalDecision(task.executionStateJson) ==
+          WorkChangeApprovalDecision.rejected) {
+        task.executionStateJson = _withoutApprovalCheckpoint(
+          task.executionStateJson,
+        );
+      }
+      return result;
+    }
+
     final definitions = <WorkToolDefinition>[
       WorkToolDefinition(
         name: AgentToolName.workspaceList,
@@ -779,6 +820,13 @@ class DefaultWorkTaskRunner
           if (!denied.succeeded) return denied;
           final args = invocation.arguments;
           final path = args['path'] as String;
+          if (_requiresDocumentTool(path)) {
+            // workspace.read has a strict UTF-8 contract. Redirect known
+            // binary document extensions to the parser boundary so a model
+            // choosing the text tool cannot turn a valid XLSX into a false
+            // task failure.
+            return documentHandler(invocation);
+          }
           final startByte = _intArgument(args['startByte'], 0);
           final byteLength = _nullableInt(args['byteLength']);
           final approved = _sensitiveReadAllowed(
@@ -890,31 +938,7 @@ class DefaultWorkTaskRunner
         name: documentDefinition.name,
         access: documentDefinition.access,
         schema: documentDefinition.schema,
-        handler: (invocation) async {
-          if (!attachmentDocumentPermission(invocation)) {
-            return permission(ToolPermission.workspaceRead);
-          }
-          final result = await documentDefinition.handler(invocation);
-          if (_approvalDecision(task.executionStateJson) ==
-                  WorkChangeApprovalDecision.rejected &&
-              result.data['requiresApproval'] == true &&
-              result.data['sensitive'] == true) {
-            task.executionStateJson = _withoutApprovalCheckpoint(
-              task.executionStateJson,
-            );
-            return const WorkToolResult.success(
-              message: '用户拒绝读取敏感文件，已跳过本次文档分析。',
-              data: {'rejected': true, 'skipped': true, 'sensitive': true},
-            );
-          }
-          if (_approvalDecision(task.executionStateJson) ==
-              WorkChangeApprovalDecision.rejected) {
-            task.executionStateJson = _withoutApprovalCheckpoint(
-              task.executionStateJson,
-            );
-          }
-          return result;
-        },
+        handler: documentHandler,
       ),
       WorkToolDefinition(
         name: AgentToolName.workspacePatch,
@@ -1908,10 +1932,12 @@ class DefaultWorkTaskRunner
             cancellation: invocation.context.cancellation?.whenCancelled,
             isCancelled: () => invocation.context.isCancelled,
           );
+    final artifactPaths = await _existingCommandArtifactPaths(command);
     final data = <String, dynamic>{
       if (result.exitCode != null) 'exitCode': result.exitCode,
       'elapsedMs': result.elapsed.inMilliseconds,
       'outputTruncated': result.outputTruncated,
+      if (artifactPaths.isNotEmpty) 'artifactPaths': artifactPaths,
       if (result.stdout.isNotEmpty) 'stdout': result.stdout,
       if (result.stderr.isNotEmpty) 'stderr': result.stderr,
       if (result.installSuggestion != null)
@@ -1947,6 +1973,39 @@ class DefaultWorkTaskRunner
       data: data,
       failureCode: failureCode,
     );
+  }
+
+  Future<List<String>> _existingCommandArtifactPaths(
+    WorkCommand command,
+  ) async {
+    final files = workspaceFileService;
+    if (files == null) return const <String>[];
+    final paths = <String>{};
+    for (final rawPath in command.declaredImpact.take(64)) {
+      try {
+        final candidate = _effectivePath(
+          null,
+          command.workingDirectory,
+          rawPath,
+          enforceRevision: false,
+        );
+        final resolved = await files.pathPolicy.resolveExisting(candidate);
+        // The path policy may mark harmless parent aliases such as macOS
+        // /var -> /private/var as symbolic. Reject only a linked final
+        // component; the policy has already authorized the resolved path.
+        final requestedType = await FileSystemEntity.type(
+          candidate,
+          followLinks: false,
+        );
+        if (resolved.isFile && requestedType != FileSystemEntityType.link) {
+          paths.add(resolved.path);
+        }
+      } on Object {
+        // declaredImpact is an authorization hint, not proof that a file was
+        // produced. Only existing, policy-resolved files become artifacts.
+      }
+    }
+    return paths.toList(growable: false);
   }
 
   @override
@@ -2309,6 +2368,11 @@ class DefaultWorkTaskRunner
     return WorkspacePathPolicy.normalizePath(absolute, isWindows: isWindows);
   }
 
+  bool _requiresDocumentTool(String path) {
+    final normalized = path.trim().replaceAll('\\', '/').toLowerCase();
+    return RegExp(r'\.(?:pdf|docx|xlsx)$').hasMatch(normalized);
+  }
+
   String? _revisionTarget(AgentTask task) {
     final value = _decodeMap(task.executionStateJson)['revisionTargetPath'];
     if (value is! String ||
@@ -2632,6 +2696,55 @@ class DefaultWorkTaskRunner
     character.skillIds = {...character.skillIds, skill.id}.toList();
     await database.aiCharacterBox.put(character.id, character);
     return {'ok': true, 'skillId': skill.id, 'templateId': template.id};
+  }
+
+  Future<String> _failureReply(AgentTask task, WorkFailure failure) async {
+    final reason = _failureReplyText(failure.reason, fallback: '任务执行失败。');
+    final technical = _failureReplyText(
+      failure.technicalDetail,
+      fallback: reason,
+    );
+    final attachmentSelection = await _safeArtifactsForAttachment(task);
+    final artifactNames = attachmentSelection.files
+        .map((file) => _basename(file.path))
+        .where((name) => name.trim().isNotEmpty)
+        .take(6)
+        .toList(growable: false);
+    final recordedArtifactNames = task.lastArtifactPaths
+        .map(_basename)
+        .where((name) => name.trim().isNotEmpty)
+        .take(6)
+        .toList(growable: false);
+    final lines = <String>[
+      '任务未完成。',
+      '原因：$reason',
+      if (technical != reason) '技术细节：$technical',
+    ];
+    if (task.completedOperations.isNotEmpty) {
+      lines.add('已完成：${task.completedOperations.length} 个步骤，最近的安全检查点已保留。');
+    }
+    if (artifactNames.isNotEmpty) {
+      lines.add(
+        '输出文件：已确认工作区中有 ${artifactNames.join('、')}；任务失败不会删除这些文件，并会尽量附加到这条消息。',
+      );
+    } else if (recordedArtifactNames.isNotEmpty) {
+      lines.add(
+        '输出文件：已记录候选路径 ${recordedArtifactNames.join('、')}，但当前没有确认到仍可交付的文件；重试时会从最近检查点继续核对。',
+      );
+    } else {
+      lines.add(
+        '输出文件：当前没有确认到可交付文件；如果失败前已经写入文件，重试时会从最近检查点继续核对。',
+      );
+    }
+    lines.add(
+        '下一步：${_failureReplyText(failure.suggestedAction, fallback: '请检查任务面板后重试。')}');
+    return lines.join('\n');
+  }
+
+  String _failureReplyText(String value, {required String fallback}) {
+    if (value.trim().isEmpty) return fallback;
+    final safe = sanitizeWorkTaskError(value);
+    return safe == '任务执行失败' ? fallback : safe;
   }
 
   Future<void> _appendPublicMessage(

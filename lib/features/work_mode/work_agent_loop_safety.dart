@@ -299,6 +299,14 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
         paths.add(_publicText(value, maximum: 1000));
       }
     }
+    final reportedArtifacts = result?.data['artifactPaths'];
+    if (reportedArtifacts is List) {
+      for (final value in reportedArtifacts.whereType<String>()) {
+        if (value.trim().isNotEmpty) {
+          paths.add(_publicText(value, maximum: 1000));
+        }
+      }
+    }
     return paths.take(64).toList(growable: false);
   }
 

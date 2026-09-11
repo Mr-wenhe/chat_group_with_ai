@@ -127,7 +127,10 @@ class WorkAgentLoop
   static const int defaultMaxActions = AgentTask.defaultActionLimit;
   static const Duration defaultSoftTimeLimit = AgentTask.defaultSoftTimeLimit;
   static const int defaultMaxModelRetries = 2;
-  static const int defaultMaxProtocolRetries = 1;
+  // A protocol drift is recoverable without user input. Allow two fresh
+  // decisions after the one bounded repair attempt before surfacing a task
+  // failure, while retaining the global retry cap below.
+  static const int defaultMaxProtocolRetries = 2;
   static const int defaultMaxToolRetries = 1;
   static const int maxRetryCountCap = 5;
   static const List<Duration> defaultRetryDelays = [

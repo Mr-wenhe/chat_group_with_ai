@@ -73,6 +73,13 @@ abstract interface class WorkTaskCheckpointReporter {
   void setTaskCheckpointSink(Future<void> Function(AgentTask task) sink);
 }
 
+/// Optional capability for runners that can mirror a terminal failure into
+/// the conversation. The task panel remains the diagnostic surface, while a
+/// durable chat message makes the outcome visible even after the panel closes.
+abstract interface class WorkTaskFailureReporter {
+  Future<void> reportFailure(AgentTask task, WorkFailure failure);
+}
+
 /// Computes the complete resource plan before a task starts executing.
 typedef WorkTaskResourceLockPlan = Iterable<WorkResourceLockRequest> Function(
     AgentTask task);
@@ -1170,6 +1177,7 @@ class WorkTaskCoordinator {
           );
           _applyFailure(stored, failure);
           await _save(stored);
+          await _reportFailure(stored, failure);
           unawaited(
             _record(
               stored,
@@ -1267,15 +1275,14 @@ class WorkTaskCoordinator {
 
   Future<void> _failInvalidResourcePlan(AgentTask task, Object error) async {
     _conversationReservations.remove(task.groupId);
-    _applyFailure(
-      task,
-      WorkFailure.fromError(
-        error,
-        scope: 'resource',
-        completedContent: _completedContentForTask(task),
-      ),
+    final failure = WorkFailure.fromError(
+      error,
+      scope: 'resource',
+      completedContent: _completedContentForTask(task),
     );
+    _applyFailure(task, failure);
     await _save(task);
+    await _reportFailure(task, failure);
     unawaited(_record(task, WorkTaskEventKind.failed, '资源锁计划无效'));
     _makeConversationReady(task.groupId);
     await _schedule();
@@ -1450,15 +1457,14 @@ class WorkTaskCoordinator {
       _dropWaiting(waiting);
       final stored = _taskBox.get(waiting.task.id);
       if (stored == null || stored.isTerminal) return;
-      _applyFailure(
-        stored,
-        WorkFailure.fromError(
-          error,
-          scope: 'resource',
-          completedContent: _completedContentForTask(stored),
-        ),
+      final failure = WorkFailure.fromError(
+        error,
+        scope: 'resource',
+        completedContent: _completedContentForTask(stored),
       );
+      _applyFailure(stored, failure);
       await _save(stored);
+      await _reportFailure(stored, failure);
       unawaited(
         _record(stored, WorkTaskEventKind.failed, '资源锁等待失败'),
       );
@@ -1562,12 +1568,14 @@ class WorkTaskCoordinator {
         return;
       }
 
+      WorkFailure? failureToReport;
       if (error != null && !stored.isTerminal) {
         final failure = WorkFailure.fromError(
           error,
           scope: 'runner',
           completedContent: _completedContentForTask(stored),
         );
+        failureToReport = failure;
         _applyFailure(stored, failure);
         await _save(stored);
         unawaited(_record(
@@ -1604,6 +1612,24 @@ class WorkTaskCoordinator {
                 : null,
       );
       await _save(stored);
+
+      if (!handedOff && stored.status == AgentTaskStatus.failed) {
+        final failure = stored.workFailure ??
+            failureToReport ??
+            WorkFailure.fromToolFailure(
+              code: 'internal',
+              message: stored.lastError.trim().isEmpty
+                  ? '任务执行失败。'
+                  : stored.lastError,
+              scope: 'runner',
+              completedContent: _completedContentForTask(stored),
+            );
+        if (stored.workFailure == null) {
+          _applyFailure(stored, failure);
+          await _save(stored);
+        }
+        await _reportFailure(stored, failure);
+      }
 
       // A follow-up is promoted only after a successful stage. Failures and
       // pauses must leave the FIFO untouched so the recovery action can resume
@@ -2001,6 +2027,19 @@ class WorkTaskCoordinator {
   Future<void> _save(AgentTask task) async {
     await _taskBox.put(task.id, task);
     _publish(task);
+  }
+
+  Future<void> _reportFailure(AgentTask task, WorkFailure? failure) async {
+    if (failure == null) return;
+    final reporter = _runner;
+    if (reporter is! WorkTaskFailureReporter) return;
+    try {
+      await (reporter as WorkTaskFailureReporter).reportFailure(task, failure);
+    } on Object {
+      // The task panel and durable failure checkpoint remain authoritative if
+      // chat persistence is temporarily unavailable. Never turn a best-effort
+      // notification into a second task failure.
+    }
   }
 
   void _applyFailure(

@@ -112,7 +112,9 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
   ) async {
     final repairContext = <String, dynamic>{
       ...original.context,
-      'repairInstruction': '只返回一个合法 AgentDecision JSON object。',
+      'repairInstruction': '只返回一个合法 AgentDecision JSON object；'
+          'command.run 的 arguments 必须是 JSON 字符串数组，'
+          '即使只有一个参数也必须写成 ["test"]，不得返回字符串。',
     };
     final response = await model(
       original.copyWith(

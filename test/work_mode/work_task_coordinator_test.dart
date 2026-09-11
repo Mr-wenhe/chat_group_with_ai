@@ -11,6 +11,7 @@ import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
+import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -117,6 +118,34 @@ class _FakeProgressReporter
 
   @override
   Future<void> run(AgentTask task, WorkTaskCancellation cancellation) async {}
+}
+
+class _FailureReportingRunner
+    implements WorkTaskRunner, WorkTaskFailureReporter {
+  final bool persistFailure;
+
+  _FailureReportingRunner({this.persistFailure = true});
+
+  WorkFailure? reportedFailure;
+  int reportCount = 0;
+
+  @override
+  Future<void> run(AgentTask task, WorkTaskCancellation cancellation) async {
+    final failure = WorkFailure.fromToolFailure(
+      code: 'documentParseFailed',
+      message: 'budget.xlsx 无法解析：文件内容无法读取。',
+    );
+    task
+      ..status = AgentTaskStatus.failed
+      ..lastError = failure.reason;
+    if (persistFailure) WorkFailure.persistOnTask(task, failure);
+  }
+
+  @override
+  Future<void> reportFailure(AgentTask task, WorkFailure failure) async {
+    reportCount++;
+    reportedFailure = failure;
+  }
 }
 
 class _GateWorkTaskRunner implements WorkTaskRunner {
@@ -1071,6 +1100,49 @@ void main() {
 
     expect(taskBox.get('event-failure')?.eventLogIncomplete, isTrue);
     runner.complete('event-failure');
+  });
+
+  test('reports terminal failures through the runner outcome channel',
+      () async {
+    final failureRunner = _FailureReportingRunner();
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: failureRunner,
+    );
+    addTearDown(localCoordinator.dispose);
+
+    await localCoordinator.submit(
+      _task(id: 'terminal-failure', conversationId: 'group-a'),
+    );
+    await _settle();
+
+    expect(failureRunner.reportCount, 1);
+    expect(failureRunner.reportedFailure?.reason, contains('budget.xlsx'));
+    expect(
+      taskBox.get('terminal-failure')?.status,
+      AgentTaskStatus.failed,
+    );
+  });
+
+  test('creates a durable fallback when a runner omits its failure checkpoint',
+      () async {
+    final failureRunner = _FailureReportingRunner(persistFailure: false);
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: failureRunner,
+    );
+    addTearDown(localCoordinator.dispose);
+
+    await localCoordinator.submit(
+      _task(id: 'uncheckpointed-failure', conversationId: 'group-a'),
+    );
+    await _settle();
+
+    expect(failureRunner.reportCount, 1);
+    expect(failureRunner.reportedFailure?.reason, contains('budget.xlsx'));
+    expect(taskBox.get('uncheckpointed-failure')?.workFailure, isNotNull);
   });
 
   test('runner progress reporter is connected to the coordinator stream', () {

@@ -46,6 +46,12 @@ void main() {
     expect(prompt, contains('public_update'));
     expect(prompt, contains('只写用户可见的动作、依据或结论'));
     expect(prompt, contains('workspace.read'));
+    expect(prompt, contains('workspace.document'));
+    expect(prompt, contains('PDF、DOCX、XLSX'));
+    expect(prompt, contains('workspace.read 仅适用于 UTF-8 文本或代码'));
+    expect(prompt, contains('arguments 必须是 JSON 字符串数组'));
+    expect(prompt, contains('"arguments":["generate_report.py"]'));
+    expect(prompt, contains('"declaredImpact":["reports/economy.xlsx"]'));
     expect(prompt, isNot(contains('```agent_tool')));
     expect(prompt, isNot(contains('<tool_call>')));
   });

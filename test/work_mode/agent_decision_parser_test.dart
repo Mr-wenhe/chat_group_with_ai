@@ -402,6 +402,69 @@ void main() {
     expect(decision.tool.arguments['workingDirectory'], isNot('.'));
   });
 
+  test('normalizes a JSON-encoded command argument list', () async {
+    final result = await parser.parse(_json({
+      'action': 'tool',
+      'public_update': '运行检查。',
+      'tool': {
+        'name': 'command.run',
+        'arguments': {
+          'executable': 'flutter',
+          'arguments': '["test", "--no-pub"]',
+          'workingDirectory': '',
+          'declaredImpact': ['.'],
+        },
+      },
+      'completion': null,
+    }));
+
+    expect(result.isSuccess, isTrue, reason: result.detail);
+    final decision = result.decision! as AgentToolDecision;
+    expect(decision.tool.arguments['arguments'], ['test', '--no-pub']);
+  });
+
+  test('normalizes a simple whitespace-separated command argument string',
+      () async {
+    final result = await parser.parse(_json({
+      'action': 'tool',
+      'public_update': '运行检查。',
+      'tool': {
+        'name': 'command.run',
+        'arguments': {
+          'executable': 'flutter',
+          'arguments': 'test --no-pub',
+          'workingDirectory': '',
+          'declaredImpact': ['.'],
+        },
+      },
+      'completion': null,
+    }));
+
+    expect(result.isSuccess, isTrue, reason: result.detail);
+    final decision = result.decision! as AgentToolDecision;
+    expect(decision.tool.arguments['arguments'], ['test', '--no-pub']);
+  });
+
+  test('does not split shell syntax from a command argument string', () async {
+    final result = await parser.parse(_json({
+      'action': 'tool',
+      'public_update': '运行检查。',
+      'tool': {
+        'name': 'command.run',
+        'arguments': {
+          'executable': 'flutter',
+          'arguments': 'test && echo unsafe',
+          'workingDirectory': '',
+          'declaredImpact': ['.'],
+        },
+      },
+      'completion': null,
+    }));
+
+    expect(result.isFailure, isTrue);
+    expect(result.detail, contains('类型不正确'));
+  });
+
   test('repair-empty detail preserves the first protocol validation error',
       () async {
     final result = await parser.parse(
