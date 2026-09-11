@@ -24,22 +24,24 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         await _checkpoint(state);
         return null;
       case AgentClarifyDecision(:final completion):
+        final question = _publicText(completion.question);
         final failure = WorkFailure.fromSignalsForUserAction(
-          completion.question,
+          question,
           completedContent: _completedContent(state),
         );
         state.failure = failure;
+        WorkTaskClarification.markPending(task, question);
         task
           ..status = AgentTaskStatus.paused
           ..resumeRequired = true
-          ..lastError = _publicText(completion.question)
+          ..lastError = question
           ..pendingToolRequestJson = '';
         state.publicUpdates.add(publicUpdate);
         await _emit(
           state,
           WorkTaskEventKind.paused,
           publicUpdate,
-          detail: _publicText(completion.question),
+          detail: question,
           safeMetadata: {'reason': 'clarification'},
         );
         await _checkpoint(state);

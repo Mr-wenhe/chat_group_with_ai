@@ -37,6 +37,7 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
   final WorkTaskEventStream? eventStreamFor;
   final Future<void> Function(String taskId)? onStopTask;
   final Future<void> Function(String taskId)? onContinueTask;
+  final Future<void> Function(String taskId, String reply)? onReplyTask;
   final Future<void> Function(String taskId)? onApproveTask;
   final Future<void> Function(String taskId)? onApproveWithoutUndoTask;
   final Future<void> Function(String taskId)? onRejectTask;
@@ -62,6 +63,7 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
     this.eventStreamFor,
     this.onStopTask,
     this.onContinueTask,
+    this.onReplyTask,
     this.onApproveTask,
     this.onApproveWithoutUndoTask,
     this.onRejectTask,
@@ -222,6 +224,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
                   setState(() => _selectedTaskId = taskId),
               onStop: _stopTask,
               onContinue: _continueTask,
+              onReply: _canReplyToTask ? _replyTask : null,
               onApprove: _approveTask,
               onApproveWithoutUndo: _approveWithoutUndoTask,
               onReject: _rejectTask,
@@ -414,6 +417,19 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       return _coordinator!.continueAfterSoftLimit(taskId);
     }
     return _coordinator!.resumeByUser(taskId);
+  }
+
+  bool get _canReplyToTask =>
+      widget.onReplyTask != null || _coordinator != null;
+
+  Future<void> _replyTask(String taskId, String reply) {
+    final callback = widget.onReplyTask;
+    if (callback != null) return callback(taskId, reply);
+    final coordinator = _coordinator;
+    if (coordinator == null) {
+      throw StateError('工作任务调度器不可用，请稍后重试。');
+    }
+    return coordinator.enqueueFollowUp(taskId, reply);
   }
 
   Future<void> _retryTask(String taskId) {

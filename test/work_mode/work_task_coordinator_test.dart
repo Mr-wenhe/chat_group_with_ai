@@ -713,6 +713,84 @@ void main() {
     expect(runner.startedTaskIds, ['clarification-answer']);
   });
 
+  test('a model clarification answer resumes the paused task', () async {
+    final task = _task(
+      id: 'model-clarification-answer',
+      conversationId: 'group-model-clarify',
+    )
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..lastError = '你要生成 PPTX 还是其他格式？'
+      ..executionStateJson = jsonEncode({
+        'clarificationRequired': true,
+        'clarificationQuestion': '你要生成 PPTX 还是其他格式？',
+      });
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '生成 PowerPoint .pptx 文件');
+
+    final resumed = taskBox.get(task.id)!;
+    expect(resumed.status, AgentTaskStatus.planning);
+    expect(resumed.resumeRequired, isFalse);
+    expect(resumed.queuedUserRequests, isEmpty);
+    expect(resumed.userRequest, contains('生成 PowerPoint .pptx 文件'));
+    expect(runner.startedTaskIds, ['model-clarification-answer']);
+  });
+
+  test('a model clarification answer resumes an interrupted task', () async {
+    final task = _task(
+      id: 'interrupted-model-clarification-answer',
+      conversationId: 'group-interrupted-model-clarify',
+    )
+      ..status = AgentTaskStatus.interrupted
+      ..resumeRequired = true
+      ..lastError = '你要生成 PPTX 还是其他格式？'
+      ..executionStateJson = jsonEncode({
+        'clarificationRequired': true,
+        'clarificationQuestion': '你要生成 PPTX 还是其他格式？',
+      });
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '生成 PowerPoint .pptx 文件');
+
+    final resumed = taskBox.get(task.id)!;
+    expect(resumed.status, AgentTaskStatus.planning);
+    expect(resumed.resumeRequired, isFalse);
+    expect(resumed.queuedUserRequests, isEmpty);
+    expect(resumed.userRequest, contains('生成 PowerPoint .pptx 文件'));
+    expect(runner.startedTaskIds, ['interrupted-model-clarification-answer']);
+  });
+
+  test('restore reserves a conversation with a pending model clarification',
+      () async {
+    final task = _task(
+      id: 'restored-model-clarification',
+      conversationId: 'group-restored-model-clarify',
+    )
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..lastError = '你要生成 PPTX 还是其他格式？'
+      ..executionStateJson = jsonEncode({
+        'clarificationRequired': true,
+        'clarificationQuestion': '你要生成 PPTX 还是其他格式？',
+      });
+    await taskBox.put(task.id, task);
+
+    await coordinator.restore();
+    await coordinator.submit(
+      _task(
+        id: 'blocked-by-restored-model-clarification',
+        conversationId: 'group-restored-model-clarify',
+      ),
+    );
+
+    expect(runner.startedTaskIds, isEmpty);
+    expect(
+      taskBox.get('blocked-by-restored-model-clarification')?.status,
+      AgentTaskStatus.queued,
+    );
+  });
+
   test('keeps an approval checkpoint after its runner releases the slot',
       () async {
     await coordinator.submit(_task(id: 'approval', conversationId: 'group-a'));

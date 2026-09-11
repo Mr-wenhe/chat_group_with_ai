@@ -10,6 +10,7 @@ import 'work_task_event.dart';
 import 'work_task_event_store.dart';
 import 'work_task_error_sanitizer.dart';
 import 'work_folder_grant_service.dart';
+import 'work_task_clarification.dart';
 import 'work_resource_lock_manager.dart';
 import 'work_snapshot_manifest.dart';
 import 'work_approval_decision.dart';
@@ -348,21 +349,35 @@ class WorkTaskCoordinator {
         await _schedule();
         return;
       }
-      final answeringClarification = task.status == AgentTaskStatus.paused &&
-          _isFollowUpClarification(task) &&
-          task.queuedUserRequests.isNotEmpty;
+      final answeringFollowUpClarification =
+          task.status == AgentTaskStatus.paused &&
+              _isFollowUpClarification(task) &&
+              task.queuedUserRequests.isNotEmpty;
+      final answeringModelClarification =
+          (task.status == AgentTaskStatus.paused ||
+                  task.status == AgentTaskStatus.interrupted) &&
+              WorkTaskClarification.isPending(task);
+      final answeringClarification =
+          answeringFollowUpClarification || answeringModelClarification;
       final attachmentId = attachmentMessageId?.trim();
       final queuedAttachmentIds = _queuedAttachmentMessageIds(
         task.executionStateJson,
         expectedLength: task.queuedUserRequests.length,
       );
-      task.queuedUserRequests = answeringClarification
-          ? <String>[
-              '${task.queuedUserRequests.first}\n用户明确目标：$normalized',
-              ...task.queuedUserRequests.skip(1),
-            ]
-          : <String>[...task.queuedUserRequests, normalized];
-      if (answeringClarification) {
+      if (answeringFollowUpClarification) {
+        task.queuedUserRequests = <String>[
+          '${task.queuedUserRequests.first}\n用户明确目标：$normalized',
+          ...task.queuedUserRequests.skip(1),
+        ];
+      } else if (answeringModelClarification) {
+        task.queuedUserRequests = <String>[normalized];
+      } else {
+        task.queuedUserRequests = <String>[
+          ...task.queuedUserRequests,
+          normalized
+        ];
+      }
+      if (answeringFollowUpClarification) {
         if (attachmentId != null && attachmentId.isNotEmpty) {
           queuedAttachmentIds[0] = attachmentId;
         }
@@ -801,6 +816,9 @@ class WorkTaskCoordinator {
         // leaving the ambiguous FIFO head untouched.
         throw StateError('请先明确要修改的文件路径，再继续任务。');
       }
+      if (WorkTaskClarification.isPending(task)) {
+        throw StateError('请先在任务面板回答模型的问题。');
+      }
       if (_requiresExplicitCommandRequest(task)) {
         throw StateError('请发送明确的测试、构建或分析请求后再继续任务。');
       }
@@ -1032,8 +1050,10 @@ class WorkTaskCoordinator {
           );
           await _save(task);
         }
-        if (task.status == AgentTaskStatus.paused &&
-            _isFollowUpClarification(task)) {
+        if ((task.status == AgentTaskStatus.paused ||
+                task.status == AgentTaskStatus.interrupted) &&
+            (_isFollowUpClarification(task) ||
+                WorkTaskClarification.isPending(task))) {
           // An unanswered target question still owns this conversation. A
           // second task must not bypass it while the user is deciding which
           // artifact the queued revision may overwrite.
@@ -2314,7 +2334,11 @@ class WorkTaskCoordinator {
   }) async {
     final canPromotePausedClarification =
         allowPausedClarification && _isFollowUpClarification(task);
-    if ((!task.isTerminal && !canPromotePausedClarification) ||
+    final answeringModelClarification =
+        allowPausedClarification && WorkTaskClarification.isPending(task);
+    if ((!task.isTerminal &&
+            !canPromotePausedClarification &&
+            !answeringModelClarification) ||
         task.status == AgentTaskStatus.cancelled ||
         task.queuedUserRequests.isEmpty ||
         _disposed) {
@@ -2387,8 +2411,11 @@ class WorkTaskCoordinator {
         : decision.isRevision && decision.artifactPath != null
             ? <String>[decision.artifactPath!]
             : List<String>.from(task.lastArtifactPaths);
+    final nextUserRequest = answeringModelClarification
+        ? _mergeClarificationAnswer(task.userRequest, nextRequest)
+        : nextRequest;
     task
-      ..userRequest = nextRequest
+      ..userRequest = nextUserRequest
       ..status = AgentTaskStatus.queued
       // A new artifact needs a fresh plan. Keeping the previous plan can
       // force an unrelated request to follow stale instructions (for example,
@@ -2430,6 +2457,12 @@ class WorkTaskCoordinator {
     unawaited(
       _record(task, WorkTaskEventKind.queued, '开始处理已排队的追问'),
     );
+  }
+
+  String _mergeClarificationAnswer(String original, String answer) {
+    final normalizedOriginal = original.trim();
+    if (normalizedOriginal.isEmpty) return answer;
+    return '$normalizedOriginal\n用户对上述问题的回答：$answer';
   }
 
   List<String> _followUpArtifactPaths(AgentTask task) {

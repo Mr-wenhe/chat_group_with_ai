@@ -233,6 +233,33 @@ void main() {
     );
   });
 
+  test('persists a durable marker when the model asks for clarification',
+      () async {
+    const question = '你要生成 PPTX 还是其他格式？';
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'content': jsonEncode({
+          'action': 'clarify',
+          'public_update': '需要先确认交付格式。',
+          'tool': null,
+          'completion': {
+            'question': question,
+            'options': ['PowerPoint（.pptx）', '其他格式'],
+          },
+        }),
+      });
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+    final task = _task(id: 'clarification-marker');
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    final execution = jsonDecode(task.executionStateJson) as Map;
+    expect(execution['clarificationRequired'], isTrue);
+    expect(execution['clarificationQuestion'], question);
+  });
+
   test('runs a 20+ step trace, emits every step, then finish completes',
       () async {
     final model = _FakeModel();

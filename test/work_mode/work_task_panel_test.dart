@@ -573,6 +573,99 @@ void main() {
       expect(continued, isFalse);
     });
 
+    testWidgets('shows a reply editor for a model clarification pause',
+        (tester) async {
+      final task = _task(
+        id: 'model-clarification-panel',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = true
+        ..lastError = '你要生成 PPTX 还是其他格式？'
+        ..executionStateJson = jsonEncode({
+          'clarificationRequired': true,
+          'clarificationQuestion': '你要生成 PPTX 还是其他格式？',
+        });
+      var shouldFail = false;
+      String? submittedReply;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onReply: (_, reply) async {
+              if (shouldFail) throw StateError('network timeout');
+              submittedReply = reply;
+            },
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-reply-box')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-reply-input')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-reply-send')), findsOneWidget);
+      expect(find.text('请回答模型的问题'), findsOneWidget);
+
+      final continueButton = tester.widget<FilledButton>(
+        find.byKey(const Key('work-task-continue')),
+      );
+      expect(continueButton.onPressed, isNull);
+
+      await tester.enterText(
+        find.byKey(const Key('work-task-reply-input')),
+        '生成 PowerPoint .pptx 文件',
+      );
+      await tester.pump();
+      expect(
+        tester.widget<FilledButton>(
+          find.byKey(const Key('work-task-reply-send')),
+        ).onPressed,
+        isNotNull,
+      );
+      await tester.ensureVisible(find.byKey(const Key('work-task-reply-send')));
+      await tester.tap(find.byKey(const Key('work-task-reply-send')));
+      await tester.pumpAndSettle();
+      expect(submittedReply, '生成 PowerPoint .pptx 文件');
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const Key('work-task-reply-input')),
+            )
+            .controller!
+            .text,
+        isEmpty,
+      );
+
+      shouldFail = true;
+      await tester.enterText(
+        find.byKey(const Key('work-task-reply-input')),
+        '再次发送',
+      );
+      await tester.pump();
+      await tester.ensureVisible(find.byKey(const Key('work-task-reply-send')));
+      await tester.tap(find.byKey(const Key('work-task-reply-send')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('work-task-reply-error')), findsOneWidget);
+      expect(find.textContaining('发送失败：任务执行超时'), findsOneWidget);
+      expect(
+        tester
+            .widget<TextField>(
+              find.byKey(const Key('work-task-reply-input')),
+            )
+            .controller!
+            .text,
+        '再次发送',
+      );
+    });
+
     testWidgets(
         'shows continue for a soft-limit pause despite stale retry data',
         (tester) async {

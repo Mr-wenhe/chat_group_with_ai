@@ -8,6 +8,7 @@ import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
@@ -17,6 +18,10 @@ import 'package:flutter/material.dart';
 
 typedef WorkTaskEventStream = Stream<WorkTaskEvent> Function(String taskId);
 typedef WorkTaskAction = FutureOr<void> Function(String taskId);
+typedef WorkTaskReply = FutureOr<void> Function(
+  String taskId,
+  String reply,
+);
 typedef WorkTaskUndoPreview = FutureOr<List<WorkSnapshotUndoItem>> Function(
     String taskId);
 
@@ -32,6 +37,7 @@ class WorkTaskPanel extends StatefulWidget {
   final ValueChanged<String> onSelectTask;
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
+  final WorkTaskReply? onReply;
   final WorkTaskAction? onApprove;
   final WorkTaskAction? onApproveWithoutUndo;
   final WorkTaskAction? onReject;
@@ -59,6 +65,7 @@ class WorkTaskPanel extends StatefulWidget {
     required this.onSelectTask,
     required this.onStop,
     required this.onContinue,
+    this.onReply,
     required this.onOpenConversation,
     required this.onCollapse,
     required this.onClose,
@@ -93,6 +100,16 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   Timer? _durationTicker;
   bool _actionInFlight = false;
   String? _actionError;
+  final TextEditingController _replyController = TextEditingController();
+
+  @override
+  void didUpdateWidget(covariant WorkTaskPanel oldWidget) {
+    super.didUpdateWidget(oldWidget);
+    if (_selectedTaskId(oldWidget) != _selectedTaskId(widget)) {
+      _replyController.clear();
+      _actionError = null;
+    }
+  }
 
   @override
   void initState() {
@@ -105,7 +122,16 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   @override
   void dispose() {
     _durationTicker?.cancel();
+    _replyController.dispose();
     super.dispose();
+  }
+
+  String? _selectedTaskId(WorkTaskPanel panel) {
+    final selected = panel.selectedTaskId;
+    if (selected != null && panel.tasks.any((task) => task.id == selected)) {
+      return selected;
+    }
+    return panel.tasks.isEmpty ? null : panel.tasks.first.id;
   }
 
   AgentTask? get _selectedTask {
@@ -189,6 +215,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
                 _TaskActions(
                   task: task,
                   actionInFlight: _actionInFlight,
+                  actionError: _actionError,
                   onOpenConversation: widget.onOpenConversation,
                   onApprove: widget.onApprove,
                   onApproveWithoutUndo: widget.onApproveWithoutUndo,
@@ -203,6 +230,8 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
                   undoPreviewFor: widget.undoPreviewFor,
                   onStop: widget.onStop,
                   onContinue: widget.onContinue,
+                  onReply: widget.onReply,
+                  replyController: _replyController,
                   onModalVisibilityChanged: widget.onModalVisibilityChanged,
                   dialogContext: widget.dialogContext,
                   runAction: (action) => _runAction(action, task.id),
@@ -215,8 +244,8 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
     );
   }
 
-  Future<void> _runAction(WorkTaskAction action, String taskId) async {
-    if (_actionInFlight) return;
+  Future<bool> _runAction(WorkTaskAction action, String taskId) async {
+    if (_actionInFlight) return false;
     // The panel can be hidden while a confirmation dialog is open. Keep the
     // app-scoped action alive, but never touch State after the overlay route
     // has disposed this widget.
@@ -228,9 +257,10 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
     }
     try {
       await action(taskId);
+      return true;
     } on Object catch (error) {
-      if (!mounted) return;
-      setState(() => _actionError = sanitizeWorkTaskError(error));
+      if (mounted) setState(() => _actionError = sanitizeWorkTaskError(error));
+      return false;
     } finally {
       if (mounted) setState(() => _actionInFlight = false);
     }
@@ -505,6 +535,7 @@ class _FailureDetails extends StatelessWidget {
 class _TaskActions extends StatelessWidget {
   final AgentTask task;
   final bool actionInFlight;
+  final String? actionError;
   final ValueChanged<String> onOpenConversation;
   final WorkTaskAction? onApprove;
   final WorkTaskAction? onApproveWithoutUndo;
@@ -519,13 +550,16 @@ class _TaskActions extends StatelessWidget {
   final WorkTaskUndoPreview? undoPreviewFor;
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
+  final WorkTaskReply? onReply;
+  final TextEditingController replyController;
   final ValueChanged<bool>? onModalVisibilityChanged;
   final BuildContext? dialogContext;
-  final Future<void> Function(WorkTaskAction action) runAction;
+  final Future<bool> Function(WorkTaskAction action) runAction;
 
   const _TaskActions({
     required this.task,
     required this.actionInFlight,
+    required this.actionError,
     required this.onOpenConversation,
     required this.onApprove,
     required this.onApproveWithoutUndo,
@@ -540,6 +574,8 @@ class _TaskActions extends StatelessWidget {
     required this.undoPreviewFor,
     required this.onStop,
     required this.onContinue,
+    required this.replyController,
+    this.onReply,
     this.onModalVisibilityChanged,
     this.dialogContext,
     required this.runAction,
@@ -568,148 +604,177 @@ class _TaskActions extends StatelessWidget {
         (task.status == AgentTaskStatus.paused ||
             task.status == AgentTaskStatus.interrupted) &&
         (isSoftLimitPause || failure == null || failure.canContinue);
-    return Wrap(
-      spacing: 8,
-      runSpacing: 8,
+    final canReply = onReply != null && WorkTaskClarification.isPending(task);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
-        OutlinedButton.icon(
-          key: const Key('work-task-open-conversation'),
-          onPressed: () => onOpenConversation(task.groupId),
-          icon: const Icon(Icons.forum_outlined),
-          label: const Text('回到对话'),
-        ),
-        if (!needsFolder &&
-            task.status == AgentTaskStatus.waitingForApproval &&
-            task.pendingToolRequestJson.trim().isNotEmpty) ...<Widget>[
-          if (!requiresNoUndo && onApprove != null)
-            Tooltip(
-              message: approvalPlanUnavailable
-                  ? '审批计划无法读取，已阻止文件变更；请让任务重新规划。'
-                  : '批准当前列出的工具操作。',
-              child: FilledButton.icon(
-                key: const Key('work-task-approve'),
-                onPressed: actionInFlight || approvalPlanUnavailable
-                    ? null
-                    : () => _approveWithConfirmation(context, approvalPlan),
-                icon: const Icon(Icons.check_rounded),
-                label: const Text('批准'),
-              ),
+        if (canReply) ...<Widget>[
+          _TaskReplyBox(
+            task: task,
+            controller: replyController,
+            actionInFlight: actionInFlight,
+            actionError: actionError,
+            onSubmit: (reply) async {
+              final replyAction = onReply;
+              if (replyAction == null) return;
+              final sent = await runAction(
+                (_) => replyAction(task.id, reply),
+              );
+              if (sent && replyController.text.trim() == reply) {
+                replyController.clear();
+              }
+            },
+          ),
+          const SizedBox(height: 8),
+        ],
+        Wrap(
+          spacing: 8,
+          runSpacing: 8,
+          children: <Widget>[
+            OutlinedButton.icon(
+              key: const Key('work-task-open-conversation'),
+              onPressed: () => onOpenConversation(task.groupId),
+              icon: const Icon(Icons.forum_outlined),
+              label: const Text('回到对话'),
             ),
-          if (onApproveWithoutUndo != null &&
-              (requiresNoUndo ||
-                  approvalPlan != null &&
-                      (!approvalPlan.snapshotAvailable ||
-                          !approvalPlan.reversible)))
-            Tooltip(
-              message: requiresNoUndo
-                  ? '技能配置没有文件快照，仅在你确认无法撤销时执行。'
-                  : '仅在你确认无法撤销时使用；不会因为设置开关而自动启用。',
-              child: OutlinedButton.icon(
-                key: const Key('work-task-approve-without-undo'),
+            if (!needsFolder &&
+                task.status == AgentTaskStatus.waitingForApproval &&
+                task.pendingToolRequestJson.trim().isNotEmpty) ...<Widget>[
+              if (!requiresNoUndo && onApprove != null)
+                Tooltip(
+                  message: approvalPlanUnavailable
+                      ? '审批计划无法读取，已阻止文件变更；请让任务重新规划。'
+                      : '批准当前列出的工具操作。',
+                  child: FilledButton.icon(
+                    key: const Key('work-task-approve'),
+                    onPressed: actionInFlight || approvalPlanUnavailable
+                        ? null
+                        : () => _approveWithConfirmation(context, approvalPlan),
+                    icon: const Icon(Icons.check_rounded),
+                    label: const Text('批准'),
+                  ),
+                ),
+              if (onApproveWithoutUndo != null &&
+                  (requiresNoUndo ||
+                      approvalPlan != null &&
+                          (!approvalPlan.snapshotAvailable ||
+                              !approvalPlan.reversible)))
+                Tooltip(
+                  message: requiresNoUndo
+                      ? '技能配置没有文件快照，仅在你确认无法撤销时执行。'
+                      : '仅在你确认无法撤销时使用；不会因为设置开关而自动启用。',
+                  child: OutlinedButton.icon(
+                    key: const Key('work-task-approve-without-undo'),
+                    onPressed: actionInFlight
+                        ? null
+                        : () => _approveWithoutUndoWithConfirmation(
+                              context,
+                              approvalPlan,
+                            ),
+                    icon: const Icon(Icons.warning_amber_rounded),
+                    label: const Text('无撤销执行'),
+                  ),
+                ),
+              if (onReject != null)
+                Tooltip(
+                  message: '拒绝当前操作，并让任务尝试安全路径。',
+                  child: OutlinedButton.icon(
+                    key: const Key('work-task-reject'),
+                    onPressed:
+                        actionInFlight ? null : () => runAction(onReject!),
+                    icon: const Icon(Icons.block_rounded),
+                    label: const Text('拒绝'),
+                  ),
+                ),
+            ],
+            if (needsFolder && onRequestFolder != null)
+              OutlinedButton.icon(
+                key: const Key('work-task-add-folder'),
+                onPressed:
+                    actionInFlight ? null : () => runAction(onRequestFolder!),
+                icon: const Icon(Icons.folder_shared_outlined),
+                label: const Text('授权目录'),
+              ),
+            if (hasInstallSuggestion && onInstallTool != null)
+              OutlinedButton.icon(
+                key: const Key('work-task-install-tool'),
+                onPressed:
+                    actionInFlight ? null : () => _confirmInstallTool(context),
+                icon: const Icon(Icons.download_outlined),
+                label: const Text('帮助安装工具'),
+              ),
+            if (needsVisionModel && onSelectVisionModel != null)
+              OutlinedButton.icon(
+                key: const Key('work-task-select-vision-model'),
                 onPressed: actionInFlight
                     ? null
-                    : () => _approveWithoutUndoWithConfirmation(
-                          context,
-                          approvalPlan,
-                        ),
-                icon: const Icon(Icons.warning_amber_rounded),
-                label: const Text('无撤销执行'),
+                    : () => runAction(onSelectVisionModel!),
+                icon: const Icon(Icons.image_search_outlined),
+                label: const Text('选择视觉模型'),
               ),
-            ),
-          if (onReject != null)
+            if (onRetry != null &&
+                (canRestartFromBeginning ||
+                    !isSoftLimitPause && failure?.canRetry == true))
+              FilledButton.icon(
+                key: const Key('work-task-retry'),
+                onPressed: actionInFlight ? null : () => runAction(onRetry!),
+                icon: const Icon(Icons.refresh_rounded),
+                label: Text(canRestartFromBeginning ? '从头开始' : '重试'),
+              ),
+            if (failure?.canReauthorize == true &&
+                (onReauthorize != null || onRequestFolder != null))
+              OutlinedButton.icon(
+                key: const Key('work-task-reauthorize'),
+                onPressed: actionInFlight
+                    ? null
+                    : () => runAction(onReauthorize ?? onRequestFolder!),
+                icon: const Icon(Icons.lock_open_outlined),
+                label: const Text('重新授权'),
+              ),
+            if (failure?.canViewConflict == true && onViewConflict != null)
+              OutlinedButton.icon(
+                key: const Key('work-task-view-conflict'),
+                onPressed:
+                    actionInFlight ? null : () => runAction(onViewConflict!),
+                icon: const Icon(Icons.compare_arrows_rounded),
+                label: const Text('查看冲突'),
+              ),
+            if (!task.isTerminal)
+              Tooltip(
+                message: stopReason ?? '停止当前任务。',
+                child: OutlinedButton.icon(
+                  key: const Key('work-task-stop'),
+                  onPressed: actionInFlight ? null : () => runAction(onStop),
+                  icon: const Icon(Icons.stop_circle_outlined),
+                  label: const Text('停止'),
+                ),
+              ),
+            if (canShowContinue)
+              Tooltip(
+                message: continueReason ?? '继续当前任务。',
+                child: FilledButton.icon(
+                  key: const Key('work-task-continue'),
+                  onPressed: continueReason == null && !actionInFlight
+                      ? () => runAction(onContinue)
+                      : null,
+                  icon: const Icon(Icons.play_arrow_rounded),
+                  label: const Text('继续'),
+                ),
+              ),
             Tooltip(
-              message: '拒绝当前操作，并让任务尝试安全路径。',
+              message: task.isTerminal && onUndo != null
+                  ? '撤销本任务改动。'
+                  : '撤销将在任务快照完成后可用。',
               child: OutlinedButton.icon(
-                key: const Key('work-task-reject'),
-                onPressed: actionInFlight ? null : () => runAction(onReject!),
-                icon: const Icon(Icons.block_rounded),
-                label: const Text('拒绝'),
+                key: const Key('work-task-undo'),
+                onPressed: task.isTerminal && onUndo != null && !actionInFlight
+                    ? () => _confirmUndo(context)
+                    : null,
+                icon: const Icon(Icons.undo_rounded),
+                label: const Text('撤销'),
               ),
             ),
-        ],
-        if (needsFolder && onRequestFolder != null)
-          OutlinedButton.icon(
-            key: const Key('work-task-add-folder'),
-            onPressed:
-                actionInFlight ? null : () => runAction(onRequestFolder!),
-            icon: const Icon(Icons.folder_shared_outlined),
-            label: const Text('授权目录'),
-          ),
-        if (hasInstallSuggestion && onInstallTool != null)
-          OutlinedButton.icon(
-            key: const Key('work-task-install-tool'),
-            onPressed:
-                actionInFlight ? null : () => _confirmInstallTool(context),
-            icon: const Icon(Icons.download_outlined),
-            label: const Text('帮助安装工具'),
-          ),
-        if (needsVisionModel && onSelectVisionModel != null)
-          OutlinedButton.icon(
-            key: const Key('work-task-select-vision-model'),
-            onPressed:
-                actionInFlight ? null : () => runAction(onSelectVisionModel!),
-            icon: const Icon(Icons.image_search_outlined),
-            label: const Text('选择视觉模型'),
-          ),
-        if (onRetry != null &&
-            (canRestartFromBeginning ||
-                !isSoftLimitPause && failure?.canRetry == true))
-          FilledButton.icon(
-            key: const Key('work-task-retry'),
-            onPressed: actionInFlight ? null : () => runAction(onRetry!),
-            icon: const Icon(Icons.refresh_rounded),
-            label: Text(canRestartFromBeginning ? '从头开始' : '重试'),
-          ),
-        if (failure?.canReauthorize == true &&
-            (onReauthorize != null || onRequestFolder != null))
-          OutlinedButton.icon(
-            key: const Key('work-task-reauthorize'),
-            onPressed: actionInFlight
-                ? null
-                : () => runAction(onReauthorize ?? onRequestFolder!),
-            icon: const Icon(Icons.lock_open_outlined),
-            label: const Text('重新授权'),
-          ),
-        if (failure?.canViewConflict == true && onViewConflict != null)
-          OutlinedButton.icon(
-            key: const Key('work-task-view-conflict'),
-            onPressed: actionInFlight ? null : () => runAction(onViewConflict!),
-            icon: const Icon(Icons.compare_arrows_rounded),
-            label: const Text('查看冲突'),
-          ),
-        if (!task.isTerminal)
-          Tooltip(
-            message: stopReason ?? '停止当前任务。',
-            child: OutlinedButton.icon(
-              key: const Key('work-task-stop'),
-              onPressed: actionInFlight ? null : () => runAction(onStop),
-              icon: const Icon(Icons.stop_circle_outlined),
-              label: const Text('停止'),
-            ),
-          ),
-        if (canShowContinue)
-          Tooltip(
-            message: continueReason ?? '继续当前任务。',
-            child: FilledButton.icon(
-              key: const Key('work-task-continue'),
-              onPressed: continueReason == null && !actionInFlight
-                  ? () => runAction(onContinue)
-                  : null,
-              icon: const Icon(Icons.play_arrow_rounded),
-              label: const Text('继续'),
-            ),
-          ),
-        Tooltip(
-          message:
-              task.isTerminal && onUndo != null ? '撤销本任务改动。' : '撤销将在任务快照完成后可用。',
-          child: OutlinedButton.icon(
-            key: const Key('work-task-undo'),
-            onPressed: task.isTerminal && onUndo != null && !actionInFlight
-                ? () => _confirmUndo(context)
-                : null,
-            icon: const Icon(Icons.undo_rounded),
-            label: const Text('撤销'),
-          ),
+          ],
         ),
       ],
     );
@@ -902,6 +967,95 @@ class _TaskActions extends StatelessWidget {
     } finally {
       onModalVisibilityChanged?.call(true);
     }
+  }
+}
+
+class _TaskReplyBox extends StatelessWidget {
+  final AgentTask task;
+  final TextEditingController controller;
+  final bool actionInFlight;
+  final String? actionError;
+  final Future<void> Function(String reply) onSubmit;
+
+  const _TaskReplyBox({
+    required this.task,
+    required this.controller,
+    required this.actionInFlight,
+    required this.actionError,
+    required this.onSubmit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return DecoratedBox(
+      key: const Key('work-task-reply-box'),
+      decoration: BoxDecoration(
+        color: colors.primaryContainer.withValues(alpha: 0.45),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: colors.primary.withValues(alpha: 0.35)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(10),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.stretch,
+          children: <Widget>[
+            Text(
+              '请回答模型的问题',
+              style: Theme.of(context).textTheme.labelLarge,
+            ),
+            const SizedBox(height: 4),
+            Text(_safePanelText(WorkTaskClarification.question(task))),
+            const SizedBox(height: 8),
+            TextField(
+              key: const Key('work-task-reply-input'),
+              controller: controller,
+              minLines: 1,
+              maxLines: 4,
+              enabled: !actionInFlight,
+              textInputAction: TextInputAction.newline,
+              decoration: const InputDecoration(
+                hintText: '输入回复…',
+                border: OutlineInputBorder(),
+                isDense: true,
+              ),
+            ),
+            if (actionError != null && actionError!.trim().isNotEmpty) ...[
+              const SizedBox(height: 6),
+              Text(
+                '发送失败：${_safePanelText(actionError!)}',
+                key: const Key('work-task-reply-error'),
+                style: TextStyle(color: colors.error),
+              ),
+            ],
+            const SizedBox(height: 8),
+            Align(
+              alignment: Alignment.centerRight,
+              child: ValueListenableBuilder<TextEditingValue>(
+                valueListenable: controller,
+                builder: (context, value, _) {
+                  final canSend =
+                      !actionInFlight && value.text.trim().isNotEmpty;
+                  return FilledButton.icon(
+                    key: const Key('work-task-reply-send'),
+                    onPressed:
+                        canSend ? () => onSubmit(value.text.trim()) : null,
+                    icon: actionInFlight
+                        ? const SizedBox(
+                            width: 16,
+                            height: 16,
+                            child: CircularProgressIndicator(strokeWidth: 2),
+                          )
+                        : const Icon(Icons.send_rounded),
+                    label: Text(actionInFlight ? '发送中…' : '发送回复'),
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
   }
 }
 
@@ -1524,6 +1678,7 @@ String? _continueUnavailableReasonForPanel(AgentTask task) {
   final isSoftLimitPause =
       task.softLimitReached && _isPausedStatus(task.status);
   if (_taskNeedsVisionModel(task)) return '请先选择支持图片的视觉模型。';
+  if (WorkTaskClarification.isPending(task)) return '请先回答上方模型问题。';
   if (_requiresExplicitCommandRequest(task)) {
     return '请发送明确的测试、构建或分析请求后继续。';
   }
