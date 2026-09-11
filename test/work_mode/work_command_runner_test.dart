@@ -158,6 +158,27 @@ void main() {
     expect(starts, 0);
   });
 
+  test('rejects control-character command input as a failed validation',
+      () async {
+    var starts = 0;
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      processStarter: (_, {required env, required shell}) async {
+        starts++;
+        return _FakeProcess().asProcess();
+      },
+    );
+
+    final result = await runner.run(
+      _command(arguments: const ['line-one\nline-two']),
+      taskId: 'task-control-character-command',
+    );
+
+    expect(result.status, WorkCommandRunStatus.failed);
+    expect(result.message, '命令包含控制字符。');
+    expect(starts, 0);
+  });
+
   test('output over the combined limit terminates the process', () async {
     final process = _FakeProcess();
     final runner = WorkCommandRunner(

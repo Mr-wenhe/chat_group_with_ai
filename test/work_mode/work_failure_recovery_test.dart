@@ -264,6 +264,123 @@ void main() {
       expect(commandFailure.retryable, isFalse);
     });
 
+    test('keeps safe command diagnostics for a nonzero exit', () {
+      final failure = WorkFailure.fromToolResult(
+        const WorkToolResult.failed(
+          message: '命令退出码为 1。',
+          data: <String, dynamic>{
+            'commandDisplay': 'clang --version',
+            'exitCode': 1,
+            'stdout': '[Clang 17.0.0]',
+            'stderr': 'compiler failed',
+          },
+          failureCode: 'commandFailed',
+        ),
+      );
+
+      expect(failure.type, WorkFailureType.commandFailed);
+      expect(failure.technicalDetail, contains('命令：clang --version'));
+      expect(failure.technicalDetail, contains('退出码：1'));
+      expect(failure.technicalDetail, contains('stderr：compiler failed'));
+      expect(failure.technicalDetail, contains('stdout：[Clang 17.0.0]'));
+    });
+
+    test('automatically replans an invalid command before showing recovery UI',
+        () async {
+      final model = _ModelQueue()
+        ..responses.add(_toolDecision())
+        ..responses.add(_finishDecision());
+      final tool = _ToolQueue()
+        ..results.add(
+          const WorkToolResult.failed(
+            message: '命令包含控制字符。',
+            data: <String, dynamic>{
+              'rejectionKind': 'invalidInput',
+              'commandDisplay': 'python -c [invalid]',
+            },
+            failureCode: 'modelProtocol',
+          ),
+        );
+
+      final task = _task('auto-replan-invalid-command');
+      final result = await _loop(
+        model,
+        WorkToolRegistry(
+          definitions: [_definition(AgentToolName.workspaceRead, tool)],
+        ),
+      ).execute(task);
+
+      expect(result.status, WorkAgentLoopStatus.completed);
+      expect(result.failure, isNull);
+      expect(model.responses, isEmpty);
+      expect(tool.calls, 1);
+      expect(task.status, AgentTaskStatus.completed);
+    });
+
+    test('bounds automatic invalid-command replanning', () async {
+      final model = _ModelQueue()
+        ..responses.add(_toolDecision())
+        ..responses.add(_toolDecision())
+        ..responses.add(_toolDecision());
+      final tool = _ToolQueue()
+        ..results.addAll(
+          List<WorkToolResult>.filled(
+            3,
+            const WorkToolResult.failed(
+              message: '命令包含控制字符。',
+              data: <String, dynamic>{
+                'rejectionKind': 'invalidInput',
+                'commandDisplay': 'python -c [invalid]',
+              },
+              failureCode: 'modelProtocol',
+            ),
+          ),
+        );
+
+      final task = _task('bounded-invalid-command');
+      final result = await _loop(
+        model,
+        WorkToolRegistry(
+          definitions: [_definition(AgentToolName.workspaceRead, tool)],
+        ),
+      ).execute(task);
+
+      expect(result.status, WorkAgentLoopStatus.failed);
+      expect(result.failure?.type, WorkFailureType.modelProtocol);
+      expect(
+        result.failure?.technicalDetail,
+        contains('命令：'),
+      );
+      expect(tool.calls, 3);
+      expect(task.status, AgentTaskStatus.failed);
+      expect(task.resumeRequired, isTrue);
+    });
+
+    test('migrates a legacy invalid-command pause to a retryable failure', () {
+      final task = _task('legacy-invalid-command')
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = true
+        ..lastError = '命令包含控制字符。';
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.userActionRequired,
+          title: '需要你的操作才能继续',
+          reason: '命令包含控制字符。',
+          technicalDetail: '命令包含控制字符。',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '完成提示的操作后点击“继续”。',
+        ),
+      );
+
+      final failure = task.workFailure;
+
+      expect(failure?.type, WorkFailureType.modelProtocol);
+      expect(failure?.canRetry, isTrue);
+      expect(failure?.canContinue, isFalse);
+    });
+
     test('classifies tool, file, snapshot, command and browser failures',
         () async {
       final cases = <String, WorkToolResult>{

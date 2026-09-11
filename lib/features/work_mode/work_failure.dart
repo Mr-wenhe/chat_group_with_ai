@@ -116,8 +116,11 @@ class WorkFailure {
     try {
       final decoded = jsonDecode(raw);
       if (decoded is! Map || decoded['workFailure'] is! Map) return null;
-      final failure = WorkFailure.fromJson(
-        Map<String, dynamic>.from(decoded['workFailure'] as Map),
+      final failure = _migrateLegacyInvalidCommandFailure(
+        task,
+        WorkFailure.fromJson(
+          Map<String, dynamic>.from(decoded['workFailure'] as Map),
+        ),
       );
       if (failure.type == WorkFailureType.toolMissing) {
         final hasTrustedInstaller = _hasInstallableMissingTool(task, decoded);
@@ -139,6 +142,27 @@ class WorkFailure {
     return _hasInstallableMissingTool(
       task,
       _decodeMetadata(task.executionStateJson),
+    );
+  }
+
+  /// Older builds incorrectly persisted command-policy validation failures as
+  /// user-action pauses. Reclassify those checkpoints when they are read so a
+  /// task already visible in the panel loses the misleading Continue action.
+  static WorkFailure _migrateLegacyInvalidCommandFailure(
+    AgentTask task,
+    WorkFailure failure,
+  ) {
+    if (failure.type != WorkFailureType.userActionRequired) return failure;
+    final text =
+        '${failure.reason} ${failure.technicalDetail} ${task.lastError}';
+    if (!text.contains('命令包含控制字符')) return failure;
+    return _fromSignals(
+      code: 'modelProtocol',
+      message: failure.reason,
+      technicalDetail: failure.technicalDetail,
+      scope: 'model',
+      completedContent: failure.completedContent,
+      retryableHint: true,
     );
   }
 
@@ -264,9 +288,16 @@ class WorkFailure {
     final scope = result.data['scope'] is String
         ? result.data['scope'] as String
         : 'tool';
+    final isInvalidCommand = code == 'modelProtocol' &&
+        result.data['rejectionKind'] ==
+            WorkCommandRejectionKind.invalidInput.name;
+    final technicalDetail = code == 'commandFailed' || isInvalidCommand
+        ? _commandTechnicalDetail(result)
+        : '';
     final failure = _fromSignals(
       code: code,
       message: result.message,
+      technicalDetail: technicalDetail,
       scope: scope,
       completedContent: completedContent,
       // Snapshot completion can fail after the file write has already
@@ -286,6 +317,29 @@ class WorkFailure {
       return _manualToolGuidance(failure);
     }
     return failure;
+  }
+
+  static String _commandTechnicalDetail(WorkToolResult result) {
+    final details = <String>[];
+    final command = _clean(
+      result.data['commandDisplay'] ?? result.data['command'],
+      fallback: '',
+    );
+    if (command.isNotEmpty) details.add('命令：$command');
+
+    final exitCode = result.data['exitCode'];
+    if (exitCode is num || exitCode is String && exitCode.trim().isNotEmpty) {
+      final exitText = exitCode is num ? '$exitCode' : exitCode as String;
+      details.add('退出码：${_clean(exitText, fallback: '未知')}');
+    }
+    for (final entry in const <String, String>{
+      'stderr': 'stderr',
+      'stdout': 'stdout',
+    }.entries) {
+      final output = _clean(result.data[entry.key], fallback: '');
+      if (output.isNotEmpty) details.add('${entry.value}：$output');
+    }
+    return details.join('；');
   }
 
   static bool _hasInstallCommand(Object? rawSuggestion) {

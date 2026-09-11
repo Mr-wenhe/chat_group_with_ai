@@ -1208,27 +1208,42 @@ class DefaultWorkTaskRunner
         );
         if (writableResult != null) return writableResult;
         if (!policy.allowed) {
-          if (policy.changePlan != null) {
-            task.executionStateJson = _withApprovalPlan(
-              task.executionStateJson,
-              policy.changePlan!,
-            );
-          }
           if (policy.requiresExplicitRequest) {
+            if (policy.changePlan != null) {
+              task.executionStateJson = _withApprovalPlan(
+                task.executionStateJson,
+                policy.changePlan!,
+              );
+            }
             task.executionStateJson = _withExplicitCommandRequest(
               task.executionStateJson,
             );
+            return WorkToolResult.paused(
+              message: policy.reason,
+              data: {
+                'impact': policy.impact.wireName,
+                'requiresApproval': policy.requiresApproval,
+                'requiresSeparateConfirmation':
+                    policy.requiresSeparateConfirmation,
+                'requiresExplicitRequest': policy.requiresExplicitRequest,
+              },
+            );
           }
-          return WorkToolResult.paused(
-            message: policy.reason,
-            data: {
-              'impact': policy.impact.wireName,
-              'requiresApproval': policy.requiresApproval,
-              'requiresSeparateConfirmation':
-                  policy.requiresSeparateConfirmation,
-              'requiresExplicitRequest': policy.requiresExplicitRequest,
-            },
-          );
+          final data = <String, dynamic>{
+            'impact': policy.impact.wireName,
+            'rejectionKind': policy.rejectionKind.name,
+            'commandDisplay': _safeCommandDisplay(command),
+          };
+          return policy.rejectionKind == WorkCommandRejectionKind.pathRejected
+              ? WorkToolResult.pathRejected(
+                  message: policy.reason,
+                  data: data,
+                )
+              : WorkToolResult.failed(
+                  message: policy.reason,
+                  data: data,
+                  failureCode: 'modelProtocol',
+                );
         }
         // Read-only commands share the mutation-shaped registry entry so the
         // command name cannot bypass the closed schema, but they must not be
@@ -1934,6 +1949,7 @@ class DefaultWorkTaskRunner
           );
     final artifactPaths = await _existingCommandArtifactPaths(command);
     final data = <String, dynamic>{
+      'commandDisplay': _safeCommandDisplay(command),
       if (result.exitCode != null) 'exitCode': result.exitCode,
       'elapsedMs': result.elapsed.inMilliseconds,
       'outputTruncated': result.outputTruncated,
@@ -1946,9 +1962,13 @@ class DefaultWorkTaskRunner
     if (result.succeeded) {
       return WorkToolResult.success(message: result.message, data: data);
     }
-    if (result.status == WorkCommandRunStatus.waitingForApproval ||
-        result.status == WorkCommandRunStatus.blockedByDefault ||
-        result.status == WorkCommandRunStatus.pausedForUser ||
+    if (result.status == WorkCommandRunStatus.waitingForApproval) {
+      return WorkToolResult.waitingForApproval(
+        message: result.message,
+        data: data,
+      );
+    }
+    if (result.status == WorkCommandRunStatus.pausedForUser ||
         result.status == WorkCommandRunStatus.toolMissing) {
       return WorkToolResult.paused(
         message: result.message,
@@ -1958,13 +1978,23 @@ class DefaultWorkTaskRunner
             : 'userActionRequired',
       );
     }
+    if (result.status == WorkCommandRunStatus.blockedByDefault) {
+      return WorkToolResult.failed(
+        message: result.message,
+        data: data,
+        failureCode: 'commandFailed',
+      );
+    }
     if (result.status == WorkCommandRunStatus.pathRejected) {
       return WorkToolResult.pathRejected(message: result.message, data: data);
     }
     final failureCode = switch (result.status) {
       WorkCommandRunStatus.timedOut => 'commandFailed',
       WorkCommandRunStatus.outputLimitExceeded => 'commandFailed',
-      WorkCommandRunStatus.failed => 'commandFailed',
+      WorkCommandRunStatus.failed => !policy.allowed &&
+              policy.rejectionKind == WorkCommandRejectionKind.invalidInput
+          ? 'modelProtocol'
+          : 'commandFailed',
       WorkCommandRunStatus.cancelled => 'userActionRequired',
       _ => 'commandFailed',
     };
@@ -2402,6 +2432,21 @@ class DefaultWorkTaskRunner
     final normalized = value.replaceAll('\\', '/');
     final index = normalized.lastIndexOf('/');
     return index < 0 ? normalized : normalized.substring(index + 1);
+  }
+
+  String _safeCommandDisplay(WorkCommand command) {
+    var display = const SearchSecretScanner().redact(
+      command.displayCommand,
+      includeOpaqueTokens: true,
+    );
+    display = display
+        .replaceAll(RegExp(r'[\u0000-\u001f\u007f]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    const maximum = 1200;
+    return display.length <= maximum
+        ? display
+        : '${display.substring(0, maximum - 1)}…';
   }
 
   int _intArgument(Object? value, int fallback) =>

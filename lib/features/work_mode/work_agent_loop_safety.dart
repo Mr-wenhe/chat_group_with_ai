@@ -584,6 +584,7 @@ class _LoopState {
   int modelRetryCount = 0;
   int toolRetryCount = 0;
   int protocolRepairAttempts = 0;
+  int invalidCommandRepairCount = 0;
 
   _LoopState({
     required this.task,

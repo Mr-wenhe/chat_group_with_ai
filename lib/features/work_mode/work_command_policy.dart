@@ -65,6 +65,18 @@ enum WorkCommandImpact {
   }
 }
 
+/// Explains why a command was rejected before a process could start.
+///
+/// This distinction is important to recovery UI: a malformed command is a
+/// model-protocol problem that can be retried, while an out-of-scope path is an
+/// authorization boundary and an explicit test/build request is a user gate.
+enum WorkCommandRejectionKind {
+  none,
+  invalidInput,
+  pathRejected,
+  explicitRequest,
+}
+
 /// Structured command input. It is deliberately not a shell string.
 class WorkCommand {
   final String executable;
@@ -134,6 +146,7 @@ class WorkCommandPolicyResult {
   final String reason;
   final String? rejectionReason;
   final WorkChangePlan? changePlan;
+  final WorkCommandRejectionKind rejectionKind;
 
   const WorkCommandPolicyResult({
     required this.command,
@@ -145,6 +158,7 @@ class WorkCommandPolicyResult {
     required this.reason,
     this.rejectionReason,
     this.changePlan,
+    this.rejectionKind = WorkCommandRejectionKind.none,
   });
 
   bool get isReadOnly => impact == WorkCommandImpact.readOnly;
@@ -367,6 +381,7 @@ class WorkCommandPolicy {
         requiresExplicitRequest: false,
         reason: validationError,
         rejectionReason: validationError,
+        rejectionKind: _validationRejectionKind(validationError),
       );
     }
 
@@ -390,6 +405,7 @@ class WorkCommandPolicy {
         reason: reason,
         rejectionReason: reason,
         changePlan: plan,
+        rejectionKind: WorkCommandRejectionKind.explicitRequest,
       );
     }
 
@@ -472,6 +488,15 @@ class WorkCommandPolicy {
       }
     }
     return null;
+  }
+
+  WorkCommandRejectionKind _validationRejectionKind(String reason) {
+    final pathBoundary = reason.contains('workingDirectory') ||
+        reason.contains('授权目录') ||
+        reason.contains('路径');
+    return pathBoundary
+        ? WorkCommandRejectionKind.pathRejected
+        : WorkCommandRejectionKind.invalidInput;
   }
 
   WorkCommandImpact _classify(WorkCommand command) {

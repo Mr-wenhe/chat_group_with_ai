@@ -264,13 +264,32 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         );
       }
       final message = _publicText(toolResult.message);
+      final failure = WorkFailure.fromToolResult(
+        toolResult,
+        completedContent: _completedContent(state),
+      );
+      if (toolResult.failureCode == 'modelProtocol' &&
+          toolResult.data['rejectionKind'] ==
+              WorkCommandRejectionKind.invalidInput.name &&
+          state.invalidCommandRepairCount < maxProtocolRetries) {
+        state.invalidCommandRepairCount++;
+        await _emit(
+          state,
+          WorkTaskEventKind.toolOutput,
+          '命令未通过安全校验，正在自动重新规划。',
+          detail: message,
+          safeMetadata: {
+            'scope': WorkCommandRejectionKind.invalidInput.name,
+            'retry': state.invalidCommandRepairCount,
+          },
+        );
+        await _checkpoint(state);
+        return null;
+      }
       return _fail(
         state,
         message,
-        failure: WorkFailure.fromToolResult(
-          toolResult,
-          completedContent: _completedContent(state),
-        ),
+        failure: failure,
       );
     }
 

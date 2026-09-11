@@ -153,6 +153,45 @@ void main() {
       expect(find.text('项目分析结论已整理完成。'), findsOneWidget);
     });
 
+    testWidgets(
+        'migrates a legacy invalid-command pause without showing continue',
+        (tester) async {
+      final task = _task(
+        id: 'legacy-invalid-command-panel-task',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = true
+        ..lastError = '命令包含控制字符。';
+      WorkFailure.persistOnTask(
+        task,
+        WorkFailure.defaults(WorkFailureType.userActionRequired),
+      );
+      var retried = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onRetry: (_) async => retried = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-continue')), findsNothing);
+      expect(find.byKey(const Key('work-task-retry')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('work-task-retry')));
+      expect(retried, isTrue);
+    });
+
     testWidgets('shows the budgeted action count rather than a tool index',
         (tester) async {
       final task = _task(
@@ -625,9 +664,11 @@ void main() {
       );
       await tester.pump();
       expect(
-        tester.widget<FilledButton>(
-          find.byKey(const Key('work-task-reply-send')),
-        ).onPressed,
+        tester
+            .widget<FilledButton>(
+              find.byKey(const Key('work-task-reply-send')),
+            )
+            .onPressed,
         isNotNull,
       );
       await tester.ensureVisible(find.byKey(const Key('work-task-reply-send')));

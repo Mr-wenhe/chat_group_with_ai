@@ -165,7 +165,9 @@ class _MultiPatchGateway extends AiRequestGateway {
 }
 
 class _CommandGateway extends AiRequestGateway {
-  _CommandGateway()
+  final List<String> commandArguments;
+
+  _CommandGateway({this.commandArguments = const []})
       : super(
           store: MemoryGovernanceStore(),
           client: _UnusedClient(),
@@ -200,7 +202,7 @@ class _CommandGateway extends AiRequestGateway {
           'name': 'command.run',
           'arguments': {
             'executable': 'pwd',
-            'arguments': <String>[],
+            'arguments': commandArguments,
             'workingDirectory': '.',
             'declaredImpact': <String>['.'],
           },
@@ -872,6 +874,98 @@ void main() {
     expect(task.lastError, contains('commandRun'));
     expect(task.pendingToolRequestJson, contains('command.run'));
     expect(processStarts, 0);
+  });
+
+  test(
+      'invalid command input fails as a protocol error without a continue pause',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final mutations = WorkspaceMutationService(pathPolicy: pathPolicy);
+    final config = ApiConfig(
+      id: 'invalid-command-config',
+      name: 'Invalid command test',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'invalid-command-character',
+      name: '命令协议角色',
+      avatar: 'IC',
+      age: 30,
+      role: '测试执行角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [ToolPermission.commandRun],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    var processStarts = 0;
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: _CommandGateway(
+        commandArguments: const ['line-one\nline-two'],
+      ),
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      commandRunner: WorkCommandRunner(
+        policy: WorkCommandPolicy(
+          authorizedRoots: [authorizedDirectory.path],
+          isWindows: false,
+        ),
+        pathPolicy: pathPolicy,
+        processStarter: (_, {required env, required shell}) async {
+          processStarts++;
+          throw StateError('invalid command must not start a process');
+        },
+      ),
+    );
+    final task = AgentTask(
+      id: 'invalid-command-task',
+      groupId: 'invalid-command-group',
+      characterId: character.id,
+      userRequest: '生成报告',
+      requestedPermissions: character.toolPermissions,
+      assignedCharacterIds: const ['invalid-command-character'],
+      workModeTask: true,
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.failed);
+    expect(task.workFailure?.type, WorkFailureType.modelProtocol);
+    expect(task.resumeRequired, isTrue);
+    expect(task.pendingToolRequestJson, isEmpty);
+    expect(task.lastError, contains('命令包含控制字符'));
+    expect(processStarts, 0);
+    expect(
+      (await eventStore.read(task.id)).events.any(
+            (event) => event.title.contains('命令未通过安全校验'),
+          ),
+      isTrue,
+    );
   });
 
   test(

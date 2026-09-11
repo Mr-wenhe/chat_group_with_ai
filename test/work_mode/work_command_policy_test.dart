@@ -359,6 +359,25 @@ void main() {
     expect(traversal.rejectionReason, contains('路径'));
   });
 
+  test('classifies command rejection boundaries for recovery UI', () {
+    final invalid = policy.evaluate(
+      _command(arguments: const ['line-one\nline-two']),
+      taskId: 'task-invalid-input',
+    );
+    final outside = policy.evaluate(
+      _command(workingDirectory: '/outside'),
+      taskId: 'task-path-rejected',
+    );
+    final explicit = policy.evaluate(
+      _command(executable: 'flutter', arguments: const ['test']),
+      taskId: 'task-explicit-request',
+    );
+
+    expect(invalid.rejectionKind, WorkCommandRejectionKind.invalidInput);
+    expect(outside.rejectionKind, WorkCommandRejectionKind.pathRejected);
+    expect(explicit.rejectionKind, WorkCommandRejectionKind.explicitRequest);
+  });
+
   test('attached command options cannot hide an outside path', () {
     final output = policy.evaluate(
       _command(

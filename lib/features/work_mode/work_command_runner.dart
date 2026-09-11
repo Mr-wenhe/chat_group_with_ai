@@ -228,16 +228,16 @@ class WorkCommandRunner {
     required bool Function()? isCancelled,
   }) {
     if (!policyResult.allowed) {
-      final isPathRejected =
-          policyResult.rejectionReason?.contains('workingDirectory') == true ||
-              policyResult.rejectionReason?.contains('授权目录') == true ||
-              policyResult.rejectionReason?.contains('路径') == true;
+      final status = policyResult.rejectionKind ==
+              WorkCommandRejectionKind.pathRejected
+          ? WorkCommandRunStatus.pathRejected
+          : policyResult.rejectionKind == WorkCommandRejectionKind.invalidInput
+              ? WorkCommandRunStatus.failed
+              : WorkCommandRunStatus.blockedByDefault;
       return _result(
         command,
         policyResult,
-        status: isPathRejected
-            ? WorkCommandRunStatus.pathRejected
-            : WorkCommandRunStatus.blockedByDefault,
+        status: status,
         message: policyResult.rejectionReason ?? policyResult.reason,
       );
     }
