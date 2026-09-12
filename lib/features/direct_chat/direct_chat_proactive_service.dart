@@ -237,6 +237,7 @@ class DirectChatProactiveService {
   }
 
   bool _canGenerateProactiveMessage(AICharacter character) {
+    if (!character.proactiveChatEnabled) return false;
     final config = _resolveApiConfig(character);
     return config?.hasCredential == true;
   }

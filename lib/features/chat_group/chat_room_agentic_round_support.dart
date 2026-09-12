@@ -67,7 +67,12 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     // The snapshot was prepared once by _runAiRound. A missing snapshot is a
     // valid outcome (policy off, consent denied, stable question, or failure),
     // and must not cause this character to search again.
-    final webSearch = searchTurnContext?.snapshot;
+    // The turn snapshot is prepared once for all replies, but each role still
+    // observes its own capability boundary. Disabled roles receive ordinary
+    // context and never get search evidence injected into their prompt.
+    final webSearch = character.webSearchEnabled
+        ? searchTurnContext?.snapshot
+        : null;
     // 查询模型能力（是否支持图片输入），决定要不要拼多模态内容。
     final capability = _aiGateway.capability(provider, config.modelName);
     final apiMessages = _withWebSearchContext(
@@ -287,7 +292,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       _flushVoiceReply();
     }
     await _appendMessage(temp);
-    if (searchTurnContext != null) {
+    if (searchTurnContext != null && webSearch != null) {
       _searchTurnController.bindReply(temp.id, searchTurnContext);
     }
     await _recordReplyUsage(character);

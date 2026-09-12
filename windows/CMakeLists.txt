@@ -55,6 +55,52 @@ add_subdirectory("runner")
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
+#
+# desktop_webview_window 0.3.0 embeds a Flutter title-bar view inside the
+# native WebView window. Its top-level message handler can consume the
+# system WM_CLOSE message before the host window reaches DefWindowProc, so
+# clicking the native close button appears to do nothing. Patch the pinned
+# plugin source at configure time and handle WM_CLOSE before delegating to
+# the embedded Flutter view. WM_DESTROY then emits the plugin's normal
+# onWindowClose callback, allowing the Dart session lifecycle to update.
+set(DESKTOP_WEBVIEW_WINDOW_SOURCE
+  "${CMAKE_CURRENT_SOURCE_DIR}/flutter/ephemeral/.plugin_symlinks/desktop_webview_window/windows/webview_window.cc")
+if(NOT EXISTS "${DESKTOP_WEBVIEW_WINDOW_SOURCE}")
+  message(FATAL_ERROR
+    "desktop_webview_window native source not found: ${DESKTOP_WEBVIEW_WINDOW_SOURCE}")
+endif()
+file(READ "${DESKTOP_WEBVIEW_WINDOW_SOURCE}" DESKTOP_WEBVIEW_WINDOW_CODE)
+set(DESKTOP_WEBVIEW_WINDOW_CLOSE_MARKER
+  "  // Give Flutter, including plugins, an opportunity to handle window messages.\n")
+set(DESKTOP_WEBVIEW_WINDOW_CLOSE_GUARD
+  "  // Process the native close button before the embedded Flutter view can\n  // consume WM_CLOSE. WM_DESTROY emits onWindowClose to Dart.\n  if (message == WM_CLOSE ||\n      (message == WM_SYSCOMMAND && (wparam & 0xFFF0) == SC_CLOSE)) {\n    DestroyWindow(hwnd);\n    return 0;\n  }\n\n  // Give Flutter, including plugins, an opportunity to handle window messages.\n")
+if(DESKTOP_WEBVIEW_WINDOW_CODE MATCHES "SC_CLOSE")
+  # The guard is already present; keep configuration idempotent.
+elseif(DESKTOP_WEBVIEW_WINDOW_CODE MATCHES "WM_CLOSE")
+  # Expand an earlier version of this patch to cover the system command that
+  # normally precedes WM_CLOSE when the user clicks the native close button.
+  set(DESKTOP_WEBVIEW_WINDOW_CLOSE_OLD
+    "  if (message == WM_CLOSE) {\n    DestroyWindow(hwnd);\n    return 0;\n  }\n")
+  set(DESKTOP_WEBVIEW_WINDOW_CLOSE_NEW
+    "  if (message == WM_CLOSE ||\n      (message == WM_SYSCOMMAND && (wparam & 0xFFF0) == SC_CLOSE)) {\n    DestroyWindow(hwnd);\n    return 0;\n  }\n")
+  string(REPLACE
+    "${DESKTOP_WEBVIEW_WINDOW_CLOSE_OLD}"
+    "${DESKTOP_WEBVIEW_WINDOW_CLOSE_NEW}"
+    DESKTOP_WEBVIEW_WINDOW_CODE
+    "${DESKTOP_WEBVIEW_WINDOW_CODE}")
+  file(WRITE "${DESKTOP_WEBVIEW_WINDOW_SOURCE}" "${DESKTOP_WEBVIEW_WINDOW_CODE}")
+elseif(DESKTOP_WEBVIEW_WINDOW_CODE MATCHES "Give Flutter, including plugins")
+  string(REPLACE
+    "${DESKTOP_WEBVIEW_WINDOW_CLOSE_MARKER}"
+    "${DESKTOP_WEBVIEW_WINDOW_CLOSE_GUARD}"
+    DESKTOP_WEBVIEW_WINDOW_CODE
+    "${DESKTOP_WEBVIEW_WINDOW_CODE}")
+  file(WRITE "${DESKTOP_WEBVIEW_WINDOW_SOURCE}" "${DESKTOP_WEBVIEW_WINDOW_CODE}")
+else()
+  message(FATAL_ERROR
+    "desktop_webview_window MessageHandler marker not found: ${DESKTOP_WEBVIEW_WINDOW_SOURCE}")
+endif()
+
 include(flutter/generated_plugins.cmake)
 
 

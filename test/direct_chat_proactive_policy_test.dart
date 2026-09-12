@@ -379,6 +379,44 @@ void main() {
       expect(candidate?.reason, '主动问候');
     });
 
+    test('disabled character never becomes a proactive DM candidate', () {
+      final alice = _character(id: 'alice', name: '小夏')
+        ..proactiveChatEnabled = false;
+      final now = DateTime(2026, 7, 8, 12);
+      final conversationId = DirectChatSession.conversationIdFor('alice');
+      final candidate = DirectChatProactivePolicy.selectCandidate(
+        directSummaries: [
+          DirectChatSummary(
+            conversationId: conversationId,
+            character: alice,
+            lastMessage: Message(
+              groupId: conversationId,
+              senderId: 'user',
+              senderType: 'user',
+              content: '晚点聊',
+              timestamp: now.subtract(const Duration(hours: 8)),
+            ),
+            unreadCount: 0,
+            source: DirectChatSource.direct,
+            hasUserMessage: true,
+          ),
+        ],
+        groupCandidates: [
+          _groupCandidate(
+            character: alice,
+            groupId: 'g1',
+            at: now.subtract(const Duration(minutes: 5)),
+          ),
+        ],
+        idleCharacters: [alice],
+        lastProactiveAtByCharacter: const {},
+        now: now,
+        preferredConversationId: conversationId,
+      );
+
+      expect(candidate, isNull);
+    });
+
     test('idle greeting still respects the proactive cooldown', () {
       final alice = _character(id: 'alice', name: '小夏');
       final now = DateTime(2026, 7, 8, 12);

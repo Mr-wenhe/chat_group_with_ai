@@ -56,6 +56,8 @@ class _BackupEntityRecordCodec {
       'agenticEnabled': item.agenticEnabled,
       'skillIds': item.skillIds,
       'toolPermissions': item.toolPermissions.map((item) => item.name).toList(),
+      'webSearchEnabled': item.webSearchEnabled,
+      'proactiveChatEnabled': item.proactiveChatEnabled,
     };
     if (item.hasKnownGender) value['gender'] = item.gender.name;
     return value;
@@ -94,6 +96,8 @@ class _BackupEntityRecordCodec {
       agenticEnabled: json['agenticEnabled'] as bool? ?? true,
       skillIds: _strings(json['skillIds']),
       toolPermissions: _enums(json['toolPermissions'], ToolPermission.values),
+      webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
+      proactiveChatEnabled: json['proactiveChatEnabled'] as bool? ?? true,
       gender: gender ?? CharacterGender.female,
       hasKnownGender: gender != null,
     );

@@ -49,6 +49,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   CharacterGender? _selectedGender;
   bool _isSaving = false;
   bool _agenticEnabled = true;
+  bool _webSearchEnabled = false;
+  bool _proactiveChatEnabled = true;
   List<ToolPermission> _toolPermissions = const [];
   Set<String> _selectedSkillTemplateIds = const {};
 
@@ -78,6 +80,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     _selectedVoiceId = c?.voiceId ?? '';
     _selectedGender = c != null && c.hasKnownGender ? c.gender : null;
     _agenticEnabled = c?.agenticEnabled ?? true;
+    _webSearchEnabled = c?.webSearchEnabled ?? false;
+    _proactiveChatEnabled = c?.proactiveChatEnabled ?? true;
     _selectedSkillTemplateIds =
         Set<String>.from(c?.skillIds ?? const <String>[]);
     _toolPermissions = List<ToolPermission>.from(
@@ -553,6 +557,31 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
             AppCard(
               cs: cs,
               children: [
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  value: _proactiveChatEnabled,
+                  onChanged: (value) =>
+                      setState(() => _proactiveChatEnabled = value),
+                  title: const Text('允许主动聊天'),
+                  subtitle: const Text(
+                    '关闭后不会主动发起私信，但仍会回复你主动发送的消息',
+                  ),
+                  secondary:
+                      Icon(Icons.mark_chat_unread_rounded, color: cs.primary),
+                ),
+                const Divider(height: 8),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  value: _webSearchEnabled,
+                  onChanged: (value) =>
+                      setState(() => _webSearchEnabled = value),
+                  title: const Text('允许联网搜索'),
+                  subtitle: const Text(
+                    '回答时可使用全局搜索设置中的来源；未配置 Key 时自动使用 DuckDuckGo 无 Key 搜索',
+                  ),
+                  secondary: Icon(Icons.public_rounded, color: cs.primary),
+                ),
+                const Divider(height: 8),
                 CharacterSkillEditor(
                   enabled: _agenticEnabled,
                   onEnabledChanged: (value) {
@@ -685,6 +714,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         skillIds: _mergedSkillIds(),
         toolPermissions:
             _agenticEnabled ? _normalizedToolPermissions() : const [],
+        webSearchEnabled: _webSearchEnabled,
+        proactiveChatEnabled: _proactiveChatEnabled,
         createdAt: widget.character?.createdAt ?? DateTime.now(),
         gender: _isEditing ? widget.character!.gender : _selectedGender!,
         voiceId: _selectedVoiceId,
@@ -733,6 +764,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       apiKey: '',
       apiProvider: 'deepseek',
       gender: _selectedGender ?? CharacterGender.female,
+      webSearchEnabled: _webSearchEnabled,
+      proactiveChatEnabled: _proactiveChatEnabled,
     );
   }
 

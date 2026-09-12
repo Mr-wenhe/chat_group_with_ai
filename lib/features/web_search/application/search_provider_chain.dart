@@ -5,6 +5,7 @@ import 'package:dio/dio.dart';
 import '../models/search_failure.dart';
 import '../models/search_models.dart' as domain;
 import '../providers/search_provider.dart';
+import '../providers/duckduckgo_result_page_enricher.dart';
 import '../models/search_failure_factory.dart';
 import 'search_failure_mapper.dart';
 import 'search_provider_route.dart';
@@ -22,14 +23,17 @@ class SearchProviderChain {
   final List<SearchProviderRoute> _routes;
   final SearchRetryPolicy retryPolicy;
   final DateTime Function() _clock;
+  final DuckDuckGoResultPageEnricher? _duckDuckGoPageEnricher;
   final Map<String, _ProviderCircuitState> _circuits = {};
 
   SearchProviderChain({
     required Iterable<SearchProviderRoute> routes,
     required this.retryPolicy,
     DateTime Function()? clock,
+    DuckDuckGoResultPageEnricher? duckDuckGoPageEnricher,
   })  : _routes = List.unmodifiable(routes),
-        _clock = clock ?? DateTime.now;
+        _clock = clock ?? DateTime.now,
+        _duckDuckGoPageEnricher = duckDuckGoPageEnricher;
 
   String primaryProviderKey(domain.SearchRequest request) {
     final routes = _routesFor(request);
@@ -187,7 +191,14 @@ class SearchProviderChain {
         continue;
       }
 
-      final response = _normalizeResponse(attempt.requireValue);
+      var response = _normalizeResponse(attempt.requireValue);
+      // DuckDuckGo returns lightweight snippets; hydrate its first two links
+      // before building the immutable snapshot consumed by the LLM prompt.
+      response = await _enrichDuckDuckGoResponse(
+        route: route,
+        response: response,
+        cancelToken: cancelToken,
+      );
       if (response.failure?.retryable == true) {
         _recordRetryableFailure(route);
       } else {
@@ -357,6 +368,42 @@ class SearchProviderChain {
         providerRequestId: response.providerRequestId,
       ),
     );
+  }
+
+  Future<SearchProviderResponse> _enrichDuckDuckGoResponse({
+    required SearchProviderRoute route,
+    required SearchProviderResponse response,
+    required CancelToken? cancelToken,
+  }) async {
+    final enricher = _duckDuckGoPageEnricher;
+    final sourceProvider = response.sourceProvider?.toLowerCase() ?? '';
+    final isDuckDuckGoRoute =
+        route.kind == domain.SearchProviderKind.duckDuckGoInstantAnswer ||
+            (route.kind == domain.SearchProviderKind.keylessHtml &&
+                !sourceProvider.contains('bing'));
+    if (enricher == null || !isDuckDuckGoRoute || response.items.isEmpty) {
+      return response;
+    }
+    try {
+      final items = await enricher.enrich(
+        response.items,
+        cancelToken: cancelToken,
+      );
+      return SearchProviderResponse(
+        items: items,
+        providerRequestId: response.providerRequestId,
+        sourceProvider: response.sourceProvider,
+        correctedQuery: response.correctedQuery,
+        moreResultsAvailable: response.moreResultsAvailable,
+        fromCache: response.fromCache,
+        degraded: response.degraded,
+        terminal: response.terminal,
+        failure: response.failure,
+        statusCode: response.statusCode,
+      );
+    } on Object {
+      return response;
+    }
   }
 
   domain.WebSearchSnapshot _failureSnapshot({

@@ -12,6 +12,7 @@ class VisibleBrowserPanel extends StatelessWidget {
   final ValueChanged<String> onSelectSession;
   final FutureOr<void> Function(String sessionId) onContinue;
   final FutureOr<void> Function(String sessionId) onClose;
+  final VoidCallback onClosePanel;
   final FutureOr<void> Function(String sessionId)? onBringToForeground;
   final FutureOr<void> Function()? onInstallRuntime;
 
@@ -22,6 +23,7 @@ class VisibleBrowserPanel extends StatelessWidget {
     required this.onSelectSession,
     required this.onContinue,
     required this.onClose,
+    required this.onClosePanel,
     this.onBringToForeground,
     this.onInstallRuntime,
   });
@@ -73,11 +75,17 @@ class VisibleBrowserPanel extends StatelessWidget {
         ),
         IconButton(
           key: const Key('visible-browser-close'),
-          tooltip: '关闭浏览器（任务继续）',
+          tooltip: '关闭可见浏览器接管窗口（任务继续）',
           onPressed: session.status == VisibleBrowserStatus.closed
               ? null
               : () => onClose(session.id),
           icon: const Icon(Icons.close_rounded),
+        ),
+        IconButton(
+          key: const Key('visible-browser-panel-close'),
+          tooltip: '关闭可见浏览器接管面板',
+          onPressed: onClosePanel,
+          icon: const Icon(Icons.close_fullscreen_rounded),
         ),
       ],
     );

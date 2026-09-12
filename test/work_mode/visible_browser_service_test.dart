@@ -434,6 +434,8 @@ void main() {
       await service.closeSession(service.sessions.single.id);
       expect(service.sessions.single.status, VisibleBrowserStatus.closed);
       expect(service.sessions.single.canContinue, isTrue);
+      expect(factory.windows.single.isClosed, isTrue);
+      expect(factory.windows.single.stopCount, 1);
       expect(stoppedTaskCount, 0);
       // A late native callback must not resume the closed session implicitly.
       expect(
@@ -608,6 +610,7 @@ void main() {
             onSelectSession: (_) {},
             onContinue: (_) async => continued = true,
             onClose: (_) async {},
+            onClosePanel: () {},
           ),
         ),
       ));
@@ -662,6 +665,14 @@ void main() {
       await _settle();
       expect(service.sessions.single.status, VisibleBrowserStatus.closed);
       expect(stoppedTaskIds, isEmpty);
+
+      await tester.tap(find.byKey(const Key('visible-browser-panel-close')));
+      await tester.pump();
+      expect(find.byKey(const Key('visible-browser-panel')), findsNothing);
+      expect(
+        find.byKey(const Key('visible-browser-panel-reopen')),
+        findsOneWidget,
+      );
     });
 
     test('allows public http navigation but blocks unsafe schemes', () async {

@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:flutter/foundation.dart';
+
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
@@ -16,6 +18,7 @@ import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
 import 'package:chat_group/features/web_search/providers/native_web_search_adapter.dart';
 import 'package:chat_group/features/web_search/providers/search_provider.dart';
+import 'package:chat_group/features/web_search/providers/duckduckgo_result_page_enricher.dart';
 import 'package:chat_group/features/work_mode/visible_browser_service.dart';
 import 'package:crypto/crypto.dart';
 import 'package:dio/dio.dart';
@@ -103,6 +106,9 @@ class ChatRoomSearchRuntimeController {
             visibleBrowserService == null ? null : _searchWithVisibleBrowser,
       ),
       queryPlanner: _searchQueryPlanner(),
+      duckDuckGoPageEnricher: DuckDuckGoResultPageEnricher(
+        isRelease: kReleaseMode,
+      ),
     );
   }
 
@@ -185,6 +191,7 @@ class ChatRoomSearchRuntimeController {
             'legacyModel': character.modelName,
             'legacyCustomBaseUrl': character.customBaseUrl,
             'isActive': character.isActive,
+            'webSearchEnabled': character.webSearchEnabled,
             'apiConfig': _apiConfigSignature(resolveApiConfig(character)),
           },
         )

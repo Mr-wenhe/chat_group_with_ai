@@ -142,6 +142,64 @@ void main() {
     await tester.pump(const Duration(seconds: 4));
   });
 
+  testWidgets('role can opt into keyless web search', (tester) async {
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.ensureVisible(find.text('允许联网搜索'));
+    await tester.tap(find.text('允许联网搜索'));
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextFormField).at(0), '搜索角色');
+    await tester.enterText(find.byType(TextFormField).at(2), '研究员');
+    await tester.tap(find.byType(DropdownButtonFormField<CharacterGender>));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('女'));
+    await tester.pump();
+    await tester.runAsync(() async {
+      await tester.tap(find.text('创建').first);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(db.aiCharacterBox.values.single.webSearchEnabled, isTrue);
+  });
+
+  testWidgets('role can disable proactive private messages', (tester) async {
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.ensureVisible(find.text('允许主动聊天'));
+    expect(
+      tester.widget<SwitchListTile>(
+        find.widgetWithText(SwitchListTile, '允许主动聊天'),
+      ).value,
+      isTrue,
+    );
+    await tester.tap(find.text('允许主动聊天'));
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextFormField).at(0), '安静角色');
+    await tester.enterText(find.byType(TextFormField).at(2), '研究员');
+    await tester.tap(find.byType(DropdownButtonFormField<CharacterGender>));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('女'));
+    await tester.pump();
+    await tester.runAsync(() async {
+      await tester.tap(find.text('创建').first);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(db.aiCharacterBox.values.single.proactiveChatEnabled, isFalse);
+  });
+
   testWidgets('edit form locks the stored gender and explains the boundary',
       (tester) async {
     final saved = character(gender: CharacterGender.male);

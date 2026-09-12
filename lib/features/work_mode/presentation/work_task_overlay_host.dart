@@ -106,6 +106,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   List<VisibleBrowserSession> _browserSessions =
       const <VisibleBrowserSession>[];
   String? _selectedBrowserSessionId;
+  bool _isBrowserPanelVisible = true;
   final Set<String> _approvalPromptInFlight = <String>{};
 
   @override
@@ -194,7 +195,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     return Stack(
       children: <Widget>[
         Positioned.fill(child: widget.child),
-        if (_browserSessions.isNotEmpty)
+        if (_browserSessions.isNotEmpty && _isBrowserPanelVisible)
           _positionedBrowserPanel(
             isWide: isWide,
             availableWidth: viewport.width,
@@ -206,8 +207,20 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
                   setState(() => _selectedBrowserSessionId = sessionId),
               onContinue: _continueBrowser,
               onClose: _closeBrowser,
+              onClosePanel: _closeBrowserPanel,
               onBringToForeground: _focusBrowser,
               onInstallRuntime: _installBrowserRuntime,
+            ),
+          ),
+        if (_browserSessions.isNotEmpty && !_isBrowserPanelVisible)
+          Positioned(
+            left: 16,
+            top: 72,
+            child: FloatingActionButton.small(
+              key: const Key('visible-browser-panel-reopen'),
+              tooltip: '显示可见浏览器接管面板',
+              onPressed: () => setState(() => _isBrowserPanelVisible = true),
+              child: const Icon(Icons.public_rounded),
             ),
           ),
         if (hasTasks && _isVisible && !_isCollapsed)
@@ -387,6 +400,11 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   Future<void> _closeBrowser(String sessionId) async {
     await _browserService?.closeSession(sessionId);
+  }
+
+  void _closeBrowserPanel() {
+    if (!mounted) return;
+    setState(() => _isBrowserPanelVisible = false);
   }
 
   Future<void> _focusBrowser(String sessionId) async {

@@ -136,9 +136,70 @@ Future<void> runSearchCredentialRepair(
   }
 }
 
+/// Builds the title bar for the separate visible-browser takeover window.
+///
+/// The package's default title bar has navigation controls but no explicit
+/// close action. Keep the close action in the same Flutter title-bar view so
+/// it closes the native WebView window and emits the normal onWindowClose
+/// callback back to the host app.
+Widget _visibleBrowserTitleBar(BuildContext context) {
+  final state = TitleBarWebViewState.of(context);
+  final controller = TitleBarWebViewController.of(context);
+  return Row(
+    crossAxisAlignment: CrossAxisAlignment.center,
+    children: <Widget>[
+      IconButton(
+        padding: EdgeInsets.zero,
+        splashRadius: 16,
+        iconSize: 16,
+        tooltip: '后退',
+        onPressed: !state.canGoBack ? null : controller.back,
+        icon: const Icon(Icons.arrow_back),
+      ),
+      IconButton(
+        padding: EdgeInsets.zero,
+        splashRadius: 16,
+        iconSize: 16,
+        tooltip: '前进',
+        onPressed: !state.canGoForward ? null : controller.forward,
+        icon: const Icon(Icons.arrow_forward),
+      ),
+      if (state.isLoading)
+        IconButton(
+          padding: EdgeInsets.zero,
+          splashRadius: 16,
+          iconSize: 16,
+          tooltip: '停止加载',
+          onPressed: controller.stop,
+          icon: const Icon(Icons.close),
+        )
+      else
+        IconButton(
+          padding: EdgeInsets.zero,
+          splashRadius: 16,
+          iconSize: 16,
+          tooltip: '刷新',
+          onPressed: controller.reload,
+          icon: const Icon(Icons.refresh),
+        ),
+      const Spacer(),
+      IconButton(
+        padding: EdgeInsets.zero,
+        splashRadius: 16,
+        iconSize: 18,
+        tooltip: '关闭可见浏览器',
+        onPressed: controller.close,
+        icon: const Icon(Icons.close_rounded),
+      ),
+    ],
+  );
+}
+
 void main(List<String> args) async {
   DedupKeyEventBinding.ensureInitialized();
-  if (runWebViewTitleBarWidget(args)) return;
+  if (runWebViewTitleBarWidget(args, builder: _visibleBrowserTitleBar)) {
+    return;
+  }
 
   final db = DatabaseService();
   try {

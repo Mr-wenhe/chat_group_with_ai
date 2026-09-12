@@ -7,6 +7,7 @@ import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import '../models/search_failure_factory.dart';
 import '../models/search_models.dart' as domain;
 import '../providers/search_provider.dart';
+import '../providers/duckduckgo_result_page_enricher.dart';
 import 'search_coordinator_support.dart';
 import 'search_intent_detector.dart';
 import 'search_provider_chain.dart';
@@ -42,6 +43,7 @@ class SearchCoordinator {
   final Uuid _uuid;
   final List<SearchProviderRoute> _routes;
   final Duration endToEndBudget;
+  final DuckDuckGoResultPageEnricher? duckDuckGoPageEnricher;
 
   late final SearchCoordinatorSupport _support = SearchCoordinatorSupport(
     store: store,
@@ -52,6 +54,7 @@ class SearchCoordinator {
     routes: _routes,
     retryPolicy: retryPolicy,
     clock: _clock,
+    duckDuckGoPageEnricher: duckDuckGoPageEnricher,
   );
 
   SearchCoordinator({
@@ -67,6 +70,7 @@ class SearchCoordinator {
     SearchIntentDetector? intentDetector,
     SearchQuerySanitizer? sanitizer,
     this.queryPlanner,
+    this.duckDuckGoPageEnricher,
     SearchRetrySleep sleep = searchRetrySleep,
     DateTime Function()? clock,
     Duration totalBudget = searchRetryBudget,

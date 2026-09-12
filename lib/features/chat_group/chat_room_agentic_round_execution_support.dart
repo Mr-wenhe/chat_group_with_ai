@@ -70,6 +70,8 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         userMessage: userMessage,
         currentUserMessage: currentUserMessage,
         isAutoChat: isAutoChat,
+        searchEnabled: charactersToReply.any((character) =>
+            character.webSearchEnabled),
       );
       final repliedIds = <String>[];
       for (final character in charactersToReply) {

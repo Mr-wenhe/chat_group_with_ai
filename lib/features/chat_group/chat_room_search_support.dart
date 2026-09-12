@@ -32,12 +32,16 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
     required String? userMessage,
     required Message? currentUserMessage,
     required bool isAutoChat,
+    required bool searchEnabled,
   }) async {
     final query = userMessage?.trim() ?? '';
     final origin =
         isAutoChat ? SearchMessageOrigin.autoChat : SearchMessageOrigin.user;
     final sourceMessageId = currentUserMessage?.id.trim() ?? '';
-    if (isAutoChat || query.isEmpty || sourceMessageId.isEmpty) {
+    if (!searchEnabled ||
+        isAutoChat ||
+        query.isEmpty ||
+        sourceMessageId.isEmpty) {
       return SearchTurnContext.suppressed(
         conversationId: widget.groupId,
         sourceMessageId: sourceMessageId,
@@ -329,13 +333,25 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
       {bool allowSourceLinks = false}) {
     if (snapshot == null) return messages;
     final next = List<Map<String, dynamic>>.from(messages);
-    final insertAt = next.indexWhere((message) => message['role'] != 'system');
     final contextMessages = _chatRoomSearchContextFormatter.formatMessages(
       snapshot,
       allowSourceLinks: allowSourceLinks,
     );
-    final target = insertAt < 0 ? next.length : insertAt;
-    next.insertAll(target, contextMessages);
+    // Keep the usage rules in the system-message block for provider
+    // compatibility, but place the evidence immediately before the newest
+    // user message. This prevents a long chat history from separating the
+    // Search results from the question they are meant to answer, regardless
+    // of whether the source is Tavily, DuckDuckGo, or another route.
+    final rules = contextMessages
+        .where((message) => message['role'] == 'system')
+        .toList(growable: false);
+    final evidence = contextMessages
+        .where((message) => message['role'] != 'system')
+        .toList(growable: false);
+    final firstDialogue = next.indexWhere((message) => message['role'] != 'system');
+    next.insertAll(firstDialogue < 0 ? next.length : firstDialogue, rules);
+    final newestUser = next.lastIndexWhere((message) => message['role'] == 'user');
+    next.insertAll(newestUser < 0 ? next.length : newestUser, evidence);
     return next;
   }
 
@@ -467,6 +483,13 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
     Message original, {
     required bool forceRefresh,
   }) async {
+    // A role can be edited while this room remains mounted. Do not reuse or
+    // refresh a previously captured snapshot after that role has opted out of
+    //联网搜索; the role-level switch is an explicit capability boundary.
+    final sender = _allGroupCharacters
+        .where((character) => character.id == original.senderId)
+        .firstOrNull;
+    if (sender != null && !sender.webSearchEnabled) return null;
     final existing =
         _searchTurnController.contextForRegeneration(original.id) ??
             _persistedSearchContext(original);

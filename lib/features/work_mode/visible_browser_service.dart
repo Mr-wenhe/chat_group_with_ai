@@ -244,7 +244,12 @@ class VisibleBrowserService {
       metadata: const <String, Object?>{'taskContinues': true},
     );
     final window = _windows.remove(sessionId);
-    window?.close();
+    if (window != null) {
+      // Stop an in-flight navigation before closing. Some desktop WebView
+      // runtimes keep processing the navigation callback and ignore a close
+      // request until the pending load is cancelled.
+      await _stopAndClose(window);
+    }
   }
 
   Future<void> bringToForeground(String sessionId) async {

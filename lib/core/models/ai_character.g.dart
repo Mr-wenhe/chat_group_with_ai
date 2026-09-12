@@ -45,13 +45,15 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
           : fields[21] as CharacterGender,
       hasKnownGender: fields[22] == null ? false : fields[22] as bool,
       voiceId: fields[23] == null ? '' : fields[23] as String,
+      webSearchEnabled: fields[24] == null ? false : fields[24] as bool,
+      proactiveChatEnabled: fields[25] == null ? true : fields[25] as bool,
     );
   }
 
   @override
   void write(BinaryWriter writer, AICharacter obj) {
     writer
-      ..writeByte(24)
+      ..writeByte(26)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -99,7 +101,11 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
       ..writeByte(22)
       ..write(obj.hasKnownGender)
       ..writeByte(23)
-      ..write(obj.voiceId);
+      ..write(obj.voiceId)
+      ..writeByte(24)
+      ..write(obj.webSearchEnabled)
+      ..writeByte(25)
+      ..write(obj.proactiveChatEnabled);
   }
 
   @override
