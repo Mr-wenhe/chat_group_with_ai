@@ -59,7 +59,9 @@ class DuckDuckGoResultPageEnricher {
     final pageCount = items.length < _maxPages ? items.length : _maxPages;
     for (var index = 0; index < pageCount; index++) {
       if (cancelToken?.isCancelled == true) break;
-      final pageText = await _loadPage(items[index].url, cancelToken)
+      if (!items[index].hasSourceUrl) continue;
+      final url = items[index].url;
+      final pageText = await _loadPage(url, cancelToken)
           .timeout(_pageTimeout, onTimeout: () => null);
       if (pageText == null || pageText.isEmpty) continue;
       enriched[index] = _withPageEvidence(items[index], pageText);

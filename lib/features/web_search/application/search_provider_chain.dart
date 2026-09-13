@@ -13,6 +13,7 @@ import 'search_retry_policy.dart';
 import 'search_run_state.dart';
 import 'search_snapshot_builder.dart';
 import '../security/search_query_sanitizer.dart';
+import 'search_flow_logger.dart';
 
 /// Executes the ordered normalized Provider chain without knowing any
 /// Provider-specific response JSON.
@@ -85,9 +86,15 @@ class SearchProviderChain {
             ? policyDeadline
             : deadline;
     var retryCount = 0;
+    var attemptedRouteCount = 0;
     domain.WebSearchSnapshot? lastSnapshot;
 
     if (routes.isEmpty) {
+      SearchFlowLogger.event(
+        'chain_blocked',
+        query: request.query,
+        fields: {'reason': 'no_routes'},
+      );
       return _failureSnapshot(
         request: request,
         provider: 'none',
@@ -104,11 +111,54 @@ class SearchProviderChain {
       // A visible-browser handoff deliberately waits for a user action, so
       // the bounded HTTP deadline must not prevent the final fallback from
       // opening after a slow/empty/429 response.
-      if (!route.isVisibleBrowser && !_hasBudget(effectiveDeadline)) break;
+      if (!route.isVisibleBrowser && !_hasBudget(effectiveDeadline)) {
+        SearchFlowLogger.event(
+          'provider_skipped',
+          query: request.query,
+          fields: {
+            'requestId': request.requestId,
+            'routeId': route.id,
+            'provider': route.providerName,
+            'reason': 'deadline_exhausted',
+          },
+        );
+        break;
+      }
       // Do not reserve a half-open probe until the request is known to be
       // dispatchable. Cancellation or an exhausted budget must not strand a
       // circuit in half-open state.
-      if (!_canAttempt(route)) continue;
+      if (!_canAttempt(route)) {
+        final circuit = _circuits[route.cacheKey];
+        SearchFlowLogger.event(
+          'provider_skipped',
+          query: request.query,
+          fields: {
+            'requestId': request.requestId,
+            'routeId': route.id,
+            'provider': route.providerName,
+            'reason': circuit?.halfOpenInFlight == true
+                ? 'circuit_half_open_in_flight'
+                : 'circuit_open',
+            'consecutiveFailures': circuit?.consecutiveFailures ?? 0,
+            'openUntil': circuit?.openUntil?.toIso8601String(),
+          },
+        );
+        continue;
+      }
+
+      attemptedRouteCount++;
+      SearchFlowLogger.event(
+        'provider_attempt',
+        query: request.query,
+        fields: {
+          'requestId': request.requestId,
+          'routeId': route.id,
+          'provider': route.providerName,
+          'kind': route.kind.name,
+          'isNative': route.isNative,
+          'attemptIndex': index,
+        },
+      );
 
       _emit(
         onStatus,
@@ -172,6 +222,17 @@ class SearchProviderChain {
           degraded: index > 0,
           latencyMs: _elapsedMilliseconds(startedAt),
         );
+        SearchFlowLogger.event(
+          'provider_attempt_error',
+          query: request.query,
+          fields: {
+            'requestId': request.requestId,
+            'routeId': route.id,
+            'provider': route.providerName,
+            'failureType': failure.type.name,
+            'retryCount': retryCount,
+          },
+        );
         if (failure.retryable) {
           _recordRetryableFailure(route);
         } else {
@@ -217,6 +278,19 @@ class SearchProviderChain {
       );
       lastSnapshot = snapshot;
 
+      SearchFlowLogger.event(
+        'provider_attempt_complete',
+        query: request.query,
+        fields: {
+          'requestId': request.requestId,
+          'routeId': route.id,
+          'provider': snapshot.provider,
+          'resultCount': response.items.length,
+          'failureType': response.failure?.type.name,
+          'retryCount': retryCount,
+        },
+      );
+
       if (response.items.isNotEmpty && response.failure == null) {
         return snapshot;
       }
@@ -236,6 +310,18 @@ class SearchProviderChain {
       // snapshot remains noResults rather than becoming failed.
     }
 
+    if (lastSnapshot == null) {
+      SearchFlowLogger.event(
+        'chain_complete_without_attempt',
+        query: request.query,
+        fields: {
+          'requestId': request.requestId,
+          'routeCount': routes.length,
+          'attemptedRouteCount': attemptedRouteCount,
+          'reason': 'provider_unavailable',
+        },
+      );
+    }
     return lastSnapshot ??
         _failureSnapshot(
           request: request,
@@ -502,6 +588,15 @@ class SearchProviderChain {
         state.consecutiveFailures >= _circuitFailureThreshold) {
       state.openUntil = _clock().add(_circuitOpenDuration);
       state.halfOpenInFlight = false;
+      SearchFlowLogger.event(
+        'circuit_opened',
+        fields: {
+          'routeId': route.id,
+          'provider': route.providerName,
+          'consecutiveFailures': state.consecutiveFailures,
+          'openUntil': state.openUntil?.toIso8601String(),
+        },
+      );
     }
   }
 

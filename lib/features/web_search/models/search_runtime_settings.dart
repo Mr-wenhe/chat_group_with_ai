@@ -14,6 +14,9 @@ class SearchRuntimeSettings {
   final int maxResults;
   final bool safeSearch;
   final bool nativeSearchEnabled;
+  /// When true, only a character's model-native route is constructed; no
+  /// independent search provider is even instantiated.
+  final bool nativeSearchOnly;
   final bool queryPlanningEnabled;
 
   const SearchRuntimeSettings({
@@ -22,6 +25,7 @@ class SearchRuntimeSettings {
     this.maxResults = defaultMaxResults,
     this.safeSearch = defaultSafeSearch,
     this.nativeSearchEnabled = false,
+    this.nativeSearchOnly = false,
     this.queryPlanningEnabled = false,
   });
 
@@ -33,6 +37,7 @@ class SearchRuntimeSettings {
       maxResults: _normalizeMaxResults(raw['maxResults']),
       safeSearch: raw['safeSearch'] != false,
       nativeSearchEnabled: raw['nativeSearchEnabled'] == true,
+      nativeSearchOnly: raw['nativeSearchOnly'] == true,
       queryPlanningEnabled: raw['queryPlanningEnabled'] == true,
     );
   }
@@ -43,6 +48,7 @@ class SearchRuntimeSettings {
         'maxResults': maxResults,
         'safeSearch': safeSearch,
         'nativeSearchEnabled': nativeSearchEnabled,
+        'nativeSearchOnly': nativeSearchOnly,
         'queryPlanningEnabled': queryPlanningEnabled,
       };
 
@@ -53,6 +59,7 @@ class SearchRuntimeSettings {
     int? maxResults,
     bool? safeSearch,
     bool? nativeSearchEnabled,
+    bool? nativeSearchOnly,
     bool? queryPlanningEnabled,
   }) {
     return SearchRuntimeSettings(
@@ -61,6 +68,7 @@ class SearchRuntimeSettings {
       maxResults: _normalizeMaxResults(maxResults ?? this.maxResults),
       safeSearch: safeSearch ?? this.safeSearch,
       nativeSearchEnabled: nativeSearchEnabled ?? this.nativeSearchEnabled,
+      nativeSearchOnly: nativeSearchOnly ?? this.nativeSearchOnly,
       queryPlanningEnabled: queryPlanningEnabled ?? this.queryPlanningEnabled,
     );
   }

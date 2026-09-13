@@ -10,6 +10,7 @@ import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/search_coordinator.dart';
 import 'package:chat_group/features/web_search/application/search_runtime_provider_factory.dart';
+import 'package:chat_group/features/web_search/application/search_flow_logger.dart';
 import 'package:chat_group/features/web_search/application/search_turn_context.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 import 'package:chat_group/features/web_search/models/search_failure_factory.dart';
@@ -98,14 +99,41 @@ class ChatRoomSearchRuntimeController {
   SearchCoordinator _createSearchCoordinator(
     SearchProviderConfigStore settings,
   ) {
+    final nativeBinding = _nativeSearchBinding();
+    final hasSearchAnswerOnlyRole =
+        allCharacters().any((character) => character.zhipuSearchAnswerOnly);
+    // Enabling model-native search is fail-closed: once a supported role
+    // binding exists, this room does not instantiate an independent search
+    // provider. The persisted flag keeps the policy explicit for restored
+    // settings and future per-role controls.
+    final nativeOnly = hasSearchAnswerOnlyRole ||
+        runtimeSettings.nativeSearchOnly ||
+        (runtimeSettings.nativeSearchEnabled &&
+            nativeBinding != null);
+    SearchFlowLogger.event(
+      'runtime_build',
+      fields: {
+        'conversationId': conversationId,
+        'nativeSearchEnabled': runtimeSettings.nativeSearchEnabled,
+        'nativeSearchOnly': runtimeSettings.nativeSearchOnly,
+        'nativeBinding': nativeBinding == null
+            ? null
+            : '${nativeBinding.provider.name}/${nativeBinding.model}',
+        'nativeOnly': nativeOnly,
+      },
+    );
     return SearchCoordinator(
       store: governanceStore,
       routes: SearchRuntimeProviderFactory(store: settings).buildRoutes(
-        nativeSearch: _nativeSearchBinding(),
+        nativeSearch: nativeBinding,
+        nativeOnly: nativeOnly,
         visibleBrowserSearch:
             visibleBrowserService == null ? null : _searchWithVisibleBrowser,
       ),
-      queryPlanner: _searchQueryPlanner(),
+      // Native-only search already has a provider-owned query protocol. Do
+      // not spend another model request on rewriting the query before the
+      // native Web Search call; this also keeps the mode strictly native.
+      queryPlanner: nativeOnly ? null : _searchQueryPlanner(),
       duckDuckGoPageEnricher: DuckDuckGoResultPageEnricher(
         isRelease: kReleaseMode,
       ),
@@ -113,21 +141,67 @@ class ChatRoomSearchRuntimeController {
   }
 
   NativeWebSearchBinding? _nativeSearchBinding() {
-    if (!runtimeSettings.nativeSearchEnabled) return null;
+    final characters = allCharacters().toList(growable: false);
+    final searchAnswerOnly = characters
+        .where((character) => character.zhipuSearchAnswerOnly)
+        .toList(growable: false);
+    if (!runtimeSettings.nativeSearchEnabled && searchAnswerOnly.isEmpty) {
+      SearchFlowLogger.event(
+        'native_binding_skipped',
+        fields: {'reason': 'disabled'},
+      );
+      return null;
+    }
     final candidates = <String, ApiConfig>{};
-    for (final character in allCharacters()) {
+    // Keep the old room-level route available while no role has explicitly
+    // opted in yet; once one role opts in, bind only opted-in roles so a
+    // disabled character cannot donate its model credential.
+    final optedIn = characters.where((character) => character.webSearchEnabled);
+    final sourceCharacters = searchAnswerOnly.isNotEmpty
+        ? searchAnswerOnly
+        : (optedIn.isEmpty ? characters : optedIn);
+    for (final character in sourceCharacters) {
       final config = resolveApiConfig(character);
+      if (character.zhipuSearchAnswerOnly &&
+          (config?.provider != ApiProvider.zhipu.name ||
+              config?.modelName.trim().toLowerCase() != 'glm-4-flash')) {
+        continue;
+      }
       if (config == null ||
-          config.provider != ApiProvider.qwen.name ||
+          (config.provider != ApiProvider.qwen.name &&
+              config.provider != ApiProvider.zhipu.name) ||
           (!config.hasCredential && !config.hasApiKey)) {
         continue;
       }
       candidates[config.id] = config;
     }
-    if (candidates.length != 1) return null;
+    if (candidates.length != 1) {
+      SearchFlowLogger.event(
+        'native_binding_unavailable',
+        fields: {
+          'reason': candidates.isEmpty ? 'no_eligible_config' : 'ambiguous',
+          'candidateCount': candidates.length,
+          'characterCount': characters.length,
+          'optedInCount': optedIn.length,
+        },
+      );
+      return null;
+    }
     final config = candidates.values.single;
+    final provider = ApiProvider.values.firstWhere(
+      (value) => value.name == config.provider,
+      orElse: () => ApiProvider.custom,
+    );
+    SearchFlowLogger.event(
+      'native_binding_selected',
+      fields: {
+        'provider': provider.name,
+        'model': config.modelName,
+        'candidateCount': candidates.length,
+      },
+    );
     return NativeWebSearchBinding(
-      provider: ApiProvider.qwen,
+      provider: provider,
       model: config.modelName,
       resolveCredential: () => credentialResolver.resolve(config),
     );

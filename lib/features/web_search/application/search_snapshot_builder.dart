@@ -36,25 +36,29 @@ class SearchSnapshotBuilder {
     final hostCounts = <String, int>{};
 
     for (final item in response.items) {
+      if (!item.hasSourceUrl && provider.trim() != 'zhipu-native') continue;
       if (item.allowInsecureHttp && !routeAllowsInsecureHttp) {
         // An alternate/provider-supplied item cannot broaden the URL policy
         // of its route. Drop the mismatched item rather than allowing a
         // constructor failure to abort the whole search turn.
         continue;
       }
-      final canonicalUrl = _canonicalUrl(item.url);
+      final canonicalUrl = !item.hasSourceUrl
+          ? 'content:${_hash('${item.title}\n${item.snippet}')}'
+          : _canonicalUrl(item.url);
       if (!seenUrls.add(canonicalUrl)) continue;
-      final host = item.url.host.toLowerCase();
-      final hostCount = hostCounts[host] ?? 0;
-      if (hostCount >= maxSourcesPerHost) continue;
+      final host = item.hasSourceUrl ? item.url.host.toLowerCase() : null;
+      final hostCount = host == null ? 0 : hostCounts[host] ?? 0;
+      if (host != null && hostCount >= maxSourcesPerHost) continue;
       if (results.length >= request.maxResults) break;
-      hostCounts[host] = hostCount + 1;
+      if (host != null) hostCounts[host] = hostCount + 1;
       results.add(
         WebSearchResult(
           sourceId: 'S${results.length + 1}',
           title: item.title,
           snippet: item.snippet,
-          url: item.url,
+          url: item.hasSourceUrl ? item.url : null,
+          displayHost: item.hasSourceUrl ? item.url.host : '智谱搜索',
           publishedAt: item.publishedAt,
           providerScore: item.providerScore,
           provider: provider,

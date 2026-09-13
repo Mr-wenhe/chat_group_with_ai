@@ -5,6 +5,7 @@ class WebSearchResult {
   final String title;
   final String snippet;
   final Uri url;
+  final bool hasSourceUrl;
   final String displayHost;
   final DateTime? publishedAt;
   final double? providerScore;
@@ -20,7 +21,7 @@ class WebSearchResult {
     required String sourceId,
     required String title,
     required String snippet,
-    required Uri url,
+    Uri? url,
     String? displayHost,
     this.publishedAt,
     double? providerScore,
@@ -47,11 +48,14 @@ class WebSearchResult {
         // by setting a boolean flag.
         allowInsecureHttp =
             allowInsecureHttp && provider.trim() == 'visibleBrowser',
-        url = validateSearchUrl(
-          url,
-          allowInsecureHttp:
-              allowInsecureHttp && provider.trim() == 'visibleBrowser',
-        ),
+        hasSourceUrl = url != null,
+        url = url == null
+            ? Uri()
+            : validateSearchUrl(
+                url,
+                allowInsecureHttp:
+                    allowInsecureHttp && provider.trim() == 'visibleBrowser',
+              ),
         displayHost = _deriveDisplayHost(url, displayHost),
         providerScore = _finiteScore(providerScore),
         provider = sanitizeSearchText(
@@ -65,7 +69,7 @@ class WebSearchResult {
         'sourceId': sourceId,
         'title': title,
         'snippet': snippet,
-        'url': url.toString(),
+        'url': hasSourceUrl ? url.toString() : null,
         'publishedAt': publishedAt?.toUtc().toIso8601String(),
         'providerScore': providerScore,
         'provider': provider,
@@ -204,10 +208,12 @@ class WebSearchSnapshot {
       for (final raw in rawResults) {
         if (scannedResults++ >= searchMaxResultsLimit) break;
         if (raw is! Map) continue;
-        final url = Uri.tryParse(raw['url']?.toString() ?? '');
-        if (url == null) continue;
+        final rawUrl = raw['url']?.toString() ?? '';
+        final url = rawUrl.isEmpty ? null : Uri.tryParse(rawUrl);
+        if (rawUrl.isNotEmpty && url == null) continue;
         try {
           final provider = raw['provider']?.toString() ?? '';
+          if (url == null && provider != 'zhipu-native') continue;
           // Do not let arbitrary persisted providers opt into HTTP. The flag
           // is accepted only for the internal visible-browser provider.
           final allowInsecureHttp =

@@ -21,6 +21,7 @@ class SearchContextBundle {
 class SearchContextFormatter {
   static const int defaultMaxSnippetCharacters = 800;
   static const int defaultMaxTotalCharacters = 6000;
+  static const int defaultMaxNumberedContextCharacters = 15000;
   static const int defaultMaxSources = 5;
   static const int _maxTitleCharacters = 300;
   static const int _maxUrlCharacters = 2048;
@@ -73,7 +74,7 @@ class SearchContextFormatter {
           .map(
             (result) => _EvidenceResult(
               title: result.title,
-              url: result.url.toString(),
+              url: result.hasSourceUrl ? result.url.toString() : '',
               publishedAt: result.publishedAt,
               snippet: result.snippet,
               displayHost: result.displayHost,
@@ -99,7 +100,43 @@ class SearchContextFormatter {
     bool allowSourceLinks = false,
   }) {
     final bundle = format(snapshot);
+    if (_usesZhipuNumberedContext(snapshot) && bundle.sourceIds.isNotEmpty) {
+      return _zhipuMessagesFor(
+        snapshot,
+        allowSourceLinks: allowSourceLinks,
+      );
+    }
     return _messagesFor(bundle, allowSourceLinks: allowSourceLinks);
+  }
+
+  /// Equivalent to search_answer.py's build_context(): each result becomes a
+  /// numbered, bounded block consumed by the character's following Chat call.
+  String formatNumberedContext(
+    domain.WebSearchSnapshot snapshot, {
+    int maxTotalCharacters = defaultMaxNumberedContextCharacters,
+  }) {
+    if (!snapshot.hasResults || maxTotalCharacters <= 0) return '';
+    final blocks = <String>[];
+    final results = snapshot.results.take(maxSources).toList(growable: false);
+    for (var index = 0; index < results.length; index++) {
+      final result = results[index];
+      final publishedAt = result.publishedAt?.toUtc().toIso8601String();
+      blocks.add(
+        '[S${index + 1}] 标题: ${_truncate(result.title, _maxTitleCharacters)}\n'
+        '    来源: ${_truncate(result.displayHost, 120)}  '
+        '发布时间: ${publishedAt == null ? '未知' : publishedAt.substring(0, 10)}\n'
+        '    链接: ${result.hasSourceUrl ? _truncate(result.url.toString(), _maxUrlCharacters) : '无'}\n'
+        '    内容: ${_truncate(result.snippet, maxSnippetCharacters)}',
+      );
+    }
+    final context = blocks.join('\n\n');
+    if (context.length <= maxTotalCharacters) return context;
+    const suffix = '\n\n(注: 搜索结果过长，已截断)';
+    final contentLimit = (maxTotalCharacters - suffix.length).clamp(
+      0,
+      maxTotalCharacters,
+    );
+    return '${context.substring(0, contentLimit).trimRight()}$suffix';
   }
 
   String sanitizeCitations(
@@ -168,6 +205,30 @@ class SearchContextFormatter {
       },
     ];
   }
+
+  List<Map<String, dynamic>> _zhipuMessagesFor(
+    domain.WebSearchSnapshot snapshot, {
+    required bool allowSourceLinks,
+  }) {
+    final rules = allowSourceLinks
+        ? '${SearchPrompts.zhipuSearchAnswerPrompt}\n\n用户已明确索要来源链接；可返回对应编号中的链接。'
+        : SearchPrompts.zhipuSearchAnswerPrompt;
+    return [
+      {'role': 'system', 'content': rules},
+      {
+        'role': 'user',
+        'content': 'ZHIPU_WEB_SEARCH_RESULTS_BEGIN\n'
+            '【搜索结果】\n'
+            '${formatNumberedContext(snapshot)}\n'
+            'ZHIPU_WEB_SEARCH_RESULTS_END',
+      },
+    ];
+  }
+
+  static bool _usesZhipuNumberedContext(
+    domain.WebSearchSnapshot snapshot,
+  ) =>
+      snapshot.provider.trim().toLowerCase() == 'zhipu-native';
 
   String _promptWithEvidence(String evidenceJson) =>
       '${SearchPrompts.promptD}\n\n'

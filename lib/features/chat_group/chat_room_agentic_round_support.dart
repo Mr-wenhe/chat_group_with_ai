@@ -24,6 +24,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       if (!_isStreaming) _discardCurrentStream = false;
       return '';
     }
+    if (isAutoChat && character.zhipuSearchAnswerOnly) return '';
     // 并发兜底：同一角色正在执行 agentic 任务时，auto-chat / 其他并发路径
     // 不得触发同一角色的普通 LLM 回复，否则会出现「agentic 兜底文案 + 普通
     // LLM 泄漏代码」两条消息的 Bug（auto-chat 传 userMessage=null 会绕过工作任务
@@ -52,6 +53,19 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       return '[${character.name} 未配置 API]';
     }
 
+    if (character.zhipuSearchAnswerOnly &&
+        searchTurnContext?.snapshot?.hasResults != true) {
+      const failureReply = '未获得可用的智谱网页搜索结果，当前信息不足，无法可靠回答。';
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: character.id,
+        senderType: 'ai',
+        content: failureReply,
+        webSearchSnapshot: searchTurnContext?.snapshot?.toMap(),
+      ));
+      return failureReply;
+    }
+
     final provider = ApiProvider.values.firstWhere(
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
@@ -70,7 +84,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     // The turn snapshot is prepared once for all replies, but each role still
     // observes its own capability boundary. Disabled roles receive ordinary
     // context and never get search evidence injected into their prompt.
-    final webSearch = character.webSearchEnabled
+    final webSearch =
+        character.webSearchEnabled || character.zhipuSearchAnswerOnly
         ? searchTurnContext?.snapshot
         : null;
     // 查询模型能力（是否支持图片输入），决定要不要拼多模态内容。

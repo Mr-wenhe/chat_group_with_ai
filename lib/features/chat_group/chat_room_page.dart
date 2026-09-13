@@ -39,6 +39,7 @@ import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/ai_governance/search_coordinator.dart';
 import 'package:chat_group/features/chat_group/chat_room_search_runtime.dart';
 import 'package:chat_group/features/web_search/application/search_turn_context.dart';
+import 'package:chat_group/features/web_search/application/search_flow_logger.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart'
     as web_search;
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';

@@ -33,15 +33,41 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
     required Message? currentUserMessage,
     required bool isAutoChat,
     required bool searchEnabled,
+    bool forceSearch = false,
   }) async {
     final query = userMessage?.trim() ?? '';
     final origin =
         isAutoChat ? SearchMessageOrigin.autoChat : SearchMessageOrigin.user;
     final sourceMessageId = currentUserMessage?.id.trim() ?? '';
+    SearchFlowLogger.event(
+      'turn_prepare',
+      query: query,
+      fields: {
+        'conversationId': widget.groupId,
+        'sourceMessageIdPresent': sourceMessageId.isNotEmpty,
+        'searchEnabled': searchEnabled,
+        'isAutoChat': isAutoChat,
+        'platformUnsupported': _webSearchUnsupported,
+      },
+    );
     if (!searchEnabled ||
         isAutoChat ||
         query.isEmpty ||
         sourceMessageId.isEmpty) {
+      SearchFlowLogger.event(
+        'turn_suppressed',
+        query: query,
+        fields: {
+          'conversationId': widget.groupId,
+          'reason': !searchEnabled
+              ? 'no_reply_character_opted_in'
+              : isAutoChat
+                  ? 'auto_chat'
+                  : query.isEmpty
+                      ? 'empty_query'
+                      : 'missing_source_message_id',
+        },
+      );
       return SearchTurnContext.suppressed(
         conversationId: widget.groupId,
         sourceMessageId: sourceMessageId,
@@ -54,7 +80,14 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
       query: query,
       sourceMessageId: sourceMessageId,
     );
-    if (followUp != null) return followUp;
+    if (followUp != null) {
+      SearchFlowLogger.event(
+        'turn_reuse_sources',
+        query: query,
+        fields: {'conversationId': widget.groupId},
+      );
+      return followUp;
+    }
     return _withSearchCancellation(
       (cancelToken) => _searchTurnController.prepareUserTurn(
         conversationId: widget.groupId,
@@ -67,6 +100,7 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
         country: _searchRuntimeSettings.country,
         maxResults: _searchRuntimeSettings.maxResults,
         safeSearch: _searchRuntimeSettings.safeSearch,
+        forceSearch: forceSearch,
         cancelToken: cancelToken,
       ),
     );

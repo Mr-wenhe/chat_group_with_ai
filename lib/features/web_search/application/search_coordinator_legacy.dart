@@ -19,6 +19,7 @@ extension SearchCoordinatorMessageSearchFacade on SearchCoordinator {
     int maxResults = domain.searchDefaultMaxResults,
     bool safeSearch = true,
     bool forceRefresh = false,
+    bool forceSearch = false,
     bool isSensitive = false,
     SearchMessageOrigin origin = SearchMessageOrigin.user,
     String minimalContext = '',
@@ -32,13 +33,63 @@ extension SearchCoordinatorMessageSearchFacade on SearchCoordinator {
         origin == SearchMessageOrigin.regeneration && forceRefresh
             ? SearchMessageOrigin.user
             : origin;
-    final decision = intentDetector.detect(rawQuery, origin: decisionOrigin);
-    if (!decision.shouldSearch) return null;
+    final detectedDecision =
+        intentDetector.detect(rawQuery, origin: decisionOrigin);
+    final decision = forceSearch && rawQuery.isNotEmpty
+        ? SearchIntentDecision(
+            shouldSearch: true,
+            explicitlyRequested: true,
+            category: detectedDecision.category,
+            freshness: detectedDecision.freshness,
+            reasonCode: 'character_search_answer_only',
+            mayContainSensitiveData:
+                detectedDecision.mayContainSensitiveData,
+            localQueryCandidates:
+                detectedDecision.localQueryCandidates.isEmpty
+                    ? [rawQuery]
+                    : detectedDecision.localQueryCandidates,
+            origin: decisionOrigin,
+          )
+        : detectedDecision;
+    SearchFlowLogger.event(
+      'intent_decision',
+      query: rawQuery,
+      fields: {
+        'conversationId': conversationId,
+        'origin': decisionOrigin.name,
+        'shouldSearch': decision.shouldSearch,
+        'explicitlyRequested': decision.explicitlyRequested,
+        'category': decision.category.name,
+        'freshness': decision.freshness.name,
+        'reason': decision.reasonCode,
+        'sensitive': decision.mayContainSensitiveData,
+      },
+    );
+    if (!decision.shouldSearch) {
+      SearchFlowLogger.event(
+        'search_skipped',
+        query: rawQuery,
+        fields: {'reason': 'intent_rejected'},
+      );
+      return null;
+    }
 
     final sanitized = sanitizer.sanitize(rawQuery);
     final effective = SearchCoordinator._constrainedPolicy(
       configured: effectivePolicy(conversationId),
       requested: null,
+    );
+    SearchFlowLogger.event(
+      'search_gate',
+      query: sanitized.text,
+      fields: {
+        'policy': effective.name,
+        'routeCount': _routes.length,
+        'hasPlanner': queryPlanner != null,
+        'branch': _routes.any((route) => route.isNative)
+            ? 'native_web_search'
+            : 'provider_chain',
+      },
     );
     final localRequest = _requestFor(
       query: sanitized.text,
@@ -97,6 +148,11 @@ extension SearchCoordinatorMessageSearchFacade on SearchCoordinator {
     // for. The core coordinator records the invalid configuration without
     // invoking the optional planner or a Provider.
     if (_routes.isEmpty) {
+      SearchFlowLogger.event(
+        'search_blocked',
+        query: localRequest.query,
+        fields: {'reason': 'no_routes'},
+      );
       return search(
         request: localRequest,
         conversationId: conversationId,
@@ -134,6 +190,14 @@ extension SearchCoordinatorMessageSearchFacade on SearchCoordinator {
     // does not consume the network latency budget.
     var deadline = _clock().add(endToEndBudget);
 
+    SearchFlowLogger.event(
+      'planner_start',
+      query: sanitized.text,
+      fields: {
+        'requestId': localRequest.requestId,
+        'enabled': queryPlanner != null,
+      },
+    );
     final plan = queryPlanner == null
         ? localPlan
         : await queryPlanner!.plan(
@@ -143,6 +207,17 @@ extension SearchCoordinatorMessageSearchFacade on SearchCoordinator {
             cancelToken: cancelToken,
             deadline: deadline,
           );
+    SearchFlowLogger.event(
+      'planner_complete',
+      query: sanitized.text,
+      fields: {
+        'requestId': localRequest.requestId,
+        'usedPlanner': plan.usedPlanner,
+        'blocked': plan.blocked,
+        'primaryQueryLength': plan.primaryQuery.length,
+        'hasFallback': plan.hasFallback,
+      },
+    );
     if (plan.blocked) {
       final blockedRequest = localRequest.copyWith(isSensitive: true);
       final blockedSnapshot = await _unsafeSnapshot(

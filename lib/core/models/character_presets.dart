@@ -14,6 +14,7 @@ class CharacterPreset {
 
   /// 仅作提示用，不写入 AICharacter（创建角色仍要求用户选 ApiConfig）。
   final String? suggestedProvider;
+  final bool zhipuSearchAnswerOnly;
 
   const CharacterPreset({
     required this.name,
@@ -23,6 +24,7 @@ class CharacterPreset {
     required this.personalityTags,
     required this.systemPrompt,
     this.suggestedProvider,
+    this.zhipuSearchAnswerOnly = false,
   });
 
   /// 纯映射：返回表单控制器所需的字段值（供单测与 UI 套用共用）。
@@ -40,6 +42,17 @@ class CharacterPreset {
 
   /// 内置 10 个角色预设（纯静态，不落库）。
   static const List<CharacterPreset> presets = [
+    CharacterPreset(
+      name: '新闻角色',
+      avatar: '📰',
+      age: 30,
+      role: '实时新闻搜索问答助手',
+      personalityTags: ['新闻', '实时搜索', '多源核验', '引用来源'],
+      suggestedProvider: 'zhipu',
+      zhipuSearchAnswerOnly: true,
+      systemPrompt:
+          '你是一位严谨的中文新闻搜索问答助手。结论前置，综合多条搜索结果；信息冲突时明确指出差异；关键信息使用搜索结果编号标注来源；证据不足时直接说明信息不足，绝不根据记忆补写实时事实。',
+    ),
     CharacterPreset(
       name: '毒舌评委',
       avatar: '😈',

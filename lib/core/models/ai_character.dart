@@ -113,6 +113,11 @@ class AICharacter extends HiveObject {
   @HiveField(25, defaultValue: true)
   bool proactiveChatEnabled;
 
+  /// 固定使用“智谱网页搜索 -> 编号上下文 -> 角色模型总结”的搜索问答流程。
+  /// 该模式不允许在搜索缺失时退回普通聊天知识作答。
+  @HiveField(26, defaultValue: false)
+  bool zhipuSearchAnswerOnly;
+
   AICharacter({
     String? id,
     required this.name,
@@ -140,6 +145,7 @@ class AICharacter extends HiveObject {
     this.voiceId = '',
     this.webSearchEnabled = false,
     this.proactiveChatEnabled = true,
+    this.zhipuSearchAnswerOnly = false,
   })  : id = id ?? const Uuid().v4(),
         modelName = modelName ?? ApiProvider.defaultModels[apiProvider] ?? '',
         createdAt = createdAt ?? DateTime.now(),
@@ -181,6 +187,7 @@ class AICharacter extends HiveObject {
       voiceId: voiceId,
       webSearchEnabled: webSearchEnabled,
       proactiveChatEnabled: proactiveChatEnabled,
+      zhipuSearchAnswerOnly: zhipuSearchAnswerOnly,
     );
   }
 

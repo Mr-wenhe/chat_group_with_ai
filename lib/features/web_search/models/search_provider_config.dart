@@ -15,6 +15,7 @@ bool searchProviderRequiresCredential(
   required bool isRelease,
 }) =>
     switch (provider) {
+      SearchProviderKind.nativeModel => false,
       SearchProviderKind.gateway => isRelease,
       SearchProviderKind.tavily || SearchProviderKind.brave => true,
       SearchProviderKind.duckDuckGoInstantAnswer ||
@@ -26,6 +27,7 @@ bool searchProviderRequiresCredential(
 /// predicate beside credential policy avoids accidentally validating an empty
 /// base URL as if it were a saved endpoint.
 bool searchProviderUsesFixedEndpoint(SearchProviderKind provider) =>
+    provider == SearchProviderKind.nativeModel ||
     provider == SearchProviderKind.duckDuckGoInstantAnswer ||
     provider == SearchProviderKind.keylessHtml;
 

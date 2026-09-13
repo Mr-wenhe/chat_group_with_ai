@@ -8,6 +8,7 @@ class SearchProviderItem {
   final String title;
   final String snippet;
   final Uri url;
+  final bool hasSourceUrl;
   final DateTime? publishedAt;
   final double? providerScore;
   final String? language;
@@ -19,7 +20,7 @@ class SearchProviderItem {
   SearchProviderItem({
     required String title,
     required String snippet,
-    required Uri url,
+    Uri? url,
     this.publishedAt,
     double? providerScore,
     String? language,
@@ -37,7 +38,11 @@ class SearchProviderItem {
           redactSecrets: true,
           redactOpaqueTokens: true,
         ),
-        url = validateSearchUrl(url, allowInsecureHttp: allowInsecureHttp),
+        hasSourceUrl = url != null,
+        url = url == null
+            ? Uri()
+            : validateSearchUrl(url,
+                allowInsecureHttp: allowInsecureHttp),
         providerScore = providerScore?.isFinite == true ? providerScore : null,
         language = normalizeSearchLanguage(language);
 }

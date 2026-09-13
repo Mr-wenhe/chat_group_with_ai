@@ -148,6 +148,24 @@ void main() {
     expect(routes.last.isFallback, isTrue);
   });
 
+  test('native-only mode constructs no independent search providers', () {
+    final routes = SearchRuntimeProviderFactory(
+      store: SearchProviderConfigStore(box: box, isRelease: true),
+    ).buildRoutes(
+      nativeOnly: true,
+      nativeSearch: NativeWebSearchBinding(
+        provider: ApiProvider.zhipu,
+        model: 'glm-4-flash',
+        resolveCredential: () async => 'role-key',
+      ),
+    );
+
+    expect(routes, hasLength(1));
+    expect(routes.single.isNative, isTrue);
+    expect(routes.single.kind, SearchProviderKind.nativeModel);
+    expect(routes.single.id, 'native:zhipu:glm-4-flash');
+  });
+
   test('adds visible browser only as the final fallback when supplied', () {
     final routes = SearchRuntimeProviderFactory(
       store: SearchProviderConfigStore(box: box, isRelease: true),

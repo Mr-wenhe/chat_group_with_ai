@@ -242,8 +242,15 @@ class ModelCapabilityRegistry {
       'qwen-vl-ocr-latest',
     ])
       'qwen/$model': _vision(provider: 'qwen', context: 131072),
-    for (final model in ['glm-4-plus', 'glm-4-air', 'glm-4-flash'])
+    for (final model in ['glm-4-plus', 'glm-4-air'])
       'zhipu/$model': _text(provider: 'zhipu', context: 131072),
+    'zhipu/glm-4-flash': _text(
+      provider: 'zhipu',
+      context: 131072,
+      nativeWebSearch: true,
+      nativeWebSearchFreshness: true,
+      source: '智谱联网搜索协议快照 2026-09-13',
+    ),
     for (final model in ['glm-4v-plus', 'glm-4v', 'glm-4v-flash'])
       'zhipu/$model': _vision(provider: 'zhipu', context: 8192),
     'moonshot/moonshot-v1-8k': _text(provider: 'moonshot', context: 8192),

@@ -71,7 +71,10 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         currentUserMessage: currentUserMessage,
         isAutoChat: isAutoChat,
         searchEnabled: charactersToReply.any((character) =>
-            character.webSearchEnabled),
+            character.webSearchEnabled || character.zhipuSearchAnswerOnly),
+        forceSearch: charactersToReply.any(
+          (character) => character.zhipuSearchAnswerOnly,
+        ),
       );
       final repliedIds = <String>[];
       for (final character in charactersToReply) {

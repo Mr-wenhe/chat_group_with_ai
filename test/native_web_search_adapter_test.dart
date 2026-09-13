@@ -3,6 +3,7 @@ import 'package:chat_group/features/ai_governance/model_capability_registry.dart
 import 'package:chat_group/features/web_search/application/search_provider_chain.dart';
 import 'package:chat_group/features/web_search/application/search_provider_route.dart';
 import 'package:chat_group/features/web_search/application/search_retry_policy.dart';
+import 'package:chat_group/features/web_search/application/search_snapshot_builder.dart';
 import 'package:chat_group/features/web_search/models/search_failure.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/providers/native_web_search_adapter.dart';

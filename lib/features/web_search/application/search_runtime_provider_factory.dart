@@ -16,6 +16,7 @@ import '../providers/search_provider.dart';
 import '../providers/tavily_search_provider.dart';
 import '../providers/visible_browser_search_provider.dart';
 import 'search_provider_route.dart';
+import 'search_flow_logger.dart';
 import '../security/search_endpoint_validator.dart';
 
 /// Builds the runtime Provider chain from the settings metadata.
@@ -39,11 +40,25 @@ class SearchRuntimeProviderFactory {
   List<SearchProviderRoute> buildRoutes({
     NativeWebSearchBinding? nativeSearch,
     VisibleBrowserSearchHandler? visibleBrowserSearch,
+    bool nativeOnly = false,
   }) {
     // No Web build is a supported search target. Browser XHR may buffer an
     // entire response before app-level limits run, and it cannot provide the
     // native DNS pinning/credential boundary used by this feature.
     if (kIsWeb) return const [];
+    if (nativeOnly) {
+      final route = _nativeRoute(nativeSearch);
+      SearchFlowLogger.event(
+        'routes_built',
+        fields: {
+          'nativeOnly': true,
+          'nativeBindingPresent': nativeSearch != null,
+          'routeCount': route == null ? 0 : 1,
+          'routeId': route?.id,
+        },
+      );
+      return route == null ? const [] : <SearchProviderRoute>[route];
+    }
     final routes = <SearchProviderRoute>[];
     for (final config in store.configs.where(_isRuntimeEligible)) {
       final provider = _createProvider(config);
@@ -105,6 +120,15 @@ class SearchRuntimeProviderFactory {
     // native Qwen search usable even when no separate Brave/Tavily/Gateway
     // route has been configured for the compatible fallback.
     _prependNativeRoute(routes, nativeSearch);
+    SearchFlowLogger.event(
+      'routes_built',
+      fields: {
+        'nativeOnly': false,
+        'nativeBindingPresent': nativeSearch != null,
+        'routeCount': routes.length,
+        'routeIds': routes.map((route) => route.id).toList(growable: false),
+      },
+    );
     return List.unmodifiable(routes);
   }
 
@@ -177,6 +201,22 @@ class SearchRuntimeProviderFactory {
     );
   }
 
+  SearchProviderRoute? _nativeRoute(NativeWebSearchBinding? binding) {
+    if (binding == null) return null;
+    final adapter = NativeWebSearchAdapterRegistry(
+      isRelease: store.isRelease,
+    ).resolve(provider: binding.provider, model: binding.model);
+    if (adapter == null) return null;
+    return SearchProviderRoute(
+      id: 'native:${binding.provider.name}:${binding.model}',
+      provider: NativeWebSearchProvider(adapter: adapter, binding: binding),
+      isPrimary: true,
+      isNative: true,
+      priority: 0,
+      displayName: '${binding.provider.label} ${binding.model}（原生联网）',
+    );
+  }
+
   SearchProvider _createProvider(SearchProviderConfig config) {
     try {
       // DuckDuckGo has no configurable endpoint. Do not turn an old blank or
@@ -209,12 +249,15 @@ class SearchRuntimeProviderFactory {
           DuckDuckGoInstantAnswerProvider(isRelease: store.isRelease),
         SearchProviderKind.keylessHtml =>
           KeylessHtmlSearchProvider(isRelease: store.isRelease),
-        SearchProviderKind.gateway => GatewaySearchProvider(
+      SearchProviderKind.gateway => GatewaySearchProvider(
             baseUrl: config.baseUrl,
             isRelease: store.isRelease,
-            allowLocalDevelopmentGateway: store.allowLocalDevelopmentGateway,
-          ),
-      };
+          allowLocalDevelopmentGateway: store.allowLocalDevelopmentGateway,
+        ),
+      SearchProviderKind.nativeModel =>
+          const _UnsupportedSearchProvider(
+              SearchProviderKind.nativeModel, '原生模型搜索必须由角色绑定'),
+    };
     } on Object {
       return _UnsupportedSearchProvider(
         config.provider,
