@@ -9,6 +9,7 @@ import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
@@ -247,6 +248,62 @@ class WorkAgentLoop
     state.handoff = _loadHandoff(task);
     state.commandFailureKeys.addAll(_loadCommandFailureKeys(task));
     state.failure = task.workFailure;
+    // Terminal tasks are immutable from the execution loop's perspective.
+    // Check this before inspecting the discussion marker so a late direct
+    // runner call cannot rewrite a completed/failed/cancelled task to paused
+    // merely because its optional marker is malformed.
+    if (task.isTerminal) {
+      return _result(state, _statusForTask(task), task.resultSummary);
+    }
+    if (workExecutionCheckpointRequiresReview(task.executionStateJson)) {
+      return _pauseForCheckpointReview(state);
+    }
+    final discussion = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    if (WorkDiscussionState.requiresDiscussionForConversation(task.groupId) &&
+        discussion.present) {
+      final gate = discussion.state;
+      String? reason;
+      if (gate == null || gate.conversationId != task.groupId) {
+        reason = '讨论状态无效，已阻止执行。';
+      } else if (!gate.isExecutionReady) {
+        reason = '群讨论尚未完成，已阻止执行。';
+      } else {
+        final executor = gate.executorId?.trim() ?? '';
+        if (executor.isEmpty) {
+          reason = '群讨论尚未选定最终执行角色。';
+        } else if (task.characterId.trim().isNotEmpty &&
+            task.characterId != executor) {
+          reason = '任务记录的执行角色与群讨论最终执行人不一致。';
+        } else if (task.assignedCharacterIds.isNotEmpty &&
+            !task.assignedCharacterIds.contains(executor)) {
+          reason = '群讨论最终执行人不在任务的合格角色范围内。';
+        } else {
+          final contractRevision = gate.deliverableContract?['requestRevision'];
+          final explicitExecutor =
+              gate.deliverableContract?['explicitExecutorId'];
+          if (contractRevision is! num ||
+              contractRevision.toInt() != gate.requestRevision ||
+              (explicitExecutor is String &&
+                  explicitExecutor.trim().isNotEmpty &&
+                  explicitExecutor.trim() != executor)) {
+            reason = '讨论状态与最新请求版本或产物合同不一致。';
+          }
+          if (reason == null && task.characterId.trim().isEmpty) {
+            task.characterId = executor;
+          }
+        }
+      }
+      if (reason != null) {
+        task
+          ..status = AgentTaskStatus.paused
+          ..resumeRequired = false
+          ..lastError = reason
+          ..updatedAt = clock();
+        return _result(state, WorkAgentLoopStatus.paused, reason);
+      }
+    }
     // The full request is intentionally kept in memory while the approval
     // dialog is open, but the durable checkpoint still authenticates which
     // operation may be replayed. Comparing the canonical redacted form

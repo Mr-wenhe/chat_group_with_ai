@@ -219,6 +219,79 @@ void main() {
     }
   });
 
+  test('ordinary system notices do not create group unread badges', () async {
+    final db = DatabaseService();
+    await db.persistMessage(Message(
+      id: 'system-status',
+      groupId: 'group-system-status',
+      senderId: 'system',
+      senderType: 'system',
+      content: '工作面板已更新',
+      timestamp: DateTime(2026, 1, 1),
+    ));
+    expect(
+      db.conversationSummaries()['group-system-status']?.unreadCount,
+      0,
+    );
+
+    await db.persistMessage(Message(
+      id: 'system-action',
+      groupId: 'group-system-status',
+      senderId: 'system',
+      senderType: 'system',
+      content: '@我 请处理任务',
+      isMention: true,
+      timestamp: DateTime(2026, 1, 1, 0, 1),
+    ));
+    expect(
+      db.conversationSummaries()['group-system-status']?.unreadCount,
+      1,
+    );
+  });
+
+  test('rebuilds cached summaries after unread semantics change', () async {
+    final db = DatabaseService();
+    const groupId = 'group-summary-migration';
+    final status = Message(
+      id: 'migration-system-status',
+      groupId: groupId,
+      senderId: 'system',
+      senderType: 'system',
+      content: '旧版本状态提示',
+      timestamp: DateTime(2026, 1, 1),
+    );
+    final reply = Message(
+      id: 'migration-ai-reply',
+      groupId: groupId,
+      senderId: 'ai',
+      senderType: 'ai',
+      content: '需要处理',
+      timestamp: DateTime(2026, 1, 1, 0, 1),
+    );
+    await db.messageBox.putAll({status.id: status, reply.id: reply});
+    final settings = Hive.box<dynamic>('app_settings');
+    await settings.put('message_ids_by_group', {
+      groupId: [status.id, reply.id],
+    });
+    await settings.put('message_index_count', 2);
+    // Simulate an S4 cache that counted every system notice as unread.
+    await settings.put('conversation_summaries', {
+      groupId: {
+        'lastMessageId': reply.id,
+        'preview': reply.content,
+        'timestamp': reply.timestamp.toIso8601String(),
+        'messageCount': 2,
+        'unreadCount': 2,
+        'mentionCount': 0,
+      },
+    });
+
+    await db.ensureMessageIndex();
+
+    expect(db.conversationSummaries()[groupId]?.unreadCount, 1);
+    expect(settings.get('message_index_schema_version'), 2);
+  });
+
   test('50000-message fixture rebuilds 100 conversation summaries', () async {
     final db = DatabaseService();
     final base = DateTime(2026, 1, 1);

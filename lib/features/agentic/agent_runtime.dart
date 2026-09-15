@@ -544,7 +544,7 @@ class AgentRuntime {
     if (!hasCreateIntent) return null;
 
     final explicit = RegExp(
-      r'(?<![\w./\\-])([\w][\w./\\-]*\.(?:html?|md|markdown|dart|java|txt|json|'
+      r'(?<![\w./\\-])([\w\u3400-\u9fff][\w\u3400-\u9fff./\\-]*\.(?:html?|md|markdown|dart|java|txt|json|'
       // 补全扩展名白名单：ppt/pptx/csv/sql/log/png/jpg/jpeg/zip。
       r'yaml|yml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp|pdf|doc|docx|xlsx?|'
       r'ppt|pptx|csv|sql|log|png|jpe?g|zip))(?![\w./\\-])',
@@ -1543,6 +1543,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         request,
         character,
         allowSensitiveRead: approved,
+        userRequest: userRequest,
         executedRequests: executedRequests,
       ).timeout(toolExecutionTimeout);
     } catch (e) {
@@ -2059,6 +2060,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
     ToolRequest request,
     AICharacter character, {
     bool allowSensitiveRead = false,
+    String userRequest = '',
     List<ToolRequest> executedRequests = const [],
   }) async {
     final executor = AgentToolExecutor(
@@ -2072,6 +2074,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       allowSensitiveRead: allowSensitiveRead,
       patchWorkspace: () => _executeWorkspacePatch(
         request,
+        userRequest: userRequest,
         allowCommandValidation: (allowCommandValidation ?? true) &&
             _hasPermission(character, ToolPermission.commandRun),
         executedRequests: executedRequests,
@@ -2095,6 +2098,7 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
   /// —— 写文件这一核心动作已成功，不应因读回失败而被判定为整次工具执行失败。
   Future<Map<String, dynamic>> _executeWorkspacePatch(
     ToolRequest request, {
+    String userRequest = '',
     required bool allowCommandValidation,
     List<ToolRequest> executedRequests = const [],
   }) async {
@@ -2114,6 +2118,15 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
         'ok': false,
         'error': 'invalid_patch',
         'message': '补丁请求缺少原 SHA-256、原文片段或替换文本。',
+      };
+    }
+    if (_requiresStrictWordArtifact(userRequest) ||
+        _hasBinaryExtension(path, const {'doc', 'docx'})) {
+      return {
+        'ok': false,
+        'error': 'binary_artifact_not_supported',
+        'message': '用户明确要求 Word 时，兼容 workspace.patch 不能自动降级为 Markdown。'
+            '请使用 command.run 调用已验证的 DOCX 转换工具，或暂停等待工具安装/授权。',
       };
     }
     String? binaryDowngradedFrom;
@@ -2378,6 +2391,26 @@ $pathHint现在请**只**输出一个工具请求块，不要任何其他文字�
       'jpg',
       'jpeg',
     }.contains(extension);
+  }
+
+  static bool _hasBinaryExtension(String path, Set<String> extensions) {
+    final extension = path.split('.').last.toLowerCase();
+    return extensions.contains(extension);
+  }
+
+  static bool _requiresStrictWordArtifact(String request) {
+    final text = request.trim().toLowerCase();
+    if (text.isEmpty) return false;
+    return RegExp(
+          r'(?:\bword\b|\bdocx?\b|word\s*文档|word\s*格式|docx?\s*文档|\.docx?\b)',
+          caseSensitive: false,
+        ).hasMatch(text) &&
+        RegExp(
+          r'(?:生成|创建|新建|写入|保存|导出|输出|编写|修改|修复|更新|制作|'
+          r'转换|转成|转为|generate|create|write|save|export|output|modify|'
+          r'fix|update|convert|build)',
+          caseSensitive: false,
+        ).hasMatch(text);
   }
 
   /// 把二进制文档路径改写为等效的 Markdown 文本路径（优雅降级用）。

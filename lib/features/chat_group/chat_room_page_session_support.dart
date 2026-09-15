@@ -270,10 +270,11 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       });
       _scrollToBottom();
     }
-    if (message.senderType == 'ai') {
+    if (message.senderType == 'ai' || message.senderType == 'system') {
       // A globally persisted reply is already authoritative; only advance the
       // read marker here so a visible completion does not create an unread dot.
       unawaited(_markCurrentConversationRead(throughMessage: message));
+      _registerUserMentionIfNeeded(message);
     }
   }
 

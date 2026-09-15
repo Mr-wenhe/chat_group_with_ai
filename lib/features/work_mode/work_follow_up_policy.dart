@@ -276,9 +276,9 @@ class WorkFollowUpPolicy {
       // basename-only matcher silently treated "修改 /work/report.md" as a
       // generic continuation and could never honor an explicit absolute
       // revision target.
-      r'(?<![\w])((?:(?:[A-Za-z]:[\\/])|/)?[\w][\w./\\-]*\.(?:html?|md|markdown|dart|java|txt|'
+      r'(?<![\w])((?:(?:[A-Za-z]:[\\/])|/)?[\w\u0080-\uffff][\w\u0080-\uffff./\\-]*\.(?:html?|md|markdown|dart|java|txt|'
       r'json|ya?ml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp|pdf|docx?|xlsx?|'
-      r'pptx?|csv|sql|log|png|jpe?g|zip))(?![\w./\\-])',
+      r'pptx?|csv|sql|log|png|jpe?g|zip))(?![\w\u0080-\uffff./\\-])',
       caseSensitive: false,
     ).firstMatch(request);
     final value = match?.group(1)?.replaceAll('\\', '/');
@@ -310,7 +310,7 @@ class WorkFollowUpPolicy {
       ).hasMatch(request);
 
   bool _hasNewFileIntent(String request) => RegExp(
-        r'(新建|创建|生成(?:一个|一份)?|写一个|做一个|制作一个|实现(?:一个|一份)|另存为|'
+        r'(新建|创建|(?<!重新)生成(?:一个|一份)?|写一个|做一个|制作一个|实现(?:一个|一份)|另存为|'
         r'\b(?:new|create|generate|make)\b)',
         caseSensitive: false,
       ).hasMatch(request);

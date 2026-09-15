@@ -75,7 +75,9 @@ MentionParseResult analyzeMentionedCharacterIds(
     if (match.start > 0 && _isMentionTokenCharacter(content[match.start - 1])) {
       continue;
     }
-    final name = match.group(1);
+    final rawName = match.group(1);
+    final name =
+        rawName == null ? null : resolveKnownMentionName(rawName, byName);
     if (name != null && isMentionAllToken(name)) {
       mentionsAll = true;
       for (final character in characters) {
@@ -103,6 +105,35 @@ MentionParseResult analyzeMentionedCharacterIds(
     mentionsAll: mentionsAll,
   );
 }
+
+/// Resolves exact names first and only consumes a known adjacent action.
+String? resolveKnownMentionName(
+  String token,
+  Map<String, List<String>> knownNames,
+) {
+  if (knownNames.containsKey(token)) return token;
+  if (isMentionAllToken(token)) return token;
+  for (final alias in const ['all', 'everyone', '所有人', '全部']) {
+    if (token.startsWith(alias) &&
+        token.length > alias.length &&
+        isMentionActionSuffix(token.substring(alias.length))) {
+      return alias;
+    }
+  }
+  final prefixed = knownNames.keys.where((name) {
+    if (!token.startsWith(name) || token.length == name.length) return false;
+    final suffix = token.substring(name.length);
+    return isMentionActionSuffix(suffix);
+  }).toList()
+    ..sort((left, right) => right.length.compareTo(left.length));
+  return prefixed.isEmpty ? token : prefixed.first;
+}
+
+/// Conservative boundary for Chinese mentions without a separating space.
+/// Arbitrary Chinese suffixes may be part of an unknown person's full name.
+bool isMentionActionSuffix(String value) => RegExp(
+      r'^(?:这个方案|请|讨论|补充|输出|出具|交付|生成|制作|完成|负责|执行|评估|判断|分析|看看|审查|审核|评审|能否|是否|建议|说说|实现|写|先|再|总结)',
+    ).hasMatch(value);
 
 bool _isMentionTokenCharacter(String value) =>
     RegExp(r'^[A-Za-z0-9_./%+\-]$').hasMatch(value);

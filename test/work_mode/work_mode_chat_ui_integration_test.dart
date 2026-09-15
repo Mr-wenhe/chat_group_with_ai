@@ -31,6 +31,7 @@ import 'package:chat_group/features/work_mode/presentation/work_task_overlay_hos
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
@@ -521,10 +522,58 @@ void main() {
       find.byTooltip('工作模式已开启 · 敏感操作需确认'),
       findsOneWidget,
     );
+    // An unmentioned role enters the S3 candidate-selection path. The test
+    // completes that durable discussion state below before exercising the
+    // existing execution/authorization path.
     await tester.enterText(find.byType(TextField), '读取工作目录');
     await tester.pump();
     await tester.tap(find.byTooltip('发送'));
 
+    await tester.runAsync(() async {
+      for (var attempt = 0;
+          attempt < 120 && database.agentTaskBox.isEmpty;
+          attempt++) {
+        await Future<void>.delayed(const Duration(milliseconds: 25));
+      }
+    });
+    await tester.pump();
+    final pendingTask = database.agentTaskBox.values.single;
+    final pendingDiscussion =
+        WorkDiscussionState.fromExecutionState(pendingTask.executionStateJson);
+    if (pendingDiscussion == null) {
+      fail('expected a persisted discussion state');
+    }
+    final deliverableContract = pendingDiscussion.deliverableContract;
+    if (deliverableContract == null) {
+      fail('expected a persisted deliverable contract');
+    }
+    expect(pendingDiscussion.blockers, isNot(contains('routePending')));
+    final completedContract = <String, dynamic>{
+      ...deliverableContract,
+      'deliverableType': 'generic',
+      'format': 'text',
+      'location': 'conversation',
+      'contentScope': pendingTask.userRequest,
+      'explicitExecutorId': 'ui-worker',
+      'requestRevision': pendingDiscussion.requestRevision,
+    };
+    await tester.runAsync(() async {
+      await coordinator.updateDiscussionState(
+        pendingTask.id,
+        pendingDiscussion.copyWith(
+          phase: WorkDiscussionPhase.ready,
+          executorId: 'ui-worker',
+          coordinatorId: 'ui-worker',
+          understandingPercent: 100,
+          understandingEvidence: const ['执行人已理解需求并确认交付合同。'],
+          openQuestions: const [],
+          blockers: const [],
+          decisionSummary: '群讨论已完成，进入执行。',
+          deliverableContract: completedContract,
+        ),
+      );
+    });
+    await tester.pump();
     await _pumpUntil(tester, find.byKey(const Key('work-task-add-folder')));
     for (var attempt = 0; attempt < 20; attempt++) {
       final tasks = database.agentTaskBox.values;

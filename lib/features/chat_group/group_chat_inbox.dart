@@ -79,7 +79,10 @@ class GroupChatInbox {
       final readAt = readAtByGroup[group.id];
       final unreadMessages = sortedMessages.where((message) {
         if (group.id == activeGroupId) return false;
-        if (message.senderType != 'ai') return false;
+        if (message.senderType != 'ai' &&
+            !(message.senderType == 'system' && message.isMention)) {
+          return false;
+        }
         if (readAt == null) return true;
         return message.timestamp.isAfter(readAt);
       }).toList();

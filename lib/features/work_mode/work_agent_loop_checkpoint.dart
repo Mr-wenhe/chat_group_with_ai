@@ -54,6 +54,8 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
       approvalScope: previous.approvalScope,
       artifactPaths: task.lastArtifactPaths,
       roleHandoff: state.handoff,
+      discussionState: previous.discussionState ??
+          WorkDiscussionState.fromExecutionState(task.executionStateJson),
       errors: [
         ...previous.errors,
         if (task.lastError.trim().isNotEmpty) _publicText(task.lastError),

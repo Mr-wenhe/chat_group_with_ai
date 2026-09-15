@@ -3,6 +3,8 @@ import 'dart:io';
 
 import 'package:archive/archive.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/models/chat_group.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/api_protocol.dart';
@@ -54,6 +56,8 @@ class _SequencedGateway extends AiRequestGateway {
         );
 
   int calls = 0;
+  final observedModels = <String>[];
+  final observedCharacters = <String>[];
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
@@ -76,6 +80,8 @@ class _SequencedGateway extends AiRequestGateway {
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
+    observedModels.add(model);
+    observedCharacters.add(characterId);
     final returnsTool = repeatToolOnSecondModelCall ? calls <= 2 : calls == 1;
     return {
       'success': true,
@@ -427,9 +433,10 @@ class _MissingMutationCommandGateway extends AiRequestGateway {
 }
 
 class _ReadOnlyCommandGateway extends AiRequestGateway {
+  final String workingDirectory;
   int calls = 0;
 
-  _ReadOnlyCommandGateway()
+  _ReadOnlyCommandGateway({this.workingDirectory = '.'})
       : super(
           store: MemoryGovernanceStore(),
           client: _UnusedClient(),
@@ -465,7 +472,7 @@ class _ReadOnlyCommandGateway extends AiRequestGateway {
               'arguments': {
                 'executable': 'pwd',
                 'arguments': <String>[],
-                'workingDirectory': '.',
+                'workingDirectory': workingDirectory,
                 'declaredImpact': <String>['.'],
               },
             },
@@ -561,6 +568,29 @@ void main() {
   tearDown(() async {
     await eventStore.close();
     await closeLifecycleHive(hiveDirectory, database);
+  });
+
+  test('runner does not rewrite a terminal task through discussion validation',
+      () async {
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+    );
+    final task = AgentTask(
+      id: 'terminal-runner-discussion',
+      groupId: 'terminal-runner-group',
+      characterId: 'missing-character',
+      userRequest: '不应重新执行',
+      status: AgentTaskStatus.failed,
+      workModeTask: true,
+      executionStateJson: '{malformed discussion checkpoint',
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.failed);
+    expect(task.executionStateJson, '{malformed discussion checkpoint');
   });
 
   test('production runner routes approved workspace.patch through Stage02',
@@ -697,6 +727,446 @@ void main() {
         isTrue);
     expect((await snapshots.undo(task.id)).succeeded, isTrue);
     expect(await output.exists(), isFalse);
+  });
+
+  test('visual model supplies capability without changing the elected executor',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    final grant = await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    expect(grant, isNotNull);
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final snapshots = WorkSnapshotService(
+      appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+      pathPolicy: pathPolicy,
+    );
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: snapshots,
+    );
+    final gateway = _SequencedGateway();
+    final config = ApiConfig(
+      id: 'stage02-config',
+      name: 'Stage02 test config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'stage02-character',
+      name: 'Stage02 character',
+      avatar: 'S2',
+      age: 30,
+      role: '产品经理',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final visualConfig = ApiConfig(
+        id: 'visual-config',
+        name: 'visual',
+        provider: 'qwen',
+        modelName: 'qwen-vl-max',
+        hasCredential: true,
+        credentialId: 'visual-credential');
+    final visualCharacter = AICharacter(
+        id: 'visual-character',
+        name: '视觉助手',
+        avatar: 'V',
+        age: 30,
+        role: '设计师',
+        personalityTags: const [],
+        systemPrompt: '不应该替换执行人提示词',
+        apiKey: '',
+        apiProvider: 'qwen',
+        modelName: 'qwen-vl-max',
+        apiConfigId: visualConfig.id);
+    await database.apiConfigBox.put(visualConfig.id, visualConfig);
+    await database.aiCharacterBox.put(visualCharacter.id, visualCharacter);
+    await database.chatGroupBox.put(
+        'stage02-group',
+        ChatGroup(
+            id: 'stage02-group',
+            name: '模型协作',
+            theme: '',
+            aiCharacterIds: [character.id, visualCharacter.id]));
+
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+    );
+    final task = AgentTask(
+      id: 'stage02-runner-task',
+      groupId: 'stage02-group',
+      characterId: character.id,
+      userRequest: '请处理这个需求',
+      workModeTask: true,
+    );
+
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      jsonEncode({'visionModelCharacterId': visualCharacter.id}),
+      WorkDiscussionState.initial(
+        conversationId: task.groupId,
+        executorId: character.id,
+        candidateCharacterIds: [character.id],
+        deliverableContract: {
+          'deliverableType': 'document',
+          'format': 'txt',
+          'location': 'notes.txt',
+          'contentScope': task.userRequest,
+          'explicitExecutorId': character.id,
+          'revisionTarget': '',
+          'requestRevision': 1
+        },
+      ).copyWith(
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+        understandingEvidence: const [
+          '已确认目标',
+          '已确认交付位置',
+          '执行人已确认工具路径',
+        ],
+        blockers: const [],
+      ),
+    );
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    final publicEvents = (await eventStore.read(task.id)).events;
+    expect(
+      publicEvents.any(
+        (event) =>
+            event.kind == WorkTaskEventKind.toolOutput &&
+            event.safeMetadata['pending'] == true,
+      ),
+      isTrue,
+    );
+    expect(
+      publicEvents.any(
+        (event) =>
+            event.kind == WorkTaskEventKind.modelOutput &&
+            event.detail == '准备写入授权目录文件。',
+      ),
+      isTrue,
+    );
+    // The pending request is held in the runner while the task checkpoint is
+    // persisted; this assertion also proves the first model turn was parsed.
+    expect(task.pendingToolRequestJson, contains('workspace.patch'));
+    expect(task.executionStateJson, contains('approvalScope'));
+    final pendingSummary = jsonDecode(task.contextSummary) as Map;
+    expect(pendingSummary['schemaVersion'], 1);
+    expect(pendingSummary['conversationId'], 'stage02-group');
+    expect(pendingSummary['target'], '请处理这个需求');
+    expect(pendingSummary['artifactPaths'], isEmpty);
+    expect(
+      await File(
+        '${authorizedDirectory.path}/conversations/group_stage02-group/notes.txt',
+      ).exists(),
+      isFalse,
+    );
+
+    final checkpoint = jsonDecode(task.executionStateJson) as Map;
+    task.executionStateJson = jsonEncode({
+      ...checkpoint,
+      'approvalDecision': 'approved',
+    });
+    task.status = AgentTaskStatus.queued;
+    await database.agentTaskBox.put(task.id, task);
+    await runner.run(task, WorkTaskCancellation());
+
+    final output = File(
+      '${authorizedDirectory.path}/conversations/group_stage02-group/notes.txt',
+    );
+    expect(task.status, AgentTaskStatus.completed);
+    final completedSummary = jsonDecode(task.contextSummary) as Map;
+    expect(completedSummary['conversationId'], 'stage02-group');
+    expect(completedSummary['completedSummaries'], isNotEmpty);
+    expect(
+      (completedSummary['artifactPaths'] as List)
+          .whereType<String>()
+          .any((path) => path.endsWith('/notes.txt')),
+      isTrue,
+    );
+    expect(await output.readAsString(), 'production-stage02');
+    expect(gateway.calls, 2);
+    expect(gateway.observedModels, everyElement('qwen-vl-max'));
+    expect(gateway.observedCharacters, everyElement(character.id));
+    expect(task.characterId, character.id);
+    expect((await snapshots.readManifest(task.id))?.actions.single.completed,
+        isTrue);
+    expect((await snapshots.undo(task.id)).succeeded, isTrue);
+    expect(await output.exists(), isFalse);
+  });
+
+  test(
+      'keeps a saved artifact and marks delivery retryable when attachment copy fails',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    expect(
+      await grants.authorizeDirectory(
+        authorizedDirectory.path,
+        consent: (_) async => true,
+      ),
+      isNotNull,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final snapshots = WorkSnapshotService(
+      appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+      pathPolicy: pathPolicy,
+      eventStore: eventStore,
+    );
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: snapshots,
+      eventStore: eventStore,
+    );
+    final config = ApiConfig(
+      id: 'delivery-failure-config',
+      name: 'Delivery failure config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'delivery-failure-character',
+      name: '交付失败测试角色',
+      avatar: 'D',
+      age: 30,
+      role: '文件交付测试角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+    final gateway = _SequencedGateway(
+      patchPath: 'delivery.txt',
+      patchContent: 'saved-before-attachment-failure',
+    );
+    var attachmentCopyFails = true;
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      mediaCopier: (source, type, {fileName}) async {
+        if (attachmentCopyFails) {
+          throw StateError('simulated attachment failure');
+        }
+        return MediaAttachment(
+          id: 'retry-media-${gateway.calls}',
+          type: type,
+          localPath: source.path,
+          fileName: fileName ?? source.uri.pathSegments.last,
+          fileSize: await source.length(),
+          mimeType: 'text/plain',
+        );
+      },
+    );
+    final task = AgentTask(
+      id: 'delivery-failure-task',
+      groupId: 'delivery-failure-group',
+      characterId: character.id,
+      userRequest: '生成一个文本文件 delivery.txt 并交付',
+      workModeTask: true,
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    final checkpoint = jsonDecode(task.executionStateJson) as Map;
+    task
+      ..executionStateJson = jsonEncode({
+        ...checkpoint,
+        'approvalDecision': 'approved',
+      })
+      ..status = AgentTaskStatus.queued;
+    await database.agentTaskBox.put(task.id, task);
+    await runner.run(task, WorkTaskCancellation());
+
+    final output = File(
+      '${authorizedDirectory.path}/conversations/group_delivery-failure-group/delivery.txt',
+    );
+    expect(task.status, AgentTaskStatus.failed);
+    expect(task.resumeRequired, isTrue);
+    expect(task.workFailure?.retryable, isTrue);
+    expect(task.workFailure?.reason, contains('附件'));
+    expect(await output.readAsString(), 'saved-before-attachment-failure');
+    final message = database.messageBox.values
+        .where((item) => item.groupId == task.groupId)
+        .last;
+    final messageId = message.id;
+    expect(message.content, contains('文件已保存'));
+    expect(message.content, contains('可重试交付'));
+    expect(message.media, isNull);
+    final failureMetadata = jsonDecode(task.executionStateJson) as Map;
+    expect(failureMetadata['artifactDeliveryRetryOnly'], isTrue);
+    expect(failureMetadata['artifactDeliveryMessageId'], messageId);
+
+    // The retry is an attachment-only continuation. It must reuse the
+    // existing final message and saved path without asking the model for a
+    // second plan or applying the file mutation again.
+    final modelCallsBeforeRetry = gateway.calls;
+    attachmentCopyFails = false;
+    task.status = AgentTaskStatus.queued;
+    await database.agentTaskBox.put(task.id, task);
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.completed);
+    expect(gateway.calls, modelCallsBeforeRetry);
+    final deliveredMessages = database.messageBox.values
+        .where((item) => item.groupId == task.groupId)
+        .toList(growable: false);
+    expect(deliveredMessages, hasLength(1));
+    expect(deliveredMessages.single.id, messageId);
+    expect(deliveredMessages.single.media, isNotEmpty);
+    expect(deliveredMessages.single.content, isNot(contains('可重试交付')));
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)
+          .containsKey('artifactDeliveryRetryOnly'),
+      isFalse,
+    );
+  });
+
+  test('partial artifact attachment failure cannot mark a file task complete',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final mutations = WorkspaceMutationService(pathPolicy: pathPolicy);
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    final workspace = await workspaceService.loadOrCreate(
+      conversationId: 'partial-delivery-group',
+      isDirectChat: false,
+    );
+    final first = File('${workspace.workDirPath}/first.txt');
+    final second = File('${workspace.workDirPath}/second.txt');
+    await first.writeAsString('first');
+    await second.writeAsString('second');
+
+    final config = ApiConfig(
+      id: 'partial-delivery-config',
+      name: 'Partial delivery config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'partial-delivery-character',
+      name: '部分交付测试角色',
+      avatar: 'PD',
+      age: 30,
+      role: '文件交付测试角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final gateway = _MultiPatchGateway(const <Map<String, String>>[]);
+    final copiedNames = <String>[];
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      mediaCopier: (source, type, {fileName}) async {
+        final name = fileName ?? source.uri.pathSegments.last;
+        if (name == 'second.txt') {
+          throw StateError('simulated partial attachment failure');
+        }
+        copiedNames.add(name);
+        return MediaAttachment(
+          id: 'partial-media-${copiedNames.length}',
+          type: type,
+          localPath: source.path,
+          fileName: name,
+          fileSize: await source.length(),
+          mimeType: 'text/plain',
+        );
+      },
+    );
+    final task = AgentTask(
+      id: 'partial-delivery-task',
+      groupId: 'partial-delivery-group',
+      characterId: character.id,
+      userRequest: '生成两个文本文件并交付全部文件',
+      workModeTask: true,
+      startedAt: DateTime.now().subtract(const Duration(seconds: 1)),
+      lastArtifactPaths: [first.path, second.path],
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.failed);
+    expect(task.resumeRequired, isTrue);
+    expect(task.workFailure?.reason, contains('附件'));
+    expect(copiedNames, ['first.txt']);
+    final metadata = jsonDecode(task.executionStateJson) as Map;
+    expect(metadata['artifactDeliveryRetryOnly'], isTrue);
+    expect(metadata['artifactDeliveryMessageId'], isNotEmpty);
   });
 
   test('samples token-level model progress before persisting it', () async {
@@ -1520,11 +1990,12 @@ void main() {
     await database.aiCharacterBox.put(character.id, character);
 
     var processStarts = 0;
+    String? startedWorkingDirectory;
     final runner = DefaultWorkTaskRunner(
       database: database,
       eventStore: eventStore,
       credentials: _TestCredentials(),
-      gateway: _ReadOnlyCommandGateway(),
+      gateway: _ReadOnlyCommandGateway(workingDirectory: ''),
       workspaceService: WorkModeWorkspaceService(
         db: database,
         grantService: grants,
@@ -1537,8 +2008,9 @@ void main() {
           authorizedRoots: [authorizedDirectory.path],
           isWindows: false,
         ),
-        processStarter: (_, {required env, required shell}) async {
+        processStarter: (command, {required env, required shell}) async {
           processStarts++;
+          startedWorkingDirectory = command.workingDirectory;
           return WorkCommandProcess(
             pid: 10,
             stdout: Stream<List<int>>.value(utf8.encode('read-only\n')),
@@ -1564,6 +2036,7 @@ void main() {
     expect(task.status, AgentTaskStatus.completed);
     expect(task.lastError, isEmpty);
     expect(processStarts, 1);
+    expect(startedWorkingDirectory, authorizedDirectory.path);
 
     final persistedReplies = database.messageBox.values
         .where((message) =>

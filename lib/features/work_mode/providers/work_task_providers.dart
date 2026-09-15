@@ -2,11 +2,14 @@ import 'dart:async';
 import 'dart:io';
 
 import 'package:chat_group/core/database/database_service_provider.dart';
+import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_task_action_message_service.dart';
+import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
@@ -91,6 +94,18 @@ final workTaskRunnerProvider = Provider<WorkTaskRunner>((ref) {
   );
 });
 
+/// Production S3 discussion capability. It shares the same database, secure
+/// credential resolver and governance gateway family as the execution runner;
+/// it never owns task scheduling or starts tools on its own.
+final workDiscussionRunnerProvider = Provider<WorkTaskDiscussionRunner>((ref) {
+  final database = ref.watch(databaseServiceProvider);
+  return WorkDiscussionRunner(
+    database: database,
+    credentials: SecureApiCredentialResolver(),
+    eventStore: ref.watch(workTaskEventStoreProvider),
+  );
+});
+
 final workFolderGrantServiceProvider = Provider<WorkFolderGrantService>((ref) {
   final database = ref.watch(databaseServiceProvider);
   final service = WorkFolderGrantService(box: database.appSettingsBox);
@@ -172,6 +187,7 @@ final workMutationServiceProvider = workspaceMutationServiceProvider;
 /// auto-disposed provider, so navigating away from a chat room cannot stop it.
 final workTaskCoordinatorProvider = Provider<WorkTaskCoordinator>((ref) {
   final database = ref.watch(databaseServiceProvider);
+  final actionMessages = WorkTaskActionMessageService(database: database);
   final resourceLockManager = ref.watch(workResourceLockManagerProvider);
   WorkFolderGrantService? folderGrantService;
   try {
@@ -185,6 +201,7 @@ final workTaskCoordinatorProvider = Provider<WorkTaskCoordinator>((ref) {
     taskBox: database.agentTaskBox,
     eventStore: ref.watch(workTaskEventStoreProvider),
     runner: ref.watch(workTaskRunnerProvider),
+    discussionRunner: ref.watch(workDiscussionRunnerProvider),
     folderGrantService: folderGrantService,
     requireFolderGrant: true,
     resourceLockManager: resourceLockManager,
@@ -216,6 +233,7 @@ final workTaskCoordinatorProvider = Provider<WorkTaskCoordinator>((ref) {
     ),
     snapshotStatusUpdater: (taskId, status) =>
         ref.read(workSnapshotServiceProvider).markTaskStatus(taskId, status),
+    userActionNotifier: actionMessages.notify,
   );
   unawaited(coordinator.restore());
   ref.onDispose(coordinator.dispose);

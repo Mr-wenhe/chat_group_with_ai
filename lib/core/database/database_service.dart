@@ -765,6 +765,13 @@ class DatabaseService {
 
   static const String _messageIdsByGroupKey = 'message_ids_by_group';
   static const String _messageIndexCountKey = 'message_index_count';
+  // Increment when the meaning of cached summary fields changes. Existing
+  // installations then rebuild summaries even when the message count stayed
+  // unchanged (for example, after ordinary system notices stop counting as
+  // unread).
+  static const String _messageIndexSchemaVersionKey =
+      'message_index_schema_version';
+  static const int _messageIndexSchemaVersion = 2;
   static const String _conversationSummariesKey = 'conversation_summaries';
 
   Future<void> persistMessage(Message message) async {
@@ -798,8 +805,10 @@ class DatabaseService {
 
   Future<void> ensureMessageIndex() async {
     final storedCount = appSettingsBox.get(_messageIndexCountKey);
+    final storedSchema = appSettingsBox.get(_messageIndexSchemaVersionKey);
     _messageIndexCountCache ??= storedCount is int ? storedCount : -1;
-    if (_messageIndexCountCache != messageBox.length) {
+    final needsSchemaMigration = storedSchema != _messageIndexSchemaVersion;
+    if (_messageIndexCountCache != messageBox.length || needsSchemaMigration) {
       // Use a Completer to prevent concurrent rebuilds from multiple callers.
       final existing = _messageIndexBuildFuture;
       if (existing != null) {
@@ -845,6 +854,7 @@ class DatabaseService {
         for (final entry in summaries.entries) entry.key: entry.value.toMap(),
       },
       _messageIndexCountKey: messageBox.length,
+      _messageIndexSchemaVersionKey: _messageIndexSchemaVersion,
     });
   }
 
@@ -981,6 +991,7 @@ class DatabaseService {
     await appSettingsBox.putAll({
       _messageIdsByGroupKey: _messageIdsCache,
       _messageIndexCountKey: _messageIndexCountCache,
+      _messageIndexSchemaVersionKey: _messageIndexSchemaVersion,
     });
   }
 
@@ -1001,6 +1012,7 @@ class DatabaseService {
     await appSettingsBox.putAll({
       _messageIdsByGroupKey: _messageIdsCache,
       _messageIndexCountKey: _messageIndexCountCache,
+      _messageIndexSchemaVersionKey: _messageIndexSchemaVersion,
     });
   }
 
@@ -1039,6 +1051,7 @@ class DatabaseService {
     await appSettingsBox.putAll({
       _messageIdsByGroupKey: _messageIdsCache,
       _messageIndexCountKey: _messageIndexCountCache,
+      _messageIndexSchemaVersionKey: _messageIndexSchemaVersion,
     });
   }
 
@@ -1072,7 +1085,7 @@ class DatabaseService {
         (direct
             ? directChatReadAtByConversation()
             : groupChatReadAtByGroup())[message.groupId];
-    final isUnread = message.senderType == 'ai' &&
+    final isUnread = _isIncomingConversationMessage(message) &&
         (readAt == null || message.timestamp.isAfter(readAt));
     final ownerName = !direct ? ownerNameFromProfile() : '我';
     final mentionNames = {'我', if (ownerName.isNotEmpty) ownerName};
@@ -1113,7 +1126,7 @@ class DatabaseService {
         ? directChatReadAtByConversation()
         : groupChatReadAtByGroup())[groupId];
     final unread = sorted.where((message) {
-      return message.senderType == 'ai' &&
+      return _isIncomingConversationMessage(message) &&
           (readAt == null || message.timestamp.isAfter(readAt));
     }).toList(growable: false);
     final ownerName = !direct ? ownerNameFromProfile() : '我';
@@ -1149,6 +1162,14 @@ class DatabaseService {
     final byTime = a.timestamp.compareTo(b.timestamp);
     return byTime != 0 ? byTime : a.id.compareTo(b.id);
   }
+
+  bool _isIncomingConversationMessage(Message message) =>
+      message.senderType == 'ai' ||
+      // System messages are also used for local status/toast-style notices.
+      // Only an explicit @-addressed system reminder belongs in the inbox's
+      // unread stream; otherwise every internal status update would create a
+      // badge and look like a new role reply.
+      message.senderType == 'system' && message.isMention;
 
   void invalidateMessageIndexCache() {
     _messageIdsCache = null;

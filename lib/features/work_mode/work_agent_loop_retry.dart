@@ -144,6 +144,34 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     return null;
   }
 
+  Future<WorkAgentLoopResult> _pauseForCheckpointReview(
+    _LoopState state,
+  ) async {
+    const message = '任务检查点版本不受支持，已暂停，请确认后重新继续。';
+    final failure = WorkFailure.fromSignalsForUserAction(
+      message,
+      completedContent: _completedContent(state),
+    );
+    state.failure = failure;
+    state.task
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..lastError = message
+      ..pendingToolRequestJson = '';
+    await _emit(
+      state,
+      WorkTaskEventKind.paused,
+      '等待确认任务检查点',
+      detail: message,
+      safeMetadata: {'reason': 'unsupportedCheckpointSchema'},
+    );
+    // _checkpoint applies the current allow-list and retains typed discussion
+    // and known resource blockers before adding the review marker. It is the
+    // only safe way to rewrite an unknown checkpoint without replaying it.
+    await _checkpoint(state);
+    return _result(state, WorkAgentLoopStatus.paused, message);
+  }
+
   Future<WorkAgentLoopResult?> _checkBoundary(
     _LoopState state, {
     bool includeActionLimit = true,

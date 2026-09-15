@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 
 import 'work_task_error_sanitizer.dart';
 import 'work_command_policy.dart';
@@ -239,7 +240,7 @@ class WorkFailure {
 
   /// Stores a redacted failure while preserving every other checkpoint key.
   static void persistOnTask(AgentTask task, WorkFailure failure) {
-    final metadata = _decodeMetadata(task.executionStateJson);
+    final metadata = _decodeMetadataForTask(task);
     metadata['workFailure'] = failure.toJson();
     task.executionStateJson = jsonEncode(metadata);
   }
@@ -247,7 +248,7 @@ class WorkFailure {
   /// Removes only the failure marker. Committed actions, queue and artifacts
   /// remain untouched so a retry starts at the last safe checkpoint.
   static void clearFromTask(AgentTask task) {
-    final metadata = _decodeMetadata(task.executionStateJson);
+    final metadata = _decodeMetadataForTask(task);
     if (!metadata.containsKey('workFailure')) return;
     metadata.remove('workFailure');
     task.executionStateJson = metadata.isEmpty ? '' : jsonEncode(metadata);
@@ -1015,6 +1016,23 @@ class WorkFailure {
       // model text. The task's typed fields remain authoritative.
       return <String, dynamic>{};
     }
+  }
+
+  /// Keeps an invalid group discussion marker visible when failure recovery
+  /// rewrites the checkpoint. Without this sentinel, malformed JSON would be
+  /// replaced by a failure-only map and the coordinator could mistake the
+  /// task for a legacy marker-less task on retry.
+  static Map<String, dynamic> _decodeMetadataForTask(AgentTask task) {
+    final metadata = _decodeMetadata(task.executionStateJson);
+    final discussion = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    if (WorkDiscussionState.requiresDiscussionForConversation(task.groupId) &&
+        discussion.present &&
+        !metadata.containsKey(WorkDiscussionState.jsonKey)) {
+      metadata[WorkDiscussionState.jsonKey] = null;
+    }
+    return metadata;
   }
 }
 

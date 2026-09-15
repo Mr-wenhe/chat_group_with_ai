@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/work_agent_loop.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
@@ -802,6 +803,36 @@ void main() {
     });
   });
 
+  test(
+      'failure persistence keeps an invalid group discussion marker fail-closed',
+      () {
+    final task = _task('malformed-discussion-failure')
+      ..executionStateJson = '{malformed discussion checkpoint';
+    const failure = WorkFailure(
+      type: WorkFailureType.internal,
+      title: '任务失败',
+      reason: '测试失败',
+      technicalDetail: 'safe detail',
+      completedContent: <String>[],
+      retryable: false,
+      suggestedAction: '请检查后重试。',
+    );
+
+    WorkFailure.persistOnTask(task, failure);
+    final persisted = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    expect(persisted.present, isTrue);
+    expect(persisted.state, isNull);
+
+    WorkFailure.clearFromTask(task);
+    final afterClear = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    expect(afterClear.present, isTrue);
+    expect(afterClear.state, isNull);
+  });
+
   group('WorkTaskPanel recovery actions', () {
     AgentTask panelTask(WorkFailureType type, {bool retryable = false}) {
       final task = _task('panel-${type.name}')..status = AgentTaskStatus.failed;
@@ -921,7 +952,8 @@ void main() {
     });
   });
 
-  test('restore marks an app restart as user action and keeps the queue',
+  test(
+      'restore moves a legacy group task to discussion pause and keeps the queue',
       () async {
     final directory = await Directory.systemTemp.createTemp('work-failure-');
     addTearDown(() async {
@@ -948,8 +980,8 @@ void main() {
     );
     await coordinator.restore();
     final restored = box.get(task.id)!;
-    expect(restored.status, AgentTaskStatus.interrupted);
-    expect(restored.workFailure?.type, WorkFailureType.userActionRequired);
+    expect(restored.status, AgentTaskStatus.paused);
+    expect(restored.workFailure, isNull);
     expect(restored.queuedUserRequests, <String>['继续检查']);
     expect(restored.contextSummary, contains('继续检查'));
     await coordinator.dispose();

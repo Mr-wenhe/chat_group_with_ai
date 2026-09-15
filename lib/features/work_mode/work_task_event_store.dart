@@ -385,6 +385,22 @@ class WorkTaskEventStore {
     }
     final handle = await file.open(mode: FileMode.append);
     try {
+      // A process crash can leave a valid prefix without its trailing LF.
+      // Terminate that diagnostic line before appending so the new event is
+      // still readable after restart instead of being concatenated into the
+      // malformed prefix.
+      final length = await handle.length();
+      if (length > 0) {
+        final reader = await file.open();
+        try {
+          await reader.setPosition(length - 1);
+          if (await reader.readByte() != 0x0a) {
+            await handle.writeByte(0x0a);
+          }
+        } finally {
+          await reader.close();
+        }
+      }
       await handle.writeString('${jsonEncode(event.toJson())}\n');
       await handle.flush();
     } finally {

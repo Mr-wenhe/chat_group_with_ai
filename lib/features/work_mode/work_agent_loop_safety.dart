@@ -538,6 +538,12 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
 
   Map<String, dynamic> _safeExistingMap(String raw) {
     final decoded = _decodeMap(raw);
+    if (workExecutionCheckpointRequiresReview(raw)) {
+      // Preserve only typed gates and known blockers while a future checkpoint
+      // waits for an explicit user resume. Dropping the discussion/folder
+      // marker here would turn an unknown state into a legacy runnable task.
+      return workExecutionCheckpointReviewMetadata(decoded);
+    }
     final sanitized = _safePersistedValue(decoded, depth: 0);
     return sanitized is Map
         ? Map<String, dynamic>.from(sanitized)
@@ -546,6 +552,15 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
 
   Object? _safePersistedValue(Object? value,
       {required int depth, String? key}) {
+    if (key == WorkDiscussionState.jsonKey) {
+      // Discussion state is a typed execution gate. Its nested fields include
+      // names such as conversationId/contentScope that the generic checkpoint
+      // redactor intentionally removes; treating the marker as an ordinary
+      // map would make every model checkpoint lose the gate and break resume.
+      if (value is! Map) return null;
+      final state = WorkDiscussionState.tryParse(value);
+      return state?.toJson();
+    }
     if (key == 'workFailure' && value is Map) {
       // WorkFailure owns its own allow-list and redaction. Treating this
       // structured diagnostic as a normal result would drop completedContent

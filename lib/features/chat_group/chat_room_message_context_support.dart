@@ -346,7 +346,10 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
   Future<void> _appendMessage(Message message) async {
     // 页面离开后，任何已经结束但尚未提交的 AI 流结果都必须丢弃。
     // 这道仓储边界防止停流检查与真正写入之间的异步窗口再次落库。
-    if (message.senderType == 'ai' && !_canTouchUi) return;
+    if ((message.senderType == 'ai' || message.senderType == 'system') &&
+        !_canTouchUi) {
+      return;
+    }
     final visibleIds = _visibleCharacterIdsForMessage();
     if (message.visibleToCharacterIds.isEmpty) {
       message.visibleToCharacterIds = List<String>.from(visibleIds);
@@ -358,7 +361,7 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
       _hasRestrictedHistory = true;
     }
     await _repository.persistNewMessage(message);
-    if (message.senderType == 'ai') {
+    if (message.senderType == 'ai' || message.senderType == 'system') {
       await _markCurrentConversationRead(throughMessage: message);
     }
     // 本地记忆/遗忘/关系必须在返回前落库；只有 LLM 提炼后台执行。
@@ -430,7 +433,10 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
   ///
   /// 用户正在看这个会话时不登记——他已经看到了，弹提醒只是噪音。
   void _registerUserMentionIfNeeded(Message message) {
-    if (!_canTouchUi || message.senderType != 'ai') return;
+    if (!_canTouchUi ||
+        (message.senderType != 'ai' && message.senderType != 'system')) {
+      return;
+    }
     if (ConversationPresenceService.instance.isActive(widget.groupId)) return;
     if (!ChatActivityPolicy.contentMentionsUser(
       message.content,

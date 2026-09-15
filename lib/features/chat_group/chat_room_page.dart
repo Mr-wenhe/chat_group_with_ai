@@ -89,13 +89,16 @@ import 'package:chat_group/features/memory/relationship_private_detail_page.dart
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
-import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/work_mode/work_mode_session.dart';
 import 'package:chat_group/features/work_mode/visible_browser_service.dart';
+import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_user_action.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_role_router.dart';
 import 'package:chat_group/features/work_mode/work_role_model_selector.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/services/message_speech_service.dart';
@@ -128,6 +131,7 @@ part 'chat_room_page_state.dart';
 part 'chat_room_page_lifecycle_support.dart';
 part 'chat_room_page_session_support.dart';
 part 'chat_room_page_build_support.dart';
+part 'chat_room_task_action_support.dart';
 part 'chat_room_voice_support.dart';
 
 /// 空闲自动聊天（idle auto-chat）的对外可见状态，用于顶部状态条展示。

@@ -56,7 +56,11 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     // 用户开口即重置 burst 计数，让自动聊天重新获得完整额度。
     _autoChatRoundCount = 0;
 
-    if (_characters.isEmpty) {
+    // Ordinary chat still needs an active speaker, but work-mode requests must
+    // be durably recorded even when the group currently has no usable member;
+    // the discussion gate can then @ the owner and resume after a qualified
+    // role is added.
+    if (_characters.isEmpty && !_workModeEnabled) {
       if (mounted) {
         AppToast.show(context, _isDirectChat ? '该角色当前不可回复' : '该群聊没有活跃的角色',
             icon: Icons.info_outline_rounded);
@@ -80,7 +84,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       await _appendMessage(Message(
         groupId: widget.groupId,
         senderId: 'system',
-        senderType: 'ai',
+        senderType: 'system',
         content: WorkModePolicy.workModeHint,
       ));
     }
@@ -171,12 +175,40 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       final followUpRequest = text.trim().isEmpty && hasAttachments
           ? WorkModePolicy.attachmentOnlyRequest
           : text;
-      await coordinator.enqueueFollowUp(
+      final decision = coordinator.followUpDecisionForTask(
         activeTask.id,
         followUpRequest,
-        attachmentMessageId: hasAttachments ? attachmentMessageId : null,
       );
-      return;
+      // A completed checkpoint does not own a brand-new deliverable. Let the
+      // normal router run so explicit @角色, qualification, permissions and
+      // the fresh discussion task are rebuilt from the new request. All other
+      // inputs remain on the durable FIFO/follow-up path.
+      final startsNewTask = coordinator.shouldRouteNewTaskForFollowUp(
+        activeTask.id,
+        followUpRequest,
+      );
+      if (!startsNewTask) {
+        await coordinator.enqueueFollowUp(
+          activeTask.id,
+          followUpRequest,
+          attachmentMessageId: hasAttachments ? attachmentMessageId : null,
+        );
+        final discussion = coordinator.discussionStateForTask(activeTask.id);
+        final discussionPending =
+            discussion.state != null && !discussion.state!.isExecutionReady;
+        await _appendMessage(Message(
+          groupId: widget.groupId,
+          senderId: 'system',
+          senderType: 'system',
+          content: decision.isClarification
+              ? '@$_ownerMentionName 工作模式需要你明确修订目标：${decision.clarificationQuestion ?? '请明确要修改的文件路径。'}'
+              : discussionPending
+                  ? '已收到补充要求，已纳入当前群讨论；将按最新请求版本重新确认方案。'
+                  : '已收到补充要求，当前执行完成后将按 FIFO 顺序处理。',
+          isMention: decision.isClarification,
+        ));
+        return;
+      }
     }
 
     // Route against the complete group membership so an explicit @ can
@@ -184,12 +216,29 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     // falling back to the first active character. The router also creates the
     // durable product → development → testing stage plan used by the
     // coordinator for serial role handoff.
+    // The loader keeps deleted/history-only senders in `_allGroupCharacters`
+    // so old bubbles can still render their persona.  That display snapshot is
+    // not current group membership, however, and must never become an
+    // executor or a discussion participant.  Route against the current group
+    // ids while retaining inactive current members for precise diagnostics.
+    final currentMemberIds = _group?.aiCharacterIds.toSet() ??
+        _characters.map((character) => character.id).toSet();
     final groupCharacters =
-        _allGroupCharacters.isEmpty ? _characters : _allGroupCharacters;
+        (_allGroupCharacters.isEmpty ? _characters : _allGroupCharacters)
+            .where((character) => currentMemberIds.contains(character.id))
+            .toList(growable: false);
     // Automatic routing must not ask a model to choose a role that cannot
     // actually run. Explicit @ and DM routes retain the full list so their
     // unavailable-role diagnostics remain precise.
-    final routableCharacters = mentionedIds.isNotEmpty || _isDirectChat
+    // Use the display snapshot only to detect that the user explicitly named
+    // someone.  The router still receives current membership, so a deleted or
+    // historical name is reported as an unknown role instead of silently
+    // turning an explicit request into automatic election.
+    final hasExplicitMention = analyzeMentionedCharacterIds(
+      text,
+      _allGroupCharacters.isEmpty ? groupCharacters : _allGroupCharacters,
+    ).hasExplicitMention;
+    final routableCharacters = hasExplicitMention || _isDirectChat
         ? groupCharacters
         : await _charactersWithUsableCredentials(groupCharacters);
     final routeSelector = WorkRoleModelSelectorService(
@@ -228,67 +277,130 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       hasAttachments: hasAttachments,
       characters: routableCharacters,
       conversationId: widget.groupId,
+      requestRevision: 1,
       isDirectChat: _isDirectChat,
       directCharacterId: _directCharacterId,
       skills: _db.characterSkillBox.values,
     );
+    // Keep task routing and stage/permission lookup constrained to current
+    // group membership.  Historical senders remain available to render old
+    // bubbles, but can never become an executor or a tool-bearing stage.
+    final charactersById = <String, AICharacter>{
+      for (final character in groupCharacters) character.id: character,
+    };
     if (!route.isSuccess) {
+      final pendingTask = _buildDiscussionTask(
+        text: text,
+        hasAttachments: hasAttachments,
+        attachmentMessageId: attachmentMessageId,
+        route: route,
+        charactersById: charactersById,
+      );
+      if (pendingTask != null) {
+        final requiresOwnerClarification = route.needsMentionClarification ||
+            (route.characterId == null &&
+                route.deliverableContract?.explicitExecutorId
+                        ?.trim()
+                        .isNotEmpty ==
+                    true);
+        await _appendMessage(Message(
+          groupId: widget.groupId,
+          senderId: 'system',
+          senderType: 'system',
+          content: '${requiresOwnerClarification ? '@$_ownerMentionName ' : ''}'
+              '工作模式角色路由未完成，任务已进入群讨论等待：${route.reason}',
+          isMention: requiresOwnerClarification,
+        ));
+        await coordinator.submit(pendingTask);
+        return;
+      }
       await _appendMessage(Message(
         groupId: widget.groupId,
         senderId: 'system',
-        senderType: 'ai',
+        senderType: 'system',
         content: '工作模式角色路由未完成：${route.reason}',
       ));
       return;
     }
-    final charactersById = <String, AICharacter>{
-      for (final character in _allGroupCharacters) character.id: character,
-      for (final character in _characters) character.id: character,
-    };
     final executor = charactersById[route.characterId];
     if (executor == null) {
-      await _appendMessage(Message(
-        groupId: widget.groupId,
-        senderId: 'system',
-        senderType: 'ai',
-        content: '工作模式角色路由未完成：找不到选中的执行角色。',
-      ));
+      await _queueDiscussionTask(
+        coordinator: coordinator,
+        text: text,
+        hasAttachments: hasAttachments,
+        attachmentMessageId: attachmentMessageId,
+        route: route,
+        charactersById: charactersById,
+        additionalBlockers: const ['executorUnavailable'],
+        additionalQuestion: '找不到指定的执行角色，请先把该角色加入当前群组后再继续。',
+        reason: '找不到选中的执行角色。',
+      );
       return;
     }
     if (_workModeEnabled && !executor.agenticEnabled) {
-      await _appendMessage(Message(
-        groupId: widget.groupId,
-        senderId: 'system',
-        senderType: 'ai',
-        content: '工作模式未启动：${executor.name}未启用工作能力，请在角色设置中开启“允许工作模式”，或选择其他工作角色。',
-      ));
+      await _queueDiscussionTask(
+        coordinator: coordinator,
+        text: text,
+        hasAttachments: hasAttachments,
+        attachmentMessageId: attachmentMessageId,
+        route: route,
+        charactersById: charactersById,
+        additionalBlockers: const ['executorUnavailable'],
+        additionalQuestion: '指定的执行角色尚未启用工作能力，请在角色设置中开启后再继续。',
+        reason: '${executor.name}未启用工作能力。',
+      );
       return;
     }
     final stageRoleIds = route.stages.isEmpty
         ? <String>[executor.id]
         : route.stages.map((stage) => stage.roleId).toSet().toList();
-    // Re-check the concrete secure credential for every planned stage, not
-    // only ApiConfig.hasCredential. The latter is persisted metadata and can
-    // be stale after rotation/revocation; starting a later stage with a stale
-    // flag would make the task fail after the user already approved routing.
-    final stageCharacters = stageRoleIds
-        .map((characterId) => charactersById[characterId])
-        .whereType<AICharacter>()
-        .toList(growable: false);
-    final usableStageCharacters =
-        await _charactersWithUsableCredentials(stageCharacters);
-    final usableStageIds = usableStageCharacters.map((item) => item.id).toSet();
-    final unavailableRoles = stageCharacters
-        .where((character) => !usableStageIds.contains(character.id))
-        .map((character) => character.name)
-        .toList(growable: false);
-    if (unavailableRoles.isNotEmpty) {
-      await _appendMessage(Message(
-        groupId: widget.groupId,
-        senderId: 'system',
-        senderType: 'ai',
-        content: '工作模式角色路由未完成：${unavailableRoles.join('、')}尚未配置可用模型凭据，未启动任务。',
-      ));
+    if (_isDirectChat) {
+      // Private chats retain the existing explicit handoff semantics.  There
+      // is no group discussion task to hold a later receiver's credential
+      // blocker, so fail visibly before the fixed conversation starts.
+      final stageCharacters = stageRoleIds
+          .map((characterId) => charactersById[characterId])
+          .whereType<AICharacter>()
+          .toList(growable: false);
+      final usableStageIds = (await _charactersWithUsableCredentials(
+        stageCharacters,
+      ))
+          .map((character) => character.id)
+          .toSet();
+      final unavailableRoles = stageCharacters
+          .where((character) => !usableStageIds.contains(character.id))
+          .map((character) => character.name)
+          .toList(growable: false);
+      if (unavailableRoles.isNotEmpty) {
+        await _appendMessage(Message(
+          groupId: widget.groupId,
+          senderId: 'system',
+          senderType: 'system',
+          content: '工作模式角色路由未完成：${unavailableRoles.join('、')}尚未配置可用模型凭据。',
+        ));
+        return;
+      }
+    }
+    // A group discussion elects one final owner.  Its route may still carry
+    // legacy product/development/testing stages, but those later roles are
+    // discussion participants rather than an implicit handoff chain.  Only
+    // the concrete owner must pass the secure-credential preflight here; the
+    // discussion runner records unavailable consulted members without making
+    // an otherwise valid task disappear into a one-off chat notice.
+    final usableExecutor =
+        await _charactersWithUsableCredentials(<AICharacter>[executor]);
+    if (usableExecutor.isEmpty) {
+      await _queueDiscussionTask(
+        coordinator: coordinator,
+        text: text,
+        hasAttachments: hasAttachments,
+        attachmentMessageId: attachmentMessageId,
+        route: route,
+        charactersById: charactersById,
+        additionalBlockers: const ['executorUnavailable'],
+        additionalQuestion: '指定的执行角色当前没有可用模型凭据，请配置或更换该角色后再继续。',
+        reason: '${executor.name}尚未配置可用模型凭据。',
+      );
       return;
     }
     // 策略层判断这条输入是否值得触发一次工作任务（例如纯闲聊则跳过）。
@@ -312,48 +424,13 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     final taskRequest = text.trim().isEmpty && hasAttachments
         ? WorkModePolicy.attachmentOnlyRequest
         : text;
-    final requiredByIntent = CharacterSkillResolver.resolveFor(
-      executor,
-      taskRequest,
-    ).permissions.toSet();
-    final asksForSkillManagement = RegExp(
-      r'技能|skill|template|模板',
-      caseSensitive: false,
-    ).hasMatch(taskRequest);
-    final asksForMutation = RegExp(
-      r'写入|修改|创建|生成|保存|导出|实现|修复|更新|重构|删除|重命名|patch|write|create|generate|edit|save|export|implement|fix|update|refactor|delete|rename',
-      caseSensitive: false,
-    ).hasMatch(taskRequest);
-    final asksForCommand = RegExp(
-      r'运行|执行|测试|构建|编译|验证|命令|run|execute|test|build|compile|verify|command',
-      caseSensitive: false,
-    ).hasMatch(taskRequest);
-    final asksForBrowser = RegExp(
-      r'网页|浏览器|页面|browser|web page|website',
-      caseSensitive: false,
-    ).hasMatch(taskRequest);
-    final missingPermissions = requiredByIntent
-        .where((permission) => switch (permission) {
-              ToolPermission.skillCreate ||
-              ToolPermission.skillDownload =>
-                asksForSkillManagement,
-              ToolPermission.workspacePatch => asksForMutation,
-              ToolPermission.commandRun => asksForCommand,
-              ToolPermission.browserContext => asksForBrowser,
-              _ => true,
-            })
-        .where((permission) => !requestedPermissions.contains(permission))
-        .toSet();
-    if (missingPermissions.isNotEmpty) {
-      await _appendMessage(Message(
-        groupId: widget.groupId,
-        senderId: 'system',
-        senderType: 'ai',
-        content:
-            '工作模式未启动：角色「${executor.name}」缺少当前任务所需工具权限：${missingPermissions.map((item) => item.name).join('、')}。请在角色设置中授予权限或选择其他工作角色。',
-      ));
-      return;
-    }
+    // Tool permissions are enforced again by the production runner after the
+    // public discussion gate.  Do not reject the group input here: every
+    // group task must first leave a durable discussion record so the user can
+    // repair the role, add a qualified member, or choose a different executor
+    // without losing the original request.  A missing capability therefore
+    // becomes a visible, recoverable execution failure instead of a one-off
+    // system message that bypasses R01/R04.
     final task = AgentTask(
       groupId: widget.groupId,
       characterId: executor.id,
@@ -366,53 +443,240 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       plan: '角色路由：${route.reason}',
       workModeTask: true,
     );
+    final discussionParticipants = <String>{
+      ...stageRoleIds,
+      ...route.discussionCharacterIds,
+      ...route.consultedCharacterIds,
+    };
     if (attachmentMessageId != null && attachmentMessageId.trim().isNotEmpty) {
       task.executionStateJson = jsonEncode({
         'attachmentMessageId': attachmentMessageId.trim(),
       });
+    }
+    if (!_isDirectChat) {
+      final discussionState = WorkDiscussionState.initial(
+        conversationId: widget.groupId,
+        requestRevision: route.deliverableContract?.requestRevision ?? 1,
+        coordinatorId: route.discussionCharacterIds.isEmpty
+            ? null
+            : route.discussionCharacterIds.first,
+        executorId: executor.id,
+        candidateCharacterIds: stageRoleIds,
+        participantCharacterIds: discussionParticipants,
+        deliverableContract: route.deliverableContract?.toJson(),
+      );
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        discussionState,
+      );
     }
     final handoff = route.handoffState;
     if (handoff != null) WorkHandoffState.persistToTask(task, handoff);
     await _appendMessage(Message(
       groupId: widget.groupId,
       senderId: 'system',
-      senderType: 'ai',
+      senderType: 'system',
       content: '工作模式角色路由：${route.reason}',
     ));
     await coordinator.submit(task);
   }
 
+  /// Creates the durable waiting record for a route that still needs group
+  /// discussion or an executor. It deliberately leaves characterId empty;
+  /// a coordinator/candidate is never promoted to a tool executor here.
+  AgentTask? _buildDiscussionTask({
+    required String text,
+    required bool hasAttachments,
+    required String? attachmentMessageId,
+    required WorkRoleRouteResult route,
+    required Map<String, AICharacter> charactersById,
+    Iterable<String> additionalBlockers = const [],
+    String? additionalQuestion,
+  }) {
+    if (_isDirectChat) return null;
+    final taskRequest = text.trim().isEmpty && hasAttachments
+        ? WorkModePolicy.attachmentOnlyRequest
+        : text;
+    // Some handoff/transport failures happen before the router has a
+    // contract. Keep a durable pending record for those group tasks too; the
+    // fallback describes no executor and never grants a role or tool access.
+    final contract = route.deliverableContract ??
+        WorkDeliverableContract(
+          deliverableType: 'generic',
+          format: 'unspecified',
+          location: 'unspecified',
+          contentScope: taskRequest,
+          revisionTarget: '',
+          requestRevision: 1,
+        );
+    final candidates = route.candidateCharacterIds.toSet();
+    if (route.characterId != null) candidates.add(route.characterId!);
+    final participants = <String>{
+      ...route.discussionCharacterIds,
+      ...route.consultedCharacterIds,
+      ...candidates,
+    };
+    final explicitExecutorUnavailable = route.characterId == null &&
+        contract.explicitExecutorId?.trim().isNotEmpty == true;
+    // Even when S1 could not activate a user-named role (for example because
+    // its credential or occupation is invalid), retain that exact identity in
+    // the discussion checkpoint. A later retry must re-check the same owner;
+    // an empty executor would let the runner elect a different role silently.
+    final checkpointExecutorId = route.characterId ??
+        (explicitExecutorUnavailable
+            ? contract.explicitExecutorId!.trim()
+            : null);
+    if (checkpointExecutorId != null && checkpointExecutorId.isNotEmpty) {
+      candidates.add(checkpointExecutorId);
+    }
+    // Candidate selection is the intended S3 entry point: the group must be
+    // allowed to discuss and elect a qualified executor. Keep routePending
+    // only for a genuine routing failure (unknown/ambiguous mention, an
+    // unavailable explicit owner, or another route that needs user action),
+    // otherwise it would be an immortal blocker that even a valid election
+    // could never clear.
+    final routeNeedsUserAction = !route.needsExecutorSelection;
+    final blockers = <String>[
+      if (routeNeedsUserAction) 'routePending',
+      if (explicitExecutorUnavailable) 'executorUnavailable',
+      ...additionalBlockers,
+    ];
+    if (route.needsMentionClarification) blockers.add('mentionClarification');
+    final question = additionalQuestion?.trim() ?? '';
+    final state = WorkDiscussionState.initial(
+      conversationId: widget.groupId,
+      requestRevision:
+          contract.requestRevision < 1 ? 1 : contract.requestRevision,
+      coordinatorId: route.discussionCharacterIds.isEmpty
+          ? null
+          : route.discussionCharacterIds.first,
+      executorId: checkpointExecutorId,
+      candidateCharacterIds: candidates,
+      participantCharacterIds: participants,
+      deliverableContract: contract.toJson(),
+      openQuestions: route.needsMentionClarification ||
+              explicitExecutorUnavailable ||
+              question.isNotEmpty
+          ? <String>[question.isEmpty ? route.reason : question]
+          : const <String>[],
+      blockers: blockers,
+    );
+    final task = AgentTask(
+      groupId: widget.groupId,
+      characterId: route.characterId ?? '',
+      userRequest: taskRequest,
+      assignedCharacterIds: candidates.toList(growable: false),
+      plan: '角色路由候选：${route.reason}',
+      workModeTask: true,
+    );
+    var execution = <String, dynamic>{};
+    final attachment = attachmentMessageId?.trim();
+    if (attachment != null && attachment.isNotEmpty) {
+      execution['attachmentMessageId'] = attachment;
+    }
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      jsonEncode(execution),
+      state,
+    );
+    final handoff = route.handoffState;
+    if (handoff != null) WorkHandoffState.persistToTask(task, handoff);
+    // Keep this lookup in the helper's contract so callers cannot accidentally
+    // manufacture a candidate that is absent from the current group map.
+    if (route.characterId != null &&
+        !charactersById.containsKey(route.characterId)) {
+      task.characterId = '';
+    }
+    return task;
+  }
+
+  /// Persists a recoverable group task when routing found a concrete owner but
+  /// a user-action boundary (missing role, disabled work mode, or credentials)
+  /// prevents discussion/execution from starting. The chat message and task
+  /// checkpoint share the same reason and always address the current owner.
+  Future<void> _queueDiscussionTask({
+    required WorkTaskCoordinator coordinator,
+    required String text,
+    required bool hasAttachments,
+    required String? attachmentMessageId,
+    required WorkRoleRouteResult route,
+    required Map<String, AICharacter> charactersById,
+    Iterable<String> additionalBlockers = const [],
+    String? additionalQuestion,
+    String? reason,
+  }) async {
+    final contract = route.deliverableContract;
+    final extraBlockers = List<String>.from(additionalBlockers);
+    final publicReason =
+        reason?.trim().isNotEmpty == true ? reason!.trim() : route.reason;
+    final pendingTask = _buildDiscussionTask(
+      text: text,
+      hasAttachments: hasAttachments,
+      attachmentMessageId: attachmentMessageId,
+      route: route,
+      charactersById: charactersById,
+      additionalBlockers: extraBlockers,
+      additionalQuestion: additionalQuestion,
+    );
+    if (pendingTask == null) {
+      // Private chats deliberately do not create a virtual group discussion.
+      // Still keep the existing fixed-role conversation informed when a
+      // preflight boundary rejects the request; silently returning here would
+      // make missing credentials or disabled work mode look like a lost input.
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'system',
+        content: '工作模式角色路由未完成：$publicReason',
+      ));
+      return;
+    }
+    final requiresOwnerMention = route.needsMentionClarification ||
+        extraBlockers.isNotEmpty ||
+        (route.characterId == null &&
+            contract?.explicitExecutorId?.trim().isNotEmpty == true);
+    await _appendMessage(Message(
+      groupId: widget.groupId,
+      senderId: 'system',
+      senderType: 'system',
+      content: '${requiresOwnerMention ? '@$_ownerMentionName ' : ''}'
+          '工作模式角色路由未完成，任务已进入群讨论等待：$publicReason',
+      isMention: requiresOwnerMention,
+    ));
+    await coordinator.submit(pendingTask);
+  }
+
   Future<List<AICharacter>> _charactersWithUsableCredentials(
     Iterable<AICharacter> characters,
   ) async {
-    final result = <AICharacter>[];
-    for (final character in characters) {
-      final config = _resolveApiConfig(character);
-      if (config == null) continue;
-      try {
-        final key = await _credentialResolver
-            .resolve(config)
-            .timeout(WorkRoleModelSelectorService.defaultTimeout);
-        if (key != null && key.trim().isNotEmpty) result.add(character);
-      } on Object {
-        // A broken credential entry is unavailable for automatic routing;
-        // the explicit route/preflight still reports the affected role.
-      }
+    final members = List<AICharacter>.from(characters);
+    final checks = await Future.wait(
+      members.map(_hasUsableCredential),
+    );
+    return [
+      for (var index = 0; index < checks.length; index++)
+        if (checks[index]) members[index],
+    ];
+  }
+
+  Future<bool> _hasUsableCredential(AICharacter character) async {
+    final config = _resolveApiConfig(character);
+    if (config == null) return false;
+    try {
+      final key = await _credentialResolver
+          .resolve(config)
+          .timeout(WorkRoleModelSelectorService.defaultTimeout);
+      return key != null && key.trim().isNotEmpty;
+    } on Object {
+      // A broken credential entry is unavailable for automatic routing;
+      // the explicit route/preflight still reports the affected role.
+      return false;
     }
-    return result;
   }
 
   AgentTask? _latestWorkTaskForConversation() {
-    final tasks = _db.agentTaskBox.values
-        .where((task) =>
-            task.workModeTask &&
-            task.groupId == widget.groupId &&
-            task.status != AgentTaskStatus.cancelled)
-        .toList()
-      ..sort((left, right) => (right.updatedAt ?? right.createdAt).compareTo(
-            left.updatedAt ?? left.createdAt,
-          ));
-    return tasks.isEmpty ? null : tasks.first;
+    return ref
+        .read(workTaskCoordinatorProvider)
+        .taskForConversation(widget.groupId);
   }
 
   /// 执行一轮普通群聊 / 私聊的 AI 回复。

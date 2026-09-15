@@ -17,6 +17,7 @@ import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
+import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 
 class GroupChatProactiveResult {
@@ -62,7 +63,15 @@ class GroupChatProactiveService {
         .where((character) =>
             character.isActive && _canGenerateProactiveMessage(character))
         .toList();
-    final groups = db.chatGroupBox.values.toList()..shuffle(random);
+    final workModeConfig = WorkModeConfigService(db: db);
+    // Work-mode conversations are owned by the task coordinator. The global
+    // foreground watcher must not inject an ordinary proactive message after
+    // the room is left, because that message would bypass the discussion gate
+    // and compete with the task's durable conversation reservation.
+    final groups = db.chatGroupBox.values
+        .where((group) => !workModeConfig.isWorkMode(group.id))
+        .toList()
+      ..shuffle(random);
     final allMessages = db.messageBox.values.toList();
     final charactersById = {
       for (final character in allCharacters) character.id: character
@@ -133,6 +142,12 @@ class GroupChatProactiveService {
       conversationId: candidate.group.id,
       characterId: candidate.character.id,
     );
+    // Work mode can be enabled while the proactive model call is in flight.
+    // Re-check the durable switch before persisting so a late foreground
+    // callback cannot inject an ordinary group message into a task-owned chat.
+    if (WorkModeConfigService(db: db).isWorkMode(candidate.group.id)) {
+      return null;
+    }
     if (!(result['success'] ?? false)) return null;
     final content = result['message']?.toString().trim() ?? '';
     if (content.isEmpty) return null;

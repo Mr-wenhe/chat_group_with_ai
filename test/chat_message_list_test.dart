@@ -1,6 +1,7 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_message_list.dart';
+import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -113,5 +114,70 @@ void main() {
     await tester.tap(find.text('程序媛'));
 
     expect(tappedSender, isTrue);
+  });
+
+  testWidgets('task reminder button invokes the exact task action',
+      (tester) async {
+    WorkTaskUserAction? received;
+    const action = WorkTaskUserAction(
+      taskId: 'task-old',
+      blockerId: 'commandApproval',
+      version: 42,
+      kind: WorkTaskUserActionKind.approveCommand,
+    );
+    final message = Message(
+      id: action.messageId,
+      groupId: 'group-1',
+      senderId: 'system',
+      senderType: 'system',
+      content: '@我 系统任务提醒：请处理任务。',
+      isMention: true,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatMessageList(
+            messages: [message],
+            characters: const [],
+            messageIndex: {message.id: message},
+            characterIndex: const {},
+            scrollController: ScrollController(),
+            controller: ChatMessageListController(),
+            streamingMessageId: null,
+            regeneratingMessageId: null,
+            highlightedMentionMessageId: null,
+            isDirectChat: false,
+            readUserMessageIds: const {},
+            ownerName: '我',
+            unknownCharacter: AICharacter(
+              name: '未知角色',
+              avatar: '?',
+              age: 0,
+              role: '',
+              personalityTags: const [],
+              systemPrompt: '',
+              apiKey: '',
+              apiProvider: 'deepseek',
+            ),
+            senderColor: (_) => Colors.blue,
+            senderNameById: (_) => '系统',
+            onLongPress: (_, __) {},
+            onSenderTap: (_) {},
+            onMentionSender: (_) {},
+            onQuotedTap: (_) {},
+            onTaskAction: (value) => received = value,
+          ),
+        ),
+      ),
+    );
+
+    final button = find.byKey(ValueKey<String>(action.messageId));
+    expect(button, findsOneWidget);
+    expect(tester.getSemantics(button).label, contains(action.semanticLabel));
+    await tester.tap(button);
+    expect(received?.taskId, 'task-old');
+    expect(received?.blockerId, 'commandApproval');
+    expect(received?.version, 42);
   });
 }

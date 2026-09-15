@@ -12,6 +12,7 @@ import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_service.dart';
+import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers/capturing_chat_api_service.dart';
@@ -473,6 +474,39 @@ void main() {
     expect(await service.tryCreateProactiveMessage(), isNotNull);
     expect(chatApi.sendCount, 1);
     expect(db.aiCharacterBox.get('char-1')!.hourlyReplyCount, 1);
+  });
+
+  test('工作模式群不接受前台主动群聊消息', () async {
+    seedCharacter(atHourlyLimit: false);
+    await db.chatGroupBox.put(
+      'work-mode-group',
+      ChatGroup(
+        id: 'work-mode-group',
+        name: '工作群',
+        theme: '任务讨论',
+        aiCharacterIds: const ['char-1'],
+      ),
+    );
+    await WorkModeConfigService(db: db).setWorkMode('work-mode-group', true);
+
+    final service = GroupChatProactiveService(
+      db: db,
+      chatApi: chatApi,
+      credentialResolver: FakeApiCredentialResolver(),
+    );
+
+    expect(
+      await service.tryCreateProactiveMessage(
+        preferredGroupId: 'work-mode-group',
+      ),
+      isNull,
+    );
+    expect(chatApi.sendCount, 0);
+    expect(
+      db.messageBox.values
+          .where((message) => message.groupId == 'work-mode-group'),
+      isEmpty,
+    );
   });
 
   test('角色回复额度并发写入不会丢失增量', () async {

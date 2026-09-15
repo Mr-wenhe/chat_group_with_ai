@@ -247,6 +247,20 @@ class _RestorePlan {
       value['groupId'] = conversation(value['groupId'].toString());
       value['characterId'] =
           characterMap[value['characterId']] ?? value['characterId'];
+      value['assignedCharacterIds'] = _mapList(
+        value['assignedCharacterIds'],
+        characterMap,
+      );
+      value['executionStateJson'] = _remapTaskExecutionState(
+        value['executionStateJson']?.toString() ?? '',
+        conversation: conversation,
+        characterMap: characterMap,
+      );
+      value['contextSummary'] = _remapTaskContextSummary(
+        value['contextSummary']?.toString() ?? '',
+        conversation: conversation,
+        characterMap: characterMap,
+      );
     });
     final workspaces = _rewriteStorage(
         data.workspaces,

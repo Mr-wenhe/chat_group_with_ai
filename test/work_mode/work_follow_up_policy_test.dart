@@ -55,6 +55,16 @@ void main() {
     expect(revision.autoRenameIfExists, isFalse);
   });
 
+  test('重新生成 continues the existing artifact instead of creating a file', () {
+    final decision = policy.resolve(
+      request: '重新生成',
+      lastArtifactPaths: const ['/workspace/report.md'],
+    );
+    expect(decision.kind, WorkFollowUpKind.continueTask);
+    expect(decision.artifactPath, isNull);
+    expect(decision.autoRenameIfExists, isFalse);
+  });
+
   test('design-and-implement wording is recognized as a new artifact', () {
     final decision = policy.resolve(
       request: '设计并实现一个 html 教师节贺卡',
@@ -93,6 +103,14 @@ void main() {
     );
     expect(decision.kind, WorkFollowUpKind.reviseArtifact);
     expect(decision.artifactPath, '/workspace/report.md');
+  });
+
+  test('an explicit absolute path with a Chinese filename is preserved', () {
+    final decision = policy.resolve(
+      request: '请修复 /workspace/需求文档.docx',
+    );
+    expect(decision.kind, WorkFollowUpKind.reviseArtifact);
+    expect(decision.artifactPath, '/workspace/需求文档.docx');
   });
 
   test('uses the failed command script for an unambiguous repair follow-up',

@@ -6,7 +6,6 @@ import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 
 import 'work_handoff_state.dart';
 import 'work_mode_policy.dart';
-import 'work_task_error_sanitizer.dart';
 
 part 'work_role_router_models.dart';
 part 'work_role_router_planner.dart';
@@ -17,11 +16,61 @@ class WorkRoleRouter {
 
   const WorkRoleRouter({this.modelSelector});
 
+  /// Returns the roles that pass the same local stage/occupation checks used
+  /// by S1 routing. Discussion may ask every available group member for an
+  /// opinion, but it must use this result when it elects the final executor;
+  /// a model recommendation or a display name can never create a new
+  /// qualification.
+  static List<AICharacter> qualifiedCandidatesForRequest({
+    required String request,
+    required Iterable<AICharacter> characters,
+    Iterable<CharacterSkill> skills = const [],
+  }) {
+    final kinds = _inferStages(request.trim());
+    final members = _eligible(List<AICharacter>.from(characters));
+    return List<AICharacter>.unmodifiable(
+      _qualifiedCandidates(kinds, members, List<CharacterSkill>.from(skills)),
+    );
+  }
+
+  /// S3 uses this predicate before accepting a group recommendation.  Keep
+  /// it next to the router's private scoring implementation so a discussion
+  /// cannot drift from the S1 role contract.
+  static bool isQualifiedForRequest({
+    required String request,
+    required AICharacter character,
+    Iterable<CharacterSkill> skills = const [],
+  }) {
+    return qualifiedCandidatesForRequest(
+      request: request,
+      characters: [character],
+      skills: skills,
+    ).any((candidate) => candidate.id == character.id);
+  }
+
+  /// Reuses the router's deterministic deliverable parsing when a durable
+  /// follow-up creates a fresh discussion task.  The coordinator must be able
+  /// to rebuild the current request contract without selecting an executor;
+  /// role qualification and election remain discussion responsibilities.
+  static WorkDeliverableContract deliverableContractForRequest(
+    String request, {
+    int requestRevision = 1,
+    String? explicitExecutorId,
+  }) {
+    final normalizedRevision = requestRevision < 1 ? 1 : requestRevision;
+    return _deliverableContract(
+      request.trim(),
+      explicitExecutorId: explicitExecutorId,
+      requestRevision: normalizedRevision,
+    );
+  }
+
   Future<WorkRoleRouteResult> route({
     required String request,
     bool hasAttachments = false,
     required List<AICharacter> characters,
     String? conversationId,
+    int requestRevision = 1,
     bool isDirectChat = false,
     String? directCharacterId,
     WorkHandoffState? handoff,
@@ -49,6 +98,7 @@ class WorkRoleRouter {
 
     final members = List<AICharacter>.from(characters);
     final availableSkills = List<CharacterSkill>.from(skills);
+    final effectiveRequestRevision = requestRevision < 1 ? 1 : requestRevision;
     final conversationDirectId = _directCharacterId(conversation);
     final suppliedDirectId = directCharacterId?.trim().isNotEmpty == true
         ? directCharacterId!.trim()
@@ -63,33 +113,61 @@ class WorkRoleRouter {
     }
     final directId = conversationDirectId ?? suppliedDirectId;
     final mentions = analyzeMentionedCharacterIds(normalizedRequest, members);
+    final mentionIntent = _workRoleMentionIntent(normalizedRequest, members);
+    final contract = _deliverableContract(
+      normalizedRequest,
+      explicitExecutorId: mentionIntent.explicitExecutorId,
+      requestRevision: effectiveRequestRevision,
+    );
     final privateConversation = isDirectChat || directId != null;
     if (!privateConversation) {
-      if (mentions.mentionsAll) {
+      if (mentionIntent.ambiguousExecutorIds.isNotEmpty) {
+        final ambiguousNames = mentionIntent.ambiguousExecutorIds.map(
+          (id) => _findUnique(members, id)?.name ?? id,
+        );
         return _failure(
           WorkRoleRouteSource.explicitMention,
-          '工作模式一次只能由一个角色执行，@all 不能作为唯一执行者。',
+          '检测到多个最终执行人（${ambiguousNames.map((name) => '@$name').join('、')}），请明确只由一位角色最终输出。',
+          deliverableContract: contract,
+          discussionCharacterIds: mentionIntent.discussionCharacterIds,
+          consultedCharacterIds: mentionIntent.consultedCharacterIds,
+          ambiguousExecutorIds: mentionIntent.ambiguousExecutorIds,
         );
       }
       if (mentions.ambiguousNames.isNotEmpty) {
         return _failure(
           WorkRoleRouteSource.explicitMention,
           '角色重名，无法确定 @${mentions.ambiguousNames.join('、@')} 对应的执行者；请使用唯一名称。',
+          deliverableContract: contract,
+          discussionCharacterIds: mentionIntent.discussionCharacterIds,
+          consultedCharacterIds: mentionIntent.consultedCharacterIds,
+          ambiguousMentionNames: mentions.ambiguousNames,
         );
       }
       if (mentions.unknownNames.isNotEmpty) {
         return _failure(
           WorkRoleRouteSource.explicitMention,
           '未找到角色 @${mentions.unknownNames.join('、@')}，没有静默替换其他角色。',
+          deliverableContract: contract,
+          discussionCharacterIds: mentionIntent.discussionCharacterIds,
+          consultedCharacterIds: mentionIntent.consultedCharacterIds,
+          unknownMentionNames: mentions.unknownNames,
         );
       }
-      if (mentions.characterIds.isNotEmpty) {
+      final explicitlyAssignedIds = mentionIntent.explicitExecutorId == null
+          ? mentionIntent.explicitMentionedIds
+          : <String>[mentionIntent.explicitExecutorId!];
+      if (explicitlyAssignedIds.isNotEmpty &&
+          (!mentions.mentionsAll || mentionIntent.explicitExecutorId != null)) {
         return _routeExplicit(
           normalizedRequest,
           conversation,
-          mentions.characterIds,
+          explicitlyAssignedIds,
           members,
           availableSkills,
+          contract,
+          discussionCharacterIds: mentionIntent.discussionCharacterIds,
+          consultedCharacterIds: mentionIntent.consultedCharacterIds,
         );
       }
     } else {
@@ -101,6 +179,7 @@ class WorkRoleRouter {
         directId,
         members,
         availableSkills,
+        contract,
       );
     }
 
@@ -109,12 +188,14 @@ class WorkRoleRouter {
         return _failure(
           WorkRoleRouteSource.handoff,
           '当前接力状态属于另一个 conversationId，已拒绝跨对话改派角色。',
+          deliverableContract: contract,
         );
       }
       return _routeHandoff(
         handoff,
         members,
         availableSkills,
+        contract,
       );
     }
 
@@ -124,79 +205,24 @@ class WorkRoleRouter {
       return _failure(
         WorkRoleRouteSource.unavailable,
         '没有同时满足“活跃、已启用 Agentic 且已配置模型”的角色。',
+        deliverableContract: contract,
+        discussionCharacterIds: mentionIntent.discussionCharacterIds,
+        consultedCharacterIds: mentionIntent.consultedCharacterIds,
       );
     }
 
-    final selector = modelSelector;
-    if (selector != null) {
-      final context = WorkRoleRoutingContext(
-        request: normalizedRequest,
-        conversationId: conversation,
-        characters: candidates,
-        skills: availableSkills,
-        candidateCharacterIds: candidates.map((item) => item.id),
-        inferredStages: inferredStages,
-      );
-      Object? rawDecision;
-      try {
-        rawDecision = await selector(context);
-      } on Object catch (error) {
-        // A short routing request is an optimization, not the execution
-        // authority.  When the configured router model is temporarily
-        // unavailable, keep the conversation usable by applying the same
-        // local role/skill heuristic used when no selector is configured.
-        // The public reason names the degraded path so the user can decide
-        // whether to fix the model configuration before the next task.
-        final fallback = _routeDeterministically(
-          normalizedRequest,
-          conversation,
-          inferredStages,
-          candidates,
-          availableSkills,
-          fallbackDetail:
-              '模型角色路由暂时不可用（${_safeError(error)}），已改用本地角色职业与 Skill 判断。',
-        );
-        return fallback.isSuccess
-            ? fallback
-            : _failure(
-                WorkRoleRouteSource.model,
-                '模型角色路由失败：${_safeError(error)}；本地角色判断也无法完成：${fallback.reason}',
-              );
-      }
-      if (rawDecision != null) {
-        final decision = _coerceDecision(rawDecision);
-        if (decision == null) {
-          // A malformed router response is equivalent to a temporary router
-          // outage.  It must not make an otherwise routable conversation
-          // unusable, and it must not silently choose a different API/model.
-          // Reuse the local role/skill heuristic and tell the user why the
-          // degraded path was selected.
-          return _routeDeterministically(
-            normalizedRequest,
-            conversation,
-            inferredStages,
-            candidates,
-            availableSkills,
-            fallbackDetail: '模型角色路由结果格式无效，已改用本地角色职业与 Skill 判断。',
-          );
-        }
-        return _routeModel(
-          normalizedRequest,
-          conversation,
-          decision,
-          inferredStages,
-          candidates,
-          availableSkills,
-        );
-      }
-    }
-
-    return _routeDeterministically(
+    // No explicit executor means this is a candidate recommendation only.
+    // S3 will let the group discuss and elect the final owner; selecting the
+    // first capable member here would silently bypass that decision.
+    return _pendingExecutorSelection(
       normalizedRequest,
       conversation,
       inferredStages,
       candidates,
       availableSkills,
+      contract: contract,
+      discussionCharacterIds: mentionIntent.discussionCharacterIds,
+      consultedCharacterIds: mentionIntent.consultedCharacterIds,
     );
   }
 
@@ -206,11 +232,13 @@ class WorkRoleRouter {
     String? directId,
     List<AICharacter> members,
     List<CharacterSkill> skills,
+    WorkDeliverableContract contract,
   ) async {
     if (directId == null || directId.isEmpty) {
       return _failure(
         WorkRoleRouteSource.privateChat,
         '私聊缺少固定角色 ID，无法把任务交给其他角色。',
+        deliverableContract: contract,
       );
     }
     final role = _findUnique(members, directId);
@@ -218,12 +246,16 @@ class WorkRoleRouter {
       return _failure(
         WorkRoleRouteSource.privateChat,
         '私聊固定角色“$directId”不存在，没有静默替换其他角色。',
+        deliverableContract: contract,
       );
     }
     final availability = _availabilityFailure(role);
     if (availability != null) {
       return _failure(
-          WorkRoleRouteSource.privateChat, '私聊固定角色${role.name}$availability');
+        WorkRoleRouteSource.privateChat,
+        '私聊固定角色${role.name}$availability',
+        deliverableContract: contract,
+      );
     }
     final stages = _stagePlan(
       request,
@@ -240,6 +272,7 @@ class WorkRoleRouter {
       stages.stages,
       conversationId,
       needsHandoff: false,
+      deliverableContract: contract.copyWith(explicitExecutorId: role.id),
     );
   }
 
@@ -249,12 +282,18 @@ class WorkRoleRouter {
     List<String> ids,
     List<AICharacter> members,
     List<CharacterSkill> skills,
-  ) {
+    WorkDeliverableContract contract, {
+    List<String> discussionCharacterIds = const [],
+    List<String> consultedCharacterIds = const [],
+  }) {
     final first = _findUnique(members, ids.first);
     if (first == null) {
       return _failure(
         WorkRoleRouteSource.explicitMention,
         '被 @ 的角色不存在，没有静默替换其他角色。',
+        deliverableContract: contract,
+        discussionCharacterIds: discussionCharacterIds,
+        consultedCharacterIds: consultedCharacterIds,
       );
     }
     final availability = _availabilityFailure(first);
@@ -262,6 +301,9 @@ class WorkRoleRouter {
       return _failure(
         WorkRoleRouteSource.explicitMention,
         '被 @ 的角色「${first.name}」$availability',
+        deliverableContract: contract,
+        discussionCharacterIds: discussionCharacterIds,
+        consultedCharacterIds: consultedCharacterIds,
       );
     }
     final kinds = _inferStages(request);
@@ -269,6 +311,9 @@ class WorkRoleRouter {
       return _failure(
         WorkRoleRouteSource.explicitMention,
         '当前任务只有 ${kinds.length} 个可识别阶段，却指定了 ${ids.length} 个角色；请减少 @ 角色或明确产品、开发、测试阶段。',
+        deliverableContract: contract,
+        discussionCharacterIds: discussionCharacterIds,
+        consultedCharacterIds: consultedCharacterIds,
       );
     }
     final eligible = _eligible(members);
@@ -287,7 +332,13 @@ class WorkRoleRouter {
       explicitRoleIds: ids,
     );
     if (!plan.isSuccess) {
-      return _failure(WorkRoleRouteSource.explicitMention, plan.failure!);
+      return _failure(
+        WorkRoleRouteSource.explicitMention,
+        plan.failure!,
+        deliverableContract: contract,
+        discussionCharacterIds: discussionCharacterIds,
+        consultedCharacterIds: consultedCharacterIds,
+      );
     }
     return _success(
       first.id,
@@ -297,6 +348,9 @@ class WorkRoleRouter {
       plan.stages,
       conversationId,
       needsHandoff: plan.stages.length > 1,
+      deliverableContract: contract.copyWith(explicitExecutorId: first.id),
+      discussionCharacterIds: discussionCharacterIds,
+      consultedCharacterIds: consultedCharacterIds,
     );
   }
 
@@ -304,12 +358,14 @@ class WorkRoleRouter {
     WorkHandoffState state,
     List<AICharacter> members,
     List<CharacterSkill> skills,
+    WorkDeliverableContract contract,
   ) {
     final receiverId = state.currentRoleId;
     if (receiverId.isEmpty) {
       return _failure(
         WorkRoleRouteSource.handoff,
         '当前接力没有下一位接收角色，不能静默改派。',
+        deliverableContract: contract,
       );
     }
     final receiver = _findUnique(members, receiverId);
@@ -317,6 +373,7 @@ class WorkRoleRouter {
       return _failure(
         WorkRoleRouteSource.handoff,
         '当前接力指定的角色「$receiverId」不存在，没有静默替换其他角色。',
+        deliverableContract: contract,
       );
     }
     final availability = _availabilityFailure(receiver);
@@ -324,6 +381,7 @@ class WorkRoleRouter {
       return _failure(
         WorkRoleRouteSource.handoff,
         '当前接力指定的角色「${receiver.name}」$availability',
+        deliverableContract: contract,
       );
     }
     final stageKind = _stageKind(state.currentStage.id);
@@ -331,6 +389,7 @@ class WorkRoleRouter {
       return _failure(
         WorkRoleRouteSource.handoff,
         '当前接力指定的角色「${receiver.name}」不具备${_stageLabel(stageKind)}所需的职业或 Skill 能力。',
+        deliverableContract: contract,
       );
     }
     final activatedState =
@@ -345,100 +404,112 @@ class WorkRoleRouter {
       needsHandoff: activatedState.needsHandoff,
       stages: state.stages,
       handoffState: activatedState,
+      deliverableContract: contract.copyWith(explicitExecutorId: receiver.id),
     );
   }
 
-  WorkRoleRouteResult _routeModel(
-    String request,
-    String conversationId,
-    WorkRoleModelDecision decision,
-    List<WorkRoleStageKind> kinds,
-    List<AICharacter> candidates,
-    List<CharacterSkill> skills,
-  ) {
-    if (!decision.confidence.isFinite ||
-        decision.confidence < 0 ||
-        decision.confidence > 1) {
-      return _failure(
-        WorkRoleRouteSource.model,
-        '模型返回的置信度无效（必须是 0 到 1 之间的有限数值），未自动切换模型或角色。',
-      );
-    }
-    final role = _findUnique(candidates, decision.characterId);
-    if (role == null) {
-      return _failure(
-        WorkRoleRouteSource.model,
-        '模型选择的角色「${decision.characterId}」不存在或不可用，没有静默替换其他角色。',
-      );
-    }
-    final availability = _availabilityFailure(role);
-    if (availability != null) {
-      return _failure(
-        WorkRoleRouteSource.model,
-        '模型选择的角色「${role.name}」$availability',
-      );
-    }
-    final plan = _stagePlan(
-      request,
-      kinds,
-      candidates,
-      skills,
-      forcedFirstRoleId: role.id,
-    );
-    if (!plan.isSuccess) {
-      return _failure(WorkRoleRouteSource.model, plan.failure!);
-    }
-    final reason = decision.publicReason.trim();
-    if (reason.isEmpty) {
-      return _failure(WorkRoleRouteSource.model, '模型没有返回可展示的角色选择理由。');
-    }
-    return _success(
-      role.id,
-      WorkRoleRouteSource.model,
-      reason,
-      decision.confidence,
-      plan.stages,
-      conversationId,
-      needsHandoff: decision.needsHandoff || plan.stages.length > 1,
-    );
-  }
-
-  WorkRoleRouteResult _routeDeterministically(
+  Future<WorkRoleRouteResult> _pendingExecutorSelection(
     String request,
     String conversationId,
     List<WorkRoleStageKind> kinds,
     List<AICharacter> candidates,
     List<CharacterSkill> skills, {
-    String? fallbackDetail,
-  }) {
-    final plan = _stagePlan(request, kinds, candidates, skills);
-    if (!plan.isSuccess) {
-      return _failure(WorkRoleRouteSource.deterministicFallback, plan.failure!);
-    }
-    final first = _findUnique(candidates, plan.stages.first.roleId);
-    if (first == null) {
+    required WorkDeliverableContract contract,
+    List<String> discussionCharacterIds = const [],
+    List<String> consultedCharacterIds = const [],
+  }) async {
+    final qualified = _qualifiedCandidates(kinds, candidates, skills);
+    if (qualified.isEmpty) {
+      final label = _stageLabel(kinds.first);
       return _failure(
-        WorkRoleRouteSource.deterministicFallback,
-        '确定性路由没有找到可用执行角色。',
+        WorkRoleRouteSource.unavailable,
+        '没有活跃角色具备$label所需的职业或 Skill 能力；请 @用户加入匹配角色。',
+        deliverableContract: contract,
+        discussionCharacterIds: discussionCharacterIds,
+        consultedCharacterIds: consultedCharacterIds,
       );
     }
-    final stageName = plan.stages.first.label;
-    final specialized = kinds.first != WorkRoleStageKind.general;
-    final heuristicReason = specialized
-        ? '未使用 @；根据角色职业、persona 和 Skill 判断，这是「$stageName」任务，因此选择「${first.name}」。'
-        : '未使用 @ 且任务未指明专业阶段，按活跃角色列表顺序选择「${first.name}」作为通用执行者。';
-    final reason = fallbackDetail == null
-        ? heuristicReason
-        : '$fallbackDetail $heuristicReason';
-    return _success(
-      first.id,
-      WorkRoleRouteSource.deterministicFallback,
-      reason,
-      specialized ? 0.78 : 0.35,
-      plan.stages,
-      conversationId,
-      needsHandoff: plan.stages.length > 1,
+    var ordered = qualified;
+    String? modelNote;
+    final selector = modelSelector;
+    if (selector != null) {
+      try {
+        final rawDecision = await selector(
+          WorkRoleRoutingContext(
+            request: request,
+            conversationId: conversationId,
+            characters: candidates,
+            skills: skills,
+            candidateCharacterIds: qualified.map((character) => character.id),
+            inferredStages: kinds,
+            deliverableContract: contract,
+          ),
+        );
+        if (rawDecision != null) {
+          final decision = _coerceDecision(rawDecision);
+          final selected = decision == null
+              ? null
+              : _findUnique(candidates, decision.characterId);
+          if (decision == null) {
+            modelNote = '模型候选推荐格式无效，未采纳模型选择。';
+          } else if (!decision.confidence.isFinite ||
+              decision.confidence < 0 ||
+              decision.confidence > 1) {
+            modelNote = '模型候选推荐置信度无效，未采纳模型选择。';
+          } else if (decision.publicReason.trim().isEmpty) {
+            modelNote = '模型候选推荐缺少可展示依据，未采纳模型选择。';
+          } else if (selected == null ||
+              !_isSuitable(selected, kinds.first, skills)) {
+            modelNote = '模型推荐角色不满足本任务的${_stageLabel(kinds.first)}资格，未采纳模型选择。';
+          } else {
+            ordered = [
+              selected,
+              ...qualified.where((character) => character.id != selected.id),
+            ];
+            modelNote =
+                '模型建议「${selected.name}」作为首位候选（${decision.publicReason.trim()}），仍需群内推举。';
+          }
+        }
+      } on Object {
+        modelNote = '模型候选推荐暂不可用，保留本地资格候选并等待群内推举。';
+      }
+    }
+    final names = ordered.map(_candidateDisplayName).join('、');
+    final stageName = _stageLabel(kinds.first);
+    return WorkRoleRouteResult(
+      characterId: null,
+      source: WorkRoleRouteSource.candidateSelection,
+      publicReason:
+          '${modelNote == null ? '' : '$modelNote '}尚未指定最终执行人。候选角色：$names；任务需要$stageName能力，请由群内讨论后推举一位。',
+      confidence: 0,
+      needsHandoff: false,
+      deliverableContract: contract,
+      discussionCharacterIds: discussionCharacterIds,
+      consultedCharacterIds: consultedCharacterIds,
+      candidateCharacterIds:
+          List<String>.unmodifiable(ordered.map((character) => character.id)),
+      needsExecutorSelection: true,
     );
+  }
+
+  static List<AICharacter> _qualifiedCandidates(
+    List<WorkRoleStageKind> kinds,
+    List<AICharacter> candidates,
+    List<CharacterSkill> skills,
+  ) {
+    if (kinds.isEmpty) return const [];
+    // Candidate selection names the role that can own the first required
+    // deliverable. Other stages may contribute to discussion or an explicit
+    // later handoff, but a test-only role must not be advertised as an HTML
+    // executor merely because testing is another stage in the same request.
+    final requiredKind = kinds.first;
+    final result = <AICharacter>[];
+    for (final candidate in candidates) {
+      if (_isSuitable(candidate, requiredKind, skills)) {
+        result.add(candidate);
+      }
+    }
+    return result;
   }
 
   static List<AICharacter> _eligible(List<AICharacter> members) => members
@@ -460,13 +531,6 @@ class WorkRoleRouter {
     return matches.length == 1 ? matches.single : null;
   }
 
-  static String? _directCharacterId(String conversationId) {
-    if (!conversationId.startsWith('dm:') || conversationId.length <= 3) {
-      return null;
-    }
-    return conversationId.substring(3);
-  }
-
   static WorkRoleModelDecision? _coerceDecision(Object raw) {
     if (raw is WorkRoleModelDecision) return raw;
     if (raw is Map) {
@@ -479,6 +543,13 @@ class WorkRoleRouter {
     return null;
   }
 
+  static String? _directCharacterId(String conversationId) {
+    if (!conversationId.startsWith('dm:') || conversationId.length <= 3) {
+      return null;
+    }
+    return conversationId.substring(3);
+  }
+
   static WorkRoleRouteResult _success(
     String roleId,
     WorkRoleRouteSource source,
@@ -487,6 +558,9 @@ class WorkRoleRouter {
     List<WorkHandoffStage> stages,
     String conversationId, {
     required bool needsHandoff,
+    WorkDeliverableContract? deliverableContract,
+    List<String> discussionCharacterIds = const [],
+    List<String> consultedCharacterIds = const [],
   }) {
     final safeStages = List<WorkHandoffStage>.unmodifiable(stages);
     final state = WorkHandoffState(
@@ -501,44 +575,40 @@ class WorkRoleRouter {
       needsHandoff: needsHandoff,
       stages: safeStages,
       handoffState: state,
+      deliverableContract: deliverableContract,
+      discussionCharacterIds: discussionCharacterIds,
+      consultedCharacterIds: consultedCharacterIds,
     );
   }
 
   static WorkRoleRouteResult _failure(
     WorkRoleRouteSource source,
-    String reason,
-  ) =>
+    String reason, {
+    WorkDeliverableContract? deliverableContract,
+    List<String> discussionCharacterIds = const [],
+    List<String> consultedCharacterIds = const [],
+    List<String> unknownMentionNames = const [],
+    List<String> ambiguousMentionNames = const [],
+    List<String> ambiguousExecutorIds = const [],
+  }) =>
       WorkRoleRouteResult(
         characterId: null,
         source: source,
         publicReason: reason,
         confidence: 0,
         needsHandoff: false,
+        deliverableContract: deliverableContract,
+        discussionCharacterIds: discussionCharacterIds,
+        consultedCharacterIds: consultedCharacterIds,
+        unknownMentionNames: unknownMentionNames,
+        ambiguousMentionNames: ambiguousMentionNames,
+        ambiguousExecutorIds: ambiguousExecutorIds,
       );
+}
 
-  static String _safeError(Object error) {
-    return sanitizeWorkTaskError(error);
-  }
+String _candidateDisplayName(AICharacter character) {
+  final role = character.role.trim();
+  return role.isEmpty ? character.name : '${character.name}（$role）';
 }
 
 String _modelText(Object? value) => value is String ? value.trim() : '';
-
-AICharacter _publicCharacter(AICharacter character) => AICharacter(
-      id: character.id,
-      name: character.name,
-      avatar: character.avatar,
-      age: character.age,
-      role: character.role,
-      personalityTags: List<String>.from(character.personalityTags),
-      systemPrompt: character.systemPrompt,
-      apiKey: '',
-      apiProvider: character.apiProvider,
-      modelName: character.modelName,
-      customBaseUrl: '',
-      apiConfigId: '',
-      agenticEnabled: character.agenticEnabled,
-      skillIds: List<String>.from(character.skillIds),
-      toolPermissions: List.from(character.toolPermissions),
-      gender: character.gender,
-      hasKnownGender: character.hasKnownGender,
-    );

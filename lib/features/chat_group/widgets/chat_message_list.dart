@@ -1,5 +1,8 @@
+import 'dart:async';
+
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_message_bubble.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
 import 'package:flutter/material.dart';
@@ -27,6 +30,7 @@ class ChatMessageList extends StatelessWidget {
   final Set<String> readUserMessageIds;
   final String ownerName;
   final AICharacter unknownCharacter;
+
   /// IDs of current, editable characters. Deleted/history snapshots and
   /// synthetic system senders can still be displayed, but must not open the
   /// character editor or be used for @/regenerate actions.
@@ -37,6 +41,7 @@ class ChatMessageList extends StatelessWidget {
   final void Function(AICharacter sender) onSenderTap;
   final void Function(AICharacter sender) onMentionSender;
   final void Function(Message message) onQuotedTap;
+  final FutureOr<void> Function(WorkTaskUserAction action)? onTaskAction;
 
   /// P2：进度气泡总耗时起点查表，key=task.id，value=runStartedAtMs；
   /// 为 null 时进度气泡不展示实时耗时。
@@ -64,6 +69,7 @@ class ChatMessageList extends StatelessWidget {
     required this.onSenderTap,
     required this.onMentionSender,
     required this.onQuotedTap,
+    this.onTaskAction,
     this.progressStartTimes,
   });
 
@@ -76,9 +82,10 @@ class ChatMessageList extends StatelessWidget {
       itemCount: messages.length,
       itemBuilder: (context, index) {
         final message = messages[index];
-        final resolvedSender = message.senderType == 'user'
-            ? null
-            : characterIndex[message.senderId] ?? unknownCharacter;
+        final resolvedSender =
+            message.senderType == 'user' || message.senderType == 'system'
+                ? null
+                : characterIndex[message.senderId] ?? unknownCharacter;
         final sender = resolvedSender;
         final actionSender = resolvedSender != null &&
                 editableSenderIds.contains(resolvedSender.id)
@@ -136,6 +143,7 @@ class ChatMessageList extends StatelessWidget {
                     : null,
                 // P2：进度消息携带 runStartedAtMs，其它消息为 null（旧调用兼容）。
                 runStartedAtMs: runStartedAtMs,
+                onTaskAction: isDirectChat ? null : onTaskAction,
               ),
             ],
           ),

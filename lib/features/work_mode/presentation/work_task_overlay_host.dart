@@ -17,10 +17,13 @@ import 'package:chat_group/features/work_mode/providers/work_task_providers.dart
 import 'package:chat_group/features/work_mode/visible_browser_service.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
+import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/presentation/work_folder_grant_consent_dialog.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -97,6 +100,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   WorkTaskCoordinator? _coordinator;
   WorkTaskEventStore? _eventStore;
   List<AgentTask> _tasks = const <AgentTask>[];
+  List<AgentTask> _allTasks = const <AgentTask>[];
   int _hiddenTaskCount = 0;
   String? _selectedTaskId;
   bool _isVisible = true;
@@ -107,23 +111,48 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       const <VisibleBrowserSession>[];
   String? _selectedBrowserSessionId;
   final Set<String> _approvalPromptInFlight = <String>{};
+  late final WorkTaskOverlayController _overlayController;
+  late final WorkTaskOverlayOpenTask _overlayOpenCallback;
+  String? _pendingOpenTaskId;
 
   @override
   void initState() {
     super.initState();
+    try {
+      _overlayController = ref.read(workTaskOverlayControllerProvider);
+    } on Object {
+      // Lightweight widget hosts may be mounted without ProviderScope; the
+      // app-scoped singleton keeps the chat bridge usable in that harness.
+      _overlayController = WorkTaskOverlayController.shared;
+    }
+    _overlayOpenCallback = _openTask;
+    _overlayController.attach(_overlayOpenCallback);
     if (widget.taskStream == null ||
         widget.onStopTask == null ||
         widget.onContinueTask == null) {
-      _coordinator =
-          widget.coordinator ?? ref.read(workTaskCoordinatorProvider);
+      try {
+        _coordinator =
+            widget.coordinator ?? ref.read(workTaskCoordinatorProvider);
+      } on Object {
+        // A display-only host may be mounted without the app coordinator.
+        // Keep the child usable and let the explicit task stream/callbacks
+        // drive any tasks that the embedding can actually control.
+        _coordinator = widget.coordinator;
+      }
     } else {
       _coordinator = widget.coordinator;
     }
     _coordinator?.setFolderGrantConsent(_confirmFolderGrant);
-    _eventStore = widget.eventStore ??
-        (widget.eventStreamFor == null
-            ? ref.read(workTaskEventStoreProvider)
-            : null);
+    _eventStore = widget.eventStore;
+    if (_eventStore == null && widget.eventStreamFor == null) {
+      try {
+        _eventStore = ref.read(workTaskEventStoreProvider);
+      } on Object {
+        // A callback-driven/lightweight host may not have the app event-store
+        // provider. The panel still remains usable; its timeline uses the
+        // explicit empty stream fallback in build().
+      }
+    }
     _snapshotService = widget.snapshotService;
     if (_snapshotService == null &&
         widget.onUndoTask == null &&
@@ -160,17 +189,33 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         });
       });
     }
-    final taskStream = widget.taskStream ?? _coordinator!.watchAllTasks();
+    final taskStream = widget.taskStream ??
+        _coordinator?.watchAllTasks() ??
+        const Stream<List<AgentTask>>.empty();
     _tasksSubscription = taskStream.listen((tasks) {
       if (!mounted) return;
-      final visibleTasks = _visibleTasks(tasks);
+      final selectedId = _selectedTaskId;
+      final visibleTasks = _visibleTasks(
+        tasks,
+        preferredTaskId:
+            selectedId != null && tasks.any((task) => task.id == selectedId)
+                ? selectedId
+                : null,
+      );
       setState(() {
+        _allTasks = List<AgentTask>.unmodifiable(tasks);
         _tasks = visibleTasks;
         _hiddenTaskCount = tasks.length - visibleTasks.length;
         if (_tasks.every((task) => task.id != _selectedTaskId)) {
           _selectedTaskId = _tasks.isEmpty ? null : _tasks.first.id;
         }
       });
+      final pendingTaskId = _pendingOpenTaskId;
+      if (pendingTaskId != null &&
+          tasks.any((task) => task.id == pendingTaskId)) {
+        _pendingOpenTaskId = null;
+        _openTask(pendingTaskId);
+      }
       // Approval prompts are independent from panel pagination. A waiting
       // task hidden behind the compact list still needs one host-level modal;
       // the panel remains the durable fallback after the prompt is dismissed.
@@ -180,6 +225,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   @override
   void dispose() {
+    _overlayController.detach(_overlayOpenCallback);
     _coordinator?.setFolderGrantConsent(null);
     _tasksSubscription?.cancel();
     _browserSubscription?.cancel();
@@ -219,18 +265,47 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               tasks: _tasks,
               hiddenTaskCount: _hiddenTaskCount,
               selectedTaskId: _selectedTaskId,
-              eventStreamFor: widget.eventStreamFor ?? _eventStore!.watch,
+              eventStreamFor: widget.eventStreamFor ??
+                  _eventStore?.watch ??
+                  ((_) => const Stream<WorkTaskEvent>.empty()),
               onSelectTask: (taskId) =>
                   setState(() => _selectedTaskId = taskId),
               onStop: _stopTask,
               onContinue: _continueTask,
               onReply: _canReplyToTask ? _replyTask : null,
-              onApprove: _approveTask,
-              onApproveWithoutUndo: _approveWithoutUndoTask,
-              onReject: _rejectTask,
-              onRequestFolder: _requestFolder,
-              onInstallTool: _installTool,
-              onSelectVisionModel: _selectVisionModel,
+              onApprove: widget.onApproveTask ??
+                  (_coordinator == null ? null : _approveTask),
+              onApproveVersioned:
+                  widget.onApproveTask == null && _coordinator != null
+                      ? _approveTaskVersioned
+                      : null,
+              onApproveWithoutUndo: widget.onApproveWithoutUndoTask ??
+                  (_coordinator == null ? null : _approveWithoutUndoTask),
+              onApproveWithoutUndoVersioned:
+                  widget.onApproveWithoutUndoTask == null &&
+                          _coordinator != null
+                      ? _approveWithoutUndoTaskVersioned
+                      : null,
+              onReject: widget.onRejectTask ??
+                  (_coordinator == null ? null : _rejectTask),
+              onRejectVersioned:
+                  widget.onRejectTask == null && _coordinator != null
+                      ? _rejectTaskVersioned
+                      : null,
+              onRequestFolder: widget.onRequestFolderTask ??
+                  (_coordinator == null ? null : _requestFolder),
+              onRequestFolderVersioned:
+                  widget.onRequestFolderTask == null && _coordinator != null
+                      ? _requestFolderVersioned
+                      : null,
+              onInstallTool: widget.onInstallToolTask ??
+                  (_coordinator == null ? null : _installTool),
+              onInstallToolVersioned:
+                  widget.onInstallToolTask == null && _coordinator != null
+                      ? _installToolVersioned
+                      : null,
+              onSelectVisionModel: widget.onSelectVisionModelTask ??
+                  (_coordinator == null ? null : _selectVisionModel),
               onRetry: widget.onRetryTask ??
                   (_coordinator == null ? null : _retryTask),
               onReauthorize: widget.onReauthorizeTask ??
@@ -240,6 +315,9 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               onViewConflict: _viewConflictTask,
               onUndo: widget.onUndoTask ??
                   (_snapshotService == null ? null : _undoTask),
+              onLater: _coordinator == null ? null : _laterTask,
+              onLaterVersioned:
+                  _coordinator == null ? null : _laterTaskVersioned,
               undoPreviewFor: widget.undoPreviewFor ??
                   (_snapshotService == null ? null : _undoPreview),
               onOpenConversation: _openConversation,
@@ -344,7 +422,30 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     );
   }
 
-  List<AgentTask> _visibleTasks(List<AgentTask> allTasks) {
+  /// Selects an exact task from a chat action and makes the panel visible.
+  /// Hidden-task pagination is only a presentation concern; it must never
+  /// change the task id addressed by the message.
+  void _openTask(String taskId) {
+    if (!mounted) return;
+    final target = _allTasks.where((task) => task.id == taskId).firstOrNull;
+    if (target == null) {
+      _pendingOpenTaskId = taskId;
+      return;
+    }
+    final visible = _visibleTasks(_allTasks, preferredTaskId: taskId);
+    setState(() {
+      _tasks = visible;
+      _hiddenTaskCount = _allTasks.length - visible.length;
+      _selectedTaskId = taskId;
+      _isVisible = true;
+      _isCollapsed = false;
+    });
+  }
+
+  List<AgentTask> _visibleTasks(
+    List<AgentTask> allTasks, {
+    String? preferredTaskId,
+  }) {
     final sorted = List<AgentTask>.from(allTasks)
       ..sort(
         (left, right) => (right.updatedAt ?? right.createdAt).compareTo(
@@ -365,10 +466,18 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     const executionSlotCount = 2;
     final visibleActive =
         active.take(executionSlotCount).toList(growable: false);
-    if (visibleActive.length >= executionSlotCount) return visibleActive;
-    return <AgentTask>[...visibleActive, ...remaining]
-        .take(4)
-        .toList(growable: false);
+    final visible = visibleActive.length >= executionSlotCount
+        ? visibleActive
+        : <AgentTask>[...visibleActive, ...remaining]
+            .take(4)
+            .toList(growable: false);
+    if (preferredTaskId == null ||
+        visible.any((task) => task.id == preferredTaskId)) {
+      return visible;
+    }
+    final preferred =
+        sorted.where((task) => task.id == preferredTaskId).firstOrNull;
+    return preferred == null ? visible : <AgentTask>[...visible, preferred];
   }
 
   bool _isVisibleActiveStatus(AgentTaskStatus status) {
@@ -460,11 +569,90 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     return callback?.call(taskId) ?? _coordinator!.approve(taskId);
   }
 
+  Future<void> _laterTask(String taskId) {
+    final coordinator = _coordinator;
+    if (coordinator == null) return Future<void>.value();
+    return coordinator.deferUserAction(taskId);
+  }
+
+  Future<void> _laterTaskVersioned(String taskId, int version) {
+    final coordinator = _coordinator;
+    if (coordinator == null) return Future<void>.value();
+    final task = coordinator.taskById(taskId);
+    if (task == null) {
+      return Future<void>.error(StateError('该任务已不存在。'));
+    }
+    final blocker = WorkTaskUserAction.forTask(task)
+        .where((action) => action.version == version)
+        .firstOrNull;
+    final discussionCheckpoint =
+        WorkTaskUserAction.discussionCheckpointVersion(task) == version;
+    if (blocker == null && !discussionCheckpoint) {
+      return Future<void>.error(StateError('该任务提醒已失效。'));
+    }
+    return coordinator.deferUserAction(
+      taskId,
+      blockerId: blocker?.blockerId ?? 'discussionRequired',
+      version: version,
+    );
+  }
+
+  Future<void> _approveTaskVersioned(String taskId, int version) {
+    final coordinator = _coordinator;
+    return coordinator?.approve(
+          taskId,
+          expectedActionVersion: version,
+        ) ??
+        Future<void>.value();
+  }
+
+  Future<void> _approveWithoutUndoTaskVersioned(
+    String taskId,
+    int version,
+  ) {
+    final coordinator = _coordinator;
+    return coordinator?.approveWithoutUndo(
+          taskId,
+          expectedActionVersion: version,
+        ) ??
+        Future<void>.value();
+  }
+
+  Future<void> _rejectTaskVersioned(String taskId, int version) {
+    final coordinator = _coordinator;
+    return coordinator?.reject(
+          taskId,
+          expectedActionVersion: version,
+        ) ??
+        Future<void>.value();
+  }
+
+  Future<void> _requestFolderVersioned(String taskId, int version) {
+    final coordinator = _coordinator;
+    return coordinator?.requestFolderForTask(
+          taskId,
+          expectedActionVersion: version,
+        ) ??
+        Future<void>.value();
+  }
+
+  Future<void> _installToolVersioned(String taskId, int version) {
+    final coordinator = _coordinator;
+    return coordinator?.installMissingTool(
+          taskId,
+          expectedActionVersion: version,
+        ) ??
+        Future<void>.value();
+  }
+
   void _scheduleApprovalPrompt(List<AgentTask> tasks) {
     final candidates = tasks
         .where((task) =>
             task.status == AgentTaskStatus.waitingForApproval &&
             task.pendingToolRequestJson.trim().isNotEmpty &&
+            WorkTaskUserAction.forTask(task).any(
+              (action) => action.blockerId == 'commandApproval',
+            ) &&
             !_approvalPromptInFlight.contains(task.id))
         .toList(growable: false);
     if (candidates.isEmpty) return;
@@ -475,6 +663,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     WidgetsBinding.instance.addPostFrameCallback((_) async {
       AgentTask? taskToShow;
       String? markerTaskId;
+      int? markerVersion;
       try {
         // A task may already have been presented (or dismissed) while
         // another task was waiting. Walk the snapshot until the coordinator
@@ -486,17 +675,34 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
             candidate.id,
           );
           if (!shouldShow) continue;
-          taskToShow = candidate;
+          // Read the task again after the marker write. The stream snapshot
+          // may be one update behind, and the approval dialog must describe
+          // the exact pending request whose version it will resolve.
+          final current = coordinator.taskById(candidate.id);
+          final action = current == null
+              ? null
+              : WorkTaskUserAction.forTask(current)
+                  .where(
+                    (item) => item.blockerId == 'commandApproval',
+                  )
+                  .firstOrNull;
+          if (current == null || action == null) {
+            await coordinator.resetApprovalPromptShown(candidate.id);
+            continue;
+          }
+          taskToShow = current;
           markerTaskId = candidate.id;
+          markerVersion = action.version;
           break;
         }
         final task = taskToShow;
-        if (task == null) return;
+        final version = markerVersion;
+        if (task == null || version == null) return;
         if (!mounted) {
           await coordinator.resetApprovalPromptShown(task.id);
           return;
         }
-        await _showApprovalPrompt(task);
+        await _showApprovalPrompt(task, expectedActionVersion: version);
       } on Object {
         // The task panel remains the durable fallback when a navigator or a
         // lightweight test host cannot present a modal prompt.
@@ -514,7 +720,10 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     });
   }
 
-  Future<void> _showApprovalPrompt(AgentTask task) async {
+  Future<void> _showApprovalPrompt(
+    AgentTask task, {
+    required int expectedActionVersion,
+  }) async {
     final plan = approvalPlanForTask(task);
     final navigatorContext = widget.navigatorKey?.currentContext ?? context;
     final wasVisible = _isVisible;
@@ -564,12 +773,65 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       }
     }
     if (decision == null || !mounted) return;
+    await _resolveApprovalPromptDecision(
+      task.id,
+      expectedActionVersion,
+      decision,
+    );
+  }
+
+  Future<void> _resolveApprovalPromptDecision(
+    String taskId,
+    int expectedActionVersion,
+    WorkChangeApprovalDecision decision,
+  ) async {
+    final coordinator = _coordinator;
+    if (coordinator != null) {
+      // The modal may remain open while another route receives a new request.
+      // Re-check the exact command-approval marker before invoking the
+      // coordinator; its versioned API is the final durable guard.
+      final current = coordinator.taskById(taskId);
+      if (current == null ||
+          !WorkTaskUserAction.isCurrent(
+            current,
+            blockerId: 'commandApproval',
+            version: expectedActionVersion,
+          )) {
+        if (mounted) {
+          ScaffoldMessenger.of(context).showSnackBar(
+            const SnackBar(content: Text('审批提醒已失效，请打开任务面板查看最新状态。')),
+          );
+        }
+        return;
+      }
+      switch (decision) {
+        case WorkChangeApprovalDecision.approved:
+          await coordinator.approve(
+            taskId,
+            expectedActionVersion: expectedActionVersion,
+          );
+        case WorkChangeApprovalDecision.approvedWithoutUndo:
+          await coordinator.approveWithoutUndo(
+            taskId,
+            expectedActionVersion: expectedActionVersion,
+          );
+        case WorkChangeApprovalDecision.rejected:
+          await coordinator.reject(
+            taskId,
+            expectedActionVersion: expectedActionVersion,
+          );
+      }
+      return;
+    }
+    // A lightweight embedding can provide callbacks without an app-scoped
+    // coordinator. Such callbacks remain responsible for their own durable
+    // validation, as they were before the coordinator bridge existed.
     if (decision == WorkChangeApprovalDecision.approved) {
-      await _approveTask(task.id);
+      await _approveTask(taskId);
     } else if (decision == WorkChangeApprovalDecision.approvedWithoutUndo) {
-      await _approveWithoutUndoTask(task.id);
+      await _approveWithoutUndoTask(taskId);
     } else {
-      await _rejectTask(task.id);
+      await _rejectTask(taskId);
     }
   }
 

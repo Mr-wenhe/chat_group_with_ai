@@ -139,6 +139,7 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                     onMentionSender: _insertMention,
                     onQuotedTap: (message) =>
                         unawaited(_focusSearchResult(message)),
+                    onTaskAction: _handleWorkTaskAction,
                   ),
           ),
           // 底部状态区：文档解析进度优先于"AI 正在回复"提示（前者更需要可取消）。

@@ -24,6 +24,13 @@ void main() {
     _character('c3', '马文杰'),
   ];
 
+  test('unknown longer Chinese names remain unknown', () {
+    final result = analyzeMentionedCharacterIds(
+        '@王明明 出具 Word', [_character('wang', '王明')]);
+    expect(result.characterIds, isEmpty);
+    expect(result.unknownNames, ['王明明']);
+  });
+
   test(
       'parseMentionedCharacterIds parses Chinese and English mentions in order',
       () {
@@ -53,6 +60,20 @@ void main() {
         parseMentionedCharacterIds('小胖怎么看？@小胖，Alice 也说说：@Alice。', characters);
 
     expect(result, ['c1', 'c2']);
+  });
+
+  test('parseMentionedCharacterIds accepts a Chinese action after a name', () {
+    final result = parseMentionedCharacterIds('@小胖补充建议', characters);
+
+    expect(result, ['c1']);
+  });
+
+  test('parseMentionedCharacterIds keeps @all when action follows directly',
+      () {
+    final result = analyzeMentionedCharacterIds('@all讨论方案', characters);
+
+    expect(result.mentionsAll, isTrue);
+    expect(result.characterIds, ['c1', 'c2', 'c3']);
   });
 
   test('parseMentionedCharacterIds expands @all to every character', () {

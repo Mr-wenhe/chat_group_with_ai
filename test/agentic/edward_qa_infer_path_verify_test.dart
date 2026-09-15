@@ -230,11 +230,11 @@ void main() {
       userRequest: '我要一份doc文档',
       approved: true,
     );
-    expect(result.status, AgentRuntimeStatus.completed);
-    // docx 分支必须在 md 分支之前。
+    expect(result.status, AgentRuntimeStatus.failed);
+    // docx 分支必须在 md 分支之前，且兼容路径不得自动降级。
     expect(firstSystemPrompt, contains('report.docx'));
     expect(firstSystemPrompt, isNot(contains('report.md')));
-    expect(fakeTool.lastWritePath, 'report.md');
+    expect(fakeTool.lastWritePath, isNull);
   });
 
   test('[QA] 读取意图（读一下这个ppt文件）→ 不误判为文件生成 (null)', () async {

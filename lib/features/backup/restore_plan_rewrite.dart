@@ -305,3 +305,97 @@ Map<String, dynamic> _mapKeys(
 
 List<String> _strings(Object? value) =>
     (value as List? ?? const []).map((item) => item.toString()).toList();
+
+/// Copy-with-new-ids changes the conversation and character identities that
+/// the discussion gate authenticates. Rewrite only those typed references;
+/// leave malformed/unknown checkpoints untouched so the normal fail-closed
+/// recovery path can show the user a blocked task instead of inventing state.
+String _remapTaskExecutionState(
+  String raw, {
+  required String Function(String id) conversation,
+  required Map<String, String> characterMap,
+}) {
+  if (raw.trim().isEmpty) return raw;
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) return raw;
+    final output = Map<String, dynamic>.from(decoded);
+    final discussion = output[WorkDiscussionState.jsonKey];
+    final state = WorkDiscussionState.tryParse(discussion);
+    if (state == null) return raw;
+    output[WorkDiscussionState.jsonKey] = _remapDiscussionState(
+      state,
+      conversation: conversation,
+      characterMap: characterMap,
+    ).toJson();
+    return jsonEncode(output);
+  } on Object {
+    return raw;
+  }
+}
+
+String _remapTaskContextSummary(
+  String raw, {
+  required String Function(String id) conversation,
+  required Map<String, String> characterMap,
+}) {
+  if (raw.trim().isEmpty) return raw;
+  try {
+    final decoded = jsonDecode(raw);
+    if (decoded is! Map) return raw;
+    final output = Map<String, dynamic>.from(decoded);
+    final oldConversation = output['conversationId'];
+    if (oldConversation is String && oldConversation.trim().isNotEmpty) {
+      output['conversationId'] = conversation(oldConversation);
+    }
+    final discussion = output[WorkDiscussionState.jsonKey];
+    final state = WorkDiscussionState.tryParse(discussion);
+    if (state != null) {
+      output[WorkDiscussionState.jsonKey] = _remapDiscussionState(
+        state,
+        conversation: conversation,
+        characterMap: characterMap,
+      ).compactForContext().toJson();
+    }
+    return jsonEncode(output);
+  } on Object {
+    return raw;
+  }
+}
+
+WorkDiscussionState _remapDiscussionState(
+  WorkDiscussionState state, {
+  required String Function(String id) conversation,
+  required Map<String, String> characterMap,
+}) {
+  final contract = state.deliverableContract == null
+      ? null
+      : <String, dynamic>{
+          ...state.deliverableContract!,
+          if (state.deliverableContract!['explicitExecutorId'] is String)
+            'explicitExecutorId': characterMap[state
+                    .deliverableContract!['explicitExecutorId'] as String] ??
+                state.deliverableContract!['explicitExecutorId'],
+        };
+  return state.copyWith(
+    conversationId: conversation(state.conversationId),
+    coordinatorId: state.coordinatorId == null
+        ? null
+        : characterMap[state.coordinatorId!] ?? state.coordinatorId,
+    executorId: state.executorId == null
+        ? null
+        : characterMap[state.executorId!] ?? state.executorId,
+    candidateCharacterIds:
+        state.candidateCharacterIds.map((id) => characterMap[id] ?? id),
+    participants: state.participants.map(
+      (participant) => WorkDiscussionParticipant(
+        characterId:
+            characterMap[participant.characterId] ?? participant.characterId,
+        status: participant.status,
+        contributionCount: participant.contributionCount,
+        lastContribution: participant.lastContribution,
+      ),
+    ),
+    deliverableContract: contract,
+  );
+}

@@ -304,7 +304,10 @@ class _BackupEntityMemoryCodec {
         // resource locks, snapshots, tool results and committed operation
         // keys are capabilities or local evidence and must never cross the
         // backup boundary.
-        'executionStateJson': _safeExecutionStateJson(item.executionStateJson),
+        'executionStateJson': _safeExecutionStateJson(
+          item.executionStateJson,
+          conversationId: item.groupId,
+        ),
         // Artifact paths are portable workspace-relative names. Absolute and
         // traversal paths are discarded rather than reduced to a basename;
         // a basename can still disclose a private filename and is not a
@@ -318,57 +321,70 @@ class _BackupEntityMemoryCodec {
         'eventLogIncomplete': item.eventLogIncomplete,
       };
 
-  static AgentTask decodeTask(Map<String, dynamic> json) => AgentTask(
-        id: _string(json, 'id'),
-        groupId: _string(json, 'groupId'),
-        characterId: _string(json, 'characterId'),
-        userRequest: _safeTaskText(_string(json, 'userRequest')),
-        status: _enum(json, 'status', AgentTaskStatus.values),
-        requestedPermissions:
-            _enums(json['requestedPermissions'], ToolPermission.values),
-        plan: _safeTaskText(json['plan']?.toString() ?? ''),
-        resultSummary: _safeTaskText(json['resultSummary']?.toString() ?? ''),
-        createdAt: _dateTime(json, 'createdAt'),
-        currentStep: (json['currentStep'] as num?)?.toInt() ?? 0,
-        completedOperations: _strings(json['completedOperations'])
-            .map(_portableCompletedOperation)
-            .where((value) => value.isNotEmpty)
-            .toList(growable: false),
-        pendingToolRequestJson: _portableToolCheckpoint(
-          json['pendingToolRequestJson']?.toString() ?? '',
-        ),
-        updatedAt: _optionalDate(json['updatedAt']),
-        lastError: _safeTaskText(json['lastError']?.toString() ?? ''),
-        workModeTask: json['workModeTask'] as bool? ?? false,
-        queuedUserRequests: _strings(json['queuedUserRequests'])
-            .map(_safeTaskText)
-            .where((request) => request.isNotEmpty)
-            .toList(growable: false),
-        contextSummary: _safeTaskContextSummary(
-          json['contextSummary']?.toString() ?? '',
-        ),
-        assignedCharacterIds: _strings(json['assignedCharacterIds']),
-        startedAt: _optionalDate(json['startedAt']),
-        actionCount: (json['actionCount'] as num?)?.toInt() ?? 0,
-        softLimitReached: json['softLimitReached'] as bool? ?? false,
-        resumeRequired: json['resumeRequired'] as bool? ?? false,
-        // Backups may come from an older build or an untrusted file. Apply
-        // the same capability and portability boundary on import as on
-        // export, so a crafted archive cannot reintroduce a stale approval,
-        // local path or tool result into a restored task.
-        executionStateJson: _safeExecutionStateJson(
-          json['executionStateJson']?.toString() ?? '',
-        ),
-        lastArtifactPaths: _strings(json['lastArtifactPaths'])
-            .map(_portableArtifactPath)
-            .where((path) => path.isNotEmpty)
-            .toList(growable: false),
-        actionLimit: (json['actionLimit'] as num?)?.toInt() ??
-            AgentTask.defaultActionLimit,
-        softTimeLimitMinutes: (json['softTimeLimitMinutes'] as num?)?.toInt() ??
-            AgentTask.defaultSoftTimeLimitMinutes,
-        eventLogIncomplete: json['eventLogIncomplete'] as bool? ?? false,
-      );
+  static AgentTask decodeTask(Map<String, dynamic> json) {
+    final groupId = _string(json, 'groupId');
+    final status = _portableTaskStatus(json['status']);
+    final statusWasUnknown = !_knownTaskStatus(json['status']);
+    return AgentTask(
+      id: _string(json, 'id'),
+      groupId: groupId,
+      characterId: _string(json, 'characterId'),
+      userRequest: _safeTaskText(_string(json, 'userRequest')),
+      // A future/unknown status must never be treated as completed or as a
+      // runnable checkpoint. Interrupted is the fail-closed recovery state.
+      status: status,
+      requestedPermissions:
+          _enums(json['requestedPermissions'], ToolPermission.values),
+      plan: _safeTaskText(json['plan']?.toString() ?? ''),
+      resultSummary: _safeTaskText(json['resultSummary']?.toString() ?? ''),
+      createdAt: _dateTime(json, 'createdAt'),
+      currentStep: _integerOrDefault(json['currentStep'], 0),
+      completedOperations: _strings(json['completedOperations'])
+          .map(_portableCompletedOperation)
+          .where((value) => value.isNotEmpty)
+          .toList(growable: false),
+      pendingToolRequestJson: _portableToolCheckpoint(
+        json['pendingToolRequestJson']?.toString() ?? '',
+      ),
+      updatedAt: _optionalDate(json['updatedAt']),
+      lastError: _safeTaskText(json['lastError']?.toString() ?? ''),
+      workModeTask: _boolOrDefault(json['workModeTask'], false),
+      queuedUserRequests: _strings(json['queuedUserRequests'])
+          .map(_safeTaskText)
+          .where((request) => request.isNotEmpty)
+          .toList(growable: false),
+      contextSummary: _safeTaskContextSummary(
+        json['contextSummary']?.toString() ?? '',
+      ),
+      assignedCharacterIds: _strings(json['assignedCharacterIds']),
+      startedAt: _optionalDate(json['startedAt']),
+      actionCount: _integerOrDefault(json['actionCount'], 0),
+      softLimitReached: _boolOrDefault(json['softLimitReached'], false),
+      resumeRequired:
+          statusWasUnknown || _boolOrDefault(json['resumeRequired'], false),
+      // Backups may come from an older build or an untrusted file. Apply
+      // the same capability and portability boundary on import as on
+      // export, so a crafted archive cannot reintroduce a stale approval,
+      // local path or tool result into a restored task.
+      executionStateJson: _safeExecutionStateJson(
+        json['executionStateJson']?.toString() ?? '',
+        conversationId: groupId,
+      ),
+      lastArtifactPaths: _strings(json['lastArtifactPaths'])
+          .map(_portableArtifactPath)
+          .where((path) => path.isNotEmpty)
+          .toList(growable: false),
+      actionLimit: _integerOrDefault(
+        json['actionLimit'],
+        AgentTask.defaultActionLimit,
+      ),
+      softTimeLimitMinutes: _integerOrDefault(
+        json['softTimeLimitMinutes'],
+        AgentTask.defaultSoftTimeLimitMinutes,
+      ),
+      eventLogIncomplete: _boolOrDefault(json['eventLogIncomplete'], false),
+    );
+  }
 
   static Map<String, dynamic> workspace(WorkModeWorkspace item) => {
         'id': item.id,
@@ -482,37 +498,232 @@ const _portableExecutionKeys = <String>{
   'autorenameifexists',
   'foldergrantpending',
   'folderrequireswritable',
+  'toolmissing',
+  'artifactdeliverynoticepublished',
   'explicitcommandrequestrequired',
   'visionmodelrequired',
   'visionmodelprovider',
   'visionmodel',
 };
 
+String? _portableExecutionKey(String normalized) => switch (normalized) {
+      'phase' => 'phase',
+      'followupkind' => 'followUpKind',
+      'followupreason' => 'followUpReason',
+      'clarificationquestion' => 'clarificationQuestion',
+      'autorenameifexists' => 'autoRenameIfExists',
+      'foldergrantpending' => 'folderGrantPending',
+      'folderrequireswritable' => 'folderRequiresWritable',
+      'toolmissing' => 'toolMissing',
+      'explicitcommandrequestrequired' => 'explicitCommandRequestRequired',
+      'visionmodelrequired' => 'visionModelRequired',
+      'visionmodelprovider' => 'visionModelProvider',
+      'visionmodel' => 'visionModel',
+      _ => null,
+    };
+
 // Kept separate from safeToolRequestCheckpointJson: that helper is the
 // in-app restart checkpoint and intentionally retains display-only fields.
 // Portable backups need a stricter allow-list because they are transportable
 // outside the trusted app-support directory.
-String _safeExecutionStateJson(String raw) {
+String _safeExecutionStateJson(
+  String raw, {
+  String? conversationId,
+}) {
   final trimmed = raw.trim();
   if (trimmed.isEmpty) return '';
   try {
     final decoded = jsonDecode(trimmed);
-    if (decoded is! Map) return '';
+    if (decoded is! Map) {
+      // A non-empty scalar/list is a damaged or future checkpoint. Preserve a
+      // fail-closed recovery barrier across devices instead of silently
+      // downgrading it to an empty, runnable legacy state.
+      return jsonEncode(<String, dynamic>{
+        'schemaVersion': 1,
+        'checkpointSchemaUnsupported': true,
+      });
+    }
     final result = <String, dynamic>{};
     for (final entry in decoded.entries) {
       final key = entry.key.toString();
       final normalized = key.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
+      if (normalized == 'checkpointschemaunsupported') {
+        // This marker is a recovery barrier, not an executable capability.
+        // Keep it across a portable backup so an unknown future checkpoint
+        // cannot become runnable merely by changing devices.
+        if (entry.value == true) {
+          result['checkpointSchemaUnsupported'] = true;
+        }
+        continue;
+      }
+      if (normalized == 'schemaversion') {
+        // The portable execution allow-list intentionally omits the version
+        // number. An explicit future/malformed version must nevertheless leave
+        // a review marker instead of being silently downgraded to legacy V1.
+        final version = entry.value;
+        final isCurrent = version is num &&
+            version.isFinite &&
+            version == version.toInt() &&
+            version.toInt() == 1;
+        if (!isCurrent) result['checkpointSchemaUnsupported'] = true;
+        continue;
+      }
+      if (normalized == 'discussionstate') {
+        final discussion = _portableDiscussionState(
+          entry.value,
+          conversationId: conversationId,
+        );
+        if (discussion != null) {
+          result[WorkDiscussionState.jsonKey] = discussion;
+        }
+        continue;
+      }
+      if (normalized == 'workfailure') {
+        final failure = _portableWorkFailure(entry.value);
+        if (failure != null) {
+          result['workFailure'] = failure;
+        }
+        continue;
+      }
+      if (normalized == 'artifactdeliveryretryonly' ||
+          normalized == 'artifactdeliverymessageid') {
+        // A retry-only artifact checkpoint points at a device-local file and
+        // chat message. It is intentionally not portable; restoring it must
+        // never replay an old delivery operation against a new target.
+        continue;
+      }
+      if (normalized == 'artifactdeliverynoticepublished') {
+        if (entry.value is bool) {
+          result['artifactDeliveryNoticePublished'] = entry.value;
+        }
+        continue;
+      }
       if (!_portableExecutionKeys.contains(normalized)) continue;
+      final portableKey = _portableExecutionKey(normalized);
+      if (portableKey == null) continue;
       final value = entry.value;
       if (value is bool || value is num) {
-        result[key] = value;
+        result[portableKey] = value;
       } else if (value is String) {
-        result[key] = _safeTaskText(value, maximum: 512);
+        result[portableKey] = _safeTaskText(value, maximum: 512);
       }
     }
     return result.isEmpty ? '' : jsonEncode(result);
   } on Object {
-    return '';
+    // Keep malformed checkpoints visible after restore. The destination
+    // coordinator will require explicit user continuation before replanning.
+    return jsonEncode(<String, dynamic>{
+      'schemaVersion': 1,
+      'checkpointSchemaUnsupported': true,
+    });
+  }
+}
+
+AgentTaskStatus _portableTaskStatus(Object? raw) {
+  if (raw is String) {
+    for (final status in AgentTaskStatus.values) {
+      if (status.name == raw) return status;
+    }
+  }
+  return AgentTaskStatus.interrupted;
+}
+
+bool _knownTaskStatus(Object? raw) =>
+    raw is String && AgentTaskStatus.values.any((status) => status.name == raw);
+
+int _integerOrDefault(Object? raw, int fallback) =>
+    raw is num && raw.isFinite && raw == raw.toInt() ? raw.toInt() : fallback;
+
+bool _boolOrDefault(Object? raw, bool fallback) => raw is bool ? raw : fallback;
+
+Map<String, dynamic>? _portableDiscussionState(
+  Object? raw, {
+  String? conversationId,
+}) {
+  final parsed = WorkDiscussionState.tryParse(raw);
+  if (parsed == null) {
+    final owner = _safeTaskText(
+      conversationId ??
+          (raw is Map ? raw['conversationId']?.toString() ?? '' : ''),
+      maximum: 256,
+    );
+    return WorkDiscussionState(
+      conversationId: owner.isEmpty ? 'portable-unknown' : owner,
+      phase: WorkDiscussionPhase.blocked,
+      requestRevision: 1,
+      blockers: const ['discussionStateInvalid'],
+    ).toJson();
+  }
+
+  final portable = parsed.toJson();
+  final contract = parsed.deliverableContract;
+  if (contract == null) return portable;
+  final safeContract = <String, dynamic>{
+    ...contract,
+    'deliverableType': _safeTaskText(
+      contract['deliverableType']?.toString() ?? '',
+      maximum: 256,
+    ),
+    'format': _safeTaskText(
+      contract['format']?.toString() ?? '',
+      maximum: 256,
+    ),
+    'contentScope': _safeTaskText(
+      contract['contentScope']?.toString() ?? '',
+      maximum: 4096,
+    ),
+    'explicitExecutorId': contract['explicitExecutorId'],
+    'requestRevision': contract['requestRevision'],
+  };
+  final originalLocation = contract['location']?.toString() ?? '';
+  final portableLocation = _portableContractPath(originalLocation);
+  final originalRevisionTarget = contract['revisionTarget']?.toString() ?? '';
+  final portableRevisionTarget = _portableContractPath(originalRevisionTarget);
+  final droppedLocalTarget = originalLocation.trim().isNotEmpty &&
+      portableLocation.isEmpty &&
+      originalLocation.trim() != 'unspecified';
+  final droppedRevisionTarget = originalRevisionTarget.trim().isNotEmpty &&
+      portableRevisionTarget.isEmpty;
+  safeContract['location'] =
+      portableLocation.isEmpty ? 'unspecified' : portableLocation;
+  safeContract['revisionTarget'] = portableRevisionTarget;
+  portable['deliverableContract'] = safeContract;
+  if (droppedLocalTarget || droppedRevisionTarget) {
+    final blockers = <String>{
+      ...parsed.blockers,
+      'backupWorkspaceReauthorizationRequired',
+    };
+    portable['blockers'] = blockers.take(64).toList(growable: false);
+    portable['phase'] = WorkDiscussionPhase.blocked;
+  }
+  return portable;
+}
+
+String _portableContractPath(String raw) {
+  final normalized = raw.trim();
+  if (normalized == 'desktop' ||
+      normalized == 'conversation' ||
+      normalized == 'unspecified') {
+    return normalized;
+  }
+  return _portableArtifactPath(normalized);
+}
+
+Map<String, dynamic>? _portableWorkFailure(Object? raw) {
+  if (raw is! Map) return null;
+  try {
+    final failure = WorkFailure.fromJson(Map<String, dynamic>.from(raw));
+    final safe = failure.toJson();
+    final target =
+        _portableArtifactPath(safe['failureTargetPath']?.toString() ?? '');
+    if (target.isEmpty) {
+      safe.remove('failureTargetPath');
+    } else {
+      safe['failureTargetPath'] = target;
+    }
+    return safe;
+  } on Object {
+    return null;
   }
 }
 

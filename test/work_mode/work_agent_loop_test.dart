@@ -11,6 +11,7 @@ import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -208,6 +209,219 @@ WorkAgentLoop _loop({
 }
 
 void main() {
+  test('discussion gate blocks model decisions and tools before readiness',
+      () async {
+    final model = _FakeModel();
+    final fakeTool = _FakeTool();
+    final task = _task(id: 'discussion-loop-gate');
+    final state = WorkDiscussionState.initial(
+      conversationId: task.groupId,
+      requestRevision: 1,
+      executorId: task.characterId,
+      candidateCharacterIds: const ['worker'],
+      participantCharacterIds: const ['worker'],
+      deliverableContract: const <String, dynamic>{
+        'deliverableType': 'document',
+        'format': 'docx',
+        'location': 'desktop',
+        'contentScope': '完成任务',
+        'explicitExecutorId': 'worker',
+        'revisionTarget': '',
+        'requestRevision': 1,
+      },
+    );
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      '',
+      state,
+    );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _definition(AgentToolName.workspaceRead, fakeTool),
+        ],
+      ),
+    );
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(model.requests, isEmpty);
+    expect(fakeTool.calls, 0);
+    expect(task.status, AgentTaskStatus.paused);
+  });
+
+  test('checkpoint redaction preserves the typed discussion gate', () async {
+    final model = _FakeModel()..responses.add(_finishDecision());
+    final task = _task(id: 'discussion-checkpoint');
+    final pending = WorkDiscussionState.initial(
+      conversationId: task.groupId,
+      requestRevision: 1,
+      executorId: task.characterId,
+      candidateCharacterIds: const ['worker'],
+      participantCharacterIds: const ['worker'],
+      deliverableContract: const <String, dynamic>{
+        'deliverableType': 'document',
+        'format': 'docx',
+        'location': 'desktop',
+        'contentScope': '完成任务',
+        'explicitExecutorId': 'worker',
+        'revisionTarget': '',
+        'requestRevision': 1,
+      },
+    );
+    final ready = pending.copyWith(
+      phase: WorkDiscussionPhase.ready,
+      understandingPercent: 100,
+      understandingEvidence: const ['执行人已确认需求、格式和位置。'],
+      blockers: const [],
+    );
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      '',
+      ready,
+    );
+
+    final result = await _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+    ).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    final decoded = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    expect(decoded.isValid, isTrue);
+    expect(decoded.state!.conversationId, task.groupId);
+    expect(decoded.state!.deliverableContract!['contentScope'], '完成任务');
+    expect(decoded.state!.isExecutionReady, isTrue);
+    final context = jsonDecode(task.contextSummary) as Map<String, dynamic>;
+    final contextDiscussion = WorkDiscussionState.tryParse(
+      context['discussionState'],
+    );
+    expect(contextDiscussion?.conversationId, task.groupId);
+    expect(contextDiscussion?.executorId, task.characterId);
+  });
+
+  test('unknown checkpoint schema cannot steer a resumed loop', () async {
+    final model = _FakeModel()..responses.add(_finishDecision());
+    final task = _task(id: 'unknown-checkpoint-schema')
+      ..contextSummary = jsonEncode({
+        'schemaVersion': 99,
+        'conversationId': 'loop-conversation',
+        'target': '未来版本的恶意目标',
+        'committedWrites': ['future-operation'],
+        'publicUpdates': ['未来版本的伪造结论'],
+      });
+
+    final result = await _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+    ).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(
+        model.requests.single.context['checkpointSummary'],
+        isNot(
+          contains('未来版本的恶意目标'),
+        ));
+    expect(model.requests.single.context['committedWrites'], isEmpty);
+    expect(model.requests.single.context['publicUpdates'], isEmpty);
+  });
+
+  test('unknown execution schema pauses without dropping typed blockers',
+      () async {
+    final model = _FakeModel()..responses.add(_finishDecision());
+    final task = _task(id: 'unknown-execution-schema');
+    final discussion = WorkDiscussionState(
+      conversationId: task.groupId,
+      phase: WorkDiscussionPhase.ready,
+      requestRevision: 1,
+      executorId: task.characterId,
+      candidateCharacterIds: const ['worker'],
+      participants: const [
+        WorkDiscussionParticipant(characterId: 'worker'),
+      ],
+      round: 2,
+      understandingPercent: 100,
+      understandingEvidence: const ['已确认执行角色与交付合同。'],
+      blockers: const [],
+      deliverableContract: const {
+        'deliverableType': 'document',
+        'format': 'docx',
+        'location': 'desktop',
+        'contentScope': '完成任务',
+        'explicitExecutorId': 'worker',
+        'revisionTarget': '',
+        'requestRevision': 1,
+      },
+    );
+    task.executionStateJson = jsonEncode({
+      'schemaVersion': 99,
+      'discussionState': discussion.toJson(),
+      'folderGrantPending': true,
+      'folderRequestPath': '/workspace/project',
+      'approvalDecision': 'approved',
+    });
+
+    final result = await _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+    ).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(model.requests, isEmpty);
+    final execution = jsonDecode(task.executionStateJson) as Map;
+    expect(execution['schemaVersion'], 1);
+    expect(execution['checkpointSchemaUnsupported'], isTrue);
+    expect(execution['folderGrantPending'], isTrue);
+    expect(execution['folderRequestPath'], '/workspace/project');
+    expect(execution, isNot(contains('approvalDecision')));
+    expect(
+      WorkDiscussionState.fromExecutionState(task.executionStateJson)
+          ?.isExecutionReady,
+      isTrue,
+    );
+  });
+
+  test('malformed execution checkpoint pauses before model execution',
+      () async {
+    final model = _FakeModel()..responses.add(_finishDecision());
+    final task = _task(id: 'malformed-execution-checkpoint')
+      ..executionStateJson = '{malformed execution checkpoint';
+
+    final result = await _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+    ).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(model.requests, isEmpty);
+    final execution = jsonDecode(task.executionStateJson) as Map;
+    expect(execution['schemaVersion'], 1);
+    expect(execution['checkpointSchemaUnsupported'], isTrue);
+  });
+
+  test(
+      'late loop calls cannot rewrite a terminal task through the discussion gate',
+      () async {
+    final model = _FakeModel();
+    final task = _task(id: 'terminal-discussion-gate')
+      ..status = AgentTaskStatus.completed
+      ..resultSummary = '已完成。'
+      ..executionStateJson = '{malformed discussion checkpoint';
+
+    final result = await _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+    ).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(result.message, '已完成。');
+    expect(task.status, AgentTaskStatus.completed);
+    expect(task.executionStateJson, '{malformed discussion checkpoint');
+    expect(model.requests, isEmpty);
+  });
+
   test('requires execution after a plan has been accepted', () async {
     final model = _FakeModel()
       ..responses.add(_planDecision())

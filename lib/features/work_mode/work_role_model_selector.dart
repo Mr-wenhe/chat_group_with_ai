@@ -8,9 +8,9 @@ import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/work_mode/work_role_router.dart';
 
-/// The small, non-tool model request used to choose the first role in a group
-/// work task. Keeping the transport behind a callback makes this policy easy
-/// to test without constructing a database or a network client.
+/// The small, non-tool model request used to rank a candidate in a group work
+/// task. Keeping the transport behind a callback makes this policy easy to
+/// test without constructing a database or a network client.
 typedef WorkRoleModelCompletion = Future<Map<String, dynamic>> Function({
   required AICharacter character,
   required ApiConfig config,
@@ -20,7 +20,7 @@ typedef WorkRoleModelCompletion = Future<Map<String, dynamic>> Function({
   required Duration timeout,
 });
 
-/// Resolves an automatic group role through the configured LLM.
+/// Produces a group-role recommendation through the configured LLM.
 ///
 /// The router itself still validates the returned ID, confidence, availability
 /// and stage plan. This service only selects a credential-bearing candidate,
@@ -134,6 +134,8 @@ class WorkRoleModelSelectorService {
             .take(8)
             .map((item) => item.name)
             .toList(growable: false),
+        if (context.deliverableContract != null)
+          'deliverableContract': context.deliverableContract!.toJson(),
         'candidates':
             allCandidates.take(candidateLimit).toList(growable: false),
         'skills': allSkills.take(skillLimit).toList(growable: false),

@@ -1300,7 +1300,7 @@ void main() {
 
   test('doc 文档请求被识别为 docx 而非 md', () async {
     // 回归：doc/docx/文档 都应导向 docx 分支（在 md 之前）。docx 是二进制，
-    // 运行时降级为 .md 真实写入，而不是落入 md 分支或伪造 docx 附件。
+    // 兼容运行时不得未经同意降级为 .md，也不能伪造 docx 附件。
     final fakeTool = _FakeWorkspaceFileTool(
       patchResult: {'ok': true, 'path': 'report.md', 'bytes': 16},
     );
@@ -1329,13 +1329,11 @@ void main() {
       approved: true,
     );
 
-    expect(result.status, AgentRuntimeStatus.completed);
+    expect(result.status, AgentRuntimeStatus.failed);
     // 推断路径命中 docx 分支（doc文档 → report.docx），而不是被 md 分支抢走。
     expect(firstSystemPrompt, contains('report.docx'));
-    // 实际落盘为降级后的 Markdown，而非伪造 docx 二进制。
-    expect(fakeTool.lastWritePath, 'report.md');
-    expect(result.message, contains('report.md'));
-    expect(result.message, contains('降级'));
+    expect(fakeTool.lastWritePath, isNull);
+    expect(result.message, contains('不能自动降级'));
   });
 
   test('写一份技术文档被识别为 report.md（文档关键词在 md 分支）', () async {
@@ -1539,12 +1537,17 @@ void main() {
         userRequest: '生成 $path',
       );
 
-      expect(result.status, AgentRuntimeStatus.completed, reason: path);
-      // 二进制文档被优雅降级为 Markdown 文本，而不是伪造 PDF/DOCX 附件或 failed。
-      expect(
-          fakeTool.lastWritePath, path.replaceAll(RegExp(r'\.[^.]+$'), '.md'),
-          reason: path);
-      expect(result.message, contains('降级'), reason: path);
+      if (path.endsWith('.docx')) {
+        expect(result.status, AgentRuntimeStatus.failed, reason: path);
+        expect(fakeTool.lastWritePath, isNull, reason: path);
+        expect(result.message, contains('不能自动降级'), reason: path);
+      } else {
+        expect(result.status, AgentRuntimeStatus.completed, reason: path);
+        expect(
+            fakeTool.lastWritePath, path.replaceAll(RegExp(r'\.[^.]+$'), '.md'),
+            reason: path);
+        expect(result.message, contains('降级'), reason: path);
+      }
     }
   });
 

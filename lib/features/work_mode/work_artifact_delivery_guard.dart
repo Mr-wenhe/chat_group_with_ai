@@ -1,14 +1,46 @@
+import 'dart:io';
+import 'dart:typed_data';
+
+import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/features/document/binary_document_parser.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
+
+/// Result of the final artifact contract check.
+class WorkArtifactValidationResult {
+  final bool valid;
+  final String code;
+  final String message;
+  final String? path;
+
+  const WorkArtifactValidationResult.valid({this.path})
+      : valid = true,
+        code = 'ok',
+        message = '交付产物已通过格式、位置、可读性和正文校验。';
+
+  const WorkArtifactValidationResult.invalid(this.code, this.message)
+      : valid = false,
+        path = null;
+}
+
 /// Completion guard for file deliverables in production work mode.
 ///
-/// WorkAgentLoop never turns a model's prose into an attachment. When a request
-/// explicitly asks for a file artifact, the production adapter must have a
-/// real readable file before it can publish a successful completion.
+/// WorkAgentLoop never turns model prose into an attachment. A requested file
+/// must be a real file recorded by the current task before completion can be
+/// published.
 class WorkArtifactDeliveryGuard {
   const WorkArtifactDeliveryGuard._();
 
+  static const int maxValidatedDocxBytes = 10 * 1024 * 1024;
+  static const Duration fileFreshnessTolerance = Duration(seconds: 2);
+
   static const String missingArtifactMessage =
       '用户要求文件产物，但没有可读取的真实文件；未将说明文字伪装成附件。'
-      '请通过 workspace.patch 写入并核对文件后再完成。';
+      '请通过 workspace.patch 或 command.run 写入并核对文件后再完成。';
+
+  static const String docxContractMessage =
+      '用户明确要求 Word 文件，但没有找到本次生成、位于指定位置且可读取的真实 DOCX。'
+      'Markdown 只能作为转换源，不能作为最终交付。';
 
   /// Returns whether [request] asks for a source-code file rather than merely
   /// asking the model to explain or review code.
@@ -28,34 +60,286 @@ class WorkArtifactDeliveryGuard {
     return _containsCreationVerb(text);
   }
 
-  /// Returns whether a request asks for a non-source file such as Markdown.
-  /// A document is required only when the request also contains a creation or
-  /// modification verb; read/review requests must remain ordinary analysis.
+  /// Word is a distinct final format. A durable discussion contract keeps the
+  /// requirement through terse continuations, while opening or reviewing an
+  /// existing DOCX remains analysis.
+  static bool requiresDocxArtifact(String request, {String? contractFormat}) {
+    final format = contractFormat?.trim().toLowerCase();
+    if (format == 'docx') {
+      final text = request.trim().toLowerCase();
+      if (text.isEmpty) return true;
+      // A durable discussion contract survives terse continuations such as
+      // “继续执行”. Keep the review/opening escape hatch, but do not let a
+      // follow-up that omits the format silently downgrade the final output.
+      return !_isReadOnlyDocumentRequest(text) || _containsCreationVerb(text);
+    }
+    final text = request.trim().toLowerCase();
+    if (text.isEmpty || !_containsCreationVerb(text)) return false;
+    return RegExp(
+      r'(?:\bword\b|\bdocx?\b|word\s*文档|word\s*格式|docx?\s*文档|'
+      r'\.docx?\b)',
+      caseSensitive: false,
+    ).hasMatch(text);
+  }
+
+  /// Returns the normalized final format recorded by the current discussion
+  /// contract. Callers that reject text-only writes must use this value in
+  /// addition to parsing the free-form request, because the discussion may
+  /// have already resolved a format the request text does not repeat.
+  static String? contractFormatForTask(AgentTask task) {
+    final format =
+        _contractFor(task)?['format']?.toString().trim().toLowerCase();
+    return format == null || format.isEmpty ? null : format;
+  }
+
+  /// Returns whether a request asks for a non-source file. Read/review
+  /// requests remain ordinary analysis.
   static bool requiresFileArtifact(String request) {
     final text = request.trim().toLowerCase();
     if (text.isEmpty || !_containsCreationVerb(text)) return false;
     return RegExp(
       r'(?:文件|文档|报告|报表|清单|表格|附件|markdown|md文档|'
-      r'\.(?:md|markdown|txt|csv|json|ya?ml|html?)\b)',
+      r'\bword\b|\bdocx?\b|\.(?:md|markdown|txt|csv|json|ya?ml|html?|docx?)\b)',
       caseSensitive: false,
     ).hasMatch(text);
   }
 
   static bool _containsCreationVerb(String text) => RegExp(
         r'(?:生成|创建|新建|写入|保存|导出|输出|编写|实现|开发|修改|修复|'
-        r'更新|重构|制作|generate|create|write|save|export|output|implement|'
-        r'develop|modify|fix|update|refactor|build|make)',
+        r'更新|重构|制作|转换|转成|转为|generate|create|write|save|export|'
+        r'output|implement|develop|modify|fix|update|refactor|convert|build|'
+        r'make)',
         caseSensitive: false,
       ).hasMatch(text);
+
+  static bool _isReadOnlyDocumentRequest(String text) => RegExp(
+        r'(?:读取|读一下|查看|打开|分析|解析|检查|预览|阅读|展示|'
+        r'\b(?:read|open|review|inspect|analy[sz]e|check|preview)\b)',
+        caseSensitive: false,
+      ).hasMatch(text);
+
+  /// Validates durable artifact paths for the active task. A path must be
+  /// inside the current path policy, be a regular file, and have a
+  /// modification timestamp at or after this run. Word additionally requires
+  /// a bounded, structurally valid DOCX with non-empty body text.
+  static Future<WorkArtifactValidationResult> validateTask({
+    required AgentTask task,
+    required WorkspacePathPolicy pathPolicy,
+    String? workspaceRoot,
+    DateTime? now,
+  }) async {
+    final contract = _contractFor(task);
+    final needsDocx = requiresDocxArtifact(
+      task.userRequest,
+      contractFormat: contract?['format']?.toString(),
+    );
+    final needsFile = needsDocx ||
+        requiresSourceArtifact(task.userRequest) ||
+        requiresFileArtifact(task.userRequest);
+    if (!needsFile) return const WorkArtifactValidationResult.valid();
+    if (task.lastArtifactPaths.isEmpty) {
+      return WorkArtifactValidationResult.invalid(
+        needsDocx ? 'docxMissing' : 'artifactMissing',
+        needsDocx ? docxContractMessage : missingArtifactMessage,
+      );
+    }
+
+    final effectiveWorkspaceRoot = await _resolveWorkspaceRoot(
+      workspaceRoot,
+      isWindows: pathPolicy.isWindows,
+    );
+    final startedAt = task.startedAt ?? task.createdAt;
+    final freshAfter = startedAt.subtract(fileFreshnessTolerance);
+    final checkedAt = now ?? DateTime.now();
+    for (final rawPath in task.lastArtifactPaths.take(64)) {
+      final raw = rawPath.trim();
+      if (raw.isEmpty) continue;
+      try {
+        final resolved = await pathPolicy.resolveExisting(raw);
+        final requestedType = await FileSystemEntity.type(
+          raw,
+          followLinks: false,
+        );
+        // WorkspacePathPolicy may report a harmless parent alias such as
+        // macOS /var -> /private/var. Reject only an explicitly linked final
+        // component, matching the attachment delivery boundary.
+        if (!resolved.isFile ||
+            requestedType == FileSystemEntityType.link ||
+            resolved.isLink) {
+          continue;
+        }
+        final file = File(resolved.path);
+        final stat = await file.stat();
+        if (stat.type != FileSystemEntityType.file ||
+            stat.modified.isBefore(freshAfter) ||
+            stat.modified.isAfter(checkedAt.add(fileFreshnessTolerance))) {
+          continue;
+        }
+        if (!await _matchesContractLocation(
+          contract,
+          resolved,
+          pathPolicy,
+          workspaceRoot: effectiveWorkspaceRoot,
+        )) {
+          continue;
+        }
+        if (needsDocx) {
+          if (!_hasExtension(resolved.path, 'docx') ||
+              stat.size <= 0 ||
+              stat.size > maxValidatedDocxBytes) {
+            continue;
+          }
+          final bytes = await file.readAsBytes();
+          final sections = BinaryDocumentParser.validateDocxForDelivery(
+            Uint8List.fromList(bytes),
+          );
+          if (sections.isEmpty) continue;
+          // Prose in contentScope is not a literal checklist: conjunctions,
+          // synonyms and workflow instructions cannot define hard failures.
+          // Content acceptance belongs to the executor's discussion contract.
+        }
+        return WorkArtifactValidationResult.valid(path: resolved.path);
+      } on Object {
+        // A malformed or unauthorized candidate must not make another
+        // candidate appear valid; raw filesystem details stay private.
+        continue;
+      }
+    }
+    return WorkArtifactValidationResult.invalid(
+      needsDocx ? 'docxInvalidOrStale' : 'artifactInvalidOrStale',
+      needsDocx ? docxContractMessage : missingArtifactMessage,
+    );
+  }
 
   static String? failureFor({
     required String request,
     required bool hasReadableArtifact,
+    String? contractFormat,
   }) {
-    if ((!requiresSourceArtifact(request) && !requiresFileArtifact(request)) ||
+    final needsDocx = requiresDocxArtifact(
+      request,
+      contractFormat: contractFormat,
+    );
+    if ((!needsDocx &&
+            !requiresSourceArtifact(request) &&
+            !requiresFileArtifact(request)) ||
         hasReadableArtifact) {
       return null;
     }
-    return missingArtifactMessage;
+    return needsDocx ? docxContractMessage : missingArtifactMessage;
   }
+
+  static Map<String, dynamic>? _contractFor(AgentTask task) {
+    final decoded = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    final contract = decoded.state?.deliverableContract;
+    return contract == null ? null : Map<String, dynamic>.from(contract);
+  }
+
+  static Future<String?> _resolveWorkspaceRoot(
+    String? raw, {
+    required bool isWindows,
+  }) async {
+    final value = raw?.trim();
+    if (value == null || value.isEmpty) return null;
+    try {
+      final resolved = await Directory(value).resolveSymbolicLinks();
+      return WorkspacePathPolicy.normalizePath(
+        resolved,
+        isWindows: isWindows,
+      );
+    } on Object {
+      try {
+        return WorkspacePathPolicy.normalizePath(value, isWindows: isWindows);
+      } on Object {
+        return null;
+      }
+    }
+  }
+
+  static Future<bool> _matchesContractLocation(
+    Map<String, dynamic>? contract,
+    WorkspaceResolvedPath resolved,
+    WorkspacePathPolicy pathPolicy, {
+    String? workspaceRoot,
+  }) async {
+    final location = contract?['location']?.toString().trim() ?? '';
+    final lowerLocation = location.toLowerCase();
+    if (location.isEmpty || lowerLocation == 'unspecified') {
+      return true;
+    }
+    if (location.split(RegExp(r'[\\/]')).contains('..')) return false;
+    try {
+      final normalizedActual = WorkspacePathPolicy.normalizePath(
+        resolved.path,
+        isWindows: pathPolicy.isWindows,
+      );
+      final absolute = _isAbsolute(location, pathPolicy.isWindows);
+      if (lowerLocation == 'desktop') {
+        final root = workspaceRoot?.trim();
+        // The runner binds an explicit desktop request to the selected
+        // desktop workspace. When that durable root is available, require the
+        // artifact to remain inside it; the fallback keeps direct guard tests
+        // and legacy callers compatible with their authorized-root fixture.
+        return root == null || root.isEmpty
+            ? true
+            : WorkspacePathPolicy.isWithinRoot(
+                root,
+                normalizedActual,
+                isWindows: pathPolicy.isWindows,
+              );
+      }
+      final relativeLocation = _desktopPrefixedRelativePath(location);
+      final baseRoot = workspaceRoot?.trim().isNotEmpty == true
+          ? workspaceRoot!.trim()
+          : resolved.authorizedRoot;
+      final expected = absolute
+          ? await _normalizeExistingContractPath(
+              location,
+              isWindows: pathPolicy.isWindows,
+            )
+          : WorkspacePathPolicy.normalizePath(
+              '$baseRoot/${relativeLocation.replaceAll('\\', '/')}',
+              isWindows: pathPolicy.isWindows,
+            );
+      return normalizedActual == expected;
+    } on Object {
+      return false;
+    }
+  }
+
+  static Future<String> _normalizeExistingContractPath(
+    String path, {
+    required bool isWindows,
+  }) async {
+    try {
+      // macOS exposes aliases such as /var -> /private/var. Resolve an
+      // existing absolute contract path before comparing it with the path
+      // policy's canonical candidate, while retaining lexical normalization
+      // for a path that disappeared between validation steps.
+      final resolved = await File(path).resolveSymbolicLinks();
+      return WorkspacePathPolicy.normalizePath(resolved, isWindows: isWindows);
+    } on Object {
+      return WorkspacePathPolicy.normalizePath(path, isWindows: isWindows);
+    }
+  }
+
+  static bool _isAbsolute(String value, bool isWindows) =>
+      value.startsWith('/') ||
+      isWindows && RegExp(r'^[A-Za-z]:[\\/]').hasMatch(value);
+
+  static String _desktopPrefixedRelativePath(String location) {
+    final normalized = location.replaceAll('\\', '/');
+    final match = RegExp(
+      r'^(?:桌面|desktop)(?:/|$)',
+      caseSensitive: false,
+    ).matchAsPrefix(normalized);
+    if (match == null) return location;
+    final remainder = normalized.substring(match.end);
+    return remainder.isEmpty ? 'desktop' : remainder;
+  }
+
+  static bool _hasExtension(String path, String extension) =>
+      path.replaceAll('\\', '/').toLowerCase().endsWith('.$extension');
 }
