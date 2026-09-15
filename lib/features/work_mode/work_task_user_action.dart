@@ -68,7 +68,11 @@ class WorkTaskUserAction {
   /// Returns the currently advertised blockers for a task. The list is
   /// derived from the authoritative checkpoint on every save, so replaying a
   /// task after restart cannot create a second reminder for the same version.
-  static List<WorkTaskUserAction> forTask(AgentTask task) {
+  static List<WorkTaskUserAction> forTask(
+    AgentTask task, {
+    bool? isWindows,
+    bool? isMacOS,
+  }) {
     // A failed task may still expose retry/reauthorize actions in the existing
     // panel. Completed, cancelled and partially-completed tasks have no live
     // user-action checkpoint, so their old chat buttons must be inert.
@@ -187,7 +191,11 @@ class WorkTaskUserAction {
           kind: WorkTaskUserActionKind.answerQuestion));
     }
 
-    if (WorkFailure.hasInstallableMissingTool(task)) {
+    if (WorkFailure.hasInstallableMissingTool(
+      task,
+      isWindows: isWindows,
+      isMacOS: isMacOS,
+    )) {
       actions.add(
         _openAction(
           task,
@@ -249,14 +257,22 @@ class WorkTaskUserAction {
     AgentTask task, {
     required String blockerId,
     required int version,
+    bool? isWindows,
+    bool? isMacOS,
   }) {
-    return forTask(task).any(
+    return forTask(task, isWindows: isWindows, isMacOS: isMacOS).any(
       (action) => action.blockerId == blockerId && action.version == version,
     );
   }
 
-  static int versionFor(AgentTask task, String blockerId) {
-    for (final action in forTask(task)) {
+  static int versionFor(
+    AgentTask task,
+    String blockerId, {
+    bool? isWindows,
+    bool? isMacOS,
+  }) {
+    for (final action
+        in forTask(task, isWindows: isWindows, isMacOS: isMacOS)) {
       if (action.blockerId == blockerId) return action.version;
     }
     return 0;

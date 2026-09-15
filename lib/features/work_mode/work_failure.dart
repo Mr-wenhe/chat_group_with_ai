@@ -168,11 +168,17 @@ class WorkFailure {
 
   /// Returns whether the current paused checkpoint, rather than an older tool
   /// result, authorizes the one-shot trusted installer action.
-  static bool hasInstallableMissingTool(AgentTask task) {
+  static bool hasInstallableMissingTool(
+    AgentTask task, {
+    bool? isWindows,
+    bool? isMacOS,
+  }) {
     if (task.status != AgentTaskStatus.paused) return false;
     return _hasInstallableMissingTool(
       task,
       _decodeMetadata(task.executionStateJson),
+      isWindows: isWindows,
+      isMacOS: isMacOS,
     );
   }
 
@@ -225,8 +231,10 @@ class WorkFailure {
 
   static bool _hasInstallableMissingTool(
     AgentTask task,
-    Map<dynamic, dynamic> metadata,
-  ) {
+    Map<dynamic, dynamic> metadata, {
+    bool? isWindows,
+    bool? isMacOS,
+  }) {
     if (task.status != AgentTaskStatus.paused ||
         task.pendingToolRequestJson.trim().isEmpty) {
       return false;
@@ -235,7 +243,11 @@ class WorkFailure {
     final hasMissingToolBoundary = metadata['toolMissing'] == true ||
         failure is Map && failure['type'] == WorkFailureType.toolMissing.name;
     return hasMissingToolBoundary &&
-        _pendingHasTrustedInstaller(task.pendingToolRequestJson);
+        _pendingHasTrustedInstaller(
+          task.pendingToolRequestJson,
+          isWindows: isWindows,
+          isMacOS: isMacOS,
+        );
   }
 
   /// Stores a redacted failure while preserving every other checkpoint key.
@@ -486,7 +498,11 @@ class WorkFailure {
     );
   }
 
-  static bool _pendingHasTrustedInstaller(String raw) {
+  static bool _pendingHasTrustedInstaller(
+    String raw, {
+    bool? isWindows,
+    bool? isMacOS,
+  }) {
     if (raw.trim().isEmpty) return false;
     try {
       final decoded = jsonDecode(raw);
@@ -498,7 +514,11 @@ class WorkFailure {
       final args = decoded['args'];
       final executable = args is Map ? args['executable'] : null;
       return executable is String &&
-          WorkCommandInstallSuggestion.hasTrustedInstaller(executable);
+          WorkCommandInstallSuggestion.hasTrustedInstaller(
+            executable,
+            isWindows: isWindows,
+            isMacOS: isMacOS,
+          );
     } on Object {
       return false;
     }

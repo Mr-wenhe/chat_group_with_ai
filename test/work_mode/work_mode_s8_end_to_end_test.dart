@@ -2,6 +2,7 @@ import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:archive/archive.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -17,6 +18,7 @@ import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/document/binary_document_parser.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
+import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
@@ -188,6 +190,16 @@ void main() {
       db: database,
       grantService: grants,
     );
+    final pandoc = _S8PandocHarness();
+    final commandRunner = WorkCommandRunner(
+      policy: WorkCommandPolicy(
+        authorizedRoots: [isolatedDesktop.path],
+        isWindows: false,
+        isMacOS: false,
+      ),
+      pathPolicy: pathPolicy,
+      processStarter: pandoc.start,
+    );
     final executionGateway = _S8ExecutionGateway();
     final runner = DefaultWorkTaskRunner(
       database: database,
@@ -200,6 +212,7 @@ void main() {
       mutationService: mutations,
       resourceLockManager: WorkResourceLockManager(isWindows: false),
       directoryService: _S8IsolatedDirectoryService(isolatedDesktop.path),
+      commandRunner: commandRunner,
     );
     final discussionRunner = WorkDiscussionRunner(
       database: database,
@@ -274,6 +287,7 @@ void main() {
       (value) => value.status == AgentTaskStatus.completed,
     );
     expect(executionGateway.calls, 3);
+    expect(pandoc.conversionCount, 1);
     expect(completed.characterId, 's8-product');
     expect(completed.lastArtifactPaths, contains(endsWith('需求文档.docx')));
 

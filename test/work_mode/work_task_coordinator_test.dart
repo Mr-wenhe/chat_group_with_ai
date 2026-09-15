@@ -436,6 +436,7 @@ void main() {
       taskBox: taskBox,
       eventStore: eventStore,
       runner: runner,
+      installerIsMacOS: true,
     );
   });
 
@@ -1912,7 +1913,7 @@ void main() {
       })
       ..executionStateJson = jsonEncode({'toolMissing': true});
     await taskBox.put(task.id, task);
-    final action = WorkTaskUserAction.forTask(task).single;
+    final action = WorkTaskUserAction.forTask(task, isMacOS: true).single;
 
     final install = coordinator.installMissingTool(
       task.id,
@@ -1976,7 +1977,7 @@ void main() {
       })
       ..executionStateJson = jsonEncode({'toolMissing': true});
     await taskBox.put(task.id, task);
-    final action = WorkTaskUserAction.forTask(task).single;
+    final action = WorkTaskUserAction.forTask(task, isMacOS: true).single;
     final install = coordinator.installMissingTool(
       task.id,
       expectedActionVersion: action.version,

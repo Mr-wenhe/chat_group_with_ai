@@ -270,8 +270,20 @@ void main() {
         'tool': 'command.run',
         'args': <String, dynamic>{'executable': 'pandoc'},
       });
-    final toolAction = WorkTaskUserAction.forTask(tool).single;
+    final toolAction = WorkTaskUserAction.forTask(
+      tool,
+      isMacOS: true,
+    ).single;
     expect(toolAction.kind, WorkTaskUserActionKind.installTool);
+
+    expect(
+      WorkTaskUserAction.forTask(
+        tool,
+        isWindows: false,
+        isMacOS: false,
+      ),
+      isEmpty,
+    );
   });
 
   test('completed and cancelled tasks invalidate old action buttons', () {

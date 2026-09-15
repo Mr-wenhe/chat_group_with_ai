@@ -126,6 +126,91 @@ class _S8IsolatedDirectoryService extends WorkModeDirectoryService {
   }
 }
 
+/// CI images do not guarantee a Pandoc binary. This process boundary keeps the
+/// acceptance flow deterministic while still exercising command policy,
+/// approvals, locks and binary DOCX delivery through the production runner.
+class _S8PandocHarness {
+  int conversionCount = 0;
+
+  Future<WorkCommandProcess> start(
+    WorkCommand command, {
+    required Map<String, String> env,
+    required bool shell,
+  }) async {
+    if (command.executable != 'pandoc' || shell) {
+      throw StateError('S8 只接受非 shell 的 pandoc DOCX 转换。');
+    }
+    final outputIndex = command.arguments.indexOf('-o');
+    if (outputIndex != 1 || command.arguments.length != 3) {
+      throw StateError('S8 pandoc 命令格式不符合预期。');
+    }
+    final source = File(
+      '${command.workingDirectory}${Platform.pathSeparator}'
+      '${command.arguments.first}',
+    );
+    final output = File(
+      '${command.workingDirectory}${Platform.pathSeparator}'
+      '${command.arguments[outputIndex + 1]}',
+    );
+    final markdown = await source.readAsString();
+    await output.writeAsBytes(_s8Docx(markdown), flush: true);
+    conversionCount += 1;
+    return WorkCommandProcess(
+      pid: conversionCount,
+      stdout: const Stream<List<int>>.empty(),
+      stderr: const Stream<List<int>>.empty(),
+      exitCode: Future<int>.value(0),
+      terminateTree: ({bool force = false}) async {},
+    );
+  }
+
+  List<int> _s8Docx(String markdown) {
+    final paragraphs = markdown
+        .split(RegExp(r'\r?\n'))
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .map(_s8DocxParagraph)
+        .join();
+    final archive = Archive()
+      ..addFile(ArchiveFile.string(
+        '[Content_Types].xml',
+        '''<?xml version="1.0" encoding="UTF-8"?>
+<Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types">
+  <Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/>
+  <Default Extension="xml" ContentType="application/xml"/>
+  <Override PartName="/word/document.xml" ContentType="application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml"/>
+</Types>''',
+      ))
+      ..addFile(ArchiveFile.string(
+        '_rels/.rels',
+        '''<?xml version="1.0" encoding="UTF-8"?>
+<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">
+  <Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="word/document.xml"/>
+</Relationships>''',
+      ))
+      ..addFile(ArchiveFile.string(
+        'word/document.xml',
+        '''<?xml version="1.0" encoding="UTF-8"?>
+<w:document xmlns:w="http://schemas.openxmlformats.org/wordprocessingml/2006/main">
+  <w:body>$paragraphs<w:sectPr/></w:body>
+</w:document>''',
+      ));
+    return ZipEncoder().encode(archive);
+  }
+
+  String _s8DocxParagraph(String line) {
+    final text = line.replaceFirst(RegExp(r'^(?:#+|-+)\s*'), '');
+    return '<w:p><w:r><w:t>${_escapeXml(text)}</w:t></w:r></w:p>';
+  }
+
+  String _escapeXml(String value) => value
+      .replaceAll('&', '&amp;')
+      .replaceAll('<', '&lt;')
+      .replaceAll('>', '&gt;')
+      .replaceAll('"', '&quot;')
+      .replaceAll("'", '&apos;');
+}
+
 AICharacter _s8Character({
   required String id,
   required String name,

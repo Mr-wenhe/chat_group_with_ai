@@ -308,6 +308,8 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
           task,
           blockerId: blockerId,
           version: version,
+          isWindows: _installerIsWindows,
+          isMacOS: _installerIsMacOS,
         );
   }
 

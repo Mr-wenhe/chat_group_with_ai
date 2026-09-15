@@ -13,12 +13,11 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
     final task = await _serialize(() async {
       _ensureOpen();
       final current = _requireWorkTask(taskId);
-      if (!WorkFailure.hasInstallableMissingTool(current)) {
+      if (!_hasInstallableMissingTool(current)) {
         throw StateError('当前任务没有等待安装的缺失工具。');
       }
       if (expectedActionVersion != null &&
-          WorkTaskUserAction.versionFor(current, 'toolMissing') !=
-              expectedActionVersion) {
+          _installActionVersion(current) != expectedActionVersion) {
         throw StateError('该安装提醒已失效，请打开任务面板查看最新状态。');
       }
       _installCancellations
@@ -36,13 +35,10 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
         // cancelled, revised, or replaced with a new missing-tool checkpoint
         // while the installer was running. Only the exact checkpoint that
         // authorized this run may consume its result.
-        final currentToolAction = WorkTaskUserAction.versionFor(
-          stored,
-          'toolMissing',
-        );
+        final currentToolAction = _installActionVersion(stored);
         if (expectedActionVersion != null
             ? currentToolAction != expectedActionVersion
-            : !WorkFailure.hasInstallableMissingTool(stored)) {
+            : !_hasInstallableMissingTool(stored)) {
           return;
         }
         if (result.succeeded) {

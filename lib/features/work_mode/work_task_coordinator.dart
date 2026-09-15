@@ -81,6 +81,8 @@ class WorkTaskCoordinator {
   final WorkFollowUpPolicy _followUpPolicy;
   final DateTime Function() _clock;
   final WorkTaskActionNotifier? _userActionNotifier;
+  final bool? _installerIsWindows;
+  final bool? _installerIsMacOS;
   final StreamController<AgentTask> _taskUpdates =
       StreamController<AgentTask>.broadcast(sync: true);
   final Map<String, _RunningTask> _running = <String, _RunningTask>{};
@@ -130,6 +132,8 @@ class WorkTaskCoordinator {
     WorkContextBuilder? contextBuilder,
     WorkFollowUpPolicy? followUpPolicy,
     WorkTaskActionNotifier? userActionNotifier,
+    bool? installerIsWindows,
+    bool? installerIsMacOS,
     DateTime Function()? clock,
   })  : _taskBox = taskBox,
         _eventStore = eventStore,
@@ -145,6 +149,8 @@ class WorkTaskCoordinator {
         _contextBuilder = contextBuilder ?? const WorkContextBuilder(),
         _followUpPolicy = followUpPolicy ?? const WorkFollowUpPolicy(),
         _userActionNotifier = userActionNotifier,
+        _installerIsWindows = installerIsWindows,
+        _installerIsMacOS = installerIsMacOS,
         _clock = clock ?? DateTime.now {
     if (runner case final WorkTaskProgressReporter reporter) {
       reporter.setTaskUpdateSink(_publishFromRunner);
@@ -155,6 +161,20 @@ class WorkTaskCoordinator {
   }
 
   int get runningTaskCount => _implRunningTaskCount;
+
+  bool _hasInstallableMissingTool(AgentTask task) =>
+      WorkFailure.hasInstallableMissingTool(
+        task,
+        isWindows: _installerIsWindows,
+        isMacOS: _installerIsMacOS,
+      );
+
+  int _installActionVersion(AgentTask task) => WorkTaskUserAction.versionFor(
+        task,
+        'toolMissing',
+        isWindows: _installerIsWindows,
+        isMacOS: _installerIsMacOS,
+      );
 
   /// Quiesces every work task before the app-wide data lifecycle service
   /// removes event logs and snapshots. Active runners are cancelled
