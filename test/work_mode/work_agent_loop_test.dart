@@ -168,16 +168,19 @@ WorkToolDefinition _definition(
   _FakeTool fake, {
   WorkToolAccess access = WorkToolAccess.readOnly,
   WorkToolMutationPipeline? pipeline,
+  bool skillDownload = false,
 }) {
   return WorkToolDefinition(
     name: name,
     access: access,
-    schema: const WorkToolSchema(
-      fields: {
-        'path': WorkToolValueType.string,
-        'content': WorkToolValueType.string,
-      },
-      required: {'path'},
+    schema: WorkToolSchema(
+      fields: skillDownload
+          ? {'templateId': WorkToolValueType.string}
+          : {
+              'path': WorkToolValueType.string,
+              'content': WorkToolValueType.string,
+            },
+      required: skillDownload ? {'templateId'} : {'path'},
     ),
     handler: fake.call,
     mutationPipeline: pipeline,
@@ -192,6 +195,8 @@ WorkAgentLoop _loop({
   Future<void> Function(Duration)? sleep,
   int? maxModelRetries,
   int? maxToolRetries,
+  WorkAgentArtifactCompletion? artifactCompletion,
+  WorkAgentPreflightTool? preflightTool,
 }) {
   return WorkAgentLoop(
     model: model.call,
@@ -200,6 +205,8 @@ WorkAgentLoop _loop({
     sleep: sleep ?? (_) async {},
     maxModelRetries: maxModelRetries,
     maxToolRetries: maxToolRetries,
+    artifactCompletion: artifactCompletion,
+    preflightTool: preflightTool,
     onEvent: events == null
         ? null
         : (event) {
@@ -835,6 +842,167 @@ void main() {
     expect(task.executionStateJson, contains('"committedActionKeys":[]'));
     expect(task.contextSummary, contains('"committed":false'));
     expect(task.contextSummary, isNot(contains('"committed":true')));
+  });
+
+  test('an unchanged mutation replans once and then pauses without success',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(name: AgentToolName.workspacePatch))
+      ..responses.add(_toolDecision(name: AgentToolName.workspacePatch));
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.success(
+            message: '目标文件内容未发生变化，未执行写入。',
+            data: {'changed': false},
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _definition(
+            AgentToolName.workspacePatch,
+            tool,
+            access: WorkToolAccess.mutation,
+            pipeline: _recordingPipeline(<String>[]),
+          ),
+        ],
+      ),
+    );
+
+    final task = _task(id: 'unchanged-mutation');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused,
+        reason: '${result.message}; ${task.lastError}');
+    expect(task.status, AgentTaskStatus.paused,
+        reason: '${result.message}; ${task.lastError}');
+    expect(task.lastError, contains('没有实际变化'));
+    expect(task.completedOperations, isEmpty);
+    expect(task.lastArtifactPaths, isEmpty);
+    expect(tool.calls, 2);
+  });
+
+  test('unchanged mutation guard persists across soft-limit continuations',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(name: AgentToolName.workspacePatch))
+      ..responses.add(_toolDecision(name: AgentToolName.workspacePatch));
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.success(
+            message: '目标文件内容未发生变化，未执行写入。',
+            data: {'changed': false},
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _definition(
+            AgentToolName.workspacePatch,
+            tool,
+            access: WorkToolAccess.mutation,
+            pipeline: _recordingPipeline(<String>[]),
+          ),
+        ],
+      ),
+      clock: _FakeClock(DateTime.utc(2026, 8, 31, 9)),
+    );
+    final task = _task(id: 'unchanged-mutation-across-runs', actionLimit: 2);
+
+    final first = await loop.execute(task);
+    expect(first.status, WorkAgentLoopStatus.paused);
+    expect(task.lastError, contains('动作上限'));
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)['unchangedMutationCount'],
+      1,
+    );
+
+    task
+      ..actionCount = 0
+      ..softLimitReached = false
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false
+      ..startedAt = DateTime.utc(2026, 8, 31, 9);
+    final second = await loop.execute(task);
+
+    expect(second.status, WorkAgentLoopStatus.paused);
+    expect(task.lastError, contains('没有实际变化'));
+    expect(tool.calls, 2);
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)['unchangedMutationCount'],
+      2,
+    );
+  });
+
+  test('a verified artifact can finish without a second model decision',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(name: AgentToolName.workspacePatch));
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.success(
+            message: '文件已写入。',
+            data: {
+              'path': '/workspace/page.html',
+              'changed': true,
+              'beforeSha256': 'before',
+              'afterSha256': 'after',
+            },
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _definition(
+            AgentToolName.workspacePatch,
+            tool,
+            access: WorkToolAccess.mutation,
+            pipeline: _recordingPipeline(<String>[]),
+          ),
+        ],
+      ),
+      artifactCompletion: (_, __, ___) => const AgentFinishCompletion(
+        summary: '已验证文件。',
+      ),
+    );
+
+    final task = _task(id: 'auto-artifact-finish');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    expect(model.requests, hasLength(1));
+    expect(tool.calls, 1);
+  });
+
+  test('skill preflight runs before the first model decision', () async {
+    final model = _FakeModel()..responses.add(_finishDecision());
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _definition(
+            AgentToolName.skillDownload,
+            tool,
+            access: WorkToolAccess.mutation,
+            pipeline: _recordingPipeline(<String>[]),
+            skillDownload: true,
+          ),
+        ],
+      ),
+      preflightTool: (_) => const AgentToolCall(
+        name: AgentToolName.skillDownload,
+        arguments: {'templateId': 'frontend.interactive-artifact'},
+      ),
+    );
+
+    final task = _task(id: 'skill-preflight');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    expect(tool.calls, 1);
+    expect(model.requests, hasLength(1));
+    expect(
+        tool.arguments.single['templateId'], 'frontend.interactive-artifact');
   });
 
   test('protocol repair is attempted once and never exposes raw response',

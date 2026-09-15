@@ -55,9 +55,10 @@ class BackupExporter {
     var missing = 0;
     for (final entry in snapshot.messages) {
       for (final attachment in entry.value.media ?? const <MediaAttachment>[]) {
-        if (!paths.add(attachment.localPath)) continue;
-        if (isAttachmentDataUri(attachment.localPath)) {
-          final decoded = decodeAttachmentDataUri(attachment.localPath);
+        final managedPath = attachment.managedPath;
+        if (!paths.add(managedPath)) continue;
+        if (isAttachmentDataUri(managedPath)) {
+          final decoded = decodeAttachmentDataUri(managedPath);
           if (decoded == null) {
             missing++;
           } else {
@@ -65,7 +66,7 @@ class BackupExporter {
           }
           continue;
         }
-        final file = File(attachment.localPath);
+        final file = File(managedPath);
         if (!await file.exists() || !await _isManagedFile(file)) {
           missing++;
         } else {
@@ -332,8 +333,8 @@ class BackupExporter {
           );
           if (archivePath == null) {
             if (missingAttachmentIds.add(attachment.id)) {
-              missing
-                  .add(attachment.fileName ?? _basename(attachment.localPath));
+              missing.add(
+                  attachment.fileName ?? _basename(attachment.managedPath));
             }
             continue;
           }
@@ -363,15 +364,16 @@ class BackupExporter {
     Map<String, String> attachmentsByHash,
     Map<String, BackupFileEntry> files,
   ) async {
-    final source = File(attachment.localPath);
-    if (!isAttachmentDataUri(attachment.localPath) &&
+    final managedPath = attachment.managedPath;
+    final source = File(managedPath);
+    if (!isAttachmentDataUri(managedPath) &&
         (!await source.exists() || !await _isManagedFile(source))) {
       return null;
     }
-    final bytes = isAttachmentDataUri(attachment.localPath)
-        ? decodeAttachmentDataUri(attachment.localPath)?.bytes
+    final bytes = isAttachmentDataUri(managedPath)
+        ? decodeAttachmentDataUri(managedPath)?.bytes
         : null;
-    if (isAttachmentDataUri(attachment.localPath) && bytes == null) {
+    if (isAttachmentDataUri(managedPath) && bytes == null) {
       // Keep estimate/create semantics aligned: malformed inline media is a
       // missing attachment, never a filesystem path to hash or open.
       return null;

@@ -166,16 +166,55 @@ class WorkDiscussionTurn {
       source = source.replaceFirst(RegExp(r'^```(?:json)?\s*'), '');
       source = source.replaceFirst(RegExp(r'\s*```$'), '');
     }
-    try {
-      final decoded = jsonDecode(source);
-      return decoded is Map<String, dynamic>
-          ? decoded
-          : decoded is Map
-              ? Map<String, dynamic>.from(decoded)
-              : null;
-    } on Object {
-      return null;
+    final candidates = <String>[source];
+    final embedded = _embeddedObject(source);
+    if (embedded != null && embedded != source) candidates.add(embedded);
+    for (final candidate in candidates) {
+      try {
+        final decoded = jsonDecode(candidate);
+        if (decoded is Map<String, dynamic>) return decoded;
+        if (decoded is Map) return Map<String, dynamic>.from(decoded);
+      } on Object {
+        // Some OpenAI-compatible gateways prepend a short explanation even
+        // when the actual protocol body is valid JSON. Try only the first
+        // balanced object; never interpret arbitrary prose as fields.
+      }
     }
+    return null;
+  }
+
+  /// Finds one complete top-level JSON object inside a bounded text reply.
+  /// This is deliberately a parser fallback, not a free-form field extractor:
+  /// the object still goes through every required-field and range check above.
+  static String? _embeddedObject(String source) {
+    final start = source.indexOf('{');
+    if (start < 0) return null;
+    var depth = 0;
+    var quoted = false;
+    var escaped = false;
+    for (var index = start; index < source.length; index++) {
+      final character = source[index];
+      if (quoted) {
+        if (escaped) {
+          escaped = false;
+        } else if (character == '\\') {
+          escaped = true;
+        } else if (character == '"') {
+          quoted = false;
+        }
+        continue;
+      }
+      if (character == '"') {
+        quoted = true;
+      } else if (character == '{') {
+        depth++;
+      } else if (character == '}') {
+        depth--;
+        if (depth == 0) return source.substring(start, index + 1);
+        if (depth < 0) return null;
+      }
+    }
+    return null;
   }
 
   static int? _integer(Object? value) {

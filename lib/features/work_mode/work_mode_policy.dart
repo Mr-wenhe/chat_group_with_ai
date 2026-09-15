@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -14,10 +15,36 @@ class WorkModePolicy {
     final text = request.trim();
     if (text.isEmpty) return false;
     return RegExp(
-      r'(写入|修改|创建|生成|读取|打开|查看|分析|审查|修复|实现|运行|执行|测试|构建|编译|部署|提交|脚本|代码|文件|项目|目录|附件|网页|页面|UI|应用|小程序|'
-      r'\b(?:read|open|inspect|analy[sz]e|review|fix|implement|write|create|generate|edit|run|execute|test|build|compile|deploy|commit|script|code|file|project|directory|ui|app)\b)',
+      r'(写入|修改|创建|生成|读取|打开|查看|分析|审查|修复|优化|完善|改进|实现|运行|执行|测试|构建|编译|部署|提交|脚本|代码|文件|项目|目录|附件|网页|页面|UI|应用|小程序|'
+      r'\b(?:read|open|inspect|analy[sz]e|review|fix|implement|write|create|generate|edit|optimi[sz]e|improve|enhance|polish|refine|beautify|run|execute|test|build|compile|deploy|commit|script|code|file|project|directory|ui|app)\b)',
       caseSensitive: false,
     ).hasMatch(text);
+  }
+
+  static bool _looksLikeWorkContinuation(String request) => RegExp(
+        r'^\s*(?:请)?(?:继续|重试|恢复|接着)(?:执行|处理|完成|任务|刚才|上次|上一轮)?\s*[。.!！]?\s*$',
+        caseSensitive: false,
+      ).hasMatch(request);
+
+  /// Decides whether a chat input must stay on the work-task route.
+  ///
+  /// A non-terminal task owns its conversation even when the page toggle was
+  /// switched off after the task started. A terminal task can still receive a
+  /// clearly work-related revision or an attachment, while ordinary social
+  /// messages remain ordinary chat. With no task, callers must show the work
+  /// mode hint and must not let a normal model turn fabricate source code.
+  static bool shouldRouteRequest({
+    required bool enabled,
+    required String request,
+    AgentTask? ownedTask,
+    bool hasAttachments = false,
+  }) {
+    if (enabled) return true;
+    if (ownedTask == null) return false;
+    if (!ownedTask.isTerminal) return true;
+    return hasAttachments ||
+        looksLikeWorkRequest(request) ||
+        _looksLikeWorkContinuation(request);
   }
 
   static const String workModeHint =

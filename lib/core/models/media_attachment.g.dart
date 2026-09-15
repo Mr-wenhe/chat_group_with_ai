@@ -24,13 +24,14 @@ class MediaAttachmentAdapter extends TypeAdapter<MediaAttachment> {
       fileSize: fields[4] as int?,
       mimeType: fields[5] as String?,
       durationMs: fields[6] as int?,
+      cachePath: fields[7] as String?,
     );
   }
 
   @override
   void write(BinaryWriter writer, MediaAttachment obj) {
     writer
-      ..writeByte(7)
+      ..writeByte(8)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -44,7 +45,9 @@ class MediaAttachmentAdapter extends TypeAdapter<MediaAttachment> {
       ..writeByte(5)
       ..write(obj.mimeType)
       ..writeByte(6)
-      ..write(obj.durationMs);
+      ..write(obj.durationMs)
+      ..writeByte(7)
+      ..write(obj.cachePath);
   }
 
   @override

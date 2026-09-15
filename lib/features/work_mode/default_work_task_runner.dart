@@ -57,6 +57,7 @@ import 'package:chat_group/features/work_mode/stage02_workspace_file_tool.dart';
 import 'package:chat_group/features/work_mode/weather_forecast_service.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:dio/dio.dart';
+import 'package:open_filex/open_filex.dart';
 
 part 'default_work_task_runner_execution.dart';
 part 'default_work_task_runner_model_io.dart';
@@ -108,6 +109,11 @@ class DefaultWorkTaskRunner
     String type, {
     String? fileName,
   })? mediaCopier;
+
+  /// Opens a verified HTML artifact in the platform's default browser after
+  /// successful delivery. Tests can leave this disabled to avoid UI side
+  /// effects; the production provider enables it.
+  final bool autoOpenHtml;
   final DateTime Function() clock;
 
   void Function(AgentTask task)? _taskUpdateSink;
@@ -136,6 +142,7 @@ class DefaultWorkTaskRunner
     this.directoryService = const WorkModeDirectoryService(),
     this.weatherForecastService,
     this.mediaCopier,
+    this.autoOpenHtml = false,
     DateTime Function()? clock,
   })  : credentials = credentials ?? SecureApiCredentialResolver(),
         gateway = gateway ??

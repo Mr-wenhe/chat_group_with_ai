@@ -16,6 +16,7 @@ import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
+import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
@@ -45,11 +46,13 @@ class _SequencedGateway extends AiRequestGateway {
   final String patchPath;
   final String patchContent;
   final bool repeatToolOnSecondModelCall;
+  final String? finishSummary;
 
   _SequencedGateway({
     this.patchPath = 'notes.txt',
     this.patchContent = 'production-stage02',
     this.repeatToolOnSecondModelCall = false,
+    this.finishSummary,
   }) : super(
           store: MemoryGovernanceStore(),
           client: _UnusedClient(),
@@ -103,7 +106,7 @@ class _SequencedGateway extends AiRequestGateway {
               'public_update': '写入已完成并核对结果。',
               'tool': null,
               'completion': {
-                'summary': '已生成文件 $patchPath。',
+                'summary': finishSummary ?? '已生成文件 $patchPath。',
                 'evidence': ['文件可重新读取'],
               },
             }),
@@ -729,6 +732,128 @@ void main() {
     expect(await output.exists(), isFalse);
   });
 
+  test(
+      'HTML artifact auto-completes after verified write without extra model turn',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    expect(
+      await grants.authorizeDirectory(
+        authorizedDirectory.path,
+        consent: (_) async => true,
+      ),
+      isNotNull,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: WorkSnapshotService(
+        appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+        pathPolicy: pathPolicy,
+      ),
+    );
+    final mediaDirectory =
+        await Directory('${hiveDirectory.path}/html-media').create();
+    final gateway = _SequencedGateway(
+      patchPath: 'page.html',
+      patchContent:
+          '<!doctype html><html><body><main>交互页面</main></body></html>',
+    );
+    final config = ApiConfig(
+      id: 'html-auto-complete-config',
+      name: 'HTML auto-complete config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'html-auto-complete-character',
+      name: '前端执行角色',
+      avatar: 'H',
+      age: 30,
+      role: '前端工程师',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ],
+    );
+    final template = ExpertSkillCatalog.findById(
+      'frontend.interactive-artifact',
+    )!;
+    final installedSkill = template.instantiateFor(character.id);
+    character.skillIds = [installedSkill.id];
+    await database.characterSkillBox.put(installedSkill.id, installedSkill);
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      mediaCopier: (source, type, {fileName}) async {
+        final target = File(
+          '${mediaDirectory.path}/${fileName ?? 'artifact.html'}',
+        );
+        await source.copy(target.path);
+        return MediaAttachment(
+          type: type,
+          localPath: target.path,
+          fileName: fileName,
+          fileSize: await target.length(),
+          mimeType: 'text/html',
+        );
+      },
+    );
+    final task = AgentTask(
+      id: 'html-auto-complete-task',
+      groupId: 'html-auto-complete-group',
+      characterId: character.id,
+      userRequest: '生成一个 HTML 页面并保存到 page.html',
+      workModeTask: true,
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    final checkpoint = jsonDecode(task.executionStateJson) as Map;
+    task
+      ..executionStateJson = jsonEncode({
+        ...checkpoint,
+        'approvalDecision': 'approved',
+      })
+      ..status = AgentTaskStatus.queued;
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.completed,
+        reason: '${task.lastError}; ${task.resultSummary}');
+    expect(gateway.calls, 1, reason: '写入并回读通过后不应再向模型请求一个可能失真的 finish。');
+    final output = File(task.lastArtifactPaths.single);
+    expect(await output.readAsString(), contains('<html>'));
+    final message = database.messageBox.values
+        .where((item) => item.groupId == task.groupId)
+        .last;
+    expect(message.media, hasLength(1));
+    expect(message.media!.single.localPath, output.path);
+    expect(message.media!.single.cachePath, isNotNull);
+  });
+
   test('visual model supplies capability without changing the elected executor',
       () async {
     final grants = WorkFolderGrantService(
@@ -979,6 +1104,7 @@ void main() {
     final gateway = _SequencedGateway(
       patchPath: 'delivery.txt',
       patchContent: 'saved-before-attachment-failure',
+      finishSummary: '<!doctype html><html><body>模型原文</body></html>',
     );
     var attachmentCopyFails = true;
     final runner = DefaultWorkTaskRunner(
@@ -1041,6 +1167,8 @@ void main() {
     final messageId = message.id;
     expect(message.content, contains('文件已保存'));
     expect(message.content, contains('可重试交付'));
+    expect(message.content, isNot(contains('<!doctype html>')));
+    expect(message.content, isNot(contains('模型原文')));
     expect(message.media, isNull);
     final failureMetadata = jsonDecode(task.executionStateJson) as Map;
     expect(failureMetadata['artifactDeliveryRetryOnly'], isTrue);
@@ -1495,6 +1623,15 @@ void main() {
           'main_test.dart',
           'config.json',
         ]));
+    expect(
+      message.media!.every(
+        (attachment) =>
+            canonicalPaths.contains(attachment.localPath) &&
+            attachment.cachePath != null,
+      ),
+      isTrue,
+      reason: '工作产物附件必须引用原路径，并单独保留缓存路径。',
+    );
     final events = await eventStore.read(task.id);
     final progress = events.events
         .where((event) => event.title == '文件交付进度')
@@ -2181,6 +2318,63 @@ void main() {
     expect(replies.single.content, contains('budget.xlsx'));
     expect(replies.single.content, contains('文件不是有效的 UTF-8 文本'));
     expect(replies.single.content, contains('下一步'));
+  });
+
+  test('keeps the diagnostic text when an artifact task reports failure',
+      () async {
+    final config = ApiConfig(
+      id: 'artifact-failure-reply-config',
+      name: 'Artifact failure reply test',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'artifact-failure-reply-character',
+      name: '文件失败回复角色',
+      avatar: 'AF',
+      age: 30,
+      role: '测试执行角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [ToolPermission.workspaceRead],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+    );
+    final task = AgentTask(
+      id: 'artifact-failure-reply-task',
+      groupId: 'artifact-failure-reply-group',
+      characterId: character.id,
+      userRequest: '生成一个 HTML 页面并保存到桌面',
+      status: AgentTaskStatus.failed,
+      workModeTask: true,
+    );
+    final failure = WorkFailure.fromToolFailure(
+      code: 'workspaceWriteFailed',
+      message: 'HTML 写入失败：目标目录不可用。',
+      completedContent: const [],
+    );
+
+    await runner.reportFailure(task, failure);
+
+    final reply = database.messageBox.values.singleWhere(
+      (message) =>
+          message.groupId == task.groupId &&
+          message.senderId == character.id &&
+          message.senderType == 'ai',
+    );
+    expect(reply.content, contains('任务未完成'));
+    expect(reply.content, contains('HTML 写入失败'));
+    expect(reply.content, isNot(contains('正在验证并交付文件')));
   });
 
   test(

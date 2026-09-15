@@ -107,6 +107,7 @@ class AiRequestGateway {
     Duration? receiveTimeout,
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
+    bool structuredJson = false,
     bool requiresTools = false,
     bool userInitiated = false,
     required int maxResponseBytes,
@@ -137,6 +138,7 @@ class AiRequestGateway {
         maxRetries: 0,
         cancelToken: cancelToken,
         maxResponseBytes: maxResponseBytes,
+        structuredJson: structuredJson,
       ),
     );
   }

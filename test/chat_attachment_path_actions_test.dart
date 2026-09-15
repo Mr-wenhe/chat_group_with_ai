@@ -1,5 +1,6 @@
 import 'dart:io';
 
+import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/features/chat_group/attachment_path_actions.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -27,5 +28,29 @@ void main() {
     final inline = await inspectAttachmentPath('data:text/plain;base64,SGk=');
     expect(inline.success, isFalse);
     expect(inline.message, contains('内联数据'));
+  });
+
+  test('work artifact operations keep using the original path when it is gone',
+      () async {
+    final directory = await Directory.systemTemp.createTemp('artifact-path-');
+    try {
+      final original = '${directory.path}/original.html';
+      final cache = File('${directory.path}/cached.html')
+        ..writeAsStringSync('<html><body>cache</body></html>');
+      final attachment = MediaAttachment(
+        type: 'file',
+        localPath: original,
+        cachePath: cache.path,
+        fileName: 'original.html',
+      );
+
+      final result = await inspectAttachmentPath(attachment.localPath);
+
+      expect(result.success, isFalse);
+      expect(result.message, contains('不存在'));
+      expect(await cache.exists(), isTrue);
+    } finally {
+      await directory.delete(recursive: true);
+    }
   });
 }

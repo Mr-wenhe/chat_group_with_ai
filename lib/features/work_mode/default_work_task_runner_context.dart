@@ -367,6 +367,10 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     final skillCatalog = discoverable.isEmpty
         ? '无（需要时可通过 meta.find-skills 查找或安装）'
         : discoverable.map(_compactSkillCatalogEntry).join('\n');
+    final matchedTemplate = _matchingSkillTemplate(task.userRequest);
+    final skillPreflight = matchedTemplate == null
+        ? null
+        : '技能预检：已从内置目录匹配「${matchedTemplate.id}」。若角色尚未安装，任务启动阶段会先调用 skill.download；本轮禁止创建重复 Skill。';
     final tools = registry.definitions
         .map((definition) =>
             '${definition.name.wireName}(${definition.access.name})')
@@ -378,6 +382,7 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     return [
       base,
       '角色可发现技能目录（全局技能按需加载；角色已绑定技能正文会注入；权限仍需通过角色授权与工具策略交集校验）：\n$skillCatalog',
+      if (skillPreflight != null) skillPreflight,
       '当前生产 WorkAgentLoop 已注册工具：$tools。',
       '当前授权工作区绝对路径：$workspaceRoot。command.run 的 workingDirectory 为空时会自动解析为当前授权工作区；不要填写 "."，也禁止填写工作区外路径。',
       if (targetsDesktop)
@@ -430,6 +435,37 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
         ? description
         : '${description.substring(0, 179)}…';
     return '- ${skill.id}｜${skill.domain}｜${skill.name}：$clipped';
+  }
+
+  ExpertSkillTemplate? _matchingSkillTemplate(String request) {
+    final recommendations = ExpertSkillCatalog.recommendForText(request);
+    final template = recommendations.isEmpty ? null : recommendations.first;
+    if (template == null ||
+        template.id == 'general.workbuddy-expert-builder' ||
+        template.domain != 'frontend') {
+      return null;
+    }
+    return template;
+  }
+
+  AgentToolCall? _preflightSkillTool(
+    AgentTask task,
+    AICharacter character,
+  ) {
+    final template = _matchingSkillTemplate(task.userRequest);
+    if (template == null) return null;
+    final installed = database.characterSkillBox.values.any(
+      (skill) =>
+          skill.name == template.name &&
+          (skill.isGlobal ||
+              skill.characterId == character.id ||
+              character.skillIds.contains(skill.id)),
+    );
+    if (installed) return null;
+    return AgentToolCall(
+      name: AgentToolName.skillDownload,
+      arguments: {'templateId': template.id},
+    );
   }
 
   List<CharacterSkill> _skillsFor(AICharacter character, String request) {

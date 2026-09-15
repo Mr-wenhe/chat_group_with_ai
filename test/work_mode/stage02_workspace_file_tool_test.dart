@@ -109,6 +109,22 @@ void main() {
     expect(await File('${root.path}/notes.txt').exists(), isFalse);
   });
 
+  test('reports an identical overwrite as a verified no-op', () async {
+    final current = task('stage02-no-op');
+    final tool = toolFor(current);
+    final path = '${root.path}/same.txt';
+    await File(path).writeAsString('unchanged');
+    final before = await File(path).stat();
+
+    final result = await tool.write('same.txt', 'unchanged');
+
+    expect(result['ok'], isTrue);
+    expect(result['changed'], isFalse);
+    expect(result['bytes'], 0);
+    expect(await File(path).readAsString(), 'unchanged');
+    expect((await File(path).stat()).modified, before.modified);
+  });
+
   test('redacts sensitive content and emits a model-boundary audit callback',
       () async {
     final current = task('stage02-secret');

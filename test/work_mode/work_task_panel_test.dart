@@ -1603,6 +1603,62 @@ void main() {
       expect(find.byKey(const Key('work-task-panel-wide')), findsNothing);
     });
 
+    testWidgets('keeps discussion reply actions visible in a short window',
+        (tester) async {
+      tester.view.physicalSize = const Size(800, 630);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final pending = WorkDiscussionState.initial(
+        conversationId: 'short-panel-group',
+        executorId: 'worker',
+        candidateCharacterIds: const ['worker'],
+        participantCharacterIds: const ['worker'],
+        deliverableContract: const <String, dynamic>{
+          'deliverableType': 'document',
+          'format': 'docx',
+          'location': 'desktop',
+          'contentScope': '输出 Word 文档',
+          'explicitExecutorId': 'worker',
+          'revisionTarget': '',
+          'requestRevision': 1,
+        },
+      ).copyWith(
+        phase: WorkDiscussionPhase.blocked,
+        openQuestions: const ['请确认最终输出目录'],
+        blockers: const ['missingUserInformation'],
+      );
+      final task = _task(
+        id: 'short-panel-task',
+        conversationId: 'short-panel-group',
+        characterId: 'worker',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          '',
+          pending,
+        );
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          onReplyTask: (_, __) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[task]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const Key('work-task-reply-send')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-stop')), findsOneWidget);
+    });
+
     testWidgets('keeps both active execution slots visible', (tester) async {
       final taskUpdates = StreamController<List<AgentTask>>.broadcast();
       addTearDown(taskUpdates.close);

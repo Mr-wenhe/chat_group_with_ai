@@ -20,6 +20,13 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     final hasAttachments = _pendingAttachments.isNotEmpty;
     // 放宽发送条件：文案非空 或 有附件均可发送。
     if (text.isEmpty && !hasAttachments) return;
+    final ownedWorkTask = _latestWorkTaskForConversation();
+    final routeToWorkMode = WorkModePolicy.shouldRouteRequest(
+      enabled: _workModeEnabled,
+      request: text,
+      ownedTask: ownedWorkTask,
+      hasAttachments: hasAttachments,
+    );
 
     _textController.clear();
     final mentionedIds = _parseMentions(text);
@@ -60,7 +67,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     // be durably recorded even when the group currently has no usable member;
     // the discussion gate can then @ the owner and resume after a qualified
     // role is added.
-    if (_characters.isEmpty && !_workModeEnabled) {
+    if (_characters.isEmpty && !routeToWorkMode) {
       if (mounted) {
         AppToast.show(context, _isDirectChat ? '该角色当前不可回复' : '该群聊没有活跃的角色',
             icon: Icons.info_outline_rounded);
@@ -70,7 +77,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
 
     // 工作任务由全局协调器串行化。即使普通聊天页仍在处理旧回合，新的
     // 工作指令也必须立即进入持久任务队列，不能被页面队列或取消逻辑吞掉。
-    if (_workModeEnabled) {
+    if (routeToWorkMode) {
       await _runWorkModeTask(
         text: text,
         mentionedIds: mentionedIds,
@@ -87,6 +94,10 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         senderType: 'system',
         content: WorkModePolicy.workModeHint,
       ));
+      // The hint is a routing boundary, not an informational preface to a
+      // normal LLM turn. Letting execution fall through here is what caused
+      // HTML/source prose to appear without a real file attachment.
+      return;
     }
 
     if (_isAiReplying) {
@@ -112,7 +123,13 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     required List<String> mentionedIds,
     Message? userMessage,
   }) async {
-    if (_workModeEnabled) {
+    final routeToWorkMode = WorkModePolicy.shouldRouteRequest(
+      enabled: _workModeEnabled,
+      request: text,
+      ownedTask: _latestWorkTaskForConversation(),
+      hasAttachments: userMessage?.media?.isNotEmpty == true,
+    );
+    if (routeToWorkMode) {
       await _runWorkModeTask(
         text: text,
         mentionedIds: mentionedIds,
@@ -122,6 +139,10 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       );
       return;
     }
+    // A queued work-like message may reach this method after the page toggle
+    // changed while an earlier normal round was draining. The send path has
+    // already published the hint; never leak it into ordinary chat now.
+    if (WorkModePolicy.looksLikeWorkRequest(text)) return;
     final sentiment = UserMessageSentimentAnalyzer.analyze(text);
     await _runAiRound(
       userMessage: text,

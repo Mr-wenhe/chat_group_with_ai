@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -119,6 +120,85 @@ void main() {
       ),
       isNull,
     );
+  });
+
+  test('HTML creation requires and validates a complete readable document',
+      () async {
+    final root = await Directory.systemTemp.createTemp('html-contract-');
+    addTearDown(() => root.delete(recursive: true));
+    final path = '${root.path}/page.html';
+    await File(path).writeAsString(
+      '<!doctype html><html><body><button>开始</button></body></html>',
+    );
+    final task = AgentTask(
+      groupId: 'html-contract',
+      characterId: 'executor',
+      userRequest: '生成一个 HTML 页面并保存到 page.html',
+      workModeTask: true,
+      createdAt: DateTime.now(),
+      startedAt: DateTime.now().subtract(const Duration(milliseconds: 100)),
+      lastArtifactPaths: [path],
+    );
+
+    final valid = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+    );
+
+    expect(valid.valid, isTrue, reason: valid.message);
+    expect(
+      WorkArtifactDeliveryGuard.requiresFileArtifact(task.userRequest),
+      isTrue,
+    );
+
+    await File(path).writeAsString('<html><body><button>开始</button></html>');
+    final missingBodyClose = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+    );
+    expect(missingBodyClose.valid, isFalse);
+    expect(missingBodyClose.code, 'htmlInvalidOrStale');
+
+    await File(path).writeAsString('<div>fragment only</div>');
+    final invalid = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+    );
+    expect(invalid.valid, isFalse);
+    expect(invalid.code, 'htmlInvalidOrStale');
+  });
+
+  test('revision completion fails when no content change was recorded',
+      () async {
+    final root = await Directory.systemTemp.createTemp('unchanged-revision-');
+    addTearDown(() => root.delete(recursive: true));
+    final path = '${root.path}/page.html';
+    await File(path).writeAsString(
+      '<html><body><main>旧页面</main></body></html>',
+    );
+    final now = DateTime.now();
+    final task = AgentTask(
+      groupId: 'revision-contract',
+      characterId: 'executor',
+      userRequest: '优化一下',
+      workModeTask: true,
+      createdAt: now,
+      startedAt: now.subtract(const Duration(milliseconds: 100)),
+      lastArtifactPaths: [path],
+      executionStateJson: jsonEncode({
+        'followUpKind': 'reviseArtifact',
+        'revisionTargetPath': path,
+      }),
+    );
+
+    final result = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+    );
+
+    expect(result.valid, isFalse);
+    expect(result.code, 'artifactUnchanged');
+    expect(result.message, WorkArtifactDeliveryGuard.unchangedRevisionMessage);
   });
 
   test('fresh minimal DOCX passes the real Word contract', () async {

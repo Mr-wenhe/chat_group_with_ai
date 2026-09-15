@@ -316,6 +316,10 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       );
     }
 
+    if (definition.isMutation && toolResult.data['changed'] == false) {
+      return _handleUnchangedMutation(state, call, toolResult);
+    }
+
     await _completeTool(
       state,
       call: call,
@@ -325,6 +329,59 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       result: toolResult,
     );
     if (state.cancellation.isCancelled) return _interrupt(state);
+    final autoCompletion = await artifactCompletion?.call(
+      task,
+      call,
+      toolResult,
+    );
+    if (autoCompletion != null) {
+      const update = '文件已写入并验证，任务自动完成。';
+      return _handleDecision(
+        state,
+        AgentFinishDecision(
+          publicUpdate: update,
+          completion: autoCompletion,
+        ),
+        update,
+      );
+    }
+    return null;
+  }
+
+  Future<WorkAgentLoopResult?> _handleUnchangedMutation(
+    _LoopState state,
+    AgentToolCall call,
+    WorkToolResult result,
+  ) async {
+    final task = state.task;
+    state.pendingToolRequest = null;
+    task.pendingToolRequestJson = '';
+    state.unchangedMutationCount++;
+    _persistUnchangedMutationCount(task, state.unchangedMutationCount);
+    const detail = '工具报告目标文件内容未发生变化，未执行写入。';
+    if (state.unchangedMutationCount > 1) {
+      const message = '连续验证发现目标文件内容没有实际变化，任务未完成。请补充明确的修改点后再继续。';
+      return _pauseForUserAction(
+        state,
+        message,
+        failure: WorkFailure.fromSignalsForUserAction(
+          message,
+          completedContent: _completedContent(state),
+        ),
+      );
+    }
+    await _emit(
+      state,
+      WorkTaskEventKind.toolOutput,
+      '未检测到实际修改，正在自动重新规划。',
+      detail: detail,
+      safeMetadata: {
+        'tool': call.name.wireName,
+        'changed': false,
+        'automaticRepair': true,
+      },
+    );
+    await _checkpoint(state);
     return null;
   }
 
@@ -504,12 +561,14 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       ];
     if (isMutation && !rejected) {
       _clearCommandFailureHistory(state);
+      _persistUnchangedMutationCount(task, 0);
       state.committedActionKeys.add(operationKey);
       task.lastArtifactPaths = _updatedArtifactPaths(
         task,
         call,
         result: result,
       );
+      _recordArtifactChange(task, call, result);
     }
     await _emit(
       state,

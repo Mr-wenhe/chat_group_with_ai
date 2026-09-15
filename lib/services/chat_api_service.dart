@@ -92,6 +92,7 @@ class ChatApiService {
     Duration? receiveTimeout,
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
+    bool structuredJson = false,
     required int maxResponseBytes,
   }) async {
     if (kIsWeb) {
@@ -116,6 +117,7 @@ class ChatApiService {
         receiveTimeout: receiveTimeout,
         cancelToken: cancelToken,
         maxResponseBytes: maxResponseBytes,
+        structuredJson: structuredJson,
       ),
       shouldRetryResult: RetryHandler.isTransientResult,
       sleep: _retrySleep,

@@ -84,6 +84,23 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
         .toList(growable: false);
   }
 
+  int _loadUnchangedMutationCount(AgentTask task) {
+    final value =
+        _safeExistingMap(task.executionStateJson)['unchangedMutationCount'];
+    return value is num ? value.clamp(0, 2).toInt() : 0;
+  }
+
+  void _persistUnchangedMutationCount(AgentTask task, int count) {
+    final execution = _decodeMap(task.executionStateJson);
+    final bounded = count.clamp(0, 2).toInt();
+    if (bounded == 0) {
+      execution.remove('unchangedMutationCount');
+    } else {
+      execution['unchangedMutationCount'] = bounded;
+    }
+    task.executionStateJson = jsonEncode(execution);
+  }
+
   /// Returns true only when this exact command/diagnostic state was already
   /// seen in the current progress segment. A successful mutation clears the
   /// segment, so a compiler can legitimately report the same error again
@@ -151,6 +168,7 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     AgentToolCall call,
   ) {
     final rejected = result.data['rejected'] == true;
+    final changed = result.data['changed'];
     return {
       'tool': call.name.wireName,
       'status': result.status.name,
@@ -159,6 +177,7 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       // uncommitted in the model/checkpoint view so a later continuation does
       // not treat a user's refusal as durable work.
       'committed': !rejected &&
+          changed != false &&
           (result.committed ||
               result.succeeded &&
                   registry.definitionFor(call.name)?.isMutation == true),
@@ -398,6 +417,33 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       }
     }
     return paths.take(64).toList(growable: false);
+  }
+
+  void _recordArtifactChange(
+    AgentTask task,
+    AgentToolCall call,
+    WorkToolResult result,
+  ) {
+    if (result.data['changed'] != true) return;
+    final rawPath = result.data['path'] ?? call.arguments['path'];
+    if (rawPath is! String || rawPath.trim().isEmpty) return;
+    final execution = _decodeMap(task.executionStateJson);
+    final existing = execution['artifactChanges'];
+    final changes = <String, dynamic>{
+      if (existing is Map)
+        ...existing.map(
+          (key, value) => MapEntry(key.toString(), value),
+        ),
+    };
+    changes[rawPath] = {
+      'changed': true,
+      if (result.data['beforeSha256'] is String)
+        'beforeSha256': result.data['beforeSha256'],
+      if (result.data['afterSha256'] is String)
+        'afterSha256': result.data['afterSha256'],
+    };
+    execution['artifactChanges'] = changes;
+    task.executionStateJson = jsonEncode(execution);
   }
 
   bool _modelFailed(Map<String, dynamic> response) =>
@@ -693,6 +739,7 @@ class _LoopState {
   int toolRetryCount = 0;
   int protocolRepairAttempts = 0;
   int invalidCommandRepairCount = 0;
+  int unchangedMutationCount = 0;
   final List<String> commandFailureKeys = <String>[];
 
   _LoopState({

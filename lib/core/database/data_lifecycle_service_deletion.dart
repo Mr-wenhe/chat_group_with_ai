@@ -12,7 +12,7 @@ extension _DataLifecycleServiceDeletion on DataLifecycleService {
         : db.messageBox
                 .get(messageId)
                 ?.media
-                ?.map((attachment) => attachment.localPath)
+                ?.map((attachment) => attachment.managedPath)
                 .toList(growable: false) ??
             const <String>[];
     await _runner.attempt('消息删除失败', incomplete, () async {

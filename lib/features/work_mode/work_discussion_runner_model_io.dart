@@ -104,7 +104,34 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
         timeout: roleTimeout,
         cancelToken: cancelToken,
       ).timeout(roleTimeout);
-      return WorkDiscussionTurn.fromResponse(response);
+      final turn = WorkDiscussionTurn.fromResponse(response);
+      if (turn.valid ||
+          turn.failureReason != '模型返回了非结构化公开内容' ||
+          cancellation.isCancelled) {
+        return turn;
+      }
+      // Some OpenAI-compatible gateways ignore response_format. Give the
+      // same model one bounded repair opportunity, while keeping the strict
+      // parser and execution gate unchanged if it fails again.
+      await _recordDiagnostic(task, '讨论模型未返回 JSON，已请求一次协议修复。');
+      final repairedResponse = await (completion ?? _complete)(
+        character: member.character,
+        config: member.config!,
+        apiKey: member.apiKey!,
+        provider: member.provider!,
+        conversationId: task.groupId,
+        messages: <Map<String, dynamic>>[
+          ...prompt,
+          {
+            'role': 'user',
+            'content':
+                '上一条回复未被解析为 JSON。请基于同一任务和讨论状态重新回答：只输出一个合法 JSON object，不要解释、Markdown 或前后缀；严格保留协议字段，未知信息用空数组并保留未决问题，禁止虚报 100%。',
+          },
+        ],
+        timeout: roleTimeout,
+        cancelToken: cancelToken,
+      ).timeout(roleTimeout);
+      return WorkDiscussionTurn.fromResponse(repairedResponse);
     } on TimeoutException {
       if (!cancelToken.isCancelled) {
         cancelToken.cancel('模型请求超时');
@@ -154,6 +181,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       requiresTools: false,
       userInitiated: true,
       maxResponseBytes: WorkDiscussionRunner.maxResponseBytes,
+      structuredJson: true,
     );
   }
 
@@ -177,6 +205,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
               ? '你是本轮协调/执行人：要主动收集意见、指出取舍、追问未决项，并公开给出理解百分比。'
               : '你是参与成员：只提供与你职业相关的可行性、风险、测试或交付建议，不代替其他职业做决定。',
           '只能返回一个 JSON object，字段必须包含 public_update、understanding_percent、understanding_evidence、open_questions、resolved_questions、blockers、resolved_blockers、substantive_progress；已解决的问题必须原样放入 resolved_questions 或 resolved_blockers，理解达到 100 时，understanding_evidence 至少分别说明目标/范围、方案/取舍、格式位置/验收；没有把握时必须保留问题，禁止虚报 100。',
+          '输出形状示例（只模仿结构，不要复制示例内容）：{"public_update":"本轮公开结论","understanding_percent":50,"understanding_evidence":["目标/范围"],"open_questions":["待确认项"],"resolved_questions":[],"blockers":[],"resolved_blockers":[],"substantive_progress":true,"needs_user":false,"user_question":""}',
         ].join('\n'),
       },
       {

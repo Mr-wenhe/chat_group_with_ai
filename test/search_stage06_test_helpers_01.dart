@@ -112,6 +112,7 @@ class _PlannerClient extends ChatApiService {
     Duration? receiveTimeout,
     int? maxRetries,
     CancelToken? cancelToken,
+    bool structuredJson = false,
     required int maxResponseBytes,
   }) {
     receivedMaxResponseBytes = maxResponseBytes;

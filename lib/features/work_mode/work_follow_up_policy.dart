@@ -134,10 +134,29 @@ class WorkFollowUpPolicy {
         reason: '沿用上一次失败命令定位到的脚本原路径进行修复。',
       );
     }
-    // “改写到新目标” (and similar ordinary continuation wording) does not
-    // identify an existing artifact. Without a file/reference noun, keep the
-    // old continuation semantics instead of inventing a clarification stop.
+    // A terse revision such as “优化一下” is still an edit request. When the
+    // task has exactly one structured artifact, that artifact is the only
+    // safe default target and must be overwritten in place. With multiple
+    // artifacts, ask instead of silently choosing one.
     if (edit && !reference && explicitPath == null) {
+      if (!newFile && artifacts.length == 1) {
+        return WorkFollowUpDecision(
+          kind: WorkFollowUpKind.reviseArtifact,
+          request: normalizedRequest,
+          artifactPath: artifacts.single,
+          reason: '唯一结构化产物作为未指名修订请求的默认原路径。',
+        );
+      }
+      if (!newFile && artifacts.length > 1) {
+        return _clarification(
+          normalizedRequest,
+          artifacts,
+          '存在多个可能的产物，不能猜测“优化”要覆盖哪一个文件。',
+        );
+      }
+      // “改写到新目标” (and similar ordinary continuation wording) does
+      // not identify an existing artifact. Without a file/reference noun,
+      // keep the old continuation semantics instead of inventing a target.
       return WorkFollowUpDecision(
         kind: WorkFollowUpKind.continueTask,
         request: normalizedRequest,

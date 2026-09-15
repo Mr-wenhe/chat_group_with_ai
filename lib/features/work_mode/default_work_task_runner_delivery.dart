@@ -44,14 +44,19 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     if (template == null) return {'ok': false, 'error': 'template_not_found'};
     final existing = database.characterSkillBox.values.where(
       (skill) =>
-          skill.characterId == character.id && skill.name == template.name,
+          skill.name == template.name &&
+          (skill.isGlobal ||
+              skill.characterId == character.id ||
+              character.skillIds.contains(skill.id)),
     );
     final skill = existing.isEmpty
         ? template.instantiateFor(character.id)
         : existing.first;
     if (existing.isEmpty) await database.characterSkillBox.put(skill.id, skill);
-    character.skillIds = {...character.skillIds, skill.id}.toList();
-    await database.aiCharacterBox.put(character.id, character);
+    if (!skill.isGlobal && !character.skillIds.contains(skill.id)) {
+      character.skillIds = {...character.skillIds, skill.id}.toList();
+      await database.aiCharacterBox.put(character.id, character);
+    }
     return {'ok': true, 'skillId': skill.id, 'templateId': template.id};
   }
 
@@ -114,9 +119,6 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     final text = content.trim();
     if (text.isEmpty) return const _ArtifactDeliveryResult.success();
 
-    // The model's final response is the chat reply. Persist it before the
-    // optional artifact-copy phase so a slow or failed attachment delivery
-    // can never hide the conclusion from the conversation.
     final requestedMessageId = existingMessageId?.trim();
     final previousMessage =
         requestedMessageId == null || requestedMessageId.isEmpty
@@ -131,16 +133,25 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
             groupId: task.groupId,
             senderId: character.id,
             senderType: 'ai',
-            content: text,
+            content: '',
           );
-    message
-      ..content = text
-      ..media = null;
-    if (identical(message, previousMessage)) {
-      await database.updateMessage(message);
-    } else {
-      await database.persistMessage(message);
+
+    Future<void> persistMessage() async {
+      if (identical(message, previousMessage)) {
+        await database.updateMessage(message);
+      } else {
+        await database.persistMessage(message);
+      }
     }
+
+    final requiredDocx = WorkArtifactDeliveryGuard.requiresDocxArtifact(
+      task.userRequest,
+      contractFormat: WorkArtifactDeliveryGuard.contractFormatForTask(task),
+    );
+    final requiresArtifactDelivery = requiredDocx ||
+        WorkArtifactDeliveryGuard.isRevisionTask(task) ||
+        WorkArtifactDeliveryGuard.requiresFileArtifact(task.userRequest) ||
+        WorkArtifactDeliveryGuard.requiresSourceArtifact(task.userRequest);
 
     if (enforceArtifactContract) {
       final files = workspaceFileService;
@@ -151,27 +162,37 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
           workspaceRoot: _workspaceRootForTask(task),
           now: clock(),
         );
-        if (!validation.valid &&
-            (WorkArtifactDeliveryGuard.requiresDocxArtifact(
-                  task.userRequest,
-                  contractFormat:
-                      WorkArtifactDeliveryGuard.contractFormatForTask(task),
-                ) ||
-                WorkArtifactDeliveryGuard.requiresFileArtifact(
-                  task.userRequest,
-                ) ||
-                WorkArtifactDeliveryGuard.requiresSourceArtifact(
-                  task.userRequest,
-                ))) {
-          message.content = '$text\n\n交付门禁未通过：${validation.message}';
-          await database.updateMessage(message);
+        if (!validation.valid && requiresArtifactDelivery) {
+          message
+            ..content = _artifactDeliveryFailureContent(validation.message)
+            ..media = null;
+          await persistMessage();
           return _ArtifactDeliveryResult.failure(
             validation.message,
             messageId: message.id,
           );
         }
+      } else if (requiresArtifactDelivery) {
+        const failureMessage = WorkArtifactDeliveryGuard.missingArtifactMessage;
+        message.content = _artifactDeliveryFailureContent(failureMessage);
+        message.media = null;
+        await persistMessage();
+        return _ArtifactDeliveryResult.failure(
+          failureMessage,
+          messageId: message.id,
+        );
       }
     }
+
+    // Only successful artifact completions defer the model's response until
+    // attachment delivery. Failure reports must keep their diagnostic text;
+    // otherwise a failed task can appear to be stuck in delivery forever.
+    final deferArtifactText =
+        enforceArtifactContract && requiresArtifactDelivery;
+    message
+      ..content = deferArtifactText ? '正在验证并交付文件，请稍候。' : text
+      ..media = null;
+    await persistMessage();
 
     List<MediaAttachment>? media;
     File? temporaryBundle;
@@ -253,7 +274,11 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
                     'file',
                     fileName: _basename(file.path),
                   ));
-            attachments.add(copied);
+            attachments.add(
+              temporaryBundle == null
+                  ? _attachmentReferencingOriginal(file, copied)
+                  : copied,
+            );
             if (temporaryBundle == null) {
               final entry =
                   selection.entries.cast<_ArtifactFileEntry?>().firstWhere(
@@ -308,13 +333,6 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
         if (deliveryNote.isNotEmpty) {
           message.content = '$text\n\n$deliveryNote';
         }
-        final requiredDocx = WorkArtifactDeliveryGuard.requiresDocxArtifact(
-          task.userRequest,
-          contractFormat: WorkArtifactDeliveryGuard.contractFormatForTask(task),
-        );
-        final requiresArtifactDelivery = requiredDocx ||
-            WorkArtifactDeliveryGuard.requiresFileArtifact(task.userRequest) ||
-            WorkArtifactDeliveryGuard.requiresSourceArtifact(task.userRequest);
         final attachmentSkips = <String>{
           ...selection.skippedNames,
           ...bundledSkippedNames,
@@ -346,17 +364,24 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
         } else if (requiresArtifactDelivery &&
             !requiredDocx &&
             (attachmentSkips.isNotEmpty ||
+                (enforceArtifactContract && files.isEmpty) ||
                 files.isNotEmpty && attachments.isEmpty)) {
           deliveryFailure = true;
           retryWithExistingArtifact = true;
-          final skippedCount =
-              attachmentSkips.isEmpty ? files.length : attachmentSkips.length;
+          final skippedCount = attachmentSkips.isEmpty
+              ? (files.isEmpty ? 1 : files.length)
+              : attachmentSkips.length;
           deliveryFailureMessage = skippedCount == 1
               ? '文件已保存，但有 1 个产物无法作为聊天附件发送；可重试交付，重试不会重新生成或覆盖文件。'
               : '文件已保存，但有 $skippedCount 个产物无法作为聊天附件发送；可重试交付，重试不会重新生成或覆盖文件。';
         }
         if (deliveryFailure) {
-          message.content = '${message.content}\n\n$deliveryFailureMessage';
+          message.content = enforceArtifactContract && requiresArtifactDelivery
+              ? _artifactDeliveryFailureContent(
+                  deliveryFailureMessage,
+                  saved: true,
+                )
+              : '${message.content}\n\n$deliveryFailureMessage';
         }
         message.media = media;
         await database.updateMessage(message);
@@ -374,7 +399,12 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
       retryWithExistingArtifact = true;
       deliveryFailureMessage = '文件已保存，但附件发送遇到暂时性错误；可重试交付，重试不会重新转换或覆盖文件。';
       try {
-        message.content = '$text\n\n$deliveryFailureMessage';
+        message.content = enforceArtifactContract && requiresArtifactDelivery
+            ? _artifactDeliveryFailureContent(
+                deliveryFailureMessage,
+                saved: true,
+              )
+            : '$text\n\n$deliveryFailureMessage';
         await database.updateMessage(message);
       } on Object {
         // The initial text message remains durable even if its diagnostic
@@ -388,6 +418,157 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
             retryWithExistingArtifact: retryWithExistingArtifact,
           )
         : _ArtifactDeliveryResult.success(messageId: message.id);
+  }
+
+  String _artifactDeliveryFailureContent(
+    String reason, {
+    bool saved = false,
+  }) {
+    final prefix = saved ? '任务未完成，文件已保留。' : '任务未完成。';
+    return '$prefix\n交付门禁未通过：${reason.trim()}\n'
+        '未将模型说明文字伪装成附件；请先确保真实文件写入并通过回读校验后再完成。';
+  }
+
+  MediaAttachment _attachmentReferencingOriginal(
+    File original,
+    MediaAttachment cached,
+  ) {
+    final originalPath = original.path;
+    final cachedPath = cached.localPath.trim();
+    final samePath = cachedPath == originalPath ||
+        File(cachedPath).absolute.path == File(originalPath).absolute.path;
+    return MediaAttachment(
+      id: cached.id,
+      type: cached.type,
+      localPath: originalPath,
+      cachePath: cached.cachePath ?? (samePath ? null : cached.localPath),
+      fileName: cached.fileName ?? _basename(originalPath),
+      fileSize: cached.fileSize,
+      mimeType: cached.mimeType,
+      durationMs: cached.durationMs,
+    );
+  }
+
+  Future<AgentFinishCompletion?> _autoCompleteAfterArtifact(
+    AgentTask task,
+    AgentToolCall call,
+    WorkToolResult result,
+  ) async {
+    if (call.name != AgentToolName.workspacePatch ||
+        result.data['changed'] != true ||
+        !_canAutoCompleteSingleArtifact(task)) {
+      return null;
+    }
+    final requiresArtifact = WorkArtifactDeliveryGuard.isRevisionTask(task) ||
+        WorkArtifactDeliveryGuard.requiresDocxArtifact(
+          task.userRequest,
+          contractFormat: WorkArtifactDeliveryGuard.contractFormatForTask(task),
+        ) ||
+        WorkArtifactDeliveryGuard.requiresFileArtifact(task.userRequest) ||
+        WorkArtifactDeliveryGuard.requiresSourceArtifact(task.userRequest);
+    if (!requiresArtifact) return null;
+    final files = workspaceFileService;
+    if (files == null) return null;
+    final validation = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: files.pathPolicy,
+      workspaceRoot: _workspaceRootForTask(task),
+      now: clock(),
+    );
+    if (!validation.valid) return null;
+    final path = validation.path ?? result.data['path']?.toString() ?? '';
+    final requestHint = _safeCompletionRequestHint(task.userRequest);
+    final baseSummary = path.trim().isEmpty
+        ? '文件已写入并通过回读校验。'
+        : '文件已写入并通过回读校验：${_basename(path)}。';
+    return AgentFinishCompletion(
+      summary:
+          requestHint == null ? baseSummary : '$baseSummary 请求摘要：$requestHint。',
+      evidence: [
+        'workspace.patch 返回 changed=true',
+        if (path.trim().isNotEmpty) '已验证路径：$path',
+      ],
+    );
+  }
+
+  String? _safeCompletionRequestHint(String request) {
+    var hint = request
+        .replaceAll(RegExp(r'[\u0000-\u001f\u007f]'), ' ')
+        .replaceAll(RegExp(r'\s+'), ' ')
+        .trim();
+    if (hint.isEmpty) return null;
+    hint = const SearchSecretScanner().redact(
+      hint,
+      includeOpaqueTokens: true,
+    );
+    const maximum = 160;
+    if (hint.length > maximum) {
+      hint = '${hint.substring(0, maximum - 1)}…';
+    }
+    return hint;
+  }
+
+  bool _canAutoCompleteSingleArtifact(AgentTask task) {
+    final execution = _decodeMap(task.executionStateJson);
+    final rawChanges = execution['artifactChanges'];
+    final changedPaths = rawChanges is Map
+        ? rawChanges.entries
+            .where((entry) =>
+                entry.value is Map && (entry.value as Map)['changed'] == true)
+            .map((entry) => entry.key.toString())
+            .where((path) => path.trim().isNotEmpty)
+            .toSet()
+        : <String>{};
+    if (changedPaths.length != 1) return false;
+    if (WorkArtifactDeliveryGuard.isRevisionTask(task)) return true;
+    final request = task.userRequest.toLowerCase();
+    if (RegExp(r'全部|所有|多个|多份|多文件|all\s+files|multiple', caseSensitive: false)
+        .hasMatch(request)) {
+      return false;
+    }
+    final explicitExtensions = RegExp(
+      r'\.(?:html?|css|js|ts|jsx|tsx|vue|dart|py|md|txt|json|ya?ml)\b',
+      caseSensitive: false,
+    ).allMatches(request).length;
+    return explicitExtensions <= 1;
+  }
+
+  Future<void> _tryOpenHtmlArtifact(AgentTask task) async {
+    if (!autoOpenHtml || workspaceFileService == null) return;
+    final validation = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: workspaceFileService!.pathPolicy,
+      workspaceRoot: _workspaceRootForTask(task),
+      now: clock(),
+    );
+    final path = validation.path;
+    if (!validation.valid ||
+        path == null ||
+        !RegExp(r'\.html?$', caseSensitive: false).hasMatch(path)) {
+      return;
+    }
+    try {
+      final opened = await OpenFilex.open(path, type: 'text/html');
+      final succeeded = opened.type.name == 'done';
+      await _record(
+        task,
+        WorkTaskEventKind.toolOutput,
+        succeeded ? '已尝试在默认浏览器打开 HTML。' : 'HTML 已交付，但自动打开浏览器失败。',
+        detail: succeeded ? path : opened.message,
+        safeMetadata: {
+          'browserPreview': true,
+          'opened': succeeded,
+        },
+      );
+    } on Object catch (error) {
+      await _record(
+        task,
+        WorkTaskEventKind.toolOutput,
+        'HTML 已交付，但自动打开浏览器失败。',
+        detail: error.toString(),
+        safeMetadata: const {'browserPreview': true, 'opened': false},
+      );
+    }
   }
 
   /// A source-code request is successful only when a real readable file was

@@ -323,6 +323,8 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
         clock: clock,
         onCheckpoint: _persistCheckpoint,
         completionGuard: _validateCompletion,
+        artifactCompletion: _autoCompleteAfterArtifact,
+        preflightTool: (task) => _preflightSkillTool(task, character),
         contextCompressionModel: (snapshot) => _compressWorkContext(
           snapshot,
           task: task,
@@ -394,6 +396,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
         } else {
           await database.recordCharacterReplyUsage(character.id);
           _clearArtifactDeliveryNotice(task);
+          await _tryOpenHtmlArtifact(task);
         }
         await _persistCheckpoint(task);
       } else if (result.status != WorkAgentLoopStatus.waitingForApproval) {

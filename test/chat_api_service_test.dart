@@ -296,6 +296,49 @@ void main() {
     expect(calls, 1);
   });
 
+  test('bounded structured completion enables JSON mode for OpenAI protocol',
+      () async {
+    late RequestOptions captured;
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        captured = options;
+        final body = jsonEncode({
+          'choices': [
+            {
+              'message': {'content': '{}'}
+            }
+          ]
+        });
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 200,
+          data: ResponseBody.fromString(body, 200),
+        ));
+      },
+    ));
+
+    final result =
+        await ChatApiService(dio: dio).sendChatMessageWithResponseLimit(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [
+        {'role': 'user', 'content': '只返回 JSON'},
+      ],
+      maxRetries: 0,
+      structuredJson: true,
+      maxResponseBytes: 1024,
+    );
+
+    expect(result['success'], isTrue);
+    expect(
+      (captured.data as Map<String, dynamic>)['response_format'],
+      {'type': 'json_object'},
+    );
+  });
+
   test('ordinary completion also rejects an oversized response before decode',
       () async {
     var calls = 0;

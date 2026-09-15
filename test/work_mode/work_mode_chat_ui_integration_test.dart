@@ -227,6 +227,7 @@ class _RouteApi extends ChatApiService {
     Duration? receiveTimeout,
     int maxRetries = 5,
     CancelToken? cancelToken,
+    bool structuredJson = false,
     bool requiresTools = false,
     bool userInitiated = false,
     void Function(ChatStreamEvent event)? onEvent,

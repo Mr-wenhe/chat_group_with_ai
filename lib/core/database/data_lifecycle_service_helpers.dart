@@ -76,7 +76,7 @@ extension _DataLifecycleServiceHelpers on DataLifecycleService {
             (message) => message.id == messageId && message.groupId == groupId)
         .expand(
           (message) =>
-              message.media?.map((attachment) => attachment.localPath) ??
+              message.media?.map((attachment) => attachment.managedPath) ??
               const <String>[],
         )
         .toList(growable: false);

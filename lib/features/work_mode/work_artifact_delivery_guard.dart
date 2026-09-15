@@ -1,3 +1,4 @@
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
@@ -32,6 +33,7 @@ class WorkArtifactDeliveryGuard {
   const WorkArtifactDeliveryGuard._();
 
   static const int maxValidatedDocxBytes = 10 * 1024 * 1024;
+  static const int maxValidatedHtmlBytes = 10 * 1024 * 1024;
   static const Duration fileFreshnessTolerance = Duration(seconds: 2);
 
   static const String missingArtifactMessage =
@@ -41,6 +43,12 @@ class WorkArtifactDeliveryGuard {
   static const String docxContractMessage =
       '用户明确要求 Word 文件，但没有找到本次生成、位于指定位置且可读取的真实 DOCX。'
       'Markdown 只能作为转换源，不能作为最终交付。';
+
+  static const String htmlContractMessage =
+      'HTML 产物必须是真实、可读取且包含完整 html/body 结构的文件；未将说明文字伪装成附件。';
+
+  static const String unchangedRevisionMessage =
+      '修订任务没有检测到目标文件内容变化，未将未修改的原文件标记为完成。';
 
   /// Returns whether [request] asks for a source-code file rather than merely
   /// asking the model to explain or review code.
@@ -52,7 +60,7 @@ class WorkArtifactDeliveryGuard {
       r'(?:\.(?:py|py3|js|jsx|ts|tsx|dart|java|kt|kts|swift|rs|go|rb|php|'
       r'c|cc|cpp|cxx|h|hpp|sh|bash|zsh|fish|sql)\b|'
       r'python|javascript|typescript|dart|java|kotlin|swift|rust|golang|'
-      r'ruby|php|c\+\+|\bc\b|shell|bash|sql|源码|代码|脚本)',
+      r'ruby|php|c\+\+|\bc\b|shell|bash|sql|html5?|网页|页面|源码|代码|脚本)',
       caseSensitive: false,
     ).hasMatch(text);
     if (!source) return false;
@@ -92,6 +100,10 @@ class WorkArtifactDeliveryGuard {
     return format == null || format.isEmpty ? null : format;
   }
 
+  static bool isRevisionTask(AgentTask task) =>
+      _decodeExecution(task.executionStateJson)['followUpKind'] ==
+      'reviseArtifact';
+
   /// Returns whether a request asks for a non-source file. Read/review
   /// requests remain ordinary analysis.
   static bool requiresFileArtifact(String request) {
@@ -99,7 +111,7 @@ class WorkArtifactDeliveryGuard {
     if (text.isEmpty || !_containsCreationVerb(text)) return false;
     return RegExp(
       r'(?:文件|文档|报告|报表|清单|表格|附件|markdown|md文档|'
-      r'\bword\b|\bdocx?\b|\.(?:md|markdown|txt|csv|json|ya?ml|html?|docx?)\b)',
+      r'\bword\b|\bdocx?\b|html5?|网页|页面|网站|前端|\.(?:md|markdown|txt|csv|json|ya?ml|html?|docx?)\b)',
       caseSensitive: false,
     ).hasMatch(text);
   }
@@ -134,6 +146,7 @@ class WorkArtifactDeliveryGuard {
       contractFormat: contract?['format']?.toString(),
     );
     final needsFile = needsDocx ||
+        isRevisionTask(task) ||
         requiresSourceArtifact(task.userRequest) ||
         requiresFileArtifact(task.userRequest);
     if (!needsFile) return const WorkArtifactValidationResult.valid();
@@ -141,6 +154,14 @@ class WorkArtifactDeliveryGuard {
       return WorkArtifactValidationResult.invalid(
         needsDocx ? 'docxMissing' : 'artifactMissing',
         needsDocx ? docxContractMessage : missingArtifactMessage,
+      );
+    }
+
+    final revisionFailure = _revisionChangeFailure(task);
+    if (revisionFailure != null) {
+      return WorkArtifactValidationResult.invalid(
+        'artifactUnchanged',
+        revisionFailure,
       );
     }
 
@@ -198,6 +219,11 @@ class WorkArtifactDeliveryGuard {
           // synonyms and workflow instructions cannot define hard failures.
           // Content acceptance belongs to the executor's discussion contract.
         }
+        if (_isHtmlPath(resolved.path)) {
+          if (stat.size <= 0 || stat.size > maxValidatedHtmlBytes) continue;
+          final bytes = await file.readAsBytes();
+          if (!_isCompleteHtml(bytes)) continue;
+        }
         return WorkArtifactValidationResult.valid(path: resolved.path);
       } on Object {
         // A malformed or unauthorized candidate must not make another
@@ -206,8 +232,16 @@ class WorkArtifactDeliveryGuard {
       }
     }
     return WorkArtifactValidationResult.invalid(
-      needsDocx ? 'docxInvalidOrStale' : 'artifactInvalidOrStale',
-      needsDocx ? docxContractMessage : missingArtifactMessage,
+      needsDocx
+          ? 'docxInvalidOrStale'
+          : task.userRequest.toLowerCase().contains('html')
+              ? 'htmlInvalidOrStale'
+              : 'artifactInvalidOrStale',
+      needsDocx
+          ? docxContractMessage
+          : task.userRequest.toLowerCase().contains('html')
+              ? htmlContractMessage
+              : missingArtifactMessage,
     );
   }
 
@@ -342,4 +376,50 @@ class WorkArtifactDeliveryGuard {
 
   static bool _hasExtension(String path, String extension) =>
       path.replaceAll('\\', '/').toLowerCase().endsWith('.$extension');
+
+  static bool _isHtmlPath(String path) =>
+      RegExp(r'\.html?$', caseSensitive: false).hasMatch(path);
+
+  static bool _isCompleteHtml(List<int> bytes) {
+    final text = String.fromCharCodes(bytes).toLowerCase();
+    final htmlOpen = RegExp(r'<html\b').firstMatch(text)?.start ?? -1;
+    final bodyOpen = RegExp(r'<body\b').firstMatch(text)?.start ?? -1;
+    final bodyClose = RegExp(r'</body\s*>').firstMatch(text)?.start ?? -1;
+    final htmlClose = RegExp(r'</html\s*>').firstMatch(text)?.start ?? -1;
+    return htmlOpen >= 0 &&
+        bodyOpen > htmlOpen &&
+        bodyClose > bodyOpen &&
+        htmlClose > bodyClose;
+  }
+
+  static String? _revisionChangeFailure(AgentTask task) {
+    final execution = _decodeExecution(task.executionStateJson);
+    if (execution['followUpKind'] != 'reviseArtifact') return null;
+    final target = execution['revisionTargetPath']?.toString().trim() ?? '';
+    final rawChanges = execution['artifactChanges'];
+    if (rawChanges is! Map) return unchangedRevisionMessage;
+    for (final entry in rawChanges.entries) {
+      final path = entry.key.toString();
+      if (target.isNotEmpty && !_equivalentPath(path, target)) continue;
+      if (entry.value is Map && (entry.value as Map)['changed'] == true) {
+        return null;
+      }
+    }
+    return unchangedRevisionMessage;
+  }
+
+  static Map<String, dynamic> _decodeExecution(String raw) {
+    try {
+      final decoded = jsonDecode(raw);
+      return decoded is Map ? Map<String, dynamic>.from(decoded) : {};
+    } on Object {
+      return {};
+    }
+  }
+
+  static bool _equivalentPath(String left, String right) {
+    final a = left.replaceAll('\\', '/').toLowerCase();
+    final b = right.replaceAll('\\', '/').toLowerCase();
+    return a == b || a.endsWith('/$b') || b.endsWith('/$a');
+  }
 }

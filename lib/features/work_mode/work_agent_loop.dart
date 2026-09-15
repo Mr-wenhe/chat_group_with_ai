@@ -36,6 +36,14 @@ typedef WorkAgentCompletionGuard = FutureOr<String?> Function(
   AgentTask task,
   AgentFinishCompletion completion,
 );
+typedef WorkAgentArtifactCompletion = FutureOr<AgentFinishCompletion?> Function(
+  AgentTask task,
+  AgentToolCall call,
+  WorkToolResult result,
+);
+typedef WorkAgentPreflightTool = FutureOr<AgentToolCall?> Function(
+  AgentTask task,
+);
 
 class WorkAgentModelRequest {
   final AgentTask task;
@@ -164,6 +172,8 @@ class WorkAgentLoop
   final WorkAgentEventSink? onEvent;
   final WorkAgentCheckpointSink? onCheckpoint;
   final WorkAgentCompletionGuard? completionGuard;
+  final WorkAgentArtifactCompletion? artifactCompletion;
+  final WorkAgentPreflightTool? preflightTool;
   final WorkContextBuilder contextBuilder;
   final WorkContextCompressionModel? contextCompressionModel;
   final String Function()? systemPromptBuilder;
@@ -187,6 +197,8 @@ class WorkAgentLoop
     this.onEvent,
     this.onCheckpoint,
     this.completionGuard,
+    this.artifactCompletion,
+    this.preflightTool,
     WorkContextBuilder? contextBuilder,
     this.contextCompressionModel,
     this.systemPromptBuilder,
@@ -247,6 +259,7 @@ class WorkAgentLoop
     state.recentResults.addAll(_loadRecentResults(task));
     state.handoff = _loadHandoff(task);
     state.commandFailureKeys.addAll(_loadCommandFailureKeys(task));
+    state.unchangedMutationCount = _loadUnchangedMutationCount(task);
     state.failure = task.workFailure;
     // Terminal tasks are immutable from the execution loop's perspective.
     // Check this before inspecting the discussion marker so a late direct
@@ -374,6 +387,19 @@ class WorkAgentLoop
           publicUpdate.isEmpty ? '继续执行已批准操作。' : publicUpdate,
         );
         if (resumed != null) return resumed;
+      }
+      final preflight = await preflightTool?.call(task);
+      if (preflight != null) {
+        const publicUpdate = '已找到匹配的专业技能，正在启用并按技能执行。';
+        final preflightResult = await _handleDecision(
+          state,
+          AgentToolDecision(
+            publicUpdate: publicUpdate,
+            tool: preflight,
+          ),
+          publicUpdate,
+        );
+        if (preflightResult != null) return preflightResult;
       }
       while (true) {
         final boundary = await _checkBoundary(state);

@@ -91,6 +91,7 @@ final workTaskRunnerProvider = Provider<WorkTaskRunner>((ref) {
     workspaceFileService: files,
     mutationService: mutations,
     resourceLockManager: ref.watch(workResourceLockManagerProvider),
+    autoOpenHtml: true,
   );
 });
 

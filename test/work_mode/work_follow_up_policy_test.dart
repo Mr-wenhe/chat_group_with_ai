@@ -39,6 +39,17 @@ void main() {
     expect(decision.artifactPath, '/workspace/report.md');
   });
 
+  test('bare optimization targets the only existing artifact by default', () {
+    final decision = policy.resolve(
+      request: '优化一下',
+      lastArtifactPaths: const ['/workspace/report.md'],
+    );
+
+    expect(decision.kind, WorkFollowUpKind.reviseArtifact);
+    expect(decision.artifactPath, '/workspace/report.md');
+    expect(decision.autoRenameIfExists, isFalse);
+  });
+
   test('new-file wording allows collision rename but revision never does', () {
     final newFile = policy.resolve(
       request: '新建一个 report.md',
