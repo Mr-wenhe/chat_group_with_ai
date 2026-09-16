@@ -198,6 +198,8 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
 
     if (_mentionOverlay != null) {
       _mentionOverlay!.markNeedsBuild();
+      // 候选变少后高亮项可能落到可视区外，重新滚回来。
+      _revealMentionSelection();
     }
   }
 

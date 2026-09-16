@@ -1198,6 +1198,12 @@ class DatabaseService {
   static const String _pinnedGroupIdsKey = 'pinned_group_ids';
   static const String _voiceBroadcastGroupIdsKey = 'voice_broadcast_group_ids';
 
+  /// 被用户手动关掉标签的工作任务 id。
+  ///
+  /// 只影响执行面板的标签展示；[AgentTask] 记录本身必须保留，
+  /// 关掉后仍能在「历史任务」里查到。
+  static const String _hiddenWorkTaskIdsKey = 'hidden_work_task_ids';
+
   Map<String, DateTime> directChatReadAtByConversation() {
     return _dateTimeMapFromSettings(_directChatReadAtKey);
   }
@@ -1377,6 +1383,23 @@ class DatabaseService {
     }
     await appSettingsBox.put(
         _voiceBroadcastGroupIdsKey, values.toList()..sort());
+  }
+
+  /// 被用户关掉标签的工作任务 id（默认为空 → 所有任务标签都显示）。
+  Set<String> hiddenWorkTaskIds() =>
+      _stringSetFromSettings(_hiddenWorkTaskIdsKey);
+
+  /// 记住 / 取消记住某个工作任务的标签隐藏状态。
+  ///
+  /// 不涉及 `agent_tasks` 记录，只是让用户在面板上看不到不想看的标签。
+  Future<void> setWorkTaskHidden(String taskId, bool hidden) async {
+    final values = hiddenWorkTaskIds();
+    if (hidden) {
+      values.add(taskId);
+    } else {
+      values.remove(taskId);
+    }
+    await appSettingsBox.put(_hiddenWorkTaskIdsKey, values.toList()..sort());
   }
 
   Set<String> _stringSetFromSettings(String key) {
