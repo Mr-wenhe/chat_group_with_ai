@@ -2,6 +2,10 @@
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
+## 回复语言
+
+- 面向用户的所有回复必须使用中文；代码、命令、文件路径、标识符与引用原文保持原样。
+
 ## Commands
 
 - `flutter run` — run the app on a connected device/emulator
