@@ -22,6 +22,7 @@ part 'work_task_panel_details.dart';
 part 'work_task_panel_actions.dart';
 part 'work_task_panel_action_recovery.dart';
 part 'work_task_panel_controls.dart';
+part 'work_task_history_view.dart';
 part 'work_task_panel_timeline.dart';
 
 typedef WorkTaskEventStream = Stream<WorkTaskEvent> Function(String taskId);
@@ -76,6 +77,12 @@ class WorkTaskPanel extends StatefulWidget {
   final String Function(String characterId)? characterNameFor;
   final DateTime Function() clock;
 
+  /// 当前会话的历史任务（含已被用户关掉标签的任务），按时间倒序。
+  final List<AgentTask> historyTasks;
+
+  /// 关掉某个任务的标签；只影响面板展示，不删除任务记录。
+  final WorkTaskAction? onHideTask;
+
   const WorkTaskPanel({
     super.key,
     required this.tasks,
@@ -110,6 +117,8 @@ class WorkTaskPanel extends StatefulWidget {
     this.onLaterVersioned,
     this.undoPreviewFor,
     this.characterNameFor,
+    this.historyTasks = const <AgentTask>[],
+    this.onHideTask,
     DateTime Function()? clock,
   }) : clock = clock ?? DateTime.now;
 
@@ -127,6 +136,12 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   bool _actionInFlight = false;
   String? _actionError;
   final TextEditingController _replyController = TextEditingController();
+
+  /// 是否处于历史任务视图。为 false 时显示正常的任务标签面板。
+  bool _showHistory = false;
+
+  /// 历史视图里被点开查看详情的任务 id；为空表示仍停在历史列表。
+  String? _historyDetailTaskId;
 
   @override
   void didUpdateWidget(covariant WorkTaskPanel oldWidget) {
@@ -172,17 +187,6 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
 
   @override
   Widget build(BuildContext context) {
-    final task = _selectedTask;
-    if (task == null) return const SizedBox.shrink();
-    final latestEvent = _latestEvents[task.id];
-    final latestAction = _latestActionEvents[task.id] ?? latestEvent;
-    // Tool/action fields describe the active step. Once the durable task is
-    // terminal, leave the detailed event in the timeline but let the summary
-    // section show the terminal status instead of a stale tool label.
-    final toolName = task.isTerminal
-        ? null
-        : _toolName(latestEvent) ?? _toolName(_latestToolEvents[task.id]);
-
     return Material(
       key: const Key('work-task-panel'),
       elevation: 12,
@@ -201,81 +205,186 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
           behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
           child: Padding(
             padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                _PanelHeader(
-                  onCollapse: widget.onCollapse,
-                  onClose: widget.onClose,
-                ),
-                const SizedBox(height: 10),
-                _TaskTabs(
-                  tasks: widget.tasks,
-                  selectedTaskId: task.id,
-                  onSelectTask: widget.onSelectTask,
-                ),
-                if (widget.hiddenTaskCount > 0) ...<Widget>[
-                  const SizedBox(height: 6),
-                  Text(
-                    '还有 ${widget.hiddenTaskCount} 个任务在队列中，当前面板优先显示执行中的任务。',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 14),
-                Expanded(
-                  child: _TaskDetails(
-                    task: task,
-                    latestAction: latestAction,
-                    toolName: toolName,
-                    actionError: _actionError,
-                    characterNameFor: widget.characterNameFor,
-                    eventStreamFor: widget.eventStreamFor,
-                    onLatestEvent: _rememberLatestEvent,
-                    clock: widget.clock,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                _TaskActions(
-                  task: task,
-                  actionInFlight: _actionInFlight,
-                  actionError: _actionError,
-                  onOpenConversation: widget.onOpenConversation,
-                  onApprove: widget.onApprove,
-                  onApproveVersioned: widget.onApproveVersioned,
-                  onApproveWithoutUndo: widget.onApproveWithoutUndo,
-                  onApproveWithoutUndoVersioned:
-                      widget.onApproveWithoutUndoVersioned,
-                  onReject: widget.onReject,
-                  onRejectVersioned: widget.onRejectVersioned,
-                  onRequestFolder: widget.onRequestFolder,
-                  onRequestFolderVersioned: widget.onRequestFolderVersioned,
-                  onInstallTool: widget.onInstallTool,
-                  onInstallToolVersioned: widget.onInstallToolVersioned,
-                  onSelectVisionModel: widget.onSelectVisionModel,
-                  onRetry: widget.onRetry,
-                  onReauthorize: widget.onReauthorize,
-                  onViewConflict: widget.onViewConflict,
-                  onUndo: widget.onUndo,
-                  onLater: widget.onLater,
-                  onLaterVersioned: widget.onLaterVersioned,
-                  undoPreviewFor: widget.undoPreviewFor,
-                  onStop: widget.onStop,
-                  onContinue: widget.onContinue,
-                  onReply: widget.onReply,
-                  replyController: _replyController,
-                  onModalVisibilityChanged: widget.onModalVisibilityChanged,
-                  dialogContext: widget.dialogContext,
-                  runAction: (action) => _runAction(action, task.id),
-                ),
-              ],
-            ),
+            child: _showHistory
+                ? _buildHistoryBody(context)
+                : _buildLiveBody(context),
           ),
         ),
       ),
     );
+  }
+
+  /// 任务面板正文：标签 + 当前任务详情 + 操作按钮。
+  ///
+  /// 所有标签都被用户关掉时只显示空态文案，不能收掉整个面板，
+  /// 否则「历史任务」入口也会一起消失，关掉的任务就再也看不到。
+  Widget _buildLiveBody(BuildContext context) {
+    final task = _selectedTask;
+    if (task == null) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          _PanelHeader(
+            onCollapse: widget.onCollapse,
+            onClose: widget.onClose,
+            onOpenHistory: _openHistory,
+          ),
+          const SizedBox(height: 12),
+          const Text('没有正在显示的任务，可从「历史任务」里重新查看。'),
+        ],
+      );
+    }
+    final latestEvent = _latestEvents[task.id];
+    final latestAction = _latestActionEvents[task.id] ?? latestEvent;
+    // Tool/action fields describe the active step. Once the durable task is
+    // terminal, leave the detailed event in the timeline but let the summary
+    // section show the terminal status instead of a stale tool label.
+    final toolName = task.isTerminal
+        ? null
+        : _toolName(latestEvent) ?? _toolName(_latestToolEvents[task.id]);
+    final onHideTask = widget.onHideTask;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        _PanelHeader(
+          onCollapse: widget.onCollapse,
+          onClose: widget.onClose,
+          onOpenHistory: _openHistory,
+        ),
+        const SizedBox(height: 10),
+        _TaskTabs(
+          tasks: widget.tasks,
+          selectedTaskId: task.id,
+          onSelectTask: widget.onSelectTask,
+          onHideTask: onHideTask == null
+              ? null
+              : (taskId) => unawaited(_runAction(onHideTask, taskId)),
+        ),
+        if (widget.hiddenTaskCount > 0) ...<Widget>[
+          const SizedBox(height: 6),
+          Text(
+            '还有 ${widget.hiddenTaskCount} 个任务在队列中，当前面板优先显示执行中的任务。',
+            style: TextStyle(
+              fontSize: 12,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+        const SizedBox(height: 14),
+        Expanded(
+          child: _TaskDetails(
+            task: task,
+            latestAction: latestAction,
+            toolName: toolName,
+            actionError: _actionError,
+            characterNameFor: widget.characterNameFor,
+            eventStreamFor: widget.eventStreamFor,
+            onLatestEvent: _rememberLatestEvent,
+            clock: widget.clock,
+          ),
+        ),
+        const SizedBox(height: 12),
+        _TaskActions(
+          task: task,
+          actionInFlight: _actionInFlight,
+          actionError: _actionError,
+          onOpenConversation: widget.onOpenConversation,
+          onApprove: widget.onApprove,
+          onApproveVersioned: widget.onApproveVersioned,
+          onApproveWithoutUndo: widget.onApproveWithoutUndo,
+          onApproveWithoutUndoVersioned: widget.onApproveWithoutUndoVersioned,
+          onReject: widget.onReject,
+          onRejectVersioned: widget.onRejectVersioned,
+          onRequestFolder: widget.onRequestFolder,
+          onRequestFolderVersioned: widget.onRequestFolderVersioned,
+          onInstallTool: widget.onInstallTool,
+          onInstallToolVersioned: widget.onInstallToolVersioned,
+          onSelectVisionModel: widget.onSelectVisionModel,
+          onRetry: widget.onRetry,
+          onReauthorize: widget.onReauthorize,
+          onViewConflict: widget.onViewConflict,
+          onUndo: widget.onUndo,
+          onLater: widget.onLater,
+          onLaterVersioned: widget.onLaterVersioned,
+          undoPreviewFor: widget.undoPreviewFor,
+          onStop: widget.onStop,
+          onContinue: widget.onContinue,
+          onReply: widget.onReply,
+          replyController: _replyController,
+          onModalVisibilityChanged: widget.onModalVisibilityChanged,
+          dialogContext: widget.dialogContext,
+          runAction: (action) => _runAction(action, task.id),
+        ),
+      ],
+    );
+  }
+
+  /// 历史任务视图：先看列表（时间 + 标题），点进去才展开任务详情。
+  ///
+  /// 被关掉标签的任务只在这里还能看到；历史任务不会再执行，
+  /// 所以详情不接动作按钮，耗时也按「创建 → 最后更新」计算。
+  Widget _buildHistoryBody(BuildContext context) {
+    final detailTask = _historyTaskById(_historyDetailTaskId);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        _PanelHeader(
+          inHistory: true,
+          onCollapse: widget.onCollapse,
+          onClose: widget.onClose,
+          onBackFromHistory: detailTask == null
+              ? _closeHistory
+              : () => setState(() => _historyDetailTaskId = null),
+        ),
+        const SizedBox(height: 10),
+        if (detailTask == null)
+          Expanded(
+            child: _TaskHistoryList(
+              tasks: widget.historyTasks,
+              onSelectTask: (taskId) =>
+                  setState(() => _historyDetailTaskId = taskId),
+            ),
+          )
+        else
+          Expanded(
+            child: _TaskDetails(
+              task: detailTask,
+              latestAction: null,
+              toolName: null,
+              actionError: null,
+              characterNameFor: widget.characterNameFor,
+              eventStreamFor: widget.eventStreamFor,
+              onLatestEvent: (_) {},
+              // 历史任务已经结束，用最后更新时间当基准，否则耗时会按
+              // 当前时间算成几百上千小时。
+              clock: () => detailTask.updatedAt ?? detailTask.createdAt,
+            ),
+          ),
+      ],
+    );
+  }
+
+  void _openHistory() {
+    setState(() {
+      _showHistory = true;
+      _historyDetailTaskId = null;
+    });
+  }
+
+  void _closeHistory() {
+    setState(() {
+      _showHistory = false;
+      _historyDetailTaskId = null;
+    });
+  }
+
+  AgentTask? _historyTaskById(String? taskId) {
+    if (taskId == null) return null;
+    for (final task in widget.historyTasks) {
+      if (task.id == taskId) return task;
+    }
+    return null;
   }
 
   Future<bool> _runAction(WorkTaskAction action, String taskId) async {

@@ -61,13 +61,13 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
     );
   }
 
-  /// 弹出群成员列表面板（可查看状态、进角色设置、发起私聊）。
+  /// 弹出群成员列表面板（可查看状态、进角色设置、发起私聊、添加成员）。
   void _showMembersSheet() {
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
       isScrollControlled: true,
-      builder: (_) => MemberSheet(
+      builder: (sheetContext) => MemberSheet(
         characters: _characters,
         ownerName: _ownerMentionName,
         senderColor: _senderColor,
@@ -76,8 +76,101 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
         onDirectChat: (character) {
           if (mounted) Navigator.of(context).pushNamed('/dm/${character.id}');
         },
+        onAddMember: () {
+          // 先收起成员面板，避免两个底部弹层叠加、且添加后列表不会自动刷新。
+          Navigator.of(sheetContext).pop();
+          unawaited(_showAddMemberDialog());
+        },
       ),
     );
+  }
+
+  /// 弹出「添加成员」选择器：候选为尚未加入当前群聊的角色，确认后落库并刷新。
+  Future<void> _showAddMemberDialog() async {
+    final group = _group;
+    if (group == null) return;
+    final allCharacters = ref.read(aiCharactersProvider);
+    final currentIds = group.aiCharacterIds.toSet();
+    final candidates = allCharacters
+        .where((character) => !currentIds.contains(character.id))
+        .toList(growable: false);
+    if (candidates.isEmpty) {
+      AppToast.show(
+        context,
+        '没有可添加的角色，请先创建角色',
+        icon: Icons.info_outline_rounded,
+      );
+      return;
+    }
+    final selected = await showModalBottomSheet<List<AICharacter>>(
+      context: context,
+      backgroundColor: Colors.transparent,
+      isScrollControlled: true,
+      builder: (_) => MemberAddSheet(
+        candidates: candidates,
+        statusText: _memberStatusText,
+      ),
+    );
+    if (selected == null || selected.isEmpty || !_canTouchUi) return;
+    final added = await _addMembersToGroup(
+      selected.map((character) => character.id),
+    );
+    // 重新打开成员面板，让用户看到刚加入的成员。
+    if (added && _canTouchUi) _showMembersSheet();
+  }
+
+  /// 把新成员 id 合入群成员列表并持久化，随后刷新页面内存态。
+  ///
+  /// 返回是否真的写入了新成员（无候选 / 角色已不存在时返回 false）。
+  Future<bool> _addMembersToGroup(Iterable<String> newCharacterIds) async {
+    final group = _group;
+    final ids = newCharacterIds.toList(growable: false);
+    if (group == null || ids.isEmpty) return false;
+    final allCharacters = ref.read(aiCharactersProvider);
+    final byId = {
+      for (final character in allCharacters) character.id: character,
+    };
+    final added = ids
+        .map((id) => byId[id])
+        .whereType<AICharacter>()
+        .toList(growable: false);
+    if (added.isEmpty) return false;
+
+    final updated = ChatGroup(
+      id: group.id,
+      name: group.name,
+      theme: group.theme,
+      description: group.description,
+      announcement: group.announcement,
+      replyIntervalSeconds: group.replyIntervalSeconds,
+      aiCharacterIds: [...group.aiCharacterIds, ...added.map((c) => c.id)],
+      createdAt: group.createdAt,
+      ownerName: group.ownerName,
+    );
+    await ref.read(chatGroupsProvider.notifier).updateGroup(updated);
+    if (!_canTouchUi) return false;
+    _setUiState(() {
+      _group = updated;
+      // 历史消息里可能已有被移出又加回的角色的快照，避免成员列表出现重复。
+      final existingIds =
+          _allGroupCharacters.map((character) => character.id).toSet();
+      final fresh = added
+          .where((character) => !existingIds.contains(character.id))
+          .toList(growable: false);
+      _allGroupCharacters = List.from(_allGroupCharacters)..addAll(fresh);
+      _characters = List.from(_characters)
+        ..addAll(fresh.where((character) => character.isActive));
+      _hasAnyApiConfig = _characters.any(
+        (character) => _resolveApiConfig(character)?.hasCredential == true,
+      );
+    });
+    if (!mounted) return false;
+    AppToast.show(
+      context,
+      '已添加 ${added.length} 位成员',
+      icon: Icons.check_circle_outline_rounded,
+    );
+    return true;
   }
 
   /// 清空当前群聊或私聊，并让用户明确选择是否删除来源永久数据。

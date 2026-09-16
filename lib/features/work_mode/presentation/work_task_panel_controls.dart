@@ -97,17 +97,48 @@ class _PanelHeader extends StatelessWidget {
   final VoidCallback onCollapse;
   final VoidCallback onClose;
 
-  const _PanelHeader({required this.onCollapse, required this.onClose});
+  /// 进入历史任务视图；为空时不显示历史入口。
+  final VoidCallback? onOpenHistory;
+
+  /// 历史视图里的返回按钮：详情 → 列表，列表 → 任务面板。
+  final VoidCallback? onBackFromHistory;
+  final bool inHistory;
+
+  const _PanelHeader({
+    required this.onCollapse,
+    required this.onClose,
+    this.onOpenHistory,
+    this.onBackFromHistory,
+    this.inHistory = false,
+  });
 
   @override
   Widget build(BuildContext context) {
     return Row(
       children: <Widget>[
-        const Icon(Icons.auto_awesome_rounded),
+        if (inHistory)
+          IconButton(
+            key: const Key('work-task-history-back'),
+            tooltip: '返回任务面板',
+            onPressed: onBackFromHistory,
+            icon: const Icon(Icons.arrow_back_rounded),
+          )
+        else
+          const Icon(Icons.auto_awesome_rounded),
         const SizedBox(width: 8),
         Expanded(
-          child: Text('工作任务', style: Theme.of(context).textTheme.titleLarge),
+          child: Text(
+            inHistory ? '历史任务' : '工作任务',
+            style: Theme.of(context).textTheme.titleLarge,
+          ),
         ),
+        if (!inHistory && onOpenHistory != null)
+          IconButton(
+            key: const Key('work-task-history-open'),
+            tooltip: '查看历史任务',
+            onPressed: onOpenHistory,
+            icon: const Icon(Icons.history_rounded),
+          ),
         IconButton(
           key: const Key('work-task-collapse'),
           tooltip: '收起执行面板（任务继续运行）',
@@ -130,10 +161,14 @@ class _TaskTabs extends StatelessWidget {
   final String selectedTaskId;
   final ValueChanged<String> onSelectTask;
 
+  /// 关掉某个任务标签；为空时不显示关闭按钮。
+  final ValueChanged<String>? onHideTask;
+
   const _TaskTabs({
     required this.tasks,
     required this.selectedTaskId,
     required this.onSelectTask,
+    this.onHideTask,
   });
 
   @override
@@ -143,11 +178,18 @@ class _TaskTabs extends StatelessWidget {
       runSpacing: 6,
       children: tasks
           .map(
-            (task) => ChoiceChip(
+            // 只有终态任务允许关掉标签：执行中 / 等待审批的任务一旦隐藏，
+            // 用户就看不到它卡在哪里，因此不提供关闭入口。
+            (task) => InputChip(
               key: Key('work-task-tab-${task.id}'),
               label: Text('任务 ${tasks.indexOf(task) + 1}'),
               selected: task.id == selectedTaskId,
               onSelected: (_) => onSelectTask(task.id),
+              onDeleted: onHideTask == null || !task.isTerminal
+                  ? null
+                  : () => onHideTask!(task.id),
+              deleteIcon: const Icon(Icons.close_rounded, size: 16),
+              deleteButtonTooltipMessage: '关掉这个标签（记录保留在历史任务中）',
             ),
           )
           .toList(growable: false),

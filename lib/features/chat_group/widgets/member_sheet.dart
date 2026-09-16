@@ -100,6 +100,7 @@ class MemberSheet extends StatefulWidget {
   final String Function(AICharacter character) statusText;
   final ValueChanged<AICharacter> onOpenSettings;
   final ValueChanged<AICharacter> onDirectChat;
+  final VoidCallback? onAddMember;
 
   const MemberSheet({
     super.key,
@@ -109,6 +110,7 @@ class MemberSheet extends StatefulWidget {
     required this.statusText,
     required this.onOpenSettings,
     required this.onDirectChat,
+    this.onAddMember,
   });
 
   @override
@@ -205,6 +207,10 @@ class _MemberSheetState extends State<MemberSheet> {
           Expanded(
             child: ListView(
               children: [
+                if (widget.onAddMember != null) ...[
+                  _AddMemberTile(onTap: widget.onAddMember!),
+                  const SizedBox(height: 4),
+                ],
                 _MemberTile(
                   avatarText: '我',
                   avatarColor: colorScheme.primary,
@@ -365,6 +371,228 @@ class _MemberTile extends StatelessWidget {
               color: colorScheme.primary,
               tooltip: '私聊',
             ),
+        ],
+      ),
+    );
+  }
+}
+
+/// 成员面板顶部的「添加成员」入口行。
+class _AddMemberTile extends StatelessWidget {
+  final VoidCallback onTap;
+
+  const _AddMemberTile({required this.onTap});
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return InkWell(
+      onTap: onTap,
+      borderRadius: BorderRadius.circular(12),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(vertical: 6),
+        child: Row(
+          children: [
+            Container(
+              width: 44,
+              height: 44,
+              decoration: BoxDecoration(
+                shape: BoxShape.circle,
+                color: colorScheme.primary.withValues(alpha: 0.12),
+                border: Border.all(
+                  color: colorScheme.primary.withValues(alpha: 0.3),
+                  width: 1.5,
+                ),
+              ),
+              alignment: Alignment.center,
+              child: Icon(
+                Icons.person_add_alt_1_rounded,
+                size: 22,
+                color: colorScheme.primary,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Text(
+              '添加成员',
+              style: TextStyle(
+                fontSize: 15,
+                fontWeight: FontWeight.w600,
+                color: colorScheme.primary,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+/// 添加成员选择器：从候选角色（尚未进群）中多选，确认后 pop 出选中列表。
+class MemberAddSheet extends StatefulWidget {
+  final List<AICharacter> candidates;
+  final String Function(AICharacter character) statusText;
+
+  const MemberAddSheet({
+    super.key,
+    required this.candidates,
+    required this.statusText,
+  });
+
+  @override
+  State<MemberAddSheet> createState() => _MemberAddSheetState();
+}
+
+class _MemberAddSheetState extends State<MemberAddSheet> {
+  final _searchController = TextEditingController();
+  final _selectedIds = <String>{};
+
+  @override
+  void dispose() {
+    _searchController.dispose();
+    super.dispose();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    final query = _searchController.text.trim();
+    final filtered = query.isEmpty
+        ? widget.candidates
+        : widget.candidates
+            .where((character) =>
+                character.name.contains(query) ||
+                character.role.contains(query) ||
+                character.personalityTags.any((tag) => tag.contains(query)))
+            .toList(growable: false);
+
+    return Container(
+      constraints: BoxConstraints(
+        maxHeight: MediaQuery.sizeOf(context).height * 0.78,
+      ),
+      padding: const EdgeInsets.fromLTRB(20, 12, 20, 20),
+      decoration: BoxDecoration(
+        color: colorScheme.surface,
+        borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
+      ),
+      child: Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Center(
+            child: Container(
+              width: 40,
+              height: 4,
+              margin: const EdgeInsets.only(bottom: 16),
+              decoration: BoxDecoration(
+                color: colorScheme.outlineVariant,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+          ),
+          Row(
+            children: [
+              Text(
+                '添加成员',
+                style: TextStyle(
+                  fontSize: 18,
+                  fontWeight: FontWeight.w700,
+                  color: colorScheme.onSurface,
+                ),
+              ),
+              const SizedBox(width: 8),
+              Text(
+                '已选 ${_selectedIds.length}',
+                style: TextStyle(
+                  fontSize: 14,
+                  color: colorScheme.onSurfaceVariant,
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 12),
+          TextField(
+            controller: _searchController,
+            decoration: InputDecoration(
+              hintText: '搜索名称、角色或标签',
+              prefixIcon: Icon(
+                Icons.search_rounded,
+                size: 18,
+                color: colorScheme.onSurfaceVariant,
+              ),
+              isDense: true,
+              filled: true,
+              fillColor: colorScheme.surfaceContainerHighest,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide(color: colorScheme.outlineVariant),
+              ),
+            ),
+            onChanged: (_) => setState(() {}),
+          ),
+          const SizedBox(height: 16),
+          Expanded(
+            child: filtered.isEmpty
+                ? Center(
+                    child: Text(
+                      '没有可添加的角色',
+                      style: TextStyle(
+                        fontSize: 14,
+                        color: colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  )
+                : ListView(
+                    children: [
+                      for (final character in filtered)
+                        CheckboxListTile(
+                          value: _selectedIds.contains(character.id),
+                          onChanged: (checked) => setState(() {
+                            if (checked == true) {
+                              _selectedIds.add(character.id);
+                            } else {
+                              _selectedIds.remove(character.id);
+                            }
+                          }),
+                          title: Text(
+                            character.name,
+                            overflow: TextOverflow.ellipsis,
+                            style: TextStyle(
+                              fontSize: 15,
+                              fontWeight: FontWeight.w600,
+                              color: colorScheme.onSurface,
+                            ),
+                          ),
+                          subtitle: Text(
+                            widget.statusText(character),
+                            style: TextStyle(
+                              fontSize: 12,
+                              color: colorScheme.onSurfaceVariant,
+                            ),
+                          ),
+                          controlAffinity: ListTileControlAffinity.leading,
+                          activeColor: colorScheme.primary,
+                          contentPadding: EdgeInsets.zero,
+                        ),
+                    ],
+                  ),
+          ),
+          const SizedBox(height: 12),
+          SizedBox(
+            width: double.infinity,
+            child: FilledButton.icon(
+              onPressed: _selectedIds.isEmpty
+                  ? null
+                  : () => Navigator.pop(
+                        context,
+                        widget.candidates
+                            .where((character) =>
+                                _selectedIds.contains(character.id))
+                            .toList(growable: false),
+                      ),
+              icon: const Icon(Icons.person_add_alt_1_rounded),
+              label: Text('添加 ${_selectedIds.length} 人'),
+            ),
+          ),
         ],
       ),
     );

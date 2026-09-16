@@ -24,6 +24,7 @@ import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/presentation/work_folder_grant_consent_dialog.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
+import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -103,6 +104,10 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   List<AgentTask> _allTasks = const <AgentTask>[];
   int _hiddenTaskCount = 0;
   String? _selectedTaskId;
+
+  /// 被用户关掉标签的任务 id。只影响标签展示，任务记录仍然完整保留，
+  /// 关掉后依旧能在历史任务列表里查到。
+  final Set<String> _hiddenWorkTaskIds = <String>{};
   bool _isVisible = true;
   bool _isCollapsed = false;
   WorkSnapshotService? _snapshotService;
@@ -118,6 +123,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   @override
   void initState() {
     super.initState();
+    // 必须在订阅任务流之前载入隐藏状态，否则首帧会把已关掉的标签又画出来。
+    _loadHiddenWorkTaskIds();
     try {
       _overlayController = ref.read(workTaskOverlayControllerProvider);
     } on Object {
@@ -205,7 +212,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       setState(() {
         _allTasks = List<AgentTask>.unmodifiable(tasks);
         _tasks = visibleTasks;
-        _hiddenTaskCount = tasks.length - visibleTasks.length;
+        _hiddenTaskCount = _hiddenTaskCountFor(tasks, visibleTasks);
         if (_tasks.every((task) => task.id != _selectedTaskId)) {
           _selectedTaskId = _tasks.isEmpty ? null : _tasks.first.id;
         }
@@ -234,7 +241,9 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   @override
   Widget build(BuildContext context) {
-    final hasTasks = _tasks.isNotEmpty;
+    // 标签全被关掉时面板也必须留着：历史任务入口在面板里，一旦整体消失，
+    // 用户就再也看不到那些被关掉的任务。
+    final hasTasks = _tasks.isNotEmpty || _hasHiddenWorkTasks;
     final viewport = MediaQuery.sizeOf(context);
     final isWide = viewport.width >= 800;
     return Stack(
@@ -264,6 +273,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
             child: WorkTaskPanel(
               tasks: _tasks,
               hiddenTaskCount: _hiddenTaskCount,
+              historyTasks: _historyTasksForActiveConversation(),
+              onHideTask: _hideTask,
               selectedTaskId: _selectedTaskId,
               eventStreamFor: widget.eventStreamFor ??
                   _eventStore?.watch ??
@@ -432,21 +443,101 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       _pendingOpenTaskId = taskId;
       return;
     }
+    // 从聊天卡片点任务比「关掉标签」更新，这里顺带取消隐藏，
+    // 否则面板会打开却找不到对应的标签。
+    if (_hiddenWorkTaskIds.contains(taskId)) {
+      unawaited(_setTaskHidden(taskId, false));
+    }
     final visible = _visibleTasks(_allTasks, preferredTaskId: taskId);
     setState(() {
       _tasks = visible;
-      _hiddenTaskCount = _allTasks.length - visible.length;
+      _hiddenTaskCount = _hiddenTaskCountFor(_allTasks, visible);
       _selectedTaskId = taskId;
       _isVisible = true;
       _isCollapsed = false;
     });
   }
 
+  void _loadHiddenWorkTaskIds() {
+    try {
+      _hiddenWorkTaskIds.addAll(
+        ref.read(databaseServiceProvider).hiddenWorkTaskIds(),
+      );
+    } on Object {
+      // 轻量宿主（widget 测试）可能没有 ProviderScope / 数据库，
+      // 此时隐藏状态只在本次会话内生效。
+    }
+  }
+
+  /// 是否存在被用户关掉标签的任务。只要有一个，面板就不能整体消失。
+  bool get _hasHiddenWorkTasks =>
+      _allTasks.any((task) => _hiddenWorkTaskIds.contains(task.id));
+
+  /// 当前会话的历史任务（含被用户关掉标签的任务），按创建时间倒序。
+  ///
+  /// 面板标签只展示有限的执行快照，历史列表要能回溯整条记录，
+  /// 所以这里从全局任务流里筛出属于当前会话的部分。
+  List<AgentTask> _historyTasksForActiveConversation() {
+    final conversationId =
+        ConversationPresenceService.instance.activeConversationId;
+    if (conversationId == null) return const <AgentTask>[];
+    final tasks = _allTasks
+        .where((task) => task.groupId == conversationId)
+        .toList()
+      ..sort((left, right) => right.createdAt.compareTo(left.createdAt));
+    return List<AgentTask>.unmodifiable(tasks);
+  }
+
+  Future<void> _hideTask(String taskId) => _setTaskHidden(taskId, true);
+
+  /// 切换某个任务标签的显示状态。
+  ///
+  /// 只改标签可见性，不动 `agent_tasks` 记录；关掉的任务仍然能在
+  /// 「历史任务」里查到。持久化失败也不回滚界面，避免轻量宿主里
+  /// 面板状态和数据库状态来回打架。
+  Future<void> _setTaskHidden(String taskId, bool hidden) async {
+    if (!mounted) return;
+    if (hidden == _hiddenWorkTaskIds.contains(taskId)) return;
+    final pool = <AgentTask>[..._allTasks];
+    if (hidden) {
+      _hiddenWorkTaskIds.add(taskId);
+    } else {
+      _hiddenWorkTaskIds.remove(taskId);
+    }
+    final visibleTasks = _visibleTasks(pool);
+    setState(() {
+      _tasks = visibleTasks;
+      _hiddenTaskCount = _hiddenTaskCountFor(pool, visibleTasks);
+      if (_tasks.every((task) => task.id != _selectedTaskId)) {
+        _selectedTaskId = _tasks.isEmpty ? null : _tasks.first.id;
+      }
+    });
+    try {
+      await ref.read(databaseServiceProvider).setWorkTaskHidden(taskId, hidden);
+    } on Object {
+      // 见方法注释：界面已经更新，隐藏状态最差只在本次会话生效。
+    }
+  }
+
+  /// 队列里被折叠的任务数，不含用户手动关掉的标签。
+  int _hiddenTaskCountFor(List<AgentTask> allTasks, List<AgentTask> visible) {
+    final offScreen = allTasks
+        .where((task) => !_hiddenWorkTaskIds.contains(task.id))
+        .length;
+    final count = offScreen - visible.length;
+    return count < 0 ? 0 : count;
+  }
+
   List<AgentTask> _visibleTasks(
     List<AgentTask> allTasks, {
     String? preferredTaskId,
   }) {
-    final sorted = List<AgentTask>.from(allTasks)
+    // 被用户关掉标签的任务不参与标签挑选，但仍然留在 _allTasks 里，
+    // 供历史任务列表回查。
+    final candidates = allTasks
+        .where((task) => !_hiddenWorkTaskIds.contains(task.id))
+        .toList(growable: false);
+    final sorted = List<AgentTask>.from(candidates)
       ..sort(
         (left, right) => (right.updatedAt ?? right.createdAt).compareTo(
           left.updatedAt ?? left.createdAt,

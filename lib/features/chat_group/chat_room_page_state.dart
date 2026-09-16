@@ -170,6 +170,20 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   final TextEditingController _mentionSearchController =
       TextEditingController();
 
+  /// @ 候选列表的滚动控制器：让键盘高亮项始终留在可视区。
+  final ScrollController _mentionListController = ScrollController();
+
+  /// @ 候选列表每一项的 GlobalKey（按列表下标，即"槽位"）。
+  ///
+  /// 按槽位而非按角色缓存：候选集变化后同一槽位仍是同一个定位目标，
+  /// 因此过滤 / 搜索时无需重建。
+  final Map<int, GlobalKey> _mentionItemKeys = <int, GlobalKey>{};
+
+  /// @ 候选列表的单行高度估算值（px）。
+  ///
+  /// 只用于目标项已被 ListView 回收时的兜底跳转，下一帧会再精确定位一次。
+  static const double _mentionItemHeightEstimate = 56;
+
   // 输入框 GlobalKey，用于精确定位 @ 弹窗。
   final GlobalKey _inputFieldKey = GlobalKey();
 
