@@ -309,6 +309,21 @@ class WorkArtifactDeliveryGuard {
         resolved.path,
         isWindows: pathPolicy.isWindows,
       );
+      // Public discussion/event sanitization can replace an explicit output
+      // path with a redaction token before the contract is persisted. The
+      // token is not a usable filename; rely on the already-authorized
+      // workspace boundary and the fresh DOCX checks instead of comparing it
+      // literally with the generated artifact.
+      if (_isRedactedLocation(location)) {
+        final root = workspaceRoot?.trim();
+        return root == null || root.isEmpty
+            ? true
+            : WorkspacePathPolicy.isWithinRoot(
+                root,
+                normalizedActual,
+                isWindows: pathPolicy.isWindows,
+              );
+      }
       final absolute = _isAbsolute(location, pathPolicy.isWindows);
       if (lowerLocation == 'desktop') {
         final root = workspaceRoot?.trim();
@@ -376,6 +391,9 @@ class WorkArtifactDeliveryGuard {
 
   static bool _hasExtension(String path, String extension) =>
       path.replaceAll('\\', '/').toLowerCase().endsWith('.$extension');
+
+  static bool _isRedactedLocation(String location) =>
+      location.contains('[REDACTED]') || location.contains('[本地路径]');
 
   static bool _isHtmlPath(String path) =>
       RegExp(r'\.html?$', caseSensitive: false).hasMatch(path);

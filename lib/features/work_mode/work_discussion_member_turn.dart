@@ -31,7 +31,11 @@ extension _DiscussionMemberTurn on _DiscussionSession {
         member.character.id,
       );
       if (isQualifiedMember) {
-        roundBlockers.add('structuredResponseInvalid:${member.character.id}');
+        roundBlockers.add(
+          _isModelRequestFailure(turn.failureReason)
+              ? 'modelRequestFailed:${member.character.id}'
+              : 'structuredResponseInvalid:${member.character.id}',
+        );
       }
       await runner._recordDiagnostic(
         task,
@@ -104,7 +108,9 @@ extension _DiscussionMemberTurn on _DiscussionSession {
         publicResponses.add(suggestion);
       }
     }
-    roundBlockers.remove('structuredResponseInvalid:${member.character.id}');
+    roundBlockers
+      ..remove('structuredResponseInvalid:${member.character.id}')
+      ..remove('modelRequestFailed:${member.character.id}');
     // Member confidence is evidence, not the executor's understanding.
     if (state.executorId == null) {
       roundPercent = turn.understandingPercent;
@@ -219,4 +225,11 @@ extension _DiscussionMemberTurn on _DiscussionSession {
     }
     return true;
   }
+
+  bool _isModelRequestFailure(String reason) =>
+      reason.startsWith('模型请求失败（HTTP ') ||
+      reason == '任务网络连接失败' ||
+      reason == '任务权限不足' ||
+      reason == '任务执行超时' ||
+      reason == '模型请求异常';
 }

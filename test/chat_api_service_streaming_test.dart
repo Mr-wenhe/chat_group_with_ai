@@ -293,6 +293,42 @@ void main() {
     expect(result['message'], '<html>reasoning fallback</html>');
   });
 
+  test('non-stream completion does not expose native StepFun reasoning',
+      () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'choices': [
+              {
+                'message': {
+                  'content': '',
+                  'reasoning': '{"ok":true}',
+                }
+              }
+            ]
+          },
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio);
+
+    final result = await service.sendChatMessage(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'step-3.7-flash',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isFalse);
+    expect(result['message'], '模型返回了空内容');
+  });
+
   test('streamed agent completion forwards its cancellation token', () async {
     late CancelToken? capturedToken;
     final dio = Dio();

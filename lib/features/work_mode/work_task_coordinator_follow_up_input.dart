@@ -149,9 +149,23 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
         // old run has drained.
         _discussionCancellations[task.id]?.cancel();
         final currentRequest = task.userRequest.trim();
-        final mergedRequest = currentRequest.isEmpty
+        final continuationLine = '用户补充要求：$normalized';
+        // Retrying the same in-panel discussion action must not keep growing
+        // the durable prompt.  Preserve the first occurrence (so the user's
+        // intent remains auditable) and discard only identical duplicates.
+        var seenContinuation = false;
+        final canonicalLines = currentRequest.split('\n').where((line) {
+          if (line.trim() != continuationLine) return true;
+          if (seenContinuation) return false;
+          seenContinuation = true;
+          return true;
+        });
+        final canonicalRequest = canonicalLines.join('\n').trim();
+        final mergedRequest = canonicalRequest.isEmpty
             ? normalized
-            : '$currentRequest\n用户补充要求：$normalized';
+            : seenContinuation
+                ? canonicalRequest
+                : '$canonicalRequest\n$continuationLine';
         if (!_discussionExecutorIsPinned(discussionMarker.state!)) {
           // A group election is scoped to the previous request revision. Clear
           // the task-level lease before reopening it so a new qualified role

@@ -125,6 +125,17 @@ void main() {
       expect(mixed.doneEvent().content, '标准结果');
     });
 
+    test('StepFun 原生 reasoning 不会冒充最终回复', () {
+      final parser = SseParser();
+      expect(
+        parser.ingest(
+          'data: {"choices":[{"delta":{"reasoning":"原生结果"}}]}\n',
+        ),
+        isEmpty,
+      );
+      expect(parser.doneEvent().content, '');
+    });
+
     test('非法 JSON 的 data 行产出 error 事件且已解析内容保留', () {
       final p = SseParser();
       p.ingest('data: {"choices":[{"delta":{"content":"OK"}}]}\n');

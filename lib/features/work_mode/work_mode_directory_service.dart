@@ -3,6 +3,25 @@ import 'dart:io';
 class WorkModeDirectoryService {
   const WorkModeDirectoryService();
 
+  /// Resolves the workspace explicitly named in a request before falling
+  /// back to the legacy desktop destination rule. A project path is a
+  /// capability request, not prose for the model: keeping it at the runner's
+  /// workspace boundary prevents relative reads from landing in Desktop.
+  String? requestedWorkspacePath(String request, {String? homePath}) {
+    return requestedLocalPath(request) ??
+        requestedDesktopPath(request, homePath: homePath);
+  }
+
+  /// Extracts one absolute local path that the user explicitly supplied.
+  /// Only common local roots are accepted; the folder grant service remains
+  /// the authority that decides whether the path may actually be used.
+  String? requestedLocalPath(String request) {
+    final match = RegExp(
+      r'(?<![A-Za-z0-9_/:])((?:/Volumes|/Users|/home|/tmp|/var)/[^\s，。；、]+)',
+    ).firstMatch(request);
+    return match?.group(1)?.trim();
+  }
+
   /// Returns whether the request explicitly names the user's desktop as the
   /// destination. This is intentionally narrow so a generic mention of a
   /// desktop application does not change the workspace boundary.

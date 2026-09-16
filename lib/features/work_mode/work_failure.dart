@@ -83,6 +83,13 @@ class WorkFailure {
 
   bool get canContinue => type == WorkFailureType.userActionRequired;
 
+  /// A role capability can be corrected in the character editor without
+  /// changing the authorized workspace. Keep this distinct from folder
+  /// authorization failures so the panel does not open an unrelated picker.
+  bool get canContinueAfterRolePermissionUpdate =>
+      type == WorkFailureType.permissionDenied &&
+      '$reason\n$technicalDetail'.contains('角色未授予');
+
   bool get canReauthorize =>
       type == WorkFailureType.permissionDenied ||
       type == WorkFailureType.authorizationLost;
@@ -148,6 +155,8 @@ class WorkFailure {
         ),
       );
       failure = _migrateLegacyTransientCommandFailure(task, failure);
+      failure = _migrateLegacyMissingTargetFailure(task, failure);
+      failure = _migrateLegacyArtifactValidationFailure(task, failure);
       final inferredTarget =
           failure.failureTargetPath ?? _inferFailureTargetPath(task, failure);
       if (inferredTarget != null && failure.failureTargetPath == null) {
@@ -226,6 +235,57 @@ class WorkFailure {
       retryable: true,
       suggestedAction: _retryFromCheckpointAction,
       failureTargetPath: failure.failureTargetPath,
+    );
+  }
+
+  /// Older runners surfaced a missing relative file as an unclassified
+  /// internal error. Reopen that checkpoint as a model retry so a corrected
+  /// workspace root or a fresh path plan can resume the same task.
+  static WorkFailure _migrateLegacyMissingTargetFailure(
+    AgentTask task,
+    WorkFailure failure,
+  ) {
+    if (failure.type != WorkFailureType.internal) return failure;
+    final text =
+        '${failure.reason} ${failure.technicalDetail} ${task.lastError}'
+            .toLowerCase();
+    if (!text.contains('目标不存在') &&
+        !text.contains('target does not exist') &&
+        !text.contains('file not found')) {
+      return failure;
+    }
+    return _fromSignals(
+      code: 'modelProtocol',
+      message: failure.reason,
+      technicalDetail: failure.technicalDetail,
+      scope: 'model',
+      completedContent: failure.completedContent,
+      retryableHint: true,
+    );
+  }
+
+  /// Older runners persisted the final DOCX delivery guard exception as an
+  /// internal failure. It is safe to retry because the conversion step is
+  /// checkpointed and a valid existing artifact will be reused after the
+  /// contract/path validator is corrected.
+  static WorkFailure _migrateLegacyArtifactValidationFailure(
+    AgentTask task,
+    WorkFailure failure,
+  ) {
+    if (failure.type != WorkFailureType.internal) return failure;
+    final text =
+        '${failure.reason} ${failure.technicalDetail} ${task.lastError}'
+            .toLowerCase();
+    if (!text.contains('真实 docx') && !text.contains('markdown 只能作为转换源')) {
+      return failure;
+    }
+    return _fromSignals(
+      code: 'modelProtocol',
+      message: failure.reason,
+      technicalDetail: failure.technicalDetail,
+      scope: 'model',
+      completedContent: failure.completedContent,
+      retryableHint: true,
     );
   }
 
@@ -770,6 +830,14 @@ class WorkFailure {
         normalized.contains('磁盘空间不足') ||
         normalized.contains('enospc')) {
       return WorkFailureType.snapshotUnavailable;
+    }
+    if (normalizedCode == 'notfound' ||
+        normalizedCode == 'filenotfound' ||
+        normalized.contains('目标不存在')) {
+      // A missing relative file is usually a model path-selection mistake,
+      // so retry planning instead of sending the user through folder
+      // authorization recovery. Explicit directory failures stay below.
+      return WorkFailureType.modelProtocol;
     }
     if (normalizedCode == 'authorizationlost' ||
         normalizedCode == 'authorizationrequired' ||

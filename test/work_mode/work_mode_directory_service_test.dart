@@ -24,4 +24,23 @@ void main() {
     expect(dmDir.path, contains('dm_character-1'));
     expect(groupDir.path, isNot(dmDir.path));
   });
+
+  test('prefers an explicit local project path over the desktop fallback', () {
+    const service = WorkModeDirectoryService();
+
+    expect(
+      service.requestedWorkspacePath(
+        '读取/Volumes/new_disk/work/flutter/guess 的所有文件并生成文档',
+      ),
+      '/Volumes/new_disk/work/flutter/guess',
+    );
+    expect(
+      service.requestedWorkspacePath('请把报告保存到桌面'),
+      contains('/Desktop'),
+    );
+    expect(
+      service.requestedLocalPath('参考 https://example.com/Volumes/demo 的说明'),
+      isNull,
+    );
+  });
 }

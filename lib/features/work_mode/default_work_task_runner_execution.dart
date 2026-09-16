@@ -255,7 +255,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
       conversationId: task.groupId,
       isDirectChat: task.groupId.startsWith('dm:'),
       requireWritable: requiresWritableWorkspace,
-      preferredRootPath: directoryService.requestedDesktopPath(
+      preferredRootPath: directoryService.requestedWorkspacePath(
         task.userRequest,
       ),
     );

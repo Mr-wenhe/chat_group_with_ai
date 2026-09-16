@@ -296,7 +296,7 @@ void main() {
     expect(calls, 1);
   });
 
-  test('bounded structured completion enables JSON mode for OpenAI protocol',
+  test('Step Plan reasoning completion uses its compatible output channel',
       () async {
     late RequestOptions captured;
     final dio = Dio();
@@ -322,8 +322,8 @@ void main() {
         await ChatApiService(dio: dio).sendChatMessageWithResponseLimit(
       apiKey: 'key',
       provider: ApiProvider.custom,
-      customBaseUrl: 'http://127.0.0.1:12345',
-      model: 'model',
+      customBaseUrl: 'https://api.stepfun.com/step_plan/v1',
+      model: 'step-3.5-flash',
       messages: const [
         {'role': 'user', 'content': '只返回 JSON'},
       ],
@@ -336,6 +336,57 @@ void main() {
     expect(
       (captured.data as Map<String, dynamic>)['response_format'],
       {'type': 'json_object'},
+    );
+    expect(
+      (captured.data as Map<String, dynamic>)['reasoning_format'],
+      'deepseek-style',
+    );
+  });
+
+  test('Step 3.7 structured completion uses JSON mode with reasoning format',
+      () async {
+    late RequestOptions captured;
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        captured = options;
+        final body = jsonEncode({
+          'choices': [
+            {
+              'message': {'content': '{"public_update":"ok"}'},
+            },
+          ],
+        });
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 200,
+          data: ResponseBody.fromString(body, 200),
+        ));
+      },
+    ));
+
+    final result =
+        await ChatApiService(dio: dio).sendChatMessageWithResponseLimit(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'https://api.stepfun.com/v1',
+      model: 'step-3.7-flash',
+      messages: const [
+        {'role': 'user', 'content': '只返回 JSON'},
+      ],
+      maxRetries: 0,
+      structuredJson: true,
+      maxResponseBytes: 1024,
+    );
+
+    expect(result['success'], isTrue);
+    expect(
+      (captured.data as Map<String, dynamic>)['response_format'],
+      {'type': 'json_object'},
+    );
+    expect(
+      (captured.data as Map<String, dynamic>)['reasoning_format'],
+      'deepseek-style',
     );
   });
 

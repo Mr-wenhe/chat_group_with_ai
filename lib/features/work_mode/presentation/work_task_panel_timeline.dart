@@ -281,6 +281,7 @@ String? _continueUnavailableReasonForPanel(AgentTask task) {
   }
   final failure = _visibleWorkFailure(task);
   if (failure != null) {
+    if (failure.canContinueAfterRolePermissionUpdate) return null;
     if (failure.canReauthorize) return failure.suggestedAction;
     if (failure.canViewConflict) return failure.suggestedAction;
     if (!isSoftLimitPause && failure.canRetry) {

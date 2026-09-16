@@ -126,6 +126,138 @@ void main() {
     await closeLifecycleHive(directory, database);
   });
 
+  test('preserves the configured StepFun quota endpoint for discussion', () {
+    final stepPlanConfig = ApiConfig(
+      name: 'step-plan',
+      provider: 'custom',
+      modelName: 'step-3.5-flash',
+      customBaseUrl: 'https://api.stepfun.com/step_plan/v1',
+    );
+    final ordinaryConfig = ApiConfig(
+      name: 'ordinary',
+      provider: 'custom',
+      modelName: 'custom-model',
+      customBaseUrl: 'https://example.com/step_plan/v1',
+    );
+
+    expect(
+      WorkDiscussionRunner.structuredDiscussionBaseUrlFor(stepPlanConfig),
+      stepPlanConfig.customBaseUrl,
+    );
+    expect(
+      WorkDiscussionRunner.structuredDiscussionBaseUrlFor(ordinaryConfig),
+      ordinaryConfig.customBaseUrl,
+    );
+  });
+
+  test('adds a sanitized local project dossier for an explicit task path',
+      () async {
+    final project =
+        await Directory.systemTemp.createTemp('discussion-project-');
+    try {
+      await File('${project.path}/pubspec.yaml').writeAsString('name: demo');
+      await Directory('${project.path}/lib').create();
+      await Directory('${project.path}/docs').create();
+      await Directory('${project.path}/.nightly').create();
+      await Directory('${project.path}/scripts').create();
+      await File('${project.path}/lib/main.dart')
+          .writeAsString('void main() {}');
+      await File('${project.path}/embedding_server.py')
+          .writeAsString('from threading import Lock\n_model_lock = Lock()');
+      await Directory('${project.path}/lib/services').create(recursive: true);
+      await File('${project.path}/lib/services/embedding_service.dart')
+          .writeAsString('class EmbeddingService {}');
+      await Directory('${project.path}/test').create();
+      await File('${project.path}/test/semantic_scorer_test.dart')
+          .writeAsString(
+        'CalibrationCurve ManualSimilarityOverrides SemanticScoreRules fallback',
+      );
+      await File('${project.path}/.nightly/nightly_launcher.sh').writeAsString(
+        'exec scripts/nightly_train_v26.sh',
+      );
+      await File('${project.path}/scripts/nightly_train_v26.sh').writeAsString(
+        'LOCK_DIR=x\ntrap cleanup EXIT',
+      );
+      final config = ApiConfig(
+        id: 'cfg-project-dossier',
+        name: 'project-dossier',
+        provider: 'deepseek',
+        modelName: 'deepseek-chat',
+        hasCredential: true,
+        credentialId: 'credential-project-dossier',
+      );
+      await database.apiConfigBox.put(config.id, config);
+      final character = _character(
+        'project-dossier-product',
+        '产品',
+        '产品经理',
+        config.id,
+      );
+      await database.aiCharacterBox.put(character.id, character);
+      final group = ChatGroup(
+        id: 'project-dossier-group',
+        name: '项目清单群',
+        theme: '需求讨论',
+        aiCharacterIds: [character.id],
+      );
+      await database.chatGroupBox.put(group.id, group);
+      final task = _task(
+        group: group,
+        request: '读取${project.path} 并制定需求文档',
+        executorId: character.id,
+        members: [character.id],
+      );
+      var sawDossier = false;
+      var sawNoHallucinatedBlockerGuard = false;
+      var sawProjectScopeGuard = false;
+      final runner = WorkDiscussionRunner(
+        database: database,
+        credentials: _Credentials(),
+        completion: ({
+          required character,
+          required config,
+          required apiKey,
+          required provider,
+          required conversationId,
+          required messages,
+          required timeout,
+          cancelToken,
+        }) async {
+          final systemPrompt = messages.first['content'].toString();
+          final prompt = messages.last['content'].toString();
+          sawDossier = sawDossier ||
+              (prompt.contains('本地或在线语义 embedding 能力') &&
+                  prompt.contains('embedding_server.py') &&
+                  prompt.contains('lib/main.dart') &&
+                  prompt.contains('embedding_server.py 已用 _model_lock') &&
+                  prompt.contains('semantic_scorer_test.dart 已覆盖') &&
+                  prompt.contains('项目根目录已存在 docs/ 文档目录') &&
+                  prompt.contains('.nightly/nightly_launcher.sh 是转发') &&
+                  !prompt.contains(project.path));
+          sawNoHallucinatedBlockerGuard = sawNoHallucinatedBlockerGuard ||
+              systemPrompt.contains('不存在的文件、日志、指标当作事实或阻塞问题');
+          sawProjectScopeGuard = sawProjectScopeGuard ||
+              (systemPrompt.contains('区块链、DID、Gas、支付、链上存证') &&
+                  prompt.contains('本轮项目范围聚焦'));
+          return _turn(update: '已基于项目清单讨论。', percent: 70);
+        },
+      );
+      await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+        task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          task.executionStateJson,
+          state,
+        );
+        return task;
+      });
+
+      expect(sawDossier, isTrue);
+      expect(sawNoHallucinatedBlockerGuard, isTrue);
+      expect(sawProjectScopeGuard, isTrue);
+    } finally {
+      await project.delete(recursive: true);
+    }
+  });
+
   test(
       'gives every role its own turn, then lets the elected executor summarize',
       () async {
@@ -389,6 +521,139 @@ void main() {
     expect(finalState.executorId, 'front-b');
     expect(finalState.deliverableContract?['explicitExecutorId'], 'front-b');
     expect(calls, contains('front-b'));
+  });
+
+  test('normalizes a fully converged conservative 99 percent summary to 100',
+      () async {
+    final config = ApiConfig(
+      id: 'cfg-converged-99',
+      name: 'converged-99',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+      credentialId: 'credential-converged-99',
+    );
+    await database.apiConfigBox.put(config.id, config);
+    final character = _character('converged-99', '执行人', '前端工程师', config.id);
+    await database.aiCharacterBox.put(character.id, character);
+    final group = ChatGroup(
+      id: 'converged-99-group',
+      name: '收敛群',
+      theme: '需求文档',
+      aiCharacterIds: [character.id],
+    );
+    await database.chatGroupBox.put(group.id, group);
+    final task = _task(
+      group: group,
+      request: '实现 HTML 页面并写入 desktop.html',
+      executorId: character.id,
+      members: [character.id],
+    );
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async =>
+          _turn(
+        update: '目标、方案、交付位置和验收均已收敛。',
+        percent: 99,
+      ),
+    );
+
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    final finalState = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    expect(finalState.isExecutionReady, isTrue);
+    expect(finalState.understandingPercent, 100);
+  });
+
+  test('keeps a deferred-scope decision question open', () async {
+    final config = ApiConfig(
+      id: 'cfg-deferred-scope-question',
+      name: 'deferred-scope-question',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+      credentialId: 'credential-deferred-scope-question',
+    );
+    await database.apiConfigBox.put(config.id, config);
+    final character = _character(
+      'deferred-scope-question',
+      '执行人',
+      '前端工程师',
+      config.id,
+    );
+    await database.aiCharacterBox.put(character.id, character);
+    final group = ChatGroup(
+      id: 'deferred-scope-question-group',
+      name: '范围确认群',
+      theme: '需求讨论',
+      aiCharacterIds: [character.id],
+    );
+    await database.chatGroupBox.put(group.id, group);
+    final task = _task(
+      group: group,
+      request: '实现 HTML 页面并写入 desktop.html',
+      executorId: character.id,
+      members: [character.id],
+    );
+    const question = '是否本轮不重构区块链能力？';
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      '',
+      WorkDiscussionState.initial(
+        conversationId: group.id,
+        executorId: character.id,
+        candidateCharacterIds: [character.id],
+        participantCharacterIds: [character.id],
+        openQuestions: [question],
+        deliverableContract: _contract(executorId: character.id),
+      ),
+    );
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async =>
+          _turn(update: '继续评估实现边界。', percent: 70),
+    );
+
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    final finalState = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    expect(finalState.openQuestions, contains(question));
+    expect(finalState.isExecutionReady, isFalse);
   });
 
   test(
@@ -1433,6 +1698,82 @@ void main() {
       contains('structuredResponseInvalid:${character.id}'),
     );
     expect(latest!.isExecutionReady, isFalse);
+  });
+
+  test('reports provider HTTP failures without calling them malformed JSON',
+      () async {
+    final config = ApiConfig(
+      id: 'cfg-http-402',
+      name: 'http-402',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+      credentialId: 'credential-http-402',
+    );
+    await database.apiConfigBox.put(config.id, config);
+    final character = _character(
+      'http-402-front',
+      '前端',
+      '前端工程师',
+      config.id,
+    );
+    await database.aiCharacterBox.put(character.id, character);
+    final group = ChatGroup(
+      id: 'http-402-group',
+      name: '模型可用性异常群',
+      theme: '网页',
+      aiCharacterIds: [character.id],
+    );
+    await database.chatGroupBox.put(group.id, group);
+    final task = _task(
+      group: group,
+      request: '实现 HTML 页面',
+      executorId: character.id,
+      members: [character.id],
+    );
+    final requestOptions = RequestOptions(path: '/chat/completions');
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async {
+        throw DioException(
+          requestOptions: requestOptions,
+          response: Response<void>(
+            requestOptions: requestOptions,
+            statusCode: 402,
+          ),
+        );
+      },
+    );
+    WorkDiscussionState? latest;
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      latest = state;
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    expect(latest, isNotNull);
+    expect(latest!.blockers, contains('modelRequestFailed:${character.id}'));
+    expect(
+      latest!.blockers,
+      isNot(contains('structuredResponseInvalid:${character.id}')),
+    );
+    expect(
+      latest!.participants.single.lastContribution,
+      '模型请求失败（HTTP 402）',
+    );
   });
 
   test('does not persist a plain multiline coordinator preview as state',

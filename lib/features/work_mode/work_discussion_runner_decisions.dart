@@ -330,6 +330,7 @@ extension _WorkDiscussionRunnerDecisions on WorkDiscussionRunner {
   bool _protectedBlocker(String value) {
     if (WorkDiscussionRunner.userDecisionBlockers.contains(value)) return true;
     if (value.startsWith('structuredResponseInvalid:')) return true;
+    if (value.startsWith('modelRequestFailed:')) return true;
     return value == 'discussionRequired' ||
         value == 'executorSelectionRequired' ||
         value == 'routePending' ||

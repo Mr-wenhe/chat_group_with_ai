@@ -140,6 +140,55 @@ void main() {
       expect(failure.suggestedAction, contains('重新授权'));
     });
 
+    test('classifies a missing file target as a retryable model checkpoint',
+        () {
+      final failure = WorkFailure.fromToolFailure(
+        code: 'notFound',
+        message: '目标不存在。',
+      );
+
+      expect(failure.type, WorkFailureType.modelProtocol);
+      expect(failure.retryable, isTrue);
+    });
+
+    test('migrates a legacy internal missing-target checkpoint to retry', () {
+      final task = _task('legacy-missing-target');
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.internal,
+          title: '工作任务内部处理失败',
+          reason: '目标不存在。',
+          technicalDetail: '目标不存在。',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '重新发起任务。',
+        ),
+      );
+
+      expect(task.workFailure?.type, WorkFailureType.modelProtocol);
+      expect(task.workFailure?.retryable, isTrue);
+    });
+
+    test('migrates a legacy DOCX delivery checkpoint to retry', () {
+      final task = _task('legacy-docx-delivery');
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.internal,
+          title: '工作任务内部处理失败',
+          reason: '用户明确要求 Word 文件，但没有找到真实 DOCX。',
+          technicalDetail: 'Markdown 只能作为转换源，不能作为最终交付。',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '重新发起任务。',
+        ),
+      );
+
+      expect(task.workFailure?.type, WorkFailureType.modelProtocol);
+      expect(task.workFailure?.retryable, isTrue);
+    });
+
     test('classifies model 429, 5xx, timeout, empty stream and protocol errors',
         () async {
       final cases = <String, Object>{
@@ -925,6 +974,39 @@ void main() {
       expect(find.byKey(const Key('work-task-continue')), findsNothing);
       await tester.tap(find.byKey(const Key('work-task-reauthorize')));
       expect(calls, 1);
+    });
+
+    testWidgets('offers continue after a role capability is granted',
+        (tester) async {
+      var continued = false;
+      final task = _task('panel-role-permission')
+        ..status = AgentTaskStatus.paused;
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.permissionDenied,
+          title: '当前操作没有权限',
+          reason: '角色未授予 commandRun 工具权限。',
+          technicalDetail: '角色未授予 commandRun 工具权限。',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '调整角色工具权限后继续。',
+        ),
+      );
+
+      await pumpPanel(
+        tester,
+        task,
+        onContinue: (_) async => continued = true,
+      );
+
+      expect(find.byKey(const Key('work-task-reauthorize')), findsNothing);
+      final continueButton = tester.widget<FilledButton>(
+        find.byKey(const Key('work-task-continue')),
+      );
+      expect(continueButton.onPressed, isNotNull);
+      await tester.tap(find.byKey(const Key('work-task-continue')));
+      expect(continued, isTrue);
     });
 
     testWidgets('only exposes conflict viewer for file conflicts',

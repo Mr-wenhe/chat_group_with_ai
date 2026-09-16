@@ -413,7 +413,7 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
     } on Object {
       // Malformed execution metadata cannot safely identify a requested path.
     }
-    return const WorkModeDirectoryService().requestedDesktopPath(
+    return const WorkModeDirectoryService().requestedWorkspacePath(
       task.userRequest,
     );
   }

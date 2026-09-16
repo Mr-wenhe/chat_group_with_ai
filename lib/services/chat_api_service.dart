@@ -118,6 +118,10 @@ class ChatApiService {
         cancelToken: cancelToken,
         maxResponseBytes: maxResponseBytes,
         structuredJson: structuredJson,
+        stepPlanLowReasoning: _isStepPlanEndpoint(
+          provider: provider,
+          customBaseUrl: customBaseUrl,
+        ),
       ),
       shouldRetryResult: RetryHandler.isTransientResult,
       sleep: _retrySleep,
@@ -216,6 +220,7 @@ class ChatApiService {
     CancelToken? cancelToken,
     required int? maxResponseBytes,
     bool structuredJson = false,
+    bool stepPlanLowReasoning = false,
   }) async {
     if (kIsWeb) {
       return {
@@ -251,6 +256,7 @@ class ChatApiService {
           maxTokens: maxTokens,
           streaming: false,
           structuredJson: structuredJson,
+          stepPlanLowReasoning: stepPlanLowReasoning,
         ),
         options: Options(
           headers: headers,
@@ -432,6 +438,10 @@ class ChatApiService {
             receiveTimeout: receiveTimeout,
             cancelToken: cancelToken,
             structuredJson: structuredJson,
+            stepPlanLowReasoning: _isStepPlanEndpoint(
+              provider: provider,
+              customBaseUrl: customBaseUrl,
+            ),
             maxResponseBytes: defaultMaxResponseBytes,
           );
         }
@@ -581,6 +591,10 @@ class ChatApiService {
       maxTokens: maxTokens,
       streaming: true,
       structuredJson: structuredJson,
+      stepPlanLowReasoning: _isStepPlanEndpoint(
+        provider: provider,
+        customBaseUrl: customBaseUrl,
+      ),
     );
 
     final parser = SseParser();

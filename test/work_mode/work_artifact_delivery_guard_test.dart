@@ -357,6 +357,25 @@ void main() {
     expect(result.path, endsWith('/report.docx'));
   });
 
+  test('redacted target location falls back to the authorized workspace',
+      () async {
+    final root = await Directory.systemTemp.createTemp('s6-redacted-location-');
+    addTearDown(() => root.delete(recursive: true));
+    final path = '${root.path}/docs/report.docx';
+    await Directory('${root.path}/docs').create(recursive: true);
+    await File(path).writeAsBytes(_minimalDocx('核心正文'));
+
+    final task = _wordTask(path, root.path, location: '[REDACTED].docx');
+    final result = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+      workspaceRoot: root.path,
+    );
+
+    expect(result.valid, isTrue, reason: result.message);
+    expect(result.path, endsWith('/docs/report.docx'));
+  });
+
   test('desktop-prefixed target is resolved relative to the desktop workspace',
       () async {
     final root = await Directory.systemTemp.createTemp('s6-desktop-root-');

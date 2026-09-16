@@ -97,6 +97,10 @@ extension _ChatApiServiceSupport on ChatApiService {
         receiveTimeout: receiveTimeout,
         cancelToken: cancelToken,
         structuredJson: structuredJson,
+        stepPlanLowReasoning: _isStepPlanEndpoint(
+          provider: provider,
+          customBaseUrl: customBaseUrl,
+        ),
         maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
       );
     }

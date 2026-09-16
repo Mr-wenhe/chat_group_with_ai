@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
@@ -421,6 +422,9 @@ void main() {
   setUp(() async {
     directory = await Directory.systemTemp.createTemp('work-task-coordinator-');
     Hive.init(directory.path);
+    if (!Hive.isAdapterRegistered(10)) {
+      Hive.registerAdapter(ToolPermissionAdapter());
+    }
     if (!Hive.isAdapterRegistered(12)) {
       Hive.registerAdapter(AgentTaskStatusAdapter());
     }
@@ -1804,6 +1808,25 @@ void main() {
       throwsStateError,
     );
     expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('manual resume refreshes the role capability snapshot', () async {
+    final task = _task(
+      id: 'refresh-role-capabilities',
+      conversationId: 'dm:worker',
+    )
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..requestedPermissions = <ToolPermission>[
+        ToolPermission.skillCreate,
+      ];
+    await taskBox.put(task.id, task);
+
+    await coordinator.resumeByUser(task.id);
+    await _waitForStartedCount(runner, 1);
+
+    expect(taskBox.get(task.id)!.requestedPermissions, isEmpty);
+    runner.complete(task.id);
   });
 
   test('generic resume remains blocked until a visual model is selected',

@@ -1,9 +1,13 @@
 part of 'work_task_panel.dart';
 
+const _discussionContinuationReply =
+    '请继续基于现有任务上下文完成两轮可验证讨论：测试给出验收标准，开发给出改造边界，设计给出交互方案，产品经理整合结论；信息充分后再更新到100%，不要虚报进度。';
+
 class _TaskReplyBox extends StatelessWidget {
   final AgentTask task;
   final String? discussionQuestion;
   final TextEditingController controller;
+  final FocusNode focusNode;
   final bool actionInFlight;
   final String? actionError;
   final Future<void> Function(String reply) onSubmit;
@@ -12,6 +16,7 @@ class _TaskReplyBox extends StatelessWidget {
     required this.task,
     this.discussionQuestion,
     required this.controller,
+    required this.focusNode,
     required this.actionInFlight,
     required this.actionError,
     required this.onSubmit,
@@ -41,17 +46,30 @@ class _TaskReplyBox extends StatelessWidget {
             const SizedBox(height: 4),
             Text(_safePanelText(question)),
             const SizedBox(height: 8),
-            TextField(
-              key: const Key('work-task-reply-input'),
-              controller: controller,
-              minLines: 1,
-              maxLines: 4,
-              enabled: !actionInFlight,
-              textInputAction: TextInputAction.newline,
-              decoration: const InputDecoration(
-                hintText: '输入回复…',
-                border: OutlineInputBorder(),
-                isDense: true,
+            Semantics(
+              container: true,
+              textField: true,
+              label: '任务回复输入框',
+              onTap: focusNode.requestFocus,
+              child: TextField(
+                key: const Key('work-task-reply-input'),
+                controller: controller,
+                focusNode: focusNode,
+                minLines: 1,
+                maxLines: 4,
+                enabled: !actionInFlight,
+                textInputAction: TextInputAction.send,
+                decoration: const InputDecoration(
+                  hintText: '输入回复…',
+                  border: OutlineInputBorder(),
+                  isDense: true,
+                ),
+                onSubmitted: (value) {
+                  final reply = value.trim();
+                  if (!actionInFlight && reply.isNotEmpty) {
+                    unawaited(onSubmit(reply));
+                  }
+                },
               ),
             ),
             if (actionError != null && actionError!.trim().isNotEmpty) ...[
@@ -63,28 +81,50 @@ class _TaskReplyBox extends StatelessWidget {
               ),
             ],
             const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerRight,
-              child: ValueListenableBuilder<TextEditingValue>(
-                valueListenable: controller,
-                builder: (context, value, _) {
-                  final canSend =
-                      !actionInFlight && value.text.trim().isNotEmpty;
-                  return FilledButton.icon(
-                    key: const Key('work-task-reply-send'),
-                    onPressed:
-                        canSend ? () => onSubmit(value.text.trim()) : null,
-                    icon: actionInFlight
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.send_rounded),
-                    label: Text(actionInFlight ? '发送中…' : '发送回复'),
-                  );
-                },
-              ),
+            Row(
+              mainAxisAlignment: MainAxisAlignment.end,
+              children: <Widget>[
+                if (isDiscussionQuestion)
+                  TextButton.icon(
+                    key: const Key('work-task-continue-discussion'),
+                    onPressed: actionInFlight
+                        ? null
+                        : () => onSubmit(_discussionContinuationReply),
+                    icon: const Icon(Icons.forum_outlined, size: 16),
+                    label: const Text('继续讨论'),
+                  ),
+                ValueListenableBuilder<TextEditingValue>(
+                  valueListenable: controller,
+                  builder: (context, value, _) {
+                    final canSend =
+                        !actionInFlight && value.text.trim().isNotEmpty;
+                    final label = actionInFlight ? '发送中…' : '发送回复';
+                    return Semantics(
+                      container: true,
+                      excludeSemantics: true,
+                      button: true,
+                      enabled: canSend,
+                      label: label,
+                      onTap: canSend ? () => onSubmit(value.text.trim()) : null,
+                      child: FilledButton.icon(
+                        key: const Key('work-task-reply-send'),
+                        onPressed:
+                            canSend ? () => onSubmit(value.text.trim()) : null,
+                        icon: actionInFlight
+                            ? const SizedBox(
+                                width: 16,
+                                height: 16,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                ),
+                              )
+                            : const Icon(Icons.send_rounded),
+                        label: Text(label),
+                      ),
+                    );
+                  },
+                ),
+              ],
             ),
           ],
         ),

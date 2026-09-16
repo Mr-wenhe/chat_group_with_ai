@@ -60,6 +60,11 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
           task.executionStateJson,
         )
         ..updatedAt = _clock();
+      // A manual continuation is a fresh plan against the current role
+      // configuration. The old list was a snapshot of capabilities at task
+      // creation and would otherwise keep a newly granted role permission
+      // excluded by the runner's safety intersection.
+      task.requestedPermissions.clear();
       _conversationReservations.remove(task.groupId);
       await _save(task);
       _enqueueTask(task);
@@ -80,6 +85,10 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       final task = _requireWorkTask(taskId);
       if (_running.containsKey(taskId) || _startingTaskIds.contains(taskId)) {
         throw StateError('任务正在执行，不能同时重试。');
+      }
+      if (_discussionRuns.containsKey(taskId) ||
+          _discussionStartingIds.contains(taskId)) {
+        throw StateError('群讨论正在进行，不能同时重试。');
       }
       final restartFromBeginning =
           WorkTaskCoordinator.canRestartAfterUserStop(task);
@@ -133,8 +142,26 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
             _renewDiscussionForRequest(existingDiscussion, task.userRequest),
           );
         }
+        final needsDiscussion = existingDiscussion != null &&
+            !WorkDiscussionState.decodeExecutionState(task.executionStateJson)
+                .state!
+                .isExecutionReady;
+        if (needsDiscussion) {
+          // Do not enqueue a non-ready group task while the discussion runner
+          // is being started. The scheduler could otherwise enter _start in
+          // the same turn, race the first discussion callback, and reject a
+          // legitimate state update as a concurrent execution.
+          await _pauseForDiscussion(
+            task,
+            _discussionWaitingReason(existingDiscussion),
+          );
+        }
         await _save(task);
         await _markSnapshotStatus(task);
+        if (needsDiscussion) {
+          _maybeStartDiscussion(task);
+          return;
+        }
         _enqueueTask(task);
         await _record(
           task,

@@ -127,6 +127,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   bool _actionInFlight = false;
   String? _actionError;
   final TextEditingController _replyController = TextEditingController();
+  final FocusNode _replyFocusNode = FocusNode();
 
   @override
   void didUpdateWidget(covariant WorkTaskPanel oldWidget) {
@@ -149,6 +150,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   void dispose() {
     _durationTicker?.cancel();
     _replyController.dispose();
+    _replyFocusNode.dispose();
     super.dispose();
   }
 
@@ -183,94 +185,102 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
         ? null
         : _toolName(latestEvent) ?? _toolName(_latestToolEvents[task.id]);
 
-    return Material(
-      key: const Key('work-task-panel'),
-      elevation: 12,
-      borderRadius: BorderRadius.circular(20),
-      color: Theme.of(context).colorScheme.surface,
-      child: ConstrainedBox(
-        // Desktop overlays have enough vertical room for a readable live
-        // transcript. The details section keeps its own scrollbar, so a
-        // taller panel does not make the action buttons unreachable.
-        constraints: const BoxConstraints(maxHeight: 720),
-        child: ScrollConfiguration(
-          // Material's desktop ScrollBehavior adds a scrollbar to every
-          // ScrollView. The task panel deliberately owns two independent
-          // scroll regions, so automatic scrollbars would overlap and make
-          // the inner thumb impossible to drag.
-          behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                _PanelHeader(
-                  onCollapse: widget.onCollapse,
-                  onClose: widget.onClose,
-                ),
-                const SizedBox(height: 10),
-                _TaskTabs(
-                  tasks: widget.tasks,
-                  selectedTaskId: task.id,
-                  onSelectTask: widget.onSelectTask,
-                ),
-                if (widget.hiddenTaskCount > 0) ...<Widget>[
-                  const SizedBox(height: 6),
-                  Text(
-                    '还有 ${widget.hiddenTaskCount} 个任务在队列中，当前面板优先显示执行中的任务。',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
+    return Semantics(
+      key: const Key('work-task-panel-semantics'),
+      container: true,
+      explicitChildNodes: true,
+      label: '工作任务面板',
+      child: Material(
+        key: const Key('work-task-panel'),
+        elevation: 12,
+        borderRadius: BorderRadius.circular(20),
+        color: Theme.of(context).colorScheme.surface,
+        child: ConstrainedBox(
+          // Desktop overlays have enough vertical room for a readable live
+          // transcript. The details section keeps its own scrollbar, so a
+          // taller panel does not make the action buttons unreachable.
+          constraints: const BoxConstraints(maxHeight: 720),
+          child: ScrollConfiguration(
+            // Material's desktop ScrollBehavior adds a scrollbar to every
+            // ScrollView. The task panel deliberately owns two independent
+            // scroll regions, so automatic scrollbars would overlap and make
+            // the inner thumb impossible to drag.
+            behavior:
+                ScrollConfiguration.of(context).copyWith(scrollbars: false),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: <Widget>[
+                  _PanelHeader(
+                    onCollapse: widget.onCollapse,
+                    onClose: widget.onClose,
+                  ),
+                  const SizedBox(height: 10),
+                  _TaskTabs(
+                    tasks: widget.tasks,
+                    selectedTaskId: task.id,
+                    onSelectTask: widget.onSelectTask,
+                  ),
+                  if (widget.hiddenTaskCount > 0) ...<Widget>[
+                    const SizedBox(height: 6),
+                    Text(
+                      '还有 ${widget.hiddenTaskCount} 个任务在队列中，当前面板优先显示执行中的任务。',
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: Theme.of(context).colorScheme.onSurfaceVariant,
+                      ),
+                    ),
+                  ],
+                  const SizedBox(height: 14),
+                  Expanded(
+                    child: _TaskDetails(
+                      task: task,
+                      latestAction: latestAction,
+                      toolName: toolName,
+                      actionError: _actionError,
+                      characterNameFor: widget.characterNameFor,
+                      eventStreamFor: widget.eventStreamFor,
+                      onLatestEvent: _rememberLatestEvent,
+                      clock: widget.clock,
                     ),
                   ),
-                ],
-                const SizedBox(height: 14),
-                Expanded(
-                  child: _TaskDetails(
+                  const SizedBox(height: 12),
+                  _TaskActions(
                     task: task,
-                    latestAction: latestAction,
-                    toolName: toolName,
+                    actionInFlight: _actionInFlight,
                     actionError: _actionError,
-                    characterNameFor: widget.characterNameFor,
-                    eventStreamFor: widget.eventStreamFor,
-                    onLatestEvent: _rememberLatestEvent,
-                    clock: widget.clock,
+                    onOpenConversation: widget.onOpenConversation,
+                    onApprove: widget.onApprove,
+                    onApproveVersioned: widget.onApproveVersioned,
+                    onApproveWithoutUndo: widget.onApproveWithoutUndo,
+                    onApproveWithoutUndoVersioned:
+                        widget.onApproveWithoutUndoVersioned,
+                    onReject: widget.onReject,
+                    onRejectVersioned: widget.onRejectVersioned,
+                    onRequestFolder: widget.onRequestFolder,
+                    onRequestFolderVersioned: widget.onRequestFolderVersioned,
+                    onInstallTool: widget.onInstallTool,
+                    onInstallToolVersioned: widget.onInstallToolVersioned,
+                    onSelectVisionModel: widget.onSelectVisionModel,
+                    onRetry: widget.onRetry,
+                    onReauthorize: widget.onReauthorize,
+                    onViewConflict: widget.onViewConflict,
+                    onUndo: widget.onUndo,
+                    onLater: widget.onLater,
+                    onLaterVersioned: widget.onLaterVersioned,
+                    undoPreviewFor: widget.undoPreviewFor,
+                    onStop: widget.onStop,
+                    onContinue: widget.onContinue,
+                    onReply: widget.onReply,
+                    replyController: _replyController,
+                    replyFocusNode: _replyFocusNode,
+                    onModalVisibilityChanged: widget.onModalVisibilityChanged,
+                    dialogContext: widget.dialogContext,
+                    runAction: (action) => _runAction(action, task.id),
                   ),
-                ),
-                const SizedBox(height: 12),
-                _TaskActions(
-                  task: task,
-                  actionInFlight: _actionInFlight,
-                  actionError: _actionError,
-                  onOpenConversation: widget.onOpenConversation,
-                  onApprove: widget.onApprove,
-                  onApproveVersioned: widget.onApproveVersioned,
-                  onApproveWithoutUndo: widget.onApproveWithoutUndo,
-                  onApproveWithoutUndoVersioned:
-                      widget.onApproveWithoutUndoVersioned,
-                  onReject: widget.onReject,
-                  onRejectVersioned: widget.onRejectVersioned,
-                  onRequestFolder: widget.onRequestFolder,
-                  onRequestFolderVersioned: widget.onRequestFolderVersioned,
-                  onInstallTool: widget.onInstallTool,
-                  onInstallToolVersioned: widget.onInstallToolVersioned,
-                  onSelectVisionModel: widget.onSelectVisionModel,
-                  onRetry: widget.onRetry,
-                  onReauthorize: widget.onReauthorize,
-                  onViewConflict: widget.onViewConflict,
-                  onUndo: widget.onUndo,
-                  onLater: widget.onLater,
-                  onLaterVersioned: widget.onLaterVersioned,
-                  undoPreviewFor: widget.undoPreviewFor,
-                  onStop: widget.onStop,
-                  onContinue: widget.onContinue,
-                  onReply: widget.onReply,
-                  replyController: _replyController,
-                  onModalVisibilityChanged: widget.onModalVisibilityChanged,
-                  dialogContext: widget.dialogContext,
-                  runAction: (action) => _runAction(action, task.id),
-                ),
-              ],
+                ],
+              ),
             ),
           ),
         ),
