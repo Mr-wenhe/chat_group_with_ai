@@ -2823,6 +2823,91 @@ void main() {
     );
   });
 
+  test('reauthorize rebuilds a terminal missing-scope task from its checkpoint',
+      () async {
+    final oldStart = DateTime.utc(2026, 7, 15, 12);
+    final task = _task(
+      id: 'missing-scope-recovery',
+      conversationId: 'dm:worker',
+    )
+      ..status = AgentTaskStatus.failed
+      ..startedAt = oldStart
+      ..completedOperations = <String>[
+        '{"tool":"skill.download","args":{"templateId":"frontend.interactive-artifact"}}',
+      ]
+      ..lastArtifactPaths = <String>['/Users/fengye/Desktop/已有产物.html']
+      ..contextSummary = const WorkContextBuilder().build(
+        conversationId: 'dm:worker',
+        target: '生成新的交付文件',
+        approvalScope: <String, dynamic>{
+          'taskId': 'missing-scope-recovery',
+          'entries': <Map<String, dynamic>>[
+            <String, dynamic>{'path': '/Users/fengye/Desktop/旧范围.html'},
+          ],
+        },
+      ).toJsonString()
+      ..executionStateJson = jsonEncode(<String, dynamic>{
+        'approvalDecision': 'approvedWithoutUndo',
+        'approvalCapability': 'mutation',
+        'approvalConsumed': true,
+      });
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'notApproved',
+        message: '审批范围缺失，已要求任务重新生成变更计划。',
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.reauthorizeTask(task.id);
+    await _waitForStartedCount(runner, 1);
+
+    final recovered = taskBox.get(task.id)!;
+    expect(recovered.status, AgentTaskStatus.planning);
+    expect(recovered.startedAt, isNot(oldStart));
+    expect(recovered.completedOperations, hasLength(1));
+    expect(recovered.lastArtifactPaths, ['/Users/fengye/Desktop/已有产物.html']);
+    expect(recovered.pendingToolRequestJson, isEmpty);
+    expect(recovered.executionStateJson, isNot(contains('approvalDecision')));
+    expect(
+      (jsonDecode(recovered.contextSummary) as Map)['approvalScope'],
+      isNull,
+    );
+    runner.complete(task.id);
+  });
+
+  test('reauthorize removes stale approval scope from a legacy summary',
+      () async {
+    final task = _task(
+      id: 'legacy-missing-scope-recovery',
+      conversationId: 'dm:legacy-worker',
+    )
+      ..status = AgentTaskStatus.failed
+      ..contextSummary = jsonEncode(<String, dynamic>{
+        'goal': '旧任务目标',
+        'approvalScope': <String, dynamic>{
+          'taskId': 'legacy-missing-scope-recovery',
+          'entries': const <Map<String, dynamic>>[],
+        },
+      });
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'notApproved',
+        message: '审批范围缺失，已要求任务重新生成变更计划。',
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.reauthorizeTask(task.id);
+    await _waitForStartedCount(runner, 1);
+
+    final recovered = taskBox.get(task.id)!;
+    expect(recovered.contextSummary, isNot(contains('approvalScope')));
+    runner.complete(task.id);
+  });
+
   test('creates a durable fallback when a runner omits its failure checkpoint',
       () async {
     final failureRunner = _FailureReportingRunner(persistFailure: false);

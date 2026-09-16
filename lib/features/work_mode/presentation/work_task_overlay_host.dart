@@ -638,7 +638,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   Future<void> _reauthorizeTask(String taskId) {
     final callback = widget.onReauthorizeTask ?? widget.onRequestFolderTask;
-    return callback?.call(taskId) ?? _coordinator!.requestFolderForTask(taskId);
+    return callback?.call(taskId) ?? _coordinator!.reauthorizeTask(taskId);
   }
 
   Future<void> _viewConflictTask(String taskId) async {

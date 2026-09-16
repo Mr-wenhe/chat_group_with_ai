@@ -12,19 +12,36 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
     required WorkApprovalScope? approvalScope,
     required ModelCapability modelCapability,
   }) {
+    // A mutation approval without an exact file scope belongs to an
+    // application-skill mutation (or a stale checkpoint), not to Stage 02.
+    // Do not pass that decision into the file boundary: when ordinary-write
+    // confirmations are disabled, Stage 02 may derive its own narrow scope;
+    // otherwise the mutation policy will request a fresh file plan.
+    final approvalCapability = _approvalCapability(task);
+    final hasScopedMutationApproval = approvalDecision != null &&
+        approvalScope != null &&
+        approvalCapability == WorkApprovalCapability.mutation;
+    final stage02ApprovalDecision = hasScopedMutationApproval
+        ? approvalDecision
+        : approvalCapability == WorkApprovalCapability.sensitiveRead
+            ? approvalDecision
+            : null;
+    final stage02ApprovalScope =
+        hasScopedMutationApproval ? approvalScope : null;
+    final allowImplicitStage02Scope = stage02ApprovalDecision == null &&
+        (folderGrantService?.settings.confirmOrdinaryWrites == false);
     final stage02 = Stage02WorkspaceFileTool(
       files: files,
       mutations: mutations,
       pathPolicy: files.pathPolicy,
       task: task,
       workspaceRoot: workspaceRoot,
-      approvalDecision: approvalDecision,
-      approvalScope: approvalScope,
+      approvalDecision: stage02ApprovalDecision,
+      approvalScope: stage02ApprovalScope,
       approvedSensitiveOperation: _approvedSensitiveOperation(task),
-      approvalCapability: _approvalCapability(task),
-      allowImplicitScope: approvalDecision == null &&
-          (folderGrantService?.settings.confirmOrdinaryWrites == false),
-      allowWithoutUndo: approvalDecision?.permitsWithoutUndo == true,
+      approvalCapability: approvalCapability,
+      allowImplicitScope: allowImplicitStage02Scope,
+      allowWithoutUndo: stage02ApprovalDecision?.permitsWithoutUndo == true,
       resourceLockManager: resourceLockManager,
       onSensitiveRead: (path, operation) => unawaited(_record(
         task,

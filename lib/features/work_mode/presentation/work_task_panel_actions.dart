@@ -287,7 +287,11 @@ class _TaskActions extends StatelessWidget {
                     ? null
                     : () => runAction(onReauthorize ?? onRequestFolder!),
                 icon: const Icon(Icons.lock_open_outlined),
-                label: const Text('重新授权'),
+                label: Text(
+                  failure?.canReplanAfterApprovalScopeFailure == true
+                      ? '重新生成计划'
+                      : '重新授权',
+                ),
               ),
             if (failure?.canViewConflict == true && onViewConflict != null)
               OutlinedButton.icon(

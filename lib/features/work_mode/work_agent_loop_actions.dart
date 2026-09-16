@@ -397,6 +397,21 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     task.executionStateJson = jsonEncode(checkpoint);
   }
 
+  /// A mutation approval authenticates one concrete operation only. Once that
+  /// operation has completed, remove its checkpoint before the next model turn
+  /// so a different tool cannot inherit the decision or its scope.
+  void _clearCompletedMutationApproval(AgentTask task) {
+    final checkpoint = _decodeMap(task.executionStateJson)
+      ..remove('approvalDecision')
+      ..remove('approvalPlan')
+      ..remove('approvalScope')
+      ..remove('approvalCapability')
+      ..remove('approvalOperationFingerprint')
+      ..remove('approvalConsumed')
+      ..remove('approvalPromptShown');
+    task.executionStateJson = checkpoint.isEmpty ? '' : jsonEncode(checkpoint);
+  }
+
   void _recordCommittedMutationFailure(
     _LoopState state, {
     required ToolRequest operation,
@@ -570,6 +585,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       );
       _recordArtifactChange(task, call, result);
     }
+    if (isMutation) _clearCompletedMutationApproval(task);
     await _emit(
       state,
       WorkTaskEventKind.toolOutput,

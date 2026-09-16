@@ -976,6 +976,24 @@ void main() {
       expect(calls, 1);
     });
 
+    testWidgets('explains that missing approval scope rebuilds the plan',
+        (tester) async {
+      final task = _task('panel-missing-approval-scope')
+        ..status = AgentTaskStatus.failed;
+      WorkFailure.persistOnTask(
+        task,
+        WorkFailure.fromToolFailure(
+          code: 'notApproved',
+          message: '审批范围缺失，已要求任务重新生成变更计划。',
+        ),
+      );
+
+      await pumpPanel(tester, task, onReauthorize: (_) async {});
+
+      expect(find.text('重新生成计划'), findsOneWidget);
+      expect(find.textContaining('点击“重新生成计划”'), findsOneWidget);
+    });
+
     testWidgets('offers continue after a role capability is granted',
         (tester) async {
       var continued = false;

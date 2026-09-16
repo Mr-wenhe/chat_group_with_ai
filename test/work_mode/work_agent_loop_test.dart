@@ -844,6 +844,62 @@ void main() {
     expect(task.contextSummary, isNot(contains('"committed":true')));
   });
 
+  test('does not reuse a completed mutation approval for the next tool',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.skillDownload,
+        arguments: {'templateId': 'frontend.interactive-artifact'},
+      ))
+      ..responses.add(_toolDecision(name: AgentToolName.workspacePatch))
+      ..responses.add(_finishDecision());
+    final skillTool = _FakeTool();
+    final fileTool = _FakeTool();
+    final task = _task(id: 'approval-cannot-leak-between-tools')
+      ..executionStateJson = jsonEncode({
+        'approvalDecision': 'approvedWithoutUndo',
+        'approvalCapability': 'mutation',
+      });
+    final registry = WorkToolRegistry(
+      definitions: [
+        _definition(
+          AgentToolName.skillDownload,
+          skillTool,
+          access: WorkToolAccess.mutation,
+          pipeline: _recordingPipeline(<String>[]),
+          skillDownload: true,
+        ),
+        _definition(
+          AgentToolName.workspacePatch,
+          fileTool,
+          access: WorkToolAccess.mutation,
+          pipeline: WorkToolMutationPipeline(
+            policy: (invocation) {
+              final execution = jsonDecode(
+                invocation.task.executionStateJson,
+              ) as Map<String, dynamic>;
+              if (execution['approvalDecision'] != null) {
+                return const WorkToolResult.failed(
+                  message: '旧审批不应继续授权新的文件变更。',
+                  failureCode: 'notApproved',
+                );
+              }
+              return null;
+            },
+          ),
+        ),
+      ],
+    );
+
+    final result = await _loop(model: model, registry: registry).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(skillTool.calls, 1);
+    expect(fileTool.calls, 1);
+    final execution = jsonDecode(task.executionStateJson) as Map;
+    expect(execution, isNot(contains('approvalDecision')));
+  });
+
   test('an unchanged mutation replans once and then pauses without success',
       () async {
     final model = _FakeModel()

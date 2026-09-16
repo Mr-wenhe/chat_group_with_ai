@@ -265,7 +265,7 @@ class _FailureDetails extends StatelessWidget {
             const SizedBox(height: 4),
             _PublicDetail(
               title: '下一步',
-              text: _safePanelText(failure.suggestedAction),
+              text: _safePanelText(failure.panelSuggestedAction),
             ),
           ],
         ),

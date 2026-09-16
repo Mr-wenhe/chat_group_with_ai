@@ -369,6 +369,10 @@ class WorkTaskCoordinator {
       _implRequestFolderForTask(taskId,
           expectedActionVersion: expectedActionVersion);
 
+  /// Rebuilds a plan after a missing approval scope, or delegates to the
+  /// directory picker for a genuine workspace authorization failure.
+  Future<void> reauthorizeTask(String taskId) => _implReauthorizeTask(taskId);
+
   /// Stops only the requested task. Other conversations keep their slots.
   Future<void> stop(String taskId, {String reason = '用户已停止任务。'}) =>
       _implStop(taskId, reason: reason);

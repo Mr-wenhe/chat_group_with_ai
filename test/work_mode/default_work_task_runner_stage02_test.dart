@@ -20,6 +20,8 @@ import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
+import 'package:chat_group/features/work_mode/work_change_policy.dart';
+import 'package:chat_group/features/work_mode/work_approval_fingerprint.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
@@ -730,6 +732,244 @@ void main() {
         isTrue);
     expect((await snapshots.undo(task.id)).succeeded, isTrue);
     expect(await output.exists(), isFalse);
+  });
+
+  test('production runner refreshes Stage02 approval between file mutations',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    expect(
+      await grants.authorizeDirectory(
+        authorizedDirectory.path,
+        consent: (_) async => true,
+      ),
+      isNotNull,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final snapshots = WorkSnapshotService(
+      appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+      pathPolicy: pathPolicy,
+    );
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: snapshots,
+    );
+    final mediaDirectory =
+        await Directory('${hiveDirectory.path}/stage02-refresh-media').create();
+    var mediaCopyIndex = 0;
+    final gateway = _MultiPatchGateway(const [
+      {'path': 'first.txt', 'content': 'first'},
+      {'path': 'second.txt', 'content': 'second'},
+    ]);
+    final config = ApiConfig(
+      id: 'stage02-refresh-config',
+      name: 'Stage02 refresh test config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'stage02-refresh-character',
+      name: 'Stage02 refresh character',
+      avatar: 'R',
+      age: 30,
+      role: '测试连续写入角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      mediaCopier: (source, type, {fileName}) async {
+        final target = File(
+          '${mediaDirectory.path}/${mediaCopyIndex++}-${fileName ?? 'attachment'}',
+        );
+        await source.copy(target.path);
+        return MediaAttachment(
+          type: type,
+          localPath: target.path,
+          fileName: fileName,
+          fileSize: await target.length(),
+        );
+      },
+    );
+    final task = AgentTask(
+      id: 'stage02-refresh-task',
+      groupId: 'stage02-refresh-group',
+      characterId: character.id,
+      userRequest: '生成多个文件并交付全部文件',
+      workModeTask: true,
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    final firstCheckpoint = jsonDecode(task.executionStateJson) as Map;
+    await grants.setOrdinaryWriteConfirmation(false);
+    task
+      ..executionStateJson = jsonEncode({
+        ...firstCheckpoint,
+        'approvalDecision': 'approved',
+      })
+      ..status = AgentTaskStatus.queued;
+    await database.agentTaskBox.put(task.id, task);
+
+    await runner.run(task, WorkTaskCancellation());
+
+    final workspace = await WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    ).loadOrCreate(
+      conversationId: task.groupId,
+      isDirectChat: false,
+      requireWritable: true,
+    );
+    expect(
+      task.status,
+      AgentTaskStatus.completed,
+      reason: '${task.lastError}; ${task.resultSummary}',
+    );
+    expect(
+      await File('${workspace.workDirPath}/first.txt').readAsString(),
+      'first',
+    );
+    expect(
+      await File('${workspace.workDirPath}/second.txt').readAsString(),
+      'second',
+    );
+    expect(gateway.calls, 3);
+  });
+
+  test('production runner does not use implicit scope for a foreign approval',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    expect(
+      await grants.authorizeDirectory(
+        authorizedDirectory.path,
+        consent: (_) async => true,
+      ),
+      isNotNull,
+    );
+    await grants.setOrdinaryWriteConfirmation(false);
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: WorkSnapshotService(
+        appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+        pathPolicy: pathPolicy,
+      ),
+    );
+    final foreignPlan = WorkChangePlan(
+      taskId: 'foreign-approval-task',
+      actionType: WorkChangeActionType.create,
+      exactPaths: <String>['${authorizedDirectory.path}/foreign.txt'],
+      knownAffectedDirectories: <String>[authorizedDirectory.path],
+      estimatedBytes: 1,
+      snapshotAvailable: true,
+      reversible: true,
+      riskReason: '测试失配审批范围',
+    );
+    final config = ApiConfig(
+      id: 'foreign-approval-config',
+      name: 'Foreign approval test config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'foreign-approval-character',
+      name: 'Foreign approval character',
+      avatar: 'F',
+      age: 30,
+      role: '审批边界测试角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+    final gateway = _SequencedGateway(
+      patchPath: 'second.txt',
+      patchContent: 'must-not-write',
+    );
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+    );
+    final task = AgentTask(
+      id: 'foreign-approval-task-under-test',
+      groupId: 'foreign-approval-group',
+      characterId: character.id,
+      userRequest: '请执行工作',
+      workModeTask: true,
+      status: AgentTaskStatus.queued,
+      executionStateJson: jsonEncode(<String, dynamic>{
+        'approvalDecision': 'approved',
+        'approvalCapability': WorkApprovalCapability.mutation,
+        'approvalScope': WorkApprovalScope.fromPlan(foreignPlan).toJson(),
+        'approvalOperationFingerprint': 'not-the-current-operation',
+      }),
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    final workspace = await WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    ).loadOrCreate(
+      conversationId: task.groupId,
+      isDirectChat: false,
+      requireWritable: true,
+    );
+    expect(task.status, AgentTaskStatus.failed);
+    expect(
+      await File('${workspace.workDirPath}/second.txt').exists(),
+      isFalse,
+    );
   });
 
   test(

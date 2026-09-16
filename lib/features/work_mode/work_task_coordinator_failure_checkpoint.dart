@@ -23,6 +23,7 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
     Iterable<String> extraErrors = const [],
     bool clearRecentToolResults = false,
     bool resetTargetAndArtifacts = false,
+    bool clearApprovalScope = false,
   }) {
     final raw = task.contextSummary.trim();
     if (raw.isNotEmpty && !_isTask15Context(raw, task.groupId)) {
@@ -53,6 +54,7 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
       // Keep older Stage 02 summaries byte-for-byte compatible. The durable
       // AgentTask queue/artifact fields still carry the new state, and a
       // subsequent Task 15 checkpoint will migrate it through the builder.
+      if (clearApprovalScope) _removeLegacyApprovalScope(task);
       return;
     }
     final previous = raw.isEmpty
@@ -70,10 +72,12 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
     final execution = _decodeExecutionMap(task.executionStateJson);
     final discussionState = previous.discussionState ??
         WorkDiscussionState.fromExecutionState(task.executionStateJson);
-    final approvalScope = previous.approvalScope ??
-        (execution['approvalScope'] is Map
-            ? Map<String, dynamic>.from(execution['approvalScope'] as Map)
-            : null);
+    final approvalScope = clearApprovalScope
+        ? null
+        : previous.approvalScope ??
+            (execution['approvalScope'] is Map
+                ? Map<String, dynamic>.from(execution['approvalScope'] as Map)
+                : null);
     task.contextSummary = _contextBuilder
         .build(
           conversationId: task.groupId,
@@ -97,6 +101,20 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
           nextStep: nextStep ?? previous.nextStep,
         )
         .toJsonString();
+  }
+
+  void _removeLegacyApprovalScope(AgentTask task) {
+    try {
+      final decoded = jsonDecode(task.contextSummary);
+      if (decoded is! Map) return;
+      final sanitized = Map<String, dynamic>.from(decoded)
+        ..remove('approvalScope')
+        ..remove('approvedScope');
+      task.contextSummary = jsonEncode(sanitized);
+    } on Object {
+      // Malformed legacy summaries remain untouched; the execution checkpoint
+      // is still cleared and the next normal checkpoint will rebuild context.
+    }
   }
 
   List<String> _uniqueStrings(Iterable<String> values) {

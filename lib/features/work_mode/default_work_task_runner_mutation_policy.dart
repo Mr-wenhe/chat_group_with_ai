@@ -90,10 +90,43 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
             message: '无法在授权目录内解析精确文件路径。',
           );
         }
+        stage02.updateImplicitScopeAllowed(
+          folderGrantService?.settings.confirmOrdinaryWrites == false,
+        );
         // Keep policy and approval in one gate. This prevents a high-risk
         // command (or a no-snapshot write) from being approved by one gate and
         // then silently reusing the same decision in a second gate.
-        return _mutationApprovalGate(task, invocation, plan);
+        var approvalAccepted = false;
+        final result = await _mutationApprovalGate(
+          task,
+          invocation,
+          plan,
+          onApprovalEvaluated: (accepted) => approvalAccepted = accepted,
+        );
+        final currentDecision = _approvalDecision(task.executionStateJson);
+        final currentScope = _approvalScope(task.executionStateJson);
+        final currentCapability = _approvalCapability(task);
+        final retainsMutationApproval =
+            currentDecision?.permitsExecution == true &&
+                currentCapability == WorkApprovalCapability.mutation &&
+                currentScope != null;
+        // Keep an explicit mutation scope when it is still present in the
+        // durable checkpoint. If it does not cover this plan, Stage 02 must
+        // reject it; falling back to the ordinary-write setting would turn a
+        // stale or foreign approval into broader authority.
+        if (result == null &&
+            !approvalAccepted &&
+            stage02.approvalDecision != null &&
+            !retainsMutationApproval) {
+          // The registry is created once per runner invocation, while the
+          // task checkpoint is consumed after each approved mutation. Clear
+          // the old Stage 02 scope before the next handler uses it.
+          stage02.clearApprovalForMutation(
+            allowImplicitScope:
+                folderGrantService?.settings.confirmOrdinaryWrites == false,
+          );
+        }
+        return result;
       },
       approval: null,
       snapshot: (invocation) async {
@@ -318,8 +351,9 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
   Future<WorkToolResult?> _mutationApprovalGate(
     AgentTask task,
     WorkToolInvocation invocation,
-    WorkChangePlan plan,
-  ) async {
+    WorkChangePlan plan, {
+    void Function(bool accepted)? onApprovalEvaluated,
+  }) async {
     final settings = WorkChangePolicySettings(
       confirmOrdinaryWrites:
           folderGrantService?.settings.confirmOrdinaryWrites ?? true,
@@ -344,13 +378,15 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
       settings: settings,
       scope: scope,
     );
-    if (_approvalAllowsMutation(
+    final approvalAccepted = _approvalAllowsMutation(
       task,
       invocation,
       fingerprint: fingerprint,
       scopeAllows: scope?.allows(plan) == true,
       requiresFresh: _requiresFreshApproval(plan),
-    )) {
+    );
+    onApprovalEvaluated?.call(approvalAccepted);
+    if (approvalAccepted) {
       return null;
     }
     final sensitiveMutation = plan.exactPaths.any(

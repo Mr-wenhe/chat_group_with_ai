@@ -1,6 +1,91 @@
 part of 'work_task_coordinator.dart';
 
 extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
+  /// Requeues a terminal approval-scope failure after clearing the stale
+  /// one-shot capability. Directory authorization failures keep their native
+  /// picker flow, so this action cannot turn a missing role or folder grant
+  /// into an implicit permission.
+  Future<void> _implReauthorizeTask(String taskId) async {
+    final shouldReplan = await _serialize<bool>(() async {
+      _ensureOpen();
+      final task = _requireWorkTask(taskId);
+      return task.workFailure?.canReplanAfterApprovalScopeFailure == true;
+    });
+    if (!shouldReplan) {
+      await _implRequestFolderForTask(taskId);
+      return;
+    }
+
+    await _serialize(() async {
+      _ensureOpen();
+      final task = _requireWorkTask(taskId);
+      final failure = _approvalScopeReplanFailure(task);
+      _resetApprovalScopeReplanTask(task);
+      _refreshTaskContext(
+        task,
+        nextStep: '已清除失效审批范围，正在重新生成变更计划。',
+        extraErrors: [failure.reason],
+        clearApprovalScope: true,
+      );
+      await _save(task);
+      _enqueueTask(task, prioritize: true);
+      await _record(
+        task,
+        WorkTaskEventKind.queued,
+        '已重新生成变更计划，继续任务',
+        detail: failure.reason,
+      );
+      await _schedule();
+    });
+  }
+
+  WorkFailure _approvalScopeReplanFailure(AgentTask task) {
+    final failure = task.workFailure;
+    if (failure?.canReplanAfterApprovalScopeFailure != true) {
+      throw StateError('该权限提醒已失效，请打开任务面板查看最新状态。');
+    }
+    if (_running.containsKey(task.id) || _startingTaskIds.contains(task.id)) {
+      throw StateError('任务正在执行，不能重新生成变更计划。');
+    }
+    if (_discussionRuns.containsKey(task.id) ||
+        _discussionStartingIds.contains(task.id)) {
+      throw StateError('群讨论正在进行，不能重新生成变更计划。');
+    }
+    final discussion = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    if (_requiresDiscussionForTask(task) &&
+        discussion.present &&
+        (discussion.state == null || !discussion.state!.isExecutionReady)) {
+      throw StateError('请先完成群讨论并确定最终执行角色。');
+    }
+    return failure!;
+  }
+
+  void _resetApprovalScopeReplanTask(AgentTask task) {
+    _removeQueuedTask(task);
+    _waitingForResources.remove(task.id)?.cancellation.cancel();
+    _folderWaiters.remove(task.id)?.cancel();
+    _conversationReservations.remove(task.groupId);
+    _taskLockPlans.remove(task.id);
+    task
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false
+      ..plan = ''
+      ..lastError = ''
+      ..pendingToolRequestJson = ''
+      // Approval decisions and scopes are one-shot credentials. Replanning
+      // must start with the current request and current workspace state.
+      ..executionStateJson = _withoutApprovalCheckpoint(
+        task.executionStateJson,
+      )
+      // Waiting time must not consume the next execution window, while the
+      // durable action count and committed-operation keys remain intact.
+      ..startedAt = _clock()
+      ..updatedAt = _clock();
+    task.requestedPermissions.clear();
+  }
+
   /// Queues an interrupted or paused task only after an explicit user action.
   Future<void> _implResumeByUser(String taskId) {
     return _serialize(() async {

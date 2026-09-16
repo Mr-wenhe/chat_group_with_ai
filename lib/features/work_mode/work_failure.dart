@@ -90,6 +90,23 @@ class WorkFailure {
       type == WorkFailureType.permissionDenied &&
       '$reason\n$technicalDetail'.contains('角色未授予');
 
+  /// A missing exact approval scope is recoverable by rebuilding the plan.
+  /// It is distinct from a missing role capability or a lost workspace grant;
+  /// neither of those should be silently bypassed by a task retry.
+  bool get canReplanAfterApprovalScopeFailure {
+    if (type != WorkFailureType.permissionDenied) return false;
+    final text = '$reason\n$technicalDetail';
+    return text.contains('审批范围') ||
+        text.toLowerCase().contains('approval scope');
+  }
+
+  /// Keeps panel guidance aligned with the recovery action exposed for a
+  /// stale approval scope. Other consumers retain [suggestedAction] so older
+  /// chat and delivery messages remain compatible.
+  String get panelSuggestedAction => canReplanAfterApprovalScopeFailure
+      ? '点击“重新生成计划”清除失效审批范围并继续。'
+      : suggestedAction;
+
   bool get canReauthorize =>
       type == WorkFailureType.permissionDenied ||
       type == WorkFailureType.authorizationLost;

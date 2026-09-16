@@ -20,15 +20,15 @@ class Stage02WorkspaceFileTool {
   final WorkspacePathPolicy pathPolicy;
   final AgentTask task;
   final String workspaceRoot;
-  final WorkApprovalScope? approvalScope;
-  final WorkChangeApprovalDecision? approvalDecision;
+  WorkApprovalScope? approvalScope;
+  WorkChangeApprovalDecision? approvalDecision;
 
   /// Exact sensitive-read operation approved for this task. A general
   /// mutation decision is deliberately not accepted as a substitute.
-  final String? approvedSensitiveOperation;
+  String? approvedSensitiveOperation;
   final String? approvalCapability;
-  final bool allowImplicitScope;
-  final bool allowWithoutUndo;
+  bool allowImplicitScope;
+  bool allowWithoutUndo;
   final WorkResourceLockManager? resourceLockManager;
   final void Function(String path, String operation)? onSensitiveRead;
 
@@ -51,6 +51,23 @@ class Stage02WorkspaceFileTool {
   bool get acceptsAbsolutePaths => true;
 
   bool isSensitivePath(String path) => files.isSensitivePath(path);
+
+  /// Applies a current settings change without rebuilding the shared registry.
+  void updateImplicitScopeAllowed(bool allowed) {
+    allowImplicitScope = allowed;
+  }
+
+  /// Invalidates approval cached by a registry after a mutation consumes the
+  /// task's one-shot checkpoint. A runner may reuse its registry for the next
+  /// model turn, so retaining the previous exact scope would reject a valid
+  /// ordinary write or accidentally authorize a different operation.
+  void clearApprovalForMutation({required bool allowImplicitScope}) {
+    approvalScope = null;
+    approvalDecision = null;
+    approvedSensitiveOperation = null;
+    allowWithoutUndo = false;
+    this.allowImplicitScope = allowImplicitScope;
+  }
 
   /// Returns the token the runner stores when a sensitive read is paused.
   /// Resolution happens before hashing so relative and absolute spellings of
