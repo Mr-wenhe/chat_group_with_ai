@@ -133,7 +133,8 @@ class WorkArtifactDeliveryGuard {
   /// Validates durable artifact paths for the active task. A path must be
   /// inside the current path policy, be a regular file, and have a
   /// modification timestamp at or after this run. Word additionally requires
-  /// a bounded, structurally valid DOCX with non-empty body text.
+  /// a bounded, structurally valid DOCX with non-empty body text. Resuming
+  /// the same logical task must not make its already-generated artifact stale.
   static Future<WorkArtifactValidationResult> validateTask({
     required AgentTask task,
     required WorkspacePathPolicy pathPolicy,
@@ -169,16 +170,20 @@ class WorkArtifactDeliveryGuard {
       workspaceRoot,
       isWindows: pathPolicy.isWindows,
     );
-    final startedAt = task.startedAt ?? task.createdAt;
-    final freshAfter = startedAt.subtract(fileFreshnessTolerance);
+    final freshAfter = task.createdAt.subtract(fileFreshnessTolerance);
     final checkedAt = now ?? DateTime.now();
     for (final rawPath in task.lastArtifactPaths.take(64)) {
       final raw = rawPath.trim();
       if (raw.isEmpty) continue;
       try {
-        final resolved = await pathPolicy.resolveExisting(raw);
-        final requestedType = await FileSystemEntity.type(
+        final lookupPath = _artifactLookupPath(
           raw,
+          effectiveWorkspaceRoot,
+          isWindows: pathPolicy.isWindows,
+        );
+        final resolved = await pathPolicy.resolveExisting(lookupPath);
+        final requestedType = await FileSystemEntity.type(
+          lookupPath,
           followLinks: false,
         );
         // WorkspacePathPolicy may report a harmless parent alias such as
@@ -298,7 +303,9 @@ class WorkArtifactDeliveryGuard {
     WorkspacePathPolicy pathPolicy, {
     String? workspaceRoot,
   }) async {
-    final location = contract?['location']?.toString().trim() ?? '';
+    final location = _normalizeContractLocation(
+      contract?['location']?.toString().trim() ?? '',
+    );
     final lowerLocation = location.toLowerCase();
     if (location.isEmpty || lowerLocation == 'unspecified') {
       return true;
@@ -339,7 +346,9 @@ class WorkArtifactDeliveryGuard {
                 isWindows: pathPolicy.isWindows,
               );
       }
-      final relativeLocation = _desktopPrefixedRelativePath(location);
+      final relativeLocation = _desktopPrefixedRelativePath(
+        _stripProjectPrefix(location),
+      );
       final baseRoot = workspaceRoot?.trim().isNotEmpty == true
           ? workspaceRoot!.trim()
           : resolved.authorizedRoot;
@@ -352,7 +361,23 @@ class WorkArtifactDeliveryGuard {
               '$baseRoot/${relativeLocation.replaceAll('\\', '/')}',
               isWindows: pathPolicy.isWindows,
             );
-      return normalizedActual == expected;
+      // Discussion contracts may name a directory (for example, “项目下
+      // doc/需求优化文档/”) instead of inventing a filename. Accept only
+      // files inside that existing directory; explicit file paths remain an
+      // exact match.
+      final lastSegment = location.replaceAll('\\', '/').split('/').last;
+      final locationLooksLikeFile =
+          RegExp(r'\.[^./\\]+$').hasMatch(lastSegment);
+      final locationIsDirectory =
+          location.replaceAll('\\', '/').endsWith('/') ||
+              !locationLooksLikeFile && await Directory(expected).exists();
+      return locationIsDirectory
+          ? WorkspacePathPolicy.isWithinRoot(
+              expected,
+              normalizedActual,
+              isWindows: pathPolicy.isWindows,
+            )
+          : normalizedActual == expected;
     } on Object {
       return false;
     }
@@ -387,6 +412,41 @@ class WorkArtifactDeliveryGuard {
     if (match == null) return location;
     final remainder = normalized.substring(match.end);
     return remainder.isEmpty ? 'desktop' : remainder;
+  }
+
+  static String _stripProjectPrefix(String location) {
+    final normalized = location.replaceAll('\\', '/');
+    return normalized.replaceFirst(
+      RegExp(r'^项目(?:下|内)(?:/)?', caseSensitive: false),
+      '',
+    );
+  }
+
+  static String _normalizeContractLocation(String location) {
+    // Discussion summaries may append a non-path confirmation note to the
+    // durable directory contract. Keep the filesystem check strict while
+    // removing only this known workflow annotation.
+    return location
+        .replaceFirst(
+          RegExp(r'[（(]待群内最终确认[）)]\s*$', caseSensitive: false),
+          '',
+        )
+        .trim();
+  }
+
+  static String _artifactLookupPath(
+    String raw,
+    String? workspaceRoot, {
+    required bool isWindows,
+  }) {
+    if (_isAbsolute(raw, isWindows) ||
+        workspaceRoot == null ||
+        workspaceRoot.trim().isEmpty) {
+      return raw;
+    }
+    // Preserve traversal segments for WorkspacePathPolicy to reject. Folding
+    // `..` here would hide the boundary violation before authorization runs.
+    return '${workspaceRoot.trim()}/${raw.replaceAll('\\', '/')}';
   }
 
   static bool _hasExtension(String path, String extension) =>

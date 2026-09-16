@@ -1,6 +1,32 @@
 part of 'work_discussion_runner.dart';
 
 extension _WorkDiscussionRunnerDecisions on WorkDiscussionRunner {
+  /// Ordinary solution choices belong to the group discussion, not the owner.
+  /// Only a real role gap may interrupt the discussion for a user decision;
+  /// unresolved conclusions are handled by the bounded-round convergence gate.
+  bool _shouldEscalateOwnerQuestion({
+    required WorkDiscussionState state,
+    required List<String> qualifiedAvailableIds,
+    required List<_DiscussionMember> availableMembers,
+    required String question,
+  }) {
+    if (question.trim().isEmpty ||
+        state.executorId != null ||
+        qualifiedAvailableIds.isNotEmpty) {
+      return false;
+    }
+    if (availableMembers.any(
+      (member) => _memberMatchesUnresolved(member.character, question),
+    )) {
+      return false;
+    }
+    final normalized = question.replaceAll(RegExp(r'\s+'), '');
+    return RegExp(
+      r'(没有|缺少|无法|需要).*(合适|匹配|可用)?(执行人|执行角色|成员|角色)'
+      r'|(添加|加入|补充|选择|指定).*(成员|角色|执行人|执行角色)',
+    ).hasMatch(normalized);
+  }
+
   Future<void> _finishBlocked(
     AgentTask task,
     WorkDiscussionState state,

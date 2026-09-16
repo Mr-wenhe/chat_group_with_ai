@@ -757,7 +757,7 @@ void main() {
             message.content.contains('@小明') &&
             message.content.contains('最终桌面文件名'),
       ),
-      isTrue,
+      isFalse,
     );
   });
 

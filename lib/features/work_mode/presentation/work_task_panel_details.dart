@@ -77,8 +77,11 @@ class _TaskDetailsState extends State<_TaskDetails> {
         // A discussion reply box can consume most of a short desktop window.
         // Let the live timeline yield space before the panel's action row is
         // pushed outside the Positioned viewport.
+        const timelineHeaderHeight = 40.0;
         final timelineHeight = availableHeight < 300
-            ? (availableHeight * 0.38).clamp(0.0, 180.0).toDouble()
+            ? (availableHeight - timelineHeaderHeight)
+                .clamp(0.0, 180.0)
+                .toDouble()
             : (availableHeight * 0.46).clamp(220.0, 360.0).toDouble();
         return Column(
           crossAxisAlignment: CrossAxisAlignment.stretch,

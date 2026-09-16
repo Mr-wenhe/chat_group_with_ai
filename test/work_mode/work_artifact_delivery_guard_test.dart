@@ -357,6 +357,134 @@ void main() {
     expect(result.path, endsWith('/report.docx'));
   });
 
+  test('project-relative directory contract accepts a DOCX inside it',
+      () async {
+    final root = await Directory.systemTemp.createTemp('s6-project-dir-');
+    final directory = Directory('${root.path}/doc/需求优化文档');
+    await directory.create(recursive: true);
+    addTearDown(() => root.delete(recursive: true));
+    final path = '${directory.path}/需求优化文档.docx';
+    await File(path).writeAsBytes(_minimalDocx('项目需求正文'));
+
+    final task = _wordTask(
+      path,
+      root.path,
+      location: '项目下doc/需求优化文档/',
+    );
+    final result = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+      workspaceRoot: root.path,
+    );
+
+    expect(result.valid, isTrue, reason: result.message);
+    expect(result.path, endsWith('/doc/需求优化文档/需求优化文档.docx'));
+  });
+
+  test('directory contract ignores its final confirmation annotation',
+      () async {
+    final root = await Directory.systemTemp.createTemp('s6-contract-note-');
+    final directory = Directory('${root.path}/doc/需求优化文档');
+    await directory.create(recursive: true);
+    addTearDown(() => root.delete(recursive: true));
+    final path = '${directory.path}/需求优化文档.docx';
+    await File(path).writeAsBytes(_minimalDocx('项目需求正文'));
+
+    final task = _wordTask(
+      path,
+      root.path,
+      location: '项目下doc/需求优化文档/（待群内最终确认）',
+    );
+    final result = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+      workspaceRoot: root.path,
+    );
+
+    expect(result.valid, isTrue, reason: result.message);
+  });
+
+  test('explicit file contract does not widen for a same-named directory',
+      () async {
+    final root = await Directory.systemTemp.createTemp('s6-file-contract-');
+    final directory = Directory('${root.path}/report.docx');
+    await directory.create(recursive: true);
+    final path = '${directory.path}/nested.docx';
+    await File(path).writeAsBytes(_minimalDocx('不应被接受'));
+    addTearDown(() => root.delete(recursive: true));
+
+    final task = _wordTask(path, root.path, location: 'report.docx');
+    final result = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+      workspaceRoot: root.path,
+    );
+
+    expect(result.valid, isFalse);
+    expect(result.code, 'docxInvalidOrStale');
+  });
+
+  test('relative recorded artifact resolves from the task workspace', () async {
+    final root = await Directory.systemTemp.createTemp('s6-relative-artifact-');
+    final directory = Directory('${root.path}/doc/需求优化文档');
+    await directory.create(recursive: true);
+    addTearDown(() => root.delete(recursive: true));
+    final path = '${directory.path}/需求优化文档.docx';
+    await File(path).writeAsBytes(_minimalDocx('项目需求正文'));
+
+    final task = _wordTask(
+      'doc/需求优化文档/需求优化文档.docx',
+      root.path,
+      location: '项目下doc/需求优化文档/',
+    );
+    final result = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+      workspaceRoot: root.path,
+    );
+
+    expect(result.valid, isTrue, reason: result.message);
+    expect(result.path, endsWith('/doc/需求优化文档/需求优化文档.docx'));
+  });
+
+  test('relative artifact traversal is rejected before authorization',
+      () async {
+    final root = await Directory.systemTemp.createTemp('s6-traversal-');
+    final workspace = Directory('${root.path}/workspace');
+    await workspace.create(recursive: true);
+    final path = '${root.path}/outside.docx';
+    await File(path).writeAsBytes(_minimalDocx('越界正文'));
+    addTearDown(() => root.delete(recursive: true));
+
+    final task = _wordTask('../outside.docx', root.path);
+    final result = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+      workspaceRoot: workspace.path,
+    );
+
+    expect(result.valid, isFalse);
+    expect(result.code, 'docxInvalidOrStale');
+  });
+
+  test('resumed task keeps an artifact created before its latest start fresh',
+      () async {
+    final root = await Directory.systemTemp.createTemp('s6-resumed-artifact-');
+    addTearDown(() => root.delete(recursive: true));
+    final path = '${root.path}/需求优化文档.docx';
+    await File(path).writeAsBytes(_minimalDocx('重试正文'));
+
+    final task = _wordTask(path, root.path)
+      ..createdAt = DateTime.now().subtract(const Duration(minutes: 1))
+      ..startedAt = DateTime.now();
+    final result = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+    );
+
+    expect(result.valid, isTrue, reason: result.message);
+  });
+
   test('redacted target location falls back to the authorized workspace',
       () async {
     final root = await Directory.systemTemp.createTemp('s6-redacted-location-');

@@ -94,6 +94,20 @@ void main() {
     );
     expect(questionAction.kind, WorkTaskUserActionKind.answerQuestion);
     expect(questionAction.blockerId, 'missingUserInformation');
+
+    final inGroupDecisionTask = _task(
+      id: 'in-group-decision-task',
+      executionStateJson: jsonEncode({
+        'discussionState': _discussion(
+          candidates: const <String>['front'],
+          executorId: 'front',
+          phase: WorkDiscussionPhase.awaitingDiscussion,
+          openQuestions: const <String>['请在群内确定默认重试次数'],
+          blockers: const <String>[],
+        ).toJson(),
+      }),
+    );
+    expect(WorkTaskUserAction.forTask(inGroupDecisionTask), isEmpty);
   });
 
   test('does not ask the user to add a role while candidates are being elected',

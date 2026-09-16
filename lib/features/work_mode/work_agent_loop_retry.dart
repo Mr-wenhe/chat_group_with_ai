@@ -113,6 +113,8 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     final repairContext = <String, dynamic>{
       ...original.context,
       'repairInstruction': '只返回一个合法 AgentDecision JSON object；'
+          'action 只能放在顶层，禁止把 action、reason 或 public_update 放进 tool.arguments；'
+          'tool.arguments 只能包含对应工具 schema 声明的字段；'
           'command.run 的 arguments 必须是 JSON 字符串数组，'
           '即使只有一个参数也必须写成 ["test"]，不得返回字符串。',
     };

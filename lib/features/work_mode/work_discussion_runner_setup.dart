@@ -24,8 +24,11 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
       return;
     }
     if (initial.phase == WorkDiscussionPhase.blocked) return;
+    final hasCandidateHint = initial.candidateCharacterIds.isNotEmpty;
     final userBlocker = initial.blockers.firstWhere(
-      WorkDiscussionRunner.userDecisionBlockers.contains,
+      (blocker) =>
+          WorkDiscussionRunner.userDecisionBlockers.contains(blocker) &&
+          !(blocker == 'missingQualifiedRole' && hasCandidateHint),
       orElse: () => '',
     );
     if (userBlocker.isNotEmpty) {
@@ -331,7 +334,13 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
         .where(
           (blocker) =>
               blocker != 'discussionRequired' &&
-              blocker != 'executorSelectionRequired',
+              blocker != 'executorSelectionRequired' &&
+              // Older checkpoints treated every model question as a user
+              // blocker. Ordinary decisions now stay inside the group; a
+              // genuine role gap is represented separately below.
+              blocker != 'missingUserInformation' &&
+              !(blocker == 'missingQualifiedRole' &&
+                  candidateIds.any(availableIds.contains)),
         )
         .toList(growable: false);
     return state.copyWith(

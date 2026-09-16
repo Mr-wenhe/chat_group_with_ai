@@ -38,6 +38,7 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
   void _startAutoChat() {
     if (!ChatActivityPolicy.canStartAutoChat(
       workModeEnabled: _workModeEnabled,
+      hasActiveWorkTask: _latestWorkTaskForConversation()?.isTerminal == false,
       autoChatEnabled: _isAutoChatEnabled,
       hasCharacters: _characters.isNotEmpty,
       hasApiConfig: _hasAnyApiConfig,
@@ -83,8 +84,13 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
   /// - 本 burst 轮数达上限 → 停止并冷却 [_autoChatBurstPause]。
   Future<void> _tryAutoChatRound() async {
     if (!_pageActive) return;
+    if (_latestWorkTaskForConversation()?.isTerminal == false) {
+      _stopAutoChat();
+      return;
+    }
     if (!ChatActivityPolicy.canStartAutoChat(
       workModeEnabled: _workModeEnabled,
+      hasActiveWorkTask: _latestWorkTaskForConversation()?.isTerminal == false,
       autoChatEnabled: _isAutoChatEnabled,
       hasCharacters: _characters.isNotEmpty,
       hasApiConfig: _hasAnyApiConfig,

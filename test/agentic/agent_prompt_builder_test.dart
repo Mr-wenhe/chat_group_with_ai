@@ -52,6 +52,8 @@ void main() {
     );
 
     expect(prompt, contains('固定顶层字段'));
+    expect(prompt, contains('禁止复制到 tool.arguments'));
+    expect(prompt, contains('不要在 arguments 中添加 action'));
     expect(prompt, contains('action 只能是 plan、tool、clarify、handoff、finish'));
     expect(prompt, contains('public_update'));
     expect(prompt, contains('只写用户可见的动作、依据或结论'));
