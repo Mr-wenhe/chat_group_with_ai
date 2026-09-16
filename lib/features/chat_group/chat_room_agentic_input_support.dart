@@ -700,6 +700,22 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         .taskForConversation(widget.groupId);
   }
 
+  /// 是否应让空闲自动聊天让位于进行中的工作任务。
+  ///
+  /// 仅用于自动聊天让位判断，因此允许降级：工作模式运行时尚未就绪时按
+  /// "没有进行中任务"处理。若在这里抛出，异常会穿到 `_loadData` 的兜底
+  /// 分支，把"暂停闲聊"这一咨询性问题升级成整页加载失败，反而让会话不可用。
+  ///
+  /// 任务所有权判断必须继续走 [_latestWorkTaskForConversation]：那里静默
+  /// 返回 null 会把恢复中任务的修订请求误判成新任务，破坏任务连续性。
+  bool get _hasActiveWorkTaskForAutoChat {
+    try {
+      return _latestWorkTaskForConversation()?.isTerminal == false;
+    } on Object {
+      return false;
+    }
+  }
+
   /// 执行一轮普通群聊 / 私聊的 AI 回复。
   ///
   /// [userMessage] 本轮触发的用户文本（自动聊天时为 null）；

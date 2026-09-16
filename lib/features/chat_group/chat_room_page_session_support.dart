@@ -101,8 +101,7 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       _scheduleAgentTaskRecovery();
       if (ChatActivityPolicy.canStartAutoChat(
         workModeEnabled: _workModeEnabled,
-        hasActiveWorkTask:
-            _latestWorkTaskForConversation()?.isTerminal == false,
+        hasActiveWorkTask: _hasActiveWorkTaskForAutoChat,
         autoChatEnabled: _isAutoChatEnabled,
         hasCharacters: loaded.activeCharacters.isNotEmpty,
         hasApiConfig: loaded.hasAnyApiConfig,
