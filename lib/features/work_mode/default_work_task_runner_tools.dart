@@ -193,7 +193,11 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
           final denied = permission(ToolPermission.workspaceRead);
           if (!denied.succeeded) return denied;
           return _mapFileResult(await stage02.listWithOptions(
-            path: invocation.arguments['path']?.toString() ?? '.',
+            // A missing, null or blank path means "the authorized workspace
+            // root". Stringifying it produced the literal path "null", which
+            // the path policy then rejected as a non-existent target and the
+            // loop reported as a fatal internal failure.
+            path: _workspaceListPath(invocation.arguments['path']),
             page: _intArgument(invocation.arguments['page'], 0),
             pageSize: _intArgument(invocation.arguments['pageSize'], 200),
             recursive: invocation.arguments['recursive'] == true,

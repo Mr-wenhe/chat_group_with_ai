@@ -193,6 +193,21 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
   int _intArgument(Object? value, int fallback) =>
       value is int && value >= 0 ? value : fallback;
 
+  /// Normalizes an optional tool path. Anything other than a non-blank string
+  /// means "the current authorized workspace root": a model may omit the
+  /// argument, send an explicit `null`, or send an empty string, and
+  /// `null.toString()` would otherwise become the literal path `null`.
+  /// Exactly `.` and `./` also fold to the root so every spelling resolves to
+  /// the same authorized directory.
+  String _workspaceListPath(Object? rawPath) {
+    if (rawPath is! String) return '.';
+    final value = rawPath.trim().replaceAll('\\', '/');
+    if (value.isEmpty) return '.';
+    final withoutTrailingSeparator =
+        value.length > 1 ? value.replaceFirst(RegExp(r'/+$'), '') : value;
+    return withoutTrailingSeparator.isEmpty ? '.' : withoutTrailingSeparator;
+  }
+
   String _defaultWeatherLocation() {
     try {
       final profile = database.userProfileBox.get('me');
@@ -384,7 +399,7 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
       '角色可发现技能目录（全局技能按需加载；角色已绑定技能正文会注入；权限仍需通过角色授权与工具策略交集校验）：\n$skillCatalog',
       if (skillPreflight != null) skillPreflight,
       '当前生产 WorkAgentLoop 已注册工具：$tools。',
-      '当前授权工作区绝对路径：$workspaceRoot。command.run 的 workingDirectory 为空时会自动解析为当前授权工作区；不要填写 "."，也禁止填写工作区外路径。',
+      '当前授权工作区绝对路径：$workspaceRoot。command.run 的 workingDirectory 为空时会自动解析为当前授权工作区；不要填写 "."，也禁止填写工作区外路径。workspace.list 省略 path 即表示该根目录，无需再拼接绝对路径，也不要为列目录改用 command.run。',
       if (targetsDesktop)
         '用户明确指定“桌面”：当前工作区已绑定到授权的桌面根目录；请直接使用相对文件名，不要再添加 Desktop/ 或 conversations/ 前缀。',
       if (task.plan.trim().isNotEmpty) '公开角色路由计划：${task.plan.trim()}',
