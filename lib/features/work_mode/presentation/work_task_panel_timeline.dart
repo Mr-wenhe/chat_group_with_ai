@@ -209,19 +209,6 @@ bool _pendingToolRequiresPlan(AgentTask task) {
       pending?.tool == AgentToolName.workspaceDelete;
 }
 
-bool _pendingToolRequiresNoUndo(
-  AgentTask task,
-  WorkChangePlan? approvalPlan,
-) {
-  final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
-  if (pending?.tool == AgentToolName.skillCreate ||
-      pending?.tool == AgentToolName.skillDownload) {
-    return true;
-  }
-  return approvalPlan != null &&
-      (!approvalPlan.snapshotAvailable || !approvalPlan.reversible);
-}
-
 bool _taskNeedsFolderGrant(AgentTask task) {
   if (task.status != AgentTaskStatus.waitingForApproval &&
       task.status != AgentTaskStatus.paused &&

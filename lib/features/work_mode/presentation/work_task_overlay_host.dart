@@ -9,8 +9,8 @@ import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
 import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_generic_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
-import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/presentation/visible_browser_panel.dart';
 import 'package:chat_group/features/work_mode/providers/work_task_providers.dart';
@@ -829,30 +829,11 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         );
       } else {
         final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
-        decision = await showDialog<WorkChangeApprovalDecision>(
-          context: navigatorContext,
-          barrierDismissible: true,
-          builder: (dialogContext) => AlertDialog(
-            key: const Key('work-generic-approval-dialog'),
-            title: const Text('工作任务需要审批'),
-            content: Text(
-              pending == null
-                  ? '任务准备执行一项需要确认的操作。'
-                  : WorkModePolicy.approvalSummary(pending),
-            ),
-            actions: <Widget>[
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext)
-                    .pop(WorkChangeApprovalDecision.rejected),
-                child: const Text('拒绝并暂停'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(dialogContext)
-                    .pop(WorkChangeApprovalDecision.approved),
-                child: const Text('允许本次操作'),
-              ),
-            ],
-          ),
+        final requiresNoUndo = taskRequiresNoUndoApproval(task, plan);
+        decision = await WorkTaskGenericApprovalDialog.show(
+          navigatorContext,
+          pending: pending,
+          requiresNoUndo: requiresNoUndo,
         );
       }
     } finally {

@@ -73,7 +73,7 @@ class _TaskActions extends StatelessWidget {
     final approvalPlan = approvalPlanForTask(task);
     final requiresPlan = _pendingToolRequiresPlan(task);
     final approvalPlanUnavailable = requiresPlan && approvalPlan == null;
-    final requiresNoUndo = _pendingToolRequiresNoUndo(task, approvalPlan);
+    final requiresNoUndo = taskRequiresNoUndoApproval(task, approvalPlan);
     final needsFolder = _taskNeedsFolderGrant(task);
     final hasInstallSuggestion = _taskHasInstallSuggestion(task);
     final needsVisionModel = _taskNeedsVisionModel(task);
