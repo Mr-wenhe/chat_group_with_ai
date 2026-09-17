@@ -12,16 +12,33 @@ class WorkArtifactValidationResult {
   final bool valid;
   final String code;
   final String message;
+
+  /// The first validated deliverable, kept for callers that need one path.
   final String? path;
 
-  const WorkArtifactValidationResult.valid({this.path})
-      : valid = true,
+  /// Every candidate that satisfied the contract this run. An ordinary task
+  /// leaves this empty (it declares no file contract), while an artifact task
+  /// reports all of its deliverables so delivery can ignore the intermediate
+  /// files the same run also wrote.
+  final List<String> deliveredPaths;
+
+  /// Whether the request carried a file contract at all.
+  final bool requiresArtifact;
+
+  const WorkArtifactValidationResult.valid({
+    this.path,
+    this.deliveredPaths = const <String>[],
+    this.requiresArtifact = false,
+  })  : valid = true,
         code = 'ok',
         message = '交付产物已通过格式、位置、可读性和正文校验。';
 
   const WorkArtifactValidationResult.invalid(this.code, this.message)
       : valid = false,
-        path = null;
+        path = null,
+        deliveredPaths = const <String>[],
+        // A missing deliverable is still an artifact contract.
+        requiresArtifact = true;
 }
 
 /// Completion guard for file deliverables in production work mode.
@@ -106,12 +123,20 @@ class WorkArtifactDeliveryGuard {
 
   /// Returns whether a request asks for a non-source file. Read/review
   /// requests remain ordinary analysis.
+  ///
+  /// The Office family and PDF belong here even though they are binary: a
+  /// workbook or slide deck is a deliverable the user has to receive as a file
+  /// just like a Markdown document. Leaving them out made “生成一份 xlsx 排名表”
+  /// count as a request with no artifact contract, so its completion was never
+  /// validated against a real file.
   static bool requiresFileArtifact(String request) {
     final text = request.trim().toLowerCase();
     if (text.isEmpty || !_containsCreationVerb(text)) return false;
     return RegExp(
       r'(?:文件|文档|报告|报表|清单|表格|附件|markdown|md文档|'
-      r'\bword\b|\bdocx?\b|html5?|网页|页面|网站|前端|\.(?:md|markdown|txt|csv|json|ya?ml|html?|docx?)\b)',
+      r'\bword\b|\bdocx?\b|\bxlsx?\b|\bpptx?\b|\bpdf\b|'
+      r'html5?|网页|页面|网站|前端|'
+      r'\.(?:md|markdown|txt|csv|json|ya?ml|html?|docx?|xlsx?|pptx?|pdf)\b)',
       caseSensitive: false,
     ).hasMatch(text);
   }
@@ -150,7 +175,9 @@ class WorkArtifactDeliveryGuard {
         isRevisionTask(task) ||
         requiresSourceArtifact(task.userRequest) ||
         requiresFileArtifact(task.userRequest);
-    if (!needsFile) return const WorkArtifactValidationResult.valid();
+    if (!needsFile) {
+      return const WorkArtifactValidationResult.valid();
+    }
     if (task.lastArtifactPaths.isEmpty) {
       return WorkArtifactValidationResult.invalid(
         needsDocx ? 'docxMissing' : 'artifactMissing',
@@ -172,6 +199,13 @@ class WorkArtifactDeliveryGuard {
     );
     final freshAfter = task.createdAt.subtract(fileFreshnessTolerance);
     final checkedAt = now ?? DateTime.now();
+    final declaredFormats = declaredOutputFormats(task);
+    // A run legitimately writes intermediate files next to its deliverable (a
+    // script, a data dump, a conversion source). Every candidate is therefore
+    // validated against the contract and the accepted ones are returned, so
+    // callers can deliver the deliverables without guessing from the paths that
+    // happened to change.
+    final validatedPaths = <String>[];
     for (final rawPath in task.lastArtifactPaths.take(64)) {
       final raw = rawPath.trim();
       if (raw.isEmpty) continue;
@@ -229,12 +263,26 @@ class WorkArtifactDeliveryGuard {
           final bytes = await file.readAsBytes();
           if (!_isCompleteHtml(bytes)) continue;
         }
-        return WorkArtifactValidationResult.valid(path: resolved.path);
+        if (declaredFormats.isNotEmpty &&
+            !declaredFormats.any(
+              (format) => _matchesDeclaredFormat(resolved.path, format),
+            )) {
+          continue;
+        }
+        validatedPaths.add(resolved.path);
+        continue;
       } on Object {
         // A malformed or unauthorized candidate must not make another
         // candidate appear valid; raw filesystem details stay private.
         continue;
       }
+    }
+    if (validatedPaths.isNotEmpty) {
+      return WorkArtifactValidationResult.valid(
+        path: validatedPaths.first,
+        deliveredPaths: List<String>.unmodifiable(validatedPaths),
+        requiresArtifact: true,
+      );
     }
     return WorkArtifactValidationResult.invalid(
       needsDocx
@@ -447,6 +495,65 @@ class WorkArtifactDeliveryGuard {
     // Preserve traversal segments for WorkspacePathPolicy to reject. Folding
     // `..` here would hide the boundary violation before authorization runs.
     return '${workspaceRoot.trim()}/${raw.replaceAll('\\', '/')}';
+  }
+
+  /// Output formats the request (or the durable discussion contract) names
+  /// explicitly, as canonical file extensions without the dot.
+  ///
+  /// A request that names a format must be delivered in that format: without
+  /// this check an intermediate file satisfies the presence contract, so
+  /// “生成一份 xlsx 排名表” auto-completed as soon as its generator script was
+  /// written.
+  static Set<String> declaredOutputFormats(AgentTask task) {
+    // A durable discussion contract is authoritative. A “Markdown 转 Word” task
+    // must deliver only the DOCX, not also the Markdown it converted from.
+    final contractFormat = contractFormatForTask(task);
+    if (contractFormat != null) {
+      final canonical = _canonicalFormat(contractFormat);
+      if (canonical != null) return <String>{canonical};
+    }
+    final formats = <String>{};
+    // Users write the format either bare (“一份 xlsx 表”) or as an extension
+    // (“ranking.xlsx”), so both spellings have to be recognised. The extension
+    // group is restricted to known formats: a generic `\.\w+` also matched
+    // version numbers such as “v2.10” and produced the format “10”.
+    for (final match in RegExp(
+      r'\b(markdown|xlsx?|docx?|pptx?|pdf|html5?|csv|json|ya?ml|txt|word)\b|'
+      r'\.(md|markdown|txt|csv|json|ya?ml|html?|docx?|xlsx?|pptx?|pdf)\b',
+      caseSensitive: false,
+    ).allMatches(task.userRequest)) {
+      final raw = (match.group(1) ?? match.group(2))?.toLowerCase();
+      if (raw == null || raw.isEmpty) continue;
+      final canonical = _canonicalFormat(raw);
+      if (canonical != null) formats.add(canonical);
+    }
+    return formats;
+  }
+
+  /// Maps every spelling used by the request parser, the discussion contract and
+  /// the user's own wording onto one extension. Returns null for a word that is
+  /// not an output format at all.
+  static String? _canonicalFormat(String raw) => switch (raw.toLowerCase()) {
+        'word' || 'doc' || 'docx' => 'docx',
+        'xls' || 'xlsx' => 'xlsx',
+        'ppt' || 'pptx' => 'pptx',
+        'markdown' || 'md' => 'md',
+        'html' || 'html5' || 'htm' => 'html',
+        'yml' || 'yaml' => 'yaml',
+        'pdf' || 'csv' || 'json' || 'txt' => raw.toLowerCase(),
+        _ => null,
+      };
+
+  /// Whether a file satisfies one canonical format. `docx` also accepts the
+  /// legacy `.doc`, and `html` accepts `.htm`, because both spellings are the
+  /// same deliverable to the user.
+  static bool _matchesDeclaredFormat(String path, String format) {
+    if (_hasExtension(path, format)) return true;
+    return switch (format) {
+      'docx' => _hasExtension(path, 'doc'),
+      'html' => _hasExtension(path, 'htm'),
+      _ => false,
+    };
   }
 
   static bool _hasExtension(String path, String extension) =>

@@ -153,6 +153,12 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
         WorkArtifactDeliveryGuard.requiresFileArtifact(task.userRequest) ||
         WorkArtifactDeliveryGuard.requiresSourceArtifact(task.userRequest);
 
+    // Deliverables accepted by the contract check. Delivery is scoped to these
+    // paths so an intermediate file the same run wrote (a script, a conversion
+    // source) cannot be attached as if it were a deliverable, nor make the
+    // attachment step fail on a file the user never asked for.
+    var validatedDeliverables = const <String>[];
+
     if (enforceArtifactContract) {
       final files = workspaceFileService;
       if (files != null) {
@@ -172,6 +178,7 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
             messageId: message.id,
           );
         }
+        validatedDeliverables = validation.deliveredPaths;
       } else if (requiresArtifactDelivery) {
         const failureMessage = WorkArtifactDeliveryGuard.missingArtifactMessage;
         message.content = _artifactDeliveryFailureContent(failureMessage);
@@ -201,7 +208,10 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     var retryWithExistingArtifact = false;
     try {
       try {
-        final selection = await _safeArtifactsForAttachment(task);
+        final selection = await _safeArtifactsForAttachment(
+          task,
+          deliverablePaths: validatedDeliverables,
+        );
         final files = selection.files;
         final attachmentSkippedNames = <String>[];
         final deliveredArchivePaths = <String>[];
@@ -449,24 +459,41 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     );
   }
 
+  /// Tools whose result can prove that a task's deliverable already exists.
+  ///
+  /// `command.run` belongs here because a script writing the workbook produces
+  /// it just as directly as `workspace.patch` produces a text file. Without it a
+  /// “write a script, then run it” task never auto-completed and kept re-reading
+  /// and re-running a finished artifact.
+  static const Set<AgentToolName> _artifactCompletionTools = {
+    AgentToolName.workspacePatch,
+    AgentToolName.commandRun,
+  };
+
+  /// Finishes a single-deliverable task as soon as its contract is satisfied.
+  ///
+  /// The decision uses the contract check, not “how many files changed”: one run
+  /// normally writes an intermediate script as well, and any change-count rule
+  /// either blocks the completion or treats the script as a deliverable.
   Future<AgentFinishCompletion?> _autoCompleteAfterArtifact(
     AgentTask task,
     AgentToolCall call,
     WorkToolResult result,
   ) async {
-    if (call.name != AgentToolName.workspacePatch ||
-        result.data['changed'] != true ||
+    if (!_artifactCompletionTools.contains(call.name) ||
+        !_artifactToolChanged(call, result) ||
         !_canAutoCompleteSingleArtifact(task)) {
       return null;
     }
-    final requiresArtifact = WorkArtifactDeliveryGuard.isRevisionTask(task) ||
-        WorkArtifactDeliveryGuard.requiresDocxArtifact(
-          task.userRequest,
-          contractFormat: WorkArtifactDeliveryGuard.contractFormatForTask(task),
-        ) ||
-        WorkArtifactDeliveryGuard.requiresFileArtifact(task.userRequest) ||
-        WorkArtifactDeliveryGuard.requiresSourceArtifact(task.userRequest);
-    if (!requiresArtifact) return null;
+    // A command reports every file it touched in `artifactPaths`, so a successful
+    // run alone does not prove the deliverable exists: “开发一个网页应用” would
+    // finish as soon as its first script ran. Requiring a format the user named
+    // (or the discussion contract fixed) keeps the command branch as narrow as
+    // the `workspace.patch` branch it replaced.
+    if (call.name == AgentToolName.commandRun &&
+        WorkArtifactDeliveryGuard.declaredOutputFormats(task).isEmpty) {
+      return null;
+    }
     final files = workspaceFileService;
     if (files == null) return null;
     final validation = await WorkArtifactDeliveryGuard.validateTask(
@@ -475,7 +502,10 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
       workspaceRoot: _workspaceRootForTask(task),
       now: clock(),
     );
-    if (!validation.valid) return null;
+    // A request without a file contract is not an artifact task; one whose
+    // deliverable is missing or invalid must keep looping so the model can fix
+    // it.
+    if (!validation.valid || !validation.requiresArtifact) return null;
     final path = validation.path ?? result.data['path']?.toString() ?? '';
     final requestHint = _safeCompletionRequestHint(task.userRequest);
     final baseSummary = path.trim().isEmpty
@@ -485,10 +515,23 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
       summary:
           requestHint == null ? baseSummary : '$baseSummary 请求摘要：$requestHint。',
       evidence: [
-        'workspace.patch 返回 changed=true',
+        '${call.name.wireName} 确认产物已写入',
         if (path.trim().isNotEmpty) '已验证路径：$path',
       ],
     );
+  }
+
+  /// Whether a tool result committed a change that could complete an artifact
+  /// task. `workspace.patch` reports `changed`; a successful `command.run`
+  /// reports the files it created.
+  bool _artifactToolChanged(AgentToolCall call, WorkToolResult result) {
+    if (call.name == AgentToolName.workspacePatch) {
+      return result.data['changed'] == true;
+    }
+    final artifacts = result.data['artifactPaths'];
+    return result.data['runStatus'] == WorkCommandRunStatus.completed.name &&
+        artifacts is List &&
+        artifacts.whereType<String>().any((path) => path.trim().isNotEmpty);
   }
 
   String? _safeCompletionRequestHint(String request) {
@@ -508,18 +551,14 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     return hint;
   }
 
+  /// Whether the request names a single deliverable, so the run can finish as
+  /// soon as the artifact contract is satisfied.
+  ///
+  /// This deliberately counts the extensions the user wrote instead of the
+  /// files the run changed: one run legitimately writes an intermediate script
+  /// next to its deliverable, and a change-count rule would read that as “this
+  /// task produces several files” and never auto-complete.
   bool _canAutoCompleteSingleArtifact(AgentTask task) {
-    final execution = _decodeMap(task.executionStateJson);
-    final rawChanges = execution['artifactChanges'];
-    final changedPaths = rawChanges is Map
-        ? rawChanges.entries
-            .where((entry) =>
-                entry.value is Map && (entry.value as Map)['changed'] == true)
-            .map((entry) => entry.key.toString())
-            .where((path) => path.trim().isNotEmpty)
-            .toSet()
-        : <String>{};
-    if (changedPaths.length != 1) return false;
     if (WorkArtifactDeliveryGuard.isRevisionTask(task)) return true;
     final request = task.userRequest.toLowerCase();
     if (RegExp(r'全部|所有|多个|多份|多文件|all\s+files|multiple', caseSensitive: false)
@@ -527,7 +566,7 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
       return false;
     }
     final explicitExtensions = RegExp(
-      r'\.(?:html?|css|js|ts|jsx|tsx|vue|dart|py|md|txt|json|ya?ml)\b',
+      r'\.(?:html?|css|js|ts|jsx|tsx|vue|dart|py|md|txt|json|ya?ml|xlsx?|pptx?|docx?|pdf|csv)\b',
       caseSensitive: false,
     ).allMatches(request).length;
     return explicitExtensions <= 1;

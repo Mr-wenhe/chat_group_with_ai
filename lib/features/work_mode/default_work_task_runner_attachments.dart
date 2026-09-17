@@ -1,16 +1,25 @@
 part of 'default_work_task_runner.dart';
 
 extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
+  /// Collects the files this run may attach.
+  ///
+  /// When [deliverablePaths] is non-empty the task declared a file contract and
+  /// every candidate passed that contract, so only those paths are considered.
+  /// Without it the run has no contract and the ordinary set of changed files is
+  /// used.
   Future<_ArtifactAttachmentSelection> _safeArtifactsForAttachment(
-    AgentTask task,
-  ) async {
+    AgentTask task, {
+    List<String> deliverablePaths = const <String>[],
+  }) async {
     final files = workspaceFileService;
     if (files == null || task.lastArtifactPaths.isEmpty) {
       return const _ArtifactAttachmentSelection();
     }
+    final candidates =
+        deliverablePaths.isEmpty ? task.lastArtifactPaths : deliverablePaths;
     final entries = <_ArtifactFileEntry>[];
     final skipped = <String>[];
-    for (final raw in task.lastArtifactPaths) {
+    for (final raw in candidates) {
       try {
         final resolved = await files.pathPolicy.resolveExisting(raw);
         // `wasSymbolicLink` also reports harmless platform aliases such as
@@ -191,10 +200,45 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
         .split('/')
         .where((segment) =>
             segment.isNotEmpty && segment != '.' && segment != '..')
-        .map((segment) => segment.replaceAll(RegExp(r'[^A-Za-z0-9._ -]'), '_'))
+        .map(_archiveSafeSegment)
         .where((segment) => segment.isNotEmpty)
         .toList(growable: false);
     return safeSegments.isEmpty ? 'artifact' : safeSegments.join('/');
+  }
+
+  /// Characters that could escape the staging directory or break the archive
+  /// entry name. Control characters are handled separately by code point so no
+  /// regex range can silently swallow printable ASCII.
+  static const String _unsafeArchiveCharacters = r'/\:*?"<>|';
+
+  String _archiveSafeSegment(String segment) {
+    final withoutTraversal = segment.replaceAll('..', '_');
+    final buffer = StringBuffer();
+    for (final rune in withoutTraversal.runes) {
+      final isControl = rune < 0x20 || rune == 0x7f;
+      final character = String.fromCharCode(rune);
+      buffer.write(
+        isControl || _unsafeArchiveCharacters.contains(character)
+            ? '_'
+            : character,
+      );
+    }
+    final collapsed = buffer.toString().replaceAll(RegExp(r'_{2,}'), '_');
+    final trimmed = collapsed
+        .replaceFirst(RegExp(r'^[. _]+'), '')
+        .replaceFirst(RegExp(r'[. _]+$'), '');
+    // Archive entries have a 255-byte name limit on most extractors; 80
+    // characters keeps multi-byte names comfortably inside it. Two long names
+    // that share a prefix would otherwise truncate to the SAME entry, and most
+    // extractors silently keep one — so the truncation carries a short digest of
+    // the full name.
+    final runes = trimmed.runes.toList(growable: false);
+    if (runes.length <= 80) return trimmed;
+    final digest = workArtifactNameDigest(trimmed);
+    return String.fromCharCodes(runes.take(80)).replaceFirst(
+      RegExp(r'(.{8})$'),
+      '_${digest.substring(0, 8)}',
+    );
   }
 
   String? _workspaceRootForTask(AgentTask task) {
