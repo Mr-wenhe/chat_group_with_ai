@@ -689,6 +689,82 @@ void main() {
     expect(model.requests, hasLength(5));
   });
 
+  test('pauses when a repaired command keeps failing with the same error',
+      () async {
+    // 回归：模型每次“修复”都改写了命令文本，但进程错误完全没变。旧指纹包含
+    // 整条命令，所以每次都算“新失败”，循环检测永不触发，一次任务因此空转
+    // 十几步。现在只要退出码 + stderr 末行相同，修复一次后即暂停。
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(path: 'v1.py'))
+      ..responses.add(_toolDecision(path: 'v2.py'))
+      ..responses.add(_toolDecision(path: 'v3.py'))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.failed(
+            message: '命令退出码为 1。',
+            data: {
+              'runStatus': 'failed',
+              'exitCode': 1,
+              'stderr': 'Traceback (most recent call last):\n'
+                  '  File "v1.py", line 3\n'
+                  "NameError: name 'rank' is not defined",
+            },
+            failureCode: 'commandFailed',
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final task = _task(id: 'command-repaired-same-outcome');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(result.message, contains('自动修复没有取得进展'));
+    expect(tool.calls, 2, reason: '同一错误只允许一次诚实的修复尝试');
+    expect(task.lastError, contains('自动修复没有取得进展'));
+  });
+
+  test('continues when the repaired command produces a new error', () async {
+    // 反向：末行错误确实变化时，说明修复在推进，必须继续自动修复。
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(path: 'v1.py'))
+      ..responses.add(_toolDecision(path: 'v2.py'))
+      ..responses.add(_toolDecision(path: 'v3.py'))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool();
+    var calls = 0;
+    tool.behavior = (_) {
+      calls++;
+      if (calls >= 3) {
+        return const WorkToolResult.success(message: '脚本执行成功。');
+      }
+      return WorkToolResult.failed(
+        message: '命令退出码为 1。',
+        data: {
+          'runStatus': 'failed',
+          'exitCode': 1,
+          'stderr': 'Traceback (most recent call last):\n'
+              "NameError: name 'step$calls' is not defined",
+        },
+        failureCode: 'commandFailed',
+      );
+    };
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final result = await loop.execute(_task(id: 'command-new-outcome'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(tool.calls, 3);
+  });
+
   test('continues command repair after a timeout', () async {
     final model = _FakeModel()
       ..responses.add(_toolDecision())

@@ -68,6 +68,38 @@ void main() {
     expect(prompt, isNot(contains('<tool_call>')));
   });
 
+  test('Stage 03 prompt steers the model away from inline command bodies', () {
+    // 回归：模型用 `python3 -c "..."` 内联一行流时，引号转义极易报语法错误，
+    // 且内联代码会被判为“影响范围不确定”而每次都要重新审批。提示词必须要求
+    // 先写脚本文件再执行，并限制产物登记范围。
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '从网上取数并生成一份 Excel 排名表',
+    );
+
+    expect(prompt, contains('先用 workspace.patch 写出一个可运行的脚本文件'));
+    expect(prompt, contains('python3 -c'));
+    expect(prompt, contains('bash -c'));
+    expect(prompt, contains('引号转义'));
+    expect(prompt, contains('影响范围不确定'));
+    expect(prompt, contains('不要登记中间脚本'));
+    expect(prompt, contains('重复登记'));
+    expect(prompt, contains('直接 finish'));
+  });
+
+  test('Stage 03 prompt documents the workspace.list root default', () {
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '看看工作区里有哪些文件',
+    );
+
+    expect(prompt, contains('workspace.list'));
+    expect(prompt, contains('省略、留空或写 "."'));
+    expect(prompt, contains('不要为了列目录而调用 command.run'));
+  });
+
   test('Stage 03 weather tasks use the structured forecast tool', () {
     final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
       rolePlaySystemPrompt: '你是工作助手。',

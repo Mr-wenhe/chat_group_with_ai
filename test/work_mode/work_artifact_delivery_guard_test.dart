@@ -6,6 +6,7 @@ import 'package:archive/archive.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -67,6 +68,165 @@ void main() {
       ),
       WorkArtifactDeliveryGuard.missingArtifactMessage,
     );
+  });
+
+  test('declared output formats drive which files can be delivered', () {
+    // 回归：请求点名了格式时，中间文件不能顶替交付物——“生成一份 xlsx 排名表”
+    // 曾在其生成脚本写好后就被判为完成。
+    AgentTask taskFor(String request) => AgentTask(
+          id: 'format-task',
+          groupId: 'format-group',
+          characterId: 'worker',
+          userRequest: request,
+          workModeTask: true,
+        );
+
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(
+        taskFor('从网上取数并生成一份 xlsx 大模型排名表'),
+      ),
+      equals(<String>{'xlsx'}),
+    );
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(
+          taskFor('生成 ranking.PDF')),
+      equals(<String>{'pdf'}),
+    );
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(
+        taskFor('把报告转成 Word 文档'),
+      ),
+      equals(<String>{'docx'}),
+    );
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(taskFor('生成 report.md')),
+      equals(<String>{'md'}),
+    );
+    // 版本号不是格式：`v2.10` 曾被当成格式 "10"，从而拒绝真正的交付物。
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(taskFor('生成 v2.10 版的报告')),
+      isEmpty,
+    );
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(
+        taskFor('生成本月 3.15 促销分析报告'),
+      ),
+      isEmpty,
+    );
+    // 没有点名格式的普通任务不限制交付范围。
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(
+        taskFor('整理一下工作区里的文件'),
+      ),
+      isEmpty,
+    );
+  });
+
+  test('a durable contract format maps to the real file extension', () {
+    // 回归：讨论契约写的是 `markdown`，而交付物是 `report.md`。契约权威且必须
+    // 归一化，否则合法产物会被判为 stale、整个任务交付失败。
+    AgentTask contracted(String format) {
+      final state = WorkDiscussionState(
+        conversationId: 'contract-format-group',
+        phase: WorkDiscussionPhase.ready,
+        requestRevision: 1,
+        executorId: 'worker',
+        candidateCharacterIds: const ['worker'],
+        participants: const [WorkDiscussionParticipant(characterId: 'worker')],
+        round: 1,
+        understandingPercent: 100,
+        understandingEvidence: const ['已确认交付合同。'],
+        blockers: const [],
+        deliverableContract: {
+          'deliverableType': 'document',
+          'format': format,
+          'location': 'workspace',
+          'contentScope': '完成任务',
+          'explicitExecutorId': 'worker',
+          'revisionTarget': '',
+          'requestRevision': 1,
+        },
+      );
+      return AgentTask(
+        id: 'contract-format-task',
+        groupId: 'contract-format-group',
+        characterId: 'worker',
+        userRequest: '生成一份报告',
+        workModeTask: true,
+        executionStateJson: jsonEncode({
+          WorkDiscussionState.jsonKey: state.toJson(),
+        }),
+      );
+    }
+
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(contracted('markdown')),
+      equals(<String>{'md'}),
+    );
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(contracted('html')),
+      equals(<String>{'html'}),
+    );
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(
+          contracted('unspecified')),
+      isEmpty,
+    );
+  });
+
+  test('spreadsheet, slide deck and PDF requests are file deliverables', () {
+    // 回归：扩展名白名单漏了 Office/PDF，导致“生成一份 xlsx 排名表”不算产物
+    // 任务，跳过完成校验（而 docx 算）。三者都必须建立产物契约。
+    const requests = <String>[
+      '从网上取数并生成一份 xlsx 大模型排名表',
+      '生成一份 xlsx 文件',
+      '制作一个 pptx 汇报',
+      '导出一份报告 pdf',
+      '生成 ranking.xlsx',
+      '生成 deck.pptx',
+      '生成 report.pdf',
+    ];
+
+    for (final request in requests) {
+      expect(
+        WorkArtifactDeliveryGuard.requiresFileArtifact(request),
+        isTrue,
+        reason: request,
+      );
+      expect(
+        WorkArtifactDeliveryGuard.failureFor(
+          request: request,
+          hasReadableArtifact: false,
+        ),
+        WorkArtifactDeliveryGuard.missingArtifactMessage,
+        reason: request,
+      );
+    }
+  });
+
+  test('reading an existing spreadsheet is not a delivery request', () {
+    // 反向：只读/分析既有表格不得被当成产物契约，否则正常分析会被判失败。
+    const requests = <String>[
+      '读取并分析 budget.xlsx',
+      '查看这份 report.pdf',
+      '分析现有 pptx 的内容',
+    ];
+
+    for (final request in requests) {
+      expect(
+        WorkArtifactDeliveryGuard.requiresFileArtifact(request),
+        isFalse,
+        reason: request,
+      );
+      expect(
+        WorkArtifactDeliveryGuard.failureFor(
+          request: request,
+          hasReadableArtifact: false,
+        ),
+        isNull,
+        reason: request,
+      );
+    }
   });
 
   test('Markdown to Word conversion is a strict DOCX delivery request', () {
