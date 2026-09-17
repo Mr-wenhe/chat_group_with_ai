@@ -287,7 +287,8 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         return null;
       }
       if (_isAutomaticallyRepairableCommandFailure(toolResult)) {
-        if (_isCommandFailureLoop(state, call, toolResult)) {
+        if (_isCommandFailureLoop(state, call, toolResult) ||
+            _isRepeatedCommandOutcome(state, call, toolResult)) {
           const loopMessage =
               '检测到命令和错误反复出现，自动修复没有取得进展，已暂停。请检查权限、依赖或补充新的处理信息后继续。';
           return _pauseForUserAction(
@@ -575,7 +576,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         safeToolRequestCheckpoint(operation),
       ];
     if (isMutation && !rejected) {
-      _clearCommandFailureHistory(state);
+      clearCommandFailureHistory(state);
       _persistUnchangedMutationCount(task, 0);
       state.committedActionKeys.add(operationKey);
       task.lastArtifactPaths = _updatedArtifactPaths(
