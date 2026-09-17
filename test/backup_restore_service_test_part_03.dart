@@ -1,6 +1,49 @@
 part of 'backup_restore_service_test.dart';
 
 void _registerBackupRestoreServiceTestPart3() {
+  test('portable task backup keeps the per-attempt elapsed start', () async {
+    final attachment = File('${mediaDirectory.path}/attempt-start.txt');
+    await attachment.writeAsString('task attachment');
+    await _seedCoreData(db, attachment);
+    final attemptStartedAt = DateTime.utc(2026, 3, 4, 5, 6, 7);
+    final task = AgentTask(
+      id: 'task-attempt-start',
+      groupId: 'group-1',
+      characterId: 'char-1',
+      userRequest: '恢复本次尝试耗时起点',
+      workModeTask: true,
+      status: AgentTaskStatus.queued,
+      startedAt: DateTime.utc(2026, 3, 4, 4, 0, 0),
+      attemptStartedAt: attemptStartedAt,
+    );
+    await db.agentTaskBox.put(task.id, task);
+
+    final backup = File('${testRoot.path}/attempt-start.cgbak');
+    final sourceService = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await sourceService.createBackup(destination: backup);
+
+    await reopenEmptyDatabase();
+    final restoreService = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final prepared = await restoreService.inspect(backup);
+    addTearDown(prepared.dispose);
+    await restoreService.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.emptyOnly,
+    );
+
+    // 本次尝试耗时是纯展示状态，跨设备恢复后不应丢失，否则面板会退回按整条
+    // 任务起算，把"3 分钟"显示成"2 小时"。
+    expect(db.agentTaskBox.values.single.attemptStartedAt, attemptStartedAt);
+  });
+
   test('portable task backup preserves an unknown checkpoint review barrier',
       () async {
     final attachment = File('${mediaDirectory.path}/unknown-checkpoint.txt');

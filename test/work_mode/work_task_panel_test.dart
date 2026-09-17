@@ -44,6 +44,32 @@ AgentTask _task({
 
 void main() {
   group('WorkTaskPanel', () {
+    testWidgets('shows elapsed time for the current attempt', (tester) async {
+      final task = _task(
+        id: 'attempt-duration',
+        conversationId: 'dm:worker',
+        characterId: 'worker',
+        startedAt: DateTime.utc(2026, 8, 28, 9),
+      )..attemptStartedAt = DateTime.utc(2026, 8, 28, 10);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: [task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+            clock: () => DateTime.utc(2026, 8, 28, 10, 2),
+          ),
+        ),
+      ));
+      expect(find.text('已执行 2 分钟'), findsOneWidget);
+      expect(find.textContaining('1 小时'), findsNothing);
+    });
+
     testWidgets('shows public task details and streamed events in sequence',
         (tester) async {
       final events = StreamController<WorkTaskEvent>.broadcast();
@@ -71,7 +97,10 @@ void main() {
         ),
       ));
 
-      expect(find.text('整理发布说明'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('work-task-request'))).data,
+        '整理发布说明',
+      );
       expect(find.text('执行角色：product-owner'), findsOneWidget);
       expect(find.text('步骤 3 / 8'), findsOneWidget);
       expect(find.text('已执行 2 分钟'), findsOneWidget);
@@ -665,15 +694,19 @@ void main() {
         ),
       ));
 
-      expect(find.text('整理需求'), findsOneWidget);
-      expect(find.text('实现面板'), findsNothing);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('work-task-request'))).data,
+        '整理需求',
+      );
 
       await tester.tap(find.byKey(const Key('work-task-tab-task-two')));
       await tester.pump();
 
-      expect(find.text('实现面板'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('work-task-request'))).data,
+        '实现面板',
+      );
       expect(find.text('执行角色：developer'), findsOneWidget);
-      expect(find.text('整理需求'), findsNothing);
     });
 
     testWidgets('shows approval controls, role names, and safe public text',
@@ -1694,6 +1727,72 @@ void main() {
       expect(find.byKey(const Key('work-task-tab-active-one')), findsOneWidget);
       expect(find.byKey(const Key('work-task-tab-active-two')), findsOneWidget);
       expect(find.byKey(const Key('work-task-tab-newer-queued')), findsNothing);
+    });
+
+    testWidgets('labels task tabs with the user request instead of an index',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final task = _task(
+        id: 'labeled-task',
+        conversationId: 'group-labeled',
+        characterId: 'developer',
+        request: '在桌面生成隆中对对策 PDF 文档',
+      )..status = AgentTaskStatus.planning;
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[task]);
+      await tester.pump();
+      await tester.pump();
+
+      // 「任务 1」既说不清在干什么，也会在列表变化时改号。标签必须能直接
+      // 认出是哪条需求。
+      final tab = find.byKey(const Key('work-task-tab-labeled-task'));
+      expect(
+          find.descendant(of: tab, matching: find.text(workTaskTabLabel(task))),
+          findsOneWidget);
+      expect(find.text('任务 1'), findsNothing);
+    });
+
+    testWidgets('marks a task hidden from the tab strip in the history list',
+        (tester) async {
+      final task = _task(
+        id: 'hidden-history-task',
+        conversationId: 'group-history',
+        characterId: 'developer',
+        request: '在桌面生成隆中对对策 PDF',
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: [task],
+            historyTasks: [task],
+            hiddenTaskIds: {task.id},
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+      await tester.tap(find.byKey(const Key('work-task-history-open')));
+      await tester.pump();
+      expect(find.textContaining('已从标签栏隐藏'), findsOneWidget);
+      await tester.tap(find.byKey(Key('work-task-history-item-${task.id}')));
+      await tester.pump();
+      expect(find.byKey(const Key('work-task-request')), findsOneWidget);
     });
 
     testWidgets('opens the exact older task from a hidden chat reminder',

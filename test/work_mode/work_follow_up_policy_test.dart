@@ -124,6 +124,69 @@ void main() {
     expect(decision.artifactPath, '/workspace/需求文档.docx');
   });
 
+  test('a depth-only request revises the single existing artifact', () {
+    // 「再详细些」是对上一份产物的深度修订，不是一句新的闲聊。它必须和
+    // "优化一下"一样落到唯一产物上，否则用户的补充只会被当成普通追问排队，
+    // 当前执行照旧把旧深度的文件交付出去。
+    final decision = policy.resolve(
+      request: '再详细些',
+      lastArtifactPaths: const ['/workspace/隆中对策略.md'],
+    );
+    expect(decision.kind, WorkFollowUpKind.reviseArtifact);
+    expect(decision.artifactPath, '/workspace/隆中对策略.md');
+  });
+
+  test('a depth-only request with several artifacts asks for the target', () {
+    final decision = policy.resolve(
+      request: '内容再详细些',
+      lastArtifactPaths: const [
+        '/workspace/a.md',
+        '/workspace/b.md',
+      ],
+    );
+    expect(decision.kind, WorkFollowUpKind.clarification);
+  });
+
+  test('depth adjectives do not authorize overwriting during inspection', () {
+    for (final request in [
+      '详细阅读当前文件',
+      '详细解释 /workspace/report.md',
+      'Explain in more detail what /workspace/report.md does',
+    ]) {
+      final decision = policy.resolve(
+        request: request,
+        lastArtifactPaths: const ['/workspace/report.md'],
+      );
+      expect(decision.kind, WorkFollowUpKind.continueTask, reason: request);
+      expect(decision.artifactPath, isNull);
+    }
+  });
+
+  test('depth wording in a new deliverable does not revise the old artifact',
+      () {
+    for (final request in [
+      '新建一份详细报告',
+      '生成一份内容丰富的个人主页 html',
+      'Create a new report with more detail',
+    ]) {
+      final decision = policy.resolve(
+        request: request,
+        lastArtifactPaths: const ['/workspace/old.md'],
+      );
+      expect(decision.kind, WorkFollowUpKind.newArtifact, reason: request);
+      expect(decision.autoRenameIfExists, isTrue);
+      expect(decision.artifactPath, isNull);
+    }
+  });
+
+  test('a brand-new deliverable is still not a depth revision', () {
+    final decision = policy.resolve(
+      request: '再生成一份个人主页的 html',
+      lastArtifactPaths: const ['/workspace/隆中对策略.md'],
+    );
+    expect(decision.kind, WorkFollowUpKind.newArtifact);
+  });
+
   test('uses the failed command script for an unambiguous repair follow-up',
       () {
     final decision = policy.resolve(

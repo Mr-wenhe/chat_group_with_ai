@@ -240,6 +240,9 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
       task
         ..status = AgentTaskStatus.planning
         ..startedAt ??= _clock()
+        // 每次真正开跑都重新计一次"本次尝试"的展示耗时；任务级时间预算仍按
+        // `startedAt` 计算，不受追问影响。
+        ..attemptStartedAt = _clock()
         ..updatedAt = _clock();
       await _save(task);
       await _markSnapshotStatus(task);

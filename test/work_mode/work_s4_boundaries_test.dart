@@ -62,16 +62,33 @@ class _VersionedDiscussionRunner implements WorkTaskDiscussionRunner {
 class _ImmediateRevisionDiscussionRunner implements WorkTaskDiscussionRunner {
   int runCount = 0;
 
+  /// 每次讨论实际执行时观察到的请求版本，用于证明修订确实重开了讨论版本。
+  final List<int> requestRevisions = <int>[];
+  final List<Completer<void>> _runs = <Completer<void>>[];
+
+  Future<void> waitForRun(int index) {
+    while (_runs.length <= index) {
+      _runs.add(Completer<void>());
+    }
+    return _runs[index].future;
+  }
+
   @override
   Future<void> runDiscussion(
     AgentTask task,
     WorkTaskCancellation cancellation,
     WorkTaskDiscussionStateSink updateState,
   ) async {
+    final index = runCount;
     runCount++;
     final current = WorkDiscussionState.fromExecutionState(
       task.executionStateJson,
     )!;
+    requestRevisions.add(current.requestRevision);
+    while (_runs.length <= index) {
+      _runs.add(Completer<void>());
+    }
+    _runs[index].complete();
     if (cancellation.isCancelled) return;
     await updateState(
       current.copyWith(
@@ -303,7 +320,8 @@ void main() {
     expect(discussion.revisions, [1, 2]);
   });
 
-  test('A13 keeps same-file revisions and attachments in FIFO order', () async {
+  test('A13 queues group revisions and renews the discussion version',
+      () async {
     final storage = await _openStorage('work-s4-a13-');
     final runner = _RecordingRunner();
     final discussion = _ImmediateRevisionDiscussionRunner();
@@ -329,6 +347,101 @@ void main() {
     await coordinator.submit(task);
     await runner.startedAt(0);
 
+    // 群聊修订不能即时改道：交付合约、请求版本和执行人属于一次讨论版本，
+    // 只换 userRequest 会让执行门禁核对旧版本，并让任务带着与旧目标匹配的
+    // contentScope 继续跑。第一条修订因此排队。
+    await coordinator.enqueueFollowUp(
+      task.id,
+      '请修改 /workspace/report.docx 的中文标题',
+      attachmentMessageId: 'attachment-cn',
+    );
+    expect(storage.box.get(task.id)!.queuedUserRequests, hasLength(1));
+    expect(storage.box.get(task.id)!.executionStateJson,
+        contains('attachment-cn'));
+    expect(runner.requests, hasLength(1));
+
+    // 第二条修订同样排队，并且与自己的附件一一对应。
+    await coordinator.enqueueFollowUp(
+      task.id,
+      'Please revise /workspace/report.docx with the English title',
+      attachmentMessageId: 'attachment-en',
+    );
+    expect(storage.box.get(task.id)!.queuedUserRequests, hasLength(2));
+    expect(storage.box.get(task.id)!.executionStateJson,
+        contains('attachment-en'));
+
+    // 记录提交时已经跑过的那一次讨论，下面等的是它之后的下一次。
+    final runsBefore = discussion.runCount;
+    runner.completeAt(0);
+
+    // 第一轮结束后必须重新走讨论门禁：请求版本 +1、讨论真正再跑一次，
+    // 然后才按新请求启动 runner。只断言"进了队列"不足以证明版本续期。
+    await discussion.waitForRun(runsBefore);
+    expect(
+      discussion.requestRevisions,
+      contains(2),
+      reason: '第二轮讨论必须看到新的请求版本。',
+    );
+    final renewed = WorkDiscussionState.fromExecutionState(
+      storage.box.get(task.id)!.executionStateJson,
+    )!;
+    expect(
+      renewed.requestRevision,
+      2,
+      reason: '群聊修订必须作为新的讨论版本重新确认，而不是复用旧版本。',
+    );
+
+    // 讨论重新跑完并放行后，才按新请求启动 runner。
+    await runner.startedAt(1);
+    expect(runner.artifactPaths[1], ['/workspace/report.docx']);
+    expect(runner.requests[1], contains('中文标题'));
+    expect(runner.attachmentIds[1], 'attachment-cn');
+    expect(
+      WorkDiscussionState.fromExecutionState(
+        storage.box.get(task.id)!.executionStateJson,
+      )!
+          .isExecutionReady,
+      isTrue,
+    );
+
+    runner.completeAt(1);
+    await runner.startedAt(2);
+    expect(runner.artifactPaths[2], ['/workspace/report.docx']);
+    expect(runner.requests[2], contains('English title'));
+    expect(runner.attachmentIds[2], 'attachment-en');
+    runner.completeAt(2);
+  });
+
+  test('queued revision keeps its own attachment paired with its request',
+      () async {
+    final storage = await _openStorage('work-s4-queued-pairing-');
+    final runner = _RecordingRunner();
+    final discussion = _ImmediateRevisionDiscussionRunner();
+    final coordinator = WorkTaskCoordinator(
+      taskBox: storage.box,
+      eventStore: storage.events,
+      runner: runner,
+      discussionRunner: discussion,
+    );
+    addTearDown(() => _closeStorage(storage, coordinator));
+
+    final task = _task('pairing', 'group-pairing');
+    task.userRequest = '生成报告';
+    task.lastArtifactPaths = ['/workspace/report.docx'];
+    _attachDiscussion(
+      task,
+      _readyDiscussion(
+        conversationId: 'group-pairing',
+        executorId: 'worker',
+        revisionTarget: '/workspace/report.docx',
+      ),
+    );
+    await coordinator.submit(task);
+    await runner.startedAt(0);
+
+    // 两条修订文本不同、附件不同，必须各自与自己的附件配对。只追加文本会让
+    // queuedAttachmentMessageIds 与 queuedUserRequests 长度失配，恢复时附件
+    // 就会错配到另一条请求上。
     await coordinator.enqueueFollowUp(
       task.id,
       '请修改 /workspace/report.docx 的中文标题',
@@ -339,23 +452,14 @@ void main() {
       'Please revise /workspace/report.docx with the English title',
       attachmentMessageId: 'attachment-en',
     );
-    expect(storage.box.get(task.id)!.queuedUserRequests, hasLength(2));
-    expect(storage.box.get(task.id)!.executionStateJson,
-        contains('attachment-cn'));
-    expect(storage.box.get(task.id)!.executionStateJson,
-        contains('attachment-en'));
+
+    final stored = storage.box.get(task.id)!;
+    expect(stored.queuedUserRequests, hasLength(2));
+    final metadata = jsonDecode(stored.executionStateJson) as Map;
+    expect(metadata['queuedAttachmentMessageIds'],
+        ['attachment-cn', 'attachment-en']);
 
     runner.completeAt(0);
-    await runner.startedAt(1);
-    expect(runner.artifactPaths[1], ['/workspace/report.docx']);
-    expect(runner.attachmentIds[1], 'attachment-cn');
-    runner.completeAt(1);
-    await runner.startedAt(2);
-    expect(runner.artifactPaths[2], ['/workspace/report.docx']);
-    expect(runner.attachmentIds[2], 'attachment-en');
-    expect(runner.requests[1], contains('中文标题'));
-    expect(runner.requests[2], contains('English title'));
-    runner.completeAt(2);
   });
 
   test('terminal-looking in-flight checkpoint keeps follow-up queued',

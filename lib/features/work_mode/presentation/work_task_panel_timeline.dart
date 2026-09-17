@@ -322,7 +322,9 @@ bool _requiresExplicitCommandRequest(AgentTask task) {
 }
 
 String _durationLabel(AgentTask task, DateTime now) {
-  final startedAt = task.startedAt ?? task.createdAt;
+  // 面板展示的是"这次尝试跑了多久"。每次执行会重新计时，但 60 分钟预算仍按
+  // `startedAt` 计算，两者刻意分开。
+  final startedAt = task.attemptStartedAt ?? task.startedAt ?? task.createdAt;
   final duration = now.difference(startedAt);
   if (duration.inMinutes <= 0) return '刚刚开始执行';
   if (duration.inHours > 0) {

@@ -48,13 +48,14 @@ class AgentTaskAdapter extends TypeAdapter<AgentTask> {
       actionLimit: fields[24] == null ? 100 : fields[24] as int,
       softTimeLimitMinutes: fields[25] == null ? 60 : fields[25] as int,
       eventLogIncomplete: fields[26] == null ? false : fields[26] as bool,
+      attemptStartedAt: fields[27] as DateTime?,
     );
   }
 
   @override
   void write(BinaryWriter writer, AgentTask obj) {
     writer
-      ..writeByte(27)
+      ..writeByte(28)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -108,7 +109,9 @@ class AgentTaskAdapter extends TypeAdapter<AgentTask> {
       ..writeByte(25)
       ..write(obj.softTimeLimitMinutes)
       ..writeByte(26)
-      ..write(obj.eventLogIncomplete);
+      ..write(obj.eventLogIncomplete)
+      ..writeByte(27)
+      ..write(obj.attemptStartedAt);
   }
 
   @override

@@ -33,6 +33,13 @@ class _FakeWorkTaskRunner
   final List<String> startedTaskIds = <String>[];
   final List<String> cancelledTaskIds = <String>[];
   final Set<String> throwTaskIds = <String>{};
+  final Set<String> failOnCompletion = <String>{};
+
+  /// 每次运行实际看到的当前附件 id，按任务分组，用于验证追问是否切换了附件。
+  final Map<String, List<String>> _attachments = <String, List<String>>{};
+
+  List<String> attachmentsFor(String taskId) =>
+      List<String>.unmodifiable(_attachments[taskId] ?? const <String>[]);
   final Map<String, Completer<void>> _completions = <String, Completer<void>>{};
   final Map<String, int> _activeByConversation = <String, int>{};
 
@@ -58,6 +65,7 @@ class _FakeWorkTaskRunner
       startedTaskIds.add(task.id);
       throw StateError('runner failed');
     }
+    (_attachments[task.id] ??= <String>[]).add(_attachmentIdOf(task));
     final completion = Completer<void>();
     _completions[task.id] = completion;
     startedTaskIds.add(task.id);
@@ -85,7 +93,20 @@ class _FakeWorkTaskRunner
     } else {
       _activeByConversation[task.groupId] = remaining;
     }
+    if (failOnCompletion.remove(task.id)) throw StateError('completion failed');
   }
+
+  Map<String, dynamic> _decode(String raw) {
+    if (raw.trim().isEmpty) return <String, dynamic>{};
+    final value = jsonDecode(raw);
+    return value is Map
+        ? Map<String, dynamic>.from(value)
+        : <String, dynamic>{};
+  }
+
+  String _attachmentIdOf(AgentTask task) =>
+      (_decode(task.executionStateJson)['attachmentMessageId'] ?? '')
+          .toString();
 
   void complete(String taskId) {
     final completion = _completions[taskId];
@@ -450,6 +471,79 @@ void main() {
     await eventStore.close();
     await Hive.close();
     if (await directory.exists()) await directory.delete(recursive: true);
+  });
+
+  test('direct revisions remain FIFO and keep attachments and time budget',
+      () async {
+    var now = DateTime.utc(2026, 9, 17, 9);
+    final originalStart = now;
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      clock: () => now,
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'revision-fifo', conversationId: 'dm:worker')
+      ..userRequest = '生成报告'
+      ..lastArtifactPaths = ['/workspace/report.md'];
+    await localCoordinator.submit(task);
+    await localCoordinator.enqueueFollowUp(
+      task.id,
+      '修改同一文件的标题',
+      attachmentMessageId: 'attachment-first',
+    );
+    await localCoordinator.enqueueFollowUp(task.id, '内容再详细些');
+    expect(task.userRequest, '生成报告');
+    expect(task.queuedUserRequests, ['修改同一文件的标题', '内容再详细些']);
+    expect(runner.cancelledTaskIds, isEmpty);
+    expect(runner.startedTaskIds, [task.id]);
+
+    now = now.add(const Duration(minutes: 10));
+    runner.complete(task.id);
+    await _waitForStartedCount(runner, 2);
+    expect(task.userRequest, '修改同一文件的标题');
+    expect(task.queuedUserRequests, ['内容再详细些']);
+    expect(task.lastArtifactPaths, ['/workspace/report.md']);
+    expect(runner.attachmentsFor(task.id), ['', 'attachment-first']);
+    expect(task.startedAt, originalStart);
+    expect(task.attemptStartedAt, now);
+
+    now = now.add(const Duration(minutes: 10));
+    runner.complete(task.id);
+    await _waitForStartedCount(runner, 3);
+    expect(task.userRequest, '内容再详细些');
+    expect(task.queuedUserRequests, isEmpty);
+    expect(task.lastArtifactPaths, ['/workspace/report.md']);
+    expect(runner.attachmentsFor(task.id), ['', 'attachment-first', '']);
+    expect(task.startedAt, originalStart);
+    expect(task.attemptStartedAt, now);
+    expect(runner.maximumActiveForOneConversation, 1);
+    expect(runner.cancelledTaskIds, isEmpty);
+    runner.complete(task.id);
+    await _waitForTaskState(taskBox, task.id, (task) => task.isTerminal);
+  });
+
+  test('a late execution failure preserves queued direct revisions', () async {
+    final task = _task(id: 'revision-failure', conversationId: 'dm:worker')
+      ..userRequest = '生成报告'
+      ..lastArtifactPaths = ['/workspace/report.md'];
+    await coordinator.submit(task);
+    await coordinator.enqueueFollowUp(task.id, '内容再详细些',
+        attachmentMessageId: 'revision-attachment');
+    runner.failOnCompletion.add(task.id);
+    runner.complete(task.id);
+    await _waitForTaskState(
+        taskBox, task.id, (task) => task.status == AgentTaskStatus.failed);
+    expect(task.lastError, contains('completion failed'));
+    expect(task.userRequest, '生成报告');
+    expect(task.queuedUserRequests, ['内容再详细些']);
+    expect(
+        (jsonDecode(task.executionStateJson)
+            as Map)['queuedAttachmentMessageIds'],
+        ['revision-attachment']);
+    expect(runner.startedTaskIds, [task.id]);
+    expect(runner.cancelledTaskIds, isEmpty);
   });
 
   test('regression: visual recovery keeps discussion executor consistent',

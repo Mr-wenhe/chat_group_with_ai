@@ -8,6 +8,7 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
+import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 
 import 'work_task_user_action.dart';
 
@@ -32,10 +33,10 @@ class WorkTaskActionMessageService {
         _clock = clock ?? DateTime.now;
 
   Future<void> notify(AgentTask task) async {
-    // The S5 bridge belongs to group conversations. Direct chats keep their
-    // fixed-character flow and the existing global task panel; projecting a
-    // synthetic group reminder into `dm:*` would violate that isolation.
-    if (task.groupId.trim().startsWith('dm:')) return;
+    // 私聊和群聊一样会在等待审批、授权或补充信息时卡住。提醒必须投递到用户
+    // 正看着的那个对话里，否则用户唯一的入口就是去任务面板里翻找——而隐藏的
+    // 标签根本不在标签栏上。隔离由发送者身份保证：私聊永远不会替另一个角色
+    // 发言，找不到合格发送者时退化为系统提醒。
     final actions = WorkTaskUserAction.forTask(task);
     for (final action in actions) {
       // One broken message write must not prevent the other independent
@@ -250,9 +251,7 @@ class WorkTaskActionMessageService {
   }) {
     final mention = '@${ownerName.trim().isEmpty ? '我' : ownerName.trim()}';
     final prefix = sender == null ? '系统任务提醒' : '工作任务提醒';
-    final taskName = group?.name.trim().isNotEmpty == true
-        ? '「${group!.name.trim()}」'
-        : '当前群聊';
+    final taskName = _conversationLabel(task, group);
     final reason = switch (action.kind) {
       WorkTaskUserActionKind.addMember => '任务需要符合目标职业能力的群成员，当前角色资格或执行人仍未确认。',
       WorkTaskUserActionKind.answerQuestion => '任务还缺少必要信息或需要你回答讨论问题。',
@@ -263,6 +262,21 @@ class WorkTaskActionMessageService {
     };
     return '$mention $prefix：$taskName $reason '
         '请点击“${action.label}”打开对应任务（${task.id.substring(0, _shortIdLength(task.id))}）。';
+  }
+
+  /// 私聊没有群名，必须说「当前对话」而不是「当前群聊」，否则提醒看起来像是
+  /// 从另一个会话飘过来的。私聊本身不写入 chat_groups，所以还要看任务自己的
+  /// 会话标识。
+  String _conversationLabel(AgentTask task, ChatGroup? group) {
+    final name = group?.name.trim() ?? '';
+    if (name.isNotEmpty) return '「$name」';
+    final conversationId = group?.id.trim().isNotEmpty == true
+        ? group!.id.trim()
+        : task.groupId.trim();
+    if (DirectChatSession.isDirectConversationId(conversationId)) {
+      return '当前对话';
+    }
+    return '当前群聊';
   }
 
   int _shortIdLength(String id) => id.length < 8 ? id.length : 8;

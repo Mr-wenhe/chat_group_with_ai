@@ -100,6 +100,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                     children: <Widget>[
                       Text(
                         _safePanelText(widget.task.userRequest),
+                        key: const Key('work-task-request'),
                         style: Theme.of(context).textTheme.titleMedium,
                       ),
                       const SizedBox(height: 4),

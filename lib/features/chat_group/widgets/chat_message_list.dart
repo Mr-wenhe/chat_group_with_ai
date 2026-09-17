@@ -143,7 +143,9 @@ class ChatMessageList extends StatelessWidget {
                     : null,
                 // P2：进度消息携带 runStartedAtMs，其它消息为 null（旧调用兼容）。
                 runStartedAtMs: runStartedAtMs,
-                onTaskAction: isDirectChat ? null : onTaskAction,
+                // 私聊同样会收到任务提醒（任务卡在等待审批/授权时），按钮必须
+                // 可点，否则文案让人点、按钮却是灰的。
+                onTaskAction: onTaskAction,
               ),
             ],
           ),

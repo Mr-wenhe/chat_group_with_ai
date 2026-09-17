@@ -274,6 +274,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               tasks: _tasks,
               hiddenTaskCount: _hiddenTaskCount,
               historyTasks: _historyTasksForActiveConversation(),
+              hiddenTaskIds: _hiddenWorkTaskIds,
               onHideTask: _hideTask,
               selectedTaskId: _selectedTaskId,
               eventStreamFor: widget.eventStreamFor ??

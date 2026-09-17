@@ -180,4 +180,69 @@ void main() {
     expect(received?.blockerId, 'commandApproval');
     expect(received?.version, 42);
   });
+
+  testWidgets('task reminder button stays actionable in a direct chat',
+      (tester) async {
+    WorkTaskUserAction? received;
+    const action = WorkTaskUserAction(
+      taskId: 'task-dm',
+      blockerId: 'commandApproval',
+      version: 7,
+      kind: WorkTaskUserActionKind.approveCommand,
+    );
+    final message = Message(
+      id: action.messageId,
+      groupId: 'dm:worker',
+      senderId: 'system',
+      senderType: 'system',
+      content: '@我 系统任务提醒：请处理任务。',
+      isMention: true,
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatMessageList(
+            messages: [message],
+            characters: const [],
+            messageIndex: {message.id: message},
+            characterIndex: const {},
+            scrollController: ScrollController(),
+            controller: ChatMessageListController(),
+            streamingMessageId: null,
+            regeneratingMessageId: null,
+            highlightedMentionMessageId: null,
+            isDirectChat: true,
+            readUserMessageIds: const {},
+            ownerName: '我',
+            unknownCharacter: AICharacter(
+              name: '未知角色',
+              avatar: '?',
+              age: 0,
+              role: '',
+              personalityTags: const [],
+              systemPrompt: '',
+              apiKey: '',
+              apiProvider: 'deepseek',
+            ),
+            senderColor: (_) => Colors.blue,
+            senderNameById: (_) => '系统',
+            onLongPress: (_, __) {},
+            onSenderTap: (_) {},
+            onMentionSender: (_) {},
+            onQuotedTap: (_) {},
+            onTaskAction: (value) => received = value,
+          ),
+        ),
+      ),
+    );
+
+    // 私聊同样会收到任务卡住时的提醒。文案写着"请点击打开对应任务"，按钮就
+    // 必须可点，否则私聊里唯一的处理入口是灰的。
+    final button = find.byKey(ValueKey<String>(action.messageId));
+    expect(button, findsOneWidget);
+    expect(tester.widget<OutlinedButton>(button).onPressed, isNotNull);
+    await tester.tap(button);
+    expect(received?.taskId, 'task-dm');
+  });
 }

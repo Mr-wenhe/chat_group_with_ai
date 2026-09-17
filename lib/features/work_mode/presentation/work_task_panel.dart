@@ -80,6 +80,10 @@ class WorkTaskPanel extends StatefulWidget {
   /// 当前会话的历史任务（含已被用户关掉标签的任务），按时间倒序。
   final List<AgentTask> historyTasks;
 
+  /// 已被用户从标签栏隐藏的任务 id；历史列表用它标注"已从标签栏隐藏"，
+  /// 让用户知道记录还在、可以继续基于它追加要求。
+  final Set<String> hiddenTaskIds;
+
   /// 关掉某个任务的标签；只影响面板展示，不删除任务记录。
   final WorkTaskAction? onHideTask;
 
@@ -87,6 +91,7 @@ class WorkTaskPanel extends StatefulWidget {
     super.key,
     required this.tasks,
     this.hiddenTaskCount = 0,
+    this.hiddenTaskIds = const <String>{},
     required this.eventStreamFor,
     required this.onSelectTask,
     required this.onStop,
@@ -359,6 +364,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
           Expanded(
             child: _TaskHistoryList(
               tasks: widget.historyTasks,
+              hiddenTaskIds: widget.hiddenTaskIds,
               onSelectTask: (taskId) =>
                   setState(() => _historyDetailTaskId = taskId),
             ),

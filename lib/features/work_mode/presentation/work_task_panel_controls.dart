@@ -222,7 +222,7 @@ class _TaskTabs extends StatelessWidget {
             // 用户就看不到它卡在哪里，因此不提供关闭入口。
             (task) => InputChip(
               key: Key('work-task-tab-${task.id}'),
-              label: Text('任务 ${tasks.indexOf(task) + 1}'),
+              label: Text(workTaskTabLabel(task)),
               selected: task.id == selectedTaskId,
               onSelected: (_) => onSelectTask(task.id),
               onDeleted: onHideTask == null || !task.isTerminal
