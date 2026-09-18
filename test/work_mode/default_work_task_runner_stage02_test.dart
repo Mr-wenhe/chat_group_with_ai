@@ -3093,10 +3093,11 @@ void main() {
       requireWritable: true,
     );
     final workspaceRoot = workspace.workDirPath;
-    // Two names whose shared prefix alone exceeds the 80-rune archive budget.
+    // Keep the source filename below Linux's 255-byte component limit while
+    // making the shared prefix exceed the 80-rune archive budget.
     const shared = '2026年第三季度大模型能力评测与横向对比分析报告_内部评审稿_含全部评测维度与'
         '推理编码数学安全多语言长上下文工具调用对齐人工偏好等细分榜单的完整明细_'
-        '附图表与数据来源说明';
+        '附图表与数';
     final artifactNames = <String>[
       '${shared}_甲部门.xlsx',
       '${shared}_乙部门.xlsx',
