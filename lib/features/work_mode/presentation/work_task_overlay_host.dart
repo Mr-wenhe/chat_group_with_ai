@@ -844,11 +844,35 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         });
       }
     }
-    if (decision == null || !mounted) return;
+    if (decision == null) {
+      // Dismissing the modal is not a decision, but the checkpoint is still
+      // waiting and the host presents at most one prompt per checkpoint. Without
+      // this hint the task blocks forever on a dialog the user just closed.
+      _showApprovalStillPendingHint(task.id);
+      return;
+    }
+    if (!mounted) return;
     await _resolveApprovalPromptDecision(
       task.id,
       expectedActionVersion,
       decision,
+    );
+  }
+
+  /// Points a user who dismissed the approval modal at the durable fallback
+  /// instead of leaving the task silently blocked.
+  void _showApprovalStillPendingHint(String taskId) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger.showSnackBar(
+      SnackBar(
+        content: const Text('已关闭审批弹窗，任务仍在等待审批。'),
+        action: SnackBarAction(
+          label: '查看任务',
+          onPressed: () => _openTask(taskId),
+        ),
+      ),
     );
   }
 

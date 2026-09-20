@@ -11,6 +11,7 @@ import 'work_task_event_store.dart';
 import 'work_task_error_sanitizer.dart';
 import 'work_folder_grant_service.dart';
 import 'work_task_clarification.dart';
+import 'work_task_budget_wait.dart';
 import 'work_resource_lock_manager.dart';
 import 'work_snapshot_manifest.dart';
 import 'work_approval_decision.dart';

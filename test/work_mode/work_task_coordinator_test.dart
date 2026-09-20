@@ -16,6 +16,7 @@ import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_follow_up_policy.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
@@ -2382,6 +2383,50 @@ void main() {
       taskBox.get('approval-once')?.executionStateJson,
       isNot(contains('"approvalPromptShown":true')),
     );
+  });
+
+  test('approval checkpoint opens a wait window for the time budget', () async {
+    await coordinator
+        .submit(_task(id: 'approval-wait', conversationId: 'group-a'));
+
+    await coordinator.pauseForApproval(
+      'approval-wait',
+      pendingToolRequestJson: '{"tool":"workspace.patch"}',
+    );
+
+    final execution = Map<String, dynamic>.from(
+      jsonDecode(taskBox.get('approval-wait')!.executionStateJson) as Map,
+    );
+    expect(WorkTaskBudgetWait.startedAtOf(execution), isNotNull);
+    expect(
+      execution[WorkTaskBudgetWait.totalKey],
+      isNull,
+      reason: '等待尚未结束，还没有可抵扣的时长。',
+    );
+  });
+
+  test('stopping records the queued follow-ups it discards', () async {
+    await coordinator
+        .submit(_task(id: 'stop-drops', conversationId: 'group-a'));
+    await coordinator.enqueueFollowUp('stop-drops', '改成第二版');
+    await coordinator.enqueueFollowUp('stop-drops', '再补一个附录');
+    expect(
+      taskBox.get('stop-drops')?.queuedUserRequests,
+      ['改成第二版', '再补一个附录'],
+    );
+
+    await coordinator.stop('stop-drops');
+    await _settle();
+
+    final stored = taskBox.get('stop-drops');
+    expect(stored?.status, AgentTaskStatus.cancelled);
+    expect(stored?.queuedUserRequests, isEmpty);
+    final events = (await eventStore.read('stop-drops')).events;
+    final dropped =
+        events.where((event) => event.title.contains('未执行')).toList();
+    expect(dropped, hasLength(1), reason: '丢弃的追问必须留下可追溯的记录。');
+    expect(dropped.single.detail, contains('改成第二版'));
+    expect(dropped.single.detail, contains('再补一个附录'));
   });
 
   test('resets an approval prompt marker after host presentation failure',

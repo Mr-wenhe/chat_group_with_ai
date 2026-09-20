@@ -195,10 +195,10 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     bool includeActionLimit = true,
   }) {
     final task = state.task;
-    final started = task.startedAt ??= clock();
+    task.startedAt ??= clock();
     return (includeActionLimit &&
             task.actionCount >= _effectiveActionLimit(task)) ||
-        clock().difference(started) >= _effectiveTimeLimit(task);
+        _timeBudgetExceeded(task);
   }
 
   Future<WorkAgentLoopResult> _pauseForLimit(

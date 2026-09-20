@@ -419,6 +419,8 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
       _conversationReservations.remove(task.groupId);
       _makeConversationReady(task.groupId);
       _taskLockPlans.remove(taskId);
+      final droppedFollowUps =
+          List<String>.unmodifiable(task.queuedUserRequests);
       task
         ..status = AgentTaskStatus.cancelled
         ..resumeRequired = false
@@ -431,6 +433,19 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
       unawaited(
         _record(task, WorkTaskEventKind.failed, '任务已停止', detail: reason),
       );
+      if (droppedFollowUps.isNotEmpty) {
+        // Stopping is terminal for this task, but the user's queued amendments
+        // must not vanish without a trace. Record exactly what was discarded so
+        // the task history explains why those messages never ran.
+        unawaited(
+          _record(
+            task,
+            WorkTaskEventKind.failed,
+            '已停止任务：${droppedFollowUps.length} 条待处理的追问未执行',
+            detail: droppedFollowUps.join('\n'),
+          ),
+        );
+      }
       await _schedule();
     });
   }

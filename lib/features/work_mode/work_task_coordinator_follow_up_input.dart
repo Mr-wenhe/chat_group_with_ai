@@ -328,6 +328,14 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
         // retained by the in-process runner while the approval dialog is open.
         ..pendingToolRequestJson =
             safeToolRequestCheckpointJson(pendingToolRequestJson)
+        // Mark the start of the user wait so the resumed run can exclude it
+        // from the task's wall-clock budget.
+        ..executionStateJson = jsonEncode(
+          WorkTaskBudgetWait.begin(
+            _decodeExecutionMap(task.executionStateJson),
+            _clock(),
+          ),
+        )
         ..updatedAt = _clock();
       await _save(task);
       await _markSnapshotStatus(task);

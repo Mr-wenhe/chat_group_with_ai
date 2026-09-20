@@ -11,6 +11,7 @@ import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -1362,6 +1363,111 @@ void main() {
     expect(task.softLimitReached, isTrue);
     expect(task.actionCount, 1);
     expect(modelCalls, 1);
+  });
+
+  test('a settled approval wait does not consume the task time budget',
+      () async {
+    final clock = _FakeClock();
+    final model = _FakeModel()
+      ..responses.add(_toolDecision())
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (_) {
+        // The hour passed while the user was deciding on an approval, not
+        // while the agent was working.
+        clock.advance(const Duration(minutes: 60));
+        return const WorkToolResult.success(message: '完成一步');
+      };
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+      clock: clock,
+    );
+    final task = _task(id: 'approval-wait-budget')..startedAt = clock.now;
+    task.executionStateJson = jsonEncode(
+      WorkTaskBudgetWait.settle(
+        WorkTaskBudgetWait.begin(<String, dynamic>{}, task.startedAt!),
+        task.startedAt!.add(const Duration(hours: 1)),
+        budgetStartedAt: task.startedAt!,
+      ),
+    );
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(task.softLimitReached, isFalse);
+    expect(model.requests, hasLength(2));
+  });
+
+  test('an open approval wait is settled when the run resumes', () async {
+    final clock = _FakeClock();
+    final startedAt = clock.now;
+    final model = _FakeModel()..responses.add(_finishDecision());
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      clock: clock,
+    );
+    final task = _task(id: 'settle-approval-wait')
+      ..startedAt = startedAt
+      ..executionStateJson = jsonEncode(<String, dynamic>{
+        WorkTaskBudgetWait.startedAtKey: startedAt.millisecondsSinceEpoch,
+      });
+    // The wait ends when the user approves and the coordinator requeues the
+    // task; the resumed run is the first place that can fold it in.
+    clock.advance(const Duration(minutes: 45));
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    final execution =
+        Map<String, dynamic>.from(jsonDecode(task.executionStateJson) as Map);
+    expect(WorkTaskBudgetWait.startedAtOf(execution), isNull);
+    expect(
+      WorkTaskBudgetWait.totalFor(execution, startedAt),
+      const Duration(minutes: 45),
+    );
+  });
+
+  test('a wait settled before a replan cannot extend the new time budget',
+      () async {
+    final clock = _FakeClock();
+    final model = _FakeModel()
+      ..responses.add(_toolDecision())
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (_) {
+        clock.advance(const Duration(hours: 1));
+        return const WorkToolResult.success(message: '完成一步');
+      };
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+      clock: clock,
+    );
+    // The task waited an hour for an approval, then the user replanned it: the
+    // fresh window starts now, so the old discount must not apply to it.
+    final task = _task(id: 'superseded-wait-budget', softTimeLimitMinutes: 30)
+      ..startedAt = clock.now;
+    task.executionStateJson = jsonEncode(
+      WorkTaskBudgetWait.settle(
+        WorkTaskBudgetWait.begin(
+          <String, dynamic>{},
+          clock.now.subtract(const Duration(hours: 1)),
+        ),
+        clock.now,
+        budgetStartedAt: clock.now.subtract(const Duration(hours: 1)),
+      ),
+    );
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(task.softLimitReached, isTrue);
   });
 
   test(

@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_host.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
@@ -9,11 +10,39 @@ import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_change_policy.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
+import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
+import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive/hive.dart';
+
+import '../helpers/lifecycle_hive.dart';
+
+/// Keeps a submitted task in flight so a test can drive its own checkpoints.
+class _HoldingWorkTaskRunner implements WorkTaskRunner {
+  @override
+  Future<void> run(AgentTask task, WorkTaskCancellation cancellation) =>
+      cancellation.whenCancelled;
+}
+
+/// Pumps frames until [finder] matches, allowing Hive I/O between frames.
+Future<void> _pumpUntilFound(
+  WidgetTester tester,
+  Finder finder, {
+  int maxFrames = 80,
+}) async {
+  for (var frame = 0; frame < maxFrames; frame++) {
+    if (finder.evaluate().isNotEmpty) return;
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+  }
+  expect(finder, findsOneWidget);
+}
 
 AgentTask _task({
   required String id,
@@ -1855,6 +1884,115 @@ void main() {
       expect(find.byKey(const Key('work-task-tab-hidden-old-task')),
           findsOneWidget);
       expect(find.text('执行角色：developer'), findsOneWidget);
+    });
+  });
+
+  group('WorkTaskOverlayHost approval prompt', () {
+    // Hive and the event store need real file I/O, which the widget-test
+    // fake-async zone never pumps. Following the repository convention, the
+    // fixture is opened outside the test bodies and only the writes are wrapped
+    // in `tester.runAsync`.
+    late Directory hiveDirectory;
+    late WorkTaskEventStore eventStore;
+    late WorkTaskCoordinator coordinator;
+    late Box<AgentTask> taskBox;
+
+    setUpAll(() async {
+      hiveDirectory = await openLifecycleHive();
+      taskBox = Hive.box<AgentTask>(DatabaseService.agentTaskBoxName);
+      eventStore = WorkTaskEventStore(appSupportDirectory: hiveDirectory);
+      coordinator = WorkTaskCoordinator(
+        taskBox: taskBox,
+        eventStore: eventStore,
+        runner: _HoldingWorkTaskRunner(),
+      );
+    });
+
+    tearDownAll(() async {
+      // A frame can leave a Hive write chain pending in the widget-test
+      // fake-async zone, which would make `Hive.close()` wait forever. The
+      // fixture only backs this group, so a bounded wait is enough to release
+      // the temporary directory without hanging the suite.
+      await closeLifecycleHive(hiveDirectory).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {},
+      );
+    });
+
+    setUp(() async {
+      await taskBox.clear();
+    });
+
+    testWidgets(
+        'dismissing the approval modal points the user back at the task panel',
+        (tester) async {
+      // The host presents at most one modal per checkpoint, so a dismissed
+      // prompt must still leave a visible route back to the durable approval.
+      final task = _task(
+        id: 'overlay-dismiss',
+        conversationId: 'group-dismiss',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.queued;
+      await tester.runAsync(() => taskBox.put(task.id, task));
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          coordinator: coordinator,
+          eventStore: eventStore,
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          // ScaffoldMessenger only renders a SnackBar once a Scaffold is
+          // registered; the production host always sits above one.
+          child: const Scaffold(body: SizedBox.expand()),
+        ),
+      ));
+      await tester.pump();
+
+      await tester.runAsync(() async {
+        await coordinator.pauseForApproval(
+          task.id,
+          pendingToolRequestJson: jsonEncode(<String, dynamic>{
+            'tool': 'command.run',
+            'args': <String, dynamic>{
+              'executable': 'echo',
+              'arguments': <String>['ok'],
+            },
+          }),
+        );
+      });
+      await _pumpUntilFound(
+        tester,
+        find.byKey(const Key('work-generic-approval-dialog')),
+      );
+
+      try {
+        // Tapping the barrier dismisses the modal without deciding anything.
+        await tester.tapAt(const Offset(4, 4));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 750));
+
+        expect(
+          find.byKey(const Key('work-generic-approval-dialog')),
+          findsNothing,
+          reason: '点击遮罩应当关闭弹窗。',
+        );
+        expect(find.text('已关闭审批弹窗，任务仍在等待审批。'), findsOneWidget);
+        expect(find.text('查看任务'), findsOneWidget);
+        expect(
+          taskBox.get(task.id)?.status,
+          AgentTaskStatus.waitingForApproval,
+          reason: '关闭弹窗不是拒绝，任务必须继续等待审批。',
+        );
+      } finally {
+        // Real I/O must be drained outside the fake-async zone, matching the
+        // repository convention for widget tests that own a coordinator.
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await tester.runAsync(() async {
+          await coordinator.dispose();
+          await eventStore.close();
+        });
+      }
     });
   });
 }

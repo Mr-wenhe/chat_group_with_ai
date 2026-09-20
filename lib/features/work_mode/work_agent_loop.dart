@@ -16,6 +16,7 @@ import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:chat_group/features/work_mode/work_task_clarification.dart';
+import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:crypto/crypto.dart';
 
@@ -352,6 +353,10 @@ class WorkAgentLoop
       task.lastError = '';
     }
     task.startedAt ??= clock();
+    // An approval wait that ended before this run resumed must stop counting
+    // against the wall-clock budget. It is folded in against this run's budget
+    // origin, so a replanned task cannot inherit an older window's discount.
+    _settleBudgetWait(task);
 
     try {
       var protocolRetryCount = 0;

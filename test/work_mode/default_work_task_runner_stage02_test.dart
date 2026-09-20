@@ -968,6 +968,9 @@ void main() {
     await runner.run(task, WorkTaskCancellation());
     expect(task.status, AgentTaskStatus.waitingForApproval);
     final firstCheckpoint = jsonDecode(task.executionStateJson) as Map;
+    // Start from the least prompting configuration so the assertions below
+    // prove the refresh comes from the scope policy and not from the
+    // ordinary-write toggle.
     await grants.setOrdinaryWriteConfirmation(false);
     task
       ..executionStateJson = jsonEncode({
@@ -977,8 +980,6 @@ void main() {
       ..status = AgentTaskStatus.queued;
     await database.agentTaskBox.put(task.id, task);
 
-    await runner.run(task, WorkTaskCancellation());
-
     final workspace = await WorkModeWorkspaceService(
       db: database,
       grantService: grants,
@@ -987,6 +988,36 @@ void main() {
       isDirectChat: false,
       requireWritable: true,
     );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    // The first approval covers first.txt only. second.txt is a new path, so
+    // the refreshed scope demands its own approval even though ordinary-write
+    // confirmation is off.
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    expect(
+      await File('${workspace.workDirPath}/first.txt').readAsString(),
+      'first',
+    );
+    expect(await File('${workspace.workDirPath}/second.txt').exists(), isFalse);
+    expect(task.pendingToolRequestJson, contains('workspace.patch'));
+    final secondCheckpoint = jsonDecode(task.executionStateJson) as Map;
+    final secondPlan = WorkChangePlan.fromJson(
+      Map<String, dynamic>.from(secondCheckpoint['approvalPlan'] as Map),
+    );
+    // Mirrors the coordinator's own decision record: approving a plan replaces
+    // the task scope with the plan the user actually reviewed.
+    task
+      ..executionStateJson = jsonEncode({
+        ...secondCheckpoint,
+        'approvalDecision': 'approved',
+        'approvalScope': WorkApprovalScope.fromPlan(secondPlan).toJson(),
+      })
+      ..status = AgentTaskStatus.queued;
+    await database.agentTaskBox.put(task.id, task);
+
+    await runner.run(task, WorkTaskCancellation());
+
     expect(
       task.status,
       AgentTaskStatus.completed,

@@ -350,6 +350,42 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
         : effective;
   }
 
+  /// Budget time already spent working, excluding time the task spent waiting
+  /// on the user.
+  ///
+  /// [AgentTask.startedAt] deliberately stays fixed across user revisions so a
+  /// revision cannot extend the shared budget. An approval wait is not agent
+  /// work, so it is accumulated separately by [WorkTaskBudgetWait] and removed
+  /// here; otherwise a user who approves after a long pause would immediately
+  /// hit the time limit. Only the waits recorded for the current budget origin
+  /// count, so a replan or a manual continue starts from a clean window.
+  Duration _elapsedBudget(AgentTask task) {
+    final started = task.startedAt ??= clock();
+    final waited = WorkTaskBudgetWait.totalFor(
+      _decodeMap(task.executionStateJson),
+      started,
+    );
+    return clock().difference(started) - waited;
+  }
+
+  bool _timeBudgetExceeded(AgentTask task) =>
+      _elapsedBudget(task) >= _effectiveTimeLimit(task);
+
+  /// Folds a finished user wait into the excluded budget once the agent is
+  /// about to work again. The next checkpoint persists the updated value.
+  void _settleBudgetWait(AgentTask task) {
+    final execution = _decodeMap(task.executionStateJson);
+    if (WorkTaskBudgetWait.startedAtOf(execution) == null) return;
+    final budgetStartedAt = task.startedAt ??= clock();
+    task.executionStateJson = jsonEncode(
+      WorkTaskBudgetWait.settle(
+        execution,
+        clock(),
+        budgetStartedAt: budgetStartedAt,
+      ),
+    );
+  }
+
   WorkAgentLoopStatus _statusForTask(AgentTask task) => switch (task.status) {
         AgentTaskStatus.completed => WorkAgentLoopStatus.completed,
         AgentTaskStatus.cancelled => WorkAgentLoopStatus.cancelled,

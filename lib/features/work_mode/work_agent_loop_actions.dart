@@ -192,9 +192,8 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     WorkToolResult? softLimitResult;
     WorkToolResult? startAction() {
       if (actionStarted) return null;
-      final started = task.startedAt ?? clock();
       if (task.actionCount >= _effectiveActionLimit(task) ||
-          clock().difference(started) >= _effectiveTimeLimit(task)) {
+          _timeBudgetExceeded(task)) {
         softLimitResult = const WorkToolResult.paused(
           message: '已达到执行软上限，请手点继续。',
           failureCode: 'softLimit',
@@ -399,13 +398,18 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
   }
 
   /// A mutation approval authenticates one concrete operation only. Once that
-  /// operation has completed, remove its checkpoint before the next model turn
-  /// so a different tool cannot inherit the decision or its scope.
+  /// operation has completed, remove its per-operation capability before the
+  /// next model turn so a different tool cannot inherit the decision.
+  ///
+  /// The approved path scope deliberately outlives the operation: it is the
+  /// grant the user already made for this task, and WorkChangePolicy still
+  /// forces a fresh prompt for deletes, commands, irreversible writes and
+  /// sensitive paths. Dropping it here re-asked for every later write to the
+  /// same approved paths and reported each one as the task's "first" write.
   void _clearCompletedMutationApproval(AgentTask task) {
     final checkpoint = _decodeMap(task.executionStateJson)
       ..remove('approvalDecision')
       ..remove('approvalPlan')
-      ..remove('approvalScope')
       ..remove('approvalCapability')
       ..remove('approvalOperationFingerprint')
       ..remove('approvalConsumed')
