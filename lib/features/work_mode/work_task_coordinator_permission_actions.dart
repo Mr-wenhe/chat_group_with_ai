@@ -159,6 +159,11 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
         throw StateError('当前任务没有等待目录授权。');
       }
       final requestedPath = _requestedFolderPath(task);
+      // A native picker can stay open for minutes, and waiting on the user is
+      // not agent work. Record the wait durably before the dialog appears; the
+      // next run subtracts it instead of charging it to the task's budget.
+      _openBudgetWait(task);
+      await _save(task);
       // Start or join the process-global picker but do not await it while the
       // coordinator serial queue is held. Stop/revise actions must be able to
       // commit a newer checkpoint while the native dialog is open.

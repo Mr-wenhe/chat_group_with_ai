@@ -310,6 +310,22 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
     );
   }
 
+  /// Marks the start of a user wait on the task's durable checkpoint.
+  ///
+  /// A task blocked on a user choice is not consuming agent work, so the
+  /// interval is booked by [WorkTaskBudgetWait] and subtracted from the
+  /// wall-clock budget when the next run resumes. Callers persist the task
+  /// themselves; the window must be durable before the dialog appears, because
+  /// the user may take minutes to answer.
+  void _openBudgetWait(AgentTask task) {
+    task.executionStateJson = jsonEncode(
+      WorkTaskBudgetWait.begin(
+        _decodeExecutionMap(task.executionStateJson),
+        _clock(),
+      ),
+    );
+  }
+
   /// Persists a tool-approval checkpoint without requiring a chat page to
   /// retain the pending request in memory.
   Future<void> _implPauseForApproval(
@@ -328,15 +344,9 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
         // retained by the in-process runner while the approval dialog is open.
         ..pendingToolRequestJson =
             safeToolRequestCheckpointJson(pendingToolRequestJson)
-        // Mark the start of the user wait so the resumed run can exclude it
-        // from the task's wall-clock budget.
-        ..executionStateJson = jsonEncode(
-          WorkTaskBudgetWait.begin(
-            _decodeExecutionMap(task.executionStateJson),
-            _clock(),
-          ),
-        )
         ..updatedAt = _clock();
+      // The resumed run can only exclude the wait if it was recorded durably.
+      _openBudgetWait(task);
       await _save(task);
       await _markSnapshotStatus(task);
       unawaited(

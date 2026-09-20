@@ -406,6 +406,14 @@ Future<void> _waitForTaskState(
   fail('任务未在限定时间内达到预期状态：$taskId');
 }
 
+/// The start of an open budget wait window, or null when the task has none.
+DateTime? _budgetWaitStart(AgentTask task) {
+  if (task.executionStateJson.trim().isEmpty) return null;
+  return WorkTaskBudgetWait.startedAtOf(
+    Map<String, dynamic>.from(jsonDecode(task.executionStateJson) as Map),
+  );
+}
+
 Future<void> _waitForLockCount(
   WorkResourceLockManager manager,
   int expected,
@@ -3335,6 +3343,102 @@ void main() {
           'picker-first',
           'picker-second',
         ]));
+  });
+
+  test('a native folder picker books the user wait for every waiting task',
+      () async {
+    final settingsBox =
+        await Hive.openBox<dynamic>('app_settings-picker-budget-wait');
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      isWindows: false,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+    );
+    final pickerGate = Completer<String?>();
+    final guarded = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: () => pickerGate.future,
+      folderGrantConsent: (_) async => true,
+    );
+    addTearDown(() async {
+      if (!pickerGate.isCompleted) pickerGate.complete(null);
+      await guarded.dispose();
+      await settingsBox.deleteFromDisk();
+    });
+
+    await guarded.submit(_task(id: 'picker-wait-a', conversationId: 'wait-a'));
+    await guarded.submit(_task(id: 'picker-wait-b', conversationId: 'wait-b'));
+
+    // Both tasks block on the one native dialog, so both must book the wait:
+    // otherwise the time spent choosing a directory is charged as agent work.
+    for (final id in ['picker-wait-a', 'picker-wait-b']) {
+      await _waitForTaskState(
+        taskBox,
+        id,
+        (task) => _budgetWaitStart(task) != null,
+      );
+      expect(
+        taskBox.get(id)?.status,
+        AgentTaskStatus.waitingForApproval,
+        reason: '$id 应停在目录授权上。',
+      );
+    }
+
+    pickerGate.complete(null);
+  });
+
+  test('a panel request for the folder picker books the same user wait',
+      () async {
+    final settingsBox =
+        await Hive.openBox<dynamic>('app_settings-panel-budget-wait');
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      isWindows: false,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+    );
+    final pickerGate = Completer<String?>();
+    final guarded = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: () => pickerGate.future,
+      folderGrantConsent: (_) async => true,
+    );
+    addTearDown(() async {
+      if (!pickerGate.isCompleted) pickerGate.complete(null);
+      await guarded.dispose();
+      await settingsBox.deleteFromDisk();
+    });
+    final task = _task(
+      id: 'folder-panel-budget-wait',
+      conversationId: 'group-folder-panel',
+    )
+      ..status = AgentTaskStatus.paused
+      ..executionStateJson = jsonEncode({'folderGrantPending': true});
+    await taskBox.put(task.id, task);
+    final action = WorkTaskUserAction.forTask(task).single;
+
+    final request = guarded.requestFolderForTask(
+      task.id,
+      expectedActionVersion: action.version,
+    );
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (current) => _budgetWaitStart(current) != null,
+    );
+
+    pickerGate.complete(directory.path);
+    await request;
+    await _waitForStartedCount(runner, 1);
+    expect(runner.startedTaskIds, [task.id]);
+    runner.complete(task.id);
   });
 
   test('queues a conflicting resource and starts it after release', () async {
