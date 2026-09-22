@@ -453,6 +453,37 @@ void main() {
     }
   });
 
+  test('工作模式对客户端标记为可重试的空回复仍走兼容路径', () async {
+    final client = FakeCompletionClient();
+    client.structuredStreamedResult = {
+      'success': false,
+      'message': '模型返回了空内容',
+      'failureCode': 'emptyResponse',
+      'retryable': true,
+    };
+    final gateway = AiRequestGateway(
+      store: MemoryGovernanceStore(),
+      client: client,
+    );
+
+    final result = await gateway.sendChatMessageStreamed(
+      apiKey: 'secret',
+      provider: ApiProvider.deepseek,
+      model: 'deepseek-chat',
+      messages: messages,
+      purpose: AiRequestPurpose.agent,
+      conversationId: 'work-task',
+      characterId: 'worker',
+      maxRetries: 0,
+      requiresTools: true,
+    );
+
+    // The bounded protocol failure carries the same retryable signal that
+    // WorkFailure reads, so the compatibility call must still run.
+    expect(client.boundedCount, 1);
+    expect(result['success'], isTrue);
+  });
+
   test('网关重试按 RetryAttempt 回退温度', () async {
     final store = MemoryGovernanceStore();
     final client = FakeCompletionClient();

@@ -296,6 +296,10 @@ class AiRequestGateway {
       return false;
     }
     if (result['success'] != true) {
+      // The client marks a bounded protocol failure (an empty completion, for
+      // example) as retryable, the same signal `WorkFailure` reads, so re-ask
+      // on the compatibility transport instead of treating it as internal.
+      if (result['retryable'] == true) return true;
       final statusCode = result['statusCode'];
       if (statusCode is int) return _isRetryableCompletionStatus(statusCode);
       // No status: retry only on a positive transport-failure signal.
