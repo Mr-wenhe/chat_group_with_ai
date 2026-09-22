@@ -26,7 +26,20 @@ typedef WorkRoleModelCompletion = Future<Map<String, dynamic>> Function({
 /// and stage plan. This service only selects a credential-bearing candidate,
 /// sends bounded public persona metadata, and parses the strict decision.
 class WorkRoleModelSelectorService {
+  /// 凭据解析只读本地安全存储，保持短超时，避免一个坏条目拖住整轮路由。
   static const Duration defaultTimeout = Duration(seconds: 8);
+
+  /// 路由是一次真实模型调用。推理型模型（SenseNova Flash、DeepSeek 系列）冷启动
+  /// 加上内部推理常常超过 8 秒，8 秒超时会被 `WorkRoleRouter` 记成「候选推荐
+  /// 不可用」，于是群聊每次都退化成「等待群内推举」。
+  static const Duration defaultModelTimeout = Duration(seconds: 20);
+
+  /// 路由只需要一个裸 JSON 决策，但仍要给推理 token 留余量：预算过小会让模型
+  /// 把 token 全花在内部推理上并返回空正文（原来的 256 在推理型模型上几乎必然
+  /// 空返回，路由于是每次都退化成「等待群内推举」）。实际请求会按模型能力与
+  /// 剩余上下文夹取，见 `AiRequestGateway.clampOutputBudget`。
+  static const int preferredMaxTokens = 2048;
+
   static const int maxResponseBytes = 16 * 1024;
   static const int maxPromptCharacters = 24 * 1024;
 
@@ -35,6 +48,7 @@ class WorkRoleModelSelectorService {
   final ApiConfig? Function(AICharacter character) resolveApiConfig;
   final WorkRoleModelCompletion complete;
   final Duration timeout;
+  final Duration modelTimeout;
 
   WorkRoleModelSelectorService({
     required Iterable<AICharacter> characters,
@@ -42,7 +56,9 @@ class WorkRoleModelSelectorService {
     required this.resolveApiConfig,
     required this.complete,
     this.timeout = defaultTimeout,
-  }) : sourceCharacters = List<AICharacter>.unmodifiable(characters);
+    Duration? modelTimeout,
+  })  : modelTimeout = modelTimeout ?? defaultModelTimeout,
+        sourceCharacters = List<AICharacter>.unmodifiable(characters);
 
   Future<WorkRoleModelDecision> select(WorkRoleRoutingContext context) async {
     final candidateIds = context.candidateCharacterIds.toSet();
@@ -75,8 +91,8 @@ class WorkRoleModelSelectorService {
         },
         {'role': 'user', 'content': prompt},
       ],
-      timeout: timeout,
-    ).timeout(timeout);
+      timeout: modelTimeout,
+    ).timeout(modelTimeout);
     if (response['success'] == false) {
       throw StateError('自动角色判断模型请求失败。');
     }

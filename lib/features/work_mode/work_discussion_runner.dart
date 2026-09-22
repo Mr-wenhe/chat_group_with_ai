@@ -21,6 +21,7 @@ import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/services/chat_api_service.dart';
 import 'package:dio/dio.dart';
 
 part 'work_discussion_session.dart';
@@ -65,8 +66,15 @@ class _DiscussionMember {
 /// It only asks models for bounded, structured public contributions; tools and
 /// file side effects remain behind the S2 `updateDiscussionState` gate.
 class WorkDiscussionRunner implements WorkTaskDiscussionRunner {
-  static const Duration defaultRoleTimeout = Duration(seconds: 30);
+  /// 讨论成员回复必须是非流式结构化 JSON，推理型模型（如 SenseNova Flash、
+  /// DeepSeek 系列）在 768 tokens 预算下经常把全部预算花在内部推理上，
+  /// 30s 会误杀正常请求。实测同一提示词的真实耗时/长度需要更宽的窗口。
+  static const Duration defaultRoleTimeout = Duration(seconds: 60);
   static const Duration defaultCredentialTimeout = Duration(seconds: 8);
+  /// 成员发言的首选输出预算。推理型模型会把预算全花在内部推理上并返回空正文，
+  /// 所以不能沿用早期的 768/2048；实际请求会按模型能力与剩余上下文夹取，见
+  /// `AiRequestGateway.clampOutputBudget`。
+  static const int preferredMaxOutputTokens = 4096;
   static const int maxResponseBytes = 48 * 1024;
   static const int maxPromptCharacters = 24 * 1024;
   static const int maxMembers = 32;

@@ -281,7 +281,12 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         customBaseUrl: config.customBaseUrl,
         model: config.modelName,
         messages: messages,
-        maxTokens: 256,
+        maxTokens: _aiGateway.clampOutputBudget(
+          provider: provider,
+          model: config.modelName,
+          preferred: WorkRoleModelSelectorService.preferredMaxTokens,
+          messages: messages,
+        ),
         receiveTimeout: timeout,
         maxRetries: 0,
         purpose: AiRequestPurpose.agent,

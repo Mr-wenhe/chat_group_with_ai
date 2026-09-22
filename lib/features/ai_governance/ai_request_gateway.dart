@@ -41,6 +41,28 @@ class AiRequestGateway {
     return guard.capability(provider, model);
   }
 
+  /// 把业务层期望的输出预算夹到 [AiRequestGuard.check] 会放行的区间。
+  ///
+  /// 预算是工作模式「空回复」的常见诱因：推理型模型会把预算先花在内部推理上，
+  /// 预算给得太小就会返回空正文；而给得太大又会被治理层硬拦截——超过模型输出
+  /// 上限（未在能力快照中声明的模型只有保守的 2048），或挤占上下文
+  /// （`inputTokens + maxTokens > contextWindow`）。拦截在上层看来是不可修复失败，
+  /// 会让整轮工作直接判死，所以这里按 `preferred`、模型上限与剩余上下文三者取最小。
+  int clampOutputBudget({
+    required ApiProvider provider,
+    required String model,
+    required int preferred,
+    required List<Map<String, dynamic>> messages,
+  }) {
+    final resolved = capability(provider, model);
+    final outputLimit = resolved.maxOutput > 0 ? resolved.maxOutput : preferred;
+    final outputBudget = preferred < outputLimit ? preferred : outputLimit;
+    final remaining =
+        resolved.contextWindow - AiRequestGuard.estimateTokens(messages);
+    if (remaining > 0 && remaining < outputBudget) return remaining;
+    return outputBudget;
+  }
+
   Future<Map<String, dynamic>> sendChatMessage({
     required String apiKey,
     required ApiProvider provider,

@@ -166,6 +166,19 @@ void main() {
           'content': '',
           'reasoning_content': '',
         },
+        // 真实空返回带 message，分类只能靠 failureCode；缺 code 时会掉进
+        // internal，这条用例就是防止该回归。
+        'empty completion': <String, dynamic>{
+          'success': false,
+          'failureCode': 'emptyResponse',
+          'message': '模型返回了空内容',
+        },
+        'silent stream empty completion': <String, dynamic>{
+          'success': false,
+          'failureCode': 'emptyResponse',
+          'message': '模型返回了空内容',
+          'streamEmpty': true,
+        },
         'protocol': <String, dynamic>{
           'success': true,
           'content': 'not-json',
@@ -186,13 +199,22 @@ void main() {
         final expectedType = switch (entry.key) {
           'protocol' ||
           'empty stream' ||
-          'empty failed response' =>
+          'empty failed response' ||
+          'empty completion' ||
+          'silent stream empty completion' =>
             WorkFailureType.modelProtocol,
           '401 exception' => WorkFailureType.authorizationLost,
           '403 exception' => WorkFailureType.permissionDenied,
           _ => WorkFailureType.retryableNetwork,
         };
         expect(result.failure!.type, expectedType, reason: entry.key);
+        if (entry.key == 'silent stream empty completion') {
+          expect(
+            result.failure!.technicalDetail,
+            contains('流式通道没有返回文本'),
+            reason: entry.key,
+          );
+        }
         expect(
           task.status,
           entry.key == '401 exception' || entry.key == '403 exception'

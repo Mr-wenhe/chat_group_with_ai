@@ -85,7 +85,7 @@ extension _ChatApiServiceSupport on ChatApiService {
     if (content.trim().isEmpty) {
       // 部分 OpenAI 兼容服务的 SSE 通道只返回 [DONE]，但同一
       // 请求的非流式通道可正常返回内容；立即回退一次避免任务误报。
-      return _sendChatMessageOnce(
+      final fallback = await _sendChatMessageOnce(
         apiKey: apiKey,
         provider: provider,
         apiProtocol: apiProtocol,
@@ -99,6 +99,9 @@ extension _ChatApiServiceSupport on ChatApiService {
         structuredJson: structuredJson,
         maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
       );
+      // 打上诊断标记再返回：回退成功时它是无害的附加信息，回退也失败时
+      // 工作模式面板就能看出「流式通道是静默的」，而不是笼统的空返回。
+      return {...fallback, ChatApiService.streamEmptyField: true};
     }
     return {
       'success': true,

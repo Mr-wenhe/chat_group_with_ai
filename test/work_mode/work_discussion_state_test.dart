@@ -287,8 +287,8 @@ void main() {
   });
 
   test(
-      'ready state requires concrete format, location, and optional executor pin',
-      () {
+      'ready state requires a concrete format, allows default delivery, and '
+      'accepts an optional executor pin', () {
     final state = _readyState();
     expect(
       state.copyWith(
@@ -299,6 +299,8 @@ void main() {
       ).isExecutionReady,
       isFalse,
     );
+    // "unspecified" location means "deliver to the conversation default
+    // workspace", which is a legitimate target and must not block execution.
     expect(
       state.copyWith(
         deliverableContract: {
@@ -306,7 +308,7 @@ void main() {
           'location': 'unspecified',
         },
       ).isExecutionReady,
-      isFalse,
+      isTrue,
     );
     // A null pin represents the role elected by the group; the selected
     // executor is still required in the discussion state itself.

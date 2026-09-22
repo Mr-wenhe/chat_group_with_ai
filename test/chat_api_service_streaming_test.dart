@@ -219,9 +219,60 @@ void main() {
 
     expect(result['success'], isTrue);
     expect(result['message'], '<html>fallback</html>');
+    // 回退成功也保留诊断标记：面板可以据此说明「流式通道是静默的」。
+    expect(result['streamEmpty'], isTrue);
     expect(requests, hasLength(2));
     expect((requests.first.data as Map)['stream'], isTrue);
     expect((requests.last.data as Map)['stream'], isNull);
+  });
+
+  test('silent stream with an empty fallback reports the empty response code',
+      () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        final requestData = options.data as Map<String, dynamic>;
+        if (requestData['stream'] == true) {
+          handler.resolve(Response<ResponseBody>(
+            requestOptions: options,
+            statusCode: 200,
+            data: ResponseBody(
+              Stream.value(
+                Uint8List.fromList(utf8.encode('data: [DONE]\n')),
+              ),
+              200,
+            ),
+          ));
+          return;
+        }
+        handler.resolve(Response(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'choices': [
+              {
+                'message': {'content': ''}
+              }
+            ]
+          },
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio);
+
+    final result = await service.sendChatMessageStreamed(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isFalse);
+    expect(result['message'], '模型返回了空内容');
+    expect(result['failureCode'], 'emptyResponse');
+    expect(result['streamEmpty'], isTrue);
   });
 
   test('empty non-stream completion is rejected instead of being accepted',
@@ -255,6 +306,8 @@ void main() {
 
     expect(result['success'], isFalse);
     expect(result['message'], '模型返回了空内容');
+    // 工作模式的失败分类依赖这个稳定 code 才会归到可重试的 modelProtocol。
+    expect(result['failureCode'], 'emptyResponse');
   });
 
   test('non-stream completion accepts reasoning content when content is empty',

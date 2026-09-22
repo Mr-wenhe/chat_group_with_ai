@@ -27,10 +27,16 @@ extension _DiscussionMemberTurn on _DiscussionSession {
     );
     if (cancellation.isCancelled) return false;
     if (!turn.valid) {
+      // A rate-limited (HTTP 429), timed-out or network-failed call says
+      // nothing about this member's opinion, so it must not become a protected
+      // protocol blocker. `structuredResponseInvalid:` can never be cleared by
+      // the model, which would pin the group at 99% and make it re-ask the same
+      // question every round. Only a real protocol or governance failure marks
+      // the member as unusable for this discussion.
       final isQualifiedMember = qualifiedAvailableIds.contains(
         member.character.id,
       );
-      if (isQualifiedMember) {
+      if (isQualifiedMember && !turn.isTransportFailure) {
         roundBlockers.add('structuredResponseInvalid:${member.character.id}');
       }
       await runner._recordDiagnostic(

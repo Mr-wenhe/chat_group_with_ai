@@ -227,16 +227,16 @@ bool _hasValidContractForExecution(
   if (safe == null) return false;
   final deliverableType = safe['deliverableType'];
   final format = safe['format'];
-  final location = safe['location'];
   final contentScope = safe['contentScope'];
+  // `location` is intentionally not checked: it is already normalised to a
+  // non-empty string by [_safeContract], and "unspecified" legitimately means
+  // "deliver to the conversation's default workspace". Requiring a concrete
+  // place here would keep a fully understood plan permanently non-executable.
   if (deliverableType is! String ||
       deliverableType.trim().isEmpty ||
       format is! String ||
       format.trim().isEmpty ||
       format == 'unspecified' ||
-      location is! String ||
-      location.trim().isEmpty ||
-      location == 'unspecified' ||
       contentScope is! String ||
       contentScope.trim().isEmpty) {
     return false;

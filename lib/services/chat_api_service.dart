@@ -14,6 +14,17 @@ part 'chat_api_protocol_support.dart';
 
 class ChatApiService {
   static const String _emptyCompletionMessage = '模型返回了空内容';
+  /// 与 [_emptyCompletionMessage] 配套的稳定失败码。工作模式的
+  /// `WorkFailure._typeFor` 会把 `emptyResponse` 归为可重试的
+  /// `modelProtocol`，让偶发的空返回自动重试而不是直接判死。
+  ///
+  /// 讨论链路需要按失败码（而不是中文文案）判断"是否值得重试一次"，
+  /// 因此该常量对外可见；调用方不得依赖它做业务分支以外的判断。
+  static const String emptyResponseFailureCode = 'emptyResponse';
+  /// 诊断字段：流式通道一个字都没回（例如只收到 `[DONE]`），本次结果来自
+  /// 非流式回退请求。让工作模式能区分「静默的 SSE 流」和「非流式 200 但
+  /// 正文为空」这两种都会报 [_emptyCompletionMessage] 的情况。
+  static const String streamEmptyField = 'streamEmpty';
   static const String _webNetworkUnsupportedMessage = 'Web 端暂不支持联网模型调用';
   static const int defaultMaxResponseBytes = 4 * 1024 * 1024;
   static const int maxSseLineBytes = 512 * 1024;
@@ -274,7 +285,14 @@ class ChatApiService {
         }
         final reply = _responseText(data, apiProtocol);
         if (reply.trim().isEmpty) {
-          return {'success': false, 'message': _emptyCompletionMessage};
+          // 必须带上 failureCode：工作模式的失败分类只看 code 和 message
+          // 关键词，而「模型返回了空内容」不含任何关键词，缺 code 时会被
+          // 兜底成不可重试的 internal，导致偶发空返回直接判死。
+          return {
+            'success': false,
+            'failureCode': emptyResponseFailureCode,
+            'message': _emptyCompletionMessage,
+          };
         }
         final usage = _usageFields(data, apiProtocol);
         return {

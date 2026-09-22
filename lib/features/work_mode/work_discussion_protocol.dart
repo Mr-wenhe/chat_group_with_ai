@@ -53,6 +53,24 @@ class WorkDiscussionTurn {
     required this.userQuestion,
   }) : valid = true;
 
+  /// Reasons produced by the transport layer rather than by the model's
+  /// answer: an HTTP error status (rate limiting, upstream 5xx), a timeout, or
+  /// a network-level exception. They say nothing about whether this member
+  /// understands the task, so they must never be recorded as a protocol
+  /// violation that the group can only resolve by asking the user again.
+  static final RegExp _httpStatusFailure = RegExp(r'^HTTP \d{3} 请求失败$');
+
+  static const Set<String> _transportFailureReasons = <String>{
+    '请求失败',
+    '模型请求超时',
+    '模型请求异常',
+    '模型调用失败',
+  };
+
+  bool get isTransportFailure =>
+      _transportFailureReasons.contains(failureReason) ||
+      _httpStatusFailure.hasMatch(failureReason);
+
   factory WorkDiscussionTurn.fromResponse(Map<String, dynamic> response) {
     if (response['success'] == false) {
       final message = _safeText(response['message']);

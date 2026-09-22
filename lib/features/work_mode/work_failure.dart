@@ -28,6 +28,15 @@ enum WorkFailureType {
 
 const _retryFromCheckpointAction = '点击“重试”，从最近安全检查点继续；已提交的写入不会重复执行。';
 
+/// 由 `ChatApiService.streamEmptyField` 写入的响应字段。两边都按字面量匹配，
+/// 与既有 `failureCode` / `statusCode` 的响应契约保持一致，避免为单个字段
+/// 让数据层依赖 services 层。
+const _streamEmptyResponseField = 'streamEmpty';
+
+/// 流式通道静默时的技术说明。它只解释「文本从哪条通道来」，因此无论非流式
+/// 回退是成功还是失败都成立。
+const _silentStreamDetail = '流式通道没有返回文本，本次结果来自非流式回退请求。';
+
 /// A public, durable description of one failed or paused work-mode attempt.
 ///
 /// Raw model responses, command output, credentials and full file contents are
@@ -291,10 +300,15 @@ class WorkFailure {
         statusCode == null &&
         code == null &&
         rawMessage.isEmpty;
+    // The chat client flags a silent SSE channel. Surface it as the technical
+    // detail so the user can tell a stream that never produced text apart from
+    // an empty non-stream body, instead of seeing one opaque message.
+    final streamEmpty = response[_streamEmptyResponseField] == true;
     return _fromSignals(
       code: isEmptyStream ? 'modelProtocol' : code,
       statusCode: statusCode,
       message: message.isEmpty ? '模型没有返回可处理的响应。' : message,
+      technicalDetail: streamEmpty ? _silentStreamDetail : '',
       scope: 'model',
       completedContent: completedContent,
       retryableHint: response['retryable'] == true,

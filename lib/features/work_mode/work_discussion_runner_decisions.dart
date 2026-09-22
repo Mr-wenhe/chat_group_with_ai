@@ -184,7 +184,6 @@ extension _WorkDiscussionRunnerDecisions on WorkDiscussionRunner {
     final type = contract['deliverableType'];
     final scope = contract['contentScope'];
     final format = contract['format'];
-    final location = contract['location'];
     final revision = contract['requestRevision'];
     final explicitExecutor = contract['explicitExecutorId'];
     if (type is! String ||
@@ -198,14 +197,15 @@ extension _WorkDiscussionRunnerDecisions on WorkDiscussionRunner {
                 explicitExecutor.trim() != executorId)) {
       return false;
     }
+    // `location` is deliberately not required here. "unspecified" means the
+    // artifact is delivered to the conversation's default workspace, which is
+    // a legitimate target; requiring a concrete place would keep a perfectly
+    // understood plan stuck at 99% and never let the group converge.
     return scope is String &&
         scope.trim().isNotEmpty &&
         format is String &&
         format.trim().isNotEmpty &&
-        format != 'unspecified' &&
-        location is String &&
-        location.trim().isNotEmpty &&
-        location != 'unspecified';
+        format != 'unspecified';
   }
 
   List<String> _discussionBlockers(List<String> blockers,

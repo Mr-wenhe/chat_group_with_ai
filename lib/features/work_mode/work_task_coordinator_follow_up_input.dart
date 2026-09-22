@@ -148,6 +148,14 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
         // its completion callback will start the renewed revision after the
         // old run has drained.
         _discussionCancellations[task.id]?.cancel();
+        // This input is the answer to whatever the discussion last asked the
+        // user: a model clarification, or the pending group question surfaced
+        // in the task panel. Renewing must drop that exact question, otherwise
+        // the new round prints it again under `待解决：` and the user sees the
+        // same question repeated right after answering it.
+        final answeredQuestion = answeringModelClarification
+            ? WorkTaskClarification.question(task)
+            : _pendingDiscussionQuestion(discussionMarker.state!);
         final currentRequest = task.userRequest.trim();
         final mergedRequest = currentRequest.isEmpty
             ? normalized
@@ -169,6 +177,7 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
               mergedRequest,
               decision: followUpDecision,
               contractRequest: normalized,
+              answeredQuestion: answeredQuestion,
             ),
           )
           ..updatedAt = _clock();

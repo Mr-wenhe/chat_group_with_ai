@@ -3,7 +3,9 @@ part of 'work_task_coordinator.dart';
 extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
   WorkDiscussionState _renewDiscussionForRequest(
       WorkDiscussionState previous, String request,
-      {WorkFollowUpDecision? decision, String? contractRequest}) {
+      {WorkFollowUpDecision? decision,
+      String? contractRequest,
+      String? answeredQuestion}) {
     final revision = previous.requestRevision + 1;
     final pinnedExecutor = _contractExecutorId(previous.deliverableContract);
     final parsed = WorkRoleRouter.deliverableContractForRequest(
@@ -34,20 +36,112 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     contract
       ..['contentScope'] = request
       ..['requestRevision'] = revision;
-    return WorkDiscussionState.initial(
+
+    // A supplement that keeps the same deliverable is a revision of the same
+    // plan, not a new one. Only a real target change (another artifact type,
+    // format, place or path) may discard what the group already confirmed.
+    final deliverableChanged = _deliverableIdentityChanged(
+      previous.deliverableContract,
+      contract,
+    );
+    final keepElection = pinnedExecutor != null || !deliverableChanged;
+    final renewed = WorkDiscussionState.initial(
       conversationId: previous.conversationId,
       requestRevision: revision,
       coordinatorId: previous.coordinatorId,
       // A user-specified executor remains pinned. A role elected by the group
-      // belongs to the previous request version; a revision must reopen the
-      // election so the new deliverable is matched against current skills.
-      executorId: pinnedExecutor == null ? null : previous.executorId,
+      // belongs to the previous request version; a revision that retargets the
+      // deliverable must reopen the election so the new deliverable is matched
+      // against current skills. A supplement that keeps the same deliverable
+      // keeps its elected owner.
+      executorId: keepElection ? previous.executorId : null,
       candidateCharacterIds:
-          pinnedExecutor == null ? const [] : previous.candidateCharacterIds,
+          keepElection ? previous.candidateCharacterIds : const [],
       participantCharacterIds:
           previous.participants.map((item) => item.characterId),
       deliverableContract: contract,
     );
+    if (deliverableChanged) return renewed;
+    // Carrying the confirmed understanding over is what stops a one-line
+    // supplement from wiping the whole discussion back to 0%. Evidence and
+    // still-open questions travel with it so the group continues where it
+    // stopped instead of re-asking what it already agreed on.
+    //
+    // Two fields are deliberately *not* carried over:
+    // - `round`: the previous run may already have burnt its round budget;
+    //   keeping the old count would let the renewed discussion hit the limit
+    //   before it can even answer the supplement.
+    // - `blockers`: terminal ones (discussionNotConverged /
+    //   discussionRoundLimit / structuredResponseInvalid) are model-proof and
+    //   would pin the task forever, and user-decision ones would make
+    //   `_discussionWaitsForUser` refuse to restart the discussion at all.
+    // `initial()` also re-arms it, so its phase never looks ready by accident.
+    return renewed.copyWith(
+      understandingPercent: previous.understandingPercent,
+      understandingEvidence: previous.understandingEvidence,
+      openQuestions: _withoutAnsweredQuestion(
+        previous.openQuestions,
+        answeredQuestion,
+      ),
+    );
+  }
+
+  /// Drops the one question the user just answered. Carrying it over would make
+  /// the renewed discussion print it again under `待解决：` in its very first
+  /// round, which reads as "the same question was asked twice" right after the
+  /// user replied. Questions the user did not answer stay open.
+  List<String> _withoutAnsweredQuestion(
+    List<String> questions,
+    String? answeredQuestion,
+  ) {
+    final answered = answeredQuestion?.trim() ?? '';
+    if (answered.isEmpty) return questions;
+    return questions
+        .where((item) => item.trim() != answered)
+        .toList(growable: false);
+  }
+
+  /// The question the group last surfaced to the user. The task panel answers
+  /// exactly this one (first non-empty entry of `openQuestions`, presented while
+  /// the discussion is not execution-ready), so a new user input is its answer.
+  String? _pendingDiscussionQuestion(WorkDiscussionState state) {
+    if (state.isExecutionReady) return null;
+    for (final item in state.openQuestions) {
+      final trimmed = item.trim();
+      if (trimmed.isNotEmpty) return trimmed;
+    }
+    return null;
+  }
+
+  /// Whether the latest request points at a different artifact than the one the
+  /// group already confirmed. `contentScope` is intentionally excluded: it
+  /// always absorbs the new wording and is not part of the deliverable identity.
+  bool _deliverableIdentityChanged(
+    Map<String, dynamic>? before,
+    Map<String, dynamic> after,
+  ) {
+    const identityFields = <String>[
+      'deliverableType',
+      'format',
+      'location',
+      'revisionTarget',
+    ];
+    if (before == null) return true;
+    for (final field in identityFields) {
+      if (_contractIdentityValue(before[field]) !=
+          _contractIdentityValue(after[field])) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  /// Normalises "no target specified" to an empty string so an omitted field is
+  /// never mistaken for a target change.
+  String _contractIdentityValue(Object? value) {
+    if (value is! String) return '';
+    final trimmed = value.trim();
+    return trimmed == 'unspecified' ? '' : trimmed;
   }
 
   String? _contractExecutorId(Map<String, dynamic>? contract) {

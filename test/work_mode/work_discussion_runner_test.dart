@@ -113,6 +113,82 @@ Map<String, dynamic> _turn({
   };
 }
 
+bool _isCoordinatorPrompt(List<Map<String, dynamic>> messages) =>
+    messages.first['content'].toString().contains('你是本轮协调/执行人');
+
+bool _isRepairPrompt(List<Map<String, dynamic>> messages) =>
+    messages.last['content'].toString().contains('不是合法 JSON');
+
+/// Runs a one-member discussion where every member attempt is answered by
+/// [memberResponse] (1-based attempt number) and the coordinator always
+/// summarizes. Returns the final state plus every member prompt so a test can
+/// assert whether the runner asked the same member again.
+Future<
+    ({
+      WorkDiscussionState? state,
+      List<List<Map<String, dynamic>>> memberPrompts,
+    })> _runSingleMemberFixture(
+  DatabaseService database, {
+  required String characterId,
+  required Map<String, dynamic> Function(int attempt) memberResponse,
+}) async {
+  final config = ApiConfig(
+    id: 'cfg-$characterId',
+    name: characterId,
+    provider: 'deepseek',
+    modelName: 'deepseek-chat',
+    hasCredential: true,
+    credentialId: 'credential-$characterId',
+  );
+  await database.apiConfigBox.put(config.id, config);
+  final character = _character(characterId, '前端', '前端工程师', config.id);
+  await database.aiCharacterBox.put(character.id, character);
+  final group = ChatGroup(
+    id: '$characterId-group',
+    name: '重试群',
+    theme: '网页',
+    aiCharacterIds: [character.id],
+  );
+  await database.chatGroupBox.put(group.id, group);
+  final task = _task(
+    group: group,
+    request: '实现 HTML 页面',
+    executorId: character.id,
+    members: [character.id],
+  );
+  final memberPrompts = <List<Map<String, dynamic>>>[];
+  WorkDiscussionState? latest;
+  final runner = WorkDiscussionRunner(
+    database: database,
+    credentials: _Credentials(),
+    completion: ({
+      required character,
+      required config,
+      required apiKey,
+      required provider,
+      required conversationId,
+      required messages,
+      required timeout,
+      cancelToken,
+    }) async {
+      if (_isCoordinatorPrompt(messages)) {
+        return _turn(update: '本轮公开结论已经收集齐全。', percent: 100);
+      }
+      memberPrompts.add(messages);
+      return memberResponse(memberPrompts.length);
+    },
+  );
+  await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+    latest = state;
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      task.executionStateJson,
+      state,
+    );
+    return task;
+  });
+  return (state: latest, memberPrompts: memberPrompts);
+}
+
 void main() {
   late Directory directory;
   late DatabaseService database;
@@ -1759,5 +1835,135 @@ void main() {
     cancellation.cancel();
     await run;
     expect(updateCount, 1); // only the initial discussion checkpoint landed
+  });
+
+  test('asks the same member again when the model returns an empty body',
+      () async {
+    final outcome = await _runSingleMemberFixture(
+      database,
+      characterId: 'empty-body-front',
+      // Attempt one reproduces the real gateway reply: HTTP 200 with an empty
+      // body, reported by ChatApiService as the stable `emptyResponse` code.
+      memberResponse: (attempt) => attempt == 1
+          ? <String, dynamic>{
+              'success': false,
+              'failureCode': 'emptyResponse',
+              'message': '模型返回了空内容',
+            }
+          : _turn(update: '已补充前端可行性意见。', percent: 100),
+    );
+
+    // Round one spends exactly one repair call, round two speaks once.
+    expect(outcome.memberPrompts.length, 3);
+    expect(_isRepairPrompt(outcome.memberPrompts[1]), isTrue);
+    expect(outcome.memberPrompts[1].length, outcome.memberPrompts[0].length + 1);
+    final messages = database.messageBox.values
+        .where((message) => message.groupId == 'empty-body-front-group')
+        .toList();
+    expect(
+      messages.any((message) =>
+          message.senderId == 'empty-body-front' &&
+          message.content.contains('职责意见：')),
+      isTrue,
+    );
+    expect(
+      messages.any((message) => message.content.contains('暂不计入理解进度')),
+      isFalse,
+    );
+    expect(outcome.state, isNotNull);
+    expect(outcome.state!.phase, WorkDiscussionPhase.ready);
+    expect(outcome.state!.understandingPercent, 100);
+  });
+
+  test('asks the same member again when a truncated reply loses its fields',
+      () async {
+    final outcome = await _runSingleMemberFixture(
+      database,
+      characterId: 'truncated-front',
+      // Valid JSON that lost the protocol fields, which is what a reply cut
+      // off in the middle of an array looks like after decoding.
+      memberResponse: (attempt) => attempt == 1
+          ? <String, dynamic>{
+              'success': true,
+              'message': jsonEncode(<String, dynamic>{
+                'public_update': '已确认目标范围',
+              }),
+            }
+          : _turn(update: '已补充前端可行性意见。', percent: 100),
+    );
+
+    expect(outcome.memberPrompts.length, 3);
+    expect(_isRepairPrompt(outcome.memberPrompts[1]), isTrue);
+    expect(outcome.state, isNotNull);
+    expect(outcome.state!.phase, WorkDiscussionPhase.ready);
+  });
+
+  test('does not spend a repair call on a non-protocol member failure',
+      () async {
+    final outcome = await _runSingleMemberFixture(
+      database,
+      characterId: 'blocked-front',
+      // A governance rejection is a real answer about this request, so
+      // resending the same prompt cannot help and must not consume a call.
+      memberResponse: (_) => <String, dynamic>{
+        'success': false,
+        'failureCode': 'governanceBlocked',
+        'message': '请求输出上限超过模型上限',
+      },
+    );
+
+    expect(outcome.memberPrompts.length, 2); // one attempt per round
+    expect(
+      outcome.memberPrompts.any(_isRepairPrompt),
+      isFalse,
+    );
+    final messages = database.messageBox.values
+        .where((message) => message.groupId == 'blocked-front-group')
+        .toList();
+    expect(
+      messages.any((message) => message.content.contains('暂不计入理解进度')),
+      isTrue,
+    );
+    expect(outcome.state, isNotNull);
+    expect(outcome.state!.phase, WorkDiscussionPhase.blocked);
+    expect(
+      outcome.state!.blockers,
+      contains('structuredResponseInvalid:blocked-front'),
+    );
+  });
+
+  test('does not pin the discussion when a member is rate limited', () async {
+    final outcome = await _runSingleMemberFixture(
+      database,
+      characterId: 'rate-limited-front',
+      // HTTP 429 is a transport failure: it says nothing about this member's
+      // opinion, so it must not become the model-proof
+      // `structuredResponseInvalid:<id>` blocker. That blocker can never be
+      // cleared, which used to freeze the group at 99% and make it re-ask the
+      // same question every round.
+      memberResponse: (_) => <String, dynamic>{
+        'success': false,
+        'statusCode': 429,
+        'message': 'HTTP 429 请求失败',
+      },
+    );
+
+    final messages = database.messageBox.values
+        .where((message) => message.groupId == 'rate-limited-front-group')
+        .toList();
+    // The failure is still reported honestly to the user.
+    expect(
+      messages.any((message) => message.content.contains('暂不计入理解进度')),
+      isTrue,
+    );
+    // A rate limit is not worth a repair resend, so no call is wasted on it.
+    expect(outcome.memberPrompts.any(_isRepairPrompt), isFalse);
+    expect(outcome.state, isNotNull);
+    expect(
+      outcome.state!.blockers,
+      isNot(contains('structuredResponseInvalid:rate-limited-front')),
+    );
+    // The remaining members can still converge.
+    expect(outcome.state!.phase, WorkDiscussionPhase.ready);
   });
 }

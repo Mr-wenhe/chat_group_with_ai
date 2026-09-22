@@ -1,5 +1,40 @@
 part of 'work_discussion_runner.dart';
 
+/// 解析成功但结构无效时，值得再给模型一次机会的失败原因。这些原因几乎都来自
+/// 「输出被 max_tokens 截断」或「网关忽略 response_format」，而换到非 JSON 通道
+/// 并追加重新约束的提示词后通常能通过；业务类失败（如缺少公开职责意见）不在其中。
+const Set<String> _repairableDiscussionFailureReasons = <String>{
+  // 网关忽略了 response_format，模型直接说了人话。
+  '模型返回了非结构化公开内容',
+  // JSON 完整但字段缺失/类型不对：多为输出在字段中间被截断。
+  '结构化回复无效',
+};
+
+/// Bookkeeping blockers that are not natural-language questions. They must be
+/// excluded before `openQuestions + blockers` is matched against member names,
+/// because `structuredResponseInvalid:<characterId>` embeds a member id: leaving
+/// it in would match that very member every round and re-invite the one who
+/// already failed, forever.
+bool _isInternalDiscussionMarker(String value) {
+  final trimmed = value.trim();
+  if (trimmed.startsWith('structuredResponseInvalid')) return true;
+  return const <String>{
+    'coordinatorResponseInvalid',
+    'coordinatorUnavailable',
+    'missingUserInformation',
+    'discussionRequired',
+    'executorSelectionRequired',
+    'discussionNotConverged',
+    'discussionRoundLimit',
+    'routePending',
+    'executorIdentityMismatch',
+    'executorUnavailable',
+    'missingQualifiedRole',
+    'groupUnavailable',
+    'mentionClarification',
+  }.contains(trimmed);
+}
+
 extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
   List<String> _speakerIds({
     required int round,
@@ -24,7 +59,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     }
     final unresolved = <String>[
       ...state.openQuestions,
-      ...state.blockers,
+      ...state.blockers.where((item) => !_isInternalDiscussionMarker(item)),
     ].join(' ');
     final targeted = unresolved.trim().isEmpty
         ? contributors
@@ -94,42 +129,40 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       isCoordinator: isCoordinator,
     );
     try {
-      final response = await (completion ?? _complete)(
-        character: member.character,
-        config: member.config!,
-        apiKey: member.apiKey!,
-        provider: member.provider!,
-        conversationId: task.groupId,
+      final response = await _completeTurn(
+        member: member,
+        task: task,
         messages: prompt,
-        timeout: roleTimeout,
         cancelToken: cancelToken,
       ).timeout(roleTimeout);
       final turn = WorkDiscussionTurn.fromResponse(response);
       if (turn.valid ||
-          turn.failureReason != '模型返回了非结构化公开内容' ||
+          !_isRepairableFailure(response, turn) ||
           cancellation.isCancelled) {
         return turn;
       }
-      // Some OpenAI-compatible gateways ignore response_format. Give the
-      // same model one bounded repair opportunity, while keeping the strict
-      // parser and execution gate unchanged if it fails again.
-      await _recordDiagnostic(task, '讨论模型未返回 JSON，已请求一次协议修复。');
-      final repairedResponse = await (completion ?? _complete)(
-        character: member.character,
-        config: member.config!,
-        apiKey: member.apiKey!,
-        provider: member.provider!,
-        conversationId: task.groupId,
+      // A transport- or protocol-level failure (empty body, truncated JSON, an
+      // ignored response_format) says nothing about this member's opinion, so
+      // the same model gets one bounded repair opportunity. The strict parser
+      // and the execution gate stay unchanged if the repair fails too.
+      // The retry deliberately switches channel instead of repeating the same
+      // JSON-mode request: when the upstream silently drops `response_format`
+      // or spends the whole budget on reasoning, an identical resend fails in
+      // exactly the same way and only burns a call.
+      await _recordDiagnostic(task, '讨论模型未返回可解析的结构化回复，已改用非 JSON 模式重发一次。');
+      final repairedResponse = await _completeTurn(
+        member: member,
+        task: task,
         messages: <Map<String, dynamic>>[
           ...prompt,
           {
             'role': 'user',
             'content':
-                '上一条回复未被解析为 JSON。请基于同一任务和讨论状态重新回答：只输出一个合法 JSON object，不要解释、Markdown 或前后缀；严格保留协议字段，未知信息用空数组并保留未决问题，禁止虚报 100%。',
+                '上一条回复为空、被截断或不是合法 JSON。请基于同一任务和讨论状态重新回答：只输出一个合法 JSON object，不要解释、Markdown 或前后缀；严格保留协议字段，未知信息用空数组并保留未决问题，禁止虚报 100%。',
           },
         ],
-        timeout: roleTimeout,
         cancelToken: cancelToken,
+        structuredJson: false,
       ).timeout(roleTimeout);
       return WorkDiscussionTurn.fromResponse(repairedResponse);
     } on TimeoutException {
@@ -153,6 +186,58 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     }
   }
 
+  /// 只有"传输/协议层不稳定"的失败才值得重试一次：上游返回了空正文
+  /// （`emptyResponse`）、未按 JSON 返回、或 JSON 被截断导致字段无效。
+  /// 治理拦截、取消、权限与业务类失败都不在此列，避免把一次修复机会
+  /// 放大成无限重试。
+  bool _isRepairableFailure(
+    Map<String, dynamic> response,
+    WorkDiscussionTurn turn,
+  ) {
+    if (response['success'] == false) {
+      // 按稳定失败码判断，而不是中文文案，避免措辞变化导致重试失效。
+      return response['failureCode'] ==
+          ChatApiService.emptyResponseFailureCode;
+    }
+    return _repairableDiscussionFailureReasons.contains(turn.failureReason);
+  }
+
+  /// 成员发言的唯一出口：测试注入的 `completion` 优先，生产环境走治理网关。
+  /// 只有修复重发会传 `structuredJson: false`，用于绕开被上游静默忽略的
+  /// `response_format`；提示词里的 JSON 协议约束始终保留。
+  Future<Map<String, dynamic>> _completeTurn({
+    required _DiscussionMember member,
+    required AgentTask task,
+    required List<Map<String, dynamic>> messages,
+    required CancelToken cancelToken,
+    bool structuredJson = true,
+  }) {
+    final injected = completion;
+    if (injected != null) {
+      return injected(
+        character: member.character,
+        config: member.config!,
+        apiKey: member.apiKey!,
+        provider: member.provider!,
+        conversationId: task.groupId,
+        messages: messages,
+        timeout: roleTimeout,
+        cancelToken: cancelToken,
+      );
+    }
+    return _complete(
+      character: member.character,
+      config: member.config!,
+      apiKey: member.apiKey!,
+      provider: member.provider!,
+      conversationId: task.groupId,
+      messages: messages,
+      timeout: roleTimeout,
+      cancelToken: cancelToken,
+      structuredJson: structuredJson,
+    );
+  }
+
   Future<Map<String, dynamic>> _complete({
     required AICharacter character,
     required ApiConfig config,
@@ -162,6 +247,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     required List<Map<String, dynamic>> messages,
     required Duration timeout,
     CancelToken? cancelToken,
+    bool structuredJson = true,
   }) {
     return gateway.sendChatMessageWithResponseLimit(
       apiKey: apiKey,
@@ -174,14 +260,21 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       conversationId: conversationId,
       characterId: character.id,
       temperature: 0.35,
-      maxTokens: 768,
+      // 768/2048 都太窄：推理型模型会把预算全花在内部推理上并返回空正文，成员
+      // 发言直接判死；上限由治理层按模型能力与剩余上下文夹取，避免反过来被拦截。
+      maxTokens: gateway.clampOutputBudget(
+        provider: provider,
+        model: config.modelName,
+        preferred: WorkDiscussionRunner.preferredMaxOutputTokens,
+        messages: messages,
+      ),
       receiveTimeout: timeout,
       maxRetries: 0,
       cancelToken: cancelToken,
       requiresTools: false,
       userInitiated: true,
       maxResponseBytes: WorkDiscussionRunner.maxResponseBytes,
-      structuredJson: true,
+      structuredJson: structuredJson,
     );
   }
 
