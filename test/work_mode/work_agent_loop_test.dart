@@ -552,6 +552,28 @@ void main() {
     expect(result.retryCount, 1);
   });
 
+  test('retries an empty model completion from the latest checkpoint',
+      () async {
+    final model = _FakeModel()
+      ..responses.add({
+        'success': false,
+        'failureCode': 'emptyResponse',
+        'message': '模型返回了空内容',
+      })
+      ..responses.add(_finishDecision());
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      maxModelRetries: 1,
+    );
+
+    final result = await loop.execute(_task(id: 'empty-model-retry'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(model.requests, hasLength(2));
+    expect(result.modelRetryCount, 1);
+  });
+
   test('pauses instead of failing when a model retry reaches the action limit',
       () async {
     final model = _FakeModel()

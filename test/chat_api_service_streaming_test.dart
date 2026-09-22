@@ -224,6 +224,58 @@ void main() {
     expect((requests.last.data as Map)['stream'], isNull);
   });
 
+  test('empty stream and empty fallback preserve retryable failure metadata',
+      () async {
+    final requests = <RequestOptions>[];
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        requests.add(options);
+        final requestData = options.data as Map<String, dynamic>;
+        if (requestData['stream'] == true) {
+          handler.resolve(Response<ResponseBody>(
+            requestOptions: options,
+            statusCode: 200,
+            data: ResponseBody(
+              Stream.value(
+                Uint8List.fromList(utf8.encode('data: [DONE]\n')),
+              ),
+              200,
+            ),
+          ));
+          return;
+        }
+        handler.resolve(Response(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'choices': [
+              {
+                'message': {'content': '   '}
+              }
+            ]
+          },
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio);
+
+    final result = await service.sendChatMessageStreamed(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isFalse);
+    expect(result['message'], '模型返回了空内容');
+    expect(result['failureCode'], 'emptyResponse');
+    expect(result['retryable'], isTrue);
+    expect(requests, hasLength(2));
+  });
+
   test('empty non-stream completion is rejected instead of being accepted',
       () async {
     final dio = Dio();
@@ -255,6 +307,8 @@ void main() {
 
     expect(result['success'], isFalse);
     expect(result['message'], '模型返回了空内容');
+    expect(result['failureCode'], 'emptyResponse');
+    expect(result['retryable'], isTrue);
   });
 
   test('non-stream completion accepts reasoning content when content is empty',

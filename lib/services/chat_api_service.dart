@@ -280,7 +280,16 @@ class ChatApiService {
         }
         final reply = _responseText(data, apiProtocol);
         if (reply.trim().isEmpty) {
-          return {'success': false, 'message': _emptyCompletionMessage};
+          // An empty completion is a typed, bounded model-protocol failure.
+          // Work mode can retry the same checkpoint without treating it as an
+          // internal error, while callers still receive the stable user-facing
+          // empty-content message.
+          return {
+            'success': false,
+            'message': _emptyCompletionMessage,
+            'failureCode': 'emptyResponse',
+            'retryable': true,
+          };
         }
         final usage = _usageFields(data, apiProtocol);
         return {
