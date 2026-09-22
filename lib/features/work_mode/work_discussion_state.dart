@@ -1,5 +1,7 @@
 import 'dart:convert';
 
+import 'package:chat_group/core/models/agent_task.dart';
+
 part 'work_discussion_state_metadata.dart';
 part 'work_discussion_state_validation.dart';
 
@@ -11,6 +13,60 @@ part 'work_discussion_state_validation.dart';
 class WorkDiscussionState {
   static const int currentSchemaVersion = 1;
   static const String jsonKey = 'discussionState';
+
+  /// Returns the current revision's scope only when its durable discussion
+  /// contract still matches this task and conversation.
+  static String currentRequestScope(AgentTask task) {
+    final decoded = decodeExecutionState(task.executionStateJson);
+    final state = decoded.state;
+    if (!decoded.isValid ||
+        state == null ||
+        state.conversationId != task.groupId ||
+        state.requestRevision <= 1) {
+      return task.userRequest;
+    }
+    final contract = state.deliverableContract;
+    final revision = contract?['requestRevision'];
+    final scope = contract?['contentScope'];
+    if (revision is! num ||
+        revision.toInt() != state.requestRevision ||
+        scope is! String ||
+        scope.trim().isEmpty) {
+      return task.userRequest;
+    }
+    return scope.trim();
+  }
+
+  /// Returns the newest follow-up portion of the durable request history.
+  ///
+  /// Follow-ups are intentionally appended for auditability. Stage routing
+  /// must still judge only the newest stage; otherwise an earlier `QA-only`
+  /// marker can incorrectly suppress a later developer repair.
+  static String latestRequestScope(AgentTask task) {
+    final queued = task.queuedUserRequests;
+    if (queued.isNotEmpty && queued.last.trim().isNotEmpty) {
+      return queued.last.trim();
+    }
+    final source = currentRequestScope(task).trim();
+    if (source.isEmpty) return task.userRequest.trim();
+    const markers = <String>[
+      '用户补充要求：',
+      '用户明确要求：',
+      'User follow-up:',
+    ];
+    var markerIndex = -1;
+    var markerLength = 0;
+    for (final marker in markers) {
+      final index = source.lastIndexOf(marker);
+      if (index > markerIndex) {
+        markerIndex = index;
+        markerLength = marker.length;
+      }
+    }
+    return markerIndex < 0
+        ? source
+        : source.substring(markerIndex + markerLength).trim();
+  }
 
   /// Group work conversations use the discussion gate. A `dm:` conversation
   /// remains bound to one character even if an old checkpoint accidentally

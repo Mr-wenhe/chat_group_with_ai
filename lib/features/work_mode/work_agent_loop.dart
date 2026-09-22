@@ -340,10 +340,9 @@ class WorkAgentLoop
             !canResumeApprovedTool)) {
       return _result(state, _statusForTask(task), task.resultSummary);
     }
-    // A retry/continuation is allowed to keep the old failure visible while it
-    // is queued. Once the runner actually starts, remove only that diagnostic
-    // marker; committed action keys, artifacts, follow-ups and summaries stay
-    // in the checkpoint and protect mutations from being repeated.
+    // Retries keep the failure visible while queued. User continuations that
+    // first re-enter group discussion clear it at the coordinator boundary;
+    // this remains the fallback for runs that reach WorkAgentLoop directly.
     if (state.failure != null &&
         (task.status == AgentTaskStatus.queued ||
             task.status == AgentTaskStatus.planning ||

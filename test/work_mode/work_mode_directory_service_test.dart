@@ -43,4 +43,21 @@ void main() {
       isNull,
     );
   });
+
+  test('does not include sentence punctuation in an explicit local path', () {
+    const service = WorkModeDirectoryService();
+
+    expect(
+      service.requestedLocalPath(
+        'The selected workspace root is /Users/fengye/Desktop. Bind it now.',
+      ),
+      '/Users/fengye/Desktop',
+    );
+    expect(
+      service.requestedLocalPath(
+        'Use /Users/fengye/project.v2/output for this task.',
+      ),
+      '/Users/fengye/project.v2/output',
+    );
+  });
 }

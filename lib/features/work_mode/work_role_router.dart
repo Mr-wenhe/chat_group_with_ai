@@ -25,12 +25,36 @@ class WorkRoleRouter {
     required String request,
     required Iterable<AICharacter> characters,
     Iterable<CharacterSkill> skills = const [],
+    String? deliverableFormatOverride,
   }) {
-    final kinds = _inferStages(request.trim());
+    final normalizedRequest = request.trim();
+    final contract = _deliverableContract(
+      normalizedRequest,
+      requestRevision: 1,
+    );
+    final kinds = _inferStages(
+      normalizedRequest,
+      deliverableFormat: _effectiveDeliverableFormat(
+        deliverableFormatOverride,
+        contract.format,
+      ),
+    );
     final members = _eligible(List<AICharacter>.from(characters));
     return List<AICharacter>.unmodifiable(
       _qualifiedCandidates(kinds, members, List<CharacterSkill>.from(skills)),
     );
+  }
+
+  /// Whether the active request starts with QA rather than implementation.
+  /// Shared by routing and work-mode preflight so an HTML input reference does
+  /// not trigger frontend-only setup in a Markdown testing stage.
+  static bool startsWithTestingStage(String request) {
+    final contract = _deliverableContract(request, requestRevision: 1);
+    return _inferStages(
+          request,
+          deliverableFormat: contract.format,
+        ).first ==
+        WorkRoleStageKind.testing;
   }
 
   /// S3 uses this predicate before accepting a group recommendation.  Keep
@@ -40,11 +64,13 @@ class WorkRoleRouter {
     required String request,
     required AICharacter character,
     Iterable<CharacterSkill> skills = const [],
+    String? deliverableFormatOverride,
   }) {
     return qualifiedCandidatesForRequest(
       request: request,
       characters: [character],
       skills: skills,
+      deliverableFormatOverride: deliverableFormatOverride,
     ).any((candidate) => candidate.id == character.id);
   }
 
@@ -69,6 +95,7 @@ class WorkRoleRouter {
     required String request,
     bool hasAttachments = false,
     required List<AICharacter> characters,
+    String? deliverableFormatOverride,
     String? conversationId,
     int requestRevision = 1,
     bool isDirectChat = false,
@@ -119,6 +146,10 @@ class WorkRoleRouter {
       explicitExecutorId: mentionIntent.explicitExecutorId,
       requestRevision: effectiveRequestRevision,
     );
+    final stageFormat = _effectiveDeliverableFormat(
+      deliverableFormatOverride,
+      contract.format,
+    );
     final privateConversation = isDirectChat || directId != null;
     if (!privateConversation) {
       if (mentionIntent.ambiguousExecutorIds.isNotEmpty) {
@@ -166,6 +197,7 @@ class WorkRoleRouter {
           members,
           availableSkills,
           contract,
+          deliverableFormatOverride: stageFormat,
           discussionCharacterIds: mentionIntent.discussionCharacterIds,
           consultedCharacterIds: mentionIntent.consultedCharacterIds,
         );
@@ -199,7 +231,10 @@ class WorkRoleRouter {
       );
     }
 
-    final inferredStages = _inferStages(normalizedRequest);
+    final inferredStages = _inferStages(
+      normalizedRequest,
+      deliverableFormat: stageFormat,
+    );
     final candidates = _eligible(members);
     if (candidates.isEmpty) {
       return _failure(
@@ -283,6 +318,7 @@ class WorkRoleRouter {
     List<AICharacter> members,
     List<CharacterSkill> skills,
     WorkDeliverableContract contract, {
+    String? deliverableFormatOverride,
     List<String> discussionCharacterIds = const [],
     List<String> consultedCharacterIds = const [],
   }) {
@@ -306,7 +342,11 @@ class WorkRoleRouter {
         consultedCharacterIds: consultedCharacterIds,
       );
     }
-    final kinds = _inferStages(request);
+    final kinds = _inferStages(
+      request,
+      deliverableFormat: _effectiveDeliverableFormat(
+          deliverableFormatOverride, contract.format),
+    );
     if (ids.length > kinds.length) {
       return _failure(
         WorkRoleRouteSource.explicitMention,

@@ -129,6 +129,7 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       if (_requiresVisionModelSelection(task)) {
         throw StateError('请先选择支持图片的视觉模型后再继续任务。');
       }
+      WorkFailure.clearFromTask(task);
       task
         ..status = AgentTaskStatus.queued
         ..resumeRequired = false
@@ -193,6 +194,9 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
         }
         final existingDiscussion =
             _requiresDiscussionForTask(task) ? discussionMarker.state : null;
+        final currentScope = existingDiscussion == null
+            ? task.userRequest
+            : WorkDiscussionState.currentRequestScope(task);
         _removeQueuedTask(task);
         _waitingForResources.remove(taskId)?.cancellation.cancel();
         _folderWaiters.remove(taskId)?.cancel();
@@ -224,7 +228,11 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
           }
           task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
             '',
-            _renewDiscussionForRequest(existingDiscussion, task.userRequest),
+            _renewDiscussionForRequest(
+              existingDiscussion,
+              task.userRequest,
+              activeScopeOverride: currentScope,
+            ),
           );
         }
         final needsDiscussion = existingDiscussion != null &&
@@ -361,6 +369,11 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       )) {
         return;
       }
+      // A resumed group task may spend time in its discussion runner before
+      // WorkAgentLoop gets a chance to clear the prior soft-limit failure.
+      // Remove that stale action marker now so the panel does not offer an
+      // invalid second continuation while the discussion gate is still open.
+      WorkFailure.clearFromTask(task);
       task
         ..status = AgentTaskStatus.queued
         ..actionCount = 0

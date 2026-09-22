@@ -89,7 +89,9 @@ class WorkArtifactDeliveryGuard {
   /// requirement through terse continuations, while opening or reviewing an
   /// existing DOCX remains analysis.
   static bool requiresDocxArtifact(String request, {String? contractFormat}) {
-    final format = contractFormat?.trim().toLowerCase();
+    final rawFormat = contractFormat?.trim().toLowerCase();
+    final format = rawFormat == null ? null : _canonicalFormat(rawFormat);
+    if (format != null && format != 'docx') return false;
     if (format == 'docx') {
       final text = request.trim().toLowerCase();
       if (text.isEmpty) return true;
@@ -167,14 +169,15 @@ class WorkArtifactDeliveryGuard {
     DateTime? now,
   }) async {
     final contract = _contractFor(task);
+    final request = WorkDiscussionState.currentRequestScope(task);
     final needsDocx = requiresDocxArtifact(
-      task.userRequest,
+      request,
       contractFormat: contract?['format']?.toString(),
     );
     final needsFile = needsDocx ||
         isRevisionTask(task) ||
-        requiresSourceArtifact(task.userRequest) ||
-        requiresFileArtifact(task.userRequest);
+        requiresSourceArtifact(request) ||
+        requiresFileArtifact(request);
     if (!needsFile) {
       return const WorkArtifactValidationResult.valid();
     }
@@ -287,12 +290,12 @@ class WorkArtifactDeliveryGuard {
     return WorkArtifactValidationResult.invalid(
       needsDocx
           ? 'docxInvalidOrStale'
-          : task.userRequest.toLowerCase().contains('html')
+          : request.toLowerCase().contains('html')
               ? 'htmlInvalidOrStale'
               : 'artifactInvalidOrStale',
       needsDocx
           ? docxContractMessage
-          : task.userRequest.toLowerCase().contains('html')
+          : request.toLowerCase().contains('html')
               ? htmlContractMessage
               : missingArtifactMessage,
     );
@@ -521,7 +524,7 @@ class WorkArtifactDeliveryGuard {
       r'\b(markdown|xlsx?|docx?|pptx?|pdf|html5?|csv|json|ya?ml|txt|word)\b|'
       r'\.(md|markdown|txt|csv|json|ya?ml|html?|docx?|xlsx?|pptx?|pdf)\b',
       caseSensitive: false,
-    ).allMatches(task.userRequest)) {
+    ).allMatches(WorkDiscussionState.currentRequestScope(task))) {
       final raw = (match.group(1) ?? match.group(2))?.toLowerCase();
       if (raw == null || raw.isEmpty) continue;
       final canonical = _canonicalFormat(raw);

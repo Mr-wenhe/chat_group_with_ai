@@ -189,6 +189,25 @@ void main() {
       expect(task.workFailure?.retryable, isTrue);
     });
 
+    test('migrates an empty model response checkpoint to retry', () {
+      final task = _task('legacy-empty-model-response');
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.internal,
+          title: '工作任务内部处理失败',
+          reason: '模型返回了空内容',
+          technicalDetail: '模型返回了空内容',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '重新发起任务。',
+        ),
+      );
+
+      expect(task.workFailure?.type, WorkFailureType.modelProtocol);
+      expect(task.workFailure?.retryable, isTrue);
+    });
+
     test('classifies model 429, 5xx, timeout, empty stream and protocol errors',
         () async {
       final cases = <String, Object>{
@@ -215,6 +234,11 @@ void main() {
           'content': '',
           'reasoning_content': '',
         },
+        'empty completion error': <String, dynamic>{
+          'success': false,
+          'failureCode': 'emptyResponse',
+          'message': '模型返回了空内容',
+        },
         'protocol': <String, dynamic>{
           'success': true,
           'content': 'not-json',
@@ -235,7 +259,8 @@ void main() {
         final expectedType = switch (entry.key) {
           'protocol' ||
           'empty stream' ||
-          'empty failed response' =>
+          'empty failed response' ||
+          'empty completion error' =>
             WorkFailureType.modelProtocol,
           '401 exception' => WorkFailureType.authorizationLost,
           '403 exception' => WorkFailureType.permissionDenied,
@@ -256,6 +281,32 @@ void main() {
         expect(task.executionStateJson, isNot(contains('模型超时')),
             reason: '技术细节必须脱敏');
       }
+    });
+
+    test('retries an empty completion error when another model turn is allowed',
+        () async {
+      final model = _ModelQueue()
+        ..responses.add(<String, dynamic>{
+          'success': false,
+          'failureCode': 'emptyResponse',
+          'message': '模型返回了空内容',
+        })
+        ..responses.add(_finishDecision());
+      final loop = WorkAgentLoop(
+        model: model.call,
+        registry: WorkToolRegistry(),
+        maxModelRetries: 1,
+        maxToolRetries: 0,
+        sleep: (_) async {},
+      );
+      final task = _task('empty-completion-retry');
+
+      final result = await loop.execute(task);
+
+      expect(result.status, WorkAgentLoopStatus.completed);
+      expect(result.failure, isNull);
+      expect(result.modelRetryCount, 1);
+      expect(model.responses, isEmpty);
     });
 
     test('recovers retryable streamed HTTP failures and pauses on 401',

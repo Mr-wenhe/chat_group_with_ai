@@ -977,6 +977,321 @@ void main() {
     runner.complete(task.id);
   });
 
+  test('a new QA deliverable scopes a renewed discussion to the QA stage',
+      () async {
+    const originalRequest =
+        'Create the playable HTML game at Desktop/doudizhu_game.html.';
+    const qaRequest = 'Test the existing Desktop/doudizhu_game.html against '
+        'Desktop/doudizhu_design.md in a browser and create the Markdown '
+        'report Desktop/doudizhu_test_report.md.';
+    final priorState = WorkDiscussionState.initial(
+      conversationId: 'group-qa-scope',
+      executorId: null,
+      candidateCharacterIds: const [],
+      participantCharacterIds: const ['frontend', 'tester'],
+      deliverableContract: const <String, dynamic>{
+        'deliverableType': 'source',
+        'format': 'html',
+        'location': 'doudizhu_game.html',
+        'contentScope': originalRequest,
+        'explicitExecutorId': null,
+        'revisionTarget': '',
+        'requestRevision': 1,
+      },
+    ).copyWith(
+      phase: WorkDiscussionPhase.awaitingDiscussion,
+      understandingPercent: 60,
+      understandingEvidence: const ['HTML 开发范围已确认。'],
+    );
+    final task = _task(
+      id: 'discussion-qa-scope',
+      conversationId: 'group-qa-scope',
+      characterId: '',
+    )
+      ..userRequest = originalRequest
+      ..status = AgentTaskStatus.paused
+      ..executionStateJson =
+          WorkDiscussionState.mergeIntoExecutionState('', priorState);
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, qaRequest);
+
+    final stored = taskBox.get(task.id)!;
+    final renewed = WorkDiscussionState.fromExecutionState(
+      stored.executionStateJson,
+    )!;
+    expect(stored.userRequest, contains(originalRequest));
+    expect(renewed.deliverableContract?['format'], 'markdown');
+    expect(
+      renewed.deliverableContract?['location'],
+      'doudizhu_test_report.md',
+    );
+    expect(WorkDiscussionState.currentRequestScope(stored), qaRequest);
+  });
+
+  test('new explicit workspace root replaces stale authorization checkpoint',
+      () async {
+    final requestedRoot = '${directory.path}/new-workspace';
+    await Directory(requestedRoot).create(recursive: true);
+    final settingsBox = await Hive.openBox<dynamic>('folder-settings-test');
+    var pickerCalled = false;
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: () async {
+        pickerCalled = true;
+        return requestedRoot;
+      },
+      folderGrantConsent: (_) async => true,
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _taskWithDiscussion(
+      _task(
+        id: 'discussion-new-workspace-root',
+        conversationId: 'group-new-workspace-root',
+      )..status = AgentTaskStatus.paused,
+      _discussionState(
+        conversationId: 'group-new-workspace-root',
+      ),
+    )..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+        'tool': 'workspace.list',
+        'args': <String, dynamic>{'path': 'Desktop'},
+      });
+    final execution =
+        jsonDecode(task.executionStateJson) as Map<String, dynamic>
+          ..['folderRequestPath'] = '/Volumes/old-workspace/Desktop'
+          ..['folderGrantPending'] = true
+          ..['folderRequiresWritable'] = true;
+    task.executionStateJson = jsonEncode(execution);
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'authorizationLost',
+        message: '旧工作目录授权已失效，请重新选择目录。',
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await localCoordinator.enqueueFollowUp(
+      task.id,
+      'Use $requestedRoot as the exact workspace root and continue.',
+    );
+
+    final revised = taskBox.get(task.id)!;
+    final revisedExecution =
+        jsonDecode(revised.executionStateJson) as Map<String, dynamic>;
+    expect(revised.userRequest, contains(requestedRoot));
+    expect(revisedExecution['folderRequestPath'], requestedRoot);
+    expect(revisedExecution['folderGrantPending'], isTrue);
+    expect(revisedExecution['folderRequiresWritable'], isTrue);
+    expect(revised.pendingToolRequestJson, isEmpty);
+
+    await localCoordinator.reauthorizeTask(task.id);
+
+    final authorizedExecution =
+        jsonDecode(taskBox.get(task.id)!.executionStateJson)
+            as Map<String, dynamic>;
+    expect(pickerCalled, isTrue);
+    expect(taskBox.get(task.id)?.workFailure, isNull);
+    expect(authorizedExecution, isNot(contains('folderRequestPath')));
+    expect(authorizedExecution, isNot(contains('folderGrantPending')));
+    expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('applies queued workspace root correction after auth-lost run drains',
+      () async {
+    final requestedRoot = '${directory.path}/corrected-workspace';
+    await Directory(requestedRoot).create(recursive: true);
+    final task = _taskWithDiscussion(
+      _task(
+          id: 'running-auth-root-correction',
+          conversationId: 'group-auth-root'),
+      _discussionState(
+        conversationId: 'group-auth-root',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    )..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+        'tool': 'workspace.list',
+        'args': <String, dynamic>{'path': 'Desktop'},
+      });
+    await coordinator.submit(task);
+    await _waitForStartedCount(runner, 1);
+
+    final active = taskBox.get(task.id)!;
+    final execution =
+        jsonDecode(active.executionStateJson) as Map<String, dynamic>
+          ..['folderRequestPath'] = '/Volumes/old-workspace/Desktop'
+          ..['folderGrantPending'] = true
+          ..['folderRequiresWritable'] = true;
+    active
+      ..status = AgentTaskStatus.paused
+      ..executionStateJson = jsonEncode(execution);
+    WorkFailure.persistOnTask(
+      active,
+      WorkFailure.fromToolFailure(
+        code: 'authorizationLost',
+        message: '旧工作目录授权已失效。',
+      ),
+    );
+    await taskBox.put(active.id, active);
+    final correction =
+        'Path correction: $requestedRoot is the exact workspace root. Use workspace.list path=".".';
+
+    await coordinator.enqueueFollowUp(active.id, correction);
+
+    expect(taskBox.get(active.id)?.queuedUserRequests, [correction]);
+    expect(runner.cancelledTaskIds, isEmpty);
+    runner.complete(active.id);
+    await _waitForTaskState(
+      taskBox,
+      active.id,
+      (stored) =>
+          stored.queuedUserRequests.isEmpty &&
+          stored.executionStateJson.contains(requestedRoot),
+    );
+
+    final recovered = taskBox.get(active.id)!;
+    final recoveredExecution =
+        jsonDecode(recovered.executionStateJson) as Map<String, dynamic>;
+    expect(recovered.userRequest, contains(requestedRoot));
+    expect(recoveredExecution['folderRequestPath'], requestedRoot);
+    expect(recoveredExecution['folderGrantPending'], isTrue);
+    expect(recoveredExecution['folderRequiresWritable'], isTrue);
+    expect(recovered.pendingToolRequestJson, isEmpty);
+    expect(recovered.status, AgentTaskStatus.paused);
+    expect(recovered.workFailure?.type, WorkFailureType.authorizationLost);
+    expect(runner.cancelledTaskIds, isEmpty);
+    expect(runner.startedTaskIds, [active.id]);
+  });
+
+  test('reauthorize migrates a persisted queued workspace root correction',
+      () async {
+    final requestedRoot = '${directory.path}/persisted-correction';
+    await Directory(requestedRoot).create(recursive: true);
+    final settingsBox = await Hive.openBox<dynamic>('folder-settings-queued');
+    var pickerCalled = false;
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: () async {
+        pickerCalled = true;
+        return requestedRoot;
+      },
+      folderGrantConsent: (_) async => true,
+    );
+    addTearDown(localCoordinator.dispose);
+    final correction =
+        'Path correction: $requestedRoot is the exact workspace root. Use workspace.list path=".".';
+    final task = _taskWithDiscussion(
+      _task(
+        id: 'persisted-auth-root-correction',
+        conversationId: 'group-persisted-auth-root',
+      )..status = AgentTaskStatus.paused,
+      _discussionState(
+        conversationId: 'group-persisted-auth-root',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    )
+      ..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+        'tool': 'workspace.list',
+        'args': <String, dynamic>{'path': 'Desktop'},
+      })
+      ..queuedUserRequests = [correction];
+    task.executionStateJson = jsonEncode(<String, dynamic>{
+      ...jsonDecode(task.executionStateJson) as Map<String, dynamic>,
+      'folderRequestPath': '/Volumes/old-workspace/Desktop',
+      'folderGrantPending': true,
+      'folderRequiresWritable': true,
+      'queuedAttachmentMessageIds': [''],
+    });
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'authorizationLost',
+        message: '旧工作目录授权已失效。',
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    final actionVersion =
+        WorkTaskUserAction.versionFor(task, 'folderAuthorization');
+    expect(actionVersion, greaterThan(0));
+    await localCoordinator.requestFolderForTask(
+      task.id,
+      expectedActionVersion: actionVersion,
+    );
+    await _waitForStartedCount(runner, 1);
+
+    final recovered = taskBox.get(task.id)!;
+    final recoveredExecution =
+        jsonDecode(recovered.executionStateJson) as Map<String, dynamic>;
+    expect(pickerCalled, isTrue);
+    expect(recovered.userRequest, contains(requestedRoot));
+    expect(recovered.queuedUserRequests, isEmpty);
+    expect(recovered.pendingToolRequestJson, isEmpty);
+    expect(recovered.status, AgentTaskStatus.planning);
+    expect(recovered.workFailure, isNull);
+    expect(recoveredExecution, isNot(contains('folderRequestPath')));
+    expect(recoveredExecution, isNot(contains('folderGrantPending')));
+    expect(runner.startedTaskIds, [task.id]);
+  });
+
+  test('repairs an unknown mention after the user corrects the discussion',
+      () async {
+    final task = _taskWithDiscussion(
+      _task(
+        id: 'discussion-mention-repair',
+        conversationId: 'group-mention-repair',
+        characterId: '',
+      )
+        ..status = AgentTaskStatus.paused
+        ..userRequest =
+            'Create the design file.\\n用户补充要求：@Chen. Provide frontend details.',
+      _discussionState(
+        conversationId: 'group-mention-repair',
+        executorId: null,
+        phase: WorkDiscussionPhase.blocked,
+        openQuestions: const ['未找到角色 @Chen，没有静默替换其他角色。'],
+        blockers: const ['mentionClarification'],
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(
+      task.id,
+      'Use @陈雨薇 instead of @Chen. Continue the original task.',
+    );
+
+    final stored = taskBox.get(task.id)!;
+    final renewed = WorkDiscussionState.fromExecutionState(
+      stored.executionStateJson,
+    )!;
+    expect(stored.userRequest, isNot(contains('@Chen')));
+    expect(stored.userRequest, contains('Create the design file.'));
+    expect(stored.userRequest, contains('@陈雨薇'));
+    expect(renewed.requestRevision, 2);
+    expect(renewed.blockers, isNot(contains('mentionClarification')));
+    expect(renewed.phase, WorkDiscussionPhase.awaitingExecutor);
+  });
+
   test('does not apply a group discussion marker to private chat execution',
       () async {
     final task = _taskWithDiscussion(
@@ -1183,6 +1498,18 @@ void main() {
         'schemaVersion': 1,
         'checkpointSchemaUnsupported': true,
       });
+    WorkFailure.persistOnTask(
+      task,
+      const WorkFailure(
+        type: WorkFailureType.userActionRequired,
+        title: '执行时间已达上限',
+        reason: '已达到本任务时间上限，请手点继续。',
+        technicalDetail: '已达到本任务时间上限，请手点继续。',
+        completedContent: <String>[],
+        retryable: false,
+        suggestedAction: '点击继续。',
+      ),
+    );
     await taskBox.put(task.id, task);
 
     await coordinator.continueAfterSoftLimit(task.id);
@@ -1193,6 +1520,9 @@ void main() {
     );
     expect(restored.status, AgentTaskStatus.paused);
     expect(restored.softLimitReached, isFalse);
+    expect(restored.workFailure, isNull);
+    expect(restored.lastError, contains('旧任务需要补充群讨论'));
+    expect(restored.lastError, isNot(contains('本任务时间上限')));
     expect(state?.phase, WorkDiscussionPhase.awaitingDiscussion);
     expect(state?.isExecutionReady, isFalse);
     expect(runner.startedTaskIds, isEmpty);
@@ -2789,6 +3119,18 @@ void main() {
     first
       ..status = AgentTaskStatus.paused
       ..softLimitReached = true;
+    WorkFailure.persistOnTask(
+      first,
+      const WorkFailure(
+        type: WorkFailureType.userActionRequired,
+        title: '执行时间已达上限',
+        reason: '已达到本任务时间上限，请手点继续。',
+        technicalDetail: '已达到本任务时间上限，请手点继续。',
+        completedContent: <String>[],
+        retryable: false,
+        suggestedAction: '点击继续。',
+      ),
+    );
     await taskBox.put(first.id, first);
     runner.complete(first.id);
     await _waitForTaskState(
@@ -2807,6 +3149,7 @@ void main() {
     await coordinator.continueAfterSoftLimit(first.id);
     await _waitForStartedCount(runner, 2);
     expect(runner.startedTaskIds, ['soft-limit-first', 'soft-limit-first']);
+    expect(taskBox.get(first.id)?.workFailure, isNull);
 
     runner.complete(first.id);
     await _waitForStartedCount(runner, 3);
@@ -3147,6 +3490,58 @@ void main() {
 
     await expectLater(coordinator.retry(committed.id), throwsStateError);
     expect(taskBox.get(committed.id)?.status, AgentTaskStatus.cancelled);
+  });
+
+  test('restarting a stopped QA task preserves its current report scope',
+      () async {
+    const qaScope = '只测试现有斗地主 HTML，并写入 doudizhu_test_report.md';
+    final task = _task(id: 'restart-stopped-qa', conversationId: 'group-a')
+      ..status = AgentTaskStatus.cancelled
+      ..lastError = '用户已停止任务。'
+      ..userRequest = '旧任务：开发 Desktop/doudizhu_game.html。QA 追问：$qaScope';
+    final readyDiscussion = WorkDiscussionState.initial(
+      conversationId: task.groupId,
+      requestRevision: 2,
+      coordinatorId: 'coordinator',
+      executorId: task.characterId,
+      candidateCharacterIds: [task.characterId],
+      participantCharacterIds: [task.characterId],
+      deliverableContract: const <String, dynamic>{
+        'deliverableType': 'document',
+        'format': 'markdown',
+        'location': 'doudizhu_test_report.md',
+        'contentScope': qaScope,
+        'explicitExecutorId': null,
+        'revisionTarget': '',
+        'requestRevision': 2,
+      },
+    ).copyWith(
+      phase: WorkDiscussionPhase.ready,
+      understandingPercent: 100,
+      understandingEvidence: const ['QA 报告合同已确认。'],
+      openQuestions: const [],
+      blockers: const [],
+    );
+    _taskWithDiscussion(task, readyDiscussion);
+    await taskBox.put(task.id, task);
+
+    await coordinator.retry(task.id);
+
+    final restarted = taskBox.get(task.id)!;
+    final discussion = WorkDiscussionState.fromExecutionState(
+      restarted.executionStateJson,
+    );
+    expect(discussion, isNotNull);
+    expect(discussion!.requestRevision, 3);
+    expect(
+      discussion.deliverableContract!['contentScope'],
+      qaScope,
+    );
+    expect(discussion.deliverableContract!['format'], 'markdown');
+    expect(
+      discussion.deliverableContract!['location'],
+      'doudizhu_test_report.md',
+    );
   });
 
   test('restore publishes interrupted tasks without running them', () async {

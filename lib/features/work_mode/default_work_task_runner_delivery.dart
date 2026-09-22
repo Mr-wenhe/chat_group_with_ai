@@ -144,14 +144,15 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
       }
     }
 
+    final currentRequest = WorkDiscussionState.currentRequestScope(task);
     final requiredDocx = WorkArtifactDeliveryGuard.requiresDocxArtifact(
-      task.userRequest,
+      currentRequest,
       contractFormat: WorkArtifactDeliveryGuard.contractFormatForTask(task),
     );
     final requiresArtifactDelivery = requiredDocx ||
         WorkArtifactDeliveryGuard.isRevisionTask(task) ||
-        WorkArtifactDeliveryGuard.requiresFileArtifact(task.userRequest) ||
-        WorkArtifactDeliveryGuard.requiresSourceArtifact(task.userRequest);
+        WorkArtifactDeliveryGuard.requiresFileArtifact(currentRequest) ||
+        WorkArtifactDeliveryGuard.requiresSourceArtifact(currentRequest);
 
     // Deliverables accepted by the contract check. Delivery is scoped to these
     // paths so an intermediate file the same run wrote (a script, a conversion
@@ -507,7 +508,9 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     // it.
     if (!validation.valid || !validation.requiresArtifact) return null;
     final path = validation.path ?? result.data['path']?.toString() ?? '';
-    final requestHint = _safeCompletionRequestHint(task.userRequest);
+    final requestHint = _safeCompletionRequestHint(
+      WorkDiscussionState.currentRequestScope(task),
+    );
     final baseSummary = path.trim().isEmpty
         ? '文件已写入并通过回读校验。'
         : '文件已写入并通过回读校验：${_basename(path)}。';
@@ -560,7 +563,7 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
   /// task produces several files” and never auto-complete.
   bool _canAutoCompleteSingleArtifact(AgentTask task) {
     if (WorkArtifactDeliveryGuard.isRevisionTask(task)) return true;
-    final request = task.userRequest.toLowerCase();
+    final request = WorkDiscussionState.currentRequestScope(task).toLowerCase();
     if (RegExp(r'全部|所有|多个|多份|多文件|all\s+files|multiple', caseSensitive: false)
         .hasMatch(request)) {
       return false;
@@ -621,7 +624,7 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     final files = workspaceFileService;
     if (files == null) {
       return WorkArtifactDeliveryGuard.failureFor(
-        request: task.userRequest,
+        request: WorkDiscussionState.currentRequestScope(task),
         hasReadableArtifact: false,
         contractFormat: WorkArtifactDeliveryGuard.contractFormatForTask(task),
       );

@@ -55,9 +55,14 @@ class WorkDiscussionTurn {
 
   factory WorkDiscussionTurn.fromResponse(Map<String, dynamic> response) {
     if (response['success'] == false) {
+      final statusCode = _httpStatusCode(response['statusCode']);
       final message = _safeText(response['message']);
       return WorkDiscussionTurn.invalid(
-        failureReason: message.isEmpty ? '模型调用失败' : message,
+        failureReason: statusCode != null
+            ? '模型请求失败（HTTP $statusCode）'
+            : message.isEmpty
+                ? '模型调用失败'
+                : message,
       );
     }
     final raw = _responseText(response);
@@ -223,6 +228,18 @@ class WorkDiscussionTurn {
     }
     final integer = value.toInt();
     return integer < 0 || integer > 100 ? null : integer;
+  }
+
+  static int? _httpStatusCode(Object? value) {
+    final statusCode = switch (value) {
+      num value when value.isFinite && value == value.truncate() =>
+        value.toInt(),
+      String value => int.tryParse(value.trim()),
+      _ => null,
+    };
+    return statusCode != null && statusCode >= 100 && statusCode <= 599
+        ? statusCode
+        : null;
   }
 
   static List<String>? _strings(Object? value, {required int maximum}) {

@@ -121,9 +121,16 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     // relative or absolute spelling, but it cannot redirect the mutation to a
     // different basename after the user queued “modify the same file”.
     if (enforceRevision && revision != null) {
-      final absoluteRevision = _isAbsolutePath(revision)
-          ? revision
-          : '${workspaceRoot.replaceAll('\\', '/')}/$revision';
+      final normalizedRoot = workspaceRoot.replaceAll('\\', '/');
+      // A public contract may say Desktop/foo.html while the authorized root
+      // is already /Users/.../Desktop. Do not resolve that as Desktop/Desktop.
+      final relativeRevision = _stripAuthorizedRootLeaf(
+        revision,
+        normalizedRoot,
+      );
+      final absoluteRevision = _isAbsolutePath(relativeRevision)
+          ? relativeRevision
+          : '$normalizedRoot/$relativeRevision';
       final isWindows = workspaceFileService?.pathPolicy.isWindows ??
           RegExp(r'^[A-Za-z]:').hasMatch(absoluteRevision);
       return WorkspacePathPolicy.normalizePath(
@@ -164,6 +171,23 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     return path.startsWith('/') ||
         path.startsWith('\\') ||
         RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path);
+  }
+
+  /// Removes a leading authorized-root leaf from a contract-supplied path.
+  ///
+  /// A public contract may name `Desktop/report.md` while the authorized root
+  /// already ends in `Desktop`; resolving that literally would produce
+  /// `Desktop/Desktop/report.md` and be rejected as out of scope. Absolute
+  /// paths and paths that do not start with the leaf are returned unchanged.
+  String _stripAuthorizedRootLeaf(String path, String normalizedRoot) {
+    final candidate = path.replaceAll('\\', '/');
+    if (_isAbsolutePath(candidate)) return candidate;
+    final rootLeaf =
+        normalizedRoot.split('/').where((segment) => segment.isNotEmpty).last;
+    if (candidate.startsWith('$rootLeaf/')) {
+      return candidate.substring(rootLeaf.length + 1);
+    }
+    return candidate == rootLeaf ? '' : candidate;
   }
 
   bool _containsParentTraversal(String value) =>
@@ -263,7 +287,7 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
       messages: messages.length <= 24
           ? messages
           : messages.sublist(messages.length - 24),
-      currentUserRequest: task.userRequest,
+      currentUserRequest: WorkDiscussionState.currentRequestScope(task),
     );
   }
 
@@ -304,7 +328,7 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
       source = messages.isEmpty ? null : messages.first;
     }
     return AgentAttachmentContext.enhanceCurrentRequest(
-      userRequest: task.userRequest,
+      userRequest: WorkDiscussionState.currentRequestScope(task),
       media: source?.media,
     );
   }
@@ -370,19 +394,20 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
   String _workModeContext(
       AgentTask task, AICharacter character, WorkToolRegistry registry,
       {required String workspaceRoot}) {
+    final currentRequest = WorkDiscussionState.currentRequestScope(task);
     final base = WorkModePolicy.planningContext(character);
     final discoverable = WorkModePolicy.discoverableSkills(
       character: character,
       installedSkills: database.characterSkillBox.values,
       resolvedSkills: CharacterSkillResolver.resolveFor(
         character,
-        task.userRequest,
+        currentRequest,
       ).skills,
     );
     final skillCatalog = discoverable.isEmpty
         ? '无（需要时可通过 meta.find-skills 查找或安装）'
         : discoverable.map(_compactSkillCatalogEntry).join('\n');
-    final matchedTemplate = _matchingSkillTemplate(task.userRequest);
+    final matchedTemplate = _matchingSkillTemplate(currentRequest);
     final skillPreflight = matchedTemplate == null
         ? null
         : '技能预检：已从内置目录匹配「${matchedTemplate.id}」。若角色尚未安装，任务启动阶段会先调用 skill.download；本轮禁止创建重复 Skill。';
@@ -393,7 +418,7 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     final summary = task.contextSummary.trim();
     final handoff = WorkHandoffState.fromTask(task);
     final targetsDesktop =
-        WorkModeDirectoryService.requestTargetsDesktop(task.userRequest);
+        WorkModeDirectoryService.requestTargetsDesktop(currentRequest);
     return [
       base,
       '角色可发现技能目录（全局技能按需加载；角色已绑定技能正文会注入；权限仍需通过角色授权与工具策略交集校验）：\n$skillCatalog',
@@ -453,6 +478,7 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
   }
 
   ExpertSkillTemplate? _matchingSkillTemplate(String request) {
+    if (WorkRoleRouter.startsWithTestingStage(request)) return null;
     final recommendations = ExpertSkillCatalog.recommendForText(request);
     final template = recommendations.isEmpty ? null : recommendations.first;
     if (template == null ||
@@ -467,7 +493,9 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     AgentTask task,
     AICharacter character,
   ) {
-    final template = _matchingSkillTemplate(task.userRequest);
+    final template = _matchingSkillTemplate(
+      WorkDiscussionState.currentRequestScope(task),
+    );
     if (template == null) return null;
     final installed = database.characterSkillBox.values.any(
       (skill) =>

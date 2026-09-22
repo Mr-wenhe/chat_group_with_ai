@@ -177,8 +177,14 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
 
   Map<String, dynamic> _buildContext(_LoopState state) {
     final task = state.task;
+    final checkpointSummary = _safeExistingMap(task.contextSummary);
+    final currentScope = WorkDiscussionState.currentRequestScope(task);
+    if (checkpointSummary.isNotEmpty) {
+      checkpointSummary['target'] = currentScope;
+      checkpointSummary['goal'] = currentScope;
+    }
     return <String, dynamic>{
-      'goal': _publicText(task.userRequest),
+      'goal': _publicText(currentScope),
       'plan': _publicText(task.plan),
       'resultSummary': _publicText(task.resultSummary),
       'lastError': _publicText(task.lastError),
@@ -205,7 +211,7 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
           .map(_safeHistoryMessage)
           .toList(growable: false),
       if (task.contextSummary.trim().isNotEmpty)
-        'checkpointSummary': jsonEncode(_safeExistingMap(task.contextSummary)),
+        'checkpointSummary': jsonEncode(checkpointSummary),
     };
   }
 
@@ -238,7 +244,12 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
             'public_update 只能描述公开动作、依据或结论，不得输出思维链。\n'
             '$planningInstruction',
       },
-      {'role': 'user', 'content': _publicText(task.userRequest)},
+      {
+        'role': 'user',
+        'content': _publicText(
+          WorkDiscussionState.currentRequestScope(task),
+        ),
+      },
       {
         'role': 'system',
         'content': '公开任务检查点：${jsonEncode(promptContext)}',

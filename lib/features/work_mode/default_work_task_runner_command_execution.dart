@@ -24,7 +24,9 @@ extension _DefaultWorkTaskRunnerCommandExecution on DefaultWorkTaskRunner {
     final policy = commandPolicy.evaluate(
       command,
       taskId: task.id,
-      userExplicitlyRequested: _requestsExplicitValidation(task.userRequest),
+      userExplicitlyRequested: _requestsExplicitValidation(
+        WorkDiscussionState.currentRequestScope(task),
+      ),
     );
     final plan = policy.changePlan;
     final checkpoint = _decodeMap(task.executionStateJson);
@@ -52,8 +54,9 @@ extension _DefaultWorkTaskRunnerCommandExecution on DefaultWorkTaskRunner {
           command,
           taskId: task.id,
           approvalGranted: approvalGranted,
-          userExplicitlyRequested:
-              _requestsExplicitValidation(task.userRequest),
+          userExplicitlyRequested: _requestsExplicitValidation(
+            WorkDiscussionState.currentRequestScope(task),
+          ),
           cancellation: invocation.context.cancellation?.whenCancelled,
           isCancelled: () => invocation.context.isCancelled,
         );

@@ -114,6 +114,7 @@ class DefaultWorkTaskRunner
   /// successful delivery. Tests can leave this disabled to avoid UI side
   /// effects; the production provider enables it.
   final bool autoOpenHtml;
+  final Duration modelCompletionTimeout;
   final DateTime Function() clock;
 
   void Function(AgentTask task)? _taskUpdateSink;
@@ -143,6 +144,10 @@ class DefaultWorkTaskRunner
     this.weatherForecastService,
     this.mediaCopier,
     this.autoOpenHtml = false,
+    // Large single-file artifacts may need several minutes for the model to
+    // produce a tool plan and content; keep the deadline bounded but above the
+    // previous 120s ceiling that aborted valid HTML generations.
+    this.modelCompletionTimeout = const Duration(seconds: 300),
     DateTime Function()? clock,
   })  : credentials = credentials ?? SecureApiCredentialResolver(),
         gateway = gateway ??

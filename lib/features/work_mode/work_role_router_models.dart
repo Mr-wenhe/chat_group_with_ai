@@ -63,6 +63,15 @@ class WorkDeliverableContract {
       };
 }
 
+String _effectiveDeliverableFormat(String? override, String inferred) {
+  final normalized = override?.trim().toLowerCase();
+  // A renewed discussion may retain the original request text; its persisted
+  // deliverable format is authoritative for the active phase.
+  return const {'docx', 'html', 'markdown', 'pdf'}.contains(normalized)
+      ? normalized!
+      : inferred;
+}
+
 /// Structured output accepted from the short model-based routing request.
 class WorkRoleModelDecision {
   final String characterId;
@@ -227,13 +236,55 @@ WorkDeliverableContract _deliverableContract(
   required int requestRevision,
 }) {
   final lower = request.toLowerCase();
-  final paths = RegExp(
-    r'(?<![\w./\\-])((?:[A-Za-z]:[\\/]|/)?[\w\u3400-\u9fff][\w\u3400-\u9fff./\\-]*\.(?:docx?|html?|md|markdown|pdf|txt|json|ya?ml|css|js|ts|dart|py))(?![\w./\\-])',
+  final pathMatches = RegExp(
+    r'(?<![\w./\\-])((?:[A-Za-z]:[\\/]|/)?[\w\u3400-\u9fff][\w\u3400-\u9fff./\\-]*\.(?:docx?|html?|md|markdown|pdf|txt|json|ya?ml|css|js|ts|dart|py))(?![\w/\\-]|\.(?=\S))',
     caseSensitive: false,
-  ).allMatches(request).map((match) => match.group(1)!).toList(growable: false);
+  ).allMatches(request).toList(growable: false);
+  final paths = pathMatches.map((match) => match.group(1)!).toList();
   final sourcePath = paths.isEmpty ? null : paths.first;
-  final format = _requestedFormat(lower, sourcePath);
-  final outputPath = _outputPathForFormat(paths, format);
+  final explicitOutputPath = _explicitOutputPath(request, pathMatches);
+  final isTestingRequest = RegExp(
+    r'测试|验证|回归|qa|quality assurance|test|验收',
+    caseSensitive: false,
+  ).hasMatch(lower.replaceAll('验收标准', ''));
+  final explicitQaOnly =
+      RegExp(r'qa[- ]only', caseSensitive: false).hasMatch(lower);
+  final outputPathFormat = explicitOutputPath == null
+      ? 'unspecified'
+      : _requestedFormat('', explicitOutputPath);
+  final hasHtmlSourcePath = pathMatches.any(
+    (match) =>
+        RegExp(r'\.html?$', caseSensitive: false).hasMatch(match.group(1)!),
+  );
+  final isTestingSourceReference = isTestingRequest &&
+      hasHtmlSourcePath &&
+      (explicitQaOnly || !_hasFrontendImplementationBeforeTesting(lower));
+  final qaReportPath = isTestingSourceReference
+      ? paths.cast<String?>().lastWhere(
+            (path) =>
+                path != null &&
+                RegExp(r'\.(?:md|markdown)$', caseSensitive: false)
+                    .hasMatch(path),
+            orElse: () => null,
+          )
+      : null;
+  // A renewed QA request may retain an earlier developer HTML path in its
+  // audit text.  When the same request names a Markdown report, that report
+  // is the active deliverable even if the stale HTML path looked explicit.
+  final qaReportIsActive = isTestingSourceReference && qaReportPath != null;
+  final format = qaReportIsActive
+      ? 'markdown'
+      : outputPathFormat == 'unspecified'
+          ? isTestingSourceReference
+              ? 'unspecified'
+              : _requestedFormat(lower, sourcePath)
+          : outputPathFormat;
+  final outputPath = qaReportIsActive
+      ? qaReportPath
+      : explicitOutputPath == null
+          ? _outputPathForFormat(paths, format)
+          : _outputPathForFormat([explicitOutputPath], format) ??
+              explicitOutputPath;
   final document = format == 'docx' ||
       format == 'pdf' ||
       format == 'markdown' ||
@@ -265,6 +316,30 @@ WorkDeliverableContract _deliverableContract(
     revisionTarget: revision ? (contractLocation ?? 'same-output') : '',
     requestRevision: requestRevision,
   );
+}
+
+String? _explicitOutputPath(String request, List<RegExpMatch> pathMatches) {
+  final outputAction = RegExp(
+    r'生成|创建|新建|产出|输出|写入|保存|导出|上传|更新|修改|修复|\b(?:generate|create|produce|output|write|save|export|upload|update|modify|fix|deliver|attach)\w*\b',
+    caseSensitive: false,
+  );
+  final existingReference = RegExp(
+    r'\b(?:already|existing|previous|original|source|input|reference|attachment|attached)\b|附件|现有|已有|原始|参考|被测',
+    caseSensitive: false,
+  );
+  var previousPathEnd = 0;
+  for (final match in pathMatches) {
+    // Keep each path's instruction local so an earlier "create" cannot turn
+    // a later input attachment into an output. The first requested output is
+    // the active stage; later paths may describe conditional follow-up work.
+    final pathContext = request.substring(previousPathEnd, match.start);
+    previousPathEnd = match.end;
+    if (outputAction.hasMatch(pathContext) &&
+        !existingReference.hasMatch(pathContext)) {
+      return match.group(1);
+    }
+  }
+  return null;
 }
 
 String? _contractLocationForOutput(

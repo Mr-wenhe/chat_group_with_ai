@@ -173,6 +173,7 @@ class WorkFailure {
       );
       failure = _migrateLegacyTransientCommandFailure(task, failure);
       failure = _migrateLegacyMissingTargetFailure(task, failure);
+      failure = _migrateLegacyEmptyModelResponse(task, failure);
       failure = _migrateLegacyArtifactValidationFailure(task, failure);
       final inferredTarget =
           failure.failureTargetPath ?? _inferFailureTargetPath(task, failure);
@@ -298,6 +299,26 @@ class WorkFailure {
     }
     return _fromSignals(
       code: 'modelProtocol',
+      message: failure.reason,
+      technicalDetail: failure.technicalDetail,
+      scope: 'model',
+      completedContent: failure.completedContent,
+      retryableHint: true,
+    );
+  }
+
+  /// Earlier builds saved an empty model completion as an internal error,
+  /// which hid the checkpoint retry action. Reclassify only that exact signal.
+  static WorkFailure _migrateLegacyEmptyModelResponse(
+    AgentTask task,
+    WorkFailure failure,
+  ) {
+    if (failure.type != WorkFailureType.internal) return failure;
+    final text =
+        '${failure.reason} ${failure.technicalDetail} ${task.lastError}';
+    if (!text.contains('模型返回了空内容')) return failure;
+    return _fromSignals(
+      code: 'emptyResponse',
       message: failure.reason,
       technicalDetail: failure.technicalDetail,
       scope: 'model',

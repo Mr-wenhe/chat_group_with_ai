@@ -16,8 +16,9 @@ class WorkModeDirectoryService {
   /// Only common local roots are accepted; the folder grant service remains
   /// the authority that decides whether the path may actually be used.
   String? requestedLocalPath(String request) {
+    // Stop on trailing sentence punctuation while preserving dots inside paths.
     final match = RegExp(
-      r'(?<![A-Za-z0-9_/:])((?:/Volumes|/Users|/home|/tmp|/var)/[^\s，。；、]+)',
+      r'(?<![A-Za-z0-9_/:])((?:/Volumes|/Users|/home|/tmp|/var)/[^\s，。；、]+?)(?=[.,;:!?](?:\s|$)|[\s，。；、]|$)',
     ).firstMatch(request);
     return match?.group(1)?.trim();
   }

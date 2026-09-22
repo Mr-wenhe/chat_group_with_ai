@@ -105,9 +105,10 @@ extension _DiscussionSummaryTurn on _DiscussionSession {
                     summary.resolvedQuestions.isNotEmpty ||
                     summary.resolvedBlockers.isNotEmpty) &&
                 summaryProgress);
+        final currentRequest = WorkDiscussionState.currentRequestScope(task);
         if (extensionReason.isNotEmpty &&
-            runner._maxRounds(task.userRequest) >= 6) {
-          final extendedLimit = runner._maxRounds(task.userRequest) +
+            runner._maxRounds(currentRequest) >= 6) {
+          final extendedLimit = runner._maxRounds(currentRequest) +
               WorkDiscussionRunner.maxComplexityExtensionRounds;
           if (maxRounds < extendedLimit) {
             maxRounds = extendedLimit;

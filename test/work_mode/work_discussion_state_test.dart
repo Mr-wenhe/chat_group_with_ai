@@ -38,6 +38,66 @@ WorkDiscussionState _readyState({
 }
 
 void main() {
+  test('uses only the valid current revision scope for group work', () {
+    const historicalRequest =
+        'Create the playable HTML game, then test the generated page.';
+    const qaScope = 'Test the existing HTML and write doudizhu_test_report.md.';
+    final task = AgentTask(
+      id: 'current-scope-task',
+      groupId: 'scope-group',
+      characterId: 'tester',
+      userRequest: historicalRequest,
+      workModeTask: true,
+      executionStateJson: WorkDiscussionState.mergeIntoExecutionState(
+        '',
+        WorkDiscussionState.initial(
+          conversationId: 'scope-group',
+          requestRevision: 2,
+          deliverableContract: const <String, dynamic>{
+            'deliverableType': 'document',
+            'format': 'markdown',
+            'location': 'doudizhu_test_report.md',
+            'contentScope': qaScope,
+            'explicitExecutorId': null,
+            'revisionTarget': '',
+            'requestRevision': 2,
+          },
+        ),
+      ),
+    );
+
+    expect(WorkDiscussionState.currentRequestScope(task), qaScope);
+    expect(
+      WorkDiscussionState.currentRequestScope(
+        AgentTask(
+          id: task.id,
+          groupId: 'other-group',
+          characterId: task.characterId,
+          userRequest: historicalRequest,
+          workModeTask: true,
+          executionStateJson: task.executionStateJson,
+        ),
+      ),
+      historicalRequest,
+    );
+  });
+
+  test('latest request scope ignores an older appended stage marker', () {
+    final task = AgentTask(
+      id: 'latest-request-task',
+      groupId: 'latest-request-group',
+      characterId: 'worker',
+      userRequest: 'QA-only test the existing HTML.\n'
+          '用户补充要求：Work Mode developer stage regenerate the same HTML.',
+      workModeTask: true,
+    );
+
+    expect(
+      WorkDiscussionState.latestRequestScope(task),
+      'Work Mode developer stage regenerate the same HTML.',
+    );
+  });
+
   test('encodes a bounded versioned state and preserves unrelated metadata',
       () {
     final state = _readyState();

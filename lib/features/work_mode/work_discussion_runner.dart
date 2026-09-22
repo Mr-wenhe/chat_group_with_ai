@@ -68,7 +68,9 @@ class _DiscussionMember {
 /// It only asks models for bounded, structured public contributions; tools and
 /// file side effects remain behind the S2 `updateDiscussionState` gate.
 class WorkDiscussionRunner implements WorkTaskDiscussionRunner {
-  static const Duration defaultRoleTimeout = Duration(seconds: 30);
+  // Complex work-mode prompts can legitimately take longer than a short chat turn.
+  // Keep the bound finite while allowing the configured providers to finish.
+  static const Duration defaultRoleTimeout = Duration(seconds: 90);
   static const Duration defaultCredentialTimeout = Duration(seconds: 8);
   static const int maxResponseBytes = 48 * 1024;
   static const int maxPromptCharacters = 24 * 1024;

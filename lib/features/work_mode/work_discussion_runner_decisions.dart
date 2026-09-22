@@ -163,6 +163,12 @@ extension _WorkDiscussionRunnerDecisions on WorkDiscussionRunner {
 
   int _maxRounds(String request) {
     final normalized = request.trim();
+    // An explicit finite discussion count is part of the user's workflow
+    // request, so it takes precedence over the generic complexity heuristic.
+    if (RegExp(r'(?:完成|进行|开展)\s*(?:两|二|2)\s*轮(?:可验证)?(?:群聊)?讨论')
+        .hasMatch(normalized)) {
+      return 2;
+    }
     if (normalized.length > 700 ||
         RegExp(r'复杂|多模块|架构|集成|迁移|全面|跨端|系统', caseSensitive: false)
             .hasMatch(normalized)) {

@@ -165,7 +165,7 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
     }
     if (discussion.present && discussion.state != null) return false;
 
-    final previousError = task.lastError.trim();
+    final previousError = resetSoftLimit ? '' : task.lastError.trim();
     const reason = '旧任务需要补充群讨论后才能继续。';
     final safeCheckpoint = discussion.present
         ? jsonEncode(
@@ -178,6 +178,7 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
       _withoutApprovalCheckpoint(safeCheckpoint),
       _legacyDiscussionState(task),
     );
+    WorkFailure.clearFromTask(task);
     if (resetSoftLimit) {
       task
         ..softLimitReached = false

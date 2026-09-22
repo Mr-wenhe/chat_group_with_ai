@@ -59,6 +59,65 @@ void main() {
     }
   });
 
+  test('Markdown references do not suppress HTML implementation routing',
+      () async {
+    final front = _character('front', '小前', '前端工程师');
+    final result = await router.route(
+      request:
+          'Read the Dou Dizhu design Markdown as input. Product Manager defines rules; the front-end developer creates a playable HTML page, then a tester tests that page and writes a Markdown report.',
+      conversationId: 'group:markdown-html-test',
+      characters: [product, front, tester],
+      skills: skills,
+    );
+
+    expect(result.deliverableContract?.format, 'html');
+    expect(result.candidateCharacterIds, [front.id]);
+    expect(result.publicReason, contains('前端'));
+  });
+
+  test('QA of an existing HTML file routes to testing and the report output',
+      () async {
+    final front = _character('front', '小前', '前端工程师');
+    final result = await router.route(
+      request:
+          'Test the App-generated attachment Desktop/doudizhu_game.html against Desktop/doudizhu_design.md. The product manager coordinates only; the testing engineer executes cases and creates and attaches Desktop/doudizhu_test_report.md. If QA finds defects, only then fix the same Desktop/doudizhu_game.html and attach the revised version.',
+      conversationId: 'group:existing-html-qa',
+      characters: [product, front, tester],
+      skills: skills,
+    );
+
+    expect(result.deliverableContract?.format, 'markdown');
+    expect(result.deliverableContract?.location, 'doudizhu_test_report.md');
+    expect(result.candidateCharacterIds, [tester.id]);
+    expect(
+      WorkRoleRouter.startsWithTestingStage(
+        'Test existing Desktop/doudizhu_game.html and create '
+        'Desktop/doudizhu_test_report.md.',
+      ),
+      isTrue,
+    );
+    expect(
+      WorkRoleRouter.startsWithTestingStage(
+        'Create a playable HTML game, then let a tester validate it.',
+      ),
+      isFalse,
+    );
+  });
+
+  test('a QA-only continuation treats its HTML attachment as input', () async {
+    final front = _character('front', '小前', '前端工程师');
+    final result = await router.route(
+      request:
+          'Continue testing the attached Desktop/doudizhu_game.html; do not modify it.',
+      conversationId: 'group:qa-html-input-only',
+      characters: [front, tester],
+      skills: skills,
+    );
+
+    expect(result.deliverableContract?.format, 'unspecified');
+    expect(result.candidateCharacterIds, [tester.id]);
+  });
+
   test('unknown longer Chinese executor is never shortened to a known role',
       () async {
     final result = await router.route(

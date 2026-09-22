@@ -130,7 +130,7 @@ extension _ChatApiServiceSupport on ChatApiService {
 
   /// 把 DioException 转换为统一的人类可读错误信息。
   String _dioErrorMessage(DioException e) {
-    if (CancelToken.isCancel(e)) return '请求已取消';
+    if (CancelToken.isCancel(e)) return ChatApiService.cancelledResultMessage;
     if (e.type == DioExceptionType.connectionTimeout ||
         e.type == DioExceptionType.sendTimeout ||
         e.type == DioExceptionType.receiveTimeout) {

@@ -135,7 +135,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
         {
           'role': 'system',
           'content':
-              '你是严格的 JSON 协议修复器。只输出一个合法 JSON object，禁止 Markdown、解释、分析过程或前后缀。必须包含字段：public_update（字符串）、understanding_percent（0 到 100 的整数）、understanding_evidence（字符串数组）、open_questions（字符串数组）、resolved_questions（字符串数组）、blockers（字符串数组）、resolved_blockers（字符串数组）、substantive_progress（布尔值）、needs_user（布尔值）、user_question（字符串）。未知内容使用空数组、0、false 和空字符串；不得虚报 100%。输出形状示例：{"public_update":"已确认本轮范围。","understanding_percent":40,"understanding_evidence":["范围已确认"],"open_questions":[],"resolved_questions":[],"blockers":[],"resolved_blockers":[],"substantive_progress":true,"needs_user":false,"user_question":""}。',
+              '你是严格的 JSON 协议修复器。只输出一个合法 JSON object，禁止 Markdown、解释、分析过程或前后缀。必须包含字段：public_update（字符串）、understanding_percent（0 到 100 的整数）、understanding_evidence（字符串数组）、open_questions（字符串数组）、resolved_questions（字符串数组）、blockers（字符串数组）、resolved_blockers（字符串数组）、substantive_progress（布尔值）、needs_user（布尔值）、user_question（字符串）、recommend_executor_id（字符串或 null）、contract（对象或 null）。若原意见明确推荐了合格执行角色，必须保留其 ID；无明确推荐时填 null。若原意见包含交付格式、位置、范围、显式执行人或修订目标，必须写入 contract 对象；没有合同建议时填 null。未知内容使用空数组、0、false、null 和空字符串；不得虚报 100%。输出形状示例：{"public_update":"已确认本轮范围。","understanding_percent":40,"understanding_evidence":["范围已确认"],"open_questions":[],"resolved_questions":[],"blockers":[],"resolved_blockers":[],"substantive_progress":true,"needs_user":false,"user_question":"","recommend_executor_id":null,"contract":null}。',
         },
         {
           'role': 'user',
@@ -163,10 +163,11 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
               messages: repairMessages,
               timeout: roleTimeout,
               cancelToken: cancelToken,
-              // Keep the repair request on the same structured protocol. The
-              // provider helper adds the compatible reasoning envelope for
-              // StepFun while JSON mode prevents another free-form answer.
-              structuredJson: true,
+              // Repair through the plain response path. Some compatible
+              // providers reject response_format even when the prompt itself
+              // requests a JSON object; the strict parser still gates the
+              // result after this one fallback attempt.
+              structuredJson: false,
             ).timeout(roleTimeout);
       return WorkDiscussionTurn.fromResponse(repairedResponse);
     } on TimeoutException {
@@ -234,7 +235,10 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     required List<Map<String, dynamic>> messages,
     required Duration timeout,
     CancelToken? cancelToken,
-    bool structuredJson = true,
+    // Keep the JSON contract in the prompt and validate it locally. Some
+    // configured providers reject response_format or stall while handling it,
+    // which blocks discussion before the protocol-repair path can run.
+    bool structuredJson = false,
   }) {
     final completionBaseUrl =
         WorkDiscussionRunner.structuredDiscussionBaseUrlFor(config);
@@ -295,8 +299,13 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
         'role': 'user',
         'content': _discussionPromptContent(
           context: {
-            'task': boundedDiscussionText(task.userRequest, maximum: 4000),
-            'projectDossier': await _projectDossier(task.userRequest),
+            'task': boundedDiscussionText(
+              WorkDiscussionState.currentRequestScope(task),
+              maximum: 4000,
+            ),
+            'projectDossier': await _projectDossier(
+              WorkDiscussionState.currentRequestScope(task),
+            ),
             'group': {
               'name': boundedDiscussionText(group.name, maximum: 256),
               'theme': boundedDiscussionText(group.theme, maximum: 512),

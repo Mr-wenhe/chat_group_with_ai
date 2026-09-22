@@ -15,6 +15,11 @@ part 'chat_api_protocol_support.dart';
 class ChatApiService {
   static const String _emptyCompletionMessage = '模型返回了空内容';
   static const String _webNetworkUnsupportedMessage = 'Web 端暂不支持联网模型调用';
+
+  /// Result message for a request that was cancelled. Callers that retry on
+  /// another transport must treat this as terminal rather than a failure to
+  /// recover from.
+  static const String cancelledResultMessage = '请求已取消';
   static const int defaultMaxResponseBytes = 4 * 1024 * 1024;
   static const int maxSseLineBytes = 512 * 1024;
   static const int maxSseWireBytes = 8 * 1024 * 1024;
@@ -313,7 +318,7 @@ class ChatApiService {
       return {'success': false, 'message': '模型响应超过安全大小限制'};
     } on DioException catch (e) {
       if (CancelToken.isCancel(e)) {
-        return {'success': false, 'message': '请求已取消'};
+        return {'success': false, 'message': cancelledResultMessage};
       } else if (e.type == DioExceptionType.connectionTimeout ||
           e.type == DioExceptionType.sendTimeout ||
           e.type == DioExceptionType.receiveTimeout) {

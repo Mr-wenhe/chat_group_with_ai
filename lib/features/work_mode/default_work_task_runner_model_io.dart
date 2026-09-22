@@ -1,6 +1,28 @@
 part of 'default_work_task_runner.dart';
 
 extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
+  Future<T> _withModelCompletionDeadline<T>({
+    required Future<T> Function(CancelToken cancelToken) request,
+    required WorkTaskCancellation cancellation,
+    required CancelToken requestToken,
+  }) async {
+    final cancellationSubscription =
+        Stream<void>.fromFuture(cancellation.whenCancelled).listen((_) {
+      requestToken.cancel('用户已停止任务');
+    });
+    try {
+      return await request(requestToken).timeout(
+        modelCompletionTimeout,
+        onTimeout: () {
+          requestToken.cancel('工作模式模型请求超时');
+          throw TimeoutException('工作模式模型请求超时。');
+        },
+      );
+    } finally {
+      await cancellationSubscription.cancel();
+    }
+  }
+
   Future<Map<String, dynamic>> _completeModelTurn(
     WorkAgentModelRequest request, {
     required AgentTask task,
@@ -9,11 +31,13 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     required String apiKey,
     required String requestText,
     required CancelToken cancellationToken,
+    required WorkTaskCancellation cancellation,
     required int capabilityMaxOutput,
     required int capabilityContextWindow,
   }) async {
     final messages = request.messages.map((message) {
-      if (message['role'] == 'user' && message['content'] == task.userRequest) {
+      if (message['role'] == 'user' &&
+          message['content'] == WorkDiscussionState.currentRequestScope(task)) {
         return <String, dynamic>{...message, 'content': requestText};
       }
       return Map<String, dynamic>.from(message);
@@ -62,91 +86,104 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
         'pendingText': '已连接模型，正在等待第一段公开进度…',
       },
     );
-    final response = await gateway.sendChatMessageStreamed(
-      apiKey: apiKey,
-      provider: provider,
-      apiProtocol: config.protocol,
-      customBaseUrl: config.customBaseUrl,
-      model: config.modelName,
-      messages: boundedMessages,
-      // Deterministic sampling reduces protocol drift; JSON mode is selected
-      // by AiRequestGateway for this agent/tool request.
-      temperature: 0.2,
-      maxTokens: outputTokens,
-      receiveTimeout: const Duration(seconds: 120),
-      maxRetries: 0,
-      cancelToken: cancellationToken,
-      purpose: AiRequestPurpose.agent,
-      conversationId: task.groupId,
-      characterId: task.characterId,
-      requiresTools: true,
-      userInitiated: true,
-      onEvent: (event) {
-        // Dio cancellation can race with the last bytes already buffered by
-        // the provider. Ignore those late callbacks so a stopped task cannot
-        // keep extending its durable event queue.
-        if (cancellationToken.isCancelled) return;
-        if (event.type != ChatStreamEventType.token) return;
-        final delta = event.delta ?? '';
-        streamedCharacters += delta.length;
-        final now = clock();
+    final modelRequestToken = CancelToken();
+    final response = await _withModelCompletionDeadline(
+      cancellation: cancellation,
+      requestToken: modelRequestToken,
+      request: (requestCancelToken) => gateway.sendChatMessageStreamed(
+        apiKey: apiKey,
+        provider: provider,
+        apiProtocol: config.protocol,
+        customBaseUrl: config.customBaseUrl,
+        model: config.modelName,
+        messages: boundedMessages,
+        // Deterministic sampling reduces protocol drift; JSON mode is selected
+        // by AiRequestGateway for this agent/tool request.
+        temperature: 0.2,
+        maxTokens: outputTokens,
+        receiveTimeout: const Duration(seconds: 300),
+        maxRetries: 0,
+        cancelToken: requestCancelToken,
+        purpose: AiRequestPurpose.agent,
+        conversationId: task.groupId,
+        characterId: task.characterId,
+        requiresTools: true,
+        userInitiated: true,
+        onEvent: (event) {
+          // Ignore late bytes after either a task stop or this request's hard
+          // deadline so stale progress cannot be written after a retry.
+          if (cancellationToken.isCancelled || requestCancelToken.isCancelled) {
+            return;
+          }
+          if (event.type != ChatStreamEventType.token) return;
+          final delta = event.delta ?? '';
+          streamedCharacters += delta.length;
+          final now = clock();
 
-        final publicUpdate = WorkPublicUpdateStream.sanitize(
-          publicUpdateStream.add(delta),
-        );
-        final publicUpdateChanged = publicUpdate.isNotEmpty &&
-            publicUpdate != lastPublishedPublicUpdate;
-        final shouldPublishPublicUpdate = publicUpdateChanged &&
-            (lastPublishedPublicUpdate.isEmpty ||
-                publicUpdate.length - lastPublishedPublicUpdate.length >= 24 ||
-                now.difference(lastPublicUpdateAt) >=
-                    const Duration(milliseconds: 250));
-        if (shouldPublishPublicUpdate) {
-          lastPublishedPublicUpdate = publicUpdate;
-          lastPublicUpdateAt = now;
-          final draft = publicUpdate;
+          final publicUpdate = WorkPublicUpdateStream.sanitize(
+            publicUpdateStream.add(delta),
+          );
+          final publicUpdateChanged = publicUpdate.isNotEmpty &&
+              publicUpdate != lastPublishedPublicUpdate;
+          final shouldPublishPublicUpdate = publicUpdateChanged &&
+              (lastPublishedPublicUpdate.isEmpty ||
+                  publicUpdate.length - lastPublishedPublicUpdate.length >=
+                      24 ||
+                  now.difference(lastPublicUpdateAt) >=
+                      const Duration(milliseconds: 250));
+          if (shouldPublishPublicUpdate) {
+            lastPublishedPublicUpdate = publicUpdate;
+            lastPublicUpdateAt = now;
+            final draft = publicUpdate;
+            final characters = streamedCharacters;
+            progressWrites = progressWrites.then<void>((_) async {
+              if (cancellationToken.isCancelled ||
+                  requestCancelToken.isCancelled) {
+                return;
+              }
+              await _record(
+                task,
+                WorkTaskEventKind.modelOutput,
+                'AI 正在输出公开进度',
+                detail: draft,
+                safeMetadata: {
+                  'stream': 'public_update',
+                  'publicDraft': draft,
+                  'characters': characters,
+                },
+              );
+            });
+          }
+
+          if (!progressThrottle.shouldPublish(
+            streamedCharacters: streamedCharacters,
+            now: now,
+          )) {
+            return;
+          }
           final characters = streamedCharacters;
           progressWrites = progressWrites.then<void>((_) async {
-            if (cancellationToken.isCancelled) return;
+            if (cancellationToken.isCancelled ||
+                requestCancelToken.isCancelled) {
+              return;
+            }
+            final safeMetadata = <String, Object?>{
+              'stream': 'model',
+              'characters': characters,
+            };
+            if (publicUpdate.isNotEmpty) {
+              safeMetadata['publicDraft'] = publicUpdate;
+            }
             await _record(
               task,
-              WorkTaskEventKind.modelOutput,
-              'AI 正在输出公开进度',
-              detail: draft,
-              safeMetadata: {
-                'stream': 'public_update',
-                'publicDraft': draft,
-                'characters': characters,
-              },
+              WorkTaskEventKind.toolOutput,
+              publicUpdate.isEmpty ? 'AI 正在整理公开进度' : 'AI 公开进度',
+              detail: publicUpdate.isEmpty ? '正在等待可公开的执行内容。' : publicUpdate,
+              safeMetadata: safeMetadata,
             );
           });
-        }
-
-        if (!progressThrottle.shouldPublish(
-          streamedCharacters: streamedCharacters,
-          now: now,
-        )) {
-          return;
-        }
-        final characters = streamedCharacters;
-        progressWrites = progressWrites.then<void>((_) async {
-          if (cancellationToken.isCancelled) return;
-          final safeMetadata = <String, Object?>{
-            'stream': 'model',
-            'characters': characters,
-          };
-          if (publicUpdate.isNotEmpty) {
-            safeMetadata['publicDraft'] = publicUpdate;
-          }
-          await _record(
-            task,
-            WorkTaskEventKind.toolOutput,
-            publicUpdate.isEmpty ? 'AI 正在整理公开进度' : 'AI 公开进度',
-            detail: publicUpdate.isEmpty ? '正在等待可公开的执行内容。' : publicUpdate,
-            safeMetadata: safeMetadata,
-          );
-        });
-      },
+        },
+      ),
     );
     // A short final delta may not pass the live-update throttle before the
     // stream closes. Flush the decoded public field so the durable timeline
@@ -163,12 +200,15 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
       finalPublicUpdate = _publicUpdateFromResponse(response);
     }
     if (!cancellationToken.isCancelled &&
+        !modelRequestToken.isCancelled &&
         finalPublicUpdate.isNotEmpty &&
         finalPublicUpdate != lastPublishedPublicUpdate) {
       lastPublishedPublicUpdate = finalPublicUpdate;
       final characters = streamedCharacters;
       progressWrites = progressWrites.then<void>((_) async {
-        if (cancellationToken.isCancelled) return;
+        if (cancellationToken.isCancelled || modelRequestToken.isCancelled) {
+          return;
+        }
         await _record(
           task,
           WorkTaskEventKind.modelOutput,
@@ -204,6 +244,7 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     required ApiProvider provider,
     required ApiConfig config,
     required String apiKey,
+    required WorkTaskCancellation cancellation,
   }) async {
     final capability = gateway.capability(provider, config.modelName);
     final contextWindow =
@@ -216,33 +257,39 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
       contextWindow: contextWindow,
       maxOutput: outputTokens,
     );
-    final response = await gateway.sendChatMessage(
-      apiKey: apiKey,
-      provider: provider,
-      apiProtocol: config.protocol,
-      customBaseUrl: config.customBaseUrl,
-      model: config.modelName,
-      messages: ContextWindowManager.fitToTokenBudget(
-        [
-          {
-            'role': 'system',
-            'content': '你是工作任务检查点压缩器。只输出严格 JSON object，字段为 '
-                'completedSummaries（字符串数组）和 recentToolResults（安全诊断对象数组）。'
-                '只总结公开进度，不得输出文件正文、私有 reasoning、凭据、原始响应或会话消息。',
-          },
-          {'role': 'user', 'content': snapshot.toJsonString()},
-        ],
-        maxTokens: inputBudget,
+    final compressionRequestToken = CancelToken();
+    final response = await _withModelCompletionDeadline(
+      cancellation: cancellation,
+      requestToken: compressionRequestToken,
+      request: (requestCancelToken) => gateway.sendChatMessage(
+        apiKey: apiKey,
+        provider: provider,
+        apiProtocol: config.protocol,
+        customBaseUrl: config.customBaseUrl,
+        model: config.modelName,
+        messages: ContextWindowManager.fitToTokenBudget(
+          [
+            {
+              'role': 'system',
+              'content': '你是工作任务检查点压缩器。只输出严格 JSON object，字段为 '
+                  'completedSummaries（字符串数组）和 recentToolResults（安全诊断对象数组）。'
+                  '只总结公开进度，不得输出文件正文、私有 reasoning、凭据、原始响应或会话消息。',
+            },
+            {'role': 'user', 'content': snapshot.toJsonString()},
+          ],
+          maxTokens: inputBudget,
+        ),
+        purpose: AiRequestPurpose.summary,
+        conversationId: task.groupId,
+        characterId: task.characterId,
+        temperature: 0.2,
+        maxTokens: outputTokens,
+        receiveTimeout: const Duration(seconds: 30),
+        maxRetries: 0,
+        cancelToken: requestCancelToken,
+        requiresTools: false,
+        userInitiated: false,
       ),
-      purpose: AiRequestPurpose.summary,
-      conversationId: task.groupId,
-      characterId: task.characterId,
-      temperature: 0.2,
-      maxTokens: outputTokens,
-      receiveTimeout: const Duration(seconds: 30),
-      maxRetries: 0,
-      requiresTools: false,
-      userInitiated: false,
     );
     if (response['success'] != true) return null;
     final raw = response['message'] ?? response['content'];

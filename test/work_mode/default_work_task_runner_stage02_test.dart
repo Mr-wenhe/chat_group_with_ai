@@ -5,6 +5,7 @@ import 'package:archive/archive.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/api_protocol.dart';
@@ -113,6 +114,43 @@ class _SequencedGateway extends AiRequestGateway {
               },
             }),
     };
+  }
+}
+
+class _HangingModelGateway extends AiRequestGateway {
+  _HangingModelGateway()
+      : super(
+          store: MemoryGovernanceStore(),
+          client: _UnusedClient(),
+        );
+
+  final requestTokens = <CancelToken>[];
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required AiRequestPurpose purpose,
+    required String conversationId,
+    required String characterId,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    bool requiresTools = false,
+    bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) {
+    final token = cancelToken!;
+    requestTokens.add(token);
+    return token.whenCancel.then<Map<String, dynamic>>(
+      (_) => {'success': false, 'message': '请求已取消'},
+    );
   }
 }
 
@@ -268,6 +306,62 @@ class _MultiPatchGateway extends AiRequestGateway {
             },
           });
     return {'success': true, 'message': message};
+  }
+}
+
+class _SingleToolGateway extends AiRequestGateway {
+  final AgentToolName toolName;
+  final Map<String, dynamic> arguments;
+
+  _SingleToolGateway(this.toolName, this.arguments)
+      : super(
+          store: MemoryGovernanceStore(),
+          client: _UnusedClient(),
+        );
+
+  int calls = 0;
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required AiRequestPurpose purpose,
+    required String conversationId,
+    required String characterId,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    bool requiresTools = false,
+    bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) async {
+    calls++;
+    final response = calls == 1
+        ? {
+            'action': 'tool',
+            'public_update': '准备执行 QA 工具操作。',
+            'tool': {
+              'name': toolName.wireName,
+              'arguments': arguments,
+            },
+            'completion': null,
+          }
+        : {
+            'action': 'finish',
+            'public_update': 'QA 工具操作已处理。',
+            'tool': null,
+            'completion': {
+              'summary': '已完成 QA 工具操作。',
+              'evidence': ['已确认工具结果'],
+            },
+          };
+    return {'success': true, 'message': jsonEncode(response)};
   }
 }
 
@@ -738,6 +832,73 @@ void main() {
     expect(task.executionStateJson, '{malformed discussion checkpoint');
   });
 
+  test('model completion has a cancellable total deadline', () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final config = ApiConfig(
+      id: 'model-deadline-config',
+      name: 'Model deadline test config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'model-deadline-character',
+      name: 'Model deadline character',
+      avatar: 'D',
+      age: 30,
+      role: '测试超时处理',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final gateway = _HangingModelGateway();
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: WorkspaceFileService(pathPolicy: pathPolicy),
+      mutationService: WorkspaceMutationService(pathPolicy: pathPolicy),
+      modelCompletionTimeout: const Duration(milliseconds: 20),
+    );
+    final task = AgentTask(
+      id: 'model-deadline-task',
+      groupId: 'model-deadline-group',
+      characterId: character.id,
+      userRequest: '验证模型请求超时后能够安全重试',
+      workModeTask: true,
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.failed);
+    expect(gateway.requestTokens, hasLength(3));
+    expect(gateway.requestTokens.toSet(), hasLength(3));
+    expect(gateway.requestTokens.every((token) => token.isCancelled), isTrue);
+    expect(task.workFailure?.type, WorkFailureType.retryableNetwork);
+    expect(task.workFailure?.retryable, isTrue);
+  });
+
   test('production runner routes approved workspace.patch through Stage02',
       () async {
     final grants = WorkFolderGrantService(
@@ -872,6 +1033,233 @@ void main() {
         isTrue);
     expect((await snapshots.undo(task.id)).succeeded, isTrue);
     expect(await output.exists(), isFalse);
+  });
+
+  test('QA revision can write its report but cannot mutate the HTML input',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    await grants.setOrdinaryWriteConfirmation(false);
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final snapshots = WorkSnapshotService(
+      appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+      pathPolicy: pathPolicy,
+    );
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: snapshots,
+    );
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    const groupId = 'qa-stage02-group';
+    final workspace = await workspaceService.loadOrCreate(
+      conversationId: groupId,
+      isDirectChat: false,
+      requireWritable: true,
+    );
+    const originalHtml = '<html><body>original game</body></html>';
+    final htmlInput = File('${workspace.workDirPath}/doudizhu_game.html');
+    await htmlInput.writeAsString(originalHtml);
+
+    final config = ApiConfig(
+      id: 'qa-stage02-config',
+      name: 'QA Stage02 test config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'qa-stage02-tester',
+      name: 'QA tester',
+      avatar: 'QA',
+      age: 30,
+      role: '测试工程师',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+        ToolPermission.skillCreate,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+    await database.chatGroupBox.put(
+      groupId,
+      ChatGroup(
+        id: groupId,
+        name: 'QA 测试群',
+        theme: '斗地主验收',
+        aiCharacterIds: [character.id],
+      ),
+    );
+    const qaScope = 'Test the existing doudizhu_game.html against '
+        'doudizhu_design.md and create doudizhu_test_report.md.';
+    const historicalRequest = 'Create the playable HTML game at '
+        'Desktop/doudizhu_game.html. 用户补充要求：$qaScope';
+    final discussion = WorkDiscussionState.initial(
+      conversationId: groupId,
+      requestRevision: 2,
+      coordinatorId: character.id,
+      executorId: character.id,
+      candidateCharacterIds: [character.id],
+      participantCharacterIds: [character.id],
+      deliverableContract: const <String, dynamic>{
+        'deliverableType': 'document',
+        'format': 'markdown',
+        'location': 'doudizhu_test_report.md',
+        'contentScope': qaScope,
+        'explicitExecutorId': null,
+        'revisionTarget': '',
+        'requestRevision': 2,
+      },
+    ).copyWith(
+      phase: WorkDiscussionPhase.ready,
+      understandingPercent: 100,
+      understandingEvidence: const [
+        '测试对象是现有 HTML。',
+        '当前输出是 Markdown 测试报告。',
+        '测试阶段只记录缺陷，修复另行启动。',
+      ],
+      openQuestions: const [],
+      blockers: const [],
+    );
+    final discussionState = WorkDiscussionState.mergeIntoExecutionState(
+      '',
+      discussion,
+    );
+    final mediaDirectory =
+        await Directory('${hiveDirectory.path}/qa-stage02-media').create();
+    var mediaCopyIndex = 0;
+    AgentTask qaTask(String id) => AgentTask(
+          id: id,
+          groupId: groupId,
+          characterId: character.id,
+          userRequest: historicalRequest,
+          assignedCharacterIds: [character.id],
+          workModeTask: true,
+          executionStateJson: discussionState,
+        );
+    DefaultWorkTaskRunner runnerFor(AiRequestGateway gateway) =>
+        DefaultWorkTaskRunner(
+          database: database,
+          eventStore: eventStore,
+          credentials: _TestCredentials(),
+          gateway: gateway,
+          workspaceService: workspaceService,
+          folderGrantService: grants,
+          workspaceFileService: files,
+          mutationService: mutations,
+          mediaCopier: (source, type, {fileName}) async {
+            final target = File(
+              '${mediaDirectory.path}/${mediaCopyIndex++}-${fileName ?? 'attachment'}',
+            );
+            await source.copy(target.path);
+            return MediaAttachment(
+              type: type,
+              localPath: target.path,
+              fileName: fileName,
+              fileSize: await target.length(),
+            );
+          },
+        );
+    final blockedGateway = _MultiPatchGateway(const [
+      {'path': 'doudizhu_game.html', 'content': '<html>premature edit</html>'},
+    ]);
+    final blockedTask = qaTask('qa-stage02-blocked-task');
+
+    await runnerFor(blockedGateway).run(
+      blockedTask,
+      WorkTaskCancellation(),
+    );
+
+    expect(
+      blockedTask.status,
+      AgentTaskStatus.failed,
+      reason:
+          '${blockedTask.lastError}; ${blockedTask.resultSummary}; gateway calls=${blockedGateway.calls}',
+    );
+    expect(await htmlInput.readAsString(), originalHtml);
+    expect(blockedGateway.calls, 1);
+
+    final reportTask = qaTask('qa-stage02-report-task');
+    final reportGateway = _MultiPatchGateway(const [
+      {
+        'path': 'doudizhu_test_report.md',
+        'content': '# QA report\n\nTests executed: 30.\n',
+      },
+    ]);
+    await runnerFor(reportGateway).run(
+      reportTask,
+      WorkTaskCancellation(),
+    );
+
+    expect(
+      reportTask.status,
+      AgentTaskStatus.completed,
+      reason:
+          '${reportTask.lastError}; ${reportTask.resultSummary}; gateway calls=${reportGateway.calls}',
+    );
+    expect(
+      await File('${workspace.workDirPath}/doudizhu_test_report.md')
+          .readAsString(),
+      contains('Tests executed: 30.'),
+    );
+
+    final reportFile = File('${workspace.workDirPath}/doudizhu_test_report.md');
+    final reportBeforeDelete = await reportFile.readAsString();
+    final deleteGateway = _SingleToolGateway(
+      AgentToolName.workspaceDelete,
+      {'path': 'doudizhu_test_report.md'},
+    );
+    final deleteTask = qaTask('qa-stage02-delete-report-task');
+    await runnerFor(deleteGateway).run(deleteTask, WorkTaskCancellation());
+    expect(deleteTask.status, AgentTaskStatus.failed);
+    expect(await reportFile.readAsString(), reportBeforeDelete);
+
+    final renameGateway = _SingleToolGateway(
+      AgentToolName.workspaceRename,
+      {
+        'path': 'doudizhu_test_report.md',
+        'destinationPath': 'renamed_report.md',
+      },
+    );
+    final renameTask = qaTask('qa-stage02-rename-report-task');
+    await runnerFor(renameGateway).run(renameTask, WorkTaskCancellation());
+    expect(renameTask.status, AgentTaskStatus.failed);
+    expect(await reportFile.readAsString(), reportBeforeDelete);
+    expect(
+      await File('${workspace.workDirPath}/renamed_report.md').exists(),
+      isFalse,
+    );
+
+    final skillGateway = _SingleToolGateway(
+      AgentToolName.skillCreate,
+      {
+        'name': 'qa-helper',
+        'domain': 'testing',
+        'description': 'Must not be installed during QA.',
+        'instructions': ['No mutation during QA.'],
+      },
+    );
+    final skillTask = qaTask('qa-stage02-skill-mutation-task');
+    await runnerFor(skillGateway).run(skillTask, WorkTaskCancellation());
+    expect(skillTask.status, AgentTaskStatus.failed);
+    expect(skillGateway.calls, 1);
   });
 
   test('production runner refreshes Stage02 approval between file mutations',

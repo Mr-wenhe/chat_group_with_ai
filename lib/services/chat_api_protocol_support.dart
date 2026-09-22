@@ -244,7 +244,12 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
   String _responseText(Map<String, dynamic> data, ApiProtocol protocol) {
     switch (protocol) {
       case ApiProtocol.anthropicMessages:
-        return _messageText(data['content']);
+        final standard = _messageText(data['content']);
+        if (standard.trim().isNotEmpty) return standard;
+        // Some compatible Anthropic endpoints expose the assistant payload
+        // only as reasoning_content. Use it only after normal content is
+        // confirmed empty so the public response contract stays deterministic.
+        return _messageText(data['reasoning_content']);
       case ApiProtocol.openAiChatCompletions:
         final choices = data['choices'];
         if (choices is List && choices.isNotEmpty && choices.first is Map) {

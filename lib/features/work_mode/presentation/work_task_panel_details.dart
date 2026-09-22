@@ -77,7 +77,11 @@ class _TaskDetailsState extends State<_TaskDetails> {
         // A discussion reply box can consume most of a short desktop window.
         // Let the live timeline yield space before the panel's action row is
         // pushed outside the Positioned viewport.
-        const timelineHeaderHeight = 40.0;
+        // Text metrics make the timeline heading slightly taller than 40px
+        // on some desktop themes; leave a small buffer so reply controls stay
+        // inside the short overlay instead of overflowing by a pixel.
+        const timelineHeaderHeight = 48.0;
+        final showTimeline = availableHeight >= timelineHeaderHeight;
         final timelineHeight = availableHeight < 300
             ? (availableHeight - timelineHeaderHeight)
                 .clamp(0.0, 180.0)
@@ -201,21 +205,23 @@ class _TaskDetailsState extends State<_TaskDetails> {
                 ),
               ),
             ),
-            const SizedBox(height: 14),
-            Text(
-              '执行动态 · 实时公开输出',
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
-            const SizedBox(height: 6),
-            SizedBox(
-              height: timelineHeight,
-              child: _TaskEventTimeline(
-                key: ValueKey<String>(widget.task.id),
-                taskId: widget.task.id,
-                eventStreamFor: widget.eventStreamFor,
-                onLatestEvent: widget.onLatestEvent,
+            if (showTimeline) ...<Widget>[
+              const SizedBox(height: 14),
+              Text(
+                '执行动态 · 实时公开输出',
+                style: Theme.of(context).textTheme.titleSmall,
               ),
-            ),
+              const SizedBox(height: 6),
+              SizedBox(
+                height: timelineHeight,
+                child: _TaskEventTimeline(
+                  key: ValueKey<String>(widget.task.id),
+                  taskId: widget.task.id,
+                  eventStreamFor: widget.eventStreamFor,
+                  onLatestEvent: widget.onLatestEvent,
+                ),
+              ),
+            ],
           ],
         );
       },

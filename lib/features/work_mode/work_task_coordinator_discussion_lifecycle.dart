@@ -3,7 +3,9 @@ part of 'work_task_coordinator.dart';
 extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
   WorkDiscussionState _renewDiscussionForRequest(
       WorkDiscussionState previous, String request,
-      {WorkFollowUpDecision? decision, String? contractRequest}) {
+      {WorkFollowUpDecision? decision,
+      String? contractRequest,
+      String? activeScopeOverride}) {
     final revision = previous.requestRevision + 1;
     final pinnedExecutor = _contractExecutorId(previous.deliverableContract);
     final parsed = WorkRoleRouter.deliverableContractForRequest(
@@ -11,6 +13,29 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
       requestRevision: revision,
       explicitExecutorId: pinnedExecutor,
     );
+    final previousContract = previous.deliverableContract;
+    final previousType = previousContract?['deliverableType'];
+    final previousFormat = previousContract?['format'];
+    final previousLocation = previousContract?['location'];
+    final changedDeliverable = previousContract != null &&
+        (parsed.deliverableType != 'generic' &&
+                previousType is String &&
+                previousType != 'generic' &&
+                parsed.deliverableType != previousType ||
+            parsed.format != 'unspecified' &&
+                previousFormat is String &&
+                previousFormat != 'unspecified' &&
+                parsed.format != previousFormat ||
+            parsed.location != 'unspecified' &&
+                previousLocation is String &&
+                previousLocation != 'unspecified' &&
+                parsed.location != previousLocation);
+    final activeScope = activeScopeOverride?.trim().isNotEmpty == true
+        ? activeScopeOverride!.trim()
+        : contractRequest?.trim().isNotEmpty == true && changedDeliverable
+            ? contractRequest!.trim()
+            : request;
+    final preserveContract = activeScopeOverride?.trim().isNotEmpty == true;
     final contract = previous.deliverableContract == null
         ? parsed.toJson()
         : Map<String, dynamic>.from(previous.deliverableContract!);
@@ -18,21 +43,23 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     // explicit new format/location/path in the latest request replace them.
     // This makes target changes visible to the next discussion instead of
     // silently carrying a stale Markdown/HTML contract forward.
-    if (previous.deliverableContract == null ||
-        parsed.deliverableType != 'generic') {
-      contract['deliverableType'] = parsed.deliverableType;
-    }
-    if (parsed.format != 'unspecified') contract['format'] = parsed.format;
-    if (parsed.location != 'unspecified') {
-      contract['location'] = parsed.location;
-    }
-    if (decision?.artifactPath?.trim().isNotEmpty == true) {
-      contract['revisionTarget'] = decision!.artifactPath!.trim();
-    } else if (parsed.revisionTarget.isNotEmpty) {
-      contract['revisionTarget'] = parsed.revisionTarget;
+    if (!preserveContract) {
+      if (previous.deliverableContract == null ||
+          parsed.deliverableType != 'generic') {
+        contract['deliverableType'] = parsed.deliverableType;
+      }
+      if (parsed.format != 'unspecified') contract['format'] = parsed.format;
+      if (parsed.location != 'unspecified') {
+        contract['location'] = parsed.location;
+      }
+      if (decision?.artifactPath?.trim().isNotEmpty == true) {
+        contract['revisionTarget'] = decision!.artifactPath!.trim();
+      } else if (parsed.revisionTarget.isNotEmpty) {
+        contract['revisionTarget'] = parsed.revisionTarget;
+      }
     }
     contract
-      ..['contentScope'] = request
+      ..['contentScope'] = activeScope
       ..['requestRevision'] = revision;
     return WorkDiscussionState.initial(
       conversationId: previous.conversationId,

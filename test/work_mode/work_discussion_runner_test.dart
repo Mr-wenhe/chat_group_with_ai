@@ -404,6 +404,261 @@ void main() {
         greaterThanOrEqualTo(2));
   });
 
+  test('protocol repair preserves executor recommendations and contract',
+      () async {
+    for (final id in ['front-a', 'front-b']) {
+      await database.apiConfigBox.put(
+        'cfg-$id',
+        ApiConfig(
+          id: 'cfg-$id',
+          name: id,
+          provider: 'deepseek',
+          modelName: 'deepseek-chat',
+          hasCredential: true,
+          credentialId: 'credential-$id',
+        ),
+      );
+      await database.aiCharacterBox.put(
+        id,
+        _character(id, id, '前端工程师', 'cfg-$id'),
+      );
+    }
+    const request = '实现前端 HTML 页面，随后进行测试验收';
+    const candidateIds = ['front-a', 'front-b'];
+    final group = ChatGroup(
+      id: 'repair-vote-group',
+      name: '协议修复讨论群',
+      theme: '前端开发与测试',
+      aiCharacterIds: candidateIds,
+    );
+    await database.chatGroupBox.put(group.id, group);
+    final task = AgentTask(
+      id: 'repair-vote-task',
+      groupId: group.id,
+      characterId: '',
+      userRequest: request,
+      assignedCharacterIds: candidateIds,
+      workModeTask: true,
+    )..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        '',
+        WorkDiscussionState.initial(
+          conversationId: group.id,
+          coordinatorId: 'front-a',
+          executorId: null,
+          candidateCharacterIds: candidateIds,
+          participantCharacterIds: candidateIds,
+          deliverableContract: <String, dynamic>{
+            'deliverableType': 'source',
+            'format': 'unspecified',
+            'location': 'unspecified',
+            'contentScope': request,
+            'explicitExecutorId': null,
+            'revisionTarget': '',
+            'requestRevision': 1,
+          },
+        ),
+      );
+
+    final repairSchemas = <String>[];
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async {
+        final systemPrompt = messages.first['content'].toString();
+        if (!systemPrompt.contains('严格的 JSON 协议修复器')) {
+          return <String, dynamic>{
+            'success': true,
+            'message':
+                '我推荐 front-b 作为执行人，交付 HTML 页面到 Desktop/doudizhu_game.html。',
+          };
+        }
+
+        repairSchemas.add(systemPrompt);
+        return <String, dynamic>{
+          'success': true,
+          'message': jsonEncode(<String, dynamic>{
+            'public_update': '已确认由 front-b 实现桌面 HTML 页面。',
+            'understanding_percent': 100,
+            'understanding_evidence': const [
+              '目标和范围已确认。',
+              '由 front-b 负责前端实现。',
+              'HTML 格式、桌面路径和验收方式已确认。',
+            ],
+            'open_questions': const <String>[],
+            'resolved_questions': const <String>[],
+            'blockers': const <String>[],
+            'resolved_blockers': const <String>[],
+            'substantive_progress': true,
+            'needs_user': false,
+            'user_question': '',
+            if (systemPrompt.contains('recommend_executor_id'))
+              'recommend_executor_id': 'front-b',
+            if (systemPrompt.contains('contract（对象或 null）'))
+              'contract': <String, dynamic>{
+                'format': 'html',
+                'location': 'Desktop/doudizhu_game.html',
+                'requestRevision': 1,
+              },
+          }),
+        };
+      },
+    );
+
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    final finalState = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    expect(repairSchemas, isNotEmpty);
+    expect(
+      repairSchemas.every((prompt) =>
+          prompt.contains('recommend_executor_id') &&
+          prompt.contains('contract（对象或 null）')),
+      isTrue,
+    );
+    expect(finalState.isExecutionReady, isTrue);
+    expect(finalState.executorId, 'front-b');
+    expect(finalState.deliverableContract?['format'], 'html');
+    expect(
+      finalState.deliverableContract?['location'],
+      'Desktop/doudizhu_game.html',
+    );
+  });
+
+  test('a QA revision routes from its current Markdown contract', () async {
+    final configs = [
+      for (final id in ['product', 'front', 'test'])
+        ApiConfig(
+          id: 'cfg-$id',
+          name: id,
+          provider: 'deepseek',
+          modelName: 'deepseek-chat',
+          hasCredential: true,
+          credentialId: 'credential-$id',
+        ),
+    ];
+    for (final config in configs) {
+      await database.apiConfigBox.put(config.id, config);
+    }
+    final characters = <AICharacter>[
+      _character('product', '产品', '产品经理', 'cfg-product'),
+      _character('front', '前端', '前端工程师', 'cfg-front'),
+      _character('test', '测试', '测试工程师', 'cfg-test'),
+    ];
+    for (final character in characters) {
+      await database.aiCharacterBox.put(character.id, character);
+    }
+    final group = ChatGroup(
+      id: 'qa-revision-group',
+      name: 'QA 修订群',
+      theme: '斗地主验收',
+      aiCharacterIds: characters.map((item) => item.id).toList(),
+    );
+    await database.chatGroupBox.put(group.id, group);
+    const qaScope = 'Test the existing Desktop/doudizhu_game.html against '
+        'Desktop/doudizhu_design.md and create Desktop/doudizhu_test_report.md; '
+        'only fix the HTML if QA finds a defect.';
+    const request = 'Create the playable HTML game and save it to '
+        'Desktop/doudizhu_game.html first. 用户补充要求：$qaScope';
+    final task = AgentTask(
+      id: 'qa-revision-task',
+      groupId: group.id,
+      characterId: '',
+      userRequest: request,
+      assignedCharacterIds: characters.map((item) => item.id).toList(),
+      workModeTask: true,
+    )..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        '',
+        WorkDiscussionState.initial(
+          conversationId: group.id,
+          requestRevision: 2,
+          participantCharacterIds: characters.map((item) => item.id),
+          deliverableContract: <String, dynamic>{
+            'deliverableType': 'document',
+            'format': 'markdown',
+            'location': 'doudizhu_test_report.md',
+            'contentScope': qaScope,
+            'explicitExecutorId': null,
+            'revisionTarget': '',
+            'requestRevision': 2,
+          },
+        ),
+      );
+    final observedPrompts = <String>[];
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async {
+        observedPrompts.add(
+          messages.map((message) => message['content'].toString()).join('\n'),
+        );
+        return <String, dynamic>{
+          'success': true,
+          'message': jsonEncode(<String, dynamic>{
+            'public_update': '${character.name}确认测试阶段职责。',
+            'understanding_percent': 100,
+            'understanding_evidence': const [
+              '当前阶段是对现有 HTML 文件执行 QA。',
+              '测试工程师负责执行用例并输出 Markdown 报告。',
+              '修复仅在 QA 发现缺陷后启动。',
+            ],
+            'open_questions': const <String>[],
+            'blockers': const <String>[],
+            'recommend_executor_id': 'test',
+            'substantive_progress': true,
+          }),
+        };
+      },
+    );
+
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    final finalState = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    expect(finalState.isExecutionReady, isTrue);
+    expect(finalState.executorId, 'test');
+    expect(finalState.candidateCharacterIds, ['test']);
+    expect(observedPrompts, isNotEmpty);
+    expect(observedPrompts.every((prompt) => prompt.contains(qaScope)), isTrue);
+    expect(
+      observedPrompts.every(
+        (prompt) => !prompt.contains('Create the playable HTML game'),
+      ),
+      isTrue,
+    );
+  });
+
   test('fresh discussion honors an explicit final executor mention', () async {
     final configs = <ApiConfig>[
       ApiConfig(
@@ -1968,8 +2223,12 @@ void main() {
     final complexRequest = List<String>.filled(90, '复杂系统架构与跨模块集成').join(' ');
     final complexRounds =
         await runRequest('complex-round-group', complexRequest);
+    const explicitTwoRoundRequest = '复杂前端系统架构请完成两轮可验证讨论。';
+    final explicitTwoRounds =
+        await runRequest('explicit-two-round-group', explicitTwoRoundRequest);
     expect(simpleRounds, 2);
     expect(complexRounds, 6);
+    expect(explicitTwoRounds, 2);
   });
 
   test('records a model timeout without fabricating a role message', () async {

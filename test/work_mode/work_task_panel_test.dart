@@ -1689,7 +1689,12 @@ void main() {
         },
       ).copyWith(
         phase: WorkDiscussionPhase.blocked,
-        openQuestions: const ['请确认最终输出目录'],
+        openQuestions: const [
+          '请确认本轮冒烟测试的具体验收项是否仅覆盖基础功能，还是包含性能、兼容性项；'
+              '冒烟测试的兼容性覆盖范围（浏览器版本、设备类型）待确认；'
+              '400错误、半格延迟问题的质检判定标准待明早对齐确认；'
+              '暗色模式可识别度的测试用例阈值待确认',
+        ],
         blockers: const ['missingUserInformation'],
       );
       final task = _task(

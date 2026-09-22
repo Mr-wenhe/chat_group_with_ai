@@ -102,6 +102,9 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
       // status is known so a result/error is still recoverable when a runner
       // did not publish its own checkpoint callback.
       final handedOff = _advanceCompletedHandoff(stored);
+      if (!handedOff) {
+        await _applyQueuedAuthorizationRootCorrection(stored);
+      }
       _refreshTaskContext(
         stored,
         nextStep: handedOff

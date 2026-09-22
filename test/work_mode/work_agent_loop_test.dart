@@ -13,6 +13,7 @@ import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -334,6 +335,61 @@ void main() {
         ));
     expect(model.requests.single.context['committedWrites'], isEmpty);
     expect(model.requests.single.context['publicUpdates'], isEmpty);
+  });
+
+  test('current QA scope replaces a stale development target in checkpoint',
+      () async {
+    const qaScope = '只测试现有 HTML，并写入 doudizhu_test_report.md';
+    final model = _FakeModel()..responses.add(_finishDecision());
+    final task = _task()
+      ..userRequest = '旧任务：开发 Desktop/doudizhu_game.html。新的 QA：$qaScope'
+      ..contextSummary = jsonEncode({
+        'schemaVersion': WorkContextSnapshot.currentSchemaVersion,
+        'conversationId': 'loop-conversation',
+        'target': '旧任务：开发 Desktop/doudizhu_game.html',
+        'goal': '旧任务：开发 Desktop/doudizhu_game.html',
+      });
+    final discussion = WorkDiscussionState.initial(
+      conversationId: task.groupId,
+      requestRevision: 2,
+      coordinatorId: 'coordinator',
+      executorId: task.characterId,
+      candidateCharacterIds: [task.characterId],
+      participantCharacterIds: [task.characterId],
+      deliverableContract: const <String, dynamic>{
+        'deliverableType': 'document',
+        'format': 'markdown',
+        'location': 'doudizhu_test_report.md',
+        'contentScope': qaScope,
+        'explicitExecutorId': null,
+        'revisionTarget': '',
+        'requestRevision': 2,
+      },
+    ).copyWith(
+      phase: WorkDiscussionPhase.ready,
+      understandingPercent: 100,
+      understandingEvidence: const ['QA 报告合同已确认。'],
+      openQuestions: const [],
+      blockers: const [],
+    );
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      '',
+      discussion,
+    );
+
+    final result = await _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+    ).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    final context = model.requests.single.context;
+    expect(context['goal'], qaScope);
+    expect(context['checkpointSummary'], contains(qaScope));
+    expect(
+      context['checkpointSummary'],
+      isNot(contains('旧任务：开发 Desktop/doudizhu_game.html')),
+    );
   });
 
   test('unknown execution schema pauses without dropping typed blockers',

@@ -245,6 +245,26 @@ void main() {
     );
   });
 
+  test('an explicit HTML contract ignores negative DOCX mentions', () {
+    const request = '生成斗地主 HTML 页面；不产出 DOCX、不产出测试报告，只交付 html';
+
+    expect(
+      WorkArtifactDeliveryGuard.requiresDocxArtifact(
+        request,
+        contractFormat: 'html',
+      ),
+      isFalse,
+    );
+    expect(
+      WorkArtifactDeliveryGuard.failureFor(
+        request: request,
+        contractFormat: 'html',
+        hasReadableArtifact: false,
+      ),
+      WorkArtifactDeliveryGuard.missingArtifactMessage,
+    );
+  });
+
   test('durable Word contract survives a terse execution continuation', () {
     expect(
       WorkArtifactDeliveryGuard.requiresDocxArtifact(

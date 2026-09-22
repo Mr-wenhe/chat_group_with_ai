@@ -39,7 +39,9 @@ class _DiscussionSession {
       required this.qualifiedAvailableIds,
       required this.memberIds,
       required this.state}) {
-    maxRounds = runner._maxRounds(task.userRequest);
+    maxRounds = runner._maxRounds(
+      WorkDiscussionState.currentRequestScope(task),
+    );
   }
 
   Future<void> run() async {
