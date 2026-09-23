@@ -335,6 +335,9 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
           selection,
           bundled: temporaryBundle != null,
           attachedCount: media?.length ?? 0,
+          // Only the failure report bypasses the contract gate, so a bypassed
+          // gate is what makes these files intermediates rather than 产物.
+          contractUnmet: !enforceArtifactContract && requiresArtifactDelivery,
           deliveredArchivePaths: deliveredArchivePaths,
           skippedNames: [
             ...bundledSkippedNames,

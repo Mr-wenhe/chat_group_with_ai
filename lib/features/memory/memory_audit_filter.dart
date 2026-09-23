@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/features/memory/memory_audit_presenter.dart';
 
 export 'memory_audit_presenter.dart'
@@ -304,81 +305,106 @@ class MemoryAuditFilter {
     // Apply the entry boundary before user-controlled filters so a filter can
     // only narrow the result, never add records back into it.
     final scopedMemories = scope?.apply(memories) ?? memories;
-    final filtered = scopedMemories.where((m) {
-      if (observerCharacterId != null &&
-          m.observerCharacterId != observerCharacterId) {
-        return false;
-      }
-      if (originType != null && m.originType != originType) {
-        return false;
-      }
-      if (originConversationId != null &&
-          m.originConversationId != originConversationId) {
-        return false;
-      }
-      if (status != null && m.status != status) return false;
-      if (memoryKind != null && m.kind != memoryKind) return false;
-      if (pinnedOnly != null) {
-        if (pinnedOnly! && !m.pinned) return false;
-        if (!pinnedOnly! && m.pinned) return false;
-      }
-      if (subjectFilter == SubjectFilter.all) {
-        // no subject filtering
-      } else if (subjectFilter == SubjectFilter.aboutMe) {
-        if (!m.subjectIds.contains('user')) {
-          return false;
-        }
-      } else if (subjectFilter == SubjectFilter.selfGrowth) {
-        if (m.kind != MemoryKind.personaGrowth) {
-          return false;
-        }
-      } else {
-        if (!m.subjectIds.contains(subjectFilter.characterId)) {
-          return false;
-        }
-      }
-      if (!_matchesSearch(m, searchText)) return false;
-      return true;
-    }).toList(growable: false);
-    return _sort(filtered);
+    final matched = <({PermanentMemory memory, bool exact})>[];
+    for (final memory in scopedMemories) {
+      if (!_allows(memory)) continue;
+      final search = _matchSearch(memory, searchText);
+      if (!search.matched) continue;
+      matched.add((memory: memory, exact: search.exact));
+    }
+    return _sort(matched);
   }
 
-  bool _matchesSearch(
+  /// 除搜索以外的全部过滤条件。
+  bool _allows(PermanentMemory memory) {
+    if (observerCharacterId != null &&
+        memory.observerCharacterId != observerCharacterId) {
+      return false;
+    }
+    if (originType != null && memory.originType != originType) return false;
+    if (originConversationId != null &&
+        memory.originConversationId != originConversationId) {
+      return false;
+    }
+    if (status != null && memory.status != status) return false;
+    if (memoryKind != null && memory.kind != memoryKind) return false;
+    if (pinnedOnly != null && memory.pinned != pinnedOnly) return false;
+
+    if (subjectFilter == SubjectFilter.all) return true;
+    if (subjectFilter == SubjectFilter.aboutMe) {
+      return memory.subjectIds.contains('user');
+    }
+    if (subjectFilter == SubjectFilter.selfGrowth) {
+      return memory.kind == MemoryKind.personaGrowth;
+    }
+    return memory.subjectIds.contains(subjectFilter.characterId);
+  }
+
+  /// 返回是否命中搜索词，以及是字面命中还是仅拼音命中。
+  ///
+  /// 两者一次算出：`searchText` 回调可能很贵，每个条目只允许调用一次。
+  ({bool matched, bool exact}) _matchSearch(
     PermanentMemory memory,
     MemoryAuditSearchText? searchText,
   ) {
-    final query = searchQuery?.trim().toLowerCase();
-    if (query == null || query.isEmpty) return true;
-    final projection = searchText?.call(memory) ??
-        MemoryAuditSearchProjection(
-          content: memory.content,
-          observerName: '',
-          subjectNames: const [],
-          originName: MemoryAuditPresenter.normalizeLegacyOriginSnapshot(
-                memory.originNameSnapshot,
-                originType: memory.originType,
-                conversationId: memory.originConversationId,
-              ) ??
-              '',
-          kindLabel: MemoryAuditLabels.kind(memory.kind).label,
-          statusLabel: MemoryAuditLabels.status(memory.status).label,
-          originTypeLabel:
-              MemoryAuditLabels.originType(memory.originType).label,
-          pinnedLabel: MemoryAuditLabels.pinned(memory.pinned).label,
-        );
-    return projection.searchableText.toLowerCase().contains(query);
+    final query = searchQuery?.trim();
+    if (query == null || query.isEmpty) return (matched: true, exact: false);
+
+    final projection = _projectionFor(memory, searchText);
+    final matched = PinyinSearch.matchesFieldModes([
+      (text: projection.content, mode: PinyinMatchMode.content),
+      for (final name in projection.nameFields)
+        (text: name, mode: PinyinMatchMode.name),
+    ], query);
+    if (!matched) return (matched: false, exact: false);
+    return (
+      matched: true,
+      exact: PinyinSearch.matchesLiterally(projection.searchFields, query),
+    );
   }
 
-  List<PermanentMemory> _sort(List<PermanentMemory> memories) {
+  MemoryAuditSearchProjection _projectionFor(
+    PermanentMemory memory,
+    MemoryAuditSearchText? searchText,
+  ) =>
+      searchText?.call(memory) ?? _defaultProjection(memory);
+
+  MemoryAuditSearchProjection _defaultProjection(PermanentMemory memory) =>
+      MemoryAuditSearchProjection(
+        content: memory.content,
+        observerName: '',
+        subjectNames: const [],
+        originName: MemoryAuditPresenter.normalizeLegacyOriginSnapshot(
+              memory.originNameSnapshot,
+              originType: memory.originType,
+              conversationId: memory.originConversationId,
+            ) ??
+            '',
+        kindLabel: MemoryAuditLabels.kind(memory.kind).label,
+        statusLabel: MemoryAuditLabels.status(memory.status).label,
+        originTypeLabel: MemoryAuditLabels.originType(memory.originType).label,
+        pinnedLabel: MemoryAuditLabels.pinned(memory.pinned).label,
+      );
+
+  List<PermanentMemory> _sort(
+    List<({PermanentMemory memory, bool exact})> matched,
+  ) {
     final indexed = [
-      for (var index = 0; index < memories.length; index++)
-        (memory: memories[index], index: index),
+      for (var index = 0; index < matched.length; index++)
+        (
+          memory: matched[index].memory,
+          index: index,
+          exact: matched[index].exact,
+        ),
     ];
     indexed.sort((left, right) {
       final pinned = _rank(left.memory.pinned).compareTo(
         _rank(right.memory.pinned),
       );
       if (pinned != 0) return pinned;
+
+      // 搜索时把字面命中排在纯拼音命中之前，置顶和当前/历史仍然优先。
+      if (left.exact != right.exact) return left.exact ? -1 : 1;
 
       final leftIsCurrent = _isCurrentMemory(left.memory);
       final rightIsCurrent = _isCurrentMemory(right.memory);

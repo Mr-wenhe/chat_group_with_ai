@@ -158,6 +158,7 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
     _ArtifactAttachmentSelection selection, {
     required bool bundled,
     required int attachedCount,
+    bool contractUnmet = false,
     Iterable<String> deliveredArchivePaths = const <String>[],
     Iterable<String> skippedNames = const <String>[],
   }) {
@@ -167,13 +168,12 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
       return '';
     }
     final deliveredPaths = deliveredArchivePaths.toList(growable: false);
-    final delivered = bundled
-        ? attachedCount > 0
-            ? '已将 ${deliveredPaths.length} 个产物打包为 ZIP 附件。'
-            : '产物已生成，但 ZIP 附件暂时无法复制。'
-        : attachedCount > 0
-            ? '已附加 $attachedCount 个产物。'
-            : '产物已生成，但暂时无法复制为聊天附件。';
+    final delivered = _deliveryHeadline(
+      contractUnmet: contractUnmet,
+      bundled: bundled,
+      attachedCount: attachedCount,
+      deliveredCount: deliveredPaths.length,
+    );
     final listed = deliveredPaths.take(6).join('、');
     final listSuffix = deliveredPaths.length > 6 ? ' 等' : '';
     final withPaths =
@@ -186,6 +186,36 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
     final names = allSkipped.take(6).join('、');
     final suffix = allSkipped.length > 6 ? ' 等' : '';
     return '$withPaths 未附加：$names$suffix（文件不存在、超出大小限制或无法安全读取）。';
+  }
+
+  /// How the attachment step describes itself.
+  ///
+  /// A failed artifact task still hands over whatever the run wrote, but those
+  /// files are intermediates: reporting them as 产物 — and reporting the
+  /// attachment as a success — contradicted the failure report sitting directly
+  /// above it and read as "the deliverable is here after all".
+  String _deliveryHeadline({
+    required bool contractUnmet,
+    required bool bundled,
+    required int attachedCount,
+    required int deliveredCount,
+  }) {
+    if (contractUnmet) {
+      if (attachedCount == 0) {
+        return '本次运行写出的文件暂时无法复制为聊天附件。';
+      }
+      return bundled
+          ? '已将本次运行写出的 $deliveredCount 个中间文件打包为 ZIP 附件，供你排查或继续处理。'
+          : '已附加本次运行写出的 $attachedCount 个中间文件，供你排查或继续处理。';
+    }
+    if (bundled) {
+      return attachedCount > 0
+          ? '已将 $deliveredCount 个产物打包为 ZIP 附件。'
+          : '产物已生成，但 ZIP 附件暂时无法复制。';
+    }
+    return attachedCount > 0
+        ? '已附加 $attachedCount 个产物。'
+        : '产物已生成，但暂时无法复制为聊天附件。';
   }
 
   String _archiveRelativePath(String root, String path) {

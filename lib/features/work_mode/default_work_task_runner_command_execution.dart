@@ -1,5 +1,9 @@
 part of 'default_work_task_runner.dart';
 
+/// Identity of one file inside a command's watch roots, taken before and after
+/// the command runs.
+typedef _ObservedFileState = ({int modifiedMicros, int size});
+
 extension _DefaultWorkTaskRunnerCommandExecution on DefaultWorkTaskRunner {
   Future<WorkToolResult> _runCommand(
     AgentTask task,
@@ -67,8 +71,27 @@ extension _DefaultWorkTaskRunnerCommandExecution on DefaultWorkTaskRunner {
         failureCode: 'commandLockUnavailable',
       );
     }
+    // State of the watched directories before the command starts. A file that is
+    // already there is not this run's output, and only a before/after comparison
+    // can tell the two apart: a modification-time window cannot, because every
+    // file the user (or an earlier step) put in the workspace moments ago falls
+    // inside it.
+    Map<String, _ObservedFileState>? watchedBefore;
+    Future<WorkCommandResult> captureWatchThenRun() async {
+      // Policy evaluation already knows whether this cwd and every declared
+      // path are authorized. Do not walk model-provided roots until those paths
+      // have passed that check and any required mutation approval is present.
+      if (!policy.allowed ||
+          (policy.requiresApproval && !approvalGranted) ||
+          invocation.context.isCancelled) {
+        return run();
+      }
+      watchedBefore = await _snapshotCommandRoots(command);
+      return run();
+    }
+
     final result = plan == null || policy.isReadOnly
-        ? await run()
+        ? await captureWatchThenRun()
         : await lockManager!.withLocks(
             task.id,
             <WorkResourceLockRequest>{
@@ -76,11 +99,14 @@ extension _DefaultWorkTaskRunnerCommandExecution on DefaultWorkTaskRunner {
                   .map(WorkResourceLockRequest.treeWrite),
               ...plan.exactPaths.map(WorkResourceLockRequest.treeWrite),
             },
-            run,
+            captureWatchThenRun,
             cancellation: invocation.context.cancellation?.whenCancelled,
             isCancelled: () => invocation.context.isCancelled,
           );
-    final artifactPaths = await _existingCommandArtifactPaths(command);
+    final artifactPaths = await _existingCommandArtifactPaths(
+      command,
+      watchedBefore: _commandLaunchedProcess(result) ? watchedBefore : null,
+    );
     final data = <String, dynamic>{
       'commandDisplay': _safeCommandDisplay(command),
       'runStatus': result.status.name,
@@ -149,10 +175,13 @@ extension _DefaultWorkTaskRunnerCommandExecution on DefaultWorkTaskRunner {
   }
 
   Future<List<String>> _existingCommandArtifactPaths(
-    WorkCommand command,
-  ) async {
+    WorkCommand command, {
+    Map<String, _ObservedFileState>? watchedBefore,
+  }) async {
     final files = workspaceFileService;
-    if (files == null) return const <String>[];
+    // A declared path is only a hint. If the process never got past the
+    // command gates, none of its existing files can be attributed to this run.
+    if (files == null || watchedBefore == null) return const <String>[];
     final paths = <String>{};
     for (final rawPath in command.declaredImpact.take(64)) {
       try {
@@ -171,14 +200,209 @@ extension _DefaultWorkTaskRunnerCommandExecution on DefaultWorkTaskRunner {
           followLinks: false,
         );
         if (resolved.isFile && requestedType != FileSystemEntityType.link) {
-          paths.add(resolved.path);
+          final stat = await File(resolved.path).stat();
+          if (!_unchangedSince(
+            watchedBefore[candidate] ?? watchedBefore[resolved.path],
+            stat,
+          )) {
+            paths.add(resolved.path);
+          }
         }
       } on Object {
         // declaredImpact is an authorization hint, not proof that a file was
         // produced. Only existing, policy-resolved files become artifacts.
       }
     }
-    return paths.toList(growable: false);
+    paths.addAll(await _observedCommandArtifacts(command, watchedBefore));
+    return paths
+        .take(DefaultWorkTaskRunner._maxObservedArtifacts)
+        .toList(growable: false);
+  }
+
+  /// Whether the runner reached the point of launching a process.
+  ///
+  /// A command that stopped at its own gate never touched the filesystem, so a
+  /// fresh file in the watched directories cannot be attributed to it.
+  bool _commandLaunchedProcess(WorkCommandResult result) =>
+      switch (result.status) {
+        WorkCommandRunStatus.completed ||
+        WorkCommandRunStatus.failed ||
+        WorkCommandRunStatus.timedOut ||
+        WorkCommandRunStatus.cancelled ||
+        WorkCommandRunStatus.outputLimitExceeded ||
+        WorkCommandRunStatus.pausedForUser =>
+          true,
+        WorkCommandRunStatus.toolMissing ||
+        WorkCommandRunStatus.waitingForApproval ||
+        WorkCommandRunStatus.blockedByDefault ||
+        WorkCommandRunStatus.pathRejected =>
+          false,
+      };
+
+  /// Files under the command's own directories that this run created or
+  /// rewrote.
+  ///
+  /// `declaredImpact` is a model-authored hint, and a generator script picks
+  /// its own output name: the two can disagree, which left a finished
+  /// deliverable invisible to the artifact contract, to the completion check
+  /// and to the attachment list alike. Everything else found in the watched
+  /// directories has to be compared against [before] so that a file which was
+  /// already sitting there is never reported as this run's output.
+  Future<List<String>> _observedCommandArtifacts(
+    WorkCommand command,
+    Map<String, _ObservedFileState> before,
+  ) async {
+    final files = workspaceFileService;
+    if (files == null) return const <String>[];
+    final found = <String>[];
+    var examined = 0;
+    for (final root in _commandWatchRoots(command)) {
+      if (found.length >= DefaultWorkTaskRunner._maxObservedArtifacts) break;
+      try {
+        final authorizedRoot = await _authorizedCommandWatchRoot(files, root);
+        if (authorizedRoot == null) continue;
+        await for (final entity in Directory(authorizedRoot).list(
+          recursive: true,
+          followLinks: false,
+        )) {
+          if (found.length >= DefaultWorkTaskRunner._maxObservedArtifacts ||
+              ++examined > DefaultWorkTaskRunner._maxObservedEntries) {
+            return found;
+          }
+          if (entity is! File) continue;
+          try {
+            final stat = await entity.stat();
+            if (stat.type != FileSystemEntityType.file) continue;
+            if (_unchangedSince(before[entity.path], stat)) continue;
+            found.add(
+              (await files.pathPolicy.resolveExisting(entity.path)).path,
+            );
+          } on Object {
+            // An unreadable or unauthorized candidate is skipped; the declared
+            // impact paths are still resolved by the caller.
+          }
+        }
+      } on Object {
+        // An unreadable watch root does not cancel the remaining roots.
+      }
+    }
+    return found;
+  }
+
+  /// Records the identity of every file under the command's watch roots.
+  ///
+  /// Both this walk and [_observedCommandArtifacts] start from
+  /// [_commandWatchRoots], so an entry is spelled the same way in both.
+  Future<Map<String, _ObservedFileState>> _snapshotCommandRoots(
+    WorkCommand command,
+  ) async {
+    final files = workspaceFileService;
+    if (files == null) return const <String, _ObservedFileState>{};
+    final states = <String, _ObservedFileState>{};
+    var examined = 0;
+    for (final root in _commandWatchRoots(command)) {
+      if (states.length >= DefaultWorkTaskRunner._maxObservedEntries) break;
+      try {
+        final authorizedRoot = await _authorizedCommandWatchRoot(files, root);
+        if (authorizedRoot == null) continue;
+        await for (final entity in Directory(authorizedRoot).list(
+          recursive: true,
+          followLinks: false,
+        )) {
+          if (++examined > DefaultWorkTaskRunner._maxObservedEntries) break;
+          if (entity is! File) continue;
+          try {
+            final stat = await entity.stat();
+            if (stat.type != FileSystemEntityType.file) continue;
+            states[entity.path] = _stateOf(stat);
+          } on Object {
+            // An unreadable entry simply has no recorded state; the post-run
+            // scan then treats it as changed, which only over-reports.
+          }
+        }
+      } on Object {
+        // An unreadable watch root contributes no state.
+      }
+    }
+    // A bounded recursive walk may not reach a declared target in a large
+    // workspace. Snapshot those exact files separately so an unchanged file
+    // cannot evade the comparison just because it fell beyond the walk limit.
+    for (final rawPath in command.declaredImpact.take(64)) {
+      try {
+        final candidate = _effectivePath(
+          null,
+          command.workingDirectory,
+          rawPath,
+          enforceRevision: false,
+        );
+        final resolved = await files.pathPolicy.resolveExisting(candidate);
+        final requestedType = await FileSystemEntity.type(
+          candidate,
+          followLinks: false,
+        );
+        if (!resolved.isFile || requestedType == FileSystemEntityType.link) {
+          continue;
+        }
+        final state = _stateOf(await File(resolved.path).stat());
+        states[candidate] = state;
+        states[resolved.path] = state;
+      } on Object {
+        // A missing or unauthorized declared path has no before-state.
+      }
+    }
+    return states;
+  }
+
+  /// Resolves a scan root through the same workspace boundary used for every
+  /// candidate file; a lexically in-root symlink may still escape its grant.
+  Future<String?> _authorizedCommandWatchRoot(
+    WorkspaceFileService files,
+    String root,
+  ) async {
+    try {
+      final resolved = await files.pathPolicy.resolveExisting(root);
+      return resolved.isDirectory ? resolved.path : null;
+    } on Object {
+      return null;
+    }
+  }
+
+  /// Whether a file still has the identity recorded before the run.
+  ///
+  /// Size is part of the identity because a filesystem may report modification
+  /// times at whole-second resolution, which a fast rewrite stays inside.
+  bool _unchangedSince(_ObservedFileState? before, FileStat stat) =>
+      before != null &&
+      before.modifiedMicros == stat.modified.microsecondsSinceEpoch &&
+      before.size == stat.size;
+
+  _ObservedFileState _stateOf(FileStat stat) => (
+        modifiedMicros: stat.modified.microsecondsSinceEpoch,
+        size: stat.size,
+      );
+
+  /// Directories a command may have written into: its working directory plus
+  /// the parent of every path it declared. `WorkCommandPolicy` has already
+  /// authorized both spellings, so the walk stays inside the granted roots.
+  Iterable<String> _commandWatchRoots(WorkCommand command) {
+    final roots = <String>{command.workingDirectory};
+    for (final rawPath in command.declaredImpact.take(64)) {
+      try {
+        final candidate = _effectivePath(
+          null,
+          command.workingDirectory,
+          rawPath,
+          enforceRevision: false,
+        );
+        final normalized = candidate.replaceAll('\\', '/');
+        final separator = normalized.lastIndexOf('/');
+        if (separator > 0) roots.add(normalized.substring(0, separator));
+      } on Object {
+        // A path that cannot be normalized adds no watch root; the working
+        // directory still applies.
+      }
+    }
+    return roots;
   }
 
   String? _commandFailureTargetPath(
@@ -216,10 +440,8 @@ extension _DefaultWorkTaskRunnerCommandExecution on DefaultWorkTaskRunner {
     return argumentMatches.length == 1 ? argumentMatches.single : null;
   }
 
-  bool _looksLikeSourceArtifact(String path) => RegExp(
-        r'\.(?:py|pyw|js|mjs|cjs|ts|tsx|jsx|dart|sh|bash|rb|go|rs|java|kt|swift|c|cc|cpp|h|hpp)$',
-        caseSensitive: false,
-      ).hasMatch(path.replaceAll('\\', '/'));
+  bool _looksLikeSourceArtifact(String path) =>
+      WorkArtifactDeliveryGuard.isSourceArtifactPath(path);
 
   Future<WorkCommandResult> _implInstallMissingTool(
     AgentTask task,

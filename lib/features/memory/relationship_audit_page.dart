@@ -227,9 +227,11 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
     return Map.unmodifiable(origins);
   }
 
-  List<RelationshipState> get _visibleRelationships {
+  /// 可见关系，以及其中**字面**命中搜索词（而非仅拼音命中）的 id。
+  ({List<RelationshipState> items, Set<String> exactMatchIds})
+      _visibleRelationshipPage() {
     final allowed = widget.allowedObserverCharacterIds;
-    var values = _relationships.where(
+    final values = _relationships.where(
       (relationship) =>
           allowed == null || allowed.contains(relationship.sourceCharacterId),
     );
@@ -237,18 +239,38 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
     final characterById = {
       for (final character in _characters) character.id: character,
     };
-    return filtered
-        .where(
-          (relationship) => RelationshipAuditPresenter.matchesSearch(
-            relationship,
-            observerName: _observerName(relationship, characterById),
-            observerRole: _observerRole(relationship, characterById),
-            targetName: _targetName(relationship, characterById),
-            targetRole: _targetRole(relationship, characterById),
-            query: _filter.searchQuery,
-          ),
-        )
-        .toList(growable: false);
+
+    final items = <RelationshipState>[];
+    final exactMatchIds = <String>{};
+    for (final relationship in filtered) {
+      final observerName = _observerName(relationship, characterById);
+      final observerRole = _observerRole(relationship, characterById);
+      final targetName = _targetName(relationship, characterById);
+      final targetRole = _targetRole(relationship, characterById);
+
+      if (!RelationshipAuditPresenter.matchesSearch(
+        relationship,
+        observerName: observerName,
+        observerRole: observerRole,
+        targetName: targetName,
+        targetRole: targetRole,
+        query: _filter.searchQuery,
+      )) {
+        continue;
+      }
+      items.add(relationship);
+      if (RelationshipAuditPresenter.matchesSearchLiterally(
+        relationship,
+        observerName: observerName,
+        observerRole: observerRole,
+        targetName: targetName,
+        targetRole: targetRole,
+        query: _filter.searchQuery,
+      )) {
+        exactMatchIds.add(relationship.id);
+      }
+    }
+    return (items: items, exactMatchIds: exactMatchIds);
   }
 
   @override
@@ -256,10 +278,13 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
     if (_isLoading) return _loadingScaffold();
     if (_loadError != null) return _errorScaffold();
 
-    final filtered = _visibleRelationships;
+    final page = _visibleRelationshipPage();
     final sections = RelationshipAuditPresenter.sections(
-      filtered,
+      page.items,
       isPinned: _controls.isPinned,
+      isSearchExact: (_filter.searchQuery?.trim().isEmpty ?? true)
+          ? null
+          : (relationship) => page.exactMatchIds.contains(relationship.id),
     );
     return Scaffold(
       appBar: MemoryPageAppBar(
@@ -276,7 +301,7 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
           final wide = constraints.maxWidth >= _wideBreakpoint;
           final content = _buildContent(
             context,
-            filtered: filtered,
+            filtered: page.items,
             sections: sections,
             narrow: !wide,
           );

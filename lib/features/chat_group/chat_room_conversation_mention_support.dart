@@ -104,7 +104,7 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
               controller: _mentionSearchController,
               autofocus: false,
               decoration: InputDecoration(
-                hintText: '搜索名称、角色或标签…',
+                hintText: '搜索名称、角色或标签，支持拼音',
                 prefixIcon: Icon(Icons.search_rounded,
                     size: 16, color: cs.onSurfaceVariant),
                 isDense: true,
@@ -147,12 +147,16 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
     if (q.isEmpty) {
       _filteredMentionMembers = List.from(_allGroupCharacters);
     } else {
-      _filteredMentionMembers = _allGroupCharacters
-          .where((c) =>
-              c.name.contains(q) ||
-              c.role.contains(q) ||
-              c.personalityTags.any((tag) => tag.contains(q)))
-          .toList();
+      _filteredMentionMembers = PinyinSearch.exactFirst(
+        _allGroupCharacters
+            .where((c) => PinyinSearch.matchesFields(
+                  c.searchFields,
+                  q,
+                  mode: PinyinMatchMode.name,
+                ))
+            .toList(),
+        (c) => PinyinSearch.matchesLiterally(c.searchFields, q),
+      );
     }
     _mentionSelectedIndex = 0;
     _mentionOverlay?.markNeedsBuild();

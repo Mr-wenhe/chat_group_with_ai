@@ -115,8 +115,8 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
           return _fail(
             state,
             completionFailure,
-            failure: WorkFailure.fromError(
-              StateError(completionFailure),
+            failure: WorkFailure.fromLoopMessage(
+              completionFailure,
               scope: 'completion',
               completedContent: _completedContent(state),
             ),

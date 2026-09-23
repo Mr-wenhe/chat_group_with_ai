@@ -5,6 +5,7 @@ import 'package:archive/archive.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
@@ -651,10 +652,22 @@ class _ScriptArtifactGateway extends AiRequestGateway {
   static const String scriptName = 'generate_ranking.py';
   static const String artifactName = '大模型排名.xlsx';
 
+  /// The file the stubbed process actually writes. Setting it to a name other
+  /// than [artifactName] reproduces a model that declares one path to
+  /// `command.run` while its script writes another.
+  final String writtenName;
+
+  /// Whether the model declares completion once the command returns, instead of
+  /// asking for another inspection round.
+  final bool finishAfterCommand;
+
   int calls = 0;
 
-  _ScriptArtifactGateway()
-      : super(
+  _ScriptArtifactGateway({
+    String? writtenName,
+    this.finishAfterCommand = false,
+  })  : writtenName = writtenName ?? artifactName,
+        super(
           store: MemoryGovernanceStore(),
           client: _UnusedClient(),
         );
@@ -706,6 +719,15 @@ class _ScriptArtifactGateway extends AiRequestGateway {
             },
           },
           'completion': null,
+        },
+      _ when finishAfterCommand => {
+          'action': 'finish',
+          'public_update': '文件已生成。',
+          'tool': null,
+          'completion': {
+            'summary': '文件已生成到桌面：$writtenName。',
+            'evidence': ['command.run 报告脚本执行完成'],
+          },
         },
       _ => {
           'action': 'tool',
@@ -3916,6 +3938,518 @@ void main() {
     expect(message.media!.single.fileName, _ScriptArtifactGateway.artifactName);
     expect(message.content, contains('已附加 1 个产物'));
     expect(message.content, isNot(contains(_ScriptArtifactGateway.scriptName)));
+  });
+
+  test(
+      'a script deliverable is delivered when the declared impact name does '
+      'not match what the script wrote', () async {
+    // A generator script chooses its own output filename, so `declaredImpact`
+    // is only a hint. When the two disagree the real file used to stay
+    // invisible: the task failed with "no readable artifact" while the
+    // deliverable sat in the workspace.
+    const writtenName = '大模型排名-终版.xlsx';
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final snapshots = WorkSnapshotService(
+      appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+      pathPolicy: pathPolicy,
+    );
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: snapshots,
+    );
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    final workspace = await workspaceService.loadOrCreate(
+      conversationId: 'renamed-artifact-group',
+      isDirectChat: false,
+      requireWritable: true,
+    );
+    final workspaceRoot = workspace.workDirPath;
+
+    final config = ApiConfig(
+      id: 'renamed-artifact-config',
+      name: 'Renamed artifact test',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'renamed-artifact-character',
+      name: '改名校验角色',
+      avatar: 'RA',
+      age: 30,
+      role: '改名校验角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+        ToolPermission.commandRun,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final mediaDirectory =
+        await Directory('${hiveDirectory.path}/media').create(recursive: true);
+    var mediaCopyIndex = 0;
+    final gateway = _ScriptArtifactGateway(
+      writtenName: writtenName,
+      finishAfterCommand: true,
+    );
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      resourceLockManager: WorkResourceLockManager(isWindows: false),
+      mediaCopier: (source, type, {fileName}) async {
+        final target = File(
+          '${mediaDirectory.path}/${mediaCopyIndex++}-${fileName ?? 'attachment'}',
+        );
+        await source.copy(target.path);
+        return MediaAttachment(
+          type: type,
+          localPath: target.path,
+          fileName: fileName,
+          fileSize: await target.length(),
+        );
+      },
+      commandRunner: WorkCommandRunner(
+        policy: WorkCommandPolicy(
+          authorizedRoots: [workspaceRoot],
+          isWindows: false,
+        ),
+        processStarter: (command, {required env, required shell}) async {
+          await File('$workspaceRoot/$writtenName')
+              .writeAsString('rank,model\n1,demo\n');
+          return WorkCommandProcess(
+            pid: 31,
+            stdout: Stream<List<int>>.value(utf8.encode('已生成排名表\n')),
+            stderr: const Stream<List<int>>.empty(),
+            exitCode: Future<int>.value(0),
+            terminateTree: ({bool force = false}) async {},
+          );
+        },
+      ),
+    );
+    final task = AgentTask(
+      id: 'renamed-artifact-task',
+      groupId: 'renamed-artifact-group',
+      characterId: character.id,
+      userRequest: '从网上取数并生成一份 xlsx 大模型排名表',
+      requestedPermissions: character.toolPermissions,
+      assignedCharacterIds: [character.id],
+      workModeTask: true,
+    );
+
+    for (var round = 0; round < 8; round++) {
+      if (task.isTerminal) break;
+      await runner.run(task, WorkTaskCancellation());
+      if (task.status == AgentTaskStatus.waitingForApproval) {
+        final checkpoint = jsonDecode(task.executionStateJson) as Map;
+        task
+          ..executionStateJson = jsonEncode({
+            ...checkpoint,
+            'approvalDecision': 'approvedWithoutUndo',
+          })
+          ..status = AgentTaskStatus.queued;
+        continue;
+      }
+      if (task.status != AgentTaskStatus.queued) break;
+    }
+
+    expect(
+      task.status,
+      AgentTaskStatus.completed,
+      reason: 'status=${task.status} error=${task.lastError} '
+          'calls=${gateway.calls}',
+    );
+    final message = database.messageBox.values
+        .where((item) => item.groupId == task.groupId)
+        .last;
+    // The script itself wrote a different filename than the model declared, so
+    // the deliverable has to be discovered from the workspace, not from the
+    // declaration.
+    expect(message.media, hasLength(1));
+    expect(message.media!.single.fileName, writtenName);
+    expect(message.content, isNot(contains(_ScriptArtifactGateway.scriptName)));
+  });
+
+  test(
+      'a file that was already in the workspace is not delivered as this '
+      "run's artifact", () async {
+    // 回归：产物发现只看修改时间，容差窗口之内本来就在工作区里的文件也会被算作
+    // 本次运行的产出——一条什么都没写的命令，于是把旧文件当交付物附上。
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final snapshots = WorkSnapshotService(
+      appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+      pathPolicy: pathPolicy,
+    );
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: snapshots,
+    );
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    final workspace = await workspaceService.loadOrCreate(
+      conversationId: 'stale-artifact-group',
+      isDirectChat: false,
+      requireWritable: true,
+    );
+    final workspaceRoot = workspace.workDirPath;
+    // Match the command's declaredImpact exactly: declaredImpact is a hint, so
+    // an unchanged file at that path must not bypass the before/after check.
+    final stale = File(
+      '$workspaceRoot/${_ScriptArtifactGateway.artifactName}',
+    );
+    await stale.writeAsString('旧数据');
+
+    final config = ApiConfig(
+      id: 'stale-artifact-config',
+      name: 'Stale artifact test',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'stale-artifact-character',
+      name: '旧文件校验角色',
+      avatar: 'SA',
+      age: 30,
+      role: '旧文件校验角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+        ToolPermission.commandRun,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final mediaDirectory =
+        await Directory('${hiveDirectory.path}/media').create(recursive: true);
+    var mediaCopyIndex = 0;
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: _ScriptArtifactGateway(finishAfterCommand: true),
+      // 时钟略快于文件系统：旧实现的时间窗因此稳定覆盖那份事先放好的文件，
+      // 复现不依赖测试机的实际耗时。
+      clock: () => DateTime.now().add(const Duration(seconds: 1)),
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      resourceLockManager: WorkResourceLockManager(isWindows: false),
+      mediaCopier: (source, type, {fileName}) async {
+        final target = File(
+          '${mediaDirectory.path}/${mediaCopyIndex++}-${fileName ?? 'attachment'}',
+        );
+        await source.copy(target.path);
+        return MediaAttachment(
+          type: type,
+          localPath: target.path,
+          fileName: fileName,
+          fileSize: await target.length(),
+        );
+      },
+      commandRunner: WorkCommandRunner(
+        policy: WorkCommandPolicy(
+          authorizedRoots: [workspaceRoot],
+          isWindows: false,
+        ),
+        processStarter: (command, {required env, required shell}) async {
+          // 这条命令没有写出任何文件。
+          return WorkCommandProcess(
+            pid: 41,
+            stdout: Stream<List<int>>.value(utf8.encode('done\n')),
+            stderr: const Stream<List<int>>.empty(),
+            exitCode: Future<int>.value(0),
+            terminateTree: ({bool force = false}) async {},
+          );
+        },
+      ),
+    );
+    final task = AgentTask(
+      id: 'stale-artifact-task',
+      groupId: 'stale-artifact-group',
+      characterId: character.id,
+      userRequest: '从网上取数并生成一份 xlsx 大模型排名表',
+      requestedPermissions: character.toolPermissions,
+      assignedCharacterIds: [character.id],
+      workModeTask: true,
+    );
+
+    for (var round = 0; round < 8; round++) {
+      if (task.isTerminal) break;
+      await runner.run(task, WorkTaskCancellation());
+      if (task.status == AgentTaskStatus.waitingForApproval) {
+        final checkpoint = jsonDecode(task.executionStateJson) as Map;
+        task
+          ..executionStateJson = jsonEncode({
+            ...checkpoint,
+            'approvalDecision': 'approvedWithoutUndo',
+          })
+          ..status = AgentTaskStatus.queued;
+        continue;
+      }
+      if (task.status != AgentTaskStatus.queued) break;
+    }
+
+    expect(
+      task.status,
+      isNot(AgentTaskStatus.completed),
+      reason: 'status=${task.status} error=${task.lastError}',
+    );
+    expect(
+      task.lastArtifactPaths,
+      isNot(contains(stale.path)),
+      reason: '命令之前就在工作区里的文件被当成了本次运行的产物',
+    );
+  });
+
+  test(
+      'an unmet artifact contract reports its own message, not a Dart '
+      'exception string', () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: WorkSnapshotService(
+        appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+        pathPolicy: pathPolicy,
+      ),
+    );
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    await workspaceService.loadOrCreate(
+      conversationId: 'contract-message-group',
+      isDirectChat: false,
+      requireWritable: true,
+    );
+
+    final config = ApiConfig(
+      id: 'contract-message-config',
+      name: 'Contract message test',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'contract-message-character',
+      name: '契约文案角色',
+      avatar: 'CM',
+      age: 30,
+      role: '契约文案角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [ToolPermission.workspaceRead],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    // The model claims completion without producing anything; the request names
+    // a deliverable, so the completion guard rejects it.
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: _WorkspaceListPathGateway(const <Object?>[]),
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+    );
+    final task = AgentTask(
+      id: 'contract-message-task',
+      groupId: 'contract-message-group',
+      characterId: character.id,
+      userRequest: '生成一份 xlsx 大模型排名表',
+      requestedPermissions: character.toolPermissions,
+      assignedCharacterIds: [character.id],
+      workModeTask: true,
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.failed, reason: task.lastError);
+    final failure = WorkFailure.fromTask(task);
+    expect(failure, isNotNull);
+    expect(failure!.reason, contains('用户要求文件产物'));
+    // Wrapping the guard's prose in a StateError used to reach the chat as
+    // "Bad state: 用户要求文件产物…".
+    expect(failure.reason, isNot(contains('Bad state')));
+    expect(failure.technicalDetail, isNot(contains('Bad state')));
+  });
+
+  test('a failed artifact task does not hand over its intermediates as 产物',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: WorkSnapshotService(
+        appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+        pathPolicy: pathPolicy,
+      ),
+    );
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    final workspace = await workspaceService.loadOrCreate(
+      conversationId: 'intermediate-failure-group',
+      isDirectChat: false,
+      requireWritable: true,
+    );
+    // The run wrote only its generator script; the deck itself never appeared.
+    final script = File(
+      '${workspace.workDirPath}/generate_philosophy_ppt.py',
+    );
+    await script.writeAsString('print("deck")');
+
+    final config = ApiConfig(
+      id: 'intermediate-failure-config',
+      name: 'Intermediate failure test',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'intermediate-failure-character',
+      name: '中间文件角色',
+      avatar: 'IF',
+      age: 30,
+      role: '中间文件角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [ToolPermission.workspaceRead],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final mediaDirectory =
+        await Directory('${hiveDirectory.path}/media').create(recursive: true);
+    var mediaCopyIndex = 0;
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      mediaCopier: (source, type, {fileName}) async {
+        final target = File(
+          '${mediaDirectory.path}/${mediaCopyIndex++}-${fileName ?? 'attachment'}',
+        );
+        await source.copy(target.path);
+        return MediaAttachment(
+          type: type,
+          localPath: target.path,
+          fileName: fileName,
+          fileSize: await target.length(),
+        );
+      },
+    );
+    final task = AgentTask(
+      id: 'intermediate-failure-task',
+      groupId: 'intermediate-failure-group',
+      characterId: character.id,
+      userRequest: '生成一份 pptx 幻灯片文件',
+      status: AgentTaskStatus.failed,
+      workModeTask: true,
+    )..lastArtifactPaths = <String>[script.path];
+
+    await runner.reportFailure(
+      task,
+      WorkFailure.fromLoopMessage(
+        WorkArtifactDeliveryGuard.missingArtifactMessage,
+        scope: 'completion',
+      ),
+    );
+
+    final reply = database.messageBox.values.singleWhere(
+      (message) =>
+          message.groupId == task.groupId &&
+          message.senderId == character.id &&
+          message.senderType == 'ai',
+    );
+    expect(reply.content, contains('任务未完成'));
+    // The user still has to be able to find the file the run did write.
+    expect(reply.content, contains('generate_philosophy_ppt.py'));
+    // But a failure must not read as "here is your deliverable": the attached
+    // files are described as intermediates, never as 产物.
+    expect(reply.content, contains('中间文件'));
+    expect(reply.content, isNot(contains('个产物')));
   });
 }
 

@@ -292,9 +292,8 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
   }) async {
     final task = state.task;
     final resolvedFailure = failure ??
-        WorkFailure.fromError(
-          StateError(message),
-          scope: 'loop',
+        WorkFailure.fromLoopMessage(
+          message,
           completedContent: _completedContent(state),
         );
     state.failure = resolvedFailure;

@@ -49,8 +49,15 @@ class WorkArtifactValidationResult {
 class WorkArtifactDeliveryGuard {
   const WorkArtifactDeliveryGuard._();
 
-  static const int maxValidatedDocxBytes = 10 * 1024 * 1024;
-  static const int maxValidatedHtmlBytes = 10 * 1024 * 1024;
+  /// The largest deliverable the guard will validate.
+  ///
+  /// This mirrors the ceiling for a single chat attachment rather than sitting
+  /// below it: a 10 MB ceiling rejected real deliverables whose size was never
+  /// the user's problem — an HTML report with embedded images, for instance.
+  /// Reading and parsing stays bounded, and the archive parsers in
+  /// [BinaryDocumentParser] keep their own expansion limits.
+  static const int maxValidatedDocxBytes = 50 * 1024 * 1024;
+  static const int maxValidatedHtmlBytes = 50 * 1024 * 1024;
   static const Duration fileFreshnessTolerance = Duration(seconds: 2);
 
   static const String missingArtifactMessage =
@@ -69,21 +76,58 @@ class WorkArtifactDeliveryGuard {
 
   /// Returns whether [request] asks for a source-code file rather than merely
   /// asking the model to explain or review code.
+  ///
+  /// A bare language name is the only ambiguous signal; see
+  /// [_mentionsSourceArtifact] for how “生成一份 Python 学习报告” stays a
+  /// document request.
   static bool requiresSourceArtifact(String request) {
     final text = request.trim().toLowerCase();
     if (text.isEmpty) return false;
-
-    final source = RegExp(
-      r'(?:\.(?:py|py3|js|jsx|ts|tsx|dart|java|kt|kts|swift|rs|go|rb|php|'
-      r'c|cc|cpp|cxx|h|hpp|sh|bash|zsh|fish|sql)\b|'
-      r'python|javascript|typescript|dart|java|kotlin|swift|rust|golang|'
-      r'ruby|php|c\+\+|\bc\b|shell|bash|sql|html5?|网页|页面|源码|代码|脚本)',
-      caseSensitive: false,
-    ).hasMatch(text);
-    if (!source) return false;
+    if (!_mentionsSourceArtifact(text)) return false;
 
     return _containsCreationVerb(text);
   }
+
+  /// Whether [text] asks for source code rather than a document about some
+  /// language.
+  ///
+  /// An extension (`main.dart`) or a source noun (`脚本`, `页面`) names the
+  /// artefact itself, so it always counts. A bare language name (`Python`) does
+  /// not: “生成一份 Python 学习报告” asks for a report, and reading `Python` as a
+  /// source signal let its generator script stand in for that report.
+  static bool _mentionsSourceArtifact(String text) =>
+      _sourceExtension.hasMatch(text) ||
+      !_documentArtifactNoun.hasMatch(text) &&
+          (_sourceArtifactNoun.hasMatch(text) ||
+              _bareSourceFormatWord.hasMatch(text));
+
+  /// A source file named by its extension, in any alias spelling.
+  static final RegExp _sourceExtension = RegExp(
+    r'\.(?:py|py3|pyw|ipynb|js|mjs|cjs|jsx|ts|tsx|dart|java|kt|kts|'
+    r'swift|rs|go|rb|php|c|cc|cpp|cxx|h|hpp|sh|bash|zsh|fish|sql)\b',
+    caseSensitive: false,
+  );
+
+  /// A noun that names the artefact itself, so the source reading is explicit.
+  static final RegExp _sourceArtifactNoun = RegExp(
+    r'(?:网页|页面|源码|代码|脚本)',
+    caseSensitive: false,
+  );
+
+  /// A format or language written as a word rather than as an extension.
+  static final RegExp _bareSourceFormatWord = RegExp(
+    r'(?:python|javascript|typescript|dart|java|kotlin|swift|rust|golang|'
+    r'ruby|php|c\+\+|\bc\b|shell|bash|sql|html5?)',
+    caseSensitive: false,
+  );
+
+  /// A noun that names a document deliverable. A language name next to one of
+  /// these is the document's subject, not its format.
+  static final RegExp _documentArtifactNoun = RegExp(
+    r'(?:报告|文档|报表|表格|清单|说明|总结|教程|课件|笔记|方案|手册|'
+    r'指南|纪要|论文|简历|讲义)',
+    caseSensitive: false,
+  );
 
   /// Word is a distinct final format. A durable discussion contract keeps the
   /// requirement through terse continuations, while opening or reviewing an
@@ -123,6 +167,59 @@ class WorkArtifactDeliveryGuard {
       _decodeExecution(task.executionStateJson)['followUpKind'] ==
       'reviseArtifact';
 
+  /// Canonical formats that are source code rather than a deliverable.
+  ///
+  /// A run normally writes a generator script next to its deliverable, so a
+  /// source file must never be accepted in place of the requested output:
+  /// “生成一份分析报告” delivered `build_report.py`, because a contract without
+  /// a named format accepted any fresh file.
+  static const Set<String> sourceFormats = <String>{
+    'py',
+    'ipynb',
+    'js',
+    'jsx',
+    'ts',
+    'tsx',
+    'dart',
+    'java',
+    'kt',
+    'swift',
+    'rs',
+    'go',
+    'rb',
+    'php',
+    'c',
+    'cpp',
+    'h',
+    'hpp',
+    'sh',
+    'sql',
+  };
+
+  /// Whether [path] is source code rather than a deliverable document.
+  ///
+  /// The extension is normalized through [formatAliases] first: `.mjs`, `.cjs`,
+  /// `.pyw` or `.bash` are the same source file as `.js`, `.py` or `.sh`, and
+  /// matching their raw spelling let a generator script stand in for the
+  /// requested deliverable.
+  static bool isSourceArtifactPath(String path) {
+    final extension = extensionOf(path);
+    if (extension == null) return false;
+    return isSourceFormat(formatAliases[extension] ?? extension);
+  }
+
+  /// Whether a canonical format is source code rather than a deliverable.
+  static bool isSourceFormat(String format) => sourceFormats.contains(format);
+
+  /// The lowercase extension of [path] without its dot, or null when the name
+  /// carries none.
+  static String? extensionOf(String path) {
+    final name = path.replaceAll('\\', '/').split('/').last;
+    final dot = name.lastIndexOf('.');
+    if (dot <= 0 || dot == name.length - 1) return null;
+    return name.substring(dot + 1).toLowerCase();
+  }
+
   /// Returns whether a request asks for a non-source file. Read/review
   /// requests remain ordinary analysis.
   ///
@@ -134,13 +231,39 @@ class WorkArtifactDeliveryGuard {
   static bool requiresFileArtifact(String request) {
     final text = request.trim().toLowerCase();
     if (text.isEmpty || !_containsCreationVerb(text)) return false;
+    // Whether a contract exists is a deliberately broad question: a request
+    // that mentions a format in passing (“生成一份报告，包含 png 图表”) still has
+    // to deliver a real file. What keeps that mention from over-constraining
+    // the output is [_formatsNamedBy], which is the narrower scan used for the
+    // format filter. Answering this question with that narrower scan dropped
+    // the contract for “把 notes.txt 更新为 v2” and silently disabled
+    // auto-completion for the file it had just written.
+    if (_mentionsAnyFormat(text)) return true;
+    // A request can ask for a file without naming any format at all
+    // (“生成一份报告”). Those still carry a contract; only the format filter is
+    // unavailable, so the source rule has to keep the generator script out.
     return RegExp(
-      r'(?:文件|文档|报告|报表|清单|表格|附件|markdown|md文档|'
-      r'\bword\b|\bdocx?\b|\bxlsx?\b|\bpptx?\b|\bpdf\b|'
-      r'html5?|网页|页面|网站|前端|'
-      r'\.(?:md|markdown|txt|csv|json|ya?ml|html?|docx?|xlsx?|pptx?|pdf)\b)',
+      r'(?:文件|文档|报告|报表|清单|表格|附件|markdown|md文档)',
       caseSensitive: false,
     ).hasMatch(text);
+  }
+
+  /// Whether the request mentions any recognised format at all, however it is
+  /// introduced.
+  ///
+  /// A token that doubles as an ordinary word still counts only in its
+  /// extension form, so “生成一段 c 语言的说明文字” stays an ordinary answer
+  /// rather than becoming a file task.
+  static bool _mentionsAnyFormat(String text) {
+    for (final match in RegExp(r'[a-z0-9]+').allMatches(text)) {
+      final token = match.group(0)!;
+      if (!formatAliases.containsKey(token)) continue;
+      final isExtension = match.start > 0 && text[match.start - 1] == '.';
+      if (!isExtension && _ambiguousBareTokens.contains(token)) continue;
+      return true;
+    }
+    return _cjkFormatAliases.keys.any(text.contains) ||
+        _cjkCategoryAliases.keys.any(text.contains);
   }
 
   static bool _containsCreationVerb(String text) => RegExp(
@@ -203,6 +326,12 @@ class WorkArtifactDeliveryGuard {
     final freshAfter = task.createdAt.subtract(fileFreshnessTolerance);
     final checkedAt = now ?? DateTime.now();
     final declaredFormats = declaredOutputFormats(task);
+    // A contract only a source request may be satisfied by source code. Every
+    // other contract has to receive a real deliverable: “生成一份分析报告” used to
+    // deliver `build_report.py`, because a request that names no format left the
+    // presence contract with nothing to check.
+    final sourceMayStandIn = requiresSourceArtifact(request) &&
+        declaredFormats.every(isSourceFormat);
     // A run legitimately writes intermediate files next to its deliverable (a
     // script, a data dump, a conversion source). Every candidate is therefore
     // validated against the contract and the accepted ones are returned, so
@@ -246,8 +375,11 @@ class WorkArtifactDeliveryGuard {
         )) {
           continue;
         }
+        if (!sourceMayStandIn && isSourceArtifactPath(resolved.path)) {
+          continue;
+        }
         if (needsDocx) {
-          if (!_hasExtension(resolved.path, 'docx') ||
+          if (extensionOf(resolved.path) != 'docx' ||
               stat.size <= 0 ||
               stat.size > maxValidatedDocxBytes) {
             continue;
@@ -500,6 +632,150 @@ class WorkArtifactDeliveryGuard {
     return '${workspaceRoot.trim()}/${raw.replaceAll('\\', '/')}';
   }
 
+  /// Every spelling a request can use for a deliverable format, mapped onto one
+  /// canonical format.
+  ///
+  /// Keys are an extension without its dot, a format word, or a language name.
+  /// Spellings inside one family share a canonical value, because they are the
+  /// same deliverable to the user: a Word request is satisfied by `.docx`,
+  /// `.doc` or `.docm`, and a web-page request by `.html` or `.htm`.
+  static const Map<String, String> formatAliases = <String, String>{
+    'markdown': 'md',
+    'md': 'md',
+    'txt': 'txt',
+    'csv': 'csv',
+    'tsv': 'tsv',
+    'json': 'json',
+    'yaml': 'yaml',
+    'yml': 'yaml',
+    'xml': 'xml',
+    'html': 'html',
+    'html5': 'html',
+    'htm': 'html',
+    'word': 'docx',
+    'doc': 'docx',
+    'docx': 'docx',
+    'docm': 'docx',
+    'excel': 'xlsx',
+    'xls': 'xlsx',
+    'xlsx': 'xlsx',
+    'xlsm': 'xlsx',
+    'powerpoint': 'pptx',
+    'ppt': 'pptx',
+    'pptx': 'pptx',
+    'pptm': 'pptx',
+    'pdf': 'pdf',
+    'png': 'png',
+    'apng': 'png',
+    'jpg': 'jpg',
+    'jpeg': 'jpg',
+    'jpe': 'jpg',
+    'gif': 'gif',
+    'webp': 'webp',
+    'svg': 'svg',
+    'bmp': 'bmp',
+    'ico': 'ico',
+    'tif': 'tiff',
+    'tiff': 'tiff',
+    'heic': 'heic',
+    'mp3': 'mp3',
+    'wav': 'wav',
+    'm4a': 'm4a',
+    'aac': 'aac',
+    'flac': 'flac',
+    'ogg': 'ogg',
+    'mp4': 'mp4',
+    'mov': 'mov',
+    'avi': 'avi',
+    'mkv': 'mkv',
+    'webm': 'webm',
+    'zip': 'zip',
+    'tar': 'tar',
+    'gz': 'gz',
+    '7z': '7z',
+    'rar': 'rar',
+    'epub': 'epub',
+    'mobi': 'mobi',
+    'rtf': 'rtf',
+    'odt': 'odt',
+    'ods': 'ods',
+    'odp': 'odp',
+    'python': 'py',
+    'py': 'py',
+    'py3': 'py',
+    'pyw': 'py',
+    'ipynb': 'ipynb',
+    'javascript': 'js',
+    'js': 'js',
+    'mjs': 'js',
+    'cjs': 'js',
+    'jsx': 'jsx',
+    'typescript': 'ts',
+    'ts': 'ts',
+    'tsx': 'tsx',
+    'dart': 'dart',
+    'java': 'java',
+    'kotlin': 'kt',
+    'kt': 'kt',
+    'kts': 'kt',
+    'swift': 'swift',
+    'rust': 'rs',
+    'rs': 'rs',
+    'golang': 'go',
+    'go': 'go',
+    'ruby': 'rb',
+    'rb': 'rb',
+    'php': 'php',
+    'c': 'c',
+    'cc': 'cpp',
+    'cpp': 'cpp',
+    'cxx': 'cpp',
+    'h': 'h',
+    'hpp': 'hpp',
+    'shell': 'sh',
+    'bash': 'sh',
+    'sh': 'sh',
+    'zsh': 'sh',
+    'fish': 'sh',
+    'sql': 'sql',
+  };
+
+  /// Spellings that do name a format but are ordinary words far more often.
+  /// They count only in their extension form (`.go`, `.c`).
+  static const Set<String> _ambiguousBareTokens = <String>{
+    'c',
+    'cc',
+    'h',
+    'sh',
+    'go',
+    'rs',
+  };
+
+  /// Chinese spellings that name a deliverable format without an extension.
+  static const Map<String, String> _cjkFormatAliases = <String, String>{
+    '幻灯片': 'pptx',
+    '演示文稿': 'pptx',
+  };
+
+  /// Chinese category words that only imply a format.
+  ///
+  /// “前端” and “页面” describe a kind of deliverable rather than naming one, so
+  /// they never override an explicitly named format: “生成一个 TSX 前端页面” has
+  /// to deliver `App.tsx`, and an inferred `html` constraint excluded it.
+  static const Map<String, String> _cjkCategoryAliases = <String, String>{
+    '网页': 'html',
+    '页面': 'html',
+    '网站': 'html',
+    '前端': 'html',
+  };
+
+  /// Introducers that mark the following token as an input, a conversion source
+  /// or a piece of the deliverable's content, rather than its format.
+  static final RegExp _ingredientIntroducer = RegExp(
+    r'(?:包含|包括|含|附上|附带|带上|带有|加入|嵌入|插入|参考|依据|基于|'
+    r'读取|读|打开|分析|解析|结合|使用|利用|把|将|用|以|从|由|按|根据)\s*$',
+  );
+
   /// Output formats the request (or the durable discussion contract) names
   /// explicitly, as canonical file extensions without the dot.
   ///
@@ -515,52 +791,89 @@ class WorkArtifactDeliveryGuard {
       final canonical = _canonicalFormat(contractFormat);
       if (canonical != null) return <String>{canonical};
     }
+    return _formatsNamedBy(WorkDiscussionState.currentRequestScope(task));
+  }
+
+  /// Formats the request names as an output.
+  ///
+  /// Users write a format either bare (“一份 xlsx 表”) or as an extension
+  /// (“ranking.xlsx”), so both spellings count. Only the alias table decides
+  /// what a token means, which is what keeps a version number such as “v2.10”
+  /// from being read as the format “10”. Two kinds of mention are still not an
+  /// output: a token the alias table knows only as an extension (a bare `go` or
+  /// `c` is ordinary prose), and a token introduced as an ingredient —
+  /// “生成一份报告，包含 png 图表”, “把 chart.png 转成 pdf”. Treating either as
+  /// the deliverable's format rejects the very file the user asked for.
+  static Set<String> _formatsNamedBy(String request) {
+    final text = request.toLowerCase();
     final formats = <String>{};
-    // Users write the format either bare (“一份 xlsx 表”) or as an extension
-    // (“ranking.xlsx”), so both spellings have to be recognised. The extension
-    // group is restricted to known formats: a generic `\.\w+` also matched
-    // version numbers such as “v2.10” and produced the format “10”.
-    for (final match in RegExp(
-      r'\b(markdown|xlsx?|docx?|pptx?|pdf|html5?|csv|json|ya?ml|txt|word)\b|'
-      r'\.(md|markdown|txt|csv|json|ya?ml|html?|docx?|xlsx?|pptx?|pdf)\b',
-      caseSensitive: false,
-    ).allMatches(WorkDiscussionState.currentRequestScope(task))) {
-      final raw = (match.group(1) ?? match.group(2))?.toLowerCase();
-      if (raw == null || raw.isEmpty) continue;
-      final canonical = _canonicalFormat(raw);
-      if (canonical != null) formats.add(canonical);
+    for (final match in RegExp(r'[a-z0-9]+').allMatches(text)) {
+      final token = match.group(0)!;
+      final canonical = formatAliases[token];
+      if (canonical == null) continue;
+      final isExtension = match.start > 0 && text[match.start - 1] == '.';
+      if (!isExtension && _ambiguousBareTokens.contains(token)) continue;
+      // A bare language name is only the deliverable's format when the request
+      // asks for source code at all: “生成一份 Python 学习报告” delivers a
+      // report, and constraining it to {py} rejected that report.
+      if (!isExtension &&
+          isSourceFormat(canonical) &&
+          !_mentionsSourceArtifact(text)) {
+        continue;
+      }
+      // The introducer governs the whole mention. For `chart.png` that means
+      // reading backwards past the file name, not just past the extension:
+      // “把 chart.png 转成 pdf” introduces a source file, not a PNG output.
+      var mentionStart = match.start;
+      if (isExtension) {
+        while (mentionStart > 0 &&
+            _fileNameCharacters.hasMatch(text[mentionStart - 1])) {
+          mentionStart--;
+        }
+      }
+      if (_ingredientIntroducer.hasMatch(text.substring(0, mentionStart))) {
+        continue;
+      }
+      formats.add(canonical);
+    }
+    for (final entry in _cjkFormatAliases.entries) {
+      final index = text.indexOf(entry.key);
+      if (index < 0) continue;
+      if (_ingredientIntroducer.hasMatch(text.substring(0, index))) continue;
+      formats.add(entry.value);
+    }
+    // Category words are a fallback, not a second constraint: they apply only
+    // when the request names no format of its own and does not ask for a
+    // document about the category (“生成一份网页性能分析报告” delivers a report,
+    // and an inferred `html` constraint rejected it).
+    if (formats.isEmpty && !_documentArtifactNoun.hasMatch(text)) {
+      for (final entry in _cjkCategoryAliases.entries) {
+        final index = text.indexOf(entry.key);
+        if (index < 0) continue;
+        if (_ingredientIntroducer.hasMatch(text.substring(0, index))) continue;
+        formats.add(entry.value);
+      }
     }
     return formats;
   }
 
+  /// Characters that can belong to a file name, used to find where a mention
+  /// carrying an extension actually starts.
+  static final RegExp _fileNameCharacters = RegExp(r'[a-z0-9_.\-]');
+
   /// Maps every spelling used by the request parser, the discussion contract and
-  /// the user's own wording onto one extension. Returns null for a word that is
-  /// not an output format at all.
-  static String? _canonicalFormat(String raw) => switch (raw.toLowerCase()) {
-        'word' || 'doc' || 'docx' => 'docx',
-        'xls' || 'xlsx' => 'xlsx',
-        'ppt' || 'pptx' => 'pptx',
-        'markdown' || 'md' => 'md',
-        'html' || 'html5' || 'htm' => 'html',
-        'yml' || 'yaml' => 'yaml',
-        'pdf' || 'csv' || 'json' || 'txt' => raw.toLowerCase(),
-        _ => null,
-      };
+  /// the user's own wording onto one canonical format. Returns null for a word
+  /// that is not an output format at all.
+  static String? _canonicalFormat(String raw) =>
+      formatAliases[raw.trim().toLowerCase()];
 
-  /// Whether a file satisfies one canonical format. `docx` also accepts the
-  /// legacy `.doc`, and `html` accepts `.htm`, because both spellings are the
-  /// same deliverable to the user.
+  /// Whether a file satisfies one canonical format. Family aliases such as
+  /// `.doc` for `docx` are covered by [formatAliases], because all of them are
+  /// the same deliverable to the user.
   static bool _matchesDeclaredFormat(String path, String format) {
-    if (_hasExtension(path, format)) return true;
-    return switch (format) {
-      'docx' => _hasExtension(path, 'doc'),
-      'html' => _hasExtension(path, 'htm'),
-      _ => false,
-    };
+    final extension = extensionOf(path);
+    return extension != null && formatAliases[extension] == format;
   }
-
-  static bool _hasExtension(String path, String extension) =>
-      path.replaceAll('\\', '/').toLowerCase().endsWith('.$extension');
 
   static bool _isRedactedLocation(String location) =>
       location.contains('[REDACTED]') || location.contains('[本地路径]');

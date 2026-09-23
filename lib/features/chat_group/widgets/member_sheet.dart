@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:flutter/material.dart';
 
 class MemberStackChip extends StatelessWidget {
@@ -132,12 +133,17 @@ class _MemberSheetState extends State<MemberSheet> {
     final query = _searchController.text.trim();
     final filtered = query.isEmpty
         ? widget.characters
-        : widget.characters
-            .where((character) =>
-                character.name.contains(query) ||
-                character.role.contains(query) ||
-                character.personalityTags.any((tag) => tag.contains(query)))
-            .toList(growable: false);
+        : PinyinSearch.exactFirst(
+            widget.characters
+                .where((character) => PinyinSearch.matchesFields(
+                      character.searchFields,
+                      query,
+                      mode: PinyinMatchMode.name,
+                    ))
+                .toList(growable: false),
+            (character) =>
+                PinyinSearch.matchesLiterally(character.searchFields, query),
+          );
 
     return Container(
       constraints: BoxConstraints(
@@ -187,7 +193,7 @@ class _MemberSheetState extends State<MemberSheet> {
           TextField(
             controller: _searchController,
             decoration: InputDecoration(
-              hintText: '搜索名称、角色或标签',
+              hintText: '搜索名称、角色或标签，支持拼音',
               prefixIcon: Icon(
                 Icons.search_rounded,
                 size: 18,
@@ -458,12 +464,17 @@ class _MemberAddSheetState extends State<MemberAddSheet> {
     final query = _searchController.text.trim();
     final filtered = query.isEmpty
         ? widget.candidates
-        : widget.candidates
-            .where((character) =>
-                character.name.contains(query) ||
-                character.role.contains(query) ||
-                character.personalityTags.any((tag) => tag.contains(query)))
-            .toList(growable: false);
+        : PinyinSearch.exactFirst(
+            widget.candidates
+                .where((character) => PinyinSearch.matchesFields(
+                      character.searchFields,
+                      query,
+                      mode: PinyinMatchMode.name,
+                    ))
+                .toList(growable: false),
+            (character) =>
+                PinyinSearch.matchesLiterally(character.searchFields, query),
+          );
 
     return Container(
       constraints: BoxConstraints(
@@ -513,7 +524,7 @@ class _MemberAddSheetState extends State<MemberAddSheet> {
           TextField(
             controller: _searchController,
             decoration: InputDecoration(
-              hintText: '搜索名称、角色或标签',
+              hintText: '搜索名称、角色或标签，支持拼音',
               prefixIcon: Icon(
                 Icons.search_rounded,
                 size: 18,

@@ -641,6 +641,23 @@ class WorkFailure {
     );
   }
 
+  /// Builds a failure from a message the work runner authored itself.
+  ///
+  /// Loop stops and completion-guard rejections are already user-facing prose.
+  /// Passing them through [fromError] meant stringifying a synthetic exception,
+  /// so the reason rendered in chat began with Dart's `Bad state: ` prefix.
+  factory WorkFailure.fromLoopMessage(
+    String message, {
+    String scope = 'loop',
+    Iterable<String> completedContent = const <String>[],
+  }) {
+    return _fromSignals(
+      message: message,
+      scope: scope,
+      completedContent: completedContent,
+    );
+  }
+
   /// Default public copy for a category. Dynamic details are added by the
   /// factories above; keeping defaults here makes deserialization stable.
   static WorkFailure defaults(WorkFailureType type) {

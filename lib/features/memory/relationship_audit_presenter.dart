@@ -1,6 +1,7 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 
 enum RelationshipTargetQuickFilter { all, user, ai }
 
@@ -59,6 +60,7 @@ class RelationshipAuditPresenter {
   static List<RelationshipAuditSection> sections(
     Iterable<RelationshipState> relationships, {
     required bool Function(RelationshipState relationship) isPinned,
+    bool Function(RelationshipState relationship)? isSearchExact,
   }) {
     final grouped = <String, List<RelationshipState>>{
       '亲近关系': [],
@@ -72,6 +74,12 @@ class RelationshipAuditPresenter {
       values.sort((left, right) {
         final pinned = _rank(isPinned(left)).compareTo(_rank(isPinned(right)));
         if (pinned != 0) return pinned;
+        // 搜索时字面命中排在纯拼音命中之前，置顶仍然优先。
+        if (isSearchExact != null) {
+          final exact = _rank(isSearchExact(left))
+              .compareTo(_rank(isSearchExact(right)));
+          if (exact != 0) return exact;
+        }
         final updated = right.updatedAt.compareTo(left.updatedAt);
         if (updated != 0) return updated;
         return left.id.compareTo(right.id);
@@ -92,19 +100,64 @@ class RelationshipAuditPresenter {
     required String targetRole,
     String? query,
   }) {
-    final normalized = query?.trim().toLowerCase() ?? '';
-    if (normalized.isEmpty) return true;
-    final projection = [
-      observerName,
-      observerRole,
-      targetName,
-      targetRole,
-      stageLabel(relationship.stage),
-      moodLabel(relationship.recentMood),
-      relationship.notes,
-    ].join(' ');
-    return projection.toLowerCase().contains(normalized);
+    final trimmed = query?.trim() ?? '';
+    if (trimmed.isEmpty) return true;
+
+    // 名称、角色与阶段/情绪标签走宽松拼音匹配，备注正文走保守匹配。
+    final labels = _labelTexts(
+      relationship,
+      observerName: observerName,
+      observerRole: observerRole,
+      targetName: targetName,
+      targetRole: targetRole,
+    );
+    return PinyinSearch.matchesFieldModes([
+      for (final label in labels) (text: label, mode: PinyinMatchMode.name),
+      (text: relationship.notes, mode: PinyinMatchMode.content),
+    ], trimmed);
   }
+
+  /// 查询是否**字面**命中（不含拼音）。
+  ///
+  /// 用于把精确命中排到纯拼音命中之前：同样是搜 `lin`，名字里真的写着 `lin`
+  /// 的那条通常比拼音命中的「林黛玉」更贴用户想要的。
+  static bool matchesSearchLiterally(
+    RelationshipState relationship, {
+    required String observerName,
+    required String observerRole,
+    required String targetName,
+    required String targetRole,
+    String? query,
+  }) =>
+      PinyinSearch.matchesLiterally(
+        [
+          ..._labelTexts(
+            relationship,
+            observerName: observerName,
+            observerRole: observerRole,
+            targetName: targetName,
+            targetRole: targetRole,
+          ),
+          relationship.notes,
+        ],
+        query ?? '',
+      );
+
+  static List<String> _labelTexts(
+    RelationshipState relationship, {
+    required String observerName,
+    required String observerRole,
+    required String targetName,
+    required String targetRole,
+  }) =>
+      [
+        observerName,
+        observerRole,
+        targetName,
+        targetRole,
+        stageLabel(relationship.stage),
+        moodLabel(relationship.recentMood),
+      ];
 
   static String recentChangeSummary(
     List<RelationshipEvent> events, {

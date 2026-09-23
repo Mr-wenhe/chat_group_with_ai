@@ -213,6 +213,14 @@ class DefaultWorkTaskRunner
   static const int _maxArtifactAttachments = 12;
   static const int _maxAttachedArtifactBytes = 50 * 1024 * 1024;
   static const int _maxArtifactBundleBytes = 200 * 1024 * 1024;
+
+  /// Bounds the scan for files a command produced itself: how many deliverables
+  /// it may report, and how many directory entries the before/after snapshots
+  /// may inspect to find them.
+  /// ponytail: discovery caps at 4000 entries; add a filesystem watcher or
+  /// persistent index only if workspaces exceed that scan limit in practice.
+  static const int _maxObservedArtifacts = 64;
+  static const int _maxObservedEntries = 4000;
 }
 
 class _ArtifactAttachmentSelection {
