@@ -225,6 +225,8 @@ Large suites are split into `*_part_NN.dart` and `*_helpers_NN.dart` files (back
 - Fully offline proactive contact is not implemented: closed-app AI generation would need pre-generated local notifications or a server-side push service. Current proactive DMs are foreground-only.
 - Web builds cannot provide the app's credential boundary, so they are not a release target.
 - UI-heavy chat-room behaviour is mostly covered indirectly through extracted logic tests rather than widget tests.
+- Work mode has no structural validation of generated files. The legacy runtime's `FileValidator` (HTML tag balance, `flutter analyze` on generated Dart, Java/C++ shape checks) was the only implementation and was removed with it, so generated code is written and reported but never shape-checked. Re-adding that for work mode is a separate piece of work, not a regression to restore.
+- In-room progress is shown by `WorkTaskPanel`, not in the chat transcript. The multi-line `agent-progress:` bubble has had no producer since the work-mode rewrite; only its renderer survives, for messages already persisted in users' Hive boxes.
 
 ## Documentation map
 
