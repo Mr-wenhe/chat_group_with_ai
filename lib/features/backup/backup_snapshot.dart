@@ -235,22 +235,10 @@ class _Snapshot {
     final safe = _safeSettings(db);
     if (selection.scope == BackupScope.all) return safe;
     if (selection.scope == BackupScope.configurationOnly) {
-      const configurationKeys = {
-        'theme_mode',
-        'app_skin_mode',
-        'tts_enabled',
-        'pinned_character_ids',
-        'pinned_group_ids',
-        // 禁言是用户显式设定的偏好（而非阅后即焚的运行态），随配置一起走。
-        GroupMuteStore.storageKey,
-        SearchProviderConfigStore.configsKey,
-        SearchProviderConfigStore.defaultProviderKey,
-        SearchProviderConfigStore.runtimeSettingsKey,
-        AiGovernanceStore.globalSearchPolicyKey,
-        AiGovernanceStore.conversationSearchPoliciesKey,
-      };
       return Map.fromEntries(
-        safe.entries.where((entry) => configurationKeys.contains(entry.key)),
+        safe.entries.where(
+          (entry) => backupConfigurationOnlySettingKeys.contains(entry.key),
+        ),
       );
     }
 

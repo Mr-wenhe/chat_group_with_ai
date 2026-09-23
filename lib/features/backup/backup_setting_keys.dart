@@ -35,6 +35,25 @@ const List<String> backupCarriedSettingKeyPrefixes = [
   'context_compressed_through:',
 ];
 
+/// 其中属于「用户配置」的子集，随 `configurationOnly` 范围一起备份。
+///
+/// 必须是 [backupCarriedSettingKeys] 的子集；两者都是手写字符串，键名打错会静默
+/// 失效，因此由 `backup_setting_keys_test.dart` 钉住这层包含关系。
+const Set<String> backupConfigurationOnlySettingKeys = {
+  'theme_mode',
+  'app_skin_mode',
+  'tts_enabled',
+  'pinned_character_ids',
+  'pinned_group_ids',
+  // 禁言是用户显式设定的偏好（而非阅后即焚的运行态），随配置一起走。
+  GroupMuteStore.storageKey,
+  SearchProviderConfigStore.configsKey,
+  SearchProviderConfigStore.defaultProviderKey,
+  SearchProviderConfigStore.runtimeSettingsKey,
+  AiGovernanceStore.globalSearchPolicyKey,
+  AiGovernanceStore.conversationSearchPoliciesKey,
+};
+
 /// 该 `app_settings` 键是否由备份携带。
 bool isBackupCarriedSettingKey(String key) =>
     backupCarriedSettingKeys.contains(key) ||
