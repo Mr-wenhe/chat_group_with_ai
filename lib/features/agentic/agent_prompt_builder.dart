@@ -102,7 +102,7 @@ WorkBuddy 工作方式（严格按顺序在内部执行，不要泄露思维过�
 - workspace.rename
 - workspace.delete
 - command.run
-- browser.context（仅旧版 AgentRuntime；Stage 03 WorkAgentLoop 不注册此工具）
+- browser.context（工作模式暂不注册此工具）
 - skill.create
 - skill.download
 
