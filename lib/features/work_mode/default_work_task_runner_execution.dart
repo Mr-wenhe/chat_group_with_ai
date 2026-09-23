@@ -380,24 +380,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           task.resultSummary,
         );
         if (!delivery.succeeded) {
-          final failure = WorkFailure.fromToolFailure(
-            code: 'artifactDelivery',
-            message: delivery.message,
-            scope: 'delivery',
-            completedContent: task.lastArtifactPaths,
-            retryable: true,
-          );
-          task
-            ..status = AgentTaskStatus.failed
-            ..resumeRequired = true
-            ..lastError = failure.reason
-            ..updatedAt = clock();
-          WorkFailure.persistOnTask(task, failure);
-          _markArtifactDeliveryNoticePublished(
-            task,
-            messageId: delivery.messageId,
-            retryOnly: delivery.retryWithExistingArtifact,
-          );
+          _applyArtifactDeliveryFailure(task, delivery);
         } else {
           await database.recordCharacterReplyUsage(character.id);
           _clearArtifactDeliveryNotice(task);

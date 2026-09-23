@@ -298,11 +298,17 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
         retryable: true,
       );
       task
-        ..status = AgentTaskStatus.failed
+        // 执行角色缺失是 App 侧状态问题，已保存的产物不受影响，任务保持完成。
+        ..status = AgentTaskStatus.completed
         ..resumeRequired = true
         ..lastError = failure.reason
         ..updatedAt = clock();
       WorkFailure.persistOnTask(task, failure);
+      _markArtifactDeliveryNoticePublished(
+        task,
+        messageId: messageId,
+        retryOnly: true,
+      );
       await _persistCheckpoint(task);
       return;
     }
@@ -323,23 +329,10 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
       _clearArtifactDeliveryNotice(task);
       await database.recordCharacterReplyUsage(character.id);
     } else {
-      final failure = WorkFailure.fromToolFailure(
-        code: 'artifactDelivery',
-        message: result.message,
-        scope: 'delivery',
-        completedContent: task.lastArtifactPaths,
-        retryable: true,
-      );
-      task
-        ..status = AgentTaskStatus.failed
-        ..resumeRequired = true
-        ..lastError = failure.reason
-        ..updatedAt = clock();
-      WorkFailure.persistOnTask(task, failure);
-      _markArtifactDeliveryNoticePublished(
+      _applyArtifactDeliveryFailure(
         task,
-        messageId: result.messageId ?? messageId,
-        retryOnly: result.retryWithExistingArtifact,
+        result,
+        previousMessageId: messageId,
       );
     }
     await _persistCheckpoint(task);
@@ -386,19 +379,48 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
     task.executionStateJson = metadata.isEmpty ? '' : jsonEncode(metadata);
   }
 
+  /// Records the outcome of a delivery attempt that did not produce the
+  /// expected chat message.
+  ///
+  /// A deliverable that is saved and validated but could not be attached is an
+  /// app-side fault, so the task keeps its completed status and only a
+  /// retryable "resend" notice is recorded — finished work must not be reported
+  /// as failed. A deliverable that no longer satisfies its contract really did
+  /// leave the task incomplete and keeps the failed status.
+  void _applyArtifactDeliveryFailure(
+    AgentTask task,
+    _ArtifactDeliveryResult result, {
+    String? previousMessageId,
+  }) {
+    final failure = WorkFailure.fromToolFailure(
+      code: 'artifactDelivery',
+      message: result.message,
+      scope: 'delivery',
+      completedContent: task.lastArtifactPaths,
+      retryable: true,
+    );
+    task
+      ..status = result.retryWithExistingArtifact
+          ? AgentTaskStatus.completed
+          : AgentTaskStatus.failed
+      ..resumeRequired = true
+      ..lastError = failure.reason
+      ..updatedAt = clock();
+    WorkFailure.persistOnTask(task, failure);
+    _markArtifactDeliveryNoticePublished(
+      task,
+      messageId: result.messageId ?? previousMessageId,
+      retryOnly: result.retryWithExistingArtifact,
+    );
+  }
+
   bool _artifactDeliveryNoticePublished(AgentTask task) =>
       _decodeExecutionMetadata(
           task.executionStateJson)['artifactDeliveryNoticePublished'] ==
       true;
 
-  bool _artifactDeliveryRetryOnly(AgentTask task) {
-    final metadata = _decodeExecutionMetadata(task.executionStateJson);
-    final messageId = metadata['artifactDeliveryMessageId'];
-    return metadata['artifactDeliveryNoticePublished'] == true &&
-        metadata['artifactDeliveryRetryOnly'] == true &&
-        messageId is String &&
-        messageId.trim().isNotEmpty;
-  }
+  bool _artifactDeliveryRetryOnly(AgentTask task) =>
+      workArtifactDeliveryRetryPending(task.executionStateJson);
 
   String _artifactDeliveryMessageId(AgentTask task) {
     final value = _decodeExecutionMetadata(

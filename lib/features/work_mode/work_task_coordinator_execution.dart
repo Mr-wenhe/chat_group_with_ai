@@ -131,6 +131,10 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
           await _save(stored);
         }
         await _reportFailure(stored, failure);
+        // A failure the transport or the provider caused is not the end of the
+        // work: the checkpoint is still valid, so the coordinator resumes it on
+        // its own instead of waiting for the user to notice and click retry.
+        _scheduleAutoResume(stored);
       }
 
       // A follow-up is promoted only after a successful stage. Failures and

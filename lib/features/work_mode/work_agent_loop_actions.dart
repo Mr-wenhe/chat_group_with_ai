@@ -150,6 +150,50 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     }
   }
 
+  /// Hands a failed or malformed tool call back to the model as one bounded
+  /// repair round, and pauses once the task has used up its repair budget or the
+  /// exact failure keeps repeating.
+  ///
+  /// [repeats] is consulted only while budget remains, so a task that has
+  /// already exhausted its repairs pauses without recording another failure
+  /// fingerprint. Returns null when the loop should continue with a fresh model
+  /// decision.
+  Future<WorkAgentLoopResult?> _repairToolFailure(
+    _LoopState state, {
+    required String message,
+    required String instruction,
+    required String scope,
+    bool Function()? repeats,
+  }) async {
+    if (state.toolRepairCount >= maxToolRepairs || (repeats?.call() ?? false)) {
+      const loopMessage =
+          '工具和错误反复出现，自动修复没有取得进展，已暂停。请检查权限、依赖或补充新的处理信息后继续。';
+      return _pauseForUserAction(
+        state,
+        loopMessage,
+        failure: WorkFailure.fromSignalsForUserAction(
+          loopMessage,
+          completedContent: _completedContent(state),
+        ),
+      );
+    }
+    state.toolRepairCount++;
+    state.toolRepairInstruction = instruction;
+    await _emit(
+      state,
+      WorkTaskEventKind.toolOutput,
+      '工具调用失败，正在根据错误自动修复并继续。',
+      detail: message,
+      safeMetadata: {
+        'scope': scope,
+        'automaticRepair': true,
+        'repair': state.toolRepairCount,
+      },
+    );
+    await _checkpoint(state);
+    return null;
+  }
+
   Future<WorkAgentLoopResult?> _handleTool(
     _LoopState state,
     AgentToolCall call,
@@ -161,6 +205,9 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     if (boundary != null) return boundary;
     final validation = registry.validate(call);
     if (!validation.isValid) {
+      // Unreachable with the production registry, which always defines every
+      // tool the parser's Stage 03 allow-list accepts; a registry that is
+      // missing one of them is a wiring defect, not a model mistake to repair.
       final message = validation.error ?? '工具校验失败。';
       return _fail(
         state,
@@ -269,8 +316,18 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       );
       if (toolResult.failureCode == 'modelProtocol' &&
           toolResult.data['rejectionKind'] ==
-              WorkCommandRejectionKind.invalidInput.name &&
-          state.invalidCommandRepairCount < maxProtocolRetries) {
+              WorkCommandRejectionKind.invalidInput.name) {
+        if (state.invalidCommandRepairCount >=
+            WorkAgentLoop.defaultMaxInvalidCommandRepairs) {
+          // The dedicated replan budget is authoritative for a rejected command.
+          // Letting it fall through to the generic repair round would silently
+          // hand it a second, larger budget and lose the command's own remedy.
+          return _fail(
+            state,
+            message,
+            failure: failure,
+          );
+        }
         state.invalidCommandRepairCount++;
         await _emit(
           state,
@@ -285,29 +342,16 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         await _checkpoint(state);
         return null;
       }
-      if (_isAutomaticallyRepairableCommandFailure(toolResult)) {
-        if (_isCommandFailureLoop(state, call, toolResult) ||
-            _isRepeatedCommandOutcome(state, call, toolResult)) {
-          const loopMessage =
-              '检测到命令和错误反复出现，自动修复没有取得进展，已暂停。请检查权限、依赖或补充新的处理信息后继续。';
-          return _pauseForUserAction(
-            state,
-            loopMessage,
-            failure: WorkFailure.fromSignalsForUserAction(
-              loopMessage,
-              completedContent: _completedContent(state),
-            ),
-          );
-        }
-        await _emit(
+      if (_isRepairableToolFailure(toolResult)) {
+        return _repairToolFailure(
           state,
-          WorkTaskEventKind.toolOutput,
-          '命令执行失败，正在根据错误自动修复并继续。',
-          detail: message,
-          safeMetadata: {'scope': 'command', 'automaticRepair': true},
+          message: message,
+          instruction: _toolRepairInstruction(call, toolResult),
+          scope: toolResult.failureCode ?? call.name.wireName,
+          repeats: () =>
+              _isCommandFailureLoop(state, call, toolResult) ||
+              _isRepeatedCommandOutcome(state, call, toolResult),
         );
-        await _checkpoint(state);
-        return null;
       }
       return _fail(
         state,
@@ -565,6 +609,11 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     required WorkToolResult result,
   }) async {
     final task = state.task;
+    // A completed tool call is progress, so the repair budget starts over; the
+    // failure fingerprint history is deliberately left alone because a
+    // successful read does not prove an earlier defect is gone.
+    state.toolRepairCount = 0;
+    state.toolRepairInstruction = '';
     state.pendingToolRequest = null;
     state.failure = null;
     WorkFailure.clearFromTask(task);

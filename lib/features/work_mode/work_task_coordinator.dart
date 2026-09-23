@@ -31,6 +31,7 @@ part 'work_task_coordinator_submission.dart';
 part 'work_task_coordinator_follow_up_input.dart';
 part 'work_task_coordinator_permission_actions.dart';
 part 'work_task_coordinator_recovery.dart';
+part 'work_task_coordinator_auto_resume.dart';
 part 'work_task_coordinator_discussion_lifecycle.dart';
 part 'work_task_coordinator_scheduling.dart';
 part 'work_task_coordinator_execution.dart';
@@ -46,6 +47,16 @@ part 'work_task_coordinator_contracts.dart';
 /// submissions cannot consume the same slot or run the same conversation.
 class WorkTaskCoordinator {
   static const int maximumConcurrentTasks = 2;
+
+  /// How long a retryable failure waits before it resumes itself, one entry per
+  /// automatic attempt. Thirty seconds outlasts a brief provider brownout while
+  /// staying visible in the panel; the longer second step covers a link that is
+  /// still flapping. The ladder is also the cap: beyond it the task is the
+  /// user's call, not the app's.
+  static const List<Duration> defaultAutoResumeDelays = [
+    Duration(seconds: 30),
+    Duration(seconds: 90),
+  ];
 
   /// A user stop is terminal by design, but a task that has not committed a
   /// mutation can safely be restarted from zero.  This narrow predicate keeps
@@ -81,6 +92,8 @@ class WorkTaskCoordinator {
   final WorkContextBuilder _contextBuilder;
   final WorkFollowUpPolicy _followUpPolicy;
   final DateTime Function() _clock;
+  /// The delay ladder for automatic resumes of a retryable failure.
+  final List<Duration> autoResumeDelays;
   final WorkTaskActionNotifier? _userActionNotifier;
   final bool? _installerIsWindows;
   final bool? _installerIsMacOS;
@@ -136,6 +149,7 @@ class WorkTaskCoordinator {
     bool? installerIsWindows,
     bool? installerIsMacOS,
     DateTime Function()? clock,
+    List<Duration>? autoResumeDelays,
   })  : _taskBox = taskBox,
         _eventStore = eventStore,
         _runner = runner,
@@ -152,7 +166,10 @@ class WorkTaskCoordinator {
         _userActionNotifier = userActionNotifier,
         _installerIsWindows = installerIsWindows,
         _installerIsMacOS = installerIsMacOS,
-        _clock = clock ?? DateTime.now {
+        _clock = clock ?? DateTime.now,
+        autoResumeDelays = List<Duration>.unmodifiable(
+          autoResumeDelays ?? defaultAutoResumeDelays,
+        ) {
     if (runner case final WorkTaskProgressReporter reporter) {
       reporter.setTaskUpdateSink(_publishFromRunner);
     }

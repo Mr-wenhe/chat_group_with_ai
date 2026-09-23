@@ -137,17 +137,37 @@ class WorkAgentLoop
         WorkTaskCheckpointReporter {
   static const int defaultMaxActions = AgentTask.defaultActionLimit;
   static const Duration defaultSoftTimeLimit = AgentTask.defaultSoftTimeLimit;
-  static const int defaultMaxModelRetries = 2;
-  // A protocol drift is recoverable without user input. Allow two fresh
+  // Sized to ride out an ordinary link hiccup or a short provider brownout on
+  // its own: the ladder below spans about twelve seconds of waiting across five
+  // attempts. Anything longer is the coordinator's auto-resume layer's job, so
+  // this budget does not need to grow with the outage length.
+  static const int defaultMaxModelRetries = 4;
+  // A protocol drift is recoverable without user input. Allow three fresh
   // decisions after the one bounded repair attempt before surfacing a task
   // failure, while retaining the global retry cap below.
-  static const int defaultMaxProtocolRetries = 2;
+  static const int defaultMaxProtocolRetries = 3;
+  // How many times a command the input validator rejected may be replanned
+  // before that rejection is surfaced. Deliberately separate from the protocol
+  // retry budget: a rejected command carries its own failure text and remedy, so
+  // a change to protocol-drift handling must not widen it.
+  static const int defaultMaxInvalidCommandRepairs = 2;
   static const int defaultMaxToolRetries = 1;
+  // How many times one task may hand a failed tool call back to the model for a
+  // repair before pausing for the user. The failure-history detectors only
+  // recognise repeated fingerprints and outcomes, so a model that keeps
+  // proposing new, equally broken calls needs this separate bound. It is set
+  // well above real convergence (a write/compile/fix loop usually converges in
+  // one to three rounds) so a task that is still making progress is never
+  // paused for being slow; the 100-action budget remains the outer limit.
+  static const int defaultMaxToolRepairs = 8;
   static const int maxRetryCountCap = 5;
+  // Must have one entry per configured retry: a shorter ladder silently repeats
+  // its last delay and turns the extra retries into back-to-back attempts.
   static const List<Duration> defaultRetryDelays = [
     Duration(milliseconds: 250),
     Duration(seconds: 1),
     Duration(seconds: 3),
+    Duration(seconds: 8),
   ];
   static const Set<String> _userActionFailureCodes = {
     'userActionRequired',
@@ -183,6 +203,7 @@ class WorkAgentLoop
   final int maxModelRetries;
   final int maxProtocolRetries;
   final int maxToolRetries;
+  final int maxToolRepairs;
   final String systemPrompt;
   void Function(AgentTask task)? _taskUpdateSink;
   WorkAgentCheckpointSink? _taskCheckpointSink;
@@ -208,6 +229,7 @@ class WorkAgentLoop
     int? maxModelRetries,
     int? maxProtocolRetries,
     int? maxToolRetries,
+    int? maxToolRepairs,
     this.systemPrompt = '',
   })  : parser = parser ?? const AgentDecisionParser(),
         contextBuilder = contextBuilder ?? const WorkContextBuilder(),
@@ -223,6 +245,9 @@ class WorkAgentLoop
         ),
         maxToolRetries = _boundRetryCount(
           maxToolRetries ?? defaultMaxToolRetries,
+        ),
+        maxToolRepairs = _boundRetryCount(
+          maxToolRepairs ?? defaultMaxToolRepairs,
         );
 
   static int _boundRetryCount(int value) =>

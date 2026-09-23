@@ -615,9 +615,22 @@ void main() {
         'missing-tool': WorkFailureType.toolMissing,
         'browser': WorkFailureType.userActionRequired,
       };
+      // 可回灌的三类：失败不再终止任务，而是交回模型再决策一次。
+      const repairable = <String>{'conflict', 'disk', 'command-timeout'};
       for (final entry in cases.entries) {
+        // 分类本身是 WorkFailure 的契约：直接断言它，这样即使某类失败不再终止
+        // 任务（见下面 repairable），它的归属仍然被钉住。
+        expect(
+          WorkFailure.fromToolResult(entry.value).type,
+          expected[entry.key],
+          reason: '${entry.key} 的分类',
+        );
+        final repairableCase = repairable.contains(entry.key);
         final model = _ModelQueue()..responses.add(_toolDecision());
         final tool = _ToolQueue()..results.add(entry.value);
+        if (repairableCase) {
+          model.responses.add(_finishDecision());
+        }
         final task = _task('tool-${entry.key}');
         final result = await _loop(
           model,
@@ -625,24 +638,35 @@ void main() {
             definitions: [_definition(AgentToolName.workspaceRead, tool)],
           ),
         ).execute(task);
-        expect(result.failure?.type, expected[entry.key], reason: entry.key);
+        if (repairableCase) {
+          expect(
+            result.status,
+            WorkAgentLoopStatus.completed,
+            reason: '${entry.key} 应回灌模型自行修复，而不是终止任务',
+          );
+          expect(tool.calls, 1, reason: entry.key);
+        } else {
+          expect(result.failure?.type, expected[entry.key], reason: entry.key);
+          expect(task.executionStateJson, contains('workFailure'));
+        }
         expect(task.completedOperations, contains('已完成：读取项目结构'));
         expect(task.contextSummary, contains('已完成读取项目结构'));
         expect(task.queuedUserRequests, <String>['后续追问保留']);
         expect(task.contextSummary, contains('后续追问保留'));
-        expect(task.executionStateJson, contains('workFailure'));
         expect(
           task.status,
-          entry.key == 'snapshot' ||
-                  entry.key == 'permission' ||
-                  entry.key == 'authorization' ||
-                  entry.key == 'missing-tool' ||
-                  entry.key == 'browser'
-              ? anyOf(
-                  AgentTaskStatus.paused,
-                  AgentTaskStatus.waitingForApproval,
-                )
-              : AgentTaskStatus.failed,
+          repairableCase
+              ? AgentTaskStatus.completed
+              : entry.key == 'snapshot' ||
+                      entry.key == 'permission' ||
+                      entry.key == 'authorization' ||
+                      entry.key == 'missing-tool' ||
+                      entry.key == 'browser'
+                  ? anyOf(
+                      AgentTaskStatus.paused,
+                      AgentTaskStatus.waitingForApproval,
+                    )
+                  : AgentTaskStatus.failed,
         );
       }
     });

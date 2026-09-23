@@ -106,9 +106,9 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     task.executionStateJson = jsonEncode(execution);
   }
 
-  /// Returns true only when this exact command/diagnostic state was already
-  /// seen in the current progress segment. A successful mutation clears the
-  /// segment, so a compiler can legitimately report the same error again
+  /// Returns true only when this exact command/tool and diagnostic state was
+  /// already seen in the current progress segment. A successful mutation clears
+  /// the segment, so a compiler can legitimately report the same error again
   /// after the model has changed the input.
   bool _isCommandFailureLoop(
     _LoopState state,
@@ -250,12 +250,34 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       result.failureCode == 'commandFailed' &&
       result.data['runStatus'] == WorkCommandRunStatus.blockedByDefault.name;
 
-  bool _isAutomaticallyRepairableCommandFailure(WorkToolResult result) {
-    if (result.failureCode != 'commandFailed' || result.committed) return false;
-    final runStatus = result.data['runStatus'];
-    return runStatus == WorkCommandRunStatus.failed.name ||
-        runStatus == WorkCommandRunStatus.timedOut.name ||
-        runStatus == WorkCommandRunStatus.outputLimitExceeded.name;
+  /// Whether a failed tool result may be handed back to the model so it can
+  /// repair its own call instead of ending the task.
+  ///
+  /// Approval, permission and path gates are excluded: their remedy is a user
+  /// grant or a different plan, which the panel already offers, so retrying
+  /// them would only repeat a refusal. A mutation that already reached the
+  /// filesystem is excluded too: its effect may be half-applied, and the
+  /// durable operation key means a repeat could only be a no-op, so it surfaces
+  /// as a classified failure for the user to judge. Everything else — a
+  /// rejected argument, a missing prerequisite, a resource conflict or an
+  /// unhandled tool error — is something the model's next decision can still
+  /// fix. Runaway repair is bounded by the failure-history detectors below and
+  /// the task's repair budget, not by refusing the retry up front.
+  bool _isRepairableToolFailure(WorkToolResult result) {
+    if (result.succeeded || result.committed) return false;
+    if (result.status == WorkToolResultStatus.pathRejected) return false;
+    return result.failureCode != 'softLimit';
+  }
+
+  /// The imperative the model reads on its next turn after a repairable tool
+  /// failure. The failed result is already in `recentToolResults`; this states
+  /// what to do with it so the model does not simply repeat the same call.
+  String _toolRepairInstruction(AgentToolCall call, WorkToolResult result) {
+    final code = result.failureCode ?? result.status.name;
+    final detail = _publicText(result.message, maximum: 400);
+    return '上一次工具调用（${call.name.wireName}）失败（$code）：$detail。'
+        '请根据该错误修正参数、补齐前置条件或改用其他可行工具后重试，'
+        '不要重复完全相同的调用。';
   }
 
   Map<String, dynamic> _safeResult(
@@ -847,7 +869,13 @@ class _LoopState {
   int toolRetryCount = 0;
   int protocolRepairAttempts = 0;
   int invalidCommandRepairCount = 0;
+  int toolRepairCount = 0;
   int unchangedMutationCount = 0;
+
+  /// Turn-scoped instruction describing what the last tool call got wrong. It
+  /// is deliberately not durable: a resumed run rebuilds it from the
+  /// checkpointed tool results instead of trusting in-memory text.
+  String toolRepairInstruction = '';
   final List<String> commandFailureKeys = <String>[];
 
   /// Counts identical process outcomes, independent of the command text, so a

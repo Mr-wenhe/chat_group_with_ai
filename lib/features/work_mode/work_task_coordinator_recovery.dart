@@ -178,8 +178,14 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       }
       final restartFromBeginning =
           WorkTaskCoordinator.canRestartAfterUserStop(task);
+      // A finished task can still be waiting to re-send a deliverable that was
+      // saved but whose chat attachment failed. That resend runs through this
+      // same retry path, so a completed task stays retryable exactly while its
+      // delivery marker is pending.
+      final deliveryRetryPending =
+          workArtifactDeliveryRetryPending(task.executionStateJson);
       if ((task.status == AgentTaskStatus.cancelled && !restartFromBeginning) ||
-          task.status == AgentTaskStatus.completed) {
+          task.status == AgentTaskStatus.completed && !deliveryRetryPending) {
         throw StateError('已停止或已完成的任务不能重试。');
       }
 
@@ -274,30 +280,52 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       if (!failure.retryable) {
         throw StateError(failure.suggestedAction);
       }
-      _removeQueuedTask(task);
-      _waitingForResources.remove(taskId)?.cancellation.cancel();
-      _folderWaiters.remove(taskId)?.cancel();
-      _conversationReservations.remove(task.groupId);
-      task
-        ..status = AgentTaskStatus.queued
-        ..resumeRequired = false
-        ..pendingToolRequestJson = ''
-        ..updatedAt = _clock();
-      _refreshTaskContext(
+      await _requeueFailedTask(
         task,
+        failure,
+        title: '已请求重试，继续最近安全检查点',
         nextStep: '已请求重试：${failure.suggestedAction}',
-        extraErrors: [failure.reason],
       );
-      await _save(task);
-      _enqueueTask(task);
-      await _record(
-        task,
-        WorkTaskEventKind.queued,
-        '已请求重试，继续最近安全检查点',
-        detail: failure.reason,
-      );
-      await _schedule();
     });
+  }
+
+  /// Re-queues a failed task from its last durable checkpoint.
+  ///
+  /// The caller must hold the coordinator lock and must already have verified
+  /// that [failure] is retryable. Completed operations, artifact paths and the
+  /// approval scope are deliberately left untouched, so a resumed run cannot
+  /// replay a committed mutation. This is the single path shared by the user's
+  /// retry and the coordinator's automatic resume, which is what keeps the two
+  /// from drifting apart.
+  Future<void> _requeueFailedTask(
+    AgentTask task,
+    WorkFailure failure, {
+    required String title,
+    required String nextStep,
+  }) async {
+    _removeQueuedTask(task);
+    _waitingForResources.remove(task.id)?.cancellation.cancel();
+    _folderWaiters.remove(task.id)?.cancel();
+    _conversationReservations.remove(task.groupId);
+    task
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false
+      ..pendingToolRequestJson = ''
+      ..updatedAt = _clock();
+    _refreshTaskContext(
+      task,
+      nextStep: nextStep,
+      extraErrors: [failure.reason],
+    );
+    await _save(task);
+    _enqueueTask(task);
+    await _record(
+      task,
+      WorkTaskEventKind.queued,
+      title,
+      detail: failure.reason,
+    );
+    await _schedule();
   }
 
   Future<void> _implRetryTask(String taskId) => retry(taskId);

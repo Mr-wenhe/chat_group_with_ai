@@ -188,6 +188,10 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
       'plan': _publicText(task.plan),
       'resultSummary': _publicText(task.resultSummary),
       'lastError': _publicText(task.lastError),
+      // Set only on the turn right after a repairable tool failure, so the model
+      // is told what to do with the failed result it can already see.
+      if (state.toolRepairInstruction.isNotEmpty)
+        'previousToolFailure': state.toolRepairInstruction,
       if (state.failure != null) 'workFailure': state.failure!.toJson(),
       'actionCount': task.actionCount,
       'actionLimit': _effectiveActionLimit(task),

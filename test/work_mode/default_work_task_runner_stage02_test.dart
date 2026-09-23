@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:archive/archive.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/chat_group.dart';
+import 'package:chat_group/features/work_mode/work_agent_loop.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -914,8 +915,10 @@ void main() {
     await runner.run(task, WorkTaskCancellation());
 
     expect(task.status, AgentTaskStatus.failed);
-    expect(gateway.requestTokens, hasLength(3));
-    expect(gateway.requestTokens.toSet(), hasLength(3));
+    // 每次尝试都必须拿到自己的可取消 token；次数跟随循环的重试预算，不要写死。
+    const attempts = WorkAgentLoop.defaultMaxModelRetries + 1;
+    expect(gateway.requestTokens, hasLength(attempts));
+    expect(gateway.requestTokens.toSet(), hasLength(attempts));
     expect(gateway.requestTokens.every((token) => token.isCancelled), isTrue);
     expect(task.workFailure?.type, WorkFailureType.retryableNetwork);
     expect(task.workFailure?.retryable, isTrue);
@@ -1546,11 +1549,14 @@ void main() {
       isDirectChat: false,
       requireWritable: true,
     );
-    expect(task.status, AgentTaskStatus.failed);
+    // 安全性质优先：foreign approval 没有被复用，文件从未写入。
     expect(
       await File('${workspace.workDirPath}/second.txt').exists(),
       isFalse,
     );
+    // 拒绝现在会交回模型再决策一次（它可以重新申请一次审批），而不是直接判失败。
+    expect(gateway.calls, 2);
+    expect(task.status, AgentTaskStatus.completed);
   });
 
   test(
@@ -1980,7 +1986,9 @@ void main() {
     final output = File(
       '${authorizedDirectory.path}/conversations/group_delivery-failure-group/delivery.txt',
     );
-    expect(task.status, AgentTaskStatus.failed);
+    // 文件已保存且通过校验，只是聊天附件发送失败：这属于 App 侧故障，任务仍按完成
+    // 落库，只保留一条可重发的交付提示，避免把做完的活判成失败。
+    expect(task.status, AgentTaskStatus.completed);
     expect(task.resumeRequired, isTrue);
     expect(task.workFailure?.retryable, isTrue);
     expect(task.workFailure?.reason, contains('附件'));
@@ -2023,7 +2031,8 @@ void main() {
     );
   });
 
-  test('partial artifact attachment failure cannot mark a file task complete',
+  test(
+      'partial artifact attachment failure keeps the task completed and retryable',
       () async {
     final grants = WorkFolderGrantService(
       box: database.appSettingsBox,
@@ -2112,13 +2121,114 @@ void main() {
 
     await runner.run(task, WorkTaskCancellation());
 
-    expect(task.status, AgentTaskStatus.failed);
+    // 两个文件都已落盘，仅 second.txt 的附件拷贝失败。用户仍要看到「少了一个附件、
+    // 可重发」的明确提示，但任务本身已经执行完成，不因投递问题被判失败。
+    expect(task.status, AgentTaskStatus.completed);
     expect(task.resumeRequired, isTrue);
     expect(task.workFailure?.reason, contains('附件'));
     expect(copiedNames, ['first.txt']);
     final metadata = jsonDecode(task.executionStateJson) as Map;
     expect(metadata['artifactDeliveryRetryOnly'], isTrue);
     expect(metadata['artifactDeliveryMessageId'], isNotEmpty);
+  });
+
+  test('a delivery-only retry with a vanished deliverable still fails the task',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final mutations = WorkspaceMutationService(pathPolicy: pathPolicy);
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    final workspace = await workspaceService.loadOrCreate(
+      conversationId: 'vanished-delivery-group',
+      isDirectChat: false,
+    );
+    final deliverable = File('${workspace.workDirPath}/report.xlsx');
+    await deliverable.writeAsString('placeholder');
+
+    final config = ApiConfig(
+      id: 'vanished-delivery-config',
+      name: 'Vanished delivery config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'vanished-delivery-character',
+      name: '投递边界测试角色',
+      avatar: 'VD',
+      age: 30,
+      role: '文件交付测试角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: _MultiPatchGateway(const <Map<String, String>>[]),
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+      mediaCopier: (source, type, {fileName}) async => MediaAttachment(
+        type: type,
+        localPath: source.path,
+        fileName: fileName ?? source.uri.pathSegments.last,
+        fileSize: await source.length(),
+      ),
+    );
+    final task = AgentTask(
+      id: 'vanished-delivery-task',
+      groupId: 'vanished-delivery-group',
+      characterId: character.id,
+      userRequest: '生成一份 xlsx 报告并交付',
+      status: AgentTaskStatus.queued,
+      workModeTask: true,
+      startedAt: DateTime.now().subtract(const Duration(seconds: 1)),
+      resultSummary: '报告已生成。',
+      lastArtifactPaths: <String>[deliverable.path],
+      executionStateJson: jsonEncode(<String, dynamic>{
+        'artifactDeliveryNoticePublished': true,
+        'artifactDeliveryRetryOnly': true,
+        'artifactDeliveryMessageId': 'vanished-delivery-message',
+      }),
+    );
+    // 产物在两次投递之间被删除：重发不再满足产物合同，这是真正的任务失败，不能
+    // 因为走的是「重发」分支就保持完成。
+    await deliverable.delete();
+
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.failed);
+    expect(task.resumeRequired, isTrue);
+    expect(task.workFailure?.retryable, isTrue);
+    final retried = database.messageBox.values
+        .where((item) => item.groupId == task.groupId)
+        .last;
+    expect(retried.content, contains('任务未完成'));
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)['artifactDeliveryRetryOnly'],
+      isNot(isTrue),
+    );
   });
 
   test('samples token-level model progress before persisting it', () async {

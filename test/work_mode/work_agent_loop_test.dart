@@ -197,6 +197,7 @@ WorkAgentLoop _loop({
   Future<void> Function(Duration)? sleep,
   int? maxModelRetries,
   int? maxToolRetries,
+  int? maxToolRepairs,
   WorkAgentArtifactCompletion? artifactCompletion,
   WorkAgentPreflightTool? preflightTool,
 }) {
@@ -207,6 +208,7 @@ WorkAgentLoop _loop({
     sleep: sleep ?? (_) async {},
     maxModelRetries: maxModelRetries,
     maxToolRetries: maxToolRetries,
+    maxToolRepairs: maxToolRepairs,
     artifactCompletion: artifactCompletion,
     preflightTool: preflightTool,
     onEvent: events == null
@@ -608,6 +610,35 @@ void main() {
     expect(result.retryCount, 1);
   });
 
+  test('uses the extended model retry budget across a growing backoff', () async {
+    // 退避阶梯必须覆盖全部重试次数：阶梯短于预算时，末尾延迟会被重复使用，
+    // 那次重试就等于没有更长的等待。
+    final model = _FakeModel();
+    for (var attempt = 0;
+        attempt < WorkAgentLoop.defaultMaxModelRetries;
+        attempt++) {
+      model.responses.add({
+        'success': false,
+        'statusCode': 503,
+        'message': '服务暂时不可用',
+      });
+    }
+    model.responses.add(_finishDecision());
+    final delays = <Duration>[];
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      sleep: (delay) async => delays.add(delay),
+    );
+
+    final result = await loop.execute(_task(id: 'model-retry-budget'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(result.modelRetryCount, WorkAgentLoop.defaultMaxModelRetries);
+    expect(delays, WorkAgentLoop.defaultRetryDelays);
+    expect(delays.last, const Duration(seconds: 8));
+  });
+
   test('retries an empty model completion from the latest checkpoint',
       () async {
     final model = _FakeModel()
@@ -966,6 +997,86 @@ void main() {
     }
   });
 
+  test('hands a non-command tool failure back to the model for repair',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_finishDecision('已改用可用的读取方式。'));
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.failed(
+            message: '文档解析失败',
+            failureCode: 'documentParseFailed',
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final result = await loop.execute(_task(id: 'tool-repair'));
+
+    expect(tool.calls, 1);
+    expect(model.requests, hasLength(2));
+    expect(
+      model.requests[1].context['previousToolFailure'],
+      contains('文档解析失败'),
+    );
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(result.retryCount, 0);
+  });
+
+  test('pauses when a non-command tool failure repeats without progress',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead));
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.failed(
+            message: '文档解析失败',
+            failureCode: 'documentParseFailed',
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final result = await loop.execute(_task(id: 'tool-repair-repeat'));
+
+    expect(tool.calls, 2);
+    expect(result.status, WorkAgentLoopStatus.paused);
+  });
+
+  test('pauses after the tool repair budget instead of failing the task',
+      () async {
+    // 每次失败文案都不同，指纹与结果签名都不重复，只有修复预算能兜住这种
+    // 「每次看起来都是新错误」的漂移。
+    var attempt = 0;
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead));
+    final tool = _FakeTool()
+      ..behavior = (_) => WorkToolResult.failed(
+            message: '文档解析失败 ${++attempt}',
+            failureCode: 'documentParseFailed',
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+      maxToolRepairs: 2,
+    );
+
+    final result = await loop.execute(_task(id: 'tool-repair-budget'));
+
+    expect(tool.calls, 3);
+    expect(result.status, WorkAgentLoopStatus.paused);
+  });
+
   test('a rejected mutation is a safe no-op, never a committed artifact',
       () async {
     final model = _FakeModel()
@@ -1293,6 +1404,25 @@ void main() {
     expect(model.requests[2].isRepair, isFalse);
     expect(model.requests[3].isRepair, isTrue);
     expect(model.requests[4].isRepair, isFalse);
+  });
+
+  test('automatically retries a third fresh protocol decision', () async {
+    final invalidResponse = <String, dynamic>{
+      'success': true,
+      'content': '仍然不是合法 AgentDecision。',
+    };
+    final model = _FakeModel();
+    for (var attempt = 0; attempt < 6; attempt++) {
+      model.responses.add(invalidResponse);
+    }
+    model.responses.add(_finishDecision('自动协议重试后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final result = await loop.execute(_task(id: 'protocol-retry-thrice'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(result.protocolRepairAttempts, 3);
+    expect(model.requests, hasLength(7));
   });
 
   test('stop before model creates an interrupted checkpoint', () async {

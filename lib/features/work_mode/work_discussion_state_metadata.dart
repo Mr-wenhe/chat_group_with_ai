@@ -136,6 +136,26 @@ bool workExecutionCheckpointRequiresReview(String raw) {
   }
 }
 
+/// Whether a task is holding a saved deliverable that still has to be re-sent
+/// as a chat attachment.
+///
+/// The marker is what lets an already finished task re-enter the runner for a
+/// delivery-only pass, so it is always read back from the persisted checkpoint
+/// rather than from in-memory run state.
+bool workArtifactDeliveryRetryPending(String executionStateJson) {
+  if (executionStateJson.trim().isEmpty) return false;
+  try {
+    final decoded = jsonDecode(executionStateJson);
+    if (decoded is! Map) return false;
+    if (decoded['artifactDeliveryNoticePublished'] != true) return false;
+    if (decoded['artifactDeliveryRetryOnly'] != true) return false;
+    final messageId = decoded['artifactDeliveryMessageId'];
+    return messageId is String && messageId.trim().isNotEmpty;
+  } on Object {
+    return false;
+  }
+}
+
 /// Reduces an unsupported execution checkpoint to the small set of fields
 /// that can still explain a recovery gate. Capability grants and opaque future
 /// fields are deliberately dropped; the review marker keeps the task paused

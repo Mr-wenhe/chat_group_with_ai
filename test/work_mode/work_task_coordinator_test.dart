@@ -36,6 +36,10 @@ class _FakeWorkTaskRunner
   final Set<String> throwTaskIds = <String>{};
   final Set<String> failOnCompletion = <String>{};
 
+  /// Error raised for [throwTaskIds]. A transport error exercises the
+  /// coordinator's automatic resume; the default exercises a plain failure.
+  Object throwError = StateError('runner failed');
+
   /// 每次运行实际看到的当前附件 id，按任务分组，用于验证追问是否切换了附件。
   final Map<String, List<String>> _attachments = <String, List<String>>{};
 
@@ -64,7 +68,7 @@ class _FakeWorkTaskRunner
   Future<void> run(AgentTask task, WorkTaskCancellation cancellation) async {
     if (throwTaskIds.contains(task.id)) {
       startedTaskIds.add(task.id);
-      throw StateError('runner failed');
+      throw throwError;
     }
     (_attachments[task.id] ??= <String>[]).add(_attachmentIdOf(task));
     final completion = Completer<void>();
@@ -406,6 +410,15 @@ Future<void> _waitForTaskState(
   fail('任务未在限定时间内达到预期状态：$taskId');
 }
 
+/// The persisted count of automatic resumes, or 0 when the task has none.
+int _autoResumeCountOf(AgentTask task) {
+  if (task.executionStateJson.trim().isEmpty) return 0;
+  final decoded = jsonDecode(task.executionStateJson);
+  if (decoded is! Map) return 0;
+  final count = decoded['autoResumeCount'];
+  return count is int ? count : 0;
+}
+
 /// The start of an open budget wait window, or null when the task has none.
 DateTime? _budgetWaitStart(AgentTask task) {
   if (task.executionStateJson.trim().isEmpty) return null;
@@ -700,6 +713,205 @@ void main() {
 
     expect(retryRunner.validationCount, 0);
     expect(retryRunner.runCount, 1);
+  });
+
+  test('retries a completed task while its artifact delivery is pending',
+      () async {
+    final task = _task(id: 'artifact-resend', conversationId: 'dm:worker')
+      ..status = AgentTaskStatus.completed
+      ..resultSummary = '报告已生成。'
+      ..lastArtifactPaths = const ['/workspace/report.docx'];
+    task.executionStateJson = jsonEncode(<String, dynamic>{
+      'artifactDeliveryNoticePublished': true,
+      'artifactDeliveryRetryOnly': true,
+      'artifactDeliveryMessageId': 'artifact-resend-message',
+    });
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'artifactDelivery',
+        message: '文件已保存，但有 1 个产物无法作为聊天附件发送；可重试交付。',
+        scope: 'delivery',
+        completedContent: task.lastArtifactPaths,
+        retryable: true,
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.retry(task.id);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status != AgentTaskStatus.completed,
+    );
+
+    expect(runner.startedTaskIds, contains(task.id));
+    // 重发必须保留投递标记与产物路径，否则 runner 会把它当成一次全新执行。
+    expect(
+      jsonDecode(task.executionStateJson)['artifactDeliveryRetryOnly'],
+      isTrue,
+    );
+    expect(task.resultSummary, '报告已生成。');
+    expect(task.lastArtifactPaths, const ['/workspace/report.docx']);
+    runner.complete(task.id);
+  });
+
+  test('refuses to retry a completed task with nothing left to deliver',
+      () async {
+    final task = _task(id: 'artifact-done', conversationId: 'dm:worker')
+      ..status = AgentTaskStatus.completed;
+    await taskBox.put(task.id, task);
+
+    await expectLater(coordinator.retry(task.id), throwsA(isA<StateError>()));
+    expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('automatically resumes a retryable failure along the delay ladder',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration.zero, Duration.zero],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'auto-resume', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) =>
+          _autoResumeCountOf(value) == 2 &&
+          value.status == AgentTaskStatus.failed,
+    );
+
+    expect(task.status, AgentTaskStatus.failed);
+    expect(task.resumeRequired, isTrue);
+    expect(
+      runner.startedTaskIds.where((id) => id == task.id),
+      hasLength(3),
+      reason: '首次执行 + 两次自动续跑；阶梯用尽后不再自行重试',
+    );
+  });
+
+  test('does not resume a failure that is not retryable', () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration.zero],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'no-auto-resume', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(_autoResumeCountOf(task), 0);
+    expect(
+      runner.startedTaskIds.where((id) => id == task.id),
+      hasLength(1),
+      reason: '内部失败不是链路问题，不能自行重试',
+    );
+  });
+
+  test('an automatic resume never re-dispatches a task that moved on',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 150)],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'resume-after-manual', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+
+    // 用户在这个窗口内先手动重试：定时器到点后必须看到任务已经不在失败态。
+    runner.throwTaskIds.remove(task.id);
+    await localCoordinator.retry(task.id);
+    await _waitForStartedCount(runner, 2);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    expect(
+      runner.startedTaskIds.where((id) => id == task.id),
+      hasLength(2),
+      reason: '手动重试已接管，自动续跑不得再派发一次',
+    );
+    expect(_autoResumeCountOf(task), 0);
+    runner.complete(task.id);
+  });
+
+  test('a pending automatic resume leaves a disposed coordinator alone',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 50)],
+    );
+    final task = _task(id: 'disposed-resume', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+
+    await localCoordinator.dispose();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+
+    expect(runner.startedTaskIds.where((id) => id == task.id), hasLength(1));
+  });
+
+  test('an automatic resume re-reads the failure it is resuming', () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 150)],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'resume-reread', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+
+    // 用户在定时器到点前手动重试，而这一次失败变成了内部错误。自动续跑必须
+    // 重新读取当前失败，而不是照搬排队时的那个可重试失败。
+    runner.throwError = StateError('runner failed');
+    await localCoordinator.retry(task.id);
+    await _waitForStartedCount(runner, 2);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    expect(_autoResumeCountOf(task), 0);
+    expect(runner.startedTaskIds.where((id) => id == task.id), hasLength(2));
   });
 
   test('rejects external discussion overwrite and restarts a renewed revision',
