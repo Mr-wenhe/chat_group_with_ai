@@ -41,7 +41,7 @@ The gateway is plain TypeScript executed via Node's type-stripping — there is 
 | `scripts/generate_changelog.py` | Regenerate `CHANGELOG.md` from Conventional Commits |
 | `scripts/verify_android_release_permissions.sh` | Manifest/permission check for a debug-signed release APK |
 | `scripts/seed_data.dart`, `merge_data_to_project.dart`, `clear_dm_context.dart`, `fix_config_refs.dart`, `inspect_configs.dart`, `update_reply_limit.dart` | Development-data maintenance (Hive fixtures) |
-| `scripts/qa_*.dart` | Manual end-to-end harnesses for agentic/tool flows |
+| `scripts/qa_*.dart` | Standalone harnesses for tool-request parsing (`qa_real_tool_request_check.dart`, `qa_verify_tool_request.dart`) |
 
 ## Architecture
 
@@ -72,7 +72,7 @@ data/         Hive development fixtures (api_configs.hive is local-only + gitign
 | `chat_group/` | ~16k | Group list, chat room UI, AI selection/scoring, streaming, memory, attachments |
 | `memory/` | ~13k | Long-term memory: observation pipeline, migrators, audit UI, relationships |
 | `web_search/` | ~12k | Pluggable search providers, query planning, per-turn snapshots, citations, security |
-| `agentic/` | ~7.8k | `AgentRuntime` + character skills + local-agent bridge |
+| `agentic/` | ~4.1k | Character skills, prompt/context builders, tool + progress protocol |
 | `backup/` | ~5.9k | Versioned `.cgbak` export/restore |
 | `settings/` | ~5.1k | API configs, theme, tokens, search config, work-mode settings, governance |
 | `ai_character/` | ~3.4k | Character CRUD, presets, gender inference + migration |
@@ -109,16 +109,16 @@ Direct chats reuse `Message.groupId` with the stable key `dm:{characterId}` (`Di
 
 ### Work mode (`lib/features/work_mode/`)
 
-An explicit per-room toggle. When on, non-empty user input is routed to `AgentRuntime`-style work tasks instead of chat rounds. This is the largest and most actively developed subsystem.
+An explicit per-room toggle. When on, non-empty user input is routed to a work task (`WorkTaskCoordinator` → `WorkAgentLoop`) instead of chat rounds. This is the largest and most actively developed subsystem.
 
 - `WorkTaskCoordinator` owns scheduling **app-wide** (mounted via `WorkTaskOverlayHost` in `MaterialApp.builder`), independent of any widget, with `maximumConcurrentTasks = 2`. Tasks survive chat-room disposal.
 - `WorkAgentLoop` drives execution; the model receives public checkpoints, never a private reasoning trace.
 - `WorkRoleRouter` elects an executor among group members from inferred stage/occupation + `CharacterSkill`. A model recommendation can never invent a qualification.
 - `WorkDiscussionRunner` runs a governed multi-member discussion before execution.
-- Tools: sandboxed command runner (approval-gated, with `blockedByDefault` / `pathRejected` / `waitingForApproval` states), workspace file service, visible browser, document tool, weather service, and a desktop local-agent bridge.
+- Tools: sandboxed command runner (approval-gated, with `blockedByDefault` / `pathRejected` / `waitingForApproval` states), workspace file service (list / read / search / patch / rename / delete), document tool, weather service, and skill create / download. `browser.context` exists in the tool enum and is still described in prompts, but no runtime registers it — treat it as unavailable.
 - Permissions: folder grants and agent settings persist under `app_settings` keys `work_mode_folder_grants_v1` / `work_mode_agent_settings_v1`; mutations are fingerprinted and require explicit approval dialogs.
 
-Note the name collision: `AgentRuntime` (`lib/features/agentic/agent_runtime.dart`, 12-step budget, 120 s completion timeout, 5 min file-generation timeout) is documented in-code as the **legacy/ordinary** agentic path. Work mode deliberately does not dispatch through it.
+Work mode is the only agentic execution path. The legacy ordinary agentic runtime (`AgentRuntime`) and its progress-reporting subsystem were removed because nothing in `lib/` ever instantiated them — do not reintroduce a second execution loop.
 
 ### Web search + gateway
 
@@ -183,7 +183,7 @@ This project builds against **Flutter 3.27.1**, whose Gradle plugin does not acc
 
 ## Testing
 
-252 test files. `test/` root holds feature-level suites (chat room, characters, memory, backup, direct chat, search, persistence); subdirectories group `work_mode/` (56), `agentic/` (36), `audio/` (9), `core/`, `services/`, `web_search/`. Shared helpers live in `test/helpers/` (`lifecycle_hive.dart`, `fault_injecting_box.dart`, `capturing_chat_api_service.dart`); fixtures in `test/fixtures/`.
+204 test files. `test/` root holds feature-level suites (chat room, characters, memory, backup, direct chat, search, persistence); subdirectories group `work_mode/` (57), `agentic/` (17), `audio/` (9), `core/`, `services/`, `web_search/`. Shared helpers live in `test/helpers/` (`lifecycle_hive.dart`, `fault_injecting_box.dart`, `capturing_chat_api_service.dart`); fixtures in `test/fixtures/`.
 
 Large suites are split into `*_part_NN.dart` and `*_helpers_NN.dart` files (backup, data lifecycle, search). When adding a case to one of these, add it to the correct part file rather than creating a new top-level suite.
 
@@ -237,11 +237,12 @@ Large suites are split into `*_part_NN.dart` and `*_helpers_NN.dart` files (back
 - `docs/group_work_discussion/` — staged design + review docs for the governed discussion workflow
 - `docs/verification/`, `docs/roadmap/`, `docs/archive/`
 
-`AGENTS.md` at the repo root is a near-duplicate of this file intended for other agents. Keep the two in sync when changing shared guidance.
+`AGENTS.md` at the repo root is a short pointer file for other agents: it carries the reply-language rule and tells them to read this file, but deliberately duplicates none of it. **Guidance lives only here** — when you change a constraint, change it in this file and do not copy it into `AGENTS.md`, which previously drifted out of date exactly because it held a second copy.
 
 ## Important caveats
 
 - `AICharacter` tracks hourly reply counts via `lastReplyTimestamp` / `hourlyReplyCount` mutated in `_isEligibleToReply` without re-saving to DB each round — only the limit check is enforced during a round.
 - `ApiProvider` has 8 entries: `deepseek`, `qwen`, `zhipu`, `moonshot`, `baidu`, `xfyun`, `sensenova`, `custom`. `custom` requires a manual `baseUrl`. `ApiProtocol` additionally selects OpenAI Chat Completions / Anthropic Messages / OpenAI Responses / Gemini Native upstream formats.
 - `CharacterPreset.presets` contains **14** built-in presets; the in-code doc comment still says 10.
+- `RelationshipState.recentMoodAt` decides whether a mood is still live (`kRelationshipMoodTtl`, 30 min). Read it through `effectiveMood()`, never `recentMood` directly — ordinary events neither change the mood nor refresh the timestamp, so a stored mood the code forgot to expire would otherwise leak into prompts and reply scoring. On upgrade the field is null for existing rows, so **all pre-existing moods read as expired (neutral)**; there is deliberately no backfill, because the only available source (`updatedAt`) is advanced by later ordinary events and would keep stale moods alive.
 - Treat repository access as sensitive: versioned `data/` fixtures and `data/ai_files/conversations/` contain real chat and task history. The credential-bearing `data/api_configs.hive` is local-only and ignored.
