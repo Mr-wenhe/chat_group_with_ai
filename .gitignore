@@ -62,7 +62,6 @@ docs/superpowers/plans/*
 # Local workspace artifacts (not part of the app)
 LESSONS_LEARNED.md
 bin/*
-!bin/local_agent_bridge.dart
 devtools_options.yaml
 dl.txt
 docs/plans/

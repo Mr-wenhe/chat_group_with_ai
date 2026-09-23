@@ -41,7 +41,7 @@ The gateway is plain TypeScript executed via Node's type-stripping — there is 
 | `scripts/generate_changelog.py` | Regenerate `CHANGELOG.md` from Conventional Commits |
 | `scripts/verify_android_release_permissions.sh` | Manifest/permission check for a debug-signed release APK |
 | `scripts/seed_data.dart`, `merge_data_to_project.dart`, `clear_dm_context.dart`, `fix_config_refs.dart`, `inspect_configs.dart`, `update_reply_limit.dart` | Development-data maintenance (Hive fixtures) |
-| `scripts/qa_*.dart` | Standalone harnesses for tool-request parsing (`qa_real_tool_request_check.dart`, `qa_verify_tool_request.dart`) |
+| `scripts/qa_*.dart` (**local-only**, gitignored) | Standalone harnesses for tool-request parsing (`qa_real_tool_request_check.dart`, `qa_verify_tool_request.dart`) |
 
 ## Architecture
 
