@@ -914,6 +914,88 @@ void main() {
     expect(runner.startedTaskIds.where((id) => id == task.id), hasLength(2));
   });
 
+  test('new input during the auto-resume window preempts the automatic resume',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 60)],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'resume-vs-input', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+
+    // 一条追问在定时器到点前到达。对它这种已终止的任务，追问会被立即提升并复用
+    // 同一任务，所以它应当抢占自动续跑：任务只再跑一次，同一会话始终串行。
+    runner.throwTaskIds.remove(task.id);
+    await localCoordinator.enqueueFollowUp(task.id, '顺带再改一下标题');
+    await _waitForStartedCount(runner, 2);
+
+    expect(task.userRequest, '顺带再改一下标题');
+    expect(task.queuedUserRequests, isEmpty);
+    expect(runner.maximumActiveForOneConversation, 1);
+    expect(
+      _autoResumeCountOf(task),
+      0,
+      reason: '用户先动作，自动续跑不该消耗一次尝试',
+    );
+
+    // 让定时器到点：此时任务已不是 failed，唤醒必须什么都不做。
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(
+      runner.startedTaskIds.where((id) => id == task.id),
+      hasLength(2),
+      reason: '自动续跑不得与追问各派发一次',
+    );
+    expect(_autoResumeCountOf(task), 0);
+    runner.complete(task.id);
+  });
+
+  test('a completed task awaiting artifact resend is not auto-resumed',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration.zero, Duration.zero],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'delivery-pending', conversationId: 'dm:worker')
+      ..status = AgentTaskStatus.completed
+      ..lastArtifactPaths = const <String>['/workspace/report.docx'];
+    task.executionStateJson = jsonEncode(<String, dynamic>{
+      'artifactDeliveryNoticePublished': true,
+      'artifactDeliveryRetryOnly': true,
+      'artifactDeliveryMessageId': 'delivery-pending-message',
+    });
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'artifactDelivery',
+        message: '文件已保存，但有 1 个产物无法作为聊天附件发送；可重试交付。',
+        scope: 'delivery',
+        completedContent: task.lastArtifactPaths,
+        retryable: true,
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+
+    // 重发是用户动作：自动续跑只恢复 failed 任务，不会替用户再发一条消息。
+    expect(runner.startedTaskIds, isEmpty);
+    expect(_autoResumeCountOf(task), 0);
+  });
+
   test('rejects external discussion overwrite and restarts a renewed revision',
       () async {
     final discussionRunner = _FakeDiscussionRunner();
