@@ -296,8 +296,8 @@ class _RelationshipAuditDetailPageState
               ),
               _statusChip(
                 context,
-                '情绪 · ${RelationshipAuditPresenter.moodLabel(relationship.recentMood)}',
-                _moodColor(context, relationship.recentMood),
+                '情绪 · ${RelationshipAuditPresenter.moodLabel(relationship.effectiveMood())}',
+                _moodColor(context, relationship.effectiveMood()),
               ),
             ],
           );

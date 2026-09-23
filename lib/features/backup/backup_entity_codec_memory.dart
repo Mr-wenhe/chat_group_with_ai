@@ -48,6 +48,11 @@ class _BackupEntityMemoryCodec {
         'friction': item.friction,
         'familiarity': item.familiarity,
         'recentMood': item.recentMood.name,
+        // 心情时效：不带上它，恢复后老心情会一律被判过期。
+        // 注意用编码函数 _date（→ISO8601 字符串）；_optionalDate 是解码方向。
+        'recentMoodAt': item.recentMoodAt == null
+            ? null
+            : _date(item.recentMoodAt!),
         'notes': item.notes,
         'lastInteractionAt': _date(item.lastInteractionAt),
         'createdAt': _date(item.createdAt),
@@ -148,6 +153,8 @@ class _BackupEntityMemoryCodec {
         friction: _integer(json, 'friction'),
         familiarity: _integer(json, 'familiarity'),
         recentMood: _enum(json, 'recentMood', RelationshipMood.values),
+        // 容错读取：不含该字段的旧备份解码为 null（按已过期处理）。
+        recentMoodAt: _optionalDate(json['recentMoodAt']),
         notes: json['notes']?.toString() ?? '',
         lastInteractionAt: _dateTime(json, 'lastInteractionAt'),
         createdAt: _dateTime(json, 'createdAt'),

@@ -77,6 +77,9 @@ class RelationshipSnapshotRebuilder {
       friction: last.frictionAfter,
       familiarity: last.familiarityAfter,
       recentMood: last.moodAfter,
+      // 取事件时刻而非 now：重建必须幂等，用 now 会让每次重建都给心情续命。
+      recentMoodAt:
+          last.moodAfter == RelationshipMood.neutral ? null : last.occurredAt,
       notes: notes,
       lastInteractionAt: last.occurredAt,
       createdAt: existing?.createdAt ?? events.first.createdAt,

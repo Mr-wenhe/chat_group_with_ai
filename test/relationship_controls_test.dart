@@ -33,6 +33,7 @@ void main() {
     int friction = 3,
     int familiarity = 30,
     RelationshipMood mood = RelationshipMood.neutral,
+    DateTime? moodAt,
     RelationshipStage stage = RelationshipStage.acquaintance,
     String notes = '旧备注',
   }) {
@@ -45,6 +46,7 @@ void main() {
       friction: friction,
       familiarity: familiarity,
       recentMood: mood,
+      recentMoodAt: moodAt,
       stage: stage,
       notes: notes,
       lastInteractionAt: DateTime(2026, 8, 1, 12),
@@ -374,5 +376,75 @@ void main() {
       throwsA(isA<RangeError>()),
     );
     expect(db.relationshipEventBox, isEmpty);
+  });
+
+  test('仅改备注不会抹掉心情时间戳', () async {
+    final moodAt = DateTime(2026, 9, 23, 9, 0);
+    final initial = relation(mood: RelationshipMood.warm, moodAt: moodAt);
+    await put(initial);
+
+    final updated = await RelationshipControls(db).applyManualUpdate(
+      relationship: initial,
+      affinity: initial.affinity,
+      trust: initial.trust,
+      friction: initial.friction,
+      familiarity: initial.familiarity,
+      mood: initial.recentMood,
+      stage: initial.stage,
+      notes: '只改了备注',
+    );
+
+    expect(updated!.notes, '只改了备注');
+    expect(
+      db.relationshipStateBox.get(initial.id)!.recentMoodAt,
+      moodAt,
+      reason: '心情未改动时不得重新计时，否则只改备注也会让心情作废',
+    );
+  });
+
+  test('显式改心情会刷新时间戳', () async {
+    final initial = relation(mood: RelationshipMood.neutral);
+    await put(initial);
+    expect(initial.recentMoodAt, isNull);
+
+    final updated = await RelationshipControls(db).applyManualUpdate(
+      relationship: initial,
+      affinity: initial.affinity,
+      trust: initial.trust,
+      friction: initial.friction,
+      familiarity: initial.familiarity,
+      mood: RelationshipMood.warm,
+      stage: initial.stage,
+      notes: initial.notes,
+    );
+
+    final storedMoodAt = db.relationshipStateBox.get(updated!.id)!.recentMoodAt;
+    expect(storedMoodAt, isNotNull);
+    expect(
+      DateTime.now().difference(storedMoodAt!).inMinutes,
+      lessThan(1),
+    );
+  });
+
+  test('显式改为 neutral 会清空时间戳', () async {
+    final initial = relation(
+      mood: RelationshipMood.warm,
+      moodAt: DateTime(2026, 9, 23, 9, 0),
+    );
+    await put(initial);
+
+    final updated = await RelationshipControls(db).applyManualUpdate(
+      relationship: initial,
+      affinity: initial.affinity,
+      trust: initial.trust,
+      friction: initial.friction,
+      familiarity: initial.familiarity,
+      mood: RelationshipMood.neutral,
+      stage: initial.stage,
+      notes: initial.notes,
+    );
+
+    expect(updated!.recentMood, RelationshipMood.neutral);
+    expect(db.relationshipStateBox.get(initial.id)!.recentMoodAt, isNull);
   });
 }

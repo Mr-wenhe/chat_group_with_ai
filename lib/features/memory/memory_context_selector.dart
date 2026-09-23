@@ -142,7 +142,7 @@ class MemoryContextSelector {
       final stage = r.stage.name;
       final note = r.notes.trim().isEmpty ? '' : '，${r.notes.trim()}';
       final line =
-          '$name($stage)：亲近${r.affinity}，信任${r.trust}，摩擦${r.friction}，熟悉度${r.familiarity}，最近情绪${r.recentMood.name}$note';
+          '$name($stage)：亲近${r.affinity}，信任${r.trust}，摩擦${r.friction}，熟悉度${r.familiarity}，最近情绪${r.effectiveMood().name}$note';
       final needed = line.length;
       if (used + needed > budget) break;
       lines.add(line);

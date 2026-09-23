@@ -156,7 +156,7 @@ class RelationshipAuditPresenter {
         targetName,
         targetRole,
         stageLabel(relationship.stage),
-        moodLabel(relationship.recentMood),
+        moodLabel(relationship.effectiveMood()),
       ];
 
   static String recentChangeSummary(

@@ -564,7 +564,7 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
                     stageLabel: RelationshipAuditPresenter.stageLabel(
                         relationship.stage),
                     moodLabel: RelationshipAuditPresenter.moodLabel(
-                        relationship.recentMood),
+                        relationship.effectiveMood()),
                     recentChange:
                         RelationshipAuditPresenter.recentChangeSummary(
                       events,
