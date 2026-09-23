@@ -38,7 +38,7 @@ class CharacterPreset {
         'systemPrompt': systemPrompt,
       };
 
-  /// 内置 10 个角色预设（纯静态，不落库）。
+  /// 内置 14 个角色预设（纯静态，不落库）。
   static const List<CharacterPreset> presets = [
     CharacterPreset(
       name: '毒舌评委',
