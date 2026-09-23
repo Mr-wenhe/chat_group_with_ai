@@ -135,7 +135,10 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
       mentionedIds: const [],
       memories: _characterMemories,
       relationships: _relationshipStates,
-      isEligible: _isEligibleToReply,
+      // 空闲自动聊天没有 @ 点名，禁言角色因此被整轮排除。
+      isEligible: (character) =>
+          _isEligibleToReply(character) &&
+          _mayAutoPick(character, mentionedIds: const {}),
       random: _autoChatRandom,
       isAutoChat: true,
     );

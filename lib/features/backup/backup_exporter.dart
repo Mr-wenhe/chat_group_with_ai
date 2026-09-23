@@ -10,6 +10,7 @@ import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:crypto/crypto.dart';
 import 'package:uuid/uuid.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/chat_group/group_mute_store.dart';
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 

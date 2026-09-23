@@ -11,6 +11,28 @@ import 'package:chat_group/core/models/message.dart';
 // Mention parsing
 // ---------------------------------------------------------------------------
 
+/// Inserts a mention without discarding the draft; only an active query is
+/// replaced. Returns the new caret position beside the updated text.
+({String text, int cursor}) insertMentionInDraft(
+  String text,
+  int cursor,
+  String mention, {
+  required bool replaceQuery,
+}) {
+  cursor = cursor < 0 ? text.length : cursor.clamp(0, text.length);
+  final before = text.substring(0, cursor);
+  final query = replaceQuery ? RegExp(r'@[^@\s]*$').firstMatch(before) : null;
+  final start = query?.start ?? cursor;
+  // Keep a token boundary, otherwise English drafts parse as email addresses.
+  final prefix =
+      start > 0 && _isMentionTokenCharacter(text[start - 1]) ? ' ' : '';
+  final inserted = '$prefix$mention';
+  return (
+    text: text.replaceRange(start, cursor, inserted),
+    cursor: start + inserted.length,
+  );
+}
+
 /// The shared mention parser's diagnostic result.
 ///
 /// Work-mode routing needs to distinguish an unknown name from an ambiguous

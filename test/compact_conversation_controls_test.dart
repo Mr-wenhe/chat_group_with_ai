@@ -54,4 +54,65 @@ void main() {
     expect(find.byKey(const Key('auto-chat-toggle')), findsNothing);
     expect(find.byKey(const Key('work-mode-toggle')), findsOneWidget);
   });
+
+  testWidgets('例外态提示只在 statusAlert 非空时出现', (tester) async {
+    Future<void> pump({ConversationStatusAlert? alert}) => tester.pumpWidget(
+          MaterialApp(
+            home: Scaffold(
+              body: CompactConversationControls(
+                showAutoChat: true,
+                autoChatEnabled: true,
+                workModeEnabled: false,
+                autoChatAvailable: true,
+                autoChatTooltip: '自动发言等待中',
+                workModeTooltip: '工作模式',
+                onAutoChatChanged: (_) {},
+                onWorkModeChanged: (_) {},
+                statusAlert: alert,
+              ),
+            ),
+          ),
+        );
+
+    // 正常态：只有两个按钮，不占额外空间。
+    await pump();
+    expect(find.textContaining('已暂停'), findsNothing);
+    expect(find.byType(IconButton), findsNWidgets(2));
+
+    var tapped = 0;
+    await pump(
+      alert: ConversationStatusAlert(
+        message: '角色未配置 API Key，AI 无法回复',
+        actionLabel: '去设置',
+        onAction: () => tapped++,
+      ),
+    );
+    expect(find.text('角色未配置 API Key，AI 无法回复'), findsOneWidget);
+
+    await tester.tap(find.text('去设置'));
+    expect(tapped, 1);
+  });
+
+  testWidgets('私聊即使有自动发言状态也不显示自动发言提示', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: CompactConversationControls(
+            showAutoChat: false,
+            autoChatEnabled: false,
+            workModeEnabled: false,
+            autoChatAvailable: false,
+            autoChatTooltip: '自动发言',
+            workModeTooltip: '工作模式',
+            onAutoChatChanged: (_) {},
+            onWorkModeChanged: (_) {},
+            statusAlert: const ConversationStatusAlert(message: '自动发言异常'),
+          ),
+        ),
+      ),
+    );
+
+    expect(find.text('自动发言异常'), findsNothing);
+    expect(find.byKey(const Key('work-mode-toggle')), findsOneWidget);
+  });
 }

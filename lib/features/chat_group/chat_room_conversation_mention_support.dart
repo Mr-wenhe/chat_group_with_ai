@@ -408,25 +408,17 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
     _insertMentionText('@${character.name} ');
   }
 
-  /// 用 [mentionText] 替换掉光标前那段正在输入的 `@查询词`。
-  ///
-  /// 从光标前一位向左找最近的 `@` 作为替换起点（找不到就从头替换），
-  /// 插入后把光标移到 @ 文本之后，并立刻把焦点还给输入框。
+  /// 候选弹窗替换正在输入的查询词；成员面板和消息菜单保留已有草稿。
   void _insertMentionText(String mentionText) {
-    final text = _textController.text;
-    int cursorPos = _textController.selection.baseOffset;
-    // baseOffset 为 -1 表示无选区（未聚焦），退化为在末尾插入。
-    if (cursorPos < 0) cursorPos = text.length;
-
-    final searchEnd = cursorPos > 0 ? cursorPos - 1 : 0;
-    int atPos = text.lastIndexOf('@', searchEnd);
-    if (atPos < 0) atPos = 0;
-
-    final newText =
-        '${text.substring(0, atPos)}$mentionText${text.substring(cursorPos)}';
+    final draft = insertMentionInDraft(
+      _textController.text,
+      _textController.selection.baseOffset,
+      mentionText,
+      replaceQuery: _showMentionPopup,
+    );
     _textController.value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: atPos + mentionText.length),
+      text: draft.text,
+      selection: TextSelection.collapsed(offset: draft.cursor),
     );
 
     // Overlay dismissal can steal focus; restore it immediately.

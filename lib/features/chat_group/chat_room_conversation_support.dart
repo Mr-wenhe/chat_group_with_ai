@@ -113,6 +113,22 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     return _replyEligibility.isEligible(character);
   }
 
+  /// 该角色本轮是否可能被**自动**选中（禁言者只有被 @ 点名才可能）。
+  ///
+  /// 与 [_isEligibleToReply] 分开的理由：后者表达"能不能说话"（未配置 API、
+  /// 超出频率上限等），其阻塞原因会展示给用户；禁言是用户的主动选择，且被 @
+  /// 点名时必须放行——否则 @ 会连同一并被挡掉，而"@ 是唤起禁言角色的通路"
+  /// 正是这个功能的语义。私聊没有禁言概念。
+  bool _mayAutoPick(AICharacter character,
+      {required Set<String> mentionedIds}) {
+    if (_isDirectChat) return true;
+    return _muteStore.mayAutoPick(
+      groupId: widget.groupId,
+      characterId: character.id,
+      mentionedIds: mentionedIds,
+    );
+  }
+
   /// 该角色不能发言的具体原因（未配置 API、超出频率上限等）。
   ReplyBlockReason? _blockReasonFor(AICharacter character) {
     return _replyEligibility.blockReasonFor(character);
@@ -242,6 +258,8 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     required bool isAutoChat,
     UserMessageSentiment? userSentiment,
   }) {
+    // 被禁言的角色退出自动挑选，除非本轮被明确 @ 点名。
+    final mentionedSet = (mentionedIds ?? const <String>[]).toSet();
     var replyIntents = HumanizedChatOrchestrator.selectReplyIntents(
       characters: _characters,
       recentMessages: _recentMessagesForContext(),
@@ -255,7 +273,9 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
       mentionedIds: mentionedIds ?? const [],
       memories: _characterMemories,
       relationships: _relationshipStates,
-      isEligible: _isEligibleToReply,
+      isEligible: (character) =>
+          _isEligibleToReply(character) &&
+          _mayAutoPick(character, mentionedIds: mentionedSet),
       random: _random,
       isAutoChat: isAutoChat,
       userSentiment: userSentiment,
@@ -320,6 +340,7 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     required ApiConfig config,
     required ApiProvider provider,
     required List<Message> fallbackContext,
+    required Set<String> mentionedIds,
   }) async {
     final transient = _transientContextCompression[character.id];
     final visibleFallbackContext = _visibleContextForCharacter(
@@ -352,9 +373,15 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     final manager = ContextWindowManager(
       maxRetries: 0,
       complete: (messages) async {
+        if (!_mayAutoPick(character, mentionedIds: mentionedIds)) {
+          return const {'success': false, 'message': '角色已禁言'};
+        }
         final apiKey = await _credentialResolver.resolve(config);
         if (apiKey == null) {
           return const {'success': false, 'message': 'API 凭据不可用'};
+        }
+        if (!_mayAutoPick(character, mentionedIds: mentionedIds)) {
+          return const {'success': false, 'message': '角色已禁言'};
         }
         return _aiGateway.sendChatMessage(
           apiKey: apiKey,

@@ -18,6 +18,11 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       Message? currentUserMessage,
       UserMessageSentiment? userSentiment,
       SearchTurnContext? searchTurnContext}) async {
+    final userMentionedIds = isAutoChat
+        ? const <String>{}
+        : _parseMentions(userMessage ?? '').toSet();
+    // 所有回复入口都在实际生成前复检，避免排队期间禁言仍然发言。
+    if (!_mayAutoPick(character, mentionedIds: userMentionedIds)) return '';
     if (isAutoChat && _workModeEnabled) {
       // No stream is created on this path, so any transition latch must not
       // survive until the next unrelated automatic reply.
@@ -36,6 +41,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     final apiKey =
         config == null ? null : await _credentialResolver.resolve(config);
     if (!_pageActive || _disposed) return '';
+    if (!_mayAutoPick(character, mentionedIds: userMentionedIds)) return '';
     if (config == null || apiKey == null) {
       if (_canTouchUi) {
         _setUiState(() {
@@ -51,6 +57,9 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       ));
       return '[${character.name} 未配置 API]';
     }
+    if (_lastReplyBlockReason == ReplyBlockReason.noApiConfig) {
+      _lastReplyBlockReason = null;
+    }
 
     final provider = ApiProvider.values.firstWhere(
       (p) => p.name == config.provider,
@@ -62,6 +71,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       config: config,
       provider: provider,
       fallbackContext: context,
+      mentionedIds: userMentionedIds,
     );
 
     // The snapshot was prepared once by _runAiRound. A missing snapshot is a
@@ -105,6 +115,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       return '';
     }
     if (!_pageActive || _disposed) return '';
+    if (!_mayAutoPick(character, mentionedIds: userMentionedIds)) return '';
     // —— 内存态临时消息：先以空内容入列用于增量渲染，整条完成后再落库一次 ——
     final temp = Message(
       groupId: widget.groupId,
@@ -201,7 +212,9 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     }
 
     // 失败重试一次；但被治理网关拦下（超预算/限流）时不重试，否则只是重复挨拒。
-    if (failed && !AiRequestGateway.isBlockedMessage(result.error)) {
+    if (failed &&
+        !AiRequestGateway.isBlockedMessage(result.error) &&
+        _mayAutoPick(character, mentionedIds: userMentionedIds)) {
       final retryContent = await _retryFailedReply(
         character: character,
         config: config,
@@ -209,6 +222,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
         apiMessages: boundedApiMessages,
         maxTokens: replyOutputTokens,
         userInitiated: !isAutoChat,
+        autoPickMentionedIds: userMentionedIds,
       );
       if (retryContent != null && retryContent.trim().isNotEmpty) {
         failed = false;
@@ -344,9 +358,18 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     required List<Map<String, dynamic>> apiMessages,
     required int maxTokens,
     required bool userInitiated,
+    Set<String>? autoPickMentionedIds,
   }) async {
+    if (autoPickMentionedIds != null &&
+        !_mayAutoPick(character, mentionedIds: autoPickMentionedIds)) {
+      return null;
+    }
     final apiKey = await _credentialResolver.resolve(config);
     if (apiKey == null) return null;
+    if (autoPickMentionedIds != null &&
+        !_mayAutoPick(character, mentionedIds: autoPickMentionedIds)) {
+      return null;
+    }
     final result = await _aiGateway.sendChatMessageStreamed(
       apiKey: apiKey,
       provider: provider,

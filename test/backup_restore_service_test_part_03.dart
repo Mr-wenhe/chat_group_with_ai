@@ -306,6 +306,96 @@ void _registerBackupRestoreServiceTestPart3() {
     );
   });
 
+  test(
+      'mute backups sanitize storage, isolate scopes and reject malformed imports',
+      () async {
+    final attachment = File('${mediaDirectory.path}/mute-scopes.txt');
+    await attachment.writeAsString('attachment');
+    await _seedCoreData(db, attachment);
+    await db.appSettingsBox.put(GroupMuteStore.storageKey, {
+      'group-1': ['char-1', '', 'char-1', 42],
+      'other': ['other-character'],
+      'broken': 'not-a-list',
+    });
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    for (final selection in const [
+      BackupSelection.all(),
+      BackupSelection.configurationOnly(),
+      BackupSelection.conversation('group-1'),
+      BackupSelection.conversation('dm:char-1'),
+    ]) {
+      final backup = File(
+          '${testRoot.path}/mute-${selection.scope.name}-${selection.conversationId ?? 'all'}.cgbak');
+      await service.createBackup(destination: backup, selection: selection);
+      final prepared = await service.inspect(backup);
+      addTearDown(prepared.dispose);
+      final settingsFile =
+          File('${prepared.stagingDirectory.path}/data/settings.json');
+      final settings =
+          jsonDecode(await settingsFile.readAsString()) as Map<String, dynamic>;
+      if (selection.conversationId == 'dm:char-1') {
+        expect(settings, isNot(contains(GroupMuteStore.storageKey)));
+      } else {
+        expect(settings[GroupMuteStore.storageKey], {
+          'group-1': ['char-1'],
+          if (selection.scope != BackupScope.conversation)
+            'other': ['other-character'],
+        });
+      }
+      if (selection.scope == BackupScope.all) {
+        settings[GroupMuteStore.storageKey] = {'group-1': 'invalid'};
+        await settingsFile.writeAsString(jsonEncode(settings));
+        await expectLater(
+          StagedBackupData.load(prepared.stagingDirectory, prepared.manifest),
+          throwsA(isA<BackupException>()
+              .having((e) => e.message, 'message', '群禁言设置格式无效')),
+        );
+      }
+    }
+  });
+
+  test('group mute state remaps both group and character ids on copy restore',
+      () async {
+    final attachment = File('${mediaDirectory.path}/mute-copy.txt');
+    await attachment.writeAsString('task attachment');
+    await _seedCoreData(db, attachment);
+    // group-1 里禁言 char-1（由 _seedCoreData 建立，含该成员）。
+    await GroupMuteStore(db).setMuted(
+      groupId: 'group-1',
+      characterId: 'char-1',
+      muted: true,
+    );
+
+    final backup = File('${testRoot.path}/mute-copy.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(destination: backup);
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.copyWithNewIds,
+    );
+
+    final copiedGroup =
+        db.chatGroupBox.values.singleWhere((item) => item.id != 'group-1');
+    final copiedCharacter =
+        db.aiCharacterBox.values.singleWhere((item) => item.id != 'char-1');
+    expect(
+      GroupMuteStore(db).mutedFor(copiedGroup.id),
+      contains(copiedCharacter.id),
+      reason: '禁言是「群 + 角色」两层引用，只映射其中一层就会静默失效',
+    );
+  });
+
   test('copy restore preserves and remaps memory pin controls', () async {
     final attachment = File('${mediaDirectory.path}/memory-pins.txt');
     await attachment.writeAsString('memory pins');

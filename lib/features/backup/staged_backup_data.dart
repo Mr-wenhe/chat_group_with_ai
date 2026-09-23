@@ -7,6 +7,7 @@ import 'backup_entity_codec.dart';
 import 'backup_models.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/chat_group/group_mute_store.dart';
 
 part 'staged_backup_data_json_guard.dart';
 part 'staged_backup_data_validation.dart';
@@ -214,6 +215,7 @@ class StagedBackupData {
       'direct_chat_last_proactive_at',
       'group_chat_read_at',
       'group_chat_last_proactive_at',
+      GroupMuteStore.storageKey,
       'pinned_character_ids',
       'pinned_group_ids',
       'memory_pinned_keys_v1',
@@ -229,6 +231,17 @@ class StagedBackupData {
           !key.startsWith('work_mode_enabled:') &&
           !key.startsWith('context_compressed_through:')) {
         throw BackupException('备份包含不允许的设置：$key');
+      }
+    }
+    if (settings.containsKey(GroupMuteStore.storageKey)) {
+      final mutes = settings[GroupMuteStore.storageKey];
+      if (mutes is! Map ||
+          mutes.entries.any((entry) =>
+              entry.key is! String ||
+              (entry.key as String).isEmpty ||
+              entry.value is! List ||
+              (entry.value as List).any((id) => id is! String || id.isEmpty))) {
+        throw const BackupException('群禁言设置格式无效');
       }
     }
   }

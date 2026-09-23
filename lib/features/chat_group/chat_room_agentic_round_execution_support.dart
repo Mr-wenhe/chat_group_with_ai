@@ -128,7 +128,9 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
           final proxyId = notMentionedPending.first;
           // 仅在 proxyId 真实对应一个角色时才播报提醒，也清理脏 id。
           final matched = _characters.where((c) => c.id == proxyId).toList();
-          if (matched.isNotEmpty && _isEligibleToReply(matched.first)) {
+          if (matched.isNotEmpty &&
+              _isEligibleToReply(matched.first) &&
+              _mayAutoPick(matched.first, mentionedIds: mentionedIds.toSet())) {
             final proxyChar = matched.first;
             await _appendMessage(Message(
               groupId: widget.groupId,

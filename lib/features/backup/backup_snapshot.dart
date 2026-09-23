@@ -216,6 +216,7 @@ class _Snapshot {
       'direct_chat_last_proactive_at',
       'group_chat_read_at',
       'group_chat_last_proactive_at',
+      GroupMuteStore.storageKey,
       'pinned_character_ids',
       'pinned_group_ids',
       'memory_pinned_keys_v1',
@@ -233,6 +234,7 @@ class _Snapshot {
           key.startsWith('context_compressed_through:')) {
         final raw = db.appSettingsBox.get(key);
         final safe = switch (key) {
+          GroupMuteStore.storageKey => GroupMuteStore.normalize(raw),
           SearchProviderConfigStore.configsKey =>
             SearchProviderConfigStore.backupValue(raw),
           SearchProviderConfigStore.runtimeSettingsKey =>
@@ -261,6 +263,8 @@ class _Snapshot {
         'tts_enabled',
         'pinned_character_ids',
         'pinned_group_ids',
+        // 禁言是用户显式设定的偏好（而非阅后即焚的运行态），随配置一起走。
+        GroupMuteStore.storageKey,
         SearchProviderConfigStore.configsKey,
         SearchProviderConfigStore.defaultProviderKey,
         SearchProviderConfigStore.runtimeSettingsKey,
@@ -312,6 +316,12 @@ class _Snapshot {
       } else if (value is Map &&
           (key == 'group_chat_read_at' ||
               key == 'group_chat_last_proactive_at') &&
+          directCharacterId == null) {
+        if (value.containsKey(conversationId)) {
+          result[key] = {conversationId: value[conversationId]};
+        }
+      } else if (value is Map &&
+          key == GroupMuteStore.storageKey &&
           directCharacterId == null) {
         if (value.containsKey(conversationId)) {
           result[key] = {conversationId: value[conversationId]};

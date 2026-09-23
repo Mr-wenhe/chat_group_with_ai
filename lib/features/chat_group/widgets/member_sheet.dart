@@ -2,6 +2,9 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:flutter/material.dart';
 
+/// 成员行溢出菜单里的操作。
+enum _MemberAction { toggleMute, mention }
+
 class MemberStackChip extends StatelessWidget {
   final List<AICharacter> characters;
   final Color Function(AICharacter character) senderColor;
@@ -101,6 +104,17 @@ class MemberSheet extends StatefulWidget {
   final String Function(AICharacter character) statusText;
   final ValueChanged<AICharacter> onOpenSettings;
   final ValueChanged<AICharacter> onDirectChat;
+
+  /// 当前群被禁言的角色 id。面板内部持一份可变副本，使保存结果可见——
+  /// `showModalBottomSheet` 构建的 widget 不会随页面 `setState` 重建。
+  final Set<String> mutedIds;
+
+  /// 切换某角色的禁言状态。面板不自动关闭，方便连续设置多个成员。
+  final Future<void> Function(AICharacter character, bool muted)? onToggleMute;
+
+  /// 点名某角色发言：由页面把 `@` 插入输入框，复用既有提及通路。
+  final ValueChanged<AICharacter>? onMention;
+
   final VoidCallback? onAddMember;
 
   const MemberSheet({
@@ -111,6 +125,9 @@ class MemberSheet extends StatefulWidget {
     required this.statusText,
     required this.onOpenSettings,
     required this.onDirectChat,
+    this.mutedIds = const {},
+    this.onToggleMute,
+    this.onMention,
     this.onAddMember,
   });
 
@@ -120,6 +137,41 @@ class MemberSheet extends StatefulWidget {
 
 class _MemberSheetState extends State<MemberSheet> {
   final _searchController = TextEditingController();
+
+  /// 面板内的禁言状态副本，只在保存成功后刷新。
+  late Set<String> _mutedIds;
+  bool _savingMute = false;
+  String? _muteError;
+
+  @override
+  void initState() {
+    super.initState();
+    _mutedIds = {...widget.mutedIds};
+  }
+
+  Future<void> _toggleMute(AICharacter character) async {
+    if (_savingMute || widget.onToggleMute == null) return;
+    final muted = !_mutedIds.contains(character.id);
+    setState(() {
+      _savingMute = true;
+      _muteError = null;
+    });
+    try {
+      await widget.onToggleMute!(character, muted);
+      if (!mounted) return;
+      setState(() {
+        if (muted) {
+          _mutedIds.add(character.id);
+        } else {
+          _mutedIds.remove(character.id);
+        }
+      });
+    } catch (_) {
+      if (mounted) setState(() => _muteError = '禁言设置保存失败，请重试');
+    } finally {
+      if (mounted) setState(() => _savingMute = false);
+    }
+  }
 
   @override
   void dispose() {
@@ -210,6 +262,8 @@ class _MemberSheetState extends State<MemberSheet> {
             onChanged: (_) => setState(() {}),
           ),
           const SizedBox(height: 16),
+          if (_muteError != null)
+            Text(_muteError!, style: TextStyle(color: colorScheme.error)),
           Expanded(
             child: ListView(
               children: [
@@ -249,6 +303,7 @@ class _MemberSheetState extends State<MemberSheet> {
                         avatarColor: widget.senderColor(character),
                         name: character.name,
                         subtitle: widget.statusText(character),
+                        isMuted: _mutedIds.contains(character.id),
                         onOpenSettings: () {
                           Navigator.pop(context);
                           widget.onOpenSettings(character);
@@ -257,6 +312,16 @@ class _MemberSheetState extends State<MemberSheet> {
                           Navigator.pop(context);
                           widget.onDirectChat(character);
                         },
+                        onToggleMute: widget.onToggleMute == null || _savingMute
+                            ? null
+                            : () => _toggleMute(character),
+                        onMention: widget.onMention == null
+                            ? null
+                            : () {
+                                // 点名要把 @ 写进输入框，必须先收起面板。
+                                Navigator.pop(context);
+                                widget.onMention!(character);
+                              },
                       )),
               ],
             ),
@@ -273,8 +338,11 @@ class _MemberTile extends StatelessWidget {
   final String name;
   final String subtitle;
   final bool isOwner;
+  final bool isMuted;
   final VoidCallback? onOpenSettings;
   final VoidCallback? onDirectChat;
+  final VoidCallback? onToggleMute;
+  final VoidCallback? onMention;
 
   const _MemberTile({
     required this.avatarText,
@@ -282,8 +350,11 @@ class _MemberTile extends StatelessWidget {
     required this.name,
     required this.subtitle,
     this.isOwner = false,
+    this.isMuted = false,
     this.onOpenSettings,
     this.onDirectChat,
+    this.onToggleMute,
+    this.onMention,
   });
 
   @override
@@ -361,7 +432,8 @@ class _MemberTile extends StatelessWidget {
                 ),
                 const SizedBox(height: 2),
                 Text(
-                  subtitle,
+                  // 禁言放在副标题里：它是"该成员当前状态"，与在线/未配置 API 同类。
+                  isMuted ? '已禁言 · $subtitle' : subtitle,
                   style: TextStyle(
                     fontSize: 13,
                     color: colorScheme.onSurfaceVariant,
@@ -376,6 +448,33 @@ class _MemberTile extends StatelessWidget {
               icon: const Icon(Icons.chat_bubble_outline_rounded, size: 20),
               color: colorScheme.primary,
               tooltip: '私聊',
+            ),
+          // 禁言与点名放进溢出菜单：一行里挤三个图标按钮会挤掉成员名，
+          // 而这两个操作都是低频、非连续点击的动作。
+          if (onToggleMute != null || onMention != null)
+            PopupMenuButton<_MemberAction>(
+              tooltip: '更多操作',
+              icon: Icon(
+                Icons.more_vert_rounded,
+                size: 20,
+                color: colorScheme.onSurfaceVariant,
+              ),
+              onSelected: (action) => switch (action) {
+                _MemberAction.toggleMute => onToggleMute?.call(),
+                _MemberAction.mention => onMention?.call(),
+              },
+              itemBuilder: (context) => [
+                if (onToggleMute != null)
+                  PopupMenuItem(
+                    value: _MemberAction.toggleMute,
+                    child: Text(isMuted ? '取消禁言' : '禁言（@ 点名仍可回复）'),
+                  ),
+                if (onMention != null)
+                  const PopupMenuItem(
+                    value: _MemberAction.mention,
+                    child: Text('点名发言'),
+                  ),
+              ],
             ),
         ],
       ),

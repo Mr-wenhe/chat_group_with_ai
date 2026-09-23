@@ -58,6 +58,7 @@ import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 import 'package:chat_group/features/chat_group/chat_scroll_utils.dart';
 import 'package:chat_group/features/chat_group/conversation_controller.dart';
 import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
+import 'package:chat_group/features/chat_group/group_mute_store.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
@@ -146,6 +147,51 @@ part 'chat_room_voice_support.dart';
 /// - [unavailable]：没有任何配置了 API Key 的角色，功能不可用
 /// - [error]：上一轮生成失败
 enum AutoChatStatus { idle, waiting, generating, paused, unavailable, error }
+
+/// 由自动发言状态推导控制条下方的例外态提示；正常态返回 null。
+///
+/// 抽成纯函数而不是内联在页面里，是为了能直接覆盖 6 种状态的映射：误把正常态
+/// 渲染成提示条会长期占据消息空间，而那正是控制条注释里明确要避免的。
+ConversationStatusAlert? autoChatStatusAlert({
+  required bool workModeEnabled,
+  required bool autoChatEnabled,
+  required AutoChatStatus status,
+  required bool allMembersMuted,
+  required String blockedText,
+  required bool needsApiConfig,
+  VoidCallback? onConfigureApi,
+}) {
+  // 工作模式与总开关的优先级高于具体运行状态：它们是"为什么不发言"的根因。
+  if (workModeEnabled) {
+    return const ConversationStatusAlert(
+      message: '工作模式中，自动发言已暂停',
+      isWarning: false,
+    );
+  }
+  // 用户自己关掉的开关不需要提醒。
+  if (!autoChatEnabled) return null;
+  if (allMembersMuted) {
+    return const ConversationStatusAlert(
+      message: '全部成员已禁言：只有 @ 点名才会回复',
+      isWarning: false,
+    );
+  }
+  switch (status) {
+    case AutoChatStatus.error:
+      return const ConversationStatusAlert(message: '自动发言异常，请检查网络或 API 配置');
+    case AutoChatStatus.unavailable:
+      return ConversationStatusAlert(
+        message: blockedText,
+        actionLabel: needsApiConfig ? '去设置' : null,
+        onAction: needsApiConfig ? onConfigureApi : null,
+      );
+    case AutoChatStatus.idle:
+    case AutoChatStatus.waiting:
+    case AutoChatStatus.generating:
+    case AutoChatStatus.paused:
+      return null;
+  }
+}
 
 /// 构建群成员面板的性别、职业、年龄、回复状态和限额文案。
 String formatMemberStatus(
