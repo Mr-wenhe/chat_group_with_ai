@@ -112,15 +112,33 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       case AgentFinishDecision(:final completion):
         final completionFailure = await completionGuard?.call(task, completion);
         if (completionFailure != null && completionFailure.trim().isNotEmpty) {
-          return _fail(
-            state,
-            completionFailure,
-            failure: WorkFailure.fromLoopMessage(
+          if (state.completionRepairCount >= maxCompletionRepairs) {
+            return _fail(
+              state,
               completionFailure,
-              scope: 'completion',
-              completedContent: _completedContent(state),
-            ),
+              failure: WorkFailure.fromLoopMessage(
+                completionFailure,
+                scope: 'completion',
+                completedContent: _completedContent(state),
+              ),
+            );
+          }
+          state.completionRepairCount++;
+          state.completionRepairInstruction = _publicText(completionFailure);
+          task.lastError = state.completionRepairInstruction;
+          await _emit(
+            state,
+            WorkTaskEventKind.toolOutput,
+            '完成校验未通过，正在根据校验结果自动修复。',
+            detail: state.completionRepairInstruction,
+            safeMetadata: {
+              'scope': 'completion',
+              'automaticRepair': true,
+              'repair': state.completionRepairCount,
+            },
           );
+          await _checkpoint(state);
+          return null;
         }
         task
           ..resultSummary = _publicText(completion.summary)
@@ -130,6 +148,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
           ..lastError = ''
           ..pendingToolRequestJson = '';
         state.failure = null;
+        state.completionRepairInstruction = '';
         WorkFailure.clearFromTask(task);
         state.publicUpdates.add(publicUpdate);
         await _emit(
@@ -166,8 +185,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     bool Function()? repeats,
   }) async {
     if (state.toolRepairCount >= maxToolRepairs || (repeats?.call() ?? false)) {
-      const loopMessage =
-          '工具和错误反复出现，自动修复没有取得进展，已暂停。请检查权限、依赖或补充新的处理信息后继续。';
+      const loopMessage = '工具和错误反复出现，自动修复没有取得进展，已暂停。请检查权限、依赖或补充新的处理信息后继续。';
       return _pauseForUserAction(
         state,
         loopMessage,
@@ -609,11 +627,12 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     required WorkToolResult result,
   }) async {
     final task = state.task;
-    // A completed tool call is progress, so the repair budget starts over; the
+    // A completed tool call is progress, so the repair budgets start over; the
     // failure fingerprint history is deliberately left alone because a
     // successful read does not prove an earlier defect is gone.
     state.toolRepairCount = 0;
     state.toolRepairInstruction = '';
+    state.completionRepairCount = 0;
     state.pendingToolRequest = null;
     state.failure = null;
     WorkFailure.clearFromTask(task);

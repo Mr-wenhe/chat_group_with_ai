@@ -371,12 +371,9 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
   }
 
   void _clearArtifactDeliveryNotice(AgentTask task) {
-    final metadata = _decodeExecutionMetadata(task.executionStateJson);
-    metadata
-      ..remove('artifactDeliveryNoticePublished')
-      ..remove('artifactDeliveryMessageId')
-      ..remove('artifactDeliveryRetryOnly');
-    task.executionStateJson = metadata.isEmpty ? '' : jsonEncode(metadata);
+    task.executionStateJson = workWithoutArtifactDeliveryNotice(
+      task.executionStateJson,
+    );
   }
 
   /// Records the outcome of a delivery attempt that did not produce the

@@ -129,6 +129,7 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     _waitingForResources.clear();
     _conversationReservations.clear();
     _handoffsAwaitingLease.clear();
+    _autoResumeTaskIds.clear();
     _taskLockPlans.clear();
     _notifySlotAvailable();
     _readyConversations.clear();

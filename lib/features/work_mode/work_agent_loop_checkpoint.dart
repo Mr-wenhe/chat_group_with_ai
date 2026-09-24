@@ -164,15 +164,30 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
     );
   }
 
-  Future<void> _delayFor(_LoopState state, int retryNumber) async {
+  Future<void> _delayFor(
+    _LoopState state,
+    int retryNumber, {
+    Duration? retryAfter,
+  }) async {
     final index = retryNumber
         .clamp(0, WorkAgentLoop.defaultRetryDelays.length - 1)
         .toInt();
-    final delay = sleep(WorkAgentLoop.defaultRetryDelays[index]);
+    final base = WorkAgentLoop.defaultRetryDelays[index];
+    final delayDuration = retryAfter ?? _jitteredDelay(base);
+    final delay = sleep(delayDuration);
     await Future.any<void>(<Future<void>>[
       delay,
       state.cancellation.whenCancelled,
     ]);
+  }
+
+  Duration _jitteredDelay(Duration base) {
+    if (base == Duration.zero) return base;
+    final sample = retryJitter().clamp(0.0, 1.0).toDouble();
+    final factor = 1 + (sample * 2 - 1) * WorkAgentLoop.retryJitterRatio;
+    return Duration(
+      microseconds: (base.inMicroseconds * factor).round(),
+    );
   }
 
   Map<String, dynamic> _buildContext(_LoopState state) {
@@ -192,6 +207,8 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
       // is told what to do with the failed result it can already see.
       if (state.toolRepairInstruction.isNotEmpty)
         'previousToolFailure': state.toolRepairInstruction,
+      if (state.completionRepairInstruction.isNotEmpty)
+        'previousCompletionFailure': state.completionRepairInstruction,
       if (state.failure != null) 'workFailure': state.failure!.toJson(),
       'actionCount': task.actionCount,
       'actionLimit': _effectiveActionLimit(task),

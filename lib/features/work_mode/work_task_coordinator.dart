@@ -57,6 +57,14 @@ class WorkTaskCoordinator {
     Duration(seconds: 30),
     Duration(seconds: 90),
   ];
+  /// Upper bound on one automatic-resume attempt.
+  ///
+  /// An app-initiated retry must not be able to sit on a slot for the whole
+  /// model deadline (300s) just because the provider is unreachable, so the
+  /// round is cancelled at this point and counted as a failed attempt, which
+  /// puts the next step of [defaultAutoResumeDelays] in charge. User-initiated
+  /// runs are deliberately not bounded this way.
+  static const Duration defaultAutoResumeRoundTimeout = Duration(seconds: 120);
 
   /// A user stop is terminal by design, but a task that has not committed a
   /// mutation can safely be restarted from zero.  This narrow predicate keeps
@@ -92,8 +100,10 @@ class WorkTaskCoordinator {
   final WorkContextBuilder _contextBuilder;
   final WorkFollowUpPolicy _followUpPolicy;
   final DateTime Function() _clock;
+
   /// The delay ladder for automatic resumes of a retryable failure.
   final List<Duration> autoResumeDelays;
+  final Duration autoResumeRoundTimeout;
   final WorkTaskActionNotifier? _userActionNotifier;
   final bool? _installerIsWindows;
   final bool? _installerIsMacOS;
@@ -122,6 +132,7 @@ class WorkTaskCoordinator {
   final Map<String, Future<void>> _folderActionRuns = <String, Future<void>>{};
   final Set<String> _conversationReservations = <String>{};
   final Set<String> _handoffsAwaitingLease = <String>{};
+  final Set<String> _autoResumeTaskIds = <String>{};
   final Set<String> _startingTaskIds = <String>{};
   final Queue<Completer<void>> _slotWaiters = Queue<Completer<void>>();
   Future<WorkFolderRequestResult>? _folderRequest;
@@ -150,6 +161,7 @@ class WorkTaskCoordinator {
     bool? installerIsMacOS,
     DateTime Function()? clock,
     List<Duration>? autoResumeDelays,
+    Duration? autoResumeRoundTimeout,
   })  : _taskBox = taskBox,
         _eventStore = eventStore,
         _runner = runner,
@@ -169,7 +181,9 @@ class WorkTaskCoordinator {
         _clock = clock ?? DateTime.now,
         autoResumeDelays = List<Duration>.unmodifiable(
           autoResumeDelays ?? defaultAutoResumeDelays,
-        ) {
+        ),
+        autoResumeRoundTimeout =
+            autoResumeRoundTimeout ?? defaultAutoResumeRoundTimeout {
     if (runner case final WorkTaskProgressReporter reporter) {
       reporter.setTaskUpdateSink(_publishFromRunner);
     }

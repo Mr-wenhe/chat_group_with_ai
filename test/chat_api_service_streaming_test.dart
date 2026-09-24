@@ -493,6 +493,67 @@ void main() {
     }
   });
 
+  test('streamed HTTP failures preserve a bounded Retry-After hint', () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 429,
+          headers: Headers.fromMap({
+            'retry-after': ['7'],
+          }),
+          data: ResponseBody(const Stream<Uint8List>.empty(), 429),
+        ));
+      },
+    ));
+
+    final events = <ChatStreamEvent>[];
+    final result = await ChatApiService(dio: dio).sendChatMessageStreamed(
+      apiKey: 'test-key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'test-model',
+      messages: const [
+        {'role': 'user', 'content': '继续工作'}
+      ],
+      maxRetries: 0,
+      onEvent: events.add,
+    );
+
+    expect(events.single.retryAfter, const Duration(seconds: 7));
+    expect(result['retryAfterMs'], 7000);
+  });
+
+  test('Retry-After HTTP dates use the same two-minute safety bound', () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 429,
+          headers: Headers.fromMap({
+            'Retry-After': ['Fri, 01 Jan 2099 00:00:00 GMT'],
+          }),
+          data: ResponseBody(const Stream<Uint8List>.empty(), 429),
+        ));
+      },
+    ));
+
+    final result = await ChatApiService(dio: dio).sendChatMessageStreamed(
+      apiKey: 'test-key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'test-model',
+      messages: const [
+        {'role': 'user', 'content': '继续工作'}
+      ],
+      maxRetries: 0,
+    );
+
+    expect(result['retryAfterMs'], const Duration(minutes: 2).inMilliseconds);
+  });
+
   test('streamed completion falls back to non-stream on fifth retry', () async {
     late RequestOptions fallbackRequest;
     final dio = Dio();

@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -160,7 +161,19 @@ class WorkAgentLoop
   // one to three rounds) so a task that is still making progress is never
   // paused for being slow; the 100-action budget remains the outer limit.
   static const int defaultMaxToolRepairs = 8;
+  // How many times a rejected finish may be handed back to the model before the
+  // task fails. Unlike the tool budget this one is deliberately small: a
+  // completion guard failure means the model claimed done work that is not
+  // there, so a couple of corrections are worth trying, and beyond that the
+  // claim is the problem. The count restarts whenever a tool call succeeds, so
+  // this bounds one progress segment rather than the whole run; the 100-action
+  // budget is what bounds the run.
+  static const int defaultMaxCompletionRepairs = 2;
   static const int maxRetryCountCap = 5;
+  /// Fraction by which a model/tool backoff delay is randomly stretched or
+  /// shaved (0.2 = ±20%), so two concurrent tasks do not retry in lockstep.
+  /// Injected as a 0..1 sample; a server-provided Retry-After is never jittered.
+  static const double retryJitterRatio = 0.2;
   // Must have one entry per configured retry: a shorter ladder silently repeats
   // its last delay and turns the extra retries into back-to-back attempts.
   static const List<Duration> defaultRetryDelays = [
@@ -204,6 +217,10 @@ class WorkAgentLoop
   final int maxProtocolRetries;
   final int maxToolRetries;
   final int maxToolRepairs;
+  final int maxCompletionRepairs;
+  /// Returns a 0..1 sample used to jitter a backoff delay. Injectable so tests
+  /// can pin the delay; production uses [Random.nextDouble].
+  final double Function() retryJitter;
   final String systemPrompt;
   void Function(AgentTask task)? _taskUpdateSink;
   WorkAgentCheckpointSink? _taskCheckpointSink;
@@ -230,6 +247,8 @@ class WorkAgentLoop
     int? maxProtocolRetries,
     int? maxToolRetries,
     int? maxToolRepairs,
+    int? maxCompletionRepairs,
+    double Function()? retryJitter,
     this.systemPrompt = '',
   })  : parser = parser ?? const AgentDecisionParser(),
         contextBuilder = contextBuilder ?? const WorkContextBuilder(),
@@ -248,7 +267,11 @@ class WorkAgentLoop
         ),
         maxToolRepairs = _boundRetryCount(
           maxToolRepairs ?? defaultMaxToolRepairs,
-        );
+        ),
+        maxCompletionRepairs = _boundRetryCount(
+          maxCompletionRepairs ?? defaultMaxCompletionRepairs,
+        ),
+        retryJitter = retryJitter ?? Random().nextDouble;
 
   static int _boundRetryCount(int value) =>
       value.clamp(0, maxRetryCountCap).toInt();

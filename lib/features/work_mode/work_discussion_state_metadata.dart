@@ -156,6 +156,27 @@ bool workArtifactDeliveryRetryPending(String executionStateJson) {
   }
 }
 
+/// Removes a pending artifact-delivery notice from an execution checkpoint.
+///
+/// A stage that hands the task to the next role must not leave its own resend
+/// marker behind: the next role's run would otherwise enter the delivery-only
+/// branch and re-send the previous stage's message instead of executing its own
+/// stage. Returns the input unchanged when it cannot be read as a map.
+String workWithoutArtifactDeliveryNotice(String executionStateJson) {
+  if (executionStateJson.trim().isEmpty) return executionStateJson;
+  try {
+    final decoded = jsonDecode(executionStateJson);
+    if (decoded is! Map) return executionStateJson;
+    final metadata = Map<String, dynamic>.from(decoded)
+      ..remove('artifactDeliveryNoticePublished')
+      ..remove('artifactDeliveryMessageId')
+      ..remove('artifactDeliveryRetryOnly');
+    return metadata.isEmpty ? '' : jsonEncode(metadata);
+  } on Object {
+    return executionStateJson;
+  }
+}
+
 /// Reduces an unsupported execution checkpoint to the small set of fields
 /// that can still explain a recovery gate. Capability grants and opaque future
 /// fields are deliberately dropped; the review marker keeps the task paused

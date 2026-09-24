@@ -1150,6 +1150,60 @@ void main() {
       isTrue,
     );
   });
+
+  test('a pending delivery notice is cleared without touching other keys', () {
+    final cleared = workWithoutArtifactDeliveryNotice(jsonEncode({
+      'artifactDeliveryNoticePublished': true,
+      'artifactDeliveryRetryOnly': true,
+      'artifactDeliveryMessageId': 'message-1',
+      'committedActionKeys': <String>['op'],
+    }));
+    final decoded = jsonDecode(cleared) as Map<String, dynamic>;
+
+    expect(decoded.containsKey('artifactDeliveryNoticePublished'), isFalse);
+    expect(decoded.containsKey('artifactDeliveryRetryOnly'), isFalse);
+    expect(decoded.containsKey('artifactDeliveryMessageId'), isFalse);
+    expect(decoded['committedActionKeys'], <String>['op']);
+  });
+
+  test('clearing the last remaining key yields an empty checkpoint', () {
+    expect(
+      workWithoutArtifactDeliveryNotice(jsonEncode({
+        'artifactDeliveryNoticePublished': true,
+        'artifactDeliveryRetryOnly': true,
+        'artifactDeliveryMessageId': 'message-1',
+      })),
+      '',
+    );
+  });
+
+  test('a damaged checkpoint is not wiped by the delivery-notice clear', () {
+    // 非 map 的检查点是被损坏或来自未来版本的记录：只清标记不能把它抹成空串，
+    // 否则它看起来就像一个可运行的 legacy 状态。
+    expect(workWithoutArtifactDeliveryNotice('[1,2]'), '[1,2]');
+    expect(workWithoutArtifactDeliveryNotice('not-json'), 'not-json');
+    expect(workWithoutArtifactDeliveryNotice(''), '');
+  });
+
+  test('a delivery retry is pending only with a published message id', () {
+    expect(
+      workArtifactDeliveryRetryPending(jsonEncode({
+        'artifactDeliveryNoticePublished': true,
+        'artifactDeliveryRetryOnly': true,
+        'artifactDeliveryMessageId': 'message-1',
+      })),
+      isTrue,
+    );
+    expect(
+      workArtifactDeliveryRetryPending(jsonEncode({
+        'artifactDeliveryNoticePublished': true,
+        'artifactDeliveryRetryOnly': true,
+      })),
+      isFalse,
+      reason: '没有消息 id 就没有可重发的对象',
+    );
+    expect(workArtifactDeliveryRetryPending(''), isFalse);
+  });
 }
 
 /// Builds a task whose request names [request] and whose only recorded artifact

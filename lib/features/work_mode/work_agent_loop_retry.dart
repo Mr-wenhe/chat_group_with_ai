@@ -100,9 +100,23 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
         detail: '第 ${attempt + 1} 次重试',
         safeMetadata: {'retry': attempt + 1, 'scope': 'model'},
       );
-      await _delayFor(state, attempt);
+      await _delayFor(
+        state,
+        attempt,
+        retryAfter: _retryAfter(response),
+      );
     }
     return last ?? const {};
+  }
+
+  Duration? _retryAfter(Map<String, dynamic>? response) {
+    final milliseconds = response?['retryAfterMs'];
+    if (milliseconds is! num || milliseconds < 0) return null;
+    final bounded = milliseconds
+        .toInt()
+        .clamp(0, const Duration(minutes: 2).inMilliseconds)
+        .toInt();
+    return Duration(milliseconds: bounded);
   }
 
   Future<String?> _repairModel(

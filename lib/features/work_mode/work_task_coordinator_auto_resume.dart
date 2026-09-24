@@ -56,6 +56,7 @@ extension _WorkTaskCoordinatorAutoResume on WorkTaskCoordinator {
       if (attempt >= autoResumeDelays.length) return;
       if (!_persistAutoResumeCount(task, attempt + 1)) return;
       await _save(task);
+      _autoResumeTaskIds.add(task.id);
       await _requeueFailedTask(
         task,
         failure,

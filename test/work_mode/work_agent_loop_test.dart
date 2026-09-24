@@ -195,10 +195,13 @@ WorkAgentLoop _loop({
   _FakeClock? clock,
   List<WorkTaskEvent>? events,
   Future<void> Function(Duration)? sleep,
+  double Function()? retryJitter,
   int? maxModelRetries,
   int? maxToolRetries,
   int? maxToolRepairs,
+  int? maxCompletionRepairs,
   WorkAgentArtifactCompletion? artifactCompletion,
+  WorkAgentCompletionGuard? completionGuard,
   WorkAgentPreflightTool? preflightTool,
 }) {
   return WorkAgentLoop(
@@ -206,10 +209,13 @@ WorkAgentLoop _loop({
     registry: registry,
     clock: clock?.call,
     sleep: sleep ?? (_) async {},
+    retryJitter: retryJitter ?? () => 0.5,
     maxModelRetries: maxModelRetries,
     maxToolRetries: maxToolRetries,
     maxToolRepairs: maxToolRepairs,
+    maxCompletionRepairs: maxCompletionRepairs,
     artifactCompletion: artifactCompletion,
+    completionGuard: completionGuard,
     preflightTool: preflightTool,
     onEvent: events == null
         ? null
@@ -610,7 +616,8 @@ void main() {
     expect(result.retryCount, 1);
   });
 
-  test('uses the extended model retry budget across a growing backoff', () async {
+  test('uses the extended model retry budget across a growing backoff',
+      () async {
     // 退避阶梯必须覆盖全部重试次数：阶梯短于预算时，末尾延迟会被重复使用，
     // 那次重试就等于没有更长的等待。
     final model = _FakeModel();
@@ -637,6 +644,173 @@ void main() {
     expect(result.modelRetryCount, WorkAgentLoop.defaultMaxModelRetries);
     expect(delays, WorkAgentLoop.defaultRetryDelays);
     expect(delays.last, const Duration(seconds: 8));
+  });
+
+  test('honors Retry-After and jitters ordinary model backoff', () async {
+    final retryAfterModel = _FakeModel()
+      ..responses.add({
+        'success': false,
+        'statusCode': 429,
+        'retryAfterMs': 7000,
+        'message': '请求过于频繁',
+      })
+      ..responses.add(_finishDecision());
+    final retryAfterDelays = <Duration>[];
+    final retryAfterLoop = _loop(
+      model: retryAfterModel,
+      registry: WorkToolRegistry(),
+      maxModelRetries: 1,
+      retryJitter: () => 1,
+      sleep: (delay) async => retryAfterDelays.add(delay),
+    );
+
+    final retryAfterResult = await retryAfterLoop.execute(
+      _task(id: 'model-retry-after'),
+    );
+
+    expect(retryAfterResult.status, WorkAgentLoopStatus.completed);
+    expect(retryAfterDelays, [const Duration(seconds: 7)]);
+
+    final jitterModel = _FakeModel()
+      ..responses.add({
+        'success': false,
+        'statusCode': 503,
+        'message': '服务暂时不可用',
+      })
+      ..responses.add(_finishDecision());
+    final jitterDelays = <Duration>[];
+    final jitterLoop = _loop(
+      model: jitterModel,
+      registry: WorkToolRegistry(),
+      maxModelRetries: 1,
+      retryJitter: () => 1,
+      sleep: (delay) async => jitterDelays.add(delay),
+    );
+
+    final jitterResult = await jitterLoop.execute(
+      _task(id: 'model-retry-jitter'),
+    );
+
+    expect(jitterResult.status, WorkAgentLoopStatus.completed);
+    expect(jitterDelays, [const Duration(milliseconds: 300)]);
+  });
+
+  test('feeds completion guard failures back to the next model decision',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_finishDecision('第一次完成'))
+      ..responses.add(_finishDecision('修复后完成'));
+    var guardCalls = 0;
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      completionGuard: (_, __) {
+        guardCalls++;
+        return guardCalls == 1 ? '用户要求 xlsx 文件，但尚未生成真实文件。' : null;
+      },
+    );
+
+    final task = _task(id: 'completion-guard-repair');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(task.status, AgentTaskStatus.completed);
+    expect(model.requests, hasLength(2));
+    expect(
+      model.requests[1].context['previousCompletionFailure'],
+      contains('尚未生成真实文件'),
+    );
+    expect(guardCalls, 2);
+  });
+
+  test('a successful tool call restores the completion repair budget',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_finishDecision('第一次完成'))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_finishDecision('第二次完成'))
+      ..responses.add(_finishDecision('第三次完成'));
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.success(message: '读取成功');
+    var guardCalls = 0;
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+      maxCompletionRepairs: 1,
+      completionGuard: (_, __) {
+        guardCalls++;
+        // 前两次未通过，而第 2 次紧跟在一次成功的工具调用之后：那次成功必须把
+        // 预算归零，否则第 2 次就已经超预算、任务会被直接判失败。
+        return guardCalls <= 2 ? '尚未生成真实文件。' : null;
+      },
+    );
+
+    final result = await loop.execute(_task(id: 'completion-repair-reset'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(guardCalls, 3);
+    expect(tool.calls, 1);
+    // finish / tool / finish / finish：失败后各要一次新决策，最后一次通过。
+    expect(model.requests, hasLength(4));
+  });
+
+  test('a persistently failing completion guard fails after its repair budget',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_finishDecision('第一次完成'))
+      ..responses.add(_finishDecision('第二次完成'))
+      ..responses.add(_finishDecision('第三次完成'));
+    var guardCalls = 0;
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      maxCompletionRepairs: 2,
+      completionGuard: (_, __) {
+        guardCalls++;
+        return '用户要求 xlsx 文件，但尚未生成真实文件。';
+      },
+    );
+
+    final result = await loop.execute(_task(id: 'completion-repair-exhaust'));
+
+    expect(result.status, WorkAgentLoopStatus.failed);
+    expect(result.failure?.reason, contains('尚未生成真实文件'));
+    expect(guardCalls, 3, reason: '首次 + 两次修复，之后必须判失败而不是继续循环');
+    expect(model.requests, hasLength(3));
+  });
+
+  test('completion repairs restart after every successful tool call', () async {
+    // 预算是按进展分段的：每次成功的工具调用都会重置，所以整轮可以修 3 次以上
+    // （示例为 3 次），最终由 100 步动作上限兜底，而不是整轮只修 2 次。
+    final model = _FakeModel()
+      ..responses.add(_finishDecision('第一次完成'))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_finishDecision('第二次完成'))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_finishDecision('第三次完成'))
+      ..responses.add(_finishDecision('第四次完成'));
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.success(message: '读取成功');
+    var guardCalls = 0;
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+      completionGuard: (_, __) {
+        guardCalls++;
+        return guardCalls <= 3 ? '尚未生成真实文件。' : null;
+      },
+    );
+
+    final result = await loop.execute(_task(id: 'completion-repair-cycles'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(guardCalls, 4);
+    expect(tool.calls, 2);
+    expect(model.requests, hasLength(6));
   });
 
   test('retries an empty model completion from the latest checkpoint',

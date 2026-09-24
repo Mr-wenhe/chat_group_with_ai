@@ -122,6 +122,33 @@ void main() {
     expect(calls, 1);
   });
 
+  test('non-stream HTTP failures preserve Retry-After', () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response(
+          requestOptions: options,
+          statusCode: 429,
+          headers: Headers.fromMap({
+            'Retry-After': ['7'],
+          }),
+          data: {'error': 'busy'},
+        ));
+      },
+    ));
+
+    final result = await ChatApiService(dio: dio).sendChatMessage(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['retryAfterMs'], 7000);
+  });
+
   test('non-stream provider error body is never exposed to callers', () async {
     const secretProviderBody = 'provider-internal-secret-42';
     final dio = Dio();

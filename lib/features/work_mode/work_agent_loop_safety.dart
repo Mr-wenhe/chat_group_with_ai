@@ -870,12 +870,14 @@ class _LoopState {
   int protocolRepairAttempts = 0;
   int invalidCommandRepairCount = 0;
   int toolRepairCount = 0;
+  int completionRepairCount = 0;
   int unchangedMutationCount = 0;
 
   /// Turn-scoped instruction describing what the last tool call got wrong. It
   /// is deliberately not durable: a resumed run rebuilds it from the
   /// checkpointed tool results instead of trusting in-memory text.
   String toolRepairInstruction = '';
+  String completionRepairInstruction = '';
   final List<String> commandFailureKeys = <String>[];
 
   /// Counts identical process outcomes, independent of the command text, so a

@@ -35,6 +35,7 @@ class _FakeWorkTaskRunner
   final List<String> cancelledTaskIds = <String>[];
   final Set<String> throwTaskIds = <String>{};
   final Set<String> failOnCompletion = <String>{};
+  final Set<String> waitForCancellationTaskIds = <String>{};
 
   /// Error raised for [throwTaskIds]. A transport error exercises the
   /// coordinator's automatic resume; the default exercises a plain failure.
@@ -69,6 +70,12 @@ class _FakeWorkTaskRunner
     if (throwTaskIds.contains(task.id)) {
       startedTaskIds.add(task.id);
       throw throwError;
+    }
+    if (waitForCancellationTaskIds.contains(task.id)) {
+      startedTaskIds.add(task.id);
+      await cancellation.whenCancelled;
+      cancelledTaskIds.add(task.id);
+      return;
     }
     (_attachments[task.id] ??= <String>[]).add(_attachmentIdOf(task));
     final completion = Completer<void>();
@@ -802,7 +809,7 @@ void main() {
       taskBox: taskBox,
       eventStore: eventStore,
       runner: runner,
-      autoResumeDelays: const <Duration>[Duration.zero],
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 30)],
     );
     addTearDown(localCoordinator.dispose);
     final task = _task(id: 'no-auto-resume', conversationId: 'dm:worker');
@@ -994,6 +1001,83 @@ void main() {
     // 重发是用户动作：自动续跑只恢复 failed 任务，不会替用户再发一条消息。
     expect(runner.startedTaskIds, isEmpty);
     expect(_autoResumeCountOf(task), 0);
+  });
+
+  test('bounds an automatic resume round and cancels the runner', () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 30)],
+      autoResumeRoundTimeout: const Duration(milliseconds: 20),
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'auto-resume-timeout', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+    runner.waitForCancellationTaskIds.add(task.id);
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+    runner.throwTaskIds.remove(task.id);
+    await _waitForStartedCount(runner, 2);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+
+    expect(task.status, AgentTaskStatus.failed);
+    expect(task.lastError, contains('任务执行超时'));
+    expect(runner.cancelledTaskIds, contains(task.id));
+    expect(task.resumeRequired, isTrue);
+  });
+
+  test('a manual retry never inherits the automatic resume round deadline',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 150)],
+      autoResumeRoundTimeout: const Duration(milliseconds: 50),
+    );
+    addTearDown(localCoordinator.dispose);
+    final victim = _task(id: 'deadline-handover', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(victim.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    // 先让受害者失败一次并排上自动续跑，随后用同会话的占位任务占住会话：同会话
+    // 串行是协调器的硬约束，比抢全局槽位更确定地让续跑那一轮排不上队。
+    await localCoordinator.submit(victim);
+    await _waitForTaskState(
+      taskBox,
+      victim.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+    final holder = _task(id: 'conversation-holder', conversationId: 'dm:worker');
+    await localCoordinator.submit(holder);
+    await _waitForStartedCount(runner, 2);
+
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(_autoResumeCountOf(victim), 1, reason: '自动续跑应先发生并排在同会话队列里');
+
+    // 用户此时手动重试：这一轮是用户发起的，不该被只用于约束 App 自动尝试的
+    // 轮次时限取消。
+    runner.throwTaskIds.remove(victim.id);
+    runner.waitForCancellationTaskIds.add(victim.id);
+    await localCoordinator.retry(victim.id);
+    runner.complete(holder.id);
+    await _waitForStartedCount(runner, 3);
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+
+    expect(
+      runner.cancelledTaskIds,
+      isNot(contains(victim.id)),
+      reason: '用户发起的运行不该被自动续跑的轮次时限取消',
+    );
+    expect(victim.status, isNot(AgentTaskStatus.failed));
+    expect(victim.resumeRequired, isFalse);
   });
 
   test('rejects external discussion overwrite and restarts a renewed revision',
@@ -2195,6 +2279,66 @@ void main() {
     expect(runner.startedTaskIds, ['handoff-product', 'handoff-developer']);
     expect(runner.maximumActiveForOneConversation, 1);
     runner.complete(developer.id);
+  });
+
+  test('handoff advances after a completed stage with delivery retry pending',
+      () async {
+    final task = _task(
+      id: 'handoff-delivery-failure',
+      conversationId: 'handoff-delivery-group',
+      characterId: 'product',
+    );
+    WorkHandoffState.persistToTask(
+      task,
+      WorkHandoffState.initial(
+        conversationId: task.groupId,
+        stages: [
+          WorkHandoffStage(id: 'product', label: '产品', roleId: 'product'),
+          WorkHandoffStage(id: 'developer', label: '开发', roleId: 'developer'),
+        ],
+      ),
+    );
+    final execution =
+        jsonDecode(task.executionStateJson) as Map<String, dynamic>
+          ..addAll(<String, dynamic>{
+            'artifactDeliveryNoticePublished': true,
+            'artifactDeliveryRetryOnly': true,
+            'artifactDeliveryMessageId': 'handoff-delivery-message',
+          });
+    task
+      ..executionStateJson = jsonEncode(execution)
+      ..resultSummary = '产品阶段已完成，但附件待重发。'
+      ..lastArtifactPaths = const ['/workspace/report.docx'];
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'artifactDelivery',
+        message: '文件已保存，但附件发送失败；可重试交付。',
+        scope: 'delivery',
+        completedContent: task.lastArtifactPaths,
+        retryable: true,
+      ),
+    );
+    await coordinator.submit(task);
+    task.status = AgentTaskStatus.completed;
+    await _waitForStartedCount(runner, 1);
+    runner.complete(task.id);
+    await _waitForStartedCount(runner, 2);
+
+    expect(task.characterId, 'developer');
+    expect(
+      task.status,
+      anyOf(AgentTaskStatus.queued, AgentTaskStatus.planning),
+    );
+    // 上一阶段的待重发标记不能跟着任务进入下一角色：否则下一角色的 run 会命中
+    // 「queued + 投递标记」的专用分支去重发上一条消息，自己的阶段根本不执行。
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)
+          .containsKey('artifactDeliveryRetryOnly'),
+      isFalse,
+    );
+    expect(task.workFailure, isNull);
+    runner.complete(task.id);
   });
 
   test('100 same-conversation role handoffs never overlap active roles',

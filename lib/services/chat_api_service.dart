@@ -305,6 +305,7 @@ class ChatApiService {
         };
       } else {
         final providerError = _safeProviderErrorDetail(responseData);
+        final retryAfter = _retryAfterFromHeaders(response.headers);
         return {
           'success': false,
           'statusCode': response.statusCode,
@@ -312,6 +313,7 @@ class ChatApiService {
           'requestPath': _requestPath(url),
           'requestModel': modelName,
           if (providerError != null) 'providerError': providerError,
+          if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
         };
       }
     } on _ChatResponseTooLargeException {
@@ -327,6 +329,7 @@ class ChatApiService {
         return {'success': false, 'message': '网络连接失败：无法连接到服务器'};
       } else if (e.response != null) {
         final providerError = _safeProviderErrorDetail(e.response!.data);
+        final retryAfter = _retryAfterFromHeaders(e.response!.headers);
         return {
           'success': false,
           'statusCode': e.response!.statusCode,
@@ -336,6 +339,7 @@ class ChatApiService {
           ),
           'requestModel': modelName,
           if (providerError != null) 'providerError': providerError,
+          if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
         };
       } else {
         return {'success': false, 'message': '请求失败'};
@@ -631,7 +635,10 @@ class ChatApiService {
       );
 
       if (response.statusCode != 200) {
-        yield ChatStreamEvent.error(_safeHttpErrorMessage(response.statusCode));
+        yield ChatStreamEvent.error(
+          _safeHttpErrorMessage(response.statusCode),
+          retryAfter: _retryAfterFromHeaders(response.headers),
+        );
         return;
       }
 
@@ -663,7 +670,10 @@ class ChatApiService {
             : protocolParser!.ingestLine(line);
         if (event != null) {
           yield event.type == ChatStreamEventType.error
-              ? ChatStreamEvent.error(_safeStreamErrorMessage(event.message))
+              ? ChatStreamEvent.error(
+                  _safeStreamErrorMessage(event.message),
+                  retryAfter: event.retryAfter,
+                )
               : event;
           if (parser.terminated || protocolParser?.terminated == true) return;
         }
@@ -678,7 +688,10 @@ class ChatApiService {
     } on SseInputLimitException {
       yield ChatStreamEvent.error('流式响应超过安全大小限制');
     } on DioException catch (e) {
-      yield ChatStreamEvent.error(_dioErrorMessage(e));
+      yield ChatStreamEvent.error(
+        _dioErrorMessage(e),
+        retryAfter: _retryAfterFromHeaders(e.response?.headers),
+      );
     } catch (e) {
       yield ChatStreamEvent.error('请求失败');
     }

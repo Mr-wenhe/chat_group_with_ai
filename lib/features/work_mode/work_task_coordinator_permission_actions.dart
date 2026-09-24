@@ -435,6 +435,9 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
       _conversationReservations.remove(task.groupId);
       _makeConversationReady(task.groupId);
       _taskLockPlans.remove(taskId);
+      // A stop ends any pending automatic attempt for this task, so a later
+      // restart cannot inherit its round deadline.
+      _autoResumeTaskIds.remove(taskId);
       final droppedFollowUps =
           List<String>.unmodifiable(task.queuedUserRequests);
       task

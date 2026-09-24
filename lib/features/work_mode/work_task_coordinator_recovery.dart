@@ -176,6 +176,11 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
           _discussionStartingIds.contains(taskId)) {
         throw StateError('群讨论正在进行，不能同时重试。');
       }
+      // A retry that is allowed to proceed takes the task over from any pending
+      // automatic resume: without this the user's own run would inherit the
+      // round deadline that exists only to bound an app-initiated attempt. A
+      // rejected retry above leaves the pending attempt untouched.
+      _autoResumeTaskIds.remove(taskId);
       final restartFromBeginning =
           WorkTaskCoordinator.canRestartAfterUserStop(task);
       // A finished task can still be waiting to re-send a deliverable that was

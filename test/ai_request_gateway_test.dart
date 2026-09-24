@@ -21,6 +21,10 @@ class FakeCompletionClient extends ChatApiService {
   /// Result returned by the structured streamed call when set; lets a test
   /// simulate a provider rejection that carries an HTTP status.
   Map<String, dynamic>? structuredStreamedResult;
+
+  /// Result returned by the bounded compatibility call when set, so a test can
+  /// exercise the fallback path's own failure payload.
+  Map<String, dynamic>? boundedResult;
   final temperatures = <double>[];
   Future<Map<String, dynamic>> Function(int count)? responder;
 
@@ -68,7 +72,7 @@ class FakeCompletionClient extends ChatApiService {
   }) async {
     boundedCount++;
     boundedReceiveTimeouts.add(receiveTimeout ?? Duration.zero);
-    return {'success': true, 'message': '{}'};
+    return boundedResult ?? {'success': true, 'message': '{}'};
   }
 
   @override
@@ -451,6 +455,70 @@ void main() {
       expect(client.boundedCount, 0, reason: '$failure 不应触发兼容路径');
       expect(client.streamedCount, 0, reason: '$failure 不应触发兼容路径');
     }
+  });
+
+  test('Retry-After 提示穿过网关的直返与兼容两条路径', () async {
+    final directClient = FakeCompletionClient()
+      ..structuredStreamedResult = {
+        'success': false,
+        'statusCode': 402,
+        'retryAfterMs': 5000,
+        'message': '需要付费',
+      };
+    final directGateway = AiRequestGateway(
+      store: MemoryGovernanceStore(),
+      client: directClient,
+    );
+
+    final direct = await directGateway.sendChatMessageStreamed(
+      apiKey: 'secret',
+      provider: ApiProvider.deepseek,
+      model: 'deepseek-chat',
+      messages: messages,
+      purpose: AiRequestPurpose.agent,
+      conversationId: 'work-task',
+      characterId: 'worker',
+      maxRetries: 0,
+      requiresTools: true,
+    );
+
+    // 非重试状态直接返回流式结果：提示不能被字段收窄丢掉。
+    expect(directClient.boundedCount, 0);
+    expect(direct['retryAfterMs'], 5000);
+
+    final fallbackClient = FakeCompletionClient()
+      ..structuredStreamedResult = {
+        'success': false,
+        'statusCode': 429,
+        'retryAfterMs': 7000,
+        'message': 'HTTP 429 请求失败',
+      }
+      ..boundedResult = {
+        'success': false,
+        'statusCode': 429,
+        'retryAfterMs': 3000,
+        'message': 'HTTP 429 请求失败',
+      };
+    final fallbackGateway = AiRequestGateway(
+      store: MemoryGovernanceStore(),
+      client: fallbackClient,
+    );
+
+    final fallback = await fallbackGateway.sendChatMessageStreamed(
+      apiKey: 'secret',
+      provider: ApiProvider.deepseek,
+      model: 'deepseek-chat',
+      messages: messages,
+      purpose: AiRequestPurpose.agent,
+      conversationId: 'work-task',
+      characterId: 'worker',
+      maxRetries: 0,
+      requiresTools: true,
+    );
+
+    // 429 会落到兼容路径，最终生效的是那次调用的提示，同样不能被丢掉。
+    expect(fallbackClient.boundedCount, 1);
+    expect(fallback['retryAfterMs'], 3000);
   });
 
   test('工作模式对客户端标记为可重试的空回复仍走兼容路径', () async {
