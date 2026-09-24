@@ -119,27 +119,47 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     return Duration(milliseconds: bounded);
   }
 
+  /// 供应商在输出上限处截断时的失败原因。
+  ///
+  /// 正文缺少结尾，动作 JSON 必然解析失败；带上已输出的 token 数是为了让
+  /// 「模型把预算烧在了重复内容上」这类故障一眼可见。
+  String _truncatedOutputDetail(Map<String, dynamic> response) {
+    final completion = response['completionTokens'];
+    return completion is int && completion > 0
+        ? '模型输出达到上限被截断（已输出 $completion token），未产出完整动作 JSON。'
+        : '模型输出达到上限被截断，未产出完整动作 JSON。';
+  }
+
   Future<String?> _repairModel(
     _LoopState state,
     WorkAgentModelRequest original,
-    String raw,
-  ) async {
+    String raw, {
+    bool wasTruncated = false,
+  }) async {
+    const decisionRules = '只返回一个合法 AgentDecision JSON object；'
+        'action 只能放在顶层，禁止把 action、reason 或 public_update 放进 tool.arguments；'
+        'tool.arguments 只能包含对应工具 schema 声明的字段；'
+        'command.run 的 arguments 必须是 JSON 字符串数组，'
+        '即使只有一个参数也必须写成 ["test"]，不得返回字符串。';
     final repairContext = <String, dynamic>{
       ...original.context,
-      'repairInstruction': '只返回一个合法 AgentDecision JSON object；'
-          'action 只能放在顶层，禁止把 action、reason 或 public_update 放进 tool.arguments；'
-          'tool.arguments 只能包含对应工具 schema 声明的字段；'
-          'command.run 的 arguments 必须是 JSON 字符串数组，'
-          '即使只有一个参数也必须写成 ["test"]，不得返回字符串。',
+      'repairInstruction': wasTruncated
+          // 输出被上限截断时原文对修复没有价值：重复的内容不是 JSON 语法问题，
+          // 回灌只会把 prompt 撑成三倍，并给模型再喂一遍重复的引子。
+          ? '上一次响应因为达到输出上限被截断，不是 JSON 语法问题；'
+              '不要输出正文、解释或 Markdown 代码块。$decisionRules'
+          : decisionRules,
     };
-    final response = await model(
-      original.copyWith(
-        context: repairContext,
-        messages: _buildMessages(state.task, repairContext),
-        isRepair: true,
-        malformedResponse: raw,
-      ),
+    var repair = original.copyWith(
+      context: repairContext,
+      messages: _buildMessages(state.task, repairContext),
+      isRepair: true,
     );
+    if (!wasTruncated) {
+      // copyWith 用 `??` 合并，传 null 不会清空，所以只在非截断时回灌原文。
+      repair = repair.copyWith(malformedResponse: raw);
+    }
+    final response = await model(repair);
     if (_modelFailed(response)) return null;
     return _responseContent(response);
   }

@@ -16,6 +16,7 @@ extension _ChatApiServiceSupport on ChatApiService {
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     String content = '';
+    var truncated = false;
     int? promptTokens;
     int? completionTokens;
     int? cachedTokens;
@@ -57,18 +58,23 @@ extension _ChatApiServiceSupport on ChatApiService {
             break;
           case ChatStreamEventType.done:
             if ((event.content ?? '').isNotEmpty) content = event.content!;
+            if (event.truncated) truncated = true;
             promptTokens = event.promptTokens;
             completionTokens = event.completionTokens;
             cachedTokens = event.cachedTokens;
             break;
           case ChatStreamEventType.error:
-            // The stream parser may receive a provider-controlled error body.
-            // Never promote that body into the result consumed by the chat UI.
+            // 已由 ChatApiService 分类/脱敏的消息原样透传，否则「连接超时」
+            // 会被再洗成「流式请求失败」，isTransientResult 与 WorkFailure
+            // 就再也看不出这次失败能否重试。未标记的消息可能仍含供应商正文
+            // （自定义 streamChatMessage 实现直接 yield 的情况），保留一次脱敏。
             final statusCode = _streamStatusCode(event.message);
             final retryAfter = event.retryAfter;
             return {
               'success': false,
-              'message': _safeStreamErrorMessage(event.message),
+              'message': event.sanitized
+                  ? (event.message ?? '流式请求失败')
+                  : _safeStreamErrorMessage(event.message),
               if (statusCode != null) 'statusCode': statusCode,
               if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
             };
@@ -111,6 +117,7 @@ extension _ChatApiServiceSupport on ChatApiService {
     return {
       'success': true,
       'message': content,
+      if (truncated) 'truncated': true,
       if (promptTokens != null) 'promptTokens': promptTokens,
       if (completionTokens != null) 'completionTokens': completionTokens,
       if (cachedTokens != null) 'cachedTokens': cachedTokens,

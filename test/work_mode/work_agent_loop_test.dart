@@ -1533,6 +1533,82 @@ void main() {
     expect(task.contextSummary, isNot(contains('不是 JSON')));
   });
 
+  test(
+      'truncated response is repaired with a compact instruction, not the raw body',
+      () async {
+    // 模型把输出预算烧在重复内容上时（实测 8192 token），原文对修复毫无价值，
+    // 回灌还会把 prompt 从 3902 撑到 10968 token。这里锁定它被换成精简指令。
+    const repeated = '陆教授：好的，我先把完整的量子力学研究报告 Markdown 源文件写到桌面。';
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'content': repeated,
+        'truncated': true,
+      })
+      ..responses.add(_finishDecision('截断后按精简指令完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final task = _task(id: 'truncated-repair');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    final repair = model.requests.firstWhere((request) => request.isRepair);
+    expect(repair.malformedResponse, isNull);
+    final repairPrompt = repair.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(repairPrompt, contains('输出上限'));
+    expect(repairPrompt, isNot(contains(repeated)));
+  });
+
+  test('untruncated malformed response still feeds the raw body back',
+      () async {
+    // 对照：非截断的格式错误仍要把原文当数据交回模型，否则修 JSON 就没有依据。
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'content': '{"action":"不完整的 JSON"',
+      })
+      ..responses.add(_finishDecision('按原文修复后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final task = _task(id: 'untruncated-repair');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    final repair = model.requests.firstWhere((request) => request.isRepair);
+    expect(repair.malformedResponse, '{"action":"不完整的 JSON"');
+  });
+
+  test('an exhausted truncated run names the output cap, not a format error',
+      () async {
+    // 真实故障：模型把输出预算烧在重复内容上，四轮都拿不到完整动作 JSON。
+    // 此时报「格式无效 / 内部处理失败」会让人以为是模型不会写 JSON。
+    final model = _FakeModel();
+    for (var attempt = 0; attempt < 10; attempt++) {
+      model.responses.add({
+        'success': true,
+        'content': '陆教授：好的，我先把完整的量子力学研究报告 Markdown 源文件写到桌面。',
+        'truncated': true,
+        'completionTokens': 8192,
+      });
+    }
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final task = _task(id: 'truncated-exhausted');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.failed);
+    expect(result.message, contains('截断'));
+    expect(result.message, contains('8192'));
+    expect(
+      result.events.map((event) => event.title).join('\n'),
+      contains('截断'),
+    );
+  });
+
   test('retries a fresh model decision when protocol repair is empty',
       () async {
     final model = _FakeModel()

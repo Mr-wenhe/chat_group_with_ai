@@ -497,31 +497,43 @@ class WorkAgentLoop
               : _fail(state, message, failure: failure);
         }
 
+        final truncated = response['truncated'] == true;
         final parsed = await parser.parseResponse(
           response,
-          repair: (malformed) => _repairModel(state, request, malformed),
+          repair: (malformed) => _repairModel(
+            state,
+            request,
+            malformed,
+            wasTruncated: truncated,
+          ),
         );
         if (parsed.repairAttempted) state.protocolRepairAttempts++;
         if (!parsed.isSuccess) {
+          // 截断才是这次不可解析的原因，它比解析器的具体校验信息更值得上报：
+          // 用户据此才知道该收窄要求或换模型，而不是以为模型不会写 JSON。
+          final detail = truncated
+              ? _truncatedOutputDetail(response)
+              : (parsed.detail ?? '模型返回的 AgentDecision 无法解析。');
           if (protocolRetryCount < maxProtocolRetries) {
             protocolRetryCount++;
             await _emit(
               state,
               WorkTaskEventKind.toolOutput,
-              '模型返回格式无效，正在自动重试。',
+              truncated ? '模型输出被上限截断，改用精简指令重试。' : '模型返回格式无效，正在自动重试。',
               detail: '第 $protocolRetryCount 次协议重试',
               safeMetadata: {
                 'scope': 'modelProtocol',
                 'retry': protocolRetryCount,
+                if (truncated) 'truncated': true,
               },
             );
             continue;
           }
           return await _fail(
             state,
-            parsed.detail ?? '模型返回的 AgentDecision 无法解析。',
+            detail,
             failure: WorkFailure.fromSignalsForProtocol(
-              parsed.detail ?? '模型返回的 AgentDecision 无法解析。',
+              detail,
               completedContent: _completedContent(state),
             ),
           );
