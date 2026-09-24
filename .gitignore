@@ -43,7 +43,8 @@ docs/superpowers/plans/*
 
 # The .vscode folder contains launch configuration and tasks you configure in
 # VS Code, so it may be useful to include it in version control.
-#.vscode/
+# 本机生成的 settings.json 会写入绝对路径，不提交到仓库。
+.vscode/settings.json
 
 # Miscellaneous
 *.class
@@ -61,7 +62,6 @@ docs/superpowers/plans/*
 # Local workspace artifacts (not part of the app)
 LESSONS_LEARNED.md
 bin/*
-!bin/local_agent_bridge.dart
 devtools_options.yaml
 dl.txt
 docs/plans/

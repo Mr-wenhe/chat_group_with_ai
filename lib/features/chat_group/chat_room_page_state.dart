@@ -64,6 +64,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 关系事件服务（方向性关系历史 + 幂等快照更新）。
   late final RelationshipEventService _relationshipEventService;
 
+  /// 群内禁言状态（app_settings 轻量存储）；只作用于自动挑选。
+  late final GroupMuteStore _muteStore;
+
   /// 会话串行控制器：保证同一时刻只有一轮 AI 回复在跑，并支持中断。
   final ConversationController _conversationController =
       ConversationController();
@@ -425,6 +428,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _memoryContextSelector = MemoryContextSelector(_db);
     _observationEntry = ObservationEntry(db: _db);
     _relationshipEventService = RelationshipEventService(_db);
+    _muteStore = GroupMuteStore(_db);
     _replyEligibility = ReplyEligibilityPolicy(
       resolveApiConfig: _resolveApiConfig,
     );

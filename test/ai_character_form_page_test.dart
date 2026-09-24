@@ -12,6 +12,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'helpers/async_pump.dart';
 import 'helpers/lifecycle_hive.dart';
 
 void main() {
@@ -216,8 +217,10 @@ void main() {
 
     await tester.runAsync(() async {
       await tester.tap(find.text('更新').first);
-      await Future<void>.delayed(const Duration(milliseconds: 100));
     });
+    // Saving writes to Hive before the route pops, so wait for the caller to
+    // receive the result rather than for a guessed duration.
+    await pumpUntilReady(tester, () => returned != null);
     await tester.pump(const Duration(milliseconds: 300));
 
     expect(returned?.id, saved.id);

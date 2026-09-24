@@ -5,7 +5,8 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
       WorkDiscussionState previous, String request,
       {WorkFollowUpDecision? decision,
       String? contractRequest,
-      String? answeredQuestion}) {
+      String? answeredQuestion,
+      String? activeScopeOverride}) {
     final revision = previous.requestRevision + 1;
     final pinnedExecutor = _contractExecutorId(previous.deliverableContract);
     final parsed = WorkRoleRouter.deliverableContractForRequest(
@@ -13,6 +14,29 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
       requestRevision: revision,
       explicitExecutorId: pinnedExecutor,
     );
+    final previousContract = previous.deliverableContract;
+    final previousType = previousContract?['deliverableType'];
+    final previousFormat = previousContract?['format'];
+    final previousLocation = previousContract?['location'];
+    final changedDeliverable = previousContract != null &&
+        (parsed.deliverableType != 'generic' &&
+                previousType is String &&
+                previousType != 'generic' &&
+                parsed.deliverableType != previousType ||
+            parsed.format != 'unspecified' &&
+                previousFormat is String &&
+                previousFormat != 'unspecified' &&
+                parsed.format != previousFormat ||
+            parsed.location != 'unspecified' &&
+                previousLocation is String &&
+                previousLocation != 'unspecified' &&
+                parsed.location != previousLocation);
+    final activeScope = activeScopeOverride?.trim().isNotEmpty == true
+        ? activeScopeOverride!.trim()
+        : contractRequest?.trim().isNotEmpty == true && changedDeliverable
+            ? contractRequest!.trim()
+            : request;
+    final preserveContract = activeScopeOverride?.trim().isNotEmpty == true;
     final contract = previous.deliverableContract == null
         ? parsed.toJson()
         : Map<String, dynamic>.from(previous.deliverableContract!);
@@ -20,21 +44,23 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     // explicit new format/location/path in the latest request replace them.
     // This makes target changes visible to the next discussion instead of
     // silently carrying a stale Markdown/HTML contract forward.
-    if (previous.deliverableContract == null ||
-        parsed.deliverableType != 'generic') {
-      contract['deliverableType'] = parsed.deliverableType;
-    }
-    if (parsed.format != 'unspecified') contract['format'] = parsed.format;
-    if (parsed.location != 'unspecified') {
-      contract['location'] = parsed.location;
-    }
-    if (decision?.artifactPath?.trim().isNotEmpty == true) {
-      contract['revisionTarget'] = decision!.artifactPath!.trim();
-    } else if (parsed.revisionTarget.isNotEmpty) {
-      contract['revisionTarget'] = parsed.revisionTarget;
+    if (!preserveContract) {
+      if (previous.deliverableContract == null ||
+          parsed.deliverableType != 'generic') {
+        contract['deliverableType'] = parsed.deliverableType;
+      }
+      if (parsed.format != 'unspecified') contract['format'] = parsed.format;
+      if (parsed.location != 'unspecified') {
+        contract['location'] = parsed.location;
+      }
+      if (decision?.artifactPath?.trim().isNotEmpty == true) {
+        contract['revisionTarget'] = decision!.artifactPath!.trim();
+      } else if (parsed.revisionTarget.isNotEmpty) {
+        contract['revisionTarget'] = parsed.revisionTarget;
+      }
     }
     contract
-      ..['contentScope'] = request
+      ..['contentScope'] = activeScope
       ..['requestRevision'] = revision;
 
     // A supplement that keeps the same deliverable is a revision of the same
@@ -99,18 +125,6 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     return questions
         .where((item) => item.trim() != answered)
         .toList(growable: false);
-  }
-
-  /// The question the group last surfaced to the user. The task panel answers
-  /// exactly this one (first non-empty entry of `openQuestions`, presented while
-  /// the discussion is not execution-ready), so a new user input is its answer.
-  String? _pendingDiscussionQuestion(WorkDiscussionState state) {
-    if (state.isExecutionReady) return null;
-    for (final item in state.openQuestions) {
-      final trimmed = item.trim();
-      if (trimmed.isNotEmpty) return trimmed;
-    }
-    return null;
   }
 
   /// Whether the latest request points at a different artifact than the one the
@@ -196,6 +210,7 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     _waitingForResources.clear();
     _conversationReservations.clear();
     _handoffsAwaitingLease.clear();
+    _autoResumeTaskIds.clear();
     _taskLockPlans.clear();
     _notifySlotAvailable();
     _readyConversations.clear();

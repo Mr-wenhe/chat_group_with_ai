@@ -104,7 +104,7 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
               controller: _mentionSearchController,
               autofocus: false,
               decoration: InputDecoration(
-                hintText: '搜索名称、角色或标签…',
+                hintText: '搜索名称、角色或标签，支持拼音',
                 prefixIcon: Icon(Icons.search_rounded,
                     size: 16, color: cs.onSurfaceVariant),
                 isDense: true,
@@ -147,12 +147,16 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
     if (q.isEmpty) {
       _filteredMentionMembers = List.from(_allGroupCharacters);
     } else {
-      _filteredMentionMembers = _allGroupCharacters
-          .where((c) =>
-              c.name.contains(q) ||
-              c.role.contains(q) ||
-              c.personalityTags.any((tag) => tag.contains(q)))
-          .toList();
+      _filteredMentionMembers = PinyinSearch.exactFirst(
+        _allGroupCharacters
+            .where((c) => PinyinSearch.matchesFields(
+                  c.searchFields,
+                  q,
+                  mode: PinyinMatchMode.name,
+                ))
+            .toList(),
+        (c) => PinyinSearch.matchesLiterally(c.searchFields, q),
+      );
     }
     _mentionSelectedIndex = 0;
     _mentionOverlay?.markNeedsBuild();
@@ -228,7 +232,8 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
         if (showAll && i == 0) {
           return KeyedSubtree(
             key: _mentionItemKey(i),
-            child: _buildMentionAllTile(cs, selected: _mentionSelectedIndex == 0),
+            child:
+                _buildMentionAllTile(cs, selected: _mentionSelectedIndex == 0),
           );
         }
         final memberIndex = showAll ? i - 1 : i;
@@ -403,25 +408,17 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
     _insertMentionText('@${character.name} ');
   }
 
-  /// 用 [mentionText] 替换掉光标前那段正在输入的 `@查询词`。
-  ///
-  /// 从光标前一位向左找最近的 `@` 作为替换起点（找不到就从头替换），
-  /// 插入后把光标移到 @ 文本之后，并立刻把焦点还给输入框。
+  /// 候选弹窗替换正在输入的查询词；成员面板和消息菜单保留已有草稿。
   void _insertMentionText(String mentionText) {
-    final text = _textController.text;
-    int cursorPos = _textController.selection.baseOffset;
-    // baseOffset 为 -1 表示无选区（未聚焦），退化为在末尾插入。
-    if (cursorPos < 0) cursorPos = text.length;
-
-    final searchEnd = cursorPos > 0 ? cursorPos - 1 : 0;
-    int atPos = text.lastIndexOf('@', searchEnd);
-    if (atPos < 0) atPos = 0;
-
-    final newText =
-        '${text.substring(0, atPos)}$mentionText${text.substring(cursorPos)}';
+    final draft = insertMentionInDraft(
+      _textController.text,
+      _textController.selection.baseOffset,
+      mentionText,
+      replaceQuery: _showMentionPopup,
+    );
     _textController.value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: atPos + mentionText.length),
+      text: draft.text,
+      selection: TextSelection.collapsed(offset: draft.cursor),
     );
 
     // Overlay dismissal can steal focus; restore it immediately.

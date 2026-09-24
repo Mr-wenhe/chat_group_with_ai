@@ -164,24 +164,51 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
     );
   }
 
-  Future<void> _delayFor(_LoopState state, int retryNumber) async {
+  Future<void> _delayFor(
+    _LoopState state,
+    int retryNumber, {
+    Duration? retryAfter,
+  }) async {
     final index = retryNumber
         .clamp(0, WorkAgentLoop.defaultRetryDelays.length - 1)
         .toInt();
-    final delay = sleep(WorkAgentLoop.defaultRetryDelays[index]);
+    final base = WorkAgentLoop.defaultRetryDelays[index];
+    final delayDuration = retryAfter ?? _jitteredDelay(base);
+    final delay = sleep(delayDuration);
     await Future.any<void>(<Future<void>>[
       delay,
       state.cancellation.whenCancelled,
     ]);
   }
 
+  Duration _jitteredDelay(Duration base) {
+    if (base == Duration.zero) return base;
+    final sample = retryJitter().clamp(0.0, 1.0).toDouble();
+    final factor = 1 + (sample * 2 - 1) * WorkAgentLoop.retryJitterRatio;
+    return Duration(
+      microseconds: (base.inMicroseconds * factor).round(),
+    );
+  }
+
   Map<String, dynamic> _buildContext(_LoopState state) {
     final task = state.task;
+    final checkpointSummary = _safeExistingMap(task.contextSummary);
+    final currentScope = WorkDiscussionState.currentRequestScope(task);
+    if (checkpointSummary.isNotEmpty) {
+      checkpointSummary['target'] = currentScope;
+      checkpointSummary['goal'] = currentScope;
+    }
     return <String, dynamic>{
-      'goal': _publicText(task.userRequest),
+      'goal': _publicText(currentScope),
       'plan': _publicText(task.plan),
       'resultSummary': _publicText(task.resultSummary),
       'lastError': _publicText(task.lastError),
+      // Set only on the turn right after a repairable tool failure, so the model
+      // is told what to do with the failed result it can already see.
+      if (state.toolRepairInstruction.isNotEmpty)
+        'previousToolFailure': state.toolRepairInstruction,
+      if (state.completionRepairInstruction.isNotEmpty)
+        'previousCompletionFailure': state.completionRepairInstruction,
       if (state.failure != null) 'workFailure': state.failure!.toJson(),
       'actionCount': task.actionCount,
       'actionLimit': _effectiveActionLimit(task),
@@ -205,7 +232,7 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
           .map(_safeHistoryMessage)
           .toList(growable: false),
       if (task.contextSummary.trim().isNotEmpty)
-        'checkpointSummary': jsonEncode(_safeExistingMap(task.contextSummary)),
+        'checkpointSummary': jsonEncode(checkpointSummary),
     };
   }
 
@@ -238,7 +265,12 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
             'public_update 只能描述公开动作、依据或结论，不得输出思维链。\n'
             '$planningInstruction',
       },
-      {'role': 'user', 'content': _publicText(task.userRequest)},
+      {
+        'role': 'user',
+        'content': _publicText(
+          WorkDiscussionState.currentRequestScope(task),
+        ),
+      },
       {
         'role': 'system',
         'content': '公开任务检查点：${jsonEncode(promptContext)}',
@@ -348,6 +380,42 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
     return effective <= Duration.zero
         ? const Duration(milliseconds: 1)
         : effective;
+  }
+
+  /// Budget time already spent working, excluding time the task spent waiting
+  /// on the user.
+  ///
+  /// [AgentTask.startedAt] deliberately stays fixed across user revisions so a
+  /// revision cannot extend the shared budget. An approval wait is not agent
+  /// work, so it is accumulated separately by [WorkTaskBudgetWait] and removed
+  /// here; otherwise a user who approves after a long pause would immediately
+  /// hit the time limit. Only the waits recorded for the current budget origin
+  /// count, so a replan or a manual continue starts from a clean window.
+  Duration _elapsedBudget(AgentTask task) {
+    final started = task.startedAt ??= clock();
+    final waited = WorkTaskBudgetWait.totalFor(
+      _decodeMap(task.executionStateJson),
+      started,
+    );
+    return clock().difference(started) - waited;
+  }
+
+  bool _timeBudgetExceeded(AgentTask task) =>
+      _elapsedBudget(task) >= _effectiveTimeLimit(task);
+
+  /// Folds a finished user wait into the excluded budget once the agent is
+  /// about to work again. The next checkpoint persists the updated value.
+  void _settleBudgetWait(AgentTask task) {
+    final execution = _decodeMap(task.executionStateJson);
+    if (WorkTaskBudgetWait.startedAtOf(execution) == null) return;
+    final budgetStartedAt = task.startedAt ??= clock();
+    task.executionStateJson = jsonEncode(
+      WorkTaskBudgetWait.settle(
+        execution,
+        clock(),
+        budgetStartedAt: budgetStartedAt,
+      ),
+    );
   }
 
   WorkAgentLoopStatus _statusForTask(AgentTask task) => switch (task.status) {

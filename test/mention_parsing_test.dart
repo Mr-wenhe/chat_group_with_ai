@@ -18,6 +18,31 @@ AICharacter _character(String id, String name) {
 }
 
 void main() {
+  test('点名插入保留草稿、旧提及和光标后的内容', () {
+    for (final (text, cursor, expected) in [
+      ('hello', -1, 'hello @Alice '),
+      ('@小胖 已有草稿', -1, '@小胖 已有草稿@Alice '),
+      ('前文后文', 2, '前文@Alice 后文'),
+      ('', 0, '@Alice '),
+    ]) {
+      final draft =
+          insertMentionInDraft(text, cursor, '@Alice ', replaceQuery: false);
+      expect(draft.text, expected);
+      expect(draft.text.substring(0, draft.cursor), endsWith('@Alice '));
+    }
+  });
+
+  test('候选选择只替换当前查询词，不覆盖前文或已结束的提及', () {
+    expect(
+        insertMentionInDraft('前文 @Al 后文', 6, '@Alice ', replaceQuery: true)
+            .text,
+        '前文 @Alice  后文');
+    expect(
+        insertMentionInDraft('@小胖 已有草稿', -1, '@Alice ', replaceQuery: true)
+            .text,
+        '@小胖 已有草稿@Alice ');
+  });
+
   final characters = [
     _character('c1', '小胖'),
     _character('c2', 'Alice'),

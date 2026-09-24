@@ -208,6 +208,9 @@ class SseParser {
         _fullContent += content;
         return ChatStreamEvent.token(content);
       }
+      // `reasoning_content` is the supported compatibility channel. StepFun's
+      // native `reasoning` field is private thinking and must never be
+      // promoted to visible/final content when `content` is empty.
       final reasoningContent = delta['reasoning_content'];
       if (reasoningContent is String && reasoningContent.isNotEmpty) {
         final reasoningBytes = utf8.encode(reasoningContent).length;

@@ -13,6 +13,9 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
       if (_disposed) return;
       _dataClearInProgress = true;
       _eventStore.suspendAppendsForDataClear();
+      // Terminal tasks are skipped by the loop below, so clear every pending
+      // automatic-resume marker outright.
+      _autoResumeTaskIds.clear();
       activeRuns = List<Future<void>>.from(_activeRuns.values);
       activeRuns.addAll(_discussionRuns.values);
       activeRuns.addAll(_installRuns.values);

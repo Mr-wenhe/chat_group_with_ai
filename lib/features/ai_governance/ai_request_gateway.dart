@@ -16,6 +16,12 @@ part 'ai_request_gateway_retry.dart';
 class AiRequestGateway {
   static const blockedPrefix = '治理拦截：';
 
+  /// Idle-gap bound for the streamed work-mode attempt. dio resets its receive
+  /// timeout on every chunk, so this abandons a stream that stopped emitting
+  /// without capping the whole turn: work-mode turns legitimately run for
+  /// minutes and the caller owns the overall deadline.
+  static const Duration _structuredStreamIdleTimeout = Duration(seconds: 30);
+
   final GovernancePersistence store;
   final ChatApiService client;
   final AiRequestGuard guard;
@@ -199,11 +205,8 @@ class AiRequestGateway {
       userInitiated: userInitiated,
       operation: (attempt) {
         final requestTemperature = attempt.temperatureFor(temperature);
-        // Work-mode decisions are a strict JSON protocol. Keep ordinary
-        // streamed chat unchanged, while using JSON mode for agent calls that
-        // have already opted into the tool-capability gate.
         if (requiresTools && purpose == AiRequestPurpose.agent) {
-          return client.sendStructuredChatMessageStreamed(
+          return _structuredWorkCompletionWithJsonFallback(
             apiKey: apiKey,
             provider: provider,
             apiProtocol: apiProtocol,
@@ -213,7 +216,6 @@ class AiRequestGateway {
             temperature: requestTemperature,
             maxTokens: maxTokens,
             receiveTimeout: receiveTimeout,
-            maxRetries: 0,
             cancelToken: cancelToken,
             onEvent: onEvent,
           );
@@ -235,6 +237,105 @@ class AiRequestGateway {
       },
     );
   }
+
+  Future<Map<String, dynamic>> _structuredWorkCompletionWithJsonFallback({
+    required String apiKey,
+    required ApiProvider provider,
+    required ApiProtocol apiProtocol,
+    required String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required double temperature,
+    required int maxTokens,
+    required Duration receiveTimeout,
+    required CancelToken? cancelToken,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) async {
+    // No step here carries a total-duration bound: the caller owns the overall
+    // work-mode deadline and the cancellation token. The streaming attempt
+    // only bounds its idle gap, so a stream that stops emitting hands over to
+    // the compatibility path instead of holding the task lease until that
+    // deadline.
+    final streamed = await client.sendStructuredChatMessageStreamed(
+      apiKey: apiKey,
+      provider: provider,
+      apiProtocol: apiProtocol,
+      customBaseUrl: customBaseUrl,
+      model: model,
+      messages: messages,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      receiveTimeout: _structuredStreamIdleTimeout,
+      maxRetries: 0,
+      cancelToken: cancelToken,
+      onEvent: onEvent,
+    );
+    if (!_needsCompletionFallback(streamed)) return streamed;
+    final structured = await client.sendChatMessageWithResponseLimit(
+      apiKey: apiKey,
+      provider: provider,
+      apiProtocol: apiProtocol,
+      customBaseUrl: customBaseUrl,
+      model: model,
+      messages: messages,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      receiveTimeout: receiveTimeout,
+      maxRetries: 0,
+      cancelToken: cancelToken,
+      structuredJson: true,
+      maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
+    );
+    if (structured['statusCode'] != 400) return structured;
+    return client.sendChatMessageWithResponseLimit(
+      apiKey: apiKey,
+      provider: provider,
+      apiProtocol: apiProtocol,
+      customBaseUrl: customBaseUrl,
+      model: model,
+      messages: messages,
+      temperature: temperature,
+      maxTokens: maxTokens,
+      receiveTimeout: receiveTimeout,
+      maxRetries: 0,
+      cancelToken: cancelToken,
+      structuredJson: false,
+      maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
+    );
+  }
+
+  /// Whether a failed streamed attempt is worth one non-streaming retry.
+  ///
+  /// The compatibility call is a different transport, so it earns an attempt on
+  /// transport failures, on server-side/rate-limit statuses, and on an empty
+  /// successful body: some gateways close an SSE stream without emitting the
+  /// JSON payload. A rejected request (401/404 and other client errors) and a
+  /// deterministic local failure such as an invalid or oversized body fail
+  /// identically there, so they must not cost the task another provider call.
+  bool _needsCompletionFallback(Map<String, dynamic> result) {
+    // A user stop is terminal: never re-send it on another path.
+    if (result['message'] == ChatApiService.cancelledResultMessage) {
+      return false;
+    }
+    if (result['success'] != true) {
+      // The client marks a bounded protocol failure (an empty completion, for
+      // example) as retryable, the same signal `WorkFailure` reads, so re-ask
+      // on the compatibility transport instead of treating it as internal.
+      if (result['retryable'] == true) return true;
+      final statusCode = result['statusCode'];
+      if (statusCode is int) return _isRetryableCompletionStatus(statusCode);
+      // No status: retry only on a positive transport-failure signal.
+      return RetryHandler.isTransientResult(result);
+    }
+    final message = result['message'];
+    return message is! String || message.trim().isEmpty;
+  }
+
+  /// The streamed attempt and the compatibility call are different transports,
+  /// so a server-side or rate-limit status earns one attempt there even though
+  /// the shared retry policy only retries a narrower set of statuses.
+  static bool _isRetryableCompletionStatus(int statusCode) =>
+      statusCode == 408 || statusCode == 429 || statusCode >= 500;
 
   Stream<ChatStreamEvent> streamChatMessage({
     required String apiKey,

@@ -100,9 +100,23 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
         detail: '第 ${attempt + 1} 次重试',
         safeMetadata: {'retry': attempt + 1, 'scope': 'model'},
       );
-      await _delayFor(state, attempt);
+      await _delayFor(
+        state,
+        attempt,
+        retryAfter: _retryAfter(response),
+      );
     }
     return last ?? const {};
+  }
+
+  Duration? _retryAfter(Map<String, dynamic>? response) {
+    final milliseconds = response?['retryAfterMs'];
+    if (milliseconds is! num || milliseconds < 0) return null;
+    final bounded = milliseconds
+        .toInt()
+        .clamp(0, const Duration(minutes: 2).inMilliseconds)
+        .toInt();
+    return Duration(milliseconds: bounded);
   }
 
   Future<String?> _repairModel(
@@ -113,6 +127,8 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     final repairContext = <String, dynamic>{
       ...original.context,
       'repairInstruction': '只返回一个合法 AgentDecision JSON object；'
+          'action 只能放在顶层，禁止把 action、reason 或 public_update 放进 tool.arguments；'
+          'tool.arguments 只能包含对应工具 schema 声明的字段；'
           'command.run 的 arguments 必须是 JSON 字符串数组，'
           '即使只有一个参数也必须写成 ["test"]，不得返回字符串。',
     };
@@ -193,10 +209,10 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     bool includeActionLimit = true,
   }) {
     final task = state.task;
-    final started = task.startedAt ??= clock();
+    task.startedAt ??= clock();
     return (includeActionLimit &&
             task.actionCount >= _effectiveActionLimit(task)) ||
-        clock().difference(started) >= _effectiveTimeLimit(task);
+        _timeBudgetExceeded(task);
   }
 
   Future<WorkAgentLoopResult> _pauseForLimit(
@@ -290,9 +306,8 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
   }) async {
     final task = state.task;
     final resolvedFailure = failure ??
-        WorkFailure.fromError(
-          StateError(message),
-          scope: 'loop',
+        WorkFailure.fromLoopMessage(
+          message,
           completedContent: _completedContent(state),
         );
     state.failure = resolvedFailure;

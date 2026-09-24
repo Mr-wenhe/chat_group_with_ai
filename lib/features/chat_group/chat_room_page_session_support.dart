@@ -101,6 +101,7 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       _scheduleAgentTaskRecovery();
       if (ChatActivityPolicy.canStartAutoChat(
         workModeEnabled: _workModeEnabled,
+        hasActiveWorkTask: _hasActiveWorkTaskForAutoChat,
         autoChatEnabled: _isAutoChatEnabled,
         hasCharacters: loaded.activeCharacters.isNotEmpty,
         hasApiConfig: loaded.hasAnyApiConfig,
@@ -395,6 +396,53 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
     }
   }
 
+  /// 控制条下方的例外态提示；映射规则见 [autoChatStatusAlert]。
+  ConversationStatusAlert? get _autoChatStatusAlert {
+    final candidates = _characters
+        .where((c) => _mayAutoPick(c, mentionedIds: const {}))
+        .toList();
+    final available = candidates.any(_isEligibleToReply);
+    final reason = available
+        ? (_lastReplyBlockReason == ReplyBlockReason.noApiConfig
+            ? _lastReplyBlockReason
+            : null)
+        : _firstBlockReason(candidates);
+    // 编排器本轮选择沉默不代表成员无法回复；能力状态以当前成员为准。
+    final status = !available
+        ? AutoChatStatus.unavailable
+        : _autoChatStatus == AutoChatStatus.unavailable && reason == null
+            ? AutoChatStatus.waiting
+            : _autoChatStatus;
+    return autoChatStatusAlert(
+      workModeEnabled: _workModeEnabled,
+      autoChatEnabled: _isAutoChatEnabled,
+      status: status,
+      allMembersMuted: _allMembersMuted,
+      blockedText: _replyBlockText(reason),
+      needsApiConfig: reason == ReplyBlockReason.noApiConfig,
+      onConfigureApi: () async {
+        await Navigator.pushNamed(context, '/settings');
+        if (!mounted) return;
+        _setUiState(() {
+          _hasAnyApiConfig = _characters.any(
+            (c) => _resolveApiConfig(c)?.hasCredential == true,
+          );
+          final candidates = _characters
+              .where((c) => _mayAutoPick(c, mentionedIds: const {}))
+              .toList();
+          _lastReplyBlockReason = _firstBlockReason(candidates);
+        });
+        _startAutoChat();
+      },
+    );
+  }
+
+  /// 群里是否所有成员都被禁言了（私聊没有禁言概念）。
+  bool get _allMembersMuted =>
+      !_isDirectChat &&
+      _characters.isNotEmpty &&
+      _characters.every((c) => _muteStore.isMuted(widget.groupId, c.id));
+
   /// 切换空闲自动发言开关（仅本次会话内存态，不改全局治理设置）。
   void _toggleAutoChat(bool enabled) {
     if (!_canTouchUi) return;
@@ -454,6 +502,7 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       workModeEnabled: _workModeEnabled,
       autoChatAvailable: _hasAnyApiConfig,
       autoChatTooltip: _autoChatStatusText,
+      statusAlert: _autoChatStatusAlert,
       workModeTooltip: _workModeEnabled ? '工作模式已开启 · 敏感操作需确认' : '工作模式已关闭',
       onAutoChatChanged: _toggleAutoChat,
       onWorkModeChanged: _toggleWorkMode,

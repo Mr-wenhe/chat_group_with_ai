@@ -60,6 +60,11 @@ class WorkDiscussionTurn {
   /// violation that the group can only resolve by asking the user again.
   static final RegExp _httpStatusFailure = RegExp(r'^HTTP \d{3} 请求失败$');
 
+  /// 网关会把带状态码的失败包成 `模型请求失败（HTTP 429）` 这类文案。它同样只
+  /// 说明「这次调用没有成功」，不代表成员对任务的理解有分歧。
+  static final RegExp _statusFailureReason =
+      RegExp(r'^模型请求失败（HTTP (\d{3})）$');
+
   static const Set<String> _transportFailureReasons = <String>{
     '请求失败',
     '模型请求超时',
@@ -69,13 +74,30 @@ class WorkDiscussionTurn {
 
   bool get isTransportFailure =>
       _transportFailureReasons.contains(failureReason) ||
-      _httpStatusFailure.hasMatch(failureReason);
+      _httpStatusFailure.hasMatch(failureReason) ||
+      _isRetryableHttpStatusFailure(failureReason);
+
+  /// 限流、请求超时与上游 5xx 都属于「稍后重试可能成功」的传输层错误。账号、
+  /// 额度、权限类 4xx 不在此列：那是配置问题，必须如实报给用户去修，而不是
+  /// 当成一次无关的限流悄悄跳过。
+  static bool _isRetryableHttpStatusFailure(String reason) {
+    final status = int.tryParse(
+      _statusFailureReason.firstMatch(reason)?.group(1) ?? '',
+    );
+    if (status == null) return false;
+    return status == 408 || status == 429 || status >= 500;
+  }
 
   factory WorkDiscussionTurn.fromResponse(Map<String, dynamic> response) {
     if (response['success'] == false) {
+      final statusCode = _httpStatusCode(response['statusCode']);
       final message = _safeText(response['message']);
       return WorkDiscussionTurn.invalid(
-        failureReason: message.isEmpty ? '模型调用失败' : message,
+        failureReason: statusCode != null
+            ? '模型请求失败（HTTP $statusCode）'
+            : message.isEmpty
+                ? '模型调用失败'
+                : message,
       );
     }
     final raw = _responseText(response);
@@ -241,6 +263,18 @@ class WorkDiscussionTurn {
     }
     final integer = value.toInt();
     return integer < 0 || integer > 100 ? null : integer;
+  }
+
+  static int? _httpStatusCode(Object? value) {
+    final statusCode = switch (value) {
+      num value when value.isFinite && value == value.truncate() =>
+        value.toInt(),
+      String value => int.tryParse(value.trim()),
+      _ => null,
+    };
+    return statusCode != null && statusCode >= 100 && statusCode <= 599
+        ? statusCode
+        : null;
   }
 
   static List<String>? _strings(Object? value, {required int maximum}) {

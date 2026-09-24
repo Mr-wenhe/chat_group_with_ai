@@ -140,6 +140,74 @@ void main() {
       expect(failure.suggestedAction, contains('重新授权'));
     });
 
+    test('classifies a missing file target as a retryable model checkpoint',
+        () {
+      final failure = WorkFailure.fromToolFailure(
+        code: 'notFound',
+        message: '目标不存在。',
+      );
+
+      expect(failure.type, WorkFailureType.modelProtocol);
+      expect(failure.retryable, isTrue);
+    });
+
+    test('migrates a legacy internal missing-target checkpoint to retry', () {
+      final task = _task('legacy-missing-target');
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.internal,
+          title: '工作任务内部处理失败',
+          reason: '目标不存在。',
+          technicalDetail: '目标不存在。',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '重新发起任务。',
+        ),
+      );
+
+      expect(task.workFailure?.type, WorkFailureType.modelProtocol);
+      expect(task.workFailure?.retryable, isTrue);
+    });
+
+    test('migrates a legacy DOCX delivery checkpoint to retry', () {
+      final task = _task('legacy-docx-delivery');
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.internal,
+          title: '工作任务内部处理失败',
+          reason: '用户明确要求 Word 文件，但没有找到真实 DOCX。',
+          technicalDetail: 'Markdown 只能作为转换源，不能作为最终交付。',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '重新发起任务。',
+        ),
+      );
+
+      expect(task.workFailure?.type, WorkFailureType.modelProtocol);
+      expect(task.workFailure?.retryable, isTrue);
+    });
+
+    test('migrates an empty model response checkpoint to retry', () {
+      final task = _task('legacy-empty-model-response');
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.internal,
+          title: '工作任务内部处理失败',
+          reason: '模型返回了空内容',
+          technicalDetail: '模型返回了空内容',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '重新发起任务。',
+        ),
+      );
+
+      expect(task.workFailure?.type, WorkFailureType.modelProtocol);
+      expect(task.workFailure?.retryable, isTrue);
+    });
+
     test('classifies model 429, 5xx, timeout, empty stream and protocol errors',
         () async {
       final cases = <String, Object>{
@@ -166,18 +234,10 @@ void main() {
           'content': '',
           'reasoning_content': '',
         },
-        // 真实空返回带 message，分类只能靠 failureCode；缺 code 时会掉进
-        // internal，这条用例就是防止该回归。
-        'empty completion': <String, dynamic>{
+        'empty completion error': <String, dynamic>{
           'success': false,
           'failureCode': 'emptyResponse',
           'message': '模型返回了空内容',
-        },
-        'silent stream empty completion': <String, dynamic>{
-          'success': false,
-          'failureCode': 'emptyResponse',
-          'message': '模型返回了空内容',
-          'streamEmpty': true,
         },
         'protocol': <String, dynamic>{
           'success': true,
@@ -200,8 +260,7 @@ void main() {
           'protocol' ||
           'empty stream' ||
           'empty failed response' ||
-          'empty completion' ||
-          'silent stream empty completion' =>
+          'empty completion error' =>
             WorkFailureType.modelProtocol,
           '401 exception' => WorkFailureType.authorizationLost,
           '403 exception' => WorkFailureType.permissionDenied,
@@ -229,6 +288,32 @@ void main() {
         expect(task.executionStateJson, isNot(contains('模型超时')),
             reason: '技术细节必须脱敏');
       }
+    });
+
+    test('retries an empty completion error when another model turn is allowed',
+        () async {
+      final model = _ModelQueue()
+        ..responses.add(<String, dynamic>{
+          'success': false,
+          'failureCode': 'emptyResponse',
+          'message': '模型返回了空内容',
+        })
+        ..responses.add(_finishDecision());
+      final loop = WorkAgentLoop(
+        model: model.call,
+        registry: WorkToolRegistry(),
+        maxModelRetries: 1,
+        maxToolRetries: 0,
+        sleep: (_) async {},
+      );
+      final task = _task('empty-completion-retry');
+
+      final result = await loop.execute(task);
+
+      expect(result.status, WorkAgentLoopStatus.completed);
+      expect(result.failure, isNull);
+      expect(result.modelRetryCount, 1);
+      expect(model.responses, isEmpty);
     });
 
     test('recovers retryable streamed HTTP failures and pauses on 401',
@@ -537,9 +622,22 @@ void main() {
         'missing-tool': WorkFailureType.toolMissing,
         'browser': WorkFailureType.userActionRequired,
       };
+      // 可回灌的三类：失败不再终止任务，而是交回模型再决策一次。
+      const repairable = <String>{'conflict', 'disk', 'command-timeout'};
       for (final entry in cases.entries) {
+        // 分类本身是 WorkFailure 的契约：直接断言它，这样即使某类失败不再终止
+        // 任务（见下面 repairable），它的归属仍然被钉住。
+        expect(
+          WorkFailure.fromToolResult(entry.value).type,
+          expected[entry.key],
+          reason: '${entry.key} 的分类',
+        );
+        final repairableCase = repairable.contains(entry.key);
         final model = _ModelQueue()..responses.add(_toolDecision());
         final tool = _ToolQueue()..results.add(entry.value);
+        if (repairableCase) {
+          model.responses.add(_finishDecision());
+        }
         final task = _task('tool-${entry.key}');
         final result = await _loop(
           model,
@@ -547,24 +645,35 @@ void main() {
             definitions: [_definition(AgentToolName.workspaceRead, tool)],
           ),
         ).execute(task);
-        expect(result.failure?.type, expected[entry.key], reason: entry.key);
+        if (repairableCase) {
+          expect(
+            result.status,
+            WorkAgentLoopStatus.completed,
+            reason: '${entry.key} 应回灌模型自行修复，而不是终止任务',
+          );
+          expect(tool.calls, 1, reason: entry.key);
+        } else {
+          expect(result.failure?.type, expected[entry.key], reason: entry.key);
+          expect(task.executionStateJson, contains('workFailure'));
+        }
         expect(task.completedOperations, contains('已完成：读取项目结构'));
         expect(task.contextSummary, contains('已完成读取项目结构'));
         expect(task.queuedUserRequests, <String>['后续追问保留']);
         expect(task.contextSummary, contains('后续追问保留'));
-        expect(task.executionStateJson, contains('workFailure'));
         expect(
           task.status,
-          entry.key == 'snapshot' ||
-                  entry.key == 'permission' ||
-                  entry.key == 'authorization' ||
-                  entry.key == 'missing-tool' ||
-                  entry.key == 'browser'
-              ? anyOf(
-                  AgentTaskStatus.paused,
-                  AgentTaskStatus.waitingForApproval,
-                )
-              : AgentTaskStatus.failed,
+          repairableCase
+              ? AgentTaskStatus.completed
+              : entry.key == 'snapshot' ||
+                      entry.key == 'permission' ||
+                      entry.key == 'authorization' ||
+                      entry.key == 'missing-tool' ||
+                      entry.key == 'browser'
+                  ? anyOf(
+                      AgentTaskStatus.paused,
+                      AgentTaskStatus.waitingForApproval,
+                    )
+                  : AgentTaskStatus.failed,
         );
       }
     });
@@ -947,6 +1056,57 @@ void main() {
       expect(find.byKey(const Key('work-task-continue')), findsNothing);
       await tester.tap(find.byKey(const Key('work-task-reauthorize')));
       expect(calls, 1);
+    });
+
+    testWidgets('explains that missing approval scope rebuilds the plan',
+        (tester) async {
+      final task = _task('panel-missing-approval-scope')
+        ..status = AgentTaskStatus.failed;
+      WorkFailure.persistOnTask(
+        task,
+        WorkFailure.fromToolFailure(
+          code: 'notApproved',
+          message: '审批范围缺失，已要求任务重新生成变更计划。',
+        ),
+      );
+
+      await pumpPanel(tester, task, onReauthorize: (_) async {});
+
+      expect(find.text('重新生成计划'), findsOneWidget);
+      expect(find.textContaining('点击“重新生成计划”'), findsOneWidget);
+    });
+
+    testWidgets('offers continue after a role capability is granted',
+        (tester) async {
+      var continued = false;
+      final task = _task('panel-role-permission')
+        ..status = AgentTaskStatus.paused;
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.permissionDenied,
+          title: '当前操作没有权限',
+          reason: '角色未授予 commandRun 工具权限。',
+          technicalDetail: '角色未授予 commandRun 工具权限。',
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '调整角色工具权限后继续。',
+        ),
+      );
+
+      await pumpPanel(
+        tester,
+        task,
+        onContinue: (_) async => continued = true,
+      );
+
+      expect(find.byKey(const Key('work-task-reauthorize')), findsNothing);
+      final continueButton = tester.widget<FilledButton>(
+        find.byKey(const Key('work-task-continue')),
+      );
+      expect(continueButton.onPressed, isNotNull);
+      await tester.tap(find.byKey(const Key('work-task-continue')));
+      expect(continued, isTrue);
     });
 
     testWidgets('only exposes conflict viewer for file conflicts',

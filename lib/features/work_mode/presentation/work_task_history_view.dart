@@ -1,5 +1,12 @@
 part of 'work_task_panel.dart';
 
+/// 任务标签栏里显示的名字：取用户指令首行并截断。
+///
+/// 标签栏是用户唯一能一眼分辨"哪一个任务"的地方，因此这里必须复用历史列表
+/// 的标题规则。「任务 1」这类序号既不说明在做什么，也会随列表变化改号。
+String workTaskTabLabel(AgentTask task, {int maxLength = 12}) =>
+    workTaskHistoryTitle(task, maxLength: maxLength);
+
 /// 历史任务列表里显示的标题：取用户指令首行并截断。
 ///
 /// 历史列表按需求只展示「时间 + 标题」，因此这里不拼接状态、角色等信息，
@@ -21,12 +28,26 @@ String workTaskHistoryTime(DateTime time) {
       '${pad(time.hour)}:${pad(time.minute)}';
 }
 
+/// 历史任务列表里显示的次行：创建时间，必要时附上"已从标签栏隐藏"。
+String workTaskHistorySubtitle(
+  AgentTask task, {
+  bool hiddenFromTabStrip = false,
+}) {
+  final time = workTaskHistoryTime(task.createdAt);
+  return hiddenFromTabStrip ? '$time · 已从标签栏隐藏' : time;
+}
+
 /// 历史任务列表：每行只显示创建时间和标题，点击后由外层切到任务详情。
 class _TaskHistoryList extends StatefulWidget {
   final List<AgentTask> tasks;
   final ValueChanged<String> onSelectTask;
+  final Set<String> hiddenTaskIds;
 
-  const _TaskHistoryList({required this.tasks, required this.onSelectTask});
+  const _TaskHistoryList({
+    required this.tasks,
+    required this.onSelectTask,
+    this.hiddenTaskIds = const <String>{},
+  });
 
   @override
   State<_TaskHistoryList> createState() => _TaskHistoryListState();
@@ -66,7 +87,10 @@ class _TaskHistoryListState extends State<_TaskHistoryList> {
             dense: true,
             contentPadding: EdgeInsets.zero,
             title: Text(workTaskHistoryTitle(task)),
-            subtitle: Text(workTaskHistoryTime(task.createdAt)),
+            subtitle: Text(workTaskHistorySubtitle(
+              task,
+              hiddenFromTabStrip: widget.hiddenTaskIds.contains(task.id),
+            )),
             onTap: () => widget.onSelectTask(task.id),
           );
         },

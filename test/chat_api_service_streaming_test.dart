@@ -226,11 +226,13 @@ void main() {
     expect((requests.last.data as Map)['stream'], isNull);
   });
 
-  test('silent stream with an empty fallback reports the empty response code',
+  test('empty stream and empty fallback preserve retryable failure metadata',
       () async {
+    final requests = <RequestOptions>[];
     final dio = Dio();
     dio.interceptors.add(InterceptorsWrapper(
       onRequest: (options, handler) {
+        requests.add(options);
         final requestData = options.data as Map<String, dynamic>;
         if (requestData['stream'] == true) {
           handler.resolve(Response<ResponseBody>(
@@ -251,7 +253,7 @@ void main() {
           data: {
             'choices': [
               {
-                'message': {'content': ''}
+                'message': {'content': '   '}
               }
             ]
           },
@@ -273,6 +275,8 @@ void main() {
     expect(result['message'], '模型返回了空内容');
     expect(result['failureCode'], 'emptyResponse');
     expect(result['streamEmpty'], isTrue);
+    expect(result['retryable'], isTrue);
+    expect(requests, hasLength(2));
   });
 
   test('empty non-stream completion is rejected instead of being accepted',
@@ -306,8 +310,8 @@ void main() {
 
     expect(result['success'], isFalse);
     expect(result['message'], '模型返回了空内容');
-    // 工作模式的失败分类依赖这个稳定 code 才会归到可重试的 modelProtocol。
     expect(result['failureCode'], 'emptyResponse');
+    expect(result['retryable'], isTrue);
   });
 
   test('non-stream completion accepts reasoning content when content is empty',
@@ -344,6 +348,42 @@ void main() {
 
     expect(result['success'], isTrue);
     expect(result['message'], '<html>reasoning fallback</html>');
+  });
+
+  test('non-stream completion does not expose native StepFun reasoning',
+      () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'choices': [
+              {
+                'message': {
+                  'content': '',
+                  'reasoning': '{"ok":true}',
+                }
+              }
+            ]
+          },
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio);
+
+    final result = await service.sendChatMessage(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'step-3.7-flash',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isFalse);
+    expect(result['message'], '模型返回了空内容');
   });
 
   test('streamed agent completion forwards its cancellation token', () async {
@@ -454,6 +494,67 @@ void main() {
       expect(result['statusCode'], statusCode, reason: '$statusCode');
       expect(result['message'], 'HTTP $statusCode 请求失败');
     }
+  });
+
+  test('streamed HTTP failures preserve a bounded Retry-After hint', () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 429,
+          headers: Headers.fromMap({
+            'retry-after': ['7'],
+          }),
+          data: ResponseBody(const Stream<Uint8List>.empty(), 429),
+        ));
+      },
+    ));
+
+    final events = <ChatStreamEvent>[];
+    final result = await ChatApiService(dio: dio).sendChatMessageStreamed(
+      apiKey: 'test-key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'test-model',
+      messages: const [
+        {'role': 'user', 'content': '继续工作'}
+      ],
+      maxRetries: 0,
+      onEvent: events.add,
+    );
+
+    expect(events.single.retryAfter, const Duration(seconds: 7));
+    expect(result['retryAfterMs'], 7000);
+  });
+
+  test('Retry-After HTTP dates use the same two-minute safety bound', () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 429,
+          headers: Headers.fromMap({
+            'Retry-After': ['Fri, 01 Jan 2099 00:00:00 GMT'],
+          }),
+          data: ResponseBody(const Stream<Uint8List>.empty(), 429),
+        ));
+      },
+    ));
+
+    final result = await ChatApiService(dio: dio).sendChatMessageStreamed(
+      apiKey: 'test-key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'test-model',
+      messages: const [
+        {'role': 'user', 'content': '继续工作'}
+      ],
+      maxRetries: 0,
+    );
+
+    expect(result['retryAfterMs'], const Duration(minutes: 2).inMilliseconds);
   });
 
   test('streamed completion falls back to non-stream on fifth retry', () async {

@@ -11,7 +11,9 @@ import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -193,9 +195,13 @@ WorkAgentLoop _loop({
   _FakeClock? clock,
   List<WorkTaskEvent>? events,
   Future<void> Function(Duration)? sleep,
+  double Function()? retryJitter,
   int? maxModelRetries,
   int? maxToolRetries,
+  int? maxToolRepairs,
+  int? maxCompletionRepairs,
   WorkAgentArtifactCompletion? artifactCompletion,
+  WorkAgentCompletionGuard? completionGuard,
   WorkAgentPreflightTool? preflightTool,
 }) {
   return WorkAgentLoop(
@@ -203,9 +209,13 @@ WorkAgentLoop _loop({
     registry: registry,
     clock: clock?.call,
     sleep: sleep ?? (_) async {},
+    retryJitter: retryJitter ?? () => 0.5,
     maxModelRetries: maxModelRetries,
     maxToolRetries: maxToolRetries,
+    maxToolRepairs: maxToolRepairs,
+    maxCompletionRepairs: maxCompletionRepairs,
     artifactCompletion: artifactCompletion,
+    completionGuard: completionGuard,
     preflightTool: preflightTool,
     onEvent: events == null
         ? null
@@ -333,6 +343,61 @@ void main() {
         ));
     expect(model.requests.single.context['committedWrites'], isEmpty);
     expect(model.requests.single.context['publicUpdates'], isEmpty);
+  });
+
+  test('current QA scope replaces a stale development target in checkpoint',
+      () async {
+    const qaScope = '只测试现有 HTML，并写入 doudizhu_test_report.md';
+    final model = _FakeModel()..responses.add(_finishDecision());
+    final task = _task()
+      ..userRequest = '旧任务：开发 Desktop/doudizhu_game.html。新的 QA：$qaScope'
+      ..contextSummary = jsonEncode({
+        'schemaVersion': WorkContextSnapshot.currentSchemaVersion,
+        'conversationId': 'loop-conversation',
+        'target': '旧任务：开发 Desktop/doudizhu_game.html',
+        'goal': '旧任务：开发 Desktop/doudizhu_game.html',
+      });
+    final discussion = WorkDiscussionState.initial(
+      conversationId: task.groupId,
+      requestRevision: 2,
+      coordinatorId: 'coordinator',
+      executorId: task.characterId,
+      candidateCharacterIds: [task.characterId],
+      participantCharacterIds: [task.characterId],
+      deliverableContract: const <String, dynamic>{
+        'deliverableType': 'document',
+        'format': 'markdown',
+        'location': 'doudizhu_test_report.md',
+        'contentScope': qaScope,
+        'explicitExecutorId': null,
+        'revisionTarget': '',
+        'requestRevision': 2,
+      },
+    ).copyWith(
+      phase: WorkDiscussionPhase.ready,
+      understandingPercent: 100,
+      understandingEvidence: const ['QA 报告合同已确认。'],
+      openQuestions: const [],
+      blockers: const [],
+    );
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      '',
+      discussion,
+    );
+
+    final result = await _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+    ).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    final context = model.requests.single.context;
+    expect(context['goal'], qaScope);
+    expect(context['checkpointSummary'], contains(qaScope));
+    expect(
+      context['checkpointSummary'],
+      isNot(contains('旧任务：开发 Desktop/doudizhu_game.html')),
+    );
   });
 
   test('unknown execution schema pauses without dropping typed blockers',
@@ -551,6 +616,225 @@ void main() {
     expect(result.retryCount, 1);
   });
 
+  test('uses the extended model retry budget across a growing backoff',
+      () async {
+    // 退避阶梯必须覆盖全部重试次数：阶梯短于预算时，末尾延迟会被重复使用，
+    // 那次重试就等于没有更长的等待。
+    final model = _FakeModel();
+    for (var attempt = 0;
+        attempt < WorkAgentLoop.defaultMaxModelRetries;
+        attempt++) {
+      model.responses.add({
+        'success': false,
+        'statusCode': 503,
+        'message': '服务暂时不可用',
+      });
+    }
+    model.responses.add(_finishDecision());
+    final delays = <Duration>[];
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      sleep: (delay) async => delays.add(delay),
+    );
+
+    final result = await loop.execute(_task(id: 'model-retry-budget'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(result.modelRetryCount, WorkAgentLoop.defaultMaxModelRetries);
+    expect(delays, WorkAgentLoop.defaultRetryDelays);
+    expect(delays.last, const Duration(seconds: 8));
+  });
+
+  test('honors Retry-After and jitters ordinary model backoff', () async {
+    final retryAfterModel = _FakeModel()
+      ..responses.add({
+        'success': false,
+        'statusCode': 429,
+        'retryAfterMs': 7000,
+        'message': '请求过于频繁',
+      })
+      ..responses.add(_finishDecision());
+    final retryAfterDelays = <Duration>[];
+    final retryAfterLoop = _loop(
+      model: retryAfterModel,
+      registry: WorkToolRegistry(),
+      maxModelRetries: 1,
+      retryJitter: () => 1,
+      sleep: (delay) async => retryAfterDelays.add(delay),
+    );
+
+    final retryAfterResult = await retryAfterLoop.execute(
+      _task(id: 'model-retry-after'),
+    );
+
+    expect(retryAfterResult.status, WorkAgentLoopStatus.completed);
+    expect(retryAfterDelays, [const Duration(seconds: 7)]);
+
+    final jitterModel = _FakeModel()
+      ..responses.add({
+        'success': false,
+        'statusCode': 503,
+        'message': '服务暂时不可用',
+      })
+      ..responses.add(_finishDecision());
+    final jitterDelays = <Duration>[];
+    final jitterLoop = _loop(
+      model: jitterModel,
+      registry: WorkToolRegistry(),
+      maxModelRetries: 1,
+      retryJitter: () => 1,
+      sleep: (delay) async => jitterDelays.add(delay),
+    );
+
+    final jitterResult = await jitterLoop.execute(
+      _task(id: 'model-retry-jitter'),
+    );
+
+    expect(jitterResult.status, WorkAgentLoopStatus.completed);
+    expect(jitterDelays, [const Duration(milliseconds: 300)]);
+  });
+
+  test('feeds completion guard failures back to the next model decision',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_finishDecision('第一次完成'))
+      ..responses.add(_finishDecision('修复后完成'));
+    var guardCalls = 0;
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      completionGuard: (_, __) {
+        guardCalls++;
+        return guardCalls == 1 ? '用户要求 xlsx 文件，但尚未生成真实文件。' : null;
+      },
+    );
+
+    final task = _task(id: 'completion-guard-repair');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(task.status, AgentTaskStatus.completed);
+    expect(model.requests, hasLength(2));
+    expect(
+      model.requests[1].context['previousCompletionFailure'],
+      contains('尚未生成真实文件'),
+    );
+    expect(guardCalls, 2);
+  });
+
+  test('a successful tool call restores the completion repair budget',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_finishDecision('第一次完成'))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_finishDecision('第二次完成'))
+      ..responses.add(_finishDecision('第三次完成'));
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.success(message: '读取成功');
+    var guardCalls = 0;
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+      maxCompletionRepairs: 1,
+      completionGuard: (_, __) {
+        guardCalls++;
+        // 前两次未通过，而第 2 次紧跟在一次成功的工具调用之后：那次成功必须把
+        // 预算归零，否则第 2 次就已经超预算、任务会被直接判失败。
+        return guardCalls <= 2 ? '尚未生成真实文件。' : null;
+      },
+    );
+
+    final result = await loop.execute(_task(id: 'completion-repair-reset'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(guardCalls, 3);
+    expect(tool.calls, 1);
+    // finish / tool / finish / finish：失败后各要一次新决策，最后一次通过。
+    expect(model.requests, hasLength(4));
+  });
+
+  test('a persistently failing completion guard fails after its repair budget',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_finishDecision('第一次完成'))
+      ..responses.add(_finishDecision('第二次完成'))
+      ..responses.add(_finishDecision('第三次完成'));
+    var guardCalls = 0;
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      maxCompletionRepairs: 2,
+      completionGuard: (_, __) {
+        guardCalls++;
+        return '用户要求 xlsx 文件，但尚未生成真实文件。';
+      },
+    );
+
+    final result = await loop.execute(_task(id: 'completion-repair-exhaust'));
+
+    expect(result.status, WorkAgentLoopStatus.failed);
+    expect(result.failure?.reason, contains('尚未生成真实文件'));
+    expect(guardCalls, 3, reason: '首次 + 两次修复，之后必须判失败而不是继续循环');
+    expect(model.requests, hasLength(3));
+  });
+
+  test('completion repairs restart after every successful tool call', () async {
+    // 预算是按进展分段的：每次成功的工具调用都会重置，所以整轮可以修 3 次以上
+    // （示例为 3 次），最终由 100 步动作上限兜底，而不是整轮只修 2 次。
+    final model = _FakeModel()
+      ..responses.add(_finishDecision('第一次完成'))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_finishDecision('第二次完成'))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_finishDecision('第三次完成'))
+      ..responses.add(_finishDecision('第四次完成'));
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.success(message: '读取成功');
+    var guardCalls = 0;
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+      completionGuard: (_, __) {
+        guardCalls++;
+        return guardCalls <= 3 ? '尚未生成真实文件。' : null;
+      },
+    );
+
+    final result = await loop.execute(_task(id: 'completion-repair-cycles'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(guardCalls, 4);
+    expect(tool.calls, 2);
+    expect(model.requests, hasLength(6));
+  });
+
+  test('retries an empty model completion from the latest checkpoint',
+      () async {
+    final model = _FakeModel()
+      ..responses.add({
+        'success': false,
+        'failureCode': 'emptyResponse',
+        'message': '模型返回了空内容',
+      })
+      ..responses.add(_finishDecision());
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      maxModelRetries: 1,
+    );
+
+    final result = await loop.execute(_task(id: 'empty-model-retry'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(model.requests, hasLength(2));
+    expect(result.modelRetryCount, 1);
+  });
+
   test('pauses instead of failing when a model retry reaches the action limit',
       () async {
     final model = _FakeModel()
@@ -689,6 +973,82 @@ void main() {
     expect(model.requests, hasLength(5));
   });
 
+  test('pauses when a repaired command keeps failing with the same error',
+      () async {
+    // 回归：模型每次“修复”都改写了命令文本，但进程错误完全没变。旧指纹包含
+    // 整条命令，所以每次都算“新失败”，循环检测永不触发，一次任务因此空转
+    // 十几步。现在只要退出码 + stderr 末行相同，修复一次后即暂停。
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(path: 'v1.py'))
+      ..responses.add(_toolDecision(path: 'v2.py'))
+      ..responses.add(_toolDecision(path: 'v3.py'))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.failed(
+            message: '命令退出码为 1。',
+            data: {
+              'runStatus': 'failed',
+              'exitCode': 1,
+              'stderr': 'Traceback (most recent call last):\n'
+                  '  File "v1.py", line 3\n'
+                  "NameError: name 'rank' is not defined",
+            },
+            failureCode: 'commandFailed',
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final task = _task(id: 'command-repaired-same-outcome');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(result.message, contains('自动修复没有取得进展'));
+    expect(tool.calls, 2, reason: '同一错误只允许一次诚实的修复尝试');
+    expect(task.lastError, contains('自动修复没有取得进展'));
+  });
+
+  test('continues when the repaired command produces a new error', () async {
+    // 反向：末行错误确实变化时，说明修复在推进，必须继续自动修复。
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(path: 'v1.py'))
+      ..responses.add(_toolDecision(path: 'v2.py'))
+      ..responses.add(_toolDecision(path: 'v3.py'))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool();
+    var calls = 0;
+    tool.behavior = (_) {
+      calls++;
+      if (calls >= 3) {
+        return const WorkToolResult.success(message: '脚本执行成功。');
+      }
+      return WorkToolResult.failed(
+        message: '命令退出码为 1。',
+        data: {
+          'runStatus': 'failed',
+          'exitCode': 1,
+          'stderr': 'Traceback (most recent call last):\n'
+              "NameError: name 'step$calls' is not defined",
+        },
+        failureCode: 'commandFailed',
+      );
+    };
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final result = await loop.execute(_task(id: 'command-new-outcome'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(tool.calls, 3);
+  });
+
   test('continues command repair after a timeout', () async {
     final model = _FakeModel()
       ..responses.add(_toolDecision())
@@ -811,6 +1171,86 @@ void main() {
     }
   });
 
+  test('hands a non-command tool failure back to the model for repair',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_finishDecision('已改用可用的读取方式。'));
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.failed(
+            message: '文档解析失败',
+            failureCode: 'documentParseFailed',
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final result = await loop.execute(_task(id: 'tool-repair'));
+
+    expect(tool.calls, 1);
+    expect(model.requests, hasLength(2));
+    expect(
+      model.requests[1].context['previousToolFailure'],
+      contains('文档解析失败'),
+    );
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(result.retryCount, 0);
+  });
+
+  test('pauses when a non-command tool failure repeats without progress',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead));
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.failed(
+            message: '文档解析失败',
+            failureCode: 'documentParseFailed',
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+
+    final result = await loop.execute(_task(id: 'tool-repair-repeat'));
+
+    expect(tool.calls, 2);
+    expect(result.status, WorkAgentLoopStatus.paused);
+  });
+
+  test('pauses after the tool repair budget instead of failing the task',
+      () async {
+    // 每次失败文案都不同，指纹与结果签名都不重复，只有修复预算能兜住这种
+    // 「每次看起来都是新错误」的漂移。
+    var attempt = 0;
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead))
+      ..responses.add(_toolDecision(name: AgentToolName.workspaceRead));
+    final tool = _FakeTool()
+      ..behavior = (_) => WorkToolResult.failed(
+            message: '文档解析失败 ${++attempt}',
+            failureCode: 'documentParseFailed',
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+      maxToolRepairs: 2,
+    );
+
+    final result = await loop.execute(_task(id: 'tool-repair-budget'));
+
+    expect(tool.calls, 3);
+    expect(result.status, WorkAgentLoopStatus.paused);
+  });
+
   test('a rejected mutation is a safe no-op, never a committed artifact',
       () async {
     final model = _FakeModel()
@@ -842,6 +1282,62 @@ void main() {
     expect(task.executionStateJson, contains('"committedActionKeys":[]'));
     expect(task.contextSummary, contains('"committed":false'));
     expect(task.contextSummary, isNot(contains('"committed":true')));
+  });
+
+  test('does not reuse a completed mutation approval for the next tool',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.skillDownload,
+        arguments: {'templateId': 'frontend.interactive-artifact'},
+      ))
+      ..responses.add(_toolDecision(name: AgentToolName.workspacePatch))
+      ..responses.add(_finishDecision());
+    final skillTool = _FakeTool();
+    final fileTool = _FakeTool();
+    final task = _task(id: 'approval-cannot-leak-between-tools')
+      ..executionStateJson = jsonEncode({
+        'approvalDecision': 'approvedWithoutUndo',
+        'approvalCapability': 'mutation',
+      });
+    final registry = WorkToolRegistry(
+      definitions: [
+        _definition(
+          AgentToolName.skillDownload,
+          skillTool,
+          access: WorkToolAccess.mutation,
+          pipeline: _recordingPipeline(<String>[]),
+          skillDownload: true,
+        ),
+        _definition(
+          AgentToolName.workspacePatch,
+          fileTool,
+          access: WorkToolAccess.mutation,
+          pipeline: WorkToolMutationPipeline(
+            policy: (invocation) {
+              final execution = jsonDecode(
+                invocation.task.executionStateJson,
+              ) as Map<String, dynamic>;
+              if (execution['approvalDecision'] != null) {
+                return const WorkToolResult.failed(
+                  message: '旧审批不应继续授权新的文件变更。',
+                  failureCode: 'notApproved',
+                );
+              }
+              return null;
+            },
+          ),
+        ),
+      ],
+    );
+
+    final result = await _loop(model: model, registry: registry).execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(skillTool.calls, 1);
+    expect(fileTool.calls, 1);
+    final execution = jsonDecode(task.executionStateJson) as Map;
+    expect(execution, isNot(contains('approvalDecision')));
   });
 
   test('an unchanged mutation replans once and then pauses without success',
@@ -1084,6 +1580,25 @@ void main() {
     expect(model.requests[4].isRepair, isFalse);
   });
 
+  test('automatically retries a third fresh protocol decision', () async {
+    final invalidResponse = <String, dynamic>{
+      'success': true,
+      'content': '仍然不是合法 AgentDecision。',
+    };
+    final model = _FakeModel();
+    for (var attempt = 0; attempt < 6; attempt++) {
+      model.responses.add(invalidResponse);
+    }
+    model.responses.add(_finishDecision('自动协议重试后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final result = await loop.execute(_task(id: 'protocol-retry-thrice'));
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(result.protocolRepairAttempts, 3);
+    expect(model.requests, hasLength(7));
+  });
+
   test('stop before model creates an interrupted checkpoint', () async {
     final model = _FakeModel()..responses.add(_finishDecision());
     final cancellation = WorkTaskCancellation()..cancel();
@@ -1230,6 +1745,111 @@ void main() {
     expect(task.softLimitReached, isTrue);
     expect(task.actionCount, 1);
     expect(modelCalls, 1);
+  });
+
+  test('a settled approval wait does not consume the task time budget',
+      () async {
+    final clock = _FakeClock();
+    final model = _FakeModel()
+      ..responses.add(_toolDecision())
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (_) {
+        // The hour passed while the user was deciding on an approval, not
+        // while the agent was working.
+        clock.advance(const Duration(minutes: 60));
+        return const WorkToolResult.success(message: '完成一步');
+      };
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+      clock: clock,
+    );
+    final task = _task(id: 'approval-wait-budget')..startedAt = clock.now;
+    task.executionStateJson = jsonEncode(
+      WorkTaskBudgetWait.settle(
+        WorkTaskBudgetWait.begin(<String, dynamic>{}, task.startedAt!),
+        task.startedAt!.add(const Duration(hours: 1)),
+        budgetStartedAt: task.startedAt!,
+      ),
+    );
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(task.softLimitReached, isFalse);
+    expect(model.requests, hasLength(2));
+  });
+
+  test('an open approval wait is settled when the run resumes', () async {
+    final clock = _FakeClock();
+    final startedAt = clock.now;
+    final model = _FakeModel()..responses.add(_finishDecision());
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      clock: clock,
+    );
+    final task = _task(id: 'settle-approval-wait')
+      ..startedAt = startedAt
+      ..executionStateJson = jsonEncode(<String, dynamic>{
+        WorkTaskBudgetWait.startedAtKey: startedAt.millisecondsSinceEpoch,
+      });
+    // The wait ends when the user approves and the coordinator requeues the
+    // task; the resumed run is the first place that can fold it in.
+    clock.advance(const Duration(minutes: 45));
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    final execution =
+        Map<String, dynamic>.from(jsonDecode(task.executionStateJson) as Map);
+    expect(WorkTaskBudgetWait.startedAtOf(execution), isNull);
+    expect(
+      WorkTaskBudgetWait.totalFor(execution, startedAt),
+      const Duration(minutes: 45),
+    );
+  });
+
+  test('a wait settled before a replan cannot extend the new time budget',
+      () async {
+    final clock = _FakeClock();
+    final model = _FakeModel()
+      ..responses.add(_toolDecision())
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (_) {
+        clock.advance(const Duration(hours: 1));
+        return const WorkToolResult.success(message: '完成一步');
+      };
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+      clock: clock,
+    );
+    // The task waited an hour for an approval, then the user replanned it: the
+    // fresh window starts now, so the old discount must not apply to it.
+    final task = _task(id: 'superseded-wait-budget', softTimeLimitMinutes: 30)
+      ..startedAt = clock.now;
+    task.executionStateJson = jsonEncode(
+      WorkTaskBudgetWait.settle(
+        WorkTaskBudgetWait.begin(
+          <String, dynamic>{},
+          clock.now.subtract(const Duration(hours: 1)),
+        ),
+        clock.now,
+        budgetStartedAt: clock.now.subtract(const Duration(hours: 1)),
+      ),
+    );
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(task.softLimitReached, isTrue);
   });
 
   test(

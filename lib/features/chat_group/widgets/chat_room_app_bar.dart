@@ -236,7 +236,7 @@ class _SearchField extends StatelessWidget {
             controller: controller,
             autofocus: true,
             decoration: InputDecoration(
-              hintText: '搜索消息...',
+              hintText: '搜索消息，支持拼音',
               hintStyle: TextStyle(
                 color: colorScheme.onSurfaceVariant.withValues(alpha: 0.6),
               ),

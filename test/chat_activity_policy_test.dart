@@ -110,6 +110,19 @@ void main() {
     );
   });
 
+  test('an active work task blocks auto chat even when the toggle is off', () {
+    expect(
+      ChatActivityPolicy.canStartAutoChat(
+        workModeEnabled: false,
+        hasActiveWorkTask: true,
+        autoChatEnabled: true,
+        hasCharacters: true,
+        hasApiConfig: true,
+      ),
+      isFalse,
+    );
+  });
+
   test('pending mentions are handled before casual follow-ups', () {
     final selected = ChatActivityPolicy.selectUserReplyCharacters(
       characters: characters,

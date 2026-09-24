@@ -127,6 +127,9 @@ extension _WorkTaskCoordinatorWorkspaceQueue on WorkTaskCoordinator {
         requiresWritable: requiresWritable,
       )
       ..updatedAt = _clock();
+    // The picker below blocks on the user, which is not agent work: book the
+    // wait before the dialog appears so the resumed run can subtract it.
+    _openBudgetWait(task);
     await _save(task);
     await _record(
       task,

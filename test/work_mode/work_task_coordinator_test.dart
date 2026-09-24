@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
@@ -15,6 +16,7 @@ import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_follow_up_policy.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
@@ -32,6 +34,18 @@ class _FakeWorkTaskRunner
   final List<String> startedTaskIds = <String>[];
   final List<String> cancelledTaskIds = <String>[];
   final Set<String> throwTaskIds = <String>{};
+  final Set<String> failOnCompletion = <String>{};
+  final Set<String> waitForCancellationTaskIds = <String>{};
+
+  /// Error raised for [throwTaskIds]. A transport error exercises the
+  /// coordinator's automatic resume; the default exercises a plain failure.
+  Object throwError = StateError('runner failed');
+
+  /// 每次运行实际看到的当前附件 id，按任务分组，用于验证追问是否切换了附件。
+  final Map<String, List<String>> _attachments = <String, List<String>>{};
+
+  List<String> attachmentsFor(String taskId) =>
+      List<String>.unmodifiable(_attachments[taskId] ?? const <String>[]);
   final Map<String, Completer<void>> _completions = <String, Completer<void>>{};
   final Map<String, int> _activeByConversation = <String, int>{};
 
@@ -55,8 +69,15 @@ class _FakeWorkTaskRunner
   Future<void> run(AgentTask task, WorkTaskCancellation cancellation) async {
     if (throwTaskIds.contains(task.id)) {
       startedTaskIds.add(task.id);
-      throw StateError('runner failed');
+      throw throwError;
     }
+    if (waitForCancellationTaskIds.contains(task.id)) {
+      startedTaskIds.add(task.id);
+      await cancellation.whenCancelled;
+      cancelledTaskIds.add(task.id);
+      return;
+    }
+    (_attachments[task.id] ??= <String>[]).add(_attachmentIdOf(task));
     final completion = Completer<void>();
     _completions[task.id] = completion;
     startedTaskIds.add(task.id);
@@ -84,7 +105,20 @@ class _FakeWorkTaskRunner
     } else {
       _activeByConversation[task.groupId] = remaining;
     }
+    if (failOnCompletion.remove(task.id)) throw StateError('completion failed');
   }
+
+  Map<String, dynamic> _decode(String raw) {
+    if (raw.trim().isEmpty) return <String, dynamic>{};
+    final value = jsonDecode(raw);
+    return value is Map
+        ? Map<String, dynamic>.from(value)
+        : <String, dynamic>{};
+  }
+
+  String _attachmentIdOf(AgentTask task) =>
+      (_decode(task.executionStateJson)['attachmentMessageId'] ?? '')
+          .toString();
 
   void complete(String taskId) {
     final completion = _completions[taskId];
@@ -383,6 +417,23 @@ Future<void> _waitForTaskState(
   fail('任务未在限定时间内达到预期状态：$taskId');
 }
 
+/// The persisted count of automatic resumes, or 0 when the task has none.
+int _autoResumeCountOf(AgentTask task) {
+  if (task.executionStateJson.trim().isEmpty) return 0;
+  final decoded = jsonDecode(task.executionStateJson);
+  if (decoded is! Map) return 0;
+  final count = decoded['autoResumeCount'];
+  return count is int ? count : 0;
+}
+
+/// The start of an open budget wait window, or null when the task has none.
+DateTime? _budgetWaitStart(AgentTask task) {
+  if (task.executionStateJson.trim().isEmpty) return null;
+  return WorkTaskBudgetWait.startedAtOf(
+    Map<String, dynamic>.from(jsonDecode(task.executionStateJson) as Map),
+  );
+}
+
 Future<void> _waitForLockCount(
   WorkResourceLockManager manager,
   int expected,
@@ -421,6 +472,9 @@ void main() {
   setUp(() async {
     directory = await Directory.systemTemp.createTemp('work-task-coordinator-');
     Hive.init(directory.path);
+    if (!Hive.isAdapterRegistered(10)) {
+      Hive.registerAdapter(ToolPermissionAdapter());
+    }
     if (!Hive.isAdapterRegistered(12)) {
       Hive.registerAdapter(AgentTaskStatusAdapter());
     }
@@ -446,6 +500,79 @@ void main() {
     await eventStore.close();
     await Hive.close();
     if (await directory.exists()) await directory.delete(recursive: true);
+  });
+
+  test('direct revisions remain FIFO and keep attachments and time budget',
+      () async {
+    var now = DateTime.utc(2026, 9, 17, 9);
+    final originalStart = now;
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      clock: () => now,
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'revision-fifo', conversationId: 'dm:worker')
+      ..userRequest = '生成报告'
+      ..lastArtifactPaths = ['/workspace/report.md'];
+    await localCoordinator.submit(task);
+    await localCoordinator.enqueueFollowUp(
+      task.id,
+      '修改同一文件的标题',
+      attachmentMessageId: 'attachment-first',
+    );
+    await localCoordinator.enqueueFollowUp(task.id, '内容再详细些');
+    expect(task.userRequest, '生成报告');
+    expect(task.queuedUserRequests, ['修改同一文件的标题', '内容再详细些']);
+    expect(runner.cancelledTaskIds, isEmpty);
+    expect(runner.startedTaskIds, [task.id]);
+
+    now = now.add(const Duration(minutes: 10));
+    runner.complete(task.id);
+    await _waitForStartedCount(runner, 2);
+    expect(task.userRequest, '修改同一文件的标题');
+    expect(task.queuedUserRequests, ['内容再详细些']);
+    expect(task.lastArtifactPaths, ['/workspace/report.md']);
+    expect(runner.attachmentsFor(task.id), ['', 'attachment-first']);
+    expect(task.startedAt, originalStart);
+    expect(task.attemptStartedAt, now);
+
+    now = now.add(const Duration(minutes: 10));
+    runner.complete(task.id);
+    await _waitForStartedCount(runner, 3);
+    expect(task.userRequest, '内容再详细些');
+    expect(task.queuedUserRequests, isEmpty);
+    expect(task.lastArtifactPaths, ['/workspace/report.md']);
+    expect(runner.attachmentsFor(task.id), ['', 'attachment-first', '']);
+    expect(task.startedAt, originalStart);
+    expect(task.attemptStartedAt, now);
+    expect(runner.maximumActiveForOneConversation, 1);
+    expect(runner.cancelledTaskIds, isEmpty);
+    runner.complete(task.id);
+    await _waitForTaskState(taskBox, task.id, (task) => task.isTerminal);
+  });
+
+  test('a late execution failure preserves queued direct revisions', () async {
+    final task = _task(id: 'revision-failure', conversationId: 'dm:worker')
+      ..userRequest = '生成报告'
+      ..lastArtifactPaths = ['/workspace/report.md'];
+    await coordinator.submit(task);
+    await coordinator.enqueueFollowUp(task.id, '内容再详细些',
+        attachmentMessageId: 'revision-attachment');
+    runner.failOnCompletion.add(task.id);
+    runner.complete(task.id);
+    await _waitForTaskState(
+        taskBox, task.id, (task) => task.status == AgentTaskStatus.failed);
+    expect(task.lastError, contains('completion failed'));
+    expect(task.userRequest, '生成报告');
+    expect(task.queuedUserRequests, ['内容再详细些']);
+    expect(
+        (jsonDecode(task.executionStateJson)
+            as Map)['queuedAttachmentMessageIds'],
+        ['revision-attachment']);
+    expect(runner.startedTaskIds, [task.id]);
+    expect(runner.cancelledTaskIds, isEmpty);
   });
 
   test('regression: visual recovery keeps discussion executor consistent',
@@ -593,6 +720,364 @@ void main() {
 
     expect(retryRunner.validationCount, 0);
     expect(retryRunner.runCount, 1);
+  });
+
+  test('retries a completed task while its artifact delivery is pending',
+      () async {
+    final task = _task(id: 'artifact-resend', conversationId: 'dm:worker')
+      ..status = AgentTaskStatus.completed
+      ..resultSummary = '报告已生成。'
+      ..lastArtifactPaths = const ['/workspace/report.docx'];
+    task.executionStateJson = jsonEncode(<String, dynamic>{
+      'artifactDeliveryNoticePublished': true,
+      'artifactDeliveryRetryOnly': true,
+      'artifactDeliveryMessageId': 'artifact-resend-message',
+    });
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'artifactDelivery',
+        message: '文件已保存，但有 1 个产物无法作为聊天附件发送；可重试交付。',
+        scope: 'delivery',
+        completedContent: task.lastArtifactPaths,
+        retryable: true,
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.retry(task.id);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status != AgentTaskStatus.completed,
+    );
+
+    expect(runner.startedTaskIds, contains(task.id));
+    // 重发必须保留投递标记与产物路径，否则 runner 会把它当成一次全新执行。
+    expect(
+      jsonDecode(task.executionStateJson)['artifactDeliveryRetryOnly'],
+      isTrue,
+    );
+    expect(task.resultSummary, '报告已生成。');
+    expect(task.lastArtifactPaths, const ['/workspace/report.docx']);
+    runner.complete(task.id);
+  });
+
+  test('refuses to retry a completed task with nothing left to deliver',
+      () async {
+    final task = _task(id: 'artifact-done', conversationId: 'dm:worker')
+      ..status = AgentTaskStatus.completed;
+    await taskBox.put(task.id, task);
+
+    await expectLater(coordinator.retry(task.id), throwsA(isA<StateError>()));
+    expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('automatically resumes a retryable failure along the delay ladder',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration.zero, Duration.zero],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'auto-resume', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) =>
+          _autoResumeCountOf(value) == 2 &&
+          value.status == AgentTaskStatus.failed,
+    );
+
+    expect(task.status, AgentTaskStatus.failed);
+    expect(task.resumeRequired, isTrue);
+    expect(
+      runner.startedTaskIds.where((id) => id == task.id),
+      hasLength(3),
+      reason: '首次执行 + 两次自动续跑；阶梯用尽后不再自行重试',
+    );
+  });
+
+  test('does not resume a failure that is not retryable', () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 30)],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'no-auto-resume', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+    await Future<void>.delayed(const Duration(milliseconds: 50));
+
+    expect(_autoResumeCountOf(task), 0);
+    expect(
+      runner.startedTaskIds.where((id) => id == task.id),
+      hasLength(1),
+      reason: '内部失败不是链路问题，不能自行重试',
+    );
+  });
+
+  test('an automatic resume never re-dispatches a task that moved on',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 150)],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'resume-after-manual', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+
+    // 用户在这个窗口内先手动重试：定时器到点后必须看到任务已经不在失败态。
+    runner.throwTaskIds.remove(task.id);
+    await localCoordinator.retry(task.id);
+    await _waitForStartedCount(runner, 2);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    expect(
+      runner.startedTaskIds.where((id) => id == task.id),
+      hasLength(2),
+      reason: '手动重试已接管，自动续跑不得再派发一次',
+    );
+    expect(_autoResumeCountOf(task), 0);
+    runner.complete(task.id);
+  });
+
+  test('a pending automatic resume leaves a disposed coordinator alone',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 50)],
+    );
+    final task = _task(id: 'disposed-resume', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+
+    await localCoordinator.dispose();
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+
+    expect(runner.startedTaskIds.where((id) => id == task.id), hasLength(1));
+  });
+
+  test('an automatic resume re-reads the failure it is resuming', () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 150)],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'resume-reread', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+
+    // 用户在定时器到点前手动重试，而这一次失败变成了内部错误。自动续跑必须
+    // 重新读取当前失败，而不是照搬排队时的那个可重试失败。
+    runner.throwError = StateError('runner failed');
+    await localCoordinator.retry(task.id);
+    await _waitForStartedCount(runner, 2);
+    await Future<void>.delayed(const Duration(milliseconds: 300));
+
+    expect(_autoResumeCountOf(task), 0);
+    expect(runner.startedTaskIds.where((id) => id == task.id), hasLength(2));
+  });
+
+  test('new input during the auto-resume window preempts the automatic resume',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 60)],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'resume-vs-input', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+
+    // 一条追问在定时器到点前到达。对它这种已终止的任务，追问会被立即提升并复用
+    // 同一任务，所以它应当抢占自动续跑：任务只再跑一次，同一会话始终串行。
+    runner.throwTaskIds.remove(task.id);
+    await localCoordinator.enqueueFollowUp(task.id, '顺带再改一下标题');
+    await _waitForStartedCount(runner, 2);
+
+    expect(task.userRequest, '顺带再改一下标题');
+    expect(task.queuedUserRequests, isEmpty);
+    expect(runner.maximumActiveForOneConversation, 1);
+    expect(
+      _autoResumeCountOf(task),
+      0,
+      reason: '用户先动作，自动续跑不该消耗一次尝试',
+    );
+
+    // 让定时器到点：此时任务已不是 failed，唤醒必须什么都不做。
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(
+      runner.startedTaskIds.where((id) => id == task.id),
+      hasLength(2),
+      reason: '自动续跑不得与追问各派发一次',
+    );
+    expect(_autoResumeCountOf(task), 0);
+    runner.complete(task.id);
+  });
+
+  test('a completed task awaiting artifact resend is not auto-resumed',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration.zero, Duration.zero],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'delivery-pending', conversationId: 'dm:worker')
+      ..status = AgentTaskStatus.completed
+      ..lastArtifactPaths = const <String>['/workspace/report.docx'];
+    task.executionStateJson = jsonEncode(<String, dynamic>{
+      'artifactDeliveryNoticePublished': true,
+      'artifactDeliveryRetryOnly': true,
+      'artifactDeliveryMessageId': 'delivery-pending-message',
+    });
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'artifactDelivery',
+        message: '文件已保存，但有 1 个产物无法作为聊天附件发送；可重试交付。',
+        scope: 'delivery',
+        completedContent: task.lastArtifactPaths,
+        retryable: true,
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await Future<void>.delayed(const Duration(milliseconds: 60));
+
+    // 重发是用户动作：自动续跑只恢复 failed 任务，不会替用户再发一条消息。
+    expect(runner.startedTaskIds, isEmpty);
+    expect(_autoResumeCountOf(task), 0);
+  });
+
+  test('bounds an automatic resume round and cancels the runner', () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 30)],
+      autoResumeRoundTimeout: const Duration(milliseconds: 20),
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'auto-resume-timeout', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(task.id);
+    runner.throwError = TimeoutException('连接超时');
+    runner.waitForCancellationTaskIds.add(task.id);
+
+    await localCoordinator.submit(task);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+    runner.throwTaskIds.remove(task.id);
+    await _waitForStartedCount(runner, 2);
+    await Future<void>.delayed(const Duration(milliseconds: 80));
+
+    expect(task.status, AgentTaskStatus.failed);
+    expect(task.lastError, contains('任务执行超时'));
+    expect(runner.cancelledTaskIds, contains(task.id));
+    expect(task.resumeRequired, isTrue);
+  });
+
+  test('a manual retry never inherits the automatic resume round deadline',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 150)],
+      autoResumeRoundTimeout: const Duration(milliseconds: 50),
+    );
+    addTearDown(localCoordinator.dispose);
+    final victim = _task(id: 'deadline-handover', conversationId: 'dm:worker');
+    runner.throwTaskIds.add(victim.id);
+    runner.throwError = TimeoutException('连接超时');
+
+    // 先让受害者失败一次并排上自动续跑，随后用同会话的占位任务占住会话：同会话
+    // 串行是协调器的硬约束，比抢全局槽位更确定地让续跑那一轮排不上队。
+    await localCoordinator.submit(victim);
+    await _waitForTaskState(
+      taskBox,
+      victim.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+    final holder = _task(id: 'conversation-holder', conversationId: 'dm:worker');
+    await localCoordinator.submit(holder);
+    await _waitForStartedCount(runner, 2);
+
+    await Future<void>.delayed(const Duration(milliseconds: 250));
+    expect(_autoResumeCountOf(victim), 1, reason: '自动续跑应先发生并排在同会话队列里');
+
+    // 用户此时手动重试：这一轮是用户发起的，不该被只用于约束 App 自动尝试的
+    // 轮次时限取消。
+    runner.throwTaskIds.remove(victim.id);
+    runner.waitForCancellationTaskIds.add(victim.id);
+    await localCoordinator.retry(victim.id);
+    runner.complete(holder.id);
+    await _waitForStartedCount(runner, 3);
+    await Future<void>.delayed(const Duration(milliseconds: 200));
+
+    expect(
+      runner.cancelledTaskIds,
+      isNot(contains(victim.id)),
+      reason: '用户发起的运行不该被自动续跑的轮次时限取消',
+    );
+    expect(victim.status, isNot(AgentTaskStatus.failed));
+    expect(victim.resumeRequired, isFalse);
   });
 
   test('rejects external discussion overwrite and restarts a renewed revision',
@@ -870,6 +1355,321 @@ void main() {
     runner.complete(task.id);
   });
 
+  test('a new QA deliverable scopes a renewed discussion to the QA stage',
+      () async {
+    const originalRequest =
+        'Create the playable HTML game at Desktop/doudizhu_game.html.';
+    const qaRequest = 'Test the existing Desktop/doudizhu_game.html against '
+        'Desktop/doudizhu_design.md in a browser and create the Markdown '
+        'report Desktop/doudizhu_test_report.md.';
+    final priorState = WorkDiscussionState.initial(
+      conversationId: 'group-qa-scope',
+      executorId: null,
+      candidateCharacterIds: const [],
+      participantCharacterIds: const ['frontend', 'tester'],
+      deliverableContract: const <String, dynamic>{
+        'deliverableType': 'source',
+        'format': 'html',
+        'location': 'doudizhu_game.html',
+        'contentScope': originalRequest,
+        'explicitExecutorId': null,
+        'revisionTarget': '',
+        'requestRevision': 1,
+      },
+    ).copyWith(
+      phase: WorkDiscussionPhase.awaitingDiscussion,
+      understandingPercent: 60,
+      understandingEvidence: const ['HTML 开发范围已确认。'],
+    );
+    final task = _task(
+      id: 'discussion-qa-scope',
+      conversationId: 'group-qa-scope',
+      characterId: '',
+    )
+      ..userRequest = originalRequest
+      ..status = AgentTaskStatus.paused
+      ..executionStateJson =
+          WorkDiscussionState.mergeIntoExecutionState('', priorState);
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, qaRequest);
+
+    final stored = taskBox.get(task.id)!;
+    final renewed = WorkDiscussionState.fromExecutionState(
+      stored.executionStateJson,
+    )!;
+    expect(stored.userRequest, contains(originalRequest));
+    expect(renewed.deliverableContract?['format'], 'markdown');
+    expect(
+      renewed.deliverableContract?['location'],
+      'doudizhu_test_report.md',
+    );
+    expect(WorkDiscussionState.currentRequestScope(stored), qaRequest);
+  });
+
+  test('new explicit workspace root replaces stale authorization checkpoint',
+      () async {
+    final requestedRoot = '${directory.path}/new-workspace';
+    await Directory(requestedRoot).create(recursive: true);
+    final settingsBox = await Hive.openBox<dynamic>('folder-settings-test');
+    var pickerCalled = false;
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: () async {
+        pickerCalled = true;
+        return requestedRoot;
+      },
+      folderGrantConsent: (_) async => true,
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _taskWithDiscussion(
+      _task(
+        id: 'discussion-new-workspace-root',
+        conversationId: 'group-new-workspace-root',
+      )..status = AgentTaskStatus.paused,
+      _discussionState(
+        conversationId: 'group-new-workspace-root',
+      ),
+    )..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+        'tool': 'workspace.list',
+        'args': <String, dynamic>{'path': 'Desktop'},
+      });
+    final execution =
+        jsonDecode(task.executionStateJson) as Map<String, dynamic>
+          ..['folderRequestPath'] = '/Volumes/old-workspace/Desktop'
+          ..['folderGrantPending'] = true
+          ..['folderRequiresWritable'] = true;
+    task.executionStateJson = jsonEncode(execution);
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'authorizationLost',
+        message: '旧工作目录授权已失效，请重新选择目录。',
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await localCoordinator.enqueueFollowUp(
+      task.id,
+      'Use $requestedRoot as the exact workspace root and continue.',
+    );
+
+    final revised = taskBox.get(task.id)!;
+    final revisedExecution =
+        jsonDecode(revised.executionStateJson) as Map<String, dynamic>;
+    expect(revised.userRequest, contains(requestedRoot));
+    expect(revisedExecution['folderRequestPath'], requestedRoot);
+    expect(revisedExecution['folderGrantPending'], isTrue);
+    expect(revisedExecution['folderRequiresWritable'], isTrue);
+    expect(revised.pendingToolRequestJson, isEmpty);
+
+    await localCoordinator.reauthorizeTask(task.id);
+
+    final authorizedExecution =
+        jsonDecode(taskBox.get(task.id)!.executionStateJson)
+            as Map<String, dynamic>;
+    expect(pickerCalled, isTrue);
+    expect(taskBox.get(task.id)?.workFailure, isNull);
+    expect(authorizedExecution, isNot(contains('folderRequestPath')));
+    expect(authorizedExecution, isNot(contains('folderGrantPending')));
+    expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('applies queued workspace root correction after auth-lost run drains',
+      () async {
+    final requestedRoot = '${directory.path}/corrected-workspace';
+    await Directory(requestedRoot).create(recursive: true);
+    final task = _taskWithDiscussion(
+      _task(
+          id: 'running-auth-root-correction',
+          conversationId: 'group-auth-root'),
+      _discussionState(
+        conversationId: 'group-auth-root',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    )..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+        'tool': 'workspace.list',
+        'args': <String, dynamic>{'path': 'Desktop'},
+      });
+    await coordinator.submit(task);
+    await _waitForStartedCount(runner, 1);
+
+    final active = taskBox.get(task.id)!;
+    final execution =
+        jsonDecode(active.executionStateJson) as Map<String, dynamic>
+          ..['folderRequestPath'] = '/Volumes/old-workspace/Desktop'
+          ..['folderGrantPending'] = true
+          ..['folderRequiresWritable'] = true;
+    active
+      ..status = AgentTaskStatus.paused
+      ..executionStateJson = jsonEncode(execution);
+    WorkFailure.persistOnTask(
+      active,
+      WorkFailure.fromToolFailure(
+        code: 'authorizationLost',
+        message: '旧工作目录授权已失效。',
+      ),
+    );
+    await taskBox.put(active.id, active);
+    final correction =
+        'Path correction: $requestedRoot is the exact workspace root. Use workspace.list path=".".';
+
+    await coordinator.enqueueFollowUp(active.id, correction);
+
+    expect(taskBox.get(active.id)?.queuedUserRequests, [correction]);
+    expect(runner.cancelledTaskIds, isEmpty);
+    runner.complete(active.id);
+    await _waitForTaskState(
+      taskBox,
+      active.id,
+      (stored) =>
+          stored.queuedUserRequests.isEmpty &&
+          stored.executionStateJson.contains(requestedRoot),
+    );
+
+    final recovered = taskBox.get(active.id)!;
+    final recoveredExecution =
+        jsonDecode(recovered.executionStateJson) as Map<String, dynamic>;
+    expect(recovered.userRequest, contains(requestedRoot));
+    expect(recoveredExecution['folderRequestPath'], requestedRoot);
+    expect(recoveredExecution['folderGrantPending'], isTrue);
+    expect(recoveredExecution['folderRequiresWritable'], isTrue);
+    expect(recovered.pendingToolRequestJson, isEmpty);
+    expect(recovered.status, AgentTaskStatus.paused);
+    expect(recovered.workFailure?.type, WorkFailureType.authorizationLost);
+    expect(runner.cancelledTaskIds, isEmpty);
+    expect(runner.startedTaskIds, [active.id]);
+  });
+
+  test('reauthorize migrates a persisted queued workspace root correction',
+      () async {
+    final requestedRoot = '${directory.path}/persisted-correction';
+    await Directory(requestedRoot).create(recursive: true);
+    final settingsBox = await Hive.openBox<dynamic>('folder-settings-queued');
+    var pickerCalled = false;
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: () async {
+        pickerCalled = true;
+        return requestedRoot;
+      },
+      folderGrantConsent: (_) async => true,
+    );
+    addTearDown(localCoordinator.dispose);
+    final correction =
+        'Path correction: $requestedRoot is the exact workspace root. Use workspace.list path=".".';
+    final task = _taskWithDiscussion(
+      _task(
+        id: 'persisted-auth-root-correction',
+        conversationId: 'group-persisted-auth-root',
+      )..status = AgentTaskStatus.paused,
+      _discussionState(
+        conversationId: 'group-persisted-auth-root',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    )
+      ..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+        'tool': 'workspace.list',
+        'args': <String, dynamic>{'path': 'Desktop'},
+      })
+      ..queuedUserRequests = [correction];
+    task.executionStateJson = jsonEncode(<String, dynamic>{
+      ...jsonDecode(task.executionStateJson) as Map<String, dynamic>,
+      'folderRequestPath': '/Volumes/old-workspace/Desktop',
+      'folderGrantPending': true,
+      'folderRequiresWritable': true,
+      'queuedAttachmentMessageIds': [''],
+    });
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'authorizationLost',
+        message: '旧工作目录授权已失效。',
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    final actionVersion =
+        WorkTaskUserAction.versionFor(task, 'folderAuthorization');
+    expect(actionVersion, greaterThan(0));
+    await localCoordinator.requestFolderForTask(
+      task.id,
+      expectedActionVersion: actionVersion,
+    );
+    await _waitForStartedCount(runner, 1);
+
+    final recovered = taskBox.get(task.id)!;
+    final recoveredExecution =
+        jsonDecode(recovered.executionStateJson) as Map<String, dynamic>;
+    expect(pickerCalled, isTrue);
+    expect(recovered.userRequest, contains(requestedRoot));
+    expect(recovered.queuedUserRequests, isEmpty);
+    expect(recovered.pendingToolRequestJson, isEmpty);
+    expect(recovered.status, AgentTaskStatus.planning);
+    expect(recovered.workFailure, isNull);
+    expect(recoveredExecution, isNot(contains('folderRequestPath')));
+    expect(recoveredExecution, isNot(contains('folderGrantPending')));
+    expect(runner.startedTaskIds, [task.id]);
+  });
+
+  test('repairs an unknown mention after the user corrects the discussion',
+      () async {
+    final task = _taskWithDiscussion(
+      _task(
+        id: 'discussion-mention-repair',
+        conversationId: 'group-mention-repair',
+        characterId: '',
+      )
+        ..status = AgentTaskStatus.paused
+        ..userRequest =
+            'Create the design file.\\n用户补充要求：@Chen. Provide frontend details.',
+      _discussionState(
+        conversationId: 'group-mention-repair',
+        executorId: null,
+        phase: WorkDiscussionPhase.blocked,
+        openQuestions: const ['未找到角色 @Chen，没有静默替换其他角色。'],
+        blockers: const ['mentionClarification'],
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(
+      task.id,
+      'Use @陈雨薇 instead of @Chen. Continue the original task.',
+    );
+
+    final stored = taskBox.get(task.id)!;
+    final renewed = WorkDiscussionState.fromExecutionState(
+      stored.executionStateJson,
+    )!;
+    expect(stored.userRequest, isNot(contains('@Chen')));
+    expect(stored.userRequest, contains('Create the design file.'));
+    expect(stored.userRequest, contains('@陈雨薇'));
+    expect(renewed.requestRevision, 2);
+    expect(renewed.blockers, isNot(contains('mentionClarification')));
+    expect(renewed.phase, WorkDiscussionPhase.awaitingExecutor);
+  });
+
   test('does not apply a group discussion marker to private chat execution',
       () async {
     final task = _taskWithDiscussion(
@@ -1076,6 +1876,18 @@ void main() {
         'schemaVersion': 1,
         'checkpointSchemaUnsupported': true,
       });
+    WorkFailure.persistOnTask(
+      task,
+      const WorkFailure(
+        type: WorkFailureType.userActionRequired,
+        title: '执行时间已达上限',
+        reason: '已达到本任务时间上限，请手点继续。',
+        technicalDetail: '已达到本任务时间上限，请手点继续。',
+        completedContent: <String>[],
+        retryable: false,
+        suggestedAction: '点击继续。',
+      ),
+    );
     await taskBox.put(task.id, task);
 
     await coordinator.continueAfterSoftLimit(task.id);
@@ -1086,6 +1898,9 @@ void main() {
     );
     expect(restored.status, AgentTaskStatus.paused);
     expect(restored.softLimitReached, isFalse);
+    expect(restored.workFailure, isNull);
+    expect(restored.lastError, contains('旧任务需要补充群讨论'));
+    expect(restored.lastError, isNot(contains('本任务时间上限')));
     expect(state?.phase, WorkDiscussionPhase.awaitingDiscussion);
     expect(state?.isExecutionReady, isFalse);
     expect(runner.startedTaskIds, isEmpty);
@@ -1466,6 +2281,66 @@ void main() {
     runner.complete(developer.id);
   });
 
+  test('handoff advances after a completed stage with delivery retry pending',
+      () async {
+    final task = _task(
+      id: 'handoff-delivery-failure',
+      conversationId: 'handoff-delivery-group',
+      characterId: 'product',
+    );
+    WorkHandoffState.persistToTask(
+      task,
+      WorkHandoffState.initial(
+        conversationId: task.groupId,
+        stages: [
+          WorkHandoffStage(id: 'product', label: '产品', roleId: 'product'),
+          WorkHandoffStage(id: 'developer', label: '开发', roleId: 'developer'),
+        ],
+      ),
+    );
+    final execution =
+        jsonDecode(task.executionStateJson) as Map<String, dynamic>
+          ..addAll(<String, dynamic>{
+            'artifactDeliveryNoticePublished': true,
+            'artifactDeliveryRetryOnly': true,
+            'artifactDeliveryMessageId': 'handoff-delivery-message',
+          });
+    task
+      ..executionStateJson = jsonEncode(execution)
+      ..resultSummary = '产品阶段已完成，但附件待重发。'
+      ..lastArtifactPaths = const ['/workspace/report.docx'];
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'artifactDelivery',
+        message: '文件已保存，但附件发送失败；可重试交付。',
+        scope: 'delivery',
+        completedContent: task.lastArtifactPaths,
+        retryable: true,
+      ),
+    );
+    await coordinator.submit(task);
+    task.status = AgentTaskStatus.completed;
+    await _waitForStartedCount(runner, 1);
+    runner.complete(task.id);
+    await _waitForStartedCount(runner, 2);
+
+    expect(task.characterId, 'developer');
+    expect(
+      task.status,
+      anyOf(AgentTaskStatus.queued, AgentTaskStatus.planning),
+    );
+    // 上一阶段的待重发标记不能跟着任务进入下一角色：否则下一角色的 run 会命中
+    // 「queued + 投递标记」的专用分支去重发上一条消息，自己的阶段根本不执行。
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)
+          .containsKey('artifactDeliveryRetryOnly'),
+      isFalse,
+    );
+    expect(task.workFailure, isNull);
+    runner.complete(task.id);
+  });
+
   test('100 same-conversation role handoffs never overlap active roles',
       () async {
     final tasks = List<AgentTask>.generate(
@@ -1804,6 +2679,25 @@ void main() {
       throwsStateError,
     );
     expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('manual resume refreshes the role capability snapshot', () async {
+    final task = _task(
+      id: 'refresh-role-capabilities',
+      conversationId: 'dm:worker',
+    )
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..requestedPermissions = <ToolPermission>[
+        ToolPermission.skillCreate,
+      ];
+    await taskBox.put(task.id, task);
+
+    await coordinator.resumeByUser(task.id);
+    await _waitForStartedCount(runner, 1);
+
+    expect(taskBox.get(task.id)!.requestedPermissions, isEmpty);
+    runner.complete(task.id);
   });
 
   test('generic resume remains blocked until a visual model is selected',
@@ -2267,6 +3161,50 @@ void main() {
     );
   });
 
+  test('approval checkpoint opens a wait window for the time budget', () async {
+    await coordinator
+        .submit(_task(id: 'approval-wait', conversationId: 'group-a'));
+
+    await coordinator.pauseForApproval(
+      'approval-wait',
+      pendingToolRequestJson: '{"tool":"workspace.patch"}',
+    );
+
+    final execution = Map<String, dynamic>.from(
+      jsonDecode(taskBox.get('approval-wait')!.executionStateJson) as Map,
+    );
+    expect(WorkTaskBudgetWait.startedAtOf(execution), isNotNull);
+    expect(
+      execution[WorkTaskBudgetWait.totalKey],
+      isNull,
+      reason: '等待尚未结束，还没有可抵扣的时长。',
+    );
+  });
+
+  test('stopping records the queued follow-ups it discards', () async {
+    await coordinator
+        .submit(_task(id: 'stop-drops', conversationId: 'group-a'));
+    await coordinator.enqueueFollowUp('stop-drops', '改成第二版');
+    await coordinator.enqueueFollowUp('stop-drops', '再补一个附录');
+    expect(
+      taskBox.get('stop-drops')?.queuedUserRequests,
+      ['改成第二版', '再补一个附录'],
+    );
+
+    await coordinator.stop('stop-drops');
+    await _settle();
+
+    final stored = taskBox.get('stop-drops');
+    expect(stored?.status, AgentTaskStatus.cancelled);
+    expect(stored?.queuedUserRequests, isEmpty);
+    final events = (await eventStore.read('stop-drops')).events;
+    final dropped =
+        events.where((event) => event.title.contains('未执行')).toList();
+    expect(dropped, hasLength(1), reason: '丢弃的追问必须留下可追溯的记录。');
+    expect(dropped.single.detail, contains('改成第二版'));
+    expect(dropped.single.detail, contains('再补一个附录'));
+  });
+
   test('resets an approval prompt marker after host presentation failure',
       () async {
     await coordinator
@@ -2619,6 +3557,18 @@ void main() {
     first
       ..status = AgentTaskStatus.paused
       ..softLimitReached = true;
+    WorkFailure.persistOnTask(
+      first,
+      const WorkFailure(
+        type: WorkFailureType.userActionRequired,
+        title: '执行时间已达上限',
+        reason: '已达到本任务时间上限，请手点继续。',
+        technicalDetail: '已达到本任务时间上限，请手点继续。',
+        completedContent: <String>[],
+        retryable: false,
+        suggestedAction: '点击继续。',
+      ),
+    );
     await taskBox.put(first.id, first);
     runner.complete(first.id);
     await _waitForTaskState(
@@ -2637,6 +3587,7 @@ void main() {
     await coordinator.continueAfterSoftLimit(first.id);
     await _waitForStartedCount(runner, 2);
     expect(runner.startedTaskIds, ['soft-limit-first', 'soft-limit-first']);
+    expect(taskBox.get(first.id)?.workFailure, isNull);
 
     runner.complete(first.id);
     await _waitForStartedCount(runner, 3);
@@ -2800,6 +3751,91 @@ void main() {
     );
   });
 
+  test('reauthorize rebuilds a terminal missing-scope task from its checkpoint',
+      () async {
+    final oldStart = DateTime.utc(2026, 7, 15, 12);
+    final task = _task(
+      id: 'missing-scope-recovery',
+      conversationId: 'dm:worker',
+    )
+      ..status = AgentTaskStatus.failed
+      ..startedAt = oldStart
+      ..completedOperations = <String>[
+        '{"tool":"skill.download","args":{"templateId":"frontend.interactive-artifact"}}',
+      ]
+      ..lastArtifactPaths = <String>['/Users/fengye/Desktop/已有产物.html']
+      ..contextSummary = const WorkContextBuilder().build(
+        conversationId: 'dm:worker',
+        target: '生成新的交付文件',
+        approvalScope: <String, dynamic>{
+          'taskId': 'missing-scope-recovery',
+          'entries': <Map<String, dynamic>>[
+            <String, dynamic>{'path': '/Users/fengye/Desktop/旧范围.html'},
+          ],
+        },
+      ).toJsonString()
+      ..executionStateJson = jsonEncode(<String, dynamic>{
+        'approvalDecision': 'approvedWithoutUndo',
+        'approvalCapability': 'mutation',
+        'approvalConsumed': true,
+      });
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'notApproved',
+        message: '审批范围缺失，已要求任务重新生成变更计划。',
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.reauthorizeTask(task.id);
+    await _waitForStartedCount(runner, 1);
+
+    final recovered = taskBox.get(task.id)!;
+    expect(recovered.status, AgentTaskStatus.planning);
+    expect(recovered.startedAt, isNot(oldStart));
+    expect(recovered.completedOperations, hasLength(1));
+    expect(recovered.lastArtifactPaths, ['/Users/fengye/Desktop/已有产物.html']);
+    expect(recovered.pendingToolRequestJson, isEmpty);
+    expect(recovered.executionStateJson, isNot(contains('approvalDecision')));
+    expect(
+      (jsonDecode(recovered.contextSummary) as Map)['approvalScope'],
+      isNull,
+    );
+    runner.complete(task.id);
+  });
+
+  test('reauthorize removes stale approval scope from a legacy summary',
+      () async {
+    final task = _task(
+      id: 'legacy-missing-scope-recovery',
+      conversationId: 'dm:legacy-worker',
+    )
+      ..status = AgentTaskStatus.failed
+      ..contextSummary = jsonEncode(<String, dynamic>{
+        'goal': '旧任务目标',
+        'approvalScope': <String, dynamic>{
+          'taskId': 'legacy-missing-scope-recovery',
+          'entries': const <Map<String, dynamic>>[],
+        },
+      });
+    WorkFailure.persistOnTask(
+      task,
+      WorkFailure.fromToolFailure(
+        code: 'notApproved',
+        message: '审批范围缺失，已要求任务重新生成变更计划。',
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.reauthorizeTask(task.id);
+    await _waitForStartedCount(runner, 1);
+
+    final recovered = taskBox.get(task.id)!;
+    expect(recovered.contextSummary, isNot(contains('approvalScope')));
+    runner.complete(task.id);
+  });
+
   test('creates a durable fallback when a runner omits its failure checkpoint',
       () async {
     final failureRunner = _FailureReportingRunner(persistFailure: false);
@@ -2892,6 +3928,58 @@ void main() {
 
     await expectLater(coordinator.retry(committed.id), throwsStateError);
     expect(taskBox.get(committed.id)?.status, AgentTaskStatus.cancelled);
+  });
+
+  test('restarting a stopped QA task preserves its current report scope',
+      () async {
+    const qaScope = '只测试现有斗地主 HTML，并写入 doudizhu_test_report.md';
+    final task = _task(id: 'restart-stopped-qa', conversationId: 'group-a')
+      ..status = AgentTaskStatus.cancelled
+      ..lastError = '用户已停止任务。'
+      ..userRequest = '旧任务：开发 Desktop/doudizhu_game.html。QA 追问：$qaScope';
+    final readyDiscussion = WorkDiscussionState.initial(
+      conversationId: task.groupId,
+      requestRevision: 2,
+      coordinatorId: 'coordinator',
+      executorId: task.characterId,
+      candidateCharacterIds: [task.characterId],
+      participantCharacterIds: [task.characterId],
+      deliverableContract: const <String, dynamic>{
+        'deliverableType': 'document',
+        'format': 'markdown',
+        'location': 'doudizhu_test_report.md',
+        'contentScope': qaScope,
+        'explicitExecutorId': null,
+        'revisionTarget': '',
+        'requestRevision': 2,
+      },
+    ).copyWith(
+      phase: WorkDiscussionPhase.ready,
+      understandingPercent: 100,
+      understandingEvidence: const ['QA 报告合同已确认。'],
+      openQuestions: const [],
+      blockers: const [],
+    );
+    _taskWithDiscussion(task, readyDiscussion);
+    await taskBox.put(task.id, task);
+
+    await coordinator.retry(task.id);
+
+    final restarted = taskBox.get(task.id)!;
+    final discussion = WorkDiscussionState.fromExecutionState(
+      restarted.executionStateJson,
+    );
+    expect(discussion, isNotNull);
+    expect(discussion!.requestRevision, 3);
+    expect(
+      discussion.deliverableContract!['contentScope'],
+      qaScope,
+    );
+    expect(discussion.deliverableContract!['format'], 'markdown');
+    expect(
+      discussion.deliverableContract!['location'],
+      'doudizhu_test_report.md',
+    );
   });
 
   test('restore publishes interrupted tasks without running them', () async {
@@ -3088,6 +4176,102 @@ void main() {
           'picker-first',
           'picker-second',
         ]));
+  });
+
+  test('a native folder picker books the user wait for every waiting task',
+      () async {
+    final settingsBox =
+        await Hive.openBox<dynamic>('app_settings-picker-budget-wait');
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      isWindows: false,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+    );
+    final pickerGate = Completer<String?>();
+    final guarded = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: () => pickerGate.future,
+      folderGrantConsent: (_) async => true,
+    );
+    addTearDown(() async {
+      if (!pickerGate.isCompleted) pickerGate.complete(null);
+      await guarded.dispose();
+      await settingsBox.deleteFromDisk();
+    });
+
+    await guarded.submit(_task(id: 'picker-wait-a', conversationId: 'wait-a'));
+    await guarded.submit(_task(id: 'picker-wait-b', conversationId: 'wait-b'));
+
+    // Both tasks block on the one native dialog, so both must book the wait:
+    // otherwise the time spent choosing a directory is charged as agent work.
+    for (final id in ['picker-wait-a', 'picker-wait-b']) {
+      await _waitForTaskState(
+        taskBox,
+        id,
+        (task) => _budgetWaitStart(task) != null,
+      );
+      expect(
+        taskBox.get(id)?.status,
+        AgentTaskStatus.waitingForApproval,
+        reason: '$id 应停在目录授权上。',
+      );
+    }
+
+    pickerGate.complete(null);
+  });
+
+  test('a panel request for the folder picker books the same user wait',
+      () async {
+    final settingsBox =
+        await Hive.openBox<dynamic>('app_settings-panel-budget-wait');
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      isWindows: false,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+    );
+    final pickerGate = Completer<String?>();
+    final guarded = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: () => pickerGate.future,
+      folderGrantConsent: (_) async => true,
+    );
+    addTearDown(() async {
+      if (!pickerGate.isCompleted) pickerGate.complete(null);
+      await guarded.dispose();
+      await settingsBox.deleteFromDisk();
+    });
+    final task = _task(
+      id: 'folder-panel-budget-wait',
+      conversationId: 'group-folder-panel',
+    )
+      ..status = AgentTaskStatus.paused
+      ..executionStateJson = jsonEncode({'folderGrantPending': true});
+    await taskBox.put(task.id, task);
+    final action = WorkTaskUserAction.forTask(task).single;
+
+    final request = guarded.requestFolderForTask(
+      task.id,
+      expectedActionVersion: action.version,
+    );
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (current) => _budgetWaitStart(current) != null,
+    );
+
+    pickerGate.complete(directory.path);
+    await request;
+    await _waitForStartedCount(runner, 1);
+    expect(runner.startedTaskIds, [task.id]);
+    runner.complete(task.id);
   });
 
   test('queues a conflicting resource and starts it after release', () async {

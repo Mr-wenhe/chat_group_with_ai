@@ -1,6 +1,32 @@
 part of 'work_discussion_runner.dart';
 
 extension _WorkDiscussionRunnerDecisions on WorkDiscussionRunner {
+  /// Ordinary solution choices belong to the group discussion, not the owner.
+  /// Only a real role gap may interrupt the discussion for a user decision;
+  /// unresolved conclusions are handled by the bounded-round convergence gate.
+  bool _shouldEscalateOwnerQuestion({
+    required WorkDiscussionState state,
+    required List<String> qualifiedAvailableIds,
+    required List<_DiscussionMember> availableMembers,
+    required String question,
+  }) {
+    if (question.trim().isEmpty ||
+        state.executorId != null ||
+        qualifiedAvailableIds.isNotEmpty) {
+      return false;
+    }
+    if (availableMembers.any(
+      (member) => _memberMatchesUnresolved(member.character, question),
+    )) {
+      return false;
+    }
+    final normalized = question.replaceAll(RegExp(r'\s+'), '');
+    return RegExp(
+      r'(没有|缺少|无法|需要).*(合适|匹配|可用)?(执行人|执行角色|成员|角色)'
+      r'|(添加|加入|补充|选择|指定).*(成员|角色|执行人|执行角色)',
+    ).hasMatch(normalized);
+  }
+
   Future<void> _finishBlocked(
     AgentTask task,
     WorkDiscussionState state,
@@ -137,6 +163,12 @@ extension _WorkDiscussionRunnerDecisions on WorkDiscussionRunner {
 
   int _maxRounds(String request) {
     final normalized = request.trim();
+    // An explicit finite discussion count is part of the user's workflow
+    // request, so it takes precedence over the generic complexity heuristic.
+    if (RegExp(r'(?:完成|进行|开展)\s*(?:两|二|2)\s*轮(?:可验证)?(?:群聊)?讨论')
+        .hasMatch(normalized)) {
+      return 2;
+    }
     if (normalized.length > 700 ||
         RegExp(r'复杂|多模块|架构|集成|迁移|全面|跨端|系统', caseSensitive: false)
             .hasMatch(normalized)) {
@@ -330,6 +362,7 @@ extension _WorkDiscussionRunnerDecisions on WorkDiscussionRunner {
   bool _protectedBlocker(String value) {
     if (WorkDiscussionRunner.userDecisionBlockers.contains(value)) return true;
     if (value.startsWith('structuredResponseInvalid:')) return true;
+    if (value.startsWith('modelRequestFailed:')) return true;
     return value == 'discussionRequired' ||
         value == 'executorSelectionRequired' ||
         value == 'routePending' ||

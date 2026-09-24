@@ -85,6 +85,93 @@ void main() {
     expect(find.text('Amy'), findsNothing);
   });
 
+  testWidgets('character list searches names and roles by pinyin',
+      (tester) async {
+    final female = _character(
+      id: 'female',
+      name: 'Amy',
+      gender: CharacterGender.female,
+      role: '瑜伽教练',
+    );
+    final male = _character(
+      id: 'male',
+      name: '阿杰',
+      gender: CharacterGender.male,
+      role: '工程师',
+      age: 30,
+    );
+    await tester.runAsync(
+      () => db.aiCharacterBox.putAll({female.id: female, male.id: male}),
+    );
+
+    await tester.pumpWidget(
+      ProviderScope(
+        overrides: [databaseServiceProvider.overrideWithValue(db)],
+        child: const MaterialApp(home: AICharacterListPage()),
+      ),
+    );
+    await tester.pump();
+
+    final search = find.byType(TextField).first;
+
+    await tester.enterText(search, 'aj');
+    await tester.pump();
+    expect(find.text('阿杰'), findsOneWidget);
+    expect(find.text('Amy'), findsNothing);
+
+    await tester.enterText(search, 'yjjl');
+    await tester.pump();
+    expect(find.text('Amy'), findsOneWidget);
+    expect(find.text('阿杰'), findsNothing);
+
+    await tester.enterText(search, 'gcs');
+    await tester.pump();
+    expect(find.text('阿杰'), findsOneWidget);
+    expect(find.text('Amy'), findsNothing);
+  });
+
+  testWidgets('member sheet ranks literal hits above pinyin-only hits',
+      (tester) async {
+    final pinyinOnly = _character(
+      id: 'lin',
+      name: '林黛玉',
+      gender: CharacterGender.female,
+      role: '诗人',
+    );
+    final literal = _character(
+      id: 'lily',
+      name: 'Lily',
+      gender: CharacterGender.female,
+      role: '助手',
+    );
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: MemberSheet(
+            // 林黛玉 排在前面：不排序的话拼音命中会占住第一行。
+            characters: [pinyinOnly, literal],
+            ownerName: '群主',
+            senderColor: (_) => Colors.blue,
+            statusText: (member) => formatMemberStatus(member, null),
+            onOpenSettings: (_) {},
+            onDirectChat: (_) {},
+          ),
+        ),
+      ),
+    );
+    await tester.pumpAndSettle();
+
+    await tester.enterText(find.byType(TextField).first, 'li');
+    await tester.pumpAndSettle();
+
+    expect(find.text('Lily'), findsOneWidget);
+    expect(find.text('林黛玉'), findsOneWidget);
+    expect(
+      tester.getTopLeft(find.text('Lily')).dy,
+      lessThan(tester.getTopLeft(find.text('林黛玉')).dy),
+    );
+  });
+
   testWidgets('member sheet shows gender status and has no narrow overflow',
       (tester) async {
     tester.view.physicalSize = const Size(320, 640);

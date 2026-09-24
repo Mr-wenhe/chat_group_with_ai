@@ -71,8 +71,16 @@ class MemoryAuditSearchProjection {
     this.pinnedLabel = '',
   });
 
-  String get searchableText => [
-        content,
+  String get searchableText => [content, ...nameFields].join(' · ');
+
+  /// 参与搜索匹配的全部字段，正文在前、名称类字段在后。
+  List<String> get searchFields => [content, ...nameFields];
+
+  /// 名称类字段（不含正文），由调用方逐个独立做宽松拼音匹配。
+  ///
+  /// 必须逐字段匹配而不是拼成一串：首字母串只能从某一串的开头匹配，拼接后
+  /// 「薛宝钗」的首字母 `xbc` 会被前面的「林黛玉」挡掉。
+  List<String> get nameFields => [
         observerName,
         ...subjectNames,
         originName,
@@ -80,7 +88,7 @@ class MemoryAuditSearchProjection {
         statusLabel,
         originTypeLabel,
         pinnedLabel,
-      ].join(' · ');
+      ];
 }
 
 /// Immutable display data for one [PermanentMemory]. Only values needed by the

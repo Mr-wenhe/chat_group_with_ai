@@ -190,7 +190,7 @@ class _RelationshipPrivateDetailPageState
           ),
           _statusChip(
             context,
-            '情绪 · ${RelationshipAuditPresenter.moodLabel(relationship.recentMood)}',
+            '情绪 · ${RelationshipAuditPresenter.moodLabel(relationship.effectiveMood())}',
             Colors.green,
           ),
         ],
@@ -548,7 +548,7 @@ class _RelationshipPrivateDetailPageState
     if (notes.isNotEmpty) return notes;
     final name = _character?.name ?? '该 AI';
     final stage = RelationshipAuditPresenter.stageLabel(relation.stage);
-    final mood = switch (relation.recentMood) {
+    final mood = switch (relation.effectiveMood()) {
       RelationshipMood.warm || RelationshipMood.protective => '温暖',
       RelationshipMood.annoyed || RelationshipMood.awkward => '有些复杂',
       RelationshipMood.cold => '冷淡',

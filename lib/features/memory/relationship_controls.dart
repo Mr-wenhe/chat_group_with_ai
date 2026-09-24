@@ -235,7 +235,8 @@ class RelationshipControls {
           frictionAfter: friction,
           familiarityBefore: current.familiarity,
           familiarityAfter: familiarity,
-          moodBefore: current.recentMood,
+          // 记录当时**生效**的心情：存储值可能是一条已过期、尚未归一化的心情。
+          moodBefore: current.effectiveMood(),
           moodAfter: mood,
           stageBefore: current.stage,
           stageAfter: stage,
@@ -266,6 +267,8 @@ class RelationshipControls {
           lastEventId: event.id,
           updatedAt: now,
         );
+        // 手动设置心情即一次明确信号：重新计时；未改心情则沿用原时间戳。
+        updated.recentMoodAt = _moodAtAfterManualEdit(source: current, mood: mood);
         await _writeState(updated);
         return updated;
       },
@@ -294,7 +297,7 @@ class RelationshipControls {
     final interactionAt = event.createdBy == RelationshipEventCreator.manual
         ? current.lastInteractionAt
         : event.occurredAt;
-    return _copyState(
+    final next = _copyState(
       current,
       affinity: event.affinityAfter,
       trust: event.trustAfter,
@@ -308,6 +311,25 @@ class RelationshipControls {
       lastInteractionAt: interactionAt,
       updatedAt: DateTime.now(),
     );
+    // 重放必须幂等：时间戳取事件时刻而非 now，否则每次修复都会给心情续命。
+    next.recentMoodAt =
+        event.moodAfter == RelationshipMood.neutral ? null : event.occurredAt;
+    return next;
+  }
+
+  /// 手动编辑后的心情时间戳。
+  ///
+  /// - 未显式改心情（mood 为 null）或与存储值相同：沿用原时间戳，
+  ///   否则只改备注、或重新保存同一心情，都会让心情被重新计时。
+  /// - 改为非 neutral：打当前时间（手动设置即明确信号）。
+  /// - 改为 neutral：清空。
+  static DateTime? _moodAtAfterManualEdit({
+    required RelationshipState source,
+    required RelationshipMood? mood,
+  }) {
+    if (mood == null || mood == source.recentMood) return source.recentMoodAt;
+    if (mood == RelationshipMood.neutral) return null;
+    return DateTime.now();
   }
 
   String _notesAfterReplay(
@@ -357,6 +379,7 @@ class RelationshipControls {
         friction: supplied.friction,
         familiarity: supplied.familiarity,
         recentMood: supplied.recentMood,
+        recentMoodAt: supplied.recentMoodAt,
         notes: supplied.notes,
         lastInteractionAt: supplied.lastInteractionAt,
         stage: supplied.stage,
@@ -397,6 +420,9 @@ class RelationshipControls {
       friction: friction ?? source.friction,
       familiarity: familiarity ?? source.familiarity,
       recentMood: mood ?? source.recentMood,
+      // 默认沿用原时间戳。调用方若同时改变了 mood，必须覆盖 recentMoodAt，
+      // 否则会留下「新心情 + 旧时间戳」的不一致状态。
+      recentMoodAt: source.recentMoodAt,
       notes: notes ?? source.notes,
       lastInteractionAt: lastInteractionAt ?? source.lastInteractionAt,
       createdAt: source.createdAt,

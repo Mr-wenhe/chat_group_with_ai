@@ -1,6 +1,7 @@
 import 'dart:async';
 
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/search/message_search_index.dart';
@@ -76,7 +77,7 @@ class _GlobalSearchPageState extends ConsumerState<GlobalSearchPage> {
                   textInputAction: TextInputAction.search,
                   onSubmitted: (_) => _search(),
                   decoration: InputDecoration(
-                    hintText: '搜索消息、角色名或附件文件名',
+                    hintText: '搜索消息、角色名或附件文件名，支持拼音',
                     prefixIcon: const Icon(Icons.search_rounded),
                     suffixIcon: IconButton(
                       onPressed: _building ? null : _search,
@@ -145,27 +146,34 @@ class _GlobalSearchPageState extends ConsumerState<GlobalSearchPage> {
     );
   }
 
+  /// 高亮命中片段。
+  ///
+  /// 拼音命中时高亮的是命中的**汉字**而不是查询里的字母——原文里根本没有
+  /// `lin` 这三个字母，只把字面命中标出来会让拼音结果看起来毫无高亮。
   Widget _highlight(String snippet) {
-    final terms = _queryController.text
-        .trim()
-        .split(RegExp(r'\s+'))
-        .where((value) => value.isNotEmpty);
-    final lower = snippet.toLowerCase();
-    final query = terms.cast<String?>().firstWhere(
-          (term) => lower.contains(term!.toLowerCase()),
-          orElse: () => null,
-        );
-    if (query == null) return Text(snippet);
-    final index = lower.indexOf(query.toLowerCase());
-    if (index < 0) return Text(snippet);
-    return Text.rich(TextSpan(children: [
-      TextSpan(text: snippet.substring(0, index)),
-      TextSpan(
-        text: snippet.substring(index, index + query.length),
+    final spans = PinyinSearch.highlightSpans(
+      PinyinSearch.digest(snippet),
+      _queryController.text,
+      mode: PinyinMatchMode.content,
+    );
+    if (spans.isEmpty) return Text(snippet);
+
+    final children = <TextSpan>[];
+    var cursor = 0;
+    for (final span in spans) {
+      if (span.start > cursor) {
+        children.add(TextSpan(text: snippet.substring(cursor, span.start)));
+      }
+      children.add(TextSpan(
+        text: snippet.substring(span.start, span.end),
         style: const TextStyle(fontWeight: FontWeight.bold),
-      ),
-      TextSpan(text: snippet.substring(index + query.length)),
-    ]));
+      ));
+      cursor = span.end;
+    }
+    if (cursor < snippet.length) {
+      children.add(TextSpan(text: snippet.substring(cursor)));
+    }
+    return Text.rich(TextSpan(children: children));
   }
 
   Future<void> _rebuild() async {

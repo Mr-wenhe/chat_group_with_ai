@@ -112,15 +112,33 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       case AgentFinishDecision(:final completion):
         final completionFailure = await completionGuard?.call(task, completion);
         if (completionFailure != null && completionFailure.trim().isNotEmpty) {
-          return _fail(
+          if (state.completionRepairCount >= maxCompletionRepairs) {
+            return _fail(
+              state,
+              completionFailure,
+              failure: WorkFailure.fromLoopMessage(
+                completionFailure,
+                scope: 'completion',
+                completedContent: _completedContent(state),
+              ),
+            );
+          }
+          state.completionRepairCount++;
+          state.completionRepairInstruction = _publicText(completionFailure);
+          task.lastError = state.completionRepairInstruction;
+          await _emit(
             state,
-            completionFailure,
-            failure: WorkFailure.fromError(
-              StateError(completionFailure),
-              scope: 'completion',
-              completedContent: _completedContent(state),
-            ),
+            WorkTaskEventKind.toolOutput,
+            '完成校验未通过，正在根据校验结果自动修复。',
+            detail: state.completionRepairInstruction,
+            safeMetadata: {
+              'scope': 'completion',
+              'automaticRepair': true,
+              'repair': state.completionRepairCount,
+            },
           );
+          await _checkpoint(state);
+          return null;
         }
         task
           ..resultSummary = _publicText(completion.summary)
@@ -130,6 +148,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
           ..lastError = ''
           ..pendingToolRequestJson = '';
         state.failure = null;
+        state.completionRepairInstruction = '';
         WorkFailure.clearFromTask(task);
         state.publicUpdates.add(publicUpdate);
         await _emit(
@@ -150,6 +169,49 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     }
   }
 
+  /// Hands a failed or malformed tool call back to the model as one bounded
+  /// repair round, and pauses once the task has used up its repair budget or the
+  /// exact failure keeps repeating.
+  ///
+  /// [repeats] is consulted only while budget remains, so a task that has
+  /// already exhausted its repairs pauses without recording another failure
+  /// fingerprint. Returns null when the loop should continue with a fresh model
+  /// decision.
+  Future<WorkAgentLoopResult?> _repairToolFailure(
+    _LoopState state, {
+    required String message,
+    required String instruction,
+    required String scope,
+    bool Function()? repeats,
+  }) async {
+    if (state.toolRepairCount >= maxToolRepairs || (repeats?.call() ?? false)) {
+      const loopMessage = '工具和错误反复出现，自动修复没有取得进展，已暂停。请检查权限、依赖或补充新的处理信息后继续。';
+      return _pauseForUserAction(
+        state,
+        loopMessage,
+        failure: WorkFailure.fromSignalsForUserAction(
+          loopMessage,
+          completedContent: _completedContent(state),
+        ),
+      );
+    }
+    state.toolRepairCount++;
+    state.toolRepairInstruction = instruction;
+    await _emit(
+      state,
+      WorkTaskEventKind.toolOutput,
+      '工具调用失败，正在根据错误自动修复并继续。',
+      detail: message,
+      safeMetadata: {
+        'scope': scope,
+        'automaticRepair': true,
+        'repair': state.toolRepairCount,
+      },
+    );
+    await _checkpoint(state);
+    return null;
+  }
+
   Future<WorkAgentLoopResult?> _handleTool(
     _LoopState state,
     AgentToolCall call,
@@ -161,6 +223,9 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     if (boundary != null) return boundary;
     final validation = registry.validate(call);
     if (!validation.isValid) {
+      // Unreachable with the production registry, which always defines every
+      // tool the parser's Stage 03 allow-list accepts; a registry that is
+      // missing one of them is a wiring defect, not a model mistake to repair.
       final message = validation.error ?? '工具校验失败。';
       return _fail(
         state,
@@ -192,9 +257,8 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     WorkToolResult? softLimitResult;
     WorkToolResult? startAction() {
       if (actionStarted) return null;
-      final started = task.startedAt ?? clock();
       if (task.actionCount >= _effectiveActionLimit(task) ||
-          clock().difference(started) >= _effectiveTimeLimit(task)) {
+          _timeBudgetExceeded(task)) {
         softLimitResult = const WorkToolResult.paused(
           message: '已达到执行软上限，请手点继续。',
           failureCode: 'softLimit',
@@ -270,8 +334,18 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       );
       if (toolResult.failureCode == 'modelProtocol' &&
           toolResult.data['rejectionKind'] ==
-              WorkCommandRejectionKind.invalidInput.name &&
-          state.invalidCommandRepairCount < maxProtocolRetries) {
+              WorkCommandRejectionKind.invalidInput.name) {
+        if (state.invalidCommandRepairCount >=
+            WorkAgentLoop.defaultMaxInvalidCommandRepairs) {
+          // The dedicated replan budget is authoritative for a rejected command.
+          // Letting it fall through to the generic repair round would silently
+          // hand it a second, larger budget and lose the command's own remedy.
+          return _fail(
+            state,
+            message,
+            failure: failure,
+          );
+        }
         state.invalidCommandRepairCount++;
         await _emit(
           state,
@@ -286,28 +360,16 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         await _checkpoint(state);
         return null;
       }
-      if (_isAutomaticallyRepairableCommandFailure(toolResult)) {
-        if (_isCommandFailureLoop(state, call, toolResult)) {
-          const loopMessage =
-              '检测到命令和错误反复出现，自动修复没有取得进展，已暂停。请检查权限、依赖或补充新的处理信息后继续。';
-          return _pauseForUserAction(
-            state,
-            loopMessage,
-            failure: WorkFailure.fromSignalsForUserAction(
-              loopMessage,
-              completedContent: _completedContent(state),
-            ),
-          );
-        }
-        await _emit(
+      if (_isRepairableToolFailure(toolResult)) {
+        return _repairToolFailure(
           state,
-          WorkTaskEventKind.toolOutput,
-          '命令执行失败，正在根据错误自动修复并继续。',
-          detail: message,
-          safeMetadata: {'scope': 'command', 'automaticRepair': true},
+          message: message,
+          instruction: _toolRepairInstruction(call, toolResult),
+          scope: toolResult.failureCode ?? call.name.wireName,
+          repeats: () =>
+              _isCommandFailureLoop(state, call, toolResult) ||
+              _isRepeatedCommandOutcome(state, call, toolResult),
         );
-        await _checkpoint(state);
-        return null;
       }
       return _fail(
         state,
@@ -395,6 +457,26 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       ..remove('approvalConsumed')
       ..['toolMissing'] = true;
     task.executionStateJson = jsonEncode(checkpoint);
+  }
+
+  /// A mutation approval authenticates one concrete operation only. Once that
+  /// operation has completed, remove its per-operation capability before the
+  /// next model turn so a different tool cannot inherit the decision.
+  ///
+  /// The approved path scope deliberately outlives the operation: it is the
+  /// grant the user already made for this task, and WorkChangePolicy still
+  /// forces a fresh prompt for deletes, commands, irreversible writes and
+  /// sensitive paths. Dropping it here re-asked for every later write to the
+  /// same approved paths and reported each one as the task's "first" write.
+  void _clearCompletedMutationApproval(AgentTask task) {
+    final checkpoint = _decodeMap(task.executionStateJson)
+      ..remove('approvalDecision')
+      ..remove('approvalPlan')
+      ..remove('approvalCapability')
+      ..remove('approvalOperationFingerprint')
+      ..remove('approvalConsumed')
+      ..remove('approvalPromptShown');
+    task.executionStateJson = checkpoint.isEmpty ? '' : jsonEncode(checkpoint);
   }
 
   void _recordCommittedMutationFailure(
@@ -545,6 +627,12 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     required WorkToolResult result,
   }) async {
     final task = state.task;
+    // A completed tool call is progress, so the repair budgets start over; the
+    // failure fingerprint history is deliberately left alone because a
+    // successful read does not prove an earlier defect is gone.
+    state.toolRepairCount = 0;
+    state.toolRepairInstruction = '';
+    state.completionRepairCount = 0;
     state.pendingToolRequest = null;
     state.failure = null;
     WorkFailure.clearFromTask(task);
@@ -560,7 +648,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         safeToolRequestCheckpoint(operation),
       ];
     if (isMutation && !rejected) {
-      _clearCommandFailureHistory(state);
+      clearCommandFailureHistory(state);
       _persistUnchangedMutationCount(task, 0);
       state.committedActionKeys.add(operationKey);
       task.lastArtifactPaths = _updatedArtifactPaths(
@@ -570,6 +658,7 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       );
       _recordArtifactChange(task, call, result);
     }
+    if (isMutation) _clearCompletedMutationApproval(task);
     await _emit(
       state,
       WorkTaskEventKind.toolOutput,

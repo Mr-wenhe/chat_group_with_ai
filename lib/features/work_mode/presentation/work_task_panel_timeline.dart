@@ -209,19 +209,6 @@ bool _pendingToolRequiresPlan(AgentTask task) {
       pending?.tool == AgentToolName.workspaceDelete;
 }
 
-bool _pendingToolRequiresNoUndo(
-  AgentTask task,
-  WorkChangePlan? approvalPlan,
-) {
-  final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
-  if (pending?.tool == AgentToolName.skillCreate ||
-      pending?.tool == AgentToolName.skillDownload) {
-    return true;
-  }
-  return approvalPlan != null &&
-      (!approvalPlan.snapshotAvailable || !approvalPlan.reversible);
-}
-
 bool _taskNeedsFolderGrant(AgentTask task) {
   if (task.status != AgentTaskStatus.waitingForApproval &&
       task.status != AgentTaskStatus.paused &&
@@ -281,8 +268,9 @@ String? _continueUnavailableReasonForPanel(AgentTask task) {
   }
   final failure = _visibleWorkFailure(task);
   if (failure != null) {
-    if (failure.canReauthorize) return failure.suggestedAction;
-    if (failure.canViewConflict) return failure.suggestedAction;
+    if (failure.canContinueAfterRolePermissionUpdate) return null;
+    if (failure.canReauthorize) return failure.panelSuggestedAction;
+    if (failure.canViewConflict) return failure.panelSuggestedAction;
     if (!isSoftLimitPause && failure.canRetry) {
       return '请先点击“重试”从安全检查点继续。';
     }
@@ -321,7 +309,9 @@ bool _requiresExplicitCommandRequest(AgentTask task) {
 }
 
 String _durationLabel(AgentTask task, DateTime now) {
-  final startedAt = task.startedAt ?? task.createdAt;
+  // 面板展示的是"这次尝试跑了多久"。每次执行会重新计时，但 60 分钟预算仍按
+  // `startedAt` 计算，两者刻意分开。
+  final startedAt = task.attemptStartedAt ?? task.startedAt ?? task.createdAt;
   final duration = now.difference(startedAt);
   if (duration.inMinutes <= 0) return '刚刚开始执行';
   if (duration.inHours > 0) {

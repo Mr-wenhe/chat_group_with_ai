@@ -9,6 +9,7 @@ import 'package:flutter/services.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 
+import 'helpers/async_pump.dart';
 import 'helpers/lifecycle_hive.dart';
 
 void main() {
@@ -78,11 +79,12 @@ void main() {
           ),
         ),
       );
-      await Future<void>.delayed(const Duration(milliseconds: 50));
     });
-    await tester.pump(const Duration(milliseconds: 100));
-
+    // The room hydrates its group, messages and providers asynchronously, so
+    // wait for the composer instead of guessing how long that takes.
     final textField = find.byType(TextField);
+    await pumpUntilReady(tester, () => textField.evaluate().isNotEmpty);
+
     expect(textField, findsOneWidget);
 
     await tester.tap(textField);

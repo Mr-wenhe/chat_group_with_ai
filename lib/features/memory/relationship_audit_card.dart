@@ -204,7 +204,8 @@ class RelationshipAuditCard extends StatelessWidget {
     };
   }
 
-  Color _moodColor(BuildContext context) => switch (relationship.recentMood) {
+  Color _moodColor(BuildContext context) =>
+      switch (relationship.effectiveMood()) {
         RelationshipMood.warm || RelationshipMood.protective => Colors.green,
         RelationshipMood.annoyed || RelationshipMood.awkward => Colors.orange,
         RelationshipMood.cold => Theme.of(context).colorScheme.error,

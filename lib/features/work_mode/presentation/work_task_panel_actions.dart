@@ -27,6 +27,7 @@ class _TaskActions extends StatelessWidget {
   final WorkTaskAction onContinue;
   final WorkTaskReply? onReply;
   final TextEditingController replyController;
+  final FocusNode replyFocusNode;
   final ValueChanged<bool>? onModalVisibilityChanged;
   final BuildContext? dialogContext;
   final Future<bool> Function(WorkTaskAction action) runAction;
@@ -57,6 +58,7 @@ class _TaskActions extends StatelessWidget {
     required this.onStop,
     required this.onContinue,
     required this.replyController,
+    required this.replyFocusNode,
     this.onReply,
     this.onModalVisibilityChanged,
     this.dialogContext,
@@ -71,7 +73,7 @@ class _TaskActions extends StatelessWidget {
     final approvalPlan = approvalPlanForTask(task);
     final requiresPlan = _pendingToolRequiresPlan(task);
     final approvalPlanUnavailable = requiresPlan && approvalPlan == null;
-    final requiresNoUndo = _pendingToolRequiresNoUndo(task, approvalPlan);
+    final requiresNoUndo = taskRequiresNoUndoApproval(task, approvalPlan);
     final needsFolder = _taskNeedsFolderGrant(task);
     final hasInstallSuggestion = _taskHasInstallSuggestion(task);
     final needsVisionModel = _taskNeedsVisionModel(task);
@@ -88,7 +90,10 @@ class _TaskActions extends StatelessWidget {
     final canShowContinue = !task.isTerminal &&
         (task.status == AgentTaskStatus.paused ||
             task.status == AgentTaskStatus.interrupted) &&
-        (isSoftLimitPause || failure == null || failure.canContinue);
+        (isSoftLimitPause ||
+            failure == null ||
+            failure.canContinue ||
+            failure.canContinueAfterRolePermissionUpdate);
     final modelClarificationPending = WorkTaskClarification.isPending(task);
     // Discussion questions use the same durable follow-up path as model
     // clarifications. Keep the panel answerable even when the runner stored
@@ -115,6 +120,7 @@ class _TaskActions extends StatelessWidget {
             task: task,
             discussionQuestion: discussionQuestion,
             controller: replyController,
+            focusNode: replyFocusNode,
             actionInFlight: actionInFlight,
             actionError: actionError,
             onSubmit: (reply) async {
@@ -273,6 +279,7 @@ class _TaskActions extends StatelessWidget {
                 label: Text(canRestartFromBeginning ? '从头开始' : '重试'),
               ),
             if (failure?.canReauthorize == true &&
+                failure?.canContinueAfterRolePermissionUpdate != true &&
                 (onReauthorize != null || onRequestFolder != null))
               OutlinedButton.icon(
                 key: const Key('work-task-reauthorize'),
@@ -280,7 +287,11 @@ class _TaskActions extends StatelessWidget {
                     ? null
                     : () => runAction(onReauthorize ?? onRequestFolder!),
                 icon: const Icon(Icons.lock_open_outlined),
-                label: const Text('重新授权'),
+                label: Text(
+                  failure?.canReplanAfterApprovalScopeFailure == true
+                      ? '重新生成计划'
+                      : '重新授权',
+                ),
               ),
             if (failure?.canViewConflict == true && onViewConflict != null)
               OutlinedButton.icon(

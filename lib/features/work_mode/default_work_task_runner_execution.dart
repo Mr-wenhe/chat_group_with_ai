@@ -88,7 +88,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
       }
     }
     if (!WorkRoleRouter.isQualifiedForRequest(
-      request: task.userRequest,
+      request: WorkDiscussionState.currentRequestScope(task),
       character: character,
       skills: database.characterSkillBox.values,
     )) {
@@ -147,7 +147,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
       }
     }
     if (!WorkRoleRouter.isQualifiedForRequest(
-      request: task.userRequest,
+      request: WorkDiscussionState.currentRequestScope(task),
       character: character,
       skills: database.characterSkillBox.values,
     )) {
@@ -255,8 +255,8 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
       conversationId: task.groupId,
       isDirectChat: task.groupId.startsWith('dm:'),
       requireWritable: requiresWritableWorkspace,
-      preferredRootPath: directoryService.requestedDesktopPath(
-        task.userRequest,
+      preferredRootPath: directoryService.requestedWorkspacePath(
+        WorkDiscussionState.currentRequestScope(task),
       ),
     );
     if (requiresWritableWorkspace && _hasWritableWorkspaceMarker(task)) {
@@ -279,7 +279,10 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
     );
 
     try {
-      final skills = _skillsFor(character, task.userRequest);
+      final skills = _skillsFor(
+        character,
+        WorkDiscussionState.currentRequestScope(task),
+      );
       final capability = gateway.capability(provider, config.modelName);
       final registry = _registryFor(
         task: task,
@@ -312,6 +315,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           apiKey: apiKey,
           requestText: requestText,
           cancellationToken: cancellationToken,
+          cancellation: cancellation,
           capabilityMaxOutput: capability.maxOutput,
           capabilityContextWindow: capability.contextWindow,
         ),
@@ -331,6 +335,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           provider: provider,
           config: config,
           apiKey: apiKey,
+          cancellation: cancellation,
         ),
         systemPrompt: systemPrompt,
         // Skill creation/download is a normal in-task mutation. Rebuild the
@@ -375,24 +380,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           task.resultSummary,
         );
         if (!delivery.succeeded) {
-          final failure = WorkFailure.fromToolFailure(
-            code: 'artifactDelivery',
-            message: delivery.message,
-            scope: 'delivery',
-            completedContent: task.lastArtifactPaths,
-            retryable: true,
-          );
-          task
-            ..status = AgentTaskStatus.failed
-            ..resumeRequired = true
-            ..lastError = failure.reason
-            ..updatedAt = clock();
-          WorkFailure.persistOnTask(task, failure);
-          _markArtifactDeliveryNoticePublished(
-            task,
-            messageId: delivery.messageId,
-            retryOnly: delivery.retryWithExistingArtifact,
-          );
+          _applyArtifactDeliveryFailure(task, delivery);
         } else {
           await database.recordCharacterReplyUsage(character.id);
           _clearArtifactDeliveryNotice(task);

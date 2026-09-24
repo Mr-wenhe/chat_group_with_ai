@@ -121,9 +121,16 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     // relative or absolute spelling, but it cannot redirect the mutation to a
     // different basename after the user queued “modify the same file”.
     if (enforceRevision && revision != null) {
-      final absoluteRevision = _isAbsolutePath(revision)
-          ? revision
-          : '${workspaceRoot.replaceAll('\\', '/')}/$revision';
+      final normalizedRoot = workspaceRoot.replaceAll('\\', '/');
+      // A public contract may say Desktop/foo.html while the authorized root
+      // is already /Users/.../Desktop. Do not resolve that as Desktop/Desktop.
+      final relativeRevision = _stripAuthorizedRootLeaf(
+        revision,
+        normalizedRoot,
+      );
+      final absoluteRevision = _isAbsolutePath(relativeRevision)
+          ? relativeRevision
+          : '$normalizedRoot/$relativeRevision';
       final isWindows = workspaceFileService?.pathPolicy.isWindows ??
           RegExp(r'^[A-Za-z]:').hasMatch(absoluteRevision);
       return WorkspacePathPolicy.normalizePath(
@@ -166,6 +173,23 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
         RegExp(r'^[A-Za-z]:[\\/]').hasMatch(path);
   }
 
+  /// Removes a leading authorized-root leaf from a contract-supplied path.
+  ///
+  /// A public contract may name `Desktop/report.md` while the authorized root
+  /// already ends in `Desktop`; resolving that literally would produce
+  /// `Desktop/Desktop/report.md` and be rejected as out of scope. Absolute
+  /// paths and paths that do not start with the leaf are returned unchanged.
+  String _stripAuthorizedRootLeaf(String path, String normalizedRoot) {
+    final candidate = path.replaceAll('\\', '/');
+    if (_isAbsolutePath(candidate)) return candidate;
+    final rootLeaf =
+        normalizedRoot.split('/').where((segment) => segment.isNotEmpty).last;
+    if (candidate.startsWith('$rootLeaf/')) {
+      return candidate.substring(rootLeaf.length + 1);
+    }
+    return candidate == rootLeaf ? '' : candidate;
+  }
+
   bool _containsParentTraversal(String value) =>
       value.replaceAll('\\', '/').split('/').any((segment) => segment == '..');
 
@@ -192,6 +216,21 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
 
   int _intArgument(Object? value, int fallback) =>
       value is int && value >= 0 ? value : fallback;
+
+  /// Normalizes an optional tool path. Anything other than a non-blank string
+  /// means "the current authorized workspace root": a model may omit the
+  /// argument, send an explicit `null`, or send an empty string, and
+  /// `null.toString()` would otherwise become the literal path `null`.
+  /// Exactly `.` and `./` also fold to the root so every spelling resolves to
+  /// the same authorized directory.
+  String _workspaceListPath(Object? rawPath) {
+    if (rawPath is! String) return '.';
+    final value = rawPath.trim().replaceAll('\\', '/');
+    if (value.isEmpty) return '.';
+    final withoutTrailingSeparator =
+        value.length > 1 ? value.replaceFirst(RegExp(r'/+$'), '') : value;
+    return withoutTrailingSeparator.isEmpty ? '.' : withoutTrailingSeparator;
+  }
 
   String _defaultWeatherLocation() {
     try {
@@ -248,7 +287,7 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
       messages: messages.length <= 24
           ? messages
           : messages.sublist(messages.length - 24),
-      currentUserRequest: task.userRequest,
+      currentUserRequest: WorkDiscussionState.currentRequestScope(task),
     );
   }
 
@@ -289,7 +328,7 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
       source = messages.isEmpty ? null : messages.first;
     }
     return AgentAttachmentContext.enhanceCurrentRequest(
-      userRequest: task.userRequest,
+      userRequest: WorkDiscussionState.currentRequestScope(task),
       media: source?.media,
     );
   }
@@ -355,19 +394,20 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
   String _workModeContext(
       AgentTask task, AICharacter character, WorkToolRegistry registry,
       {required String workspaceRoot}) {
+    final currentRequest = WorkDiscussionState.currentRequestScope(task);
     final base = WorkModePolicy.planningContext(character);
     final discoverable = WorkModePolicy.discoverableSkills(
       character: character,
       installedSkills: database.characterSkillBox.values,
       resolvedSkills: CharacterSkillResolver.resolveFor(
         character,
-        task.userRequest,
+        currentRequest,
       ).skills,
     );
     final skillCatalog = discoverable.isEmpty
         ? '无（需要时可通过 meta.find-skills 查找或安装）'
         : discoverable.map(_compactSkillCatalogEntry).join('\n');
-    final matchedTemplate = _matchingSkillTemplate(task.userRequest);
+    final matchedTemplate = _matchingSkillTemplate(currentRequest);
     final skillPreflight = matchedTemplate == null
         ? null
         : '技能预检：已从内置目录匹配「${matchedTemplate.id}」。若角色尚未安装，任务启动阶段会先调用 skill.download；本轮禁止创建重复 Skill。';
@@ -378,13 +418,13 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     final summary = task.contextSummary.trim();
     final handoff = WorkHandoffState.fromTask(task);
     final targetsDesktop =
-        WorkModeDirectoryService.requestTargetsDesktop(task.userRequest);
+        WorkModeDirectoryService.requestTargetsDesktop(currentRequest);
     return [
       base,
       '角色可发现技能目录（全局技能按需加载；角色已绑定技能正文会注入；权限仍需通过角色授权与工具策略交集校验）：\n$skillCatalog',
       if (skillPreflight != null) skillPreflight,
       '当前生产 WorkAgentLoop 已注册工具：$tools。',
-      '当前授权工作区绝对路径：$workspaceRoot。command.run 的 workingDirectory 为空时会自动解析为当前授权工作区；不要填写 "."，也禁止填写工作区外路径。',
+      '当前授权工作区绝对路径：$workspaceRoot。command.run 的 workingDirectory 为空时会自动解析为当前授权工作区；不要填写 "."，也禁止填写工作区外路径。workspace.list 省略 path 即表示该根目录，无需再拼接绝对路径，也不要为列目录改用 command.run。',
       if (targetsDesktop)
         '用户明确指定“桌面”：当前工作区已绑定到授权的桌面根目录；请直接使用相对文件名，不要再添加 Desktop/ 或 conversations/ 前缀。',
       if (task.plan.trim().isNotEmpty) '公开角色路由计划：${task.plan.trim()}',
@@ -438,6 +478,7 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
   }
 
   ExpertSkillTemplate? _matchingSkillTemplate(String request) {
+    if (WorkRoleRouter.startsWithTestingStage(request)) return null;
     final recommendations = ExpertSkillCatalog.recommendForText(request);
     final template = recommendations.isEmpty ? null : recommendations.first;
     if (template == null ||
@@ -452,7 +493,9 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     AgentTask task,
     AICharacter character,
   ) {
-    final template = _matchingSkillTemplate(task.userRequest);
+    final template = _matchingSkillTemplate(
+      WorkDiscussionState.currentRequestScope(task),
+    );
     if (template == null) return null;
     final installed = database.characterSkillBox.values.any(
       (skill) =>

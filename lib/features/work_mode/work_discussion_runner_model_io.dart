@@ -1,15 +1,5 @@
 part of 'work_discussion_runner.dart';
 
-/// 解析成功但结构无效时，值得再给模型一次机会的失败原因。这些原因几乎都来自
-/// 「输出被 max_tokens 截断」或「网关忽略 response_format」，而换到非 JSON 通道
-/// 并追加重新约束的提示词后通常能通过；业务类失败（如缺少公开职责意见）不在其中。
-const Set<String> _repairableDiscussionFailureReasons = <String>{
-  // 网关忽略了 response_format，模型直接说了人话。
-  '模型返回了非结构化公开内容',
-  // JSON 完整但字段缺失/类型不对：多为输出在字段中间被截断。
-  '结构化回复无效',
-};
-
 /// Bookkeeping blockers that are not natural-language questions. They must be
 /// excluded before `openQuestions + blockers` is matched against member names,
 /// because `structuredResponseInvalid:<characterId>` embeds a member id: leaving
@@ -100,6 +90,9 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       if (compact.length >= 2 && normalized.contains(compact.toLowerCase())) {
         return true;
       }
+      final roleMarker =
+          RegExp(r'开发|测试|设计|产品|项目|安全|运维|运营').firstMatch(label)?.group(0);
+      if (roleMarker != null && normalized.contains(roleMarker)) return true;
     }
     return false;
   }
@@ -120,50 +113,89 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     unawaited(cancellation.whenCancelled.then((_) {
       if (!cancelToken.isCancelled) cancelToken.cancel('用户已停止讨论');
     }));
-    final prompt = _buildPrompt(
-      task: task,
-      group: group,
-      character: member.character,
-      state: state,
-      publicResponses: publicResponses,
-      isCoordinator: isCoordinator,
-    );
     try {
-      final response = await _completeTurn(
-        member: member,
+      final prompt = await _buildPrompt(
         task: task,
+        group: group,
+        character: member.character,
+        state: state,
+        publicResponses: publicResponses,
+        isCoordinator: isCoordinator,
+      );
+      // Project inventory is asynchronous. A stop can arrive while it is
+      // being assembled, so do not start a model request after cancellation.
+      if (cancellation.isCancelled) {
+        return const WorkDiscussionTurn.invalid();
+      }
+      final response = await (completion ?? _complete)(
+        character: member.character,
+        config: member.config!,
+        apiKey: member.apiKey!,
+        provider: member.provider!,
+        conversationId: task.groupId,
         messages: prompt,
+        // 与修复重发路径使用同一次限：发起后由外层 `.timeout(roleTimeout)`
+        // 兜底，这里把限值透传给网关，避免个别 provider 的接收超时被放大。
+        timeout: roleTimeout,
         cancelToken: cancelToken,
       ).timeout(roleTimeout);
       final turn = WorkDiscussionTurn.fromResponse(response);
       if (turn.valid ||
-          !_isRepairableFailure(response, turn) ||
+          !_canRepairDiscussionResponse(turn) ||
           cancellation.isCancelled) {
         return turn;
       }
-      // A transport- or protocol-level failure (empty body, truncated JSON, an
-      // ignored response_format) says nothing about this member's opinion, so
-      // the same model gets one bounded repair opportunity. The strict parser
-      // and the execution gate stay unchanged if the repair fails too.
-      // The retry deliberately switches channel instead of repeating the same
-      // JSON-mode request: when the upstream silently drops `response_format`
-      // or spends the whole budget on reasoning, an identical resend fails in
-      // exactly the same way and only burns a call.
-      await _recordDiagnostic(task, '讨论模型未返回可解析的结构化回复，已改用非 JSON 模式重发一次。');
-      final repairedResponse = await _completeTurn(
-        member: member,
-        task: task,
-        messages: <Map<String, dynamic>>[
-          ...prompt,
-          {
-            'role': 'user',
-            'content':
-                '上一条回复为空、被截断或不是合法 JSON。请基于同一任务和讨论状态重新回答：只输出一个合法 JSON object，不要解释、Markdown 或前后缀；严格保留协议字段，未知信息用空数组并保留未决问题，禁止虚报 100%。',
-          },
-        ],
-        cancelToken: cancelToken,
-        structuredJson: false,
-      ).timeout(roleTimeout);
+      // Some OpenAI-compatible gateways ignore response_format. Give the
+      // same model one bounded repair opportunity, while keeping the strict
+      // parser and execution gate unchanged if it fails again.
+      await _recordDiagnostic(task, '讨论模型未返回 JSON，已请求一次协议修复。');
+      final originalReply = boundedDiscussionText(
+        _firstNonEmptyResponseText(response),
+        maximum: 4000,
+      );
+      // Keep the repair request deliberately small. Replaying the complete
+      // project dossier and group transcript makes weaker gateways continue
+      // the conversational answer instead of performing the requested
+      // protocol conversion. The original answer is untrusted text here; it
+      // is only data for a fresh, schema-focused conversion request.
+      final repairMessages = <Map<String, dynamic>>[
+        {
+          'role': 'system',
+          'content':
+              '你是严格的 JSON 协议修复器。只输出一个合法 JSON object，禁止 Markdown、解释、分析过程或前后缀。必须包含字段：public_update（字符串）、understanding_percent（0 到 100 的整数）、understanding_evidence（字符串数组）、open_questions（字符串数组）、resolved_questions（字符串数组）、blockers（字符串数组）、resolved_blockers（字符串数组）、substantive_progress（布尔值）、needs_user（布尔值）、user_question（字符串）、recommend_executor_id（字符串或 null）、contract（对象或 null）。若原意见明确推荐了合格执行角色，必须保留其 ID；无明确推荐时填 null。若原意见包含交付格式、位置、范围、显式执行人或修订目标，必须写入 contract 对象；没有合同建议时填 null。未知内容使用空数组、0、false、null 和空字符串；不得虚报 100%。输出形状示例：{"public_update":"已确认本轮范围。","understanding_percent":40,"understanding_evidence":["范围已确认"],"open_questions":[],"resolved_questions":[],"blockers":[],"resolved_blockers":[],"substantive_progress":true,"needs_user":false,"user_question":"","recommend_executor_id":null,"contract":null}。',
+        },
+        {
+          'role': 'user',
+          'content':
+              '请将下面这段职业意见安全转换为上述 JSON。保留原意，不要补造项目事实；如果意见提出了未确认的数值或前置条件，把它放入 open_questions。\n\n原始职业意见：\n$originalReply',
+        },
+      ];
+      final repairedResponse = completion != null
+          ? await completion!(
+              character: member.character,
+              config: member.config!,
+              apiKey: member.apiKey!,
+              provider: member.provider!,
+              conversationId: task.groupId,
+              messages: repairMessages,
+              timeout: roleTimeout,
+              cancelToken: cancelToken,
+            ).timeout(roleTimeout)
+          : await _complete(
+              character: member.character,
+              config: member.config!,
+              apiKey: member.apiKey!,
+              provider: member.provider!,
+              conversationId: task.groupId,
+              messages: repairMessages,
+              timeout: roleTimeout,
+              cancelToken: cancelToken,
+              // Repair through the plain response path. Some compatible
+              // providers reject response_format even when the prompt itself
+              // requests a JSON object; the strict parser still gates the
+              // result after this one fallback attempt.
+              structuredJson: false,
+            ).timeout(roleTimeout);
       return WorkDiscussionTurn.fromResponse(repairedResponse);
     } on TimeoutException {
       if (!cancelToken.isCancelled) {
@@ -172,70 +204,53 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       await _recordDiagnostic(task, '讨论模型请求超时，未伪造成员发言。');
       return const WorkDiscussionTurn.invalid(failureReason: '模型请求超时');
     } on DioException catch (error) {
+      final failureReason = _discussionRequestFailureReason(error);
       if (!cancellation.isCancelled) {
-        await _recordDiagnostic(
-            task, '讨论模型请求失败：${sanitizeWorkTaskError(error.message ?? '网络错误')}');
+        await _recordDiagnostic(task, '讨论模型请求失败：$failureReason');
       }
-      return const WorkDiscussionTurn.invalid(failureReason: '模型请求异常');
+      return WorkDiscussionTurn.invalid(failureReason: failureReason);
     } on Object catch (error) {
+      final failureReason = _discussionRequestFailureReason(error);
       if (!cancellation.isCancelled) {
-        await _recordDiagnostic(
-            task, '讨论模型请求失败：${sanitizeWorkTaskError(error)}');
+        await _recordDiagnostic(task, '讨论模型请求失败：$failureReason');
       }
-      return const WorkDiscussionTurn.invalid(failureReason: '模型请求异常');
+      return WorkDiscussionTurn.invalid(failureReason: failureReason);
     }
   }
 
-  /// 只有"传输/协议层不稳定"的失败才值得重试一次：上游返回了空正文
-  /// （`emptyResponse`）、未按 JSON 返回、或 JSON 被截断导致字段无效。
-  /// 治理拦截、取消、权限与业务类失败都不在此列，避免把一次修复机会
-  /// 放大成无限重试。
-  bool _isRepairableFailure(
-    Map<String, dynamic> response,
-    WorkDiscussionTurn turn,
-  ) {
-    if (response['success'] == false) {
-      // 按稳定失败码判断，而不是中文文案，避免措辞变化导致重试失效。
-      return response['failureCode'] ==
-          ChatApiService.emptyResponseFailureCode;
+  String _firstNonEmptyResponseText(Map<String, dynamic> response) {
+    for (final value in <Object?>[
+      response['content'],
+      response['message'],
+      response['reasoning_content'],
+    ]) {
+      if (value is String && value.trim().isNotEmpty) return value;
     }
-    return _repairableDiscussionFailureReasons.contains(turn.failureReason);
+    return '';
   }
 
-  /// 成员发言的唯一出口：测试注入的 `completion` 优先，生产环境走治理网关。
-  /// 只有修复重发会传 `structuredJson: false`，用于绕开被上游静默忽略的
-  /// `response_format`；提示词里的 JSON 协议约束始终保留。
-  Future<Map<String, dynamic>> _completeTurn({
-    required _DiscussionMember member,
-    required AgentTask task,
-    required List<Map<String, dynamic>> messages,
-    required CancelToken cancelToken,
-    bool structuredJson = true,
-  }) {
-    final injected = completion;
-    if (injected != null) {
-      return injected(
-        character: member.character,
-        config: member.config!,
-        apiKey: member.apiKey!,
-        provider: member.provider!,
-        conversationId: task.groupId,
-        messages: messages,
-        timeout: roleTimeout,
-        cancelToken: cancelToken,
-      );
-    }
-    return _complete(
-      character: member.character,
-      config: member.config!,
-      apiKey: member.apiKey!,
-      provider: member.provider!,
-      conversationId: task.groupId,
-      messages: messages,
-      timeout: roleTimeout,
-      cancelToken: cancelToken,
-      structuredJson: structuredJson,
-    );
+  bool _canRepairDiscussionResponse(WorkDiscussionTurn turn) {
+    // A provider can honor JSON mode while still omitting a required field or
+    // using the wrong type. Treat those protocol failures like plain text and
+    // give the same model exactly one bounded conversion attempt. Transport,
+    // credential, timeout, and cancellation failures must remain actionable
+    // failures rather than being hidden behind a repair request.
+    return const {
+      '模型返回了非结构化公开内容',
+      '结构化回复无效',
+      '模型没有提供公开职责意见',
+    }.contains(turn.failureReason);
+  }
+
+  /// Keeps request availability failures distinct from a valid response that
+  /// merely violates the discussion JSON protocol.  The latter can be
+  /// repaired once; the former needs an actionable provider/configuration fix.
+  String _discussionRequestFailureReason(Object error) {
+    final statusCode =
+        error is DioException ? error.response?.statusCode : null;
+    if (statusCode != null) return '模型请求失败（HTTP $statusCode）';
+    final sanitized = sanitizeWorkTaskError(error);
+    return sanitized == '任务执行失败' ? '模型请求异常' : sanitized;
   }
 
   Future<Map<String, dynamic>> _complete({
@@ -247,27 +262,25 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     required List<Map<String, dynamic>> messages,
     required Duration timeout,
     CancelToken? cancelToken,
-    bool structuredJson = true,
+    // Keep the JSON contract in the prompt and validate it locally. Some
+    // configured providers reject response_format or stall while handling it,
+    // which blocks discussion before the protocol-repair path can run.
+    bool structuredJson = false,
   }) {
+    final completionBaseUrl =
+        WorkDiscussionRunner.structuredDiscussionBaseUrlFor(config);
     return gateway.sendChatMessageWithResponseLimit(
       apiKey: apiKey,
       provider: provider,
       apiProtocol: config.protocol,
-      customBaseUrl: config.customBaseUrl,
+      customBaseUrl: completionBaseUrl,
       model: config.modelName,
       messages: messages,
       purpose: AiRequestPurpose.agent,
       conversationId: conversationId,
       characterId: character.id,
       temperature: 0.35,
-      // 768/2048 都太窄：推理型模型会把预算全花在内部推理上并返回空正文，成员
-      // 发言直接判死；上限由治理层按模型能力与剩余上下文夹取，避免反过来被拦截。
-      maxTokens: gateway.clampOutputBudget(
-        provider: provider,
-        model: config.modelName,
-        preferred: WorkDiscussionRunner.preferredMaxOutputTokens,
-        messages: messages,
-      ),
+      maxTokens: WorkDiscussionRunner.discussionMaxTokens,
       receiveTimeout: timeout,
       maxRetries: 0,
       cancelToken: cancelToken,
@@ -278,14 +291,14 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     );
   }
 
-  List<Map<String, dynamic>> _buildPrompt({
+  Future<List<Map<String, dynamic>>> _buildPrompt({
     required AgentTask task,
     required ChatGroup group,
     required AICharacter character,
     required WorkDiscussionState state,
     required List<String> publicResponses,
     required bool isCoordinator,
-  }) {
+  }) async {
     final messages = <Map<String, dynamic>>[
       {
         'role': 'system',
@@ -294,9 +307,17 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
           if (character.systemPrompt.trim().isNotEmpty)
             boundedDiscussionText(character.systemPrompt, maximum: 4000),
           '当前处于群工作讨论阶段；禁止调用工具、写文件、安装插件、访问浏览器或声称已经执行。',
+          '允许从多个模块、风险和替代方案发散思考，但每条意见都必须回扣当前任务主题、项目事实或可验证验收项；禁止把闲聊、饮品、私人安排等无关内容带入工作讨论。',
           isCoordinator
               ? '你是本轮协调/执行人：要主动收集意见、指出取舍、追问未决项，并公开给出理解百分比。'
               : '你是参与成员：只提供与你职业相关的可行性、风险、测试或交付建议，不代替其他职业做决定。',
+          '当任务上下文包含 available=true 的 projectDossier 时，它是群主明确授权后本地读取的项目事实。必须据此完成职业判断和方案取舍：不得要求用户粘贴源码、重复授权路径、选择本应由产品经理比较决定的优化方向，或把可由清单推断的问题标为 needs_user。应以可复核的假设和验收标准记录仍然存在的技术风险。',
+          '群成员必须优先自行讨论并确定文件名、优先级、阈值、重试次数/间隔、验收口径等普通方案细节；只有确实没有合适的执行角色、需要群主添加或选择角色时，才将 needs_user 设为 true 并 @群主。普通细节问题放入 open_questions，继续由群内角色解决。',
+          'groupMembers 中角色名包含“产品”“开发”“测试”“设计”即可提供对应职业意见；不要因为开发角色的专业标签不是 Flutter 就要求群主新增角色，先由该开发成员说明可复用能力、适用边界和需要验证的部分。',
+          '不得把 projectDossier、群公开讨论或附件上下文中不存在的文件、日志、指标当作事实或阻塞问题。对于尚未建立的性能基线、遥测值或运行日志，需将其明确为交付后的验收采集项和暂定阈值，而不是向群主追问或因此阻塞需求收敛。',
+          '本任务的项目范围边界优先于角色人格和通用知识：优化候选只能围绕 projectDossier 明确列出的实际目录、代码能力、测试链路和可复核事实提出。区块链、DID、Gas、支付、链上存证等未被清单证实的方案只能在 public_update 中标记为“超出本轮范围，不纳入需求”，不得写入 open_questions、blockers、contract 或最终执行方向。',
+          '已明确标注为“本轮不重构”“本轮范围外”或“仅记录当前默认值”的事项必须写入范围边界、风险或验收项；不得继续放入 open_questions、needs_user 或 blockers。参数取舍由群内执行人作暂定决定并在文档中标明复核时点。',
+          '当四个角色均已完成职责意见、open_questions 与 blockers 为空、交付格式/位置/范围已明确且理解证据齐全时，讨论理解度必须返回 100；产品经理后续实际生成 Word 文件属于执行阶段，不得因为文件尚未写入而把已收集完成的讨论停在 99。',
           '只能返回一个 JSON object，字段必须包含 public_update、understanding_percent、understanding_evidence、open_questions、resolved_questions、blockers、resolved_blockers、substantive_progress；已解决的问题必须原样放入 resolved_questions 或 resolved_blockers，理解达到 100 时，understanding_evidence 至少分别说明目标/范围、方案/取舍、格式位置/验收；没有把握时必须保留问题，禁止虚报 100。',
           '输出形状示例（只模仿结构，不要复制示例内容）：{"public_update":"本轮公开结论","understanding_percent":50,"understanding_evidence":["目标/范围"],"open_questions":["待确认项"],"resolved_questions":[],"blockers":[],"resolved_blockers":[],"substantive_progress":true,"needs_user":false,"user_question":""}',
         ].join('\n'),
@@ -305,7 +326,13 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
         'role': 'user',
         'content': _discussionPromptContent(
           context: {
-            'task': boundedDiscussionText(task.userRequest, maximum: 4000),
+            'task': boundedDiscussionText(
+              WorkDiscussionState.currentRequestScope(task),
+              maximum: 4000,
+            ),
+            'projectDossier': await _projectDossier(
+              WorkDiscussionState.currentRequestScope(task),
+            ),
             'group': {
               'name': boundedDiscussionText(group.name, maximum: 256),
               'theme': boundedDiscussionText(group.theme, maximum: 512),
@@ -348,7 +375,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
             'recommend_executor_id': '仅在你认为某个候选具备该任务职业资格时填写角色 ID，否则为 null。',
             'contract':
                 '可补充 deliverableType、format、location、contentScope、revisionTarget；requestRevision 必须保持不变。',
-            'needs_user': '缺少用户才能提供的信息时为 true，并在 user_question 写明要 @用户 的问题。',
+            'needs_user': '仅当没有合适执行角色、需要群主添加或选择角色时为 true；普通方案细节必须由群内角色自行取舍。',
             'resolved_questions': '只填写本轮已经用公开事实解决的原问题，内容要与之前问题相同。',
             'resolved_blockers': '只填写本轮已经用公开事实消除的可恢复阻塞，不要移除用户信息或资格阻塞。',
             'blockers':

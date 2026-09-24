@@ -39,13 +39,15 @@ class _DiscussionSession {
       required this.qualifiedAvailableIds,
       required this.memberIds,
       required this.state}) {
-    maxRounds = runner._maxRounds(task.userRequest);
+    maxRounds = runner._maxRounds(
+      WorkDiscussionState.currentRequestScope(task),
+    );
   }
 
   Future<void> run() async {
     for (round = state.round + 1; round <= maxRounds; round++) {
       if (cancellation.isCancelled) return;
-      _beginRound();
+      if (!await _beginRound()) return;
       final speakerIds = runner._speakerIds(
         round: round,
         state: state,
@@ -70,7 +72,7 @@ class _DiscussionSession {
     await _finishBudget();
   }
 
-  void _beginRound() {
+  Future<bool> _beginRound() async {
     roundProgress = false;
     roundPercent = state.understandingPercent;
     roundEvidence = <String>[...state.understandingEvidence];
@@ -84,6 +86,50 @@ class _DiscussionSession {
         .toList(growable: true);
     contract = state.deliverableContract;
     userInputRequired = false;
+    final reconciliation = await runner._reconcileProjectFactQuestions(
+      task,
+      roundQuestions,
+    );
+    final resolvedQuestions = <String>[...?reconciliation['questions']];
+    final reconciledEvidence = <String>[...?reconciliation['evidence']];
+    final contractLocationQuestions = roundQuestions.where((question) {
+      final normalized = question.toLowerCase();
+      return normalized.contains('deliverablecontract') &&
+          normalized.contains('location') &&
+          normalized.contains('docx');
+    });
+    if (contractLocationQuestions.isNotEmpty &&
+        contract?['format'] == 'docx' &&
+        contract?['location'] is String &&
+        (contract?['location'] as String).trim().isNotEmpty) {
+      resolvedQuestions.addAll(contractLocationQuestions);
+      reconciledEvidence.add('已核验 Word 文档文件名由交付合同 location 字段锁定。');
+    }
+    final deferredScopeQuestions = roundQuestions.where((question) {
+      final normalized = question.toLowerCase();
+      return (normalized.contains('本轮不重构') || normalized.contains('本轮范围外')) &&
+          !runner._isDecisionQuestion(normalized);
+    });
+    if (deferredScopeQuestions.isNotEmpty) {
+      resolvedQuestions.addAll(deferredScopeQuestions);
+      reconciledEvidence.add('已将明确标注为本轮不重构或范围外的事项写入范围边界与验收记录。');
+    }
+    if (resolvedQuestions.isEmpty) return true;
+    roundQuestions = runner
+        ._removeResolved(roundQuestions, resolvedQuestions)
+        .toList(growable: true);
+    roundEvidence.addAll(reconciledEvidence);
+    state = state.copyWith(
+      openQuestions: runner._unique(roundQuestions),
+      understandingEvidence: runner._unique(roundEvidence),
+    );
+    await runner._publish(
+      task,
+      group,
+      '已依据用户授权的本地项目静态事实核验并关闭：${resolvedQuestions.join('；')}。',
+      cancellation: cancellation,
+    );
+    return runner._pushState(task, state, updateState, cancellation);
   }
 
   Future<void> _electExecutor() async {

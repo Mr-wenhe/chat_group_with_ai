@@ -11,6 +11,20 @@ import 'helpers/memory_governance_store.dart';
 
 class FakeCompletionClient extends ChatApiService {
   int sendCount = 0;
+  int boundedCount = 0;
+  int streamedCount = 0;
+  int structuredStreamedCount = 0;
+  bool structuredStreamedFailure = false;
+  Duration? structuredStreamedReceiveTimeout;
+  final boundedReceiveTimeouts = <Duration>[];
+
+  /// Result returned by the structured streamed call when set; lets a test
+  /// simulate a provider rejection that carries an HTTP status.
+  Map<String, dynamic>? structuredStreamedResult;
+
+  /// Result returned by the bounded compatibility call when set, so a test can
+  /// exercise the fallback path's own failure payload.
+  Map<String, dynamic>? boundedResult;
   final temperatures = <double>[];
   Future<Map<String, dynamic>> Function(int count)? responder;
 
@@ -38,6 +52,70 @@ class FakeCompletionClient extends ChatApiService {
           'cachedTokens': 20,
           'completionTokens': 10,
         };
+  }
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageWithResponseLimit({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration? receiveTimeout,
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    bool structuredJson = false,
+    required int maxResponseBytes,
+  }) async {
+    boundedCount++;
+    boundedReceiveTimeouts.add(receiveTimeout ?? Duration.zero);
+    return boundedResult ?? {'success': true, 'message': '{}'};
+  }
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) async {
+    streamedCount++;
+    return {'success': true, 'message': '{}'};
+  }
+
+  @override
+  Future<Map<String, dynamic>> sendStructuredChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) async {
+    structuredStreamedCount++;
+    structuredStreamedReceiveTimeout = receiveTimeout;
+    if (structuredStreamedResult != null) return structuredStreamedResult!;
+    if (structuredStreamedFailure) {
+      return {'success': false, 'message': '连接超时'};
+    }
+    return {'success': true, 'message': '{}'};
   }
 }
 
@@ -255,6 +333,223 @@ void main() {
     expect(diagnostic, isNot(contains(secret)));
     expect(diagnostic, isNot(contains(body)));
     expect(diagnostic.toLowerCase(), isNot(contains('authorization')));
+  });
+
+  test('工作模式使用结构化流式请求', () async {
+    final client = FakeCompletionClient();
+    final gateway = AiRequestGateway(
+      store: MemoryGovernanceStore(),
+      client: client,
+    );
+
+    for (final entry in const [
+      (provider: ApiProvider.sensenova, model: 'sensenova-6.8-flash-lite'),
+      (provider: ApiProvider.deepseek, model: 'deepseek-chat'),
+    ]) {
+      await gateway.sendChatMessageStreamed(
+        apiKey: 'secret',
+        provider: entry.provider,
+        model: entry.model,
+        messages: messages,
+        purpose: AiRequestPurpose.agent,
+        conversationId: 'work-task',
+        characterId: 'worker',
+        maxRetries: 0,
+        requiresTools: true,
+      );
+    }
+
+    expect(client.sendCount, 0);
+    expect(client.streamedCount, 0);
+    expect(client.structuredStreamedCount, 2);
+  });
+
+  test('SenseNova stalled work response retries structured non-stream JSON',
+      () async {
+    final client = FakeCompletionClient();
+    client.structuredStreamedFailure = true;
+    final gateway = AiRequestGateway(
+      store: MemoryGovernanceStore(),
+      client: client,
+    );
+
+    final result = await gateway.sendChatMessageStreamed(
+      apiKey: 'secret',
+      provider: ApiProvider.sensenova,
+      model: 'sensenova-6.8-flash-lite',
+      messages: messages,
+      purpose: AiRequestPurpose.agent,
+      conversationId: 'work-task',
+      characterId: 'worker',
+      maxRetries: 0,
+      requiresTools: true,
+    );
+
+    expect(result['success'], isTrue);
+    expect(client.sendCount, 0);
+    expect(client.boundedCount, 1);
+  });
+
+  test('工作模式流式尝试只约束空闲间隙，兼容路径继承调用方预算', () async {
+    const callerBudget = Duration(seconds: 300);
+    final client = FakeCompletionClient();
+    client.structuredStreamedFailure = true;
+    final gateway = AiRequestGateway(
+      store: MemoryGovernanceStore(),
+      client: client,
+    );
+
+    await gateway.sendChatMessageStreamed(
+      apiKey: 'secret',
+      provider: ApiProvider.deepseek,
+      model: 'deepseek-chat',
+      messages: messages,
+      purpose: AiRequestPurpose.agent,
+      conversationId: 'work-task',
+      characterId: 'worker',
+      maxRetries: 0,
+      requiresTools: true,
+      receiveTimeout: callerBudget,
+    );
+
+    // The streamed attempt may only bound its idle gap; a work-mode turn
+    // legitimately runs longer than that.
+    expect(
+      client.structuredStreamedReceiveTimeout,
+      lessThan(callerBudget),
+    );
+    // The compatibility path keeps the caller's full budget instead of
+    // inheriting the short idle bound.
+    expect(client.boundedReceiveTimeouts, [callerBudget]);
+  });
+
+  test('工作模式对确定性失败不再发起额外请求', () async {
+    // A client error, a malformed body and an oversized body all fail the same
+    // way on the compatibility path, and a user stop must never be re-sent.
+    for (final failure in <Map<String, dynamic>>[
+      {'success': false, 'statusCode': 401, 'message': '鉴权失败'},
+      {'success': false, 'message': '响应格式无效'},
+      {'success': false, 'message': '模型响应超过安全大小限制'},
+      {'success': false, 'message': '请求已取消'},
+    ]) {
+      final client = FakeCompletionClient();
+      client.structuredStreamedResult = failure;
+      final gateway = AiRequestGateway(
+        store: MemoryGovernanceStore(),
+        client: client,
+      );
+
+      final result = await gateway.sendChatMessageStreamed(
+        apiKey: 'secret',
+        provider: ApiProvider.deepseek,
+        model: 'deepseek-chat',
+        messages: messages,
+        purpose: AiRequestPurpose.agent,
+        conversationId: 'work-task',
+        characterId: 'worker',
+        maxRetries: 0,
+        requiresTools: true,
+      );
+
+      expect(result['message'], failure['message']);
+      expect(client.boundedCount, 0, reason: '$failure 不应触发兼容路径');
+      expect(client.streamedCount, 0, reason: '$failure 不应触发兼容路径');
+    }
+  });
+
+  test('Retry-After 提示穿过网关的直返与兼容两条路径', () async {
+    final directClient = FakeCompletionClient()
+      ..structuredStreamedResult = {
+        'success': false,
+        'statusCode': 402,
+        'retryAfterMs': 5000,
+        'message': '需要付费',
+      };
+    final directGateway = AiRequestGateway(
+      store: MemoryGovernanceStore(),
+      client: directClient,
+    );
+
+    final direct = await directGateway.sendChatMessageStreamed(
+      apiKey: 'secret',
+      provider: ApiProvider.deepseek,
+      model: 'deepseek-chat',
+      messages: messages,
+      purpose: AiRequestPurpose.agent,
+      conversationId: 'work-task',
+      characterId: 'worker',
+      maxRetries: 0,
+      requiresTools: true,
+    );
+
+    // 非重试状态直接返回流式结果：提示不能被字段收窄丢掉。
+    expect(directClient.boundedCount, 0);
+    expect(direct['retryAfterMs'], 5000);
+
+    final fallbackClient = FakeCompletionClient()
+      ..structuredStreamedResult = {
+        'success': false,
+        'statusCode': 429,
+        'retryAfterMs': 7000,
+        'message': 'HTTP 429 请求失败',
+      }
+      ..boundedResult = {
+        'success': false,
+        'statusCode': 429,
+        'retryAfterMs': 3000,
+        'message': 'HTTP 429 请求失败',
+      };
+    final fallbackGateway = AiRequestGateway(
+      store: MemoryGovernanceStore(),
+      client: fallbackClient,
+    );
+
+    final fallback = await fallbackGateway.sendChatMessageStreamed(
+      apiKey: 'secret',
+      provider: ApiProvider.deepseek,
+      model: 'deepseek-chat',
+      messages: messages,
+      purpose: AiRequestPurpose.agent,
+      conversationId: 'work-task',
+      characterId: 'worker',
+      maxRetries: 0,
+      requiresTools: true,
+    );
+
+    // 429 会落到兼容路径，最终生效的是那次调用的提示，同样不能被丢掉。
+    expect(fallbackClient.boundedCount, 1);
+    expect(fallback['retryAfterMs'], 3000);
+  });
+
+  test('工作模式对客户端标记为可重试的空回复仍走兼容路径', () async {
+    final client = FakeCompletionClient();
+    client.structuredStreamedResult = {
+      'success': false,
+      'message': '模型返回了空内容',
+      'failureCode': 'emptyResponse',
+      'retryable': true,
+    };
+    final gateway = AiRequestGateway(
+      store: MemoryGovernanceStore(),
+      client: client,
+    );
+
+    final result = await gateway.sendChatMessageStreamed(
+      apiKey: 'secret',
+      provider: ApiProvider.deepseek,
+      model: 'deepseek-chat',
+      messages: messages,
+      purpose: AiRequestPurpose.agent,
+      conversationId: 'work-task',
+      characterId: 'worker',
+      maxRetries: 0,
+      requiresTools: true,
+    );
+
+    // The bounded protocol failure carries the same retryable signal that
+    // WorkFailure reads, so the compatibility call must still run.
+    expect(client.boundedCount, 1);
+    expect(result['success'], isTrue);
   });
 
   test('网关重试按 RetryAttempt 回退温度', () async {

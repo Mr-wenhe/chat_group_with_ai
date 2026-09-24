@@ -3,6 +3,7 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/database/data_lifecycle_models.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/character_presets.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/features/ai_character/action_skill_count.dart';
 import 'package:chat_group/features/direct_chat/pinned_ordering.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -41,19 +42,23 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
     final cs = Theme.of(context).colorScheme;
     final db = ref.read(databaseServiceProvider);
     final characters = ref.watch(aiCharactersProvider);
-    final query = _searchController.text.trim().toLowerCase();
+    final query = _searchController.text.trim();
     final filteredCharacters = query.isEmpty
         ? characters
-        : characters.where((c) {
-            final haystack =
-                '${c.name} ${c.displayGenderLabel} ${c.role} ${c.personalityTags.join(' ')}'
-                    .toLowerCase();
-            return haystack.contains(query);
-          }).toList();
+        : characters
+            .where((c) => PinyinSearch.matchesFields(
+                  [c.name, c.displayGenderLabel, c.role, ...c.personalityTags],
+                  query,
+                  mode: PinyinMatchMode.name,
+                ))
+            .toList();
     final pinnedIds = db.pinnedCharacterIds();
     final orderedCharacters = PinnedOrdering.sortCharacters(
       filteredCharacters,
       pinnedIds: pinnedIds,
+      isSearchExact: query.isEmpty
+          ? null
+          : (c) => PinyinSearch.matchesLiterally(c.searchFields, query),
     );
     // 获取全部 API 配置，用于「批量替换模型」工具栏；少于 2 个配置时无替换意义
     final apiConfigs = ref.watch(apiConfigsProvider);
@@ -122,7 +127,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
               controller: _searchController,
               decoration: appInputDecoration(
                 '搜索角色',
-                '按名字、性别、角色或标签搜索',
+                '按名字、性别、角色或标签搜索，支持拼音',
                 Icons.search_rounded,
                 cs,
               ).copyWith(

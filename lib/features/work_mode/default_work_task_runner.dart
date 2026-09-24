@@ -28,6 +28,7 @@ import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/work_mode/agent_decision_parser.dart';
 import 'package:chat_group/features/work_mode/work_agent_loop.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_notice.dart';
 import 'package:chat_group/features/work_mode/work_approval_decision.dart';
 import 'package:chat_group/features/work_mode/work_approval_fingerprint.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
@@ -114,6 +115,7 @@ class DefaultWorkTaskRunner
   /// successful delivery. Tests can leave this disabled to avoid UI side
   /// effects; the production provider enables it.
   final bool autoOpenHtml;
+  final Duration modelCompletionTimeout;
   final DateTime Function() clock;
 
   void Function(AgentTask task)? _taskUpdateSink;
@@ -143,6 +145,10 @@ class DefaultWorkTaskRunner
     this.weatherForecastService,
     this.mediaCopier,
     this.autoOpenHtml = false,
+    // Large single-file artifacts may need several minutes for the model to
+    // produce a tool plan and content; keep the deadline bounded but above the
+    // previous 120s ceiling that aborted valid HTML generations.
+    this.modelCompletionTimeout = const Duration(seconds: 300),
     DateTime Function()? clock,
   })  : credentials = credentials ?? SecureApiCredentialResolver(),
         gateway = gateway ??
@@ -208,6 +214,14 @@ class DefaultWorkTaskRunner
   static const int _maxArtifactAttachments = 12;
   static const int _maxAttachedArtifactBytes = 50 * 1024 * 1024;
   static const int _maxArtifactBundleBytes = 200 * 1024 * 1024;
+
+  /// Bounds the scan for files a command produced itself: how many deliverables
+  /// it may report, and how many directory entries the before/after snapshots
+  /// may inspect to find them.
+  /// ponytail: discovery caps at 4000 entries; add a filesystem watcher or
+  /// persistent index only if workspaces exceed that scan limit in practice.
+  static const int _maxObservedArtifacts = 64;
+  static const int _maxObservedEntries = 4000;
 }
 
 class _ArtifactAttachmentSelection {

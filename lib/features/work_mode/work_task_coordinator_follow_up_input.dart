@@ -49,6 +49,65 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
         !answeringModelClarification;
   }
 
+  Future<bool> _applyQueuedAuthorizationRootCorrection(AgentTask task) async {
+    if (task.status != AgentTaskStatus.paused ||
+        task.workFailure?.type != WorkFailureType.authorizationLost ||
+        task.queuedUserRequests.isEmpty) {
+      return false;
+    }
+    final correction = task.queuedUserRequests.first.trim();
+    final namesWorkspaceRoot =
+        RegExp(r'\b(workspace\s+root|root\s+directory)\b', caseSensitive: false)
+                .hasMatch(correction) ||
+            RegExp(r'(?:工作区根目录|工作空间根目录|工作目录|工作区|工作空间|根目录)')
+                .hasMatch(correction);
+    final requestedRoot =
+        const WorkModeDirectoryService().requestedLocalPath(correction);
+    if (!namesWorkspaceRoot || requestedRoot == null) return false;
+
+    final attachmentIds = _queuedAttachmentMessageIds(
+      task.executionStateJson,
+      expectedLength: task.queuedUserRequests.length,
+    );
+    // A root-only recovery must not consume an attached file that belongs to
+    // the queued request; let normal FIFO promotion handle that case.
+    if (attachmentIds.first.isNotEmpty) return false;
+
+    final correctionLine = '用户补充要求：$correction';
+    final currentRequest = task.userRequest.trim();
+    final requestLines = currentRequest.split('\n');
+    final mergedRequest = requestLines.any(
+      (line) => line.trim() == correctionLine,
+    )
+        ? currentRequest
+        : currentRequest.isEmpty
+            ? correction
+            : '$currentRequest\n$correctionLine';
+    final execution = _decodeExecutionMap(task.executionStateJson)
+      ..['folderRequestPath'] = requestedRoot
+      ..['folderGrantPending'] = true;
+    task
+      ..userRequest = mergedRequest
+      ..queuedUserRequests = task.queuedUserRequests.skip(1).toList()
+      ..pendingToolRequestJson = ''
+      ..executionStateJson = _withQueuedAttachmentMessageIds(
+        jsonEncode(execution),
+        attachmentIds.skip(1).toList(),
+      )
+      ..updatedAt = _clock();
+    _refreshTaskContext(
+      task,
+      nextStep: '工作目录路径已更新，请重新授权后继续。',
+    );
+    await _save(task);
+    await _record(
+      task,
+      WorkTaskEventKind.paused,
+      '已应用工作目录路径修正，等待重新授权',
+    );
+    return true;
+  }
+
   /// Adds user input to the same durable task instead of replacing its run.
   Future<void> _implEnqueueFollowUp(
     String taskId,
@@ -148,18 +207,31 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
         // its completion callback will start the renewed revision after the
         // old run has drained.
         _discussionCancellations[task.id]?.cancel();
-        // This input is the answer to whatever the discussion last asked the
-        // user: a model clarification, or the pending group question surfaced
-        // in the task panel. Renewing must drop that exact question, otherwise
-        // the new round prints it again under `待解决：` and the user sees the
-        // same question repeated right after answering it.
-        final answeredQuestion = answeringModelClarification
-            ? WorkTaskClarification.question(task)
-            : _pendingDiscussionQuestion(discussionMarker.state!);
-        final currentRequest = task.userRequest.trim();
-        final mergedRequest = currentRequest.isEmpty
-            ? normalized
-            : '$currentRequest\n用户补充要求：$normalized';
+        final currentRequest = _requestWithoutClarifiedUnknownMentions(
+          task.userRequest.trim(),
+          discussionMarker.state!,
+        );
+        final correctedReply = _requestWithoutClarifiedUnknownMentions(
+          normalized,
+          discussionMarker.state!,
+        );
+        final continuationLine = '用户补充要求：$correctedReply';
+        // Retrying the same in-panel discussion action must not keep growing
+        // the durable prompt.  Preserve the first occurrence (so the user's
+        // intent remains auditable) and discard only identical duplicates.
+        var seenContinuation = false;
+        final canonicalLines = currentRequest.split('\n').where((line) {
+          if (line.trim() != continuationLine) return true;
+          if (seenContinuation) return false;
+          seenContinuation = true;
+          return true;
+        });
+        final canonicalRequest = canonicalLines.join('\n').trim();
+        final mergedRequest = canonicalRequest.isEmpty
+            ? correctedReply
+            : seenContinuation
+                ? canonicalRequest
+                : '$canonicalRequest\n$continuationLine';
         if (!_discussionExecutorIsPinned(discussionMarker.state!)) {
           // A group election is scoped to the previous request revision. Clear
           // the task-level lease before reopening it so a new qualified role
@@ -176,8 +248,7 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
               discussionMarker.state!,
               mergedRequest,
               decision: followUpDecision,
-              contractRequest: normalized,
-              answeredQuestion: answeredQuestion,
+              contractRequest: correctedReply,
             ),
           )
           ..updatedAt = _clock();
@@ -189,6 +260,23 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
           task.executionStateJson,
           followUpDecision,
         );
+        final requestedWorkspaceRoot =
+            const WorkModeDirectoryService().requestedLocalPath(correctedReply);
+        final execution = _decodeExecutionMap(task.executionStateJson);
+        if (task.status == AgentTaskStatus.paused &&
+            task.workFailure?.type == WorkFailureType.authorizationLost &&
+            requestedWorkspaceRoot != null &&
+            execution['folderRequestPath'] != requestedWorkspaceRoot) {
+          // A newer absolute root must never be checked against or replay the
+          // old root's tool checkpoint. Keep a durable picker marker so the
+          // existing reauthorization action remains available.
+          execution
+            ..['folderRequestPath'] = requestedWorkspaceRoot
+            ..['folderGrantPending'] = true;
+          task
+            ..pendingToolRequestJson = ''
+            ..executionStateJson = jsonEncode(execution);
+        }
         await _pauseForDiscussion(
           task,
           pendingDiscussion
@@ -248,6 +336,10 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
         task.executionStateJson,
         queuedAttachmentIds,
       );
+      if (!isTaskInFlight(task.id) &&
+          await _applyQueuedAuthorizationRootCorrection(task)) {
+        return;
+      }
       _refreshTaskContext(
         task,
         nextStep: '当前任务完成后处理第 ${task.queuedUserRequests.length} 条追问。',
@@ -270,6 +362,34 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
       }
       await _save(task);
       unawaited(_record(task, WorkTaskEventKind.queued, '已排队新的追问'));
+    });
+  }
+
+  /// A reply to an unknown-mention checkpoint is an explicit correction, not
+  /// permission to keep retrying the same invalid mention forever. Remove
+  /// only names named by the checkpoint; valid mentions and unrelated text
+  /// remain untouched.
+  String _requestWithoutClarifiedUnknownMentions(
+    String request,
+    WorkDiscussionState discussion,
+  ) {
+    if (!discussion.blockers.contains('mentionClarification')) return request;
+    final unknownNames = <String>{};
+    final missingNames = RegExp(r'未找到角色\s+(.+?)[，,。；;]');
+    final mentionedName = RegExp(r'@([^@\s，。！？!?、；;：:,.]+)');
+    for (final question in discussion.openQuestions) {
+      final match = missingNames.firstMatch(question);
+      if (match == null) continue;
+      unknownNames.addAll(
+        mentionedName
+            .allMatches(match.group(1)!)
+            .map((item) => item.group(1)!)
+            .where((name) => name.isNotEmpty),
+      );
+    }
+    if (unknownNames.isEmpty) return request;
+    return request.replaceAllMapped(mentionedName, (match) {
+      return unknownNames.contains(match.group(1)) ? '' : match.group(0)!;
     });
   }
 
@@ -305,6 +425,22 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
     );
   }
 
+  /// Marks the start of a user wait on the task's durable checkpoint.
+  ///
+  /// A task blocked on a user choice is not consuming agent work, so the
+  /// interval is booked by [WorkTaskBudgetWait] and subtracted from the
+  /// wall-clock budget when the next run resumes. Callers persist the task
+  /// themselves; the window must be durable before the dialog appears, because
+  /// the user may take minutes to answer.
+  void _openBudgetWait(AgentTask task) {
+    task.executionStateJson = jsonEncode(
+      WorkTaskBudgetWait.begin(
+        _decodeExecutionMap(task.executionStateJson),
+        _clock(),
+      ),
+    );
+  }
+
   /// Persists a tool-approval checkpoint without requiring a chat page to
   /// retain the pending request in memory.
   Future<void> _implPauseForApproval(
@@ -324,6 +460,8 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
         ..pendingToolRequestJson =
             safeToolRequestCheckpointJson(pendingToolRequestJson)
         ..updatedAt = _clock();
+      // The resumed run can only exclude the wait if it was recorded durably.
+      _openBudgetWait(task);
       await _save(task);
       await _markSnapshotStatus(task);
       unawaited(

@@ -286,7 +286,10 @@ void main() {
       task.id,
       (value) => value.status == AgentTaskStatus.completed,
     );
-    expect(executionGateway.calls, 3);
+    // Two tool turns (conversion source, then pandoc) are enough: the DOCX
+    // satisfies the contract, so the loop completes from that result instead of
+    // spending a third model turn on a finish decision.
+    expect(executionGateway.calls, 2);
     expect(pandoc.conversionCount, 1);
     expect(completed.characterId, 's8-product');
     expect(completed.lastArtifactPaths, contains(endsWith('需求文档.docx')));

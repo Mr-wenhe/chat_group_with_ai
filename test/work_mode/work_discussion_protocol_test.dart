@@ -5,6 +5,18 @@ import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('normalizes gateway HTTP failures without disguising them as bad JSON',
+      () {
+    final turn = WorkDiscussionTurn.fromResponse({
+      'success': false,
+      'statusCode': 401,
+      'message': 'HTTP 401 请求失败',
+    });
+
+    expect(turn.valid, isFalse);
+    expect(turn.failureReason, '模型请求失败（HTTP 401）');
+  });
+
   test('extracts a valid protocol object wrapped in short model prose', () {
     final turn = WorkDiscussionTurn.fromResponse({
       'content': '好的，以下是本轮结果：\n${jsonEncode({

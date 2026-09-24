@@ -24,8 +24,11 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
       return;
     }
     if (initial.phase == WorkDiscussionPhase.blocked) return;
+    final hasCandidateHint = initial.candidateCharacterIds.isNotEmpty;
     final userBlocker = initial.blockers.firstWhere(
-      WorkDiscussionRunner.userDecisionBlockers.contains,
+      (blocker) =>
+          WorkDiscussionRunner.userDecisionBlockers.contains(blocker) &&
+          !(blocker == 'missingQualifiedRole' && hasCandidateHint),
       orElse: () => '',
     );
     if (userBlocker.isNotEmpty) {
@@ -82,9 +85,11 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
       return;
     }
     final qualified = WorkRoleRouter.qualifiedCandidatesForRequest(
-      request: task.userRequest,
+      request: WorkDiscussionState.currentRequestScope(task),
       characters: allCharacters,
       skills: skills,
+      deliverableFormatOverride:
+          _activeDeliverableFormat(initial.deliverableContract),
     );
     final qualifiedIds = qualified.map((item) => item.id).toSet();
     final existingCandidateIds = initial.candidateCharacterIds
@@ -331,7 +336,13 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
         .where(
           (blocker) =>
               blocker != 'discussionRequired' &&
-              blocker != 'executorSelectionRequired',
+              blocker != 'executorSelectionRequired' &&
+              // Older checkpoints treated every model question as a user
+              // blocker. Ordinary decisions now stay inside the group; a
+              // genuine role gap is represented separately below.
+              blocker != 'missingUserInformation' &&
+              !(blocker == 'missingQualifiedRole' &&
+                  candidateIds.any(availableIds.contains)),
         )
         .toList(growable: false);
     return state.copyWith(
@@ -364,17 +375,22 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
       return initial;
     }
     final route = await const WorkRoleRouter().route(
-      request: task.userRequest,
+      request: WorkDiscussionState.currentRequestScope(task),
       characters: characters,
       conversationId: group.id,
       requestRevision: initial.requestRevision,
+      deliverableFormatOverride:
+          _activeDeliverableFormat(initial.deliverableContract),
       skills: skills,
     );
     if (cancellation.isCancelled) return null;
     final routeContract = route.deliverableContract?.toJson();
-    final mergedContract = routeContract == null
-        ? initial.deliverableContract
-        : _mergeContract(initial.deliverableContract, routeContract);
+    final mergedContract =
+        initial.requestRevision > 1 && initial.deliverableContract != null
+            ? initial.deliverableContract
+            : routeContract == null
+                ? initial.deliverableContract
+                : _mergeContract(initial.deliverableContract, routeContract);
     // `routePending` is a durable reminder for the earlier failed route, not
     // a conclusion about the renewed request. Once the same route call has
     // either produced qualified candidates or selected an executor, remove
@@ -418,5 +434,10 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
       blockers: reroutedBlockers,
       deliverableContract: mergedContract,
     );
+  }
+
+  String? _activeDeliverableFormat(Map<String, dynamic>? contract) {
+    final format = contract?['format'];
+    return format is String && format.trim().isNotEmpty ? format.trim() : null;
   }
 }

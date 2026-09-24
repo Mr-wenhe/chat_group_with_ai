@@ -1,11 +1,14 @@
 part of 'chat_room_page.dart';
 
 extension _ChatRoomTaskActionSupport on _ChatRoomPageState {
-  /// Handles a durable task action embedded in a group message. The message
+  /// Handles a durable task action embedded in a chat message. The message
   /// carries its own task/version; this method never falls back to the newest
   /// task in the conversation.
+  ///
+  /// 私聊同样会收到任务提醒（见 `WorkTaskActionMessageService`），所以这里不能
+  /// 再按私聊整体拒绝。私聊中"补成员"没有意义，其余动作都只是打开全局面板的
+  /// 指定任务，不会替任何角色发言，因此对私聊是安全的。
   Future<void> _handleWorkTaskAction(WorkTaskUserAction action) async {
-    if (_isDirectChat) return;
     final coordinator = ref.read(workTaskCoordinatorProvider);
     final task = coordinator.taskById(action.taskId);
     if (task == null || task.groupId != widget.groupId) {
@@ -29,12 +32,14 @@ extension _ChatRoomTaskActionSupport on _ChatRoomPageState {
     // The app-scoped task panel is painted above the route Navigator.  Open it
     // after the member form returns; otherwise the panel can cover the very
     // fields the user needs to repair the role blocker.
-    if (action.kind != WorkTaskUserActionKind.addMember) {
+    final group = _group;
+    if (action.kind != WorkTaskUserActionKind.addMember ||
+        _isDirectChat ||
+        group == null) {
       overlay.openTask(action.taskId);
       return;
     }
-    final group = _group;
-    if (group == null || !mounted) return;
+    if (!mounted) return;
     await Navigator.of(context).push(
       MaterialPageRoute<void>(
         builder: (_) => ChatGroupFormPage(group: group),

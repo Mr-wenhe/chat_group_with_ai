@@ -90,10 +90,44 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
             message: '无法在授权目录内解析精确文件路径。',
           );
         }
+        stage02.updateImplicitScopeAllowed(
+          folderGrantService?.settings.confirmOrdinaryWrites == false,
+        );
         // Keep policy and approval in one gate. This prevents a high-risk
         // command (or a no-snapshot write) from being approved by one gate and
         // then silently reusing the same decision in a second gate.
-        return _mutationApprovalGate(task, invocation, plan);
+        var approvalAccepted = false;
+        final result = await _mutationApprovalGate(
+          task,
+          invocation,
+          plan,
+          workspaceRoot: stage02.workspaceRoot,
+          onApprovalEvaluated: (accepted) => approvalAccepted = accepted,
+        );
+        final currentDecision = _approvalDecision(task.executionStateJson);
+        final currentScope = _approvalScope(task.executionStateJson);
+        final currentCapability = _approvalCapability(task);
+        final retainsMutationApproval =
+            currentDecision?.permitsExecution == true &&
+                currentCapability == WorkApprovalCapability.mutation &&
+                currentScope != null;
+        // Keep an explicit mutation scope when it is still present in the
+        // durable checkpoint. If it does not cover this plan, Stage 02 must
+        // reject it; falling back to the ordinary-write setting would turn a
+        // stale or foreign approval into broader authority.
+        if (result == null &&
+            !approvalAccepted &&
+            stage02.approvalDecision != null &&
+            !retainsMutationApproval) {
+          // The registry is created once per runner invocation, while the
+          // task checkpoint is consumed after each approved mutation. Clear
+          // the old Stage 02 scope before the next handler uses it.
+          stage02.clearApprovalForMutation(
+            allowImplicitScope:
+                folderGrantService?.settings.confirmOrdinaryWrites == false,
+          );
+        }
+        return result;
       },
       approval: null,
       snapshot: (invocation) async {
@@ -140,8 +174,9 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
         final policy = _commandPolicyFor(character, workspaceRoot).evaluate(
           command,
           taskId: task.id,
-          userExplicitlyRequested:
-              _requestsExplicitValidation(task.userRequest),
+          userExplicitlyRequested: _requestsExplicitValidation(
+            WorkDiscussionState.currentRequestScope(task),
+          ),
         );
         final writableResult = await _commandWritableCapabilityGate(
           task,
@@ -197,7 +232,12 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
                 message: '命令影响范围无法形成审批计划，未执行。',
                 failureCode: 'commandPlanMissing',
               )
-            : _mutationApprovalGate(task, invocation, plan);
+            : _mutationApprovalGate(
+                task,
+                invocation,
+                plan,
+                workspaceRoot: workspaceRoot,
+              );
       },
       approval: null,
       snapshot: (invocation) async {
@@ -206,8 +246,9 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
         final evaluation = _commandPolicyFor(character, workspaceRoot).evaluate(
           command,
           taskId: task.id,
-          userExplicitlyRequested:
-              _requestsExplicitValidation(task.userRequest),
+          userExplicitlyRequested: _requestsExplicitValidation(
+            WorkDiscussionState.currentRequestScope(task),
+          ),
         );
         final plan = evaluation.changePlan;
         if (evaluation.isReadOnly || plan == null) return null;
@@ -233,8 +274,9 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
         final evaluation = _commandPolicyFor(character, workspaceRoot).evaluate(
           command,
           taskId: task.id,
-          userExplicitlyRequested:
-              _requestsExplicitValidation(task.userRequest),
+          userExplicitlyRequested: _requestsExplicitValidation(
+            WorkDiscussionState.currentRequestScope(task),
+          ),
         );
         final plan = evaluation.changePlan;
         if (evaluation.isReadOnly || plan == null) return null;
@@ -260,6 +302,12 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
     required String label,
   }) {
     Future<WorkToolResult?> gate(WorkToolInvocation invocation) async {
+      if (_isQaReportTask(task)) {
+        return const WorkToolResult.pathRejected(
+          message: '当前 QA 阶段仅允许写入合同指定的 Markdown 测试报告；应用内 Skill 配置未执行。',
+          data: {'stageBoundary': 'qaReportOnly'},
+        );
+      }
       final decision = _approvalDecision(task.executionStateJson);
       if (decision == WorkChangeApprovalDecision.rejected) {
         task.executionStateJson = _withoutApprovalCheckpoint(
@@ -318,8 +366,21 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
   Future<WorkToolResult?> _mutationApprovalGate(
     AgentTask task,
     WorkToolInvocation invocation,
-    WorkChangePlan plan,
-  ) async {
+    WorkChangePlan plan, {
+    required String workspaceRoot,
+    void Function(bool accepted)? onApprovalEvaluated,
+  }) async {
+    final scopeViolation = await _qaReportMutationViolation(
+      task,
+      plan,
+      workspaceRoot: workspaceRoot,
+    );
+    if (scopeViolation != null) {
+      return WorkToolResult.pathRejected(
+        message: scopeViolation,
+        data: const {'stageBoundary': 'qaReportOnly'},
+      );
+    }
     final settings = WorkChangePolicySettings(
       confirmOrdinaryWrites:
           folderGrantService?.settings.confirmOrdinaryWrites ?? true,
@@ -344,13 +405,15 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
       settings: settings,
       scope: scope,
     );
-    if (_approvalAllowsMutation(
+    final approvalAccepted = _approvalAllowsMutation(
       task,
       invocation,
       fingerprint: fingerprint,
       scopeAllows: scope?.allows(plan) == true,
       requiresFresh: _requiresFreshApproval(plan),
-    )) {
+    );
+    onApprovalEvaluated?.call(approvalAccepted);
+    if (approvalAccepted) {
       return null;
     }
     final sensitiveMutation = plan.exactPaths.any(
@@ -384,6 +447,122 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
       message: '${policy.reason} 影响范围：${_displayPlan(plan)}',
       data: {'approvalPlan': plan.toJson()},
     );
+  }
+
+  Future<String?> _qaReportMutationViolation(
+    AgentTask task,
+    WorkChangePlan plan, {
+    required String workspaceRoot,
+  }) async {
+    if (!_isQaReportTask(task)) return null;
+
+    // QA may create or update the named report, but even the report itself
+    // cannot be renamed, deleted, or changed through an opaque command.
+    if (!const <WorkChangeActionType>{
+      WorkChangeActionType.create,
+      WorkChangeActionType.modify,
+      WorkChangeActionType.patch,
+    }.contains(plan.actionType)) {
+      return '当前 QA 阶段仅允许创建或修改合同指定的 Markdown 测试报告；重命名、删除和命令变更均未执行。';
+    }
+    if (plan.exactPaths.isEmpty) {
+      return '当前 QA 阶段仅允许写入合同指定的 Markdown 测试报告；不透明命令变更未执行。';
+    }
+
+    final state = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    final contract = _effectiveQaContract(task, state);
+    final location = contract?['location'];
+    try {
+      if (location is! String || location.trim().isEmpty) {
+        return '无法安全确认 QA 报告的精确输出路径，所有文件变更均已拒绝。';
+      }
+      final isWindows = workspaceFileService?.pathPolicy.isWindows ??
+          RegExp(r'^[A-Za-z]:').hasMatch(workspaceRoot);
+      // The user-facing contract may include the authorized root leaf
+      // (Desktop/report.md) while workspaceRoot already points at Desktop.
+      // Share the stripping rule with _effectivePath so QA report writes do not
+      // resolve to Desktop/Desktop/report.md and get rejected as "other".
+      final normalizedRoot = workspaceRoot.replaceAll('\\', '/');
+      final rawTarget =
+          _stripAuthorizedRootLeaf(location.trim(), normalizedRoot);
+      final expected = WorkspacePathPolicy.normalizePath(
+        _isAbsolutePath(rawTarget) ? rawTarget : '$normalizedRoot/$rawTarget',
+        isWindows: isWindows,
+      );
+      final files = workspaceFileService;
+      if (files == null) {
+        return '无法安全确认 QA 报告的精确输出路径，所有文件变更均已拒绝。';
+      }
+      final resolvedExpected = await files.pathPolicy.resolve(
+        expected,
+        allowMissing: true,
+      );
+      if (plan.exactPaths.any((path) => path != resolvedExpected.path)) {
+        return '当前 QA 阶段仅允许写入合同指定的 Markdown 测试报告；HTML 和其他路径均未执行。';
+      }
+    } on Object {
+      return '无法安全确认 QA 报告的精确输出路径，所有文件变更均已拒绝。';
+    }
+    return null;
+  }
+
+  bool _isQaReportTask(AgentTask task) {
+    final state = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    final latest = WorkDiscussionState.latestRequestScope(task).toLowerCase();
+    final current = WorkDiscussionState.currentRequestScope(task).toLowerCase();
+    final stage = '$latest\n$current';
+    final qaOnlyStage = stage.contains('qa-only') || stage.contains('qa only');
+    final developerStage = !qaOnlyStage &&
+        (latest.contains('developer') ||
+            latest.contains('dev fix') ||
+            latest.contains('developer stage') ||
+            latest.contains('开发阶段') ||
+            latest.contains('纯开发'));
+    if (developerStage) return false;
+    final contract = _effectiveQaContract(task, state);
+    final scope = stage;
+    final location = contract?['location'];
+    return state.isValid &&
+        state.state?.conversationId == task.groupId &&
+        contract?['format'] == 'markdown' &&
+        RegExp(r'测试|验证|回归|验收|\bqa\b|quality assurance|\btest(?:ing)?\b',
+                caseSensitive: false)
+            .hasMatch(scope) &&
+        RegExp(r'\.(?:md|markdown)$', caseSensitive: false)
+            .hasMatch(location is String ? location.trim() : '');
+  }
+
+  /// A failed developer run can leave an HTML contract in the checkpoint even
+  /// after a queued QA request becomes the active stage.  Re-derive only the
+  /// narrow QA report fields from the newest request; this never broadens the
+  /// allowed path and keeps the original contract as the fallback.
+  Map<String, dynamic>? _effectiveQaContract(
+    AgentTask task,
+    WorkDiscussionDecodeResult decoded,
+  ) {
+    final persisted = decoded.state?.deliverableContract;
+    final latest = WorkDiscussionState.latestRequestScope(task).trim();
+    if (latest.isEmpty) return persisted;
+    final derived = WorkRoleRouter.deliverableContractForRequest(
+      latest,
+      requestRevision: decoded.state?.requestRevision ?? 1,
+    );
+    if (derived.format != 'markdown' ||
+        !RegExp(r'\.(?:md|markdown)$', caseSensitive: false)
+            .hasMatch(derived.location)) {
+      return persisted;
+    }
+    return <String, dynamic>{
+      ...?persisted,
+      'deliverableType': 'document',
+      'format': 'markdown',
+      'location': derived.location,
+      'contentScope': latest,
+    };
   }
 
   bool _approvalAllowsMutation(

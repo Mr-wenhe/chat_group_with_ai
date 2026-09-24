@@ -167,10 +167,8 @@ class WorkTaskUserAction {
         (item) => _informationBlockers.contains(item),
         orElse: () => '',
       );
-      if (questions.isNotEmpty || informationBlocker.isNotEmpty) {
-        final blockerId = informationBlocker.isEmpty
-            ? 'missingUserInformation'
-            : informationBlocker;
+      if (informationBlocker.isNotEmpty) {
+        final blockerId = informationBlocker;
         actions.add(
           WorkTaskUserAction(
             taskId: task.id,

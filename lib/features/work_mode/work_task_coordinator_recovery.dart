@@ -1,6 +1,91 @@
 part of 'work_task_coordinator.dart';
 
 extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
+  /// Requeues a terminal approval-scope failure after clearing the stale
+  /// one-shot capability. Directory authorization failures keep their native
+  /// picker flow, so this action cannot turn a missing role or folder grant
+  /// into an implicit permission.
+  Future<void> _implReauthorizeTask(String taskId) async {
+    final shouldReplan = await _serialize<bool>(() async {
+      _ensureOpen();
+      final task = _requireWorkTask(taskId);
+      return task.workFailure?.canReplanAfterApprovalScopeFailure == true;
+    });
+    if (!shouldReplan) {
+      await _implRequestFolderForTask(taskId);
+      return;
+    }
+
+    await _serialize(() async {
+      _ensureOpen();
+      final task = _requireWorkTask(taskId);
+      final failure = _approvalScopeReplanFailure(task);
+      _resetApprovalScopeReplanTask(task);
+      _refreshTaskContext(
+        task,
+        nextStep: '已清除失效审批范围，正在重新生成变更计划。',
+        extraErrors: [failure.reason],
+        clearApprovalScope: true,
+      );
+      await _save(task);
+      _enqueueTask(task, prioritize: true);
+      await _record(
+        task,
+        WorkTaskEventKind.queued,
+        '已重新生成变更计划，继续任务',
+        detail: failure.reason,
+      );
+      await _schedule();
+    });
+  }
+
+  WorkFailure _approvalScopeReplanFailure(AgentTask task) {
+    final failure = task.workFailure;
+    if (failure?.canReplanAfterApprovalScopeFailure != true) {
+      throw StateError('该权限提醒已失效，请打开任务面板查看最新状态。');
+    }
+    if (_running.containsKey(task.id) || _startingTaskIds.contains(task.id)) {
+      throw StateError('任务正在执行，不能重新生成变更计划。');
+    }
+    if (_discussionRuns.containsKey(task.id) ||
+        _discussionStartingIds.contains(task.id)) {
+      throw StateError('群讨论正在进行，不能重新生成变更计划。');
+    }
+    final discussion = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    if (_requiresDiscussionForTask(task) &&
+        discussion.present &&
+        (discussion.state == null || !discussion.state!.isExecutionReady)) {
+      throw StateError('请先完成群讨论并确定最终执行角色。');
+    }
+    return failure!;
+  }
+
+  void _resetApprovalScopeReplanTask(AgentTask task) {
+    _removeQueuedTask(task);
+    _waitingForResources.remove(task.id)?.cancellation.cancel();
+    _folderWaiters.remove(task.id)?.cancel();
+    _conversationReservations.remove(task.groupId);
+    _taskLockPlans.remove(task.id);
+    task
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false
+      ..plan = ''
+      ..lastError = ''
+      ..pendingToolRequestJson = ''
+      // Approval decisions and scopes are one-shot credentials. Replanning
+      // must start with the current request and current workspace state.
+      ..executionStateJson = _withoutApprovalCheckpoint(
+        task.executionStateJson,
+      )
+      // Waiting time must not consume the next execution window, while the
+      // durable action count and committed-operation keys remain intact.
+      ..startedAt = _clock()
+      ..updatedAt = _clock();
+    task.requestedPermissions.clear();
+  }
+
   /// Queues an interrupted or paused task only after an explicit user action.
   Future<void> _implResumeByUser(String taskId) {
     return _serialize(() async {
@@ -44,6 +129,7 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       if (_requiresVisionModelSelection(task)) {
         throw StateError('请先选择支持图片的视觉模型后再继续任务。');
       }
+      WorkFailure.clearFromTask(task);
       task
         ..status = AgentTaskStatus.queued
         ..resumeRequired = false
@@ -60,6 +146,11 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
           task.executionStateJson,
         )
         ..updatedAt = _clock();
+      // A manual continuation is a fresh plan against the current role
+      // configuration. The old list was a snapshot of capabilities at task
+      // creation and would otherwise keep a newly granted role permission
+      // excluded by the runner's safety intersection.
+      task.requestedPermissions.clear();
       _conversationReservations.remove(task.groupId);
       await _save(task);
       _enqueueTask(task);
@@ -81,10 +172,25 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       if (_running.containsKey(taskId) || _startingTaskIds.contains(taskId)) {
         throw StateError('任务正在执行，不能同时重试。');
       }
+      if (_discussionRuns.containsKey(taskId) ||
+          _discussionStartingIds.contains(taskId)) {
+        throw StateError('群讨论正在进行，不能同时重试。');
+      }
+      // A retry that is allowed to proceed takes the task over from any pending
+      // automatic resume: without this the user's own run would inherit the
+      // round deadline that exists only to bound an app-initiated attempt. A
+      // rejected retry above leaves the pending attempt untouched.
+      _autoResumeTaskIds.remove(taskId);
       final restartFromBeginning =
           WorkTaskCoordinator.canRestartAfterUserStop(task);
+      // A finished task can still be waiting to re-send a deliverable that was
+      // saved but whose chat attachment failed. That resend runs through this
+      // same retry path, so a completed task stays retryable exactly while its
+      // delivery marker is pending.
+      final deliveryRetryPending =
+          workArtifactDeliveryRetryPending(task.executionStateJson);
       if ((task.status == AgentTaskStatus.cancelled && !restartFromBeginning) ||
-          task.status == AgentTaskStatus.completed) {
+          task.status == AgentTaskStatus.completed && !deliveryRetryPending) {
         throw StateError('已停止或已完成的任务不能重试。');
       }
 
@@ -99,6 +205,9 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
         }
         final existingDiscussion =
             _requiresDiscussionForTask(task) ? discussionMarker.state : null;
+        final currentScope = existingDiscussion == null
+            ? task.userRequest
+            : WorkDiscussionState.currentRequestScope(task);
         _removeQueuedTask(task);
         _waitingForResources.remove(taskId)?.cancellation.cancel();
         _folderWaiters.remove(taskId)?.cancel();
@@ -130,11 +239,33 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
           }
           task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
             '',
-            _renewDiscussionForRequest(existingDiscussion, task.userRequest),
+            _renewDiscussionForRequest(
+              existingDiscussion,
+              task.userRequest,
+              activeScopeOverride: currentScope,
+            ),
+          );
+        }
+        final needsDiscussion = existingDiscussion != null &&
+            !WorkDiscussionState.decodeExecutionState(task.executionStateJson)
+                .state!
+                .isExecutionReady;
+        if (needsDiscussion) {
+          // Do not enqueue a non-ready group task while the discussion runner
+          // is being started. The scheduler could otherwise enter _start in
+          // the same turn, race the first discussion callback, and reject a
+          // legitimate state update as a concurrent execution.
+          await _pauseForDiscussion(
+            task,
+            _discussionWaitingReason(existingDiscussion),
           );
         }
         await _save(task);
         await _markSnapshotStatus(task);
+        if (needsDiscussion) {
+          _maybeStartDiscussion(task);
+          return;
+        }
         _enqueueTask(task);
         await _record(
           task,
@@ -154,30 +285,52 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       if (!failure.retryable) {
         throw StateError(failure.suggestedAction);
       }
-      _removeQueuedTask(task);
-      _waitingForResources.remove(taskId)?.cancellation.cancel();
-      _folderWaiters.remove(taskId)?.cancel();
-      _conversationReservations.remove(task.groupId);
-      task
-        ..status = AgentTaskStatus.queued
-        ..resumeRequired = false
-        ..pendingToolRequestJson = ''
-        ..updatedAt = _clock();
-      _refreshTaskContext(
+      await _requeueFailedTask(
         task,
+        failure,
+        title: '已请求重试，继续最近安全检查点',
         nextStep: '已请求重试：${failure.suggestedAction}',
-        extraErrors: [failure.reason],
       );
-      await _save(task);
-      _enqueueTask(task);
-      await _record(
-        task,
-        WorkTaskEventKind.queued,
-        '已请求重试，继续最近安全检查点',
-        detail: failure.reason,
-      );
-      await _schedule();
     });
+  }
+
+  /// Re-queues a failed task from its last durable checkpoint.
+  ///
+  /// The caller must hold the coordinator lock and must already have verified
+  /// that [failure] is retryable. Completed operations, artifact paths and the
+  /// approval scope are deliberately left untouched, so a resumed run cannot
+  /// replay a committed mutation. This is the single path shared by the user's
+  /// retry and the coordinator's automatic resume, which is what keeps the two
+  /// from drifting apart.
+  Future<void> _requeueFailedTask(
+    AgentTask task,
+    WorkFailure failure, {
+    required String title,
+    required String nextStep,
+  }) async {
+    _removeQueuedTask(task);
+    _waitingForResources.remove(task.id)?.cancellation.cancel();
+    _folderWaiters.remove(task.id)?.cancel();
+    _conversationReservations.remove(task.groupId);
+    task
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false
+      ..pendingToolRequestJson = ''
+      ..updatedAt = _clock();
+    _refreshTaskContext(
+      task,
+      nextStep: nextStep,
+      extraErrors: [failure.reason],
+    );
+    await _save(task);
+    _enqueueTask(task);
+    await _record(
+      task,
+      WorkTaskEventKind.queued,
+      title,
+      detail: failure.reason,
+    );
+    await _schedule();
   }
 
   Future<void> _implRetryTask(String taskId) => retry(taskId);
@@ -249,6 +402,11 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       )) {
         return;
       }
+      // A resumed group task may spend time in its discussion runner before
+      // WorkAgentLoop gets a chance to clear the prior soft-limit failure.
+      // Remove that stale action marker now so the panel does not offer an
+      // invalid second continuation while the discussion gate is still open.
+      WorkFailure.clearFromTask(task);
       task
         ..status = AgentTaskStatus.queued
         ..actionCount = 0

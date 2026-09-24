@@ -171,6 +171,16 @@ class AICharacter extends HiveObject {
 
   String get displayGenderLabel => hasKnownGender ? gender.label : '未知';
 
+  /// 角色搜索框的匹配字段集合，由 `PinyinSearch.matchesFields` 逐字段匹配。
+  ///
+  /// 集中定义以避免各搜索入口各拼一份 haystack，导致一处改了另一处漏改。
+  List<String> get searchFields => [
+        name,
+        role,
+        displayGenderLabel,
+        ...personalityTags,
+      ];
+
   // Active legacy records need a deterministic prompt fallback while storage
   // is still migrating; deleted snapshots remain visibly unknown and never
   // become prompt participants.

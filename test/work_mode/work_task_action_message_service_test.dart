@@ -15,6 +15,7 @@ import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_task_action_message_service.dart';
+import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
@@ -46,6 +47,16 @@ class _GateCredentialResolver implements ApiCredentialResolver {
     return gate.future;
   }
 }
+
+AgentTask _directApprovalTask() => AgentTask(
+      id: 'direct-approval-task',
+      groupId: 'dm:frontend-action-message',
+      characterId: 'frontend-action-message',
+      userRequest: '运行项目测试',
+      status: AgentTaskStatus.waitingForApproval,
+      workModeTask: true,
+      pendingToolRequestJson: jsonEncode({'tool': 'command.run'}),
+    );
 
 void main() {
   late Directory tempDir;
@@ -315,13 +326,35 @@ void main() {
     expect(message.senderId, 'system');
   });
 
-  test('does not project group action reminders into direct chats', () async {
+  test('projects an actionable reminder into the direct chat', () async {
     final db = DatabaseService();
-    final task = _roleBlockedTask('dm:frontend-action-message');
+    final task = _directApprovalTask();
+    await db.agentTaskBox.put(task.id, task);
 
     await WorkTaskActionMessageService(database: db).notify(task);
 
-    expect(db.messageBox.values, isEmpty);
+    // 私聊里的任务同样会在等待审批 / 授权时卡住。只有把可点击的提醒投递到
+    // 对话本身，用户才有入口处理它，而不是去全局面板里翻找隐藏的标签。
+    final message = db.messageBox.values.single;
+    expect(message.groupId, 'dm:frontend-action-message');
+    expect(message.senderType, 'system');
+    expect(message.senderId, 'system');
+    expect(WorkTaskUserAction.fromMessageId(message.id)?.kind,
+        WorkTaskUserActionKind.approveCommand);
+    expect(message.isMention, isTrue);
+    expect(message.content, contains('打开对应任务'));
+  });
+
+  test('describes a direct-chat reminder without group wording', () async {
+    final db = DatabaseService();
+    final task = _directApprovalTask();
+    await db.agentTaskBox.put(task.id, task);
+
+    await WorkTaskActionMessageService(database: db).notify(task);
+
+    final content = db.messageBox.values.single.content;
+    expect(content, isNot(contains('当前群聊')));
+    expect(content, contains('当前对话'));
   });
 
   test('uses a system reminder when a role credential was revoked', () async {

@@ -1,5 +1,21 @@
 part of 'work_task_coordinator.dart';
 
+/// Raised when an automatic-resume round hits [WorkTaskCoordinator.
+/// defaultAutoResumeRoundTimeout].
+///
+/// A dedicated type keeps the detection independent of the runner's own error:
+/// a runner that fails *while* the deadline fires still reports a timeout, so
+/// the attempt is recorded and the next rung of the ladder is scheduled instead
+/// of the task being left interrupted with no automatic attempt pending.
+class _AutomaticResumeDeadlineExceeded implements Exception {
+  const _AutomaticResumeDeadlineExceeded(this.message);
+
+  final String message;
+
+  @override
+  String toString() => message;
+}
+
 extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
   Future<void> _run(
     AgentTask task,
@@ -7,6 +23,7 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
   ) async {
     Object? error;
     StackTrace? stackTrace;
+    final automaticResume = _autoResumeTaskIds.remove(task.id);
     try {
       if ((_folderGrantService != null || _requireFolderGrant) &&
           !await _ensureFolderGrant(task, cancellation)) {
@@ -31,7 +48,11 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
         });
         return;
       }
-      await _runner.run(task, cancellation);
+      if (automaticResume) {
+        await _runWithAutomaticResumeDeadline(task, cancellation);
+      } else {
+        await _runner.run(task, cancellation);
+      }
     } on Object catch (caught, trace) {
       error = caught;
       stackTrace = trace;
@@ -58,7 +79,9 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
       // cooperative runner necessarily returns. A late runner result must
       // only release in-memory ownership; it must not refresh context, emit a
       // completion event/message, promote FIFO, or save a newer checkpoint.
-      if (cancellation.isCancelled ||
+      final automaticResumeTimedOut =
+          automaticResume && error is _AutomaticResumeDeadlineExceeded;
+      if ((cancellation.isCancelled && !automaticResumeTimedOut) ||
           stored.status == AgentTaskStatus.cancelled) {
         _folderWaiters.remove(task.id);
         _conversationReservations.remove(task.groupId);
@@ -102,6 +125,9 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
       // status is known so a result/error is still recoverable when a runner
       // did not publish its own checkpoint callback.
       final handedOff = _advanceCompletedHandoff(stored);
+      if (!handedOff) {
+        await _applyQueuedAuthorizationRootCorrection(stored);
+      }
       _refreshTaskContext(
         stored,
         nextStep: handedOff
@@ -128,6 +154,10 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
           await _save(stored);
         }
         await _reportFailure(stored, failure);
+        // A failure the transport or the provider caused is not the end of the
+        // work: the checkpoint is still valid, so the coordinator resumes it on
+        // its own instead of waiting for the user to notice and click retry.
+        _scheduleAutoResume(stored);
       }
 
       // A follow-up is promoted only after a successful stage. Failures and
@@ -173,6 +203,35 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
     });
   }
 
+  Future<void> _runWithAutomaticResumeDeadline(
+    AgentTask task,
+    WorkTaskCancellation cancellation,
+  ) async {
+    var timedOut = false;
+    final timer = Timer(autoResumeRoundTimeout, () {
+      timedOut = true;
+      cancellation.cancel();
+    });
+    try {
+      // Dart cannot forcibly terminate a runner, so a runner that ignores the
+      // cancellation signal would hold this await (and the slot) open with no
+      // deadline at all. Every production runner honours the signal, which is
+      // why the round is bounded by cancelling rather than by racing.
+      await _runner.run(task, cancellation);
+    } on Object catch (error, trace) {
+      if (timedOut) throw _automaticResumeTimeout();
+      Error.throwWithStackTrace(error, trace);
+    } finally {
+      timer.cancel();
+    }
+    if (timedOut) throw _automaticResumeTimeout();
+  }
+
+  _AutomaticResumeDeadlineExceeded _automaticResumeTimeout() =>
+      _AutomaticResumeDeadlineExceeded(
+        '自动续跑本轮超时（${autoResumeRoundTimeout.inSeconds} 秒）。',
+      );
+
   /// Promotes a routed task to its next role after the current runner returns.
   /// Keeping this transition in the coordinator guarantees that one
   /// conversation never runs two assigned roles at the same time.
@@ -213,6 +272,15 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
         summary: task.resultSummary,
       );
       final active = waiting.activateReceiver();
+      // The finished stage's resend marker and its failure checkpoint belong to
+      // that stage. Carrying them into the next role would make its run take the
+      // delivery-only branch (queued + marker) instead of executing its own
+      // stage, so they are dropped here — the previous stage's message is
+      // already durable and its resend affordance ends with the stage.
+      task.executionStateJson = workWithoutArtifactDeliveryNotice(
+        task.executionStateJson,
+      );
+      WorkFailure.clearFromTask(task);
       task
         ..characterId = active.currentRoleId
         ..status = AgentTaskStatus.queued

@@ -45,17 +45,15 @@ _StagePlanResult _stagePlan(
   return _StagePlanResult.success(stages);
 }
 
-List<WorkRoleStageKind> _inferStages(String request) {
+List<WorkRoleStageKind> _inferStages(
+  String request, {
+  required String deliverableFormat,
+}) {
   final lower = request.toLowerCase();
   final forTesting = lower.replaceAll('验收标准', '');
   final result = <WorkRoleStageKind>[];
-  // A document mentioned as a discussion topic ("write requirements, then
-  // implement") is not the same as a document being the final artifact. Only
-  // an explicit output format suppresses the implementation stages.
-  final isDocumentRequest = RegExp(
-    r'\b(?:docx?|word|pdf|markdown|md)\b|word文档',
-    caseSensitive: false,
-  ).hasMatch(lower);
+  final isDocumentDeliverable =
+      const {'docx', 'pdf', 'markdown'}.contains(deliverableFormat);
   final isProductRequest = RegExp(
     r'需求|产品|prd|roadmap|用户故事|需求文档|product|strategy',
     caseSensitive: false,
@@ -64,6 +62,14 @@ List<WorkRoleStageKind> _inferStages(String request) {
     r'html?|前端|frontend|front[- ]end|网页|网站|web 页面|web page|css|javascript|typescript',
     caseSensitive: false,
   ).hasMatch(lower);
+  final isTestingRequest = RegExp(
+    r'测试|验证|回归|qa|quality assurance|test|验收',
+    caseSensitive: false,
+  ).hasMatch(forTesting);
+  final isTestingOnlySourceReference = isTestingRequest &&
+      deliverableFormat == 'unspecified' &&
+      isFrontendRequest &&
+      !_hasFrontendImplementationBeforeTesting(lower);
   // Only an explicit product deliverable creates a preceding product stage.
   // "根据需求做 HTML" describes the context, not a product handoff.
   final explicitProductStage = RegExp(
@@ -71,25 +77,42 @@ List<WorkRoleStageKind> _inferStages(String request) {
     caseSensitive: false,
   ).hasMatch(lower);
   if (isProductRequest &&
-      (isDocumentRequest || !isFrontendRequest || explicitProductStage)) {
+      (explicitProductStage ||
+          (!isTestingRequest &&
+              (isDocumentDeliverable || !isFrontendRequest)))) {
     result.add(WorkRoleStageKind.product);
   }
-  if (isFrontendRequest && !isDocumentRequest) {
+  // A source document mentioned in the request must not hide an explicitly
+  // requested HTML implementation stage.
+  if (isFrontendRequest &&
+      !isDocumentDeliverable &&
+      !isTestingOnlySourceReference) {
     result.add(WorkRoleStageKind.frontend);
-  } else if (!isDocumentRequest &&
+  } else if (!isDocumentDeliverable &&
+      !isTestingOnlySourceReference &&
       RegExp(
         r'代码|编码|开发|编程|实现|修复|flutter|dart|javascript|typescript|python|coding|developer|engineer|bug',
         caseSensitive: false,
       ).hasMatch(lower)) {
     result.add(WorkRoleStageKind.development);
   }
-  if (RegExp(
-    r'测试|验证|回归|qa|quality assurance|test|验收',
-    caseSensitive: false,
-  ).hasMatch(forTesting)) {
+  if (isTestingRequest) {
     result.add(WorkRoleStageKind.testing);
   }
   return result.isEmpty ? [WorkRoleStageKind.general] : result;
+}
+
+bool _hasFrontendImplementationBeforeTesting(String request) {
+  final testingStart = RegExp(
+    r'测试|验证|回归|qa|quality assurance|test|验收',
+    caseSensitive: false,
+  ).firstMatch(request)?.start;
+  final implementation = RegExp(
+    r'(?:(?:做|开发|实现|构建|编写|制作|生成|修复|修改)|\b(?:build|create|develop|implement|make|generate|write|fix|repair)\w*\b).{0,48}?(?:html?|frontend|front[- ]end|前端|网页|网站|web 页面|web page|css|javascript|typescript)|(?:html?|网页|网站|web 页面|web page).{0,48}(?:修复|修改|fix|repair)',
+    caseSensitive: false,
+  ).firstMatch(request);
+  return implementation != null &&
+      (testingStart == null || implementation.start < testingStart);
 }
 
 WorkHandoffStage _stageFor(WorkRoleStageKind kind, String roleId) {

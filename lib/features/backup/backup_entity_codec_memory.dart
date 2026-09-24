@@ -48,6 +48,11 @@ class _BackupEntityMemoryCodec {
         'friction': item.friction,
         'familiarity': item.familiarity,
         'recentMood': item.recentMood.name,
+        // 心情时效：不带上它，恢复后老心情会一律被判过期。
+        // 注意用编码函数 _date（→ISO8601 字符串）；_optionalDate 是解码方向。
+        'recentMoodAt': item.recentMoodAt == null
+            ? null
+            : _date(item.recentMoodAt!),
         'notes': item.notes,
         'lastInteractionAt': _date(item.lastInteractionAt),
         'createdAt': _date(item.createdAt),
@@ -148,6 +153,8 @@ class _BackupEntityMemoryCodec {
         friction: _integer(json, 'friction'),
         familiarity: _integer(json, 'familiarity'),
         recentMood: _enum(json, 'recentMood', RelationshipMood.values),
+        // 容错读取：不含该字段的旧备份解码为 null（按已过期处理）。
+        recentMoodAt: _optionalDate(json['recentMoodAt']),
         notes: json['notes']?.toString() ?? '',
         lastInteractionAt: _dateTime(json, 'lastInteractionAt'),
         createdAt: _dateTime(json, 'createdAt'),
@@ -297,6 +304,9 @@ class _BackupEntityMemoryCodec {
         'contextSummary': _safeTaskContextSummary(item.contextSummary),
         'assignedCharacterIds': item.assignedCharacterIds,
         'startedAt': item.startedAt?.toIso8601String(),
+        // 本次尝试的展示起点。属于纯展示状态，跨设备恢复后不应丢失（否则
+        // "已执行多久"会退回按整条任务起算）。
+        'attemptStartedAt': item.attemptStartedAt?.toIso8601String(),
         'actionCount': item.actionCount,
         'softLimitReached': item.softLimitReached,
         'resumeRequired': item.resumeRequired,
@@ -358,6 +368,7 @@ class _BackupEntityMemoryCodec {
       ),
       assignedCharacterIds: _strings(json['assignedCharacterIds']),
       startedAt: _optionalDate(json['startedAt']),
+      attemptStartedAt: _optionalDate(json['attemptStartedAt']),
       actionCount: _integerOrDefault(json['actionCount'], 0),
       softLimitReached: _boolOrDefault(json['softLimitReached'], false),
       resumeRequired:

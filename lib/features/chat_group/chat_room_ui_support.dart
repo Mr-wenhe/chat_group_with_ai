@@ -81,8 +81,22 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
           Navigator.of(sheetContext).pop();
           unawaited(_showAddMemberDialog());
         },
+        mutedIds: _muteStore.mutedFor(widget.groupId),
+        onToggleMute: _setCharacterMuted,
+        onMention: _insertMention,
       ),
     );
+  }
+
+  /// 保存成功后刷新页面；错误交由成员面板展示，避免显示未落库的状态。
+  Future<void> _setCharacterMuted(AICharacter character, bool muted) async {
+    if (!_canTouchUi || _isDirectChat) return;
+    await _muteStore.setMuted(
+      groupId: widget.groupId,
+      characterId: character.id,
+      muted: muted,
+    );
+    _setUiState(() {});
   }
 
   /// 弹出「添加成员」选择器：候选为尚未加入当前群聊的角色，确认后落库并刷新。
@@ -378,6 +392,11 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
                 _resolveApiConfig(updatedCharacter)?.hasCredential == true
             ? null
             : _blockReasonFor(updatedCharacter);
+      } else {
+        final candidates = _characters
+            .where((c) => _mayAutoPick(c, mentionedIds: const {}))
+            .toList();
+        _lastReplyBlockReason = _firstBlockReason(candidates);
       }
     });
     // Search/planner routes read character bindings through this controller;

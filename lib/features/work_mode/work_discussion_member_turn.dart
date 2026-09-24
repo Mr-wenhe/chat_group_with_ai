@@ -37,7 +37,11 @@ extension _DiscussionMemberTurn on _DiscussionSession {
         member.character.id,
       );
       if (isQualifiedMember && !turn.isTransportFailure) {
-        roundBlockers.add('structuredResponseInvalid:${member.character.id}');
+        roundBlockers.add(
+          _isModelRequestFailure(turn.failureReason)
+              ? 'modelRequestFailed:${member.character.id}'
+              : 'structuredResponseInvalid:${member.character.id}',
+        );
       }
       await runner._recordDiagnostic(
         task,
@@ -76,6 +80,12 @@ extension _DiscussionMemberTurn on _DiscussionSession {
     final previousPublicResponses = List<String>.from(publicResponses);
     final contractSuggestion =
         runner._formatContractSuggestion(turn.contractPatch);
+    final escalateToOwner = runner._shouldEscalateOwnerQuestion(
+      state: state,
+      qualifiedAvailableIds: qualifiedAvailableIds,
+      availableMembers: availableMembers,
+      question: turn.userQuestion,
+    );
     if (turn.publicUpdate.isNotEmpty || contractSuggestion.isNotEmpty) {
       final text = turn.publicUpdate.isEmpty
           ? '交付合同建议（待执行人取舍）：$contractSuggestion'
@@ -110,7 +120,9 @@ extension _DiscussionMemberTurn on _DiscussionSession {
         publicResponses.add(suggestion);
       }
     }
-    roundBlockers.remove('structuredResponseInvalid:${member.character.id}');
+    roundBlockers
+      ..remove('structuredResponseInvalid:${member.character.id}')
+      ..remove('modelRequestFailed:${member.character.id}');
     // Member confidence is evidence, not the executor's understanding.
     if (state.executorId == null) {
       roundPercent = turn.understandingPercent;
@@ -132,7 +144,14 @@ extension _DiscussionMemberTurn on _DiscussionSession {
           turn.resolvedBlockers,
         )
         .toList(growable: true);
-    roundBlockers.addAll(turn.blockers);
+    roundBlockers.addAll(
+      turn.blockers.where(
+        (blocker) =>
+            (blocker != 'missingUserInformation' || escalateToOwner) &&
+            (blocker != 'missingQualifiedRole' ||
+                qualifiedAvailableIds.isEmpty),
+      ),
+    );
     final turnProgress = runner._hasProgressChange(
       previousPercent: previousPercent,
       nextPercent: roundPercent,
@@ -159,16 +178,24 @@ extension _DiscussionMemberTurn on _DiscussionSession {
       }
     }
     if (turn.needsUser && turn.userQuestion.isNotEmpty) {
-      userInputRequired = true;
-      roundQuestions.add(turn.userQuestion);
-      roundBlockers.add('missingUserInformation');
-      await runner._publish(
-        task,
-        group,
-        '@${runner._ownerMentionName(group)} ${member.character.name} 请求补充：${turn.userQuestion}',
-        isMention: true,
-        cancellation: cancellation,
-      );
+      if (escalateToOwner) {
+        userInputRequired = true;
+        roundQuestions.add(turn.userQuestion);
+        roundBlockers.add('missingUserInformation');
+        await runner._publish(
+          task,
+          group,
+          '@${runner._ownerMentionName(group)} ${member.character.name} 请求补充：${turn.userQuestion}',
+          isMention: true,
+          cancellation: cancellation,
+        );
+      } else {
+        // File names, priorities, thresholds, and retry parameters are normal
+        // product/engineering decisions. Keep them as an in-group question
+        // so another role can resolve them instead of interrupting the owner.
+        roundQuestions.add(turn.userQuestion);
+        roundEvidence.add('已将普通方案取舍留在群内继续讨论，未升级群主。');
+      }
     }
     roundPercent = runner._safeUnderstandingPercent(
       roundPercent,
@@ -225,4 +252,11 @@ extension _DiscussionMemberTurn on _DiscussionSession {
     }
     return true;
   }
+
+  bool _isModelRequestFailure(String reason) =>
+      reason.startsWith('模型请求失败（HTTP ') ||
+      reason == '任务网络连接失败' ||
+      reason == '任务权限不足' ||
+      reason == '任务执行超时' ||
+      reason == '模型请求异常';
 }

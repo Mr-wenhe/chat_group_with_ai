@@ -165,7 +165,7 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
     }
     if (discussion.present && discussion.state != null) return false;
 
-    final previousError = task.lastError.trim();
+    final previousError = resetSoftLimit ? '' : task.lastError.trim();
     const reason = '旧任务需要补充群讨论后才能继续。';
     final safeCheckpoint = discussion.present
         ? jsonEncode(
@@ -178,6 +178,7 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
       _withoutApprovalCheckpoint(safeCheckpoint),
       _legacyDiscussionState(task),
     );
+    WorkFailure.clearFromTask(task);
     if (resetSoftLimit) {
       task
         ..softLimitReached = false
@@ -240,6 +241,9 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
       task
         ..status = AgentTaskStatus.planning
         ..startedAt ??= _clock()
+        // 每次真正开跑都重新计一次"本次尝试"的展示耗时；任务级时间预算仍按
+        // `startedAt` 计算，不受追问影响。
+        ..attemptStartedAt = _clock()
         ..updatedAt = _clock();
       await _save(task);
       await _markSnapshotStatus(task);

@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
 import 'package:chat_group/core/audio/voice_service_config.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/core/storage/legacy_api_credential_migrator.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
@@ -905,14 +906,23 @@ class DatabaseService {
     return _pageFromIds(ids, start, min(ids.length, start + limit));
   }
 
+  /// 在单个会话内搜索消息。
+  ///
+  /// 搜索按输入防抖执行，但同一批消息会被连续查询；正文指纹走
+  /// [PinyinSearch.digestCached]，字面命中（中文原词、英文单词）则在
+  /// 指纹里直接短路，不再逐字查拼音词典。
   Future<List<Message>> searchMessages(String groupId, String query) async {
     await ensureMessageIndex();
-    final normalized = query.trim().toLowerCase();
+    final normalized = query.trim();
     if (normalized.isEmpty) return const [];
     return (_messageIdsForGroup(groupId) ?? const <String>[])
         .map(messageBox.get)
         .whereType<Message>()
-        .where((message) => message.content.toLowerCase().contains(normalized))
+        .where((message) => PinyinSearch.matches(
+              PinyinSearch.digestCached(message.content),
+              normalized,
+              mode: PinyinMatchMode.content,
+            ))
         .toList(growable: false);
   }
 

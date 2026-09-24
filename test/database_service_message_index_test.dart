@@ -175,6 +175,24 @@ void main() {
     );
   });
 
+  test('searchMessages matches content by pinyin from two letters on',
+      () async {
+    final db = DatabaseService();
+    await db.persistMessage(Message(
+      id: 'cn',
+      groupId: 'g1',
+      senderId: 'ai',
+      senderType: 'ai',
+      content: '今天喝咖啡',
+      timestamp: DateTime(2026, 2, 1),
+    ));
+
+    expect((await db.searchMessages('g1', 'jint')).single.id, 'cn');
+    expect((await db.searchMessages('g1', 'kafei')).single.id, 'cn');
+    // 单个字母不触发正文拼音匹配，否则会命中几乎所有消息。
+    expect(await db.searchMessages('g1', 'j'), isEmpty);
+  });
+
   test('marking group and direct conversations read clears cached unread',
       () async {
     final db = DatabaseService();

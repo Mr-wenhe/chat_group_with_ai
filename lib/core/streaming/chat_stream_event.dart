@@ -33,6 +33,9 @@ class ChatStreamEvent {
   /// type == error 时有效：人类可读的错误信息。
   final String? message;
 
+  /// type == error 时可选：服务端建议的下一次重试等待时间。
+  final Duration? retryAfter;
+
   /// 估算的 prompt token 数量（用于消费统计）。
   final int? promptTokens;
 
@@ -48,6 +51,7 @@ class ChatStreamEvent {
     this.content,
     this.model,
     this.message,
+    this.retryAfter,
     this.promptTokens,
     this.completionTokens,
     this.cachedTokens,
@@ -69,10 +73,17 @@ class ChatStreamEvent {
           completionTokens: completionTokens,
           cachedTokens: cachedTokens);
 
-  factory ChatStreamEvent.error(String message) =>
-      ChatStreamEvent(type: ChatStreamEventType.error, message: message);
+  factory ChatStreamEvent.error(
+    String message, {
+    Duration? retryAfter,
+  }) =>
+      ChatStreamEvent(
+        type: ChatStreamEventType.error,
+        message: message,
+        retryAfter: retryAfter,
+      );
 
   @override
   String toString() =>
-      'ChatStreamEvent(type: $type, delta: $delta, content: $content, model: $model, message: $message)';
+      'ChatStreamEvent(type: $type, delta: $delta, content: $content, model: $model, message: $message, retryAfter: $retryAfter)';
 }

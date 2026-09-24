@@ -9,8 +9,8 @@ import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
 import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_generic_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
-import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/presentation/visible_browser_panel.dart';
 import 'package:chat_group/features/work_mode/providers/work_task_providers.dart';
@@ -274,6 +274,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               tasks: _tasks,
               hiddenTaskCount: _hiddenTaskCount,
               historyTasks: _historyTasksForActiveConversation(),
+              hiddenTaskIds: _hiddenWorkTaskIds,
               onHideTask: _hideTask,
               selectedTaskId: _selectedTaskId,
               eventStreamFor: widget.eventStreamFor ??
@@ -521,9 +522,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   /// 队列里被折叠的任务数，不含用户手动关掉的标签。
   int _hiddenTaskCountFor(List<AgentTask> allTasks, List<AgentTask> visible) {
-    final offScreen = allTasks
-        .where((task) => !_hiddenWorkTaskIds.contains(task.id))
-        .length;
+    final offScreen =
+        allTasks.where((task) => !_hiddenWorkTaskIds.contains(task.id)).length;
     final count = offScreen - visible.length;
     return count < 0 ? 0 : count;
   }
@@ -639,7 +639,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   Future<void> _reauthorizeTask(String taskId) {
     final callback = widget.onReauthorizeTask ?? widget.onRequestFolderTask;
-    return callback?.call(taskId) ?? _coordinator!.requestFolderForTask(taskId);
+    return callback?.call(taskId) ?? _coordinator!.reauthorizeTask(taskId);
   }
 
   Future<void> _viewConflictTask(String taskId) async {
@@ -829,30 +829,11 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         );
       } else {
         final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
-        decision = await showDialog<WorkChangeApprovalDecision>(
-          context: navigatorContext,
-          barrierDismissible: true,
-          builder: (dialogContext) => AlertDialog(
-            key: const Key('work-generic-approval-dialog'),
-            title: const Text('工作任务需要审批'),
-            content: Text(
-              pending == null
-                  ? '任务准备执行一项需要确认的操作。'
-                  : WorkModePolicy.approvalSummary(pending),
-            ),
-            actions: <Widget>[
-              TextButton(
-                onPressed: () => Navigator.of(dialogContext)
-                    .pop(WorkChangeApprovalDecision.rejected),
-                child: const Text('拒绝并暂停'),
-              ),
-              FilledButton(
-                onPressed: () => Navigator.of(dialogContext)
-                    .pop(WorkChangeApprovalDecision.approved),
-                child: const Text('允许本次操作'),
-              ),
-            ],
-          ),
+        final requiresNoUndo = taskRequiresNoUndoApproval(task, plan);
+        decision = await WorkTaskGenericApprovalDialog.show(
+          navigatorContext,
+          pending: pending,
+          requiresNoUndo: requiresNoUndo,
         );
       }
     } finally {
@@ -863,11 +844,35 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         });
       }
     }
-    if (decision == null || !mounted) return;
+    if (decision == null) {
+      // Dismissing the modal is not a decision, but the checkpoint is still
+      // waiting and the host presents at most one prompt per checkpoint. Without
+      // this hint the task blocks forever on a dialog the user just closed.
+      _showApprovalStillPendingHint(task.id);
+      return;
+    }
+    if (!mounted) return;
     await _resolveApprovalPromptDecision(
       task.id,
       expectedActionVersion,
       decision,
+    );
+  }
+
+  /// Points a user who dismissed the approval modal at the durable fallback
+  /// instead of leaving the task silently blocked.
+  void _showApprovalStillPendingHint(String taskId) {
+    if (!mounted) return;
+    final messenger = ScaffoldMessenger.maybeOf(context);
+    if (messenger == null) return;
+    messenger.showSnackBar(
+      SnackBar(
+        content: const Text('已关闭审批弹窗，任务仍在等待审批。'),
+        action: SnackBarAction(
+          label: '查看任务',
+          onPressed: () => _openTask(taskId),
+        ),
+      ),
     );
   }
 

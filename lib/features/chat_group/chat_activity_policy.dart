@@ -12,11 +12,16 @@ class ChatActivityPolicy {
 
   static bool canStartAutoChat({
     required bool workModeEnabled,
+    bool hasActiveWorkTask = false,
     required bool autoChatEnabled,
     required bool hasCharacters,
     required bool hasApiConfig,
   }) =>
-      !workModeEnabled && autoChatEnabled && hasCharacters && hasApiConfig;
+      !workModeEnabled &&
+      !hasActiveWorkTask &&
+      autoChatEnabled &&
+      hasCharacters &&
+      hasApiConfig;
 
   static List<AICharacter> selectUserReplyCharacters({
     required List<AICharacter> characters,

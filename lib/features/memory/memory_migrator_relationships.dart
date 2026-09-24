@@ -84,6 +84,11 @@ extension _MemoryMigratorRelationships on MemoryMigrator {
           friction: mergedFriction,
           familiarity: mergedFamiliarity,
           recentMood: mergedMood,
+          // 心情时刻取最近一次互动时间，而非 now：迁移出的心情若早已过期，
+          // 就应该读作过期，不能靠迁移给它续命。这与快照重建的规则一致。
+          recentMoodAt: mergedMood == RelationshipMood.neutral
+              ? null
+              : latest.lastInteractionAt,
           notes: latest.notes,
           lastInteractionAt: latest.lastInteractionAt,
           stage: derivedStage,

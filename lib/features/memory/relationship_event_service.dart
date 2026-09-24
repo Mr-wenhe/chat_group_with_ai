@@ -90,6 +90,9 @@ class _AfterSnapshot {
   final int friction;
   final int familiarity;
   final RelationshipMood mood;
+
+  /// [mood] 的设定时刻；[mood] 为 neutral 时为 null。
+  final DateTime? moodAt;
   final RelationshipStage stage;
 
   const _AfterSnapshot({
@@ -98,6 +101,7 @@ class _AfterSnapshot {
     required this.friction,
     required this.familiarity,
     required this.mood,
+    required this.moodAt,
     required this.stage,
   });
 }
@@ -177,6 +181,10 @@ class RelationshipEventService {
         friction: latest.frictionAfter,
         familiarity: latest.familiarityAfter,
         recentMood: latest.moodAfter,
+        // 与重建保持一致：时间戳取事件时刻，保证导入重放幂等。
+        recentMoodAt: latest.moodAfter == RelationshipMood.neutral
+            ? null
+            : latest.occurredAt,
         notes: _notesAfterImportedEvent(current, latest),
         lastInteractionAt: latest.createdBy == RelationshipEventCreator.manual
             ? current?.lastInteractionAt
@@ -426,13 +434,17 @@ class RelationshipEventService {
       delta: delta,
     );
 
-    // 构建绝对 After 快照。
+    // 构建绝对 After 快照。整段事件处理共用同一时刻，避免心情时间戳与
+    // 事件记录出现微小漂移。
+    final now = DateTime.now();
     final afterSnapshot = _applyDelta(
       affinity: relation.affinity,
       trust: relation.trust,
       friction: relation.friction,
       familiarity: relation.familiarity,
       mood: relation.recentMood,
+      moodAt: relation.recentMoodAt,
+      now: now,
       stage: targetStage,
       delta: delta,
       isGroupChat: !DirectChatSession.isDirectConversationId(conversationId),
@@ -453,7 +465,9 @@ class RelationshipEventService {
       frictionAfter: afterSnapshot.friction,
       familiarityBefore: relation.familiarity,
       familiarityAfter: afterSnapshot.familiarity,
-      moodBefore: relation.recentMood,
+      // 事件记录的是当时**生效**的心情，使审计日志与真实行为一致
+      // （存储值可能是一条已过期、尚未归一化的心情）。
+      moodBefore: relation.effectiveMood(now: now),
       moodAfter: afterSnapshot.mood,
       stageBefore: relation.stage,
       stageAfter: afterSnapshot.stage,
@@ -480,8 +494,9 @@ class RelationshipEventService {
       friction: afterSnapshot.friction,
       familiarity: afterSnapshot.familiarity,
       recentMood: afterSnapshot.mood,
+      recentMoodAt: afterSnapshot.moodAt,
       notes: relation.notes,
-      lastInteractionAt: DateTime.now(),
+      lastInteractionAt: now,
       stage: afterSnapshot.stage,
       revision: relation.revision + 1,
       lastEventId: event.id,
@@ -516,6 +531,9 @@ class RelationshipEventService {
         friction: event.frictionAfter,
         familiarity: event.familiarityAfter,
         recentMood: event.moodAfter,
+        // 同上：修复路径同样取事件时刻，避免每次修复都给心情续命。
+        recentMoodAt:
+            event.moodAfter == RelationshipMood.neutral ? null : event.occurredAt,
         notes: _notesAfterReplay(relation, event),
         lastInteractionAt: interactionAt,
         stage: event.stageAfter,
@@ -619,7 +637,9 @@ class RelationshipEventService {
       confidence = 0.7;
     } else if (message.senderType == 'user') {
       // 用户消息：基于情感分析。
-      familiarityDelta = isGroupChat ? 3 : 6;
+      // 熟悉度只反映互动量，与发言人身份无关；平凡的寒暄必须与重要事件拉开差距，
+      // 否则「我喜欢你」和「今天天气不错」同价（见设计文档 §4.4）。
+      familiarityDelta = isGroupChat ? 1 : 2;
       if (userSentiment != null) {
         affinityDelta = userSentiment.affinityDelta;
         frictionDelta = userSentiment.frictionDelta;
@@ -638,8 +658,8 @@ class RelationshipEventService {
         }
       }
     } else {
-      // AI 消息：普通互动。
-      familiarityDelta = isGroupChat ? 2 : 4;
+      // AI 消息：普通互动。熟悉度与用户消息同值，质量由 affinity 承载。
+      familiarityDelta = isGroupChat ? 1 : 2;
       affinityDelta = isGroupChat ? 1 : 2;
     }
 
@@ -648,7 +668,7 @@ class RelationshipEventService {
       affinityDelta = _dampenDelta(affinityDelta);
       trustDelta = _dampenDelta(trustDelta);
       frictionDelta = _dampenDelta(frictionDelta);
-      familiarityDelta = _dampenDelta(familiarityDelta);
+      familiarityDelta = _dampenFamiliarity(familiarityDelta);
     }
 
     return RelationshipDelta(
@@ -663,6 +683,14 @@ class RelationshipEventService {
   }
 
   int _dampenDelta(int value) => value.sign * (value.abs() ~/ 2);
+
+  /// 熟悉度的旁观者衰减。
+  ///
+  /// 熟悉度语义是「互动量」而非态度：旁观者确实目睹了这次互动，减半后若归零
+  /// 会变成完全不累积，普通互动（增量 1）下尤其明显。因此非零增量至少保留 1，
+  /// 保持与改小尺度前的旁观者行为一致。
+  static int _dampenFamiliarity(int value) =>
+      value == 0 ? 0 : value.sign * math.max(1, value.abs() ~/ 2);
 
   static final _romanticNegationPattern = RegExp(
     r'(?:不|没|无|别|不要|不是|没有|并不|绝不|从不|不太|不想|不愿|不会)',
@@ -920,16 +948,34 @@ class RelationshipEventService {
     required int friction,
     required int familiarity,
     required RelationshipMood mood,
+    required DateTime? moodAt,
+    required DateTime now,
     required RelationshipStage stage,
     required RelationshipDelta delta,
     required bool isGroupChat,
   }) {
+    // 心情只在明确情绪信号下改变；普通事件既不改心情也不刷新时间戳。
+    // 若普通事件也刷新时间戳，活跃会话会不断续命，使过期心情永不失效。
+    final RelationshipMood nextMood;
+    DateTime? nextMoodAt;
+    if (delta.targetMood != RelationshipMood.neutral) {
+      nextMood = delta.targetMood;
+      nextMoodAt = now;
+    } else if (!RelationshipState.hasActiveMood(mood, moodAt, now: now)) {
+      nextMood = RelationshipMood.neutral;
+      nextMoodAt = null;
+    } else {
+      nextMood = mood;
+      nextMoodAt = moodAt;
+    }
+
     return _AfterSnapshot(
       affinity: (affinity + delta.affinityDelta).clamp(-100, 100),
       trust: (trust + delta.trustDelta).clamp(-100, 100),
       friction: (friction + delta.frictionDelta).clamp(0, 100),
       familiarity: (familiarity + delta.familiarityDelta).clamp(0, 100),
-      mood: delta.targetMood,
+      mood: nextMood,
+      moodAt: nextMoodAt,
       stage: stage,
     );
   }

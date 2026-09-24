@@ -7,6 +7,7 @@ import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/user_profile.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
 import 'package:chat_group/features/memory/relationship_audit_presenter.dart';
 import 'package:chat_group/features/memory/relationship_controls.dart';
@@ -295,8 +296,8 @@ class _RelationshipAuditDetailPageState
               ),
               _statusChip(
                 context,
-                '情绪 · ${RelationshipAuditPresenter.moodLabel(relationship.recentMood)}',
-                _moodColor(context, relationship.recentMood),
+                '情绪 · ${RelationshipAuditPresenter.moodLabel(relationship.effectiveMood())}',
+                _moodColor(context, relationship.effectiveMood()),
               ),
             ],
           );
@@ -552,7 +553,7 @@ class _RelationshipAuditDetailPageState
               onChanged: (value) => setState(() => _eventQuery = value),
               decoration: const InputDecoration(
                 isDense: true,
-                hintText: '搜索事件原因或来源',
+                hintText: '搜索事件原因或来源，支持拼音',
                 prefixIcon: Icon(Icons.search_rounded, size: 18),
               ),
             ),
@@ -598,12 +599,16 @@ class _RelationshipAuditDetailPageState
       );
 
   List<RelationshipEvent> get _filteredEvents {
-    final query = _eventQuery.trim().toLowerCase();
+    final query = _eventQuery.trim();
     final events = _events.where((event) {
       if (query.isNotEmpty &&
-          !'${event.reason} ${RelationshipAuditPresenter.sourceLabel(event)}'
-              .toLowerCase()
-              .contains(query)) {
+          !PinyinSearch.matchesFieldModes([
+            (text: event.reason, mode: PinyinMatchMode.content),
+            (
+              text: RelationshipAuditPresenter.sourceLabel(event),
+              mode: PinyinMatchMode.name,
+            ),
+          ], query)) {
         return false;
       }
       final numeric =

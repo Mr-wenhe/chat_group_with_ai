@@ -121,7 +121,7 @@ void main() {
 
       expect(result.requirement, WorkChangeApprovalRequirement.initial);
       expect(result.requiresPrompt, isTrue);
-      expect(result.reason, contains('首次'));
+      expect(result.reason, contains('不在本任务已批准的路径范围内'));
     });
 
     test('does not prompt again inside the same approved file set', () {

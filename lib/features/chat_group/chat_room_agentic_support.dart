@@ -38,6 +38,7 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
   void _startAutoChat() {
     if (!ChatActivityPolicy.canStartAutoChat(
       workModeEnabled: _workModeEnabled,
+      hasActiveWorkTask: _hasActiveWorkTaskForAutoChat,
       autoChatEnabled: _isAutoChatEnabled,
       hasCharacters: _characters.isNotEmpty,
       hasApiConfig: _hasAnyApiConfig,
@@ -83,8 +84,13 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
   /// - 本 burst 轮数达上限 → 停止并冷却 [_autoChatBurstPause]。
   Future<void> _tryAutoChatRound() async {
     if (!_pageActive) return;
+    if (_hasActiveWorkTaskForAutoChat) {
+      _stopAutoChat();
+      return;
+    }
     if (!ChatActivityPolicy.canStartAutoChat(
       workModeEnabled: _workModeEnabled,
+      hasActiveWorkTask: _hasActiveWorkTaskForAutoChat,
       autoChatEnabled: _isAutoChatEnabled,
       hasCharacters: _characters.isNotEmpty,
       hasApiConfig: _hasAnyApiConfig,
@@ -129,7 +135,10 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
       mentionedIds: const [],
       memories: _characterMemories,
       relationships: _relationshipStates,
-      isEligible: _isEligibleToReply,
+      // 空闲自动聊天没有 @ 点名，禁言角色因此被整轮排除。
+      isEligible: (character) =>
+          _isEligibleToReply(character) &&
+          _mayAutoPick(character, mentionedIds: const {}),
       random: _autoChatRandom,
       isAutoChat: true,
     );

@@ -52,9 +52,11 @@ class WorkFollowUpPolicy {
     }
     final artifacts = _paths(lastArtifactPaths);
     final explicitPath = _explicitPath(normalizedRequest);
-    final edit = _hasEditVerb(normalizedRequest);
-    final reference = _hasArtifactReference(normalizedRequest);
     final newFile = _hasNewFileIntent(normalizedRequest);
+    // Depth adjectives in a new-file request must not turn creation into an edit.
+    final edit = _hasEditVerb(normalizedRequest) ||
+        (!newFile && _hasDepthRevisionPhrase(normalizedRequest));
+    final reference = _hasArtifactReference(normalizedRequest);
 
     // "新建/创建" is the one case where an occupied name may be changed.
     // An edit request always wins over a generic file keyword.
@@ -303,6 +305,20 @@ class WorkFollowUpPolicy {
     final value = match?.group(1)?.replaceAll('\\', '/');
     return value == null || value.contains('..') ? null : value;
   }
+
+  /// Only a standalone depth instruction can implicitly target an artifact.
+  /// Descriptive/read-only requests such as "详细阅读当前文件" must not grant
+  /// overwrite intent merely because they contain a depth adjective.
+  bool _hasDepthRevisionPhrase(String request) => RegExp(
+        r'^(?:(?:请|麻烦)?\s*(?:内容\s*)?(?:'
+        r'(?:再|更)(?:详细|细致|详尽|具体)(?:一)?(?:些|点)?|'
+        r'多(?:说|写|讲)(?:一)?点|'
+        r'(?:展开|扩充|丰富|深化|细化)(?:一下|内容|说明|细节)?)|'
+        r'(?:please\s+)?(?:more\s+details?|in\s+more\s+detail|'
+        r'elaborate|expand|longer|more\s+specific|flesh\s+out))'
+        r'[。.!！?？]*$',
+        caseSensitive: false,
+      ).hasMatch(request);
 
   bool _hasEditVerb(String request) => RegExp(
         r'(修改|修复|改写|改成|改|调整|优化|完善|更新|替换|覆盖|修订|'

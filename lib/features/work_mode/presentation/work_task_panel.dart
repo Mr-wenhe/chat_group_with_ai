@@ -80,6 +80,10 @@ class WorkTaskPanel extends StatefulWidget {
   /// 当前会话的历史任务（含已被用户关掉标签的任务），按时间倒序。
   final List<AgentTask> historyTasks;
 
+  /// 已被用户从标签栏隐藏的任务 id；历史列表用它标注"已从标签栏隐藏"，
+  /// 让用户知道记录还在、可以继续基于它追加要求。
+  final Set<String> hiddenTaskIds;
+
   /// 关掉某个任务的标签；只影响面板展示，不删除任务记录。
   final WorkTaskAction? onHideTask;
 
@@ -87,6 +91,7 @@ class WorkTaskPanel extends StatefulWidget {
     super.key,
     required this.tasks,
     this.hiddenTaskCount = 0,
+    this.hiddenTaskIds = const <String>{},
     required this.eventStreamFor,
     required this.onSelectTask,
     required this.onStop,
@@ -136,6 +141,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   bool _actionInFlight = false;
   String? _actionError;
   final TextEditingController _replyController = TextEditingController();
+  final FocusNode _replyFocusNode = FocusNode();
 
   /// 是否处于历史任务视图。为 false 时显示正常的任务标签面板。
   bool _showHistory = false;
@@ -164,6 +170,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   void dispose() {
     _durationTicker?.cancel();
     _replyController.dispose();
+    _replyFocusNode.dispose();
     super.dispose();
   }
 
@@ -187,27 +194,34 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      key: const Key('work-task-panel'),
-      elevation: 12,
-      borderRadius: BorderRadius.circular(20),
-      color: Theme.of(context).colorScheme.surface,
-      child: ConstrainedBox(
-        // Desktop overlays have enough vertical room for a readable live
-        // transcript. The details section keeps its own scrollbar, so a
-        // taller panel does not make the action buttons unreachable.
-        constraints: const BoxConstraints(maxHeight: 720),
-        child: ScrollConfiguration(
-          // Material's desktop ScrollBehavior adds a scrollbar to every
-          // ScrollView. The task panel deliberately owns two independent
-          // scroll regions, so automatic scrollbars would overlap and make
-          // the inner thumb impossible to drag.
-          behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: _showHistory
-                ? _buildHistoryBody(context)
-                : _buildLiveBody(context),
+    return Semantics(
+      key: const Key('work-task-panel-semantics'),
+      container: true,
+      explicitChildNodes: true,
+      label: '工作任务面板',
+      child: Material(
+        key: const Key('work-task-panel'),
+        elevation: 12,
+        borderRadius: BorderRadius.circular(20),
+        color: Theme.of(context).colorScheme.surface,
+        child: ConstrainedBox(
+          // Desktop overlays have enough vertical room for a readable live
+          // transcript. The details section keeps its own scrollbar, so a
+          // taller panel does not make the action buttons unreachable.
+          constraints: const BoxConstraints(maxHeight: 720),
+          child: ScrollConfiguration(
+            // Material's desktop ScrollBehavior adds a scrollbar to every
+            // ScrollView. The task panel deliberately owns two independent
+            // scroll regions, so automatic scrollbars would overlap and make
+            // the inner thumb impossible to drag.
+            behavior:
+                ScrollConfiguration.of(context).copyWith(scrollbars: false),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: _showHistory
+                  ? _buildHistoryBody(context)
+                  : _buildLiveBody(context),
+            ),
           ),
         ),
       ),
@@ -285,36 +299,44 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
           ),
         ),
         const SizedBox(height: 12),
-        _TaskActions(
-          task: task,
-          actionInFlight: _actionInFlight,
-          actionError: _actionError,
-          onOpenConversation: widget.onOpenConversation,
-          onApprove: widget.onApprove,
-          onApproveVersioned: widget.onApproveVersioned,
-          onApproveWithoutUndo: widget.onApproveWithoutUndo,
-          onApproveWithoutUndoVersioned: widget.onApproveWithoutUndoVersioned,
-          onReject: widget.onReject,
-          onRejectVersioned: widget.onRejectVersioned,
-          onRequestFolder: widget.onRequestFolder,
-          onRequestFolderVersioned: widget.onRequestFolderVersioned,
-          onInstallTool: widget.onInstallTool,
-          onInstallToolVersioned: widget.onInstallToolVersioned,
-          onSelectVisionModel: widget.onSelectVisionModel,
-          onRetry: widget.onRetry,
-          onReauthorize: widget.onReauthorize,
-          onViewConflict: widget.onViewConflict,
-          onUndo: widget.onUndo,
-          onLater: widget.onLater,
-          onLaterVersioned: widget.onLaterVersioned,
-          undoPreviewFor: widget.undoPreviewFor,
-          onStop: widget.onStop,
-          onContinue: widget.onContinue,
-          onReply: widget.onReply,
-          replyController: _replyController,
-          onModalVisibilityChanged: widget.onModalVisibilityChanged,
-          dialogContext: widget.dialogContext,
-          runAction: (action) => _runAction(action, task.id),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 180),
+          child: SingleChildScrollView(
+            primary: false,
+            child: _TaskActions(
+              task: task,
+              actionInFlight: _actionInFlight,
+              actionError: _actionError,
+              onOpenConversation: widget.onOpenConversation,
+              onApprove: widget.onApprove,
+              onApproveVersioned: widget.onApproveVersioned,
+              onApproveWithoutUndo: widget.onApproveWithoutUndo,
+              onApproveWithoutUndoVersioned:
+                  widget.onApproveWithoutUndoVersioned,
+              onReject: widget.onReject,
+              onRejectVersioned: widget.onRejectVersioned,
+              onRequestFolder: widget.onRequestFolder,
+              onRequestFolderVersioned: widget.onRequestFolderVersioned,
+              onInstallTool: widget.onInstallTool,
+              onInstallToolVersioned: widget.onInstallToolVersioned,
+              onSelectVisionModel: widget.onSelectVisionModel,
+              onRetry: widget.onRetry,
+              onReauthorize: widget.onReauthorize,
+              onViewConflict: widget.onViewConflict,
+              onUndo: widget.onUndo,
+              onLater: widget.onLater,
+              onLaterVersioned: widget.onLaterVersioned,
+              undoPreviewFor: widget.undoPreviewFor,
+              onStop: widget.onStop,
+              onContinue: widget.onContinue,
+              onReply: widget.onReply,
+              replyController: _replyController,
+              replyFocusNode: _replyFocusNode,
+              onModalVisibilityChanged: widget.onModalVisibilityChanged,
+              dialogContext: widget.dialogContext,
+              runAction: (action) => _runAction(action, task.id),
+            ),
+          ),
         ),
       ],
     );
@@ -342,6 +364,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
           Expanded(
             child: _TaskHistoryList(
               tasks: widget.historyTasks,
+              hiddenTaskIds: widget.hiddenTaskIds,
               onSelectTask: (taskId) =>
                   setState(() => _historyDetailTaskId = taskId),
             ),

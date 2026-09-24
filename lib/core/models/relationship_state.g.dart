@@ -31,6 +31,7 @@ class RelationshipStateAdapter extends TypeAdapter<RelationshipState> {
       recentMood: fields[9] == null
           ? RelationshipMood.neutral
           : fields[9] as RelationshipMood,
+      recentMoodAt: fields[17] as DateTime?,
       notes: fields[10] == null ? '' : fields[10] as String,
       lastInteractionAt: fields[11] as DateTime?,
       createdAt: fields[12] as DateTime?,
@@ -46,7 +47,7 @@ class RelationshipStateAdapter extends TypeAdapter<RelationshipState> {
   @override
   void write(BinaryWriter writer, RelationshipState obj) {
     writer
-      ..writeByte(17)
+      ..writeByte(18)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -80,7 +81,9 @@ class RelationshipStateAdapter extends TypeAdapter<RelationshipState> {
       ..writeByte(15)
       ..write(obj.lastEventId)
       ..writeByte(16)
-      ..write(obj.updatedAt);
+      ..write(obj.updatedAt)
+      ..writeByte(17)
+      ..write(obj.recentMoodAt);
   }
 
   @override

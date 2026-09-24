@@ -151,6 +151,12 @@ Map<String, dynamic> _remapSettings(
             key == 'group_chat_last_proactive_at')) {
       value = _mapKeys(value, (id) => groups[id] ?? id);
     }
+    if (value is Map && key == GroupMuteStore.storageKey) {
+      value = value.map((groupId, ids) => MapEntry(
+            groups[groupId] ?? groupId,
+            _mapList(ids, characters),
+          ));
+    }
     if (value is Map && key == 'token_usage') {
       final usage = Map<String, dynamic>.from(value);
       if (usage['byCharacter'] is Map) {

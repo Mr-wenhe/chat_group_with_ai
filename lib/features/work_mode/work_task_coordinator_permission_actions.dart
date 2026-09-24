@@ -143,6 +143,7 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
         throw StateError('当前没有可用的工作目录选择器。');
       }
       final task = _requireWorkTask(taskId);
+      var actionVersion = expectedActionVersion;
       if (expectedActionVersion != null &&
           WorkTaskUserAction.versionFor(task, 'folderAuthorization') !=
               expectedActionVersion) {
@@ -158,7 +159,21 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
         // approval or paused task open a new native picker.
         throw StateError('当前任务没有等待目录授权。');
       }
+      if (!isTaskInFlight(task.id) &&
+          await _applyQueuedAuthorizationRootCorrection(task)) {
+        if (actionVersion != null) {
+          actionVersion = WorkTaskUserAction.versionFor(
+            task,
+            'folderAuthorization',
+          );
+        }
+      }
       final requestedPath = _requestedFolderPath(task);
+      // A native picker can stay open for minutes, and waiting on the user is
+      // not agent work. Record the wait durably before the dialog appears; the
+      // next run subtracts it instead of charging it to the task's budget.
+      _openBudgetWait(task);
+      await _save(task);
       // Start or join the process-global picker but do not await it while the
       // coordinator serial queue is held. Stop/revise actions must be able to
       // commit a newer checkpoint while the native dialog is open.
@@ -167,7 +182,7 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
         task: task,
         requestedPath: requestedPath,
       );
-      return (request: request,);
+      return (request: request, actionVersion: actionVersion);
     });
 
     WorkFolderRequestResult folderResult;
@@ -176,7 +191,7 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
     } on Object catch (error) {
       await _failFolderAuthorization(
         taskId,
-        expectedActionVersion: expectedActionVersion,
+        expectedActionVersion: preparation.actionVersion,
         error: error,
       );
       return;
@@ -184,7 +199,7 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
     if (!folderResult.granted) {
       await _failFolderAuthorization(
         taskId,
-        expectedActionVersion: expectedActionVersion,
+        expectedActionVersion: preparation.actionVersion,
         reason: folderResult.reason,
       );
       return;
@@ -193,8 +208,8 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
     final currentTask = await _serialize<AgentTask?>(() async {
       if (_disposed) return null;
       final current = _taskBox.get(taskId);
-      if (!_canApplyFolderResult(current, expectedActionVersion)) {
-        _throwIfFolderActionIsStale(current, expectedActionVersion);
+      if (!_canApplyFolderResult(current, preparation.actionVersion)) {
+        _throwIfFolderActionIsStale(current, preparation.actionVersion);
         return null;
       }
       return current;
@@ -209,8 +224,8 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
     await _serialize(() async {
       if (_disposed) return;
       final latest = _taskBox.get(taskId);
-      if (!_canApplyFolderResult(latest, expectedActionVersion)) {
-        _throwIfFolderActionIsStale(latest, expectedActionVersion);
+      if (!_canApplyFolderResult(latest, preparation.actionVersion)) {
+        _throwIfFolderActionIsStale(latest, preparation.actionVersion);
         return;
       }
       final activeTask = latest!;
@@ -222,6 +237,7 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
         ..executionStateJson =
             _withoutFolderRequest(activeTask.executionStateJson)
         ..updatedAt = _clock();
+      WorkFailure.clearFromTask(activeTask);
       await _save(activeTask);
       _enqueueTask(activeTask);
       await _schedule();
@@ -419,6 +435,11 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
       _conversationReservations.remove(task.groupId);
       _makeConversationReady(task.groupId);
       _taskLockPlans.remove(taskId);
+      // A stop ends any pending automatic attempt for this task, so a later
+      // restart cannot inherit its round deadline.
+      _autoResumeTaskIds.remove(taskId);
+      final droppedFollowUps =
+          List<String>.unmodifiable(task.queuedUserRequests);
       task
         ..status = AgentTaskStatus.cancelled
         ..resumeRequired = false
@@ -431,6 +452,19 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
       unawaited(
         _record(task, WorkTaskEventKind.failed, '任务已停止', detail: reason),
       );
+      if (droppedFollowUps.isNotEmpty) {
+        // Stopping is terminal for this task, but the user's queued amendments
+        // must not vanish without a trace. Record exactly what was discarded so
+        // the task history explains why those messages never ran.
+        unawaited(
+          _record(
+            task,
+            WorkTaskEventKind.failed,
+            '已停止任务：${droppedFollowUps.length} 条待处理的追问未执行',
+            detail: droppedFollowUps.join('\n'),
+          ),
+        );
+      }
       await _schedule();
     });
   }

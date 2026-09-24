@@ -47,6 +47,12 @@ extension _DiscussionSummaryTurn on _DiscussionSession {
         final previousEvidence = List<String>.from(roundEvidence);
         final previousQuestions = List<String>.from(roundQuestions);
         final previousBlockers = List<String>.from(roundBlockers);
+        final escalateToOwner = runner._shouldEscalateOwnerQuestion(
+          state: state,
+          qualifiedAvailableIds: qualifiedAvailableIds,
+          availableMembers: availableMembers,
+          question: summary.userQuestion,
+        );
         roundBlockers.remove('coordinatorResponseInvalid');
         // The latest executor assessment is authoritative; new information
         // may reduce confidence even within the same request revision.
@@ -73,7 +79,12 @@ extension _DiscussionSummaryTurn on _DiscussionSession {
             .toList(growable: true);
         roundBlockers.addAll(
           summary.blockers.where(
-              (blocker) => runner._discussionExtensionReason(blocker) == null),
+            (blocker) =>
+                runner._discussionExtensionReason(blocker) == null &&
+                (blocker != 'missingUserInformation' || escalateToOwner) &&
+                (blocker != 'missingQualifiedRole' ||
+                    qualifiedAvailableIds.isEmpty),
+          ),
         );
         final summaryProgress = runner._hasProgressChange(
           previousPercent: previousPercent,
@@ -94,9 +105,10 @@ extension _DiscussionSummaryTurn on _DiscussionSession {
                     summary.resolvedQuestions.isNotEmpty ||
                     summary.resolvedBlockers.isNotEmpty) &&
                 summaryProgress);
+        final currentRequest = WorkDiscussionState.currentRequestScope(task);
         if (extensionReason.isNotEmpty &&
-            runner._maxRounds(task.userRequest) >= 6) {
-          final extendedLimit = runner._maxRounds(task.userRequest) +
+            runner._maxRounds(currentRequest) >= 6) {
+          final extendedLimit = runner._maxRounds(currentRequest) +
               WorkDiscussionRunner.maxComplexityExtensionRounds;
           if (maxRounds < extendedLimit) {
             maxRounds = extendedLimit;
@@ -125,16 +137,24 @@ extension _DiscussionSummaryTurn on _DiscussionSession {
           );
         }
         if (summary.needsUser && summary.userQuestion.isNotEmpty) {
-          userInputRequired = true;
-          roundQuestions.add(summary.userQuestion);
-          roundBlockers.add('missingUserInformation');
-          await runner._publish(
-            task,
-            group,
-            '@${runner._ownerMentionName(group)} 执行人需要你补充：${summary.userQuestion}',
-            isMention: true,
-            cancellation: cancellation,
-          );
+          if (escalateToOwner) {
+            userInputRequired = true;
+            roundQuestions.add(summary.userQuestion);
+            roundBlockers.add('missingUserInformation');
+            await runner._publish(
+              task,
+              group,
+              '@${runner._ownerMentionName(group)} 执行人需要你补充：${summary.userQuestion}',
+              isMention: true,
+              cancellation: cancellation,
+            );
+          } else {
+            // The executor may ask for a detail while still being able to
+            // choose a defensible default. Keep that decision inside the
+            // group rather than turning it into an owner-facing blocker.
+            roundQuestions.add(summary.userQuestion);
+            roundEvidence.add('执行人已将普通方案取舍留在群内继续讨论，未升级群主。');
+          }
         }
         final percent = runner._safeUnderstandingPercent(
           roundPercent,

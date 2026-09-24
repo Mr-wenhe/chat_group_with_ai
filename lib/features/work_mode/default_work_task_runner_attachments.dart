@@ -1,16 +1,25 @@
 part of 'default_work_task_runner.dart';
 
 extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
+  /// Collects the files this run may attach.
+  ///
+  /// When [deliverablePaths] is non-empty the task declared a file contract and
+  /// every candidate passed that contract, so only those paths are considered.
+  /// Without it the run has no contract and the ordinary set of changed files is
+  /// used.
   Future<_ArtifactAttachmentSelection> _safeArtifactsForAttachment(
-    AgentTask task,
-  ) async {
+    AgentTask task, {
+    List<String> deliverablePaths = const <String>[],
+  }) async {
     final files = workspaceFileService;
     if (files == null || task.lastArtifactPaths.isEmpty) {
       return const _ArtifactAttachmentSelection();
     }
+    final candidates =
+        deliverablePaths.isEmpty ? task.lastArtifactPaths : deliverablePaths;
     final entries = <_ArtifactFileEntry>[];
     final skipped = <String>[];
-    for (final raw in task.lastArtifactPaths) {
+    for (final raw in candidates) {
       try {
         final resolved = await files.pathPolicy.resolveExisting(raw);
         // `wasSymbolicLink` also reports harmless platform aliases such as
@@ -149,6 +158,7 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
     _ArtifactAttachmentSelection selection, {
     required bool bundled,
     required int attachedCount,
+    bool contractUnmet = false,
     Iterable<String> deliveredArchivePaths = const <String>[],
     Iterable<String> skippedNames = const <String>[],
   }) {
@@ -158,13 +168,12 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
       return '';
     }
     final deliveredPaths = deliveredArchivePaths.toList(growable: false);
-    final delivered = bundled
-        ? attachedCount > 0
-            ? '已将 ${deliveredPaths.length} 个产物打包为 ZIP 附件。'
-            : '产物已生成，但 ZIP 附件暂时无法复制。'
-        : attachedCount > 0
-            ? '已附加 $attachedCount 个产物。'
-            : '产物已生成，但暂时无法复制为聊天附件。';
+    final delivered = _deliveryHeadline(
+      contractUnmet: contractUnmet,
+      bundled: bundled,
+      attachedCount: attachedCount,
+      deliveredCount: deliveredPaths.length,
+    );
     final listed = deliveredPaths.take(6).join('、');
     final listSuffix = deliveredPaths.length > 6 ? ' 等' : '';
     final withPaths =
@@ -179,6 +188,36 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
     return '$withPaths 未附加：$names$suffix（文件不存在、超出大小限制或无法安全读取）。';
   }
 
+  /// How the attachment step describes itself.
+  ///
+  /// A failed artifact task still hands over whatever the run wrote, but those
+  /// files are intermediates: reporting them as 产物 — and reporting the
+  /// attachment as a success — contradicted the failure report sitting directly
+  /// above it and read as "the deliverable is here after all".
+  String _deliveryHeadline({
+    required bool contractUnmet,
+    required bool bundled,
+    required int attachedCount,
+    required int deliveredCount,
+  }) {
+    if (contractUnmet) {
+      if (attachedCount == 0) {
+        return '本次运行写出的文件暂时无法复制为聊天附件。';
+      }
+      return bundled
+          ? '已将本次运行写出的 $deliveredCount 个中间文件打包为 ZIP 附件，供你排查或继续处理。'
+          : '已附加本次运行写出的 $attachedCount 个中间文件，供你排查或继续处理。';
+    }
+    if (bundled) {
+      return attachedCount > 0
+          ? '已将 $deliveredCount 个产物打包为 ZIP 附件。'
+          : '产物已生成，但 ZIP 附件暂时无法复制。';
+    }
+    return attachedCount > 0
+        ? '已附加 $attachedCount 个产物。'
+        : '产物已生成，但暂时无法复制为聊天附件。';
+  }
+
   String _archiveRelativePath(String root, String path) {
     final normalizedRoot =
         root.replaceAll('\\', '/').replaceFirst(RegExp(r'/+$'), '');
@@ -191,10 +230,45 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
         .split('/')
         .where((segment) =>
             segment.isNotEmpty && segment != '.' && segment != '..')
-        .map((segment) => segment.replaceAll(RegExp(r'[^A-Za-z0-9._ -]'), '_'))
+        .map(_archiveSafeSegment)
         .where((segment) => segment.isNotEmpty)
         .toList(growable: false);
     return safeSegments.isEmpty ? 'artifact' : safeSegments.join('/');
+  }
+
+  /// Characters that could escape the staging directory or break the archive
+  /// entry name. Control characters are handled separately by code point so no
+  /// regex range can silently swallow printable ASCII.
+  static const String _unsafeArchiveCharacters = r'/\:*?"<>|';
+
+  String _archiveSafeSegment(String segment) {
+    final withoutTraversal = segment.replaceAll('..', '_');
+    final buffer = StringBuffer();
+    for (final rune in withoutTraversal.runes) {
+      final isControl = rune < 0x20 || rune == 0x7f;
+      final character = String.fromCharCode(rune);
+      buffer.write(
+        isControl || _unsafeArchiveCharacters.contains(character)
+            ? '_'
+            : character,
+      );
+    }
+    final collapsed = buffer.toString().replaceAll(RegExp(r'_{2,}'), '_');
+    final trimmed = collapsed
+        .replaceFirst(RegExp(r'^[. _]+'), '')
+        .replaceFirst(RegExp(r'[. _]+$'), '');
+    // Archive entries have a 255-byte name limit on most extractors; 80
+    // characters keeps multi-byte names comfortably inside it. Two long names
+    // that share a prefix would otherwise truncate to the SAME entry, and most
+    // extractors silently keep one — so the truncation carries a short digest of
+    // the full name.
+    final runes = trimmed.runes.toList(growable: false);
+    if (runes.length <= 80) return trimmed;
+    final digest = workArtifactNameDigest(trimmed);
+    return String.fromCharCodes(runes.take(80)).replaceFirst(
+      RegExp(r'(.{8})$'),
+      '_${digest.substring(0, 8)}',
+    );
   }
 
   String? _workspaceRootForTask(AgentTask task) {
@@ -224,11 +298,17 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
         retryable: true,
       );
       task
-        ..status = AgentTaskStatus.failed
+        // 执行角色缺失是 App 侧状态问题，已保存的产物不受影响，任务保持完成。
+        ..status = AgentTaskStatus.completed
         ..resumeRequired = true
         ..lastError = failure.reason
         ..updatedAt = clock();
       WorkFailure.persistOnTask(task, failure);
+      _markArtifactDeliveryNoticePublished(
+        task,
+        messageId: messageId,
+        retryOnly: true,
+      );
       await _persistCheckpoint(task);
       return;
     }
@@ -249,23 +329,10 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
       _clearArtifactDeliveryNotice(task);
       await database.recordCharacterReplyUsage(character.id);
     } else {
-      final failure = WorkFailure.fromToolFailure(
-        code: 'artifactDelivery',
-        message: result.message,
-        scope: 'delivery',
-        completedContent: task.lastArtifactPaths,
-        retryable: true,
-      );
-      task
-        ..status = AgentTaskStatus.failed
-        ..resumeRequired = true
-        ..lastError = failure.reason
-        ..updatedAt = clock();
-      WorkFailure.persistOnTask(task, failure);
-      _markArtifactDeliveryNoticePublished(
+      _applyArtifactDeliveryFailure(
         task,
-        messageId: result.messageId ?? messageId,
-        retryOnly: result.retryWithExistingArtifact,
+        result,
+        previousMessageId: messageId,
       );
     }
     await _persistCheckpoint(task);
@@ -304,12 +371,44 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
   }
 
   void _clearArtifactDeliveryNotice(AgentTask task) {
-    final metadata = _decodeExecutionMetadata(task.executionStateJson);
-    metadata
-      ..remove('artifactDeliveryNoticePublished')
-      ..remove('artifactDeliveryMessageId')
-      ..remove('artifactDeliveryRetryOnly');
-    task.executionStateJson = metadata.isEmpty ? '' : jsonEncode(metadata);
+    task.executionStateJson = workWithoutArtifactDeliveryNotice(
+      task.executionStateJson,
+    );
+  }
+
+  /// Records the outcome of a delivery attempt that did not produce the
+  /// expected chat message.
+  ///
+  /// A deliverable that is saved and validated but could not be attached is an
+  /// app-side fault, so the task keeps its completed status and only a
+  /// retryable "resend" notice is recorded — finished work must not be reported
+  /// as failed. A deliverable that no longer satisfies its contract really did
+  /// leave the task incomplete and keeps the failed status.
+  void _applyArtifactDeliveryFailure(
+    AgentTask task,
+    _ArtifactDeliveryResult result, {
+    String? previousMessageId,
+  }) {
+    final failure = WorkFailure.fromToolFailure(
+      code: 'artifactDelivery',
+      message: result.message,
+      scope: 'delivery',
+      completedContent: task.lastArtifactPaths,
+      retryable: true,
+    );
+    task
+      ..status = result.retryWithExistingArtifact
+          ? AgentTaskStatus.completed
+          : AgentTaskStatus.failed
+      ..resumeRequired = true
+      ..lastError = failure.reason
+      ..updatedAt = clock();
+    WorkFailure.persistOnTask(task, failure);
+    _markArtifactDeliveryNoticePublished(
+      task,
+      messageId: result.messageId ?? previousMessageId,
+      retryOnly: result.retryWithExistingArtifact,
+    );
   }
 
   bool _artifactDeliveryNoticePublished(AgentTask task) =>
@@ -317,14 +416,8 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
           task.executionStateJson)['artifactDeliveryNoticePublished'] ==
       true;
 
-  bool _artifactDeliveryRetryOnly(AgentTask task) {
-    final metadata = _decodeExecutionMetadata(task.executionStateJson);
-    final messageId = metadata['artifactDeliveryMessageId'];
-    return metadata['artifactDeliveryNoticePublished'] == true &&
-        metadata['artifactDeliveryRetryOnly'] == true &&
-        messageId is String &&
-        messageId.trim().isNotEmpty;
-  }
+  bool _artifactDeliveryRetryOnly(AgentTask task) =>
+      workArtifactDeliveryRetryPending(task.executionStateJson);
 
   String _artifactDeliveryMessageId(AgentTask task) {
     final value = _decodeExecutionMetadata(

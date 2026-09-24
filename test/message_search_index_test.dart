@@ -90,6 +90,27 @@ void main() {
     );
   });
 
+  test('searches content, sender and attachment names by pinyin', () async {
+    await db.messageBox.putAll({
+      'p1': Message(
+        id: 'p1',
+        groupId: 'g1',
+        senderId: 'c1',
+        senderType: 'ai',
+        content: '今天喝咖啡',
+        timestamp: DateTime(2026, 7, 2),
+      ),
+    });
+    final index = MessageSearchIndex(db);
+
+    // 正文走保守模式：两个字母起才触发拼音。
+    expect((await index.query('jint')).single.messageId, 'p1');
+    expect(await index.query('j'), isEmpty);
+    // 发送者名「小薇」走宽松模式：单个字母也能命中。
+    expect((await index.query('xw')).single.messageId, 'p1');
+    expect((await index.query('x')).single.messageId, 'p1');
+  });
+
   test('deleted source messages never become ghost results', () async {
     final message = Message(
       id: 'gone',

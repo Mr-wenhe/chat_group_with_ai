@@ -161,7 +161,7 @@ class CharacterSkillResolver {
       needles.any(text.contains);
 
   /// 这些短句依赖对话历史才有完整语义，不是一个新的专业任务。
-  /// 把它们交给 AgentRuntime 结合 conversationHistory 处理，避免
+  /// 把它们交给普通聊天回复结合 conversationHistory 处理，避免
   /// “附件呢”之类的追问反复触发 skill.create。
   static bool _isContextualFollowUp(String text) {
     final compact = text.trim().replaceAll(RegExp(r'\s+'), ' ');

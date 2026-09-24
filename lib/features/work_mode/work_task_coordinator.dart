@@ -6,11 +6,13 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:hive/hive.dart';
 
+import 'work_artifact_delivery_notice.dart';
 import 'work_task_event.dart';
 import 'work_task_event_store.dart';
 import 'work_task_error_sanitizer.dart';
 import 'work_folder_grant_service.dart';
 import 'work_task_clarification.dart';
+import 'work_task_budget_wait.dart';
 import 'work_resource_lock_manager.dart';
 import 'work_snapshot_manifest.dart';
 import 'work_approval_decision.dart';
@@ -30,6 +32,7 @@ part 'work_task_coordinator_submission.dart';
 part 'work_task_coordinator_follow_up_input.dart';
 part 'work_task_coordinator_permission_actions.dart';
 part 'work_task_coordinator_recovery.dart';
+part 'work_task_coordinator_auto_resume.dart';
 part 'work_task_coordinator_discussion_lifecycle.dart';
 part 'work_task_coordinator_scheduling.dart';
 part 'work_task_coordinator_execution.dart';
@@ -45,6 +48,24 @@ part 'work_task_coordinator_contracts.dart';
 /// submissions cannot consume the same slot or run the same conversation.
 class WorkTaskCoordinator {
   static const int maximumConcurrentTasks = 2;
+
+  /// How long a retryable failure waits before it resumes itself, one entry per
+  /// automatic attempt. Thirty seconds outlasts a brief provider brownout while
+  /// staying visible in the panel; the longer second step covers a link that is
+  /// still flapping. The ladder is also the cap: beyond it the task is the
+  /// user's call, not the app's.
+  static const List<Duration> defaultAutoResumeDelays = [
+    Duration(seconds: 30),
+    Duration(seconds: 90),
+  ];
+  /// Upper bound on one automatic-resume attempt.
+  ///
+  /// An app-initiated retry must not be able to sit on a slot for the whole
+  /// model deadline (300s) just because the provider is unreachable, so the
+  /// round is cancelled at this point and counted as a failed attempt, which
+  /// puts the next step of [defaultAutoResumeDelays] in charge. User-initiated
+  /// runs are deliberately not bounded this way.
+  static const Duration defaultAutoResumeRoundTimeout = Duration(seconds: 120);
 
   /// A user stop is terminal by design, but a task that has not committed a
   /// mutation can safely be restarted from zero.  This narrow predicate keeps
@@ -80,6 +101,10 @@ class WorkTaskCoordinator {
   final WorkContextBuilder _contextBuilder;
   final WorkFollowUpPolicy _followUpPolicy;
   final DateTime Function() _clock;
+
+  /// The delay ladder for automatic resumes of a retryable failure.
+  final List<Duration> autoResumeDelays;
+  final Duration autoResumeRoundTimeout;
   final WorkTaskActionNotifier? _userActionNotifier;
   final bool? _installerIsWindows;
   final bool? _installerIsMacOS;
@@ -108,6 +133,7 @@ class WorkTaskCoordinator {
   final Map<String, Future<void>> _folderActionRuns = <String, Future<void>>{};
   final Set<String> _conversationReservations = <String>{};
   final Set<String> _handoffsAwaitingLease = <String>{};
+  final Set<String> _autoResumeTaskIds = <String>{};
   final Set<String> _startingTaskIds = <String>{};
   final Queue<Completer<void>> _slotWaiters = Queue<Completer<void>>();
   Future<WorkFolderRequestResult>? _folderRequest;
@@ -135,6 +161,8 @@ class WorkTaskCoordinator {
     bool? installerIsWindows,
     bool? installerIsMacOS,
     DateTime Function()? clock,
+    List<Duration>? autoResumeDelays,
+    Duration? autoResumeRoundTimeout,
   })  : _taskBox = taskBox,
         _eventStore = eventStore,
         _runner = runner,
@@ -151,7 +179,12 @@ class WorkTaskCoordinator {
         _userActionNotifier = userActionNotifier,
         _installerIsWindows = installerIsWindows,
         _installerIsMacOS = installerIsMacOS,
-        _clock = clock ?? DateTime.now {
+        _clock = clock ?? DateTime.now,
+        autoResumeDelays = List<Duration>.unmodifiable(
+          autoResumeDelays ?? defaultAutoResumeDelays,
+        ),
+        autoResumeRoundTimeout =
+            autoResumeRoundTimeout ?? defaultAutoResumeRoundTimeout {
     if (runner case final WorkTaskProgressReporter reporter) {
       reporter.setTaskUpdateSink(_publishFromRunner);
     }
@@ -368,6 +401,10 @@ class WorkTaskCoordinator {
   }) =>
       _implRequestFolderForTask(taskId,
           expectedActionVersion: expectedActionVersion);
+
+  /// Rebuilds a plan after a missing approval scope, or delegates to the
+  /// directory picker for a genuine workspace authorization failure.
+  Future<void> reauthorizeTask(String taskId) => _implReauthorizeTask(taskId);
 
   /// Stops only the requested task. Other conversations keep their slots.
   Future<void> stop(String taskId, {String reason = '用户已停止任务。'}) =>
