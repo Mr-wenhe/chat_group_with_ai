@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:hive/hive.dart';
 
+import 'work_artifact_delivery_notice.dart';
 import 'work_task_event.dart';
 import 'work_task_event_store.dart';
 import 'work_task_error_sanitizer.dart';

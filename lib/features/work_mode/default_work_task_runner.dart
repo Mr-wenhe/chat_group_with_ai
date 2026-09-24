@@ -28,6 +28,7 @@ import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/work_mode/agent_decision_parser.dart';
 import 'package:chat_group/features/work_mode/work_agent_loop.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_notice.dart';
 import 'package:chat_group/features/work_mode/work_approval_decision.dart';
 import 'package:chat_group/features/work_mode/work_approval_fingerprint.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';

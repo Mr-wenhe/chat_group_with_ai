@@ -136,47 +136,6 @@ bool workExecutionCheckpointRequiresReview(String raw) {
   }
 }
 
-/// Whether a task is holding a saved deliverable that still has to be re-sent
-/// as a chat attachment.
-///
-/// The marker is what lets an already finished task re-enter the runner for a
-/// delivery-only pass, so it is always read back from the persisted checkpoint
-/// rather than from in-memory run state.
-bool workArtifactDeliveryRetryPending(String executionStateJson) {
-  if (executionStateJson.trim().isEmpty) return false;
-  try {
-    final decoded = jsonDecode(executionStateJson);
-    if (decoded is! Map) return false;
-    if (decoded['artifactDeliveryNoticePublished'] != true) return false;
-    if (decoded['artifactDeliveryRetryOnly'] != true) return false;
-    final messageId = decoded['artifactDeliveryMessageId'];
-    return messageId is String && messageId.trim().isNotEmpty;
-  } on Object {
-    return false;
-  }
-}
-
-/// Removes a pending artifact-delivery notice from an execution checkpoint.
-///
-/// A stage that hands the task to the next role must not leave its own resend
-/// marker behind: the next role's run would otherwise enter the delivery-only
-/// branch and re-send the previous stage's message instead of executing its own
-/// stage. Returns the input unchanged when it cannot be read as a map.
-String workWithoutArtifactDeliveryNotice(String executionStateJson) {
-  if (executionStateJson.trim().isEmpty) return executionStateJson;
-  try {
-    final decoded = jsonDecode(executionStateJson);
-    if (decoded is! Map) return executionStateJson;
-    final metadata = Map<String, dynamic>.from(decoded)
-      ..remove('artifactDeliveryNoticePublished')
-      ..remove('artifactDeliveryMessageId')
-      ..remove('artifactDeliveryRetryOnly');
-    return metadata.isEmpty ? '' : jsonEncode(metadata);
-  } on Object {
-    return executionStateJson;
-  }
-}
-
 /// Reduces an unsupported execution checkpoint to the small set of fields
 /// that can still explain a recovery gate. Capability grants and opaque future
 /// fields are deliberately dropped; the review marker keeps the task paused
