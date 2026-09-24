@@ -245,6 +245,9 @@ void main() {
     );
 
     expect(result['success'], isTrue);
+    // 非流式通道同样不产出 finish_reason：带上本次请求的输出上限，工作模式才能
+    // 靠"已输出 token 是否用满"跨协议判定截断。
+    expect(result['requestedMaxTokens'], 4096);
     expect((captured.data as Map<String, dynamic>)['max_tokens'], 4096);
     expect(captured.receiveTimeout, const Duration(seconds: 120));
   });

@@ -1,5 +1,19 @@
 part of 'work_agent_loop.dart';
 
+/// 输出被上限截断时给模型的唯一出路：把这次写入拆小。
+///
+/// 只要求"输出合法 JSON"没有用——被截断的正是"一次写完整份文件"这个动作，
+/// 原样重试必然再撞上限。截断修复与协议重试共用同一句话，避免两处措辞漂移。
+///
+/// 措辞里刻意不提"追加"：`workspace.patch` 是整文件覆盖写、没有追加，让模型
+/// "再往目标文件写一段"会把前一段冲掉，而它还以为拼好了。
+const String _truncatedOutputChunkingAdvice =
+    '这一次的输出太大：把内容拆成多次动作——每个分段各写一个**独立的分段文件**'
+    '（workspace.patch，每次 content 控制在 3000 字以内），'
+    '全部写完后再用一次 command.run 合并成目标文件（Markdown 转 DOCX 可把各分段'
+    '一起交给 pandoc），然后读回并交付；'
+    '不要反复往目标文件写，也不要把整份内容放进一次动作。';
+
 extension _WorkAgentLoopRetry on WorkAgentLoop {
   Future<WorkToolResult> _callToolWithRetries(
     _LoopState state,
@@ -130,6 +144,35 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
         : '模型输出达到上限被截断，未产出完整动作 JSON。';
   }
 
+  /// 供应商是否把输出预算用尽（正文因此不完整、动作 JSON 必然解析失败）。
+  ///
+  /// `truncated` 只有 OpenAI 兼容解析器会给出（`finish_reason == length`）；
+  /// 协议通道（Anthropic / Responses / Gemini）只回 usage，所以再比一次
+  /// "已输出 token 是否达到本次请求的 max_tokens"。协议解析器将来若映射
+  /// stop reason，这条兜底可以保留，代价只是极少数恰好用满预算的正常响应会多
+  /// 走一次修复。
+  bool _responseHitsOutputLimit(Map<String, dynamic> response) {
+    if (response['truncated'] == true) return true;
+    final completion = response['completionTokens'];
+    final requested = response['requestedMaxTokens'];
+    return completion is int &&
+        requested is int &&
+        requested > 0 &&
+        completion >= requested;
+  }
+
+  /// 截断之后的协议重试要给模型换策略，而不是原样重试同一个巨无霸动作。
+  ///
+  /// 指令只加在这一次的提示里（渲染进公开任务检查点），不写回任务上下文：
+  /// 它是这次重试的指令，不是任务的持久状态，重试成功后即失效。**注意它必须经
+  /// `messages` 出站**——运行器只发 `request.messages`，`request.context` 不参与，
+  /// 将来若改成从 context 重建消息，这里要一起改，否则指令会静默丢掉。
+  Map<String, dynamic> _withTruncatedOutputHint(Map<String, dynamic> context) =>
+      <String, dynamic>{
+        ...context,
+        'truncatedOutputHint': _truncatedOutputChunkingAdvice,
+      };
+
   Future<String?> _repairModel(
     _LoopState state,
     WorkAgentModelRequest original,
@@ -147,7 +190,8 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
           // 输出被上限截断时原文对修复没有价值：重复的内容不是 JSON 语法问题，
           // 回灌只会把 prompt 撑成三倍，并给模型再喂一遍重复的引子。
           ? '上一次响应因为达到输出上限被截断，不是 JSON 语法问题；'
-              '不要输出正文、解释或 Markdown 代码块。$decisionRules'
+              '不要输出正文、解释或 Markdown 代码块。'
+              '$_truncatedOutputChunkingAdvice$decisionRules'
           : decisionRules,
     };
     var repair = original.copyWith(

@@ -118,6 +118,9 @@ extension _ChatApiServiceSupport on ChatApiService {
       'success': true,
       'message': content,
       if (truncated) 'truncated': true,
+      // 请求时给出的输出上限。`truncated` 只有 OpenAI 兼容解析器会产出（看
+      // finish_reason），带上这个值，调用方就能跨协议判断"输出是否被用尽"。
+      if (maxTokens > 0) 'requestedMaxTokens': maxTokens,
       if (promptTokens != null) 'promptTokens': promptTokens,
       if (completionTokens != null) 'completionTokens': completionTokens,
       if (cachedTokens != null) 'cachedTokens': cachedTokens,

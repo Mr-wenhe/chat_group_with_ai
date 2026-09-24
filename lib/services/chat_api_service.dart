@@ -301,6 +301,9 @@ class ChatApiService {
           'success': true,
           'message': reply,
           'model': _responseModel(data, apiProtocol) ?? modelName,
+          // 与流式通道一致：带上本次请求的输出上限，调用方才能跨协议判断
+          // "输出是否被用尽"（非流式通道同样不产出 finish_reason）。
+          if (maxTokens > 0) 'requestedMaxTokens': maxTokens,
           if (usage != null) ...usage,
         };
       } else {

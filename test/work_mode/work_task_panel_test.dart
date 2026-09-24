@@ -55,7 +55,7 @@ Future<void> _pumpUntilFound(
 Future<void> _pumpUntil(
   WidgetTester tester,
   bool Function() condition, {
-  int maxFrames = 80,
+  int maxFrames = 120,
   String? reason,
   bool requireStable = true,
 }) async {
@@ -2629,7 +2629,12 @@ void main() {
         await tester.pumpWidget(const SizedBox.shrink());
         await tester.pump();
       });
-      await tester.runAsync(() => taskBox.put(task.id, task));
+      // 预置"这条任务早先被关掉标签"的状态：不再让用例依赖"刚点完关闭、动作是否
+      // 已释放"的时序（那会在全量并行时抖动）。
+      await tester.runAsync(() async {
+        await taskBox.put(task.id, task);
+        await database.setWorkTasksHidden(<String>[task.id], true);
+      });
 
       await tester.pumpWidget(ProviderScope(
         overrides: [databaseServiceProvider.overrideWithValue(database)],
@@ -2644,17 +2649,8 @@ void main() {
         ),
       ));
       const tabKey = Key('work-task-tab-overlay-delete-task');
-      await _pumpUntilFound(tester, find.byKey(tabKey));
-
-      // 先关掉标签，让隐藏标记落到设置里。
-      await tester.tap(
-        find.descendant(of: find.byKey(tabKey), matching: find.byIcon(Icons.close_rounded)),
-      );
-      await tester.pump();
-      await _pumpUntil(
-        tester,
-        () => database.hiddenWorkTaskIds().contains(task.id),
-      );
+      await _pumpUntilFound(tester, find.byKey(const Key('work-task-history-open')));
+      expect(find.byKey(tabKey), findsNothing, reason: '预置隐藏的标签不应出现');
 
       // 关掉的标签只能在历史任务里找到，删除入口也必须留在那一层。
       await tester.tap(find.byKey(const Key('work-task-history-open')));

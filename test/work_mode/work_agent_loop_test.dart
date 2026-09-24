@@ -1559,7 +1559,41 @@ void main() {
         .map((message) => message['content']?.toString() ?? '')
         .join('\n');
     expect(repairPrompt, contains('输出上限'));
+    // 只要求"输出合法 JSON"没有用：被截断的正是"一次写完整份文件"这个动作，
+    // 修复指令必须把策略换成"分块写"，否则模型原样重试还会再撞一次上限。
+    expect(repairPrompt, contains('拆成多次动作'));
     expect(repairPrompt, isNot(contains(repeated)));
+  });
+
+  test('a truncation that survives repair retries with a chunking instruction',
+      () async {
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'content': '陆教授：我先把完整的量子力学研究报告写到桌面',
+        'truncated': true,
+      })
+      ..responses.add({
+        'success': true,
+        'content': '还是被截断了',
+        'truncated': true,
+      })
+      ..responses.add(_finishDecision('按分块指令完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final task = _task(id: 'truncation-chunking-retry');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    // 第三次请求是"截断后的协议重试"（不是修复请求）：它必须带上分块指令。
+    expect(model.requests.length, greaterThanOrEqualTo(3));
+    final retry = model.requests[2];
+    expect(retry.isRepair, isFalse);
+    final retryPrompt = retry.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(retryPrompt, contains('拆成多次动作'));
   });
 
   test('untruncated malformed response still feeds the raw body back',
@@ -1580,6 +1614,59 @@ void main() {
         reason: '${result.message}; ${task.lastError}');
     final repair = model.requests.firstWhere((request) => request.isRepair);
     expect(repair.malformedResponse, '{"action":"不完整的 JSON"');
+    // 对照：非截断的格式错误不该被塞进"分块写"指令——它是语法问题，原文回灌
+    // 才是修复依据。
+    final repairPrompt = repair.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(repairPrompt, isNot(contains('拆成多次动作')));
+  });
+
+  test('a response that merely fills the budget is not treated as truncated',
+      () async {
+    // token 兜底只在解析失败之后才起作用：恰好用满预算但 JSON 合法的响应必须
+    // 照常完成，不能被当截断而走进"分块写"的修复指令。
+    final model = _FakeModel()
+      ..responses.add(<String, dynamic>{
+        ..._finishDecision('预算刚好用满，但 JSON 完整。'),
+        'completionTokens': 8192,
+        'requestedMaxTokens': 8192,
+      });
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final task = _task(id: 'budget-boundary-finish');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    expect(model.requests.where((request) => request.isRepair), isEmpty);
+  });
+
+  test('a broken JSON below the output budget is not treated as truncation',
+      () async {
+    // 负例：没有用满预算的格式错误仍是普通 JSON 语法问题，必须回灌原文修，
+    // 而不是把它当成截断去要求"分块写"。
+    final model = _FakeModel()
+      ..responses.add(<String, dynamic>{
+        'success': true,
+        'content': '{"action":"不完整的 JSON"',
+        'completionTokens': 120,
+        'requestedMaxTokens': 8192,
+      })
+      ..responses.add(_finishDecision('按原文修复后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final task = _task(id: 'budget-below-format-error');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    final repair = model.requests.firstWhere((request) => request.isRepair);
+    expect(repair.malformedResponse, isNotNull);
+    final repairPrompt = repair.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(repairPrompt, isNot(contains('拆成多次动作')));
   });
 
   test('an exhausted truncated run names the output cap, not a format error',
@@ -1607,6 +1694,30 @@ void main() {
       result.events.map((event) => event.title).join('\n'),
       contains('截断'),
     );
+  });
+
+  test('a protocol without the truncated flag still detects a spent budget',
+      () async {
+    // Anthropic / Responses / Gemini 通道不回 finish_reason，只回 usage：靠
+    // "已输出 token 是否达到本次请求的 max_tokens"判定，否则这条恢复链在那些
+    // 协议下完全不触发——用户换个协议就照旧失败。
+    final model = _FakeModel();
+    for (var attempt = 0; attempt < 10; attempt++) {
+      model.responses.add({
+        'success': true,
+        'content': '陆教授：好的，我先把完整的量子力学研究报告写一遍。',
+        'completionTokens': 8192,
+        'requestedMaxTokens': 8192,
+      });
+    }
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final task = _task(id: 'protocol-truncated-exhausted');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.failed);
+    expect(result.message, contains('截断'), reason: result.message);
+    expect(result.message, contains('8192'));
   });
 
   test('retries a fresh model decision when protocol repair is empty',
