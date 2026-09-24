@@ -110,6 +110,24 @@ void main() {
     expect(WorkTaskUserAction.forTask(inGroupDecisionTask), isEmpty);
   });
 
+  test('a follow-up clarification exposes the same answer action', () {
+    // 追问澄清和模型澄清一样是"必须由用户回答"的问题，可回答性判据只能有一处。
+    // 分开维护过一次的后果：面板不给回复框、聊天没有回答入口，而"继续"又按
+    // 另一个判据拒绝，任务既答不了也退不出。
+    final task = _task(
+      id: 'follow-up-clarification-task',
+      executionStateJson: jsonEncode({
+        'followUpKind': 'clarification',
+        'clarificationQuestion': '请明确要修改的文件路径（a.md、b.md）？',
+      }),
+    );
+
+    final action = WorkTaskUserAction.forTask(task).singleWhere(
+      (item) => item.kind == WorkTaskUserActionKind.answerQuestion,
+    );
+    expect(action.blockerId, 'clarificationRequired');
+  });
+
   test('does not ask the user to add a role while candidates are being elected',
       () {
     final task = _task(

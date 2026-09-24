@@ -387,9 +387,22 @@ extension _WorkTaskCoordinatorWorkspaceQueue on WorkTaskCoordinator {
   }
 
   Future<void> _save(AgentTask task) async {
-    await _taskBox.put(task.id, task);
+    if (!await _putTaskRecord(task)) return;
     _publish(task);
     await _notifyUserAction(task);
+  }
+
+  /// 任务记录的**唯一**写入口。
+  ///
+  /// 已删除的任务不能写回：迟到的异步续跑（启动流程、讨论完成、失败上报、日志
+  /// 失败分支）各自只检查内存态，这里是唯一覆盖全部写入路径的闸门。
+  ///
+  /// 同一个 id 又被外部带回来（备份导入）时由 `reconcileDeletionGates` 显式
+  /// 解除，不在写入路径上猜——"记录存在"证明不了"这次写入拥有它"。
+  Future<bool> _putTaskRecord(AgentTask task) async {
+    if (_deletedTaskIds.contains(task.id)) return false;
+    await _taskBox.put(task.id, task);
+    return true;
   }
 
   Future<void> _notifyUserAction(AgentTask task) async {

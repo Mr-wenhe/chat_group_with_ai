@@ -41,6 +41,7 @@ part 'work_task_coordinator_failure_checkpoint.dart';
 part 'work_task_coordinator_follow_up_promotion.dart';
 part 'work_task_coordinator_checkpoint_policy.dart';
 part 'work_task_coordinator_contracts.dart';
+part 'work_task_coordinator_deletion.dart';
 
 /// Owns work-task scheduling independently from every chat-room widget.
 ///
@@ -66,6 +67,11 @@ class WorkTaskCoordinator {
   /// puts the next step of [defaultAutoResumeDelays] in charge. User-initiated
   /// runs are deliberately not bounded this way.
   static const Duration defaultAutoResumeRoundTimeout = Duration(seconds: 120);
+
+  /// 澄清答复的持久标记：答复被拼到它要回答的那句原请求之后
+  /// （`原句\n用户明确目标：答复`）。写入与解析共用这一个常量，
+  /// 两边各写一份字符串会让"取出答复"在改动后静默失配。
+  static const String clarificationAnswerMarker = '用户明确目标：';
 
   /// A user stop is terminal by design, but a task that has not committed a
   /// mutation can safely be restarted from zero.  This narrow predicate keeps
@@ -132,6 +138,13 @@ class WorkTaskCoordinator {
   final Map<String, Future<void>> _approvalRuns = <String, Future<void>>{};
   final Map<String, Future<void>> _folderActionRuns = <String, Future<void>>{};
   final Set<String> _conversationReservations = <String>{};
+  /// 本进程内已被真删除的任务 id。
+  ///
+  /// 删除要走异步收尾（取消 runner、删日志），期间可能有迟到的 `_save` 把记录
+  /// 写回来。墓碑让写入路径无条件拒绝这些 id；任务 id 是 UUID，不会与新建任务
+  /// 撞名。备份导入时由 [reconcileDeletionGates] 逐 id 核对解禁；数据清除不需要
+  /// 清理（清除后记录不存在，闸门无害）。
+  final Set<String> _deletedTaskIds = <String>{};
   final Set<String> _handoffsAwaitingLease = <String>{};
   final Set<String> _autoResumeTaskIds = <String>{};
   final Set<String> _startingTaskIds = <String>{};
@@ -409,6 +422,33 @@ class WorkTaskCoordinator {
   /// Stops only the requested task. Other conversations keep their slots.
   Future<void> stop(String taskId, {String reason = '用户已停止任务。'}) =>
       _implStop(taskId, reason: reason);
+
+  /// 真删除一条工作任务记录（含它的事件日志）。
+  ///
+  /// 保留终态记录会让同会话的下一条请求继续挂到它上面：追问会复用同一任务 id
+  /// 和它的产物路径，用户"删掉这条任务"的意图就落空了。删除只影响任务记录与
+  /// 诊断日志；已经生成的文件不会被删。
+  Future<void> deleteTask(String taskId) => _implDeleteTask(taskId);
+
+  /// 把删除闸门收敛到与实际记录一致：**只有记录已经回来的 id** 才解禁。
+  ///
+  /// 备份导入会把同一个 id 的任务记录写回 Hive。若不解除，那条任务的写入与
+  /// 诊断日志会被静默丢弃，表现为"点继续没反应、时间线空白"。反过来，整表解除
+  /// 会把**记录仍不存在**的 id 也放开——那样一条停在 await 上的迟到续跑就能把
+  /// 记录写回来，所以这里逐 id 核对。数据清除不需要单独调用：清除后导入时自然
+  /// 会重新核对（记录回来了才解禁）。
+  ///
+  /// **不 `_serialize`，且方法体必须保持同步**（`containsKey` 与集合变更之间不能
+  /// 有 await）：一旦中断，就可能出现"读到记录已存在 → 另一处删除完成 → 这里再
+  /// 解禁"的窗口，把闸门从一条已删除的任务上摘掉。事件存储侧的
+  /// `releaseDeletionGates` 同理保持同步。
+  Future<void> reconcileDeletionGates() async {
+    final restored =
+        _deletedTaskIds.where(_taskBox.containsKey).toList(growable: false);
+    if (restored.isEmpty) return;
+    _deletedTaskIds.removeAll(restored);
+    _eventStore.releaseDeletionGates(restored);
+  }
 
   /// Queues an interrupted or paused task only after an explicit user action.
   Future<void> resumeByUser(String taskId) => _implResumeByUser(taskId);

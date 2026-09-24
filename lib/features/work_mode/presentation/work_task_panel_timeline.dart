@@ -263,6 +263,10 @@ String? _continueUnavailableReasonForPanel(AgentTask task) {
       task.softLimitReached && _isPausedStatus(task.status);
   if (_taskNeedsVisionModel(task)) return '请先选择支持图片的视觉模型。';
   if (WorkTaskClarification.isPending(task)) return '请先回答上方模型问题。';
+  // 追问澄清同样在等用户输入：让"继续"当场可见地不可用，而不是点下去才报错。
+  if (WorkTaskClarification.isFollowUpPending(task)) {
+    return '请先在上方明确要修订哪一个文件。';
+  }
   if (_requiresExplicitCommandRequest(task)) {
     return '请发送明确的测试、构建或分析请求后继续。';
   }

@@ -69,6 +69,15 @@ class WorkTaskPanel extends StatefulWidget {
   final WorkTaskAction? onLater;
   final WorkTaskVersionedAction? onLaterVersioned;
   final WorkTaskUndoPreview? undoPreviewFor;
+
+  /// 真删除一条任务记录（不可逆）。为 null 时不展示删除入口。
+  final WorkTaskAction? onDeleteTask;
+
+  /// 把历史任务重新放回标签栏并选中它。
+  ///
+  /// 历史详情本身不接执行动作，但"这条旧任务我要接着处理"是正常诉求：它需要先
+  /// 回到标签栏（被关掉的标签也要恢复），面板上的回复框/继续/重试才会出现。
+  final WorkTaskAction? onOpenInTabStrip;
   final ValueChanged<String> onOpenConversation;
   final VoidCallback onCollapse;
   final VoidCallback onClose;
@@ -121,6 +130,8 @@ class WorkTaskPanel extends StatefulWidget {
     this.onLater,
     this.onLaterVersioned,
     this.undoPreviewFor,
+    this.onDeleteTask,
+    this.onOpenInTabStrip,
     this.characterNameFor,
     this.historyTasks = const <AgentTask>[],
     this.onHideTask,
@@ -278,7 +289,8 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
         if (widget.hiddenTaskCount > 0) ...<Widget>[
           const SizedBox(height: 6),
           Text(
-            '还有 ${widget.hiddenTaskCount} 个任务在队列中，当前面板优先显示执行中的任务。',
+            '本会话还有 ${widget.hiddenTaskCount} 个未结束的任务未在标签栏显示，'
+            '可在「历史任务」里查看。',
             style: TextStyle(
               fontSize: 12,
               color: Theme.of(context).colorScheme.onSurfaceVariant,
@@ -327,6 +339,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               onLater: widget.onLater,
               onLaterVersioned: widget.onLaterVersioned,
               undoPreviewFor: widget.undoPreviewFor,
+              onDeleteTask: widget.onDeleteTask,
               onStop: widget.onStop,
               onContinue: widget.onContinue,
               onReply: widget.onReply,
@@ -384,8 +397,77 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               clock: () => detailTask.updatedAt ?? detailTask.createdAt,
             ),
           ),
+        // 历史任务不再执行，所以这里不接执行类动作；但"重新放回标签栏"和
+        // "删除记录"都不是执行动作，而历史列表正是这两件事的唯一入口。
+        if (detailTask != null &&
+            (widget.onOpenInTabStrip != null || widget.onDeleteTask != null))
+          ...<Widget>[
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Wrap(
+                spacing: 8,
+                children: <Widget>[
+                  if (widget.onOpenInTabStrip != null)
+                    OutlinedButton.icon(
+                      key: const Key('work-task-history-open-in-tabs'),
+                      onPressed: _actionInFlight
+                          ? null
+                          : () => _openHistoryTaskInTabs(detailTask),
+                      icon: const Icon(Icons.tab_unselected_rounded),
+                      label: const Text('在标签栏打开'),
+                    ),
+                  if (widget.onDeleteTask != null)
+                    TextButton.icon(
+                      key: const Key('work-task-history-delete'),
+                      onPressed: _actionInFlight
+                          ? null
+                          : () => _confirmDeleteHistoryTask(detailTask),
+                      icon: const Icon(Icons.delete_outline_rounded),
+                      label: const Text('删除任务'),
+                    ),
+                ],
+              ),
+            ),
+          ],
       ],
     );
+  }
+
+  /// 把历史详情里的任务放回标签栏，并退出历史视图——否则标签恢复了也看不到，
+  /// 因为标签栏只画在实时视图里。
+  Future<void> _openHistoryTaskInTabs(AgentTask task) async {
+    final openInTabs = widget.onOpenInTabStrip;
+    if (openInTabs == null) return;
+    final opened = await _runAction(openInTabs, task.id);
+    if (opened && mounted) {
+      setState(() {
+        _showHistory = false;
+        _historyDetailTaskId = null;
+      });
+    }
+  }
+
+  Future<void> _confirmDeleteHistoryTask(AgentTask task) async {
+    final onDelete = widget.onDeleteTask;
+    if (onDelete == null) return;
+    widget.onModalVisibilityChanged?.call(false);
+    bool confirmed;
+    try {
+      confirmed = await _confirmWorkTaskDeletion(
+        context,
+        task: task,
+        dialogContext: widget.dialogContext,
+      );
+    } finally {
+      widget.onModalVisibilityChanged?.call(true);
+    }
+    if (!confirmed) return;
+    final deleted = await _runAction(onDelete, task.id);
+    if (deleted && mounted) {
+      // 记录已经不在列表里了，回到列表层，避免停在一个已消失的详情上。
+      setState(() => _historyDetailTaskId = null);
+    }
   }
 
   void _openHistory() {

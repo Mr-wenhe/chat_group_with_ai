@@ -187,6 +187,53 @@ void main() {
     expect(decision.kind, WorkFollowUpKind.newArtifact);
   });
 
+  test('a new deliverable derived from a referenced artifact is not a revision',
+      () {
+    // 「生成一份 html……优化……这个 docx」里同时出现新建动词、程度词和来源指代。
+    // 指代的是**来源材料**，不是要覆盖的目标；把它当成修订请求会让分类器去问
+    // "要修改哪个旧文件"，而这个问题对"生成新文件"的请求没有答案。
+    for (final request in const [
+      '根据这个docx 再帮我生成一份html 使用相关前端技能 优化，内容就是这个 word文档的内容',
+      '按这份报告再生成一个网页，顺便优化排版',
+      'Generate a new html from this docx and polish the layout',
+    ]) {
+      final decision = policy.resolve(
+        request: request,
+        lastArtifactPaths: const [
+          '/workspace/量子力学研究报告.md',
+          '/workspace/量子力学研究报告.docx',
+        ],
+      );
+      expect(decision.kind, WorkFollowUpKind.newArtifact, reason: request);
+      expect(decision.artifactPath, isNull, reason: request);
+      expect(decision.autoRenameIfExists, isTrue, reason: request);
+    }
+  });
+
+  test('a new deliverable that also names a revision target keeps the target',
+      () {
+    // 新建词与真正的修订动词同时出现时，修订动词描述的仍是既有产物，
+    // 不能因为「生成」一词就把目标丢掉。
+    final decision = policy.resolve(
+      request: '生成一个副本，并修改 /workspace/report.md',
+      lastArtifactPaths: const ['/workspace/report.md'],
+    );
+    expect(decision.kind, WorkFollowUpKind.reviseArtifact);
+    expect(decision.artifactPath, '/workspace/report.md');
+  });
+
+  test('manner wording without a new-file verb still asks which artifact',
+      () {
+    final decision = policy.resolve(
+      request: '优化一下排版',
+      lastArtifactPaths: const [
+        '/workspace/a.md',
+        '/workspace/b.md',
+      ],
+    );
+    expect(decision.kind, WorkFollowUpKind.clarification);
+  });
+
   test('uses the failed command script for an unambiguous repair follow-up',
       () {
     final decision = policy.resolve(

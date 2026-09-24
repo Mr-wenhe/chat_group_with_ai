@@ -147,11 +147,13 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
     }
   }
 
-  bool _isFollowUpClarification(AgentTask task) {
-    final execution = _decodeExecutionMap(task.executionStateJson);
-    return execution['followUpKind'] == WorkFollowUpKind.clarification.name &&
-        execution['clarificationQuestion'] is String;
-  }
+  /// 与面板、聊天回答入口共用同一判据。
+  ///
+  /// 这里曾单独按 `followUpKind` 判断，而面板按 `clarificationRequired`
+  /// 判断：同一个暂停态，一个说"必须先回答"，另一个说"无需回答"，
+  /// 于是回复框不出现、"继续"又被拒绝，任务既答不了也退不出。
+  bool _isFollowUpClarification(AgentTask task) =>
+      WorkTaskClarification.isFollowUpPending(task);
 
   bool _requiresExplicitCommandRequest(AgentTask task) {
     return _decodeExecutionMap(
@@ -315,6 +317,14 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
     if (!_disposed) _taskUpdates.add(task);
   }
 
+  /// 触发一次任务列表刷新。
+  ///
+  /// [watchAllTasks] 只用这个信号重新读取 Hive，所以删除记录后也走这里：
+  /// 单独写一个方法，免得后来的人以为"发布一个已删除的任务"是想更新它。
+  void _publishTaskListChanged(AgentTask removed) {
+    if (!_disposed) _taskUpdates.add(removed);
+  }
+
   /// Progress callbacks originate from the in-process runner and may arrive
   /// after [stop] has committed cancellation. Keep them behind the same
   /// identity/cancellation check as checkpoint writes so a late UI update
@@ -352,7 +362,12 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
   }) async {
     // Data clear owns a hard lifecycle barrier. Late runner callbacks must not
     // recreate event files after the clear has removed the app-managed tree.
-    if (_disposed || _dataClearInProgress) return;
+    // 已删除的任务同理：它不该再产生任何日志，更不该在写入失败时被写回记录。
+    if (_disposed ||
+        _dataClearInProgress ||
+        _deletedTaskIds.contains(task.id)) {
+      return;
+    }
     try {
       await _eventStore.append(
         taskId: task.id,
@@ -375,8 +390,9 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
         task.lastError = '任务日志保存不完整：${sanitizeWorkTaskError(error)}';
       }
       try {
-        await _taskBox.put(task.id, task);
-        _publish(task);
+        // 走统一的写入口：这里曾经直写 `_taskBox.put`，绕过了删除墓碑，
+        // 于是删除后迟到的日志失败会把记录（带着"日志保存不完整"）写回来。
+        if (await _putTaskRecord(task)) _publish(task);
       } on Object {
         // The database may already be closing. The task outcome must remain
         // authoritative even when there is no storage left for this flag.

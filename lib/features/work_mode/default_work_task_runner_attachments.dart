@@ -463,8 +463,10 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
           ? '任务日志保存不完整：${sanitizeWorkTaskError(error)}'
           : task.lastError;
       try {
-        await database.agentTaskBox.put(task.id, task);
-        _taskUpdateSink?.call(task);
+        // 走 runner 既有的持久化路径：协调器的 checkpoint sink 会经过唯一的任务
+        // 写入口，从而尊重"任务已被删除"的闸门。这里曾经直写 agentTaskBox，
+        // 是同一族绕过闸门的写法。
+        await _persistCheckpoint(task);
       } on Object {
         // Logging is diagnostic and cannot replace the task outcome.
       }
