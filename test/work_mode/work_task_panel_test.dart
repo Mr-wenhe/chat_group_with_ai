@@ -15,7 +15,9 @@ import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
+import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
@@ -1890,6 +1892,88 @@ void main() {
           findsOneWidget);
       expect(find.text('执行角色：developer'), findsOneWidget);
     });
+
+    testWidgets('restores the tab of a hidden task that is resumed',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final task = _task(
+        id: 'resumed-hidden-task',
+        conversationId: 'group-resumed',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.failed;
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[task]);
+      await tester.pump();
+      await tester.pump();
+
+      const tabKey = Key('work-task-tab-resumed-hidden-task');
+      final tab = find.byKey(tabKey);
+      expect(tab, findsOneWidget);
+      await tester.tap(
+        find.descendant(of: tab, matching: find.byIcon(Icons.close_rounded)),
+      );
+      await tester.pump();
+      expect(tab, findsNothing);
+
+      // 追问续跑会把同一个任务从终态拉回执行中。此时标签必须自己回来，
+      // 否则运行中的任务在面板上既看不见、也没有任何恢复入口。
+      taskUpdates.add(<AgentTask>[task..status = AgentTaskStatus.planning]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(tab, findsOneWidget);
+    });
+
+    testWidgets('keeps a closed tab hidden while its task stays terminal',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final task = _task(
+        id: 'still-terminal-task',
+        conversationId: 'group-terminal',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.completed;
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[task]);
+      await tester.pump();
+      await tester.pump();
+
+      const tabKey = Key('work-task-tab-still-terminal-task');
+      final tab = find.byKey(tabKey);
+      await tester.tap(
+        find.descendant(of: tab, matching: find.byIcon(Icons.close_rounded)),
+      );
+      await tester.pump();
+      expect(tab, findsNothing);
+
+      // 终态任务仍然终止：不能因为“这条被关过”就在下一次流更新里把它放回来。
+      taskUpdates.add(<AgentTask>[
+        task..updatedAt = DateTime.utc(2026, 3, 1),
+      ]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(tab, findsNothing);
+    });
   });
 
   group('WorkTaskOverlayHost approval prompt', () {
@@ -1998,6 +2082,91 @@ void main() {
           await eventStore.close();
         });
       }
+    });
+  });
+
+  group('WorkTaskOverlayHost hidden tab persistence', () {
+    // 隐藏标记是持久化的。撤销如果只停在内存里，数据库会继续留着运行中任务的
+    // id，启动时又要重新撤销一次，历史列表也会把一条正在跑的任务标成
+    // 「已从标签栏隐藏」。
+    late Directory hiveDirectory;
+    late DatabaseService database;
+
+    setUpAll(() async {
+      hiveDirectory = await openLifecycleHive();
+      database = DatabaseService();
+    });
+
+    tearDownAll(() async {
+      await closeLifecycleHive(hiveDirectory, database).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {},
+      );
+    });
+
+    setUp(() async {
+      await database.appSettingsBox.delete('hidden_work_task_ids');
+    });
+
+    testWidgets('clears all persisted markers when hidden tasks are resumed',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+      });
+      final firstTask = _task(
+        id: 'first-persisted-hidden-task',
+        conversationId: 'group-persisted',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.failed;
+      final secondTask = _task(
+        id: 'second-persisted-hidden-task',
+        conversationId: 'group-persisted',
+        characterId: 'tester',
+      )..status = AgentTaskStatus.failed;
+      await tester.runAsync(() async {
+        await database.setWorkTaskHidden(firstTask.id, true);
+        await database.setWorkTaskHidden(secondTask.id, true);
+      });
+
+      await tester.pumpWidget(ProviderScope(
+        overrides: [databaseServiceProvider.overrideWithValue(database)],
+        child: MaterialApp(
+          home: WorkTaskOverlayHost(
+            taskStream: taskUpdates.stream,
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onStopTask: (_) async {},
+            onContinueTask: (_) async {},
+            child: const SizedBox.expand(),
+          ),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[firstTask, secondTask]);
+      await tester.pump();
+
+      firstTask.status = AgentTaskStatus.planning;
+      secondTask.status = AgentTaskStatus.runningTool;
+      taskUpdates.add(<AgentTask>[firstTask, secondTask]);
+      await tester.pump();
+      await tester.pump();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+
+      expect(
+        find.byKey(const Key('work-task-tab-first-persisted-hidden-task')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('work-task-tab-second-persisted-hidden-task')),
+        findsOneWidget,
+      );
+      expect(database.hiddenWorkTaskIds(), isEmpty);
     });
   });
 }

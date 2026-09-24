@@ -1403,11 +1403,21 @@ class DatabaseService {
   ///
   /// 不涉及 `agent_tasks` 记录，只是让用户在面板上看不到不想看的标签。
   Future<void> setWorkTaskHidden(String taskId, bool hidden) async {
+    await setWorkTasksHidden(<String>[taskId], hidden);
+  }
+
+  /// 批量更新工作任务标签的隐藏状态，避免多次读改写互相覆盖。
+  Future<void> setWorkTasksHidden(
+    Iterable<String> taskIds,
+    bool hidden,
+  ) async {
+    final ids = taskIds.toSet();
+    if (ids.isEmpty) return;
     final values = hiddenWorkTaskIds();
     if (hidden) {
-      values.add(taskId);
+      values.addAll(ids);
     } else {
-      values.remove(taskId);
+      values.removeAll(ids);
     }
     await appSettingsBox.put(_hiddenWorkTaskIdsKey, values.toList()..sort());
   }

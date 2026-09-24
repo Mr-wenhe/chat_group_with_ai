@@ -108,6 +108,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   /// 被用户关掉标签的任务 id。只影响标签展示，任务记录仍然完整保留，
   /// 关掉后依旧能在历史任务列表里查到。
   final Set<String> _hiddenWorkTaskIds = <String>{};
+  Future<void> _hiddenMarkerWrites = Future<void>.value();
   bool _isVisible = true;
   bool _isCollapsed = false;
   WorkSnapshotService? _snapshotService;
@@ -201,6 +202,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         const Stream<List<AgentTask>>.empty();
     _tasksSubscription = taskStream.listen((tasks) {
       if (!mounted) return;
+      _releaseHiddenMarkersForResumedTasks(tasks);
       final selectedId = _selectedTaskId;
       final visibleTasks = _visibleTasks(
         tasks,
@@ -491,6 +493,24 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   Future<void> _hideTask(String taskId) => _setTaskHidden(taskId, true);
 
+  /// 撤销已被续跑任务的隐藏标记。
+  ///
+  /// 标签栏只给终态任务提供关闭入口，正因如此「被关掉的标签」不会一直关着：
+  /// 追问续跑、重试或恢复会把同一个任务 id 从终态拉回执行中。若不在这里撤销
+  /// 标记，运行中的任务会被隐藏过滤挡在标签栏之外，而 X 入口又只对终态任务
+  /// 开放，用户就再也无法把它找回来。
+  void _releaseHiddenMarkersForResumedTasks(List<AgentTask> tasks) {
+    if (_hiddenWorkTaskIds.isEmpty) return;
+    final resumedTaskIds = tasks
+        .where(
+            (task) => !task.isTerminal && _hiddenWorkTaskIds.contains(task.id))
+        .map((task) => task.id)
+        .toList(growable: false);
+    if (resumedTaskIds.isEmpty) return;
+    _hiddenWorkTaskIds.removeAll(resumedTaskIds);
+    unawaited(_persistTasksHidden(resumedTaskIds, false));
+  }
+
   /// 切换某个任务标签的显示状态。
   ///
   /// 只改标签可见性，不动 `agent_tasks` 记录；关掉的任务仍然能在
@@ -513,11 +533,26 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         _selectedTaskId = _tasks.isEmpty ? null : _tasks.first.id;
       }
     });
-    try {
-      await ref.read(databaseServiceProvider).setWorkTaskHidden(taskId, hidden);
-    } on Object {
-      // 见方法注释：界面已经更新，隐藏状态最差只在本次会话生效。
-    }
+    await _persistTaskHidden(taskId, hidden);
+  }
+
+  Future<void> _persistTaskHidden(String taskId, bool hidden) async {
+    await _persistTasksHidden(<String>[taskId], hidden);
+  }
+
+  Future<void> _persistTasksHidden(
+    Iterable<String> taskIds,
+    bool hidden,
+  ) async {
+    final ids = List<String>.unmodifiable(taskIds);
+    _hiddenMarkerWrites = _hiddenMarkerWrites.then((_) async {
+      try {
+        await ref.read(databaseServiceProvider).setWorkTasksHidden(ids, hidden);
+      } on Object {
+        // 见 [_setTaskHidden] 注释：界面已经更新，隐藏状态最差只在本次会话生效。
+      }
+    });
+    await _hiddenMarkerWrites;
   }
 
   /// 队列里被折叠的任务数，不含用户手动关掉的标签。
