@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:io';
 import 'dart:typed_data';
 
 import 'package:audioplayers/audioplayers.dart';
@@ -38,9 +39,14 @@ class AudioplayersVoiceSink implements VoicePlaybackSink {
 
     try {
       await player.play(BytesSource(wavBytes, mimeType: 'audio/wav'));
-    } catch (_) {
-      // 播放未能启动：按“完成”处理，不阻塞串行队列。
-      complete();
+    } catch (e) {
+      final retried = await _retryAfterCreatingMissingDir(
+        player: player,
+        wavBytes: wavBytes,
+        error: e,
+      );
+      // 播放未能启动且修复重试失败：按“完成”处理，不阻塞串行队列。
+      if (!retried) complete();
     }
     await completer.future;
 
@@ -54,6 +60,29 @@ class AudioplayersVoiceSink implements VoicePlaybackSink {
       await player.dispose();
     } catch (_) {
       // 忽略平台侧销毁异常。
+    }
+  }
+
+  Future<bool> _retryAfterCreatingMissingDir({
+    required AudioPlayer player,
+    required Uint8List wavBytes,
+    required Object error,
+  }) async {
+    if (!Platform.isMacOS || error is! PathNotFoundException) return false;
+    final missingPath = error.path;
+    if (missingPath == null || missingPath.isEmpty) return false;
+    final slashIndex = missingPath.lastIndexOf('/');
+    if (slashIndex <= 0) return false;
+    final parentDirPath = missingPath.substring(0, slashIndex);
+    try {
+      final parentDir = Directory(parentDirPath);
+      if (!await parentDir.exists()) {
+        await parentDir.create(recursive: true);
+      }
+      await player.play(BytesSource(wavBytes, mimeType: 'audio/wav'));
+      return true;
+    } catch (_) {
+      return false;
     }
   }
 

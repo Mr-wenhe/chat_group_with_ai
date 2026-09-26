@@ -410,6 +410,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _db = ref.read(databaseServiceProvider);
     // 读取本会话此前保存过的流式语音播报开关（默认关闭）。
     _voiceBroadcastEnabled = _db.voiceBroadcastEnabled(widget.groupId);
+    // 会话开关可能在上次已开启；进入页面时即补建播报器，避免
+    // 只在用户再次手动切换开关后才可播报。
+    if (_voiceBroadcastEnabled) {
+      _ensureVoiceBroadcaster();
+    }
     _credentialResolver =
         widget.credentialResolver ?? SecureApiCredentialResolver();
     _governanceStore = AiGovernanceStore.forDatabase(_db);
