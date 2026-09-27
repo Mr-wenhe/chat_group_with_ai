@@ -54,6 +54,9 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
         _workModeSession.setEnabled(
           WorkModeConfigService(db: _db).isWorkMode(widget.groupId),
         );
+        _roundtableModeSession.setEnabled(
+          RoundtableModeConfigService(db: _db).isEnabled(widget.groupId),
+        );
         _hasAnyApiConfig = loaded.hasAnyApiConfig;
         _isAutoChatEnabled = _governanceStore.budgetSettings.autoChatEnabled;
         _autoChatStatus = loaded.hasAnyApiConfig
@@ -112,7 +115,7 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
             : _ChatRoomPageState._autoChatInitialDelay;
         _autoChatStartTimer = Timer(delay, () {
           _autoChatStartTimer = null;
-          if (_canTouchUi && !_workModeEnabled) _startAutoChat();
+          if (_canTouchUi && !_autoChatPausedByWorkMode) _startAutoChat();
         });
       }
     } on ChatRoomLoadException catch (error) {
@@ -451,7 +454,7 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       _autoChatStatus =
           enabled ? AutoChatStatus.waiting : AutoChatStatus.paused;
     });
-    if (enabled && !_workModeEnabled) {
+    if (enabled && !_autoChatPausedByWorkMode) {
       _startAutoChat();
     } else {
       _autoChatScheduler.stop();
@@ -463,6 +466,11 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
   /// 开启：中断进行中的自动发言流式输出并停掉调度器，再检查可恢复的任务。
   /// 关闭：只关闭本会话的 UI 开关；全局工作任务仍由执行面板控制。
   Future<void> _toggleWorkMode(bool enabled) async {
+    if (enabled && _roundtableModeEnabled) {
+      await RoundtableModeConfigService(db: _db)
+          .setEnabled(widget.groupId, false);
+      _roundtableModeSession.setEnabled(false);
+    }
     await WorkModeConfigService(db: _db).setWorkMode(widget.groupId, enabled);
     _workModeSession.setEnabled(enabled);
     if (enabled) {
@@ -490,6 +498,18 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
     }
   }
 
+  /// 切换圆桌会议模式；与工作模式互斥，同时保留群聊空闲自动发言。
+  Future<void> _toggleRoundtableMode(bool enabled) async {
+    if (enabled && _workModeEnabled) {
+      await WorkModeConfigService(db: _db).setWorkMode(widget.groupId, false);
+      _workModeSession.setEnabled(false);
+    }
+    await RoundtableModeConfigService(db: _db)
+        .setEnabled(widget.groupId, enabled);
+    _roundtableModeSession.setEnabled(enabled);
+    if (_canTouchUi) setState(() {});
+  }
+
   /// 构建 AppBar 下方的会话控件（自动发言 / 语音播报 / 工作模式开关）。
   ///
   /// 私聊只展示工作模式；流式语音播报属于群聊特性，默认关闭。语音服务未
@@ -500,12 +520,19 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       showAutoChat: !_isDirectChat,
       autoChatEnabled: _isAutoChatEnabled && _hasAnyApiConfig,
       workModeEnabled: _workModeEnabled,
+      showRoundtableMode: !_isDirectChat,
+      roundtableModeEnabled: _roundtableModeEnabled,
+      roundtableModeAvailable: !_isAiReplying,
       autoChatAvailable: _hasAnyApiConfig,
       autoChatTooltip: _autoChatStatusText,
       statusAlert: _autoChatStatusAlert,
       workModeTooltip: _workModeEnabled ? '工作模式已开启 · 敏感操作需确认' : '工作模式已关闭',
       onAutoChatChanged: _toggleAutoChat,
       onWorkModeChanged: _toggleWorkMode,
+      roundtableModeTooltip: _roundtableModeEnabled
+          ? '圆桌会议模式已开启 · 用户事件先联网搜索，再由群成员讨论'
+          : '开启圆桌会议模式（用户事件联网搜索后由群成员讨论）',
+      onRoundtableModeChanged: _toggleRoundtableMode,
       showVoiceBroadcast: !_isDirectChat && !kIsWeb,
       voiceBroadcastEnabled: _voiceBroadcastEnabled,
       voiceBroadcastAvailable: usable,

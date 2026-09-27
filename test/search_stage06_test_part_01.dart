@@ -18,6 +18,24 @@ void _registerSearchStage06TestPart1() {
       expect(detector.detect('Explain what a mutex is').shouldSearch, isFalse);
     });
 
+    test('detects real-time silver price as finance search', () {
+      final decision = detector.detect('今天实时银价');
+
+      expect(decision.shouldSearch, isTrue);
+      expect(decision.category, SearchCategory.finance);
+      expect(decision.freshness, SearchFreshness.day);
+      expect(decision.reasonCode, 'price_or_market');
+    });
+
+    test('routes recency, news, and search keywords into Web Search intent', () {
+      for (final query in ['最近有什么新闻', '搜索最新版本', '最近的市场消息']) {
+        final decision = detector.detect(query);
+
+        expect(decision.shouldSearch, isTrue, reason: query);
+        expect(decision.freshness, isNot(SearchFreshness.any), reason: query);
+      }
+    });
+
     test('generated origins never grant search permission', () {
       for (final origin in [
         SearchMessageOrigin.ai,

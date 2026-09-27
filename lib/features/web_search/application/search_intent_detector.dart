@@ -144,7 +144,18 @@ class SearchIntentDetector {
     if (_containsAny(
       value,
       lower,
-      const ['价格', '股价', '汇率', '金融', 'price', 'stock', 'exchange rate'],
+      const [
+        '价格',
+        '银价',
+        '白银',
+        '黄金',
+        '股价',
+        '汇率',
+        '金融',
+        'price',
+        'stock',
+        'exchange rate',
+      ],
     )) {
       return SearchCategory.finance;
     }
@@ -203,7 +214,16 @@ class SearchIntentDetector {
     if (_containsAny(
       value,
       lower,
-      const ['今天', '今日', '现在', 'today', 'now'],
+      const [
+        '今天',
+        '今日',
+        '现在',
+        '实时',
+        'today',
+        'now',
+        'real-time',
+        'live',
+      ],
     )) {
       return SearchFreshness.day;
     }
@@ -217,7 +237,15 @@ class SearchIntentDetector {
       return SearchFreshness.year;
     }
     if (_containsAny(
-        value, lower, const ['最新', '当前', '最近', 'latest', 'current'])) {
+        value,
+        lower,
+        const [
+          '最新',
+          '当前',
+          '最近',
+          'latest',
+          'current',
+        ])) {
       return SearchFreshness.month;
     }
     return SearchFreshness.any;
@@ -288,11 +316,15 @@ class SearchIntentDetector {
     '今天',
     '今日',
     '现在',
+    '实时',
     '几点',
     '日期',
     '时间',
     '新闻',
     '价格',
+    '银价',
+    '白银',
+    '黄金',
     '股价',
     '汇率',
     '天气',
@@ -305,6 +337,8 @@ class SearchIntentDetector {
     '发布',
     'latest',
     'current',
+    'real-time',
+    'live',
     'today',
     'now',
     'news',

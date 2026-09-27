@@ -8,18 +8,19 @@ class SearchProviderItem {
   final String title;
   final String snippet;
   final Uri url;
+  final bool hasSourceUrl;
   final DateTime? publishedAt;
   final double? providerScore;
   final String? language;
 
-  /// Interactive browser pages may legitimately remain on public HTTP. All
-  /// network providers keep the secure HTTPS default.
+  /// Legacy metadata from removed visible-browser results. Live search routes
+  /// reject this flag before constructing a result snapshot.
   final bool allowInsecureHttp;
 
   SearchProviderItem({
     required String title,
     required String snippet,
-    required Uri url,
+    Uri? url,
     this.publishedAt,
     double? providerScore,
     String? language,
@@ -37,7 +38,11 @@ class SearchProviderItem {
           redactSecrets: true,
           redactOpaqueTokens: true,
         ),
-        url = validateSearchUrl(url, allowInsecureHttp: allowInsecureHttp),
+        hasSourceUrl = url != null,
+        url = url == null
+            ? Uri()
+            : validateSearchUrl(url,
+                allowInsecureHttp: allowInsecureHttp),
         providerScore = providerScore?.isFinite == true ? providerScore : null,
         language = normalizeSearchLanguage(language);
 }

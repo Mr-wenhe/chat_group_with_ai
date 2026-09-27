@@ -7,11 +7,13 @@ import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import '../models/search_failure_factory.dart';
 import '../models/search_models.dart' as domain;
 import '../providers/search_provider.dart';
+import '../providers/duckduckgo_result_page_enricher.dart';
 import 'search_coordinator_support.dart';
 import 'search_intent_detector.dart';
 import 'search_provider_chain.dart';
 import 'search_provider_route.dart';
 import 'search_query_planner.dart';
+import 'search_flow_logger.dart';
 import 'search_retry_policy.dart';
 import 'search_run_state.dart';
 import 'search_turn_cache.dart';
@@ -42,6 +44,7 @@ class SearchCoordinator {
   final Uuid _uuid;
   final List<SearchProviderRoute> _routes;
   final Duration endToEndBudget;
+  final DuckDuckGoResultPageEnricher? duckDuckGoPageEnricher;
 
   late final SearchCoordinatorSupport _support = SearchCoordinatorSupport(
     store: store,
@@ -52,6 +55,7 @@ class SearchCoordinator {
     routes: _routes,
     retryPolicy: retryPolicy,
     clock: _clock,
+    duckDuckGoPageEnricher: duckDuckGoPageEnricher,
   );
 
   SearchCoordinator({
@@ -67,6 +71,7 @@ class SearchCoordinator {
     SearchIntentDetector? intentDetector,
     SearchQuerySanitizer? sanitizer,
     this.queryPlanner,
+    this.duckDuckGoPageEnricher,
     SearchRetrySleep sleep = searchRetrySleep,
     DateTime Function()? clock,
     Duration totalBudget = searchRetryBudget,
@@ -215,6 +220,18 @@ class SearchCoordinator {
       return snapshot;
     }
 
+    SearchFlowLogger.event(
+      'provider_dispatch',
+      query: prepared.query,
+      fields: {
+        'requestId': prepared.requestId,
+        'conversationId': conversationId,
+        'routeCount': _routes.length,
+        'routes': _routes.map((route) => route.id).toList(growable: false),
+        'policy': effective.name,
+      },
+    );
+
     _emit(onStatus, SearchRunStatus.planning, request: prepared);
     final snapshot = _routes.isNotEmpty
         ? await _searchProvidersCached(
@@ -229,7 +246,20 @@ class SearchCoordinator {
             failure: buildSearchFailure(
               type: SearchFailureType.invalidConfiguration,
             ),
-          );
+        );
+
+    SearchFlowLogger.event(
+      'provider_complete',
+      query: prepared.query,
+      fields: {
+        'requestId': prepared.requestId,
+        'provider': snapshot.provider,
+        'hasResults': snapshot.hasResults,
+        'hasFailure': snapshot.hasFailure,
+        'failureType': snapshot.failure?.type.name,
+        'fromCache': snapshot.fromCache,
+      },
+    );
 
     _emit(
       onStatus,

@@ -28,16 +28,24 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         if (!isAutoChat) _consecutiveRound++;
       });
 
-      // 私聊固定由对方角色回复；群聊则由意图编排器挑选发言者。
-      var charactersToReply = _isDirectChat
+      final roundtableMode =
+          _roundtableModeEnabled && !_isDirectChat && !isAutoChat;
+      final roundtableParticipants =
+          roundtableMode ? _prepareRoundtableParticipants(mentionedIds) : null;
+      if (roundtableMode && roundtableParticipants == null) return;
+
+      // 私聊固定由对方回复；圆桌模式由所有可发言成员讨论搜索结果；
+      // 普通群聊仍由拟人化编排器挑选本轮发言者。
+      final charactersToReply = _isDirectChat
           ? _directReplyCharacters()
-          : _charactersForIntents(_selectGroupReplyIntents(
-              userMessage:
-                  userMessage!, // nullable param, non-null at this point
-              mentionedIds: mentionedIds,
-              isAutoChat: isAutoChat,
-              userSentiment: userSentiment,
-            ));
+          : roundtableMode
+              ? roundtableParticipants!
+              : _charactersForIntents(_selectGroupReplyIntents(
+                  userMessage: userMessage!,
+                  mentionedIds: mentionedIds,
+                  isAutoChat: isAutoChat,
+                  userSentiment: userSentiment,
+                ));
       if (charactersToReply.isEmpty) {
         // 有人有资格但编排器选择“本轮沉默”：静默收尾，不算异常。
         if (_characters.any(_isEligibleToReply)) return;
@@ -70,7 +78,26 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         userMessage: userMessage,
         currentUserMessage: currentUserMessage,
         isAutoChat: isAutoChat,
+        searchEnabled: roundtableMode ||
+            charactersToReply.any((character) =>
+                character.webSearchEnabled || character.zhipuSearchAnswerOnly),
+        category: roundtableMode ? web_search.SearchCategory.news : null,
+        freshness: roundtableMode ? web_search.SearchFreshness.week : null,
+        forceSearch: roundtableMode ||
+            charactersToReply
+                .any((character) => character.zhipuSearchAnswerOnly),
       );
+      if (roundtableMode && searchTurnContext.snapshot?.hasResults != true) {
+        _clearPendingRoundtableMentions(mentionedIds);
+        if (mounted && !isAutoChat) {
+          AppToast.show(
+            context,
+            '未获得可用的热点搜索结果，本轮圆桌讨论未开始。请检查当前群聊的联网搜索设置和搜索服务状态。',
+            icon: Icons.info_outline_rounded,
+          );
+        }
+        return;
+      }
       final repliedIds = <String>[];
       for (final character in charactersToReply) {
         final wasPendingReply = _pendingMentionedIds.contains(character.id);
@@ -169,5 +196,37 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
       // never stranded while the page remains active.
       if (!isAutoChat) await _drainQueuedUserMessage();
     }
+  }
+
+  List<AICharacter>? _prepareRoundtableParticipants(
+    List<String>? mentionedIds,
+  ) {
+    final hiddenNewsCharacterIds = _characters
+        .where((character) => character.zhipuSearchAnswerOnly)
+        .map((character) => character.id)
+        .toList(growable: false);
+    _clearPendingRoundtableMentions(hiddenNewsCharacterIds);
+    final participants = _roundtableParticipants(
+      mentionedIds: mentionedIds ?? const [],
+    );
+    if (participants.isEmpty) {
+      _clearPendingRoundtableMentions(mentionedIds);
+      if (mounted) {
+        AppToast.show(
+          context,
+          '圆桌会议需要至少一位当前可发言的普通群成员；新闻角色只用于辅助联网搜索，不会在群聊中发言。',
+          icon: Icons.info_outline_rounded,
+        );
+      }
+      return null;
+    }
+    _pendingReplyIntents.clear();
+    return participants;
+  }
+
+  void _clearPendingRoundtableMentions(List<String>? mentionedIds) {
+    if (mentionedIds == null || mentionedIds.isEmpty) return;
+    final mentioned = mentionedIds.toSet();
+    _pendingMentionedIds.removeWhere(mentioned.contains);
   }
 }

@@ -348,60 +348,6 @@ void main() {
       expect(snapshot.results, hasLength(2));
     });
 
-    test('escalates an empty HTML result to the visible browser route',
-        () async {
-      final htmlCalls = <SearchProviderKind>[];
-      final browserCalls = <SearchProviderKind>[];
-      final browserResponse = SearchProviderResponse(
-        items: [
-          SearchProviderItem(
-            title: '公开网页',
-            snippet: '用户确认后的公开内容',
-            url: Uri.parse('https://example.com/browser'),
-          ),
-        ],
-        sourceProvider: 'visibleBrowser',
-      );
-      final chain = SearchProviderChain(
-        routes: [
-          SearchProviderRoute(
-            provider: _RecordingProvider(
-              kind: SearchProviderKind.keylessHtml,
-              calls: htmlCalls,
-              response: _noResultsResponse(),
-            ),
-            isFallback: true,
-            id: 'builtin-keyless-html',
-          ),
-          SearchProviderRoute(
-            provider: _RecordingProvider(
-              kind: SearchProviderKind.keylessHtml,
-              calls: browserCalls,
-              response: browserResponse,
-            ),
-            isFallback: true,
-            isVisibleBrowser: true,
-            id: 'builtin-visible-browser',
-          ),
-        ],
-        retryPolicy: const SearchRetryPolicy(
-          maxRetries: 0,
-          sleep: _noSleep,
-        ),
-      );
-
-      final snapshot = await chain.execute(
-        request: _request('browser fallback'),
-        cancelToken: null,
-        onStatus: null,
-      );
-
-      expect(htmlCalls, hasLength(1));
-      expect(browserCalls, hasLength(1));
-      expect(snapshot.provider, 'visibleBrowser');
-      expect(snapshot.results, hasLength(1));
-    });
-
     test('coordinator records HTML sources in the security audit', () async {
       final instant = _EmptyInstantAnswerProvider();
       final store = MemoryGovernanceStore(

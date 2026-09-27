@@ -22,8 +22,8 @@ class ConversationStatusAlert {
 
 /// 聊天页顶部的紧凑控制按钮。
 ///
-/// 群聊显示“自动发言”“语音播报”和“工作模式”三个 36×36 按钮；私聊只显示
-/// 工作模式（语音播报属于群聊流式 TTS 播报）。正常态的状态说明放在 Tooltip 中，
+/// 群聊显示“自动发言”“语音播报”“工作模式”和“圆桌会议模式”按钮；私聊只显示
+/// 工作模式（语音播报和圆桌会议属于群聊特性）。正常态的状态说明放在 Tooltip 中，
 /// 避免常驻状态栏挤占消息空间；只有 [statusAlert] 非空（例外态）时才多出一行。
 class CompactConversationControls extends StatelessWidget {
   const CompactConversationControls({
@@ -36,6 +36,11 @@ class CompactConversationControls extends StatelessWidget {
     required this.workModeTooltip,
     required this.onAutoChatChanged,
     required this.onWorkModeChanged,
+    this.showRoundtableMode = false,
+    this.roundtableModeEnabled = false,
+    this.roundtableModeAvailable = true,
+    this.roundtableModeTooltip = '',
+    this.onRoundtableModeChanged,
     this.statusAlert,
     this.showVoiceBroadcast = false,
     this.voiceBroadcastEnabled = false,
@@ -52,6 +57,11 @@ class CompactConversationControls extends StatelessWidget {
   final String workModeTooltip;
   final ValueChanged<bool> onAutoChatChanged;
   final ValueChanged<bool> onWorkModeChanged;
+  final bool showRoundtableMode;
+  final bool roundtableModeEnabled;
+  final bool roundtableModeAvailable;
+  final String roundtableModeTooltip;
+  final ValueChanged<bool>? onRoundtableModeChanged;
 
   /// 例外态提示；为 null 时完全不占空间。
   final ConversationStatusAlert? statusAlert;
@@ -132,6 +142,21 @@ class CompactConversationControls extends StatelessWidget {
                       onPressed: () => onWorkModeChanged(!workModeEnabled),
                       cs: cs,
                     ),
+                    if (showRoundtableMode) ...[
+                      const SizedBox(width: 2),
+                      _toggle(
+                        key: const Key('roundtable-mode-toggle'),
+                        tooltip: roundtableModeTooltip,
+                        enabled: roundtableModeEnabled,
+                        available: roundtableModeAvailable,
+                        icon: roundtableModeEnabled
+                            ? Icons.table_restaurant_rounded
+                            : Icons.table_restaurant_outlined,
+                        onPressed: () => onRoundtableModeChanged
+                            ?.call(!roundtableModeEnabled),
+                        cs: cs,
+                      ),
+                    ],
                   ],
                 ),
               ),

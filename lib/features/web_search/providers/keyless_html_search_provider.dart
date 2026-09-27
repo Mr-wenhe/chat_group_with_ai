@@ -18,8 +18,8 @@ import 'search_provider_http_support.dart';
 /// Keyless HTML search against a public DuckDuckGo result page.
 ///
 /// The page is treated as untrusted evidence. Login, CAPTCHA, and paywall
-/// pages become an explicit provider failure so a later visible-browser route
-/// can take over without attempting to bypass the challenge.
+/// pages become an explicit provider failure so the chain can stop safely
+/// without attempting to bypass the challenge.
 class KeylessHtmlSearchProvider implements SearchProvider {
   static const String endpoint = 'https://html.duckduckgo.com/html/';
   static const String searchPath = '/html/';

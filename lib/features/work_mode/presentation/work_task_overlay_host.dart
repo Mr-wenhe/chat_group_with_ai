@@ -12,9 +12,7 @@ import 'package:chat_group/features/work_mode/presentation/work_change_approval_
 import 'package:chat_group/features/work_mode/presentation/work_task_generic_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
-import 'package:chat_group/features/work_mode/presentation/visible_browser_panel.dart';
 import 'package:chat_group/features/work_mode/providers/work_task_providers.dart';
-import 'package:chat_group/features/work_mode/visible_browser_service.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
@@ -62,7 +60,6 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
   final WorkTaskUndoPreview? undoPreviewFor;
   final WorkSnapshotService? snapshotService;
   final String Function(String characterId)? characterNameFor;
-  final VisibleBrowserService? browserService;
 
   const WorkTaskOverlayHost({
     super.key,
@@ -90,7 +87,6 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
     this.undoPreviewFor,
     this.snapshotService,
     this.characterNameFor,
-    this.browserService,
   });
 
   @override
@@ -107,7 +103,6 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   StreamSubscription<List<AgentTask>>? _tasksSubscription;
   StreamSubscription<String?>? _conversationSubscription;
-  StreamSubscription<List<VisibleBrowserSession>>? _browserSubscription;
   WorkTaskCoordinator? _coordinator;
   WorkTaskEventStore? _eventStore;
   List<AgentTask> _tasks = const <AgentTask>[];
@@ -122,10 +117,6 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   bool _isVisible = true;
   bool _isCollapsed = false;
   WorkSnapshotService? _snapshotService;
-  VisibleBrowserService? _browserService;
-  List<VisibleBrowserSession> _browserSessions =
-      const <VisibleBrowserSession>[];
-  String? _selectedBrowserSessionId;
   final Set<String> _approvalPromptInFlight = <String>{};
   late final WorkTaskOverlayController _overlayController;
   late final WorkTaskOverlayOpenTask _overlayOpenCallback;
@@ -181,31 +172,6 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         // Lightweight widget tests may not initialize DatabaseService; the
         // undo control remains disabled until a production service is wired.
       }
-    }
-    _browserService = widget.browserService;
-    if (_browserService == null) {
-      try {
-        _browserService = ref.read(visibleBrowserServiceProvider);
-      } on Object {
-        // A lightweight host can omit the app-scoped browser service.
-      }
-    }
-    final browserService = _browserService;
-    if (browserService != null) {
-      _browserSessions = browserService.sessions;
-      _selectedBrowserSessionId =
-          _browserSessions.isEmpty ? null : _browserSessions.last.id;
-      _browserSubscription = browserService.watchSessions().listen((sessions) {
-        if (!mounted) return;
-        setState(() {
-          _browserSessions = sessions;
-          if (_browserSessions
-              .every((session) => session.id != _selectedBrowserSessionId)) {
-            _selectedBrowserSessionId =
-                _browserSessions.isEmpty ? null : _browserSessions.last.id;
-          }
-        });
-      });
     }
     final taskStream = widget.taskStream ??
         _coordinator?.watchAllTasks() ??
@@ -264,7 +230,6 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     _coordinator?.setFolderGrantConsent(null);
     _tasksSubscription?.cancel();
     _conversationSubscription?.cancel();
-    _browserSubscription?.cancel();
     super.dispose();
   }
 
@@ -278,27 +243,9 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     return Stack(
       children: <Widget>[
         Positioned.fill(child: widget.child),
-        if (_browserSessions.isNotEmpty)
-          _positionedBrowserPanel(
-            isWide: isWide,
-            availableWidth: viewport.width,
-            availableHeight: viewport.height,
-            child: VisibleBrowserPanel(
-              sessions: _browserSessions,
-              selectedSessionId: _selectedBrowserSessionId,
-              onSelectSession: (sessionId) =>
-                  setState(() => _selectedBrowserSessionId = sessionId),
-              onContinue: _continueBrowser,
-              onClose: _closeBrowser,
-              onBringToForeground: _focusBrowser,
-              onInstallRuntime: _installBrowserRuntime,
-            ),
-          ),
         if (hasTasks && _isVisible && !_isCollapsed)
           _positionedPanel(
             isWide: isWide,
-            availableHeight: viewport.height,
-            splitForBrowser: _browserSessions.isNotEmpty,
             child: WorkTaskPanel(
               tasks: _tasks,
               hiddenTaskCount: _hiddenTaskCount,
@@ -401,8 +348,6 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   Widget _positionedPanel({
     required bool isWide,
-    required double availableHeight,
-    required bool splitForBrowser,
     required Widget child,
   }) {
     if (isWide) {
@@ -420,42 +365,9 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       left: 12,
       right: 12,
       bottom: 12,
-      height: splitForBrowser ? _splitPanelHeight(availableHeight) : 470,
+      height: 470,
       child: child,
     );
-  }
-
-  Widget _positionedBrowserPanel({
-    required bool isWide,
-    required double availableWidth,
-    required double availableHeight,
-    required Widget child,
-  }) {
-    if (isWide) {
-      // Keep the two non-modal panels side by side even at the default
-      // 800px widget-test/desktop width; neither panel may absorb the other.
-      final width = (availableWidth - 468).clamp(300.0, 420.0);
-      return Positioned(
-        key: const Key('visible-browser-panel-wide'),
-        left: 16,
-        top: 72,
-        bottom: 16,
-        width: width,
-        child: child,
-      );
-    }
-    return Positioned(
-      key: const Key('visible-browser-panel-top'),
-      left: 12,
-      right: 12,
-      top: 12,
-      height: _splitPanelHeight(availableHeight),
-      child: child,
-    );
-  }
-
-  double _splitPanelHeight(double availableHeight) {
-    return ((availableHeight - 36) / 2).clamp(180.0, 470.0);
   }
 
   Widget _positionedMiniBar({required bool isWide, required Widget child}) {
@@ -618,27 +530,6 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   Future<void> _stopTask(String taskId) {
     return widget.onStopTask?.call(taskId) ?? _coordinator!.stop(taskId);
-  }
-
-  Future<void> _continueBrowser(String sessionId) async {
-    await _browserService?.continueSession(sessionId);
-  }
-
-  Future<void> _closeBrowser(String sessionId) async {
-    await _browserService?.closeSession(sessionId);
-  }
-
-  Future<void> _focusBrowser(String sessionId) async {
-    await _browserService?.bringToForeground(sessionId);
-  }
-
-  Future<void> _installBrowserRuntime() async {
-    final installed = await _browserService?.openRuntimeInstallFlow() ?? false;
-    if (!installed && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('无法打开官方 WebView 运行时安装流程。')),
-      );
-    }
   }
 
   Future<void> _continueTask(String taskId) {

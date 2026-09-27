@@ -7,6 +7,14 @@ void main() {
       expect(CharacterPreset.presets.length, greaterThanOrEqualTo(14));
       final names = CharacterPreset.presets.map((p) => p.name);
       expect(names, containsAll(['代码大神', 'Bug 修复师', '产品参谋', '网页研究员']));
+      expect(names, contains('新闻角色'));
+    });
+
+    test('新闻角色固定启用智谱搜索问答模式', () {
+      final preset =
+          CharacterPreset.presets.singleWhere((p) => p.name == '新闻角色');
+      expect(preset.suggestedProvider, 'zhipu');
+      expect(preset.zhipuSearchAnswerOnly, isTrue);
     });
 
     test('每个预设的关键字段均非空且年龄合法', () {

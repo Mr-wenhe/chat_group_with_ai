@@ -23,12 +23,13 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
         : _parseMentions(userMessage ?? '').toSet();
     // 所有回复入口都在实际生成前复检，避免排队期间禁言仍然发言。
     if (!_mayAutoPick(character, mentionedIds: userMentionedIds)) return '';
-    if (isAutoChat && _workModeEnabled) {
+    if (isAutoChat && _autoChatPausedByWorkMode) {
       // No stream is created on this path, so any transition latch must not
       // survive until the next unrelated automatic reply.
       if (!_isStreaming) _discardCurrentStream = false;
       return '';
     }
+    if (isAutoChat && character.zhipuSearchAnswerOnly) return '';
     // 并发兜底：同一角色正在执行 agentic 任务时，auto-chat / 其他并发路径
     // 不得触发同一角色的普通 LLM 回复，否则会出现「agentic 兜底文案 + 普通
     // LLM 泄漏代码」两条消息的 Bug（auto-chat 传 userMessage=null 会绕过工作任务
@@ -61,6 +62,19 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       _lastReplyBlockReason = null;
     }
 
+    if (character.zhipuSearchAnswerOnly &&
+        searchTurnContext?.snapshot?.hasResults != true) {
+      const failureReply = '未获得可用的智谱网页搜索结果，当前信息不足，无法可靠回答。';
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: character.id,
+        senderType: 'ai',
+        content: failureReply,
+        webSearchSnapshot: searchTurnContext?.snapshot?.toMap(),
+      ));
+      return failureReply;
+    }
+
     final provider = ApiProvider.values.firstWhere(
       (p) => p.name == config.provider,
       orElse: () => ApiProvider.deepseek,
@@ -74,10 +88,15 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       mentionedIds: userMentionedIds,
     );
 
-    // The snapshot was prepared once by _runAiRound. A missing snapshot is a
-    // valid outcome (policy off, consent denied, stable question, or failure),
-    // and must not cause this character to search again.
-    final webSearch = searchTurnContext?.snapshot;
+    // A roundtable user turn has one shared search snapshot for every member;
+    // outside roundtable mode, each character keeps its own search setting.
+    final isRoundtableUserTurn =
+        _roundtableModeEnabled && !_isDirectChat && !isAutoChat;
+    final webSearch = isRoundtableUserTurn ||
+            character.webSearchEnabled ||
+            character.zhipuSearchAnswerOnly
+        ? searchTurnContext?.snapshot
+        : null;
     // 查询模型能力（是否支持图片输入），决定要不要拼多模态内容。
     final capability = _aiGateway.capability(provider, config.modelName);
     final apiMessages = _withWebSearchContext(
@@ -110,7 +129,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       maxTokens: replyInputBudget,
     );
     // 上面的 await 期间用户可能切到工作模式，此时放弃这次自动聊天回复。
-    if (isAutoChat && _workModeEnabled) {
+    if (isAutoChat && _autoChatPausedByWorkMode) {
       _discardCurrentStream = false;
       return '';
     }
@@ -134,6 +153,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
 
     // 开启流式语音播报时，为这条回复新建切句缓冲（无音色则整条不朗读）。
     _beginVoiceReply(character);
+    final hideZhipuSourceAttribution =
+        webSearch?.provider.trim().toLowerCase() == 'zhipu-native';
     final session = StreamingReplySession();
     _streamingSession = session;
     if (_canTouchUi) _setUiState(() {});
@@ -154,6 +175,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       ),
       // 每收到一段增量就直接改临时消息的 content 并请求重绘（不走 setState 全量重建）。
       onDraft: (draft) {
+        // 智谱来源标记可能被拆在多个增量中，等完整回复清理后再展示。
+        if (hideZhipuSourceAttribution) return;
         temp.content = draft;
         _conversationController.updateStreamingDraft(draft);
         _flushStreamingUi();
@@ -250,6 +273,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       webSearch == null
           ? const <String>[]
           : _chatRoomSearchContextFormatter.format(webSearch).sourceIds,
+      hideCitations: webSearch?.provider.trim().toLowerCase() == 'zhipu-native',
     );
     if (webSearch != null) {
       fullContent = _chatRoomSearchContextFormatter.sanitizeAnswerLinks(
@@ -298,10 +322,11 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     if (failed) {
       _cancelVoiceReply();
     } else {
+      if (hideZhipuSourceAttribution) _feedVoiceReplyDraft(fullContent);
       _flushVoiceReply();
     }
     await _appendMessage(temp);
-    if (searchTurnContext != null) {
+    if (searchTurnContext != null && webSearch != null) {
       _searchTurnController.bindReply(temp.id, searchTurnContext);
     }
     await _recordReplyUsage(character);

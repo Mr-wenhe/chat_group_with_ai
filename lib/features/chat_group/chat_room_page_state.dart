@@ -133,6 +133,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 工作模式仅在页面保存开关；任务执行、取消和审批都归全局协调器。
   final WorkModeSession _workModeSession = WorkModeSession();
 
+  /// 圆桌模式按群聊持久化；模式状态只在当前页面会话中缓存。
+  final RoundtableModeSession _roundtableModeSession = RoundtableModeSession();
+
   /// 本轮已为各角色决策好但尚未消费的发言意图：characterId -> 意图。
   final Map<String, ReplyIntent> _pendingReplyIntents = {};
 
@@ -141,6 +144,10 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 是否处于工作模式（工作模式下禁用空闲自动聊天）。
   bool get _workModeEnabled => _workModeSession.enabled;
+
+  bool get _roundtableModeEnabled => _roundtableModeSession.enabled;
+
+  bool get _autoChatPausedByWorkMode => _workModeEnabled;
 
   /// 首屏数据是否仍在加载。
   bool _isLoading = true;

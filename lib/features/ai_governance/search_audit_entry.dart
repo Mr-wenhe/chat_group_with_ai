@@ -57,6 +57,8 @@ class SearchAuditEntry {
     final normalizedQuery = _normalizeAuditQuery(query);
     final safeQuery = _truncateAuditQuery(normalizedQuery);
     final normalizedProvider = _safeAuditLabel(provider, 120);
+    // Keep historical visible-browser audit URLs readable after removing the
+    // interactive browser route. No active provider can create new HTTP hits.
     final safeSources = _sanitizeAuditSources(
       sources,
       allowInsecureHttp: normalizedProvider == 'visibleBrowser',

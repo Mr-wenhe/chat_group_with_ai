@@ -346,6 +346,38 @@ void _registerSearchStage06TestPart2() {
   });
 
   group('SearchContextFormatter', () {
+    test('formats Zhipu results as numbered context for the character reply',
+        () {
+      final snapshot = WebSearchSnapshot(
+        executedQueries: const ['今天实时银价'],
+        searchedAt: DateTime.utc(2026, 9, 14, 8),
+        provider: 'zhipu-native',
+        results: [
+          WebSearchResult(
+            sourceId: 'S9',
+            title: '白银现货价格',
+            snippet: '白银价格随市场交易实时波动。',
+            url: Uri.parse('https://example.com/silver'),
+            publishedAt: DateTime.utc(2026, 9, 14),
+            provider: 'zhipu-native',
+          ),
+        ],
+      );
+      const formatter = SearchContextFormatter();
+
+      final context = formatter.formatNumberedContext(snapshot);
+      final messages = formatter.formatMessages(snapshot);
+
+      expect(context, contains('[S1] 标题: 白银现货价格'));
+      expect(context, contains('来源: example.com'));
+      expect(context, contains('发布时间: 2026-09-14'));
+      expect(context, contains('链接: https://example.com/silver'));
+      expect(context, contains('内容: 白银价格随市场交易实时波动。'));
+      expect(messages.first['content'], contains('仅依据【搜索结果】'));
+      expect(messages.last['content'], contains('ZHIPU_WEB_SEARCH_RESULTS_BEGIN'));
+      expect(messages.last['content'], contains(context));
+    });
+
     test('keeps JSON valid, source IDs ordered, and evidence within budget',
         () {
       final snapshot = WebSearchSnapshot(

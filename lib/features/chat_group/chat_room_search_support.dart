@@ -32,12 +32,44 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
     required String? userMessage,
     required Message? currentUserMessage,
     required bool isAutoChat,
+    required bool searchEnabled,
+    bool forceSearch = false,
+    web_search.SearchCategory? category,
+    web_search.SearchFreshness? freshness,
   }) async {
     final query = userMessage?.trim() ?? '';
     final origin =
         isAutoChat ? SearchMessageOrigin.autoChat : SearchMessageOrigin.user;
     final sourceMessageId = currentUserMessage?.id.trim() ?? '';
-    if (isAutoChat || query.isEmpty || sourceMessageId.isEmpty) {
+    SearchFlowLogger.event(
+      'turn_prepare',
+      query: query,
+      fields: {
+        'conversationId': widget.groupId,
+        'sourceMessageIdPresent': sourceMessageId.isNotEmpty,
+        'searchEnabled': searchEnabled,
+        'isAutoChat': isAutoChat,
+        'platformUnsupported': _webSearchUnsupported,
+      },
+    );
+    if (!searchEnabled ||
+        isAutoChat ||
+        query.isEmpty ||
+        sourceMessageId.isEmpty) {
+      SearchFlowLogger.event(
+        'turn_suppressed',
+        query: query,
+        fields: {
+          'conversationId': widget.groupId,
+          'reason': !searchEnabled
+              ? 'no_reply_character_opted_in'
+              : isAutoChat
+                  ? 'auto_chat'
+                  : query.isEmpty
+                      ? 'empty_query'
+                      : 'missing_source_message_id',
+        },
+      );
       return SearchTurnContext.suppressed(
         conversationId: widget.groupId,
         sourceMessageId: sourceMessageId,
@@ -50,7 +82,14 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
       query: query,
       sourceMessageId: sourceMessageId,
     );
-    if (followUp != null) return followUp;
+    if (followUp != null) {
+      SearchFlowLogger.event(
+        'turn_reuse_sources',
+        query: query,
+        fields: {'conversationId': widget.groupId},
+      );
+      return followUp;
+    }
     return _withSearchCancellation(
       (cancelToken) => _searchTurnController.prepareUserTurn(
         conversationId: widget.groupId,
@@ -63,6 +102,9 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
         country: _searchRuntimeSettings.country,
         maxResults: _searchRuntimeSettings.maxResults,
         safeSearch: _searchRuntimeSettings.safeSearch,
+        category: category ?? web_search.SearchCategory.general,
+        freshness: freshness ?? web_search.SearchFreshness.any,
+        forceSearch: forceSearch,
         cancelToken: cancelToken,
       ),
     );
@@ -329,13 +371,27 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
       {bool allowSourceLinks = false}) {
     if (snapshot == null) return messages;
     final next = List<Map<String, dynamic>>.from(messages);
-    final insertAt = next.indexWhere((message) => message['role'] != 'system');
     final contextMessages = _chatRoomSearchContextFormatter.formatMessages(
       snapshot,
       allowSourceLinks: allowSourceLinks,
     );
-    final target = insertAt < 0 ? next.length : insertAt;
-    next.insertAll(target, contextMessages);
+    // Keep the usage rules in the system-message block for provider
+    // compatibility, but place the evidence immediately before the newest
+    // user message. This prevents a long chat history from separating the
+    // Search results from the question they are meant to answer, regardless
+    // of whether the source is Tavily, DuckDuckGo, or another route.
+    final rules = contextMessages
+        .where((message) => message['role'] == 'system')
+        .toList(growable: false);
+    final evidence = contextMessages
+        .where((message) => message['role'] != 'system')
+        .toList(growable: false);
+    final firstDialogue =
+        next.indexWhere((message) => message['role'] != 'system');
+    next.insertAll(firstDialogue < 0 ? next.length : firstDialogue, rules);
+    final newestUser =
+        next.lastIndexWhere((message) => message['role'] == 'user');
+    next.insertAll(newestUser < 0 ? next.length : newestUser, evidence);
     return next;
   }
 
@@ -467,6 +523,13 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
     Message original, {
     required bool forceRefresh,
   }) async {
+    // A role can be edited while this room remains mounted. Do not reuse or
+    // refresh a previously captured snapshot after that role has opted out of
+    //联网搜索; the role-level switch is an explicit capability boundary.
+    final sender = _allGroupCharacters
+        .where((character) => character.id == original.senderId)
+        .firstOrNull;
+    if (sender != null && !sender.webSearchEnabled) return null;
     final existing =
         _searchTurnController.contextForRegeneration(original.id) ??
             _persistedSearchContext(original);
