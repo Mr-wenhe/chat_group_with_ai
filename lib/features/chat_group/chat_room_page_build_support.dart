@@ -213,9 +213,9 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
         const ColoredBox(color: Color(0xFF101722)),
         Image.asset(
           _roundtableChatBackgroundAsset,
-          // Show the full portrait composition instead of zoom-cropping it on
-          // wide chat windows; the matching dark base fills the side margins.
-          fit: BoxFit.contain,
+          // Scale proportionally to cover the live window; bottom alignment
+          // keeps the roundtable visible while excess edges are cropped.
+          fit: BoxFit.cover,
           alignment: Alignment.bottomCenter,
         ),
         const ColoredBox(color: Color(0x10000000)),
