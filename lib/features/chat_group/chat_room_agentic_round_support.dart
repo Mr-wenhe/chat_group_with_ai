@@ -88,16 +88,15 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       mentionedIds: userMentionedIds,
     );
 
-    // The snapshot was prepared once by _runAiRound. A missing snapshot is a
-    // valid outcome (policy off, consent denied, stable question, or failure),
-    // and must not cause this character to search again.
-    // The turn snapshot is prepared once for all replies, but each role still
-    // observes its own capability boundary. Disabled roles receive ordinary
-    // context and never get search evidence injected into their prompt.
-    final webSearch =
-        character.webSearchEnabled || character.zhipuSearchAnswerOnly
-            ? searchTurnContext?.snapshot
-            : null;
+    // A roundtable user turn has one shared search snapshot for every member;
+    // outside roundtable mode, each character keeps its own search setting.
+    final isRoundtableUserTurn =
+        _roundtableModeEnabled && !_isDirectChat && !isAutoChat;
+    final webSearch = isRoundtableUserTurn ||
+            character.webSearchEnabled ||
+            character.zhipuSearchAnswerOnly
+        ? searchTurnContext?.snapshot
+        : null;
     // 查询模型能力（是否支持图片输入），决定要不要拼多模态内容。
     final capability = _aiGateway.capability(provider, config.modelName);
     final apiMessages = _withWebSearchContext(

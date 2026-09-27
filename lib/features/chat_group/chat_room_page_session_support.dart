@@ -530,8 +530,8 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       onAutoChatChanged: _toggleAutoChat,
       onWorkModeChanged: _toggleWorkMode,
       roundtableModeTooltip: _roundtableModeEnabled
-          ? '圆桌会议模式已开启 · 新闻角色先搜索，再由群成员讨论'
-          : '开启圆桌会议模式（需要群内配置新闻角色）',
+          ? '圆桌会议模式已开启 · 用户事件先联网搜索，再由群成员讨论'
+          : '开启圆桌会议模式（用户事件联网搜索后由群成员讨论）',
       onRoundtableModeChanged: _toggleRoundtableMode,
       showVoiceBroadcast: !_isDirectChat && !kIsWeb,
       voiceBroadcastEnabled: _voiceBroadcastEnabled,
