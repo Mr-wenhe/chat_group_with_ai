@@ -60,7 +60,8 @@ class _RelationshipEditDialogState extends State<RelationshipEditDialog> {
     _familiarityController =
         TextEditingController(text: relationship.familiarity.toString());
     _notesController = TextEditingController(text: relationship.notes);
-    _mood = relationship.recentMood;
+    // 弹窗初值取生效心情：过期的存储心情不应显示为当前状态。
+    _mood = relationship.effectiveMood();
     _stage = relationship.stage;
   }
 

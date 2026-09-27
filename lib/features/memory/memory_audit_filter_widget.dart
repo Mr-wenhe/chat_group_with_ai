@@ -202,7 +202,7 @@ class _MemoryAuditSearchFieldState extends State<_MemoryAuditSearchField> {
       onChanged: widget.onChanged,
       decoration: const InputDecoration(
         labelText: '搜索记忆',
-        hintText: '搜索观察 AI、正文、对象、来源场合或中文术语',
+        hintText: '搜索观察 AI、正文、对象、来源场合或中文术语，支持拼音',
         prefixIcon: Icon(Icons.search_rounded),
       ),
     );

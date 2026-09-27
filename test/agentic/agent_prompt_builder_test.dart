@@ -1,38 +1,7 @@
-import 'package:chat_group/core/models/character_skill.dart';
-import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('prompt includes tool protocol and character skills', () {
-    final prompt = AgentPromptBuilder.buildToolPlanningPrompt(
-      rolePlaySystemPrompt: '你是代码大神，30岁，性别女，身份是工程师。\n写代码',
-      skills: [
-        CharacterSkill(
-          characterId: 'c1',
-          name: 'Code Review',
-          domain: 'coding',
-          description: 'Review code.',
-          instructions: const ['Read files', 'Report risks'],
-          requiredPermissions: const [ToolPermission.workspaceRead],
-        )
-      ],
-      userRequest: 'review lib/main.dart',
-    );
-
-    expect(prompt, contains('代码大神'));
-    expect(prompt, contains('```agent_tool'));
-    expect(prompt, contains('workspace.read'));
-    expect(prompt, contains('Read files'));
-    expect(prompt, contains('没有任何已安装技能匹配'));
-    expect(prompt, contains('必须先调用 skill.create'));
-    expect(prompt, contains('意图判断'));
-    expect(prompt, contains('拆解执行步骤'));
-    expect(prompt, contains('调用最少必要工具'));
-    expect(prompt, contains('产出可交付物'));
-    expect(prompt, contains('交付前自检'));
-    expect(prompt, contains('先给结论'));
-  });
 
   test('Stage 03 prompt describes one strict JSON decision object', () {
     final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
@@ -42,6 +11,8 @@ void main() {
     );
 
     expect(prompt, contains('固定顶层字段'));
+    expect(prompt, contains('禁止复制到 tool.arguments'));
+    expect(prompt, contains('不要在 arguments 中添加 action'));
     expect(prompt, contains('action 只能是 plan、tool、clarify、handoff、finish'));
     expect(prompt, contains('public_update'));
     expect(prompt, contains('只写用户可见的动作、依据或结论'));
@@ -54,6 +25,75 @@ void main() {
     expect(prompt, contains('"declaredImpact":["reports/economy.xlsx"]'));
     expect(prompt, isNot(contains('```agent_tool')));
     expect(prompt, isNot(contains('<tool_call>')));
+  });
+
+  test('Stage 03 prompt steers the model away from inline command bodies', () {
+    // 回归：模型用 `python3 -c "..."` 内联一行流时，引号转义极易报语法错误，
+    // 且内联代码会被判为“影响范围不确定”而每次都要重新审批。提示词必须要求
+    // 先写脚本文件再执行，并限制产物登记范围。
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '从网上取数并生成一份 Excel 排名表',
+    );
+
+    expect(prompt, contains('先用 workspace.patch 写出一个可运行的脚本文件'));
+    expect(prompt, contains('python3 -c'));
+    expect(prompt, contains('bash -c'));
+    expect(prompt, contains('引号转义'));
+    expect(prompt, contains('影响范围不确定'));
+    expect(prompt, contains('不要登记中间脚本'));
+    expect(prompt, contains('重复登记'));
+    expect(prompt, contains('直接 finish'));
+  });
+
+  test('Stage 03 prompt requires chunked writes for long content', () {
+    // 回归：用户要 5000+ 字报告时，模型把整篇正文塞进一次 workspace.patch 必然
+    // 撞输出上限（实测 8192 token），动作 JSON 被截断、任务失败。提示词必须给出
+    // 分块写法：每个分段各写独立文件 + 一次合并，并明确"不要反复写目标文件"
+    // （workspace.patch 是整文件覆盖写，第二次写会把前一段冲掉）。
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '生成一份 5000 字以上的量子力学研究报告 Word 文档',
+    );
+
+    expect(prompt, contains('单次决策的输出有上限'));
+    expect(prompt, contains('3000 字以内'));
+    expect(prompt, contains('report.part1.md'));
+    expect(prompt, contains('整文件覆盖写、没有追加'));
+    expect(prompt, contains('pandoc'));
+    expect(prompt, contains('declaredImpact'));
+    // 触发条件写成可观察的单位，而不是"明显短于上限"这类无法据以决策的说法。
+    expect(prompt, isNot(contains('明显短于上限')));
+    // 旧的"一次写完"说法必须消失，否则模型仍会一次塞满。
+    expect(prompt, isNot(contains('文件的完整内容**直接放进')));
+  });
+
+  test('Stage 03 prompt documents the workspace.list root default', () {
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '看看工作区里有哪些文件',
+    );
+
+    expect(prompt, contains('workspace.list'));
+    expect(prompt, contains('省略、留空或写 "."'));
+    expect(prompt, contains('不要为了列目录而调用 command.run'));
+  });
+
+  test('Stage 03 weather tasks use the structured forecast tool', () {
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '帮我生成一份MD文档，记录未来7天的天气',
+    );
+
+    expect(prompt, contains('weather.forecast'));
+    expect(prompt, contains('不要读取 weather_location.json'));
+    expect(prompt, contains('没有城市时使用默认查询地点'));
+    expect(prompt, contains('未指定文件名时使用 未来7天天气.md'));
+    expect(prompt, contains('禁止使用 MD7.md'));
   });
 
   test(

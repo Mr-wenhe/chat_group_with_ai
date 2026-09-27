@@ -52,13 +52,24 @@ class WorkFollowUpPolicy {
     }
     final artifacts = _paths(lastArtifactPaths);
     final explicitPath = _explicitPath(normalizedRequest);
-    final edit = _hasEditVerb(normalizedRequest);
-    final reference = _hasArtifactReference(normalizedRequest);
     final newFile = _hasNewFileIntent(normalizedRequest);
+    // 修订动词与程度词必须分开：程度词（优化/美化）描述的可能是**新产物**的
+    // 质量，而修订动词（修改/替换/覆盖）描述的是对既有文件的处置意图。
+    final revisionVerb = _hasRevisionVerb(normalizedRequest);
+    final manner = _hasMannerVerb(normalizedRequest);
+    // Depth adjectives in a new-file request must not turn creation into an edit.
+    final edit = revisionVerb ||
+        manner ||
+        (!newFile && _hasDepthRevisionPhrase(normalizedRequest));
+    final reference = _hasArtifactReference(normalizedRequest);
 
-    // "新建/创建" is the one case where an occupied name may be changed.
-    // An edit request always wins over a generic file keyword.
-    if (newFile && !edit && !reference) {
+    // A request that asks for a new file produces one, whatever manner wording it
+    // carries and whichever existing artifact it refers to as the source. The
+    // reference names the **input** ("根据这个 docx 生成一份 html"), so treating it
+    // as a revision target would ask the user which old file to overwrite — a
+    // question that has no answer for a new deliverable. Only a real revision
+    // verb ("修改/替换/覆盖") may claim the request for an existing artifact.
+    if (newFile && !revisionVerb) {
       return WorkFollowUpDecision(
         kind: WorkFollowUpKind.newArtifact,
         request: normalizedRequest,
@@ -134,10 +145,29 @@ class WorkFollowUpPolicy {
         reason: '沿用上一次失败命令定位到的脚本原路径进行修复。',
       );
     }
-    // “改写到新目标” (and similar ordinary continuation wording) does not
-    // identify an existing artifact. Without a file/reference noun, keep the
-    // old continuation semantics instead of inventing a clarification stop.
+    // A terse revision such as “优化一下” is still an edit request. When the
+    // task has exactly one structured artifact, that artifact is the only
+    // safe default target and must be overwritten in place. With multiple
+    // artifacts, ask instead of silently choosing one.
     if (edit && !reference && explicitPath == null) {
+      if (!newFile && artifacts.length == 1) {
+        return WorkFollowUpDecision(
+          kind: WorkFollowUpKind.reviseArtifact,
+          request: normalizedRequest,
+          artifactPath: artifacts.single,
+          reason: '唯一结构化产物作为未指名修订请求的默认原路径。',
+        );
+      }
+      if (!newFile && artifacts.length > 1) {
+        return _clarification(
+          normalizedRequest,
+          artifacts,
+          '存在多个可能的产物，不能猜测“优化”要覆盖哪一个文件。',
+        );
+      }
+      // “改写到新目标” (and similar ordinary continuation wording) does
+      // not identify an existing artifact. Without a file/reference noun,
+      // keep the old continuation semantics instead of inventing a target.
       return WorkFollowUpDecision(
         kind: WorkFollowUpKind.continueTask,
         request: normalizedRequest,
@@ -276,20 +306,52 @@ class WorkFollowUpPolicy {
       // basename-only matcher silently treated "修改 /work/report.md" as a
       // generic continuation and could never honor an explicit absolute
       // revision target.
-      r'(?<![\w])((?:(?:[A-Za-z]:[\\/])|/)?[\w][\w./\\-]*\.(?:html?|md|markdown|dart|java|txt|'
+      r'(?<![\w])((?:(?:[A-Za-z]:[\\/])|/)?[\w\u0080-\uffff][\w\u0080-\uffff./\\-]*\.(?:html?|md|markdown|dart|java|txt|'
       r'json|ya?ml|svg|css|js|ts|py|sh|bash|c|cc|cpp|h|hpp|pdf|docx?|xlsx?|'
-      r'pptx?|csv|sql|log|png|jpe?g|zip))(?![\w./\\-])',
+      r'pptx?|csv|sql|log|png|jpe?g|zip))(?![\w\u0080-\uffff./\\-])',
       caseSensitive: false,
     ).firstMatch(request);
     final value = match?.group(1)?.replaceAll('\\', '/');
     return value == null || value.contains('..') ? null : value;
   }
 
-  bool _hasEditVerb(String request) => RegExp(
-        r'(修改|修复|改写|改成|改|调整|优化|完善|更新|替换|覆盖|修订|'
-        r'fix|modify|edit|revise|update|change|rewrite|patch)',
+  /// Only a standalone depth instruction can implicitly target an artifact.
+  /// Descriptive/read-only requests such as "详细阅读当前文件" must not grant
+  /// overwrite intent merely because they contain a depth adjective.
+  bool _hasDepthRevisionPhrase(String request) => RegExp(
+        r'^(?:(?:请|麻烦)?\s*(?:内容\s*)?(?:'
+        r'(?:再|更)(?:详细|细致|详尽|具体)(?:一)?(?:些|点)?|'
+        r'多(?:说|写|讲)(?:一)?点|'
+        r'(?:展开|扩充|丰富|深化|细化)(?:一下|内容|说明|细节)?)|'
+        r'(?:please\s+)?(?:more\s+details?|in\s+more\s+detail|'
+        r'elaborate|expand|longer|more\s+specific|flesh\s+out))'
+        r'[。.!！?？]*$',
         caseSensitive: false,
       ).hasMatch(request);
+
+  /// 程度词："优化/美化/改进"这类描述质量的措辞。它既不说明要处置哪个既有文件，
+  /// 也不说明产物是新的还是旧的，因此单凭它不能把请求判成修订。
+  static final RegExp _mannerWording = RegExp(
+    r'(优化|完善|美化|润色|改进|改善|升级|增强|'
+    r'optimize|optimise|improve|polish|enhance|beautify)',
+    caseSensitive: false,
+  );
+
+  /// 修订动词：处置**既有**产物的动作。
+  ///
+  /// 只有这些词才允许把"同时要求新建文件"的请求判给旧文件（例如
+  /// "生成一个副本，并修改 /work/report.md"）。判定前先剥离程度词，
+  /// 否则"改进/改善"里的"改"会被误当成"修改"。
+  bool _hasRevisionVerb(String request) {
+    final withoutManner = request.replaceAll(_mannerWording, '');
+    return RegExp(
+      r'(修改|修复|改写|改成|调整|更新|替换|覆盖|修订|改|'
+      r'fix|modify|edit|revise|update|change|rewrite|patch)',
+      caseSensitive: false,
+    ).hasMatch(withoutManner);
+  }
+
+  bool _hasMannerVerb(String request) => _mannerWording.hasMatch(request);
 
   bool _hasArtifactReference(String request) => RegExp(
         r'(当前(?:文件|页面|产物)?|上次|上一个|刚才|之前|原文件|现有|这个(?:文件|页面|代码)?|'
@@ -310,7 +372,7 @@ class WorkFollowUpPolicy {
       ).hasMatch(request);
 
   bool _hasNewFileIntent(String request) => RegExp(
-        r'(新建|创建|生成(?:一个|一份)?|写一个|做一个|制作一个|实现(?:一个|一份)|另存为|'
+        r'(新建|创建|(?<!重新)生成(?:一个|一份)?|写一个|做一个|制作一个|实现(?:一个|一份)|另存为|'
         r'\b(?:new|create|generate|make)\b)',
         caseSensitive: false,
       ).hasMatch(request);

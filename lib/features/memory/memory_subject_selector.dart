@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/features/memory/memory_audit_presenter.dart';
 import 'package:flutter/material.dart';
 
@@ -132,7 +133,7 @@ class _MemorySubjectSelectorState extends State<MemorySubjectSelector> {
             onSubmitted: (_) => onFieldSubmitted(),
             decoration: const InputDecoration(
               labelText: '搜索其他角色',
-              hintText: '按角色名、性别或职业搜索',
+              hintText: '按角色名、性别或职业搜索，支持拼音',
               prefixIcon: Icon(Icons.person_search_outlined),
             ),
           );
@@ -142,13 +143,18 @@ class _MemorySubjectSelectorState extends State<MemorySubjectSelector> {
       );
 
   Iterable<AICharacter> _characterOptions(TextEditingValue value) {
-    final query = value.text.trim().toLowerCase();
+    final query = value.text.trim();
     if (query.isEmpty) return widget.characters;
-    return widget.characters.where(
+    return PinyinSearch.exactFirst(
+      widget.characters
+          .where((character) => PinyinSearch.matchesFields(
+                character.searchFields,
+                query,
+                mode: PinyinMatchMode.name,
+              ))
+          .toList(),
       (character) =>
-          '${character.name} ${character.role} ${character.displayGenderLabel}'
-              .toLowerCase()
-              .contains(query),
+          PinyinSearch.matchesLiterally(character.searchFields, query),
     );
   }
 

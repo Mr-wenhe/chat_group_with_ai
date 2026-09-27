@@ -403,8 +403,12 @@ class _DirectChatCard extends StatelessWidget {
   }
 
   String _lastMessagePreview(Message message) {
+    final content = message.content.replaceAll(RegExp(r'\s+'), ' ');
+    // 工作任务提醒是系统消息，不是角色说的话。私聊列表只有"我 / 对方"两种说话
+    // 人，套用角色名会读成"某角色：系统任务提醒：…"。
+    if (message.senderType == 'system') return content;
     final speaker = message.senderType == 'user' ? '我' : summary.character.name;
-    return '$speaker：${message.content.replaceAll(RegExp(r'\\s+'), ' ')}';
+    return '$speaker：$content';
   }
 
   String _timeLabel(DateTime dt) {

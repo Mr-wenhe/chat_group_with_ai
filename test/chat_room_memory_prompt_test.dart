@@ -430,6 +430,8 @@ Future<void> _seedCommonMemory(
       friction: 10,
       familiarity: 70,
       recentMood: RelationshipMood.warm,
+      // 新鲜心情：无时间戳会被判过期（见 kRelationshipMoodTtl）。
+      recentMoodAt: DateTime.now(),
     ),
   );
   await db.appSettingsBox.put(

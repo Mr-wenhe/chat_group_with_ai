@@ -15,6 +15,11 @@ part 'chat_api_protocol_support.dart';
 class ChatApiService {
   static const String _emptyCompletionMessage = '模型返回了空内容';
   static const String _webNetworkUnsupportedMessage = 'Web 端暂不支持联网模型调用';
+
+  /// Result message for a request that was cancelled. Callers that retry on
+  /// another transport must treat this as terminal rather than a failure to
+  /// recover from.
+  static const String cancelledResultMessage = '请求已取消';
   static const int defaultMaxResponseBytes = 4 * 1024 * 1024;
   static const int maxSseLineBytes = 512 * 1024;
   static const int maxSseWireBytes = 8 * 1024 * 1024;
@@ -92,6 +97,7 @@ class ChatApiService {
     Duration? receiveTimeout,
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
+    bool structuredJson = false,
     required int maxResponseBytes,
   }) async {
     if (kIsWeb) {
@@ -116,6 +122,11 @@ class ChatApiService {
         receiveTimeout: receiveTimeout,
         cancelToken: cancelToken,
         maxResponseBytes: maxResponseBytes,
+        structuredJson: structuredJson,
+        stepPlanLowReasoning: _isStepPlanEndpoint(
+          provider: provider,
+          customBaseUrl: customBaseUrl,
+        ),
       ),
       shouldRetryResult: RetryHandler.isTransientResult,
       sleep: _retrySleep,
@@ -214,6 +225,7 @@ class ChatApiService {
     CancelToken? cancelToken,
     required int? maxResponseBytes,
     bool structuredJson = false,
+    bool stepPlanLowReasoning = false,
   }) async {
     if (kIsWeb) {
       return {
@@ -249,6 +261,7 @@ class ChatApiService {
           maxTokens: maxTokens,
           streaming: false,
           structuredJson: structuredJson,
+          stepPlanLowReasoning: stepPlanLowReasoning,
         ),
         options: Options(
           headers: headers,
@@ -272,17 +285,30 @@ class ChatApiService {
         }
         final reply = _responseText(data, apiProtocol);
         if (reply.trim().isEmpty) {
-          return {'success': false, 'message': _emptyCompletionMessage};
+          // An empty completion is a typed, bounded model-protocol failure.
+          // Work mode can retry the same checkpoint without treating it as an
+          // internal error, while callers still receive the stable user-facing
+          // empty-content message.
+          return {
+            'success': false,
+            'message': _emptyCompletionMessage,
+            'failureCode': 'emptyResponse',
+            'retryable': true,
+          };
         }
         final usage = _usageFields(data, apiProtocol);
         return {
           'success': true,
           'message': reply,
           'model': _responseModel(data, apiProtocol) ?? modelName,
+          // 与流式通道一致：带上本次请求的输出上限，调用方才能跨协议判断
+          // "输出是否被用尽"（非流式通道同样不产出 finish_reason）。
+          if (maxTokens > 0) 'requestedMaxTokens': maxTokens,
           if (usage != null) ...usage,
         };
       } else {
         final providerError = _safeProviderErrorDetail(responseData);
+        final retryAfter = _retryAfterFromHeaders(response.headers);
         return {
           'success': false,
           'statusCode': response.statusCode,
@@ -290,13 +316,14 @@ class ChatApiService {
           'requestPath': _requestPath(url),
           'requestModel': modelName,
           if (providerError != null) 'providerError': providerError,
+          if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
         };
       }
     } on _ChatResponseTooLargeException {
       return {'success': false, 'message': '模型响应超过安全大小限制'};
     } on DioException catch (e) {
       if (CancelToken.isCancel(e)) {
-        return {'success': false, 'message': '请求已取消'};
+        return {'success': false, 'message': cancelledResultMessage};
       } else if (e.type == DioExceptionType.connectionTimeout ||
           e.type == DioExceptionType.sendTimeout ||
           e.type == DioExceptionType.receiveTimeout) {
@@ -305,6 +332,7 @@ class ChatApiService {
         return {'success': false, 'message': '网络连接失败：无法连接到服务器'};
       } else if (e.response != null) {
         final providerError = _safeProviderErrorDetail(e.response!.data);
+        final retryAfter = _retryAfterFromHeaders(e.response!.headers);
         return {
           'success': false,
           'statusCode': e.response!.statusCode,
@@ -314,6 +342,7 @@ class ChatApiService {
           ),
           'requestModel': modelName,
           if (providerError != null) 'providerError': providerError,
+          if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
         };
       } else {
         return {'success': false, 'message': '请求失败'};
@@ -430,6 +459,10 @@ class ChatApiService {
             receiveTimeout: receiveTimeout,
             cancelToken: cancelToken,
             structuredJson: structuredJson,
+            stepPlanLowReasoning: _isStepPlanEndpoint(
+              provider: provider,
+              customBaseUrl: customBaseUrl,
+            ),
             maxResponseBytes: defaultMaxResponseBytes,
           );
         }
@@ -545,7 +578,8 @@ class ChatApiService {
     required bool structuredJson,
   }) async* {
     if (kIsWeb) {
-      yield ChatStreamEvent.error(_webNetworkUnsupportedMessage);
+      yield ChatStreamEvent.error(_webNetworkUnsupportedMessage,
+          sanitized: true);
       return;
     }
     // 与 sendChatMessage 保持一致的 URL / 模型解析
@@ -559,11 +593,11 @@ class ChatApiService {
     final modelName = _resolveModelName(provider: provider, model: model);
 
     if (url.isEmpty) {
-      yield ChatStreamEvent.error('Base URL 不能为空');
+      yield ChatStreamEvent.error('Base URL 不能为空', sanitized: true);
       return;
     }
     if (modelName.isEmpty) {
-      yield ChatStreamEvent.error('模型名称不能为空');
+      yield ChatStreamEvent.error('模型名称不能为空', sanitized: true);
       return;
     }
 
@@ -579,6 +613,10 @@ class ChatApiService {
       maxTokens: maxTokens,
       streaming: true,
       structuredJson: structuredJson,
+      stepPlanLowReasoning: _isStepPlanEndpoint(
+        provider: provider,
+        customBaseUrl: customBaseUrl,
+      ),
     );
 
     final parser = SseParser();
@@ -601,7 +639,11 @@ class ChatApiService {
       );
 
       if (response.statusCode != 200) {
-        yield ChatStreamEvent.error(_safeHttpErrorMessage(response.statusCode));
+        yield ChatStreamEvent.error(
+          _safeHttpErrorMessage(response.statusCode),
+          retryAfter: _retryAfterFromHeaders(response.headers),
+          sanitized: true,
+        );
         return;
       }
 
@@ -633,7 +675,11 @@ class ChatApiService {
             : protocolParser!.ingestLine(line);
         if (event != null) {
           yield event.type == ChatStreamEventType.error
-              ? ChatStreamEvent.error(_safeStreamErrorMessage(event.message))
+              ? ChatStreamEvent.error(
+                  _safeStreamErrorMessage(event.message),
+                  retryAfter: event.retryAfter,
+                  sanitized: true,
+                )
               : event;
           if (parser.terminated || protocolParser?.terminated == true) return;
         }
@@ -646,11 +692,15 @@ class ChatApiService {
         yield protocolParser.doneEvent();
       }
     } on SseInputLimitException {
-      yield ChatStreamEvent.error('流式响应超过安全大小限制');
+      yield ChatStreamEvent.error('流式响应超过安全大小限制', sanitized: true);
     } on DioException catch (e) {
-      yield ChatStreamEvent.error(_dioErrorMessage(e));
+      yield ChatStreamEvent.error(
+        _dioErrorMessage(e),
+        retryAfter: _retryAfterFromHeaders(e.response?.headers),
+        sanitized: true,
+      );
     } catch (e) {
-      yield ChatStreamEvent.error('请求失败');
+      yield ChatStreamEvent.error('请求失败', sanitized: true);
     }
   }
 }

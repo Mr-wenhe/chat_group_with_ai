@@ -6,12 +6,32 @@ library;
 
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
-import 'package:chat_group/features/agentic/agent_progress_meta.dart';
-import 'package:chat_group/features/agentic/agent_runtime.dart';
 
 // ---------------------------------------------------------------------------
 // Mention parsing
 // ---------------------------------------------------------------------------
+
+/// Inserts a mention without discarding the draft; only an active query is
+/// replaced. Returns the new caret position beside the updated text.
+({String text, int cursor}) insertMentionInDraft(
+  String text,
+  int cursor,
+  String mention, {
+  required bool replaceQuery,
+}) {
+  cursor = cursor < 0 ? text.length : cursor.clamp(0, text.length);
+  final before = text.substring(0, cursor);
+  final query = replaceQuery ? RegExp(r'@[^@\s]*$').firstMatch(before) : null;
+  final start = query?.start ?? cursor;
+  // Keep a token boundary, otherwise English drafts parse as email addresses.
+  final prefix =
+      start > 0 && _isMentionTokenCharacter(text[start - 1]) ? ' ' : '';
+  final inserted = '$prefix$mention';
+  return (
+    text: text.replaceRange(start, cursor, inserted),
+    cursor: start + inserted.length,
+  );
+}
 
 /// The shared mention parser's diagnostic result.
 ///
@@ -75,7 +95,9 @@ MentionParseResult analyzeMentionedCharacterIds(
     if (match.start > 0 && _isMentionTokenCharacter(content[match.start - 1])) {
       continue;
     }
-    final name = match.group(1);
+    final rawName = match.group(1);
+    final name =
+        rawName == null ? null : resolveKnownMentionName(rawName, byName);
     if (name != null && isMentionAllToken(name)) {
       mentionsAll = true;
       for (final character in characters) {
@@ -103,6 +125,35 @@ MentionParseResult analyzeMentionedCharacterIds(
     mentionsAll: mentionsAll,
   );
 }
+
+/// Resolves exact names first and only consumes a known adjacent action.
+String? resolveKnownMentionName(
+  String token,
+  Map<String, List<String>> knownNames,
+) {
+  if (knownNames.containsKey(token)) return token;
+  if (isMentionAllToken(token)) return token;
+  for (final alias in const ['all', 'everyone', '所有人', '全部']) {
+    if (token.startsWith(alias) &&
+        token.length > alias.length &&
+        isMentionActionSuffix(token.substring(alias.length))) {
+      return alias;
+    }
+  }
+  final prefixed = knownNames.keys.where((name) {
+    if (!token.startsWith(name) || token.length == name.length) return false;
+    final suffix = token.substring(name.length);
+    return isMentionActionSuffix(suffix);
+  }).toList()
+    ..sort((left, right) => right.length.compareTo(left.length));
+  return prefixed.isEmpty ? token : prefixed.first;
+}
+
+/// Conservative boundary for Chinese mentions without a separating space.
+/// Arbitrary Chinese suffixes may be part of an unknown person's full name.
+bool isMentionActionSuffix(String value) => RegExp(
+      r'^(?:这个方案|请|讨论|补充|输出|出具|交付|生成|制作|完成|负责|执行|评估|判断|分析|看看|审查|审核|评审|能否|是否|建议|说说|实现|写|先|再|总结)',
+    ).hasMatch(value);
 
 bool _isMentionTokenCharacter(String value) =>
     RegExp(r'^[A-Za-z0-9_./%+\-]$').hasMatch(value);
@@ -141,63 +192,4 @@ bool isDuplicateAiReply(
     if (normalize(message.content) == candidate) return true;
   }
   return false;
-}
-
-// ---------------------------------------------------------------------------
-// Agent progress message
-// ---------------------------------------------------------------------------
-
-/// 构建 AI 角色任务执行进度文案。
-///
-/// - [progress] 为 null：保持旧兼容行为，输出单句「规划中」。
-/// - 工作模式：输出多行累积式步骤日志：
-///   首行头部（执行中 / 已完成 / 失败）→ 已完成行（✅，由 [AgentRuntimeProgress.executedRequests] 派生）
-///   → 当前行（⏳，由 stage + [AgentRuntimeProgress.currentStepLabel] 生成）。
-/// - [finalResult] 为 true：末行转为 ✅（去光标），作为终态摘要。
-String agentProgressMessageContent({
-  required String characterName,
-  AgentRuntimeProgress? progress,
-  bool finalResult = false,
-  int? elapsedSeconds,
-}) {
-  // 非工作模式 / 旧路径：单句「规划中」，行为保持不变。
-  if (progress == null) {
-    return '🧭 $characterName 正在规划任务，接下来会持续汇报执行进度…';
-  }
-
-  final stage = progress.stage;
-  final isToolCompleted = stage == AgentRuntimeProgressStage.toolCompleted;
-
-  // 终态且携带冻结耗时：在首行头部之后追加「⏱ {formatElapsed}」，
-  // 使已完成任务气泡保持展示冻结耗时（即便 _progressStartTimes 已清理、
-  // 进度气泡不再 live 计算耗时）。非终态路径不受影响（elapsedSeconds 默认 null）。
-  final elapsedSuffix = (finalResult && elapsedSeconds != null)
-      ? ' ⏱ ${formatElapsed(elapsedSeconds)}'
-      : '';
-
-  final lines = <String>[
-    statusHeader(
-          characterName,
-          isFinal: finalResult,
-          failed: stage == AgentRuntimeProgressStage.stepFailed,
-        ) +
-        elapsedSuffix,
-  ];
-
-  // ✅ 已完成步骤行：由 executedRequests 派生（进度消息不重复计数）。
-  for (final request in progress.executedRequests) {
-    // P2：依据工具类型追加批准态文案（需批准 / 自动）。
-    final needsApproval = AgentRuntime.requiresApproval(request.tool);
-    final tag = needsApproval ? approvalTag : autoTag;
-    lines.add('$stepPrefixDone ${completedStepLabel(request)}$tag');
-  }
-
-  // 当前行（⏳）：非聚合刷新（toolCompleted）时展示；finalResult 时转为 ✅ 去光标。
-  final label = progress.currentStepLabel ?? stageLabelFallback[stage] ?? '';
-  if (label.isNotEmpty && !isToolCompleted) {
-    final prefix = finalResult ? stepPrefixDone : stepPrefixActive;
-    lines.add('$prefix $label');
-  }
-
-  return lines.join('\n');
 }

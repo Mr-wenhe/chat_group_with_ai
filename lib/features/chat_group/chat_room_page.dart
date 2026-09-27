@@ -28,11 +28,13 @@ import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/agentic/agent_task_recovery_dialog.dart';
 import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
+import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
@@ -49,6 +51,7 @@ import 'package:chat_group/features/chat_group/attachment_utils.dart';
 import 'package:chat_group/features/chat_group/auto_chat_scheduler.dart';
 import 'package:chat_group/features/chat_group/chat_activity_policy.dart';
 import 'package:chat_group/features/chat_group/chat_group_form_page.dart';
+import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 import 'package:chat_group/features/chat_group/chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/chat_room_loader.dart';
 import 'package:chat_group/features/chat_group/chat_room_repository.dart';
@@ -56,6 +59,7 @@ import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 import 'package:chat_group/features/chat_group/chat_scroll_utils.dart';
 import 'package:chat_group/features/chat_group/conversation_controller.dart';
 import 'package:chat_group/features/chat_group/direct_read_receipt_policy.dart';
+import 'package:chat_group/features/chat_group/group_mute_store.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
 import 'package:chat_group/features/chat_group/humanized_prompt_builder.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
@@ -90,13 +94,16 @@ import 'package:chat_group/features/memory/relationship_private_detail_page.dart
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
-import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/work_mode/work_mode_session.dart';
 import 'package:chat_group/features/work_mode/visible_browser_service.dart';
+import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_user_action.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_role_router.dart';
 import 'package:chat_group/features/work_mode/work_role_model_selector.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/services/message_speech_service.dart';
@@ -129,6 +136,7 @@ part 'chat_room_page_state.dart';
 part 'chat_room_page_lifecycle_support.dart';
 part 'chat_room_page_session_support.dart';
 part 'chat_room_page_build_support.dart';
+part 'chat_room_task_action_support.dart';
 part 'chat_room_voice_support.dart';
 
 /// 空闲自动聊天（idle auto-chat）的对外可见状态，用于顶部状态条展示。
@@ -140,6 +148,51 @@ part 'chat_room_voice_support.dart';
 /// - [unavailable]：没有任何配置了 API Key 的角色，功能不可用
 /// - [error]：上一轮生成失败
 enum AutoChatStatus { idle, waiting, generating, paused, unavailable, error }
+
+/// 由自动发言状态推导控制条下方的例外态提示；正常态返回 null。
+///
+/// 抽成纯函数而不是内联在页面里，是为了能直接覆盖 6 种状态的映射：误把正常态
+/// 渲染成提示条会长期占据消息空间，而那正是控制条注释里明确要避免的。
+ConversationStatusAlert? autoChatStatusAlert({
+  required bool workModeEnabled,
+  required bool autoChatEnabled,
+  required AutoChatStatus status,
+  required bool allMembersMuted,
+  required String blockedText,
+  required bool needsApiConfig,
+  VoidCallback? onConfigureApi,
+}) {
+  // 工作模式与总开关的优先级高于具体运行状态：它们是"为什么不发言"的根因。
+  if (workModeEnabled) {
+    return const ConversationStatusAlert(
+      message: '工作模式中，自动发言已暂停',
+      isWarning: false,
+    );
+  }
+  // 用户自己关掉的开关不需要提醒。
+  if (!autoChatEnabled) return null;
+  if (allMembersMuted) {
+    return const ConversationStatusAlert(
+      message: '全部成员已禁言：只有 @ 点名才会回复',
+      isWarning: false,
+    );
+  }
+  switch (status) {
+    case AutoChatStatus.error:
+      return const ConversationStatusAlert(message: '自动发言异常，请检查网络或 API 配置');
+    case AutoChatStatus.unavailable:
+      return ConversationStatusAlert(
+        message: blockedText,
+        actionLabel: needsApiConfig ? '去设置' : null,
+        onAction: needsApiConfig ? onConfigureApi : null,
+      );
+    case AutoChatStatus.idle:
+    case AutoChatStatus.waiting:
+    case AutoChatStatus.generating:
+    case AutoChatStatus.paused:
+      return null;
+  }
+}
 
 /// 构建群成员面板的性别、职业、年龄、回复状态和限额文案。
 String formatMemberStatus(

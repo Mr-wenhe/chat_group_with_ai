@@ -178,43 +178,84 @@ class AppBottomNav extends ConsumerWidget {
           selectedIndex: currentIndex,
           indicatorColor: cs.primary.withValues(alpha: 0.18),
           labelBehavior: NavigationDestinationLabelBehavior.alwaysShow,
-          onDestinationSelected: (i) {
-            if (i == currentIndex) return;
-            if (i == 0) {
-              Navigator.of(context).pushReplacementNamed('/');
-            } else if (i == 1) {
-              Navigator.of(context).pushReplacementNamed('/groups');
-            } else if (i == 2) {
-              Navigator.of(context).pushReplacementNamed('/direct-chats');
-            } else {
-              Navigator.of(context).pushReplacementNamed('/settings');
-            }
-          },
+          onDestinationSelected: (i) => _navigate(context, i),
           destinations: [
-            const NavigationDestination(
-              icon: Icon(Icons.smart_toy_outlined, size: 22),
-              selectedIcon: Icon(Icons.smart_toy_rounded, size: 22),
+            _accessibleDestination(
+              context: context,
+              index: 0,
               label: '角色',
+              child: const NavigationDestination(
+                icon: Icon(Icons.smart_toy_outlined, size: 22),
+                selectedIcon: Icon(Icons.smart_toy_rounded, size: 22),
+                label: '角色',
+              ),
             ),
-            NavigationDestination(
-              icon: _badgeIcon(Icons.group_outlined, groupUnread),
-              selectedIcon: _badgeIcon(Icons.group_rounded, groupUnread),
+            _accessibleDestination(
+              context: context,
+              index: 1,
               label: '群聊',
+              child: NavigationDestination(
+                icon: _badgeIcon(Icons.group_outlined, groupUnread),
+                selectedIcon: _badgeIcon(Icons.group_rounded, groupUnread),
+                label: '群聊',
+              ),
             ),
-            NavigationDestination(
-              icon: _badgeIcon(Icons.chat_bubble_outline_rounded, directUnread),
-              selectedIcon: _badgeIcon(Icons.chat_bubble_rounded, directUnread),
+            _accessibleDestination(
+              context: context,
+              index: 2,
               label: '私聊',
+              child: NavigationDestination(
+                icon:
+                    _badgeIcon(Icons.chat_bubble_outline_rounded, directUnread),
+                selectedIcon:
+                    _badgeIcon(Icons.chat_bubble_rounded, directUnread),
+                label: '私聊',
+              ),
             ),
-            const NavigationDestination(
-              icon: Icon(Icons.settings_outlined, size: 22),
-              selectedIcon: Icon(Icons.settings_rounded, size: 22),
+            _accessibleDestination(
+              context: context,
+              index: 3,
               label: '设置',
+              child: const NavigationDestination(
+                icon: Icon(Icons.settings_outlined, size: 22),
+                selectedIcon: Icon(Icons.settings_rounded, size: 22),
+                label: '设置',
+              ),
             ),
           ],
         ),
       ),
     );
+  }
+
+  Widget _accessibleDestination({
+    required BuildContext context,
+    required int index,
+    required String label,
+    required Widget child,
+  }) {
+    return Semantics(
+      container: true,
+      excludeSemantics: true,
+      button: true,
+      selected: index == currentIndex,
+      label: label,
+      onTap: () => _navigate(context, index),
+      child: child,
+    );
+  }
+
+  void _navigate(BuildContext context, int index) {
+    if (index == currentIndex) return;
+    if (index == 0) {
+      Navigator.of(context).pushReplacementNamed('/');
+    } else if (index == 1) {
+      Navigator.of(context).pushReplacementNamed('/groups');
+    } else if (index == 2) {
+      Navigator.of(context).pushReplacementNamed('/direct-chats');
+    } else {
+      Navigator.of(context).pushReplacementNamed('/settings');
+    }
   }
 
   Widget _badgeIcon(IconData icon, int count) {

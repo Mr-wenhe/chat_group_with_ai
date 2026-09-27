@@ -15,6 +15,7 @@ import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/user_profile.dart';
+import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/backup/backup_models.dart';
 import 'package:chat_group/features/backup/backup_entity_codec.dart';
 import 'package:chat_group/features/backup/backup_inspector.dart';
@@ -22,7 +23,9 @@ import 'package:chat_group/features/backup/backup_restore_service.dart';
 import 'package:chat_group/features/backup/staged_backup_data.dart';
 import 'package:chat_group/features/ai_character/character_gender_migrator.dart';
 import 'package:chat_group/features/ai_character/character_gender_migration_state.dart';
+import 'package:chat_group/features/chat_group/group_mute_store.dart';
 import 'package:chat_group/features/memory/memory_migrator.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:crypto/crypto.dart';
 import 'package:flutter_test/flutter_test.dart';
 

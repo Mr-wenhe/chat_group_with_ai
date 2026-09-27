@@ -105,6 +105,7 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
     required int maxTokens,
     required bool streaming,
     bool structuredJson = false,
+    bool stepPlanLowReasoning = false,
   }) {
     return switch (apiProtocol) {
       ApiProtocol.anthropicMessages => _anthropicRequestBody(
@@ -121,7 +122,15 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
           if (maxTokens > 0) 'max_tokens': maxTokens,
           if (streaming) 'stream': true,
           if (streaming) 'stream_options': {'include_usage': true},
+          // The currently supported StepFun reasoning models accept JSON mode
+          // together with their reasoning envelope.  Keep it enabled for
+          // structured work turns; prompt-only formatting is too fragile for
+          // long multi-role discussions and can surface a natural-language
+          // answer instead of the protocol object.
           if (structuredJson) 'response_format': {'type': 'json_object'},
+          if ((stepPlanLowReasoning || _isStepFunReasoningModel(model)) &&
+              _supportsStepPlanReasoningFormat(model))
+            'reasoning_format': 'deepseek-style',
         },
       ApiProtocol.openAiResponses => <String, dynamic>{
           'model': model,
@@ -138,6 +147,30 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
         ),
     };
   }
+
+  bool _isStepPlanEndpoint({
+    required ApiProvider provider,
+    required String? customBaseUrl,
+  }) {
+    if (provider != ApiProvider.custom) return false;
+    final path = Uri.tryParse(customBaseUrl?.trim() ?? '')?.path.toLowerCase();
+    return path?.contains('/step_plan/') ?? false;
+  }
+
+  bool _supportsStepPlanReasoningFormat(String model) {
+    final normalized = model.trim().toLowerCase();
+    return const {
+      'step-3.7-flash',
+      'step-3.5-flash',
+      'step-3.5-flash-2603',
+      'step-3',
+      'step-r1-v-mini',
+      'step-router-v1',
+    }.contains(normalized);
+  }
+
+  bool _isStepFunReasoningModel(String model) =>
+      _supportsStepPlanReasoningFormat(model);
 
   Map<String, dynamic> _anthropicRequestBody({
     required String model,
@@ -211,7 +244,12 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
   String _responseText(Map<String, dynamic> data, ApiProtocol protocol) {
     switch (protocol) {
       case ApiProtocol.anthropicMessages:
-        return _messageText(data['content']);
+        final standard = _messageText(data['content']);
+        if (standard.trim().isNotEmpty) return standard;
+        // Some compatible Anthropic endpoints expose the assistant payload
+        // only as reasoning_content. Use it only after normal content is
+        // confirmed empty so the public response contract stays deterministic.
+        return _messageText(data['reasoning_content']);
       case ApiProtocol.openAiChatCompletions:
         final choices = data['choices'];
         if (choices is List && choices.isNotEmpty && choices.first is Map) {
@@ -219,7 +257,11 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
           if (message is Map) {
             final standard = _messageText(message['content']);
             if (standard.trim().isNotEmpty) return standard;
-            return _messageText(message['reasoning_content']);
+            final reasoningContent = _messageText(message['reasoning_content']);
+            // StepFun's native `reasoning` is private thinking. Only the
+            // explicitly requested compatibility field may be used as a
+            // fallback, and only after standard content is empty.
+            return reasoningContent;
           }
         }
         return '';

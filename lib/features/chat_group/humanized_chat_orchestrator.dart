@@ -151,8 +151,10 @@ class HumanizedChatOrchestrator {
             tone = '熟人感、轻一点、别端着';
             length = ReplyLengthHint.short;
           }
-          if (relation.recentMood == RelationshipMood.awkward ||
-              relation.recentMood == RelationshipMood.cold) {
+          // 取生效心情：过期的存储心情不应继续压制发言意愿。
+          final relationMood = relation.effectiveMood();
+          if (relationMood == RelationshipMood.awkward ||
+              relationMood == RelationshipMood.cold) {
             score -= 12;
             reasons.add('mood-cooldown');
           }
@@ -206,7 +208,7 @@ class HumanizedChatOrchestrator {
           tone = '敷衍、不想深入聊、转移话题';
         }
       } else if (userRelation.affinity < 0 &&
-          userRelation.recentMood == RelationshipMood.cold) {
+          userRelation.effectiveMood() == RelationshipMood.cold) {
         // 冷淡情绪下好感为负：降低回复意愿。
         score -= 8;
         reasons.add('cold-mood');

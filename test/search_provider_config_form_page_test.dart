@@ -131,9 +131,10 @@ void main() {
     await tester.tap(find.text('保存配置').last);
     // Saving persists a durable repair intent and metadata in separate file
     // operations. Alternate real I/O time with widget frames until the page
-    // reports completion by popping its route.
+    // reports completion by popping its route. The bound is generous because
+    // these are real disk writes: a contended run needs more than a second.
     for (var attempt = 0;
-        attempt < 8 && !navigatorObserver.popped.isCompleted;
+        attempt < 30 && !navigatorObserver.popped.isCompleted;
         attempt++) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 200)),

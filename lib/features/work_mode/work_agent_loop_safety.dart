@@ -1,5 +1,10 @@
 part of 'work_agent_loop.dart';
 
+/// Short digest used to keep generated archive entry names unique after the
+/// name budget truncates two different long names to the same prefix.
+String workArtifactNameDigest(String value) =>
+    sha256.convert(utf8.encode(value)).toString();
+
 const Set<String> _sensitiveOperationKeys = {
   'content',
   'body',
@@ -17,6 +22,14 @@ const Set<String> _sensitiveOperationKeys = {
 // A 5 MB image becomes less than 7 MB after base64 encoding. This bound is
 // ephemeral (model context only); persisted/checkpoint views still redact it.
 const int _maxModelImageDataUriChars = 7 * 1024 * 1024;
+const int _commandFailureHistoryLimit = 128;
+final RegExp _userActionDiagnostic = RegExp(
+  r'权限|permission|access\s+denied|operation\s+not\s+permitted|'
+  r'not\s+authorized|unauthorized|administrator|sudo|登录|登入|密码|'
+  r'验证码|付费墙|付款|授权|需要确认|需要判断|captcha|login|paywall|'
+  r'payment|authorization|password|passphrase',
+  caseSensitive: false,
+);
 
 extension _WorkAgentLoopSafety on WorkAgentLoop {
   Set<String> _loadCommittedActionKeys(AgentTask task) {
@@ -56,11 +69,223 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     return Map<String, dynamic>.from(value);
   }
 
+  List<String> _loadCommandFailureKeys(AgentTask task) {
+    final value =
+        _safeExistingMap(task.executionStateJson)['commandFailureKeys'];
+    if (value is! List) return const <String>[];
+    final filtered = value
+        .whereType<String>()
+        .where(
+          (key) =>
+              RegExp(r'^[a-f0-9]{64}$', caseSensitive: false).hasMatch(key),
+        )
+        .toList(growable: false);
+    return filtered
+        .skip(
+          filtered.length > _commandFailureHistoryLimit
+              ? filtered.length - _commandFailureHistoryLimit
+              : 0,
+        )
+        .toList(growable: false);
+  }
+
+  int _loadUnchangedMutationCount(AgentTask task) {
+    final value =
+        _safeExistingMap(task.executionStateJson)['unchangedMutationCount'];
+    return value is num ? value.clamp(0, 2).toInt() : 0;
+  }
+
+  void _persistUnchangedMutationCount(AgentTask task, int count) {
+    final execution = _decodeMap(task.executionStateJson);
+    final bounded = count.clamp(0, 2).toInt();
+    if (bounded == 0) {
+      execution.remove('unchangedMutationCount');
+    } else {
+      execution['unchangedMutationCount'] = bounded;
+    }
+    task.executionStateJson = jsonEncode(execution);
+  }
+
+  /// Returns true only when this exact command/tool and diagnostic state was
+  /// already seen in the current progress segment. A successful mutation clears
+  /// the segment, so a compiler can legitimately report the same error again
+  /// after the model has changed the input.
+  bool _isCommandFailureLoop(
+    _LoopState state,
+    AgentToolCall call,
+    WorkToolResult result,
+  ) {
+    final fingerprint = _commandFailureFingerprint(call, result);
+    if (state.commandFailureKeys.contains(fingerprint)) return true;
+    state.commandFailureKeys.add(fingerprint);
+    if (state.commandFailureKeys.length > _commandFailureHistoryLimit) {
+      state.commandFailureKeys.removeRange(
+        0,
+        state.commandFailureKeys.length - _commandFailureHistoryLimit,
+      );
+    }
+    return false;
+  }
+
+  /// Whether the real failure signature changed even though the model edited its
+  /// command. The persisted `commandFailureKeys` fingerprint covers the whole
+  /// command, so a repaired script or a re-quoted argument always looks "new"
+  /// and the loop detector never fires — which is how one task burned a dozen
+  /// actions re-running a command whose process error never changed.
+  ///
+  /// A single failure that merely points at the file being repaired is not
+  /// enough to stop: the next run is expected to succeed. Requiring the same
+  /// outcome twice gives the repair one honest attempt while still ending the
+  /// repeat-on-identical-error variant of the same dead end.
+  bool _isRepeatedCommandOutcome(
+    _LoopState state,
+    AgentToolCall call,
+    WorkToolResult result,
+  ) {
+    final signature = _commandOutcomeSignature(call, result);
+    final previous = state.commandOutcomeSignatures[signature];
+    state.commandOutcomeSignatures[signature] = (previous ?? 0) + 1;
+    while (
+        state.commandOutcomeSignatures.length > _commandFailureHistoryLimit) {
+      state.commandOutcomeSignatures.remove(
+        state.commandOutcomeSignatures.keys.first,
+      );
+    }
+    return (state.commandOutcomeSignatures[signature] ?? 0) > 1;
+  }
+
+  /// Identifies a process failure independently of the command spelling.
+  ///
+  /// The exit status and the *diagnostic* stderr line are used on purpose: a
+  /// Python traceback repeats its first frames no matter which line was just
+  /// fixed, while its final line names the real defect. Two runs whose exit
+  /// status and diagnostic line match are the same dead end even if the script
+  /// text differs.
+  String _commandOutcomeSignature(
+    AgentToolCall call,
+    WorkToolResult result,
+  ) {
+    final payload = <String, dynamic>{
+      'tool': call.name.wireName,
+      'runStatus': result.data['runStatus']?.toString() ?? result.status.name,
+      'exitCode': result.data['exitCode']?.toString() ?? '',
+      'message': _diagnosticText(result.message),
+      // The artifact a repair run is trying to fix. Two unrelated scripts that
+      // fail with the same generic banner are not the same dead end.
+      'target': result.data['failureTargetPath']?.toString() ?? '',
+      'stderrTail': _diagnosticTail(result.data['stderr']),
+    };
+    return sha256
+        .convert(utf8.encode(jsonEncode(_canonical(payload))))
+        .toString();
+  }
+
+  /// The last stderr line that actually names a defect.
+  ///
+  /// Toolchains often end with a line that is identical for every failure
+  /// (`Node.js v20`, clang's `1 error generated.`, `make: *** [x] Error 1`), so
+  /// using the literal last line would make two unrelated bugs share one
+  /// signature and pause a task that was still progressing.
+  String _diagnosticTail(Object? value) {
+    final text = _diagnosticText(value);
+    if (text.isEmpty) return '';
+    final lines = text
+        .split('\n')
+        .map((line) => line.trim())
+        .where((line) => line.isNotEmpty)
+        .toList(growable: false);
+    for (final line in lines.reversed) {
+      if (!_isGenericDiagnosticTail(line)) return line;
+    }
+    return lines.isEmpty ? '' : lines.last;
+  }
+
+  bool _isGenericDiagnosticTail(String line) {
+    final lower = line.toLowerCase();
+    return RegExp(
+      r'^(node\.js v[\d.]+|python [\d.]+|'
+      r'\d+ errors? generated\.?|'
+      r'make(\[\d+\])?: \*\*\* .*error \d+|'
+      r'note:|'
+      r'error: could not compile .* due to)',
+      caseSensitive: false,
+    ).hasMatch(lower);
+  }
+
+  String _commandFailureFingerprint(
+    AgentToolCall call,
+    WorkToolResult result,
+  ) {
+    final payload = <String, dynamic>{
+      'operation': _operationKey(call),
+      'failureCode': result.failureCode ?? '',
+      'runStatus': result.data['runStatus']?.toString() ?? result.status.name,
+      'exitCode': result.data['exitCode']?.toString() ?? '',
+      'message': _diagnosticText(result.message),
+      'stderr': _diagnosticText(result.data['stderr']),
+      'stdout': _diagnosticText(result.data['stdout']),
+    };
+    return sha256
+        .convert(utf8.encode(jsonEncode(_canonical(payload))))
+        .toString();
+  }
+
+  String _diagnosticText(Object? value) {
+    if (value == null) return '';
+    final text = value.toString().replaceAll('\r\n', '\n').trim();
+    if (text.length <= 4096) return text;
+    return '${text.substring(0, 2048)}…${text.substring(text.length - 2048)}';
+  }
+
+  void clearCommandFailureHistory(_LoopState state) {
+    state.commandFailureKeys.clear();
+    // The outcome counters must be cleared with the history. Otherwise a command
+    // that failed once, was fixed, and fails with the same signature much later
+    // in the same run looks like an immediate repeat and pauses a task that was
+    // still making progress.
+    state.commandOutcomeSignatures.clear();
+  }
+
+  bool _isBlockedCommandFailure(WorkToolResult result) =>
+      result.failureCode == 'commandFailed' &&
+      result.data['runStatus'] == WorkCommandRunStatus.blockedByDefault.name;
+
+  /// Whether a failed tool result may be handed back to the model so it can
+  /// repair its own call instead of ending the task.
+  ///
+  /// Approval, permission and path gates are excluded: their remedy is a user
+  /// grant or a different plan, which the panel already offers, so retrying
+  /// them would only repeat a refusal. A mutation that already reached the
+  /// filesystem is excluded too: its effect may be half-applied, and the
+  /// durable operation key means a repeat could only be a no-op, so it surfaces
+  /// as a classified failure for the user to judge. Everything else — a
+  /// rejected argument, a missing prerequisite, a resource conflict or an
+  /// unhandled tool error — is something the model's next decision can still
+  /// fix. Runaway repair is bounded by the failure-history detectors below and
+  /// the task's repair budget, not by refusing the retry up front.
+  bool _isRepairableToolFailure(WorkToolResult result) {
+    if (result.succeeded || result.committed) return false;
+    if (result.status == WorkToolResultStatus.pathRejected) return false;
+    return result.failureCode != 'softLimit';
+  }
+
+  /// The imperative the model reads on its next turn after a repairable tool
+  /// failure. The failed result is already in `recentToolResults`; this states
+  /// what to do with it so the model does not simply repeat the same call.
+  String _toolRepairInstruction(AgentToolCall call, WorkToolResult result) {
+    final code = result.failureCode ?? result.status.name;
+    final detail = _publicText(result.message, maximum: 400);
+    return '上一次工具调用（${call.name.wireName}）失败（$code）：$detail。'
+        '请根据该错误修正参数、补齐前置条件或改用其他可行工具后重试，'
+        '不要重复完全相同的调用。';
+  }
+
   Map<String, dynamic> _safeResult(
     WorkToolResult result,
     AgentToolCall call,
   ) {
     final rejected = result.data['rejected'] == true;
+    final changed = result.data['changed'];
     return {
       'tool': call.name.wireName,
       'status': result.status.name,
@@ -69,6 +294,7 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       // uncommitted in the model/checkpoint view so a later continuation does
       // not treat a user's refusal as durable work.
       'committed': !rejected &&
+          changed != false &&
           (result.committed ||
               result.succeeded &&
                   registry.definitionFor(call.name)?.isMutation == true),
@@ -310,6 +536,46 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     return paths.take(64).toList(growable: false);
   }
 
+  void _recordArtifactChange(
+    AgentTask task,
+    AgentToolCall call,
+    WorkToolResult result,
+  ) {
+    final rawPath = result.data['path'] ?? call.arguments['path'];
+    final committed = result.data['changed'] == true;
+    // A successful command reports the files it created. Recording them keeps
+    // one definition of "changed by this run" for both mutation tools, so the
+    // artifact auto-completion can recognize a script-produced deliverable.
+    final commandArtifacts = call.name == AgentToolName.commandRun &&
+            result.data['runStatus'] == WorkCommandRunStatus.completed.name
+        ? (result.data['artifactPaths'] as List?)?.whereType<String>() ??
+            const <String>[]
+        : const <String>[];
+    if (!committed && commandArtifacts.isEmpty) return;
+    final execution = _decodeMap(task.executionStateJson);
+    final existing = execution['artifactChanges'];
+    final changes = <String, dynamic>{
+      if (existing is Map)
+        ...existing.map(
+          (key, value) => MapEntry(key.toString(), value),
+        ),
+    };
+    final hashes = <String, dynamic>{
+      if (result.data['beforeSha256'] is String)
+        'beforeSha256': result.data['beforeSha256'],
+      if (result.data['afterSha256'] is String)
+        'afterSha256': result.data['afterSha256'],
+    };
+    if (committed && rawPath is String && rawPath.trim().isNotEmpty) {
+      changes[rawPath] = {'changed': true, ...hashes};
+    }
+    for (final path in commandArtifacts) {
+      if (path.trim().isNotEmpty) changes[path] = {'changed': true};
+    }
+    execution['artifactChanges'] = changes;
+    task.executionStateJson = jsonEncode(execution);
+  }
+
   bool _modelFailed(Map<String, dynamic> response) =>
       response['success'] == false;
 
@@ -342,6 +608,7 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
 
   bool _toolNeedsUserAction(WorkToolResult result) {
     if (result.status == WorkToolResultStatus.pathRejected) return false;
+    if (_isBlockedCommandFailure(result)) return true;
     if (result.requiresUserAction ||
         result.status == WorkToolResultStatus.permissionDenied) {
       return true;
@@ -350,10 +617,12 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     if (code != null && WorkAgentLoop._userActionFailureCodes.contains(code)) {
       return true;
     }
-    return RegExp(
-      r'权限|permission|access\s+denied|登录|登入|验证码|付费墙|付款|授权|需要确认|需要判断|captcha|login|paywall|payment|authorization',
-      caseSensitive: false,
-    ).hasMatch(result.message);
+    final diagnostic = <String>[
+      result.message,
+      for (final key in const ['stderr', 'stdout'])
+        if (result.data[key] != null) _diagnosticText(result.data[key]),
+    ].join('\n');
+    return _userActionDiagnostic.hasMatch(diagnostic);
   }
 
   /// Publicly completed work is deliberately compact. The list is persisted
@@ -445,6 +714,12 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
 
   Map<String, dynamic> _safeExistingMap(String raw) {
     final decoded = _decodeMap(raw);
+    if (workExecutionCheckpointRequiresReview(raw)) {
+      // Preserve only typed gates and known blockers while a future checkpoint
+      // waits for an explicit user resume. Dropping the discussion/folder
+      // marker here would turn an unknown state into a legacy runnable task.
+      return workExecutionCheckpointReviewMetadata(decoded);
+    }
     final sanitized = _safePersistedValue(decoded, depth: 0);
     return sanitized is Map
         ? Map<String, dynamic>.from(sanitized)
@@ -453,6 +728,15 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
 
   Object? _safePersistedValue(Object? value,
       {required int depth, String? key}) {
+    if (key == WorkDiscussionState.jsonKey) {
+      // Discussion state is a typed execution gate. Its nested fields include
+      // names such as conversationId/contentScope that the generic checkpoint
+      // redactor intentionally removes; treating the marker as an ordinary
+      // map would make every model checkpoint lose the gate and break resume.
+      if (value is! Map) return null;
+      final state = WorkDiscussionState.tryParse(value);
+      return state?.toJson();
+    }
     if (key == 'workFailure' && value is Map) {
       // WorkFailure owns its own allow-list and redaction. Treating this
       // structured diagnostic as a normal result would drop completedContent
@@ -585,6 +869,21 @@ class _LoopState {
   int toolRetryCount = 0;
   int protocolRepairAttempts = 0;
   int invalidCommandRepairCount = 0;
+  int toolRepairCount = 0;
+  int completionRepairCount = 0;
+  int unchangedMutationCount = 0;
+
+  /// Turn-scoped instruction describing what the last tool call got wrong. It
+  /// is deliberately not durable: a resumed run rebuilds it from the
+  /// checkpointed tool results instead of trusting in-memory text.
+  String toolRepairInstruction = '';
+  String completionRepairInstruction = '';
+  final List<String> commandFailureKeys = <String>[];
+
+  /// Counts identical process outcomes, independent of the command text, so a
+  /// repaired-but-equally-broken command cannot repeat forever. Cleared with the
+  /// failure history after a successful mutation.
+  final Map<String, int> commandOutcomeSignatures = <String, int>{};
 
   _LoopState({
     required this.task,

@@ -8,6 +8,8 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
     _filteredMentionMembers = [];
     _mentionSelectedIndex = 0;
     _mentionSearchController.clear();
+    // 浮层已移除，定位 key 随之作废，下次打开重建（也避免旧 element 复用）。
+    _mentionItemKeys.clear();
   }
 
   /// 在输入框上方弹出 @ 成员选择浮层。
@@ -102,7 +104,7 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
               controller: _mentionSearchController,
               autofocus: false,
               decoration: InputDecoration(
-                hintText: '搜索名称、角色或标签…',
+                hintText: '搜索名称、角色或标签，支持拼音',
                 prefixIcon: Icon(Icons.search_rounded,
                     size: 16, color: cs.onSurfaceVariant),
                 isDense: true,
@@ -145,15 +147,20 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
     if (q.isEmpty) {
       _filteredMentionMembers = List.from(_allGroupCharacters);
     } else {
-      _filteredMentionMembers = _allGroupCharacters
-          .where((c) =>
-              c.name.contains(q) ||
-              c.role.contains(q) ||
-              c.personalityTags.any((tag) => tag.contains(q)))
-          .toList();
+      _filteredMentionMembers = PinyinSearch.exactFirst(
+        _allGroupCharacters
+            .where((c) => PinyinSearch.matchesFields(
+                  c.searchFields,
+                  q,
+                  mode: PinyinMatchMode.name,
+                ))
+            .toList(),
+        (c) => PinyinSearch.matchesLiterally(c.searchFields, q),
+      );
     }
     _mentionSelectedIndex = 0;
     _mentionOverlay?.markNeedsBuild();
+    _revealMentionSelection();
   }
 
   /// 是否展示 `@all` 选项：搜索为空，或搜索词是 all/所有人/全部 的前缀。
@@ -163,6 +170,48 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
         'all'.contains(q) ||
         '所有人'.contains(q) ||
         '全部'.contains(q);
+  }
+
+  /// 取候选列表某个下标对应的定位 key（按槽位懒创建）。
+  GlobalKey _mentionItemKey(int index) =>
+      _mentionItemKeys.putIfAbsent(index, () => GlobalKey());
+
+  /// 把当前高亮项滚入可视区。
+  ///
+  /// 成员多时列表要滚动，高亮项很容易跑到可视区外，用户就"看不见选中了谁"。
+  /// 目标项可能已被 ListView 回收（拿不到 context），此时先按行高估算跳一次，
+  /// 下一帧再精确定位——与搜索定位消息（`_scrollToMessageIndex`）同一套路。
+  void _revealMentionSelection() {
+    final keyContext = _mentionItemKeys[_mentionSelectedIndex]?.currentContext;
+    if (keyContext != null) {
+      _keepMentionItemVisible(keyContext);
+      return;
+    }
+    if (!_mentionListController.hasClients) return;
+    final estimatedOffset =
+        _mentionSelectedIndex * _ChatRoomPageState._mentionItemHeightEstimate;
+    _mentionListController.jumpTo(
+      estimatedOffset.clamp(
+        0.0,
+        _mentionListController.position.maxScrollExtent,
+      ),
+    );
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final ctx = _mentionItemKeys[_mentionSelectedIndex]?.currentContext;
+      if (ctx == null) return;
+      _keepMentionItemVisible(ctx);
+    });
+  }
+
+  /// 让某个候选项居中显示，保证高亮落在可视区正中间。
+  void _keepMentionItemVisible(BuildContext itemContext) {
+    Scrollable.ensureVisible(
+      itemContext,
+      duration: const Duration(milliseconds: 120),
+      curve: Curves.easeOut,
+      alignment: 0.5,
+    );
   }
 
   /// 构建 @ 候选列表；`@all` 占据首项，故成员下标需整体后移一位。
@@ -175,17 +224,24 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
       );
     }
     return ListView.builder(
+      controller: _mentionListController,
       padding: const EdgeInsets.symmetric(vertical: 4),
       itemCount: _filteredMentionMembers.length + (showAll ? 1 : 0),
       itemBuilder: (ctx2, i) {
+        // 每项挂一个按槽位复用的 key，供 [_revealMentionSelection] 定位。
         if (showAll && i == 0) {
-          return _buildMentionAllTile(cs, selected: _mentionSelectedIndex == 0);
+          return KeyedSubtree(
+            key: _mentionItemKey(i),
+            child:
+                _buildMentionAllTile(cs, selected: _mentionSelectedIndex == 0),
+          );
         }
         final memberIndex = showAll ? i - 1 : i;
         final c = _filteredMentionMembers[memberIndex];
         final pColor = _senderColor(c);
         final selected = i == _mentionSelectedIndex;
         return InkWell(
+          key: _mentionItemKey(i),
           onTap: () => _insertMention(c),
           borderRadius: BorderRadius.circular(10),
           child: Container(
@@ -295,6 +351,16 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
     );
   }
 
+  /// 按 [delta] 移动键盘高亮项，并把它滚回可视区。
+  void _moveMentionSelection(int delta, int optionCount) {
+    _setUiState(() {
+      _mentionSelectedIndex =
+          (_mentionSelectedIndex + delta).clamp(0, optionCount - 1);
+    });
+    _mentionOverlay?.markNeedsBuild();
+    _revealMentionSelection();
+  }
+
   /// @ 弹窗打开时的键盘导航：↑↓ 选择、回车插入、Esc 关闭。
   KeyEventResult _handleMentionKeyEvent(KeyEvent event) {
     if (!_showMentionPopup) return KeyEventResult.ignored;
@@ -306,18 +372,10 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
         _filteredMentionMembers.length + (_showMentionAllOption ? 1 : 0);
     if (optionCount <= 0) return KeyEventResult.ignored;
     if (key == LogicalKeyboardKey.arrowDown) {
-      _setUiState(() {
-        _mentionSelectedIndex =
-            (_mentionSelectedIndex + 1).clamp(0, optionCount - 1);
-      });
-      _mentionOverlay?.markNeedsBuild();
+      _moveMentionSelection(1, optionCount);
       return KeyEventResult.handled;
     } else if (key == LogicalKeyboardKey.arrowUp) {
-      _setUiState(() {
-        _mentionSelectedIndex =
-            (_mentionSelectedIndex - 1).clamp(0, optionCount - 1);
-      });
-      _mentionOverlay?.markNeedsBuild();
+      _moveMentionSelection(-1, optionCount);
       return KeyEventResult.handled;
     } else if (key == LogicalKeyboardKey.enter ||
         key == LogicalKeyboardKey.numpadEnter) {
@@ -350,25 +408,17 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
     _insertMentionText('@${character.name} ');
   }
 
-  /// 用 [mentionText] 替换掉光标前那段正在输入的 `@查询词`。
-  ///
-  /// 从光标前一位向左找最近的 `@` 作为替换起点（找不到就从头替换），
-  /// 插入后把光标移到 @ 文本之后，并立刻把焦点还给输入框。
+  /// 候选弹窗替换正在输入的查询词；成员面板和消息菜单保留已有草稿。
   void _insertMentionText(String mentionText) {
-    final text = _textController.text;
-    int cursorPos = _textController.selection.baseOffset;
-    // baseOffset 为 -1 表示无选区（未聚焦），退化为在末尾插入。
-    if (cursorPos < 0) cursorPos = text.length;
-
-    final searchEnd = cursorPos > 0 ? cursorPos - 1 : 0;
-    int atPos = text.lastIndexOf('@', searchEnd);
-    if (atPos < 0) atPos = 0;
-
-    final newText =
-        '${text.substring(0, atPos)}$mentionText${text.substring(cursorPos)}';
+    final draft = insertMentionInDraft(
+      _textController.text,
+      _textController.selection.baseOffset,
+      mentionText,
+      replaceQuery: _showMentionPopup,
+    );
     _textController.value = TextEditingValue(
-      text: newText,
-      selection: TextSelection.collapsed(offset: atPos + mentionText.length),
+      text: draft.text,
+      selection: TextSelection.collapsed(offset: draft.cursor),
     );
 
     // Overlay dismissal can steal focus; restore it immediately.

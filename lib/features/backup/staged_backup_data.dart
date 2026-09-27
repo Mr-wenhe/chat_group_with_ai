@@ -5,8 +5,8 @@ import 'package:chat_group/core/database/database_service.dart';
 
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';
-import 'package:chat_group/features/web_search/data/search_settings_store.dart';
-import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'backup_setting_keys.dart';
+import 'package:chat_group/features/chat_group/group_mute_store.dart';
 
 part 'staged_backup_data_json_guard.dart';
 part 'staged_backup_data_validation.dart';
@@ -205,30 +205,20 @@ class StagedBackupData {
   }
 
   void _validateSettingKeys() {
-    const allowed = {
-      'theme_mode',
-      'app_skin_mode',
-      'tts_enabled',
-      'direct_chat_read_at',
-      'direct_chat_source',
-      'direct_chat_last_proactive_at',
-      'group_chat_read_at',
-      'group_chat_last_proactive_at',
-      'pinned_character_ids',
-      'pinned_group_ids',
-      'memory_pinned_keys_v1',
-      'token_usage',
-      SearchProviderConfigStore.configsKey,
-      SearchProviderConfigStore.defaultProviderKey,
-      SearchProviderConfigStore.runtimeSettingsKey,
-      AiGovernanceStore.globalSearchPolicyKey,
-      AiGovernanceStore.conversationSearchPoliciesKey,
-    };
     for (final key in settings.keys) {
-      if (!allowed.contains(key) &&
-          !key.startsWith('work_mode_enabled:') &&
-          !key.startsWith('context_compressed_through:')) {
+      if (!isBackupCarriedSettingKey(key)) {
         throw BackupException('备份包含不允许的设置：$key');
+      }
+    }
+    if (settings.containsKey(GroupMuteStore.storageKey)) {
+      final mutes = settings[GroupMuteStore.storageKey];
+      if (mutes is! Map ||
+          mutes.entries.any((entry) =>
+              entry.key is! String ||
+              (entry.key as String).isEmpty ||
+              entry.value is! List ||
+              (entry.value as List).any((id) => id is! String || id.isEmpty))) {
+        throw const BackupException('群禁言设置格式无效');
       }
     }
   }

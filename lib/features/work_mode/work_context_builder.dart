@@ -3,6 +3,8 @@ import 'dart:convert';
 
 import 'package:chat_group/core/models/agent_task.dart';
 
+import 'work_discussion_state.dart';
+
 /// A model may return a smaller public checkpoint, but it can never change the
 /// conversation that owns the checkpoint.
 typedef WorkContextCompressionModel = FutureOr<WorkContextSnapshot?> Function(
@@ -11,6 +13,8 @@ typedef WorkContextCompressionModel = FutureOr<WorkContextSnapshot?> Function(
 /// The only data that is allowed to cross the work-task persistence boundary.
 /// File contents and raw model/tool payloads deliberately have no field here.
 class WorkContextSnapshot {
+  static const int currentSchemaVersion = 1;
+
   final int schemaVersion;
   final String conversationId;
   final String target;
@@ -20,11 +24,14 @@ class WorkContextSnapshot {
   final Map<String, dynamic>? approvalScope;
   final List<String> artifactPaths;
   final Map<String, dynamic>? roleHandoff;
+
+  /// Typed discussion state is resume-critical and must survive compression.
+  final WorkDiscussionState? discussionState;
   final List<String> errors;
   final String nextStep;
 
   WorkContextSnapshot({
-    this.schemaVersion = 1,
+    this.schemaVersion = currentSchemaVersion,
     required this.conversationId,
     this.target = '',
     Iterable<String> pendingFollowUps = const [],
@@ -33,6 +40,7 @@ class WorkContextSnapshot {
     Map<String, dynamic>? approvalScope,
     Iterable<String> artifactPaths = const [],
     Map<String, dynamic>? roleHandoff,
+    this.discussionState,
     Iterable<String> errors = const [],
     this.nextStep = '',
   })  : pendingFollowUps = List.unmodifiable(pendingFollowUps),
@@ -61,6 +69,7 @@ class WorkContextSnapshot {
         'approvalScope': approvalScope,
         'artifactPaths': artifactPaths,
         'roleHandoff': roleHandoff,
+        'discussionState': discussionState?.compactForContext().toJson(),
         'errors': errors,
         'nextStep': nextStep,
       };
@@ -79,9 +88,26 @@ class WorkContextSnapshot {
         conversationId != expectedConversationId) {
       throw const FormatException('工作上下文 conversationId 不匹配');
     }
-    final version = json['schemaVersion'];
+    final rawVersion = json['schemaVersion'];
+    final version = rawVersion == null
+        ? currentSchemaVersion
+        : rawVersion is num &&
+                rawVersion.isFinite &&
+                rawVersion == rawVersion.toInt()
+            ? rawVersion.toInt()
+            : -1;
+    if (version != currentSchemaVersion) {
+      throw const FormatException('工作上下文 schemaVersion 不受支持');
+    }
+    final rawDiscussionState = json['discussionState'];
+    final discussionState = rawDiscussionState == null
+        ? null
+        : WorkDiscussionState.tryParse(rawDiscussionState);
+    if (rawDiscussionState != null && discussionState == null) {
+      throw const FormatException('工作上下文 discussionState 无效');
+    }
     return WorkContextSnapshot(
-      schemaVersion: version is num ? version.toInt() : 1,
+      schemaVersion: version,
       conversationId: conversationId,
       target: WorkContextBuilder._stringValue(json['target']),
       pendingFollowUps:
@@ -92,6 +118,7 @@ class WorkContextSnapshot {
       approvalScope: WorkContextBuilder._mapValue(json['approvalScope']),
       artifactPaths: WorkContextBuilder._stringList(json['artifactPaths']),
       roleHandoff: WorkContextBuilder._mapValue(json['roleHandoff']),
+      discussionState: discussionState,
       errors: WorkContextBuilder._stringList(json['errors']),
       nextStep: WorkContextBuilder._stringValue(json['nextStep']),
     );
@@ -109,6 +136,8 @@ class WorkContextSnapshot {
     Iterable<String>? artifactPaths,
     Map<String, dynamic>? roleHandoff,
     bool clearRoleHandoff = false,
+    WorkDiscussionState? discussionState,
+    bool clearDiscussionState = false,
     Iterable<String>? errors,
     String? nextStep,
   }) {
@@ -123,6 +152,8 @@ class WorkContextSnapshot {
           clearApprovalScope ? null : approvalScope ?? this.approvalScope,
       artifactPaths: artifactPaths ?? this.artifactPaths,
       roleHandoff: clearRoleHandoff ? null : roleHandoff ?? this.roleHandoff,
+      discussionState:
+          clearDiscussionState ? null : discussionState ?? this.discussionState,
       errors: errors ?? this.errors,
       nextStep: nextStep ?? this.nextStep,
     );
@@ -156,6 +187,7 @@ class WorkContextBuilder {
     Map<String, dynamic>? approvalScope,
     Iterable<String> artifactPaths = const [],
     Map<String, dynamic>? roleHandoff,
+    WorkDiscussionState? discussionState,
     Iterable<String> errors = const [],
     String nextStep = '',
   }) {
@@ -173,6 +205,7 @@ class WorkContextBuilder {
       approvalScope: _safeMap(approvalScope),
       artifactPaths: _cleanPaths(artifactPaths),
       roleHandoff: _safeRoleHandoff(roleHandoff),
+      discussionState: discussionState?.compactForContext(),
       errors: _cleanStrings(errors),
       nextStep: _cleanText(nextStep),
     );
@@ -185,7 +218,18 @@ class WorkContextBuilder {
   WorkContextSnapshot fromTask(AgentTask task) {
     final decoded = _decode(task.contextSummary);
     final sameConversation = decoded['conversationId'] == task.groupId;
-    final source = sameConversation ? decoded : const <String, dynamic>{};
+    // A task summary is a convenience cache, never an authority.  Ignore a
+    // future/unknown schema here instead of letting new fields steer a legacy
+    // runner; durable AgentTask fields and the execution marker remain usable.
+    final rawVersion = decoded['schemaVersion'];
+    final supportedSchema = rawVersion == null ||
+        (rawVersion is num &&
+            rawVersion.isFinite &&
+            rawVersion == rawVersion.toInt() &&
+            rawVersion.toInt() == WorkContextSnapshot.currentSchemaVersion);
+    final source = sameConversation && supportedSchema
+        ? decoded
+        : const <String, dynamic>{};
     final rawPending = task.queuedUserRequests.isNotEmpty
         ? task.queuedUserRequests
         : _stringList(source['pendingFollowUps']);
@@ -199,6 +243,15 @@ class WorkContextBuilder {
         : legacyActions is List
             ? legacyActions.whereType<String>()
             : const <String>[];
+    // The durable execution marker is authoritative. A compressed summary
+    // may lag behind it, so never let an older pending/ready snapshot replace
+    // the current gate. Only tasks without a marker may use the summary copy.
+    final discussionMarker = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    final discussionState = discussionMarker.present
+        ? discussionMarker.state
+        : WorkDiscussionState.tryParse(source['discussionState']);
     return build(
       conversationId: task.groupId,
       target: _stringValue(source['target'] ?? source['goal']).isNotEmpty
@@ -211,6 +264,7 @@ class WorkContextBuilder {
           _mapValue(source['approvalScope'] ?? source['approvedScope']),
       artifactPaths: rawArtifacts,
       roleHandoff: _mapValue(source['roleHandoff'] ?? source['handoff']),
+      discussionState: discussionState,
       errors: _stringList(source['errors']),
       nextStep: _stringValue(source['nextStep']),
     );
@@ -271,6 +325,8 @@ class WorkContextBuilder {
             artifactPaths: safe.artifactPaths,
             roleHandoff: safe.roleHandoff,
             clearRoleHandoff: safe.roleHandoff == null,
+            discussionState: safe.discussionState,
+            clearDiscussionState: safe.discussionState == null,
             errors: safe.errors,
             nextStep: safe.nextStep,
           );
@@ -302,6 +358,7 @@ class WorkContextBuilder {
         approvalScope: snapshot.approvalScope,
         artifactPaths: snapshot.artifactPaths,
         roleHandoff: snapshot.roleHandoff,
+        discussionState: snapshot.discussionState,
         errors: snapshot.errors,
         nextStep: snapshot.nextStep,
       );
@@ -316,6 +373,7 @@ class WorkContextBuilder {
       approvalScope: _safeMap(source.approvalScope),
       artifactPaths: _cleanPaths(source.artifactPaths),
       roleHandoff: _safeRoleHandoff(source.roleHandoff),
+      discussionState: source.discussionState?.compactForContext(),
       errors: _tail(source.errors, 16),
       nextStep: _clipText(source.nextStep, 512),
     );
@@ -395,6 +453,23 @@ class WorkContextBuilder {
         pendingFollowUps: [
           _clipText(result.pendingFollowUps.last, 128),
         ],
+      );
+    }
+    if (_encodedLength(result) > maxCharacters &&
+        result.discussionState != null) {
+      // Discussion state is resume-critical. Compact prose and participation
+      // diagnostics while retaining the phase, revision, executor, blockers
+      // and deliverable contract required by the execution gate.
+      result = result.copyWith(
+        discussionState: result.discussionState!.compactForContext(
+          candidateLimit: 2,
+          participantLimit: 1,
+          evidenceLimit: 1,
+          questionLimit: 1,
+          blockerLimit: 1,
+          textLimit: 32,
+          contractScopeLimit: 32,
+        ),
       );
     }
     return result;

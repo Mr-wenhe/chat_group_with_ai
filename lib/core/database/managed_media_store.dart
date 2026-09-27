@@ -24,7 +24,7 @@ class ManagedMediaStore {
       if (!excludedMessageIds.contains(message.id)) {
         for (final attachment in message.media ?? const []) {
           try {
-            final file = File(attachment.localPath);
+            final file = File(attachment.managedPath);
             if (!await file.exists()) continue;
             final path = await file.resolveSymbolicLinks();
             if (_isInside(rootPath, path)) referenced.add(path);
@@ -108,8 +108,8 @@ class ManagedMediaStore {
     // index in phase 03 if message-volume profiling shows this is still hot.
     for (final message in db.messageBox.values) {
       for (final attachment in message.media ?? const []) {
-        if (candidates.contains(attachment.localPath)) {
-          referenced.add(attachment.localPath);
+        if (candidates.contains(attachment.managedPath)) {
+          referenced.add(attachment.managedPath);
         }
       }
       if (++scannedMessages % HiveDeletionRunner.batchSize == 0) {

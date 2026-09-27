@@ -1,6 +1,263 @@
 part of 'backup_restore_service_test.dart';
 
 void _registerBackupRestoreServiceTestPart3() {
+  test('portable task backup keeps the per-attempt elapsed start', () async {
+    final attachment = File('${mediaDirectory.path}/attempt-start.txt');
+    await attachment.writeAsString('task attachment');
+    await _seedCoreData(db, attachment);
+    final attemptStartedAt = DateTime.utc(2026, 3, 4, 5, 6, 7);
+    final task = AgentTask(
+      id: 'task-attempt-start',
+      groupId: 'group-1',
+      characterId: 'char-1',
+      userRequest: '恢复本次尝试耗时起点',
+      workModeTask: true,
+      status: AgentTaskStatus.queued,
+      startedAt: DateTime.utc(2026, 3, 4, 4, 0, 0),
+      attemptStartedAt: attemptStartedAt,
+    );
+    await db.agentTaskBox.put(task.id, task);
+
+    final backup = File('${testRoot.path}/attempt-start.cgbak');
+    final sourceService = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await sourceService.createBackup(destination: backup);
+
+    await reopenEmptyDatabase();
+    final restoreService = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final prepared = await restoreService.inspect(backup);
+    addTearDown(prepared.dispose);
+    await restoreService.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.emptyOnly,
+    );
+
+    // 本次尝试耗时是纯展示状态，跨设备恢复后不应丢失，否则面板会退回按整条
+    // 任务起算，把"3 分钟"显示成"2 小时"。
+    expect(db.agentTaskBox.values.single.attemptStartedAt, attemptStartedAt);
+  });
+
+  test('portable task backup preserves an unknown checkpoint review barrier',
+      () async {
+    final attachment = File('${mediaDirectory.path}/unknown-checkpoint.txt');
+    await attachment.writeAsString('task attachment');
+    await _seedCoreData(db, attachment);
+    final state = WorkDiscussionState(
+      conversationId: 'group-1',
+      phase: WorkDiscussionPhase.ready,
+      requestRevision: 1,
+      coordinatorId: 'char-1',
+      executorId: 'char-1',
+      candidateCharacterIds: const ['char-1'],
+      participants: const [
+        WorkDiscussionParticipant(
+          characterId: 'char-1',
+          status: 'accepted',
+          contributionCount: 2,
+        ),
+      ],
+      understandingPercent: 100,
+      understandingEvidence: const ['已确认恢复边界'],
+      deliverableContract: const {
+        'deliverableType': 'document',
+        'format': 'docx',
+        'location': 'desktop',
+        'contentScope': '未知检查点恢复',
+        'explicitExecutorId': 'char-1',
+        'revisionTarget': '',
+        'requestRevision': 1,
+      },
+    );
+    final task = AgentTask(
+      id: 'task-unknown-checkpoint',
+      groupId: 'group-1',
+      characterId: 'char-1',
+      userRequest: '恢复未知检查点',
+      workModeTask: true,
+      status: AgentTaskStatus.queued,
+      assignedCharacterIds: const ['char-1'],
+      executionStateJson: jsonEncode({
+        'schemaVersion': 99,
+        'discussionState': state.toJson(),
+        'folderGrantPending': true,
+        'folderRequestPath': '/private/unknown-checkpoint.docx',
+        'approvalScope': {
+          'taskId': 'task-unknown-checkpoint',
+          'entries': [
+            {
+              'path': '/private/unknown-checkpoint.docx',
+              'actions': ['write']
+            },
+          ],
+        },
+      }),
+    );
+    await db.agentTaskBox.put(task.id, task);
+
+    final backup = File('${testRoot.path}/unknown-checkpoint.cgbak');
+    final sourceService = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await sourceService.createBackup(destination: backup);
+
+    await reopenEmptyDatabase();
+    final restoreService = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final prepared = await restoreService.inspect(backup);
+    addTearDown(prepared.dispose);
+    await restoreService.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.emptyOnly,
+    );
+
+    final restored = db.agentTaskBox.values.single;
+    final execution = jsonDecode(restored.executionStateJson) as Map;
+    expect(execution['checkpointSchemaUnsupported'], isTrue);
+    expect(execution['approvalScope'], isNull);
+    expect(execution['folderGrantPending'], isTrue);
+    expect(
+      WorkDiscussionState.fromExecutionState(restored.executionStateJson),
+      isNotNull,
+    );
+  });
+
+  test('portable task backup preserves a malformed checkpoint review barrier',
+      () {
+    final encoded = BackupEntityCodec.task(
+      AgentTask(
+        id: 'malformed-checkpoint',
+        groupId: 'group-1',
+        characterId: 'char-1',
+        userRequest: '恢复畸形检查点',
+        workModeTask: true,
+        status: AgentTaskStatus.paused,
+        executionStateJson: '{malformed execution checkpoint',
+      ),
+    );
+
+    final execution = jsonDecode(encoded['executionStateJson'] as String)
+        as Map<String, dynamic>;
+    expect(execution['schemaVersion'], 1);
+    expect(execution['checkpointSchemaUnsupported'], isTrue);
+
+    final restored = BackupEntityCodec.decodeTask(encoded);
+    final restoredExecution =
+        jsonDecode(restored.executionStateJson) as Map<String, dynamic>;
+    expect(restoredExecution['checkpointSchemaUnsupported'], isTrue);
+  });
+
+  test('copy restore remaps discussion identity inside task checkpoints',
+      () async {
+    final attachment = File('${mediaDirectory.path}/task-discussion.txt');
+    await attachment.writeAsString('task discussion');
+    await _seedCoreData(db, attachment);
+    final state = WorkDiscussionState(
+      conversationId: 'group-1',
+      phase: WorkDiscussionPhase.ready,
+      requestRevision: 2,
+      coordinatorId: 'char-1',
+      executorId: 'char-1',
+      candidateCharacterIds: const ['char-1'],
+      participants: const [
+        WorkDiscussionParticipant(
+          characterId: 'char-1',
+          status: 'accepted',
+          contributionCount: 3,
+        ),
+      ],
+      understandingPercent: 100,
+      understandingEvidence: const ['已确认交付范围'],
+      deliverableContract: const {
+        'deliverableType': 'document',
+        'format': 'docx',
+        'location': 'desktop',
+        'contentScope': '恢复后的讨论任务',
+        'explicitExecutorId': 'char-1',
+        'revisionTarget': '',
+        'requestRevision': 2,
+      },
+    );
+    final task = AgentTask(
+      id: 'task-discussion-1',
+      groupId: 'group-1',
+      characterId: 'char-1',
+      userRequest: '恢复讨论任务',
+      workModeTask: true,
+      status: AgentTaskStatus.paused,
+      assignedCharacterIds: const ['char-1'],
+      executionStateJson: WorkDiscussionState.mergeIntoExecutionState(
+        '',
+        state,
+      ),
+      contextSummary: jsonEncode({
+        'schemaVersion': 1,
+        'conversationId': 'group-1',
+        'target': '恢复讨论任务',
+        'discussionState': state.compactForContext().toJson(),
+      }),
+    );
+    await db.agentTaskBox.put(task.id, task);
+
+    final backup = File('${testRoot.path}/task-discussion-copy.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(destination: backup);
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.copyWithNewIds,
+    );
+
+    final copiedTask = db.agentTaskBox.values.singleWhere(
+      (item) => item.id != task.id,
+    );
+    final copiedGroup = db.chatGroupBox.values.singleWhere(
+      (item) => item.id != 'group-1',
+    );
+    final copiedCharacter = db.aiCharacterBox.values.singleWhere(
+      (item) => item.id != 'char-1',
+    );
+    final copiedState = WorkDiscussionState.fromExecutionState(
+      copiedTask.executionStateJson,
+    );
+    expect(copiedTask.groupId, copiedGroup.id);
+    expect(copiedTask.characterId, copiedCharacter.id);
+    expect(copiedTask.assignedCharacterIds, [copiedCharacter.id]);
+    expect(copiedState, isNotNull);
+    expect(copiedState!.conversationId, copiedGroup.id);
+    expect(copiedState.coordinatorId, copiedCharacter.id);
+    expect(copiedState.executorId, copiedCharacter.id);
+    expect(copiedState.candidateCharacterIds, [copiedCharacter.id]);
+    expect(copiedState.participants.single.characterId, copiedCharacter.id);
+    expect(
+      copiedState.deliverableContract?['explicitExecutorId'],
+      copiedCharacter.id,
+    );
+    final copiedContext = jsonDecode(copiedTask.contextSummary) as Map;
+    expect(copiedContext['conversationId'], copiedGroup.id);
+    expect(
+      (copiedContext['discussionState'] as Map)['executorId'],
+      copiedCharacter.id,
+    );
+  });
+
   test('direct conversation copy remaps dm id, sender and read state',
       () async {
     final attachment = File('${mediaDirectory.path}/direct.txt');
@@ -46,6 +303,96 @@ void _registerBackupRestoreServiceTestPart3() {
     expect(
       Map<String, dynamic>.from(db.appSettingsBox.get('direct_chat_read_at')),
       contains('dm:${copiedCharacter.id}'),
+    );
+  });
+
+  test(
+      'mute backups sanitize storage, isolate scopes and reject malformed imports',
+      () async {
+    final attachment = File('${mediaDirectory.path}/mute-scopes.txt');
+    await attachment.writeAsString('attachment');
+    await _seedCoreData(db, attachment);
+    await db.appSettingsBox.put(GroupMuteStore.storageKey, {
+      'group-1': ['char-1', '', 'char-1', 42],
+      'other': ['other-character'],
+      'broken': 'not-a-list',
+    });
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    for (final selection in const [
+      BackupSelection.all(),
+      BackupSelection.configurationOnly(),
+      BackupSelection.conversation('group-1'),
+      BackupSelection.conversation('dm:char-1'),
+    ]) {
+      final backup = File(
+          '${testRoot.path}/mute-${selection.scope.name}-${selection.conversationId ?? 'all'}.cgbak');
+      await service.createBackup(destination: backup, selection: selection);
+      final prepared = await service.inspect(backup);
+      addTearDown(prepared.dispose);
+      final settingsFile =
+          File('${prepared.stagingDirectory.path}/data/settings.json');
+      final settings =
+          jsonDecode(await settingsFile.readAsString()) as Map<String, dynamic>;
+      if (selection.conversationId == 'dm:char-1') {
+        expect(settings, isNot(contains(GroupMuteStore.storageKey)));
+      } else {
+        expect(settings[GroupMuteStore.storageKey], {
+          'group-1': ['char-1'],
+          if (selection.scope != BackupScope.conversation)
+            'other': ['other-character'],
+        });
+      }
+      if (selection.scope == BackupScope.all) {
+        settings[GroupMuteStore.storageKey] = {'group-1': 'invalid'};
+        await settingsFile.writeAsString(jsonEncode(settings));
+        await expectLater(
+          StagedBackupData.load(prepared.stagingDirectory, prepared.manifest),
+          throwsA(isA<BackupException>()
+              .having((e) => e.message, 'message', '群禁言设置格式无效')),
+        );
+      }
+    }
+  });
+
+  test('group mute state remaps both group and character ids on copy restore',
+      () async {
+    final attachment = File('${mediaDirectory.path}/mute-copy.txt');
+    await attachment.writeAsString('task attachment');
+    await _seedCoreData(db, attachment);
+    // group-1 里禁言 char-1（由 _seedCoreData 建立，含该成员）。
+    await GroupMuteStore(db).setMuted(
+      groupId: 'group-1',
+      characterId: 'char-1',
+      muted: true,
+    );
+
+    final backup = File('${testRoot.path}/mute-copy.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(destination: backup);
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.copyWithNewIds,
+    );
+
+    final copiedGroup =
+        db.chatGroupBox.values.singleWhere((item) => item.id != 'group-1');
+    final copiedCharacter =
+        db.aiCharacterBox.values.singleWhere((item) => item.id != 'char-1');
+    expect(
+      GroupMuteStore(db).mutedFor(copiedGroup.id),
+      contains(copiedCharacter.id),
+      reason: '禁言是「群 + 角色」两层引用，只映射其中一层就会静默失效',
     );
   });
 

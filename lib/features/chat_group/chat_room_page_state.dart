@@ -64,6 +64,9 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 关系事件服务（方向性关系历史 + 幂等快照更新）。
   late final RelationshipEventService _relationshipEventService;
 
+  /// 群内禁言状态（app_settings 轻量存储）；只作用于自动挑选。
+  late final GroupMuteStore _muteStore;
+
   /// 会话串行控制器：保证同一时刻只有一轮 AI 回复在跑，并支持中断。
   final ConversationController _conversationController =
       ConversationController();
@@ -169,6 +172,20 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// @ 弹窗内的搜索输入控制器。
   final TextEditingController _mentionSearchController =
       TextEditingController();
+
+  /// @ 候选列表的滚动控制器：让键盘高亮项始终留在可视区。
+  final ScrollController _mentionListController = ScrollController();
+
+  /// @ 候选列表每一项的 GlobalKey（按列表下标，即"槽位"）。
+  ///
+  /// 按槽位而非按角色缓存：候选集变化后同一槽位仍是同一个定位目标，
+  /// 因此过滤 / 搜索时无需重建。
+  final Map<int, GlobalKey> _mentionItemKeys = <int, GlobalKey>{};
+
+  /// @ 候选列表的单行高度估算值（px）。
+  ///
+  /// 只用于目标项已被 ListView 回收时的兜底跳转，下一帧会再精确定位一次。
+  static const double _mentionItemHeightEstimate = 56;
 
   // 输入框 GlobalKey，用于精确定位 @ 弹窗。
   final GlobalKey _inputFieldKey = GlobalKey();
@@ -393,6 +410,11 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _db = ref.read(databaseServiceProvider);
     // 读取本会话此前保存过的流式语音播报开关（默认关闭）。
     _voiceBroadcastEnabled = _db.voiceBroadcastEnabled(widget.groupId);
+    // 会话开关可能在上次已开启；进入页面时即补建播报器，避免
+    // 只在用户再次手动切换开关后才可播报。
+    if (_voiceBroadcastEnabled) {
+      _ensureVoiceBroadcaster();
+    }
     _credentialResolver =
         widget.credentialResolver ?? SecureApiCredentialResolver();
     _governanceStore = AiGovernanceStore.forDatabase(_db);
@@ -411,6 +433,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _memoryContextSelector = MemoryContextSelector(_db);
     _observationEntry = ObservationEntry(db: _db);
     _relationshipEventService = RelationshipEventService(_db);
+    _muteStore = GroupMuteStore(_db);
     _replyEligibility = ReplyEligibilityPolicy(
       resolveApiConfig: _resolveApiConfig,
     );

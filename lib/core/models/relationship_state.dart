@@ -3,6 +3,11 @@ import 'package:uuid/uuid.dart';
 
 part 'relationship_state.g.dart';
 
+/// 心情的存活时长。超过此时长未被新的明确情绪信号刷新，即回落 [RelationshipMood.neutral]。
+///
+/// 单一定义，便于日后调整；不逐处传入。
+const Duration kRelationshipMoodTtl = Duration(minutes: 30);
+
 @HiveType(typeId: 6)
 enum RelationshipTargetType {
   @HiveField(0)
@@ -109,6 +114,14 @@ class RelationshipState extends HiveObject {
   @HiveField(16)
   DateTime updatedAt;
 
+  /// 心情（[recentMood]）被设定的时刻。
+  ///
+  /// 不变量：非空当且仅当 [recentMood] 非 neutral。心情只在收到明确情绪信号时
+  /// 更新，普通事件既不改变心情也不刷新此时间戳——否则活跃会话会不断续命，
+  /// 使过期心情永不失效。读取一律走 [effectiveMood]，不一致状态安全降级为 neutral。
+  @HiveField(17)
+  DateTime? recentMoodAt;
+
   RelationshipState({
     String? id,
     required this.groupId,
@@ -120,6 +133,7 @@ class RelationshipState extends HiveObject {
     this.friction = 0,
     this.familiarity = 0,
     this.recentMood = RelationshipMood.neutral,
+    this.recentMoodAt,
     this.notes = '',
     DateTime? lastInteractionAt,
     DateTime? createdAt,
@@ -143,6 +157,7 @@ class RelationshipState extends HiveObject {
     int friction = 0,
     int familiarity = 0,
     RelationshipMood recentMood = RelationshipMood.neutral,
+    DateTime? recentMoodAt,
     String notes = '',
     DateTime? lastInteractionAt,
     RelationshipStage stage = RelationshipStage.stranger,
@@ -162,6 +177,7 @@ class RelationshipState extends HiveObject {
       friction: friction,
       familiarity: familiarity,
       recentMood: recentMood,
+      recentMoodAt: recentMoodAt,
       notes: notes,
       lastInteractionAt: lastInteractionAt,
       createdAt: createdAt,
@@ -233,4 +249,26 @@ class RelationshipState extends HiveObject {
     friction = friction.clamp(0, 100).toInt();
     familiarity = familiarity.clamp(0, 100).toInt();
   }
+
+  /// 是否有仍然有效的心情。
+  ///
+  /// 时间戳为空视为已过期：老数据没有该字段，其历史心情在升级后一律回落 neutral
+  /// （一次性、已知的行为变化）。不回填是因为只能靠 [updatedAt] 猜测，而 updatedAt
+  /// 会被后续普通事件推进，等于给过期心情续命。
+  static bool hasActiveMood(
+    RelationshipMood mood,
+    DateTime? at, {
+    DateTime? now,
+  }) {
+    if (mood == RelationshipMood.neutral || at == null) return false;
+    return (now ?? DateTime.now()).difference(at) < kRelationshipMoodTtl;
+  }
+
+  /// 读取时生效的心情：过期即回落 [RelationshipMood.neutral]。
+  ///
+  /// 行为侧与展示侧统一走此方法，避免「存的是心情、读的是另一套口径」。
+  RelationshipMood effectiveMood({DateTime? now}) =>
+      hasActiveMood(recentMood, recentMoodAt, now: now)
+          ? recentMood
+          : RelationshipMood.neutral;
 }

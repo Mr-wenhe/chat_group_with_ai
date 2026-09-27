@@ -130,6 +130,57 @@ void main() {
     );
   });
 
+  test('search accepts pinyin for names, roles and labels', () {
+    final value = relation(id: 'pinyin', stage: RelationshipStage.friend);
+    bool matches(String query) => RelationshipAuditPresenter.matchesSearch(
+          value,
+          observerName: '周明',
+          observerRole: '分析师',
+          targetName: '林黛玉',
+          targetRole: '用户',
+          query: query,
+        );
+
+    // 名称类字段：单个字母即可触发拼音匹配。
+    for (final query in ['zm', 'zhou', 'ldy', 'lin', 'dai']) {
+      expect(matches(query), isTrue, reason: 'should match by pinyin: $query');
+    }
+    expect(matches('fxs'), isTrue);
+    expect(matches('py'), isTrue);
+    expect(matches('wang'), isFalse);
+  });
+
+  test('search ranking puts literal hits ahead of pinyin-only hits', () {
+    final literal = relation(
+      id: 'literal',
+      stage: RelationshipStage.friend,
+      updatedAt: DateTime(2026, 1, 1),
+    );
+    final pinyinOnly = relation(
+      id: 'pinyin',
+      stage: RelationshipStage.friend,
+      updatedAt: DateTime(2026, 2, 1),
+    );
+
+    // 不传 isSearchExact 时按更新时间倒序，较新的 pinyin 在前。
+    expect(
+      RelationshipAuditPresenter.sections(
+        [pinyinOnly, literal],
+        isPinned: (_) => false,
+      ).single.relationships.map((value) => value.id),
+      ['pinyin', 'literal'],
+    );
+
+    expect(
+      RelationshipAuditPresenter.sections(
+        [pinyinOnly, literal],
+        isPinned: (_) => false,
+        isSearchExact: (value) => value.id == 'literal',
+      ).single.relationships.map((value) => value.id),
+      ['literal', 'pinyin'],
+    );
+  });
+
   test('recent change summary is deterministic and directional', () {
     expect(
       RelationshipAuditPresenter.recentChangeSummary([event()]),

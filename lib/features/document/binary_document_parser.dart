@@ -44,6 +44,16 @@ class BinaryDocumentParser {
         _ => throw const FormatException('不支持的二进制文档格式'),
       };
 
+  /// Validates the stronger contract required before a DOCX is delivered as
+  /// a user-facing artifact. Ordinary document understanding intentionally
+  /// keeps accepting older minimal fixtures, so this stricter entry point is
+  /// separate from [parse].
+  static List<BinaryDocumentSection> validateDocxForDelivery(Uint8List bytes) {
+    final archive = _openOfficeArchive(bytes);
+    final body = _validateDocxPackage(archive);
+    return _parseDocxBody(body);
+  }
+
   static List<BinaryDocumentSection> _parsePdf(Uint8List bytes) {
     if (bytes.length < 5 || ascii.decode(bytes.sublist(0, 5)) != '%PDF-') {
       throw const FormatException('PDF 文件签名无效');
@@ -74,17 +84,43 @@ class BinaryDocumentParser {
 
   static List<BinaryDocumentSection> _parseDocx(Uint8List bytes) {
     final archive = _openOfficeArchive(bytes);
+    return _parseDocxArchive(archive);
+  }
+
+  static List<BinaryDocumentSection> _parseDocxArchive(Archive archive) {
     final documentFile = archive.find('word/document.xml');
     if (documentFile == null) {
       throw const FormatException('DOCX 缺少 word/document.xml');
     }
     final document = _xml(documentFile);
+    return _parseDocxParagraphs(_elements(document, 'p'));
+  }
+
+  static List<BinaryDocumentSection> _parseDocxBody(XmlElement body) {
+    final namespace = body.name.namespaceUri;
+    return _parseDocxParagraphs(
+      _elements(body, 'p')
+          .where((element) => element.name.namespaceUri == namespace),
+      namespace: namespace,
+    );
+  }
+
+  static List<BinaryDocumentSection> _parseDocxParagraphs(
+    Iterable<XmlElement> paragraphs, {
+    String? namespace,
+  }) {
     final result = <BinaryDocumentSection>[];
     var extractedChars = 0;
     var paragraph = 0;
-    for (final element in _elements(document, 'p')) {
+    for (final element in paragraphs) {
       paragraph++;
-      final text = _textContent(element).trim();
+      final text = (namespace == null
+              ? _textContent(element)
+              : _elements(element, 't')
+                  .where((item) => item.name.namespaceUri == namespace)
+                  .map((item) => item.innerText)
+                  .join())
+          .trim();
       if (text.isEmpty) continue;
       extractedChars += text.length;
       _checkExtractedSize(extractedChars);
@@ -94,6 +130,82 @@ class BinaryDocumentParser {
       ));
     }
     return result;
+  }
+
+  static XmlElement _validateDocxPackage(Archive archive) {
+    final contentTypesFile = archive.find('[Content_Types].xml');
+    if (contentTypesFile == null) {
+      throw const FormatException('DOCX 缺少 [Content_Types].xml');
+    }
+    const contentTypesNamespace =
+        'http://schemas.openxmlformats.org/package/2006/content-types';
+    const relationshipsNamespace =
+        'http://schemas.openxmlformats.org/package/2006/relationships';
+    const wordNamespaces = {
+      'http://schemas.openxmlformats.org/wordprocessingml/2006/main',
+      'http://purl.oclc.org/ooxml/wordprocessingml/main',
+    };
+    const officeRelationshipTypes = {
+      'http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument',
+      'http://purl.oclc.org/ooxml/officeDocument/relationships/officeDocument',
+    };
+    final relationshipsFile = archive.find('_rels/.rels');
+    if (relationshipsFile == null) {
+      throw const FormatException('DOCX 缺少根文档关系');
+    }
+    final relationships = _xml(relationshipsFile).rootElement;
+    final officeDocuments = relationships.childElements.where((element) =>
+        element.name.local == 'Relationship' &&
+        element.name.namespaceUri == relationshipsNamespace &&
+        officeRelationshipTypes.contains(element.getAttribute('Type')));
+    if (relationships.name.local != 'Relationships' ||
+        relationships.name.namespaceUri != relationshipsNamespace ||
+        officeDocuments.length != 1 ||
+        !{null, 'Internal'}
+            .contains(officeDocuments.single.getAttribute('TargetMode')) ||
+        !{'word/document.xml', '/word/document.xml'}
+            .contains(officeDocuments.single.getAttribute('Target'))) {
+      throw const FormatException('DOCX 根文档关系无效');
+    }
+    final contentTypes = _xml(contentTypesFile);
+    if (contentTypes.rootElement.name.local != 'Types' ||
+        contentTypes.rootElement.name.namespaceUri != contentTypesNamespace) {
+      throw const FormatException('DOCX Content Types 命名空间无效');
+    }
+    final hasMainContentType = contentTypes.rootElement.childElements
+        .where(
+          (element) =>
+              element.name.local == 'Override' &&
+              element.name.namespaceUri == contentTypesNamespace,
+        )
+        .any(
+          (item) =>
+              item.getAttribute('PartName') == '/word/document.xml' &&
+              item.getAttribute('ContentType') ==
+                  'application/vnd.openxmlformats-officedocument.wordprocessingml.document.main+xml',
+        );
+    if (!hasMainContentType) {
+      throw const FormatException('DOCX 主文档 ContentType 无效');
+    }
+    final documentFile = archive.find('word/document.xml');
+    if (documentFile == null) {
+      throw const FormatException('DOCX 缺少 word/document.xml');
+    }
+    final document = _xml(documentFile);
+    if (document.rootElement.name.local != 'document' ||
+        !wordNamespaces.contains(document.rootElement.name.namespaceUri)) {
+      throw const FormatException('DOCX Word document XML 根节点无效');
+    }
+    final bodies = document.rootElement.children
+        .whereType<XmlElement>()
+        .where((element) =>
+            element.name.local == 'body' &&
+            element.name.namespaceUri == document.rootElement.name.namespaceUri)
+        .toList(growable: false);
+    if (bodies.length != 1) {
+      throw const FormatException('DOCX Word document XML 缺少唯一 body');
+    }
+    return bodies.single;
   }
 
   static List<BinaryDocumentSection> _parseXlsx(Uint8List bytes) {

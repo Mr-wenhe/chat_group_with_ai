@@ -20,6 +20,15 @@ class WorkspaceMutationResult {
   final String? destinationPath;
   final int bytesWritten;
 
+  /// Whether the target contents changed. A successful mutation may be a
+  /// verified no-op when the requested bytes already equal the current file.
+  final bool? contentChanged;
+
+  /// Hashes observed at the mutation boundary, when the operation is a text
+  /// or patch write. They let a revision task prove that it changed content.
+  final String? beforeSha256;
+  final String? afterSha256;
+
   /// True only when the target change was committed before a later
   /// bookkeeping step failed. Snapshot abort handlers use this bit to keep a
   /// recoverable, auditable action instead of hiding it as an uncompleted
@@ -32,6 +41,9 @@ class WorkspaceMutationResult {
     this.path,
     this.destinationPath,
     this.bytesWritten = 0,
+    this.contentChanged,
+    this.beforeSha256,
+    this.afterSha256,
     this.mutationCommitted = false,
   });
 
@@ -48,6 +60,9 @@ class WorkspaceMutationResult {
     String? path,
     String? destinationPath,
     int? bytesWritten,
+    bool? contentChanged,
+    String? beforeSha256,
+    String? afterSha256,
     bool? mutationCommitted,
   }) {
     return WorkspaceMutationResult(
@@ -56,6 +71,9 @@ class WorkspaceMutationResult {
       path: path ?? this.path,
       destinationPath: destinationPath ?? this.destinationPath,
       bytesWritten: bytesWritten ?? this.bytesWritten,
+      contentChanged: contentChanged ?? this.contentChanged,
+      beforeSha256: beforeSha256 ?? this.beforeSha256,
+      afterSha256: afterSha256 ?? this.afterSha256,
       mutationCommitted: mutationCommitted ?? this.mutationCommitted,
     );
   }

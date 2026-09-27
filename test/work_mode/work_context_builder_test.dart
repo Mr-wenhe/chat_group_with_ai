@@ -263,6 +263,42 @@ void main() {
     expect(encoded, contains('文件正文已省略'));
   });
 
+  test('restoring a malformed discussion marker fails closed', () {
+    final raw = jsonEncode({
+      'schemaVersion': 1,
+      'conversationId': 'group-a',
+      'target': '读取报告',
+      'discussionState': <String, dynamic>{'schemaVersion': 99},
+    });
+    expect(
+      () => builder.restore(raw, conversationId: 'group-a'),
+      throwsA(isA<FormatException>()),
+    );
+  });
+
+  test('restoring an unknown context schema fails closed', () {
+    expect(
+      () => builder.restore(
+        jsonEncode({
+          'schemaVersion': 99,
+          'conversationId': 'group-future',
+          'target': '不应按当前协议执行',
+        }),
+        conversationId: 'group-future',
+      ),
+      throwsA(isA<FormatException>()),
+    );
+    // Missing schemaVersion is the legacy V1 form and remains readable.
+    final legacy = builder.restore(
+      jsonEncode({
+        'conversationId': 'group-legacy',
+        'target': '旧上下文',
+      }),
+      conversationId: 'group-legacy',
+    );
+    expect(legacy.schemaVersion, WorkContextSnapshot.currentSchemaVersion);
+  });
+
   test('buildFromTask keeps durable queue, summary and artifact paths', () {
     final task = AgentTask(
       groupId: 'group-a',
@@ -284,6 +320,28 @@ void main() {
     expect(restored.pendingFollowUps, ['第一条追问', '第二条追问']);
     expect(restored.artifactPaths, ['/workspace/report.md']);
     expect(restored.completedSummaries, ['已完成读取']);
+  });
+
+  test('buildFromTask ignores an unknown summary schema', () {
+    final task = AgentTask(
+      groupId: 'group-future',
+      characterId: 'writer',
+      userRequest: '按当前任务继续',
+      workModeTask: true,
+      queuedUserRequests: const ['保留这条追问'],
+      contextSummary: jsonEncode({
+        'schemaVersion': 99,
+        'conversationId': 'group-future',
+        'target': '未来版本不应改写目标',
+        'pendingFollowUps': ['未来版本请求'],
+        'completedSummaries': ['未来版本摘要'],
+      }),
+    );
+
+    final restored = builder.fromTask(task);
+    expect(restored.target, '按当前任务继续');
+    expect(restored.pendingFollowUps, ['保留这条追问']);
+    expect(restored.completedSummaries, isEmpty);
   });
 
   test('group context is shared only by the same conversation id', () {

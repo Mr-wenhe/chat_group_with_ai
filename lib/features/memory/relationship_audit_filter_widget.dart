@@ -166,7 +166,7 @@ class _RelationshipSearchFieldState extends State<_RelationshipSearchField> {
         onChanged: widget.onChanged,
         decoration: const InputDecoration(
           labelText: '搜索关系',
-          hintText: '搜索目标、职业、阶段、情绪或备注',
+          hintText: '搜索目标、职业、阶段、情绪或备注，支持拼音',
           prefixIcon: Icon(Icons.search_rounded),
         ),
       );

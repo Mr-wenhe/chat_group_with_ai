@@ -15,6 +15,7 @@ class DataLifecycleSettings {
 
   static const _messageIndexKey = 'message_ids_by_group';
   static const _messageIndexCountKey = 'message_index_count';
+  static const _messageIndexSchemaVersionKey = 'message_index_schema_version';
   static const _conversationSummariesKey = 'conversation_summaries';
   static const _directReadKey = 'direct_chat_read_at';
   static const _directSourceKey = 'direct_chat_source';
@@ -152,6 +153,7 @@ class DataLifecycleSettings {
       }
       builder.allNestedMapEntries(_tokenUsageKey);
       builder.exactKey(_messageIndexCountKey);
+      builder.exactKey(_messageIndexSchemaVersionKey);
       builder.exactKeysWithPrefix(_workModePrefix);
       builder.exactKeysWithPrefix(_checkpointPrefix);
       builder.exactKeysWithPrefix(_retryPrefix);

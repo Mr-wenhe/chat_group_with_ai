@@ -126,6 +126,67 @@ void main() {
     expect(replay.issues.single.message, isNot(contains('{"sequence"')));
   });
 
+  test('appends after a truncated line without losing the new event', () async {
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    await store.append(
+      taskId: 'task-truncated-append',
+      kind: WorkTaskEventKind.stepStarted,
+      title: '开始读取',
+    );
+    final file = store.eventFileFor('task-truncated-append');
+    await file.writeAsString('{"sequence":2', mode: FileMode.append);
+
+    final reopened =
+        WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    await reopened.append(
+      taskId: 'task-truncated-append',
+      kind: WorkTaskEventKind.stepCompleted,
+      title: '恢复后继续',
+    );
+
+    final replay = await reopened.read('task-truncated-append');
+    expect(replay.events.map((event) => event.sequence), [1, 2]);
+    expect(replay.events.last.title, '恢复后继续');
+    expect(replay.issues, hasLength(1));
+    expect(
+      replay.issues.single.kind,
+      WorkTaskEventReadIssueKind.malformedLineIgnored,
+    );
+  });
+
+  test('ignores fractional legacy counters instead of truncating them',
+      () async {
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    final file = store.eventFileFor('task-fractional');
+    await file.parent.create(recursive: true);
+    await file.writeAsString(
+      '${jsonEncode({
+            'taskId': 'task-fractional',
+            'sequence': 1,
+            'timestamp': DateTime.utc(2026, 9, 14).toIso8601String(),
+            'kind': WorkTaskEventKind.queued.name,
+            'title': '旧字段仍可读取',
+            'unknownFutureField': 'ignored',
+          })}\n'
+      '${jsonEncode({
+            'taskId': 'task-fractional',
+            'sequence': 1.5,
+            'timestamp': DateTime.utc(2026, 9, 14).toIso8601String(),
+            'kind': WorkTaskEventKind.planning.name,
+            'title': '不能截断序号',
+          })}\n',
+    );
+
+    final replay = await store.read('task-fractional');
+
+    expect(replay.events.map((event) => event.title), ['旧字段仍可读取']);
+    expect(replay.issues, hasLength(1));
+    expect(
+      replay.issues.single.kind,
+      WorkTaskEventReadIssueKind.malformedLineIgnored,
+    );
+  });
+
   test('watch surfaces replay issues after valid events for panel recovery',
       () async {
     final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);

@@ -167,5 +167,75 @@ void main() {
       expect(content, contains('少用职业术语'));
       expect(content, contains('不要每次都先介绍自己'));
     });
+
+    test('心情经 effectiveMood 进入提示词：过期按 neutral，未过期保留', () {
+      final alice = AICharacter(
+        id: 'a',
+        name: '阿月',
+        avatar: 'A',
+        age: 24,
+        role: '插画师',
+        personalityTags: const ['敏感'],
+        systemPrompt: '说话轻一点',
+        apiKey: 'k',
+        apiProvider: 'deepseek',
+        gender: CharacterGender.female,
+      );
+      final bob = AICharacter(
+        id: 'b',
+        name: '小林',
+        avatar: 'B',
+        age: 27,
+        role: '程序员',
+        personalityTags: const ['较真'],
+        systemPrompt: '说话直接',
+        apiKey: 'k',
+        apiProvider: 'deepseek',
+      );
+      const intent = ReplyIntent(
+        speakerId: 'a',
+        action: ReplyAction.challenge,
+        targetId: 'b',
+        lengthHint: ReplyLengthHint.oneLiner,
+        toneHint: '带刺、别太客气',
+        reason: 'test',
+      );
+
+      String contentFor(RelationshipState relation) =>
+          HumanizedPromptBuilder.buildIntentContext(
+            character: alice,
+            groupName: '灵感群',
+            groupTheme: '日常创作',
+            ownerName: '老冯',
+            intent: intent,
+            memory: CharacterMemory(groupId: 'group-1', characterId: 'a'),
+            relationships: [relation],
+            charactersById: {'a': alice, 'b': bob},
+          );
+
+      final fresh = contentFor(RelationshipState(
+        groupId: 'group-1',
+        sourceCharacterId: 'a',
+        targetId: 'b',
+        targetType: RelationshipTargetType.ai,
+        recentMood: RelationshipMood.annoyed,
+        recentMoodAt: DateTime.now().subtract(const Duration(minutes: 1)),
+      ));
+      expect(fresh, contains('最近情绪annoyed'));
+
+      final stale = contentFor(RelationshipState(
+        groupId: 'group-1',
+        sourceCharacterId: 'a',
+        targetId: 'b',
+        targetType: RelationshipTargetType.ai,
+        recentMood: RelationshipMood.annoyed,
+        recentMoodAt: DateTime.now().subtract(const Duration(hours: 2)),
+      ));
+      expect(
+        stale,
+        contains('最近情绪neutral'),
+        reason: '过期心情不得再影响提示词',
+      );
+    });
   });
 }

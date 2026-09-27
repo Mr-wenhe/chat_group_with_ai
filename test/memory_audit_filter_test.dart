@@ -364,6 +364,102 @@ void main() {
       }
     });
 
+    test('search matches observer and subject names by pinyin', () {
+      final memory = PermanentMemory(
+        id: 'pinyin-memory',
+        observerCharacterId: 'observer-id',
+        kind: MemoryKind.preference,
+        content: '用户喜欢咖啡',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.group,
+        originNameSnapshot: '旅行群',
+      );
+      MemoryAuditSearchProjection projection(PermanentMemory _) =>
+          const MemoryAuditSearchProjection(
+            content: '用户喜欢咖啡',
+            observerName: '林黛玉',
+            subjectNames: ['薛宝钗'],
+            originName: '旅行群',
+            kindLabel: '偏好',
+            statusLabel: '有效',
+          );
+
+      // 名称类字段：单个字母即可触发拼音匹配。
+      for (final query in ['lin', 'l', 'ldy', 'dai']) {
+        expect(
+          MemoryAuditFilter(searchQuery: query).apply(
+            [memory],
+            searchText: projection,
+          ),
+          [memory],
+          reason: 'observer name should match by pinyin: $query',
+        );
+      }
+      expect(
+        MemoryAuditFilter(searchQuery: 'xbc').apply(
+          [memory],
+          searchText: projection,
+        ),
+        [memory],
+      );
+    });
+
+    test('search matches content by pinyin only from two letters on', () {
+      final memory = PermanentMemory(
+        id: 'pinyin-content-memory',
+        observerCharacterId: 'observer-id',
+        kind: MemoryKind.preference,
+        content: '今天喝咖啡',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动',
+      );
+
+      expect(MemoryAuditFilter(searchQuery: 'jint').apply([memory]), [memory]);
+      // 单个字母不触发正文拼音匹配，否则噪音过大。
+      expect(MemoryAuditFilter(searchQuery: 'j').apply([memory]), isEmpty);
+    });
+
+    test('search ranks literal hits above pinyin-only hits', () {
+      final literal = PermanentMemory(
+        id: 'literal',
+        observerCharacterId: 'observer-id',
+        kind: MemoryKind.preference,
+        content: 'lin 是关键词',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动',
+        updatedAt: DateTime(2026, 1, 1),
+      );
+      final pinyinOnly = PermanentMemory(
+        id: 'pinyin-only',
+        observerCharacterId: 'observer-id',
+        kind: MemoryKind.preference,
+        content: '用户喜欢咖啡',
+        status: MemoryStatus.active,
+        originType: MemoryOriginType.manual,
+        originNameSnapshot: '手动',
+        updatedAt: DateTime(2026, 2, 1),
+      );
+      MemoryAuditSearchProjection projection(PermanentMemory memory) =>
+          MemoryAuditSearchProjection(
+            content: memory.content,
+            observerName: memory.id == 'pinyin-only' ? '林黛玉' : '旁观者',
+            subjectNames: const [],
+            originName: '手动',
+            kindLabel: '偏好',
+            statusLabel: '有效',
+          );
+
+      final result = MemoryAuditFilter(searchQuery: 'lin').apply(
+        [pinyinOnly, literal],
+        searchText: projection,
+      );
+
+      // 拼音命中的那条更新，但字面命中的要排在前面。
+      expect(result.map((item) => item.id), ['literal', 'pinyin-only']);
+    });
+
     test('default search includes localized kind and status labels', () {
       final memory = PermanentMemory(
         observerCharacterId: 'c1',

@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 
 import 'work_task_error_sanitizer.dart';
 import 'work_command_policy.dart';
@@ -82,6 +83,30 @@ class WorkFailure {
 
   bool get canContinue => type == WorkFailureType.userActionRequired;
 
+  /// A role capability can be corrected in the character editor without
+  /// changing the authorized workspace. Keep this distinct from folder
+  /// authorization failures so the panel does not open an unrelated picker.
+  bool get canContinueAfterRolePermissionUpdate =>
+      type == WorkFailureType.permissionDenied &&
+      '$reason\n$technicalDetail'.contains('角色未授予');
+
+  /// A missing exact approval scope is recoverable by rebuilding the plan.
+  /// It is distinct from a missing role capability or a lost workspace grant;
+  /// neither of those should be silently bypassed by a task retry.
+  bool get canReplanAfterApprovalScopeFailure {
+    if (type != WorkFailureType.permissionDenied) return false;
+    final text = '$reason\n$technicalDetail';
+    return text.contains('审批范围') ||
+        text.toLowerCase().contains('approval scope');
+  }
+
+  /// Keeps panel guidance aligned with the recovery action exposed for a
+  /// stale approval scope. Other consumers retain [suggestedAction] so older
+  /// chat and delivery messages remain compatible.
+  String get panelSuggestedAction => canReplanAfterApprovalScopeFailure
+      ? '点击“重新生成计划”清除失效审批范围并继续。'
+      : suggestedAction;
+
   bool get canReauthorize =>
       type == WorkFailureType.permissionDenied ||
       type == WorkFailureType.authorizationLost;
@@ -147,6 +172,9 @@ class WorkFailure {
         ),
       );
       failure = _migrateLegacyTransientCommandFailure(task, failure);
+      failure = _migrateLegacyMissingTargetFailure(task, failure);
+      failure = _migrateLegacyEmptyModelResponse(task, failure);
+      failure = _migrateLegacyArtifactValidationFailure(task, failure);
       final inferredTarget =
           failure.failureTargetPath ?? _inferFailureTargetPath(task, failure);
       if (inferredTarget != null && failure.failureTargetPath == null) {
@@ -167,11 +195,17 @@ class WorkFailure {
 
   /// Returns whether the current paused checkpoint, rather than an older tool
   /// result, authorizes the one-shot trusted installer action.
-  static bool hasInstallableMissingTool(AgentTask task) {
+  static bool hasInstallableMissingTool(
+    AgentTask task, {
+    bool? isWindows,
+    bool? isMacOS,
+  }) {
     if (task.status != AgentTaskStatus.paused) return false;
     return _hasInstallableMissingTool(
       task,
       _decodeMetadata(task.executionStateJson),
+      isWindows: isWindows,
+      isMacOS: isMacOS,
     );
   }
 
@@ -222,10 +256,83 @@ class WorkFailure {
     );
   }
 
+  /// Older runners surfaced a missing relative file as an unclassified
+  /// internal error. Reopen that checkpoint as a model retry so a corrected
+  /// workspace root or a fresh path plan can resume the same task.
+  static WorkFailure _migrateLegacyMissingTargetFailure(
+    AgentTask task,
+    WorkFailure failure,
+  ) {
+    if (failure.type != WorkFailureType.internal) return failure;
+    final text =
+        '${failure.reason} ${failure.technicalDetail} ${task.lastError}'
+            .toLowerCase();
+    if (!text.contains('目标不存在') &&
+        !text.contains('target does not exist') &&
+        !text.contains('file not found')) {
+      return failure;
+    }
+    return _fromSignals(
+      code: 'modelProtocol',
+      message: failure.reason,
+      technicalDetail: failure.technicalDetail,
+      scope: 'model',
+      completedContent: failure.completedContent,
+      retryableHint: true,
+    );
+  }
+
+  /// Older runners persisted the final DOCX delivery guard exception as an
+  /// internal failure. It is safe to retry because the conversion step is
+  /// checkpointed and a valid existing artifact will be reused after the
+  /// contract/path validator is corrected.
+  static WorkFailure _migrateLegacyArtifactValidationFailure(
+    AgentTask task,
+    WorkFailure failure,
+  ) {
+    if (failure.type != WorkFailureType.internal) return failure;
+    final text =
+        '${failure.reason} ${failure.technicalDetail} ${task.lastError}'
+            .toLowerCase();
+    if (!text.contains('真实 docx') && !text.contains('markdown 只能作为转换源')) {
+      return failure;
+    }
+    return _fromSignals(
+      code: 'modelProtocol',
+      message: failure.reason,
+      technicalDetail: failure.technicalDetail,
+      scope: 'model',
+      completedContent: failure.completedContent,
+      retryableHint: true,
+    );
+  }
+
+  /// Earlier builds saved an empty model completion as an internal error,
+  /// which hid the checkpoint retry action. Reclassify only that exact signal.
+  static WorkFailure _migrateLegacyEmptyModelResponse(
+    AgentTask task,
+    WorkFailure failure,
+  ) {
+    if (failure.type != WorkFailureType.internal) return failure;
+    final text =
+        '${failure.reason} ${failure.technicalDetail} ${task.lastError}';
+    if (!text.contains('模型返回了空内容')) return failure;
+    return _fromSignals(
+      code: 'emptyResponse',
+      message: failure.reason,
+      technicalDetail: failure.technicalDetail,
+      scope: 'model',
+      completedContent: failure.completedContent,
+      retryableHint: true,
+    );
+  }
+
   static bool _hasInstallableMissingTool(
     AgentTask task,
-    Map<dynamic, dynamic> metadata,
-  ) {
+    Map<dynamic, dynamic> metadata, {
+    bool? isWindows,
+    bool? isMacOS,
+  }) {
     if (task.status != AgentTaskStatus.paused ||
         task.pendingToolRequestJson.trim().isEmpty) {
       return false;
@@ -234,12 +341,16 @@ class WorkFailure {
     final hasMissingToolBoundary = metadata['toolMissing'] == true ||
         failure is Map && failure['type'] == WorkFailureType.toolMissing.name;
     return hasMissingToolBoundary &&
-        _pendingHasTrustedInstaller(task.pendingToolRequestJson);
+        _pendingHasTrustedInstaller(
+          task.pendingToolRequestJson,
+          isWindows: isWindows,
+          isMacOS: isMacOS,
+        );
   }
 
   /// Stores a redacted failure while preserving every other checkpoint key.
   static void persistOnTask(AgentTask task, WorkFailure failure) {
-    final metadata = _decodeMetadata(task.executionStateJson);
+    final metadata = _decodeMetadataForTask(task);
     metadata['workFailure'] = failure.toJson();
     task.executionStateJson = jsonEncode(metadata);
   }
@@ -247,7 +358,7 @@ class WorkFailure {
   /// Removes only the failure marker. Committed actions, queue and artifacts
   /// remain untouched so a retry starts at the last safe checkpoint.
   static void clearFromTask(AgentTask task) {
-    final metadata = _decodeMetadata(task.executionStateJson);
+    final metadata = _decodeMetadataForTask(task);
     if (!metadata.containsKey('workFailure')) return;
     metadata.remove('workFailure');
     task.executionStateJson = metadata.isEmpty ? '' : jsonEncode(metadata);
@@ -485,7 +596,11 @@ class WorkFailure {
     );
   }
 
-  static bool _pendingHasTrustedInstaller(String raw) {
+  static bool _pendingHasTrustedInstaller(
+    String raw, {
+    bool? isWindows,
+    bool? isMacOS,
+  }) {
     if (raw.trim().isEmpty) return false;
     try {
       final decoded = jsonDecode(raw);
@@ -497,7 +612,11 @@ class WorkFailure {
       final args = decoded['args'];
       final executable = args is Map ? args['executable'] : null;
       return executable is String &&
-          WorkCommandInstallSuggestion.hasTrustedInstaller(executable);
+          WorkCommandInstallSuggestion.hasTrustedInstaller(
+            executable,
+            isWindows: isWindows,
+            isMacOS: isMacOS,
+          );
     } on Object {
       return false;
     }
@@ -519,6 +638,23 @@ class WorkFailure {
       completedContent: completedContent,
       retryableHint: retryable,
       statusCode: inferredStatus,
+    );
+  }
+
+  /// Builds a failure from a message the work runner authored itself.
+  ///
+  /// Loop stops and completion-guard rejections are already user-facing prose.
+  /// Passing them through [fromError] meant stringifying a synthetic exception,
+  /// so the reason rendered in chat began with Dart's `Bad state: ` prefix.
+  factory WorkFailure.fromLoopMessage(
+    String message, {
+    String scope = 'loop',
+    Iterable<String> completedContent = const <String>[],
+  }) {
+    return _fromSignals(
+      message: message,
+      scope: scope,
+      completedContent: completedContent,
     );
   }
 
@@ -749,6 +885,14 @@ class WorkFailure {
         normalized.contains('磁盘空间不足') ||
         normalized.contains('enospc')) {
       return WorkFailureType.snapshotUnavailable;
+    }
+    if (normalizedCode == 'notfound' ||
+        normalizedCode == 'filenotfound' ||
+        normalized.contains('目标不存在')) {
+      // A missing relative file is usually a model path-selection mistake,
+      // so retry planning instead of sending the user through folder
+      // authorization recovery. Explicit directory failures stay below.
+      return WorkFailureType.modelProtocol;
     }
     if (normalizedCode == 'authorizationlost' ||
         normalizedCode == 'authorizationrequired' ||
@@ -1015,6 +1159,23 @@ class WorkFailure {
       // model text. The task's typed fields remain authoritative.
       return <String, dynamic>{};
     }
+  }
+
+  /// Keeps an invalid group discussion marker visible when failure recovery
+  /// rewrites the checkpoint. Without this sentinel, malformed JSON would be
+  /// replaced by a failure-only map and the coordinator could mistake the
+  /// task for a legacy marker-less task on retry.
+  static Map<String, dynamic> _decodeMetadataForTask(AgentTask task) {
+    final metadata = _decodeMetadata(task.executionStateJson);
+    final discussion = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    if (WorkDiscussionState.requiresDiscussionForConversation(task.groupId) &&
+        discussion.present &&
+        !metadata.containsKey(WorkDiscussionState.jsonKey)) {
+      metadata[WorkDiscussionState.jsonKey] = null;
+    }
+    return metadata;
   }
 }
 

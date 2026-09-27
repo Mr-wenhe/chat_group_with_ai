@@ -1,140 +1,24 @@
 # AGENTS.md
 
-This file provides guidance to Codex (Codex.ai/code) when working with code in this repository.
+本仓库的权威说明只有一份：同目录下的 **`CLAUDE.md`**。
 
-## Commands
+## 回复语言
 
-- `flutter run` — run the app on a connected device/emulator
-- `flutter analyze` — lint and static analysis
-- `flutter test` — run all tests
-- `flutter test test/widget_test.dart` — run a single test file
-- `dart run build_runner build` — generate code (Hive adapters, Riverpod providers, JSON serialization)
-- `flutter pub get` — install dependencies
+- 面向用户的所有回复必须使用中文；代码、命令、文件路径、标识符与引用原文保持原样。
 
-## Architecture
+## 开始工作前
 
-**AI Group Chat Simulator** — a Flutter app that simulates group conversations between AI characters backed by multiple LLM providers (DeepSeek, Qwen, Zhipu, Moonshot, Baidu, or custom OpenAI-compatible endpoints).
+先完整阅读 `CLAUDE.md`。以下章节在 `CLAUDE.md` 中被标记为强制约束，不得跳过，也不得凭记忆套用：
 
-### Key Data Model
+| 章节 | 约束对象 |
+|---|---|
+| 关键红线（必须遵守） | API Key 连接测试与持久化边界、工作模式连续修改、搜索与浏览器安全、前台主动私聊、导出/备份内容 |
+| 死循环防护规则 | Flutter widget 层禁止无限循环、测试环境防死循环、CI 单测 30 秒超时、AppToast timer 隔离 |
+| Review / 校验完整性规则 | 校验先定范围、一次性收集全部问题、不得只报第一个问题 |
+| 代码质量检查清单 | 每个功能完成后、提交前逐项自检 |
 
-- `ApiConfig` — shared API key/URL/model config (1:many with characters)
-- `AICharacter` — persona with system prompt, avatar, reply rate limits, and compact memory summary
-- `ChatGroup` — a group of characters with a theme and owner name; messages belong to a group
-- `Message` — user or AI messages with mention and quote-reply support
-- `GroupMemory` — weekly-summarized topic memory per group, auto-updated after each AI round
-- `CharacterMemory` / `RelationshipState` — layered per-character group memory and directional relationship state
-- Direct chat sessions reuse `Message.groupId` with stable conversation keys `dm:{characterId}`. Lightweight inbox state (`readAt`, source, last proactive timestamp) is stored in Hive `app_settings`, not new Hive model classes.
+## 为什么本文件不再重复那些内容
 
-### Flow
+本文件历史上与 `CLAUDE.md` 各存一份副本，几轮迭代后已经漂移：自动聊天参数、工作模式入口、预设数量、路线图状态都与实现不符，会误导维护者沿着错误的入口理解功能。
 
-1. User creates AI characters and groups them into `ChatGroup`s.
-2. In `ChatRoomPage`, user sends a message → triggers `_runAiRound` which randomly picks 1-2 eligible AI characters to reply in sequence (max 3 auto rounds). In addition, ~3s after entering a room the app starts an **idle auto-chat loop** (`_startAutoChat`): every 5-9s it randomly triggers 0-2 eligible characters to speak; a single burst runs at most 5 rounds, then pauses 10s and resumes.
-3. Each reply calls `ChatApiService.streamChatMessage` when streaming is enabled, or `sendChatMessage` for non-streaming calls, using the character's `ApiConfig`.
-4. After each round, if there are ≥8 messages, a summary is generated and stored as `GroupMemory` (keyed by year_week).
-5. Each character has hourly reply limits tracked on the model itself.
-6. Direct chats appear in `DirectChatListPage` (`/direct-chats`). App foreground proactive contact is coordinated by `DirectChatForegroundWatcher` + `DirectChatProactiveService`: stale existing DMs are preferred, but active group members can also start first-time DMs from recent group context. Fully offline AI generation still requires either pre-generated local notifications or a future server push service.
-
-### Tech Stack
-
-- **State**: Riverpod (annotation-based, code-generated providers)
-- **Storage**: Hive local NoSQL database with type-safe adapters
-- **Networking**: Dio for HTTP calls to LLM APIs
-- **Serialization**: json_annotation / json_serializable for model JSON
-
-### Code Generation
-
-All `.g.dart` files are generated. After modifying any model class (HiveType/HiveField) or adding Riverpod providers, run:
-```
-dart run build_runner build
-```
-
-### Provider Pattern
-
-All providers live under `lib/features/*/providers/` and are re-exported via `lib/providers/providers.dart`. The only top-level provider is `databaseServiceProvider` wrapping `DatabaseService`.
-
-### Routes
-
-| Route | Page | Purpose |
-|-------|------|---------|
-| `/` | `AICharacterListPage` | Manage AI characters |
-| `/groups` | `ChatGroupListPage` | Manage groups |
-| `/direct-chats` | `DirectChatListPage` | Private chat inbox, unread reminders, manual proactive check |
-| `/chat/{groupId}` | `ChatRoomPage` | Active group conversation |
-| `/dm/{characterId}` | `ChatRoomPage` | One-on-one private chat using `dm:{characterId}` as message groupId |
-| `/settings` | `SettingsPage` | API configs, data management |
-
-### Important Caveats
-
-- `AICharacter` tracks hourly reply counts via `lastReplyTimestamp` and `hourlyReplyCount` directly on the model — these are mutated in `_isEligibleToReply` without re-saving to DB each time, only the limit check is enforced during a round.
-- Non-release runs read Hive directly from the repository `data/` directory; the local-only `api_configs.hive` may contain development credentials and is never part of the Git index.
-- Release builds read/write Hive under the user's app support directory and create fresh empty `*.hive` files there on first launch.
-- The `custom` provider requires a manual `baseUrl` input; all others have hardcoded base URLs in `ApiProvider`.
-- Non-credential `data/*.hive` files are retained as development/Stage 16 fixtures; `data/api_configs.hive` is local-only and ignored.
-- Foreground proactive DMs may call configured LLM APIs while the app is running. Keep cooldowns conservative and never trigger background/offline network generation without an explicit notification/push design.
-- **API Key 连接测试红线**：用户在配置表单中新输入的 Key 必须直接用于本次测试，禁止为测试先临时写入/回读/删除 Keychain/Keystore；只有编辑已有配置且 Key 输入留空时，才通过 `ApiCredentialResolver` 读取已保存凭据。持久化仅能由正式保存流程执行。
-- **macOS Debug 凭据兼容**：非 release 运行时 Keychain 可能因 ad-hoc 签名不可用；安全写入失败后可仅在非 release 保留 `legacyApiKey`，并以 `hasCredential=true` 且 `credentialId=CredentialRepository.developmentHiveCredentialId` 作为开发回退标记。`ApiCredentialResolver` 与删除流程必须识别该标记；Release 严禁读取或写入 Hive 明文 Key。
-- **工作模式连续修改红线**：恢复中的工作任务必须占用会话控制器，新输入只能排队并在旧任务结束后派发，禁止取消旧任务后静默丢弃新请求。中英文“修改同一/相同/当前/上次文件”等明确修订请求必须覆盖原附件路径；只有新建请求发生重名时才允许自动改名。流式通道返回空内容时可对同一请求回退一次非流式调用；标准 `content` 为空时才允许读取兼容字段 `reasoning_content`，两者均为空必须报错。源码附件的本地兜底必须有对应语言的可运行模板，否则应明确失败，禁止把说明文本伪装成 `.py/.js/.ts` 等代码附件。
-- **Dependency overrides 策略**：本项目使用 Flutter 3.24 fork，不支持 `android.flutter` 属性（3.27+ API）。以下包的新版会触发 Android 构建失败，已通过 `dependency_overrides` 锁定：`file_picker`（≥8.0.0 <9.0.0）、`package_info_plus`（≥8.0.0 <9.0.0）、`wakelock_plus`（≥1.0.0 <1.4.0）。新增依赖前需验证 Android build.gradle 是否使用了 `android.flutter`。
-- **已处理的 P1 基线风险（2026-08-26）**：
-  - **Android Release 签名回退**：缺少完整 `android/key.properties` 时，`android/app/build.gradle` 失败关闭；只有权限校验任务显式设置 `ALLOW_DEBUG_SIGNING=true`。
-  - **仓库内 Hive 凭据风险**：`data/api_configs.hive` 已从 Git 索引移除并加入忽略规则；若历史提交曾包含真实凭据，仍需单独轮换并按组织流程清理历史。
-
-### 代码质量检查清单
-
-每个功能/需求开发完成后，提交前必须逐项检查以下维度：
-
-1. **代码 Review** — 自检逻辑是否正确、边界是否覆盖；复杂逻辑优先写成单测
-2. **注释** — 非自解释代码需有注释（说明 *why*，不是 *what*）；公共 API / 复杂算法必须有注释
-3. **命名** — 变量、函数、类名见名知意；避免 `tmp`、`data`、`handle` 等无意义命名
-4. **硬编码** — 魔法数字、字符串常量、URL 必须抽成常量或配置；禁止在业务逻辑中写死值
-5. **函数拆分** — 单函数不超过 ~50 行；职责单一，一个函数只做一件事；过长的 `build` 方法需拆 widget
-6. **函数封装** — 可复用的逻辑封装成独立方法/工具类；禁止在同一文件内复制粘贴相似代码块
-7. **文件解耦** — 单个文件不超过 ~500 行；关注点分离，widget / 逻辑 / 数据层各司其职
-8. **模块化** — 同领域逻辑归入同一 feature 目录；跨 feature 通信走 provider，禁止循环依赖
-9. **性能问题** — 避免列表内不必要的 `setState` / rebuild；大列表用 `ListView.builder`；Stream 监听及时 dispose
-10. **新老兼容** — 修改 public API 或数据模型时，检查是否影响旧数据迁移、Hive 字段版本、现有调用方
-
-### Review / 校验完整性规则
-
-- 当用户要求 Review、验收或校验某个阶段、模块、文件或改动集时，必须先明确本次范围，并完整检查范围内的需求符合性、正确性、边界与失败路径、测试有效性、可读性、架构、安全、性能、新老兼容和本清单中的代码质量要求。
-- 发现一个问题不得立即中断校验或直接给出最终结论；必须继续完成其余可执行检查，尽可能一次性收集全部问题。某项检查失败时，记录失败证据并继续不依赖该项的检查；只有安全风险、数据破坏风险或客观阻塞使后续检查无法进行时才停止，并明确未检查范围。
-- 最终报告必须集中列出所有发现，按严重级别排序，并为每项提供文件与行号、证据、影响和建议修复方向；同时列出已执行命令、通过项、失败项、未检查项及原因。完成完整范围前，不得只报告“第一个问题”，也不得宣称 Review / 校验完成。
-- “测试通过”不等于验收通过。测试、静态分析、实现逐行审查和与规格逐项对照均完成后，才可给出通过结论；如有阻塞问题，应一次性列全后给出不通过结论。
-
-## Extensible Features (Roadmap)
-
-> Ideas derived from analyzing the current codebase, ordered by fun/value vs. effort. Pick a few per iteration.
-
-### High priority — implemented
-
-- ✅ **Explicit work mode.** Per-conversation work mode routes every non-empty user instruction through `AgentRuntime` — local file generation, skill creation/download, workspace/browser tools, with a 12-step budget and 120s per-completion timeout. Normal and auto chat never enter the tool runtime; sensitive tools require explicit approval.
-- ✅ **Media attachments (v1.3.2).** Chat input bar has an attachment button; supports images and documents via `file_picker`. Desktop drag-and-drop via `desktop_drop`.
-- ✅ **Presence-aware proactive notifications (v1.3.2).** `ConversationPresenceService` tracks active conversation; suppresses notifications and auto-marks-read when user is viewing the target conversation.
-- ✅ **Streaming / typewriter replies.** `ChatApiService.streamChatMessage` reads SSE and `ChatRoomPage` renders tokens incrementally with a blinking cursor + "停止生成" button.
-- ✅ **Character persona presets / template library.** 10 built-in presets in `CharacterPreset.presets`; one-tap apply from the form dialog and a FAB on the list page (still requires choosing an ApiConfig).
-- ✅ **Conversation export / share.** `ConversationExportService` exports Markdown/JSON to `chat_group_exports/` and shares via `share_plus`; entries on Settings page and chat-room AppBar. Export only reads display fields — never apiKey/apiProvider/apiConfigId.
-- ✅ **Humanized chat engine.** Intent selection uses mentions, recent speakers, relationship state, topic fit, and character memory.
-
-### Medium priority — implemented
-
-- ✅ **Regenerate / stop reply.** Streaming replies can be stopped, and long-pressing an AI message can regenerate it with the existing context.
-- ✅ **Quote-reply UI.** `Message.replyToMessageId` is set from long-press quote actions and rendered as a quoted snippet in message bubbles.
-- ✅ **Scenario / scripted modes.** Group theme keywords inject debate / roast / board-meeting style prompts.
-- ✅ **Per-character long-term memory.** `AICharacter.memorySummary` and layered `CharacterMemory` are injected into dialogue context.
-
-### Low priority — polish / enhancement
-
-- ✅ **Token tracking.** SSE usage is parsed and accumulated per character/group in Settings.
-- ✅ **Light/dark theme toggle.** Settings exposes light / dark / system theme.
-- ✅ **Voice playback (TTS).** AI messages can be spoken aloud; Settings includes a TTS toggle.
-- ✅ **Private chat inbox + foreground proactive contact.** `/direct-chats` lists private histories with unread counts; private chats use `dm:{characterId}`; foreground watcher can create proactive DMs from stale private chats or recent group context.
-- **Cost estimation.** Token usage exists, but provider/model-specific price calculation is not implemented.
-- **Chat history search.**
-- ✅ **Import / restore flow.** `lib/features/backup/` implements versioned `.cgbak` backup and restore from Settings, including conflict strategies, staged verification, rollback on commit failure, media attachments, and cross-entity ID remapping. API keys are excluded and restored API configs require key re-binding.
-- **Offline proactive contact.** Fully closed-app AI generation needs pre-generated local notifications or a server-side push service; current implementation is foreground/local only.
-
-### Known limitations (current implementation)
-
-- Backup/restore intentionally excludes the local `ai_governance_ledger`; non-portable `WorkModeWorkspace.workDirPath` is dropped on import, and packages require an exact format/schema version because cross-version migration is not implemented.
-- Test coverage covers SSE parsing, presets, export safety, mention parsing, activity policy, chat orchestration, and humanized memory/prompt logic. UI-heavy chat room behavior still relies mostly on extracted logic tests.
-- Versioned development fixtures may contain chat data; the credential-bearing `data/api_configs.hive` is local-only and ignored, but repository access should still be treated as sensitive.
+因此约定：**指导内容只写在 `CLAUDE.md`**，本文件只负责指出去哪里读。新增或修改约束时改 `CLAUDE.md`，不要在本文件复制。

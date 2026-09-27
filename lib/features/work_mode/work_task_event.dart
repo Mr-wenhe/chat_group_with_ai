@@ -60,8 +60,8 @@ class WorkTaskEvent {
     final title = json['title'];
     if (taskId is! String ||
         taskId.isEmpty ||
-        sequence is! num ||
-        sequence.toInt() <= 0 ||
+        !_isWholeInteger(sequence) ||
+        (sequence as num).toInt() <= 0 ||
         timestamp is! String ||
         kind is! String ||
         title is! String ||
@@ -93,13 +93,21 @@ class WorkTaskEvent {
 
   static int? _optionalInteger(Object? value) {
     if (value == null) return null;
-    if (value is! num) throw const FormatException('任务事件进度无效');
-    return value.toInt();
+    if (!_isWholeInteger(value)) {
+      throw const FormatException('任务事件进度无效');
+    }
+    return (value as num).toInt();
   }
 
   static Map<String, dynamic> _metadata(Object? value) {
     if (value == null) return const {};
     if (value is! Map) throw const FormatException('任务事件元数据无效');
+    if (value.keys.any((key) => key is! String)) {
+      throw const FormatException('任务事件元数据键无效');
+    }
     return Map<String, dynamic>.from(value);
   }
+
+  static bool _isWholeInteger(Object? value) =>
+      value is num && value.isFinite && value == value.toInt();
 }

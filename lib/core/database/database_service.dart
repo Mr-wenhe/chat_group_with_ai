@@ -10,6 +10,7 @@ import 'package:path_provider/path_provider.dart';
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
 import 'package:chat_group/core/audio/voice_service_config.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/core/storage/legacy_api_credential_migrator.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
@@ -765,6 +766,13 @@ class DatabaseService {
 
   static const String _messageIdsByGroupKey = 'message_ids_by_group';
   static const String _messageIndexCountKey = 'message_index_count';
+  // Increment when the meaning of cached summary fields changes. Existing
+  // installations then rebuild summaries even when the message count stayed
+  // unchanged (for example, after ordinary system notices stop counting as
+  // unread).
+  static const String _messageIndexSchemaVersionKey =
+      'message_index_schema_version';
+  static const int _messageIndexSchemaVersion = 2;
   static const String _conversationSummariesKey = 'conversation_summaries';
 
   Future<void> persistMessage(Message message) async {
@@ -798,8 +806,10 @@ class DatabaseService {
 
   Future<void> ensureMessageIndex() async {
     final storedCount = appSettingsBox.get(_messageIndexCountKey);
+    final storedSchema = appSettingsBox.get(_messageIndexSchemaVersionKey);
     _messageIndexCountCache ??= storedCount is int ? storedCount : -1;
-    if (_messageIndexCountCache != messageBox.length) {
+    final needsSchemaMigration = storedSchema != _messageIndexSchemaVersion;
+    if (_messageIndexCountCache != messageBox.length || needsSchemaMigration) {
       // Use a Completer to prevent concurrent rebuilds from multiple callers.
       final existing = _messageIndexBuildFuture;
       if (existing != null) {
@@ -845,6 +855,7 @@ class DatabaseService {
         for (final entry in summaries.entries) entry.key: entry.value.toMap(),
       },
       _messageIndexCountKey: messageBox.length,
+      _messageIndexSchemaVersionKey: _messageIndexSchemaVersion,
     });
   }
 
@@ -895,14 +906,23 @@ class DatabaseService {
     return _pageFromIds(ids, start, min(ids.length, start + limit));
   }
 
+  /// 在单个会话内搜索消息。
+  ///
+  /// 搜索按输入防抖执行，但同一批消息会被连续查询；正文指纹走
+  /// [PinyinSearch.digestCached]，字面命中（中文原词、英文单词）则在
+  /// 指纹里直接短路，不再逐字查拼音词典。
   Future<List<Message>> searchMessages(String groupId, String query) async {
     await ensureMessageIndex();
-    final normalized = query.trim().toLowerCase();
+    final normalized = query.trim();
     if (normalized.isEmpty) return const [];
     return (_messageIdsForGroup(groupId) ?? const <String>[])
         .map(messageBox.get)
         .whereType<Message>()
-        .where((message) => message.content.toLowerCase().contains(normalized))
+        .where((message) => PinyinSearch.matches(
+              PinyinSearch.digestCached(message.content),
+              normalized,
+              mode: PinyinMatchMode.content,
+            ))
         .toList(growable: false);
   }
 
@@ -981,6 +1001,7 @@ class DatabaseService {
     await appSettingsBox.putAll({
       _messageIdsByGroupKey: _messageIdsCache,
       _messageIndexCountKey: _messageIndexCountCache,
+      _messageIndexSchemaVersionKey: _messageIndexSchemaVersion,
     });
   }
 
@@ -1001,6 +1022,7 @@ class DatabaseService {
     await appSettingsBox.putAll({
       _messageIdsByGroupKey: _messageIdsCache,
       _messageIndexCountKey: _messageIndexCountCache,
+      _messageIndexSchemaVersionKey: _messageIndexSchemaVersion,
     });
   }
 
@@ -1039,6 +1061,7 @@ class DatabaseService {
     await appSettingsBox.putAll({
       _messageIdsByGroupKey: _messageIdsCache,
       _messageIndexCountKey: _messageIndexCountCache,
+      _messageIndexSchemaVersionKey: _messageIndexSchemaVersion,
     });
   }
 
@@ -1072,7 +1095,7 @@ class DatabaseService {
         (direct
             ? directChatReadAtByConversation()
             : groupChatReadAtByGroup())[message.groupId];
-    final isUnread = message.senderType == 'ai' &&
+    final isUnread = _isIncomingConversationMessage(message) &&
         (readAt == null || message.timestamp.isAfter(readAt));
     final ownerName = !direct ? ownerNameFromProfile() : '我';
     final mentionNames = {'我', if (ownerName.isNotEmpty) ownerName};
@@ -1113,7 +1136,7 @@ class DatabaseService {
         ? directChatReadAtByConversation()
         : groupChatReadAtByGroup())[groupId];
     final unread = sorted.where((message) {
-      return message.senderType == 'ai' &&
+      return _isIncomingConversationMessage(message) &&
           (readAt == null || message.timestamp.isAfter(readAt));
     }).toList(growable: false);
     final ownerName = !direct ? ownerNameFromProfile() : '我';
@@ -1150,6 +1173,14 @@ class DatabaseService {
     return byTime != 0 ? byTime : a.id.compareTo(b.id);
   }
 
+  bool _isIncomingConversationMessage(Message message) =>
+      message.senderType == 'ai' ||
+      // System messages are also used for local status/toast-style notices.
+      // Only an explicit @-addressed system reminder belongs in the inbox's
+      // unread stream; otherwise every internal status update would create a
+      // badge and look like a new role reply.
+      message.senderType == 'system' && message.isMention;
+
   void invalidateMessageIndexCache() {
     _messageIdsCache = null;
     _conversationSummaryCache = null;
@@ -1176,6 +1207,12 @@ class DatabaseService {
   static const String _pinnedCharacterIdsKey = 'pinned_character_ids';
   static const String _pinnedGroupIdsKey = 'pinned_group_ids';
   static const String _voiceBroadcastGroupIdsKey = 'voice_broadcast_group_ids';
+
+  /// 被用户手动关掉标签的工作任务 id。
+  ///
+  /// 只影响执行面板的标签展示；[AgentTask] 记录本身必须保留，
+  /// 关掉后仍能在「历史任务」里查到。
+  static const String _hiddenWorkTaskIdsKey = 'hidden_work_task_ids';
 
   Map<String, DateTime> directChatReadAtByConversation() {
     return _dateTimeMapFromSettings(_directChatReadAtKey);
@@ -1358,6 +1395,33 @@ class DatabaseService {
         _voiceBroadcastGroupIdsKey, values.toList()..sort());
   }
 
+  /// 被用户关掉标签的工作任务 id（默认为空 → 所有任务标签都显示）。
+  Set<String> hiddenWorkTaskIds() =>
+      _stringSetFromSettings(_hiddenWorkTaskIdsKey);
+
+  /// 记住 / 取消记住某个工作任务的标签隐藏状态。
+  ///
+  /// 不涉及 `agent_tasks` 记录，只是让用户在面板上看不到不想看的标签。
+  Future<void> setWorkTaskHidden(String taskId, bool hidden) async {
+    await setWorkTasksHidden(<String>[taskId], hidden);
+  }
+
+  /// 批量更新工作任务标签的隐藏状态，避免多次读改写互相覆盖。
+  Future<void> setWorkTasksHidden(
+    Iterable<String> taskIds,
+    bool hidden,
+  ) async {
+    final ids = taskIds.toSet();
+    if (ids.isEmpty) return;
+    final values = hiddenWorkTaskIds();
+    if (hidden) {
+      values.addAll(ids);
+    } else {
+      values.removeAll(ids);
+    }
+    await appSettingsBox.put(_hiddenWorkTaskIdsKey, values.toList()..sort());
+  }
+
   Set<String> _stringSetFromSettings(String key) {
     final raw = appSettingsBox.get(key);
     if (raw is! List) return <String>{};
@@ -1509,6 +1573,8 @@ class DatabaseService {
   }
 
   static const String _ttsEnabledKey = 'tts_enabled';
+  static const String _voiceApiKeyDebugFallbackKey =
+      'voice_api_key_debug_only';
 
   bool get isTtsEnabled => appSettingsBox.get(_ttsEnabledKey) ?? true;
 
@@ -1533,7 +1599,15 @@ class DatabaseService {
   /// 从安全存储读取语音 API Key；未绑定/不可用时返回 null。
   Future<String?> readVoiceApiKey() async {
     final result = await CredentialRepository().read(volcVoiceCredentialId);
-    return result.isAvailable ? result.value : null;
+    if (result.isAvailable) return result.value;
+    // macOS debug 环境可能无法访问 Keychain。仅非 release 回退读取本地
+    // app_settings，避免开发调试被阻断；release 严禁该回退。
+    if (!kReleaseMode) {
+      final fallback =
+          appSettingsBox.get(_voiceApiKeyDebugFallbackKey)?.toString() ?? '';
+      if (fallback.isNotEmpty) return fallback;
+    }
+    return null;
   }
 
   /// 绑定语音 API Key 到安全存储，并刷新 [VoiceServiceConfig.apiKeyBound]。
@@ -1541,11 +1615,24 @@ class DatabaseService {
   /// 返回 null 表示成功；否则为失败原因文案（由调用方展示）。
   Future<String?> bindVoiceApiKey(String apiKey) async {
     if (kIsWeb) return 'Web 端不支持语音服务（依赖系统二进制协议）。';
+    final trimmed = apiKey.trim();
+    if (trimmed.isEmpty) return 'API Key 不能为空';
     final result = await CredentialRepository().save(
       volcVoiceCredentialId,
-      apiKey.trim(),
+      trimmed,
     );
     if (result.isSuccess) {
+      if (!kReleaseMode) {
+        await appSettingsBox.delete(_voiceApiKeyDebugFallbackKey);
+      }
+      await saveVoiceServiceConfig(
+        voiceServiceConfig.copyWith(apiKeyBound: true),
+      );
+      return null;
+    }
+    // 仅非 release 回退：当安全存储不可用时保留调试可用性。
+    if (!kReleaseMode) {
+      await appSettingsBox.put(_voiceApiKeyDebugFallbackKey, trimmed);
       await saveVoiceServiceConfig(
         voiceServiceConfig.copyWith(apiKeyBound: true),
       );
@@ -1561,6 +1648,9 @@ class DatabaseService {
   /// 从安全存储移除语音 API Key，并更新 [VoiceServiceConfig.apiKeyBound]。
   Future<String?> unbindVoiceApiKey() async {
     await CredentialRepository().delete(volcVoiceCredentialId);
+    if (!kReleaseMode) {
+      await appSettingsBox.delete(_voiceApiKeyDebugFallbackKey);
+    }
     await saveVoiceServiceConfig(
       voiceServiceConfig.copyWith(apiKeyBound: false),
     );

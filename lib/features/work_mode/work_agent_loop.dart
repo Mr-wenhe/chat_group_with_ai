@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'dart:math';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -9,12 +10,14 @@ import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
-import 'package:chat_group/features/work_mode/work_command_policy.dart';
+import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:chat_group/features/work_mode/work_task_clarification.dart';
+import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:crypto/crypto.dart';
 
@@ -34,6 +37,14 @@ typedef WorkAgentSleep = Future<void> Function(Duration delay);
 typedef WorkAgentCompletionGuard = FutureOr<String?> Function(
   AgentTask task,
   AgentFinishCompletion completion,
+);
+typedef WorkAgentArtifactCompletion = FutureOr<AgentFinishCompletion?> Function(
+  AgentTask task,
+  AgentToolCall call,
+  WorkToolResult result,
+);
+typedef WorkAgentPreflightTool = FutureOr<AgentToolCall?> Function(
+  AgentTask task,
 );
 
 class WorkAgentModelRequest {
@@ -127,17 +138,49 @@ class WorkAgentLoop
         WorkTaskCheckpointReporter {
   static const int defaultMaxActions = AgentTask.defaultActionLimit;
   static const Duration defaultSoftTimeLimit = AgentTask.defaultSoftTimeLimit;
-  static const int defaultMaxModelRetries = 2;
-  // A protocol drift is recoverable without user input. Allow two fresh
+  // Sized to ride out an ordinary link hiccup or a short provider brownout on
+  // its own: the ladder below spans about twelve seconds of waiting across five
+  // attempts. Anything longer is the coordinator's auto-resume layer's job, so
+  // this budget does not need to grow with the outage length.
+  static const int defaultMaxModelRetries = 4;
+  // A protocol drift is recoverable without user input. Allow three fresh
   // decisions after the one bounded repair attempt before surfacing a task
   // failure, while retaining the global retry cap below.
-  static const int defaultMaxProtocolRetries = 2;
+  static const int defaultMaxProtocolRetries = 3;
+  // How many times a command the input validator rejected may be replanned
+  // before that rejection is surfaced. Deliberately separate from the protocol
+  // retry budget: a rejected command carries its own failure text and remedy, so
+  // a change to protocol-drift handling must not widen it.
+  static const int defaultMaxInvalidCommandRepairs = 2;
   static const int defaultMaxToolRetries = 1;
+  // How many times one task may hand a failed tool call back to the model for a
+  // repair before pausing for the user. The failure-history detectors only
+  // recognise repeated fingerprints and outcomes, so a model that keeps
+  // proposing new, equally broken calls needs this separate bound. It is set
+  // well above real convergence (a write/compile/fix loop usually converges in
+  // one to three rounds) so a task that is still making progress is never
+  // paused for being slow; the 100-action budget remains the outer limit.
+  static const int defaultMaxToolRepairs = 8;
+  // How many times a rejected finish may be handed back to the model before the
+  // task fails. Unlike the tool budget this one is deliberately small: a
+  // completion guard failure means the model claimed done work that is not
+  // there, so a couple of corrections are worth trying, and beyond that the
+  // claim is the problem. The count restarts whenever a tool call succeeds, so
+  // this bounds one progress segment rather than the whole run; the 100-action
+  // budget is what bounds the run.
+  static const int defaultMaxCompletionRepairs = 2;
   static const int maxRetryCountCap = 5;
+  /// Fraction by which a model/tool backoff delay is randomly stretched or
+  /// shaved (0.2 = ±20%), so two concurrent tasks do not retry in lockstep.
+  /// Injected as a 0..1 sample; a server-provided Retry-After is never jittered.
+  static const double retryJitterRatio = 0.2;
+  // Must have one entry per configured retry: a shorter ladder silently repeats
+  // its last delay and turns the extra retries into back-to-back attempts.
   static const List<Duration> defaultRetryDelays = [
     Duration(milliseconds: 250),
     Duration(seconds: 1),
     Duration(seconds: 3),
+    Duration(seconds: 8),
   ];
   static const Set<String> _userActionFailureCodes = {
     'userActionRequired',
@@ -163,6 +206,8 @@ class WorkAgentLoop
   final WorkAgentEventSink? onEvent;
   final WorkAgentCheckpointSink? onCheckpoint;
   final WorkAgentCompletionGuard? completionGuard;
+  final WorkAgentArtifactCompletion? artifactCompletion;
+  final WorkAgentPreflightTool? preflightTool;
   final WorkContextBuilder contextBuilder;
   final WorkContextCompressionModel? contextCompressionModel;
   final String Function()? systemPromptBuilder;
@@ -171,6 +216,11 @@ class WorkAgentLoop
   final int maxModelRetries;
   final int maxProtocolRetries;
   final int maxToolRetries;
+  final int maxToolRepairs;
+  final int maxCompletionRepairs;
+  /// Returns a 0..1 sample used to jitter a backoff delay. Injectable so tests
+  /// can pin the delay; production uses [Random.nextDouble].
+  final double Function() retryJitter;
   final String systemPrompt;
   void Function(AgentTask task)? _taskUpdateSink;
   WorkAgentCheckpointSink? _taskCheckpointSink;
@@ -186,6 +236,8 @@ class WorkAgentLoop
     this.onEvent,
     this.onCheckpoint,
     this.completionGuard,
+    this.artifactCompletion,
+    this.preflightTool,
     WorkContextBuilder? contextBuilder,
     this.contextCompressionModel,
     this.systemPromptBuilder,
@@ -194,6 +246,9 @@ class WorkAgentLoop
     int? maxModelRetries,
     int? maxProtocolRetries,
     int? maxToolRetries,
+    int? maxToolRepairs,
+    int? maxCompletionRepairs,
+    double Function()? retryJitter,
     this.systemPrompt = '',
   })  : parser = parser ?? const AgentDecisionParser(),
         contextBuilder = contextBuilder ?? const WorkContextBuilder(),
@@ -209,7 +264,14 @@ class WorkAgentLoop
         ),
         maxToolRetries = _boundRetryCount(
           maxToolRetries ?? defaultMaxToolRetries,
-        );
+        ),
+        maxToolRepairs = _boundRetryCount(
+          maxToolRepairs ?? defaultMaxToolRepairs,
+        ),
+        maxCompletionRepairs = _boundRetryCount(
+          maxCompletionRepairs ?? defaultMaxCompletionRepairs,
+        ),
+        retryJitter = retryJitter ?? Random().nextDouble;
 
   static int _boundRetryCount(int value) =>
       value.clamp(0, maxRetryCountCap).toInt();
@@ -245,7 +307,65 @@ class WorkAgentLoop
     state.publicUpdates.addAll(_loadPublicUpdates(task));
     state.recentResults.addAll(_loadRecentResults(task));
     state.handoff = _loadHandoff(task);
+    state.commandFailureKeys.addAll(_loadCommandFailureKeys(task));
+    state.unchangedMutationCount = _loadUnchangedMutationCount(task);
     state.failure = task.workFailure;
+    // Terminal tasks are immutable from the execution loop's perspective.
+    // Check this before inspecting the discussion marker so a late direct
+    // runner call cannot rewrite a completed/failed/cancelled task to paused
+    // merely because its optional marker is malformed.
+    if (task.isTerminal) {
+      return _result(state, _statusForTask(task), task.resultSummary);
+    }
+    if (workExecutionCheckpointRequiresReview(task.executionStateJson)) {
+      return _pauseForCheckpointReview(state);
+    }
+    final discussion = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    if (WorkDiscussionState.requiresDiscussionForConversation(task.groupId) &&
+        discussion.present) {
+      final gate = discussion.state;
+      String? reason;
+      if (gate == null || gate.conversationId != task.groupId) {
+        reason = '讨论状态无效，已阻止执行。';
+      } else if (!gate.isExecutionReady) {
+        reason = '群讨论尚未完成，已阻止执行。';
+      } else {
+        final executor = gate.executorId?.trim() ?? '';
+        if (executor.isEmpty) {
+          reason = '群讨论尚未选定最终执行角色。';
+        } else if (task.characterId.trim().isNotEmpty &&
+            task.characterId != executor) {
+          reason = '任务记录的执行角色与群讨论最终执行人不一致。';
+        } else if (task.assignedCharacterIds.isNotEmpty &&
+            !task.assignedCharacterIds.contains(executor)) {
+          reason = '群讨论最终执行人不在任务的合格角色范围内。';
+        } else {
+          final contractRevision = gate.deliverableContract?['requestRevision'];
+          final explicitExecutor =
+              gate.deliverableContract?['explicitExecutorId'];
+          if (contractRevision is! num ||
+              contractRevision.toInt() != gate.requestRevision ||
+              (explicitExecutor is String &&
+                  explicitExecutor.trim().isNotEmpty &&
+                  explicitExecutor.trim() != executor)) {
+            reason = '讨论状态与最新请求版本或产物合同不一致。';
+          }
+          if (reason == null && task.characterId.trim().isEmpty) {
+            task.characterId = executor;
+          }
+        }
+      }
+      if (reason != null) {
+        task
+          ..status = AgentTaskStatus.paused
+          ..resumeRequired = false
+          ..lastError = reason
+          ..updatedAt = clock();
+        return _result(state, WorkAgentLoopStatus.paused, reason);
+      }
+    }
     // The full request is intentionally kept in memory while the approval
     // dialog is open, but the durable checkpoint still authenticates which
     // operation may be replayed. Comparing the canonical redacted form
@@ -268,10 +388,9 @@ class WorkAgentLoop
             !canResumeApprovedTool)) {
       return _result(state, _statusForTask(task), task.resultSummary);
     }
-    // A retry/continuation is allowed to keep the old failure visible while it
-    // is queued. Once the runner actually starts, remove only that diagnostic
-    // marker; committed action keys, artifacts, follow-ups and summaries stay
-    // in the checkpoint and protect mutations from being repeated.
+    // Retries keep the failure visible while queued. User continuations that
+    // first re-enter group discussion clear it at the coordinator boundary;
+    // this remains the fallback for runs that reach WorkAgentLoop directly.
     if (state.failure != null &&
         (task.status == AgentTaskStatus.queued ||
             task.status == AgentTaskStatus.planning ||
@@ -281,6 +400,10 @@ class WorkAgentLoop
       task.lastError = '';
     }
     task.startedAt ??= clock();
+    // An approval wait that ended before this run resumed must stop counting
+    // against the wall-clock budget. It is folded in against this run's budget
+    // origin, so a replanned task cannot inherit an older window's discount.
+    _settleBudgetWait(task);
 
     try {
       var protocolRetryCount = 0;
@@ -317,6 +440,22 @@ class WorkAgentLoop
         );
         if (resumed != null) return resumed;
       }
+      final preflight = await preflightTool?.call(task);
+      if (preflight != null) {
+        const publicUpdate = '已找到匹配的专业技能，正在启用并按技能执行。';
+        final preflightResult = await _handleDecision(
+          state,
+          AgentToolDecision(
+            publicUpdate: publicUpdate,
+            tool: preflight,
+          ),
+          publicUpdate,
+        );
+        if (preflightResult != null) return preflightResult;
+      }
+      // 上一次决策是否因输出上限被截断。它要跨迭代保留：截断说明"一次写完"这个
+      // 策略不可行，下一次决策必须换成分块指令，否则只是原样再撞一次上限。
+      var truncatedOutputRetry = false;
       while (true) {
         final boundary = await _checkBoundary(state);
         if (boundary != null) return boundary;
@@ -326,7 +465,12 @@ class WorkAgentLoop
         final context = _buildContext(state);
         final request = WorkAgentModelRequest(
           task: task,
-          messages: _buildMessages(task, context),
+          messages: _buildMessages(
+            task,
+            truncatedOutputRetry
+                ? _withTruncatedOutputHint(context)
+                : context,
+          ),
           context: context,
         );
         final response = await _callModelWithRetries(state, request);
@@ -361,36 +505,50 @@ class WorkAgentLoop
               : _fail(state, message, failure: failure);
         }
 
+        final truncated = _responseHitsOutputLimit(response);
         final parsed = await parser.parseResponse(
           response,
-          repair: (malformed) => _repairModel(state, request, malformed),
+          repair: (malformed) => _repairModel(
+            state,
+            request,
+            malformed,
+            wasTruncated: truncated,
+          ),
         );
         if (parsed.repairAttempted) state.protocolRepairAttempts++;
         if (!parsed.isSuccess) {
+          // 截断才是这次不可解析的原因，它比解析器的具体校验信息更值得上报：
+          // 用户据此才知道该收窄要求或换模型，而不是以为模型不会写 JSON。
+          truncatedOutputRetry = truncated;
+          final detail = truncated
+              ? _truncatedOutputDetail(response)
+              : (parsed.detail ?? '模型返回的 AgentDecision 无法解析。');
           if (protocolRetryCount < maxProtocolRetries) {
             protocolRetryCount++;
             await _emit(
               state,
               WorkTaskEventKind.toolOutput,
-              '模型返回格式无效，正在自动重试。',
+              truncated ? '模型输出被上限截断，改用精简指令重试。' : '模型返回格式无效，正在自动重试。',
               detail: '第 $protocolRetryCount 次协议重试',
               safeMetadata: {
                 'scope': 'modelProtocol',
                 'retry': protocolRetryCount,
+                if (truncated) 'truncated': true,
               },
             );
             continue;
           }
           return await _fail(
             state,
-            parsed.detail ?? '模型返回的 AgentDecision 无法解析。',
+            detail,
             failure: WorkFailure.fromSignalsForProtocol(
-              parsed.detail ?? '模型返回的 AgentDecision 无法解析。',
+              detail,
               completedContent: _completedContent(state),
             ),
           );
         }
         protocolRetryCount = 0;
+        truncatedOutputRetry = false;
         final decision = parsed.decision!;
         // `raw` is intentionally discarded here. Only public_update and
         // validated tool data can cross the event/checkpoint boundary.

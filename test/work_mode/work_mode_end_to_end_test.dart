@@ -300,7 +300,6 @@ void main() {
             'content': 'v2',
           },
           '已读取原文件，准备请求写入批准。'),
-      _finish('原文件已更新为 v2。'),
       _tool('workspace.read', {'path': 'notes.txt'}, '正在读取待修订文件。'),
       _tool(
           'workspace.patch',
@@ -309,7 +308,6 @@ void main() {
             'content': 'v3',
           },
           '正在修订同一原文件。'),
-      _finish('原文件已修订为 v3。'),
     ]));
     final runner = DefaultWorkTaskRunner(
       database: database,
@@ -374,7 +372,9 @@ void main() {
     );
     expect(completed.resultSummary, contains('v2'));
     expect(await original.readAsString(), 'v2');
-    expect(gateway.calls, 3);
+    // A verified patch completes the artifact task without spending another
+    // model turn on a finish JSON response.
+    expect(gateway.calls, 2);
 
     await coordinator.enqueueFollowUp(task.id, '请把原文件改成 v3');
     final revisionWaiting = await _waitFor(
@@ -390,7 +390,7 @@ void main() {
       (value) => value.status == AgentTaskStatus.completed,
     );
     expect(await original.readAsString(), 'v3');
-    expect(gateway.calls, 6);
+    expect(gateway.calls, 4);
 
     final completedEvents = await eventStore.read(task.id);
     expect(

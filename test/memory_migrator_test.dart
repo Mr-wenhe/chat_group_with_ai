@@ -735,6 +735,41 @@ void main() {
         expect(snapshot.recentMood, RelationshipMood.neutral);
       });
 
+      test('迁移出的心情带最近互动时刻，早已过期的读作 neutral', () async {
+        await db.relationshipStateBox.put(
+            'rs1',
+            RelationshipState(
+              groupId: 'g1',
+              sourceCharacterId: 'c1',
+              targetId: 'c2',
+              targetType: RelationshipTargetType.ai,
+              familiarity: 10,
+              recentMood: RelationshipMood.warm,
+              lastInteractionAt: DateTime(2024, 1, 1),
+            ));
+
+        await MemoryMigrator(db).migrate();
+
+        final snapshot = db.relationshipStateBox.get(
+          RelationshipState.stableGlobalId(
+            'c1',
+            RelationshipTargetType.ai,
+            'c2',
+          ),
+        )!;
+        expect(snapshot.recentMood, RelationshipMood.warm);
+        expect(
+          snapshot.recentMoodAt,
+          DateTime(2024, 1, 1),
+          reason: '心情时刻取最近互动时间，而非迁移时刻，否则会给老心情续命',
+        );
+        expect(
+          snapshot.effectiveMood(),
+          RelationshipMood.neutral,
+          reason: '2024 年的心情早已过期',
+        );
+      });
+
       test('re-run does not duplicate snapshots or events', () async {
         await db.relationshipStateBox.put(
             'rs1',

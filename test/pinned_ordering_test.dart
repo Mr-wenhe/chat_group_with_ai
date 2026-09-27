@@ -46,6 +46,41 @@ void main() {
       expect(sorted.map((c) => c.id), ['amber', 'zed', 'alpha', 'beta']);
     });
 
+    test('ranks literal search hits above pinyin-only hits', () {
+      final pinyinOnly = _character(id: 'ling', name: '阿玲');
+      final literal = _character(id: 'lily', name: 'Lily');
+
+      // 不传 isSearchExact 时按名称排序，阿玲 在前。
+      expect(
+        PinnedOrdering.sortCharacters([pinyinOnly, literal], pinnedIds: const {})
+            .map((c) => c.id),
+        ['ling', 'lily'],
+      );
+
+      final sorted = PinnedOrdering.sortCharacters(
+        [pinyinOnly, literal],
+        pinnedIds: const {},
+        isSearchExact: (character) =>
+            character.name.toLowerCase().contains('li'),
+      );
+
+      expect(sorted.map((c) => c.id), ['lily', 'ling']);
+    });
+
+    test('keeps pinned characters above literal search hits', () {
+      final pinnedPinyin = _character(id: 'pinned', name: '阿玲');
+      final literal = _character(id: 'lily', name: 'Lily');
+
+      final sorted = PinnedOrdering.sortCharacters(
+        [pinnedPinyin, literal],
+        pinnedIds: {'pinned'},
+        isSearchExact: (character) =>
+            character.name.toLowerCase().contains('li'),
+      );
+
+      expect(sorted.map((c) => c.id), ['pinned', 'lily']);
+    });
+
     test('sorts pinned groups before normal groups', () {
       final a = _group(id: 'a', name: 'A');
       final b = _group(id: 'b', name: 'B');

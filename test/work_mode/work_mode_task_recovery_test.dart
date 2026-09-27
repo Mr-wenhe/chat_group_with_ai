@@ -2,6 +2,7 @@ import 'dart:convert';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/backup/backup_entity_codec.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -292,5 +293,152 @@ void main() {
     final context = jsonDecode(encoded['contextSummary'] as String) as Map;
     expect(context.keys, contains('[本地路径]'));
     expect(context['ordinaryField'], '[本地路径]');
+  });
+
+  test('portable backup keeps discussion progress but blocks local targets',
+      () {
+    final discussion = WorkDiscussionState(
+      conversationId: 'group-portable',
+      phase: WorkDiscussionPhase.ready,
+      requestRevision: 3,
+      coordinatorId: 'product',
+      executorId: 'frontend',
+      candidateCharacterIds: const ['frontend', 'tester'],
+      participants: const [
+        WorkDiscussionParticipant(
+          characterId: 'frontend',
+          status: 'accepted',
+          contributionCount: 4,
+          lastContribution: '已确认页面结构',
+        ),
+      ],
+      round: 5,
+      understandingPercent: 92,
+      understandingEvidence: const ['开发已确认可实现'],
+      deliverableContract: const {
+        'deliverableType': 'document',
+        'format': 'docx',
+        'location': '/Users/alice/Desktop/需求.docx',
+        'contentScope': '输出完整需求文档',
+        'explicitExecutorId': 'frontend',
+        'revisionTarget': '/Users/alice/Desktop/旧需求.docx',
+        'requestRevision': 3,
+      },
+      decisionSummary: '保留开发与测试的取舍',
+    );
+    final task = AgentTask(
+      id: 'portable-discussion',
+      groupId: 'group-portable',
+      characterId: 'frontend',
+      userRequest: '恢复讨论',
+      workModeTask: true,
+      status: AgentTaskStatus.paused,
+      executionStateJson: jsonEncode({
+        'discussionState': discussion.toJson(),
+        'workFailure': {
+          'type': 'authorizationLost',
+          'reason': '工作目录授权失效',
+          'technicalDetail': '原路径 /Users/alice/Desktop 不可用',
+          'retryable': false,
+        },
+        'folderGrantPending': true,
+        'artifactDeliveryNoticePublished': true,
+        'artifactDeliveryRetryOnly': true,
+        'artifactDeliveryMessageId': 'message-from-old-device',
+      }),
+    );
+
+    final encoded = BackupEntityCodec.task(task);
+    final execution = jsonDecode(encoded['executionStateJson'] as String)
+        as Map<String, dynamic>;
+    final restored = BackupEntityCodec.decodeTask(encoded);
+    final state = WorkDiscussionState.fromExecutionState(
+      restored.executionStateJson,
+    );
+
+    expect(state, isNotNull);
+    expect(state!.requestRevision, 3);
+    expect(state.understandingPercent, 92);
+    expect(state.executorId, 'frontend');
+    expect(state.phase, WorkDiscussionPhase.blocked);
+    expect(
+      state.blockers,
+      contains('backupWorkspaceReauthorizationRequired'),
+    );
+    expect(state.deliverableContract?['location'], 'unspecified');
+    expect(state.deliverableContract?['revisionTarget'], isEmpty);
+    expect(execution, contains('workFailure'));
+    expect(execution['artifactDeliveryNoticePublished'], isTrue);
+    expect(execution, isNot(contains('artifactDeliveryRetryOnly')));
+    expect(execution, isNot(contains('artifactDeliveryMessageId')));
+    expect(encoded.toString(), isNot(contains('/Users/alice/Desktop')));
+  });
+
+  test('unknown backup task status becomes an interrupted user-resume state',
+      () {
+    final restored = BackupEntityCodec.decodeTask({
+      'id': 'future-status',
+      'groupId': 'group',
+      'characterId': 'worker',
+      'userRequest': '恢复未知版本任务',
+      'status': 'futureStatusFromNewerBuild',
+      'createdAt': DateTime.utc(2026, 8, 27).toIso8601String(),
+      'workModeTask': true,
+      'executionStateJson': jsonEncode({
+        'discussionState': <String, dynamic>{'schemaVersion': 99},
+      }),
+    });
+
+    expect(restored.status, AgentTaskStatus.interrupted);
+    expect(restored.resumeRequired, isTrue);
+    expect(restored.canResumeInWorkMode, isTrue);
+    expect(restored.executionStateJson, contains('discussionState'));
+  });
+
+  test('fractional backup counters fail closed instead of being truncated', () {
+    final restored = BackupEntityCodec.decodeTask({
+      'id': 'fractional-counters',
+      'groupId': 'group',
+      'characterId': 'worker',
+      'userRequest': '恢复边界',
+      'status': 'paused',
+      'createdAt': DateTime.utc(2026, 8, 27).toIso8601String(),
+      'workModeTask': true,
+      'currentStep': 2.5,
+      'actionCount': 3.5,
+      'actionLimit': 4.5,
+      'softTimeLimitMinutes': 5.5,
+    });
+
+    expect(restored.currentStep, 0);
+    expect(restored.actionCount, 0);
+    expect(restored.actionLimit, AgentTask.defaultActionLimit);
+    expect(
+      restored.softTimeLimitMinutes,
+      AgentTask.defaultSoftTimeLimitMinutes,
+    );
+  });
+
+  test('portable execution checkpoints canonicalize legacy key casing', () {
+    final restored = BackupEntityCodec.decodeTask({
+      'id': 'legacy-key-casing',
+      'groupId': 'group',
+      'characterId': 'worker',
+      'userRequest': '恢复旧键名',
+      'status': 'paused',
+      'createdAt': DateTime.utc(2026, 8, 27).toIso8601String(),
+      'workModeTask': true,
+      'executionStateJson': jsonEncode({
+        'ToolMissing': true,
+        'FolderGrantPending': true,
+        'unknownCapability': 'drop-me',
+      }),
+    });
+
+    final decoded = jsonDecode(restored.executionStateJson) as Map;
+    expect(decoded['toolMissing'], isTrue);
+    expect(decoded['folderGrantPending'], isTrue);
+    expect(decoded.containsKey('ToolMissing'), isFalse);
+    expect(decoded.containsKey('unknownCapability'), isFalse);
   });
 }

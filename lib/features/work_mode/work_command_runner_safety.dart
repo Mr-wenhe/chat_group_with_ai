@@ -17,6 +17,30 @@ extension _WorkCommandRunnerSafety on WorkCommandRunner {
     }
     final arguments = List<String>.from(command.arguments);
     final name = _commandBasename(executable).toLowerCase();
+    if (preferTectonicForPandoc &&
+        name == 'pandoc' &&
+        _isPdfGenerationCommand(command, arguments) &&
+        !_hasPdfEngineArgument(arguments) &&
+        await _isExecutableAvailableOnPath(
+          'tectonic',
+          workingDirectory: command.workingDirectory,
+        ) &&
+        !await _isExecutableAvailableOnPath(
+          'pdflatex',
+          workingDirectory: command.workingDirectory,
+        )) {
+      // Pandoc otherwise defaults to pdflatex, which is commonly absent in a
+      // desktop Flutter runtime even when Tectonic is installed. Keep this
+      // repair deterministic and local: never replace an engine the model
+      // explicitly selected and never change the declared output scope.
+      const engineArgument = '--pdf-engine=tectonic';
+      final endOfOptions = arguments.indexOf('--');
+      if (endOfOptions >= 0) {
+        arguments.insert(endOfOptions, engineArgument);
+      } else {
+        arguments.add(engineArgument);
+      }
+    }
     if (name == 'curl' && (arguments.isEmpty || arguments.first != '-q')) {
       // curl only disables ~/.curlrc when -q is the first option. A trailing
       // -q is accepted by curl but is too late to prevent config loading, so
@@ -37,6 +61,77 @@ extension _WorkCommandRunnerSafety on WorkCommandRunner {
       workingDirectory: command.workingDirectory,
       declaredImpact: command.declaredImpact,
     );
+  }
+
+  bool _isPdfGenerationCommand(
+    WorkCommand command,
+    List<String> arguments,
+  ) {
+    final declaredPdf = command.declaredImpact.any(_looksLikePdfPath);
+    final outputPdf = _hasPdfOutputArgument(arguments);
+    return declaredPdf || outputPdf;
+  }
+
+  bool _canContinueAfterOutputLimit(WorkCommand command) {
+    if (!continueAfterOutputLimit) return false;
+    final executable = _commandBasename(command.executable).toLowerCase();
+    return (executable == 'pandoc' || executable == 'tectonic') &&
+        _isPdfGenerationCommand(command, command.arguments);
+  }
+
+  bool _hasPdfOutputArgument(List<String> arguments) {
+    for (var index = 0; index < arguments.length; index++) {
+      final argument = arguments[index].trim().toLowerCase();
+      if (argument == '-o' || argument == '--output') {
+        if (index + 1 < arguments.length &&
+            _looksLikePdfPath(arguments[index + 1])) {
+          return true;
+        }
+        continue;
+      }
+      if ((argument.startsWith('--output=') || argument.startsWith('-o')) &&
+          _looksLikePdfPath(
+            arguments[index].substring(
+              argument.startsWith('--output=') ? '--output='.length : 2,
+            ),
+          )) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  bool _hasPdfEngineArgument(List<String> arguments) => arguments.any(
+        (argument) =>
+            argument.trim().toLowerCase() == '--pdf-engine' ||
+            argument.trim().toLowerCase().startsWith('--pdf-engine='),
+      );
+
+  bool _looksLikePdfPath(String value) =>
+      value.trim().replaceAll('\\', '/').toLowerCase().endsWith('.pdf');
+
+  Future<bool> _isExecutableAvailableOnPath(
+    String executable, {
+    required String workingDirectory,
+  }) async {
+    final pathValue = parentEnvironment['PATH'] ?? '';
+    final separator = Platform.isWindows ? ';' : ':';
+    final names = Platform.isWindows
+        ? <String>[executable, '$executable.exe']
+        : <String>[executable];
+    for (final directory in pathValue
+        .split(separator)
+        .where((entry) => entry.trim().isNotEmpty)) {
+      for (final name in names) {
+        final candidate = _joinCommandPath(
+          directory.trim(),
+          name,
+          baseDirectory: workingDirectory,
+        );
+        if (await _canonicalExecutable(candidate) != null) return true;
+      }
+    }
+    return false;
   }
 
   Future<String> _resolveExecutable(

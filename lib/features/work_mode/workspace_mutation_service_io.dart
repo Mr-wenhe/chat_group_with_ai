@@ -16,6 +16,8 @@ extension _WorkspaceMutationIo on WorkspaceMutationService {
       bytes: request.encodedContents,
       targetExists: false,
       expectedSha256: null,
+      contentChanged: true,
+      afterSha256: sha256.convert(request.encodedContents).toString(),
       verifyPath: verifyPath,
       cancellation: cancellation,
       isCancelled: isCancelled,
@@ -41,11 +43,30 @@ extension _WorkspaceMutationIo on WorkspaceMutationService {
     final expectedSha256 =
         request.expectedSha256 ?? sha256.convert(original).toString();
     _checkExpectedHashBytes(original, expectedSha256);
+    final afterSha256 = sha256.convert(bytes).toString();
+    if (afterSha256 == expectedSha256) {
+      _checkCancellation(cancellation, isCancelled);
+      await verifyPath();
+      final currentBytes = await _readFileBytes(target.path);
+      _checkExpectedHashBytes(currentBytes, expectedSha256);
+      _checkCancellation(cancellation, isCancelled);
+      return WorkspaceMutationResult(
+        status: WorkspaceMutationStatus.success,
+        reason: '目标文件内容未发生变化，未执行写入。',
+        path: target.path,
+        contentChanged: false,
+        beforeSha256: expectedSha256,
+        afterSha256: afterSha256,
+      );
+    }
     return _writeAtomically(
       target: target.path,
       bytes: bytes,
       targetExists: true,
       expectedSha256: expectedSha256,
+      contentChanged: true,
+      beforeSha256: expectedSha256,
+      afterSha256: afterSha256,
       verifyPath: verifyPath,
       cancellation: cancellation,
       isCancelled: isCancelled,
@@ -79,12 +100,33 @@ extension _WorkspaceMutationIo on WorkspaceMutationService {
     }
     final patched = '${originalText.substring(0, first)}$replacement'
         '${originalText.substring(first + fragment.length)}';
+    final beforeSha256 = sha256.convert(originalBytes).toString();
+    final patchedBytes = utf8.encode(patched);
+    final afterSha256 = sha256.convert(patchedBytes).toString();
+    if (afterSha256 == beforeSha256) {
+      _checkCancellation(cancellation, isCancelled);
+      await verifyPath();
+      final currentBytes = await _readFileBytes(target.path);
+      _checkExpectedHashBytes(currentBytes, request.expectedSha256);
+      _checkCancellation(cancellation, isCancelled);
+      return WorkspaceMutationResult(
+        status: WorkspaceMutationStatus.success,
+        reason: '补丁结果与原文件相同，未执行写入。',
+        path: target.path,
+        contentChanged: false,
+        beforeSha256: beforeSha256,
+        afterSha256: afterSha256,
+      );
+    }
     _checkCancellation(cancellation, isCancelled);
     return _writeAtomically(
       target: target.path,
-      bytes: utf8.encode(patched),
+      bytes: patchedBytes,
       targetExists: true,
       expectedSha256: request.expectedSha256,
+      contentChanged: true,
+      beforeSha256: beforeSha256,
+      afterSha256: afterSha256,
       verifyPath: verifyPath,
       cancellation: cancellation,
       isCancelled: isCancelled,
@@ -160,6 +202,9 @@ extension _WorkspaceMutationIo on WorkspaceMutationService {
     required List<int> bytes,
     required bool targetExists,
     required String? expectedSha256,
+    required bool contentChanged,
+    String? beforeSha256,
+    String? afterSha256,
     required Future<void> Function() verifyPath,
     required WorkTaskCancellation? cancellation,
     required bool Function()? isCancelled,
@@ -192,6 +237,9 @@ extension _WorkspaceMutationIo on WorkspaceMutationService {
         reason: '文件已通过同目录临时文件原子替换。',
         path: target,
         bytesWritten: bytes.length,
+        contentChanged: contentChanged,
+        beforeSha256: beforeSha256,
+        afterSha256: afterSha256,
       );
     } finally {
       try {

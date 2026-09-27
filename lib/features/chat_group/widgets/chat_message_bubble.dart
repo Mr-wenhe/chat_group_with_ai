@@ -15,6 +15,7 @@ import 'package:chat_group/features/chat_group/widgets/message_selectable_text.d
 import 'package:chat_group/features/chat_group/widgets/video_bubble.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
+import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
@@ -44,6 +45,7 @@ class ChatMessageBubble extends StatelessWidget {
   final VoidCallback? onQuotedTap;
   final String ownerName;
   final String? readReceiptText;
+  final FutureOr<void> Function(WorkTaskUserAction action)? onTaskAction;
 
   /// P2：进度气泡总耗时起点（ms 时间戳），来自 [_progressStartTimes] 查表；
   /// 仅进度消息使用，其它消息传 null 以保持旧调用兼容。
@@ -67,12 +69,39 @@ class ChatMessageBubble extends StatelessWidget {
     this.onQuotedTap,
     required this.ownerName,
     this.readReceiptText,
+    this.onTaskAction,
     this.runStartedAtMs,
   });
 
   @override
   Widget build(BuildContext context) {
     final isUser = message.senderType == 'user';
+    final isSystem = message.senderType == 'system';
+    final taskAction = message.senderType == 'ai' || isSystem
+        ? WorkTaskUserAction.fromMessageId(message.id)
+        : null;
+
+    if (isSystem && taskAction != null) {
+      return Padding(
+        padding: const EdgeInsets.only(bottom: 16),
+        child: Center(
+          child: ConstrainedBox(
+            constraints: const BoxConstraints(maxWidth: 560),
+            child: WeComBubbleSurface(
+              isUser: false,
+              isHighlighted: isHighlightedMention,
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.stretch,
+                children: [
+                  _buildContent(context, message),
+                  _buildTaskAction(context, taskAction),
+                ],
+              ),
+            ),
+          ),
+        ),
+      );
+    }
 
     return GestureDetector(
       onLongPress: onLongPress,
@@ -158,6 +187,8 @@ class ChatMessageBubble extends StatelessWidget {
                           ),
                         _buildMediaContent(context, message, cs, isUser),
                         _buildContent(context, message),
+                        if (taskAction != null)
+                          _buildTaskAction(context, taskAction),
                       ],
                     ),
                   ),
@@ -177,6 +208,26 @@ class ChatMessageBubble extends StatelessWidget {
             ),
             if (isUser) const SizedBox(width: 8),
           ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildTaskAction(BuildContext context, WorkTaskUserAction action) {
+    final callback = onTaskAction;
+    return Padding(
+      padding: const EdgeInsets.only(top: 10),
+      child: Semantics(
+        button: true,
+        label: action.semanticLabel,
+        onTap: callback == null ? null : () => callback(action),
+        child: ExcludeSemantics(
+          child: OutlinedButton.icon(
+            key: ValueKey<String>(action.messageId),
+            onPressed: callback == null ? null : () => callback(action),
+            icon: const Icon(Icons.open_in_new_rounded, size: 17),
+            label: Text(action.label),
+          ),
         ),
       ),
     );

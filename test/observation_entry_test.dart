@@ -1450,8 +1450,9 @@ void main() {
       );
 
       final updated = db.relationshipStateBox.get(relation.id)!;
-      // User positive message: familiarityDelta=3, confidence=0.5 → triggers acquaintance.
-      expect(updated.stage, RelationshipStage.acquaintance);
+      // 普通消息熟悉度 +1，不足以跨越陌生→认识门槛（familiarityDelta >= 3）；
+      // 阶段升级须由明确互动证据触发，不再由单条寒暄推动（见设计文档 §4.5）。
+      expect(updated.stage, RelationshipStage.stranger);
     });
 
     test('romantic stage requires explicit evidence', () async {

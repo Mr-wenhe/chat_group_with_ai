@@ -11,13 +11,26 @@ import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
+import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/chat_group/widgets/blinking_cursor.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:flutter/material.dart';
 
+part 'work_task_panel_details.dart';
+part 'work_task_panel_actions.dart';
+part 'work_task_panel_action_recovery.dart';
+part 'work_task_panel_controls.dart';
+part 'work_task_history_view.dart';
+part 'work_task_panel_timeline.dart';
+
 typedef WorkTaskEventStream = Stream<WorkTaskEvent> Function(String taskId);
 typedef WorkTaskAction = FutureOr<void> Function(String taskId);
+typedef WorkTaskVersionedAction = FutureOr<void> Function(
+  String taskId,
+  int version,
+);
 typedef WorkTaskReply = FutureOr<void> Function(
   String taskId,
   String reply,
@@ -39,16 +52,32 @@ class WorkTaskPanel extends StatefulWidget {
   final WorkTaskAction onContinue;
   final WorkTaskReply? onReply;
   final WorkTaskAction? onApprove;
+  final WorkTaskVersionedAction? onApproveVersioned;
   final WorkTaskAction? onApproveWithoutUndo;
+  final WorkTaskVersionedAction? onApproveWithoutUndoVersioned;
   final WorkTaskAction? onReject;
+  final WorkTaskVersionedAction? onRejectVersioned;
   final WorkTaskAction? onRequestFolder;
+  final WorkTaskVersionedAction? onRequestFolderVersioned;
   final WorkTaskAction? onInstallTool;
+  final WorkTaskVersionedAction? onInstallToolVersioned;
   final WorkTaskAction? onSelectVisionModel;
   final WorkTaskAction? onRetry;
   final WorkTaskAction? onReauthorize;
   final WorkTaskAction? onViewConflict;
   final WorkTaskAction? onUndo;
+  final WorkTaskAction? onLater;
+  final WorkTaskVersionedAction? onLaterVersioned;
   final WorkTaskUndoPreview? undoPreviewFor;
+
+  /// 真删除一条任务记录（不可逆）。为 null 时不展示删除入口。
+  final WorkTaskAction? onDeleteTask;
+
+  /// 把历史任务重新放回标签栏并选中它。
+  ///
+  /// 历史详情本身不接执行动作，但"这条旧任务我要接着处理"是正常诉求：它需要先
+  /// 回到标签栏（被关掉的标签也要恢复），面板上的回复框/继续/重试才会出现。
+  final WorkTaskAction? onOpenInTabStrip;
   final ValueChanged<String> onOpenConversation;
   final VoidCallback onCollapse;
   final VoidCallback onClose;
@@ -57,10 +86,21 @@ class WorkTaskPanel extends StatefulWidget {
   final String Function(String characterId)? characterNameFor;
   final DateTime Function() clock;
 
+  /// 当前会话的历史任务（含已被用户关掉标签的任务），按时间倒序。
+  final List<AgentTask> historyTasks;
+
+  /// 已被用户从标签栏隐藏的任务 id；历史列表用它标注"已从标签栏隐藏"，
+  /// 让用户知道记录还在、可以继续基于它追加要求。
+  final Set<String> hiddenTaskIds;
+
+  /// 关掉某个任务的标签；只影响面板展示，不删除任务记录。
+  final WorkTaskAction? onHideTask;
+
   const WorkTaskPanel({
     super.key,
     required this.tasks,
     this.hiddenTaskCount = 0,
+    this.hiddenTaskIds = const <String>{},
     required this.eventStreamFor,
     required this.onSelectTask,
     required this.onStop,
@@ -73,17 +113,28 @@ class WorkTaskPanel extends StatefulWidget {
     this.dialogContext,
     this.selectedTaskId,
     this.onApprove,
+    this.onApproveVersioned,
     this.onApproveWithoutUndo,
+    this.onApproveWithoutUndoVersioned,
     this.onReject,
+    this.onRejectVersioned,
     this.onRequestFolder,
+    this.onRequestFolderVersioned,
     this.onInstallTool,
+    this.onInstallToolVersioned,
     this.onSelectVisionModel,
     this.onRetry,
     this.onReauthorize,
     this.onViewConflict,
     this.onUndo,
+    this.onLater,
+    this.onLaterVersioned,
     this.undoPreviewFor,
+    this.onDeleteTask,
+    this.onOpenInTabStrip,
     this.characterNameFor,
+    this.historyTasks = const <AgentTask>[],
+    this.onHideTask,
     DateTime Function()? clock,
   }) : clock = clock ?? DateTime.now;
 
@@ -101,6 +152,13 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   bool _actionInFlight = false;
   String? _actionError;
   final TextEditingController _replyController = TextEditingController();
+  final FocusNode _replyFocusNode = FocusNode();
+
+  /// 是否处于历史任务视图。为 false 时显示正常的任务标签面板。
+  bool _showHistory = false;
+
+  /// 历史视图里被点开查看详情的任务 id；为空表示仍停在历史列表。
+  String? _historyDetailTaskId;
 
   @override
   void didUpdateWidget(covariant WorkTaskPanel oldWidget) {
@@ -123,6 +181,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   void dispose() {
     _durationTicker?.cancel();
     _replyController.dispose();
+    _replyFocusNode.dispose();
     super.dispose();
   }
 
@@ -146,8 +205,61 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
 
   @override
   Widget build(BuildContext context) {
+    return Semantics(
+      key: const Key('work-task-panel-semantics'),
+      container: true,
+      explicitChildNodes: true,
+      label: '工作任务面板',
+      child: Material(
+        key: const Key('work-task-panel'),
+        elevation: 12,
+        borderRadius: BorderRadius.circular(20),
+        color: Theme.of(context).colorScheme.surface,
+        child: ConstrainedBox(
+          // Desktop overlays have enough vertical room for a readable live
+          // transcript. The details section keeps its own scrollbar, so a
+          // taller panel does not make the action buttons unreachable.
+          constraints: const BoxConstraints(maxHeight: 720),
+          child: ScrollConfiguration(
+            // Material's desktop ScrollBehavior adds a scrollbar to every
+            // ScrollView. The task panel deliberately owns two independent
+            // scroll regions, so automatic scrollbars would overlap and make
+            // the inner thumb impossible to drag.
+            behavior:
+                ScrollConfiguration.of(context).copyWith(scrollbars: false),
+            child: Padding(
+              padding: const EdgeInsets.all(16),
+              child: _showHistory
+                  ? _buildHistoryBody(context)
+                  : _buildLiveBody(context),
+            ),
+          ),
+        ),
+      ),
+    );
+  }
+
+  /// 任务面板正文：标签 + 当前任务详情 + 操作按钮。
+  ///
+  /// 所有标签都被用户关掉时只显示空态文案，不能收掉整个面板，
+  /// 否则「历史任务」入口也会一起消失，关掉的任务就再也看不到。
+  Widget _buildLiveBody(BuildContext context) {
     final task = _selectedTask;
-    if (task == null) return const SizedBox.shrink();
+    if (task == null) {
+      return Column(
+        mainAxisSize: MainAxisSize.min,
+        crossAxisAlignment: CrossAxisAlignment.stretch,
+        children: <Widget>[
+          _PanelHeader(
+            onCollapse: widget.onCollapse,
+            onClose: widget.onClose,
+            onOpenHistory: _openHistory,
+          ),
+          const SizedBox(height: 12),
+          const Text('没有正在显示的任务，可从「历史任务」里重新查看。'),
+        ],
+      );
+    }
     final latestEvent = _latestEvents[task.id];
     final latestAction = _latestActionEvents[task.id] ?? latestEvent;
     // Tool/action fields describe the active step. Once the durable task is
@@ -156,92 +268,228 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
     final toolName = task.isTerminal
         ? null
         : _toolName(latestEvent) ?? _toolName(_latestToolEvents[task.id]);
-
-    return Material(
-      key: const Key('work-task-panel'),
-      elevation: 12,
-      borderRadius: BorderRadius.circular(20),
-      color: Theme.of(context).colorScheme.surface,
-      child: ConstrainedBox(
-        // Desktop overlays have enough vertical room for a readable live
-        // transcript. The details section keeps its own scrollbar, so a
-        // taller panel does not make the action buttons unreachable.
-        constraints: const BoxConstraints(maxHeight: 720),
-        child: ScrollConfiguration(
-          // Material's desktop ScrollBehavior adds a scrollbar to every
-          // ScrollView. The task panel deliberately owns two independent
-          // scroll regions, so automatic scrollbars would overlap and make
-          // the inner thumb impossible to drag.
-          behavior: ScrollConfiguration.of(context).copyWith(scrollbars: false),
-          child: Padding(
-            padding: const EdgeInsets.all(16),
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.stretch,
-              children: <Widget>[
-                _PanelHeader(
-                  onCollapse: widget.onCollapse,
-                  onClose: widget.onClose,
-                ),
-                const SizedBox(height: 10),
-                _TaskTabs(
-                  tasks: widget.tasks,
-                  selectedTaskId: task.id,
-                  onSelectTask: widget.onSelectTask,
-                ),
-                if (widget.hiddenTaskCount > 0) ...<Widget>[
-                  const SizedBox(height: 6),
-                  Text(
-                    '还有 ${widget.hiddenTaskCount} 个任务在队列中，当前面板优先显示执行中的任务。',
-                    style: TextStyle(
-                      fontSize: 12,
-                      color: Theme.of(context).colorScheme.onSurfaceVariant,
-                    ),
-                  ),
-                ],
-                const SizedBox(height: 14),
-                Expanded(
-                  child: _TaskDetails(
-                    task: task,
-                    latestAction: latestAction,
-                    toolName: toolName,
-                    actionError: _actionError,
-                    characterNameFor: widget.characterNameFor,
-                    eventStreamFor: widget.eventStreamFor,
-                    onLatestEvent: _rememberLatestEvent,
-                    clock: widget.clock,
-                  ),
-                ),
-                const SizedBox(height: 12),
-                _TaskActions(
-                  task: task,
-                  actionInFlight: _actionInFlight,
-                  actionError: _actionError,
-                  onOpenConversation: widget.onOpenConversation,
-                  onApprove: widget.onApprove,
-                  onApproveWithoutUndo: widget.onApproveWithoutUndo,
-                  onReject: widget.onReject,
-                  onRequestFolder: widget.onRequestFolder,
-                  onInstallTool: widget.onInstallTool,
-                  onSelectVisionModel: widget.onSelectVisionModel,
-                  onRetry: widget.onRetry,
-                  onReauthorize: widget.onReauthorize,
-                  onViewConflict: widget.onViewConflict,
-                  onUndo: widget.onUndo,
-                  undoPreviewFor: widget.undoPreviewFor,
-                  onStop: widget.onStop,
-                  onContinue: widget.onContinue,
-                  onReply: widget.onReply,
-                  replyController: _replyController,
-                  onModalVisibilityChanged: widget.onModalVisibilityChanged,
-                  dialogContext: widget.dialogContext,
-                  runAction: (action) => _runAction(action, task.id),
-                ),
-              ],
+    final onHideTask = widget.onHideTask;
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        _PanelHeader(
+          onCollapse: widget.onCollapse,
+          onClose: widget.onClose,
+          onOpenHistory: _openHistory,
+        ),
+        const SizedBox(height: 10),
+        _TaskTabs(
+          tasks: widget.tasks,
+          selectedTaskId: task.id,
+          onSelectTask: widget.onSelectTask,
+          onHideTask: onHideTask == null
+              ? null
+              : (taskId) => unawaited(_runAction(onHideTask, taskId)),
+        ),
+        if (widget.hiddenTaskCount > 0) ...<Widget>[
+          const SizedBox(height: 6),
+          Text(
+            '本会话还有 ${widget.hiddenTaskCount} 个未结束的任务未在标签栏显示，'
+            '可在「历史任务」里查看。',
+            style: TextStyle(
+              fontSize: 12,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+          ),
+        ],
+        const SizedBox(height: 14),
+        Expanded(
+          child: _TaskDetails(
+            task: task,
+            latestAction: latestAction,
+            toolName: toolName,
+            actionError: _actionError,
+            characterNameFor: widget.characterNameFor,
+            eventStreamFor: widget.eventStreamFor,
+            onLatestEvent: _rememberLatestEvent,
+            clock: widget.clock,
+          ),
+        ),
+        const SizedBox(height: 12),
+        ConstrainedBox(
+          constraints: const BoxConstraints(maxHeight: 180),
+          child: SingleChildScrollView(
+            primary: false,
+            child: _TaskActions(
+              task: task,
+              actionInFlight: _actionInFlight,
+              actionError: _actionError,
+              onOpenConversation: widget.onOpenConversation,
+              onApprove: widget.onApprove,
+              onApproveVersioned: widget.onApproveVersioned,
+              onApproveWithoutUndo: widget.onApproveWithoutUndo,
+              onApproveWithoutUndoVersioned:
+                  widget.onApproveWithoutUndoVersioned,
+              onReject: widget.onReject,
+              onRejectVersioned: widget.onRejectVersioned,
+              onRequestFolder: widget.onRequestFolder,
+              onRequestFolderVersioned: widget.onRequestFolderVersioned,
+              onInstallTool: widget.onInstallTool,
+              onInstallToolVersioned: widget.onInstallToolVersioned,
+              onSelectVisionModel: widget.onSelectVisionModel,
+              onRetry: widget.onRetry,
+              onReauthorize: widget.onReauthorize,
+              onViewConflict: widget.onViewConflict,
+              onUndo: widget.onUndo,
+              onLater: widget.onLater,
+              onLaterVersioned: widget.onLaterVersioned,
+              undoPreviewFor: widget.undoPreviewFor,
+              onDeleteTask: widget.onDeleteTask,
+              onStop: widget.onStop,
+              onContinue: widget.onContinue,
+              onReply: widget.onReply,
+              replyController: _replyController,
+              replyFocusNode: _replyFocusNode,
+              onModalVisibilityChanged: widget.onModalVisibilityChanged,
+              dialogContext: widget.dialogContext,
+              runAction: (action) => _runAction(action, task.id),
             ),
           ),
         ),
-      ),
+      ],
     );
+  }
+
+  /// 历史任务视图：先看列表（时间 + 标题），点进去才展开任务详情。
+  ///
+  /// 被关掉标签的任务只在这里还能看到；历史任务不会再执行，
+  /// 所以详情不接动作按钮，耗时也按「创建 → 最后更新」计算。
+  Widget _buildHistoryBody(BuildContext context) {
+    final detailTask = _historyTaskById(_historyDetailTaskId);
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.stretch,
+      children: <Widget>[
+        _PanelHeader(
+          inHistory: true,
+          onCollapse: widget.onCollapse,
+          onClose: widget.onClose,
+          onBackFromHistory: detailTask == null
+              ? _closeHistory
+              : () => setState(() => _historyDetailTaskId = null),
+        ),
+        const SizedBox(height: 10),
+        if (detailTask == null)
+          Expanded(
+            child: _TaskHistoryList(
+              tasks: widget.historyTasks,
+              hiddenTaskIds: widget.hiddenTaskIds,
+              onSelectTask: (taskId) =>
+                  setState(() => _historyDetailTaskId = taskId),
+            ),
+          )
+        else
+          Expanded(
+            child: _TaskDetails(
+              task: detailTask,
+              latestAction: null,
+              toolName: null,
+              actionError: null,
+              characterNameFor: widget.characterNameFor,
+              eventStreamFor: widget.eventStreamFor,
+              onLatestEvent: (_) {},
+              // 历史任务已经结束，用最后更新时间当基准，否则耗时会按
+              // 当前时间算成几百上千小时。
+              clock: () => detailTask.updatedAt ?? detailTask.createdAt,
+            ),
+          ),
+        // 历史任务不再执行，所以这里不接执行类动作；但"重新放回标签栏"和
+        // "删除记录"都不是执行动作，而历史列表正是这两件事的唯一入口。
+        if (detailTask != null &&
+            (widget.onOpenInTabStrip != null || widget.onDeleteTask != null))
+          ...<Widget>[
+            const SizedBox(height: 12),
+            Align(
+              alignment: Alignment.centerRight,
+              child: Wrap(
+                spacing: 8,
+                children: <Widget>[
+                  if (widget.onOpenInTabStrip != null)
+                    OutlinedButton.icon(
+                      key: const Key('work-task-history-open-in-tabs'),
+                      onPressed: _actionInFlight
+                          ? null
+                          : () => _openHistoryTaskInTabs(detailTask),
+                      icon: const Icon(Icons.tab_unselected_rounded),
+                      label: const Text('在标签栏打开'),
+                    ),
+                  if (widget.onDeleteTask != null)
+                    TextButton.icon(
+                      key: const Key('work-task-history-delete'),
+                      onPressed: _actionInFlight
+                          ? null
+                          : () => _confirmDeleteHistoryTask(detailTask),
+                      icon: const Icon(Icons.delete_outline_rounded),
+                      label: const Text('删除任务'),
+                    ),
+                ],
+              ),
+            ),
+          ],
+      ],
+    );
+  }
+
+  /// 把历史详情里的任务放回标签栏，并退出历史视图——否则标签恢复了也看不到，
+  /// 因为标签栏只画在实时视图里。
+  Future<void> _openHistoryTaskInTabs(AgentTask task) async {
+    final openInTabs = widget.onOpenInTabStrip;
+    if (openInTabs == null) return;
+    final opened = await _runAction(openInTabs, task.id);
+    if (opened && mounted) {
+      setState(() {
+        _showHistory = false;
+        _historyDetailTaskId = null;
+      });
+    }
+  }
+
+  Future<void> _confirmDeleteHistoryTask(AgentTask task) async {
+    final onDelete = widget.onDeleteTask;
+    if (onDelete == null) return;
+    widget.onModalVisibilityChanged?.call(false);
+    bool confirmed;
+    try {
+      confirmed = await _confirmWorkTaskDeletion(
+        context,
+        task: task,
+        dialogContext: widget.dialogContext,
+      );
+    } finally {
+      widget.onModalVisibilityChanged?.call(true);
+    }
+    if (!confirmed) return;
+    final deleted = await _runAction(onDelete, task.id);
+    if (deleted && mounted) {
+      // 记录已经不在列表里了，回到列表层，避免停在一个已消失的详情上。
+      setState(() => _historyDetailTaskId = null);
+    }
+  }
+
+  void _openHistory() {
+    setState(() {
+      _showHistory = true;
+      _historyDetailTaskId = null;
+    });
+  }
+
+  void _closeHistory() {
+    setState(() {
+      _showHistory = false;
+      _historyDetailTaskId = null;
+    });
+  }
+
+  AgentTask? _historyTaskById(String? taskId) {
+    if (taskId == null) return null;
+    for (final task in widget.historyTasks) {
+      if (task.id == taskId) return task;
+    }
+    return null;
   }
 
   Future<bool> _runAction(WorkTaskAction action, String taskId) async {
@@ -293,1445 +541,4 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
     final tool = event.safeMetadata['tool'];
     return tool is String && tool.trim().isNotEmpty ? tool : null;
   }
-}
-
-class _TaskDetails extends StatefulWidget {
-  final AgentTask task;
-  final WorkTaskEvent? latestAction;
-  final String? toolName;
-  final String? actionError;
-  final String Function(String characterId)? characterNameFor;
-  final WorkTaskEventStream eventStreamFor;
-  final ValueChanged<WorkTaskEvent> onLatestEvent;
-  final DateTime Function() clock;
-
-  const _TaskDetails({
-    required this.task,
-    required this.latestAction,
-    required this.toolName,
-    required this.actionError,
-    required this.characterNameFor,
-    required this.eventStreamFor,
-    required this.onLatestEvent,
-    required this.clock,
-  });
-
-  @override
-  State<_TaskDetails> createState() => _TaskDetailsState();
-}
-
-class _TaskDetailsState extends State<_TaskDetails> {
-  final ScrollController _detailsScrollController = ScrollController();
-
-  @override
-  void dispose() {
-    _detailsScrollController.dispose();
-    super.dispose();
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final approvalText =
-        widget.task.status == AgentTaskStatus.waitingForApproval
-            ? '等待你批准当前操作。'
-            : null;
-    final failure = _visibleWorkFailure(widget.task);
-    // A terminal task may retain the last stepStarted event for its timeline.
-    // Do not present that historical action as if it were still running after
-    // the durable task status has already become completed/failed/cancelled.
-    final displayAction = widget.task.isTerminal
-        ? null
-        : _isStaleRecoveryAction(widget.task, widget.latestAction)
-            ? null
-            : widget.latestAction;
-    final characterName =
-        widget.characterNameFor?.call(widget.task.characterId).trim();
-    return LayoutBuilder(
-      builder: (context, constraints) {
-        // Keep the live execution viewport fully inside the panel. Previously
-        // it was nested in the summary scroll view, so its lower scrollbar
-        // could be clipped by the outer viewport and become unclickable.
-        final availableHeight =
-            constraints.maxHeight.isFinite ? constraints.maxHeight : 560.0;
-        final timelineHeight = availableHeight < 300
-            ? (availableHeight * 0.5).clamp(120.0, 220.0).toDouble()
-            : (availableHeight * 0.46).clamp(220.0, 360.0).toDouble();
-        return Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            Expanded(
-              child: Scrollbar(
-                key: const Key('work-task-details-scrollbar'),
-                controller: _detailsScrollController,
-                thumbVisibility: true,
-                interactive: true,
-                child: SingleChildScrollView(
-                  controller: _detailsScrollController,
-                  primary: false,
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: <Widget>[
-                      Text(
-                        _safePanelText(widget.task.userRequest),
-                        style: Theme.of(context).textTheme.titleMedium,
-                      ),
-                      const SizedBox(height: 4),
-                      Text(
-                        '执行角色：${characterName == null || characterName.isEmpty ? widget.task.characterId : characterName}',
-                      ),
-                      const SizedBox(height: 4),
-                      // currentStep is the index of the current tool operation
-                      // and may intentionally lag behind model decisions. The
-                      // user-facing budget must reflect every counted action.
-                      Text(
-                        '步骤 ${widget.task.actionCount} / ${widget.task.actionLimit}',
-                      ),
-                      const SizedBox(height: 4),
-                      Text(_durationLabel(widget.task, widget.clock())),
-                      const SizedBox(height: 12),
-                      _PublicDetail(
-                        title: '计划摘要',
-                        text: widget.task.plan.trim().isEmpty
-                            ? '尚未生成公开计划。'
-                            : _safePanelText(widget.task.plan),
-                      ),
-                      const SizedBox(height: 8),
-                      _PublicDetail(
-                        title: '当前动作',
-                        text: displayAction == null
-                            ? _statusLabel(widget.task.status)
-                            : _safePanelText(displayAction.title),
-                        inline: true,
-                      ),
-                      if (widget.toolName != null) ...<Widget>[
-                        const SizedBox(height: 8),
-                        _PublicDetail(
-                          title: '工具',
-                          text: _safePanelText(widget.toolName!),
-                          inline: true,
-                        ),
-                      ],
-                      if (approvalText != null) ...<Widget>[
-                        const SizedBox(height: 8),
-                        _PublicDetail(
-                          title: '审批',
-                          text: _safePanelText(approvalText),
-                          inline: true,
-                        ),
-                      ],
-                      if (widget.task.resultSummary
-                          .trim()
-                          .isNotEmpty) ...<Widget>[
-                        const SizedBox(height: 8),
-                        _PublicDetail(
-                          title: '结论',
-                          text: _safePanelText(widget.task.resultSummary),
-                        ),
-                      ],
-                      if (widget.task.lastArtifactPaths.isNotEmpty) ...<Widget>[
-                        const SizedBox(height: 8),
-                        _PublicDetail(
-                          title: '已生成文件',
-                          text: _artifactNames(widget.task.lastArtifactPaths),
-                        ),
-                      ],
-                      if (failure != null) ...<Widget>[
-                        const SizedBox(height: 10),
-                        _FailureDetails(failure: failure),
-                      ],
-                      if (widget.task.eventLogIncomplete) ...<Widget>[
-                        const SizedBox(height: 8),
-                        const _PublicDetail(
-                          title: '日志',
-                          text: '部分执行动态保存失败，以上日志可能不完整。',
-                        ),
-                      ],
-                      if (widget.actionError != null) ...<Widget>[
-                        const SizedBox(height: 8),
-                        _PublicDetail(
-                          title: '操作失败',
-                          text: _safePanelText(widget.actionError!),
-                        ),
-                      ],
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(height: 14),
-            Text(
-              '执行动态 · 实时公开输出',
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
-            const SizedBox(height: 6),
-            SizedBox(
-              height: timelineHeight,
-              child: _TaskEventTimeline(
-                key: ValueKey<String>(widget.task.id),
-                taskId: widget.task.id,
-                eventStreamFor: widget.eventStreamFor,
-                onLatestEvent: widget.onLatestEvent,
-              ),
-            ),
-          ],
-        );
-      },
-    );
-  }
-}
-
-class _FailureDetails extends StatelessWidget {
-  final WorkFailure failure;
-
-  const _FailureDetails({required this.failure});
-
-  @override
-  Widget build(BuildContext context) {
-    final completed = failure.completedContent;
-    return DecoratedBox(
-      key: const Key('work-task-failure'),
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.errorContainer,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(
-              '${_safePanelText(failure.title)} · ${failure.type.name}',
-              style: Theme.of(context).textTheme.titleSmall,
-            ),
-            const SizedBox(height: 4),
-            _PublicDetail(
-              title: '具体原因',
-              text: _safePanelText(failure.reason),
-            ),
-            const SizedBox(height: 4),
-            _PublicDetail(
-              title: '技术细节',
-              text: _safePanelText(failure.technicalDetail),
-            ),
-            if (completed.isNotEmpty) ...<Widget>[
-              const SizedBox(height: 4),
-              _PublicDetail(
-                title: '已完成内容',
-                text: completed.map(_safePanelText).join('；'),
-              ),
-            ],
-            const SizedBox(height: 4),
-            _PublicDetail(
-              title: '下一步',
-              text: _safePanelText(failure.suggestedAction),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _TaskActions extends StatelessWidget {
-  final AgentTask task;
-  final bool actionInFlight;
-  final String? actionError;
-  final ValueChanged<String> onOpenConversation;
-  final WorkTaskAction? onApprove;
-  final WorkTaskAction? onApproveWithoutUndo;
-  final WorkTaskAction? onReject;
-  final WorkTaskAction? onRequestFolder;
-  final WorkTaskAction? onInstallTool;
-  final WorkTaskAction? onSelectVisionModel;
-  final WorkTaskAction? onRetry;
-  final WorkTaskAction? onReauthorize;
-  final WorkTaskAction? onViewConflict;
-  final WorkTaskAction? onUndo;
-  final WorkTaskUndoPreview? undoPreviewFor;
-  final WorkTaskAction onStop;
-  final WorkTaskAction onContinue;
-  final WorkTaskReply? onReply;
-  final TextEditingController replyController;
-  final ValueChanged<bool>? onModalVisibilityChanged;
-  final BuildContext? dialogContext;
-  final Future<bool> Function(WorkTaskAction action) runAction;
-
-  const _TaskActions({
-    required this.task,
-    required this.actionInFlight,
-    required this.actionError,
-    required this.onOpenConversation,
-    required this.onApprove,
-    required this.onApproveWithoutUndo,
-    required this.onReject,
-    required this.onRequestFolder,
-    required this.onInstallTool,
-    required this.onSelectVisionModel,
-    required this.onRetry,
-    required this.onReauthorize,
-    required this.onViewConflict,
-    required this.onUndo,
-    required this.undoPreviewFor,
-    required this.onStop,
-    required this.onContinue,
-    required this.replyController,
-    this.onReply,
-    this.onModalVisibilityChanged,
-    this.dialogContext,
-    required this.runAction,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final failure = _visibleWorkFailure(task);
-    final continueReason = _continueUnavailableReasonForPanel(task);
-    final stopReason = task.isTerminal ? '任务已结束，无法停止。' : null;
-    final approvalPlan = approvalPlanForTask(task);
-    final requiresPlan = _pendingToolRequiresPlan(task);
-    final approvalPlanUnavailable = requiresPlan && approvalPlan == null;
-    final requiresNoUndo = _pendingToolRequiresNoUndo(task, approvalPlan);
-    final needsFolder = _taskNeedsFolderGrant(task);
-    final hasInstallSuggestion = _taskHasInstallSuggestion(task);
-    final needsVisionModel = _taskNeedsVisionModel(task);
-    final canRestartFromBeginning =
-        WorkTaskCoordinator.canRestartAfterUserStop(task);
-    final isSoftLimitPause =
-        task.softLimitReached && _isPausedStatus(task.status);
-    // Recovery controls are meaningful only at a user-resumable boundary. A
-    // terminal failure may still expose retry/reauthorize/conflict actions,
-    // but must not also present a misleading generic Continue button.
-    final canShowContinue = !task.isTerminal &&
-        (task.status == AgentTaskStatus.paused ||
-            task.status == AgentTaskStatus.interrupted) &&
-        (isSoftLimitPause || failure == null || failure.canContinue);
-    final canReply = onReply != null && WorkTaskClarification.isPending(task);
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.stretch,
-      children: <Widget>[
-        if (canReply) ...<Widget>[
-          _TaskReplyBox(
-            task: task,
-            controller: replyController,
-            actionInFlight: actionInFlight,
-            actionError: actionError,
-            onSubmit: (reply) async {
-              final replyAction = onReply;
-              if (replyAction == null) return;
-              final sent = await runAction(
-                (_) => replyAction(task.id, reply),
-              );
-              if (sent && replyController.text.trim() == reply) {
-                replyController.clear();
-              }
-            },
-          ),
-          const SizedBox(height: 8),
-        ],
-        Wrap(
-          spacing: 8,
-          runSpacing: 8,
-          children: <Widget>[
-            OutlinedButton.icon(
-              key: const Key('work-task-open-conversation'),
-              onPressed: () => onOpenConversation(task.groupId),
-              icon: const Icon(Icons.forum_outlined),
-              label: const Text('回到对话'),
-            ),
-            if (!needsFolder &&
-                task.status == AgentTaskStatus.waitingForApproval &&
-                task.pendingToolRequestJson.trim().isNotEmpty) ...<Widget>[
-              if (!requiresNoUndo && onApprove != null)
-                Tooltip(
-                  message: approvalPlanUnavailable
-                      ? '审批计划无法读取，已阻止文件变更；请让任务重新规划。'
-                      : '批准当前列出的工具操作。',
-                  child: FilledButton.icon(
-                    key: const Key('work-task-approve'),
-                    onPressed: actionInFlight || approvalPlanUnavailable
-                        ? null
-                        : () => _approveWithConfirmation(context, approvalPlan),
-                    icon: const Icon(Icons.check_rounded),
-                    label: const Text('批准'),
-                  ),
-                ),
-              if (onApproveWithoutUndo != null &&
-                  (requiresNoUndo ||
-                      approvalPlan != null &&
-                          (!approvalPlan.snapshotAvailable ||
-                              !approvalPlan.reversible)))
-                Tooltip(
-                  message: requiresNoUndo
-                      ? '技能配置没有文件快照，仅在你确认无法撤销时执行。'
-                      : '仅在你确认无法撤销时使用；不会因为设置开关而自动启用。',
-                  child: OutlinedButton.icon(
-                    key: const Key('work-task-approve-without-undo'),
-                    onPressed: actionInFlight
-                        ? null
-                        : () => _approveWithoutUndoWithConfirmation(
-                              context,
-                              approvalPlan,
-                            ),
-                    icon: const Icon(Icons.warning_amber_rounded),
-                    label: const Text('无撤销执行'),
-                  ),
-                ),
-              if (onReject != null)
-                Tooltip(
-                  message: '拒绝当前操作，并让任务尝试安全路径。',
-                  child: OutlinedButton.icon(
-                    key: const Key('work-task-reject'),
-                    onPressed:
-                        actionInFlight ? null : () => runAction(onReject!),
-                    icon: const Icon(Icons.block_rounded),
-                    label: const Text('拒绝'),
-                  ),
-                ),
-            ],
-            if (needsFolder && onRequestFolder != null)
-              OutlinedButton.icon(
-                key: const Key('work-task-add-folder'),
-                onPressed:
-                    actionInFlight ? null : () => runAction(onRequestFolder!),
-                icon: const Icon(Icons.folder_shared_outlined),
-                label: const Text('授权目录'),
-              ),
-            if (hasInstallSuggestion && onInstallTool != null)
-              OutlinedButton.icon(
-                key: const Key('work-task-install-tool'),
-                onPressed:
-                    actionInFlight ? null : () => _confirmInstallTool(context),
-                icon: const Icon(Icons.download_outlined),
-                label: const Text('帮助安装工具'),
-              ),
-            if (needsVisionModel && onSelectVisionModel != null)
-              OutlinedButton.icon(
-                key: const Key('work-task-select-vision-model'),
-                onPressed: actionInFlight
-                    ? null
-                    : () => runAction(onSelectVisionModel!),
-                icon: const Icon(Icons.image_search_outlined),
-                label: const Text('选择视觉模型'),
-              ),
-            if (onRetry != null &&
-                (canRestartFromBeginning ||
-                    !isSoftLimitPause && failure?.canRetry == true))
-              FilledButton.icon(
-                key: const Key('work-task-retry'),
-                onPressed: actionInFlight ? null : () => runAction(onRetry!),
-                icon: const Icon(Icons.refresh_rounded),
-                label: Text(canRestartFromBeginning ? '从头开始' : '重试'),
-              ),
-            if (failure?.canReauthorize == true &&
-                (onReauthorize != null || onRequestFolder != null))
-              OutlinedButton.icon(
-                key: const Key('work-task-reauthorize'),
-                onPressed: actionInFlight
-                    ? null
-                    : () => runAction(onReauthorize ?? onRequestFolder!),
-                icon: const Icon(Icons.lock_open_outlined),
-                label: const Text('重新授权'),
-              ),
-            if (failure?.canViewConflict == true && onViewConflict != null)
-              OutlinedButton.icon(
-                key: const Key('work-task-view-conflict'),
-                onPressed:
-                    actionInFlight ? null : () => runAction(onViewConflict!),
-                icon: const Icon(Icons.compare_arrows_rounded),
-                label: const Text('查看冲突'),
-              ),
-            if (!task.isTerminal)
-              Tooltip(
-                message: stopReason ?? '停止当前任务。',
-                child: OutlinedButton.icon(
-                  key: const Key('work-task-stop'),
-                  onPressed: actionInFlight ? null : () => runAction(onStop),
-                  icon: const Icon(Icons.stop_circle_outlined),
-                  label: const Text('停止'),
-                ),
-              ),
-            if (canShowContinue)
-              Tooltip(
-                message: continueReason ?? '继续当前任务。',
-                child: FilledButton.icon(
-                  key: const Key('work-task-continue'),
-                  onPressed: continueReason == null && !actionInFlight
-                      ? () => runAction(onContinue)
-                      : null,
-                  icon: const Icon(Icons.play_arrow_rounded),
-                  label: const Text('继续'),
-                ),
-              ),
-            Tooltip(
-              message: task.isTerminal && onUndo != null
-                  ? '撤销本任务改动。'
-                  : '撤销将在任务快照完成后可用。',
-              child: OutlinedButton.icon(
-                key: const Key('work-task-undo'),
-                onPressed: task.isTerminal && onUndo != null && !actionInFlight
-                    ? () => _confirmUndo(context)
-                    : null,
-                icon: const Icon(Icons.undo_rounded),
-                label: const Text('撤销'),
-              ),
-            ),
-          ],
-        ),
-      ],
-    );
-  }
-
-  Future<void> _approveWithConfirmation(
-    BuildContext context,
-    WorkChangePlan? approvalPlan,
-  ) async {
-    final approve = onApprove;
-    if (approve == null) return;
-    if (_pendingToolRequiresPlan(task) && approvalPlan == null) return;
-    if (approvalPlan == null) {
-      await runAction(approve);
-      return;
-    }
-    final decision = await _showTaskModal<WorkChangeApprovalDecision>(
-      () => WorkChangeApprovalDialog.show(
-        dialogContext ?? context,
-        plan: approvalPlan,
-      ),
-    );
-    if (decision == WorkChangeApprovalDecision.approved) {
-      await runAction(approve);
-    } else if (decision == WorkChangeApprovalDecision.rejected &&
-        onReject != null) {
-      await runAction(onReject!);
-    }
-  }
-
-  Future<void> _approveWithoutUndoWithConfirmation(
-    BuildContext context,
-    WorkChangePlan? approvalPlan,
-  ) async {
-    final approveWithoutUndo = onApproveWithoutUndo;
-    if (approveWithoutUndo == null) return;
-    if (_pendingToolRequiresPlan(task) && approvalPlan == null) return;
-    if (approvalPlan == null) {
-      final confirmed = await _confirmNoUndoMutation(context);
-      if (confirmed) await runAction(approveWithoutUndo);
-      return;
-    }
-    final decision = await _showTaskModal<WorkChangeApprovalDecision>(
-      () => WorkChangeApprovalDialog.show(
-        dialogContext ?? context,
-        plan: approvalPlan,
-      ),
-    );
-    if (decision == WorkChangeApprovalDecision.approvedWithoutUndo) {
-      await runAction(approveWithoutUndo);
-    } else if (decision == WorkChangeApprovalDecision.rejected &&
-        onReject != null) {
-      await runAction(onReject!);
-    }
-  }
-
-  Future<bool> _confirmNoUndoMutation(BuildContext context) async {
-    final confirmed = await _showTaskModal<bool>(
-      () => showDialog<bool>(
-        context: dialogContext ?? context,
-        barrierDismissible: true,
-        builder: (dialogContext) => AlertDialog(
-          key: const Key('work-task-no-undo-dialog'),
-          title: const Text('确认无撤销执行'),
-          content: Text(
-            '${_safePanelText(task.lastError)}\n\n'
-            '该应用内配置没有文件快照，执行后不能通过任务撤销恢复。是否继续？',
-          ),
-          actions: [
-            TextButton(
-              key: const Key('work-task-no-undo-cancel'),
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              key: const Key('work-task-no-undo-confirm'),
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text('确认执行'),
-            ),
-          ],
-        ),
-      ),
-    );
-    return confirmed == true;
-  }
-
-  Future<void> _confirmUndo(BuildContext context) async {
-    final preview = undoPreviewFor;
-    List<WorkSnapshotUndoItem> items = const [];
-    var previewFailed = false;
-    if (preview != null) {
-      try {
-        items = await preview(task.id);
-      } on Object {
-        // Never execute an unknown undo scope. The user can retry after the
-        // manifest becomes readable again.
-        previewFailed = true;
-      }
-    }
-    if (!context.mounted) return;
-    final confirmed = await _showTaskModal<bool>(
-      () => showDialog<bool>(
-        context: dialogContext ?? context,
-        barrierDismissible: true,
-        builder: (dialogContext) => AlertDialog(
-          key: const Key('work-task-undo-dialog'),
-          title: const Text('撤销本任务改动'),
-          content: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 520, maxHeight: 360),
-            child: previewFailed
-                ? const Text('无法读取任务快照，未执行撤销。请稍后重试。')
-                : items.isEmpty
-                    ? const Text('没有可撤销的已完成文件改动。')
-                    : SingleChildScrollView(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: items
-                              .map(
-                                (item) => Padding(
-                                  padding: const EdgeInsets.symmetric(
-                                    vertical: 4,
-                                  ),
-                                  child: Text(_safeUndoItemText(item.label)),
-                                ),
-                              )
-                              .toList(growable: false),
-                        ),
-                      ),
-          ),
-          actions: [
-            TextButton(
-              key: const Key('work-task-undo-cancel'),
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              key: const Key('work-task-undo-confirm'),
-              onPressed: previewFailed
-                  ? null
-                  : () => Navigator.of(dialogContext).pop(true),
-              child: const Text('确认撤销'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (confirmed == true) await runAction(onUndo!);
-  }
-
-  Future<void> _confirmInstallTool(BuildContext context) async {
-    final install = onInstallTool;
-    if (install == null) return;
-    final confirmed = await _showTaskModal<bool>(
-      () => showDialog<bool>(
-        context: dialogContext ?? context,
-        barrierDismissible: true,
-        builder: (dialogContext) => AlertDialog(
-          key: const Key('work-task-install-tool-dialog'),
-          title: const Text('安装缺失工具？'),
-          content: Text(
-            '${_safePanelText(task.lastError)}\n\n'
-            '仅执行应用识别的可信安装命令；不会加入永久授权。安装完成后将继续原任务。',
-          ),
-          actions: [
-            TextButton(
-              key: const Key('work-task-install-tool-cancel'),
-              onPressed: () => Navigator.of(dialogContext).pop(false),
-              child: const Text('取消'),
-            ),
-            FilledButton(
-              key: const Key('work-task-install-tool-confirm'),
-              onPressed: () => Navigator.of(dialogContext).pop(true),
-              child: const Text('确认安装'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (confirmed == true) await runAction(install);
-  }
-
-  /// The app-scoped panel is painted above the route Navigator. Hide it while
-  /// any task modal is open so approval, cancellation, and undo controls stay
-  /// reachable in narrow windows as well as wide windows.
-  Future<T?> _showTaskModal<T>(Future<T?> Function() show) async {
-    onModalVisibilityChanged?.call(false);
-    try {
-      return await show();
-    } finally {
-      onModalVisibilityChanged?.call(true);
-    }
-  }
-}
-
-class _TaskReplyBox extends StatelessWidget {
-  final AgentTask task;
-  final TextEditingController controller;
-  final bool actionInFlight;
-  final String? actionError;
-  final Future<void> Function(String reply) onSubmit;
-
-  const _TaskReplyBox({
-    required this.task,
-    required this.controller,
-    required this.actionInFlight,
-    required this.actionError,
-    required this.onSubmit,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    final colors = Theme.of(context).colorScheme;
-    return DecoratedBox(
-      key: const Key('work-task-reply-box'),
-      decoration: BoxDecoration(
-        color: colors.primaryContainer.withValues(alpha: 0.45),
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: colors.primary.withValues(alpha: 0.35)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.stretch,
-          children: <Widget>[
-            Text(
-              '请回答模型的问题',
-              style: Theme.of(context).textTheme.labelLarge,
-            ),
-            const SizedBox(height: 4),
-            Text(_safePanelText(WorkTaskClarification.question(task))),
-            const SizedBox(height: 8),
-            TextField(
-              key: const Key('work-task-reply-input'),
-              controller: controller,
-              minLines: 1,
-              maxLines: 4,
-              enabled: !actionInFlight,
-              textInputAction: TextInputAction.newline,
-              decoration: const InputDecoration(
-                hintText: '输入回复…',
-                border: OutlineInputBorder(),
-                isDense: true,
-              ),
-            ),
-            if (actionError != null && actionError!.trim().isNotEmpty) ...[
-              const SizedBox(height: 6),
-              Text(
-                '发送失败：${_safePanelText(actionError!)}',
-                key: const Key('work-task-reply-error'),
-                style: TextStyle(color: colors.error),
-              ),
-            ],
-            const SizedBox(height: 8),
-            Align(
-              alignment: Alignment.centerRight,
-              child: ValueListenableBuilder<TextEditingValue>(
-                valueListenable: controller,
-                builder: (context, value, _) {
-                  final canSend =
-                      !actionInFlight && value.text.trim().isNotEmpty;
-                  return FilledButton.icon(
-                    key: const Key('work-task-reply-send'),
-                    onPressed:
-                        canSend ? () => onSubmit(value.text.trim()) : null,
-                    icon: actionInFlight
-                        ? const SizedBox(
-                            width: 16,
-                            height: 16,
-                            child: CircularProgressIndicator(strokeWidth: 2),
-                          )
-                        : const Icon(Icons.send_rounded),
-                    label: Text(actionInFlight ? '发送中…' : '发送回复'),
-                  );
-                },
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PanelHeader extends StatelessWidget {
-  final VoidCallback onCollapse;
-  final VoidCallback onClose;
-
-  const _PanelHeader({required this.onCollapse, required this.onClose});
-
-  @override
-  Widget build(BuildContext context) {
-    return Row(
-      children: <Widget>[
-        const Icon(Icons.auto_awesome_rounded),
-        const SizedBox(width: 8),
-        Expanded(
-          child: Text('工作任务', style: Theme.of(context).textTheme.titleLarge),
-        ),
-        IconButton(
-          key: const Key('work-task-collapse'),
-          tooltip: '收起执行面板（任务继续运行）',
-          onPressed: onCollapse,
-          icon: const Icon(Icons.keyboard_arrow_down_rounded),
-        ),
-        IconButton(
-          key: const Key('work-task-close'),
-          tooltip: '隐藏执行面板（任务继续运行）',
-          onPressed: onClose,
-          icon: const Icon(Icons.close_rounded),
-        ),
-      ],
-    );
-  }
-}
-
-class _TaskTabs extends StatelessWidget {
-  final List<AgentTask> tasks;
-  final String selectedTaskId;
-  final ValueChanged<String> onSelectTask;
-
-  const _TaskTabs({
-    required this.tasks,
-    required this.selectedTaskId,
-    required this.onSelectTask,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Wrap(
-      spacing: 6,
-      runSpacing: 6,
-      children: tasks
-          .map(
-            (task) => ChoiceChip(
-              key: Key('work-task-tab-${task.id}'),
-              label: Text('任务 ${tasks.indexOf(task) + 1}'),
-              selected: task.id == selectedTaskId,
-              onSelected: (_) => onSelectTask(task.id),
-            ),
-          )
-          .toList(growable: false),
-    );
-  }
-}
-
-class _PublicDetail extends StatelessWidget {
-  final String title;
-  final String text;
-  final bool inline;
-
-  const _PublicDetail({
-    required this.title,
-    required this.text,
-    this.inline = false,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    if (inline) return Text('$title：$text');
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: <Widget>[
-        Text(title, style: Theme.of(context).textTheme.labelLarge),
-        const SizedBox(height: 2),
-        Text(text),
-      ],
-    );
-  }
-}
-
-class _TaskEventTimeline extends StatefulWidget {
-  final String taskId;
-  final WorkTaskEventStream eventStreamFor;
-  final ValueChanged<WorkTaskEvent> onLatestEvent;
-
-  const _TaskEventTimeline({
-    super.key,
-    required this.taskId,
-    required this.eventStreamFor,
-    required this.onLatestEvent,
-  });
-
-  @override
-  State<_TaskEventTimeline> createState() => _TaskEventTimelineState();
-}
-
-class _TaskEventTimelineState extends State<_TaskEventTimeline> {
-  final List<WorkTaskEvent> _events = <WorkTaskEvent>[];
-  final Set<int> _seenSequences = <int>{};
-  final ScrollController _eventScrollController = ScrollController();
-  StreamSubscription<WorkTaskEvent>? _subscription;
-  String? _streamError;
-  String? _livePublicDraft;
-  WorkTaskEvent? _livePublicEvent;
-  bool _modelOutputPending = false;
-  String _modelOutputPendingText = 'AI 正在整理公开进度…';
-
-  @override
-  void initState() {
-    super.initState();
-    _listen();
-  }
-
-  @override
-  void didUpdateWidget(covariant _TaskEventTimeline oldWidget) {
-    super.didUpdateWidget(oldWidget);
-    if (oldWidget.taskId == widget.taskId) return;
-    _events.clear();
-    _seenSequences.clear();
-    _streamError = null;
-    _livePublicDraft = null;
-    _livePublicEvent = null;
-    _modelOutputPending = false;
-    _modelOutputPendingText = 'AI 正在整理公开进度…';
-    unawaited(_subscription?.cancel());
-    _listen();
-  }
-
-  @override
-  void dispose() {
-    unawaited(_subscription?.cancel());
-    _eventScrollController.dispose();
-    super.dispose();
-  }
-
-  void _listen() {
-    _subscription = widget.eventStreamFor(widget.taskId).listen(
-      (event) {
-        if (event.taskId != widget.taskId ||
-            _seenSequences.contains(event.sequence)) {
-          return;
-        }
-        if (!mounted) return;
-        final isModelOutput = event.kind == WorkTaskEventKind.modelOutput;
-        final isModelProgress = _isModelProgressEvent(event);
-        final liveDraft = _safePanelText(
-          _publicDraftFromEvent(event),
-        ).trim();
-        setState(() {
-          _seenSequences.add(event.sequence);
-          if (isModelOutput) {
-            _livePublicDraft = liveDraft.isEmpty ? null : liveDraft;
-            _livePublicEvent = liveDraft.isEmpty ? null : event;
-            _modelOutputPending = false;
-            _modelOutputPendingText = 'AI 正在整理公开进度…';
-          } else if (isModelProgress) {
-            // The transport event is only a liveness signal. It must not
-            // become a character-count-only card in the public timeline.
-            // A public_update event, when available, is rendered separately.
-            if (liveDraft.isNotEmpty) {
-              _livePublicDraft = liveDraft;
-              // Newer runners also attach the safe draft to the liveness
-              // event. Keep that value as the historical card if the model
-              // output event is unavailable or arrives later than it.
-              _livePublicEvent = WorkTaskEvent(
-                taskId: event.taskId,
-                sequence: event.sequence,
-                timestamp: event.timestamp,
-                kind: WorkTaskEventKind.modelOutput,
-                title: 'AI 正在输出公开进度',
-                detail: liveDraft,
-                safeMetadata: <String, Object?>{
-                  'stream': 'public_update',
-                  'publicDraft': liveDraft,
-                },
-              );
-              _modelOutputPendingText = 'AI 正在整理公开进度…';
-            } else if (_livePublicDraft == null) {
-              _modelOutputPending = true;
-              _modelOutputPendingText = _pendingTextFromEvent(event);
-            }
-          } else {
-            if (_eventRepeatsLiveDraft(event)) {
-              // Terminal/action events often repeat the latest public update
-              // as their title. Keep one copy instead of showing the live
-              // card, its historical card, and the terminal summary together.
-              _livePublicEvent = null;
-            } else {
-              _commitLivePublicEvent();
-            }
-            _livePublicDraft = null;
-            _modelOutputPending = false;
-            _modelOutputPendingText = 'AI 正在整理公开进度…';
-            _events.add(event);
-            _events.sort(
-              (left, right) => left.sequence.compareTo(right.sequence),
-            );
-          }
-        });
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (mounted) widget.onLatestEvent(event);
-        });
-      },
-      onError: (Object error, StackTrace stackTrace) {
-        if (!mounted) return;
-        setState(() {
-          _streamError = sanitizeWorkTaskError(error);
-        });
-      },
-    );
-  }
-
-  void _retry() {
-    unawaited(_subscription?.cancel());
-    if (!mounted) return;
-    setState(() {
-      _events.clear();
-      _seenSequences.clear();
-      _streamError = null;
-      _livePublicDraft = null;
-      _livePublicEvent = null;
-      _modelOutputPending = false;
-      _modelOutputPendingText = 'AI 正在整理公开进度…';
-    });
-    _listen();
-  }
-
-  bool _isModelProgressEvent(WorkTaskEvent event) {
-    return event.kind == WorkTaskEventKind.toolOutput &&
-        event.safeMetadata['stream'] == 'model';
-  }
-
-  String _pendingTextFromEvent(WorkTaskEvent event) {
-    final value = event.safeMetadata['pendingText'];
-    if (value is String && value.trim().isNotEmpty) {
-      return _safePanelText(value);
-    }
-    return 'AI 正在整理公开进度…';
-  }
-
-  bool _eventRepeatsLiveDraft(WorkTaskEvent event) {
-    final draft = _livePublicDraft?.trim();
-    if (draft == null || draft.isEmpty) return false;
-    final title = event.title.trim();
-    final detail = event.detail.trim();
-    return title == draft || detail == draft;
-  }
-
-  void _commitLivePublicEvent() {
-    final event = _livePublicEvent;
-    if (event == null ||
-        _events.any((candidate) => candidate.sequence == event.sequence)) {
-      _livePublicEvent = null;
-      return;
-    }
-    _events.add(event);
-    _events.sort(
-      (left, right) => left.sequence.compareTo(right.sequence),
-    );
-    _livePublicEvent = null;
-  }
-
-  int get _timelineItemCount {
-    var count = _events.length;
-    if (_streamError != null) count++;
-    if (_livePublicDraft != null) count++;
-    if (_modelOutputPending) count++;
-    return count;
-  }
-
-  Widget _buildTimelineItem(BuildContext context, int index) {
-    var remaining = index;
-    final error = _streamError;
-    if (error != null) {
-      if (remaining == 0) {
-        return _TimelineItemPadding(
-          child: _EventStreamError(error: error, onRetry: _retry),
-        );
-      }
-      remaining--;
-    }
-    final liveDraft = _livePublicDraft;
-    if (liveDraft != null) {
-      if (remaining == 0) {
-        return _TimelineItemPadding(child: _LivePublicOutput(text: liveDraft));
-      }
-      remaining--;
-    }
-    if (_modelOutputPending) {
-      if (remaining == 0) {
-        return _TimelineItemPadding(
-          child: _PendingPublicOutput(text: _modelOutputPendingText),
-        );
-      }
-      remaining--;
-    }
-    final event = _events[remaining];
-    return _TimelineItemPadding(child: _EventCard(event: event));
-  }
-
-  @override
-  Widget build(BuildContext context) {
-    final error = _streamError;
-    final liveDraft = _livePublicDraft;
-    if (_events.isEmpty &&
-        liveDraft == null &&
-        !_modelOutputPending &&
-        error == null) {
-      return const Align(
-        alignment: Alignment.centerLeft,
-        child: Text('等待公开执行动态…'),
-      );
-    }
-    return Padding(
-      // Keep the event scrollbar in its own hit-test lane. The outer details
-      // scrollbar lives at the panel edge; this inset prevents the two thumbs
-      // from covering one another while preserving wheel and drag scrolling.
-      padding: const EdgeInsets.only(right: 12),
-      child: Scrollbar(
-        key: const Key('work-task-event-scrollbar'),
-        controller: _eventScrollController,
-        thumbVisibility: true,
-        interactive: true,
-        child: ListView.builder(
-          key: const Key('work-task-event-timeline'),
-          controller: _eventScrollController,
-          primary: false,
-          padding: EdgeInsets.zero,
-          itemCount: _timelineItemCount,
-          itemBuilder: _buildTimelineItem,
-        ),
-      ),
-    );
-  }
-}
-
-class _TimelineItemPadding extends StatelessWidget {
-  final Widget child;
-
-  const _TimelineItemPadding({required this.child});
-
-  @override
-  Widget build(BuildContext context) {
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 6),
-      child: child,
-    );
-  }
-}
-
-class _EventStreamError extends StatelessWidget {
-  final String error;
-  final VoidCallback onRetry;
-
-  const _EventStreamError({required this.error, required this.onRetry});
-
-  @override
-  Widget build(BuildContext context) {
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.errorContainer,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(8),
-        child: Row(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Expanded(child: Text('执行动态读取失败：${_safePanelText(error)}')),
-            TextButton(
-              key: const Key('work-task-event-retry'),
-              onPressed: onRetry,
-              child: const Text('重试'),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-class _PendingPublicOutput extends StatelessWidget {
-  final String text;
-
-  const _PendingPublicOutput({this.text = 'AI 正在整理公开进度…'});
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return DecoratedBox(
-      key: const Key('work-task-public-output-pending'),
-      decoration: BoxDecoration(
-        color: colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(8),
-        child: Text(text),
-      ),
-    );
-  }
-}
-
-class _EventCard extends StatelessWidget {
-  final WorkTaskEvent event;
-
-  const _EventCard({required this.event});
-
-  @override
-  Widget build(BuildContext context) {
-    final title = _safePanelText(event.title);
-    final detail = _safePanelText(event.detail);
-    return DecoratedBox(
-      decoration: BoxDecoration(
-        color: Theme.of(context).colorScheme.surfaceContainerHighest,
-        borderRadius: BorderRadius.circular(10),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(8),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(title),
-            if (detail.isNotEmpty && detail != title) ...<Widget>[
-              const SizedBox(height: 2),
-              Text(detail),
-            ],
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-String _publicDraftFromEvent(WorkTaskEvent event) {
-  final metadataDraft = event.safeMetadata['publicDraft'];
-  if (metadataDraft is String && metadataDraft.trim().isNotEmpty) {
-    return metadataDraft;
-  }
-  // Only model-output events are allowed to use their detail as a draft.
-  // Transport diagnostics may carry character counts or other non-display
-  // text, which must never replace the public progress card.
-  return event.kind == WorkTaskEventKind.modelOutput ? event.detail : '';
-}
-
-class _LivePublicOutput extends StatelessWidget {
-  final String text;
-
-  const _LivePublicOutput({required this.text});
-
-  @override
-  Widget build(BuildContext context) {
-    final colorScheme = Theme.of(context).colorScheme;
-    return DecoratedBox(
-      key: const Key('work-task-live-output'),
-      decoration: BoxDecoration(
-        color: colorScheme.primaryContainer,
-        borderRadius: BorderRadius.circular(10),
-        border: Border.all(color: colorScheme.primary.withValues(alpha: 0.35)),
-      ),
-      child: Padding(
-        padding: const EdgeInsets.all(10),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: <Widget>[
-            Text(
-              'AI 正在输出公开进度',
-              style: Theme.of(context).textTheme.labelLarge?.copyWith(
-                    color: colorScheme.onPrimaryContainer,
-                  ),
-            ),
-            const SizedBox(height: 4),
-            Row(
-              crossAxisAlignment: CrossAxisAlignment.end,
-              children: <Widget>[
-                Expanded(
-                  child: SelectableText(
-                    text,
-                    style: TextStyle(color: colorScheme.onPrimaryContainer),
-                  ),
-                ),
-                const SizedBox(width: 2),
-                BlinkingCursor(color: colorScheme.onPrimaryContainer),
-              ],
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-}
-
-String _safePanelText(String value) {
-  var safe = const SearchSecretScanner().redact(
-    value.trim(),
-    includeOpaqueTokens: true,
-  );
-  safe = safe.replaceAll(RegExp(r'https?://[^\s,;）)]+'), '[外部地址]');
-  safe = safe.replaceAll(
-    RegExp(
-      r'(?:(?:[A-Za-z]:[\\/])|(?:\\\\|//)|/(?:Users|home|Volumes|private|tmp|var|etc|usr|opt|bin|sbin|Applications|System|Library|Desktop|Documents|Downloads)/)[^\s,;）)]*',
-    ),
-    '[本地路径]',
-  );
-  return safe.length <= 4000 ? safe : '${safe.substring(0, 3999)}…';
-}
-
-String _artifactNames(Iterable<String> paths) {
-  final names = paths
-      .map((path) => path.replaceAll('\\', '/').split('/').last.trim())
-      .where((name) => name.isNotEmpty)
-      .toSet()
-      .take(8)
-      .toList(growable: false);
-  if (names.isEmpty) return '已生成文件（名称不可用）。';
-  final suffix = paths.length > names.length ? ' 等' : '';
-  return '${names.join('、')}$suffix（位于当前授权工作目录）';
-}
-
-/// Undo confirmation must retain exact local paths so the user can verify the
-/// restore/delete scope; only credential-like tokens are redacted here.
-String _safeUndoItemText(String value) {
-  var safe = const SearchSecretScanner().redact(
-    value.trim(),
-    includeOpaqueTokens: true,
-  );
-  return safe.length <= 4000 ? safe : '${safe.substring(0, 3999)}…';
-}
-
-bool _isPausedStatus(AgentTaskStatus status) {
-  return status == AgentTaskStatus.paused ||
-      status == AgentTaskStatus.interrupted;
-}
-
-bool _isActiveExecutionStatus(AgentTaskStatus status) {
-  return status == AgentTaskStatus.queued ||
-      status == AgentTaskStatus.planning ||
-      status == AgentTaskStatus.runningTool;
-}
-
-WorkFailure? _visibleWorkFailure(AgentTask task) {
-  // A queued retry intentionally retains its old failure checkpoint until the
-  // runner starts. Do not render that stale diagnostic as a current blocker.
-  if (_isActiveExecutionStatus(task.status)) return null;
-  return task.workFailure;
-}
-
-bool _isStaleRecoveryAction(AgentTask task, WorkTaskEvent? event) {
-  return event?.kind == WorkTaskEventKind.paused &&
-      _isActiveExecutionStatus(task.status);
-}
-
-bool _pendingToolRequiresPlan(AgentTask task) {
-  final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
-  return pending?.tool == AgentToolName.workspacePatch ||
-      pending?.tool == AgentToolName.workspaceRename ||
-      pending?.tool == AgentToolName.workspaceDelete;
-}
-
-bool _pendingToolRequiresNoUndo(
-  AgentTask task,
-  WorkChangePlan? approvalPlan,
-) {
-  final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
-  if (pending?.tool == AgentToolName.skillCreate ||
-      pending?.tool == AgentToolName.skillDownload) {
-    return true;
-  }
-  return approvalPlan != null &&
-      (!approvalPlan.snapshotAvailable || !approvalPlan.reversible);
-}
-
-bool _taskNeedsFolderGrant(AgentTask task) {
-  if (task.status != AgentTaskStatus.waitingForApproval &&
-      task.status != AgentTaskStatus.paused) {
-    return false;
-  }
-  try {
-    final decoded = jsonDecode(task.executionStateJson);
-    if (decoded is! Map) return false;
-    final path = decoded['folderRequestPath'];
-    return decoded['folderGrantPending'] == true ||
-        path is String && path.trim().isNotEmpty;
-  } on Object {
-    return false;
-  }
-}
-
-bool _taskHasInstallSuggestion(AgentTask task) {
-  return WorkFailure.hasInstallableMissingTool(task);
-}
-
-bool _taskNeedsVisionModel(AgentTask task) {
-  if (task.status != AgentTaskStatus.paused &&
-      task.status != AgentTaskStatus.interrupted) {
-    return false;
-  }
-  try {
-    final decoded = jsonDecode(task.executionStateJson);
-    if (decoded is Map && decoded['visionModelRequired'] == true) return true;
-  } on Object {
-    // Fall through to the safe user-facing message check below.
-  }
-  return task.lastError.contains('视觉模型') ||
-      task.lastError.toLowerCase().contains('vision model');
-}
-
-String? _continueUnavailableReasonForPanel(AgentTask task) {
-  if (task.isTerminal) return '任务已结束，无需继续。';
-  final isSoftLimitPause =
-      task.softLimitReached && _isPausedStatus(task.status);
-  if (_taskNeedsVisionModel(task)) return '请先选择支持图片的视觉模型。';
-  if (WorkTaskClarification.isPending(task)) return '请先回答上方模型问题。';
-  if (_requiresExplicitCommandRequest(task)) {
-    return '请发送明确的测试、构建或分析请求后继续。';
-  }
-  final failure = _visibleWorkFailure(task);
-  if (failure != null) {
-    if (failure.canReauthorize) return failure.suggestedAction;
-    if (failure.canViewConflict) return failure.suggestedAction;
-    if (!isSoftLimitPause && failure.canRetry) {
-      return '请先点击“重试”从安全检查点继续。';
-    }
-    if (failure.canContinue) return null;
-  }
-  if (isSoftLimitPause) return null;
-  if (task.status == AgentTaskStatus.interrupted ||
-      task.status == AgentTaskStatus.paused) {
-    return null;
-  }
-  if (task.status == AgentTaskStatus.waitingForApproval) {
-    return '请先批准当前操作。';
-  }
-  return '任务正在执行，无需继续。';
-}
-
-bool _requiresExplicitCommandRequest(AgentTask task) {
-  try {
-    final decoded = jsonDecode(task.executionStateJson);
-    return decoded is Map && decoded['explicitCommandRequestRequired'] == true;
-  } on Object {
-    return false;
-  }
-}
-
-String _durationLabel(AgentTask task, DateTime now) {
-  final startedAt = task.startedAt ?? task.createdAt;
-  final duration = now.difference(startedAt);
-  if (duration.inMinutes <= 0) return '刚刚开始执行';
-  if (duration.inHours > 0) {
-    return '已执行 ${duration.inHours} 小时 ${duration.inMinutes.remainder(60)} 分钟';
-  }
-  return '已执行 ${duration.inMinutes} 分钟';
-}
-
-String _statusLabel(AgentTaskStatus status) {
-  return switch (status) {
-    AgentTaskStatus.queued => '任务正在排队。',
-    AgentTaskStatus.planning => '正在规划下一步。',
-    AgentTaskStatus.waitingForApproval => '等待你批准当前操作。',
-    AgentTaskStatus.runningTool => '正在执行工具。',
-    AgentTaskStatus.completed => '任务已完成。',
-    AgentTaskStatus.failed => '任务执行失败。',
-    AgentTaskStatus.cancelled => '任务已停止。',
-    AgentTaskStatus.partiallyCompleted => '任务部分完成。',
-    AgentTaskStatus.paused => '任务已暂停，等待继续。',
-    AgentTaskStatus.interrupted => '任务已中断，等待继续。',
-  };
 }

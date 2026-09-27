@@ -16,6 +16,7 @@ extension _ChatApiServiceSupport on ChatApiService {
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     String content = '';
+    var truncated = false;
     int? promptTokens;
     int? completionTokens;
     int? cachedTokens;
@@ -57,27 +58,36 @@ extension _ChatApiServiceSupport on ChatApiService {
             break;
           case ChatStreamEventType.done:
             if ((event.content ?? '').isNotEmpty) content = event.content!;
+            if (event.truncated) truncated = true;
             promptTokens = event.promptTokens;
             completionTokens = event.completionTokens;
             cachedTokens = event.cachedTokens;
             break;
           case ChatStreamEventType.error:
-            // The stream parser may receive a provider-controlled error body.
-            // Never promote that body into the result consumed by the chat UI.
+            // 已由 ChatApiService 分类/脱敏的消息原样透传，否则「连接超时」
+            // 会被再洗成「流式请求失败」，isTransientResult 与 WorkFailure
+            // 就再也看不出这次失败能否重试。未标记的消息可能仍含供应商正文
+            // （自定义 streamChatMessage 实现直接 yield 的情况），保留一次脱敏。
             final statusCode = _streamStatusCode(event.message);
+            final retryAfter = event.retryAfter;
             return {
               'success': false,
-              'message': _safeStreamErrorMessage(event.message),
+              'message': event.sanitized
+                  ? (event.message ?? '流式请求失败')
+                  : _safeStreamErrorMessage(event.message),
               if (statusCode != null) 'statusCode': statusCode,
+              if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
             };
         }
       }
     } on DioException catch (e) {
       final statusCode = e.response?.statusCode;
+      final retryAfter = _retryAfterFromHeaders(e.response?.headers);
       return {
         'success': false,
         'message': _dioErrorMessage(e),
         if (statusCode != null) 'statusCode': statusCode,
+        if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
       };
     } catch (e) {
       return {'success': false, 'message': '流式请求失败'};
@@ -97,12 +107,20 @@ extension _ChatApiServiceSupport on ChatApiService {
         receiveTimeout: receiveTimeout,
         cancelToken: cancelToken,
         structuredJson: structuredJson,
+        stepPlanLowReasoning: _isStepPlanEndpoint(
+          provider: provider,
+          customBaseUrl: customBaseUrl,
+        ),
         maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
       );
     }
     return {
       'success': true,
       'message': content,
+      if (truncated) 'truncated': true,
+      // 请求时给出的输出上限。`truncated` 只有 OpenAI 兼容解析器会产出（看
+      // finish_reason），带上这个值，调用方就能跨协议判断"输出是否被用尽"。
+      if (maxTokens > 0) 'requestedMaxTokens': maxTokens,
       if (promptTokens != null) 'promptTokens': promptTokens,
       if (completionTokens != null) 'completionTokens': completionTokens,
       if (cachedTokens != null) 'cachedTokens': cachedTokens,
@@ -124,9 +142,70 @@ extension _ChatApiServiceSupport on ChatApiService {
     return status == null ? null : int.tryParse(status);
   }
 
+  Duration? _retryAfterFromHeaders(Headers? headers) {
+    if (headers == null) return null;
+    String? raw;
+    for (final entry in headers.map.entries) {
+      if (entry.key.toLowerCase() != 'retry-after' || entry.value.isEmpty) {
+        continue;
+      }
+      raw = entry.value.first.trim();
+      break;
+    }
+    if (raw == null || raw.isEmpty) return null;
+    final seconds = int.tryParse(raw);
+    if (seconds != null && seconds >= 0) {
+      return _boundRetryAfter(Duration(seconds: seconds));
+    }
+    final date = _parseRetryAfterDate(raw);
+    if (date == null) return null;
+    final remaining = date.difference(DateTime.now());
+    return _boundRetryAfter(remaining.isNegative ? Duration.zero : remaining);
+  }
+
+  Duration _boundRetryAfter(Duration value) {
+    const maximum = Duration(minutes: 2);
+    return value.compareTo(maximum) > 0 ? maximum : value;
+  }
+
+  DateTime? _parseRetryAfterDate(String raw) {
+    final parsed = DateTime.tryParse(raw);
+    if (parsed != null) return parsed;
+    final match = RegExp(
+      r'^[A-Za-z]{3},\s+(\d{2})\s+([A-Za-z]{3})\s+(\d{4})\s+'
+      r'(\d{2}):(\d{2}):(\d{2})\s+GMT$',
+      caseSensitive: false,
+    ).firstMatch(raw);
+    if (match == null) return null;
+    const months = <String, int>{
+      'jan': 1,
+      'feb': 2,
+      'mar': 3,
+      'apr': 4,
+      'may': 5,
+      'jun': 6,
+      'jul': 7,
+      'aug': 8,
+      'sep': 9,
+      'oct': 10,
+      'nov': 11,
+      'dec': 12,
+    };
+    final month = months[match.group(2)!.toLowerCase()];
+    if (month == null) return null;
+    return DateTime.utc(
+      int.parse(match.group(3)!),
+      month,
+      int.parse(match.group(1)!),
+      int.parse(match.group(4)!),
+      int.parse(match.group(5)!),
+      int.parse(match.group(6)!),
+    );
+  }
+
   /// 把 DioException 转换为统一的人类可读错误信息。
   String _dioErrorMessage(DioException e) {
-    if (CancelToken.isCancel(e)) return '请求已取消';
+    if (CancelToken.isCancel(e)) return ChatApiService.cancelledResultMessage;
     if (e.type == DioExceptionType.connectionTimeout ||
         e.type == DioExceptionType.sendTimeout ||
         e.type == DioExceptionType.receiveTimeout) {

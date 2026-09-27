@@ -1,6 +1,7 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:chat_group/core/models/chat_group.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
@@ -61,13 +62,19 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final allCharacters = ref.watch(aiCharactersProvider);
-    final filtered = _searchController.text.isEmpty
+    final query = _searchController.text.trim();
+    final filtered = query.isEmpty
         ? allCharacters
-        : allCharacters
-            .where((c) =>
-                c.name.contains(_searchController.text) ||
-                c.role.contains(_searchController.text))
-            .toList();
+        : PinyinSearch.exactFirst(
+            allCharacters
+                .where((c) => PinyinSearch.matchesFields(
+                      c.searchFields,
+                      query,
+                      mode: PinyinMatchMode.name,
+                    ))
+                .toList(),
+            (c) => PinyinSearch.matchesLiterally(c.searchFields, query),
+          );
 
     return Scaffold(
       backgroundColor: cs.surface,
@@ -172,7 +179,7 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
                 TextField(
                   controller: _searchController,
                   decoration: InputDecoration(
-                    hintText: '搜索角色名称或角色...',
+                    hintText: '搜索角色名称或角色，支持拼音',
                     prefixIcon: Icon(Icons.search_rounded,
                         size: 18, color: cs.onSurfaceVariant),
                     border: OutlineInputBorder(

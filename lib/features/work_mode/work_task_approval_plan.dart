@@ -29,6 +29,26 @@ WorkChangePlan? approvalPlanForTask(AgentTask task) {
   }
 }
 
+/// Returns whether the pending operation can only continue after the user
+/// explicitly accepts that it cannot be undone.
+///
+/// Skill metadata is stored in Hive rather than the workspace snapshot store,
+/// so [AgentToolName.skillCreate] and [AgentToolName.skillDownload] never have
+/// a file snapshot. Keep this rule shared by the task panel and the global
+/// approval prompt so both entry points produce the same durable decision.
+bool taskRequiresNoUndoApproval(
+  AgentTask task,
+  WorkChangePlan? approvalPlan,
+) {
+  final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
+  if (pending?.tool == AgentToolName.skillCreate ||
+      pending?.tool == AgentToolName.skillDownload) {
+    return true;
+  }
+  return approvalPlan != null &&
+      (!approvalPlan.snapshotAvailable || !approvalPlan.reversible);
+}
+
 WorkChangePlan? _legacyPlanFromCheckpoint(
   AgentTask task,
   Map<dynamic, dynamic> checkpoint,

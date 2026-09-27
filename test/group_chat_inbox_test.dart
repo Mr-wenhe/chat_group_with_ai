@@ -77,6 +77,38 @@ void main() {
       expect(summaries.single.hasUnread, isTrue);
     });
 
+    test('counts only explicit system mentions as incoming reminders', () {
+      final group = _group(id: 'g-system', name: '系统提醒群');
+      final now = DateTime(2026, 7, 8, 10);
+
+      final summaries = GroupChatInbox.buildSummaries(
+        groups: [group],
+        messages: [
+          Message(
+            groupId: group.id,
+            senderId: 'system',
+            senderType: 'system',
+            content: '普通状态更新',
+            timestamp: now,
+          ),
+          Message(
+            id: 'work-task-action:g-system:commandApproval:1',
+            groupId: group.id,
+            senderId: 'system',
+            senderType: 'system',
+            content: '@我 请处理任务',
+            isMention: true,
+            timestamp: now.add(const Duration(minutes: 1)),
+          ),
+        ],
+        readAtByGroup: const {},
+        pinnedIds: const {},
+      );
+
+      expect(summaries.single.unreadCount, 1);
+      expect(summaries.single.mentionCount, 1);
+    });
+
     test('sorts pinned groups before recently active groups', () {
       final a = _group(id: 'a', name: 'A');
       final b = _group(id: 'b', name: 'B');

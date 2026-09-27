@@ -10,8 +10,8 @@ library;
 /// replaces oversized code blocks (>500 chars) with a placeholder, while
 /// preserving normal chat content.
 ///
-/// This is more conservative than `AgentRuntime._guardFinalMessage` because
-/// the agentic path has its own dedicated guard.
+/// Deliberately conservative: only obvious leaks are stripped, so ambiguous
+/// content is never mangled for a false positive.
 String sanitizeNonAgenticReply(String text) {
   var result = text;
 

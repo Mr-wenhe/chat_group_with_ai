@@ -29,6 +29,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   late TextEditingController _modelController;
   late TextEditingController _apiKeyController;
   late TextEditingController _baseUrlController;
+  final FocusNode _baseUrlFocusNode = FocusNode();
   ApiProvider _selectedProvider = ApiProvider.deepseek;
   ApiProtocol _selectedProtocol = ApiProtocol.defaultValue;
   String _selectedModel = '';
@@ -84,6 +85,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     _modelController.dispose();
     _apiKeyController.dispose();
     _baseUrlController.dispose();
+    _baseUrlFocusNode.dispose();
     super.dispose();
   }
 
@@ -203,16 +205,24 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                     ),
                   ),
                   const SizedBox(height: 14),
-                  TextFormField(
-                    controller: _baseUrlController,
-                    decoration: appInputDecoration(
-                      'Base URL *',
-                      _selectedProtocol.baseUrlHint,
-                      Icons.link_rounded,
-                      cs,
+                  Semantics(
+                    container: true,
+                    textField: true,
+                    label: 'Base URL 输入框',
+                    onTap: _baseUrlFocusNode.requestFocus,
+                    child: TextFormField(
+                      key: const Key('api-config-base-url'),
+                      controller: _baseUrlController,
+                      focusNode: _baseUrlFocusNode,
+                      decoration: appInputDecoration(
+                        'Base URL *',
+                        _selectedProtocol.baseUrlHint,
+                        Icons.link_rounded,
+                        cs,
+                      ),
+                      validator: (v) =>
+                          v?.trim().isEmpty ?? true ? '请输入 Base URL' : null,
                     ),
-                    validator: (v) =>
-                        v?.trim().isEmpty ?? true ? '请输入 Base URL' : null,
                   ),
                   const SizedBox(height: 14),
                   TextFormField(

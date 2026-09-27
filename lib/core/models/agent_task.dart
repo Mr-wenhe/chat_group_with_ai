@@ -120,6 +120,13 @@ class AgentTask extends HiveObject {
   @HiveField(26, defaultValue: false)
   bool eventLogIncomplete;
 
+  /// 当前这次执行尝试的开始时间，只用于面板展示耗时。
+  ///
+  /// 动作数与 [softTimeLimitMinutes] 预算属于整条任务，必须从 [startedAt] 起算，
+  /// 否则用户反复提交修订就能无限续期。一次执行会重新计时展示，但不会扩大预算。
+  @HiveField(27)
+  DateTime? attemptStartedAt;
+
   static const int defaultActionLimit = 100;
   static const int defaultSoftTimeLimitMinutes = 60;
   static const Duration defaultSoftTimeLimit =
@@ -153,6 +160,7 @@ class AgentTask extends HiveObject {
     this.actionLimit = defaultActionLimit,
     this.softTimeLimitMinutes = defaultSoftTimeLimitMinutes,
     this.eventLogIncomplete = false,
+    this.attemptStartedAt,
   })  : id = id ?? const Uuid().v4(),
         requestedPermissions = List<ToolPermission>.from(
           requestedPermissions ?? const [],

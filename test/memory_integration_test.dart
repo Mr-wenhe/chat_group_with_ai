@@ -458,6 +458,8 @@ void main() {
             trust: 40,
             friction: 20,
             recentMood: RelationshipMood.warm,
+            // 新鲜心情：无时间戳会被判过期（见 kRelationshipMoodTtl）。
+            recentMoodAt: DateTime.now(),
             notes: '最近关系不错',
             updatedAt: DateTime.now().subtract(const Duration(days: 1)),
           ));
@@ -524,6 +526,8 @@ void main() {
           friction: testCase.friction,
           familiarity: testCase.familiarity,
           recentMood: testCase.mood,
+          // 新鲜心情：无时间戳会被判过期（见 kRelationshipMoodTtl）。
+          recentMoodAt: DateTime.now(),
         );
         await db.relationshipStateBox.put(relation.id, relation);
 

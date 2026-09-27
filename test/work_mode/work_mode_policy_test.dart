@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
@@ -60,8 +61,73 @@ void main() {
 
     test('detects work intent without enabling work mode', () {
       expect(WorkModePolicy.looksLikeWorkRequest('请修改 lib/main.dart'), isTrue);
+      expect(WorkModePolicy.looksLikeWorkRequest('请优化当前 HTML 页面'), isTrue);
       expect(WorkModePolicy.looksLikeWorkRequest('帮我闲聊一下今天的天气'), isFalse);
       expect(WorkModePolicy.workModeHint, contains('工作模式'));
+    });
+
+    test('keeps owned work conversations out of ordinary chat', () {
+      final runningTask = AgentTask(
+        groupId: 'group-a',
+        characterId: 'worker',
+        userRequest: '生成 HTML 页面',
+        status: AgentTaskStatus.paused,
+        workModeTask: true,
+      );
+      expect(
+        WorkModePolicy.shouldRouteRequest(
+          enabled: false,
+          request: '你好',
+          ownedTask: runningTask,
+        ),
+        isTrue,
+      );
+
+      final completedTask = AgentTask(
+        groupId: 'group-a',
+        characterId: 'worker',
+        userRequest: '生成 HTML 页面',
+        status: AgentTaskStatus.completed,
+        workModeTask: true,
+      );
+      expect(
+        WorkModePolicy.shouldRouteRequest(
+          enabled: false,
+          request: '请优化当前 HTML 页面',
+          ownedTask: completedTask,
+        ),
+        isTrue,
+      );
+      expect(
+        WorkModePolicy.shouldRouteRequest(
+          enabled: false,
+          request: '继续',
+          ownedTask: completedTask,
+        ),
+        isTrue,
+      );
+      expect(
+        WorkModePolicy.shouldRouteRequest(
+          enabled: false,
+          request: '谢谢',
+          ownedTask: completedTask,
+        ),
+        isFalse,
+      );
+      expect(
+        WorkModePolicy.shouldRouteRequest(
+          enabled: false,
+          request: '生成 HTML 页面',
+        ),
+        isFalse,
+      );
+      expect(
+        WorkModePolicy.shouldRouteRequest(
+          enabled: false,
+          request: '继续',
+        ),
+        isFalse,
+      );
     });
 
     test('selects mentioned capable worker before the first capable worker',

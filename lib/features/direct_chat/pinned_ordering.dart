@@ -6,11 +6,18 @@ class PinnedOrdering {
   static List<AICharacter> sortCharacters(
     Iterable<AICharacter> characters, {
     required Set<String> pinnedIds,
+    bool Function(AICharacter character)? isSearchExact,
   }) {
     final sorted = characters.toList();
     sorted.sort((a, b) {
       final pinCompare = _comparePinned(a.id, b.id, pinnedIds);
       if (pinCompare != 0) return pinCompare;
+      // 搜索时把字面命中排在纯拼音命中之前，但置顶始终优先。
+      if (isSearchExact != null) {
+        final exactCompare = _rankExact(isSearchExact(a))
+            .compareTo(_rankExact(isSearchExact(b)));
+        if (exactCompare != 0) return exactCompare;
+      }
       final nameCompare = _characterSortKey(a.name).compareTo(
         _characterSortKey(b.name),
       );
@@ -39,6 +46,8 @@ class PinnedOrdering {
     if (aPinned == bPinned) return 0;
     return aPinned ? -1 : 1;
   }
+
+  static int _rankExact(bool isExact) => isExact ? 0 : 1;
 
   static String _characterSortKey(String name) {
     final normalized = name.trim().toLowerCase();

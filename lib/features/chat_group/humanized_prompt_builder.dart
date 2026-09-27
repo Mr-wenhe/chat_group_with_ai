@@ -110,7 +110,8 @@ class HumanizedPromptBuilder {
       final name = r.targetType == RelationshipTargetType.user
           ? '真人用户'
           : charactersById[r.targetId]?.name ?? '某个群友';
-      final mood = r.recentMood.name;
+      // 取生效心情：过期的存储心情不应再影响提示词。
+      final mood = r.effectiveMood().name;
       final note = r.notes.trim().isEmpty ? '没有明确备注' : r.notes.trim();
       return '$name：亲近${r.affinity}，信任${r.trust}，摩擦${r.friction}，最近情绪$mood，$note';
     }).toList();

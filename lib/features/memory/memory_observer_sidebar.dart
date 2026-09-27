@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/features/memory/memory_audit_presenter.dart';
 import 'package:flutter/material.dart';
 
@@ -111,14 +112,19 @@ class MemoryObserverSidebar extends StatelessWidget {
   }
 
   List<AICharacter> _filterCharacters() {
-    final query = searchQuery.trim().toLowerCase();
+    final query = searchQuery.trim();
     if (query.isEmpty) return characters;
-    return characters.where((character) {
-      final searchable =
-          '${character.name} ${character.displayGenderLabel} ${character.role}'
-              .toLowerCase();
-      return searchable.contains(query);
-    }).toList(growable: false);
+    return PinyinSearch.exactFirst(
+      characters
+          .where((character) => PinyinSearch.matchesFields(
+                character.searchFields,
+                query,
+                mode: PinyinMatchMode.name,
+              ))
+          .toList(growable: false),
+      (character) =>
+          PinyinSearch.matchesLiterally(character.searchFields, query),
+    );
   }
 
   int _itemCount(List<AICharacter> visibleCharacters) {
@@ -170,7 +176,7 @@ class _ObserverSearchFieldState extends State<_ObserverSearchField> {
         onChanged: widget.onChanged,
         decoration: const InputDecoration(
           labelText: '搜索观察 AI',
-          hintText: '名字、性别或职业',
+          hintText: '名字、性别或职业，支持拼音',
           prefixIcon: Icon(Icons.search_rounded),
         ),
       );
@@ -239,10 +245,18 @@ class MemoryObserverSelector extends StatelessWidget {
           initialValue: TextEditingValue(text: selected.label),
           displayStringForOption: (choice) => choice.label,
           optionsBuilder: (value) {
-            final query = value.text.trim().toLowerCase();
+            final query = value.text.trim();
             if (query.isEmpty) return choices;
-            return choices.where(
-              (choice) => choice.searchableText.contains(query),
+            return PinyinSearch.exactFirst(
+              choices
+                  .where((choice) => PinyinSearch.matchesFields(
+                        choice.searchFields,
+                        query,
+                        mode: PinyinMatchMode.name,
+                      ))
+                  .toList(growable: false),
+              (choice) =>
+                  PinyinSearch.matchesLiterally(choice.searchFields, query),
             );
           },
           onSelected: (choice) {
@@ -265,7 +279,7 @@ class MemoryObserverSelector extends StatelessWidget {
             onSubmitted: (_) => onFieldSubmitted(),
             decoration: const InputDecoration(
               labelText: '观察 AI',
-              hintText: '按名字、性别或职业搜索',
+              hintText: '按名字、性别或职业搜索，支持拼音',
               prefixIcon: Icon(Icons.search_rounded),
             ),
           ),
@@ -349,7 +363,7 @@ class _ObserverChoice {
     required this.metadata,
   });
 
-  String get searchableText => '$label $metadata'.toLowerCase();
+  List<String> get searchFields => [label, metadata];
 }
 
 class _ObserverNavTile extends StatelessWidget {

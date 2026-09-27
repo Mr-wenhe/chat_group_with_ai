@@ -2,16 +2,76 @@ import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
 
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_host.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_change_policy.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
+import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
+import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
+import 'package:chat_group/providers/providers.dart';
+import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:flutter/material.dart';
+import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
+import 'package:hive/hive.dart';
+
+import '../helpers/lifecycle_hive.dart';
+
+/// Keeps a submitted task in flight so a test can drive its own checkpoints.
+class _HoldingWorkTaskRunner implements WorkTaskRunner {
+  @override
+  Future<void> run(AgentTask task, WorkTaskCancellation cancellation) =>
+      cancellation.whenCancelled;
+}
+
+/// Pumps frames until [finder] matches, allowing Hive I/O between frames.
+Future<void> _pumpUntilFound(
+  WidgetTester tester,
+  Finder finder, {
+  int maxFrames = 80,
+}) =>
+    _pumpUntil(
+      tester,
+      () => finder.evaluate().isNotEmpty,
+      maxFrames: maxFrames,
+      // 保留"命中即返回"的旧语义：用 finder 等待的可能是瞬态 widget，
+      // 多等一轮会让它消失后才返回。
+      requireStable: false,
+      reason: '$finder 未在 $maxFrames 帧内出现',
+    );
+
+/// 有界轮询：等到 [condition] 成立（超时后让 expect 给出失败原因）。
+///
+/// 不用固定 sleep：全量套件并行时 50ms 常常不够，会变成与改动无关的假失败。
+/// 条件成立后**再多排空一轮真实异步**——Hive 的写入在值可见之后才 resolve，
+/// 触发它的动作要等它返回才会解除忙碌状态，立刻返回会让后续点击落在禁用按钮上。
+Future<void> _pumpUntil(
+  WidgetTester tester,
+  bool Function() condition, {
+  int maxFrames = 120,
+  String? reason,
+  bool requireStable = true,
+}) async {
+  var satisfied = false;
+  for (var frame = 0; frame < maxFrames; frame++) {
+    if (condition()) {
+      if (satisfied || !requireStable) return;
+      satisfied = true;
+    }
+    await tester.pump(const Duration(milliseconds: 50));
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+  }
+  expect(condition(), isTrue, reason: reason);
+}
 
 AgentTask _task({
   required String id,
@@ -42,6 +102,32 @@ AgentTask _task({
 
 void main() {
   group('WorkTaskPanel', () {
+    testWidgets('shows elapsed time for the current attempt', (tester) async {
+      final task = _task(
+        id: 'attempt-duration',
+        conversationId: 'dm:worker',
+        characterId: 'worker',
+        startedAt: DateTime.utc(2026, 8, 28, 9),
+      )..attemptStartedAt = DateTime.utc(2026, 8, 28, 10);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: [task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+            clock: () => DateTime.utc(2026, 8, 28, 10, 2),
+          ),
+        ),
+      ));
+      expect(find.text('已执行 2 分钟'), findsOneWidget);
+      expect(find.textContaining('1 小时'), findsNothing);
+    });
+
     testWidgets('shows public task details and streamed events in sequence',
         (tester) async {
       final events = StreamController<WorkTaskEvent>.broadcast();
@@ -69,7 +155,10 @@ void main() {
         ),
       ));
 
-      expect(find.text('整理发布说明'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('work-task-request'))).data,
+        '整理发布说明',
+      );
       expect(find.text('执行角色：product-owner'), findsOneWidget);
       expect(find.text('步骤 3 / 8'), findsOneWidget);
       expect(find.text('已执行 2 分钟'), findsOneWidget);
@@ -190,6 +279,258 @@ void main() {
       expect(find.byKey(const Key('work-task-retry')), findsOneWidget);
       await tester.tap(find.byKey(const Key('work-task-retry')));
       expect(retried, isTrue);
+    });
+
+    testWidgets('blocks generic continue while group discussion is pending',
+        (tester) async {
+      final pending = WorkDiscussionState.initial(
+        conversationId: 'group-discussion-panel',
+        executorId: 'worker',
+        candidateCharacterIds: const ['worker'],
+        participantCharacterIds: const ['worker'],
+        deliverableContract: const <String, dynamic>{
+          'deliverableType': 'document',
+          'format': 'docx',
+          'location': 'desktop',
+          'contentScope': '输出 Word 文档',
+          'explicitExecutorId': 'worker',
+          'revisionTarget': '',
+          'requestRevision': 1,
+        },
+      );
+      final task = _task(
+        id: 'discussion-panel-task',
+        conversationId: 'group-discussion-panel',
+        characterId: 'worker',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          '',
+          pending,
+        );
+      var continued = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) => continued = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      final continueButton = tester.widget<FilledButton>(
+        find.byKey(const Key('work-task-continue')),
+      );
+      expect(continueButton.onPressed, isNull);
+      expect(continued, isFalse);
+    });
+
+    testWidgets('offers explicit rebuild for an invalid nested discussion',
+        (tester) async {
+      final task = _task(
+          id: 'invalid-discussion-panel',
+          conversationId: 'group-invalid-panel',
+          characterId: 'worker')
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = '{"discussionState":{"schemaVersion":99}}';
+      var continued = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) => continued = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      final continueButton = tester.widget<FilledButton>(
+        find.byKey(const Key('work-task-continue')),
+      );
+      expect(continueButton.onPressed, isNotNull);
+      await tester.tap(find.byKey(const Key('work-task-continue')));
+      expect(continued, isTrue);
+    });
+
+    testWidgets('later action keeps the exact discussion checkpoint waiting',
+        (tester) async {
+      final pending = WorkDiscussionState.initial(
+        conversationId: 'discussion-later-panel',
+        executorId: null,
+        candidateCharacterIds: const [],
+        participantCharacterIds: const [],
+        deliverableContract: const <String, dynamic>{
+          'deliverableType': 'document',
+          'format': 'docx',
+          'location': 'desktop',
+          'contentScope': '输出 Word 文档',
+          'explicitExecutorId': null,
+          'revisionTarget': '',
+          'requestRevision': 1,
+        },
+      );
+      final task = _task(
+        id: 'discussion-later-task',
+        conversationId: 'discussion-later-panel',
+        characterId: '',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          '',
+          pending,
+        );
+      var laterTaskId = '';
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onLater: (taskId) async => laterTaskId = taskId,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      final later = find.byKey(const Key('work-task-later'));
+      expect(later, findsOneWidget);
+      await tester.tap(later);
+      await tester.pumpAndSettle();
+      expect(laterTaskId, task.id);
+    });
+
+    testWidgets('shows discussion understanding progress and open questions',
+        (tester) async {
+      final pending = WorkDiscussionState.initial(
+        conversationId: 'discussion-progress-panel',
+        executorId: 'worker',
+        candidateCharacterIds: const ['worker'],
+        participantCharacterIds: const ['worker'],
+        deliverableContract: const <String, dynamic>{
+          'deliverableType': 'document',
+          'format': 'docx',
+          'location': 'desktop',
+          'contentScope': '输出 Word 文档',
+          'explicitExecutorId': 'worker',
+          'revisionTarget': '',
+          'requestRevision': 1,
+        },
+      ).copyWith(
+        round: 2,
+        understandingPercent: 65,
+        understandingEvidence: const ['范围已确认'],
+        openQuestions: const ['请确认最终桌面目录'],
+      );
+      final task = _task(
+        id: 'discussion-progress-panel-task',
+        conversationId: 'discussion-progress-panel',
+        characterId: 'worker',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          '',
+          pending,
+        );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.text('讨论理解进度：65% · 第2轮'), findsOneWidget);
+      expect(find.text('待解决：请确认最终桌面目录'), findsOneWidget);
+    });
+
+    testWidgets('submits a discussion question from the panel', (tester) async {
+      final pending = WorkDiscussionState.initial(
+        conversationId: 'discussion-question-panel',
+        executorId: 'worker',
+        candidateCharacterIds: const ['worker'],
+        participantCharacterIds: const ['worker'],
+        deliverableContract: const <String, dynamic>{
+          'deliverableType': 'document',
+          'format': 'docx',
+          'location': 'desktop',
+          'contentScope': '输出 Word 文档',
+          'explicitExecutorId': 'worker',
+          'revisionTarget': '',
+          'requestRevision': 1,
+        },
+      ).copyWith(
+        phase: WorkDiscussionPhase.blocked,
+        understandingPercent: 72,
+        understandingEvidence: const ['输出格式已确认'],
+        openQuestions: const ['请确认最终输出目录'],
+        blockers: const ['missingUserInformation'],
+      );
+      final task = _task(
+        id: 'discussion-question-panel-task',
+        conversationId: 'discussion-question-panel',
+        characterId: 'worker',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          '',
+          pending,
+        );
+      String? submittedReply;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onReply: (_, reply) async => submittedReply = reply,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.text('请回答群讨论的问题'), findsOneWidget);
+      expect(find.text('请确认最终输出目录'), findsOneWidget);
+      await tester.enterText(
+        find.byKey(const Key('work-task-reply-input')),
+        '/Users/me/Desktop/exports',
+      );
+      await tester.pump();
+      await tester.ensureVisible(find.byKey(const Key('work-task-reply-send')));
+      await tester.tap(find.byKey(const Key('work-task-reply-send')));
+      await tester.pumpAndSettle();
+
+      expect(submittedReply, '/Users/me/Desktop/exports');
     });
 
     testWidgets('shows the budgeted action count rather than a tool index',
@@ -411,15 +752,19 @@ void main() {
         ),
       ));
 
-      expect(find.text('整理需求'), findsOneWidget);
-      expect(find.text('实现面板'), findsNothing);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('work-task-request'))).data,
+        '整理需求',
+      );
 
       await tester.tap(find.byKey(const Key('work-task-tab-task-two')));
       await tester.pump();
 
-      expect(find.text('实现面板'), findsOneWidget);
+      expect(
+        tester.widget<Text>(find.byKey(const Key('work-task-request'))).data,
+        '实现面板',
+      );
       expect(find.text('执行角色：developer'), findsOneWidget);
-      expect(find.text('整理需求'), findsNothing);
     });
 
     testWidgets('shows approval controls, role names, and safe public text',
@@ -471,6 +816,145 @@ void main() {
       expect(find.text('操作失败'), findsOneWidget);
       expect(find.textContaining('https://'), findsNothing);
       expect(find.textContaining('secret'), findsNothing);
+    });
+
+    testWidgets(
+        'does not fall back to a legacy approval callback for a stale button',
+        (tester) async {
+      final task = _task(
+        id: 'stale-approval-button',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.waitingForApproval
+        ..pendingToolRequestJson = '{"tool":"command.run","args":{}}';
+      var legacyCalls = 0;
+      var versionedCalls = 0;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onApprove: (_) async => legacyCalls++,
+            onApproveVersioned: (_, __) async => versionedCalls++,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      // The already-rendered button represents the old waiting checkpoint.
+      // Its task object now reflects a terminal transition before the tap;
+      // neither callback may be used as a compatibility escape hatch.
+      task.status = AgentTaskStatus.completed;
+      await tester.tap(find.byKey(const Key('work-task-approve')));
+      await tester.pump();
+
+      expect(legacyCalls, 0);
+      expect(versionedCalls, 0);
+      expect(find.textContaining('该任务提醒已失效'), findsOneWidget);
+    });
+
+    testWidgets(
+        'keeps the rendered approval version when the task mutates in place',
+        (tester) async {
+      final task = _task(
+        id: 'in-place-approval-version',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.waitingForApproval
+        ..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+          'tool': 'command.run',
+          'args': <String, dynamic>{
+            'executable': 'echo',
+            'arguments': ['old']
+          },
+        });
+      var versionedCalls = 0;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onApproveVersioned: (_, __) async => versionedCalls++,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      task.pendingToolRequestJson = jsonEncode(<String, dynamic>{
+        'tool': 'command.run',
+        'args': <String, dynamic>{
+          'executable': 'echo',
+          'arguments': ['new']
+        },
+      });
+      await tester.tap(find.byKey(const Key('work-task-approve')));
+      await tester.pump();
+
+      expect(versionedCalls, 0);
+      expect(find.textContaining('该任务提醒已失效'), findsOneWidget);
+    });
+
+    testWidgets('supports a versioned later action without a legacy callback',
+        (tester) async {
+      final task = _task(
+        id: 'versioned-later-discussion',
+        conversationId: 'group-one',
+        characterId: '',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          '',
+          WorkDiscussionState.initial(
+            conversationId: 'group-one',
+            deliverableContract: const <String, dynamic>{
+              'deliverableType': 'document',
+              'format': 'docx',
+              'location': 'desktop',
+              'contentScope': '整理发布说明',
+              'revisionTarget': '',
+              'requestRevision': 1,
+            },
+          ),
+        );
+      var versionedCalls = 0;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+            onLaterVersioned: (_, version) async {
+              expect(version, greaterThan(0));
+              versionedCalls++;
+            },
+          ),
+        ),
+      ));
+
+      await tester.tap(find.byKey(const Key('work-task-later')));
+      await tester.pump();
+
+      expect(versionedCalls, 1);
     });
 
     testWidgets('shows only folder authorization while a grant is pending',
@@ -705,6 +1189,66 @@ void main() {
             .text,
         '再次发送',
       );
+    });
+
+    testWidgets(
+        'shows a reply editor for an unresolved revision clarification',
+        (tester) async {
+      // 追问澄清（无法确定要改哪个既有产物）过去只写 clarificationQuestion，
+      // 不写 clarificationRequired，于是 isPending 为 false：面板不给回复框，
+      // 而"继续"又按另一个判据拒绝 —— 用户既答不了也退不出。
+      final task = _task(
+        id: 'follow-up-clarification-panel',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..lastError = '请明确要修改的文件路径（report.md、summary.md）？'
+        ..executionStateJson = jsonEncode({
+          'followUpKind': 'clarification',
+          'clarificationQuestion': '请明确要修改的文件路径（report.md、summary.md）？',
+        });
+      String? submittedReply;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onReply: (_, reply) async => submittedReply = reply,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-reply-box')), findsOneWidget);
+      expect(find.text('请明确修订目标'), findsOneWidget);
+      expect(
+        find.textContaining('请明确要修改的文件路径（report.md、summary.md）？'),
+        findsOneWidget,
+      );
+      // 澄清期间"继续"必须可见地不可用：既不能答、也不能继续才是原来的死角。
+      expect(
+        tester
+            .widget<FilledButton>(find.byKey(const Key('work-task-continue')))
+            .onPressed,
+        isNull,
+      );
+
+      await tester.enterText(
+        find.byKey(const Key('work-task-reply-input')),
+        '桌面',
+      );
+      await tester.pump();
+      await tester.ensureVisible(find.byKey(const Key('work-task-reply-send')));
+      await tester.tap(find.byKey(const Key('work-task-reply-send')));
+      await tester.pumpAndSettle();
+      expect(submittedReply, '桌面');
     });
 
     testWidgets(
@@ -1034,6 +1578,128 @@ void main() {
       await tester.pumpAndSettle();
       expect(undone, isTrue);
     });
+
+    testWidgets('deletes a task only after the confirmation dialog',
+        (tester) async {
+      // 删除是不可逆的，而且和"关掉标签"不是一回事：必须先确认，
+      // 取消不得触发任何删除。
+      final task = _task(
+        id: 'delete-panel-task',
+        conversationId: 'group-one',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.completed;
+      final deletedTaskIds = <String>[];
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onDeleteTask: (taskId) async => deletedTaskIds.add(taskId),
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      await tester.tap(find.byKey(const Key('work-task-delete')));
+      await tester.pumpAndSettle();
+      expect(find.text('删除这条任务？'), findsOneWidget);
+      expect(find.textContaining('已经生成的文件不会被删除'), findsOneWidget);
+
+      await tester.tap(find.byKey(const Key('work-task-delete-cancel')));
+      await tester.pumpAndSettle();
+      expect(deletedTaskIds, isEmpty);
+
+      await tester.tap(find.byKey(const Key('work-task-delete')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('work-task-delete-confirm')));
+      await tester.pumpAndSettle();
+      expect(deletedTaskIds, ['delete-panel-task']);
+    });
+
+    testWidgets('offers deletion from the history detail', (tester) async {
+      // 历史任务不再执行，所以详情不接执行类动作；但清理旧任务只能在这里做。
+      final task = _task(
+        id: 'history-delete-task',
+        conversationId: 'group-history-delete',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.cancelled;
+      final deletedTaskIds = <String>[];
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            historyTasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onDeleteTask: (taskId) async => deletedTaskIds.add(taskId),
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      await tester.tap(find.byKey(const Key('work-task-history-open')));
+      await tester.pump();
+      await tester.tap(find.byKey(Key('work-task-history-item-${task.id}')));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('work-task-history-delete')));
+      await tester.pumpAndSettle();
+      await tester.tap(find.byKey(const Key('work-task-delete-confirm')));
+      await tester.pumpAndSettle();
+      expect(deletedTaskIds, ['history-delete-task']);
+    });
+
+    testWidgets('opens a historical task back into the tab strip',
+        (tester) async {
+      // 历史详情不接执行动作，所以"这条旧任务我要接着处理"必须先回到标签栏，
+      // 否则用户看着一条旧任务却无处下手。
+      final task = _task(
+        id: 'history-open-task',
+        conversationId: 'group-history-open',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.paused;
+      final openedTaskIds = <String>[];
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            historyTasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenInTabStrip: (taskId) async => openedTaskIds.add(taskId),
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      await tester.tap(find.byKey(const Key('work-task-history-open')));
+      await tester.pump();
+      await tester.tap(find.byKey(Key('work-task-history-item-${task.id}')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('work-task-history-open-in-tabs')));
+      await tester.pumpAndSettle();
+
+      expect(openedTaskIds, ['history-open-task']);
+      // 退出历史视图后标签栏才画出来，任务才算真的能操作。
+      expect(find.byKey(const Key('work-task-history-list')), findsNothing);
+      expect(find.byKey(Key('work-task-tab-${task.id}')), findsOneWidget);
+    });
   });
 
   group('WorkTaskOverlayHost', () {
@@ -1125,6 +1791,57 @@ void main() {
       expect(stoppedTaskIds, <String>[task.id]);
     });
 
+    testWidgets(
+        'lightweight host hides optional controls without handlers and uses an empty event stream',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final task = _task(
+        id: 'lightweight-approval-task',
+        conversationId: 'group-lightweight',
+        characterId: 'worker',
+      )
+        ..status = AgentTaskStatus.waitingForApproval
+        ..pendingToolRequestJson = jsonEncode(<String, dynamic>{
+          'tool': 'command.run',
+          'args': <String, dynamic>{
+            'executable': 'echo',
+            'arguments': <String>['ok'],
+          },
+        });
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[task]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byKey(const Key('work-task-panel')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-approve')), findsNothing);
+      expect(find.byKey(const Key('work-task-reject')), findsNothing);
+      expect(find.byKey(const Key('work-task-install-tool')), findsNothing);
+      expect(find.byKey(const Key('work-task-add-folder')), findsNothing);
+    });
+
+    testWidgets('display-only host works without app-scoped providers',
+        (tester) async {
+      await tester.pumpWidget(const MaterialApp(
+        home: WorkTaskOverlayHost(
+          child: SizedBox.expand(),
+        ),
+      ));
+      await tester.pump();
+
+      expect(find.byType(SizedBox), findsWidgets);
+      expect(find.byKey(const Key('work-task-panel')), findsNothing);
+    });
+
     testWidgets('uses a bottom non-modal panel in a narrow window',
         (tester) async {
       tester.view.physicalSize = const Size(600, 1000);
@@ -1157,6 +1874,67 @@ void main() {
 
       expect(find.byKey(const Key('work-task-panel-bottom')), findsOneWidget);
       expect(find.byKey(const Key('work-task-panel-wide')), findsNothing);
+    });
+
+    testWidgets('keeps discussion reply actions visible in a short window',
+        (tester) async {
+      tester.view.physicalSize = const Size(800, 630);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final pending = WorkDiscussionState.initial(
+        conversationId: 'short-panel-group',
+        executorId: 'worker',
+        candidateCharacterIds: const ['worker'],
+        participantCharacterIds: const ['worker'],
+        deliverableContract: const <String, dynamic>{
+          'deliverableType': 'document',
+          'format': 'docx',
+          'location': 'desktop',
+          'contentScope': '输出 Word 文档',
+          'explicitExecutorId': 'worker',
+          'revisionTarget': '',
+          'requestRevision': 1,
+        },
+      ).copyWith(
+        phase: WorkDiscussionPhase.blocked,
+        openQuestions: const [
+          '请确认本轮冒烟测试的具体验收项是否仅覆盖基础功能，还是包含性能、兼容性项；'
+              '冒烟测试的兼容性覆盖范围（浏览器版本、设备类型）待确认；'
+              '400错误、半格延迟问题的质检判定标准待明早对齐确认；'
+              '暗色模式可识别度的测试用例阈值待确认',
+        ],
+        blockers: const ['missingUserInformation'],
+      );
+      final task = _task(
+        id: 'short-panel-task',
+        conversationId: 'short-panel-group',
+        characterId: 'worker',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          '',
+          pending,
+        );
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          onReplyTask: (_, __) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[task]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(tester.takeException(), isNull);
+      expect(find.byKey(const Key('work-task-reply-send')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-stop')), findsOneWidget);
     });
 
     testWidgets('keeps both active execution slots visible', (tester) async {
@@ -1194,6 +1972,708 @@ void main() {
       expect(find.byKey(const Key('work-task-tab-active-one')), findsOneWidget);
       expect(find.byKey(const Key('work-task-tab-active-two')), findsOneWidget);
       expect(find.byKey(const Key('work-task-tab-newer-queued')), findsNothing);
+    });
+
+    testWidgets('labels task tabs with the user request instead of an index',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final task = _task(
+        id: 'labeled-task',
+        conversationId: 'group-labeled',
+        characterId: 'developer',
+        request: '在桌面生成隆中对对策 PDF 文档',
+      )..status = AgentTaskStatus.planning;
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[task]);
+      await tester.pump();
+      await tester.pump();
+
+      // 「任务 1」既说不清在干什么，也会在列表变化时改号。标签必须能直接
+      // 认出是哪条需求。
+      final tab = find.byKey(const Key('work-task-tab-labeled-task'));
+      expect(
+          find.descendant(of: tab, matching: find.text(workTaskTabLabel(task))),
+          findsOneWidget);
+      expect(find.text('任务 1'), findsNothing);
+    });
+
+    testWidgets('marks a task hidden from the tab strip in the history list',
+        (tester) async {
+      final task = _task(
+        id: 'hidden-history-task',
+        conversationId: 'group-history',
+        characterId: 'developer',
+        request: '在桌面生成隆中对对策 PDF',
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: [task],
+            historyTasks: [task],
+            hiddenTaskIds: {task.id},
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+      await tester.tap(find.byKey(const Key('work-task-history-open')));
+      await tester.pump();
+      expect(find.textContaining('已从标签栏隐藏'), findsOneWidget);
+      await tester.tap(find.byKey(Key('work-task-history-item-${task.id}')));
+      await tester.pump();
+      expect(find.byKey(const Key('work-task-request')), findsOneWidget);
+    });
+
+    testWidgets('opens the exact older task from a hidden chat reminder',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final hidden = _task(
+        id: 'hidden-old-task',
+        conversationId: 'group-old',
+        characterId: 'developer',
+      )
+        ..status = AgentTaskStatus.paused
+        ..updatedAt = DateTime.utc(2026, 1, 1);
+      final visibleTasks = [
+        for (var index = 0; index < 4; index++)
+          _task(
+            id: 'newer-task-$index',
+            conversationId: 'group-$index',
+            characterId: 'developer',
+          )
+            ..status = AgentTaskStatus.queued
+            ..updatedAt = DateTime.utc(2026, 2, index + 1),
+      ];
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[...visibleTasks, hidden]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+          find.byKey(const Key('work-task-tab-hidden-old-task')), findsNothing);
+      WorkTaskOverlayController.shared.openTask(hidden.id);
+      await tester.pump();
+
+      expect(find.byKey(const Key('work-task-tab-hidden-old-task')),
+          findsOneWidget);
+      expect(find.text('执行角色：developer'), findsOneWidget);
+
+      // A later task-stream delta must not replace the exact task selected
+      // from the old reminder with the newest queued row.
+      taskUpdates.add(<AgentTask>[
+        ...visibleTasks,
+        hidden,
+        _task(
+          id: 'newest-task',
+          conversationId: 'group-newest',
+          characterId: 'developer',
+        )..status = AgentTaskStatus.queued,
+      ]);
+      await tester.pump();
+      await tester.pump();
+      expect(find.byKey(const Key('work-task-tab-hidden-old-task')),
+          findsOneWidget);
+      expect(find.text('执行角色：developer'), findsOneWidget);
+    });
+
+    testWidgets('restores the tab of a hidden task that is resumed',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final task = _task(
+        id: 'resumed-hidden-task',
+        conversationId: 'group-resumed',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.failed;
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[task]);
+      await tester.pump();
+      await tester.pump();
+
+      const tabKey = Key('work-task-tab-resumed-hidden-task');
+      final tab = find.byKey(tabKey);
+      expect(tab, findsOneWidget);
+      await tester.tap(
+        find.descendant(of: tab, matching: find.byIcon(Icons.close_rounded)),
+      );
+      await tester.pump();
+      expect(tab, findsNothing);
+
+      // 追问续跑会把同一个任务从终态拉回执行中。此时标签必须自己回来，
+      // 否则运行中的任务在面板上既看不见、也没有任何恢复入口。
+      taskUpdates.add(<AgentTask>[task..status = AgentTaskStatus.planning]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(tab, findsOneWidget);
+    });
+
+    testWidgets('keeps a closed tab hidden while its task stays terminal',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final task = _task(
+        id: 'still-terminal-task',
+        conversationId: 'group-terminal',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.completed;
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[task]);
+      await tester.pump();
+      await tester.pump();
+
+      const tabKey = Key('work-task-tab-still-terminal-task');
+      final tab = find.byKey(tabKey);
+      await tester.tap(
+        find.descendant(of: tab, matching: find.byIcon(Icons.close_rounded)),
+      );
+      await tester.pump();
+      expect(tab, findsNothing);
+
+      // 终态任务仍然终止：不能因为“这条被关过”就在下一次流更新里把它放回来。
+      taskUpdates.add(<AgentTask>[
+        task..updatedAt = DateTime.utc(2026, 3, 1),
+      ]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(tab, findsNothing);
+    });
+
+    testWidgets('scopes the tab strip to the active conversation',
+        (tester) async {
+      // 面板是全 App 覆盖层，但标签栏只该回答"当前会话我该盯哪几条任务"。
+      // 曾经它按全局更新时间取前 4 条：用户私聊里刚提交的任务会被别的会话里
+      // 早已结束的旧任务挤出标签栏，面板上只剩别人的历史。
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      const conversation = 'dm:active-conversation';
+      ConversationPresenceService.instance.enter(conversation);
+      addTearDown(
+          () => ConversationPresenceService.instance.leave(conversation));
+      final mine = _task(
+        id: 'mine-task',
+        conversationId: conversation,
+        characterId: 'developer',
+      )
+        ..status = AgentTaskStatus.paused
+        ..updatedAt = DateTime.utc(2026, 9, 1);
+      final others = <AgentTask>[
+        for (var index = 0; index < 3; index++)
+          _task(
+            id: 'other-task-$index',
+            conversationId: 'group-old-$index',
+            characterId: 'developer',
+          )
+            ..status = AgentTaskStatus.failed
+            ..updatedAt = DateTime.utc(2026, 9, 20 + index),
+      ];
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[mine, ...others]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byKey(const Key('work-task-tab-mine-task')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-tab-other-task-0')), findsNothing);
+      expect(find.byKey(const Key('work-task-tab-other-task-2')), findsNothing);
+    });
+
+    testWidgets('counts only the current conversation unfinished tasks',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      const conversation = 'dm:folded-count';
+      ConversationPresenceService.instance.enter(conversation);
+      addTearDown(
+          () => ConversationPresenceService.instance.leave(conversation));
+      AgentTask inConversation(String id, AgentTaskStatus status, int day) =>
+          _task(
+            id: id,
+            conversationId: conversation,
+            characterId: 'developer',
+          )
+            ..status = status
+            ..updatedAt = DateTime.utc(2026, 5, day);
+      final tasks = <AgentTask>[
+        for (var index = 0; index < 4; index++)
+          inConversation('count-task-$index', AgentTaskStatus.queued, 1 + index),
+        // 第 5 条未结束的任务排不进标签栏，才是这行提示真正要说的那一条。
+        inConversation('folded-paused-task', AgentTaskStatus.paused, 1),
+        // 本会话已结束的任务和别的会话的失败任务都不算队列。
+        inConversation('terminal-in-conversation', AgentTaskStatus.completed, 1),
+        _task(
+          id: 'terminal-elsewhere',
+          conversationId: 'group-elsewhere',
+          characterId: 'developer',
+        )
+          ..status = AgentTaskStatus.failed
+          ..updatedAt = DateTime.utc(2026, 6, 1),
+      ];
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(tasks);
+      await tester.pump();
+      await tester.pump();
+
+      expect(
+        find.text('本会话还有 1 个未结束的任务未在标签栏显示，可在「历史任务」里查看。'),
+        findsOneWidget,
+      );
+      expect(find.byKey(const Key('work-task-tab-terminal-elsewhere')),
+          findsNothing);
+    });
+
+    testWidgets('refreshes the tab strip when the active conversation changes',
+        (tester) async {
+      // 标签栏按当前会话收敛，所以切换会话必须主动重算：过去只在任务流更新时
+      // 重算，切到另一个已有历史任务的会话时标签栏还是上一个会话的，而且可能
+      // 一直不刷新（那个会话没有新任务事件）。
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final first = _task(
+        id: 'switch-one-task',
+        conversationId: 'dm:switch-one',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.paused;
+      final second = _task(
+        id: 'switch-two-task',
+        conversationId: 'dm:switch-two',
+        characterId: 'tester',
+      )..status = AgentTaskStatus.paused;
+      ConversationPresenceService.instance.enter('dm:switch-one');
+      addTearDown(() {
+        ConversationPresenceService.instance.leave('dm:switch-one');
+        ConversationPresenceService.instance.leave('dm:switch-two');
+      });
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[first, second]);
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byKey(const Key('work-task-tab-switch-one-task')),
+          findsOneWidget);
+      expect(find.byKey(const Key('work-task-tab-switch-two-task')),
+          findsNothing);
+      expect(find.text('执行角色：developer'), findsOneWidget);
+
+      ConversationPresenceService.instance.enter('dm:switch-two');
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.byKey(const Key('work-task-tab-switch-two-task')),
+          findsOneWidget);
+      expect(find.byKey(const Key('work-task-tab-switch-one-task')),
+          findsNothing);
+      // 选中项也必须跟着走：上个会话选过的任务不能继续占着详情。
+      expect(find.text('执行角色：tester'), findsOneWidget);
+    });
+
+    testWidgets('opens a hidden historical task back into the tab strip',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final task = _task(
+        id: 'history-restore-task',
+        conversationId: 'group-restore',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.completed;
+      ConversationPresenceService.instance.enter('group-restore');
+      addTearDown(
+          () => ConversationPresenceService.instance.leave('group-restore'));
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[task]);
+      await tester.pump();
+      await tester.pump();
+
+      const tabKey = Key('work-task-tab-history-restore-task');
+      await tester.tap(
+        find.descendant(of: find.byKey(tabKey), matching: find.byIcon(Icons.close_rounded)),
+      );
+      await tester.pump();
+      expect(find.byKey(tabKey), findsNothing);
+
+      await tester.tap(find.byKey(const Key('work-task-history-open')));
+      await tester.pump();
+      await tester.tap(find.byKey(Key('work-task-history-item-${task.id}')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('work-task-history-open-in-tabs')));
+      await tester.pump();
+      await tester.pump();
+
+      // 关掉的标签必须自己回来，用户才能接着操作这条旧任务。
+      expect(find.byKey(tabKey), findsOneWidget);
+      expect(find.text('执行角色：developer'), findsOneWidget);
+    });
+  });
+
+  group('WorkTaskOverlayHost approval prompt', () {
+    // Hive and the event store need real file I/O, which the widget-test
+    // fake-async zone never pumps. Following the repository convention, the
+    // fixture is opened outside the test bodies and only the writes are wrapped
+    // in `tester.runAsync`.
+    late Directory hiveDirectory;
+    late WorkTaskEventStore eventStore;
+    late WorkTaskCoordinator coordinator;
+    late Box<AgentTask> taskBox;
+
+    setUpAll(() async {
+      hiveDirectory = await openLifecycleHive();
+      taskBox = Hive.box<AgentTask>(DatabaseService.agentTaskBoxName);
+      eventStore = WorkTaskEventStore(appSupportDirectory: hiveDirectory);
+      coordinator = WorkTaskCoordinator(
+        taskBox: taskBox,
+        eventStore: eventStore,
+        runner: _HoldingWorkTaskRunner(),
+      );
+    });
+
+    tearDownAll(() async {
+      // A frame can leave a Hive write chain pending in the widget-test
+      // fake-async zone, which would make `Hive.close()` wait forever. The
+      // fixture only backs this group, so a bounded wait is enough to release
+      // the temporary directory without hanging the suite.
+      await closeLifecycleHive(hiveDirectory).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {},
+      );
+    });
+
+    setUp(() async {
+      await taskBox.clear();
+    });
+
+    testWidgets(
+        'dismissing the approval modal points the user back at the task panel',
+        (tester) async {
+      // The host presents at most one modal per checkpoint, so a dismissed
+      // prompt must still leave a visible route back to the durable approval.
+      final task = _task(
+        id: 'overlay-dismiss',
+        conversationId: 'group-dismiss',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.queued;
+      await tester.runAsync(() => taskBox.put(task.id, task));
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          coordinator: coordinator,
+          eventStore: eventStore,
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          // ScaffoldMessenger only renders a SnackBar once a Scaffold is
+          // registered; the production host always sits above one.
+          child: const Scaffold(body: SizedBox.expand()),
+        ),
+      ));
+      await tester.pump();
+
+      await tester.runAsync(() async {
+        await coordinator.pauseForApproval(
+          task.id,
+          pendingToolRequestJson: jsonEncode(<String, dynamic>{
+            'tool': 'command.run',
+            'args': <String, dynamic>{
+              'executable': 'echo',
+              'arguments': <String>['ok'],
+            },
+          }),
+        );
+      });
+      await _pumpUntilFound(
+        tester,
+        find.byKey(const Key('work-generic-approval-dialog')),
+      );
+
+      try {
+        // Tapping the barrier dismisses the modal without deciding anything.
+        await tester.tapAt(const Offset(4, 4));
+        await tester.pump();
+        await tester.pump(const Duration(milliseconds: 750));
+
+        expect(
+          find.byKey(const Key('work-generic-approval-dialog')),
+          findsNothing,
+          reason: '点击遮罩应当关闭弹窗。',
+        );
+        expect(find.text('已关闭审批弹窗，任务仍在等待审批。'), findsOneWidget);
+        expect(find.text('查看任务'), findsOneWidget);
+        expect(
+          taskBox.get(task.id)?.status,
+          AgentTaskStatus.waitingForApproval,
+          reason: '关闭弹窗不是拒绝，任务必须继续等待审批。',
+        );
+      } finally {
+        // Real I/O must be drained outside the fake-async zone, matching the
+        // repository convention for widget tests that own a coordinator.
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await tester.runAsync(() async {
+          await coordinator.dispose();
+          await eventStore.close();
+        });
+      }
+    });
+  });
+
+  group('WorkTaskOverlayHost hidden tab persistence', () {
+    // 隐藏标记是持久化的。撤销如果只停在内存里，数据库会继续留着运行中任务的
+    // id，启动时又要重新撤销一次，历史列表也会把一条正在跑的任务标成
+    // 「已从标签栏隐藏」。
+    late Directory hiveDirectory;
+    late DatabaseService database;
+
+    setUpAll(() async {
+      hiveDirectory = await openLifecycleHive();
+      database = DatabaseService();
+    });
+
+    tearDownAll(() async {
+      await closeLifecycleHive(hiveDirectory, database).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {},
+      );
+    });
+
+    setUp(() async {
+      await database.appSettingsBox.delete('hidden_work_task_ids');
+    });
+
+    testWidgets('clears all persisted markers when hidden tasks are resumed',
+        (tester) async {
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+      });
+      final firstTask = _task(
+        id: 'first-persisted-hidden-task',
+        conversationId: 'group-persisted',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.failed;
+      final secondTask = _task(
+        id: 'second-persisted-hidden-task',
+        conversationId: 'group-persisted',
+        characterId: 'tester',
+      )..status = AgentTaskStatus.failed;
+      await tester.runAsync(() async {
+        await database.setWorkTaskHidden(firstTask.id, true);
+        await database.setWorkTaskHidden(secondTask.id, true);
+      });
+
+      await tester.pumpWidget(ProviderScope(
+        overrides: [databaseServiceProvider.overrideWithValue(database)],
+        child: MaterialApp(
+          home: WorkTaskOverlayHost(
+            taskStream: taskUpdates.stream,
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onStopTask: (_) async {},
+            onContinueTask: (_) async {},
+            child: const SizedBox.expand(),
+          ),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[firstTask, secondTask]);
+      await tester.pump();
+
+      firstTask.status = AgentTaskStatus.planning;
+      secondTask.status = AgentTaskStatus.runningTool;
+      taskUpdates.add(<AgentTask>[firstTask, secondTask]);
+      await tester.pump();
+      await tester.pump();
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+
+      expect(
+        find.byKey(const Key('work-task-tab-first-persisted-hidden-task')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('work-task-tab-second-persisted-hidden-task')),
+        findsOneWidget,
+      );
+      expect(database.hiddenWorkTaskIds(), isEmpty);
+    });
+  });
+
+  group('WorkTaskOverlayHost task deletion', () {
+    // 删除必须落到 Hive 记录上，并且连带清掉"标签隐藏"这个展示层标记：
+    // 记录没了却留着标记，那个 id 会一直占着设置项。
+    late Directory hiveDirectory;
+    late WorkTaskEventStore eventStore;
+    late WorkTaskCoordinator coordinator;
+    late Box<AgentTask> taskBox;
+    late DatabaseService database;
+
+    setUpAll(() async {
+      hiveDirectory = await openLifecycleHive();
+      taskBox = Hive.box<AgentTask>(DatabaseService.agentTaskBoxName);
+      eventStore = WorkTaskEventStore(appSupportDirectory: hiveDirectory);
+      coordinator = WorkTaskCoordinator(
+        taskBox: taskBox,
+        eventStore: eventStore,
+        runner: _HoldingWorkTaskRunner(),
+      );
+      database = DatabaseService();
+    });
+
+    tearDownAll(() async {
+      // 理由同「hidden tab persistence」组：widget 测试的 fake-async 区可能留着
+      // 未排空的 Hive 写入链，做一次有界等待即可。
+      await closeLifecycleHive(hiveDirectory, database).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {},
+      );
+    });
+
+    setUp(() async {
+      await taskBox.clear();
+      await database.appSettingsBox.delete('hidden_work_task_ids');
+    });
+
+    testWidgets('removes the record and its hidden marker through the panel',
+        (tester) async {
+      final task = _task(
+        id: 'overlay-delete-task',
+        conversationId: 'group-overlay-delete',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.completed;
+      ConversationPresenceService.instance.enter('group-overlay-delete');
+      addTearDown(
+        () => ConversationPresenceService.instance.leave('group-overlay-delete'),
+      );
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+      });
+      // 预置"这条任务早先被关掉标签"的状态：不再让用例依赖"刚点完关闭、动作是否
+      // 已释放"的时序（那会在全量并行时抖动）。
+      await tester.runAsync(() async {
+        await taskBox.put(task.id, task);
+        await database.setWorkTasksHidden(<String>[task.id], true);
+      });
+
+      await tester.pumpWidget(ProviderScope(
+        overrides: [databaseServiceProvider.overrideWithValue(database)],
+        child: MaterialApp(
+          home: WorkTaskOverlayHost(
+            coordinator: coordinator,
+            eventStore: eventStore,
+            onStopTask: (_) async {},
+            onContinueTask: (_) async {},
+            child: const Scaffold(body: SizedBox.expand()),
+          ),
+        ),
+      ));
+      const tabKey = Key('work-task-tab-overlay-delete-task');
+      await _pumpUntilFound(tester, find.byKey(const Key('work-task-history-open')));
+      expect(find.byKey(tabKey), findsNothing, reason: '预置隐藏的标签不应出现');
+
+      // 关掉的标签只能在历史任务里找到，删除入口也必须留在那一层。
+      await tester.tap(find.byKey(const Key('work-task-history-open')));
+      await tester.pump();
+      await _pumpUntilFound(
+        tester,
+        find.byKey(Key('work-task-history-item-${task.id}')),
+      );
+      await tester.tap(find.byKey(Key('work-task-history-item-${task.id}')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('work-task-history-delete')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('work-task-delete-dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('work-task-delete-confirm')));
+      await tester.pumpAndSettle();
+      await _pumpUntil(tester, () => taskBox.get(task.id) == null);
+      await _pumpUntil(
+        tester,
+        () => !database.hiddenWorkTaskIds().contains(task.id),
+      );
+
+      expect(taskBox.get(task.id), isNull);
+      expect(database.hiddenWorkTaskIds(), isNot(contains(task.id)));
     });
   });
 }

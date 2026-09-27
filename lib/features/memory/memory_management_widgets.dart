@@ -260,7 +260,14 @@ class MemoryPageAppBar extends StatelessWidget implements PreferredSizeWidget {
   @override
   Widget build(BuildContext context) => AppBar(
         title: title == null ? null : Text(title!),
-        leading: BackButton(onPressed: () => Navigator.of(context).maybePop()),
+        // These pages are also rendered inside the desktop split-navigation
+        // shell.  `maybePop` asks the route to run its will-pop scope; when
+        // that shell reuses the page element the scope can be absent even
+        // though the route is still mounted, which makes Flutter assert
+        // instead of returning to the conversation.  Memory and relationship
+        // pages have no unsaved-pop guard, so a direct pop is the smallest
+        // safe exit for both navigator shapes.
+        leading: BackButton(onPressed: () => Navigator.of(context).pop()),
         actions: actions,
       );
 

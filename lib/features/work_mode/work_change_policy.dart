@@ -255,7 +255,7 @@ class WorkChangePolicy {
 
     return const WorkChangePolicyResult(
       requirement: WorkChangeApprovalRequirement.initial,
-      reason: '这是本任务首次进行普通写入，需要先确认具体影响范围。',
+      reason: '本次变更不在本任务已批准的路径范围内，需要先确认具体影响范围。',
     );
   }
 }

@@ -8,12 +8,14 @@ import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/features/memory/memory_audit_filter.dart';
 import 'package:chat_group/features/memory/memory_controls.dart';
 import 'package:chat_group/features/memory/memory_management_page.dart';
+import 'package:chat_group/features/memory/memory_scroll_restore.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
+import 'helpers/async_pump.dart';
 import 'helpers/lifecycle_hive.dart';
 
 void main() {
@@ -1401,6 +1403,19 @@ void main() {
     await tester.enterText(search, '目标浏览');
     await tester.pump();
     final scrollables = find.byType(Scrollable);
+    bool hasScrollableExtent() => Iterable<int>.generate(
+          scrollables.evaluate().length,
+        ).any(
+          (index) =>
+              tester
+                  .state<ScrollableState>(scrollables.at(index))
+                  .position
+                  .maxScrollExtent >
+              0,
+        );
+    // The filtered list lays out over several frames; wait for a scrollable
+    // that has a real extent before picking the one to drive.
+    await pumpUntilReady(tester, hasScrollableExtent);
     final scrollableIndex = Iterable<int>.generate(
       scrollables.evaluate().length,
     ).firstWhere(
@@ -1440,11 +1455,30 @@ void main() {
           matching: find.byType(Scrollable),
         )
         .first;
-    final afterScrollable =
-        tester.state<ScrollableState>(currentContentScrollable);
-    final afterOffset = afterScrollable.position.pixels;
+    // The restorer reaches its target over several frames: it jumps to a
+    // sliver edge and schedules the next frame from a microtask, which races
+    // with pumpAndSettle's "no frame scheduled" check. Drive the frames until
+    // the position stops moving so the assertion cannot read a mid-restore
+    // offset, while still failing if it lands anywhere else.
+    var afterOffset = tester
+        .state<ScrollableState>(currentContentScrollable)
+        .position
+        .pixels;
+    for (var frame = 0;
+        frame <= MemoryScrollRestorer.defaultMaxFrames;
+        frame++) {
+      if ((afterOffset - beforeOffset).abs() <= 2) break;
+      await tester.pump();
+      afterOffset = tester
+          .state<ScrollableState>(currentContentScrollable)
+          .position
+          .pixels;
+    }
     expect(afterOffset, closeTo(beforeOffset, 2));
-    afterScrollable.position.jumpTo(0);
+    tester
+        .state<ScrollableState>(currentContentScrollable)
+        .position
+        .jumpTo(0);
     await tester.pump();
     expect(tester.widget<TextField>(search).controller!.text, '目标浏览');
     final targetRow = find.byKey(

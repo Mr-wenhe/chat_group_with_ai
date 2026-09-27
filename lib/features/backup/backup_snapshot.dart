@@ -207,32 +207,12 @@ class _Snapshot {
   }
 
   static Map<String, dynamic> _safeSettings(DatabaseService db) {
-    const keys = {
-      'theme_mode',
-      'app_skin_mode',
-      'tts_enabled',
-      'direct_chat_read_at',
-      'direct_chat_source',
-      'direct_chat_last_proactive_at',
-      'group_chat_read_at',
-      'group_chat_last_proactive_at',
-      'pinned_character_ids',
-      'pinned_group_ids',
-      'memory_pinned_keys_v1',
-      'token_usage',
-      SearchProviderConfigStore.configsKey,
-      SearchProviderConfigStore.defaultProviderKey,
-      SearchProviderConfigStore.runtimeSettingsKey,
-      AiGovernanceStore.globalSearchPolicyKey,
-      AiGovernanceStore.conversationSearchPoliciesKey,
-    };
     final result = <String, dynamic>{};
     for (final key in db.appSettingsBox.keys.whereType<String>()) {
-      if (keys.contains(key) ||
-          key.startsWith('work_mode_enabled:') ||
-          key.startsWith('context_compressed_through:')) {
+      if (isBackupCarriedSettingKey(key)) {
         final raw = db.appSettingsBox.get(key);
         final safe = switch (key) {
+          GroupMuteStore.storageKey => GroupMuteStore.normalize(raw),
           SearchProviderConfigStore.configsKey =>
             SearchProviderConfigStore.backupValue(raw),
           SearchProviderConfigStore.runtimeSettingsKey =>
@@ -255,20 +235,10 @@ class _Snapshot {
     final safe = _safeSettings(db);
     if (selection.scope == BackupScope.all) return safe;
     if (selection.scope == BackupScope.configurationOnly) {
-      const configurationKeys = {
-        'theme_mode',
-        'app_skin_mode',
-        'tts_enabled',
-        'pinned_character_ids',
-        'pinned_group_ids',
-        SearchProviderConfigStore.configsKey,
-        SearchProviderConfigStore.defaultProviderKey,
-        SearchProviderConfigStore.runtimeSettingsKey,
-        AiGovernanceStore.globalSearchPolicyKey,
-        AiGovernanceStore.conversationSearchPoliciesKey,
-      };
       return Map.fromEntries(
-        safe.entries.where((entry) => configurationKeys.contains(entry.key)),
+        safe.entries.where(
+          (entry) => backupConfigurationOnlySettingKeys.contains(entry.key),
+        ),
       );
     }
 
@@ -312,6 +282,12 @@ class _Snapshot {
       } else if (value is Map &&
           (key == 'group_chat_read_at' ||
               key == 'group_chat_last_proactive_at') &&
+          directCharacterId == null) {
+        if (value.containsKey(conversationId)) {
+          result[key] = {conversationId: value[conversationId]};
+        }
+      } else if (value is Map &&
+          key == GroupMuteStore.storageKey &&
           directCharacterId == null) {
         if (value.containsKey(conversationId)) {
           result[key] = {conversationId: value[conversationId]};

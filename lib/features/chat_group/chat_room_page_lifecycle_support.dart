@@ -112,6 +112,8 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
     _searchRuntime.dispose();
     _hideMentionOverlay();
     _mentionSearchController.dispose();
+    // 浮层先移除再释放控制器，避免滚动位置在弹窗消失后仍被引用。
+    _mentionListController.dispose();
     unawaited(_speech.dispose());
     unawaited(_disposeVoiceBroadcast());
     unawaited(_disposeVoiceInput());

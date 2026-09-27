@@ -10,6 +10,7 @@ enum AgentToolName {
   workspacePatch('workspace.patch'),
   workspaceRename('workspace.rename'),
   workspaceDelete('workspace.delete'),
+  weatherForecast('weather.forecast'),
   commandRun('command.run'),
   browserContext('browser.context'),
   skillCreate('skill.create'),

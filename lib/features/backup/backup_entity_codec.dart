@@ -18,6 +18,8 @@ import 'package:chat_group/core/models/work_mode_workspace.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_failure.dart';
 
 part 'backup_entity_codec_records.dart';
 part 'backup_entity_codec_memory.dart';
