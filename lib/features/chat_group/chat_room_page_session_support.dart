@@ -91,11 +91,30 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       } else {
         // 带定位目标：高亮并滚动到该消息。
         _highlightMessageTemporarily(targetId);
-        WidgetsBinding.instance.addPostFrameCallback((_) {
-          if (!_canTouchUi) return;
-          final target = _messages.where((message) => message.id == targetId);
-          if (target.isNotEmpty) unawaited(_focusSearchResult(target.first));
-        });
+        final targetInWindow =
+            _messages.any((message) => message.id == targetId);
+        // 分页窗口内找不到目标（例如消息刚好被删除），或者目标就是最新
+        // 一条（通知场景），都直接落到会话末尾——那条消息本来就在底部。
+        // 不能交给按估算偏移的 jumpTo：列表总高只是按已构建子项估出来的，
+        // 估小一点目标就留在屏幕外，而未构建的 widget 没有 context，
+        // 后续的 ensureVisible 会静默失效。
+        //
+        // 判定与调用都留在本帧内同步完成：scrollToBottomAfterInitialLayout
+        // 内部同样靠 addPostFrameCallback 发第一跳，而它不会请求新帧，
+        // 从 post-frame 回调里再注册就得等下一次有人补帧。
+        if (!targetInWindow || _messages.last.id == targetId) {
+          scrollToBottomAfterInitialLayout(_scrollController);
+        } else {
+          WidgetsBinding.instance.addPostFrameCallback((_) {
+            if (!_canTouchUi) return;
+            final target = _messages.where((message) => message.id == targetId);
+            if (target.isEmpty) {
+              scrollToBottomAfterInitialLayout(_scrollController);
+              return;
+            }
+            unawaited(_focusSearchResult(target.first));
+          });
+        }
       }
       // 检查是否有上次异常中断的 agentic 任务需要恢复。
       _scheduleAgentTaskRecovery();

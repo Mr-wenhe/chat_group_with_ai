@@ -243,6 +243,24 @@ class ChatRoomPage extends ConsumerStatefulWidget {
   ConsumerState<ChatRoomPage> createState() => _ChatRoomPageState();
 }
 
+/// 打开会话并定位到指定消息。
+///
+/// 通知类入口（“有新消息了”）要带着 [messageId] 走这里，而不是只按会话 id
+/// 打开：房间需要知道该高亮哪一条，也需要在目标不在最新一页时把那一页加载
+/// 出来。私聊通知此前更是只跳到私聊列表，根本没进会话。
+Future<void> openChatRoomAtMessage(
+  NavigatorState navigator, {
+  required String conversationId,
+  required String messageId,
+}) {
+  return navigator.push(MaterialPageRoute(
+    builder: (_) => ChatRoomPage(
+      groupId: conversationId,
+      initialMessageId: messageId,
+    ),
+  ));
+}
+
 /// 聊天页面状态。
 ///
 /// 混入 [WidgetsBindingObserver] 以监听 App 前后台切换：回到前台时重新登记

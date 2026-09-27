@@ -8,8 +8,10 @@ import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
+import 'package:chat_group/features/chat_group/chat_room_page.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_inbox.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
+import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:flutter/material.dart';
@@ -95,7 +97,10 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
       '${result.character.name} 主动发来一条私聊',
       icon: Icons.mark_chat_unread_rounded,
       actionLabel: '查看',
-      onTap: () => _openDirectChatByCharacterId(result.character.id),
+      onTap: () => _openDirectChatByCharacterId(
+        result.character.id,
+        messageId: result.message.id,
+      ),
     );
   }
 
@@ -112,8 +117,15 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
     await _loadSummaries();
   }
 
-  Future<void> _openDirectChatByCharacterId(String characterId) async {
-    await Navigator.of(context).pushNamed('/dm/$characterId');
+  Future<void> _openDirectChatByCharacterId(
+    String characterId, {
+    required String messageId,
+  }) async {
+    await openChatRoomAtMessage(
+      Navigator.of(context),
+      conversationId: DirectChatSession.conversationIdFor(characterId),
+      messageId: messageId,
+    );
     await _loadSummaries();
   }
 
