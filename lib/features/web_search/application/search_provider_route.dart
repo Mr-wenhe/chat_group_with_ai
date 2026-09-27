@@ -18,10 +18,6 @@ class SearchProviderRoute {
   /// knowledge-only routing restriction.
   final bool isNative;
 
-  /// An interactive browser route is a user-facing handoff rather than a
-  /// bounded HTTP request. It must run after the keyless HTML fallback and is
-  /// intentionally not subject to the normal eight-second search budget.
-  final bool isVisibleBrowser;
   final int priority;
   final String? displayName;
 
@@ -33,7 +29,6 @@ class SearchProviderRoute {
     this.isPrimary = false,
     this.isFallback = false,
     this.isNative = false,
-    this.isVisibleBrowser = false,
     this.priority = 0,
     this.displayName,
   });

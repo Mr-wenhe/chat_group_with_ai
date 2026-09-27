@@ -174,6 +174,18 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
           '$recentContext'
     });
 
+    if (_roundtableModeEnabled) {
+      final isNewsHost = character.zhipuSearchAnswerOnly;
+      msgs.add({
+        'role': 'system',
+        'content': isAutoChat
+            ? '【圆桌会议：空闲讨论续聊】当前没有新的用户事件输入。请接着最近一轮新闻简报与群成员讨论自然接话，表达观点、追问或提出不同看法；不要再次联网搜索，也不要补充未经核验的实时事实。'
+            : isNewsHost
+                ? '【圆桌会议：新闻角色开场】先把本轮用户输入当作事件或主题关键词，使用本轮联网搜索结果找出最近一周最值得讨论的 3-5 个热点进展。简明说明每项事件及其时间，只依据搜索证据，不要根据记忆补充实时事实；不要输出 [S1]、[S2] 等来源编号或“来源于智谱搜索结果”一类归因文案。这里只做开场新闻简报，不代替其他成员发表观点。'
+                : '【圆桌会议：自由讨论】新闻角色已经先根据用户输入搜索并发布了热点简报。请围绕最近一条新闻角色发言，自由表达个人观点、影响判断、疑问、幽默或不同意见；可接续前一位成员展开讨论。不要只重复用户原话或复述整份简报，也不要编造额外的实时事实。以自然群聊发言为主，通常 1-3 句。',
+      });
+    }
+
     if (!scene.isGeneral) {
       final otherCharacters =
           _characters.where((c) => c.id != character.id).toList();
@@ -216,10 +228,14 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
         final truncated = lastUserMsg.content.length > 100
             ? '${lastUserMsg.content.substring(0, 100)}...'
             : lastUserMsg.content;
+        final hasCurrentRoundtableNewsBriefing = _roundtableModeEnabled &&
+            !character.zhipuSearchAnswerOnly &&
+            _hasRoundtableNewsBriefingAfterLastUser(visibleContext);
         msgs.add({
           'role': 'system',
-          'content':
-              '【当前任务】$speakerName 刚说："$truncated" —— 请作为 ${character.name} 针对这条消息做出自然回应。'
+          'content': hasCurrentRoundtableNewsBriefing
+              ? '【当前任务】用户刚才以“$truncated”提出本轮事件主题；新闻角色已发布热点简报。请以简报中的具体事件为讨论对象，作为 ${character.name} 自由发言并自然接续群聊。'
+              : '【当前任务】$speakerName 刚说："$truncated" —— 请作为 ${character.name} 针对这条消息做出自然回应。'
         });
       }
     } else if (visibleContext.isNotEmpty && isAutoChat) {
@@ -323,6 +339,20 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
     }
 
     return msgs;
+  }
+
+  bool _hasRoundtableNewsBriefingAfterLastUser(List<Message> context) {
+    final newsCharacter = _roundtableNewsCharacter;
+    if (newsCharacter == null) return false;
+    final lastUserIndex = context.lastIndexWhere(
+      (message) => message.senderType == 'user',
+    );
+    if (lastUserIndex < 0) return false;
+    return context.skip(lastUserIndex + 1).any(
+          (message) =>
+              message.senderType == 'ai' &&
+              message.senderId == newsCharacter.id,
+        );
   }
 
   /// 解析历史与当前消息里的文档附件，生成可注入 prompt 的文档上下文。

@@ -236,6 +236,36 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
         .toList();
   }
 
+  AICharacter? get _roundtableNewsCharacter {
+    for (final character in _characters) {
+      if (character.zhipuSearchAnswerOnly) return character;
+    }
+    return null;
+  }
+
+  /// News host leads; remaining active, unmuted, eligible group members follow.
+  List<AICharacter> _roundtableParticipants({
+    required AICharacter newsCharacter,
+    required List<String> mentionedIds,
+  }) {
+    final mentionedSet = mentionedIds.toSet();
+    final eligible = _characters
+        .where(
+          (character) =>
+              _isEligibleToReply(character) &&
+              _mayAutoPick(character, mentionedIds: mentionedSet) &&
+              !_agenticRunningCharacterIds.contains(character.id),
+        )
+        .toList();
+    if (!eligible.any((character) => character.id == newsCharacter.id)) {
+      return const [];
+    }
+    return [
+      newsCharacter,
+      ...eligible.where((character) => character.id != newsCharacter.id),
+    ];
+  }
+
   /// 私聊本轮的回复者：固定为会话对方角色（前提是它有资格回复）。
   ///
   /// 私聊没有意图编排，故顺手清空 [_pendingReplyIntents]。

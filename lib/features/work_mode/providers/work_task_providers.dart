@@ -14,11 +14,9 @@ import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
-import 'package:chat_group/features/work_mode/visible_browser_service.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive/hive.dart';
-import 'package:url_launcher/url_launcher.dart';
 
 /// Stores public task progress beside the app's Hive data, not in a chat page.
 final workTaskEventStoreProvider = Provider<WorkTaskEventStore>((ref) {
@@ -40,22 +38,6 @@ final workTaskEventStoreProvider = Provider<WorkTaskEventStore>((ref) {
   );
   ref.onDispose(() => unawaited(store.close()));
   return store;
-});
-
-/// App-scoped visible-browser handoff service. The overlay observes it, but
-/// never disposes it, so hiding or changing routes cannot close a browser.
-final visibleBrowserServiceProvider = Provider<VisibleBrowserService>((ref) {
-  final service = VisibleBrowserService(
-    eventStore: ref.watch(workTaskEventStoreProvider),
-    runtimeInstaller: () => launchUrl(
-      Uri.parse(
-          'https://developer.microsoft.com/en-us/microsoft-edge/webview2/'),
-      mode: LaunchMode.externalApplication,
-    ),
-  );
-  unawaited(service.restore());
-  ref.onDispose(() => unawaited(service.dispose()));
-  return service;
 });
 
 /// App-scoped production runner. It resolves each task's character/API config

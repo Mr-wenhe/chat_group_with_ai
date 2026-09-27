@@ -20,27 +20,19 @@ class SearchSnapshotBuilder {
     required SearchProviderResponse response,
     required DateTime searchedAt,
     required int latencyMs,
-    bool? allowInsecureHttp,
     int retryCount = 0,
     bool fromCache = false,
     bool degraded = false,
   }) {
-    // The chain supplies the route capability explicitly. Keep the provider
-    // name fallback for direct callers and old tests, but do not let a
-    // configured provider's response metadata opt itself into HTTP merely by
-    // claiming to be `visibleBrowser`.
-    final routeAllowsInsecureHttp =
-        allowInsecureHttp ?? provider.trim() == 'visibleBrowser';
     final results = <WebSearchResult>[];
     final seenUrls = <String>{};
     final hostCounts = <String, int>{};
 
     for (final item in response.items) {
       if (!item.hasSourceUrl && provider.trim() != 'zhipu-native') continue;
-      if (item.allowInsecureHttp && !routeAllowsInsecureHttp) {
-        // An alternate/provider-supplied item cannot broaden the URL policy
-        // of its route. Drop the mismatched item rather than allowing a
-        // constructor failure to abort the whole search turn.
+      if (item.allowInsecureHttp) {
+        // No active route supports HTTP evidence. Drop provider-supplied
+        // legacy metadata rather than aborting the whole search turn.
         continue;
       }
       final canonicalUrl = !item.hasSourceUrl
@@ -63,7 +55,7 @@ class SearchSnapshotBuilder {
           providerScore: item.providerScore,
           provider: provider,
           language: item.language,
-          allowInsecureHttp: item.allowInsecureHttp && routeAllowsInsecureHttp,
+          allowInsecureHttp: false,
         ),
       );
     }

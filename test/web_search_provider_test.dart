@@ -160,43 +160,6 @@ void main() {
   });
 
   group('web search domain models', () {
-    test(
-        'visible browser keeps a public HTTP source through snapshot and audit',
-        () {
-      final item = SearchProviderItem(
-        title: 'Public page',
-        snippet: 'Readable page text',
-        url: Uri.parse('http://public.example/result'),
-        allowInsecureHttp: true,
-      );
-      final request = SearchRequest(query: 'public page');
-      final snapshot = const SearchSnapshotBuilder().build(
-        request: request,
-        provider: 'visibleBrowser',
-        response: SearchProviderResponse(
-          items: [item],
-          sourceProvider: 'visibleBrowser',
-        ),
-        searchedAt: DateTime.utc(2026, 8, 23),
-        latencyMs: 1,
-      );
-
-      expect(snapshot.results.single.url.scheme, 'http');
-      final restored = WebSearchSnapshot.fromMap(snapshot.toMap());
-      expect(restored?.results.single.url.scheme, 'http');
-      expect(restored?.results.single.allowInsecureHttp, isTrue);
-
-      final audit = SearchAuditEntry(
-        conversationId: 'visible-browser',
-        query: request.query,
-        searchedAt: snapshot.searchedAt,
-        status: 'completed',
-        provider: 'visibleBrowser',
-        sources: snapshot.results.map((result) => result.url.toString()),
-      );
-      expect(audit.sources, ['http://public.example/result']);
-    });
-
     test('does not let a non-browser provider opt into public HTTP', () {
       expect(
         () => WebSearchResult(
@@ -211,13 +174,12 @@ void main() {
       );
     });
 
-    test('route capability wins over a spoofed visible-browser source label',
+    test('provider labels cannot opt public HTTP sources into live snapshots',
         () {
       final request = SearchRequest(query: 'spoofed source');
       final snapshot = const SearchSnapshotBuilder().build(
         request: request,
-        provider: 'visibleBrowser',
-        allowInsecureHttp: false,
+        provider: 'keylessHtml',
         response: SearchProviderResponse(
           items: [
             SearchProviderItem(

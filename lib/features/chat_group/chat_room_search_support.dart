@@ -34,6 +34,8 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
     required bool isAutoChat,
     required bool searchEnabled,
     bool forceSearch = false,
+    web_search.SearchCategory? category,
+    web_search.SearchFreshness? freshness,
   }) async {
     final query = userMessage?.trim() ?? '';
     final origin =
@@ -100,6 +102,8 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
         country: _searchRuntimeSettings.country,
         maxResults: _searchRuntimeSettings.maxResults,
         safeSearch: _searchRuntimeSettings.safeSearch,
+        category: category ?? web_search.SearchCategory.general,
+        freshness: freshness ?? web_search.SearchFreshness.any,
         forceSearch: forceSearch,
         cancelToken: cancelToken,
       ),
@@ -382,9 +386,11 @@ extension _ChatRoomSearchSupport on _ChatRoomPageState {
     final evidence = contextMessages
         .where((message) => message['role'] != 'system')
         .toList(growable: false);
-    final firstDialogue = next.indexWhere((message) => message['role'] != 'system');
+    final firstDialogue =
+        next.indexWhere((message) => message['role'] != 'system');
     next.insertAll(firstDialogue < 0 ? next.length : firstDialogue, rules);
-    final newestUser = next.lastIndexWhere((message) => message['role'] == 'user');
+    final newestUser =
+        next.lastIndexWhere((message) => message['role'] == 'user');
     next.insertAll(newestUser < 0 ? next.length : newestUser, evidence);
     return next;
   }

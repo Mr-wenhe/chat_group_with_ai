@@ -180,7 +180,7 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
       });
       for (final speaker in speakersToUse) {
         // 循环内逐次复检开关：用户可能中途关闭自动聊天或切到工作模式。
-        if (!_isAutoChatEnabled || _workModeEnabled) break;
+        if (!_isAutoChatEnabled || _autoChatPausedByWorkMode) break;
         if (!_isEligibleToReply(speaker)) continue;
         final replyContent = await _generateAiReply(
           speaker,
@@ -189,7 +189,7 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
           isAutoChat: true,
           intent: _pendingReplyIntents[speaker.id],
         );
-        if (_workModeEnabled) break;
+        if (_autoChatPausedByWorkMode) break;
         if (_conversationController.state.phase == ConversationPhase.stopping) {
           break;
         }
@@ -198,7 +198,7 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
       }
 
       // 自动聊天每 3 轮才更新一次记忆，避免每轮都额外调用一次 LLM。
-      if (!_workModeEnabled) {
+      if (!_autoChatPausedByWorkMode) {
         _autoChatMemoryTick++;
         if (_autoChatMemoryTick >= 3) {
           _autoChatMemoryTick = 0;
@@ -209,7 +209,7 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
       autoRunGuard.finish();
       if (_canTouchUi) {
         _setUiState(() {
-          _autoChatStatus = _isAutoChatEnabled && !_workModeEnabled
+          _autoChatStatus = _isAutoChatEnabled && !_autoChatPausedByWorkMode
               ? AutoChatStatus.waiting
               : AutoChatStatus.paused;
         });

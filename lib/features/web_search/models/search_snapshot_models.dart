@@ -12,9 +12,8 @@ class WebSearchResult {
   final String provider;
   final String? language;
 
-  /// True only for the visible-browser fallback, which supports public HTTP
-  /// pages in addition to HTTPS. Persist this bit so a restored snapshot can
-  /// be validated with the same policy as the live result.
+  /// Legacy marker retained so old snapshots created by the removed visible
+  /// browser fallback can still be read. New search routes reject HTTP.
   final bool allowInsecureHttp;
 
   WebSearchResult({
@@ -42,10 +41,8 @@ class WebSearchResult {
           redactSecrets: true,
           redactOpaqueTokens: true,
         ),
-        // Only the explicit visible-browser provider may carry a public HTTP
-        // result.  Keep the policy tied to the normalized provider identity
-        // so a custom/provider route cannot opt into insecure evidence merely
-        // by setting a boolean flag.
+        // Keep legacy HTTP records tied to their former provider identity so
+        // unrelated stored providers cannot opt into insecure evidence.
         allowInsecureHttp =
             allowInsecureHttp && provider.trim() == 'visibleBrowser',
         hasSourceUrl = url != null,
@@ -214,8 +211,8 @@ class WebSearchSnapshot {
         try {
           final provider = raw['provider']?.toString() ?? '';
           if (url == null && provider != 'zhipu-native') continue;
-          // Do not let arbitrary persisted providers opt into HTTP. The flag
-          // is accepted only for the internal visible-browser provider.
+          // Preserve old visible-browser snapshots while rejecting arbitrary
+          // persisted providers that claim the legacy HTTP marker.
           final allowInsecureHttp =
               provider == 'visibleBrowser' && raw['allowInsecureHttp'] == true;
           results.add(

@@ -28,16 +28,25 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         if (!isAutoChat) _consecutiveRound++;
       });
 
-      // 私聊固定由对方角色回复；群聊则由意图编排器挑选发言者。
-      var charactersToReply = _isDirectChat
+      final roundtableMode =
+          _roundtableModeEnabled && !_isDirectChat && !isAutoChat;
+      final roundtableParticipants = roundtableMode
+          ? _prepareRoundtableParticipants(mentionedIds, isAutoChat: isAutoChat)
+          : null;
+      if (roundtableMode && roundtableParticipants == null) return;
+
+      // 私聊固定由对方回复；圆桌模式依次邀请新闻角色与所有可发言成员；
+      // 普通群聊仍由拟人化编排器挑选本轮发言者。
+      final charactersToReply = _isDirectChat
           ? _directReplyCharacters()
-          : _charactersForIntents(_selectGroupReplyIntents(
-              userMessage:
-                  userMessage!, // nullable param, non-null at this point
-              mentionedIds: mentionedIds,
-              isAutoChat: isAutoChat,
-              userSentiment: userSentiment,
-            ));
+          : roundtableMode
+              ? roundtableParticipants!
+              : _charactersForIntents(_selectGroupReplyIntents(
+                  userMessage: userMessage!,
+                  mentionedIds: mentionedIds,
+                  isAutoChat: isAutoChat,
+                  userSentiment: userSentiment,
+                ));
       if (charactersToReply.isEmpty) {
         // 有人有资格但编排器选择“本轮沉默”：静默收尾，不算异常。
         if (_characters.any(_isEligibleToReply)) return;
@@ -72,10 +81,23 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         isAutoChat: isAutoChat,
         searchEnabled: charactersToReply.any((character) =>
             character.webSearchEnabled || character.zhipuSearchAnswerOnly),
+        category: roundtableMode ? web_search.SearchCategory.news : null,
+        freshness: roundtableMode ? web_search.SearchFreshness.week : null,
         forceSearch: charactersToReply.any(
           (character) => character.zhipuSearchAnswerOnly,
         ),
       );
+      if (roundtableMode && searchTurnContext.snapshot?.hasResults != true) {
+        _clearPendingRoundtableMentions(mentionedIds);
+        if (mounted && !isAutoChat) {
+          AppToast.show(
+            context,
+            '未获得可用的热点搜索结果，本轮圆桌讨论未开始。请检查联网搜索状态和新闻角色配置。',
+            icon: Icons.info_outline_rounded,
+          );
+        }
+        return;
+      }
       final repliedIds = <String>[];
       for (final character in charactersToReply) {
         final wasPendingReply = _pendingMentionedIds.contains(character.id);
@@ -174,5 +196,49 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
       // never stranded while the page remains active.
       if (!isAutoChat) await _drainQueuedUserMessage();
     }
+  }
+
+  List<AICharacter>? _prepareRoundtableParticipants(
+    List<String>? mentionedIds, {
+    required bool isAutoChat,
+  }) {
+    final newsCharacter = _roundtableNewsCharacter;
+    if (newsCharacter == null) {
+      _clearPendingRoundtableMentions(mentionedIds);
+      if (mounted && !isAutoChat) {
+        AppToast.show(
+          context,
+          '圆桌会议需要在当前群聊配置“新闻角色”（智谱搜索问答）。',
+          icon: Icons.info_outline_rounded,
+        );
+      }
+      return null;
+    }
+
+    final participants = _roundtableParticipants(
+      newsCharacter: newsCharacter,
+      mentionedIds: mentionedIds ?? const [],
+    );
+    if (participants.isEmpty) {
+      _clearPendingRoundtableMentions(mentionedIds);
+      final reason = _blockReasonFor(newsCharacter);
+      final message = _agenticRunningCharacterIds.contains(newsCharacter.id)
+          ? '圆桌会议未开始：新闻角色正在执行另一项协作任务。'
+          : !_isEligibleToReply(newsCharacter)
+              ? '圆桌会议未开始：${newsCharacter.name}暂不可回复${reason == null ? '，请检查角色配置' : '（${_replyBlockText(reason)}）'}。'
+              : '圆桌会议未开始：新闻角色当前已被禁言。';
+      if (mounted && !isAutoChat) {
+        AppToast.show(context, message, icon: Icons.info_outline_rounded);
+      }
+      return null;
+    }
+    _pendingReplyIntents.clear();
+    return participants;
+  }
+
+  void _clearPendingRoundtableMentions(List<String>? mentionedIds) {
+    if (mentionedIds == null || mentionedIds.isEmpty) return;
+    final mentioned = mentionedIds.toSet();
+    _pendingMentionedIds.removeWhere(mentioned.contains);
   }
 }

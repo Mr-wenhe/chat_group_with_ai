@@ -23,7 +23,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
         : _parseMentions(userMessage ?? '').toSet();
     // 所有回复入口都在实际生成前复检，避免排队期间禁言仍然发言。
     if (!_mayAutoPick(character, mentionedIds: userMentionedIds)) return '';
-    if (isAutoChat && _workModeEnabled) {
+    if (isAutoChat && _autoChatPausedByWorkMode) {
       // No stream is created on this path, so any transition latch must not
       // survive until the next unrelated automatic reply.
       if (!_isStreaming) _discardCurrentStream = false;
@@ -96,8 +96,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     // context and never get search evidence injected into their prompt.
     final webSearch =
         character.webSearchEnabled || character.zhipuSearchAnswerOnly
-        ? searchTurnContext?.snapshot
-        : null;
+            ? searchTurnContext?.snapshot
+            : null;
     // 查询模型能力（是否支持图片输入），决定要不要拼多模态内容。
     final capability = _aiGateway.capability(provider, config.modelName);
     final apiMessages = _withWebSearchContext(
@@ -130,7 +130,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       maxTokens: replyInputBudget,
     );
     // 上面的 await 期间用户可能切到工作模式，此时放弃这次自动聊天回复。
-    if (isAutoChat && _workModeEnabled) {
+    if (isAutoChat && _autoChatPausedByWorkMode) {
       _discardCurrentStream = false;
       return '';
     }
@@ -154,6 +154,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
 
     // 开启流式语音播报时，为这条回复新建切句缓冲（无音色则整条不朗读）。
     _beginVoiceReply(character);
+    final hideZhipuSourceAttribution =
+        webSearch?.provider.trim().toLowerCase() == 'zhipu-native';
     final session = StreamingReplySession();
     _streamingSession = session;
     if (_canTouchUi) _setUiState(() {});
@@ -174,6 +176,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       ),
       // 每收到一段增量就直接改临时消息的 content 并请求重绘（不走 setState 全量重建）。
       onDraft: (draft) {
+        // 智谱来源标记可能被拆在多个增量中，等完整回复清理后再展示。
+        if (hideZhipuSourceAttribution) return;
         temp.content = draft;
         _conversationController.updateStreamingDraft(draft);
         _flushStreamingUi();
@@ -270,6 +274,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       webSearch == null
           ? const <String>[]
           : _chatRoomSearchContextFormatter.format(webSearch).sourceIds,
+      hideCitations: webSearch?.provider.trim().toLowerCase() == 'zhipu-native',
     );
     if (webSearch != null) {
       fullContent = _chatRoomSearchContextFormatter.sanitizeAnswerLinks(
@@ -318,6 +323,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     if (failed) {
       _cancelVoiceReply();
     } else {
+      if (hideZhipuSourceAttribution) _feedVoiceReplyDraft(fullContent);
       _flushVoiceReply();
     }
     await _appendMessage(temp);

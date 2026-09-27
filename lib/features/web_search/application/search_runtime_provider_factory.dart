@@ -14,7 +14,6 @@ import '../providers/keyless_html_search_provider.dart';
 import '../providers/native_web_search_adapter.dart';
 import '../providers/search_provider.dart';
 import '../providers/tavily_search_provider.dart';
-import '../providers/visible_browser_search_provider.dart';
 import 'search_provider_route.dart';
 import 'search_flow_logger.dart';
 import '../security/search_endpoint_validator.dart';
@@ -39,7 +38,6 @@ class SearchRuntimeProviderFactory {
 
   List<SearchProviderRoute> buildRoutes({
     NativeWebSearchBinding? nativeSearch,
-    VisibleBrowserSearchHandler? visibleBrowserSearch,
     bool nativeOnly = false,
   }) {
     // No Web build is a supported search target. Browser XHR may buffer an
@@ -100,19 +98,6 @@ class SearchRuntimeProviderFactory {
           isFallback: true,
           priority: routes.length,
           displayName: 'DuckDuckGo HTML（无 Key）',
-        ),
-      );
-    }
-    if (visibleBrowserSearch != null &&
-        !routes.any((route) => route.isVisibleBrowser)) {
-      routes.add(
-        SearchProviderRoute(
-          id: 'builtin-visible-browser',
-          provider: VisibleBrowserSearchProvider(visibleBrowserSearch),
-          isFallback: true,
-          isVisibleBrowser: true,
-          priority: routes.length,
-          displayName: '可见浏览器接管',
         ),
       );
     }

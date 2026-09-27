@@ -6,7 +6,7 @@ Future<void> requirePublicSearchEndpointDns(
   SearchDnsLookup? lookup,
   Duration lookupTimeout = searchDnsLookupTimeout,
 }) async {
-  // The browser adapter cannot provide DNS pinning. Keep this boundary
+  // Browser transports cannot provide DNS pinning. Keep this boundary
   // unconditional so a future provider cannot accidentally re-enable Web
   // traffic by omitting its higher-level kIsWeb guard.
   throw const SearchEndpointDnsException(

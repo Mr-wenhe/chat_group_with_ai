@@ -151,9 +151,12 @@ class SearchContextFormatter {
   /// produced no evidence. Those markers must not look like valid sources.
   String sanitizeCitationsWithSourceIds(
     String answer,
-    Iterable<String> sourceIds,
-  ) =>
-      _sanitizeCitations(answer, sourceIds.toSet());
+    Iterable<String> sourceIds, {
+    bool hideCitations = false,
+  }) {
+    if (hideCitations) return _hideZhipuSourceAttribution(answer);
+    return _sanitizeCitations(answer, sourceIds.toSet());
+  }
 
   /// Enforces the default of returning citations without raw URLs. The
   /// explicit source follow-up is the only path that keeps them visible.
@@ -410,6 +413,22 @@ class SearchContextFormatter {
     });
   }
 
+  static String _hideZhipuSourceAttribution(String answer) {
+    final withoutAttribution = answer
+        .replaceAll(_zhipuAttributionPattern, '')
+        .replaceAll(_citationGroupPattern, '')
+        .replaceAll(_citationCandidatePattern, '');
+    final cleaned = withoutAttribution
+        .replaceAll(RegExp(r'\s+([，。；：！？,.!?;:、])'), r'$1')
+        .replaceAll(RegExp(r'([，,、；:：])\s*(?=[。！？.!?])'), '')
+        .replaceAll(RegExp(r'([。！？.!?])\s*[。！？.!?]+'), r'$1')
+        .replaceFirst(RegExp(r'^[\s，。；：、,.!?;:]+'), '')
+        .trim();
+    return RegExp(r'^[\s，。；：！？、,.!?;:]*$').hasMatch(cleaned)
+        ? ''
+        : cleaned;
+  }
+
   static String _canonicalCitationId(String value) {
     final normalized = value.trim();
     if (normalized.length < 2 || normalized[0].toUpperCase() != 'S') {
@@ -422,6 +441,13 @@ class SearchContextFormatter {
 
   static final _citationCandidatePattern =
       RegExp(r'\[\s*[sS](?:\d+|\s[^\]]*)?\s*\]');
+  static final _citationGroupPattern = RegExp(
+    r'\s*\[\s*[sS]\d+\s*\](?:\s*[、,，和及]\s*\[\s*[sS]\d+\s*\])*',
+  );
+  static final _zhipuAttributionPattern = RegExp(
+    r'(?:这些|上述|以上)?\s*(?:信息|内容|答案|结论)?\s*(?:均|都|主要)?\s*(?:来源于|来自于|来自|根据|依据)\s*(?:智谱(?:联网)?搜索(?:的)?结果?|搜索结果)',
+    caseSensitive: false,
+  );
 }
 
 class _EvidenceResult {

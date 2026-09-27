@@ -13,8 +13,8 @@ class SearchProviderItem {
   final double? providerScore;
   final String? language;
 
-  /// Interactive browser pages may legitimately remain on public HTTP. All
-  /// network providers keep the secure HTTPS default.
+  /// Legacy metadata from removed visible-browser results. Live search routes
+  /// reject this flag before constructing a result snapshot.
   final bool allowInsecureHttp;
 
   SearchProviderItem({

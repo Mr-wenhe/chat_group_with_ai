@@ -166,22 +166,6 @@ void main() {
     expect(routes.single.id, 'native:zhipu:glm-4-flash');
   });
 
-  test('adds visible browser only as the final fallback when supplied', () {
-    final routes = SearchRuntimeProviderFactory(
-      store: SearchProviderConfigStore(box: box, isRelease: true),
-    ).buildRoutes(
-      visibleBrowserSearch: (request, {cancelToken}) async =>
-          SearchProviderResponse(
-              items: const [], sourceProvider: 'visibleBrowser'),
-    );
-
-    expect(routes, hasLength(3));
-    expect(routes[0].kind, SearchProviderKind.duckDuckGoInstantAnswer);
-    expect(routes[1].kind, SearchProviderKind.keylessHtml);
-    expect(routes.last.isVisibleBrowser, isTrue);
-    expect(routes.last.id, 'builtin-visible-browser');
-  });
-
   test('excludes a Provider whose credential requires attention', () async {
     const config = SearchProviderConfig(
       id: 'expired-brave',

@@ -108,10 +108,7 @@ class SearchProviderChain {
       if (_isCancelled(cancelToken)) {
         return _cancelledSnapshot(request: request, provider: route.kind.name);
       }
-      // A visible-browser handoff deliberately waits for a user action, so
-      // the bounded HTTP deadline must not prevent the final fallback from
-      // opening after a slow/empty/429 response.
-      if (!route.isVisibleBrowser && !_hasBudget(effectiveDeadline)) {
+      if (!_hasBudget(effectiveDeadline)) {
         SearchFlowLogger.event(
           'provider_skipped',
           query: request.query,
@@ -168,48 +165,40 @@ class SearchProviderChain {
         retryNumber: retryCount,
       );
       CancelToken? attemptCancelToken;
-      final attempt = route.isVisibleBrowser
-          ? await _executeInteractiveRoute(
-              route: route,
-              request: request,
-              cancelToken: cancelToken,
-              onAttemptCancelToken: (token) => attemptCancelToken = token,
-            )
-          : await retryPolicy.execute<SearchProviderResponse>(
-              operation: (_) {
-                attemptCancelToken = _childCancelToken(cancelToken);
-                return route.provider.search(
-                  request,
-                  credential: route.credential,
-                  cancelToken: attemptCancelToken,
-                );
-              },
-              shouldRetryResult: (response) =>
-                  SearchRetryPolicy.isRetryableFailure(
-                failure: response.failure,
-                statusCode: response.statusCode,
-              ),
-              shouldRetryError: (error) =>
-                  !request.isSensitive &&
-                  SearchRetryPolicy.isRetryableError(error),
-              allowRetry: !request.isSensitive,
-              maxRetriesOverride: (retryPolicy.maxRetries - retryCount)
-                  .clamp(0, retryPolicy.maxRetries)
-                  .toInt(),
-              deadline: effectiveDeadline,
-              isCancelled: () => _isCancelled(cancelToken),
-              onTimeout: () => attemptCancelToken?.cancel(),
-              onRetry: (retryNumber, delay) {
-                _emit(
-                  onStatus,
-                  SearchRunStatus.retrying,
-                  request: request,
-                  provider: route.kind.name,
-                  retryNumber: retryNumber,
-                  retryDelay: delay,
-                );
-              },
-            );
+      final attempt = await retryPolicy.execute<SearchProviderResponse>(
+        operation: (_) {
+          attemptCancelToken = _childCancelToken(cancelToken);
+          return route.provider.search(
+            request,
+            credential: route.credential,
+            cancelToken: attemptCancelToken,
+          );
+        },
+        shouldRetryResult: (response) =>
+            SearchRetryPolicy.isRetryableFailure(
+          failure: response.failure,
+          statusCode: response.statusCode,
+        ),
+        shouldRetryError: (error) =>
+            !request.isSensitive && SearchRetryPolicy.isRetryableError(error),
+        allowRetry: !request.isSensitive,
+        maxRetriesOverride: (retryPolicy.maxRetries - retryCount)
+            .clamp(0, retryPolicy.maxRetries)
+            .toInt(),
+        deadline: effectiveDeadline,
+        isCancelled: () => _isCancelled(cancelToken),
+        onTimeout: () => attemptCancelToken?.cancel(),
+        onRetry: (retryNumber, delay) {
+          _emit(
+            onStatus,
+            SearchRunStatus.retrying,
+            request: request,
+            provider: route.kind.name,
+            retryNumber: retryNumber,
+            retryDelay: delay,
+          );
+        },
+      );
       retryCount += attempt.retryCount;
 
       if (attempt.error != null) {
@@ -238,14 +227,10 @@ class SearchProviderChain {
         } else {
           _recordProviderResponse(route);
         }
-        final interactiveFallbackAvailable = _hasVisibleBrowserAfter(
-          routes,
-          index,
-        );
         if (request.isSensitive ||
             failure.type == SearchFailureType.unsafeQuery ||
             failure.type == SearchFailureType.cancelled ||
-            (attempt.budgetExhausted && !interactiveFallbackAvailable) ||
+            attempt.budgetExhausted ||
             attempt.error is SearchCancelledException) {
           return lastSnapshot;
         }
@@ -270,7 +255,6 @@ class SearchProviderChain {
         provider: response.sourceProvider ?? route.kind.name,
         response: response,
         searchedAt: startedAt.toUtc(),
-        allowInsecureHttp: route.isVisibleBrowser,
         retryCount: retryCount,
         fromCache: response.fromCache,
         degraded: index > 0 || response.degraded,
@@ -365,61 +349,11 @@ class SearchProviderChain {
       request.freshness == domain.SearchFreshness.any;
 
   static int _fallbackTier(SearchProviderRoute route) {
-    if (route.isVisibleBrowser) return 3;
     if (route.kind == domain.SearchProviderKind.duckDuckGoInstantAnswer) {
       return 1;
     }
     if (route.kind == domain.SearchProviderKind.keylessHtml) return 2;
     return 0;
-  }
-
-  bool _hasVisibleBrowserAfter(List<SearchProviderRoute> routes, int index) {
-    for (var next = index + 1; next < routes.length; next++) {
-      if (routes[next].isVisibleBrowser && routes[next].enabled) return true;
-    }
-    return false;
-  }
-
-  Future<SearchRetryResult<SearchProviderResponse>> _executeInteractiveRoute({
-    required SearchProviderRoute route,
-    required domain.SearchRequest request,
-    required CancelToken? cancelToken,
-    required void Function(CancelToken token) onAttemptCancelToken,
-  }) async {
-    if (_isCancelled(cancelToken)) {
-      return const SearchRetryResult.failure(
-        error: SearchCancelledException(),
-        retryCount: 0,
-      );
-    }
-    final child = _childCancelToken(cancelToken);
-    onAttemptCancelToken(child);
-    try {
-      final response = await route.provider.search(
-        request,
-        credential: route.credential,
-        cancelToken: child,
-      );
-      if (_isCancelled(cancelToken)) {
-        return const SearchRetryResult.failure(
-          error: SearchCancelledException(),
-          retryCount: 0,
-        );
-      }
-      return SearchRetryResult.success(response, retryCount: 0);
-    } on Object catch (error, stackTrace) {
-      if (_isCancelled(cancelToken)) {
-        return const SearchRetryResult.failure(
-          error: SearchCancelledException(),
-          retryCount: 0,
-        );
-      }
-      return SearchRetryResult.failure(
-        error: error,
-        stackTrace: stackTrace,
-        retryCount: 0,
-      );
-    }
   }
 
   SearchProviderResponse _normalizeResponse(SearchProviderResponse response) {
