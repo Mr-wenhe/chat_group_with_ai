@@ -96,3 +96,4 @@ flutter:
   uses-material-design: true
   assets:
     - assets/release_templates/
+    - assets/images/roundtable_chat_background.png

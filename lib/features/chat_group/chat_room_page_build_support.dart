@@ -1,5 +1,8 @@
 part of 'chat_room_page.dart';
 
+const _roundtableChatBackgroundAsset =
+    'assets/images/roundtable_chat_background.png';
+
 extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
   Widget _buildPage(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -112,35 +115,37 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
             ),
           if (_isLoadingOlder) const LinearProgressIndicator(minHeight: 2),
           Expanded(
-            child: _messages.isEmpty
-                ? _buildEmptyState(cs)
-                : ChatMessageList(
-                    messages: _messages,
-                    characters: _allGroupCharacters,
-                    progressStartTimes: const <String, int>{},
-                    messageIndex: messageIndex,
-                    characterIndex: characterIndex,
-                    scrollController: _scrollController,
-                    controller: _messageListController,
-                    streamingMessageId: _streamingMessage?.id,
-                    regeneratingMessageId:
-                        _isRegenerating ? _regenerateMessageId : null,
-                    highlightedMentionMessageId: _highlightedMentionMessageId,
-                    isDirectChat: _isDirectChat,
-                    readUserMessageIds: readUserMessageIds,
-                    ownerName: _ownerMentionName,
-                    unknownCharacter: _unknownCharacter(),
-                    editableSenderIds:
-                        _characters.map((character) => character.id).toSet(),
-                    senderColor: _senderColor,
-                    senderNameById: _senderNameById,
-                    onLongPress: _showMessageActionSheet,
-                    onSenderTap: _openCharacterSettings,
-                    onMentionSender: _insertMention,
-                    onQuotedTap: (message) =>
-                        unawaited(_focusSearchResult(message)),
-                    onTaskAction: _handleWorkTaskAction,
-                  ),
+            child: _withRoundtableBackground(
+              _messages.isEmpty
+                  ? _buildEmptyState(cs)
+                  : ChatMessageList(
+                      messages: _messages,
+                      characters: _allGroupCharacters,
+                      progressStartTimes: const <String, int>{},
+                      messageIndex: messageIndex,
+                      characterIndex: characterIndex,
+                      scrollController: _scrollController,
+                      controller: _messageListController,
+                      streamingMessageId: _streamingMessage?.id,
+                      regeneratingMessageId:
+                          _isRegenerating ? _regenerateMessageId : null,
+                      highlightedMentionMessageId: _highlightedMentionMessageId,
+                      isDirectChat: _isDirectChat,
+                      readUserMessageIds: readUserMessageIds,
+                      ownerName: _ownerMentionName,
+                      unknownCharacter: _unknownCharacter(),
+                      editableSenderIds:
+                          _characters.map((character) => character.id).toSet(),
+                      senderColor: _senderColor,
+                      senderNameById: _senderNameById,
+                      onLongPress: _showMessageActionSheet,
+                      onSenderTap: _openCharacterSettings,
+                      onMentionSender: _insertMention,
+                      onQuotedTap: (message) =>
+                          unawaited(_focusSearchResult(message)),
+                      onTaskAction: _handleWorkTaskAction,
+                    ),
+            ),
           ),
           // 底部状态区：文档解析进度优先于"AI 正在回复"提示（前者更需要可取消）。
           if (_documentProcessingToken != null)
@@ -193,6 +198,24 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
           _buildInputArea(),
         ],
       ),
+    );
+  }
+
+  Widget _withRoundtableBackground(Widget content) {
+    if (!_roundtableModeEnabled || _isDirectChat) return content;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        Image.asset(
+          _roundtableChatBackgroundAsset,
+          // Preserve the image ratio. Bottom alignment keeps the table visible
+          // when a wide desktop viewport crops the portrait background.
+          fit: BoxFit.cover,
+          alignment: Alignment.bottomCenter,
+        ),
+        const ColoredBox(color: Color(0x18000000)),
+        content,
+      ],
     );
   }
 }
