@@ -2,7 +2,7 @@
 
 ## What This App Is
 
-AI 群聊模拟器是一个本地优先的 Flutter 应用，用 Hive 存储角色、群组、消息、记忆和设置，用 Dio 调用 OpenAI-compatible chat completions 接口。核心体验在 `ChatRoomPage`：用户发言后，应用根据提及、活跃度、关系状态、角色记忆和频率限制选择 AI 角色流式回复。
+伴伴是一个本地优先的 Flutter 应用，用 Hive 存储角色、群组、消息、记忆和设置，用 Dio 调用 OpenAI-compatible chat completions 接口。核心体验在 `ChatRoomPage`：用户发言后，应用根据提及、活跃度、关系状态、角色记忆和频率限制选择 AI 角色流式回复。
 
 ## Active Feature Areas
 

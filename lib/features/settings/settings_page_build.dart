@@ -71,7 +71,7 @@ extension _SettingsPageBuild on _SettingsPageState {
                     child: Column(
                       crossAxisAlignment: CrossAxisAlignment.start,
                       children: [
-                        Text('AI 群聊模拟器',
+                        Text('伴伴',
                             style: TextStyle(
                                 fontSize: 16,
                                 fontWeight: FontWeight.w600,

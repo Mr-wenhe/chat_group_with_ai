@@ -90,12 +90,12 @@ BEGIN
         BLOCK "040904e4"
         BEGIN
             VALUE "CompanyName", "com.example" "\0"
-            VALUE "FileDescription", "chat_group" "\0"
+            VALUE "FileDescription", "伴伴" "\0"
             VALUE "FileVersion", VERSION_AS_STRING "\0"
-            VALUE "InternalName", "chat_group" "\0"
+            VALUE "InternalName", "伴伴" "\0"
             VALUE "LegalCopyright", "Copyright (C) 2026 com.example. All rights reserved." "\0"
-            VALUE "OriginalFilename", "chat_group.exe" "\0"
-            VALUE "ProductName", "chat_group" "\0"
+            VALUE "OriginalFilename", "伴伴.exe" "\0"
+            VALUE "ProductName", "伴伴" "\0"
             VALUE "ProductVersion", VERSION_AS_STRING "\0"
         END
     END

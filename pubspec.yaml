@@ -1,5 +1,5 @@
 name: chat_group
-description: "AI群聊模拟器 - 创建AI角色群聊，观察AI自动互动"
+description: "伴伴 - 创建AI角色群聊，观察AI自动互动"
 publish_to: 'none'
 
 version: 2.1.0+225

@@ -36,7 +36,7 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
             Text(
               _isDirectChat
                   ? '发条消息，和这个角色单独聊聊。\n对话会保存在本地。'
-                  : '这是一个 AI 群聊模拟器。\n发条消息，AI 角色会自动回复；\n用 @ 可以指定某个角色回应。',
+                  : '这是伴伴。\n发条消息，AI 角色会自动回复；\n用 @ 可以指定某个角色回应。',
               textAlign: TextAlign.center,
               style: TextStyle(
                   fontSize: 14, height: 1.6, color: cs.onSurfaceVariant),

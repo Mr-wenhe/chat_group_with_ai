@@ -27,7 +27,10 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   FlutterWindow window(project);
   Win32Window::Point origin(10, 10);
   Win32Window::Size size(1280, 720);
-  if (!window.Create(L"chat_group", origin, size)) {
+  // Window title (app name, U+4F34 U+4F34) is escaped on purpose: MSVC runs without
+  // /utf-8, so a BOM-less source is read in the system code page and a literal CJK
+  // string raises C4819 - fatal here because the target compiles with /WX.
+  if (!window.Create(L"\u4F34\u4F34", origin, size)) {
     return EXIT_FAILURE;
   }
   window.SetQuitOnClose(true);

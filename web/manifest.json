@@ -1,6 +1,6 @@
 {
-    "name": "chat_group",
-    "short_name": "chat_group",
+    "name": "伴伴",
+    "short_name": "伴伴",
     "start_url": ".",
     "display": "standalone",
     "background_color": "#0175C2",

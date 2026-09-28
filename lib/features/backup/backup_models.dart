@@ -96,7 +96,7 @@ class BackupManifest {
 
   factory BackupManifest.fromJson(Map<String, dynamic> json) {
     if (json['format'] != formatName) {
-      throw const FormatException('不是 Chat Group 备份文件');
+      throw const FormatException('不是伴伴备份文件');
     }
     final scopeName = json['scope']?.toString();
     final scope = BackupScope.values.firstWhere(

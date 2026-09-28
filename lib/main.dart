@@ -203,7 +203,7 @@ class MyApp extends ConsumerWidget {
     final skin = ref.watch(appSkinModeProvider);
     final isGolden = skin == AppSkinMode.golden;
     return MaterialApp(
-      title: 'AI 群聊模拟器',
+      title: '伴伴',
       theme: isGolden ? AppTheme.goldenTheme : AppTheme.lightTheme,
       darkTheme: isGolden ? AppTheme.goldenTheme : AppTheme.darkTheme,
       themeMode: AppTheme.materialThemeModeFor(skin),
