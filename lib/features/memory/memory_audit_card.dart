@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/features/memory/memory_audit_presenter.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
@@ -12,11 +13,15 @@ class MemoryAuditCard extends StatelessWidget {
   final bool showObserver;
   final ValueChanged<String> onOpenDetails;
 
+  /// 已解析的观察 AI IP 形象图；null → 文本头像。
+  final ImageProvider? observerAvatarImage;
+
   const MemoryAuditCard({
     super.key,
     required this.displayRow,
     required this.showObserver,
     required this.onOpenDetails,
+    this.observerAvatarImage,
   });
 
   @override
@@ -56,6 +61,7 @@ class MemoryAuditCard extends StatelessWidget {
                         label: '观察 AI',
                         value: displayRow.observerName,
                         avatar: displayRow.observerAvatar,
+                        image: observerAvatarImage,
                       ),
                     _MetadataItem(label: '对象', value: subject),
                     _MetadataItem(
@@ -162,10 +168,14 @@ class _ObserverMetadataItem extends StatelessWidget {
   final String value;
   final String avatar;
 
+  /// 已解析的 IP 形象图；null → 回落文本头像。
+  final ImageProvider? image;
+
   const _ObserverMetadataItem({
     required this.label,
     required this.value,
     required this.avatar,
+    this.image,
   });
 
   @override
@@ -176,15 +186,12 @@ class _ObserverMetadataItem extends StatelessWidget {
       child: Row(
         mainAxisSize: MainAxisSize.min,
         children: [
-          CircleAvatar(
+          CharacterAvatar(
             key: const ValueKey('memory-row-observer-avatar'),
-            radius: 10,
-            child: Text(
-              avatar.trim().isEmpty ? fallback : avatar.trim(),
-              maxLines: 1,
-              overflow: TextOverflow.clip,
-              style: const TextStyle(fontSize: 10),
-            ),
+            fallbackText: avatar.trim().isEmpty ? fallback : avatar.trim(),
+            size: 20,
+            image: image,
+            textStyle: const TextStyle(fontSize: 10),
           ),
           const SizedBox(width: 4),
           Flexible(child: _MetadataItem(label: label, value: value)),

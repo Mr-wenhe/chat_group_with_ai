@@ -4,10 +4,16 @@ import 'package:flutter_secure_storage/flutter_secure_storage.dart';
 import 'package:flutter/services.dart';
 
 class SecureStorageService {
+  // Runner 的 macOS Debug/Release 均未启用 App Sandbox；插件默认的 Data
+  // Protection Keychain 需要相应 entitlement，在此签名下写入会报 -34018。
+  // 普通 macOS Keychain 仍是系统安全存储，不回退到 Hive 明文。
+  static const macOsOptions = MacOsOptions(useDataProtectionKeyChain: false);
+
   static const _storage = FlutterSecureStorage(
     aOptions: AndroidOptions(
       encryptedSharedPreferences: true,
     ),
+    mOptions: macOsOptions,
   );
 
   static const String _apiKeyPrefix = 'api_key_';

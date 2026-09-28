@@ -121,6 +121,7 @@ class CredentialRepository {
     if (configId.trim().isEmpty || secret.isEmpty) {
       return const CredentialWriteResult.failed(CredentialFailure.systemError);
     }
+    var stage = 'write';
     try {
       // 过渡期双写：新前缀为主，旧 api_config_key_ 前缀为 best-effort 兼容副本。
       // 旧前缀写入失败不阻断主流程（旧副本缺失不影响新前缀读取）。
@@ -131,16 +132,32 @@ class CredentialRepository {
         // 旧前缀仅用于过渡兼容；主凭据已写入新存储，不记录异常细节。
       }
       // Verify before a caller is allowed to remove any legacy copy.
+      stage = 'verify';
       final stored = await _store.read(credentialIdFor(configId));
       if (stored != secret) {
+        assert(() {
+          debugPrint('[CredentialSave] stage=verify result=mismatch');
+          return true;
+        }());
         return const CredentialWriteResult.failed(
             CredentialFailure.systemError);
       }
       _cache[configId] = secret;
       return const CredentialWriteResult.success();
     } on PlatformException catch (error) {
+      // macOS 插件在 details 中返回 OSStatus；不打印 message、配置 ID 或密钥。
+      assert(() {
+        final status = error.details is num ? error.details : 'unknown';
+        debugPrint('[CredentialSave] stage=$stage status=$status');
+        return true;
+      }());
       return CredentialWriteResult.failed(_mapPlatformFailure(error));
-    } catch (_) {
+    } catch (error) {
+      assert(() {
+        debugPrint(
+            '[CredentialSave] stage=$stage errorType=${error.runtimeType}');
+        return true;
+      }());
       return const CredentialWriteResult.failed(CredentialFailure.systemError);
     }
   }
@@ -203,6 +220,9 @@ class CredentialRepository {
       (await read(configId)).isAvailable;
 
   CredentialFailure _mapPlatformFailure(PlatformException error) {
+    // macOS Security.framework: errSecMissingEntitlement (-34018)。插件把
+    // 状态码放在 details，code 固定为 "Unexpected security result code"。
+    if (error.details == -34018) return CredentialFailure.permissionDenied;
     final code = error.code.toLowerCase();
     if (code.contains('auth') ||
         code.contains('permission') ||

@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
+import 'package:chat_group/features/ai_character/widgets/ip_portrait_panel.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
@@ -48,9 +49,27 @@ void main() {
         child: MaterialApp(home: page),
       );
 
+  /// 等「聚焦输入框触发的自动回滚」跑完，再点同一 ListView 里的其它控件。
+  ///
+  /// 表单 body 是 ListView，`ensureVisible` 把列表滚到底部后名字字段会被顶出
+  /// 视口；此时 `enterText` 聚焦它会启动一次回滚动画（DrivenScrollActivity，
+  /// `shouldIgnorePointer == true`），动画期间 Scrollable 外层的 IgnorePointer
+  /// 吞掉列表内全部命中 —— 紧接着的 `tap` 看似点在控件上，实则被吞掉，
+  /// 后续「找不到弹出菜单项」的报错会误导人以为是 finder 写错。
+  /// 两帧足够：第一帧让 postFrame 回调把动画启动，第二帧把它推到底。
+  Future<void> settleFocusScroll(WidgetTester tester) async {
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+  }
+
   AICharacter character({
     CharacterGender gender = CharacterGender.female,
     bool hasKnownGender = true,
+    String ipImageRelPath = '',
+    bool avatarFromIpImage = false,
+    String ipImageStyle = '',
+    String apiConfigId = 'config-1',
+    String voiceId = '',
   }) =>
       AICharacter(
         id: 'character-1',
@@ -62,9 +81,13 @@ void main() {
         systemPrompt: '温柔地陪伴用户。',
         apiKey: '',
         apiProvider: 'custom',
-        apiConfigId: 'config-1',
+        apiConfigId: apiConfigId,
+        voiceId: voiceId,
         gender: gender,
         hasKnownGender: hasKnownGender,
+        ipImageRelPath: ipImageRelPath,
+        avatarFromIpImage: avatarFromIpImage,
+        ipImageStyle: ipImageStyle,
       );
 
   testWidgets('new character requires an explicit gender', (tester) async {
@@ -156,6 +179,7 @@ void main() {
 
     await tester.enterText(find.byType(TextFormField).at(0), '搜索角色');
     await tester.enterText(find.byType(TextFormField).at(2), '研究员');
+    await settleFocusScroll(tester);
     await tester.tap(find.byType(DropdownButtonFormField<CharacterGender>));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.text('女'));
@@ -188,6 +212,7 @@ void main() {
 
     await tester.enterText(find.byType(TextFormField).at(0), '安静角色');
     await tester.enterText(find.byType(TextFormField).at(2), '研究员');
+    await settleFocusScroll(tester);
     await tester.tap(find.byType(DropdownButtonFormField<CharacterGender>));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.text('女'));
@@ -366,5 +391,277 @@ void main() {
     expect(find.text('未知（迁移中）'), findsOneWidget);
     expect(find.text('女'), findsNothing);
     expect(find.text('创建后不可修改'), findsOneWidget);
+  });
+
+  testWidgets('IP 形象面板出现在姓名行下方', (tester) async {
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+
+    expect(find.text('IP 形象'), findsOneWidget);
+    expect(find.byKey(const ValueKey('ip-portrait-generate')), findsOneWidget);
+    // 未生成时不出「设为头像 / 清除形象」。
+    expect(
+      find.byKey(const ValueKey('ip-portrait-toggle-avatar')),
+      findsNothing,
+    );
+    expect(find.byKey(const ValueKey('ip-portrait-clear')), findsNothing);
+  });
+
+  testWidgets('查看 Prompt 摊出拼装原文，并标注尚未生成过', (tester) async {
+    final saved = character();
+    await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+    await tester.pumpWidget(app(AICharacterFormPage(character: saved)));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('ip-portrait-show-prompt')));
+    await tester.pump();
+
+    expect(find.text('生图 Prompt'), findsOneWidget);
+    expect(
+      find.textContaining('a 28-year-old female 瑜伽教练'),
+      findsOneWidget,
+    );
+    // 没点过生成时要讲清这不是真实发出的请求。
+    expect(find.textContaining('本地模板拼装的预览'), findsOneWidget);
+
+    await tester.tap(find.widgetWithText(TextButton, '关闭'));
+    await tester.pump();
+  });
+
+  testWidgets('未知性别的角色拼 Prompt 不得谎报成女性', (tester) async {
+    // `_draftCharacter()` 曾只带 gender 不带 hasKnownGender，落到构造默认
+    // `true`；而 initState 对 hasKnownGender=false 的角色特意把 _selectedGender
+    // 置 null，于是 `?? CharacterGender.female` 把未知性别硬编码成女性。保存
+    // 路径由 provider 从库里回填，测试看不出来 —— 只有草稿这条线能锁住。
+    final saved = character(
+      gender: CharacterGender.female,
+      hasKnownGender: false,
+    );
+    await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+    await tester.pumpWidget(app(AICharacterFormPage(character: saved)));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('ip-portrait-show-prompt')));
+    await tester.pump();
+
+    // 年龄保留、性别词整个省略（_subjectClause 对 hasKnownGender=false 的降级）。
+    expect(find.textContaining('a 28-year-old 瑜伽教练'), findsOneWidget);
+    expect(find.textContaining('female'), findsNothing);
+    expect(find.textContaining('male'), findsNothing);
+
+    await tester.tap(find.widgetWithText(TextButton, '关闭'));
+    await tester.pump();
+  });
+
+  testWidgets('必填项没填齐时禁用生成，并点名缺什么', (tester) async {
+    // 空草稿曾能直接生成，拼出 `an AI companion.` 这种没有姓名/职业的空壳
+    // prompt，还照样扣一次生图费。按钮置灰的同时必须说清缺哪几项。
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+
+    final generate = tester.widget<FilledButton>(
+      find.byKey(const ValueKey('ip-portrait-generate')),
+    );
+    expect(generate.onPressed, isNull);
+    expect(find.text('请先填写：名字、性别、角色'), findsOneWidget);
+  });
+
+  testWidgets('必填项填齐后生成按钮启用，提示换回参考说明', (tester) async {
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextFormField).at(0), '阿杰');
+    await tester.pump();
+    await tester.enterText(find.byType(TextFormField).at(2), '工程师');
+    await tester.pump();
+    await tester.tap(find.byType(DropdownButtonFormField<CharacterGender>));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('男'));
+    await tester.pump();
+
+    final generate = tester.widget<FilledButton>(
+      find.byKey(const ValueKey('ip-portrait-generate')),
+    );
+    expect(generate.onPressed, isNotNull);
+    expect(find.text('请先填写：名字、性别、角色'), findsNothing);
+    expect(find.textContaining('提炼长相'), findsOneWidget);
+  });
+
+  testWidgets('面板滚出视口后不被卸载，生成状态得以存活', (tester) async {
+    // 表单 body 是 ListView，面板随滚动被 collectGarbage 卸载时，后台的生成
+    // 其实已跑完并写盘，只是 mounted 变假导致 _tracker.adopt() 被跳过 —— 用户
+    // 看到的正是「滚回来生成就停了」。保活是这条链的解药，本例锁住它：去掉
+    // mixin 后 State 会被重建，实例标识一变测试立刻红。
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+
+    final before = tester.state<IpPortraitPanelState>(
+      find.byType(IpPortraitPanel),
+    );
+
+    await tester.drag(find.byType(ListView), const Offset(0, -4000));
+    await tester.pumpAndSettle();
+    await tester.drag(find.byType(ListView), const Offset(0, 4000));
+    await tester.pumpAndSettle();
+
+    final after = tester.state<IpPortraitPanelState>(
+      find.byType(IpPortraitPanel),
+    );
+    expect(identical(before, after), isTrue);
+  });
+
+  testWidgets('草稿带全 apiConfigId / voiceId，LLM 外观改写不再静默失效',
+      (tester) async {
+    // 这两项曾被 _draftCharacter() 漏带：拼 prompt 用的是草稿，于是
+    // _describeVisual 看到空 apiConfigId 直接返回 null，外观改写 100% 静默
+    // 走本地模板，音色线索也不出现 —— 出图全是头发却无从排查。
+    final saved = character(voiceId: 'zh_female_gaolengyujie_moon_bigtts');
+    await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+    await tester.pumpWidget(app(AICharacterFormPage(character: saved)));
+    await tester.pump();
+
+    expect(
+      find.byKey(const ValueKey('ip-portrait-rewrite-source')),
+      findsOneWidget,
+    );
+    expect(find.textContaining('由聊天模型「测试配置」改写'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('ip-portrait-show-prompt')));
+    await tester.pump();
+
+    expect(
+      find.textContaining('Voice temperament hint: "高冷御姐"'),
+      findsOneWidget,
+    );
+    await tester.tap(find.widgetWithText(TextButton, '关闭'));
+    await tester.pump();
+  });
+
+  testWidgets('未绑定聊天模型时，面板明确标注走本地模板', (tester) async {
+    // 回落本身不是错，静默才是。要让用户看得见自己没吃到 LLM 改写。
+    final saved = character(apiConfigId: '');
+    await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+    await tester.pumpWidget(app(AICharacterFormPage(character: saved)));
+    await tester.pump();
+
+    expect(find.textContaining('本地模板（未绑定聊天模型）'), findsOneWidget);
+  });
+
+  testWidgets('画风下拉改选后随保存落库，重进表单能还原', (tester) async {
+    final saved = character(ipImageStyle: 'watercolor');
+    await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+    await tester.pumpWidget(app(AICharacterFormPage(character: saved)));
+    await tester.pump();
+    // 收起状态下下拉显示的就是选中项（DropdownButtonFormField 不暴露 value）。
+    expect(find.text('水彩'), findsOneWidget);
+
+    await tester.tap(find.byKey(const ValueKey('ip-portrait-style')));
+    await tester.pump();
+    await tester.tap(find.text('水墨').last);
+    await tester.pump();
+
+    await tester.runAsync(() async {
+      await tester.tap(find.text('更新').first);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(db.aiCharacterBox.get(saved.id)!.ipImageStyle, 'ink');
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump(const Duration(seconds: 4));
+  });
+
+  testWidgets('保存会带上 IP 形象字段（withGender 重建不清空）', (tester) async {
+    // 用不存在的相对路径：解析层返回 null 回落文本头像，避开 testWidgets
+    // FakeAsync 里 FileImage 真实解码卡死；字段往返本身不受影响。
+    final saved = character(
+      ipImageRelPath: 'character-1/missing.png',
+      avatarFromIpImage: true,
+      ipImageStyle: 'watercolor',
+    );
+    await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+    await tester.pumpWidget(app(AICharacterFormPage(character: saved)));
+    await tester.pump();
+
+    expect(find.text('取消头像'), findsOneWidget);
+
+    await tester.runAsync(() async {
+      await tester.tap(find.text('更新').first);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump(const Duration(milliseconds: 300));
+
+    final reloaded = db.aiCharacterBox.get(saved.id)!;
+    expect(reloaded.ipImageRelPath, 'character-1/missing.png');
+    expect(reloaded.avatarFromIpImage, isTrue);
+    expect(reloaded.ipImageStyle, 'watercolor');
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump(const Duration(seconds: 4));
+  });
+
+  testWidgets('取消头像后保存只关开关、不动形象路径', (tester) async {
+    final saved = character(
+      ipImageRelPath: 'character-1/missing.png',
+      avatarFromIpImage: true,
+    );
+    await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+    await tester.pumpWidget(app(AICharacterFormPage(character: saved)));
+    await tester.pump();
+
+    await tester.tap(find.byKey(const ValueKey('ip-portrait-toggle-avatar')));
+    await tester.pump();
+    expect(find.text('设为头像'), findsOneWidget);
+
+    await tester.runAsync(() async {
+      await tester.tap(find.text('更新').first);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump(const Duration(milliseconds: 300));
+
+    final reloaded = db.aiCharacterBox.get(saved.id)!;
+    expect(reloaded.ipImageRelPath, 'character-1/missing.png');
+    expect(reloaded.avatarFromIpImage, isFalse);
+    await tester.pumpWidget(const SizedBox());
+    await tester.pump();
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 100)),
+    );
+    await tester.pump(const Duration(seconds: 4));
+  });
+
+  test('withGender 重建对象时保留 IP 形象字段', () {
+    final source = character(
+      ipImageRelPath: 'character-1/ip.png',
+      avatarFromIpImage: true,
+      ipImageStyle: 'ink',
+    );
+
+    final rebuilt = source.withGender(CharacterGender.male);
+
+    expect(rebuilt.ipImageRelPath, 'character-1/ip.png');
+    expect(rebuilt.avatarFromIpImage, isTrue);
+    expect(rebuilt.ipImageStyle, 'ink');
+    // 顺带守住 voiceId 同类事故的回归。
+    expect(rebuilt.voiceId, source.voiceId);
   });
 }

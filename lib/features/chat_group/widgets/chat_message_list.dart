@@ -37,6 +37,10 @@ class ChatMessageList extends StatelessWidget {
   final Set<String> editableSenderIds;
   final Color Function(AICharacter character) senderColor;
   final String Function(String senderId) senderNameById;
+
+  /// 按发送者解析 IP 形象图；返回 null 则气泡回落文本头像。
+  /// 与 [senderColor] 同构的纯回调，本类不碰 DatabaseService。
+  final ImageProvider? Function(AICharacter? sender) avatarImageOf;
   final void Function(Message message, AICharacter? sender) onLongPress;
   final void Function(AICharacter sender) onSenderTap;
   final void Function(AICharacter sender) onMentionSender;
@@ -65,6 +69,7 @@ class ChatMessageList extends StatelessWidget {
     this.editableSenderIds = const <String>{},
     required this.senderColor,
     required this.senderNameById,
+    required this.avatarImageOf,
     required this.onLongPress,
     required this.onSenderTap,
     required this.onMentionSender,
@@ -124,6 +129,7 @@ class ChatMessageList extends StatelessWidget {
                 isHighlightedMention: highlightedMentionMessageId == message.id,
                 onLongPress: () => onLongPress(message, actionSender),
                 senderColor: senderColor,
+                senderAvatarImage: avatarImageOf(sender),
                 onSenderTap: actionSender == null
                     ? null
                     : () => onSenderTap(actionSender),

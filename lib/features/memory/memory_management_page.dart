@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/database_service_image.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/features/ai_character/ai_character_list_page.dart';
@@ -250,6 +251,7 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
             children: [
               MemoryObserverSidebar(
                 characters: _observerCharacters,
+                avatarImageOf: _db.characterAvatarImage,
                 selectedObserverId: _observerCharacterId,
                 searchQuery: _observerSearchQuery,
                 showAll:
@@ -273,6 +275,7 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
     return MemorySubjectSelector(
       value: _subjectValue,
       characters: _subjectCandidates,
+      avatarImageOf: _db.characterAvatarImage,
       onChanged: _selectSubject,
     );
   }
@@ -294,6 +297,17 @@ class _MemoryManagementPageState extends ConsumerState<MemoryManagementPage> {
     if (selectedId == null) return null;
     for (final character in _characters) {
       if (character.id == selectedId) return character;
+    }
+    return null;
+  }
+
+  /// 按观察 AI 角色 id 解析 IP 形象图（id → AICharacter → 文件）。
+  ImageProvider? _observerAvatarImage(String characterId) =>
+      _db.characterAvatarImage(_characterById(characterId));
+
+  AICharacter? _characterById(String id) {
+    for (final character in _characters) {
+      if (character.id == id) return character;
     }
     return null;
   }

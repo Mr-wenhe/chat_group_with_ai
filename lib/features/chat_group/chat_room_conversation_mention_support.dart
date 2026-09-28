@@ -255,24 +255,20 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
             ),
             child: Row(
               children: [
-                Container(
-                  width: 34,
-                  height: 34,
+                CharacterAvatar(
+                  fallbackText: c.avatar.isNotEmpty ? c.avatar : c.name[0],
+                  size: 34,
+                  image: _characterAvatarImage(c),
                   decoration: BoxDecoration(
                     shape: BoxShape.circle,
                     color: pColor.withValues(alpha: 0.14),
                     border: Border.all(
                         color: pColor.withValues(alpha: 0.3), width: 1.2),
                   ),
-                  child: Center(
-                    child: Text(
-                      c.avatar.isNotEmpty ? c.avatar : c.name[0],
-                      style: TextStyle(
-                          fontSize: 15,
-                          fontWeight: FontWeight.w700,
-                          color: pColor),
-                    ),
-                  ),
+                  textStyle: TextStyle(
+                      fontSize: 15,
+                      fontWeight: FontWeight.w700,
+                      color: pColor),
                 ),
                 const SizedBox(width: 12),
                 Expanded(

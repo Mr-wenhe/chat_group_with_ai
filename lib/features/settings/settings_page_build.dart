@@ -184,6 +184,20 @@ extension _SettingsPageBuild on _SettingsPageState {
                   ),
                 ),
               ),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              _SettingTile(
+                cs: cs,
+                icon: Icons.image_outlined,
+                iconColor: cs.primary,
+                title: '图像服务 · IP 形象生成',
+                subtitle: '为 AI 角色生成 IP 形象的 baseUrl、模型与 API Key',
+                onTap: () => Navigator.of(context).push(
+                  MaterialPageRoute(
+                    builder: (_) => const ImageServiceSettingsPage(),
+                  ),
+                ),
+              ),
             ],
           ),
           const SizedBox(height: 28),

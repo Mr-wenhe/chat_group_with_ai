@@ -54,6 +54,13 @@ class FakeSecureStorageService extends SecureStorageService {
 }
 
 void main() {
+  test('non-sandboxed macOS uses the regular system Keychain', () {
+    expect(
+      SecureStorageService.macOsOptions.toMap()['useDataProtectionKeyChain'],
+      'false',
+    );
+  });
+
   group('CredentialRepository', () {
     late FakeCredentialStore store;
     late FakeSecureStorageService legacy;
@@ -99,6 +106,19 @@ void main() {
 
       expect(result.failure, CredentialFailure.permissionDenied);
       expect(result.value, isNull);
+    });
+
+    test('maps macOS missing entitlement during write to permission denied',
+        () async {
+      store.writeError = PlatformException(
+        code: 'Unexpected security result code',
+        details: -34018,
+      );
+
+      final result = await repository.save('cfg-1', 'secret');
+
+      expect(result.failure, CredentialFailure.permissionDenied);
+      expect(store.values, isEmpty);
     });
 
     test('returns unavailable instead of silently using browser storage',

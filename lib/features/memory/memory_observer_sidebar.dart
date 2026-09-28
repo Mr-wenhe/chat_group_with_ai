@@ -1,5 +1,6 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/text/pinyin_search.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/features/memory/memory_audit_presenter.dart';
 import 'package:flutter/material.dart';
 
@@ -17,6 +18,9 @@ class MemoryObserverSidebar extends StatelessWidget {
   final VoidCallback onSelectAll;
   final ValueChanged<String> onSelectObserver;
 
+  /// 按角色解析 IP 形象图；null / 返回 null → 文本头像。
+  final ImageProvider? Function(AICharacter character)? avatarImageOf;
+
   const MemoryObserverSidebar({
     super.key,
     this.sidebarWidth,
@@ -28,6 +32,7 @@ class MemoryObserverSidebar extends StatelessWidget {
     required this.onClearSearch,
     required this.onSelectAll,
     required this.onSelectObserver,
+    this.avatarImageOf,
   });
 
   @override
@@ -98,6 +103,7 @@ class MemoryObserverSidebar extends StatelessWidget {
                       subtitle: _characterSubtitle(character),
                       avatar: character.avatar,
                       avatarKey: character.id,
+                      image: avatarImageOf?.call(character),
                       selected: selectedObserverId == character.id,
                       onTap: () => onSelectObserver(character.id),
                     );
@@ -374,6 +380,9 @@ class _ObserverNavTile extends StatelessWidget {
   final bool selected;
   final VoidCallback onTap;
 
+  /// 已解析的 IP 形象图；null → 回落文本 / 图标。
+  final ImageProvider? image;
+
   const _ObserverNavTile({
     super.key,
     required this.label,
@@ -382,6 +391,7 @@ class _ObserverNavTile extends StatelessWidget {
     required this.avatarKey,
     required this.selected,
     required this.onTap,
+    this.image,
   });
 
   @override
@@ -404,26 +414,22 @@ class _ObserverNavTile extends StatelessWidget {
       ),
       child: ListTile(
         selected: selected,
-        leading: CircleAvatar(
+        leading: CharacterAvatar(
           key: ValueKey(
             'memory-observer-avatar-$avatarKey',
           ),
-          radius: 16,
-          backgroundColor: selected ? cs.primary : cs.surfaceContainerHighest,
-          child: avatarText == null
-              ? Icon(
-                  Icons.groups_2_outlined,
-                  size: 18,
-                  color: selected ? cs.onPrimary : cs.onSurfaceVariant,
-                )
-              : Text(
-                  avatarText,
-                  maxLines: 1,
-                  overflow: TextOverflow.clip,
-                  style: TextStyle(
-                    color: selected ? cs.onPrimary : cs.onSurfaceVariant,
-                  ),
-                ),
+          fallbackText: avatarText ?? '',
+          size: 32,
+          image: image,
+          background: selected ? cs.primary : cs.surfaceContainerHighest,
+          textStyle: TextStyle(
+            color: selected ? cs.onPrimary : cs.onSurfaceVariant,
+          ),
+          child: Icon(
+            Icons.groups_2_outlined,
+            size: 18,
+            color: selected ? cs.onPrimary : cs.onSurfaceVariant,
+          ),
         ),
         title: Text(label, maxLines: 1, overflow: TextOverflow.ellipsis),
         subtitle: Text(subtitle, maxLines: 1, overflow: TextOverflow.ellipsis),
