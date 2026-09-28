@@ -294,6 +294,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
                       : null,
               onSelectVisionModel: widget.onSelectVisionModelTask ??
                   (_coordinator == null ? null : _selectVisionModel),
+              onConfirmExecutorSwap:
+                  _coordinator == null ? null : _confirmExecutorSwap,
               onRetry: widget.onRetryTask ??
                   (_coordinator == null ? null : _retryTask),
               onReauthorize: widget.onReauthorizeTask ??
@@ -662,6 +664,20 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     return coordinator?.installMissingTool(
           taskId,
           expectedActionVersion: version,
+        ) ??
+        Future<void>.value();
+  }
+
+  Future<void> _confirmExecutorSwap(
+    String taskId,
+    int version,
+    bool swap,
+  ) {
+    final coordinator = _coordinator;
+    return coordinator?.confirmExecutorSwap(
+          taskId,
+          version: version,
+          swap: swap,
         ) ??
         Future<void>.value();
   }

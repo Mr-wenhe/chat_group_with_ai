@@ -552,6 +552,32 @@ void main() {
     expect(result['success'], isTrue);
   });
 
+  test('空回复记为可重试的协议失败而不是笼统的供应商错误', () async {
+    final store = MemoryGovernanceStore();
+    final client = FakeCompletionClient();
+    client.responder = (_) async => {
+          'success': false,
+          'message': '模型返回了空内容',
+          'failureCode': 'emptyResponse',
+          'retryable': true,
+        };
+    final gateway = AiRequestGateway(store: store, client: client);
+
+    await gateway.sendChatMessage(
+      apiKey: 'secret',
+      provider: ApiProvider.deepseek,
+      model: 'deepseek-chat',
+      messages: messages,
+      purpose: AiRequestPurpose.reply,
+      conversationId: 'group-1',
+      characterId: 'char-1',
+      maxRetries: 0,
+    );
+
+    expect(store.diagnostics.last.status, 'failed');
+    expect(store.diagnostics.last.failureType, 'empty_completion');
+  });
+
   test('网关重试按 RetryAttempt 回退温度', () async {
     final store = MemoryGovernanceStore();
     final client = FakeCompletionClient();

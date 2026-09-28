@@ -54,6 +54,36 @@ void main() {
         isEmpty,
       );
     });
+
+    test('bounds text to the limit the caller asked for', () {
+      final opinion = '字' * 1500;
+
+      expect(WorkPublicUpdateStream.boundText(opinion, maximum: 2400), opinion);
+      expect(
+        WorkPublicUpdateStream.boundText(
+          opinion,
+          maximum: WorkPublicUpdateStream.maximumDraftCharacters,
+        ).length,
+        WorkPublicUpdateStream.maximumDraftCharacters + 1,
+      );
+    });
+
+    test('keeps the live draft terse but explains a durable truncation', () {
+      final opinion = '字' * 1500;
+
+      expect(
+        WorkPublicUpdateStream.boundText(opinion, maximum: 1200),
+        endsWith('…'),
+      );
+      expect(
+        WorkPublicUpdateStream.boundText(
+          opinion,
+          maximum: 1200,
+          explicitNotice: true,
+        ),
+        endsWith('（已截断，原文 1500 字）'),
+      );
+    });
   });
 
   testWidgets(

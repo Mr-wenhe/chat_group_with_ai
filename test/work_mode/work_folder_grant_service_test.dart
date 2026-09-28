@@ -84,6 +84,60 @@ void main() {
     expect(service.isPathAuthorized('${child.path}/report.md'), isTrue);
   });
 
+  test('opens the picker at the directory the task asked for', () async {
+    final needed = await Directory('${hiveDirectory.path}/needed').create();
+    final service = WorkFolderGrantService(box: settingsBox, isWindows: false);
+    String? initialDirectory;
+
+    final result = await service.requestFolder(
+      picker: ([String? start]) async {
+        initialDirectory = start;
+        return needed.path;
+      },
+      requestedPath: needed.path,
+      forcePicker: true,
+      consent: (_) async => true,
+    );
+
+    expect(initialDirectory, needed.path);
+    expect(result.granted, isTrue);
+  });
+
+  test('falls back to the nearest existing ancestor of a missing request',
+      () async {
+    final service = WorkFolderGrantService(box: settingsBox, isWindows: false);
+    String? initialDirectory;
+
+    await service.requestFolder(
+      picker: ([String? start]) async {
+        initialDirectory = start;
+        return null;
+      },
+      requestedPath: '${hiveDirectory.path}/ghost/nested/file.md',
+      forcePicker: true,
+    );
+
+    expect(initialDirectory, hiveDirectory.path);
+  });
+
+  test('opens the picker without a start directory when nothing is requested',
+      () async {
+    final service = WorkFolderGrantService(box: settingsBox, isWindows: false);
+    var pickerCalls = 0;
+    String? initialDirectory = 'sentinel';
+
+    await service.requestFolder(
+      picker: ([String? start]) async {
+        pickerCalls += 1;
+        initialDirectory = start;
+        return null;
+      },
+    );
+
+    expect(pickerCalls, 1);
+    expect(initialDirectory, isNull);
+  });
+
   test('removal takes effect immediately without deleting the directory',
       () async {
     final root = await Directory('${hiveDirectory.path}/project').create();
@@ -161,14 +215,14 @@ void main() {
     );
 
     final denied = await service.requestFolder(
-      picker: () async => root.path,
+      picker: ([String? _]) async => root.path,
       consent: (_) async => false,
     );
     expect(denied.status, WorkFolderRequestStatus.cancelled);
     expect(service.grants, isEmpty);
 
     final granted = await service.requestFolder(
-      picker: () async => root.path,
+      picker: ([String? _]) async => root.path,
       consent: (_) async => true,
     );
     expect(granted.granted, isTrue);
@@ -222,14 +276,14 @@ void main() {
     await service.addDirectory(root.path);
 
     final withoutCallback = await service.requestFolder(
-      picker: () async =>
+      picker: ([String? _]) async =>
           fail('an existing grant should not reopen the picker'),
     );
     expect(withoutCallback.status, WorkFolderRequestStatus.unavailable);
     expect(service.grants.single.cloudDisclosureConfirmedAt, isNull);
 
     final confirmed = await service.requestFolder(
-      picker: () async =>
+      picker: ([String? _]) async =>
           fail('an existing grant should not reopen the picker'),
       consent: (_) async => true,
     );
@@ -259,7 +313,7 @@ void main() {
     );
 
     final confirmed = await service.requestFolder(
-      picker: () async =>
+      picker: ([String? _]) async =>
           fail('an existing grant should not reopen the picker'),
       consent: (_) async => true,
     );
@@ -280,7 +334,7 @@ void main() {
     );
 
     final result = await service.requestFolder(
-      picker: () async => root.path,
+      picker: ([String? _]) async => root.path,
       requireWritable: true,
       consent: (_) async => true,
     );
@@ -314,7 +368,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: service,
-      folderPicker: () async => null,
+      folderPicker: ([String? _]) async => null,
     );
     addTearDown(() async {
       await coordinator.dispose();
@@ -378,7 +432,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: service,
-      folderPicker: () async => root.path,
+      folderPicker: ([String? _]) async => root.path,
       folderGrantConsent: (_) async => true,
     );
     addTearDown(() async {

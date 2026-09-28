@@ -484,7 +484,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: grants,
-      folderPicker: () async {
+      folderPicker: ([String? _]) async {
         pickerCalls++;
         return pickerCalls == 1 ? null : authorizedDirectory.path;
       },

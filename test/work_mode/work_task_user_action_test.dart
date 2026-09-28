@@ -364,4 +364,35 @@ void main() {
     expect(action.blockerId, 'executorIdentityMismatch');
     expect(action.kind, WorkTaskUserActionKind.openTask);
   });
+
+  test('a pin the group cannot satisfy offers an executor confirmation', () {
+    final base = _discussion(
+      executorId: 'elected',
+      candidates: const <String>['elected', 'pinned'],
+      phase: WorkDiscussionPhase.blocked,
+      blockers: const <String>['executorPinConflict'],
+      openQuestions: const <String>['群推举乙作为最终执行人，但交付合同钉定的是甲'],
+    );
+    final task = _task(
+      id: 'pin-conflict-task',
+      executionStateJson: jsonEncode({
+        'discussionState': base.copyWith(
+          deliverableContract: <String, dynamic>{
+            ..._contract(),
+            'explicitExecutorId': 'pinned',
+          },
+        ).toJson(),
+      }),
+    );
+
+    final actions = WorkTaskUserAction.forTask(task);
+    expect(actions, hasLength(1));
+    expect(actions.single.blockerId, 'executorPinConflict');
+    expect(actions.single.kind, WorkTaskUserActionKind.confirmExecutorSwap);
+    expect(actions.single.label, '确认执行人');
+    expect(
+      WorkTaskUserAction.versionFor(task, 'executorPinConflict'),
+      actions.single.version,
+    );
+  });
 }

@@ -463,6 +463,10 @@ class AiRequestGateway {
     if (value.contains('网络') || value.contains('connection')) {
       return 'connection';
     }
+    // Keep the typed empty-completion signal distinguishable in the audit
+    // trail: without it every provider-side hiccup collapses into
+    // `provider_error` and the raw cause is no longer recoverable.
+    if (result?['failureCode'] == 'emptyResponse') return 'empty_completion';
     return 'provider_error';
   }
 

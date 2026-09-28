@@ -347,6 +347,49 @@ void main() {
     expect(result['retryable'], isTrue);
   });
 
+  test('empty completion keeps the upstream stop signal for diagnosis',
+      () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response(
+          requestOptions: options,
+          statusCode: 200,
+          data: {
+            'choices': [
+              {
+                'message': {'content': ''},
+                'finish_reason': 'length',
+              }
+            ],
+            'usage': {
+              'prompt_tokens': 7314,
+              'completion_tokens': 4096,
+              'completion_tokens_details': {'reasoning_tokens': 4096},
+            },
+          },
+        ));
+      },
+    ));
+    final service = ChatApiService(dio: dio);
+
+    final result = await service.sendChatMessage(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isFalse);
+    expect(result['emptyCompletionDetail'], {
+      'finishReason': 'length',
+      'completionTokens': 4096,
+      'reasoningTokens': 4096,
+    });
+  });
+
   test('non-stream completion accepts reasoning content when content is empty',
       () async {
     final dio = Dio();

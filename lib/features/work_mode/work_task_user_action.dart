@@ -15,6 +15,7 @@ enum WorkTaskUserActionKind {
   installTool,
   authorizeFolder,
   approveCommand,
+  confirmExecutorSwap,
   openTask,
 }
 
@@ -41,6 +42,7 @@ class WorkTaskUserAction {
         WorkTaskUserActionKind.installTool => '处理安装',
         WorkTaskUserActionKind.authorizeFolder => '授权目录',
         WorkTaskUserActionKind.approveCommand => '查看审批',
+        WorkTaskUserActionKind.confirmExecutorSwap => '确认执行人',
         WorkTaskUserActionKind.openTask => '查看任务',
       };
 
@@ -179,6 +181,31 @@ class WorkTaskUserAction {
               <String>[...questions, ...blockers],
             ),
             kind: WorkTaskUserActionKind.answerQuestion,
+          ),
+        );
+      }
+      final conflictBlocker = blockers.firstWhere(
+        (item) => _executorConflictBlockers.contains(item),
+        orElse: () => '',
+      );
+      if (conflictBlocker.isNotEmpty) {
+        actions.add(
+          WorkTaskUserAction(
+            taskId: task.id,
+            blockerId: conflictBlocker,
+            version: _discussionVersion(
+              task,
+              conflictBlocker,
+              <String>[
+                ...questions,
+                ...blockers,
+                // A changed pin is a different decision, so an older button
+                // must go inert instead of confirming the new one.
+                state.deliverableContract?['explicitExecutorId']?.toString() ??
+                    '',
+              ],
+            ),
+            kind: WorkTaskUserActionKind.confirmExecutorSwap,
           ),
         );
       }
@@ -420,6 +447,9 @@ class WorkTaskUserAction {
   }
 
   static WorkTaskUserActionKind _kindForBlocker(String blockerId) {
+    if (_executorConflictBlockers.contains(blockerId)) {
+      return WorkTaskUserActionKind.confirmExecutorSwap;
+    }
     if (_memberActionRoleBlockers.contains(blockerId)) {
       return WorkTaskUserActionKind.addMember;
     }
@@ -464,5 +494,12 @@ class WorkTaskUserAction {
     'mentionClarification',
     'discussionNotConverged',
     'discussionRoundLimit',
+  };
+
+  /// A group election may not replace a user-pinned executor on its own, so
+  /// this checkpoint is settled by the owner's explicit choice rather than by
+  /// a free-text answer.
+  static const Set<String> _executorConflictBlockers = <String>{
+    'executorPinConflict',
   };
 }

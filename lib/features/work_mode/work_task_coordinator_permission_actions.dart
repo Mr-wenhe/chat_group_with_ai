@@ -182,24 +182,40 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
         task: task,
         requestedPath: requestedPath,
       );
-      return (request: request, actionVersion: actionVersion);
+      return (
+        request: request,
+        actionVersion: actionVersion,
+        requestedPath: requestedPath,
+      );
     });
 
     WorkFolderRequestResult folderResult;
     try {
       folderResult = await preparation.request;
     } on Object catch (error) {
-      await _failFolderAuthorization(
+      await _reportFolderAuthorizationFailure(
         taskId,
         expectedActionVersion: preparation.actionVersion,
+        notice: const WorkTaskActionNotice(
+          '未获得目录授权：工作目录授权请求失败，请重新选择目录。',
+        ),
         error: error,
       );
       return;
     }
     if (!folderResult.granted) {
-      await _failFolderAuthorization(
+      await _reportFolderAuthorizationFailure(
         taskId,
         expectedActionVersion: preparation.actionVersion,
+        notice: WorkTaskActionNotice(
+          _folderAuthorizationNotice(folderResult),
+          // 选了目录但被拒（没覆盖请求路径、只读、不可用）时，用户手上就有一次
+          // 可修的选择，面板据此弹窗点名需要授权的目录；什么都没选到时没有可
+          // 点名的对象，只记面板详情。
+          requiredDirectory: folderResult.selectedPath == null
+              ? null
+              : preparation.requestedPath,
+        ),
         reason: folderResult.reason,
       );
       return;
@@ -244,18 +260,52 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
     });
   }
 
-  Future<void> _failFolderAuthorization(
+  /// 把「用户点了授权目录却没拿到目录」的结果回传到面板。
+  ///
+  /// 面板只能从 action 的失败里显示提示，所以这里在失败确实落到任务上之后抛给
+  /// 它；任务已被停止或替换时不抛——那种情况下是另一个动作在给用户反馈，再弹
+  /// 一条授权失败只会误导。
+  Future<void> _reportFolderAuthorizationFailure(
+    String taskId, {
+    required int? expectedActionVersion,
+    required WorkTaskActionNotice notice,
+    Object? error,
+    String? reason,
+  }) async {
+    final applied = await _failFolderAuthorization(
+      taskId,
+      expectedActionVersion: expectedActionVersion,
+      error: error,
+      reason: reason,
+    );
+    if (applied) throw notice;
+  }
+
+  /// 面板提示文案。选择器返回空既可能是用户取消，也可能是系统没能弹出窗口
+  /// （`file_picker` 对两者都只返回 null），所以不替用户断言原因，只说清发生了
+  /// 什么、下一步怎么做。
+  String _folderAuthorizationNotice(WorkFolderRequestResult result) {
+    if (result.status == WorkFolderRequestStatus.cancelled) {
+      return '未获得目录授权：目录选择器没有返回任何目录。'
+          '若没有看到选择窗口，请重试或重启 App。';
+    }
+    final reason = result.reason.trim();
+    return '未获得目录授权：${reason.isEmpty ? '请重新选择目录。' : reason}';
+  }
+
+  /// 落库失败原因；返回失败是否真的写进了任务（停止/替换导致的过期结果不写）。
+  Future<bool> _failFolderAuthorization(
     String taskId, {
     required int? expectedActionVersion,
     Object? error,
     String? reason,
   }) {
-    return _serialize(() async {
-      if (_disposed) return;
+    return _serialize<bool>(() async {
+      if (_disposed) return false;
       final current = _taskBox.get(taskId);
       if (!_canApplyFolderResult(current, expectedActionVersion)) {
         _throwIfFolderActionIsStale(current, expectedActionVersion);
-        return;
+        return false;
       }
       final diagnostic = error == null
           ? null
@@ -290,6 +340,7 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
         '等待工作目录授权',
         detail: diagnostic?.technicalDetail ?? failure.technicalDetail,
       );
+      return true;
     });
   }
 

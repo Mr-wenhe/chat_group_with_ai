@@ -211,8 +211,10 @@ final workTaskCoordinatorProvider = Provider<WorkTaskCoordinator>((ref) {
           .map((path) => WorkResourceLockRequest(path: path, mode: mode))
           .toList(growable: false);
     },
-    folderPicker: () => FilePicker.platform.getDirectoryPath(
+    folderPicker: ([String? initialDirectory]) =>
+        FilePicker.platform.getDirectoryPath(
       dialogTitle: '选择工作模式目录',
+      initialDirectory: initialDirectory,
     ),
     snapshotStatusUpdater: (taskId, status) =>
         ref.read(workSnapshotServiceProvider).markTaskStatus(taskId, status),

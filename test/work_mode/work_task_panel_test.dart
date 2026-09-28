@@ -8,6 +8,7 @@ import 'package:chat_group/features/work_mode/presentation/work_task_overlay_hos
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_change_policy.dart';
+import 'package:chat_group/features/work_mode/work_task_action_notice.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
@@ -330,6 +331,72 @@ void main() {
       );
       expect(continueButton.onPressed, isNull);
       expect(continued, isFalse);
+    });
+
+    testWidgets('offers the executor confirmation for a pinned conflict',
+        (tester) async {
+      final conflict = WorkDiscussionState.initial(
+        conversationId: 'group-pin-panel',
+        executorId: 'elected',
+        candidateCharacterIds: const ['elected', 'pinned'],
+        participantCharacterIds: const ['elected', 'pinned'],
+        deliverableContract: const <String, dynamic>{
+          'deliverableType': 'document',
+          'format': 'docx',
+          'location': 'desktop',
+          'contentScope': '输出 Word 文档',
+          'explicitExecutorId': 'pinned',
+          'revisionTarget': '',
+          'requestRevision': 1,
+        },
+      ).copyWith(
+        phase: WorkDiscussionPhase.blocked,
+        understandingPercent: 99,
+        blockers: const ['executorPinConflict'],
+      );
+      final task = _task(
+        id: 'pin-panel-task',
+        conversationId: 'group-pin-panel',
+        characterId: 'elected',
+      )
+        ..status = AgentTaskStatus.paused
+        ..lastError = '等待群讨论解决：executorPinConflict。'
+        ..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          '',
+          conflict,
+        );
+      final choices = <String>[];
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            characterNameFor: (characterId) =>
+                characterId == 'elected' ? '乙' : '甲',
+            onConfirmExecutorSwap: (taskId, version, swap) async {
+              choices.add('$taskId:$swap');
+            },
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      await tester.tap(find.byKey(const Key('work-task-confirm-executor')));
+      await tester.pumpAndSettle();
+      expect(find.textContaining('乙'), findsWidgets);
+      expect(find.textContaining('甲'), findsWidgets);
+
+      await tester.tap(
+        find.byKey(const Key('work-task-confirm-executor-swap')),
+      );
+      await tester.pumpAndSettle();
+      expect(choices, ['pin-panel-task:true']);
     });
 
     testWidgets('offers explicit rebuild for an invalid nested discussion',
@@ -992,6 +1059,133 @@ void main() {
       expect(find.byKey(const Key('work-task-add-folder')), findsOneWidget);
       expect(find.byKey(const Key('work-task-approve')), findsNothing);
       expect(find.byKey(const Key('work-task-reject')), findsNothing);
+    });
+
+    testWidgets('names the required directory when the folder choice is refused',
+        (tester) async {
+      final task = _task(
+        id: 'folder-refused-task',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = jsonEncode(<String, dynamic>{
+          'folderGrantPending': true,
+          'folderRequestPath': '/tmp/project',
+        });
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+            onApprove: (_) async {},
+            onReject: (_) {},
+            // 选择了别的目录时协调器会用带 requiredDirectory 的提示回传，
+            // 面板必须当场弹窗点名需要授权的目录，而不是只留一行详情。
+            onRequestFolder: (_) async {
+              throw const WorkTaskActionNotice(
+                '未获得目录授权：所选目录未覆盖原请求路径，请选择其所在目录。',
+                requiredDirectory: '/tmp/project',
+              );
+            },
+          ),
+        ),
+      ));
+
+      await tester.tap(find.byKey(const Key('work-task-add-folder')));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('需要授权另一个目录'), findsOneWidget);
+      expect(find.textContaining('/tmp/project'), findsWidgets);
+    });
+
+    testWidgets('opens the folder notice through the navigator context',
+        (tester) async {
+      // 面板在 App 里挂在 MaterialApp.builder 的 Overlay 上（见 main.dart），
+      // 位于路由 Navigator 之上：它自己的 context 里既没有 Navigator 也没有
+      // 路由的私有 Overlay，所以弹窗只能走 host 传进来的 dialogContext。
+      // 这里复刻那棵树，否则用例会在「面板位于 Navigator 之下」的测试环境里
+      // 假通过；缺 Overlay 时面板头部会直接构建失败。
+      final navigatorKey = GlobalKey<NavigatorState>();
+      late StateSetter rebuildHost;
+      final task = _task(
+        id: 'folder-refused-above-navigator',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = jsonEncode(<String, dynamic>{
+          'folderGrantPending': true,
+          'folderRequestPath': '/tmp/project',
+        });
+
+      await tester.pumpWidget(MaterialApp(
+        navigatorKey: navigatorKey,
+        builder: (context, child) => Overlay(
+          initialEntries: <OverlayEntry>[
+            OverlayEntry(
+              builder: (_) => StatefulBuilder(
+                builder: (context, setState) {
+                  rebuildHost = setState;
+                  return Stack(
+                    alignment: Alignment.topRight,
+                    children: <Widget>[
+                      Positioned.fill(
+                        child: child ?? const SizedBox.shrink(),
+                      ),
+                      SizedBox(
+                        width: 420,
+                        child: WorkTaskPanel(
+                          tasks: <AgentTask>[task],
+                          eventStreamFor: (_) =>
+                              const Stream<WorkTaskEvent>.empty(),
+                          onSelectTask: (_) {},
+                          onStop: (_) {},
+                          onContinue: (_) {},
+                          onOpenConversation: (_) {},
+                          onCollapse: () {},
+                          onClose: () {},
+                          onApprove: (_) async {},
+                          onReject: (_) {},
+                          dialogContext: navigatorKey.currentContext,
+                          onRequestFolder: (_) async {
+                            throw const WorkTaskActionNotice(
+                              '未获得目录授权：所选目录未覆盖原请求路径，请选择其所在目录。',
+                              requiredDirectory: '/tmp/project',
+                            );
+                          },
+                        ),
+                      ),
+                    ],
+                  );
+                },
+              ),
+            ),
+          ],
+        ),
+        home: const Scaffold(body: SizedBox()),
+      ));
+      // 首帧时路由导航器尚未挂载，dialogContext 还是 null（host 同样如此，
+      // 它是靠后续重建拿到 navigatorKey.currentContext 的）。
+      rebuildHost(() {});
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('work-task-add-folder')));
+      await tester.pump();
+      await tester.pump();
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(find.text('需要授权另一个目录'), findsOneWidget);
+      expect(find.textContaining('/tmp/project'), findsWidgets);
     });
 
     testWidgets('offers install consent for a legacy pandoc checkpoint',

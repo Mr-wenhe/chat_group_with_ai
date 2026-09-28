@@ -80,7 +80,7 @@ void main() {
         home: Scaffold(
           body: WorkModeAgentSettingsSection(
             service: service,
-            pickDirectory: () async => pickedDirectory.path,
+            pickDirectory: ([String? _]) async => pickedDirectory.path,
           ),
         ),
       ),

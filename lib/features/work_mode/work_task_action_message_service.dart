@@ -258,6 +258,8 @@ class WorkTaskActionMessageService {
       WorkTaskUserActionKind.installTool => '继续任务前需要安装一个可信的缺失工具。',
       WorkTaskUserActionKind.authorizeFolder => '继续任务前需要授权工作目录。',
       WorkTaskUserActionKind.approveCommand => '任务准备执行一项需要你确认的命令操作。',
+      WorkTaskUserActionKind.confirmExecutorSwap =>
+        '群推举的执行人与请求里钉定的人不一致，需要你确认由谁来执行。',
       WorkTaskUserActionKind.openTask => '任务在等待你的处理。',
     };
     return '$mention $prefix：$taskName $reason '

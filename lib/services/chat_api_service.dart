@@ -294,6 +294,7 @@ class ChatApiService {
             'message': _emptyCompletionMessage,
             'failureCode': 'emptyResponse',
             'retryable': true,
+            'emptyCompletionDetail': _emptyCompletionDetail(data, apiProtocol),
           };
         }
         final usage = _usageFields(data, apiProtocol);

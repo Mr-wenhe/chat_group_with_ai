@@ -5,6 +5,7 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
+import 'package:chat_group/features/work_mode/work_task_action_notice.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
@@ -34,6 +35,14 @@ typedef WorkTaskVersionedAction = FutureOr<void> Function(
 typedef WorkTaskReply = FutureOr<void> Function(
   String taskId,
   String reply,
+);
+
+/// 执行人冲突的两种确认结果：`swap` 为真表示改派给群推举的角色，否则保留
+/// 请求里钉定的角色。两个分支都必须由用户明确选择，讨论不能自行改派。
+typedef WorkTaskExecutorChoice = FutureOr<void> Function(
+  String taskId,
+  int version,
+  bool swap,
 );
 typedef WorkTaskUndoPreview = FutureOr<List<WorkSnapshotUndoItem>> Function(
     String taskId);
@@ -69,6 +78,9 @@ class WorkTaskPanel extends StatefulWidget {
   final WorkTaskAction? onLater;
   final WorkTaskVersionedAction? onLaterVersioned;
   final WorkTaskUndoPreview? undoPreviewFor;
+
+  /// 群推举的执行人与请求里钉定的人不一致时的确认入口。
+  final WorkTaskExecutorChoice? onConfirmExecutorSwap;
 
   /// 真删除一条任务记录（不可逆）。为 null 时不展示删除入口。
   final WorkTaskAction? onDeleteTask;
@@ -130,6 +142,7 @@ class WorkTaskPanel extends StatefulWidget {
     this.onLater,
     this.onLaterVersioned,
     this.undoPreviewFor,
+    this.onConfirmExecutorSwap,
     this.onDeleteTask,
     this.onOpenInTabStrip,
     this.characterNameFor,
@@ -339,6 +352,8 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               onLater: widget.onLater,
               onLaterVersioned: widget.onLaterVersioned,
               undoPreviewFor: widget.undoPreviewFor,
+              onConfirmExecutorSwap: widget.onConfirmExecutorSwap,
+              characterNameFor: widget.characterNameFor,
               onDeleteTask: widget.onDeleteTask,
               onStop: widget.onStop,
               onContinue: widget.onContinue,
@@ -508,10 +523,43 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
       return true;
     } on Object catch (error) {
       if (mounted) setState(() => _actionError = sanitizeWorkTaskError(error));
+      if (error is WorkTaskActionNotice) {
+        await _showActionNoticeDialog(error);
+      }
       return false;
     } finally {
       if (mounted) setState(() => _actionInFlight = false);
     }
+  }
+
+  /// 只有当场能修好的问题才打断用户：选了目录但选错时，对话框点名需要授权的
+  /// 目录，用户关掉就能直接重选。
+  ///
+  /// 这里按原样显示绝对路径，不走 `_safePanelText`：面板详情会脱敏本地路径，是
+  /// 因为它镜像的是会进入聊天的公开进度；对话框只给机主本人看，设置页也一直这
+  /// 样展示授权目录。需要点名的目录若被脱敏成「[本地路径]」就失去了意义。
+  Future<void> _showActionNoticeDialog(WorkTaskActionNotice notice) async {
+    final requiredDirectory = notice.requiredDirectory?.trim() ?? '';
+    if (!mounted || requiredDirectory.isEmpty) return;
+    // 面板挂在 App 根 Overlay 上，自身 context 位于路由 Navigator 之上，直接
+    // 弹窗会因找不到 Navigator 抛错、变成「点了没反应」。host 传进来的
+    // dialogContext 才是路由导航器的 context，与面板其它弹窗保持一致。
+    await showDialog<void>(
+      context: widget.dialogContext ?? context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('需要授权另一个目录'),
+        content: Text(
+          '任务需要授权的目录是：\n$requiredDirectory\n\n'
+          '请点击「授权目录」，选择它或它的上级目录。',
+        ),
+        actions: <Widget>[
+          TextButton(
+            onPressed: () => Navigator.of(dialogContext).pop(),
+            child: const Text('知道了'),
+          ),
+        ],
+      ),
+    );
   }
 
   void _rememberLatestEvent(WorkTaskEvent event) {

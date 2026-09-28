@@ -22,7 +22,11 @@ class _TaskActions extends StatelessWidget {
   final WorkTaskAction? onUndo;
   final WorkTaskAction? onLater;
   final WorkTaskVersionedAction? onLaterVersioned;
+  final WorkTaskExecutorChoice? onConfirmExecutorSwap;
   final WorkTaskUndoPreview? undoPreviewFor;
+
+  /// 把角色 id 显示成名字；执行人冲突的确认框必须让用户看清是"哪两个人"。
+  final String Function(String characterId)? characterNameFor;
 
   /// 真删除任务记录（不可逆）。为 null 时不展示删除入口。
   final WorkTaskAction? onDeleteTask;
@@ -58,6 +62,8 @@ class _TaskActions extends StatelessWidget {
     required this.onLater,
     required this.onLaterVersioned,
     required this.undoPreviewFor,
+    this.onConfirmExecutorSwap,
+    this.characterNameFor,
     this.onDeleteTask,
     required this.onStop,
     required this.onContinue,
@@ -123,6 +129,20 @@ class _TaskActions extends StatelessWidget {
         WorkTaskUserAction.versionFor(task, 'folderAuthorization');
     final toolActionVersion =
         WorkTaskUserAction.versionFor(task, 'toolMissing');
+    // 合同钉定人与群推举结果不一致是唯一需要用户二选一的讨论检查点。
+    final conflictAction = WorkTaskUserAction.forTask(task)
+        .where(
+          (action) =>
+              action.kind == WorkTaskUserActionKind.confirmExecutorSwap,
+        )
+        .firstOrNull;
+    final conflictState = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    ).state;
+    final pinnedValue = conflictState?.deliverableContract?['explicitExecutorId'];
+    final canKeepPinned = conflictState != null &&
+        pinnedValue is String &&
+        conflictState.candidateCharacterIds.contains(pinnedValue.trim());
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
@@ -271,6 +291,19 @@ class _TaskActions extends StatelessWidget {
                         ),
                 icon: const Icon(Icons.download_outlined),
                 label: const Text('帮助安装工具'),
+              ),
+            if (conflictAction != null && onConfirmExecutorSwap != null)
+              FilledButton.icon(
+                key: const Key('work-task-confirm-executor'),
+                onPressed: actionInFlight
+                    ? null
+                    : () => _confirmExecutorSwap(
+                          context,
+                          expectedVersion: conflictAction.version,
+                          canKeepPinned: canKeepPinned,
+                        ),
+                icon: const Icon(Icons.swap_horiz_rounded),
+                label: const Text('确认执行人'),
               ),
             if (needsVisionModel && onSelectVisionModel != null)
               OutlinedButton.icon(

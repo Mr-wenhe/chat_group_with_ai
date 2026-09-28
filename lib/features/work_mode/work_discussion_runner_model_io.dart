@@ -102,17 +102,35 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       if (cancellation.isCancelled) {
         return const WorkDiscussionTurn.invalid();
       }
-      final response = await (completion ?? _complete)(
-        character: member.character,
-        config: member.config!,
-        apiKey: member.apiKey!,
-        provider: member.provider!,
+      var response = await _sendTurnRequest(
+        member: member,
         conversationId: task.groupId,
         messages: prompt,
         timeout: roleTimeout,
         cancelToken: cancelToken,
-      ).timeout(roleTimeout);
-      final turn = WorkDiscussionTurn.fromResponse(response);
+      );
+      var turn = WorkDiscussionTurn.fromResponse(response);
+      if (turn.emptyCompletion && !cancellation.isCancelled) {
+        // HTTP 200 with an empty completion is a transient, retryable protocol
+        // failure — the execution loop treats it the same way. Resend the
+        // identical request once rather than recording a member failure whose
+        // blocker only that member's next turn could clear. The resend then
+        // re-enters this same parser and repair decision: a prose answer on the
+        // retry is exactly as repairable as one on the first attempt.
+        await _recordDiagnostic(
+          task,
+          '讨论模型返回空内容，已原样重发一次。'
+          '${describeEmptyCompletion(response['emptyCompletionDetail'])}',
+        );
+        response = await _sendTurnRequest(
+          member: member,
+          conversationId: task.groupId,
+          messages: prompt,
+          timeout: roleTimeout,
+          cancelToken: cancelToken,
+        );
+        turn = WorkDiscussionTurn.fromResponse(response);
+      }
       if (turn.valid ||
           !_canRepairDiscussionResponse(turn) ||
           cancellation.isCancelled) {
@@ -143,32 +161,13 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
               '请将下面这段职业意见安全转换为上述 JSON。保留原意，不要补造项目事实；如果意见提出了未确认的数值或前置条件，把它放入 open_questions。\n\n原始职业意见：\n$originalReply',
         },
       ];
-      final repairedResponse = completion != null
-          ? await completion!(
-              character: member.character,
-              config: member.config!,
-              apiKey: member.apiKey!,
-              provider: member.provider!,
-              conversationId: task.groupId,
-              messages: repairMessages,
-              timeout: roleTimeout,
-              cancelToken: cancelToken,
-            ).timeout(roleTimeout)
-          : await _complete(
-              character: member.character,
-              config: member.config!,
-              apiKey: member.apiKey!,
-              provider: member.provider!,
-              conversationId: task.groupId,
-              messages: repairMessages,
-              timeout: roleTimeout,
-              cancelToken: cancelToken,
-              // Repair through the plain response path. Some compatible
-              // providers reject response_format even when the prompt itself
-              // requests a JSON object; the strict parser still gates the
-              // result after this one fallback attempt.
-              structuredJson: false,
-            ).timeout(roleTimeout);
+      final repairedResponse = await _sendTurnRequest(
+        member: member,
+        conversationId: task.groupId,
+        messages: repairMessages,
+        timeout: roleTimeout,
+        cancelToken: cancelToken,
+      );
       return WorkDiscussionTurn.fromResponse(repairedResponse);
     } on TimeoutException {
       if (!cancelToken.isCancelled) {
@@ -224,6 +223,45 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     if (statusCode != null) return '模型请求失败（HTTP $statusCode）';
     final sanitized = sanitizeWorkTaskError(error);
     return sanitized == '任务执行失败' ? '模型请求异常' : sanitized;
+  }
+
+  /// One discussion turn request. Every path — the first attempt, the bounded
+  /// resend after an empty completion, and the protocol repair — must send the
+  /// same request shape, so they share this entry point.
+  ///
+  /// All three deliberately use the plain response path: some compatible
+  /// providers reject `response_format` even when the prompt itself asks for a
+  /// JSON object, and the strict parser still gates the result afterwards.
+  Future<Map<String, dynamic>> _sendTurnRequest({
+    required _DiscussionMember member,
+    required String conversationId,
+    required List<Map<String, dynamic>> messages,
+    required Duration timeout,
+    required CancelToken cancelToken,
+  }) {
+    final override = completion;
+    if (override != null) {
+      return override(
+        character: member.character,
+        config: member.config!,
+        apiKey: member.apiKey!,
+        provider: member.provider!,
+        conversationId: conversationId,
+        messages: messages,
+        timeout: timeout,
+        cancelToken: cancelToken,
+      ).timeout(timeout);
+    }
+    return _complete(
+      character: member.character,
+      config: member.config!,
+      apiKey: member.apiKey!,
+      provider: member.provider!,
+      conversationId: conversationId,
+      messages: messages,
+      timeout: timeout,
+      cancelToken: cancelToken,
+    ).timeout(timeout);
   }
 
   Future<Map<String, dynamic>> _complete({

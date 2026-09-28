@@ -6,8 +6,19 @@ import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
 /// Public fields accepted from one discussion turn. Private reasoning and
 /// tool-shaped fields are intentionally absent from this value object.
 class WorkDiscussionTurn {
+  /// `contentScope` 的解析上限，必须与持久状态闸门
+  /// （`work_discussion_state_validation.dart` 的 `_strictContract`）以及备份
+  /// 导出用的上限一致：解析端比它们更早截断，会在执行人拿到范围说明之前就把
+  /// 内容丢掉，而状态本身其实装得下。
+  static const int contractScopeMaximum = 4096;
+
   final bool valid;
   final String failureReason;
+
+  /// True when the provider answered HTTP 200 with an empty completion. The
+  /// caller may resend the identical request once instead of recording a
+  /// member failure that only that member's next turn could clear.
+  final bool emptyCompletion;
   final String publicUpdate;
   final int understandingPercent;
   final List<String> understandingEvidence;
@@ -23,6 +34,7 @@ class WorkDiscussionTurn {
 
   const WorkDiscussionTurn.invalid({
     this.failureReason = '结构化回复无效',
+    this.emptyCompletion = false,
     this.publicUpdate = '',
     this.understandingPercent = 0,
     this.understandingEvidence = const [],
@@ -39,6 +51,7 @@ class WorkDiscussionTurn {
 
   const WorkDiscussionTurn({
     this.failureReason = '',
+    this.emptyCompletion = false,
     required this.publicUpdate,
     required this.understandingPercent,
     required this.understandingEvidence,
@@ -58,6 +71,7 @@ class WorkDiscussionTurn {
       final statusCode = _httpStatusCode(response['statusCode']);
       final message = _safeText(response['message']);
       return WorkDiscussionTurn.invalid(
+        emptyCompletion: response['failureCode'] == 'emptyResponse',
         failureReason: statusCode != null
             ? '模型请求失败（HTTP $statusCode）'
             : message.isEmpty
@@ -75,7 +89,11 @@ class WorkDiscussionTurn {
       // structured progress and therefore can never open the execution gate.
       return WorkDiscussionTurn.invalid(
         failureReason: '模型返回了非结构化公开内容',
-        publicUpdate: WorkPublicUpdateStream.sanitize(raw),
+        publicUpdate: WorkPublicUpdateStream.boundText(
+          WorkPublicUpdateStream.sanitize(raw),
+          maximum: 1024,
+          explicitNotice: true,
+        ),
       );
     }
 
@@ -247,10 +265,10 @@ class WorkDiscussionTurn {
     final result = <String>[];
     for (final item in value) {
       if (item is! String) return null;
+      // `_safeText` 已经按 [maximum] 封顶（且封顶时把长度让给截断说明），
+      // 再 `substring(0, maximum)` 是空操作，只会让人以为这里还有一层裁切。
       final safe = _safeText(item, maximum: maximum);
-      if (safe.isNotEmpty) {
-        result.add(safe.substring(0, safe.length.clamp(0, maximum).toInt()));
-      }
+      if (safe.isNotEmpty) result.add(safe);
     }
     return result.toSet().take(32).toList(growable: false);
   }
@@ -265,7 +283,11 @@ class WorkDiscussionTurn {
     final safe = WorkPublicUpdateStream.sanitize(value)
         .replaceAll(RegExp(r'[\u0000-\u001f\u007f]'), ' ')
         .trim();
-    return safe.substring(0, safe.length.clamp(0, maximum).toInt());
+    return WorkPublicUpdateStream.boundText(
+      safe,
+      maximum: maximum,
+      explicitNotice: true,
+    );
   }
 
   static String? _optionalId(Object? value) {
@@ -300,7 +322,7 @@ class WorkDiscussionTurn {
       }
       if (item is String) {
         final safe = key == 'contentScope'
-            ? _safeText(item)
+            ? _safeText(item, maximum: contractScopeMaximum)
             : item.replaceAll(RegExp(r'[\u0000-\u001f\u007f]'), ' ').trim();
         if (safe.isNotEmpty || key == 'revisionTarget') output[key] = safe;
       }
@@ -309,13 +331,33 @@ class WorkDiscussionTurn {
   }
 }
 
+/// Renders the upstream stop signal captured alongside an empty completion, so
+/// a later investigation can tell an idle provider apart from a reasoning model
+/// that spent the whole output budget before writing any content.
+String describeEmptyCompletion(Object? detail) {
+  if (detail is! Map) return '';
+  final parts = <String>[];
+  for (final entry in detail.entries) {
+    final value = entry.value?.toString().trim() ?? '';
+    if (value.isEmpty) continue;
+    parts.add(
+        '${entry.key}=${value.substring(0, value.length.clamp(0, 60).toInt())}');
+  }
+  return parts.isEmpty ? '' : '（上游信号：${parts.join('，')}）';
+}
+
 String discussionRoleLabel(AICharacter character) {
   final role = character.role.trim();
   return role.isEmpty ? character.name : '${character.name}（$role）';
 }
 
-String boundedDiscussionText(String value, {int maximum = 800}) {
-  final safe = WorkPublicUpdateStream.sanitize(value);
-  if (safe.length <= maximum) return safe;
-  return '${safe.substring(0, maximum - 1)}…';
-}
+/// 脱敏并封顶一段讨论文本。
+///
+/// [maximum] 是该用途自己的预算，不会再被实时草稿的上限压住；裁掉内容时
+/// 会写明原文规模，读者不会误以为模型只写了这么多。
+String boundedDiscussionText(String value, {int maximum = 800}) =>
+    WorkPublicUpdateStream.boundText(
+      WorkPublicUpdateStream.sanitize(value),
+      maximum: maximum,
+      explicitNotice: true,
+    );

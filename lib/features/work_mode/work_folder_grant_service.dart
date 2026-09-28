@@ -5,11 +5,19 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:hive/hive.dart';
 
 typedef WorkFolderDirectoryValidator = Future<bool> Function(String path);
-typedef WorkFolderPicker = Future<String?> Function();
+
+/// 打开系统目录选择器。
+///
+/// `initialDirectory` 是已存在的初始定位目录，可为空（由服务算好后传入）；它只
+/// 决定对话框打开在哪，是否覆盖任务要求的路径仍由授权后的校验决定。
+typedef WorkFolderPicker = Future<String?> Function([String? initialDirectory]);
 typedef WorkFolderGrantConsent = Future<bool> Function(WorkFolderGrant grant);
 typedef WorkFolderBatchGrantConsent = Future<bool> Function(
   List<WorkFolderGrant> grants,
 );
+
+/// 选择器初始定位目录向上回溯的最大层数；正常路径一两层内就能找到存在的目录。
+const int _maximumInitialDirectoryDepth = 16;
 
 enum WorkFolderRequestStatus { granted, cancelled, unavailable }
 
@@ -18,10 +26,17 @@ class WorkFolderRequestResult {
   final WorkFolderGrant? grant;
   final String reason;
 
+  /// 用户这次实际选中的目录（`null` 表示没选到任何目录）。
+  ///
+  /// 只用于把「选错了目录」和「没选目录」区分开：前者要当场告诉用户该授权哪
+  /// 个目录，后者没有可点名的对象。
+  final String? selectedPath;
+
   const WorkFolderRequestResult({
     required this.status,
     this.grant,
     this.reason = '',
+    this.selectedPath,
   });
 
   bool get granted => status == WorkFolderRequestStatus.granted;
@@ -473,7 +488,7 @@ class WorkFolderGrantService {
     }
     String? selected;
     try {
-      selected = await picker();
+      selected = await picker(await _initialDirectoryFor(requested));
     } on Object {
       return const WorkFolderRequestResult(
         status: WorkFolderRequestStatus.unavailable,
@@ -481,35 +496,43 @@ class WorkFolderGrantService {
       );
     }
     if (selected == null || selected.trim().isEmpty) {
+      // 选择器返回空并不等于用户按了取消：系统没能弹出面板时（例如客户端的
+      // bundle 已失效，AppKit 报 "Unable to display open panel"）file_picker
+      // 同样返回 null。这里只陈述事实，把「谁取消的」留给能区分的地方判断。
       return const WorkFolderRequestResult(
         status: WorkFolderRequestStatus.cancelled,
-        reason: '用户取消了工作目录授权。',
+        reason: '未选择工作目录。',
       );
     }
     try {
       final grant = await previewDirectory(selected);
       if (!grant.available) {
-        return const WorkFolderRequestResult(
+        return WorkFolderRequestResult(
           status: WorkFolderRequestStatus.unavailable,
           reason: '所选工作目录当前不可用。',
+          selectedPath: selected,
         );
       }
       if (requireWritable && !grant.writable) {
-        return const WorkFolderRequestResult(
+        return WorkFolderRequestResult(
           status: WorkFolderRequestStatus.unavailable,
           reason: '所选工作目录只读，工作模式写入需要可写目录。',
+          selectedPath: selected,
         );
       }
       if (requested != null &&
           requested.isNotEmpty &&
           !await _containsPathResolved(grant.path, requested)) {
-        return const WorkFolderRequestResult(
+        return WorkFolderRequestResult(
           status: WorkFolderRequestStatus.unavailable,
           reason: '所选目录未覆盖原请求路径，请选择其所在目录。',
+          selectedPath: selected,
         );
       }
       final confirmed = await _confirmCloudDisclosure(grant, consent);
       if (!confirmed) {
+        // 用户是主动放弃这次授权（或在确认云端使用范围时退出）的，不是选错了
+        // 目录，所以不记录选择结果、也就不触发「去授权那个目录」的提示。
         return WorkFolderRequestResult(
           status: consent == null
               ? WorkFolderRequestStatus.unavailable
@@ -528,11 +551,30 @@ class WorkFolderGrantService {
         grant: committed,
       );
     } on Object {
-      return const WorkFolderRequestResult(
+      return WorkFolderRequestResult(
         status: WorkFolderRequestStatus.unavailable,
         reason: '所选工作目录无效。',
+        selectedPath: selected,
       );
     }
+  }
+
+  /// 选择器的初始定位目录：任务要求的路径存在就直接用它，否则往上找到第一个
+  /// 真实存在的目录。
+  ///
+  /// 这不是安全判断，只是让用户少点几下——授权是否覆盖请求路径仍由
+  /// [previewDirectory] 之后的校验决定，所以这里读的是当前文件系统状态，也不
+  /// 缓存结果。
+  Future<String?> _initialDirectoryFor(String? requestedPath) async {
+    var candidate = requestedPath?.trim() ?? '';
+    if (candidate.isEmpty) return null;
+    for (var depth = 0; depth < _maximumInitialDirectoryDepth; depth++) {
+      if (await Directory(candidate).exists()) return candidate;
+      final parent = Directory(candidate).parent.path;
+      if (parent.isEmpty || parent == candidate) return null;
+      candidate = parent;
+    }
+    return null;
   }
 
   /// Validates a selected directory without persisting a new capability.

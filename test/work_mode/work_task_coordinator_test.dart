@@ -7,6 +7,7 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
+import 'package:chat_group/features/work_mode/work_task_action_notice.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
@@ -549,6 +550,60 @@ void main() {
     await Hive.close();
     if (await directory.exists()) await directory.delete(recursive: true);
   });
+
+  /// 合同钉定人与群推举结果不一致的持久检查点：群已推举 `elected`，合同仍钉 `pinned`。
+  WorkDiscussionState pinConflictState(
+    String conversationId, {
+    List<String> candidates = const <String>['elected', 'pinned'],
+  }) {
+    final base = _discussionState(
+      conversationId: conversationId,
+      executorId: 'elected',
+      requestRevision: 3,
+      phase: WorkDiscussionPhase.blocked,
+      understandingPercent: 99,
+      blockers: const <String>['executorPinConflict'],
+    );
+    return base.copyWith(
+      candidateCharacterIds: candidates,
+      round: 3,
+      understandingEvidence: const <String>[
+        '目标与范围已确认。',
+        '方案取舍与职责划分已确认。',
+        '格式、位置与验收口径已确认。',
+      ],
+      deliverableContract: <String, dynamic>{
+        ...base.deliverableContract!,
+        'explicitExecutorId': 'pinned',
+      },
+    );
+  }
+
+  Future<_FakeDiscussionRunner> useDiscussionRunner() async {
+    await coordinator.dispose();
+    final discussionRunner = _FakeDiscussionRunner();
+    coordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      discussionRunner: discussionRunner,
+    );
+    return discussionRunner;
+  }
+
+  Future<AgentTask> storePinConflictTask(
+    String conversationId, {
+    List<String> candidates = const <String>['elected', 'pinned'],
+  }) async {
+    final task = _taskWithDiscussion(
+      _task(id: '$conversationId-task', conversationId: conversationId),
+      pinConflictState(conversationId, candidates: candidates),
+    )
+      ..status = AgentTaskStatus.paused
+      ..lastError = '等待群讨论解决：executorPinConflict。';
+    await taskBox.put(task.id, task);
+    return task;
+  }
 
   test('direct revisions remain FIFO and keep attachments and time budget',
       () async {
@@ -1472,7 +1527,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: grants,
-      folderPicker: () async {
+      folderPicker: ([String? _]) async {
         pickerCalled = true;
         return requestedRoot;
       },
@@ -1616,7 +1671,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: grants,
-      folderPicker: () async {
+      folderPicker: ([String? _]) async {
         pickerCalled = true;
         return requestedRoot;
       },
@@ -2243,7 +2298,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: grants,
-      folderPicker: () async {
+      folderPicker: ([String? _]) async {
         pickerCalls++;
         return directory.path;
       },
@@ -3429,7 +3484,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: grants,
-      folderPicker: () async {
+      folderPicker: ([String? _]) async {
         pickerCalls++;
         return directory.path;
       },
@@ -3481,7 +3536,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: grants,
-      folderPicker: () {
+      folderPicker: ([String? _]) {
         pickerCalls++;
         return pickerGate.future;
       },
@@ -3532,7 +3587,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: grants,
-      folderPicker: () {
+      folderPicker: ([String? _]) {
         pickerCalls++;
         return pickerGate.future;
       },
@@ -4418,7 +4473,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: grants,
-      folderPicker: () async => null,
+      folderPicker: ([String? _]) async => null,
     );
     addTearDown(guarded.dispose);
 
@@ -4453,7 +4508,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: grants,
-      folderPicker: () => pickerGate.future,
+      folderPicker: ([String? _]) => pickerGate.future,
       folderGrantConsent: (_) async => true,
     );
     addTearDown(() async {
@@ -4501,7 +4556,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: grants,
-      folderPicker: () => pickerGate.future,
+      folderPicker: ([String? _]) => pickerGate.future,
       folderGrantConsent: (_) async => true,
     );
     addTearDown(() async {
@@ -4547,7 +4602,7 @@ void main() {
       eventStore: eventStore,
       runner: runner,
       folderGrantService: grants,
-      folderPicker: () => pickerGate.future,
+      folderPicker: ([String? _]) => pickerGate.future,
       folderGrantConsent: (_) async => true,
     );
     addTearDown(() async {
@@ -4579,6 +4634,175 @@ void main() {
     await _waitForStartedCount(runner, 1);
     expect(runner.startedTaskIds, [task.id]);
     runner.complete(task.id);
+  });
+
+  test('panel folder request reports an unselected directory to the panel',
+      () async {
+    final settingsBox =
+        await Hive.openBox<dynamic>('app_settings-panel-folder-notice');
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      isWindows: false,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+    );
+    final guarded = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: ([String? _]) async => null,
+      folderGrantConsent: (_) async => true,
+    );
+    addTearDown(() async {
+      await guarded.dispose();
+      await settingsBox.deleteFromDisk();
+    });
+    final task = _task(
+      id: 'folder-panel-notice',
+      conversationId: 'group-folder-notice',
+    )
+      ..status = AgentTaskStatus.paused
+      ..executionStateJson = jsonEncode(<String, dynamic>{
+        'folderGrantPending': true,
+      });
+    await taskBox.put(task.id, task);
+    final action = WorkTaskUserAction.forTask(task).single;
+
+    // 用户从面板点「授权目录」却没拿到目录时，必须把结果回传到面板；否则
+    // 界面既不报错也不解释，用户只能看到按钮「点了没反应」。
+    await expectLater(
+      guarded.requestFolderForTask(
+        task.id,
+        expectedActionVersion: action.version,
+      ),
+      throwsA(
+        isA<WorkTaskActionNotice>()
+            .having(
+              (WorkTaskActionNotice notice) => notice.message,
+              'message',
+              contains('目录选择器没有返回任何目录'),
+            )
+            // 没有选到任何目录时点到名的目录也不存在，只记面板详情、不弹对话框。
+            .having(
+              (WorkTaskActionNotice notice) => notice.requiredDirectory,
+              'requiredDirectory',
+              isNull,
+            ),
+      ),
+    );
+
+    final failed = taskBox.get(task.id)!;
+    expect(failed.status, AgentTaskStatus.paused);
+    expect(failed.workFailure?.type, WorkFailureType.authorizationLost);
+    // 选择器返回空既可能是用户取消，也可能是系统没能弹出窗口；持久化的原因
+    // 不能替用户断言他「取消」了。
+    expect(failed.workFailure?.reason, isNot(contains('用户取消')));
+  });
+
+  test('panel folder request reports a directory outside the requested path',
+      () async {
+    final settingsBox =
+        await Hive.openBox<dynamic>('app_settings-panel-folder-scope');
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      isWindows: false,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+    );
+    final guarded = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: ([String? _]) async => directory.path,
+      folderGrantConsent: (_) async => true,
+    );
+    addTearDown(() async {
+      await guarded.dispose();
+      await settingsBox.deleteFromDisk();
+    });
+    final task = _task(
+      id: 'folder-panel-scope',
+      conversationId: 'group-folder-scope',
+    )
+      ..status = AgentTaskStatus.paused
+      ..executionStateJson = jsonEncode(<String, dynamic>{
+        'folderGrantPending': true,
+        'folderRequestPath': '/Volumes/other-project/Desktop',
+        'folderRequiresWritable': true,
+      });
+    await taskBox.put(task.id, task);
+    final action = WorkTaskUserAction.forTask(task).single;
+
+    await expectLater(
+      guarded.requestFolderForTask(
+        task.id,
+        expectedActionVersion: action.version,
+      ),
+      throwsA(
+        isA<WorkTaskActionNotice>()
+            .having(
+              (WorkTaskActionNotice notice) => notice.message,
+              'message',
+              contains('所选目录未覆盖原请求路径'),
+            )
+            // 选了目录但选错了：面板要能当场点名需要授权的目录。路径只随这次
+            // 提示传递，不写进会被导出的任务记录。
+            .having(
+              (WorkTaskActionNotice notice) => notice.requiredDirectory,
+              'requiredDirectory',
+              '/Volumes/other-project/Desktop',
+            ),
+      ),
+    );
+    expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+    expect(
+      taskBox.get(task.id)?.workFailure?.reason,
+      isNot(contains('/Volumes/other-project')),
+    );
+  });
+
+  test('automatic folder request keeps reporting through task state only',
+      () async {
+    final settingsBox =
+        await Hive.openBox<dynamic>('app_settings-auto-folder-silent');
+    final grants = WorkFolderGrantService(
+      box: settingsBox,
+      isWindows: false,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+    );
+    final guarded = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      folderGrantService: grants,
+      folderPicker: ([String? _]) async => null,
+      folderGrantConsent: (_) async => true,
+      requireFolderGrant: true,
+    );
+    addTearDown(() async {
+      await guarded.dispose();
+      await settingsBox.deleteFromDisk();
+    });
+
+    // 自动路径没有可回传结果的界面入口：它只能把结果写进任务状态，不能抛出
+    // 无人接管的异常，也不该让面板提示污染任务失败原因。
+    await guarded.submit(
+      _task(id: 'folder-auto-silent', conversationId: 'group-auto-silent'),
+    );
+    await _waitForTaskState(
+      taskBox,
+      'folder-auto-silent',
+      (current) => current.status == AgentTaskStatus.paused,
+    );
+
+    final paused = taskBox.get('folder-auto-silent')!;
+    expect(paused.workFailure?.type, WorkFailureType.authorizationLost);
+    expect(paused.workFailure?.reason, isNot(contains('用户取消')));
+    expect(paused.workFailure?.reason, isNot(contains('Bad state')));
+    expect(runner.startedTaskIds, isEmpty);
   });
 
   test('queues a conflicting resource and starts it after release', () async {
@@ -4742,6 +4966,99 @@ void main() {
     expect(
       productionContainer.read(workTaskRunnerProvider),
       isA<DefaultWorkTaskRunner>(),
+    );
+  });
+
+  test('confirming the group-elected executor replaces the pinned contract',
+      () async {
+    final discussionRunner = await useDiscussionRunner();
+    final task = await storePinConflictTask('pin-swap-group');
+    final version = WorkTaskUserAction.versionFor(task, 'executorPinConflict');
+    expect(version, greaterThan(0), reason: '面板必须能拿到确认入口');
+
+    await coordinator.confirmExecutorSwap(task.id, version: version, swap: true);
+    await _settle();
+
+    final state = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    expect(state.deliverableContract?['explicitExecutorId'], 'elected');
+    expect(state.executorId, 'elected');
+    expect(state.blockers, isNot(contains('executorPinConflict')));
+    expect(state.phase, isNot(WorkDiscussionPhase.blocked));
+    expect(
+      state.round,
+      0,
+      reason: '重开的检查点必须重新拿到轮数预算，否则会直接落到边界再次暂停',
+    );
+    expect(
+      state.understandingEvidence.length,
+      greaterThanOrEqualTo(3),
+      reason: '群已经收敛的证据不能因为一次确认而重跑丢掉',
+    );
+    expect(discussionRunner.runCount, greaterThan(0));
+  });
+
+  test('keeping the pinned executor re-elects it without the group voting',
+      () async {
+    final discussionRunner = await useDiscussionRunner();
+    final task = await storePinConflictTask('pin-keep-group');
+    final version = WorkTaskUserAction.versionFor(task, 'executorPinConflict');
+
+    await coordinator.confirmExecutorSwap(task.id, version: version, swap: false);
+    await _settle();
+
+    final state = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    expect(state.executorId, 'pinned');
+    expect(state.deliverableContract?['explicitExecutorId'], 'pinned');
+    expect(state.blockers, isNot(contains('executorPinConflict')));
+    expect(state.phase, isNot(WorkDiscussionPhase.blocked));
+    expect(discussionRunner.runCount, greaterThan(0));
+  });
+
+  test('keeping a pinned executor that lost its qualification is refused',
+      () async {
+    await useDiscussionRunner();
+    final task = await storePinConflictTask(
+      'pin-unqualified-group',
+      candidates: const <String>['elected'],
+    );
+    final version = WorkTaskUserAction.versionFor(task, 'executorPinConflict');
+
+    await expectLater(
+      coordinator.confirmExecutorSwap(task.id, version: version, swap: false),
+      throwsA(isA<StateError>()),
+    );
+    await _settle();
+
+    final state = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    expect(state.executorId, 'elected');
+    expect(state.deliverableContract?['explicitExecutorId'], 'pinned');
+  });
+
+  test('a stale executor confirmation cannot rewrite a newer checkpoint',
+      () async {
+    await useDiscussionRunner();
+    final task = await storePinConflictTask('pin-stale-group');
+    final version = WorkTaskUserAction.versionFor(task, 'executorPinConflict');
+
+    await expectLater(
+      coordinator.confirmExecutorSwap(
+        task.id,
+        version: version + 1,
+        swap: true,
+      ),
+      throwsA(isA<StateError>()),
+    );
+    await _settle();
+    expect(
+      WorkDiscussionState.fromExecutionState(task.executionStateJson)
+          ?.deliverableContract?['explicitExecutorId'],
+      'pinned',
     );
   });
 }

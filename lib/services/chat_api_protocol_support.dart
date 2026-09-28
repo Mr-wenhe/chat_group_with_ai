@@ -280,6 +280,72 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
     }
   }
 
+  /// The upstream stop signal that accompanied an empty completion.
+  ///
+  /// It exists so work mode can record *why* a provider answered HTTP 200 with
+  /// no content: an idle endpoint and a reasoning model that spent the whole
+  /// output budget before writing anything look identical otherwise. It is
+  /// protocol data, never shown as a reply.
+  Map<String, dynamic> _emptyCompletionDetail(
+    Map<String, dynamic> data,
+    ApiProtocol protocol,
+  ) {
+    final usage = switch (protocol) {
+      ApiProtocol.geminiGenerateContent => data['usageMetadata'],
+      _ => data['usage'],
+    };
+    final usageMap = usage is Map ? usage : const <String, dynamic>{};
+    final completionTokens = _intValue(
+      protocol == ApiProtocol.geminiGenerateContent
+          ? usageMap['candidatesTokenCount']
+          : usageMap['output_tokens'] ?? usageMap['completion_tokens'],
+    );
+    final reasoningDetails = switch (protocol) {
+      ApiProtocol.geminiGenerateContent => null,
+      _ => usageMap['completion_tokens_details'] ??
+          usageMap['output_tokens_details'],
+    };
+    final reasoningTokens = _intValue(
+      protocol == ApiProtocol.geminiGenerateContent
+          ? usageMap['thoughtsTokenCount']
+          : reasoningDetails is Map
+              ? reasoningDetails['reasoning_tokens']
+              : null,
+    );
+    final stop = switch (protocol) {
+      ApiProtocol.openAiChatCompletions =>
+        _firstChoiceField(data, 'finish_reason'),
+      ApiProtocol.anthropicMessages => data['stop_reason'],
+      ApiProtocol.openAiResponses => data['incomplete_details'] is Map
+          ? (data['incomplete_details'] as Map)['reason']
+          : data['status'],
+      ApiProtocol.geminiGenerateContent =>
+        _firstCandidateField(data, 'finishReason'),
+    };
+    final stopText = stop?.toString().trim() ?? '';
+    return <String, dynamic>{
+      if (stopText.isNotEmpty) 'finishReason': stopText,
+      if (completionTokens != null) 'completionTokens': completionTokens,
+      if (reasoningTokens != null) 'reasoningTokens': reasoningTokens,
+    };
+  }
+
+  Object? _firstChoiceField(Map<String, dynamic> data, String field) {
+    final choices = data['choices'];
+    if (choices is! List || choices.isEmpty || choices.first is! Map) {
+      return null;
+    }
+    return (choices.first as Map)[field];
+  }
+
+  Object? _firstCandidateField(Map<String, dynamic> data, String field) {
+    final candidates = data['candidates'];
+    if (candidates is! List || candidates.isEmpty || candidates.first is! Map) {
+      return null;
+    }
+    return (candidates.first as Map)[field];
+  }
+
   Map<String, dynamic>? _usageFields(
     Map<String, dynamic> data,
     ApiProtocol protocol,

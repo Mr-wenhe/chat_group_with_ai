@@ -7,6 +7,7 @@ import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:hive/hive.dart';
 
 import 'work_artifact_delivery_notice.dart';
+import 'work_task_action_notice.dart';
 import 'work_task_event.dart';
 import 'work_task_event_store.dart';
 import 'work_task_error_sanitizer.dart';
@@ -34,6 +35,7 @@ part 'work_task_coordinator_permission_actions.dart';
 part 'work_task_coordinator_recovery.dart';
 part 'work_task_coordinator_auto_resume.dart';
 part 'work_task_coordinator_discussion_lifecycle.dart';
+part 'work_task_coordinator_executor_conflict.dart';
 part 'work_task_coordinator_scheduling.dart';
 part 'work_task_coordinator_execution.dart';
 part 'work_task_coordinator_workspace_queue.dart';
@@ -286,6 +288,16 @@ class WorkTaskCoordinator {
   }) =>
       _implRefreshDiscussionAfterMemberChange(taskId,
           blockerId: blockerId, version: version);
+
+  /// Settles a checkpoint where the group elected one executor while the
+  /// durable contract still pins another. `swap` confirms the group's candidate;
+  /// otherwise the pinned role keeps the task.
+  Future<void> confirmExecutorSwap(
+    String taskId, {
+    required int version,
+    required bool swap,
+  }) =>
+      _implConfirmExecutorSwap(taskId, version: version, swap: swap);
 
   /// Leaves a blocker paused and records that the user deliberately deferred
   /// it. This is an explicit, idempotent panel action rather than an implicit

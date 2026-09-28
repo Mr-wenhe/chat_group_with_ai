@@ -19,6 +19,38 @@ class WorkPublicUpdateStream {
   static const int maximumDraftCharacters = 1200;
   static const int _maximumSourceCharacters = 64 * 1024;
 
+  /// 截断标记：正文被裁掉时追加，说明原文有多长。
+  ///
+  /// 只补一个 `…` 会让读者以为模型就写了这么多；持久化的消息和协议字段
+  /// 被裁时必须能看出来，否则内容丢失是静默的。
+  static String truncationNotice(int originalLength) =>
+      '…（已截断，原文 $originalLength 字）';
+
+  /// Bounds text to the limit its caller asked for.
+  ///
+  /// 上限由调用方按用途决定，不能由这个类统一负责：实时草稿每多 24 个字符
+  /// 就整串重写一次事件日志（[maximumDraftCharacters]），而一条持久化的讨论
+  /// 消息有自己的预算。两者共用一个常量，会让消息的预算永远达不到。
+  ///
+  /// [explicitNotice] 区分两种语义：[false] 用于仍在增长的实时草稿，只补
+  /// `…`；[true] 用于会落库的正文，附上 [truncationNotice]。
+  static String boundText(
+    String value, {
+    required int maximum,
+    bool explicitNotice = false,
+  }) {
+    final limit = maximum < 1 ? 1 : maximum;
+    if (value.length <= limit) return value;
+    if (!explicitNotice) return '${value.substring(0, limit)}…';
+    final notice = truncationNotice(value.length);
+    final body = limit - notice.length;
+    return body <= 0 ? notice : '${value.substring(0, body)}$notice';
+  }
+
+  /// 实时草稿的对外取值：脱敏后按 [maximumDraftCharacters] 封顶。
+  static String boundedDraft(String value) =>
+      boundText(sanitize(value), maximum: maximumDraftCharacters);
+
   String _source = '';
   String _lastDecodedValue = '';
 
@@ -83,7 +115,9 @@ class WorkPublicUpdateStream {
     return !inString && nesting == 1;
   }
 
-  /// Redacts secrets and locations before a draft is written to the event log.
+  /// Redacts secrets and locations before the text is shown or stored.
+  ///
+  /// 只脱敏，不截断——长度上限由调用方给出（见 [boundText]）。
   static String sanitize(String value) {
     final trimmed = value.trim();
     if (trimmed.isEmpty || _privateReasoningMarker.hasMatch(trimmed)) {
@@ -94,10 +128,7 @@ class WorkPublicUpdateStream {
     var safe = scanner.redact(trimmed, includeOpaqueTokens: true);
     safe = safe.replaceAll(_urlPattern, '[外部地址]');
     safe = safe.replaceAll(_localPathPattern, '[本地路径]');
-    if (safe.length <= maximumDraftCharacters) {
-      return safe;
-    }
-    return '${safe.substring(0, maximumDraftCharacters)}…';
+    return safe;
   }
 
   static String? _decodePartialJsonString(String source, int start) {

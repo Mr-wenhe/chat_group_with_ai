@@ -42,9 +42,16 @@ class _DiscussionSession {
     maxRounds = runner._maxRounds(
       WorkDiscussionState.currentRequestScope(task),
     );
+    // Seeded before the first round so a conflict that is already durable can
+    // be reported without inviting any role to speak.
+    contract = state.deliverableContract;
   }
 
   Future<void> run() async {
+    // A conflict that is already durable needs no new turn: it cannot be
+    // resolved by the group at all, so inviting the members would only make the
+    // owner wait for conclusions that cannot change the outcome.
+    if (await _conflictWithPinnedExecutor()) return;
     for (round = state.round + 1; round <= maxRounds; round++) {
       if (cancellation.isCancelled) return;
       if (!await _beginRound()) return;
@@ -66,6 +73,7 @@ class _DiscussionSession {
       }
       if (cancellation.isCancelled) return;
       await _electExecutor();
+      if (await _conflictWithPinnedExecutor()) return;
       await _summarize();
       if (!await _finishRound()) return;
     }
@@ -155,6 +163,37 @@ class _DiscussionSession {
         cancellation: cancellation,
       );
     }
+  }
+
+  /// A user-pinned executor may only be replaced with that owner's explicit
+  /// confirmation. Carrying on would be pointless: the convergence gate
+  /// requires the pin and the elected executor to agree, so every later round
+  /// caps the understanding at 99% and the task dies on the round limit with a
+  /// misleading "nothing was confirmed" question.
+  Future<bool> _conflictWithPinnedExecutor() async {
+    final elected = state.executorId?.trim() ?? '';
+    final rawPinned = contract?['explicitExecutorId'];
+    final pinned = rawPinned is String ? rawPinned.trim() : '';
+    if (elected.isEmpty || pinned.isEmpty || pinned == elected) return false;
+    final electedMember = membersById[elected];
+    final pinnedMember = membersById[pinned];
+    final electedLabel = electedMember == null
+        ? '新推举的角色'
+        : discussionRoleLabel(electedMember.character);
+    final pinnedLabel = pinnedMember == null
+        ? '原钉定角色'
+        : discussionRoleLabel(pinnedMember.character);
+    await runner._finishBlocked(
+      task,
+      state,
+      updateState,
+      blocker: 'executorPinConflict',
+      question: '群推举 $electedLabel 作为最终执行人，但交付合同钉定的是 $pinnedLabel；'
+          '两者不一致时讨论无法收敛。请在任务面板确认改派，或保留原执行人。',
+      mentionOwner: true,
+      cancellation: cancellation,
+    );
+    return true;
   }
 
   Future<void> _finishBudget() async {

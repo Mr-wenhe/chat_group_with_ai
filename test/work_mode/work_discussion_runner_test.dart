@@ -94,6 +94,7 @@ Map<String, dynamic> _turn({
   List<String> resolvedBlockers = const [],
   Map<String, dynamic>? contract,
   bool needsUser = false,
+  String recommendExecutorId = '',
 }) {
   return <String, dynamic>{
     'success': true,
@@ -108,6 +109,8 @@ Map<String, dynamic> _turn({
       'substantive_progress': substantive,
       'needs_user': needsUser,
       if (contract != null) 'contract': contract,
+      if (recommendExecutorId.isNotEmpty)
+        'recommend_executor_id': recommendExecutorId,
       if (needsUser && questions.isNotEmpty) 'user_question': questions.first,
     }),
   };
@@ -778,6 +781,280 @@ void main() {
     expect(calls, contains('front-b'));
   });
 
+  test('a confirmed executor checkpoint still converges', () async {
+    // The reopened checkpoint a confirmation writes keeps the evidence and the
+    // understanding count but restarts the round budget. If that budget were
+    // left exhausted the loop would fall straight through to its boundary and
+    // block again, so the resumed shape has to be able to run its own rounds.
+    final config = ApiConfig(
+      id: 'cfg-confirmed',
+      name: 'confirmed',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+      credentialId: 'credential-confirmed',
+    );
+    await database.apiConfigBox.put(config.id, config);
+    final executor = _character('confirmed', '执行人', '前端工程师', config.id);
+    final other = _character('confirmed-other', '同事', '前端工程师', config.id);
+    for (final character in <AICharacter>[executor, other]) {
+      await database.aiCharacterBox.put(character.id, character);
+    }
+    final group = ChatGroup(
+      id: 'confirmed-group',
+      name: '确认群',
+      theme: '网页',
+      aiCharacterIds: <String>[executor.id, other.id],
+    );
+    await database.chatGroupBox.put(group.id, group);
+    final task = _task(
+      group: group,
+      request: '实现 HTML 页面并保存到 desktop.html',
+      executorId: executor.id,
+      members: <String>[executor.id, other.id],
+    );
+    final confirmed = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!
+        .copyWith(
+      candidateCharacterIds: <String>[executor.id, other.id],
+      round: 0,
+      understandingPercent: 99,
+      understandingEvidence: const <String>[
+        '目标与范围：只交付 desktop.html。',
+        '方案与取舍：静态页面，不引入构建步骤。',
+        '格式位置与验收：HTML 写入 desktop.html。',
+      ],
+    );
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      task.executionStateJson,
+      confirmed,
+    );
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async =>
+          _turn(
+        update: '${character.name}已给出职业意见。',
+        percent: 100,
+        // The group prefers the other role, but the confirmed contract
+        // pins the executor, so no conflict may be raised.
+        recommendExecutorId: other.id,
+      ),
+    );
+
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    final finalState = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    expect(finalState.isExecutionReady, isTrue);
+    expect(finalState.executorId, executor.id);
+    expect(finalState.deliverableContract?['explicitExecutorId'], executor.id);
+    expect(finalState.blockers, isEmpty);
+    expect(
+      finalState.round,
+      2,
+      reason: '重开只花最小轮数预算，不重跑整场讨论',
+    );
+  });
+
+  test(
+      'a pinned conflict already in the checkpoint blocks before any role turn',
+      () async {
+    // 生产里这条冲突是成员资格重验后留下的持久状态。它必须在邀请任何角色发言
+    // 之前就停下来：再跑一轮不会有新信息，只会让用户等一整轮模型调用。
+    final config = ApiConfig(
+      id: 'cfg-stale-pin',
+      name: 'stale-pin',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+      credentialId: 'credential-stale-pin',
+    );
+    await database.apiConfigBox.put(config.id, config);
+    final pinned = _character('stale-pin-a', '前端甲', '前端工程师', config.id);
+    final elected = _character('stale-pin-b', '前端乙', '前端工程师', config.id);
+    for (final character in <AICharacter>[pinned, elected]) {
+      await database.aiCharacterBox.put(character.id, character);
+    }
+    final group = ChatGroup(
+      id: 'stale-pin-group',
+      name: '遗留冲突群',
+      theme: '网页',
+      aiCharacterIds: <String>[pinned.id, elected.id],
+    );
+    await database.chatGroupBox.put(group.id, group);
+    final task = AgentTask(
+      id: 'stale-pin-task',
+      groupId: group.id,
+      characterId: elected.id,
+      userRequest: '实现页面并保存到 desktop.html',
+      assignedCharacterIds: <String>[pinned.id, elected.id],
+      workModeTask: true,
+    )..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        '',
+        WorkDiscussionState.initial(
+          conversationId: group.id,
+          executorId: elected.id,
+          candidateCharacterIds: <String>[pinned.id, elected.id],
+          participantCharacterIds: <String>[pinned.id, elected.id],
+          deliverableContract: _contract(executorId: pinned.id),
+        ),
+      );
+    final calls = <String>[];
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async {
+        calls.add(character.id);
+        return _turn(update: '${character.name}已给出职业意见。', percent: 100);
+      },
+    );
+
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    final finalState = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    expect(calls, isEmpty, reason: '已经不一致的检查点不该再花一轮成员发言');
+    expect(finalState.blockers, contains('executorPinConflict'));
+    expect(finalState.openQuestions.join('；'), contains('前端甲'));
+  });
+
+  test('pauses on the pinned executor conflict instead of the round limit',
+      () async {
+    final configs = <ApiConfig>[
+      ApiConfig(
+        id: 'cfg-pin-a',
+        name: 'pin-a',
+        provider: 'deepseek',
+        modelName: 'deepseek-chat',
+        hasCredential: true,
+        credentialId: 'credential-pin-a',
+      ),
+      ApiConfig(
+        id: 'cfg-pin-b',
+        name: 'pin-b',
+        provider: 'deepseek',
+        modelName: 'deepseek-chat',
+        hasCredential: true,
+        credentialId: 'credential-pin-b',
+      ),
+    ];
+    for (final config in configs) {
+      await database.apiConfigBox.put(config.id, config);
+    }
+    final pinned = _character('pin-a', '前端甲', '前端工程师', 'cfg-pin-a');
+    final elected = _character('pin-b', '前端乙', '前端工程师', 'cfg-pin-b');
+    for (final character in <AICharacter>[pinned, elected]) {
+      await database.aiCharacterBox.put(character.id, character);
+    }
+    final group = ChatGroup(
+      id: 'pinned-conflict-group',
+      name: '钉定冲突群',
+      theme: '网页',
+      aiCharacterIds: <String>[pinned.id, elected.id],
+    );
+    await database.chatGroupBox.put(group.id, group);
+    // The durable contract still pins 前端甲 while the reopened election may
+    // only settle on one of the two qualified roles. This is the state a
+    // member refresh leaves behind when the pinned role is revalidated out of
+    // the candidate list, so the group elects someone the pin forbids.
+    final task = AgentTask(
+      id: 'pinned-conflict-task',
+      groupId: group.id,
+      characterId: '',
+      userRequest: '实现页面并保存到 desktop.html',
+      assignedCharacterIds: const <String>[],
+      workModeTask: true,
+    )..executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        '',
+        WorkDiscussionState.initial(
+          conversationId: group.id,
+          executorId: null,
+          candidateCharacterIds: <String>[pinned.id, elected.id],
+          participantCharacterIds: <String>[pinned.id, elected.id],
+          deliverableContract: _contract(executorId: pinned.id),
+        ),
+      );
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async =>
+          _turn(
+        update: '${character.name}已给出职业意见。',
+        percent: 100,
+        // Every summary backs the same candidate so the second round's
+        // election settles on 前端乙, which the pinned contract forbids.
+        recommendExecutorId: elected.id,
+      ),
+    );
+
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    final finalState = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    expect(finalState.executorId, elected.id);
+    expect(finalState.deliverableContract?['explicitExecutorId'], pinned.id);
+    expect(finalState.isExecutionReady, isFalse);
+    expect(finalState.blockers, contains('executorPinConflict'));
+    expect(
+      finalState.blockers,
+      isNot(contains('discussionRoundLimit')),
+      reason: '不一致必须报出真实原因，不能落到轮数上限的兜底提问',
+    );
+    final question = finalState.openQuestions.join('；');
+    expect(question, contains('前端甲'));
+    expect(question, contains('前端乙'));
+  });
+
   test('normalizes a fully converged conservative 99 percent summary to 100',
       () async {
     final config = ApiConfig(
@@ -1294,6 +1571,76 @@ void main() {
     )!;
     expect(finalState.isExecutionReady, isFalse);
     expect(finalState.understandingEvidence.length, greaterThanOrEqualTo(3));
+  });
+
+  test('publishes a member turn longer than the live draft cap', () async {
+    final config = ApiConfig(
+      id: 'cfg-long-opinion',
+      name: 'long-opinion',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+      credentialId: 'credential-long-opinion',
+    );
+    await database.apiConfigBox.put(config.id, config);
+    final character = _character(
+      'long-opinion-executor',
+      '产品经理',
+      '产品经理',
+      config.id,
+    );
+    await database.aiCharacterBox.put(character.id, character);
+    final group = ChatGroup(
+      id: 'long-opinion-group',
+      name: '长意见群',
+      theme: '企业认证 WiFi',
+      aiCharacterIds: [character.id],
+    );
+    await database.chatGroupBox.put(group.id, group);
+    final task = _task(
+      group: group,
+      request: '输出企业认证 WiFi 需求文档',
+      executorId: character.id,
+      members: [character.id],
+    );
+    final opinion = '验收口径：${'字' * 700}';
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async {
+        if (messages.first['content'].toString().contains('协调/执行人')) {
+          return _turn(update: '本轮汇总已完成。', percent: 100);
+        }
+        return _turn(
+          update: opinion,
+          contract: _contract(executorId: character.id, scope: '范围' * 350),
+        );
+      },
+    );
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    final memberMessage = database.messageBox.values
+        .map((message) => message.content)
+        .firstWhere((content) => content.startsWith('职责意见：'));
+
+    expect(memberMessage.length, greaterThan(1201));
+    expect(memberMessage, contains(opinion));
+    expect(memberMessage, isNot(contains('已截断')));
   });
 
   test('publishes the latest executor assessment even when confidence falls',
@@ -2029,6 +2376,263 @@ void main() {
       latest!.participants.single.lastContribution,
       '模型请求失败（HTTP 402）',
     );
+  });
+
+  test('resends an empty completion once instead of failing the member',
+      () async {
+    final config = ApiConfig(
+      id: 'cfg-empty-retry',
+      name: 'empty-retry',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+      credentialId: 'credential-empty-retry',
+    );
+    await database.apiConfigBox.put(config.id, config);
+    final character = _character(
+      'empty-retry-front',
+      '前端',
+      '前端工程师',
+      config.id,
+    );
+    await database.aiCharacterBox.put(character.id, character);
+    final group = ChatGroup(
+      id: 'empty-retry-group',
+      name: '空回复重试群',
+      theme: '网页',
+      aiCharacterIds: [character.id],
+    );
+    await database.chatGroupBox.put(group.id, group);
+    final task = _task(
+      group: group,
+      request: '实现 HTML 页面',
+      executorId: character.id,
+      members: [character.id],
+    );
+    var emptyResponses = 0;
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async {
+        if (messages.first['content'].toString().contains('协调/执行人')) {
+          return _turn(update: '本轮汇总已完成。', percent: 100);
+        }
+        if (emptyResponses == 0) {
+          emptyResponses++;
+          return <String, dynamic>{
+            'success': false,
+            'message': '模型返回了空内容',
+            'failureCode': 'emptyResponse',
+            'retryable': true,
+          };
+        }
+        return _turn(update: '职责意见已给出。');
+      },
+    );
+    WorkDiscussionState? latest;
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      latest = state;
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    expect(emptyResponses, 1);
+    expect(latest, isNotNull);
+    expect(
+      latest!.blockers,
+      isNot(contains('structuredResponseInvalid:${character.id}')),
+    );
+    expect(latest!.participants.single.lastContribution, '职责意见已给出。');
+    expect(
+      database.messageBox.values.map((message) => message.content).join('\n'),
+      isNot(contains('暂不计入理解进度')),
+    );
+  });
+
+  test('bounds the empty-completion resend to one per member turn', () async {
+    final config = ApiConfig(
+      id: 'cfg-empty-persistent',
+      name: 'empty-persistent',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+      credentialId: 'credential-empty-persistent',
+    );
+    await database.apiConfigBox.put(config.id, config);
+    final character = _character(
+      'empty-persistent-front',
+      '前端',
+      '前端工程师',
+      config.id,
+    );
+    await database.aiCharacterBox.put(character.id, character);
+    final group = ChatGroup(
+      id: 'empty-persistent-group',
+      name: '空回复持续群',
+      theme: '网页',
+      aiCharacterIds: [character.id],
+    );
+    await database.chatGroupBox.put(group.id, group);
+    final task = _task(
+      group: group,
+      request: '实现 HTML 页面',
+      executorId: character.id,
+      members: [character.id],
+    );
+    var memberCalls = 0;
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async {
+        if (messages.first['content'].toString().contains('协调/执行人')) {
+          return _turn(update: '本轮汇总已完成。', percent: 100);
+        }
+        memberCalls++;
+        return <String, dynamic>{
+          'success': false,
+          'message': '模型返回了空内容',
+          'failureCode': 'emptyResponse',
+          'retryable': true,
+        };
+      },
+    );
+    WorkDiscussionState? latest;
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      latest = state;
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    final failureReports = database.messageBox.values
+        .where((message) => message.content.contains('暂不计入理解进度'))
+        .length;
+    expect(latest, isNotNull);
+    expect(
+      latest!.blockers,
+      contains('structuredResponseInvalid:${character.id}'),
+    );
+    expect(failureReports, greaterThan(0));
+    // One original attempt plus exactly one resend for every failed turn.
+    expect(memberCalls, failureReports * 2);
+  });
+
+  test('a repairable answer on the resend still gets its repair pass',
+      () async {
+    // 重发换回一段普通散文时，它和"首次就返回散文"没有区别，必须还能走一次
+    // 协议修复；否则重发会把一次本可救回的成员发言直接判成失败检查点。
+    final config = ApiConfig(
+      id: 'cfg-empty-repair',
+      name: 'empty-repair',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+      credentialId: 'credential-empty-repair',
+    );
+    await database.apiConfigBox.put(config.id, config);
+    final character = _character(
+      'empty-repair-front',
+      '前端',
+      '前端工程师',
+      config.id,
+    );
+    await database.aiCharacterBox.put(character.id, character);
+    final group = ChatGroup(
+      id: 'empty-repair-group',
+      name: '空回复后修复群',
+      theme: '网页',
+      aiCharacterIds: [character.id],
+    );
+    await database.chatGroupBox.put(group.id, group);
+    final task = _task(
+      group: group,
+      request: '实现 HTML 页面',
+      executorId: character.id,
+      members: [character.id],
+    );
+    var emptySent = false;
+    var repairCalls = 0;
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async {
+        final system = messages.first['content'].toString();
+        if (system.contains('协调/执行人')) {
+          return _turn(update: '本轮汇总已完成。', percent: 100);
+        }
+        if (system.contains('JSON 协议修复器')) {
+          repairCalls++;
+          return _turn(update: '修复后的职责意见。');
+        }
+        if (!emptySent) {
+          emptySent = true;
+          return <String, dynamic>{
+            'success': false,
+            'message': '模型返回了空内容',
+            'failureCode': 'emptyResponse',
+            'retryable': true,
+          };
+        }
+        return <String, dynamic>{'success': true, 'content': '我先说说我的看法。'};
+      },
+    );
+    WorkDiscussionState? latest;
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      latest = state;
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    expect(repairCalls, greaterThan(0), reason: '重发拿到的散文仍要请求一次协议修复');
+    // 关键是首轮那次发言不能被记成失败：后一轮的成功会清掉 blocker、
+    // 覆盖最后一次发言，所以只能看"有没有发布过失败记录"。
+    expect(
+      database.messageBox.values
+          .where((message) => message.content.contains('暂不计入理解进度'))
+          .length,
+      0,
+    );
+    expect(latest, isNotNull);
+    expect(
+      latest!.blockers,
+      isNot(contains('structuredResponseInvalid:${character.id}')),
+    );
+    expect(latest!.participants.single.lastContribution, '修复后的职责意见。');
   });
 
   test('does not persist a plain multiline coordinator preview as state',

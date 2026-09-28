@@ -266,6 +266,68 @@ extension _TaskActionRecovery on _TaskActions {
     if (confirmed == true) await runAction(onUndo!);
   }
 
+  /// 群推举结果与合同钉定人不一致时的唯一出口：改派还是保留必须由用户选择。
+  /// 讨论既不会自行改派钉定角色，也不会替用户把钉定角色重新推举回来，所以
+  /// 没有这条确认，任务只会在轮数上限上反复暂停。
+  Future<void> _confirmExecutorSwap(
+    BuildContext context, {
+    required int expectedVersion,
+    required bool canKeepPinned,
+  }) async {
+    final callback = onConfirmExecutorSwap;
+    if (callback == null) return;
+    final state = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    ).state;
+    final electedId = state?.executorId?.trim() ?? '';
+    final pinnedValue = state?.deliverableContract?['explicitExecutorId'];
+    final pinnedId = pinnedValue is String ? pinnedValue.trim() : '';
+    final electedName = _executorDisplayName(electedId);
+    final pinnedName = _executorDisplayName(pinnedId);
+    final choice = await _showTaskModal<bool>(
+      () => showDialog<bool>(
+        context: dialogContext ?? context,
+        barrierDismissible: true,
+        builder: (dialogContext) => AlertDialog(
+          key: const Key('work-task-confirm-executor-dialog'),
+          title: const Text('确认最终执行人'),
+          content: Text(
+            '群讨论推举「$electedName」执行本任务，但这条请求里钉定的是'
+            '「$pinnedName」，两者不一致时讨论无法收敛。\n\n'
+            '${canKeepPinned ? '改派后由「$electedName」接手；保留则由「$pinnedName」接手。' : '「$pinnedName」已不在本任务的合格候选内，只能改派。'}',
+          ),
+          actions: [
+            TextButton(
+              key: const Key('work-task-confirm-executor-cancel'),
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('取消'),
+            ),
+            if (canKeepPinned)
+              OutlinedButton(
+                key: const Key('work-task-confirm-executor-keep'),
+                onPressed: () => Navigator.of(dialogContext).pop(false),
+                child: Text('保留「$pinnedName」执行'),
+              ),
+            FilledButton(
+              key: const Key('work-task-confirm-executor-swap'),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: Text('改派给「$electedName」'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (choice == null) return;
+    await runAction((_) => callback(task.id, expectedVersion, choice));
+  }
+
+  String _executorDisplayName(String characterId) {
+    final trimmed = characterId.trim();
+    if (trimmed.isEmpty) return '未指定角色';
+    final name = characterNameFor?.call(trimmed).trim() ?? '';
+    return name.isEmpty ? trimmed : name;
+  }
+
   Future<void> _confirmInstallTool(
     BuildContext context, {
     required int expectedVersion,

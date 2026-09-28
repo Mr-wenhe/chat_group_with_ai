@@ -148,9 +148,8 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
           streamedCharacters += delta.length;
           final now = clock();
 
-          final publicUpdate = WorkPublicUpdateStream.sanitize(
-            publicUpdateStream.add(delta),
-          );
+          final publicUpdate = WorkPublicUpdateStream.boundedDraft(
+              publicUpdateStream.add(delta));
           final publicUpdateChanged = publicUpdate.isNotEmpty &&
               publicUpdate != lastPublishedPublicUpdate;
           final shouldPublishPublicUpdate = publicUpdateChanged &&
@@ -216,9 +215,8 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     // A short final delta may not pass the live-update throttle before the
     // stream closes. Flush the decoded public field so the durable timeline
     // contains the complete user-facing content, not only an earlier prefix.
-    var finalPublicUpdate = WorkPublicUpdateStream.sanitize(
-      publicUpdateStream.add(''),
-    );
+    var finalPublicUpdate =
+        WorkPublicUpdateStream.boundedDraft(publicUpdateStream.add(''));
     if (finalPublicUpdate.isEmpty) {
       // Some OpenAI-compatible providers emit the JSON protocol through
       // `reasoning_content` or only attach it to the final SSE event. The
@@ -263,7 +261,7 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     final raw = response['message'];
     if (raw is! String || raw.trim().isEmpty) return '';
     final stream = WorkPublicUpdateStream();
-    return WorkPublicUpdateStream.sanitize(stream.add(raw));
+    return WorkPublicUpdateStream.boundedDraft(stream.add(raw));
   }
 
   Future<WorkContextSnapshot?> _compressWorkContext(
