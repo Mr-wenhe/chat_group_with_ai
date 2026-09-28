@@ -38,12 +38,16 @@ class MemoryAuditSliverList extends StatelessWidget {
   final bool showObserver;
   final ValueChanged<String> onOpenDetails;
 
+  /// 按观察 AI 角色 id 解析 IP 形象图；null / 返回 null → 文本头像。
+  final ImageProvider? Function(String observerCharacterId)? observerAvatarImageOf;
+
   const MemoryAuditSliverList({
     super.key,
     required this.surfaceKey,
     required this.rows,
     required this.showObserver,
     required this.onOpenDetails,
+    this.observerAvatarImageOf,
   });
 
   @override
@@ -59,6 +63,9 @@ class MemoryAuditSliverList extends StatelessWidget {
             rowCount: rows.length,
             showObserver: showObserver,
             onOpenDetails: onOpenDetails,
+            observerAvatarImage: observerAvatarImageOf?.call(
+              rows[index].observerCharacterId,
+            ),
           ),
           childCount: rows.length,
         ),
@@ -116,12 +123,16 @@ class _MemoryAuditRowSurface extends StatelessWidget {
   final bool showObserver;
   final ValueChanged<String> onOpenDetails;
 
+  /// 已解析的观察 AI IP 形象图；null → 文本头像。
+  final ImageProvider? observerAvatarImage;
+
   const _MemoryAuditRowSurface({
     required this.row,
     required this.index,
     required this.rowCount,
     required this.showObserver,
     required this.onOpenDetails,
+    this.observerAvatarImage,
   });
 
   @override
@@ -145,6 +156,7 @@ class _MemoryAuditRowSurface extends StatelessWidget {
             displayRow: row,
             showObserver: showObserver,
             onOpenDetails: onOpenDetails,
+            observerAvatarImage: observerAvatarImage,
           ),
           if (index < rowCount - 1)
             Divider(

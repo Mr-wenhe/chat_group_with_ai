@@ -56,6 +56,12 @@ class _BackupEntityRecordCodec {
       'agenticEnabled': item.agenticEnabled,
       'skillIds': item.skillIds,
       'toolPermissions': item.toolPermissions.map((item) => item.name).toList(),
+      'voiceId': item.voiceId,
+      // 图片二进制不进 .cgbak（同 ai_governance_ledger 的设备本地先例）：只带
+      // 相对路径，同机还原后形象仍生效，跨设备文件缺失由渲染层静默回落文本。
+      'ipImageRelPath': item.ipImageRelPath,
+      'avatarFromIpImage': item.avatarFromIpImage,
+      'ipImageStyle': item.ipImageStyle,
     };
     if (item.hasKnownGender) value['gender'] = item.gender.name;
     return value;
@@ -96,6 +102,11 @@ class _BackupEntityRecordCodec {
       toolPermissions: _enums(json['toolPermissions'], ToolPermission.values),
       gender: gender ?? CharacterGender.female,
       hasKnownGender: gender != null,
+      // 旧备份缺这些键时回落默认值，向后兼容（voiceId 是本函数曾漏写的字段）。
+      voiceId: json['voiceId']?.toString() ?? '',
+      ipImageRelPath: json['ipImageRelPath']?.toString() ?? '',
+      avatarFromIpImage: json['avatarFromIpImage'] as bool? ?? false,
+      ipImageStyle: json['ipImageStyle']?.toString() ?? '',
     );
   }
 

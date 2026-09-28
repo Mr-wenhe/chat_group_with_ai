@@ -1,5 +1,6 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/text/pinyin_search.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/features/memory/memory_audit_presenter.dart';
 import 'package:flutter/material.dart';
 
@@ -13,11 +14,15 @@ class MemorySubjectSelector extends StatefulWidget {
   final List<AICharacter> characters;
   final ValueChanged<String> onChanged;
 
+  /// 按角色解析 IP 形象图；null / 返回 null → 文本头像。
+  final ImageProvider? Function(AICharacter character)? avatarImageOf;
+
   const MemorySubjectSelector({
     super.key,
     required this.value,
     required this.characters,
     required this.onChanged,
+    this.avatarImageOf,
   });
 
   @override
@@ -185,6 +190,7 @@ class _MemorySubjectSelectorState extends State<MemorySubjectSelector> {
                     character.name,
                     character.id,
                   ),
+                  image: widget.avatarImageOf?.call(character),
                 ),
                 title: Text(
                   MemoryAuditPresenter.safeDisplayName(
@@ -252,13 +258,20 @@ class _CharacterAvatar extends StatelessWidget {
   final String avatar;
   final String name;
 
-  const _CharacterAvatar({required this.avatar, required this.name});
+  /// 已解析的 IP 形象图；null → 回落文本头像。
+  final ImageProvider? image;
+
+  const _CharacterAvatar({
+    required this.avatar,
+    required this.name,
+    this.image,
+  });
 
   @override
   Widget build(BuildContext context) {
     final text = avatar.trim().isEmpty
         ? (name.trim().isEmpty ? 'AI' : name.characters.first)
         : avatar.trim();
-    return CircleAvatar(radius: 16, child: Text(text));
+    return CharacterAvatar(fallbackText: text, size: 32, image: image);
   }
 }

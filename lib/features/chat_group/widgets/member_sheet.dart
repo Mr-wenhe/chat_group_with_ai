@@ -1,5 +1,6 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/text/pinyin_search.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:flutter/material.dart';
 
 /// 成员行溢出菜单里的操作。
@@ -9,10 +10,15 @@ class MemberStackChip extends StatelessWidget {
   final List<AICharacter> characters;
   final Color Function(AICharacter character) senderColor;
 
+  /// 按角色解析 IP 形象图；null / 返回 null → 文本头像。
+  /// 与 [senderColor] 同构的纯回调，本类不碰 DatabaseService。
+  final ImageProvider? Function(AICharacter character)? avatarImageOf;
+
   const MemberStackChip({
     super.key,
     required this.characters,
     required this.senderColor,
+    this.avatarImageOf,
   });
 
   @override
@@ -43,6 +49,7 @@ class MemberStackChip extends StatelessWidget {
                       child: _MiniAvatar(
                         character: shown[index],
                         color: senderColor(shown[index]),
+                        image: avatarImageOf?.call(shown[index]),
                       ),
                     ),
                 ],
@@ -67,13 +74,23 @@ class _MiniAvatar extends StatelessWidget {
   final AICharacter character;
   final Color color;
 
-  const _MiniAvatar({required this.character, required this.color});
+  /// 已解析的 IP 形象图；null → 回落文本头像。
+  final ImageProvider? image;
+
+  const _MiniAvatar({
+    required this.character,
+    required this.color,
+    this.image,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Container(
-      width: 26,
-      height: 26,
+    return CharacterAvatar(
+      fallbackText: character.avatar.isNotEmpty
+          ? character.avatar
+          : character.name.characters.first,
+      size: 26,
+      image: image,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: color,
@@ -82,16 +99,10 @@ class _MiniAvatar extends StatelessWidget {
           width: 2,
         ),
       ),
-      alignment: Alignment.center,
-      child: Text(
-        character.avatar.isNotEmpty
-            ? character.avatar
-            : character.name.characters.first,
-        style: const TextStyle(
-          fontSize: 13,
-          fontWeight: FontWeight.w700,
-          color: Colors.white,
-        ),
+      textStyle: const TextStyle(
+        fontSize: 13,
+        fontWeight: FontWeight.w700,
+        color: Colors.white,
       ),
     );
   }
@@ -117,6 +128,9 @@ class MemberSheet extends StatefulWidget {
 
   final VoidCallback? onAddMember;
 
+  /// 按角色解析 IP 形象图；null / 返回 null → 文本头像。
+  final ImageProvider? Function(AICharacter character)? avatarImageOf;
+
   const MemberSheet({
     super.key,
     required this.characters,
@@ -129,6 +143,7 @@ class MemberSheet extends StatefulWidget {
     this.onToggleMute,
     this.onMention,
     this.onAddMember,
+    this.avatarImageOf,
   });
 
   @override
@@ -300,6 +315,7 @@ class _MemberSheetState extends State<MemberSheet> {
                         avatarText: character.avatar.isNotEmpty
                             ? character.avatar
                             : character.name.characters.first,
+                        avatarImage: widget.avatarImageOf?.call(character),
                         avatarColor: widget.senderColor(character),
                         name: character.name,
                         subtitle: widget.statusText(character),
@@ -335,6 +351,9 @@ class _MemberSheetState extends State<MemberSheet> {
 class _MemberTile extends StatelessWidget {
   final String avatarText;
   final Color avatarColor;
+
+  /// 已解析的 IP 形象图；null → 回落 [avatarText]。
+  final ImageProvider? avatarImage;
   final String name;
   final String subtitle;
   final bool isOwner;
@@ -349,6 +368,7 @@ class _MemberTile extends StatelessWidget {
     required this.avatarColor,
     required this.name,
     required this.subtitle,
+    this.avatarImage,
     this.isOwner = false,
     this.isMuted = false,
     this.onOpenSettings,
@@ -367,9 +387,10 @@ class _MemberTile extends StatelessWidget {
           InkWell(
             onTap: onOpenSettings,
             borderRadius: BorderRadius.circular(22),
-            child: Container(
-              width: 44,
-              height: 44,
+            child: CharacterAvatar(
+              fallbackText: avatarText,
+              size: 44,
+              image: avatarImage,
               decoration: BoxDecoration(
                 shape: BoxShape.circle,
                 color: avatarColor.withValues(alpha: 0.15),
@@ -378,14 +399,10 @@ class _MemberTile extends StatelessWidget {
                   width: 1.5,
                 ),
               ),
-              alignment: Alignment.center,
-              child: Text(
-                avatarText,
-                style: TextStyle(
-                  fontSize: 16,
-                  fontWeight: FontWeight.w700,
-                  color: avatarColor,
-                ),
+              textStyle: TextStyle(
+                fontSize: 16,
+                fontWeight: FontWeight.w700,
+                color: avatarColor,
               ),
             ),
           ),

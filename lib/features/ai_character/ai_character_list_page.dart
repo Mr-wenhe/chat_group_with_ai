@@ -2,6 +2,7 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/database/data_lifecycle_models.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
+import 'package:chat_group/core/database/database_service_image.dart';
 import 'package:chat_group/core/models/character_presets.dart';
 import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/features/ai_character/action_skill_count.dart';
@@ -15,6 +16,7 @@ import 'providers/ai_character_providers.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/core/widgets/data_lifecycle_result_dialog.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
@@ -162,6 +164,9 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
                           return _CharacterCard(
                             character: character,
                             cs: cs,
+                            avatarImage: ref
+                                .read(databaseServiceProvider)
+                                .characterAvatarImage(character),
                             isPinned: pinnedIds.contains(character.id),
                             onTap: () => _editCharacter(context, character),
                             onDelete: () =>
@@ -859,6 +864,9 @@ class _CharacterCard extends StatelessWidget {
   final ApiConfig? linkedConfig;
   final VoidCallback? onConfigChange;
 
+  /// 已解析的 IP 形象图；null → 回落文本头像。由调用方解析，保持本类无 IO。
+  final ImageProvider? avatarImage;
+
   const _CharacterCard({
     required this.character,
     required this.cs,
@@ -870,6 +878,7 @@ class _CharacterCard extends StatelessWidget {
     required this.onDirectChat,
     this.linkedConfig,
     this.onConfigChange,
+    this.avatarImage,
   });
 
   @override
@@ -1087,31 +1096,25 @@ class _CharacterCard extends StatelessWidget {
     final displayAvatar = character.avatar.isNotEmpty
         ? character.avatar
         : (character.name.isNotEmpty ? character.name[0] : '?');
-    return Container(
-      width: 48,
-      height: 48,
+    return CharacterAvatar(
+      fallbackText: displayAvatar,
+      size: 48,
+      image: avatarImage,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: pColor.withValues(alpha: 0.14),
         border: Border.all(color: pColor.withValues(alpha: 0.3), width: 1.5),
       ),
-      child: Stack(
-        children: [
-          Center(
-              child: Text(displayAvatar,
-                  style: TextStyle(
-                      fontSize: 20,
-                      fontWeight: FontWeight.w600,
-                      color: pColor))),
-          if (!character.isActive)
-            const Positioned.fill(
-                child: DecoratedBox(
+      textStyle: TextStyle(
+          fontSize: 20, fontWeight: FontWeight.w600, color: pColor),
+      // 未激活角色叠蒙层；有 IP 图时同样要压暗，否则「停用」状态看不出来。
+      overlay: character.isActive
+          ? null
+          : const DecoratedBox(
               decoration:
                   BoxDecoration(shape: BoxShape.circle, color: Colors.black26),
               child: Icon(Icons.pause_rounded, size: 16, color: Colors.white70),
-            )),
-        ],
-      ),
+            ),
     );
   }
 }

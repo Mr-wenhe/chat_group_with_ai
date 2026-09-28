@@ -114,6 +114,13 @@ extension _DataLifecycleServiceCharacter on DataLifecycleService {
       );
       if (deleteMessages) await _settings.removeDeletedCharacter(characterId);
     });
+    // IP 形象文件是角色私有资产，删除即回收磁盘（同 orphan 附件语义）。
+    // keepMessageHistory 策略下历史快照已含路径字段但文件已删 → 渲染层回落文本。
+    if (character != null && character.ipImageRelPath.isNotEmpty) {
+      await _runner.attempt('角色 IP 形象清理失败', incomplete, () {
+        return db.deleteAiCharacterFile(character.ipImageRelPath);
+      });
+    }
     await _runner.attempt(
       '角色删除失败',
       incomplete,

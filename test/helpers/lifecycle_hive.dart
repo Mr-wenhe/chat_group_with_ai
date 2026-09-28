@@ -100,6 +100,8 @@ AICharacter testCharacter(
   String apiConfigId = '',
   CharacterGender gender = CharacterGender.female,
   bool hasKnownGender = true,
+  String ipImageRelPath = '',
+  bool avatarFromIpImage = false,
 }) =>
     AICharacter(
       id: id,
@@ -115,6 +117,8 @@ AICharacter testCharacter(
       apiConfigId: apiConfigId,
       gender: gender,
       hasKnownGender: hasKnownGender,
+      ipImageRelPath: ipImageRelPath,
+      avatarFromIpImage: avatarFromIpImage,
     );
 
 void _registerAdapters() {

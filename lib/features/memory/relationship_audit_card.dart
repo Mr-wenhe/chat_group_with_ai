@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 
@@ -15,6 +16,9 @@ class RelationshipAuditCard extends StatelessWidget {
   final bool pinned;
   final VoidCallback onOpenDetails;
 
+  /// 已解析的 IP 形象图；null → 回落 [targetAvatar] 文本。由调用方解析。
+  final ImageProvider? avatarImage;
+
   const RelationshipAuditCard({
     super.key,
     required this.relationship,
@@ -26,6 +30,7 @@ class RelationshipAuditCard extends StatelessWidget {
     required this.recentChange,
     required this.pinned,
     required this.onOpenDetails,
+    this.avatarImage,
   });
 
   @override
@@ -109,17 +114,14 @@ class RelationshipAuditCard extends StatelessWidget {
     );
   }
 
-  Widget _avatar(BuildContext context) => CircleAvatar(
-        radius: 18,
-        backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-        child: Text(
-          targetAvatar,
-          maxLines: 1,
-          overflow: TextOverflow.clip,
-          style: TextStyle(
-            color: Theme.of(context).colorScheme.onPrimaryContainer,
-            fontWeight: FontWeight.w700,
-          ),
+  Widget _avatar(BuildContext context) => CharacterAvatar(
+        fallbackText: targetAvatar,
+        size: 36,
+        image: avatarImage,
+        background: Theme.of(context).colorScheme.primaryContainer,
+        textStyle: TextStyle(
+          color: Theme.of(context).colorScheme.onPrimaryContainer,
+          fontWeight: FontWeight.w700,
         ),
       );
 

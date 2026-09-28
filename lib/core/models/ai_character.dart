@@ -102,6 +102,25 @@ class AICharacter extends HiveObject {
   @HiveField(23, defaultValue: '')
   String voiceId;
 
+  /// IP 形象图的受管相对路径（相对 ai-processing 根，用 `/` 分隔）。
+  /// 为空表示未生成。存相对路径而非绝对路径：`WorkModeWorkspace.workDirPath`
+  /// 是「绝对本地路径不宜还原」的先例；且 ai-processing 根目录用户可改，
+  /// 相对路径在目录未变时可解析，目录变更后由渲染层静默回落文本。
+  @HiveField(24, defaultValue: '')
+  String ipImageRelPath;
+
+  /// 头像是否启用 IP 形象图。**生成 ≠ 设为头像**：只有用户点「设为头像」后
+  /// 渲染层才以图优先，否则仍显示 [avatar] 文本。让用户可「生成但暂不设头像」。
+  @HiveField(25, defaultValue: false)
+  bool avatarFromIpImage;
+
+  /// IP 形象的画风预设 id（见 `image_style_presets.dart`）。空串 = 自动。
+  ///
+  /// 存下来而不是只放表单内存：画风是 IP 形象的稳定属性，用户改完人设重新
+  /// 生成时若画风被悄悄重置，会得到一个「不像同一个人」的形象。
+  @HiveField(26, defaultValue: '')
+  String ipImageStyle;
+
   AICharacter({
     String? id,
     required this.name,
@@ -127,6 +146,9 @@ class AICharacter extends HiveObject {
     this.gender = CharacterGender.female,
     this.hasKnownGender = true,
     this.voiceId = '',
+    this.ipImageRelPath = '',
+    this.avatarFromIpImage = false,
+    this.ipImageStyle = '',
   })  : id = id ?? const Uuid().v4(),
         modelName = modelName ?? ApiProvider.defaultModels[apiProvider] ?? '',
         createdAt = createdAt ?? DateTime.now(),
@@ -137,6 +159,10 @@ class AICharacter extends HiveObject {
 
   /// Creates the replacement object used by the one migration path allowed to
   /// resolve gender. Ordinary edits must keep the saved object's gender.
+  ///
+  /// 新增字段必须逐个带上：`AICharactersNotifier.addCharacter` /
+  /// `updateCharacter` 在已有角色上会用本方法重建对象，漏带的字段会在
+  /// 保存瞬间被静默清空（`voiceId` 曾发生过同类事故）。
   AICharacter withGender(
     CharacterGender value, {
     bool hasKnownGender = true,
@@ -166,6 +192,9 @@ class AICharacter extends HiveObject {
       gender: value,
       hasKnownGender: hasKnownGender,
       voiceId: voiceId,
+      ipImageRelPath: ipImageRelPath,
+      avatarFromIpImage: avatarFromIpImage,
+      ipImageStyle: ipImageStyle,
     );
   }
 

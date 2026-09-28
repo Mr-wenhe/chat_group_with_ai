@@ -5,6 +5,7 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/chat_group/attachment_opener.dart';
 import 'package:chat_group/features/chat_group/attachment_path_actions.dart';
@@ -51,6 +52,10 @@ class ChatMessageBubble extends StatelessWidget {
   /// 仅进度消息使用，其它消息传 null 以保持旧调用兼容。
   final int? runStartedAtMs;
 
+  /// 发送者的已解析 IP 形象图；null → 回落文本头像。
+  /// 纯 data/callback 契约的一部分：本类不碰 DatabaseService。
+  final ImageProvider? senderAvatarImage;
+
   const ChatMessageBubble({
     super.key,
     required this.message,
@@ -71,6 +76,7 @@ class ChatMessageBubble extends StatelessWidget {
     this.readReceiptText,
     this.onTaskAction,
     this.runStartedAtMs,
+    this.senderAvatarImage,
   });
 
   @override
@@ -117,22 +123,19 @@ class ChatMessageBubble extends StatelessWidget {
               InkWell(
                 onTap: onSenderTap,
                 borderRadius: BorderRadius.circular(4),
-                child: Container(
-                  width: 40,
-                  height: 40,
-                  decoration: BoxDecoration(
-                    color: senderColor(sender!).withValues(alpha: 0.14),
-                    borderRadius: BorderRadius.circular(4),
-                  ),
-                  alignment: Alignment.center,
-                  child: Text(
-                      sender!.avatar.isNotEmpty
-                          ? sender!.avatar
-                          : sender!.name[0],
-                      style: TextStyle(
-                          fontSize: 14,
-                          fontWeight: FontWeight.w600,
-                          color: senderColor(sender!))),
+                child: CharacterAvatar(
+                  fallbackText: sender!.avatar.isNotEmpty
+                      ? sender!.avatar
+                      : sender!.name[0],
+                  size: 40,
+                  image: senderAvatarImage,
+                  shape: BoxShape.rectangle,
+                  borderRadius: const BorderRadius.all(Radius.circular(4)),
+                  background: senderColor(sender!).withValues(alpha: 0.14),
+                  textStyle: TextStyle(
+                      fontSize: 14,
+                      fontWeight: FontWeight.w600,
+                      color: senderColor(sender!)),
                 ),
               ),
               const SizedBox(width: 8),
