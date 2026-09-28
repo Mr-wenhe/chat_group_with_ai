@@ -1573,6 +1573,8 @@ class DatabaseService {
   }
 
   static const String _ttsEnabledKey = 'tts_enabled';
+  static const String _voiceApiKeyDebugFallbackKey =
+      'voice_api_key_debug_only';
 
   bool get isTtsEnabled => appSettingsBox.get(_ttsEnabledKey) ?? true;
 
@@ -1597,7 +1599,15 @@ class DatabaseService {
   /// 从安全存储读取语音 API Key；未绑定/不可用时返回 null。
   Future<String?> readVoiceApiKey() async {
     final result = await CredentialRepository().read(volcVoiceCredentialId);
-    return result.isAvailable ? result.value : null;
+    if (result.isAvailable) return result.value;
+    // macOS debug 环境可能无法访问 Keychain。仅非 release 回退读取本地
+    // app_settings，避免开发调试被阻断；release 严禁该回退。
+    if (!kReleaseMode) {
+      final fallback =
+          appSettingsBox.get(_voiceApiKeyDebugFallbackKey)?.toString() ?? '';
+      if (fallback.isNotEmpty) return fallback;
+    }
+    return null;
   }
 
   /// 绑定语音 API Key 到安全存储，并刷新 [VoiceServiceConfig.apiKeyBound]。
@@ -1605,11 +1615,24 @@ class DatabaseService {
   /// 返回 null 表示成功；否则为失败原因文案（由调用方展示）。
   Future<String?> bindVoiceApiKey(String apiKey) async {
     if (kIsWeb) return 'Web 端不支持语音服务（依赖系统二进制协议）。';
+    final trimmed = apiKey.trim();
+    if (trimmed.isEmpty) return 'API Key 不能为空';
     final result = await CredentialRepository().save(
       volcVoiceCredentialId,
-      apiKey.trim(),
+      trimmed,
     );
     if (result.isSuccess) {
+      if (!kReleaseMode) {
+        await appSettingsBox.delete(_voiceApiKeyDebugFallbackKey);
+      }
+      await saveVoiceServiceConfig(
+        voiceServiceConfig.copyWith(apiKeyBound: true),
+      );
+      return null;
+    }
+    // 仅非 release 回退：当安全存储不可用时保留调试可用性。
+    if (!kReleaseMode) {
+      await appSettingsBox.put(_voiceApiKeyDebugFallbackKey, trimmed);
       await saveVoiceServiceConfig(
         voiceServiceConfig.copyWith(apiKeyBound: true),
       );
@@ -1625,6 +1648,9 @@ class DatabaseService {
   /// 从安全存储移除语音 API Key，并更新 [VoiceServiceConfig.apiKeyBound]。
   Future<String?> unbindVoiceApiKey() async {
     await CredentialRepository().delete(volcVoiceCredentialId);
+    if (!kReleaseMode) {
+      await appSettingsBox.delete(_voiceApiKeyDebugFallbackKey);
+    }
     await saveVoiceServiceConfig(
       voiceServiceConfig.copyWith(apiKeyBound: false),
     );

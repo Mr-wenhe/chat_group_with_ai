@@ -148,20 +148,22 @@ void main() {
     expect(routes.last.isFallback, isTrue);
   });
 
-  test('adds visible browser only as the final fallback when supplied', () {
+  test('native-only mode constructs no independent search providers', () {
     final routes = SearchRuntimeProviderFactory(
       store: SearchProviderConfigStore(box: box, isRelease: true),
     ).buildRoutes(
-      visibleBrowserSearch: (request, {cancelToken}) async =>
-          SearchProviderResponse(
-              items: const [], sourceProvider: 'visibleBrowser'),
+      nativeOnly: true,
+      nativeSearch: NativeWebSearchBinding(
+        provider: ApiProvider.zhipu,
+        model: 'glm-4-flash',
+        resolveCredential: () async => 'role-key',
+      ),
     );
 
-    expect(routes, hasLength(3));
-    expect(routes[0].kind, SearchProviderKind.duckDuckGoInstantAnswer);
-    expect(routes[1].kind, SearchProviderKind.keylessHtml);
-    expect(routes.last.isVisibleBrowser, isTrue);
-    expect(routes.last.id, 'builtin-visible-browser');
+    expect(routes, hasLength(1));
+    expect(routes.single.isNative, isTrue);
+    expect(routes.single.kind, SearchProviderKind.nativeModel);
+    expect(routes.single.id, 'native:zhipu:glm-4-flash');
   });
 
   test('excludes a Provider whose credential requires attention', () async {

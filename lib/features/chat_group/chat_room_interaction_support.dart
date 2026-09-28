@@ -305,6 +305,8 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
 
       // 开启流式语音播报时，为这条回复新建切句缓冲（无音色则整条不朗读）。
       _beginVoiceReply(character);
+      final hideZhipuSourceAttribution =
+          webSearch?.provider.trim().toLowerCase() == 'zhipu-native';
       session = StreamingReplySession();
       _streamingSession = session;
       if (_canTouchUi) _setUiState(() {});
@@ -323,6 +325,8 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
           userInitiated: true,
         ),
         onDraft: (draft) {
+          // 智谱来源标记可能被拆在多个增量中，等完整回复清理后再展示。
+          if (hideZhipuSourceAttribution) return;
           temp!.content = draft;
           _conversationController.updateStreamingDraft(draft);
           _flushStreamingUi();
@@ -396,11 +400,13 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       fullContent = _stripNamePrefix(fullContent, character.name);
       fullContent =
           _chatRoomSearchContextFormatter.sanitizeCitationsWithSourceIds(
-        fullContent,
-        webSearch == null
-            ? const <String>[]
-            : _chatRoomSearchContextFormatter.format(webSearch).sourceIds,
-      );
+          fullContent,
+          webSearch == null
+              ? const <String>[]
+              : _chatRoomSearchContextFormatter.format(webSearch).sourceIds,
+          hideCitations:
+              webSearch?.provider.trim().toLowerCase() == 'zhipu-native',
+        );
       if (webSearch != null) {
         fullContent = _chatRoomSearchContextFormatter.sanitizeAnswerLinks(
           fullContent,
@@ -419,6 +425,7 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       temp.replyToMessageId = original.id;
       if (!failed) {
         // 语音播报收尾：重新生成成功，把缓冲里的最后一句读完。
+        if (hideZhipuSourceAttribution) _feedVoiceReplyDraft(fullContent);
         _flushVoiceReply();
         await _appendMessage(temp);
         if (searchTurnContext != null) {

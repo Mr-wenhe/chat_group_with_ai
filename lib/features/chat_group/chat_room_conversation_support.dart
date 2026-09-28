@@ -236,6 +236,24 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
         .toList();
   }
 
+  /// The search runs once for the user turn; search-only roles provide no
+  /// visible utterance, so every other active, unmuted member can discuss it.
+  List<AICharacter> _roundtableParticipants({
+    required List<String> mentionedIds,
+  }) {
+    final mentionedSet = mentionedIds.toSet();
+    final eligible = _characters
+        .where(
+          (character) =>
+              !character.zhipuSearchAnswerOnly &&
+              _isEligibleToReply(character) &&
+              _mayAutoPick(character, mentionedIds: mentionedSet) &&
+              !_agenticRunningCharacterIds.contains(character.id),
+        )
+        .toList();
+    return eligible;
+  }
+
   /// 私聊本轮的回复者：固定为会话对方角色（前提是它有资格回复）。
   ///
   /// 私聊没有意图编排，故顺手清空 [_pendingReplyIntents]。

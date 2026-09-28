@@ -364,6 +364,7 @@ class _SearchProviderConfigFormPageState
       SearchProviderKind.duckDuckGoInstantAnswer =>
         DuckDuckGoInstantAnswerProvider(),
       SearchProviderKind.keylessHtml => KeylessHtmlSearchProvider(),
+      SearchProviderKind.nativeModel => KeylessHtmlSearchProvider(),
       SearchProviderKind.gateway => GatewaySearchProvider(
           baseUrl: config.baseUrl,
           isRelease: _store.isRelease,
@@ -388,7 +389,8 @@ class _SearchProviderConfigFormPageState
   }
 
   String _providerLabel(SearchProviderKind provider) => switch (provider) {
-        SearchProviderKind.gateway => 'Backend Gateway',
+      SearchProviderKind.gateway => 'Backend Gateway',
+        SearchProviderKind.nativeModel => '角色模型原生联网',
         SearchProviderKind.tavily => 'Tavily',
         SearchProviderKind.brave => 'Brave',
         SearchProviderKind.duckDuckGoInstantAnswer => 'DuckDuckGo 百科即时答案',

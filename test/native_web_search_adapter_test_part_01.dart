@@ -17,6 +17,16 @@ void _registerNativeWebSearchAdapterTestPart1() {
     );
     expect(
       capabilities
+          .resolve(provider: ApiProvider.zhipu, modelId: 'glm-4-flash')
+          .supportsNativeWebSearch,
+      isTrue,
+    );
+    expect(
+      registry.resolve(provider: ApiProvider.zhipu, model: 'glm-4-flash'),
+      isA<ZhipuWebSearchAdapter>(),
+    );
+    expect(
+      capabilities
           .resolve(provider: ApiProvider.qwen, modelId: 'qwen-unknown')
           .supportsNativeWebSearch,
       isFalse,
@@ -35,6 +45,72 @@ void _registerNativeWebSearchAdapterTestPart1() {
       registry.resolve(provider: ApiProvider.custom, model: 'any-openai-model'),
       isNull,
     );
+  });
+
+  test('Zhipu native adapter uses the role model credential and sources',
+      () async {
+    late RequestOptions captured;
+    final adapter = ZhipuWebSearchAdapter(
+      model: 'glm-4-flash',
+      dio: _dio((options) {
+        captured = options;
+        return {
+          'id': 'glm-search-001',
+          'search_result': [
+            {
+              'title': 'GLM source',
+              'link': 'https://docs.bigmodel.cn/guide',
+              'content': 'Structured source content',
+            },
+          ],
+        };
+      }),
+    );
+    final response = await adapter.search(
+      SearchRequest(query: 'GLM latest release'),
+      credential: 'role-zhipu-key',
+    );
+    expect(captured.uri, ZhipuWebSearchAdapter.endpoint);
+    expect(captured.headers['Authorization'], 'Bearer role-zhipu-key');
+    expect(captured.data['search_query'], 'GLM latest release');
+    expect(response.sourceProvider, 'zhipu-native');
+    expect(response.items.single.url.toString(), 'https://docs.bigmodel.cn/guide');
+  });
+
+  test('Zhipu keeps textual search results when the API omits link', () async {
+    final adapter = ZhipuWebSearchAdapter(
+      model: 'glm-4-flash',
+      dio: _dio((_) => {
+            'request_id': 'glm-search-no-link',
+            'search_result': [
+              {
+                'title': '实时新闻结果',
+                'link': '',
+                'content': '智谱返回了可用于回答的新闻正文。',
+                'publish_date': '2026-09-14',
+              },
+            ],
+          }),
+    );
+
+    final response = await adapter.search(
+      SearchRequest(query: '今天有什么新闻'),
+      credential: 'role-zhipu-key',
+    );
+
+    expect(response.hasResults, isTrue);
+    expect(response.failure, isNull);
+    expect(response.items.single.hasSourceUrl, isFalse);
+    expect(response.items.single.snippet, contains('新闻正文'));
+    final snapshot = const SearchSnapshotBuilder().build(
+      request: SearchRequest(query: '今天有什么新闻'),
+      provider: 'zhipu-native',
+      response: response,
+      searchedAt: DateTime.utc(2026, 9, 14),
+      latencyMs: 1,
+    );
+    expect(snapshot.hasResults, isTrue);
+    expect(snapshot.results.single.hasSourceUrl, isFalse);
   });
 
   test('Qwen native adapter requests documented source output only', () async {

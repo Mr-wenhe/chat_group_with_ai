@@ -5,7 +5,6 @@
 list(APPEND FLUTTER_PLUGIN_LIST
   audioplayers_windows
   desktop_drop
-  desktop_webview_window
   file_selector_windows
   flutter_secure_storage_windows
   flutter_tts

@@ -25,6 +25,9 @@ final RegExp _searchLocalePattern =
 final RegExp _searchCountryPattern = RegExp(r'^[A-Za-z]{2}$');
 
 enum SearchProviderKind {
+  /// Search performed by the character's model vendor using its own API
+  /// credential. This route must never fall back to an independent provider.
+  nativeModel,
   gateway,
   tavily,
   brave,
@@ -311,4 +314,10 @@ String normalizeSearchCorrelationId(String? value) {
 
 double? _finiteScore(double? value) => value?.isFinite == true ? value : null;
 
-String _deriveDisplayHost(Uri url, String? _) => url.host;
+String _deriveDisplayHost(Uri? url, String? value) => sanitizeSearchText(
+      url?.host ?? value ?? '',
+      maxLength: searchProviderNameMaxLength,
+      fallback: '无链接来源',
+      redactSecrets: true,
+      redactOpaqueTokens: true,
+    );

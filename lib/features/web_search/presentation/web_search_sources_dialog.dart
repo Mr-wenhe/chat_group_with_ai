@@ -37,7 +37,6 @@ class SourcesDialog extends StatelessWidget {
   Widget build(BuildContext context) {
     final bundle = formatter.format(snapshot);
     final visibleResults = snapshot.results
-        .where((result) => _safeUri(result.url) != null)
         .take(bundle.sourceIds.length)
         .toList(growable: false);
     return AlertDialog(
@@ -107,7 +106,7 @@ class SourcesDialog extends StatelessWidget {
     required String sourceId,
     required domain.WebSearchResult result,
   }) {
-    final uri = _safeUri(result.url);
+    final uri = result.hasSourceUrl ? _safeUri(result.url) : null;
     final published = result.publishedAt == null
         ? '未提供发布日期'
         : result.publishedAt!.toLocal().toIso8601String().split('T').first;
@@ -156,7 +155,7 @@ class SourcesDialog extends StatelessWidget {
     return '未提供查询';
   }
 
-  Uri? _safeUri(Uri value) {
+  Uri? _safeUri(Uri? value) {
     return domain.tryValidateSearchUrl(value);
   }
 }

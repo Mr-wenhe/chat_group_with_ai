@@ -83,13 +83,8 @@ void main() {
     controller.initialize();
     expect(controller.coordinator.providerRoutes.first.id,
         'native:qwen:qwen-plus');
-    expect(
-        controller.coordinator.queryPlanner?.config.provider, ApiProvider.qwen);
-    expect(
-      await controller.coordinator.queryPlanner?.config.resolveApiKey?.call(),
-      'qwen-key',
-    );
-    expect(resolver.lastConfig?.provider, ApiProvider.qwen.name);
+    expect(controller.coordinator.queryPlanner, isNull);
+    expect(resolver.lastConfig, isNull);
 
     final deepSeekConfig = ApiConfig(
       id: configId,
@@ -116,5 +111,101 @@ void main() {
       'deepseek-key',
     );
     expect(resolver.lastConfig?.provider, ApiProvider.deepseek.name);
+  });
+
+  test('binds a Zhipu role to the Zhipu native route', () async {
+    const configId = 'chat-search-zhipu-config';
+    final config = ApiConfig(
+      id: configId,
+      name: '智谱聊天 AI',
+      provider: ApiProvider.zhipu.name,
+      modelName: 'glm-4-flash',
+      credentialId: 'credential.api-config.$configId',
+      hasCredential: true,
+    );
+    final character = AICharacter(
+      id: 'chat-search-zhipu-character',
+      name: '智谱搜索角色',
+      avatar: '智',
+      age: 20,
+      role: '测试角色',
+      personalityTags: const [],
+      systemPrompt: 'test',
+      apiKey: '',
+      apiProvider: ApiProvider.zhipu.name,
+      modelName: 'glm-4-flash',
+      apiConfigId: configId,
+      webSearchEnabled: true,
+    );
+    await db.apiConfigBox.put(configId, config);
+    await db.aiCharacterBox.put(character.id, character);
+    await SearchProviderConfigStore(db: db).saveRuntimeSettings(
+      const SearchRuntimeSettings(nativeSearchEnabled: true),
+    );
+
+    final resolver = _RecordingCredentialResolver();
+    final governance = AiGovernanceStore.forDatabase(db);
+    final controller = ChatRoomSearchRuntimeController(
+      conversationId: 'group-zhipu',
+      governanceStore: governance,
+      aiGateway: AiRequestGateway(store: governance),
+      credentialResolver: resolver,
+      allCharacters: () => db.aiCharacterBox.values,
+      resolveApiConfig: (value) => db.apiConfigBox.get(value.apiConfigId),
+    );
+    addTearDown(controller.dispose);
+
+    controller.initialize();
+
+    expect(controller.coordinator.providerRoutes.single.id,
+        'native:zhipu:glm-4-flash');
+    expect(resolver.lastConfig, isNull);
+  });
+
+  test('news role forces its Zhipu-only route when native setting is off',
+      () async {
+    const configId = 'news-zhipu-config';
+    final config = ApiConfig(
+      id: configId,
+      name: '新闻角色配置',
+      provider: ApiProvider.zhipu.name,
+      modelName: 'glm-4-flash',
+      credentialId: 'credential.api-config.$configId',
+      hasCredential: true,
+    );
+    final character = AICharacter(
+      id: 'news-character',
+      name: '新闻角色',
+      avatar: '📰',
+      age: 30,
+      role: '实时新闻搜索问答助手',
+      personalityTags: const ['新闻'],
+      systemPrompt: '仅依据搜索结果回答',
+      apiKey: '',
+      apiProvider: ApiProvider.zhipu.name,
+      modelName: 'glm-4-flash',
+      apiConfigId: configId,
+      webSearchEnabled: true,
+      zhipuSearchAnswerOnly: true,
+    );
+    await db.apiConfigBox.put(configId, config);
+    await db.aiCharacterBox.put(character.id, character);
+
+    final governance = AiGovernanceStore.forDatabase(db);
+    final controller = ChatRoomSearchRuntimeController(
+      conversationId: 'dm:news-character',
+      governanceStore: governance,
+      aiGateway: AiRequestGateway(store: governance),
+      credentialResolver: _RecordingCredentialResolver(),
+      allCharacters: () => db.aiCharacterBox.values,
+      resolveApiConfig: (value) => db.apiConfigBox.get(value.apiConfigId),
+    );
+    addTearDown(controller.dispose);
+
+    controller.initialize();
+
+    expect(controller.coordinator.providerRoutes.single.id,
+        'native:zhipu:glm-4-flash');
+    expect(controller.coordinator.queryPlanner, isNull);
   });
 }
