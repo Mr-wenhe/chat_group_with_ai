@@ -80,7 +80,9 @@ class _ImageServiceSettingsPageState
         elevation: 0,
         title: Text('图像服务',
             style: TextStyle(
-                fontWeight: FontWeight.w600, fontSize: 18, color: cs.onSurface)),
+                fontWeight: FontWeight.w600,
+                fontSize: 18,
+                color: cs.onSurface)),
       ),
       body: ListView(
         padding: const EdgeInsets.all(20),
@@ -142,8 +144,7 @@ class _ImageServiceSettingsPageState
                         : '未绑定 · IP 形象生成不可用',
                     style: TextStyle(
                         fontSize: 13,
-                        color:
-                            _apiKeyBound ? cs.primary : cs.onSurfaceVariant),
+                        color: _apiKeyBound ? cs.primary : cs.onSurfaceVariant),
                   ),
                 ],
               ),
@@ -151,8 +152,8 @@ class _ImageServiceSettingsPageState
             if (_apiKeyBound)
               TextButton(
                 onPressed: _isBusy ? null : _promptUnbindKey,
-                child: Text('移除',
-                    style: TextStyle(color: cs.error, fontSize: 13)),
+                child:
+                    Text('移除', style: TextStyle(color: cs.error, fontSize: 13)),
               ),
             TextButton.icon(
               onPressed: _isBusy ? null : _promptBindKey,
@@ -185,8 +186,8 @@ class _ImageServiceSettingsPageState
         TextFormField(
           controller: _baseUrlController,
           // 手改地址时不能还挂着预设选中态，否则「选了 A 却填 B 的地址」很迷惑。
-          onChanged: (_) => setState(
-              () => _presetId = kImageProviderPresetCustomId),
+          onChanged: (_) =>
+              setState(() => _presetId = kImageProviderPresetCustomId),
           decoration: appInputDecoration(
               '服务地址',
               preset?.apiPrefix ?? 'https://api.openai.com/v1',
@@ -197,8 +198,8 @@ class _ImageServiceSettingsPageState
         TextFormField(
           controller: _modelController,
           onChanged: (_) => setState(() {}),
-          decoration: appInputDecoration('模型名',
-              preset?.modelHint ?? 'dall-e-3', Icons.auto_awesome_motion_rounded, cs),
+          decoration: appInputDecoration('模型名', preset?.modelHint ?? 'dall-e-3',
+              Icons.auto_awesome_motion_rounded, cs),
         ),
         if (preset != null && preset.sampleModels.isNotEmpty) ...[
           const SizedBox(height: 10),
@@ -224,8 +225,7 @@ class _ImageServiceSettingsPageState
       key: const Key('image-provider-dropdown'),
       value: _presetId,
       isExpanded: true,
-      decoration:
-          appInputDecoration('服务商', null, Icons.cloud_outlined, cs),
+      decoration: appInputDecoration('服务商', null, Icons.cloud_outlined, cs),
       items: [
         for (final preset in kImageProviderPresets)
           DropdownMenuItem<String>(
@@ -245,7 +245,8 @@ class _ImageServiceSettingsPageState
           if (preset != null) {
             _baseUrlController.text = preset.apiPrefix;
             // 仅在用户还没自定义模型时带出建议值，不覆盖手填内容。
-            if (preset.sampleModels.isNotEmpty && _modelController.text.isEmpty) {
+            if (preset.sampleModels.isNotEmpty &&
+                _modelController.text.isEmpty) {
               _modelController.text = preset.sampleModels.first;
             }
             // 尺寸/质量则**无条件对齐**该家合法枚举：选预设就是在声明「我用这家」，
@@ -291,7 +292,8 @@ class _ImageServiceSettingsPageState
                 fontWeight: FontWeight.w600,
                 color: cs.onSurface)),
         const SizedBox(height: 2),
-        Text('不同服务的合法枚举不同；选服务商时会自动带出该家的建议值。'
+        Text(
+            '不同服务的合法枚举不同；选服务商时会自动带出该家的建议值。'
             '质量默认不发送以最大化兼容。',
             style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
         const SizedBox(height: 14),
@@ -314,7 +316,8 @@ class _ImageServiceSettingsPageState
                   child: Text(size, overflow: TextOverflow.ellipsis),
                 )),
           ],
-          onChanged: (value) => setState(() => _size = value ?? kDefaultImageSize),
+          onChanged: (value) =>
+              setState(() => _size = value ?? kDefaultImageSize),
         ),
         const SizedBox(height: 12),
         DropdownButtonFormField<String>(
@@ -346,8 +349,8 @@ class _ImageServiceSettingsPageState
       value: _disableWatermark,
       contentPadding: EdgeInsets.zero,
       dense: true,
-      title: Text('去除 AI 水印',
-          style: TextStyle(fontSize: 14, color: cs.onSurface)),
+      title:
+          Text('去除 AI 水印', style: TextStyle(fontSize: 14, color: cs.onSurface)),
       subtitle: Text(
         '发送 watermark_enabled: false。仅对支持该字段的服务生效；'
         '智谱需先到「个人中心 → 安全管理 → 去水印管理」签署免责声明，否则请求会被拒。',
@@ -442,13 +445,17 @@ class _ImageServiceSettingsPageState
     );
     if (confirmed != true) return;
     setState(() => _isBusy = true);
-    await ref.read(databaseServiceProvider).unbindImageApiKey();
+    final error = await ref.read(databaseServiceProvider).unbindImageApiKey();
     if (!mounted) return;
     setState(() {
       _isBusy = false;
-      _apiKeyBound = false;
+      _apiKeyBound = error != null;
     });
-    AppToast.show(context, '已移除图像 API Key', icon: Icons.check_rounded);
+    AppToast.show(
+      context,
+      error ?? '已移除图像 API Key',
+      icon: error == null ? Icons.check_rounded : Icons.error_outline_rounded,
+    );
   }
 
   Future<void> _saveMeta() async {

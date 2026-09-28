@@ -4,6 +4,8 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/database/database_service_image.dart';
 import 'package:chat_group/core/images/image_service_config.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
+import 'package:chat_group/features/backup/backup_setting_keys.dart';
+import 'package:flutter/foundation.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers/lifecycle_hive.dart';
@@ -85,7 +87,8 @@ void main() {
 
     expect(error, isNull);
     expect(db.imageServiceConfig.apiKeyBound, isTrue);
-    expect(await db.readImageApiKey(credentials: credentials), 'sk-test-secret');
+    expect(
+        await db.readImageApiKey(credentials: credentials), 'sk-test-secret');
   });
 
   test('解除绑定后读不到密钥，且 apiKeyBound 翻回 false', () async {
@@ -97,18 +100,82 @@ void main() {
     expect(db.imageServiceConfig.apiKeyBound, isFalse);
   });
 
-  test('安全存储不可用时返回中文错误文案而不是抛出', () async {
+  test('安全存储不可用时仅非 Release 回退到本地，解绑后清除', () async {
     final unavailable = CredentialRepository(
       store: store,
       legacyStorage: MemoryLegacyCredentialStore(),
       secureStorageAvailable: false,
     );
 
-    final error = await db.bindImageApiKey('sk-x', credentials: unavailable);
+    final error =
+        await db.bindImageApiKey('  sk-x  ', credentials: unavailable);
 
-    expect(error, isNotNull);
-    expect(error, contains('安全存储'));
+    if (kReleaseMode) {
+      expect(error, contains('安全存储'));
+      expect(db.imageServiceConfig.apiKeyBound, isFalse);
+      expect(db.appSettingsBox.get('image_api_key_debug_only'), isNull);
+    } else {
+      expect(error, isNull);
+      expect(db.imageServiceConfig.apiKeyBound, isTrue);
+      expect(db.appSettingsBox.get('image_api_key_debug_only'), 'sk-x');
+      expect(await db.readImageApiKey(credentials: unavailable), 'sk-x');
+      // 安全存储恢复前不谎报解绑成功，也不遗留未绑定但可读的凭据。
+      expect(await db.unbindImageApiKey(credentials: unavailable), isNotNull);
+      expect(db.imageServiceConfig.apiKeyBound, isTrue);
+      final credentials = testCredentials(store);
+      expect(await db.unbindImageApiKey(credentials: credentials), isNull);
+      expect(db.appSettingsBox.get('image_api_key_debug_only'), isNull);
+      expect(await db.readImageApiKey(credentials: credentials), isNull);
+      expect(db.imageServiceConfig.apiKeyBound, isFalse);
+    }
+  });
+
+  test('安全存储优先于调试回退；成功保存后清理过期回退', () async {
+    final credentials = testCredentials(store);
+    if (!kReleaseMode) {
+      await db.appSettingsBox.put('image_api_key_debug_only', 'sk-old');
+    }
+    expect(
+        await db.bindImageApiKey('sk-new', credentials: credentials), isNull);
+    expect(db.appSettingsBox.get('image_api_key_debug_only'), isNull);
+    expect(await db.readImageApiKey(credentials: credentials), 'sk-new');
+    if (!kReleaseMode) {
+      await db.appSettingsBox.put('image_api_key_debug_only', 'sk-stale');
+      expect(await db.readImageApiKey(credentials: credentials), 'sk-new');
+    }
+    expect(await db.unbindImageApiKey(credentials: credentials), isNull);
+    expect(db.appSettingsBox.get('image_api_key_debug_only'), isNull);
+    expect(await db.readImageApiKey(credentials: credentials), isNull);
+  });
+
+  test('安全存储删除失败时不清理回退或解除绑定', () async {
+    final credentials = testCredentials(store);
+    expect(
+        await db.bindImageApiKey('sk-live', credentials: credentials), isNull);
+    if (!kReleaseMode) {
+      await db.appSettingsBox.put('image_api_key_debug_only', 'sk-fallback');
+    }
+    store.failNextDelete = true;
+
+    expect(
+        await db.unbindImageApiKey(credentials: credentials), contains('删除失败'));
+    expect(db.imageServiceConfig.apiKeyBound, isTrue);
+    expect(await db.readImageApiKey(credentials: credentials), 'sk-live');
+    if (!kReleaseMode) {
+      expect(db.appSettingsBox.get('image_api_key_debug_only'), 'sk-fallback');
+    }
+  });
+
+  test('空白 Key 不应保存或标记绑定', () async {
+    final credentials = testCredentials(store);
+    expect(await db.bindImageApiKey('  ', credentials: credentials),
+        contains('不能为空'));
     expect(db.imageServiceConfig.apiKeyBound, isFalse);
+    expect(store.values, isEmpty);
+  });
+
+  test('调试回退凭据不得被备份携带', () {
+    expect(isBackupCarriedSettingKey('image_api_key_debug_only'), isFalse);
   });
 
   test('配置读写落 app_settings，可用 saveImageServiceConfig 覆盖', () async {
@@ -147,7 +214,8 @@ void main() {
 
   test('normalizeImageSize 把非法尺寸送到服务商建议值，查不出预设才用默认', () {
     expect(
-      normalizeImageSize('512x512', baseUrl: 'https://open.bigmodel.cn/api/paas/v4'),
+      normalizeImageSize('512x512',
+          baseUrl: 'https://open.bigmodel.cn/api/paas/v4'),
       '1280x1280',
     );
     expect(normalizeImageSize('512x512'), kDefaultImageSize);

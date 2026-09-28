@@ -14,6 +14,9 @@ import 'database_service.dart';
 /// 单独用 extension 而不是塞进 `database_service.dart`：后者已超 500 行红线，
 /// 本域的读写自成一块，不必再加重主文件。
 extension ImageServiceSettingsAccess on DatabaseService {
+  // 仅非 Release 使用；不得加入备份/导出白名单。
+  static const _imageApiKeyDebugFallbackKey = 'image_api_key_debug_only';
+
   /// 全局图像服务配置。见 [imageServiceSettingsKey]。
   ///
   /// API Key 不在此处：`apiKeyBound` 仅表示已绑定；密钥本尊在安全存储
@@ -28,13 +31,19 @@ extension ImageServiceSettingsAccess on DatabaseService {
     await appSettingsBox.put(imageServiceSettingsKey, config.toMap());
   }
 
-  /// 从安全存储读取图像 API Key；未绑定/不可用时返回 null。
+  /// 优先从安全存储读取图像 API Key；非 Release 才读取调试回退。
   ///
   /// [credentials] 仅供测试注入内存 store；生产调用一律走默认安全存储。
   Future<String?> readImageApiKey({CredentialRepository? credentials}) async {
-    final result =
-        await (credentials ?? CredentialRepository()).read(imageServiceCredentialId);
-    return result.isAvailable ? result.value : null;
+    final result = await (credentials ?? CredentialRepository())
+        .read(imageServiceCredentialId);
+    if (result.isAvailable) return result.value;
+    if (!kReleaseMode) {
+      final fallback =
+          appSettingsBox.get(_imageApiKeyDebugFallbackKey)?.toString() ?? '';
+      if (fallback.isNotEmpty) return fallback;
+    }
+    return null;
   }
 
   /// 绑定图像 API Key 到安全存储，并刷新 [ImageServiceConfig.apiKeyBound]。
@@ -49,13 +58,24 @@ extension ImageServiceSettingsAccess on DatabaseService {
     CredentialRepository? credentials,
   }) async {
     if (kIsWeb) return 'Web 端不支持图像服务。';
-    // 不给 macOS Debug 明文回退（同语音服务）：安全存储失败直接报错，
-    // 避免 Release 与 Debug 的凭据语义分叉。
+    final trimmed = apiKey.trim();
+    if (trimmed.isEmpty) return 'API Key 不能为空';
     final result = await (credentials ?? CredentialRepository()).save(
       imageServiceCredentialId,
-      apiKey.trim(),
+      trimmed,
     );
     if (result.isSuccess) {
+      if (!kReleaseMode) {
+        await appSettingsBox.delete(_imageApiKeyDebugFallbackKey);
+      }
+      await saveImageServiceConfig(
+        imageServiceConfig.copyWith(apiKeyBound: true),
+      );
+      return null;
+    }
+    // macOS 开发签名等环境可能无法写入 Keychain；仅非 Release 回退。
+    if (!kReleaseMode) {
+      await appSettingsBox.put(_imageApiKeyDebugFallbackKey, trimmed);
       await saveImageServiceConfig(
         imageServiceConfig.copyWith(apiKeyBound: true),
       );
@@ -72,7 +92,19 @@ extension ImageServiceSettingsAccess on DatabaseService {
   ///
   /// [credentials] 仅供测试注入内存 store；生产调用一律走默认安全存储。
   Future<String?> unbindImageApiKey({CredentialRepository? credentials}) async {
-    await (credentials ?? CredentialRepository()).delete(imageServiceCredentialId);
+    final result = await (credentials ?? CredentialRepository())
+        .delete(imageServiceCredentialId);
+    if (!result.isSuccess) {
+      // 不可宣称解绑成功：安全存储里的旧凭据可能仍可读。
+      return switch (result.failure) {
+        CredentialFailure.permissionDenied => '系统拒绝删除凭据（权限/锁定）',
+        CredentialFailure.unavailable => '当前环境无可用安全存储',
+        _ => '凭据删除失败，请重试',
+      };
+    }
+    if (!kReleaseMode) {
+      await appSettingsBox.delete(_imageApiKeyDebugFallbackKey);
+    }
     await saveImageServiceConfig(
       imageServiceConfig.copyWith(apiKeyBound: false),
     );
@@ -84,9 +116,8 @@ extension ImageServiceSettingsAccess on DatabaseService {
   String? aiCharacterMediaRelPath(String absolutePath) {
     final root = _aiProcessingRootSync;
     if (root == null) return null;
-    final normalizedRoot = _normalizeSeparators(root)
-        .replaceAll(RegExp(r'/+$'), '')
-        .toLowerCase();
+    final normalizedRoot =
+        _normalizeSeparators(root).replaceAll(RegExp(r'/+$'), '').toLowerCase();
     final normalizedPath = _normalizeSeparators(
       Directory(absolutePath).absolute.path,
     );
@@ -107,8 +138,8 @@ extension ImageServiceSettingsAccess on DatabaseService {
     if (trimmed.contains('..') || _hasDrivePrefix(trimmed)) return null;
     final root = _aiProcessingRootSync;
     if (root == null) return null;
-    final candidate =
-        File('${root.replaceAll(RegExp(r'/+$'), '')}/${_normalizeSeparators(trimmed)}');
+    final candidate = File(
+        '${root.replaceAll(RegExp(r'/+$'), '')}/${_normalizeSeparators(trimmed)}');
     return candidate.existsSync() ? candidate.absolute.path : null;
   }
 
@@ -149,7 +180,8 @@ extension ImageServiceSettingsAccess on DatabaseService {
   /// best-effort 删除受管相对路径对应文件；越界或不存在静默返回。
   ///
   /// 调用方（角色删除、重新生成、放弃未保存草稿）都不应因删文件失败而中断主流程。
-  Future<void> deleteAiCharacterFile(String relPath) async {    final absolute = resolveAiCharacterMediaPath(relPath);
+  Future<void> deleteAiCharacterFile(String relPath) async {
+    final absolute = resolveAiCharacterMediaPath(relPath);
     if (absolute == null) return;
     try {
       final file = File(absolute);
