@@ -394,6 +394,11 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
     return palette[hash % palette.length];
   }
 
+  /// 解析角色的 IP 形象图，供气泡 / @ 浮层共用。null → 文本头像。
+  ImageProvider? _characterAvatarImage(AICharacter? character) => ref
+      .read(databaseServiceProvider)
+      .characterAvatarImage(character);
+
   /// 自动发言状态条的展示文案。
   ///
   /// 工作模式与总开关的优先级高于具体运行状态——它们是"为什么不发言"的根因。

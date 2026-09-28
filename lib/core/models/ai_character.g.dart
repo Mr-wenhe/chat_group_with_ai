@@ -48,13 +48,16 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
       webSearchEnabled: fields[24] == null ? false : fields[24] as bool,
       proactiveChatEnabled: fields[25] == null ? true : fields[25] as bool,
       zhipuSearchAnswerOnly: fields[26] == null ? false : fields[26] as bool,
+      ipImageRelPath: fields[27] == null ? '' : fields[27] as String,
+      avatarFromIpImage: fields[28] == null ? false : fields[28] as bool,
+      ipImageStyle: fields[29] == null ? '' : fields[29] as String,
     );
   }
 
   @override
   void write(BinaryWriter writer, AICharacter obj) {
     writer
-      ..writeByte(27)
+      ..writeByte(30)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -108,7 +111,13 @@ class AICharacterAdapter extends TypeAdapter<AICharacter> {
       ..writeByte(25)
       ..write(obj.proactiveChatEnabled)
       ..writeByte(26)
-      ..write(obj.zhipuSearchAnswerOnly);
+      ..write(obj.zhipuSearchAnswerOnly)
+      ..writeByte(27)
+      ..write(obj.ipImageRelPath)
+      ..writeByte(28)
+      ..write(obj.avatarFromIpImage)
+      ..writeByte(29)
+      ..write(obj.ipImageStyle);
   }
 
   @override

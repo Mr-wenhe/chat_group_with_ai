@@ -209,6 +209,73 @@ void _registerDataLifecycleServiceTestPart2() {
     expect(service.deletedCharacter(characterId), isNull);
   });
 
+  test('character deletion recycles the IP portrait file', () async {
+    const characterId = 'c1';
+    final ipRoot = Directory('${hiveDirectory.path}/ai-processing');
+    final ipDir = Directory('${ipRoot.path}/角色${characterId}_$characterId');
+    await ipDir.create(recursive: true);
+    await db.saveAiProcessingDirPath(ipRoot.path);
+    final ipFile = File('${ipDir.path}/1_ip.png');
+    await ipFile.writeAsBytes(const [1, 2, 3]);
+    await db.aiCharacterBox.put(
+      characterId,
+      testCharacter(
+        characterId,
+        ipImageRelPath: '角色${characterId}_$characterId/1_ip.png',
+        avatarFromIpImage: true,
+      ),
+    );
+
+    final result = await service.deleteCharacter(
+      characterId,
+      policy: CharacterDeletionPolicy.deleteRelatedData,
+    );
+
+    expect(result.isComplete, isTrue);
+    expect(await ipFile.exists(), isFalse);
+  });
+
+  test('keep-history deletion still recycles the IP portrait file', () async {
+    // keepMessageHistory 只保留**消息**；IP 形象是角色私有资产，同 orphan 附件
+    // 一样删除即回收。历史快照里的路径字段留着，渲染层回落文本。
+    const characterId = 'c1';
+    final ipRoot = Directory('${hiveDirectory.path}/ai-processing');
+    final ipDir = Directory('${ipRoot.path}/角色${characterId}_$characterId');
+    await ipDir.create(recursive: true);
+    await db.saveAiProcessingDirPath(ipRoot.path);
+    final ipFile = File('${ipDir.path}/1_ip.png');
+    await ipFile.writeAsBytes(const [1, 2, 3]);
+    await db.aiCharacterBox.put(
+      characterId,
+      testCharacter(
+        characterId,
+        ipImageRelPath: '角色${characterId}_$characterId/1_ip.png',
+        avatarFromIpImage: true,
+      ),
+    );
+
+    final result = await service.deleteCharacter(
+      characterId,
+      policy: CharacterDeletionPolicy.keepMessageHistory,
+    );
+
+    expect(result.isComplete, isTrue);
+    expect(await ipFile.exists(), isFalse);
+    expect(service.deletedCharacter(characterId), isNotNull);
+  });
+
+  test('deleting a character without an IP portrait does not error', () async {
+    const characterId = 'c1';
+    await db.aiCharacterBox.put(characterId, testCharacter(characterId));
+
+    final result = await service.deleteCharacter(
+      characterId,
+      policy: CharacterDeletionPolicy.deleteRelatedData,
+    );
+
+    expect(result.isComplete, isTrue);
+  });
+
   test('group deletion keeps permanent data and global state by default',
       () async {
     await db.chatGroupBox.putAll({

@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/features/memory/memory_audit_presenter.dart';
 import 'package:flutter/material.dart';
 
@@ -9,6 +10,9 @@ class MemoryIdentityHeader extends StatelessWidget {
   final bool isDirectScope;
   final bool isGroupScope;
 
+  /// 已解析的 IP 形象图；null → 回落文本头像。由调用方解析，本类无 IO。
+  final ImageProvider? avatarImage;
+
   const MemoryIdentityHeader({
     super.key,
     required this.selectedObserver,
@@ -16,6 +20,7 @@ class MemoryIdentityHeader extends StatelessWidget {
     this.actions = const [],
     this.isDirectScope = false,
     this.isGroupScope = false,
+    this.avatarImage,
   });
 
   @override
@@ -52,13 +57,12 @@ class MemoryIdentityHeader extends StatelessWidget {
           const SizedBox(height: 12),
           Row(
             children: [
-              CircleAvatar(
-                radius: 18,
-                backgroundColor: cs.primaryContainer,
-                child: Text(
-                  avatar,
-                  style: TextStyle(color: cs.onPrimaryContainer),
-                ),
+              CharacterAvatar(
+                fallbackText: avatar,
+                size: 36,
+                image: avatarImage,
+                background: cs.primaryContainer,
+                textStyle: TextStyle(color: cs.onPrimaryContainer),
               ),
               const SizedBox(width: 10),
               Expanded(

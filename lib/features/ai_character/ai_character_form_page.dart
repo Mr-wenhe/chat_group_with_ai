@@ -1,16 +1,21 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:uuid/uuid.dart';
 import 'package:chat_group/core/audio/voice_catalog.dart';
+import 'package:chat_group/core/database/database_service_image.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:chat_group/features/agentic/skill_download_service.dart';
 import 'package:chat_group/features/agentic/widgets/character_skill_editor.dart';
+import 'package:chat_group/features/ai_character/widgets/ip_portrait_panel.dart';
+import 'package:chat_group/providers/providers.dart';
 import 'providers/ai_character_providers.dart';
 import '../settings/providers/api_config_providers.dart';
 import '../settings/api_config_form_page.dart';
@@ -43,7 +48,10 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   late TextEditingController _hourlyLimitController;
 
   bool _isEditing = false;
-  String? _existingCharacterId;
+
+  /// 进入页面即预分配 id：IP 形象落盘目录名含角色 id，新建时不能等到保存瞬间
+  /// 才生成 uuid，否则生成阶段拿不到稳定 id。
+  late final String _existingCharacterId;
   String _selectedApiConfigId = '';
   String _selectedVoiceId = '';
   CharacterGender? _selectedGender;
@@ -55,15 +63,24 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   List<ToolPermission> _toolPermissions = const [];
   Set<String> _selectedSkillTemplateIds = const {};
 
+  /// IP 形象草稿态（表单内存）；持久化由 [_save] 统一落库。
+  String _workingIpRelPath = '';
+  bool _avatarFromIpImage = false;
+  String _workingIpStyle = '';
+  final _ipPortraitPanelKey = GlobalKey<IpPortraitPanelState>();
+
   @override
   void initState() {
     super.initState();
     _isEditing = widget.character != null;
-    _existingCharacterId = widget.character?.id;
+    _existingCharacterId = widget.character?.id ?? const Uuid().v4();
     // A caller can keep an old character object after returning from this
     // page (for example, an inbox summary). Read the persisted record again
     // so the form never overwrites newer permissions with stale UI state.
     final c = _latestPersistedCharacter();
+    _workingIpRelPath = c?.ipImageRelPath ?? '';
+    _avatarFromIpImage = c?.avatarFromIpImage ?? false;
+    _workingIpStyle = c?.ipImageStyle ?? '';
 
     _nameController = TextEditingController(text: c?.name ?? '');
     _avatarController = TextEditingController(text: c?.avatar ?? '');
@@ -349,6 +366,21 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                     const SizedBox(width: 14),
                     _buildAvatarPreview(cs),
                   ],
+                ),
+                const SizedBox(height: 14),
+                IpPortraitPanel(
+                  key: _ipPortraitPanelKey,
+                  draftBuilder: _draftCharacter,
+                  missingFields: _missingPortraitFields,
+                  characterId: _existingCharacterId,
+                  initialRelPath: _workingIpRelPath,
+                  initialAvatarFromIp: _avatarFromIpImage,
+                  initialStyle: _workingIpStyle,
+                  onChanged: (relPath, avatarFromIp, style) => setState(() {
+                    _workingIpRelPath = relPath;
+                    _avatarFromIpImage = avatarFromIp;
+                    _workingIpStyle = style;
+                  }),
                 ),
                 const SizedBox(height: 14),
                 Row(
@@ -663,21 +695,25 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     final displayAvatar = _avatarController.text.isEmpty
         ? (_nameController.text.isNotEmpty ? _nameController.text[0] : '?')
         : _avatarController.text;
-    return Container(
-      width: 52,
-      height: 52,
+    // 仅在「设为头像」开启时出图：这里是「当前生效头像」预览，不是 IP 形象预览。
+    final image = _avatarFromIpImage
+        ? ref.read(databaseServiceProvider).characterAvatarImage(_draftCharacter())
+        : null;
+    return CharacterAvatar(
+      fallbackText: displayAvatar,
+      size: 52,
+      image: image,
       decoration: BoxDecoration(
         shape: BoxShape.circle,
         color: cs.primaryContainer,
         border:
             Border.all(color: cs.primary.withValues(alpha: 0.2), width: 1.5),
       ),
-      child: Center(
-          child: Text(displayAvatar,
-              style: TextStyle(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w600,
-                  color: cs.onPrimaryContainer))),
+      textStyle: TextStyle(
+        fontSize: 20,
+        fontWeight: FontWeight.w600,
+        color: cs.onPrimaryContainer,
+      ),
     );
   }
 
@@ -749,6 +785,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         createdAt: widget.character?.createdAt ?? DateTime.now(),
         gender: _isEditing ? widget.character!.gender : _selectedGender!,
         voiceId: _selectedVoiceId,
+        ipImageRelPath: _workingIpRelPath,
+        avatarFromIpImage: _avatarFromIpImage,
+        ipImageStyle: _workingIpStyle,
       );
 
       if (_isEditing) {
@@ -758,6 +797,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       } else {
         await ref.read(aiCharactersProvider.notifier).addCharacter(character);
       }
+
+      // 持久化成功才把 IP 形象文件「认领」下来；否则面板 dispose 会按未保存草稿回收。
+      _ipPortraitPanelKey.currentState?.markCommitted();
 
       if (mounted) {
         AppToast.show(context, _isEditing ? '角色已更新' : '角色已创建',
@@ -774,6 +816,21 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       if (mounted) setState(() => _isSaving = false);
     }
   }
+
+  /// 生成 IP 形象前的必填检查，返回缺失项的显示名（空列表 = 可以生成）。
+  ///
+  /// 只看与出图有关的三项。API 配置**不拦**：它服务的是聊天补全，生图走独立的
+  /// 图像服务配置（面板自己查 `imageServiceConfig`）；为出图强制先配聊天是反
+  /// 直觉的。年龄 / 性格标签 / 人设也不拦 —— [buildIpImagePrompt] 对三者都有
+  /// 降级，缺了照样拼得出可用 prompt。
+  ///
+  /// 性别仅新建时拦：编辑态性别被锁死（下面的下拉 `onChanged` 为 null），且
+  /// 遗留的未知性别角色本来就靠 `_selectedGender == null` 表达，那不是「没填」。
+  List<String> _missingPortraitFields() => [
+        if (_nameController.text.trim().isEmpty) '名字',
+        if (!_isEditing && _selectedGender == null) '性别',
+        if (_roleController.text.trim().isEmpty) '角色',
+      ];
 
   AICharacter _draftCharacter() {
     final tags = _personalityController.text
@@ -793,10 +850,26 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       systemPrompt: _systemPromptController.text.trim(),
       apiKey: '',
       apiProvider: 'deepseek',
-      gender: _selectedGender ?? CharacterGender.female,
+      // 这两项以前漏带，后果是 IP 形象的 LLM 外观改写永远静默走本地模板
+      // （[IpPortraitPanelState._describeVisual] 看到空 apiConfigId 就直接
+      // return null），音色气质线索也永远不出现，出图不对却无从排查。草稿
+      // 必须和 [_save] 一样带全字段 —— 凡是拿草稿拼 prompt 的逻辑都会踩
+      // 同一个坑（同 `voiceId` / `withGender` 丢字段那一类事故）。
+      apiConfigId: _selectedApiConfigId,
+      voiceId: _selectedVoiceId,
+      gender:
+          _selectedGender ?? widget.character?.gender ?? CharacterGender.female,
+      // 必须与 [gender] 同源：`_selectedGender` 为空正是「性别未知」——initState
+      // 对 `hasKnownGender == false` 的角色特意把它置 null。漏带本字段会落到
+      // 构造默认 `true`，于是未知性别角色被拼成 `a 25-year-old female`。保存
+      // 路径由 provider 从库里回填所以看不出来，属「保存对、草稿错」的静默失效。
+      hasKnownGender: _selectedGender != null,
       webSearchEnabled: _webSearchEnabled,
       proactiveChatEnabled: _proactiveChatEnabled,
       zhipuSearchAnswerOnly: _zhipuSearchAnswerOnly,
+      ipImageRelPath: _workingIpRelPath,
+      avatarFromIpImage: _avatarFromIpImage,
+      ipImageStyle: _workingIpStyle,
     );
   }
 

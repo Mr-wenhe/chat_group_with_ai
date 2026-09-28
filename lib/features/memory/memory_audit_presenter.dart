@@ -108,6 +108,9 @@ class MemoryAuditRow {
   final int supersedesCount;
   final String observerName;
   final String observerAvatar;
+
+  /// 观察 AI 的角色 id —— 渲染层靠它解析 IP 形象图（id → AICharacter → 文件）。
+  final String observerCharacterId;
   final List<String> subjectNames;
   final String originName;
   final MemoryAuditLabel kind;
@@ -131,6 +134,7 @@ class MemoryAuditRow {
     required this.supersedesCount,
     required this.observerName,
     this.observerAvatar = '',
+    this.observerCharacterId = '',
     required List<String> subjectNames,
     required this.originName,
     required this.kind,
@@ -224,6 +228,7 @@ class MemoryAuditPresenter {
       supersedesCount: memory.supersedesIds.length,
       observerName: _characterName(memory.observerCharacterId),
       observerAvatar: characterAvatars[memory.observerCharacterId] ?? '',
+      observerCharacterId: memory.observerCharacterId,
       subjectNames: List.unmodifiable(
         memory.subjectIds.map(_characterName),
       ),

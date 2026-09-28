@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/database_service_image.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/user_profile.dart';
@@ -13,6 +14,7 @@ import 'package:chat_group/features/memory/relationship_audit_filter.dart';
 import 'package:chat_group/features/memory/relationship_audit_filter_widget.dart';
 import 'package:chat_group/features/memory/relationship_audit_presenter.dart';
 import 'package:chat_group/features/memory/relationship_controls.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -312,6 +314,7 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
               MemoryObserverSidebar(
                 sidebarWidth: 240,
                 characters: _observerCharacters,
+                avatarImageOf: _db.characterAvatarImage,
                 selectedObserverId: _observerCharacterId,
                 searchQuery: _observerSearchQuery,
                 showAll: widget.allowedObserverCharacterIds == null,
@@ -424,17 +427,16 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
         runSpacing: 6,
         crossAxisAlignment: WrapCrossAlignment.center,
         children: [
-          CircleAvatar(
-            radius: 14,
-            backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-            child: Text(
-              selected == null
-                  ? 'AI'
-                  : RelationshipAuditPresenter.avatar(selected, 'AI'),
-              style: TextStyle(
-                fontSize: 12,
-                color: Theme.of(context).colorScheme.onPrimaryContainer,
-              ),
+          CharacterAvatar(
+            fallbackText: selected == null
+                ? 'AI'
+                : RelationshipAuditPresenter.avatar(selected, 'AI'),
+            size: 28,
+            image: _db.characterAvatarImage(selected),
+            background: Theme.of(context).colorScheme.primaryContainer,
+            textStyle: TextStyle(
+              fontSize: 12,
+              color: Theme.of(context).colorScheme.onPrimaryContainer,
             ),
           ),
           for (var index = 0; index < parts.length; index++) ...[
@@ -561,6 +563,8 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
                     targetName: _targetName(relationship, characterById),
                     targetRole: _targetRole(relationship, characterById),
                     targetAvatar: _targetAvatar(relationship, characterById),
+                    avatarImage:
+                        _targetAvatarImage(relationship, characterById),
                     stageLabel: RelationshipAuditPresenter.stageLabel(
                         relationship.stage),
                     moodLabel: RelationshipAuditPresenter.moodLabel(
@@ -793,6 +797,18 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
       characters[relationship.targetId],
       'AI',
     );
+  }
+
+  /// 与 [_targetAvatar] 同源的 IP 形象解析。用户目标没有 IP 形象，
+  /// `characterAvatarImage` 对合成的 `_userProfileCharacter` 天然返回 null。
+  ImageProvider? _targetAvatarImage(
+    RelationshipState relationship,
+    Map<String, AICharacter> characters,
+  ) {
+    if (relationship.targetType == RelationshipTargetType.user) {
+      return _db.characterAvatarImage(_userProfileCharacter);
+    }
+    return _db.characterAvatarImage(characters[relationship.targetId]);
   }
 
   AICharacter? get _userProfileCharacter {

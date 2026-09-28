@@ -84,6 +84,7 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
         mutedIds: _muteStore.mutedFor(widget.groupId),
         onToggleMute: _setCharacterMuted,
         onMention: _insertMention,
+        avatarImageOf: _characterAvatarImage,
       ),
     );
   }

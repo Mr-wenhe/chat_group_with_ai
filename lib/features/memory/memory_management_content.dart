@@ -43,6 +43,7 @@ extension _MemoryManagementContent on _MemoryManagementPageState {
         SliverToBoxAdapter(
           child: MemoryIdentityHeader(
             selectedObserver: _selectedObserver,
+            avatarImage: _db.characterAvatarImage(_selectedObserver),
             filteredCount: filteredCount,
             isDirectScope:
                 widget.scope.type == MemoryConversationScopeType.direct,
@@ -130,6 +131,7 @@ extension _MemoryManagementContent on _MemoryManagementPageState {
         showObserver:
             widget.scope.showsObserverFilter && _observerCharacterId == null,
         onOpenDetails: _openMemoryDetails,
+        observerAvatarImageOf: _observerAvatarImage,
       );
 
   Future<void> _openMemoryDetails(String memoryId) async {

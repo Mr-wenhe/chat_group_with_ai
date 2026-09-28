@@ -2,12 +2,14 @@ import 'dart:async';
 
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/database_service_image.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/text/pinyin_search.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
 import 'package:chat_group/features/memory/relationship_audit_presenter.dart';
 import 'package:chat_group/features/memory/relationship_controls.dart';
@@ -354,15 +356,14 @@ class _RelationshipAuditDetailPageState
     return Row(
       mainAxisSize: compact ? MainAxisSize.max : MainAxisSize.min,
       children: [
-        CircleAvatar(
-          radius: 24,
-          backgroundColor: Theme.of(context).colorScheme.primaryContainer,
-          child: Text(
-            RelationshipAuditPresenter.avatar(character, name),
-            style: TextStyle(
-              color: Theme.of(context).colorScheme.onPrimaryContainer,
-              fontWeight: FontWeight.w700,
-            ),
+        CharacterAvatar(
+          fallbackText: RelationshipAuditPresenter.avatar(character, name),
+          size: 48,
+          image: _db.characterAvatarImage(character),
+          background: Theme.of(context).colorScheme.primaryContainer,
+          textStyle: TextStyle(
+            color: Theme.of(context).colorScheme.onPrimaryContainer,
+            fontWeight: FontWeight.w700,
           ),
         ),
         const SizedBox(width: 10),

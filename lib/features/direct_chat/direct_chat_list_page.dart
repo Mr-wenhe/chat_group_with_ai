@@ -1,11 +1,13 @@
 import 'dart:async';
 
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/database/database_service_image.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
@@ -206,6 +208,7 @@ class _DirectChatListPageState extends ConsumerState<DirectChatListPage> {
                 return _DirectChatCard(
                   summary: summary,
                   cs: cs,
+                  avatarImage: _db.characterAvatarImage(summary.character),
                   isPinned: _db.pinnedCharacterIds().contains(
                         summary.character.id,
                       ),
@@ -279,6 +282,9 @@ class _DirectChatCard extends StatelessWidget {
   final VoidCallback onTogglePin;
   final VoidCallback? onOpenCharacter;
 
+  /// 已解析的 IP 形象图；null → 回落文本头像。由调用方解析，保持本类无 IO。
+  final ImageProvider? avatarImage;
+
   const _DirectChatCard({
     required this.summary,
     required this.cs,
@@ -286,6 +292,7 @@ class _DirectChatCard extends StatelessWidget {
     required this.onTap,
     required this.onTogglePin,
     required this.onOpenCharacter,
+    this.avatarImage,
   });
 
   @override
@@ -318,19 +325,18 @@ class _DirectChatCard extends StatelessWidget {
               InkWell(
                 onTap: onOpenCharacter,
                 borderRadius: BorderRadius.circular(24),
-                child: CircleAvatar(
-                  radius: 24,
-                  backgroundColor: color.withValues(alpha: 0.14),
-                  child: Text(
-                    character.avatar.isNotEmpty
-                        ? character.avatar
-                        : character.name.isNotEmpty
-                            ? character.name.substring(0, 1)
-                            : '?',
-                    style: TextStyle(
-                      fontWeight: FontWeight.w700,
-                      color: color,
-                    ),
+                child: CharacterAvatar(
+                  fallbackText: character.avatar.isNotEmpty
+                      ? character.avatar
+                      : character.name.isNotEmpty
+                          ? character.name.substring(0, 1)
+                          : '?',
+                  size: 48,
+                  image: avatarImage,
+                  background: color.withValues(alpha: 0.14),
+                  textStyle: TextStyle(
+                    fontWeight: FontWeight.w700,
+                    color: color,
                   ),
                 ),
               ),
