@@ -12,6 +12,7 @@ import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/ai_character/ip_visual_description_llm.dart';
+import 'package:chat_group/features/ai_character/widgets/ip_image_prompt_dialog.dart';
 import 'package:chat_group/features/ai_character/widgets/ip_portrait_draft_tracker.dart';
 import 'package:chat_group/features/settings/image_service_settings_page.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
@@ -25,6 +26,11 @@ const String kIpImageUnconfiguredMessage = '尚未配置图像服务，请先到
 const String kIpImageWriteFailedMessage = 'IP 形象保存到本地失败，请重试';
 const String kIpImageGenericFailedMessage = 'IP 形象生成失败，请重试';
 
+/// 「缺哪些必填项」的统一文案。提示行与生成兜底共用一份措辞，
+/// 免得两处文案各自漂移成两种说法。
+String ipPortraitMissingFieldsMessage(List<String> missing) =>
+    '请先填写：${missing.join('、')}';
+
 /// 角色表单内的「IP 形象」面板：按角色定义自动生成形象，并可一键设为头像。
 ///
 /// 生成**即落盘**（[DatabaseService.writeBytesToAiCharacterDir]），因为生成是
@@ -34,6 +40,7 @@ class IpPortraitPanel extends ConsumerStatefulWidget {
   const IpPortraitPanel({
     super.key,
     required this.draftBuilder,
+    required this.missingFields,
     required this.characterId,
     required this.initialRelPath,
     required this.initialAvatarFromIp,
@@ -43,6 +50,12 @@ class IpPortraitPanel extends ConsumerStatefulWidget {
 
   /// 取表单**当前草稿**（姓名/年龄/职业/性格/人设都还在内存里），拼 prompt 用。
   final AICharacter Function() draftBuilder;
+
+  /// 返回「缺失的必填项」的显示名；空列表才允许生成。
+  ///
+  /// 由表单页提供而不是本面板自判：只有表单知道哪些字段是必填、以及编辑态下
+  /// 哪些被锁死。做成 `required` 而非可选，避免「忘了传就永远放行」的暗门。
+  final List<String> Function() missingFields;
 
   /// 落盘目录名含角色 id，因此新建角色也必须先预分配 id（见表单页）。
   final String characterId;
@@ -58,7 +71,8 @@ class IpPortraitPanel extends ConsumerStatefulWidget {
   ConsumerState<IpPortraitPanel> createState() => IpPortraitPanelState();
 }
 
-class IpPortraitPanelState extends ConsumerState<IpPortraitPanel> {
+class IpPortraitPanelState extends ConsumerState<IpPortraitPanel>
+    with AutomaticKeepAliveClientMixin {
   late final IpPortraitDraftTracker _tracker;
   late final DatabaseService _db;
   late bool _avatarFromIp;
@@ -77,6 +91,13 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel> {
   /// 和 [_lastPrompt] 一起看才有意义：同样是「prompt 不对」，走没走 LLM
   /// 完全是两条排查路径。
   bool? _lastUsedLlm;
+
+  /// 生成要跑 30–120s，而面板在表单的 `ListView` 里，滚出视口会被
+  /// `collectGarbage` 卸载 —— 后台的生成其实跑完了、也写了盘，只是
+  /// `mounted` 已假导致结果被丢弃，用户看起来就是「生成停了」。保活让
+  /// 状态原地存活，把这段等待跨过去。
+  @override
+  bool get wantKeepAlive => true;
 
   @override
   void initState() {
@@ -106,6 +127,7 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel> {
 
   @override
   Widget build(BuildContext context) {
+    super.build(context); // AutomaticKeepAliveClientMixin 要求：登记保活。
     final cs = Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -167,6 +189,10 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel> {
         Text(
           _referenceHint(),
           key: const ValueKey('ip-portrait-reference-hint'),
+          // 高度必须恒定：这一行会随「缺哪些必填项」换文案，而该面板所在的
+          // 表单 `ListView` 子项一旦变高，整块内容会失去命中测试。
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
           style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
         ),
         const SizedBox(height: 2),
@@ -215,14 +241,6 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel> {
     );
   }
 
-  /// 说明形象会参考哪些字段 —— 尤其是音色，它不在表单的「外貌」区域，
-  /// 不点明用户不会想到它会影响长相。
-  String _referenceHint() {
-    final voiceName = voicePresetById(widget.draftBuilder().voiceId)?.name;
-    final suffix = voiceName == null ? '' : '、朗读音色（$voiceName）';
-    return '自动从性格、人设$suffix 提炼长相';
-  }
-
   /// 外观描述由谁产出。**必须可见**：LLM 改写失败时会静默回落本地模板，
   /// 上一版就因为草稿漏带 `apiConfigId` 而永远走本地模板，出图不对却完全
   /// 无从排查 —— 静默回落等于把 bug 藏起来。
@@ -263,11 +281,28 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel> {
     );
   }
 
+  /// 说明形象会参考哪些字段 —— 尤其是音色，它不在表单的「外貌」区域，
+  /// 不点明用户不会想到它会影响长相。
+  ///
+  /// 必填项缺失时**改用这一行**点名缺什么（生成按钮此时是灰的，不说清
+  /// 用户不知道该去填哪一项）。刻意不另起一行新 Text：给这个表单的
+  /// `ListView` 子项加高度会让整块内容失去命中测试（实测 `IgnorePointer`
+  /// 上的 viewport 被跳过），所以提示必须复用既有行位、保持高度不变。
+  String _referenceHint() {
+    final missing = widget.missingFields();
+    if (missing.isNotEmpty) return ipPortraitMissingFieldsMessage(missing);
+    final voiceName = voicePresetById(widget.draftBuilder().voiceId)?.name;
+    final suffix = voiceName == null ? '' : '、朗读音色（$voiceName）';
+    return '自动从性格、人设$suffix 提炼长相';
+  }
+
   Widget _buildGenerateButton(BuildContext context, ColorScheme cs) {
+    final missing = widget.missingFields();
     return FilledButton.icon(
       key: const ValueKey('ip-portrait-generate'),
-      // 生成期间禁用，杜绝重复点击双计费。
-      onPressed: _isGenerating ? null : _onGenerate,
+      // 生成期间禁用，杜绝重复点击双计费；必填项缺失也禁用，避免拼出
+      // `an AI companion.` 这种空壳 prompt 还照样扣一次生图费。
+      onPressed: (_isGenerating || missing.isNotEmpty) ? null : _onGenerate,
       icon: _isGenerating
           ? const SizedBox(
               width: 16,
@@ -303,67 +338,34 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel> {
     );
   }
 
-  /// 弹窗顶部的一句话，讲清这份 prompt 是哪条路径拼出来的。
-  ///
-  /// 三态必须分开说：预览（还没生成）、生成时真用了 LLM、生成时静默回落了
-  /// 本地模板。混成一句「这是 prompt」就又回到「图不对只能猜」的老路。
-  String _promptNote(String? sent) {
-    if (sent == null) {
-      return '以下是本地模板拼装的预览。点「生成形象」后这里会换成真实发出的原文。';
-    }
-    return _lastUsedLlm == true
-        ? '以下是最近一次生成真实发出的原文，外观描述由聊天模型改写。'
-        : '以下是最近一次生成真实发出的原文。外观描述走的是本地模板 '
-            '—— 聊天模型那次改写没生效，所以只有性格没有长相。';
-  }
-
-  /// 把实际发出的 prompt 摊开。
+  /// 把实际发出的 prompt 摊开（[showIpImagePromptDialog]）。
   ///
   /// 「图不对」十次有九次出在 prompt，但 prompt 是自动拼的，用户看不见就只能
   /// 猜。这里给一条能直接复制走比对的通道。没生成过时先按本地模板拼一份预览，
-  /// 并明确标注它和真实请求的差别。
+  /// 并由弹窗顶部那句话标注它和真实请求的差别。
   void _showPrompt(BuildContext context) {
-    final sent = _lastPrompt;
-    final prompt = sent ??
-        buildIpImagePrompt(
-          widget.draftBuilder(),
-          style: resolveImageStylePreset(_style),
-        );
-    showDialog<void>(
-      context: context,
-      builder: (dialogContext) {
-        final cs = Theme.of(dialogContext).colorScheme;
-        return AlertDialog(
-          title: const Text('生图 Prompt'),
-          content: SizedBox(
-            width: double.maxFinite,
-            child: SingleChildScrollView(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    _promptNote(sent),
-                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                  ),
-                  const SizedBox(height: 8),
-                  SelectableText(prompt),
-                ],
-              ),
-            ),
-          ),
-          actions: [
-            TextButton(
-              onPressed: () => Navigator.pop(dialogContext),
-              child: const Text('关闭'),
-            ),
-          ],
-        );
-      },
+    showIpImagePromptDialog(
+      context,
+      previewPrompt: buildIpImagePrompt(
+        widget.draftBuilder(),
+        style: resolveImageStylePreset(_style),
+      ),
+      sentPrompt: _lastPrompt,
+      usedLlm: _lastUsedLlm,
     );
   }
 
   Future<void> _onGenerate() async {
+    // 防御性校验：按钮已按同一条件置灰，这里兜住未来有人绕过 UI 门禁的情况。
+    final missing = widget.missingFields();
+    if (missing.isNotEmpty) {
+      AppToast.show(
+        context,
+        ipPortraitMissingFieldsMessage(missing),
+        icon: Icons.error_outline_rounded,
+      );
+      return;
+    }
     final config = _db.imageServiceConfig;
     final apiKey = await _db.readImageApiKey();
     if (!mounted) return;
@@ -395,7 +397,12 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel> {
       final bytes = await ImageGenerationService(config: config, apiKey: apiKey)
           .generate(prompt: prompt);
       final relPath = await _writePortrait(bytes);
-      if (!mounted) return;
+      if (!mounted) {
+        // 面板已被卸载，dispose 里的 _tracker.discard() 只回收已登记的路径，
+        // 而这个文件还没进 adopt()，簿记里根本没有它 —— 不显式删就成孤儿。
+        unawaited(_db.deleteAiCharacterFile(relPath));
+        return;
+      }
       _tracker.adopt(relPath);
       widget.onChanged(relPath, _avatarFromIp, _style);
       setState(() {});

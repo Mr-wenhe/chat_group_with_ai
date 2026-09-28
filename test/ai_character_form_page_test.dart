@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
+import 'package:chat_group/features/ai_character/widgets/ip_portrait_panel.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
@@ -379,6 +380,68 @@ void main() {
 
     await tester.tap(find.widgetWithText(TextButton, '关闭'));
     await tester.pump();
+  });
+
+  testWidgets('必填项没填齐时禁用生成，并点名缺什么', (tester) async {
+    // 空草稿曾能直接生成，拼出 `an AI companion.` 这种没有姓名/职业的空壳
+    // prompt，还照样扣一次生图费。按钮置灰的同时必须说清缺哪几项。
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+
+    final generate = tester.widget<FilledButton>(
+      find.byKey(const ValueKey('ip-portrait-generate')),
+    );
+    expect(generate.onPressed, isNull);
+    expect(find.text('请先填写：名字、性别、角色'), findsOneWidget);
+  });
+
+  testWidgets('必填项填齐后生成按钮启用，提示换回参考说明', (tester) async {
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextFormField).at(0), '阿杰');
+    await tester.pump();
+    await tester.enterText(find.byType(TextFormField).at(2), '工程师');
+    await tester.pump();
+    await tester.tap(find.byType(DropdownButtonFormField<CharacterGender>));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('男'));
+    await tester.pump();
+
+    final generate = tester.widget<FilledButton>(
+      find.byKey(const ValueKey('ip-portrait-generate')),
+    );
+    expect(generate.onPressed, isNotNull);
+    expect(find.text('请先填写：名字、性别、角色'), findsNothing);
+    expect(find.textContaining('提炼长相'), findsOneWidget);
+  });
+
+  testWidgets('面板滚出视口后不被卸载，生成状态得以存活', (tester) async {
+    // 表单 body 是 ListView，面板随滚动被 collectGarbage 卸载时，后台的生成
+    // 其实已跑完并写盘，只是 mounted 变假导致 _tracker.adopt() 被跳过 —— 用户
+    // 看到的正是「滚回来生成就停了」。保活是这条链的解药，本例锁住它：去掉
+    // mixin 后 State 会被重建，实例标识一变测试立刻红。
+    tester.view.physicalSize = const Size(320, 640);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.pump();
+
+    final before = tester.state<IpPortraitPanelState>(
+      find.byType(IpPortraitPanel),
+    );
+
+    await tester.drag(find.byType(ListView), const Offset(0, -4000));
+    await tester.pumpAndSettle();
+    await tester.drag(find.byType(ListView), const Offset(0, 4000));
+    await tester.pumpAndSettle();
+
+    final after = tester.state<IpPortraitPanelState>(
+      find.byType(IpPortraitPanel),
+    );
+    expect(identical(before, after), isTrue);
   });
 
   testWidgets('草稿带全 apiConfigId / voiceId，LLM 外观改写不再静默失效',

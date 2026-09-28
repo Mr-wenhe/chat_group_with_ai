@@ -363,6 +363,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                 IpPortraitPanel(
                   key: _ipPortraitPanelKey,
                   draftBuilder: _draftCharacter,
+                  missingFields: _missingPortraitFields,
                   characterId: _existingCharacterId,
                   initialRelPath: _workingIpRelPath,
                   initialAvatarFromIp: _avatarFromIpImage,
@@ -754,6 +755,21 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       if (mounted) setState(() => _isSaving = false);
     }
   }
+
+  /// 生成 IP 形象前的必填检查，返回缺失项的显示名（空列表 = 可以生成）。
+  ///
+  /// 只看与出图有关的三项。API 配置**不拦**：它服务的是聊天补全，生图走独立的
+  /// 图像服务配置（面板自己查 `imageServiceConfig`）；为出图强制先配聊天是反
+  /// 直觉的。年龄 / 性格标签 / 人设也不拦 —— [buildIpImagePrompt] 对三者都有
+  /// 降级，缺了照样拼得出可用 prompt。
+  ///
+  /// 性别仅新建时拦：编辑态性别被锁死（下面的下拉 `onChanged` 为 null），且
+  /// 遗留的未知性别角色本来就靠 `_selectedGender == null` 表达，那不是「没填」。
+  List<String> _missingPortraitFields() => [
+        if (_nameController.text.trim().isEmpty) '名字',
+        if (!_isEditing && _selectedGender == null) '性别',
+        if (_roleController.text.trim().isEmpty) '角色',
+      ];
 
   AICharacter _draftCharacter() {
     final tags = _personalityController.text
