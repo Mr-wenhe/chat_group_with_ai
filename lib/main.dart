@@ -1,6 +1,5 @@
 import 'dart:async';
 
-import 'package:desktop_webview_window/desktop_webview_window.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -136,9 +135,8 @@ Future<void> runSearchCredentialRepair(
   }
 }
 
-void main(List<String> args) async {
+void main() async {
   DedupKeyEventBinding.ensureInitialized();
-  if (runWebViewTitleBarWidget(args)) return;
 
   final db = DatabaseService();
   try {

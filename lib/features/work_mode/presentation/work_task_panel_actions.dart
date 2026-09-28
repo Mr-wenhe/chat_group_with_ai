@@ -23,6 +23,9 @@ class _TaskActions extends StatelessWidget {
   final WorkTaskAction? onLater;
   final WorkTaskVersionedAction? onLaterVersioned;
   final WorkTaskUndoPreview? undoPreviewFor;
+
+  /// 真删除任务记录（不可逆）。为 null 时不展示删除入口。
+  final WorkTaskAction? onDeleteTask;
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
   final WorkTaskReply? onReply;
@@ -55,6 +58,7 @@ class _TaskActions extends StatelessWidget {
     required this.onLater,
     required this.onLaterVersioned,
     required this.undoPreviewFor,
+    this.onDeleteTask,
     required this.onStop,
     required this.onContinue,
     required this.replyController,
@@ -94,14 +98,21 @@ class _TaskActions extends StatelessWidget {
             failure == null ||
             failure.canContinue ||
             failure.canContinueAfterRolePermissionUpdate);
-    final modelClarificationPending = WorkTaskClarification.isPending(task);
+    final modelClarificationPending =
+        WorkTaskClarification.isPending(task);
+    final followUpClarificationPending =
+        WorkTaskClarification.isFollowUpPending(task);
     // Discussion questions use the same durable follow-up path as model
     // clarifications. Keep the panel answerable even when the runner stored
     // the question in WorkDiscussionState instead of the clarification keys.
     final discussionQuestion =
-        modelClarificationPending ? null : _pendingDiscussionQuestion(task);
+        modelClarificationPending || followUpClarificationPending
+            ? null
+            : _pendingDiscussionQuestion(task);
     final canReply = onReply != null &&
-        (modelClarificationPending || discussionQuestion != null);
+        (modelClarificationPending ||
+            followUpClarificationPending ||
+            discussionQuestion != null);
     final laterAction = WorkTaskUserAction.forTask(task).firstOrNull;
     final laterBlockerId = laterAction?.blockerId ?? 'discussionRequired';
     final laterActionVersion = laterAction?.version ??
@@ -119,6 +130,7 @@ class _TaskActions extends StatelessWidget {
           _TaskReplyBox(
             task: task,
             discussionQuestion: discussionQuestion,
+            isFollowUpClarification: followUpClarificationPending,
             controller: replyController,
             focusNode: replyFocusNode,
             actionInFlight: actionInFlight,
@@ -336,6 +348,17 @@ class _TaskActions extends StatelessWidget {
                 label: const Text('撤销'),
               ),
             ),
+            if (onDeleteTask != null)
+              Tooltip(
+                message: '删除任务记录与执行日志；已生成的文件不受影响。',
+                child: TextButton.icon(
+                  key: const Key('work-task-delete'),
+                  onPressed:
+                      actionInFlight ? null : () => _confirmDelete(context),
+                  icon: const Icon(Icons.delete_outline_rounded),
+                  label: const Text('删除任务'),
+                ),
+              ),
           ],
         ),
       ],

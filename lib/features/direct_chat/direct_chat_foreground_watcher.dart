@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
+import 'package:chat_group/features/chat_group/chat_room_page.dart';
 import 'package:chat_group/features/chat_group/group_chat_proactive_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_proactive_policy.dart';
@@ -105,7 +106,7 @@ class _DirectChatForegroundWatcherState
           icon: Icons.mark_chat_unread_rounded,
           actionLabel: '去看看',
           onTap: () =>
-              widget.navigatorKey.currentState?.pushNamed('/direct-chats'),
+              _openConversationAt(conversationId, directResult.message.id),
         );
         if (mounted) setState(() {});
         return;
@@ -134,8 +135,8 @@ class _DirectChatForegroundWatcherState
           '${groupResult.character.name} 在「${groupResult.group.name}」里发言了',
           icon: Icons.groups_rounded,
           actionLabel: '去看看',
-          onTap: () => widget.navigatorKey.currentState
-              ?.pushNamed('/chat/${groupResult.group.id}'),
+          onTap: () =>
+              _openConversationAt(groupResult.group.id, groupResult.message.id),
         );
         if (mounted) setState(() {});
       }
@@ -160,6 +161,17 @@ class _DirectChatForegroundWatcherState
   bool _isDirectConversation(String? conversationId) {
     return conversationId != null &&
         DirectChatSession.isDirectConversationId(conversationId);
+  }
+
+  /// 通知点击后的跳转：进入产生该通知的会话，并定位到那条新消息。
+  void _openConversationAt(String conversationId, String messageId) {
+    final navigator = widget.navigatorKey.currentState;
+    if (navigator == null) return;
+    openChatRoomAtMessage(
+      navigator,
+      conversationId: conversationId,
+      messageId: messageId,
+    );
   }
 
   @override

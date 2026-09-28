@@ -184,7 +184,7 @@ class WorkTaskUserAction {
       }
     }
 
-    if (WorkTaskClarification.isPending(task)) {
+    if (WorkTaskClarification.isAnswerable(task)) {
       actions.add(_openAction(task, 'clarificationRequired',
           kind: WorkTaskUserActionKind.answerQuestion));
     }

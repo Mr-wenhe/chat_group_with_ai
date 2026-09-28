@@ -120,6 +120,7 @@ class SearchCoordinatorSupport {
           retryCount: snapshot.retryCount,
           fromCache: snapshot.fromCache,
           sources: snapshot.results
+              .where((result) => result.hasSourceUrl)
               .map((result) => result.url.toString())
               .toList(growable: false),
         ),

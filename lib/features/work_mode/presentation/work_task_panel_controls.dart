@@ -6,6 +6,11 @@ const _discussionContinuationReply =
 class _TaskReplyBox extends StatelessWidget {
   final AgentTask task;
   final String? discussionQuestion;
+
+  /// 追问澄清与模型澄清都是"任务在等用户回答"，但问题性质不同：前者问的是
+  /// 要改哪个既有产物，文案要说明这一点，否则用户看到"请回答模型的问题"
+  /// 会以为模型在对话里提问。
+  final bool isFollowUpClarification;
   final TextEditingController controller;
   final FocusNode focusNode;
   final bool actionInFlight;
@@ -15,6 +20,7 @@ class _TaskReplyBox extends StatelessWidget {
   const _TaskReplyBox({
     required this.task,
     this.discussionQuestion,
+    this.isFollowUpClarification = false,
     required this.controller,
     required this.focusNode,
     required this.actionInFlight,
@@ -26,7 +32,13 @@ class _TaskReplyBox extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final isDiscussionQuestion = discussionQuestion != null;
-    final question = discussionQuestion ?? WorkTaskClarification.question(task);
+    final question = discussionQuestion ??
+        WorkTaskClarification.answerableQuestion(task);
+    final prompt = isDiscussionQuestion
+        ? '请回答群讨论的问题'
+        : isFollowUpClarification
+            ? '请明确修订目标'
+            : '请回答模型的问题';
     return DecoratedBox(
       key: const Key('work-task-reply-box'),
       decoration: BoxDecoration(
@@ -40,7 +52,7 @@ class _TaskReplyBox extends StatelessWidget {
           crossAxisAlignment: CrossAxisAlignment.stretch,
           children: <Widget>[
             Text(
-              isDiscussionQuestion ? '请回答群讨论的问题' : '请回答模型的问题',
+              prompt,
               style: Theme.of(context).textTheme.labelLarge,
             ),
             const SizedBox(height: 4),

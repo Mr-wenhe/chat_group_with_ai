@@ -174,6 +174,15 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
           '$recentContext'
     });
 
+    if (_roundtableModeEnabled) {
+      msgs.add({
+        'role': 'system',
+        'content': isAutoChat
+            ? '【圆桌会议：空闲讨论续聊】当前没有新的用户事件输入。请接着最近一轮用户提出的主题与群成员讨论自然接话，表达观点、追问或提出不同看法；不要再次联网搜索，也不要补充未经核验的实时事实。'
+            : '【圆桌会议：根据搜索结果自由讨论】本轮联网搜索结果会作为共同上下文提供给所有群成员。请结合其中与用户事件或主题最相关的事实，表达你的观点、影响判断、疑问或不同意见；不必代替群聊生成新闻简报，也不要声称有角色先发布了简报。只依据搜索证据谈实时事实，不要输出 [S1]、[S2] 等来源编号或“来源于智谱搜索结果”一类归因文案。以自然群聊发言为主，通常 1-3 句。',
+      });
+    }
+
     if (!scene.isGeneral) {
       final otherCharacters =
           _characters.where((c) => c.id != character.id).toList();
@@ -218,8 +227,9 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
             : lastUserMsg.content;
         msgs.add({
           'role': 'system',
-          'content':
-              '【当前任务】$speakerName 刚说："$truncated" —— 请作为 ${character.name} 针对这条消息做出自然回应。'
+          'content': _roundtableModeEnabled && !character.zhipuSearchAnswerOnly
+              ? '【当前任务】用户刚才以“$truncated”提出本轮事件主题；本轮联网搜索结果已提供在上下文中。请结合其中的具体事件，作为 ${character.name} 自由发言并自然接续群聊。'
+              : '【当前任务】$speakerName 刚说："$truncated" —— 请作为 ${character.name} 针对这条消息做出自然回应。'
         });
       }
     } else if (visibleContext.isNotEmpty && isAutoChat) {

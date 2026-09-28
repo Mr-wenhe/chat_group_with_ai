@@ -67,6 +67,9 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
       if (_disposed) return;
       _dataClearInProgress = false;
       _eventStore.resumeAppendsAfterDataClear();
+      // 删除闸门**不**在这里清：清除后的记录要么不存在（闸门无害），要么由导入
+      // 带回来（导入路径会逐 id 核对解禁）。整表清空会给"记录仍不存在"的 id
+      // 开一个口子，让迟到续跑把它们写回来。
       await _schedule();
     });
   }

@@ -276,6 +276,20 @@ extension _SettingsPageLifecycleSupport on _SettingsPageState {
       MaterialPageRoute(builder: (_) => const BackupRestorePage()),
     );
     if (restored != true || !mounted) return;
+    // 导入会把任务记录（可能含本进程删过的 id）写回 Hive：逐 id 核对删除闸门，
+    // 否则那些任务的写入与诊断日志会被静默丢弃。核对失败要显式告知——导入本身
+    // 已经完成，但受影响的旧任务可能"点继续没反应"。
+    try {
+      await ref.read(workTaskCoordinatorProvider).reconcileDeletionGates();
+    } on Object catch (error) {
+      if (mounted) {
+        AppToast.show(
+          context,
+          '导入已完成，但工作模式任务状态同步失败：${sanitizeWorkTaskError(error)}',
+          icon: Icons.error_outline_rounded,
+        );
+      }
+    }
     final db = ref.read(databaseServiceProvider);
     _safeSetState(() {
       _currentSkinMode = db.savedAppSkinMode;

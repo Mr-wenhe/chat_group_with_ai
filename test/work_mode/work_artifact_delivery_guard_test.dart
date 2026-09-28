@@ -6,6 +6,7 @@ import 'package:archive/archive.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_notice.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';

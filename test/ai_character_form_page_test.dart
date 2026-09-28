@@ -49,6 +49,19 @@ void main() {
         child: MaterialApp(home: page),
       );
 
+  /// 等「聚焦输入框触发的自动回滚」跑完，再点同一 ListView 里的其它控件。
+  ///
+  /// 表单 body 是 ListView，`ensureVisible` 把列表滚到底部后名字字段会被顶出
+  /// 视口；此时 `enterText` 聚焦它会启动一次回滚动画（DrivenScrollActivity，
+  /// `shouldIgnorePointer == true`），动画期间 Scrollable 外层的 IgnorePointer
+  /// 吞掉列表内全部命中 —— 紧接着的 `tap` 看似点在控件上，实则被吞掉，
+  /// 后续「找不到弹出菜单项」的报错会误导人以为是 finder 写错。
+  /// 两帧足够：第一帧让 postFrame 回调把动画启动，第二帧把它推到底。
+  Future<void> settleFocusScroll(WidgetTester tester) async {
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 500));
+  }
+
   AICharacter character({
     CharacterGender gender = CharacterGender.female,
     bool hasKnownGender = true,
@@ -151,6 +164,66 @@ void main() {
       () => Future<void>.delayed(const Duration(milliseconds: 100)),
     );
     await tester.pump(const Duration(seconds: 4));
+  });
+
+  testWidgets('role can opt into keyless web search', (tester) async {
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.ensureVisible(find.text('允许联网搜索'));
+    await tester.tap(find.text('允许联网搜索'));
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextFormField).at(0), '搜索角色');
+    await tester.enterText(find.byType(TextFormField).at(2), '研究员');
+    await settleFocusScroll(tester);
+    await tester.tap(find.byType(DropdownButtonFormField<CharacterGender>));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('女'));
+    await tester.pump();
+    await tester.runAsync(() async {
+      await tester.tap(find.text('创建').first);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(db.aiCharacterBox.values.single.webSearchEnabled, isTrue);
+  });
+
+  testWidgets('role can disable proactive private messages', (tester) async {
+    tester.view.physicalSize = const Size(800, 2000);
+    tester.view.devicePixelRatio = 1;
+    addTearDown(tester.view.resetPhysicalSize);
+    addTearDown(tester.view.resetDevicePixelRatio);
+
+    await tester.pumpWidget(app(const AICharacterFormPage()));
+    await tester.ensureVisible(find.text('允许主动聊天'));
+    expect(
+      tester.widget<SwitchListTile>(
+        find.widgetWithText(SwitchListTile, '允许主动聊天'),
+      ).value,
+      isTrue,
+    );
+    await tester.tap(find.text('允许主动聊天'));
+    await tester.pump();
+
+    await tester.enterText(find.byType(TextFormField).at(0), '安静角色');
+    await tester.enterText(find.byType(TextFormField).at(2), '研究员');
+    await settleFocusScroll(tester);
+    await tester.tap(find.byType(DropdownButtonFormField<CharacterGender>));
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text('女'));
+    await tester.pump();
+    await tester.runAsync(() async {
+      await tester.tap(find.text('创建').first);
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(db.aiCharacterBox.values.single.proactiveChatEnabled, isFalse);
   });
 
   testWidgets('edit form locks the stored gender and explains the boundary',

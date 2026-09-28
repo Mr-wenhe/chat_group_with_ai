@@ -453,6 +453,9 @@ class WorkAgentLoop
         );
         if (preflightResult != null) return preflightResult;
       }
+      // 上一次决策是否因输出上限被截断。它要跨迭代保留：截断说明"一次写完"这个
+      // 策略不可行，下一次决策必须换成分块指令，否则只是原样再撞一次上限。
+      var truncatedOutputRetry = false;
       while (true) {
         final boundary = await _checkBoundary(state);
         if (boundary != null) return boundary;
@@ -462,7 +465,12 @@ class WorkAgentLoop
         final context = _buildContext(state);
         final request = WorkAgentModelRequest(
           task: task,
-          messages: _buildMessages(task, context),
+          messages: _buildMessages(
+            task,
+            truncatedOutputRetry
+                ? _withTruncatedOutputHint(context)
+                : context,
+          ),
           context: context,
         );
         final response = await _callModelWithRetries(state, request);
@@ -497,36 +505,50 @@ class WorkAgentLoop
               : _fail(state, message, failure: failure);
         }
 
+        final truncated = _responseHitsOutputLimit(response);
         final parsed = await parser.parseResponse(
           response,
-          repair: (malformed) => _repairModel(state, request, malformed),
+          repair: (malformed) => _repairModel(
+            state,
+            request,
+            malformed,
+            wasTruncated: truncated,
+          ),
         );
         if (parsed.repairAttempted) state.protocolRepairAttempts++;
         if (!parsed.isSuccess) {
+          // 截断才是这次不可解析的原因，它比解析器的具体校验信息更值得上报：
+          // 用户据此才知道该收窄要求或换模型，而不是以为模型不会写 JSON。
+          truncatedOutputRetry = truncated;
+          final detail = truncated
+              ? _truncatedOutputDetail(response)
+              : (parsed.detail ?? '模型返回的 AgentDecision 无法解析。');
           if (protocolRetryCount < maxProtocolRetries) {
             protocolRetryCount++;
             await _emit(
               state,
               WorkTaskEventKind.toolOutput,
-              '模型返回格式无效，正在自动重试。',
+              truncated ? '模型输出被上限截断，改用精简指令重试。' : '模型返回格式无效，正在自动重试。',
               detail: '第 $protocolRetryCount 次协议重试',
               safeMetadata: {
                 'scope': 'modelProtocol',
                 'retry': protocolRetryCount,
+                if (truncated) 'truncated': true,
               },
             );
             continue;
           }
           return await _fail(
             state,
-            parsed.detail ?? '模型返回的 AgentDecision 无法解析。',
+            detail,
             failure: WorkFailure.fromSignalsForProtocol(
-              parsed.detail ?? '模型返回的 AgentDecision 无法解析。',
+              detail,
               completedContent: _completedContent(state),
             ),
           );
         }
         protocolRetryCount = 0;
+        truncatedOutputRetry = false;
         final decision = parsed.decision!;
         // `raw` is intentionally discarded here. Only public_update and
         // validated tool data can cross the event/checkpoint boundary.

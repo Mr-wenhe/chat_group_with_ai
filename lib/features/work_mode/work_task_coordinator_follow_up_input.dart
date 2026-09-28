@@ -300,7 +300,8 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
       );
       if (answeringFollowUpClarification) {
         task.queuedUserRequests = <String>[
-          '${task.queuedUserRequests.first}\n用户明确目标：$normalized',
+          '${task.queuedUserRequests.first}\n'
+              '${WorkTaskCoordinator.clarificationAnswerMarker}$normalized',
           ...task.queuedUserRequests.skip(1),
         ];
       } else if (answeringModelClarification) {

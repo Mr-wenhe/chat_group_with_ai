@@ -162,8 +162,10 @@ void main() {
     test('reset 清空缓冲与累计内容', () {
       final p = SseParser();
       p.ingest('data: {"choices":[{"delta":{"content":"A"}}]}\n');
+      p.ingest('data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n');
       p.reset();
       expect(p.doneEvent().content, '');
+      expect(p.doneEvent().truncated, isFalse);
       expect(
         p.ingest('data: {"choices":[{"delta":{"content":"B"}}]}\n').first.delta,
         'B',
@@ -203,6 +205,25 @@ void main() {
       expect(events, hasLength(1));
       expect(events.first.type, ChatStreamEventType.error);
       expect(events.first.message, contains('content filter'));
+    });
+
+    test('finish_reason=length 时 done 事件标记为被截断', () {
+      // 模型把输出预算耗尽（本仓库实测到 8192 token 全是重复内容）时，
+      // 正文是不完整的，动作 JSON 必然解析失败；调用方需要据此把原因
+      // 说清楚，而不是笼统地报「格式无效」。
+      final p = SseParser();
+      p.ingest(
+          'data: {"choices":[{"delta":{"content":"{\\"act"},"finish_reason":"length"}]}\n');
+
+      expect(p.doneEvent().truncated, isTrue);
+    });
+
+    test('finish_reason=stop 时 done 事件不标记截断', () {
+      final p = SseParser();
+      p.ingest(
+          'data: {"choices":[{"delta":{"content":"完整"},"finish_reason":"stop"}]}\n');
+
+      expect(p.doneEvent().truncated, isFalse);
     });
 
     test('provider error JSON (error + null choices) 产出 error 事件', () {

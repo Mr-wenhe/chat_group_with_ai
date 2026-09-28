@@ -43,6 +43,7 @@ import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/ai_governance/search_coordinator.dart';
 import 'package:chat_group/features/chat_group/chat_room_search_runtime.dart';
 import 'package:chat_group/features/web_search/application/search_turn_context.dart';
+import 'package:chat_group/features/web_search/application/search_flow_logger.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart'
     as web_search;
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
@@ -71,6 +72,8 @@ import 'package:chat_group/features/chat_group/models/chat_room_models.dart';
 import 'package:chat_group/features/chat_group/multimodal_content.dart';
 import 'package:chat_group/features/chat_group/picked_attachment_payload.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
+import 'package:chat_group/features/chat_group/roundtable_mode_config_service.dart';
+import 'package:chat_group/features/chat_group/roundtable_mode_session.dart';
 import 'package:chat_group/features/chat_group/scene_behavior.dart';
 import 'package:chat_group/features/chat_group/streaming_reply_session.dart';
 import 'package:chat_group/features/chat_group/streaming_reply_commit_policy.dart';
@@ -96,7 +99,6 @@ import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_mode_session.dart';
-import 'package:chat_group/features/work_mode/visible_browser_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
@@ -243,6 +245,24 @@ class ChatRoomPage extends ConsumerStatefulWidget {
 
   @override
   ConsumerState<ChatRoomPage> createState() => _ChatRoomPageState();
+}
+
+/// 打开会话并定位到指定消息。
+///
+/// 通知类入口（“有新消息了”）要带着 [messageId] 走这里，而不是只按会话 id
+/// 打开：房间需要知道该高亮哪一条，也需要在目标不在最新一页时把那一页加载
+/// 出来。私聊通知此前更是只跳到私聊列表，根本没进会话。
+Future<void> openChatRoomAtMessage(
+  NavigatorState navigator, {
+  required String conversationId,
+  required String messageId,
+}) {
+  return navigator.push(MaterialPageRoute(
+    builder: (_) => ChatRoomPage(
+      groupId: conversationId,
+      initialMessageId: messageId,
+    ),
+  ));
 }
 
 /// 聊天页面状态。

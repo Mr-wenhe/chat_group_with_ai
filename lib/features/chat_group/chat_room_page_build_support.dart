@@ -1,5 +1,8 @@
 part of 'chat_room_page.dart';
 
+const _roundtableChatBackgroundAsset =
+    'assets/images/roundtable_chat_background.png';
+
 extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
   Widget _buildPage(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
@@ -78,122 +81,147 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
         onClearConversation: _showClearConversationDialog,
         onOpenMembers: _isDirectChat ? null : _showMembersSheet,
       ),
-      body: Column(
-        children: [
-          // 未配置 API Key 时给出醒目提示，避免「发了消息 AI 不回复」的困惑
-          if (!_hasAnyApiConfig)
-            ApiWarningBanner(
-              message: _isDirectChat
-                  ? _replyBlockText(_lastReplyBlockReason)
-                  : '尚未配置 API Key，AI 不会回复或自动聊天',
-              onConfigure: () => Navigator.pushNamed(context, '/settings'),
-            ),
-          if (!_isDirectChat &&
-              (_group?.announcement.trim().isNotEmpty ?? false))
-            AnnouncementBanner(
-              announcement: _group!.announcement.trim(),
-              onEdit: () => Navigator.of(context).push(MaterialPageRoute(
-                builder: (_) => ChatGroupFormPage(group: _group),
-              )),
-            ),
-          ChatRoomSearchStatus(
-            state: _webSearchState,
-            message: _webSearchStatusText,
-            onOpenDetails:
-                _webSearchState.snapshot == null ? null : _showWebSearchSources,
-          ),
-          _buildConversationControls(cs),
-          if (_pendingUserMentionMessageIds.isNotEmpty &&
-              !ConversationPresenceService.instance.isActive(widget.groupId))
-            UserMentionBanner(
-              count: _pendingUserMentionMessageIds.length,
-              onTap: _jumpToNextUserMention,
-              onClear: _clearUserMentions,
-            ),
-          if (_isLoadingOlder) const LinearProgressIndicator(minHeight: 2),
-          Expanded(
-            child: _messages.isEmpty
-                ? _buildEmptyState(cs)
-                : ChatMessageList(
-                    messages: _messages,
-                    characters: _allGroupCharacters,
-                    progressStartTimes: const <String, int>{},
-                    messageIndex: messageIndex,
-                    characterIndex: characterIndex,
-                    scrollController: _scrollController,
-                    controller: _messageListController,
-                    streamingMessageId: _streamingMessage?.id,
-                    regeneratingMessageId:
-                        _isRegenerating ? _regenerateMessageId : null,
-                    highlightedMentionMessageId: _highlightedMentionMessageId,
-                    isDirectChat: _isDirectChat,
-                    readUserMessageIds: readUserMessageIds,
-                    ownerName: _ownerMentionName,
-                    unknownCharacter: _unknownCharacter(),
-                    editableSenderIds:
-                        _characters.map((character) => character.id).toSet(),
-                    senderColor: _senderColor,
-                    senderNameById: _senderNameById,
-                    avatarImageOf: _characterAvatarImage,
-                    onLongPress: _showMessageActionSheet,
-                    onSenderTap: _openCharacterSettings,
-                    onMentionSender: _insertMention,
-                    onQuotedTap: (message) =>
-                        unawaited(_focusSearchResult(message)),
-                    onTaskAction: _handleWorkTaskAction,
-                  ),
-          ),
-          // 底部状态区：文档解析进度优先于"AI 正在回复"提示（前者更需要可取消）。
-          if (_documentProcessingToken != null)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              alignment: Alignment.centerLeft,
-              child: Row(
-                children: [
-                  Expanded(
-                    child: LinearProgressIndicator(
-                      value: _documentProcessingProgress,
-                    ),
-                  ),
-                  const SizedBox(width: 12),
-                  TextButton.icon(
-                    onPressed: _stopDocumentProcessing,
-                    icon: const Icon(Icons.stop_rounded, size: 16),
-                    label: const Text('取消文档解析'),
-                  ),
-                ],
+      body: _withRoundtableBackground(
+        Column(
+          children: [
+            // 未配置 API Key 时给出醒目提示，避免「发了消息 AI 不回复」的困惑
+            if (!_hasAnyApiConfig)
+              ApiWarningBanner(
+                message: _isDirectChat
+                    ? _replyBlockText(_lastReplyBlockReason)
+                    : '尚未配置 API Key，AI 不会回复或自动聊天',
+                onConfigure: () => Navigator.pushNamed(context, '/settings'),
               ),
-            )
-          else if (_isAiReplying)
-            Container(
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-              alignment: Alignment.centerLeft,
-              child: Row(
-                children: [
-                  Text(
-                    _isStreaming ? 'AI 正在生成...' : 'AI 正在回复...',
-                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                  ),
-                  if (_isStreaming) ...[
-                    const SizedBox(width: 10),
-                    // 「停止生成」按钮：取消当前流订阅
-                    TextButton.icon(
-                      onPressed: _stopStreaming,
-                      icon: const Icon(Icons.stop_rounded, size: 16),
-                      label: const Text('停止生成'),
-                      style: TextButton.styleFrom(
-                        foregroundColor: cs.error,
-                        visualDensity: VisualDensity.compact,
-                        padding: EdgeInsets.zero,
+            if (!_isDirectChat &&
+                (_group?.announcement.trim().isNotEmpty ?? false))
+              AnnouncementBanner(
+                announcement: _group!.announcement.trim(),
+                onEdit: () => Navigator.of(context).push(MaterialPageRoute(
+                  builder: (_) => ChatGroupFormPage(group: _group),
+                )),
+              ),
+            ChatRoomSearchStatus(
+              state: _webSearchState,
+              message: _webSearchStatusText,
+              onOpenDetails: _webSearchState.snapshot == null
+                  ? null
+                  : _showWebSearchSources,
+            ),
+            _buildConversationControls(cs),
+            if (_pendingUserMentionMessageIds.isNotEmpty &&
+                !ConversationPresenceService.instance.isActive(widget.groupId))
+              UserMentionBanner(
+                count: _pendingUserMentionMessageIds.length,
+                onTap: _jumpToNextUserMention,
+                onClear: _clearUserMentions,
+              ),
+            if (_isLoadingOlder) const LinearProgressIndicator(minHeight: 2),
+            Expanded(
+              child: _messages.isEmpty
+                  ? _buildEmptyState(cs)
+                  : ChatMessageList(
+                      messages: _messages,
+                      characters: _allGroupCharacters,
+                      progressStartTimes: const <String, int>{},
+                      messageIndex: messageIndex,
+                      characterIndex: characterIndex,
+                      scrollController: _scrollController,
+                      controller: _messageListController,
+                      streamingMessageId: _streamingMessage?.id,
+                      regeneratingMessageId:
+                          _isRegenerating ? _regenerateMessageId : null,
+                      highlightedMentionMessageId: _highlightedMentionMessageId,
+                      isDirectChat: _isDirectChat,
+                      readUserMessageIds: readUserMessageIds,
+                      ownerName: _ownerMentionName,
+                      unknownCharacter: _unknownCharacter(),
+                      editableSenderIds:
+                          _characters.map((character) => character.id).toSet(),
+                      senderColor: _senderColor,
+                      senderNameById: _senderNameById,
+                      avatarImageOf: _characterAvatarImage,
+                      onLongPress: _showMessageActionSheet,
+                      onSenderTap: _openCharacterSettings,
+                      onMentionSender: _insertMention,
+                      onQuotedTap: (message) =>
+                          unawaited(_focusSearchResult(message)),
+                      onTaskAction: _handleWorkTaskAction,
+                    ),
+            ),
+            // 底部状态区：文档解析进度优先于"AI 正在回复"提示（前者更需要可取消）。
+            if (_documentProcessingToken != null)
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                alignment: Alignment.centerLeft,
+                child: Row(
+                  children: [
+                    Expanded(
+                      child: LinearProgressIndicator(
+                        value: _documentProcessingProgress,
                       ),
                     ),
+                    const SizedBox(width: 12),
+                    TextButton.icon(
+                      onPressed: _stopDocumentProcessing,
+                      icon: const Icon(Icons.stop_rounded, size: 16),
+                      label: const Text('取消文档解析'),
+                    ),
                   ],
-                ],
+                ),
+              )
+            else if (_isAiReplying)
+              Container(
+                padding:
+                    const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                alignment: Alignment.centerLeft,
+                child: Row(
+                  children: [
+                    Text(
+                      _isStreaming ? 'AI 正在生成...' : 'AI 正在回复...',
+                      style:
+                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                    ),
+                    if (_isStreaming) ...[
+                      const SizedBox(width: 10),
+                      // 「停止生成」按钮：取消当前流订阅
+                      TextButton.icon(
+                        onPressed: _stopStreaming,
+                        icon: const Icon(Icons.stop_rounded, size: 16),
+                        label: const Text('停止生成'),
+                        style: TextButton.styleFrom(
+                          foregroundColor: cs.error,
+                          visualDensity: VisualDensity.compact,
+                          padding: EdgeInsets.zero,
+                        ),
+                      ),
+                    ],
+                  ],
+                ),
               ),
-            ),
-          _buildInputArea(),
-        ],
+            _buildInputArea(),
+          ],
+        ),
       ),
+    );
+  }
+
+  Widget _withRoundtableBackground(Widget content) {
+    if (!_roundtableModeEnabled || _isDirectChat) return content;
+    return Stack(
+      fit: StackFit.expand,
+      children: [
+        const ColoredBox(color: Color(0xFF101722)),
+        Image.asset(
+          _roundtableChatBackgroundAsset,
+          // Scale proportionally to cover the live window; bottom alignment
+          // keeps the roundtable visible while excess edges are cropped.
+          fit: BoxFit.cover,
+          alignment: Alignment.bottomCenter,
+        ),
+        const ColoredBox(color: Color(0x10000000)),
+        content,
+      ],
     );
   }
 }

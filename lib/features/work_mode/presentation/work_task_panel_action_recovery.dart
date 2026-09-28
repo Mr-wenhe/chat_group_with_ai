@@ -307,6 +307,25 @@ extension _TaskActionRecovery on _TaskActions {
     }
   }
 
+  /// 删除是任务级不可逆操作，确认框必须把它和"关掉标签"区分开：
+  /// 记录与执行日志都会消失，但已生成的文件不动。
+  Future<void> _confirmDelete(BuildContext context) async {
+    final onDelete = onDeleteTask;
+    if (onDelete == null) return;
+    onModalVisibilityChanged?.call(false);
+    bool confirmed;
+    try {
+      confirmed = await _confirmWorkTaskDeletion(
+        context,
+        task: task,
+        dialogContext: dialogContext,
+      );
+    } finally {
+      onModalVisibilityChanged?.call(true);
+    }
+    if (confirmed) await runAction(onDelete);
+  }
+
   /// The app-scoped panel is painted above the route Navigator. Hide it while
   /// any task modal is open so approval, cancellation, and undo controls stay
   /// reachable in narrow windows as well as wide windows.
@@ -318,4 +337,42 @@ extension _TaskActionRecovery on _TaskActions {
       onModalVisibilityChanged?.call(true);
     }
   }
+}
+
+/// 删除任务的确认框。
+///
+/// 两处入口（标签详情、历史详情）共用同一份说明，避免同一个不可逆操作在两个
+/// 地方给出不同的解释。
+Future<bool> _confirmWorkTaskDeletion(
+  BuildContext context, {
+  required AgentTask task,
+  required BuildContext? dialogContext,
+}) async {
+  final confirmed = await showDialog<bool>(
+    context: dialogContext ?? context,
+    barrierDismissible: true,
+    builder: (dialogContext) => AlertDialog(
+      key: const Key('work-task-delete-dialog'),
+      title: const Text('删除这条任务？'),
+      content: Text(
+        '任务记录和执行日志都会被删除，无法恢复。\n'
+        '${task.isTerminal ? '' : '任务尚未结束，会先停止它；正在执行的工具会先跑完，'
+            '期间仍可能产生文件改动。\n'}'
+        '已经生成的文件不会被删除。',
+      ),
+      actions: <Widget>[
+        TextButton(
+          key: const Key('work-task-delete-cancel'),
+          onPressed: () => Navigator.of(dialogContext).pop(false),
+          child: const Text('取消'),
+        ),
+        FilledButton(
+          key: const Key('work-task-delete-confirm'),
+          onPressed: () => Navigator.of(dialogContext).pop(true),
+          child: const Text('删除任务'),
+        ),
+      ],
+    ),
+  );
+  return confirmed == true;
 }

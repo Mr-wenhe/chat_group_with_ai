@@ -91,6 +91,7 @@ class SseParser {
   int _completionTokens = 0;
   int _cachedTokens = 0;
   bool _terminated = false;
+  bool _truncated = false;
   int _fullContentBytes = 0;
   int _fullReasoningContentBytes = 0;
   int _bufferBytes = 0;
@@ -194,6 +195,14 @@ class SseParser {
       if (choices is! List || choices.isEmpty) return null;
       final firstChoice = choices[0];
       if (firstChoice is! Map<String, dynamic>) return null;
+      // 截断判定必须放在正文分支之前：带正文的块会在下面提前 return，而
+      // 真实供应商既可能把 finish_reason 放在空的收尾块，也可能与正文同块。
+      final finishReason = (firstChoice['finish_reason'] ?? '').toString();
+      if (finishReason == 'length') {
+        // 供应商明确表示输出预算耗尽。正文是不完整的，结构化输出（动作 JSON）
+        // 会因缺少结尾而解析失败，调用方需要据此把原因说清楚。
+        _truncated = true;
+      }
       final delta = firstChoice['delta'];
       if (delta is! Map<String, dynamic>) return null;
       final content = delta['content'];
@@ -222,7 +231,7 @@ class SseParser {
         }
         _fullReasoningContent += reasoningContent;
       }
-      if ((firstChoice['finish_reason'] ?? '').toString() == 'error') {
+      if (finishReason == 'error') {
         final nestedErr = firstChoice['error'];
         final errMsg = (nestedErr is Map)
             ? (nestedErr['message']?.toString() ??
@@ -241,12 +250,16 @@ class SseParser {
     }
   }
 
-  ChatStreamEvent doneEvent() => ChatStreamEvent.done(
-      _fullContent.trim().isNotEmpty ? _fullContent : _fullReasoningContent,
-      null,
-      _promptTokens,
-      _completionTokens,
-      _cachedTokens);
+  ChatStreamEvent doneEvent() => ChatStreamEvent(
+        type: ChatStreamEventType.done,
+        content: _fullContent.trim().isNotEmpty
+            ? _fullContent
+            : _fullReasoningContent,
+        promptTokens: _promptTokens,
+        completionTokens: _completionTokens,
+        cachedTokens: _cachedTokens,
+        truncated: _truncated,
+      );
 
   int get promptTokens => _promptTokens;
   int get completionTokens => _completionTokens;
@@ -270,6 +283,7 @@ class SseParser {
     _completionTokens = 0;
     _cachedTokens = 0;
     _terminated = false;
+    _truncated = false;
   }
 
   int _extractCachedTokens(Map<String, dynamic> usage) {

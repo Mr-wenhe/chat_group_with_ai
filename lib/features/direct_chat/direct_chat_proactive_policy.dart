@@ -147,7 +147,7 @@ class DirectChatProactivePolicy {
     Map<String, DateTime> lastProactiveAtByCharacter,
     DateTime now,
   ) {
-    if (!character.isActive) return false;
+    if (!character.isActive || !character.proactiveChatEnabled) return false;
     final lastAt = lastProactiveAtByCharacter[character.id];
     if (lastAt == null) return true;
     return now.difference(lastAt) >= proactiveCooldown;
@@ -164,7 +164,11 @@ class DirectChatProactivePolicy {
         .where((item) => item.conversationId == preferredConversationId)
         .firstOrNull;
     if (summary == null) return null;
-    if (!summary.hasUserMessage || !summary.character.isActive) return null;
+    if (!summary.hasUserMessage ||
+        !summary.character.isActive ||
+        !summary.character.proactiveChatEnabled) {
+      return null;
+    }
     if (summary.unreadCount >= maxUnreadBurstMessages) return null;
 
     final lastAt = lastProactiveAtByCharacter[summary.character.id];
@@ -188,7 +192,9 @@ class DirectChatProactivePolicy {
     Map<String, DateTime> lastProactiveAtByCharacter,
     DateTime now,
   ) {
-    if (!summary.character.isActive) return false;
+    if (!summary.character.isActive || !summary.character.proactiveChatEnabled) {
+      return false;
+    }
     if (summary.unreadCount >= maxUnreadBurstMessages) return false;
     if (summary.lastMessage.senderType != 'ai') return false;
     if (now.difference(summary.lastMessage.timestamp) < unreadFollowUpDelay) {

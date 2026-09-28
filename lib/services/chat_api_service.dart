@@ -301,6 +301,9 @@ class ChatApiService {
           'success': true,
           'message': reply,
           'model': _responseModel(data, apiProtocol) ?? modelName,
+          // 与流式通道一致：带上本次请求的输出上限，调用方才能跨协议判断
+          // "输出是否被用尽"（非流式通道同样不产出 finish_reason）。
+          if (maxTokens > 0) 'requestedMaxTokens': maxTokens,
           if (usage != null) ...usage,
         };
       } else {
@@ -575,7 +578,8 @@ class ChatApiService {
     required bool structuredJson,
   }) async* {
     if (kIsWeb) {
-      yield ChatStreamEvent.error(_webNetworkUnsupportedMessage);
+      yield ChatStreamEvent.error(_webNetworkUnsupportedMessage,
+          sanitized: true);
       return;
     }
     // 与 sendChatMessage 保持一致的 URL / 模型解析
@@ -589,11 +593,11 @@ class ChatApiService {
     final modelName = _resolveModelName(provider: provider, model: model);
 
     if (url.isEmpty) {
-      yield ChatStreamEvent.error('Base URL 不能为空');
+      yield ChatStreamEvent.error('Base URL 不能为空', sanitized: true);
       return;
     }
     if (modelName.isEmpty) {
-      yield ChatStreamEvent.error('模型名称不能为空');
+      yield ChatStreamEvent.error('模型名称不能为空', sanitized: true);
       return;
     }
 
@@ -638,6 +642,7 @@ class ChatApiService {
         yield ChatStreamEvent.error(
           _safeHttpErrorMessage(response.statusCode),
           retryAfter: _retryAfterFromHeaders(response.headers),
+          sanitized: true,
         );
         return;
       }
@@ -673,6 +678,7 @@ class ChatApiService {
               ? ChatStreamEvent.error(
                   _safeStreamErrorMessage(event.message),
                   retryAfter: event.retryAfter,
+                  sanitized: true,
                 )
               : event;
           if (parser.terminated || protocolParser?.terminated == true) return;
@@ -686,14 +692,15 @@ class ChatApiService {
         yield protocolParser.doneEvent();
       }
     } on SseInputLimitException {
-      yield ChatStreamEvent.error('流式响应超过安全大小限制');
+      yield ChatStreamEvent.error('流式响应超过安全大小限制', sanitized: true);
     } on DioException catch (e) {
       yield ChatStreamEvent.error(
         _dioErrorMessage(e),
         retryAfter: _retryAfterFromHeaders(e.response?.headers),
+        sanitized: true,
       );
     } catch (e) {
-      yield ChatStreamEvent.error('请求失败');
+      yield ChatStreamEvent.error('请求失败', sanitized: true);
     }
   }
 }

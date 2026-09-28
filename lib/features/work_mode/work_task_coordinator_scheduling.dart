@@ -228,6 +228,9 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
         _dataClearInProgress ||
         cancellation.isCancelled ||
         task.isTerminal ||
+        // 记录已被删除（启动流程的 await 期间用户删了它）：绝不能为一条已删除的
+        // 任务启动 runner，否则模型与工具会继续跑用户已经删掉的工作。
+        !_taskBox.containsKey(task.id) ||
         (task.status != AgentTaskStatus.queued &&
             task.status != AgentTaskStatus.planning)) {
       cancellation.cancel();

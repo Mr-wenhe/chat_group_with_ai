@@ -103,6 +103,42 @@ void main() {
     );
   });
 
+  test('streamed completion reports provider truncation to the caller',
+      () async {
+    // 工作模式据此区分「模型输出被上限截断」与「模型返回了非法格式」：
+    // 截断时正文缺少结尾，动作 JSON 必然解析失败，重发同一请求只会再截断一次。
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        final sse = [
+          'data: {"choices":[{"delta":{"content":"{\\"action\\":"}}]}\n',
+          'data: {"choices":[{"delta":{},"finish_reason":"length"}]}\n',
+          'data: [DONE]\n',
+        ].map((line) => Uint8List.fromList(utf8.encode(line)));
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 200,
+          data: ResponseBody(Stream<Uint8List>.fromIterable(sse), 200),
+        ));
+      },
+    ));
+
+    final result = await ChatApiService(dio: dio).sendChatMessageStreamed(
+      apiKey: 'test-key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'test-model',
+      messages: const [
+        {'role': 'user', 'content': '继续工作'}
+      ],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isTrue);
+    expect(result['message'], '{"action":');
+    expect(result['truncated'], isTrue);
+  });
+
   test('streamed completion rejects an unterminated oversized frame', () async {
     final dio = Dio();
     dio.interceptors.add(InterceptorsWrapper(
@@ -470,6 +506,75 @@ void main() {
 
     expect(result['success'], isFalse);
     expect(result['message'], contains('流式请求失败'));
+  });
+
+  test('streamed timeouts keep the classified reason for retry decisions',
+      () async {
+    // 「连接超时」是 RetryHandler.isTransientResult / WorkFailure 判定可重试的
+    // 依据。此前它被 _collectStreamedOnce 二次脱敏成「流式请求失败」，导致一次
+    // 可恢复的超时被归类为不可重试的内部失败。
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.reject(
+          DioException(
+            requestOptions: options,
+            type: DioExceptionType.receiveTimeout,
+          ),
+          true,
+        );
+      },
+    ));
+
+    final result = await ChatApiService(dio: dio).sendChatMessageStreamed(
+      apiKey: 'test-key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'test-model',
+      messages: const [
+        {'role': 'user', 'content': '继续工作'}
+      ],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isFalse);
+    expect(result['message'], '连接超时');
+  });
+
+  test('a streamed timeout now earns the transport retry budget', () async {
+    // 脱敏修好后，流式超时会被 RetryHandler.isTransientResult 认成瞬时错误，
+    // 于是真正开始按调用方的重试预算重试（此前 0 次）。这是既存策略的本来
+    // 语义，但会改变可观测等待时长，所以固定下来。
+    var attempts = 0;
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        attempts++;
+        handler.reject(
+          DioException(
+            requestOptions: options,
+            type: DioExceptionType.receiveTimeout,
+          ),
+          true,
+        );
+      },
+    ));
+
+    final result = await ChatApiService(dio: dio, retrySleep: (_) async {})
+        .sendChatMessageStreamed(
+      apiKey: 'test-key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'test-model',
+      messages: const [
+        {'role': 'user', 'content': '继续工作'}
+      ],
+    );
+
+    expect(result['success'], isFalse);
+    expect(result['message'], contains('连接超时'));
+    expect(result['retryExhausted'], isTrue);
+    expect(attempts, greaterThan(1));
   });
 
   test('streamed HTTP failures preserve status codes for work-mode recovery',

@@ -57,6 +57,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   CharacterGender? _selectedGender;
   bool _isSaving = false;
   bool _agenticEnabled = true;
+  bool _webSearchEnabled = false;
+  bool _proactiveChatEnabled = true;
+  bool _zhipuSearchAnswerOnly = false;
   List<ToolPermission> _toolPermissions = const [];
   Set<String> _selectedSkillTemplateIds = const {};
 
@@ -95,6 +98,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     _selectedVoiceId = c?.voiceId ?? '';
     _selectedGender = c != null && c.hasKnownGender ? c.gender : null;
     _agenticEnabled = c?.agenticEnabled ?? true;
+    _webSearchEnabled = c?.webSearchEnabled ?? false;
+    _proactiveChatEnabled = c?.proactiveChatEnabled ?? true;
+    _zhipuSearchAnswerOnly = c?.zhipuSearchAnswerOnly ?? false;
     _selectedSkillTemplateIds =
         Set<String>.from(c?.skillIds ?? const <String>[]);
     _toolPermissions = List<ToolPermission>.from(
@@ -145,6 +151,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     _roleController.text = p.role;
     _personalityController.text = p.personalityTags.join(', ');
     _systemPromptController.text = p.systemPrompt;
+    _zhipuSearchAnswerOnly = p.zhipuSearchAnswerOnly;
+    if (_zhipuSearchAnswerOnly) _webSearchEnabled = true;
     if (!_isEditing) {
       final bundle = CharacterSkillResolver.defaultsFor(_draftCharacter());
       _agenticEnabled = bundle.permissions.isNotEmpty;
@@ -585,6 +593,45 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
             AppCard(
               cs: cs,
               children: [
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  value: _proactiveChatEnabled,
+                  onChanged: (value) =>
+                      setState(() => _proactiveChatEnabled = value),
+                  title: const Text('允许主动聊天'),
+                  subtitle: const Text(
+                    '关闭后不会主动发起私信，但仍会回复你主动发送的消息',
+                  ),
+                  secondary:
+                      Icon(Icons.mark_chat_unread_rounded, color: cs.primary),
+                ),
+                const Divider(height: 8),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  value: _webSearchEnabled,
+                  onChanged: (value) =>
+                      setState(() => _webSearchEnabled = value),
+                  title: const Text('允许联网搜索'),
+                  subtitle: const Text(
+                    '回答时可使用全局搜索设置中的来源；启用“使用模型原生联网搜索”后，将只使用角色模型能力',
+                  ),
+                  secondary: Icon(Icons.public_rounded, color: cs.primary),
+                ),
+                const Divider(height: 8),
+                SwitchListTile.adaptive(
+                  contentPadding: EdgeInsets.zero,
+                  value: _zhipuSearchAnswerOnly,
+                  onChanged: (value) => setState(() {
+                    _zhipuSearchAnswerOnly = value;
+                    if (value) _webSearchEnabled = true;
+                  }),
+                  title: const Text('仅使用智谱搜索问答流程'),
+                  subtitle: const Text(
+                    '每个问题均先调用智谱网页搜索，再由角色依据编号结果回答；需要 glm-4-flash 配置',
+                  ),
+                  secondary: Icon(Icons.newspaper_rounded, color: cs.primary),
+                ),
+                const Divider(height: 8),
                 CharacterSkillEditor(
                   enabled: _agenticEnabled,
                   onEnabledChanged: (value) {
@@ -692,6 +739,17 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         setState(() {});
         return;
       }
+      if (_zhipuSearchAnswerOnly &&
+          (config.provider != 'zhipu' ||
+              config.modelName.trim().toLowerCase() != 'glm-4-flash')) {
+        if (mounted) {
+          AppToast.show(context, '新闻角色需要选择智谱 glm-4-flash API 配置',
+              icon: Icons.info_outline_rounded);
+        }
+        _isSaving = false;
+        setState(() {});
+        return;
+      }
 
       final age = int.tryParse(_ageController.text) ?? 25;
       final hourlyLimit = int.tryParse(_hourlyLimitController.text) ?? 5;
@@ -721,6 +779,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         skillIds: _mergedSkillIds(),
         toolPermissions:
             _agenticEnabled ? _normalizedToolPermissions() : const [],
+        webSearchEnabled: _webSearchEnabled,
+        proactiveChatEnabled: _proactiveChatEnabled,
+        zhipuSearchAnswerOnly: _zhipuSearchAnswerOnly,
         createdAt: widget.character?.createdAt ?? DateTime.now(),
         gender: _isEditing ? widget.character!.gender : _selectedGender!,
         voiceId: _selectedVoiceId,
@@ -803,6 +864,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       // 构造默认 `true`，于是未知性别角色被拼成 `a 25-year-old female`。保存
       // 路径由 provider 从库里回填所以看不出来，属「保存对、草稿错」的静默失效。
       hasKnownGender: _selectedGender != null,
+      webSearchEnabled: _webSearchEnabled,
+      proactiveChatEnabled: _proactiveChatEnabled,
+      zhipuSearchAnswerOnly: _zhipuSearchAnswerOnly,
       ipImageRelPath: _workingIpRelPath,
       avatarFromIpImage: _avatarFromIpImage,
       ipImageStyle: _workingIpStyle,

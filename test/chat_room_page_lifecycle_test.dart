@@ -540,6 +540,154 @@ void main() {
     expect(find.text('私聊历史消息 35'), findsOneWidget);
     expect(after, closeTo(before, 1.0));
   });
+
+  testWidgets('带 initialMessageId 进入时加载目标消息所在窗口并高亮定位', (tester) async {
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
+    const conversationId = 'g1';
+    const anchorId = 'anchor-message-0';
+    final messageTime = DateTime(2026, 8, 13, 13);
+    await tester.runAsync(() async {
+      for (var index = 0; index < 200; index++) {
+        await db.messageBox.put(
+          'anchor-message-$index',
+          Message(
+            id: 'anchor-message-$index',
+            groupId: conversationId,
+            senderId: 'user',
+            senderType: 'user',
+            content: '锚点历史消息 $index',
+            timestamp: messageTime.add(Duration(minutes: index)),
+          ),
+        );
+      }
+    });
+
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [databaseServiceProvider.overrideWithValue(db)],
+          child: const MaterialApp(
+            home: ChatRoomPage(
+              groupId: conversationId,
+              initialMessageId: anchorId,
+            ),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pump(const Duration(milliseconds: 50));
+
+    // 目标消息远在最新一页之外：默认分页拿不到它，必须走"围绕目标消息"的窗口。
+    final messageList = find.byType(ChatMessageList);
+    ChatMessageList? rendered;
+    for (var attempt = 0; attempt < 20; attempt++) {
+      final lists = tester.widgetList<ChatMessageList>(messageList);
+      if (lists.isNotEmpty &&
+          lists.first.messages.any((message) => message.id == anchorId)) {
+        rendered = lists.first;
+        break;
+      }
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+
+    expect(
+      rendered,
+      isNotNull,
+      reason: '定位目标必须落在首屏窗口内，否则用户看不到那条消息',
+    );
+    final anchorText = find.text('锚点历史消息 0');
+    expect(anchorText, findsOneWidget);
+    expect(
+      tester.getRect(anchorText).overlaps(tester.getRect(messageList)),
+      isTrue,
+      reason: '定位目标必须落在视口内，而不是只被构建在缓存区',
+    );
+    expect(rendered!.highlightedMentionMessageId, anchorId);
+  });
+
+  testWidgets('定位最新一条消息时落到会话末尾并高亮（通知场景）', (tester) async {
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
+    const conversationId = 'g1';
+    const newestId = 'notify-message-199';
+    final messageTime = DateTime(2026, 8, 13, 13);
+    await tester.runAsync(() async {
+      for (var index = 0; index < 200; index++) {
+        // 窗口（最后 80 条）前段是短闲聊、末段是长回复。列表总高是按已构建
+        // 子项估出来的，这个形状会让估算明显偏小——按估算偏移定位会停在
+        // 离目标很远的地方，正是通知跳转最常遇到的形状。
+        final isLong = index >= 180;
+        await db.messageBox.put(
+          'notify-message-$index',
+          Message(
+            id: 'notify-message-$index',
+            groupId: conversationId,
+            senderId: index.isEven ? 'user' : 'ai',
+            senderType: index.isEven ? 'user' : 'ai',
+            content:
+                isLong ? '末尾长消息 $index ${'这是一段较长的回复内容。' * 12}' : '短消息 $index',
+            timestamp: messageTime.add(Duration(minutes: index)),
+          ),
+        );
+      }
+    });
+
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [databaseServiceProvider.overrideWithValue(db)],
+          child: const MaterialApp(
+            home: ChatRoomPage(
+              groupId: conversationId,
+              initialMessageId: newestId,
+            ),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 50));
+    });
+    await tester.pump(const Duration(milliseconds: 50));
+
+    final messageList = find.byType(ChatMessageList);
+    final newestText = find.textContaining('末尾长消息 199');
+    // find 只能证明目标被构建（缓存区里的也算），要比矩形才能证明它真的落在
+    // 视口内。落到末尾是多帧收敛的过程，所以直接把可见性当作轮询条件。
+    bool newestOnScreen() {
+      if (newestText.evaluate().length != 1) return false;
+      return tester.getRect(newestText).overlaps(tester.getRect(messageList));
+    }
+
+    for (var attempt = 0; attempt < 20 && !newestOnScreen(); attempt++) {
+      await tester.runAsync(
+        () => Future<void>.delayed(const Duration(milliseconds: 50)),
+      );
+      await tester.pump(const Duration(milliseconds: 50));
+    }
+
+    expect(
+      newestText,
+      findsOneWidget,
+      reason: '通知指向的消息必须真的出现在屏幕上',
+    );
+    expect(
+      newestOnScreen(),
+      isTrue,
+      reason: '通知指向的消息必须落在视口内，而不是只被构建在缓存区',
+    );
+    expect(
+      tester.widget<ChatMessageList>(messageList).highlightedMentionMessageId,
+      newestId,
+    );
+  });
 }
 
 class _RelocatingHost extends StatefulWidget {

@@ -12,9 +12,7 @@ import 'package:chat_group/features/work_mode/presentation/work_change_approval_
 import 'package:chat_group/features/work_mode/presentation/work_task_generic_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
-import 'package:chat_group/features/work_mode/presentation/visible_browser_panel.dart';
 import 'package:chat_group/features/work_mode/providers/work_task_providers.dart';
-import 'package:chat_group/features/work_mode/visible_browser_service.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
@@ -24,6 +22,7 @@ import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/presentation/work_folder_grant_consent_dialog.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_tab_visibility.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -52,10 +51,15 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
   final Future<void> Function(String taskId)? onReauthorizeTask;
   final Future<void> Function(String taskId)? onViewConflictTask;
   final Future<void> Function(String taskId)? onUndoTask;
+
+  /// 真删除任务记录（不可逆）。为 null 时退回协调器实现。
+  final Future<void> Function(String taskId)? onDeleteTask;
+
+  /// 把历史任务放回标签栏并选中。为 null 时用宿主自己的实现。
+  final Future<void> Function(String taskId)? onOpenInTabStrip;
   final WorkTaskUndoPreview? undoPreviewFor;
   final WorkSnapshotService? snapshotService;
   final String Function(String characterId)? characterNameFor;
-  final VisibleBrowserService? browserService;
 
   const WorkTaskOverlayHost({
     super.key,
@@ -78,10 +82,11 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
     this.onReauthorizeTask,
     this.onViewConflictTask,
     this.onUndoTask,
+    this.onDeleteTask,
+    this.onOpenInTabStrip,
     this.undoPreviewFor,
     this.snapshotService,
     this.characterNameFor,
-    this.browserService,
   });
 
   @override
@@ -97,7 +102,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   static const _reopenButtonBottomClearance = 84.0;
 
   StreamSubscription<List<AgentTask>>? _tasksSubscription;
-  StreamSubscription<List<VisibleBrowserSession>>? _browserSubscription;
+  StreamSubscription<String?>? _conversationSubscription;
   WorkTaskCoordinator? _coordinator;
   WorkTaskEventStore? _eventStore;
   List<AgentTask> _tasks = const <AgentTask>[];
@@ -108,13 +113,10 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   /// 被用户关掉标签的任务 id。只影响标签展示，任务记录仍然完整保留，
   /// 关掉后依旧能在历史任务列表里查到。
   final Set<String> _hiddenWorkTaskIds = <String>{};
+  Future<void> _hiddenMarkerWrites = Future<void>.value();
   bool _isVisible = true;
   bool _isCollapsed = false;
   WorkSnapshotService? _snapshotService;
-  VisibleBrowserService? _browserService;
-  List<VisibleBrowserSession> _browserSessions =
-      const <VisibleBrowserSession>[];
-  String? _selectedBrowserSessionId;
   final Set<String> _approvalPromptInFlight = <String>{};
   late final WorkTaskOverlayController _overlayController;
   late final WorkTaskOverlayOpenTask _overlayOpenCallback;
@@ -171,36 +173,12 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         // undo control remains disabled until a production service is wired.
       }
     }
-    _browserService = widget.browserService;
-    if (_browserService == null) {
-      try {
-        _browserService = ref.read(visibleBrowserServiceProvider);
-      } on Object {
-        // A lightweight host can omit the app-scoped browser service.
-      }
-    }
-    final browserService = _browserService;
-    if (browserService != null) {
-      _browserSessions = browserService.sessions;
-      _selectedBrowserSessionId =
-          _browserSessions.isEmpty ? null : _browserSessions.last.id;
-      _browserSubscription = browserService.watchSessions().listen((sessions) {
-        if (!mounted) return;
-        setState(() {
-          _browserSessions = sessions;
-          if (_browserSessions
-              .every((session) => session.id != _selectedBrowserSessionId)) {
-            _selectedBrowserSessionId =
-                _browserSessions.isEmpty ? null : _browserSessions.last.id;
-          }
-        });
-      });
-    }
     final taskStream = widget.taskStream ??
         _coordinator?.watchAllTasks() ??
         const Stream<List<AgentTask>>.empty();
     _tasksSubscription = taskStream.listen((tasks) {
       if (!mounted) return;
+      _releaseHiddenMarkersForResumedTasks(tasks);
       final selectedId = _selectedTaskId;
       final visibleTasks = _visibleTasks(
         tasks,
@@ -228,6 +206,22 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       // the panel remains the durable fallback after the prompt is dismissed.
       _scheduleApprovalPrompt(tasks);
     });
+    // 标签栏与队列计数按当前会话收敛，所以会话切换必须主动重算：只跟着任务流
+    // 更新重算的话，切到另一个已有历史任务的会话时，标签栏仍旧是上一个会话的，
+    // 而且可能一直不刷新（那个会话没有新任务事件）。
+    _conversationSubscription =
+        ConversationPresenceService.instance.activeConversationStream.listen((_) {
+      if (!mounted) return;
+      // 不带 preferredTaskId：上个会话选中的任务不能跟着带到新会话。
+      final visibleTasks = _visibleTasks(_allTasks);
+      setState(() {
+        _tasks = visibleTasks;
+        _hiddenTaskCount = _hiddenTaskCountFor(_allTasks, visibleTasks);
+        if (_tasks.every((task) => task.id != _selectedTaskId)) {
+          _selectedTaskId = _tasks.isEmpty ? null : _tasks.first.id;
+        }
+      });
+    });
   }
 
   @override
@@ -235,7 +229,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     _overlayController.detach(_overlayOpenCallback);
     _coordinator?.setFolderGrantConsent(null);
     _tasksSubscription?.cancel();
-    _browserSubscription?.cancel();
+    _conversationSubscription?.cancel();
     super.dispose();
   }
 
@@ -243,33 +237,15 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   Widget build(BuildContext context) {
     // 标签全被关掉时面板也必须留着：历史任务入口在面板里，一旦整体消失，
     // 用户就再也看不到那些被关掉的任务。
-    final hasTasks = _tasks.isNotEmpty || _hasHiddenWorkTasks;
+    final hasTasks = _panelHasContent;
     final viewport = MediaQuery.sizeOf(context);
     final isWide = viewport.width >= 800;
     return Stack(
       children: <Widget>[
         Positioned.fill(child: widget.child),
-        if (_browserSessions.isNotEmpty)
-          _positionedBrowserPanel(
-            isWide: isWide,
-            availableWidth: viewport.width,
-            availableHeight: viewport.height,
-            child: VisibleBrowserPanel(
-              sessions: _browserSessions,
-              selectedSessionId: _selectedBrowserSessionId,
-              onSelectSession: (sessionId) =>
-                  setState(() => _selectedBrowserSessionId = sessionId),
-              onContinue: _continueBrowser,
-              onClose: _closeBrowser,
-              onBringToForeground: _focusBrowser,
-              onInstallRuntime: _installBrowserRuntime,
-            ),
-          ),
         if (hasTasks && _isVisible && !_isCollapsed)
           _positionedPanel(
             isWide: isWide,
-            availableHeight: viewport.height,
-            splitForBrowser: _browserSessions.isNotEmpty,
             child: WorkTaskPanel(
               tasks: _tasks,
               hiddenTaskCount: _hiddenTaskCount,
@@ -332,6 +308,10 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
                   _coordinator == null ? null : _laterTaskVersioned,
               undoPreviewFor: widget.undoPreviewFor ??
                   (_snapshotService == null ? null : _undoPreview),
+              onDeleteTask: widget.onDeleteTask ??
+                  (_coordinator == null ? null : _deleteTask),
+              // 把历史里的任务放回标签栏是纯展示动作，不依赖协调器。
+              onOpenInTabStrip: widget.onOpenInTabStrip ?? _openTask,
               onOpenConversation: _openConversation,
               characterNameFor: widget.characterNameFor ?? _characterName,
               onModalVisibilityChanged: _setPanelModalVisibility,
@@ -368,8 +348,6 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   Widget _positionedPanel({
     required bool isWide,
-    required double availableHeight,
-    required bool splitForBrowser,
     required Widget child,
   }) {
     if (isWide) {
@@ -387,42 +365,9 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       left: 12,
       right: 12,
       bottom: 12,
-      height: splitForBrowser ? _splitPanelHeight(availableHeight) : 470,
+      height: 470,
       child: child,
     );
-  }
-
-  Widget _positionedBrowserPanel({
-    required bool isWide,
-    required double availableWidth,
-    required double availableHeight,
-    required Widget child,
-  }) {
-    if (isWide) {
-      // Keep the two non-modal panels side by side even at the default
-      // 800px widget-test/desktop width; neither panel may absorb the other.
-      final width = (availableWidth - 468).clamp(300.0, 420.0);
-      return Positioned(
-        key: const Key('visible-browser-panel-wide'),
-        left: 16,
-        top: 72,
-        bottom: 16,
-        width: width,
-        child: child,
-      );
-    }
-    return Positioned(
-      key: const Key('visible-browser-panel-top'),
-      left: 12,
-      right: 12,
-      top: 12,
-      height: _splitPanelHeight(availableHeight),
-      child: child,
-    );
-  }
-
-  double _splitPanelHeight(double availableHeight) {
-    return ((availableHeight - 36) / 2).clamp(180.0, 470.0);
   }
 
   Widget _positionedMiniBar({required bool isWide, required Widget child}) {
@@ -470,10 +415,6 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     }
   }
 
-  /// 是否存在被用户关掉标签的任务。只要有一个，面板就不能整体消失。
-  bool get _hasHiddenWorkTasks =>
-      _allTasks.any((task) => _hiddenWorkTaskIds.contains(task.id));
-
   /// 当前会话的历史任务（含被用户关掉标签的任务），按创建时间倒序。
   ///
   /// 面板标签只展示有限的执行快照，历史列表要能回溯整条记录，
@@ -490,6 +431,24 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   }
 
   Future<void> _hideTask(String taskId) => _setTaskHidden(taskId, true);
+
+  /// 撤销已被续跑任务的隐藏标记。
+  ///
+  /// 标签栏只给终态任务提供关闭入口，正因如此「被关掉的标签」不会一直关着：
+  /// 追问续跑、重试或恢复会把同一个任务 id 从终态拉回执行中。若不在这里撤销
+  /// 标记，运行中的任务会被隐藏过滤挡在标签栏之外，而 X 入口又只对终态任务
+  /// 开放，用户就再也无法把它找回来。
+  void _releaseHiddenMarkersForResumedTasks(List<AgentTask> tasks) {
+    if (_hiddenWorkTaskIds.isEmpty) return;
+    final resumedTaskIds = tasks
+        .where(
+            (task) => !task.isTerminal && _hiddenWorkTaskIds.contains(task.id))
+        .map((task) => task.id)
+        .toList(growable: false);
+    if (resumedTaskIds.isEmpty) return;
+    _hiddenWorkTaskIds.removeAll(resumedTaskIds);
+    unawaited(_persistTasksHidden(resumedTaskIds, false));
+  }
 
   /// 切换某个任务标签的显示状态。
   ///
@@ -513,93 +472,64 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         _selectedTaskId = _tasks.isEmpty ? null : _tasks.first.id;
       }
     });
-    try {
-      await ref.read(databaseServiceProvider).setWorkTaskHidden(taskId, hidden);
-    } on Object {
-      // 见方法注释：界面已经更新，隐藏状态最差只在本次会话生效。
-    }
+    await _persistTaskHidden(taskId, hidden);
   }
 
-  /// 队列里被折叠的任务数，不含用户手动关掉的标签。
-  int _hiddenTaskCountFor(List<AgentTask> allTasks, List<AgentTask> visible) {
-    final offScreen =
-        allTasks.where((task) => !_hiddenWorkTaskIds.contains(task.id)).length;
-    final count = offScreen - visible.length;
-    return count < 0 ? 0 : count;
+  Future<void> _persistTaskHidden(String taskId, bool hidden) async {
+    await _persistTasksHidden(<String>[taskId], hidden);
   }
+
+  Future<void> _persistTasksHidden(
+    Iterable<String> taskIds,
+    bool hidden,
+  ) async {
+    final ids = List<String>.unmodifiable(taskIds);
+    _hiddenMarkerWrites = _hiddenMarkerWrites.then((_) async {
+      try {
+        await ref.read(databaseServiceProvider).setWorkTasksHidden(ids, hidden);
+      } on Object {
+        // 见 [_setTaskHidden] 注释：界面已经更新，隐藏状态最差只在本次会话生效。
+      }
+    });
+    await _hiddenMarkerWrites;
+  }
+
+  // 标签栏与队列计数的判据集中在 [WorkTaskTabVisibility]：宿主只负责把当前的
+  // 隐藏标记和所在会话递进去。规则本身与 widget 生命周期无关，单独成文件既让
+  // 它们可以被独立测试，也不再往这个已经很长的宿主里加东西。
+  String? get _activeConversationId =>
+      ConversationPresenceService.instance.activeConversationId;
+
+  /// 队列里被折叠的任务数，不含用户手动关掉的标签。
+  int _hiddenTaskCountFor(List<AgentTask> allTasks, List<AgentTask> visible) =>
+      WorkTaskTabVisibility.foldedUnfinishedCount(
+        allTasks,
+        visible,
+        hiddenTaskIds: _hiddenWorkTaskIds,
+        activeConversationId: _activeConversationId,
+      );
 
   List<AgentTask> _visibleTasks(
     List<AgentTask> allTasks, {
     String? preferredTaskId,
-  }) {
-    // 被用户关掉标签的任务不参与标签挑选，但仍然留在 _allTasks 里，
-    // 供历史任务列表回查。
-    final candidates = allTasks
-        .where((task) => !_hiddenWorkTaskIds.contains(task.id))
-        .toList(growable: false);
-    final sorted = List<AgentTask>.from(candidates)
-      ..sort(
-        (left, right) => (right.updatedAt ?? right.createdAt).compareTo(
-          left.updatedAt ?? left.createdAt,
-        ),
+  }) =>
+      WorkTaskTabVisibility.visibleTasks(
+        allTasks,
+        hiddenTaskIds: _hiddenWorkTaskIds,
+        activeConversationId: _activeConversationId,
+        preferredTaskId: preferredTaskId,
       );
-    // A newer queued task must not hide an older task that is actively
-    // executing. Keep both global execution slots visible, then fill the
-    // remaining panel slot with the newest other checkpoint.
-    final active = sorted
-        .where((task) => _isVisibleActiveStatus(task.status))
-        .toList(growable: false);
-    final remaining = sorted
-        .where((task) => !active.any((item) => item.id == task.id))
-        .toList(growable: false);
-    // The coordinator has two global execution slots. Keep both active tasks
-    // visible; only show queued/history tabs when an execution slot is free.
-    const executionSlotCount = 2;
-    final visibleActive =
-        active.take(executionSlotCount).toList(growable: false);
-    final visible = visibleActive.length >= executionSlotCount
-        ? visibleActive
-        : <AgentTask>[...visibleActive, ...remaining]
-            .take(4)
-            .toList(growable: false);
-    if (preferredTaskId == null ||
-        visible.any((task) => task.id == preferredTaskId)) {
-      return visible;
-    }
-    final preferred =
-        sorted.where((task) => task.id == preferredTaskId).firstOrNull;
-    return preferred == null ? visible : <AgentTask>[...visible, preferred];
-  }
 
-  bool _isVisibleActiveStatus(AgentTaskStatus status) {
-    return status == AgentTaskStatus.planning ||
-        status == AgentTaskStatus.waitingForApproval ||
-        status == AgentTaskStatus.runningTool;
-  }
+  /// 面板是否还有理由出现。
+  bool get _panelHasContent => WorkTaskTabVisibility.hasContent(
+        _allTasks,
+        _tasks,
+        hiddenTaskIds: _hiddenWorkTaskIds,
+        activeConversationId: _activeConversationId,
+      );
 
   Future<void> _stopTask(String taskId) {
     return widget.onStopTask?.call(taskId) ?? _coordinator!.stop(taskId);
-  }
-
-  Future<void> _continueBrowser(String sessionId) async {
-    await _browserService?.continueSession(sessionId);
-  }
-
-  Future<void> _closeBrowser(String sessionId) async {
-    await _browserService?.closeSession(sessionId);
-  }
-
-  Future<void> _focusBrowser(String sessionId) async {
-    await _browserService?.bringToForeground(sessionId);
-  }
-
-  Future<void> _installBrowserRuntime() async {
-    final installed = await _browserService?.openRuntimeInstallFlow() ?? false;
-    if (!installed && mounted) {
-      ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text('无法打开官方 WebView 运行时安装流程。')),
-      );
-    }
   }
 
   Future<void> _continueTask(String taskId) {
@@ -1093,6 +1023,21 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   Future<void> _approveWithoutUndoTask(String taskId) {
     final callback = widget.onApproveWithoutUndoTask;
     return callback?.call(taskId) ?? _coordinator!.approveWithoutUndo(taskId);
+  }
+
+  /// 删除一条任务记录。
+  ///
+  /// 标签隐藏标记是"展示层"状态，与记录分开存放：记录没了却留下标记，会让这
+  /// 个 id 永远占着设置项。协调器只负责记录与日志，标记由宿主自己清。
+  Future<void> _deleteTask(String taskId) async {
+    final coordinator = _coordinator;
+    if (coordinator == null) {
+      throw StateError('工作任务调度器不可用，请稍后重试。');
+    }
+    if (_hiddenWorkTaskIds.remove(taskId)) {
+      unawaited(_persistTaskHidden(taskId, false));
+    }
+    await coordinator.deleteTask(taskId);
   }
 
   Future<void> _undoTask(String taskId) async {

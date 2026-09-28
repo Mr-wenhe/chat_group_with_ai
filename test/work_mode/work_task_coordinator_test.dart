@@ -26,6 +26,31 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive/hive.dart';
 
+/// 有界轮询：等到 [condition] 成立，超时即失败。
+///
+/// 不用固定 sleep：全量套件并行时 50ms 常常不够，会变成与改动无关的假失败。
+/// 超时也**不静默返回**——否则条件永远不成立的新用例会悄悄通过。
+Future<void> _waitUntil(bool Function() condition) async {
+  final deadline = DateTime.now().add(const Duration(seconds: 5));
+  while (!condition()) {
+    if (DateTime.now().isAfter(deadline)) {
+      fail('等待条件超时（5s）');
+    }
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+}
+
+/// 让排队的异步收尾跑完：只用于"不该发生"的断言。
+///
+/// 坏路径在恢复执行后的第一个可观察后果是一次 Hive 写入（值进缓存是同步的），
+/// 因此只需要把事件循环让出去若干次。**已知弱点**：'什么都没发生'无法用轮询
+/// 证明，这个窗口是个下界——负载极端时可能漏检（假通过），但不会误报。
+Future<void> _drainEventLoop() async {
+  for (var turn = 0; turn < 10; turn++) {
+    await Future<void>.delayed(const Duration(milliseconds: 10));
+  }
+}
+
 class _FakeWorkTaskRunner
     implements
         WorkTaskRunner,
@@ -250,6 +275,29 @@ class _DelayedDiscussionRunner
   @override
   Future<void> run(AgentTask task, WorkTaskCancellation cancellation) async {
     runCount += 1;
+  }
+}
+
+/// 取消后在收尾里写事件、并把写入时机交给测试的 runner。
+///
+/// 真实运行器就是这样：`whenCancelled` 恢复之后才落一条"任务已停止"，而此时
+/// 用户可能已经删掉了任务。
+class _LateEventRunner implements WorkTaskRunner {
+  _LateEventRunner(this.eventStore);
+
+  final WorkTaskEventStore eventStore;
+  final Completer<void> releaseWrite = Completer<void>();
+  WorkTaskEvent? lastEvent;
+
+  @override
+  Future<void> run(AgentTask task, WorkTaskCancellation cancellation) async {
+    await cancellation.whenCancelled;
+    await releaseWrite.future;
+    lastEvent = await eventStore.append(
+      taskId: task.id,
+      kind: WorkTaskEventKind.failed,
+      title: '任务已停止',
+    );
   }
 }
 
@@ -3042,6 +3090,65 @@ void main() {
     expect(runner.startedTaskIds, ['clarification-answer']);
   });
 
+  test('a vague answer keeps the clarification open instead of running it',
+      () async {
+    // 答复评审发现：把"答复本身只要不是澄清就放行"当作逃逸口，等于让任务带着
+    // 未确定的修订目标开跑——"不知道"落到 continueTask，目标仍然没人知道。
+    final task =
+        _task(id: 'clarification-vague', conversationId: 'dm:clarify-vague')
+          ..status = AgentTaskStatus.completed
+          ..lastArtifactPaths = [
+            '/workspace/report.md',
+            '/workspace/summary.md',
+          ];
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '优化一下');
+    expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+
+    await coordinator.enqueueFollowUp(task.id, '不知道');
+
+    final stored = taskBox.get(task.id)!;
+    expect(stored.status, AgentTaskStatus.paused);
+    expect(runner.startedTaskIds, isEmpty);
+    expect(stored.executionStateJson, contains('clarificationQuestion'));
+    // 输入不丢：答复留在排队请求里，用户还能再答一次、停止或删除任务。
+    expect(stored.queuedUserRequests, isNotEmpty);
+    expect(stored.queuedUserRequests.first, contains('不知道'));
+  });
+
+  test('a new-file answer escapes a revision clarification', () async {
+    final task = _task(
+      id: 'clarification-new-file',
+      conversationId: 'dm:clarify-new-file',
+    )
+      ..status = AgentTaskStatus.completed
+      ..lastArtifactPaths = [
+        '/workspace/report.md',
+        '/workspace/summary.md',
+      ];
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '优化一下');
+    expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+
+    // 只有"明确要求新建交付物"的答复才不需要旧文件作为覆盖目标，因此它能自洽
+    // 地绕开歧义。修复前答复会和原句拼在一起再分类，判决永远不变——任务反复
+    // 暂停，用户在那个会话里发什么都只得到一句"已收到补充要求"。
+    await coordinator.enqueueFollowUp(task.id, '另存为新的 html 页面');
+
+    final resumed = taskBox.get(task.id)!;
+    expect(resumed.status, AgentTaskStatus.planning);
+    expect(resumed.queuedUserRequests, isEmpty);
+    expect(resumed.userRequest, contains('优化一下'));
+    expect(resumed.userRequest, contains('另存为新的 html 页面'));
+    expect(
+      resumed.executionStateJson,
+      isNot(contains('clarificationQuestion')),
+    );
+    expect(runner.startedTaskIds, ['clarification-new-file']);
+  });
+
   test('a model clarification answer resumes the paused task', () async {
     final task = _task(
       id: 'model-clarification-answer',
@@ -3673,6 +3780,206 @@ void main() {
 
     expect(runner.cancelledTaskIds, contains('in-flight'));
     expect(runner.activeCount, 0);
+  });
+
+  test('deleting a task removes its record and its event log', () async {
+    final task = _task(id: 'delete-me', conversationId: 'dm:delete-me')
+      ..status = AgentTaskStatus.paused;
+    await taskBox.put(task.id, task);
+    await eventStore.append(
+      taskId: task.id,
+      kind: WorkTaskEventKind.paused,
+      title: '等待用户回答',
+    );
+    final eventFile = eventStore.eventFileFor(task.id);
+    expect(eventFile.existsSync(), isTrue);
+
+    await coordinator.deleteTask(task.id);
+
+    expect(taskBox.get(task.id), isNull);
+    expect(coordinator.taskForConversation('dm:delete-me'), isNull);
+    expect(eventFile.existsSync(), isFalse);
+
+    // 真删除的意义就在这里：同会话的下一条请求必须新建任务，不能挂到已被删掉的
+    // 记录上复用它的产物路径、追问队列和检查点。
+    await coordinator
+        .submit(_task(id: 'fresh-task', conversationId: 'dm:delete-me'));
+    expect(coordinator.taskForConversation('dm:delete-me')?.id, 'fresh-task');
+  });
+
+  test('deleting a running task cancels it and frees its conversation',
+      () async {
+    await coordinator
+        .submit(_task(id: 'delete-running', conversationId: 'dm:delete-running'));
+    expect(runner.startedTaskIds, ['delete-running']);
+
+    await coordinator.deleteTask('delete-running');
+
+    expect(taskBox.get('delete-running'), isNull);
+    expect(runner.cancelledTaskIds, contains('delete-running'));
+    // 会话保留必须一并释放，否则同会话的后续任务会被一条不存在的记录挡在门外。
+    await coordinator
+        .submit(_task(id: 'after-delete', conversationId: 'dm:delete-running'));
+    expect(runner.startedTaskIds, ['delete-running', 'after-delete']);
+  });
+
+  test('deleting a task during the start-up validation cannot resurrect it',
+      () async {
+    // 启动流程会停在"执行资格校验"上，而它的取消令牌要等这一步返回后才登记。
+    // 删除必须让这条在飞的启动彻底失效：否则校验放行后，收尾会把任务写回 Hive
+    // （这里具体是"工作目录授权不可用"的暂停写入），用户删掉的任务又回来了。
+    final gatedRunner = _DelayedDiscussionRunner();
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: gatedRunner,
+      requireFolderGrant: true,
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _taskWithDiscussion(
+      _task(
+        id: 'delete-during-validation',
+        conversationId: 'group-delete-validation',
+        characterId: 'worker',
+      )..status = AgentTaskStatus.queued,
+      _discussionState(
+        conversationId: 'group-delete-validation',
+        executorId: 'worker',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    );
+
+    final submit = localCoordinator.submit(task);
+    await gatedRunner.validationStarted.future;
+    expect(taskBox.get(task.id), isNotNull);
+
+    await localCoordinator.deleteTask(task.id);
+    expect(taskBox.get(task.id), isNull);
+
+    // 放行那条停在门禁上的启动：修复后它会在守卫处直接退出（内存对象已被标成
+    // 终态），因此这里没有"正向信号"可等——只能有界排空后断言什么都没发生。
+    gatedRunner.releaseValidation.complete();
+    await _drainEventLoop();
+    await submit;
+
+    expect(taskBox.get(task.id), isNull);
+    expect(eventStore.eventFileFor(task.id).existsSync(), isFalse);
+  });
+
+  test('a late runner event cannot recreate a deleted event log', () async {
+    final lateRunner = _LateEventRunner(eventStore);
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: lateRunner,
+    );
+    addTearDown(localCoordinator.dispose);
+    addTearDown(() {
+      if (!lateRunner.releaseWrite.isCompleted) lateRunner.releaseWrite.complete();
+    });
+    final task = _task(id: 'late-event', conversationId: 'dm:late-event');
+    await localCoordinator.submit(task);
+    // 事件是排队写入的，submit 返回时文件可能还没落盘。
+    await _waitUntil(() => eventStore.eventFileFor(task.id).existsSync());
+    expect(eventStore.eventFileFor(task.id).existsSync(), isTrue);
+
+    await localCoordinator.deleteTask(task.id);
+    expect(eventStore.eventFileFor(task.id).existsSync(), isFalse);
+
+    // 取消是异步的：收尾事件在删除返回之后才落盘。它必须被丢弃，否则诊断日志
+    // 会在用户删掉任务之后又冒出来。
+    lateRunner.releaseWrite.complete();
+    await _waitUntil(() => lateRunner.lastEvent != null);
+
+    expect(lateRunner.lastEvent, isNotNull, reason: '这次写入应当已经返回');
+    expect(eventStore.eventFileFor(task.id).existsSync(), isFalse);
+    expect(taskBox.get(task.id), isNull);
+  });
+
+  test('a failing late event write cannot resurrect a deleted task', () async {
+    // 评审发现的第二条复活路径：事件写入**失败**时，`_record` 的兜底分支会把
+    // 任务记录直接写回 Hive。删除之后这条兜底同样必须失效。
+    final gatedRunner = _DelayedDiscussionRunner();
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: gatedRunner,
+      requireFolderGrant: true,
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _taskWithDiscussion(
+      _task(
+        id: 'delete-with-failing-log',
+        conversationId: 'group-delete-failing-log',
+        characterId: 'worker',
+      )..status = AgentTaskStatus.queued,
+      _discussionState(
+        conversationId: 'group-delete-failing-log',
+        executorId: 'worker',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    );
+
+    final submit = localCoordinator.submit(task);
+    await gatedRunner.validationStarted.future;
+
+    await localCoordinator.deleteTask(task.id);
+    // 让随后那条迟到事件写入失败（存储已关闭），从而走进兜底分支。
+    await eventStore.close();
+
+    gatedRunner.releaseValidation.complete();
+    await _drainEventLoop();
+    await submit;
+
+    expect(taskBox.get(task.id), isNull);
+  });
+
+  test('an imported task regains its record only after reconciliation',
+      () async {
+    // 备份导入会带回同一个 id 的任务记录。记录出现在 box 里本身**不解禁**——
+    // 写入路径不猜"这条记录属于谁"；由导入流程调用 reconcileDeletionGates()
+    // 逐 id 核对后放行，否则恢复出来的任务会"点继续没反应、时间线永远空白"。
+    final task = _task(id: 'reimported-task', conversationId: 'dm:reimport')
+      ..status = AgentTaskStatus.paused;
+    await taskBox.put(task.id, task);
+    await coordinator.deleteTask(task.id);
+    await _waitUntil(() => taskBox.get(task.id) == null);
+
+    // 导入：同 id、不同对象。
+    final imported = _task(id: 'reimported-task', conversationId: 'dm:reimport')
+      ..status = AgentTaskStatus.paused;
+    await taskBox.put(imported.id, imported);
+    final pendingToolRequest = jsonEncode(<String, dynamic>{
+      'tool': 'command.run',
+      'args': <String, dynamic>{
+        'executable': 'echo',
+        'arguments': <String>['ok'],
+      },
+    });
+
+    // 仅"记录又存在"不够：写入与诊断日志都被闸门挡住。
+    await coordinator.pauseForApproval(
+      imported.id,
+      pendingToolRequestJson: pendingToolRequest,
+    );
+    await _drainEventLoop();
+    expect(eventStore.eventFileFor(imported.id).existsSync(), isFalse);
+
+    await coordinator.reconcileDeletionGates();
+    await coordinator.pauseForApproval(
+      imported.id,
+      pendingToolRequestJson: pendingToolRequest,
+    );
+    await _waitUntil(
+      () => eventStore.eventFileFor(imported.id).existsSync(),
+    );
+    expect(eventStore.eventFileFor(imported.id).existsSync(), isTrue);
+  });
+
+  test('deleting an unknown task fails loudly', () async {
+    await expectLater(coordinator.deleteTask('missing-task'), throwsStateError);
   });
 
   test('a late checkpoint after stop cannot rewrite or complete the task',

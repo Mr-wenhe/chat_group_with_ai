@@ -67,6 +67,9 @@ class WorkTaskEventStore {
       StreamController<WorkTaskEvent>.broadcast();
   final Map<String, Future<void>> _writeChains = {};
   final Map<String, int> _lastSequences = {};
+  /// 已删除日志的任务 id。删除只是删文件，而取消 runner 是异步的：它的收尾
+  /// 事件会在删除返回之后到达，把 JSONL 重新建出来。墓碑让这些追加变成空操作。
+  final Set<String> _deletedTaskIds = <String>{};
   // Global maintenance (data clear/retention) is serialized with per-task
   // appends. A clear captures only writes that existed when it started, so a
   // new task created after the barrier may append normally without deadlocking
@@ -133,6 +136,24 @@ class WorkTaskEventStore {
       );
     }
     _validateTaskId(taskId);
+    if (_deletedTaskIds.contains(taskId)) {
+      // 任务已被真删除：事件不再落盘，但仍返回一个内存事件，让调用方的日志/
+      // 进度路径照常结束。这里刻意不报错——`_record` 的失败分支会把任务记录
+      // 写回 Hive，那会连被删掉的记录一起复活。
+      return Future<WorkTaskEvent>.value(
+        WorkTaskEvent(
+          taskId: taskId,
+          sequence: (_lastSequences[taskId] ?? 0) + 1,
+          timestamp: timestamp ?? DateTime.now(),
+          kind: kind,
+          title: title,
+          detail: detail,
+          progressCurrent: progressCurrent,
+          progressTotal: progressTotal,
+          safeMetadata: safeMetadata,
+        ),
+      );
+    }
     final previous = _writeChains[taskId] ?? Future<void>.value();
     final maintenance = _maintenance;
     late final Future<WorkTaskEvent> operation;
@@ -201,6 +222,41 @@ class WorkTaskEventStore {
     });
   }
 
+  /// 删除单个任务的公开事件日志（任务记录被真删除时调用）。
+  ///
+  /// 事件日志只是诊断产物，`agent_tasks` 才是权威：删除失败不影响删除结果，
+  /// 残留文件留给 [cleanup] 按保留期回收。这里不动写入链与序号表——按 taskId
+  /// 记账的链在删除后不会再被使用，清掉反而可能和一条并发写入抢同一个 key。
+  Future<void> deleteEvents(String taskId) {
+    _validateTaskId(taskId);
+    // 先登记墓碑再排队删除：登记之后到达的追加一律丢弃；登记之前已经在飞的写入
+    // 由 [_scheduleMaintenance] 等待落盘，随后连同文件一起删掉。
+    _deletedTaskIds.add(taskId);
+    return _scheduleMaintenance(() async {
+      if (!await _ensureEventsDirectory(create: false)) return;
+      final file = File('${_eventsDirectory.path}/$taskId.jsonl');
+      try {
+        if (await FileSystemEntity.type(file.path, followLinks: false) ==
+            FileSystemEntityType.file) {
+          await file.delete();
+        }
+      } on Object {
+        // 见上：诊断残留不得让删除任务失败。
+      }
+    });
+  }
+
+  /// 解除这些 id 的日志墓碑（记录被外部带回来时由协调器调用）。
+  ///
+  /// 备份导入会把同一个 id 的任务记录写回 Hive，那条任务的诊断日志也要能继续写，
+  /// 否则它的时间线永远是空的。逐 id 而非整表：整表会让"记录仍不存在"的 id
+  /// 也放开，迟到的事件会把日志文件重新建出来。
+  void releaseDeletionGates(Iterable<String> taskIds) {
+    for (final taskId in taskIds) {
+      _deletedTaskIds.remove(taskId);
+    }
+  }
+
   /// Deletes only the app-managed work-mode event tree. Symlink roots and
   /// descendants are removed as links, never traversed, so a clear operation
   /// cannot touch a user project directory.
@@ -209,6 +265,9 @@ class WorkTaskEventStore {
     return _scheduleMaintenance(() async {
       if (!await _ensureManagedParents(create: false)) return 0;
       final removed = await _deleteTreeNoFollow(_eventsDirectory);
+      // 整棵树都被清掉了，墓碑也就没有意义；留着会挡住清除后重新导入的同 id
+      // 任务的日志。
+      _deletedTaskIds.clear();
       for (final entry in pending.entries) {
         if (identical(_writeChains[entry.key], entry.value)) {
           _writeChains.remove(entry.key);

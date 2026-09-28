@@ -52,13 +52,11 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
     }
     final previousDiscussion =
         _requiresDiscussionForTask(task) ? discussionMarker.state : null;
-    final decision = _followUpPolicy.resolve(
-      request: nextRequest,
-      // The model/result runner writes the structured field first. A
-      // canonical Task 15 summary is a recovery fallback for tasks imported
-      // between field writes; no chat-history or global-file lookup is used.
-      lastArtifactPaths: _followUpArtifactPaths(task),
-      failedArtifactPath: previousFailure?.failureTargetPath,
+    final decision = _followUpDecisionForPromotion(
+      task,
+      nextRequest,
+      answeringFollowUpClarification: canPromotePausedClarification,
+      previousFailure: previousFailure,
     );
     final modelClarificationNeedsDiscussion = answeringModelClarification &&
         (decision.kind == WorkFollowUpKind.newArtifact ||
@@ -301,6 +299,55 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
       '已建立新的工作任务',
       detail: fresh.id,
     );
+  }
+
+  /// 澄清答复的判决分两级。
+  ///
+  /// 第一级沿用历史行为——对「原句 + 答复」分类。答复只指明目标时
+  /// （原句"请修改当前文件" + 答复"report.md"），原句里的修订意图必须保留，
+  /// 否则目标改由模型重新猜。第二级只在第一级**仍然无法判定**时执行：被澄清的
+  /// 原句本来就解析不出目标，只看它判决永远不变，于是任务反复暂停、用户在会话里
+  /// 发什么都等于被吞掉。
+  ///
+  /// 第二级只认「明确要求新建交付物」的答复：新建不需要旧文件作为覆盖目标，
+  /// 是唯一能自洽地绕开歧义的意图。含糊的答复（"不知道"、"随便"）会落到
+  /// `continueTask`，那不是解开了目标歧义——放行它等于让任务带着未确定的目标
+  /// 开跑，原句的修订意图最终落到哪个文件上仍然没人知道。
+  ///
+  /// 分级而不是直接只看答复，是为了不丢第一级已经能判定的目标。
+  WorkFollowUpDecision _followUpDecisionForPromotion(
+    AgentTask task,
+    String nextRequest, {
+    required bool answeringFollowUpClarification,
+    required WorkFailure? previousFailure,
+  }) {
+    // The model/result runner writes the structured field first. A canonical
+    // Task 15 summary is a recovery fallback for tasks imported between field
+    // writes; no chat-history or global-file lookup is used.
+    final artifacts = _followUpArtifactPaths(task);
+    WorkFollowUpDecision resolveFor(String request) => _followUpPolicy.resolve(
+          request: request,
+          lastArtifactPaths: artifacts,
+          failedArtifactPath: previousFailure?.failureTargetPath,
+        );
+
+    final merged = resolveFor(nextRequest);
+    if (!merged.isClarification || !answeringFollowUpClarification) {
+      return merged;
+    }
+    final answer = _clarificationAnswerOf(nextRequest);
+    if (answer == nextRequest) return merged;
+    final answered = resolveFor(answer);
+    return answered.kind == WorkFollowUpKind.newArtifact ? answered : merged;
+  }
+
+  /// 「原句\n用户明确目标：答复」里最新一段答复；没有标记时原样返回。
+  String _clarificationAnswerOf(String merged) {
+    const marker = WorkTaskCoordinator.clarificationAnswerMarker;
+    final index = merged.lastIndexOf(marker);
+    if (index < 0) return merged;
+    final answer = merged.substring(index + marker.length).trim();
+    return answer.isEmpty ? merged : answer;
   }
 
   String _mergeClarificationAnswer(String original, String answer) {

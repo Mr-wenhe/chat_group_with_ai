@@ -102,23 +102,46 @@ class AICharacter extends HiveObject {
   @HiveField(23, defaultValue: '')
   String voiceId;
 
+  /// 是否允许该角色参与用户回合的联网搜索。
+  ///
+  /// 搜索 Provider 仍由全局联网治理设置决定；此字段只控制角色是否
+  /// 可以消费本回合的搜索证据，默认关闭以兼容已有角色。
+  @HiveField(24, defaultValue: false)
+  bool webSearchEnabled;
+
+  /// 是否允许角色在用户未主动发消息时发起私信，默认开启以保持原有行为。
+  @HiveField(25, defaultValue: true)
+  bool proactiveChatEnabled;
+
+  /// 固定使用“智谱网页搜索 -> 编号上下文 -> 角色模型总结”的搜索问答流程。
+  /// 该模式不允许在搜索缺失时退回普通聊天知识作答。
+  @HiveField(26, defaultValue: false)
+  bool zhipuSearchAnswerOnly;
+
+  // ── IP 形象三字段从 27 起编，不与上面的 24–26 抢号 ─────────────────────
+  // 两边独立并行开发时各占了 24–26。24–26 已随主线进过用户 Hive 盒子，绝对
+  // 不能改号（改号 = 旧数据按新语义读出，且 25 号两边都是 bool 但默认值与
+  // 含义不同，会**静默写坏数据**且不报错）。IP 形象这三个字段还没进过任何
+  // 用户数据，改号安全，所以由它们让号。
+  // 若再有新增字段，一律从 30 起。
+
   /// IP 形象图的受管相对路径（相对 ai-processing 根，用 `/` 分隔）。
   /// 为空表示未生成。存相对路径而非绝对路径：`WorkModeWorkspace.workDirPath`
   /// 是「绝对本地路径不宜还原」的先例；且 ai-processing 根目录用户可改，
   /// 相对路径在目录未变时可解析，目录变更后由渲染层静默回落文本。
-  @HiveField(24, defaultValue: '')
+  @HiveField(27, defaultValue: '')
   String ipImageRelPath;
 
   /// 头像是否启用 IP 形象图。**生成 ≠ 设为头像**：只有用户点「设为头像」后
   /// 渲染层才以图优先，否则仍显示 [avatar] 文本。让用户可「生成但暂不设头像」。
-  @HiveField(25, defaultValue: false)
+  @HiveField(28, defaultValue: false)
   bool avatarFromIpImage;
 
   /// IP 形象的画风预设 id（见 `image_style_presets.dart`）。空串 = 自动。
   ///
   /// 存下来而不是只放表单内存：画风是 IP 形象的稳定属性，用户改完人设重新
   /// 生成时若画风被悄悄重置，会得到一个「不像同一个人」的形象。
-  @HiveField(26, defaultValue: '')
+  @HiveField(29, defaultValue: '')
   String ipImageStyle;
 
   AICharacter({
@@ -146,6 +169,9 @@ class AICharacter extends HiveObject {
     this.gender = CharacterGender.female,
     this.hasKnownGender = true,
     this.voiceId = '',
+    this.webSearchEnabled = false,
+    this.proactiveChatEnabled = true,
+    this.zhipuSearchAnswerOnly = false,
     this.ipImageRelPath = '',
     this.avatarFromIpImage = false,
     this.ipImageStyle = '',
@@ -192,6 +218,9 @@ class AICharacter extends HiveObject {
       gender: value,
       hasKnownGender: hasKnownGender,
       voiceId: voiceId,
+      webSearchEnabled: webSearchEnabled,
+      proactiveChatEnabled: proactiveChatEnabled,
+      zhipuSearchAnswerOnly: zhipuSearchAnswerOnly,
       ipImageRelPath: ipImageRelPath,
       avatarFromIpImage: avatarFromIpImage,
       ipImageStyle: ipImageStyle,

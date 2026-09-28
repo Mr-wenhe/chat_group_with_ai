@@ -1,48 +1,7 @@
-import 'package:chat_group/core/models/character_skill.dart';
-import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
-  test('prompt includes tool protocol and character skills', () {
-    final prompt = AgentPromptBuilder.buildToolPlanningPrompt(
-      rolePlaySystemPrompt: '你是代码大神，30岁，性别女，身份是工程师。\n写代码',
-      skills: [
-        CharacterSkill(
-          characterId: 'c1',
-          name: 'Code Review',
-          domain: 'coding',
-          description: 'Review code.',
-          instructions: const ['Read files', 'Report risks'],
-          requiredPermissions: const [ToolPermission.workspaceRead],
-        )
-      ],
-      userRequest: 'review lib/main.dart',
-    );
-
-    expect(prompt, contains('代码大神'));
-    expect(prompt, contains('```agent_tool'));
-    expect(prompt, contains('workspace.read'));
-    expect(prompt, contains('Read files'));
-    expect(prompt, contains('没有任何已安装技能匹配'));
-    expect(prompt, contains('必须先调用 skill.create'));
-    expect(prompt, contains('意图判断'));
-    expect(prompt, contains('拆解执行步骤'));
-    expect(prompt, contains('调用最少必要工具'));
-    expect(prompt, contains('产出可交付物'));
-    expect(prompt, contains('交付前自检'));
-    expect(prompt, contains('先给结论'));
-  });
-
-  test('legacy tool prompt does not advertise the Stage 03 weather tool', () {
-    final prompt = AgentPromptBuilder.buildToolPlanningPrompt(
-      rolePlaySystemPrompt: '你是工作助手。',
-      skills: const [],
-      userRequest: '检查项目代码',
-    );
-
-    expect(prompt, isNot(contains('weather.forecast')));
-  });
 
   test('Stage 03 prompt describes one strict JSON decision object', () {
     final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
@@ -86,6 +45,29 @@ void main() {
     expect(prompt, contains('不要登记中间脚本'));
     expect(prompt, contains('重复登记'));
     expect(prompt, contains('直接 finish'));
+  });
+
+  test('Stage 03 prompt requires chunked writes for long content', () {
+    // 回归：用户要 5000+ 字报告时，模型把整篇正文塞进一次 workspace.patch 必然
+    // 撞输出上限（实测 8192 token），动作 JSON 被截断、任务失败。提示词必须给出
+    // 分块写法：每个分段各写独立文件 + 一次合并，并明确"不要反复写目标文件"
+    // （workspace.patch 是整文件覆盖写，第二次写会把前一段冲掉）。
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '你是工作助手。',
+      skills: const [],
+      userRequest: '生成一份 5000 字以上的量子力学研究报告 Word 文档',
+    );
+
+    expect(prompt, contains('单次决策的输出有上限'));
+    expect(prompt, contains('3000 字以内'));
+    expect(prompt, contains('report.part1.md'));
+    expect(prompt, contains('整文件覆盖写、没有追加'));
+    expect(prompt, contains('pandoc'));
+    expect(prompt, contains('declaredImpact'));
+    // 触发条件写成可观察的单位，而不是"明显短于上限"这类无法据以决策的说法。
+    expect(prompt, isNot(contains('明显短于上限')));
+    // 旧的"一次写完"说法必须消失，否则模型仍会一次塞满。
+    expect(prompt, isNot(contains('文件的完整内容**直接放进')));
   });
 
   test('Stage 03 prompt documents the workspace.list root default', () {

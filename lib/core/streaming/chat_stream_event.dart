@@ -36,6 +36,14 @@ class ChatStreamEvent {
   /// type == error 时可选：服务端建议的下一次重试等待时间。
   final Duration? retryAfter;
 
+  /// type == error 时有效：message 是否已由 ChatApiService 脱敏或分类。
+  ///
+  /// 为 true 表示这条文案是客户端自己产出的（供应商正文已剥离，例如
+  /// 「连接超时」「HTTP 429 请求失败」），消费方可直接展示，也可用其中的
+  /// 分类词判断这次失败能否重试。为 false 表示 message 可能仍含供应商正文，
+  /// 消费方必须再脱敏一次才能使用。
+  final bool sanitized;
+
   /// 估算的 prompt token 数量（用于消费统计）。
   final int? promptTokens;
 
@@ -45,6 +53,13 @@ class ChatStreamEvent {
   /// 输入 token 中命中缓存的数量。部分供应商不返回该字段。
   final int? cachedTokens;
 
+  /// type == done 时有效：本次回复是否因达到输出上限被供应商截断
+  /// （OpenAI 兼容通道的 `finish_reason == 'length'`）。
+  ///
+  /// 被截断的正文通常是不完整的，动作 JSON 这类结构化输出会因缺少结尾而
+  /// 无法解析；调用方据此把失败原因说清楚，而不是笼统地报「格式无效」。
+  final bool truncated;
+
   const ChatStreamEvent({
     required this.type,
     this.delta,
@@ -52,9 +67,11 @@ class ChatStreamEvent {
     this.model,
     this.message,
     this.retryAfter,
+    this.sanitized = false,
     this.promptTokens,
     this.completionTokens,
     this.cachedTokens,
+    this.truncated = false,
   });
 
   factory ChatStreamEvent.token(String delta) =>
@@ -76,14 +93,16 @@ class ChatStreamEvent {
   factory ChatStreamEvent.error(
     String message, {
     Duration? retryAfter,
+    bool sanitized = false,
   }) =>
       ChatStreamEvent(
         type: ChatStreamEventType.error,
         message: message,
         retryAfter: retryAfter,
+        sanitized: sanitized,
       );
 
   @override
   String toString() =>
-      'ChatStreamEvent(type: $type, delta: $delta, content: $content, model: $model, message: $message, retryAfter: $retryAfter)';
+      'ChatStreamEvent(type: $type, delta: $delta, content: $content, model: $model, message: $message, retryAfter: $retryAfter, sanitized: $sanitized, truncated: $truncated)';
 }
