@@ -82,6 +82,12 @@ gateway/.env*
 gateway/*.pem
 gateway/*.key
 
+# Realtime relay: the first Node service here with real dependencies, so it is
+# also the first to produce a node_modules that must never be committed.
+realtime/node_modules/
+realtime/.env*
+!realtime/.env.example
+
 # Agentic 运行时在本地生成的产物（角色/任务生成的 HTML、脚本、文档等），不应入库
 meteor_shower.html
 run_checks.sh
