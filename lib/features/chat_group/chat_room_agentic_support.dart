@@ -41,6 +41,7 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
       autoChatEnabled: _isAutoChatEnabled,
       hasCharacters: _characters.isNotEmpty,
       hasApiConfig: _hasAnyApiConfig,
+      isGuest: _isRealtimeGuest,
     )) {
       return;
     }
@@ -88,6 +89,7 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
       autoChatEnabled: _isAutoChatEnabled,
       hasCharacters: _characters.isNotEmpty,
       hasApiConfig: _hasAnyApiConfig,
+      isGuest: _isRealtimeGuest,
     )) {
       if (_canTouchUi) {
         _setUiState(() => _autoChatStatus = AutoChatStatus.paused);

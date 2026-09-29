@@ -3,6 +3,9 @@ import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/chat_group/group_chat_inbox.dart';
+import 'package:chat_group/features/realtime/realtime_protocol.dart';
+import 'package:chat_group/features/realtime/realtime_settings.dart';
+import 'package:chat_group/features/realtime/widgets/realtime_invite_sheet.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 
@@ -11,6 +14,7 @@ import 'chat_group_form_page.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/data_lifecycle_result_dialog.dart';
+import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 
@@ -91,6 +95,14 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
             ],
           ],
         ),
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.qr_code_rounded, size: 22),
+            onPressed: _joinGroup,
+            tooltip: '加入群聊',
+          ),
+          const SizedBox(width: 4),
+        ],
       ),
       body: groups.isEmpty
           ? _buildEmptyState(cs)
@@ -103,6 +115,7 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
                 return _GroupCard(
                   summary: summary,
                   cs: cs,
+                  sharedLabel: _sharedLabelFor(group),
                   onTap: () => _openChat(summary),
                   onEdit: () => _editGroup(context, group),
                   onTogglePin: () => _togglePinnedGroup(group.id),
@@ -142,15 +155,86 @@ class _ChatGroupListPageState extends ConsumerState<ChatGroupListPage> {
           const SizedBox(height: 8),
           Text('点击右下角创建你的第一个 AI 群聊',
               style: TextStyle(fontSize: 14, color: cs.onSurfaceVariant)),
+          const SizedBox(height: 20),
+          OutlinedButton.icon(
+            onPressed: _joinGroup,
+            icon: const Icon(Icons.qr_code_rounded, size: 18),
+            label: const Text('用邀请码加入群聊'),
+          ),
         ],
       ),
     );
+  }
+
+  /// 已共享的群在列表上标出自己在这段关系里的角色；未共享的群返回 null。
+  String? _sharedLabelFor(ChatGroup group) {
+    if (!group.isShared) return null;
+    return group.isHost(_db.realtimeUserId) ? '主人' : '客人';
   }
 
   void _addGroup(BuildContext context) {
     Navigator.of(context).push(
       MaterialPageRoute(builder: (context) => const ChatGroupFormPage()),
     );
+  }
+
+  /// 客人凭邀请码加入主人的群。
+  ///
+  /// 本地不会因为加入而获得任何 AI 角色：客人只负责说话和看，生成发生在主人端。
+  Future<void> _joinGroup() async {
+    // 读配置本身也可能失败（比如设备上没有可用的安全存储）。这里不接住的话，
+    // 表现是按钮点了毫无反应——用户只会以为功能坏了。
+    final RealtimeSettings settings;
+    try {
+      settings = await ref.read(realtimeSettingsProvider.future);
+    } on Object {
+      if (!mounted) return;
+      AppToast.show(context, '读取多人联机配置失败，请到「设置 - 多人联机」检查',
+          icon: Icons.error_outline_rounded);
+      return;
+    }
+    if (!mounted) return;
+    final registration = await showDialog<RealtimeGroupRegistration>(
+      context: context,
+      builder: (_) => JoinGroupDialog(
+        onSubmit: (code) => ref
+            .read(realtimeGroupServiceProvider)
+            .resolveInviteCode(settings: settings, inviteCode: code),
+      ),
+    );
+    if (registration == null || !mounted) return;
+
+    // 同一个房间重复加入时直接回到已有群，否则列表里会堆出一串同名群，
+    // 而每个群的本地消息都是残缺的一半。
+    final groups = ref.read(chatGroupsProvider);
+    for (final group in groups) {
+      if (group.roomId == registration.roomId) {
+        await _openChatById(group.id);
+        return;
+      }
+    }
+
+    final group = ChatGroup(
+      name: registration.name,
+      theme: '多人联机',
+      description: '主人：${registration.hostDisplayName}',
+      // 客人本机不持有任何 AI 角色，AI 回复全部由主人端生成后广播过来。
+      aiCharacterIds: const <String>[],
+      // 这里的 ownerName 仍然是"本机的我"，绝不能写成主人的名字：
+      // 它会被当作自己的显示名广播给其他成员，也会参与 @ 提及匹配。
+      ownerName: _db.ownerNameFromProfile(),
+      hostUserId: registration.hostUserId,
+      roomId: registration.roomId,
+      inviteCode: registration.inviteCode,
+    );
+    await ref.read(chatGroupsProvider.notifier).addGroup(group);
+    if (!mounted) return;
+    await _openChatById(group.id);
+  }
+
+  Future<void> _openChatById(String groupId) async {
+    await Navigator.of(context).pushNamed('/chat/$groupId');
+    await _loadSummaries();
   }
 
   void _editGroup(BuildContext context, ChatGroup group) {
@@ -285,6 +369,9 @@ class _GroupCard extends StatelessWidget {
   final VoidCallback onTogglePin;
   final VoidCallback onDelete;
 
+  /// 「主人」/「客人」，未共享的群为 null。
+  final String? sharedLabel;
+
   const _GroupCard({
     required this.summary,
     required this.cs,
@@ -292,6 +379,7 @@ class _GroupCard extends StatelessWidget {
     required this.onEdit,
     required this.onTogglePin,
     required this.onDelete,
+    this.sharedLabel,
   });
 
   @override
@@ -409,6 +497,30 @@ class _GroupCard extends StatelessWidget {
                                   fontWeight: FontWeight.w500),
                             ),
                           ),
+                          if (sharedLabel != null)
+                            Container(
+                              padding: const EdgeInsets.symmetric(
+                                  horizontal: 8, vertical: 2),
+                              decoration: BoxDecoration(
+                                color: cs.secondaryContainer,
+                                borderRadius: BorderRadius.circular(6),
+                              ),
+                              child: Row(
+                                mainAxisSize: MainAxisSize.min,
+                                children: [
+                                  Icon(Icons.wifi_tethering_rounded,
+                                      size: 12, color: cs.onSecondaryContainer),
+                                  const SizedBox(width: 4),
+                                  Text(
+                                    sharedLabel!,
+                                    style: TextStyle(
+                                        fontSize: 12,
+                                        color: cs.onSecondaryContainer,
+                                        fontWeight: FontWeight.w600),
+                                  ),
+                                ],
+                              ),
+                            ),
                           if (summary.hasMention)
                             Container(
                               padding: const EdgeInsets.symmetric(

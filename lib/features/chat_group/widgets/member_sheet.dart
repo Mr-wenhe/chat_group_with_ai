@@ -93,6 +93,20 @@ class _MiniAvatar extends StatelessWidget {
   }
 }
 
+/// 多人联机里另一位真人的展示信息。
+///
+/// 真人没有 [AICharacter]，也没有本机档案：主人端拿不到客人的角色设置，
+/// 客人端更是连角色都没有。所以这里只保留"叫什么、什么身份"两件事，
+/// 列表项也就不提供进设置/发起私聊这两个动作。
+class SharedGroupMember {
+  const SharedGroupMember({required this.name, required this.label});
+
+  final String name;
+
+  /// 身份标签：「主人」或「客人」。
+  final String label;
+}
+
 class MemberSheet extends StatefulWidget {
   final List<AICharacter> characters;
   final String ownerName;
@@ -100,6 +114,15 @@ class MemberSheet extends StatefulWidget {
   final String Function(AICharacter character) statusText;
   final ValueChanged<AICharacter> onOpenSettings;
   final ValueChanged<AICharacter> onDirectChat;
+
+  /// 本机用户在群里的身份，显示在自己那一行下面。
+  final String ownerRole;
+
+  /// 本机用户是否是群主，决定是否显示「群主」徽章。
+  final bool ownerIsHost;
+
+  /// 多人联机里的其他真人。纯本机的群为空。
+  final List<SharedGroupMember> sharedMembers;
 
   const MemberSheet({
     super.key,
@@ -109,6 +132,9 @@ class MemberSheet extends StatefulWidget {
     required this.statusText,
     required this.onOpenSettings,
     required this.onDirectChat,
+    this.ownerRole = '群主',
+    this.ownerIsHost = true,
+    this.sharedMembers = const <SharedGroupMember>[],
   });
 
   @override
@@ -136,6 +162,13 @@ class _MemberSheetState extends State<MemberSheet> {
                 character.role.contains(query) ||
                 character.personalityTags.any((tag) => tag.contains(query)))
             .toList(growable: false);
+    // 真人只按名字搜：他们没有角色和标签。
+    final filteredMembers = query.isEmpty
+        ? widget.sharedMembers
+        : widget.sharedMembers
+            .where((member) => member.name.contains(query))
+            .toList(growable: false);
+    final total = widget.characters.length + widget.sharedMembers.length + 1;
 
     return Container(
       constraints: BoxConstraints(
@@ -173,7 +206,7 @@ class _MemberSheetState extends State<MemberSheet> {
               ),
               const SizedBox(width: 8),
               Text(
-                '${widget.characters.length + 1}',
+                '$total',
                 style: TextStyle(
                   fontSize: 14,
                   color: colorScheme.onSurfaceVariant,
@@ -209,14 +242,22 @@ class _MemberSheetState extends State<MemberSheet> {
                   avatarText: '我',
                   avatarColor: colorScheme.primary,
                   name: widget.ownerName,
-                  subtitle: '群主',
-                  isOwner: true,
+                  subtitle: widget.ownerRole,
+                  badge: widget.ownerIsHost ? '群主' : null,
                 ),
                 Divider(
                   height: 24,
                   color: colorScheme.outlineVariant.withValues(alpha: 0.4),
                 ),
-                if (filtered.isEmpty)
+                // 真人排在 AI 角色前面：客人端压根没有角色，主人端也更关心
+                // "谁进来了"。没有可点的动作——远端真人在本机没有档案。
+                ...filteredMembers.map((member) => _MemberTile(
+                      avatarText: member.name.characters.first,
+                      avatarColor: colorScheme.primary,
+                      name: member.name,
+                      subtitle: member.label,
+                    )),
+                if (filtered.isEmpty && filteredMembers.isEmpty)
                   Padding(
                     padding: const EdgeInsets.symmetric(vertical: 24),
                     child: Center(
@@ -260,7 +301,10 @@ class _MemberTile extends StatelessWidget {
   final Color avatarColor;
   final String name;
   final String subtitle;
-  final bool isOwner;
+
+  /// 名字后面的小徽章，null 表示不加。
+  final String? badge;
+
   final VoidCallback? onOpenSettings;
   final VoidCallback? onDirectChat;
 
@@ -269,7 +313,7 @@ class _MemberTile extends StatelessWidget {
     required this.avatarColor,
     required this.name,
     required this.subtitle,
-    this.isOwner = false,
+    this.badge,
     this.onOpenSettings,
     this.onDirectChat,
   });
@@ -324,7 +368,7 @@ class _MemberTile extends StatelessWidget {
                         ),
                       ),
                     ),
-                    if (isOwner) ...[
+                    if (badge != null) ...[
                       const SizedBox(width: 6),
                       Container(
                         padding: const EdgeInsets.symmetric(
@@ -336,7 +380,7 @@ class _MemberTile extends StatelessWidget {
                           borderRadius: BorderRadius.circular(4),
                         ),
                         child: Text(
-                          '群主',
+                          badge!,
                           style: TextStyle(
                             fontSize: 10,
                             fontWeight: FontWeight.w600,

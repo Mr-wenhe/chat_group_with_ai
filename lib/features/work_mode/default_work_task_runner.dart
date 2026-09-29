@@ -37,6 +37,7 @@ import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
@@ -2024,7 +2025,7 @@ class DefaultWorkTaskRunner
     final messages = database.messageBox.values
         .where((message) =>
             message.groupId == task.groupId &&
-            !message.id.startsWith('agent-progress:'))
+            !WorkModeTaskLifecycle.isProgressMessageId(message.id))
         .toList()
       ..sort((left, right) => left.timestamp.compareTo(right.timestamp));
     return AgentAttachmentContext.buildHistory(

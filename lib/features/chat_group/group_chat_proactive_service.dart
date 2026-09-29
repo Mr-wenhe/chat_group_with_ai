@@ -62,7 +62,15 @@ class GroupChatProactiveService {
         .where((character) =>
             character.isActive && _canGenerateProactiveMessage(character))
         .toList();
-    final groups = db.chatGroupBox.values.toList()..shuffle(random);
+    // 主动消息也要遵守"只有主人这台设备调用 AI"。客人加入的群在本机没有
+    // 任何角色，但仍然要显式排除：否则一旦将来给客人端补上角色副本，
+    // 同一个群会在多台设备上各自冒出 AI 发言。
+    // 未共享的本地群 isHost 恒为 true，行为与加入实时功能之前完全一致。
+    final localUserId = db.realtimeUserId;
+    final groups = db.chatGroupBox.values
+        .where((group) => group.isHost(localUserId))
+        .toList()
+      ..shuffle(random);
     final allMessages = db.messageBox.values.toList();
     final charactersById = {
       for (final character in allCharacters) character.id: character

@@ -214,6 +214,10 @@ class DatabaseService {
     await _openBoxSafely<UserProfile>(_userProfileBox);
     await _openBoxSafely<PermanentMemory>(_permanentMemoryBox);
     await _openBoxSafely<RelationshipEvent>(_relationshipEventBox);
+    // 在初始化阶段就把实时身份落实盘，而不是等第一次用到才懒生成：
+    // 群记录与身份存在同一台设备的同一份 data 目录里，若身份的首次写入
+    // 因进程退出而丢失，重启后主人会把自已的群认成「别人的群」（降级为客人）。
+    await _ensureRealtimeIdentity();
     await _migrateApiConfigCredentials();
     final workModeMigrator = WorkModeV1Migrator(
       taskBox: agentTaskBox,
@@ -430,6 +434,49 @@ class DatabaseService {
   }
 
   String? get dataDirPath => _dataDir?.path;
+
+  static const String _realtimeUserIdKey = 'realtime_user_id';
+
+  String? _realtimeUserIdCache;
+
+  /// 本机用户在多人实时群聊中的稳定唯一标识。
+  ///
+  /// 刻意只做「标识」，不做注册登录：群聊需要的是能区分"谁说的"，
+  /// 不需要密码、会话或用户表，后者对小组作业场景是纯成本。
+  /// 代价是这个标识绑定本次安装——重装应用会变成新用户。
+  String get realtimeUserId => _realtimeUserIdCache ??= _readRealtimeUserId() ?? _mintRealtimeUserId();
+
+  Future<void> _ensureRealtimeIdentity() async {
+    final existing = _readRealtimeUserId();
+    if (existing != null) {
+      _realtimeUserIdCache = existing;
+      return;
+    }
+    final minted = const Uuid().v4();
+    _realtimeUserIdCache = minted;
+    await appSettingsBox.put(_realtimeUserIdKey, minted);
+  }
+
+  String? _readRealtimeUserId() {
+    try {
+      final raw = appSettingsBox.get(_realtimeUserIdKey);
+      return raw is String && raw.trim().isNotEmpty ? raw.trim() : null;
+    } on Object {
+      // app_settings 尚未打开（测试环境）：当作从未生成过。
+      return null;
+    }
+  }
+
+  /// 仅在 [_ensureRealtimeIdentity] 没能跑到时兜底（主要是测试）。
+  String _mintRealtimeUserId() {
+    final minted = const Uuid().v4();
+    try {
+      unawaited(appSettingsBox.put(_realtimeUserIdKey, minted).catchError((Object _) {}));
+    } on Object {
+      // 写不进去只意味着下次启动换个标识，不该让调用方的 build 失败。
+    }
+    return minted;
+  }
 
   static const String _aiProcessingDirKey = 'ai_processing_dir';
 
@@ -1054,7 +1101,9 @@ class DatabaseService {
         (direct
             ? directChatReadAtByConversation()
             : groupChatReadAtByGroup())[message.groupId];
-    final isUnread = message.senderType == 'ai' &&
+    // 「不是我说的」即为未读。多人实时群聊里别人（senderType == 'member'）
+    // 的发言同样要计未读，否则客人说的话在群列表上悄无声息。
+    final isUnread = message.senderType != Message.senderTypeUser &&
         (readAt == null || message.timestamp.isAfter(readAt));
     final ownerName = !direct ? ownerNameFromProfile() : '我';
     final mentionNames = {'我', if (ownerName.isNotEmpty) ownerName};
@@ -1095,7 +1144,9 @@ class DatabaseService {
         ? directChatReadAtByConversation()
         : groupChatReadAtByGroup())[groupId];
     final unread = sorted.where((message) {
-      return message.senderType == 'ai' &&
+      // 与 _updateConversationSummaryForAdded 保持一致：别人的发言都算未读，
+      // 包括多人实时群聊里真人成员的发言。
+      return message.senderType != Message.senderTypeUser &&
           (readAt == null || message.timestamp.isAfter(readAt));
     }).toList(growable: false);
     final ownerName = !direct ? ownerNameFromProfile() : '我';

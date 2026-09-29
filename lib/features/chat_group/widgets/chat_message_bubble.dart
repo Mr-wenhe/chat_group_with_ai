@@ -14,10 +14,21 @@ import 'package:chat_group/features/chat_group/widgets/message_selectable_text.d
 import 'package:chat_group/features/chat_group/widgets/video_bubble.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
+import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
 import 'package:flutter/material.dart';
 import 'package:open_filex/open_filex.dart';
 
 part 'progress_log_bubble.dart';
+
+/// 头像占位字：取昵称的第一个字形。
+///
+/// 用 `runes` 而不是 `name[0]`，否则 emoji 昵称会被截成半个代理对，
+/// 渲染出乱码方块。
+String _firstDisplayGlyph(String name) {
+  final trimmed = name.trim();
+  if (trimmed.isEmpty) return '?';
+  return String.fromCharCode(trimmed.runes.first);
+}
 
 /// A single chat message bubble — user or AI.
 ///
@@ -47,10 +58,18 @@ class ChatMessageBubble extends StatelessWidget {
   /// 仅进度消息使用，其它消息传 null 以保持旧调用兼容。
   final int? runStartedAtMs;
 
+  /// 群里的其他真人成员昵称，仅 `Message.senderTypeMember` 的消息传入。
+  ///
+  /// 真人没有 [AICharacter]，不能塞进 [sender] 冒充角色——那会让
+  /// `onSenderTap` 打开一个根本不存在的角色详情页，也会把真人错算进
+  /// 角色配色和 @ 提及里。单独开一个入口，让他们只借用"别人的消息"的排版。
+  final String? memberName;
+
   const ChatMessageBubble({
     super.key,
     required this.message,
     this.sender,
+    this.memberName,
     required this.characters,
     required this.cs,
     this.isStreaming = false,
@@ -71,6 +90,17 @@ class ChatMessageBubble extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final isUser = message.senderType == 'user';
+    // 昵称有两种来源：AI 角色走 sender，真人成员走 memberName。
+    final displayName = sender?.name ?? memberName;
+    final hasSender = !isUser && displayName != null;
+    // 角色按 id 取稳定配色；真人成员没有角色配色，统一用主题色
+    // （微信里其他人的昵称也是同一个颜色，不做人各一色）。
+    final accent = sender != null ? senderColor(sender!) : cs.primary;
+    final avatarText = hasSender
+        ? (sender != null && sender!.avatar.isNotEmpty
+            ? sender!.avatar
+            : _firstDisplayGlyph(displayName))
+        : '';
 
     return GestureDetector(
       onLongPress: onLongPress,
@@ -82,7 +112,7 @@ class ChatMessageBubble extends StatelessWidget {
               isUser ? MainAxisAlignment.end : MainAxisAlignment.start,
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            if (!isUser && sender != null) ...[
+            if (hasSender) ...[
               InkWell(
                 onTap: onSenderTap,
                 borderRadius: BorderRadius.circular(4),
@@ -90,18 +120,15 @@ class ChatMessageBubble extends StatelessWidget {
                   width: 40,
                   height: 40,
                   decoration: BoxDecoration(
-                    color: senderColor(sender!).withValues(alpha: 0.14),
+                    color: accent.withValues(alpha: 0.14),
                     borderRadius: BorderRadius.circular(4),
                   ),
                   alignment: Alignment.center,
-                  child: Text(
-                      sender!.avatar.isNotEmpty
-                          ? sender!.avatar
-                          : sender!.name[0],
+                  child: Text(avatarText,
                       style: TextStyle(
                           fontSize: 14,
                           fontWeight: FontWeight.w600,
-                          color: senderColor(sender!))),
+                          color: accent)),
                 ),
               ),
               const SizedBox(width: 8),
@@ -111,7 +138,7 @@ class ChatMessageBubble extends StatelessWidget {
                 crossAxisAlignment:
                     isUser ? CrossAxisAlignment.end : CrossAxisAlignment.start,
                 children: [
-                  if (!isUser && sender != null)
+                  if (hasSender)
                     Padding(
                       padding: const EdgeInsets.only(left: 4, bottom: 4),
                       child: Row(
@@ -120,11 +147,11 @@ class ChatMessageBubble extends StatelessWidget {
                             onTap: onSenderTap,
                             onSecondaryTap: onMentionSender,
                             onLongPress: onMentionSender,
-                            child: Text(sender!.name,
+                            child: Text(displayName,
                                 style: TextStyle(
                                     fontSize: 12,
                                     fontWeight: FontWeight.w600,
-                                    color: senderColor(sender!))),
+                                    color: accent)),
                           ),
                           if (isRegenerating)
                             Padding(
@@ -430,7 +457,7 @@ class ChatMessageBubble extends StatelessWidget {
 
     // 工作模式进度气泡：统一交由 [ProgressLogBubble] 渲染（可折叠 + 实时耗时）。
     // 通过 ValueKey(message.id) 保持稳定实例，content 整体替换不重置折叠态。
-    if (message.id.startsWith('agent-progress:')) {
+    if (WorkModeTaskLifecycle.isProgressMessageId(message.id)) {
       return ProgressLogBubble(
         key: ValueKey(message.id),
         message: message,

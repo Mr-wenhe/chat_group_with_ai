@@ -63,6 +63,7 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
 
   /// 弹出群成员列表面板（可查看状态、进角色设置、发起私聊）。
   void _showMembersSheet() {
+    final isHost = _group?.isHost(_realtimeUserId) ?? true;
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -76,8 +77,33 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
         onDirectChat: (character) {
           if (mounted) Navigator.of(context).pushNamed('/dm/${character.id}');
         },
+        // 之前这里一律写死「群主」，客人打开成员列表会以为自己是群主。
+        ownerRole: isHost ? '群主' : '客人',
+        ownerIsHost: isHost,
+        sharedMembers: _sharedMemberViews(),
       ),
     );
+  }
+
+  /// 把实时花名册整理成成员列表要展示的真人条目。
+  ///
+  /// 只保留有名字的成员：早期落库的花名册可能带空名（比如对方还没设昵称），
+  /// 渲染出一行空白的成员没有任何意义。主人端能认出哪一个是主人
+  /// （[ChatGroup.hostUserId] 是客人加入时一起存下来的），据此标注身份。
+  List<SharedGroupMember> _sharedMemberViews() {
+    final hostUserId = _group?.hostUserId;
+    final views = <SharedGroupMember>[];
+    for (final entry in _realtimeMemberNames.entries) {
+      if (entry.key == _realtimeUserId) continue;
+      final name = entry.value.trim();
+      if (name.isEmpty) continue;
+      views.add(SharedGroupMember(
+        name: name,
+        label: entry.key == hostUserId ? '主人' : '客人',
+      ));
+    }
+    views.sort((a, b) => a.name.compareTo(b.name));
+    return views;
   }
 
   /// 清空当前群聊或私聊，并让用户明确选择是否删除来源永久数据。

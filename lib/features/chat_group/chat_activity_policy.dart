@@ -10,13 +10,24 @@ class ChatActivityPolicy {
   static const int replyDelayMsPerCharacter = 45;
   static const int replyDelayJitterMs = 900;
 
+  /// 是否允许在本机启动空闲自动聊天。
+  ///
+  /// [isGuest] 为真表示当前用户是别人群里的客人。客人的客户端一律不调用
+  /// LLM：AI 回复由主人端统一生成后经服务端广播过来。这条规则必须在这里
+  /// 拦住——它是自动聊天的唯一入口，漏掉就会让同一个群被两端的 AI 同时刷屏。
+  /// 默认 false，保持既有调用方与测试的语义不变。
   static bool canStartAutoChat({
     required bool workModeEnabled,
     required bool autoChatEnabled,
     required bool hasCharacters,
     required bool hasApiConfig,
+    bool isGuest = false,
   }) =>
-      !workModeEnabled && autoChatEnabled && hasCharacters && hasApiConfig;
+      !isGuest &&
+      !workModeEnabled &&
+      autoChatEnabled &&
+      hasCharacters &&
+      hasApiConfig;
 
   static List<AICharacter> selectUserReplyCharacters({
     required List<AICharacter> characters,

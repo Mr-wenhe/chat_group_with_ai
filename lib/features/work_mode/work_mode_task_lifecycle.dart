@@ -5,8 +5,16 @@ import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 class WorkModeTaskLifecycle {
   const WorkModeTaskLifecycle._();
 
+  /// 进度气泡消息 id 的前缀。判断"这条是不是工作模式进度"一律用它，
+  /// 不要在各处重写字面量——已有 4 处调用方依赖这个约定。
+  static const String progressMessageIdPrefix = 'agent-progress:';
+
   static String progressMessageId(AgentTask task) =>
-      'agent-progress:${task.id}';
+      '$progressMessageIdPrefix${task.id}';
+
+  /// 消息 id 是否指向一条工作模式进度气泡。
+  static bool isProgressMessageId(String messageId) =>
+      messageId.startsWith(progressMessageIdPrefix);
 
   /// 仅当用户取消（[AgentTaskStatus.cancelled]）时删除进度气泡。
   ///
