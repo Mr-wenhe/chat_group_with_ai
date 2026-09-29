@@ -135,13 +135,19 @@ class WorkArtifactDeliveryGuard {
   /// rejected as a generator script. It is a curated list rather than “any
   /// dotted token” on purpose — `example.com` in a request must not turn an
   /// ordinary question into a file contract.
+  ///
+  /// The trailing `(?!\.)` is that same rule for abbreviations: “U.S.” writes a
+  /// dot in front of `s`, and without this a report request was read as one
+  /// whose deliverable format is `asm` — the real `.docx` was then rejected as
+  /// “没有可读取的真实文件”. A real extension is the *last* dotted segment of
+  /// the name it belongs to.
   static final RegExp _sourceExtension = RegExp(
     r'\.(?:py|py3|pyw|ipynb|js|mjs|cjs|jsx|ts|tsx|vue|svelte|dart|java|kt|'
     r'kts|scala|groovy|clj|cljs|swift|rs|go|rb|php|pl|pm|lua|hs|lhs|ex|exs|'
     r'erl|hrl|ml|mli|fs|fsx|jl|zig|nim|sol|asm|ino|v|sv|vhd|vhdl|ps1|psm1|'
     r'bat|cmd|sh|bash|zsh|ksh|csh|fish|sql|css|scss|sass|less|styl|'
     r'c|cc|cpp|cxx|h|hh|hpp|hxx|cs|mm|proto|thrift|graphql|gql|tf|hcl|rmd|'
-    r'tex|gradle|cmake|mk|s)\b',
+    r'tex|gradle|cmake|mk|s)\b(?!\.)',
     caseSensitive: false,
   );
 
@@ -357,6 +363,21 @@ class WorkArtifactDeliveryGuard {
     ).hasMatch(text);
   }
 
+  /// Whether the token at [match] is written as a file extension (`.md`) rather
+  /// than as a bare word (`md`).
+  ///
+  /// A dot in front is not enough on its own: an abbreviation writes one too
+  /// (“U.S.”), and reading its `.s` as an extension both declared `asm` the
+  /// deliverable format of a plain report request and made that request look
+  /// like a source request. A real extension ends the name it belongs to, so a
+  /// token that is itself followed by a dot is still inside the abbreviation.
+  /// Every caller that asks this question uses this one rule; when two of them
+  /// disagreed, one path saw an extension the other did not.
+  static bool _isExtensionToken(String text, RegExpMatch match) =>
+      match.start > 0 &&
+      text[match.start - 1] == '.' &&
+      (match.end >= text.length || text[match.end] != '.');
+
   /// Whether the request mentions any recognised format at all, however it is
   /// introduced.
   ///
@@ -367,8 +388,10 @@ class WorkArtifactDeliveryGuard {
     for (final match in RegExp(r'[a-z0-9]+').allMatches(text)) {
       final token = match.group(0)!;
       if (!formatAliases.containsKey(token)) continue;
-      final isExtension = match.start > 0 && text[match.start - 1] == '.';
-      if (!isExtension && _ambiguousBareTokens.contains(token)) continue;
+      if (!_isExtensionToken(text, match) &&
+          _ambiguousBareTokens.contains(token)) {
+        continue;
+      }
       return true;
     }
     return _cjkFormatAliases.keys.any(text.contains) ||
@@ -1182,7 +1205,7 @@ class WorkArtifactDeliveryGuard {
       final token = match.group(0)!;
       final canonical = formatAliases[token];
       if (canonical == null) continue;
-      final isExtension = match.start > 0 && text[match.start - 1] == '.';
+      final isExtension = _isExtensionToken(text, match);
       if (!isExtension && _ambiguousBareTokens.contains(token)) continue;
       // A bare language name is only the deliverable's format when the request
       // asks for source code at all: “生成一份 Python 学习报告” delivers a

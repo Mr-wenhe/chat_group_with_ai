@@ -801,6 +801,66 @@ void _bareSourceWordTests() {
     }
   });
 
+  test('a dotted abbreviation is not read as a file extension', () async {
+    // “U.S.” 里的 `.s` 被当成扩展名，于是 `.s`→`asm` 成了这份报告请求的"点名格式"：
+    // 桌面上真实的 us_market_report.txt 被判成 "artifactInvalidOrStale"，报的还是
+    // 那句"没有可读取的真实文件"。缩写里的点不是扩展名——真正的扩展名是文件名的
+    // 最后一段，后面不会再跟点。
+    const request = '帮我生成一份 U.S. 市场的分析报告';
+    expect(
+      WorkArtifactDeliveryGuard.requiresSourceArtifact(request),
+      isFalse,
+      reason: '缩写不该把报告请求变成源码请求',
+    );
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(_task(request: request)),
+      isEmpty,
+      reason: '报告请求没点名任何格式；点成 asm 会把它自己的交付物拒掉',
+    );
+
+    final root = await Directory.systemTemp.createTemp('dotted-abbrev-');
+    addTearDown(() => root.delete(recursive: true));
+    final report = File('${root.path}/us_market_report.txt')
+      ..writeAsStringSync('U.S. 市场分析\n');
+    final now = DateTime.now();
+    final task = AgentTask(
+      id: 'dotted-abbrev',
+      groupId: 'field',
+      characterId: 'executor',
+      userRequest: request,
+      workModeTask: true,
+      createdAt: now,
+      startedAt: now,
+      lastArtifactPaths: <String>[report.path],
+    );
+
+    final result = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+      workspaceRoot: root.path,
+      now: now,
+    );
+
+    expect(result.valid, isTrue, reason: result.message);
+
+    // 同一枚点在别处仍然只是普通文本：句尾带点的缩写后面接别的词也一样。
+    expect(
+      WorkArtifactDeliveryGuard.requiresSourceArtifact('生成一份报告，参考 U.S. 的数据'),
+      isFalse,
+    );
+    // 反过来，真正写在句尾的扩展名照样算数（不能靠"后面不能有点"把正常写法漏掉）。
+    expect(
+      WorkArtifactDeliveryGuard.requiresSourceArtifact('生成一个程序.lua'),
+      isTrue,
+    );
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(
+        _task(request: '生成一个程序.lua'),
+      ),
+      <String>{'lua'},
+    );
+  });
+
   test('a header belongs to the same deliverable family as its source', () {
     expect(
         WorkArtifactDeliveryGuard.matchesDeclaredFormat('a.h', 'cpp'), isTrue);
