@@ -861,6 +861,85 @@ void _bareSourceWordTests() {
     );
   });
 
+  test('an initialism written without its final dot is not an extension either',
+      () async {
+    // `U.S`（省略末点）与 `a.h` 形状完全相同——点两侧各一个单字母，没有结构性规则
+    // 能把它们分开，只有大小写可以：缩写由大写字母加点连成，用户点名的文件是小写。
+    // 少了这一层，`U.S` 仍然会把声明格式变成 asm、把请求判成源码请求。
+    for (final request in <String>[
+      '帮我生成一份 U.S 市场的分析报告',
+      '帮我生成一份 U.S. 市场的分析报告',
+      '帮我生成一份 U.S.A 市场的分析报告',
+      '生成一份报告，补充 P.S 说明',
+    ]) {
+      expect(
+        WorkArtifactDeliveryGuard.declaredOutputFormats(
+            _task(request: request)),
+        isEmpty,
+        reason: request,
+      );
+      expect(
+        WorkArtifactDeliveryGuard.requiresSourceArtifact(request),
+        isFalse,
+        reason: request,
+      );
+    }
+
+    // 端到端看同一个症状：请求里带缩写时，桌面上真实的报告文件必须能被收下。
+    final root = await Directory.systemTemp.createTemp('initialism-');
+    addTearDown(() => root.delete(recursive: true));
+    final report = File('${root.path}/us_market_report.txt')
+      ..writeAsStringSync('U.S 市场分析\n');
+    final now = DateTime.now();
+    final result = await WorkArtifactDeliveryGuard.validateTask(
+      task: AgentTask(
+        id: 'initialism',
+        groupId: 'field',
+        characterId: 'executor',
+        userRequest: '帮我生成一份 U.S 市场的分析报告',
+        workModeTask: true,
+        createdAt: now,
+        startedAt: now,
+        lastArtifactPaths: <String>[report.path],
+      ),
+      pathPolicy: WorkspacePathPolicy(authorizedRoots: [root.path]),
+      workspaceRoot: root.path,
+      now: now,
+    );
+
+    expect(result.valid, isTrue, reason: result.message);
+
+    // 反面清单：小写的单字母主干必须照旧算扩展名——C/C++ 现场就是靠它认出 a.h 的。
+    // 期望值是 canonical：`.h` 与 `.cpp` 同属一个交付物族。
+    for (final entry in <String, String>{
+      '生成 a.h': 'cpp',
+      '生成 a.cpp': 'cpp',
+      '生成 report.s': 'asm',
+      '生成 a.py': 'py',
+    }.entries) {
+      expect(
+        WorkArtifactDeliveryGuard.declaredOutputFormats(
+          _task(request: entry.key),
+        ),
+        <String>{entry.value},
+        reason: entry.key,
+      );
+    }
+    expect(WorkArtifactDeliveryGuard.requiresSourceArtifact('生成 a.h'), isTrue);
+    expect(
+      WorkArtifactDeliveryGuard.requiresSourceArtifact('帮我生成一份 US 市场的分析报告'),
+      isFalse,
+      reason: '去掉缩写点之后剩下的普通词不能变成格式',
+    );
+    // 这一层只在大写碰上大写时生效：`R&D.docx` 里的点后是小写，扩展名照旧。
+    expect(
+      WorkArtifactDeliveryGuard.declaredOutputFormats(
+        _task(request: '生成一份 R&D.docx'),
+      ),
+      <String>{'docx'},
+    );
+  });
+
   test('a header belongs to the same deliverable family as its source', () {
     expect(
         WorkArtifactDeliveryGuard.matchesDeclaredFormat('a.h', 'cpp'), isTrue);

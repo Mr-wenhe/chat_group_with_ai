@@ -98,6 +98,40 @@ class WorkArtifactDeliveryGuard {
   /// is the one rejection the user may not overrule by confirming files.
   static const String unchangedRevisionCode = 'artifactUnchanged';
 
+  /// Dots that join single upper-case letters, as in “U.S” or “P.S”.
+  ///
+  /// “U.S” and a one-letter file such as `a.h` have the same shape — a dot
+  /// between two single letters — so no structural rule tells them apart, and
+  /// the trailing-dot rule in [_sourceExtension] only catches the spelling that
+  /// ends the abbreviation. Case does tell them apart: an initialism joins
+  /// *upper-case* letters, while the file names these requests name are written
+  /// in lower case (`a.h`, `report.s`). Without this, “U.S” declared `asm` (from
+  /// `.s`) the deliverable format of a plain report request *and* made that
+  /// request look like a source request, so the real report file was rejected
+  /// as “没有可读取的真实文件”.
+  ///
+  /// The cost is a name whose dot is flanked by upper-case letters
+  /// (`A.PDF`, `X.H`): it is read as an initialism and its extension is lost.
+  /// Both halves being upper-case is what makes it rare — `R&D.docx` and every
+  /// lower-case name are untouched — and the alternative, requiring a two-letter
+  /// stem for one-letter extensions, would break `a.h` and `a.cpp`, the C/C++
+  /// case this table was widened for.
+  static final RegExp _initialismDot = RegExp(r'\b([A-Z])\.(?=[A-Z])');
+
+  /// The text every format scan reads: initialism dots removed, then
+  /// lower-cased.
+  ///
+  /// Only the dots go and the letters stay, so the remaining text keeps the
+  /// spacing the scans use when they walk backwards from a match to check for an
+  /// ingredient introducer. A trailing dot survives (`U.S.` becomes `US.`),
+  /// which is harmless — the token behind it is `us`, not an alias.
+  ///
+  /// Every entry point that scans a request for formats must start here, so the
+  /// file contract, the source signal and the format filter cannot disagree
+  /// about the same text again.
+  static String _formatScanText(String request) =>
+      request.trim().replaceAll(_initialismDot, r'$1').toLowerCase();
+
   /// Returns whether [request] asks for a source-code file rather than merely
   /// asking the model to explain or review code.
   ///
@@ -105,7 +139,7 @@ class WorkArtifactDeliveryGuard {
   /// [_mentionsSourceArtifact] for how “生成一份 Python 学习报告” stays a
   /// document request.
   static bool requiresSourceArtifact(String request) {
-    final text = request.trim().toLowerCase();
+    final text = _formatScanText(request);
     if (text.isEmpty) return false;
     if (!_mentionsSourceArtifact(text)) return false;
 
@@ -344,7 +378,7 @@ class WorkArtifactDeliveryGuard {
   /// count as a request with no artifact contract, so its completion was never
   /// validated against a real file.
   static bool requiresFileArtifact(String request) {
-    final text = request.trim().toLowerCase();
+    final text = _formatScanText(request);
     if (text.isEmpty || !_containsCreationVerb(text)) return false;
     // Whether a contract exists is a deliberately broad question: a request
     // that mentions a format in passing (“生成一份报告，包含 png 图表”) still has
@@ -1199,7 +1233,7 @@ class WorkArtifactDeliveryGuard {
   /// “生成一份报告，包含 png 图表”, “把 chart.png 转成 pdf”. Treating either as
   /// the deliverable's format rejects the very file the user asked for.
   static Set<String> _formatsNamedBy(String request) {
-    final text = request.toLowerCase();
+    final text = _formatScanText(request);
     final formats = <String>{};
     for (final match in RegExp(r'[a-z0-9]+').allMatches(text)) {
       final token = match.group(0)!;
