@@ -28,8 +28,6 @@ class _TaskActions extends StatelessWidget {
   /// 把角色 id 显示成名字；执行人冲突的确认框必须让用户看清是"哪两个人"。
   final String Function(String characterId)? characterNameFor;
 
-  /// 真删除任务记录（不可逆）。为 null 时不展示删除入口。
-  final WorkTaskAction? onDeleteTask;
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
   final WorkTaskReply? onReply;
@@ -64,7 +62,6 @@ class _TaskActions extends StatelessWidget {
     required this.undoPreviewFor,
     this.onConfirmExecutorSwap,
     this.characterNameFor,
-    this.onDeleteTask,
     required this.onStop,
     required this.onContinue,
     required this.replyController,
@@ -77,6 +74,7 @@ class _TaskActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     final failure = _visibleWorkFailure(task);
     final continueReason = _continueUnavailableReasonForPanel(task);
     final stopReason = task.isTerminal ? '任务已结束，无法停止。' : null;
@@ -351,6 +349,10 @@ class _TaskActions extends StatelessWidget {
                 message: stopReason ?? '停止当前任务。',
                 child: OutlinedButton.icon(
                   key: const Key('work-task-stop'),
+                  // 危险动作只改前景色，不改变按钮尺寸与顺序，避免挤动布局。
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: colors.error,
+                  ),
                   onPressed: actionInFlight ? null : () => runAction(onStop),
                   icon: const Icon(Icons.stop_circle_outlined),
                   label: const Text('停止'),
@@ -381,17 +383,6 @@ class _TaskActions extends StatelessWidget {
                 label: const Text('撤销'),
               ),
             ),
-            if (onDeleteTask != null)
-              Tooltip(
-                message: '删除任务记录与执行日志；已生成的文件不受影响。',
-                child: TextButton.icon(
-                  key: const Key('work-task-delete'),
-                  onPressed:
-                      actionInFlight ? null : () => _confirmDelete(context),
-                  icon: const Icon(Icons.delete_outline_rounded),
-                  label: const Text('删除任务'),
-                ),
-              ),
           ],
         ),
       ],

@@ -101,6 +101,16 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   // attachment/quote previews remain a known ceiling for this global host.
   static const _reopenButtonBottomClearance = 84.0;
 
+  /// 折叠态下面板的目标高度上限。
+  ///
+  /// 面板折起来时要能一眼看全：上半区（任务需求 + 运行状态 + 执行细节）优先拿到
+  /// 足够高度，剩下的才分给「执行动态」。这个上限只是给窄屏一个参考值 ——
+  /// 宽屏面板由 `top: 72 / bottom: 16` 撑满视口，此处会被视口高度覆盖。
+  static const double _collapsedPanelMaxHeight = 790.0;
+
+  /// 面板顶部至少留出的空隙，避免矮窗口下 Positioned 超出 Stack 被裁掉面板头。
+  static const double _panelTopClearance = 96.0;
+
   StreamSubscription<List<AgentTask>>? _tasksSubscription;
   StreamSubscription<String?>? _conversationSubscription;
   WorkTaskCoordinator? _coordinator;
@@ -246,6 +256,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         if (hasTasks && _isVisible && !_isCollapsed)
           _positionedPanel(
             isWide: isWide,
+            viewportHeight: viewport.height,
             child: WorkTaskPanel(
               tasks: _tasks,
               hiddenTaskCount: _hiddenTaskCount,
@@ -350,6 +361,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
   Widget _positionedPanel({
     required bool isWide,
+    required double viewportHeight,
     required Widget child,
   }) {
     if (isWide) {
@@ -362,12 +374,17 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         child: child,
       );
     }
+    // 底部面板不再钉死 470：折叠态内容（含两条单行动态）在 470 下放不下，
+    // 执行细节必须拨滚轮才能看到。改为"视口给足 + 上限保护"。
+    final panelHeight = (viewportHeight - _panelTopClearance)
+        .clamp(400.0, _collapsedPanelMaxHeight)
+        .toDouble();
     return Positioned(
       key: const Key('work-task-panel-bottom'),
       left: 12,
       right: 12,
       bottom: 12,
-      height: 470,
+      height: panelHeight,
       child: child,
     );
   }

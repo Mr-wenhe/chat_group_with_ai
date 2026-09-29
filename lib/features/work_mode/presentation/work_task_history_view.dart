@@ -66,7 +66,7 @@ class _TaskHistoryListState extends State<_TaskHistoryList> {
   Widget build(BuildContext context) {
     if (widget.tasks.isEmpty) {
       return const Align(
-        alignment: Alignment.centerLeft,
+        alignment: Alignment.center,
         child: Text('当前会话还没有历史任务。'),
       );
     }
@@ -86,6 +86,8 @@ class _TaskHistoryListState extends State<_TaskHistoryList> {
             key: Key('work-task-history-item-${task.id}'),
             dense: true,
             contentPadding: EdgeInsets.zero,
+            // 左侧状态圆点复用面板状态色，让列表能一眼区分进行中 / 成功 / 失败。
+            leading: _HistoryStatusDot(status: task.status),
             title: Text(workTaskHistoryTitle(task)),
             subtitle: Text(workTaskHistorySubtitle(
               task,
@@ -95,6 +97,24 @@ class _TaskHistoryListState extends State<_TaskHistoryList> {
           );
         },
       ),
+    );
+  }
+}
+
+/// 历史列表左侧状态圆点：只用一个色点表达状态，不额外增加文案。
+class _HistoryStatusDot extends StatelessWidget {
+  final AgentTaskStatus status;
+
+  const _HistoryStatusDot({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final tone = _statusTone(context, status);
+    return Container(
+      width: 8,
+      height: 8,
+      margin: const EdgeInsets.only(left: 2, right: 8),
+      decoration: BoxDecoration(color: tone.foreground, shape: BoxShape.circle),
     );
   }
 }

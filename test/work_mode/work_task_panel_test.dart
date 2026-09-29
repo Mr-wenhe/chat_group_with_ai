@@ -130,6 +130,35 @@ void main() {
       expect(find.textContaining('1 小时'), findsNothing);
     });
 
+    testWidgets('freezes elapsed time once the task stops', (tester) async {
+      final task = _task(
+        id: 'stopped-duration',
+        conversationId: 'dm:worker',
+        characterId: 'worker',
+        startedAt: DateTime.utc(2026, 8, 28, 9),
+      )
+        ..attemptStartedAt = DateTime.utc(2026, 8, 28, 10)
+        ..status = AgentTaskStatus.completed
+        ..updatedAt = DateTime.utc(2026, 8, 28, 10, 2);
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: [task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+            // 任务已结束 2 小时，耗时仍应停在收工那一刻，而不是跟着当前时间涨。
+            clock: () => DateTime.utc(2026, 8, 28, 12),
+          ),
+        ),
+      ));
+      expect(find.text('已执行 2 分钟'), findsOneWidget);
+    });
+
     testWidgets('shows public task details and streamed events in sequence',
         (tester) async {
       final events = StreamController<WorkTaskEvent>.broadcast();
@@ -164,6 +193,12 @@ void main() {
       expect(find.text('执行角色：product-owner'), findsOneWidget);
       expect(find.text('步骤 3 / 8'), findsOneWidget);
       expect(find.text('已执行 2 分钟'), findsOneWidget);
+      // 执行细节卡默认折叠，只有点开「详情」后才补出计划摘要与结论。
+      await tester.ensureVisible(
+        find.byKey(const Key('work-task-details-toggle')),
+      );
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('先读取项目结构，再整理发布说明。'), findsOneWidget);
       expect(find.text('发布说明已整理完成。'), findsOneWidget);
 
@@ -194,6 +229,10 @@ void main() {
       expect(find.text('当前动作：正在读取项目配置'), findsOneWidget);
       expect(find.text('工具：read_text'), findsOneWidget);
       expect(find.text('已读取 pubspec.yaml'), findsOneWidget);
+      // 折叠态每条动态只占一行：标题还在，详情整行不渲染。
+      expect(find.text('发现 3 个待确认配置。'), findsNothing);
+      await tester.tap(find.byKey(const Key('work-task-timeline-toggle')));
+      await tester.pump();
       expect(find.text('发现 3 个待确认配置。'), findsOneWidget);
       expect(
         tester.getTopLeft(find.text('正在读取项目配置')).dy,
@@ -241,7 +280,15 @@ void main() {
       expect(find.text('当前动作：任务已完成。'), findsOneWidget);
       expect(find.text('当前动作：已读取项目关键文件'), findsNothing);
       expect(find.text('工具：workspace.read'), findsNothing);
+      // 结论是展开态内容，折叠时不应出现在面板上。
+      expect(find.text('项目分析结论已整理完成。'), findsNothing);
+      await tester.ensureVisible(
+        find.byKey(const Key('work-task-details-toggle')),
+      );
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('项目分析结论已整理完成。'), findsOneWidget);
+      expect(find.text('工具：workspace.read'), findsNothing);
     });
 
     testWidgets(
@@ -757,6 +804,17 @@ void main() {
           detail: '已完成第 $sequence 个公开检查。',
         ));
       }
+      await tester.pump();
+
+      // 折叠态两个卡片都放得下，不渲染任何滚动条。
+      expect(find.byType(Scrollbar), findsNothing);
+
+      await tester.ensureVisible(
+        find.byKey(const Key('work-task-details-toggle')),
+      );
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('work-task-timeline-toggle')));
       await tester.pump();
 
       final detailsScrollbar = tester.widget<Scrollbar>(
@@ -1774,21 +1832,23 @@ void main() {
       expect(undone, isTrue);
     });
 
-    testWidgets('deletes a task only after the confirmation dialog',
+    testWidgets('confirms before deleting a task that is still running',
         (tester) async {
-      // 删除是不可逆的，而且和"关掉标签"不是一回事：必须先确认，
-      // 取消不得触发任何删除。
+      // 历史任务不再执行，所以详情不接执行类动作；真删除（不可逆）在界面上只剩
+      // 这一个入口——操作区已不再放"删除任务"，避免与标签旁的 ✕ 混淆。
+      // 任务还没结束时要先确认：删除会顺手停止它，正在跑的工具可能还在改文件。
       final task = _task(
-        id: 'delete-panel-task',
-        conversationId: 'group-one',
+        id: 'history-delete-task',
+        conversationId: 'group-history-delete',
         characterId: 'developer',
-      )..status = AgentTaskStatus.completed;
+      )..status = AgentTaskStatus.runningTool;
       final deletedTaskIds = <String>[];
 
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: WorkTaskPanel(
             tasks: <AgentTask>[task],
+            historyTasks: <AgentTask>[task],
             eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
             onSelectTask: (_) {},
             onStop: (_) {},
@@ -1801,27 +1861,33 @@ void main() {
         ),
       ));
 
-      await tester.tap(find.byKey(const Key('work-task-delete')));
+      expect(find.byKey(const Key('work-task-delete')), findsNothing);
+      await tester.tap(find.byKey(const Key('work-task-history-open')));
+      await tester.pump();
+      await tester.tap(find.byKey(Key('work-task-history-item-${task.id}')));
+      await tester.pump();
+
+      // 取消不得触发任何删除。
+      await tester.tap(find.byKey(const Key('work-task-history-delete')));
       await tester.pumpAndSettle();
       expect(find.text('删除这条任务？'), findsOneWidget);
       expect(find.textContaining('已经生成的文件不会被删除'), findsOneWidget);
-
       await tester.tap(find.byKey(const Key('work-task-delete-cancel')));
       await tester.pumpAndSettle();
       expect(deletedTaskIds, isEmpty);
 
-      await tester.tap(find.byKey(const Key('work-task-delete')));
+      await tester.tap(find.byKey(const Key('work-task-history-delete')));
       await tester.pumpAndSettle();
       await tester.tap(find.byKey(const Key('work-task-delete-confirm')));
       await tester.pumpAndSettle();
-      expect(deletedTaskIds, ['delete-panel-task']);
+      expect(deletedTaskIds, ['history-delete-task']);
     });
 
-    testWidgets('offers deletion from the history detail', (tester) async {
-      // 历史任务不再执行，所以详情不接执行类动作；但清理旧任务只能在这里做。
+    testWidgets('deletes a finished task without asking', (tester) async {
+      // 终态任务已经停手、不会再产生文件改动，删除只影响记录本身，不再弹窗。
       final task = _task(
-        id: 'history-delete-task',
-        conversationId: 'group-history-delete',
+        id: 'history-delete-terminal-task',
+        conversationId: 'group-history-delete-terminal',
         characterId: 'developer',
       )..status = AgentTaskStatus.cancelled;
       final deletedTaskIds = <String>[];
@@ -1850,9 +1916,8 @@ void main() {
 
       await tester.tap(find.byKey(const Key('work-task-history-delete')));
       await tester.pumpAndSettle();
-      await tester.tap(find.byKey(const Key('work-task-delete-confirm')));
-      await tester.pumpAndSettle();
-      expect(deletedTaskIds, ['history-delete-task']);
+      expect(find.byKey(const Key('work-task-delete-dialog')), findsNothing);
+      expect(deletedTaskIds, ['history-delete-terminal-task']);
     });
 
     testWidgets('opens a historical task back into the tab strip',
@@ -1898,7 +1963,7 @@ void main() {
   });
 
   group('WorkTaskOverlayHost', () {
-    testWidgets('collapse and hide do not stop the running task',
+    testWidgets('collapse does not stop the running task',
         (tester) async {
       final task = _task(
         id: 'running-task',
@@ -1941,17 +2006,14 @@ void main() {
 
       await tester.tap(find.byKey(const Key('work-task-mini-bar')));
       await tester.pump();
-      await tester.tap(find.byKey(const Key('work-task-close')));
-      await tester.pump();
 
-      expect(find.byKey(const Key('work-task-reopen')), findsOneWidget);
+      // 面板头只保留「收起」，不再有独立的「隐藏 ✕」按钮。
+      expect(find.byKey(const Key('work-task-close')), findsNothing);
+      expect(find.byKey(const Key('work-task-collapse')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-panel')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-mini-bar')), findsNothing);
       expect(stoppedTaskIds, isEmpty);
       expect(find.text('设置页内容仍可点击'), findsOneWidget);
-
-      await tester.tap(find.byKey(const Key('work-task-reopen')));
-      await tester.pump();
-      expect(find.byKey(const Key('work-task-panel')), findsOneWidget);
-      expect(stoppedTaskIds, isEmpty);
     });
 
     testWidgets(
@@ -2858,9 +2920,8 @@ void main() {
       await tester.pump();
       await tester.tap(find.byKey(const Key('work-task-history-delete')));
       await tester.pumpAndSettle();
-      expect(find.byKey(const Key('work-task-delete-dialog')), findsOneWidget);
-      await tester.tap(find.byKey(const Key('work-task-delete-confirm')));
-      await tester.pumpAndSettle();
+      // 这条任务已经是终态，删除只影响记录本身，不弹确认框。
+      expect(find.byKey(const Key('work-task-delete-dialog')), findsNothing);
       await _pumpUntil(tester, () => taskBox.get(task.id) == null);
       await _pumpUntil(
         tester,

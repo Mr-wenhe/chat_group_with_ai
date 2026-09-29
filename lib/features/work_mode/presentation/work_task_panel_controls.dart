@@ -147,7 +147,6 @@ class _TaskReplyBox extends StatelessWidget {
 
 class _PanelHeader extends StatelessWidget {
   final VoidCallback onCollapse;
-  final VoidCallback onClose;
 
   /// 进入历史任务视图；为空时不显示历史入口。
   final VoidCallback? onOpenHistory;
@@ -158,7 +157,6 @@ class _PanelHeader extends StatelessWidget {
 
   const _PanelHeader({
     required this.onCollapse,
-    required this.onClose,
     this.onOpenHistory,
     this.onBackFromHistory,
     this.inHistory = false,
@@ -176,7 +174,7 @@ class _PanelHeader extends StatelessWidget {
             icon: const Icon(Icons.arrow_back_rounded),
           )
         else
-          const Icon(Icons.auto_awesome_rounded),
+          const _PanelBrandMark(),
         const SizedBox(width: 8),
         Expanded(
           child: Text(
@@ -196,12 +194,6 @@ class _PanelHeader extends StatelessWidget {
           tooltip: '收起执行面板（任务继续运行）',
           onPressed: onCollapse,
           icon: const Icon(Icons.keyboard_arrow_down_rounded),
-        ),
-        IconButton(
-          key: const Key('work-task-close'),
-          tooltip: '隐藏执行面板（任务继续运行）',
-          onPressed: onClose,
-          icon: const Icon(Icons.close_rounded),
         ),
       ],
     );
@@ -225,6 +217,7 @@ class _TaskTabs extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     return Wrap(
       spacing: 6,
       runSpacing: 6,
@@ -232,17 +225,37 @@ class _TaskTabs extends StatelessWidget {
           .map(
             // 只有终态任务允许关掉标签：执行中 / 等待审批的任务一旦隐藏，
             // 用户就看不到它卡在哪里，因此不提供关闭入口。
-            (task) => InputChip(
-              key: Key('work-task-tab-${task.id}'),
-              label: Text(workTaskTabLabel(task)),
-              selected: task.id == selectedTaskId,
-              onSelected: (_) => onSelectTask(task.id),
-              onDeleted: onHideTask == null || !task.isTerminal
-                  ? null
-                  : () => onHideTask!(task.id),
-              deleteIcon: const Icon(Icons.close_rounded, size: 16),
-              deleteButtonTooltipMessage: '关掉这个标签（记录保留在历史任务中）',
-            ),
+            (task) {
+              final selected = task.id == selectedTaskId;
+              return InputChip(
+                key: Key('work-task-tab-${task.id}'),
+                label: Text(workTaskTabLabel(task)),
+                labelStyle: TextStyle(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w500,
+                  color: selected
+                      ? colors.onPrimaryContainer
+                      : colors.onSurfaceVariant,
+                ),
+                selected: selected,
+                backgroundColor: colors.surfaceContainerHighest,
+                selectedColor: colors.primaryContainer,
+                side: BorderSide(
+                  color: selected
+                      ? colors.primary.withValues(alpha: 0.45)
+                      : colors.outlineVariant,
+                ),
+                shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(999),
+                ),
+                onSelected: (_) => onSelectTask(task.id),
+                onDeleted: onHideTask == null || !task.isTerminal
+                    ? null
+                    : () => onHideTask!(task.id),
+                deleteIcon: const Icon(Icons.close_rounded, size: 16),
+                deleteButtonTooltipMessage: '关掉这个标签（记录保留在历史任务中）',
+              );
+            },
           )
           .toList(growable: false),
     );
@@ -263,10 +276,18 @@ class _PublicDetail extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     if (inline) return Text('$title：$text');
+    final colors = Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: <Widget>[
-        Text(title, style: Theme.of(context).textTheme.labelLarge),
+        Text(
+          title,
+          style: TextStyle(
+            fontSize: 13,
+            fontWeight: FontWeight.w600,
+            color: colors.onSurfaceVariant,
+          ),
+        ),
         const SizedBox(height: 2),
         Text(text),
       ],
@@ -279,11 +300,22 @@ class _TaskEventTimeline extends StatefulWidget {
   final WorkTaskEventStream eventStreamFor;
   final ValueChanged<WorkTaskEvent> onLatestEvent;
 
+  /// 展开态渲染完整时间线与滚动条；折叠态只保留最近若干条且不渲染滚动条。
+  final bool expanded;
+
+  /// 折叠态最多展示的条目数（含流式输出等临时卡片）。
+  ///
+  /// 由外层按「执行动态」区域的可用高度算出，保证列出的每条都是完整的一行卡片，
+  /// 不会因为 `shrinkWrap + NeverScrollableScrollPhysics` 被 SizedBox 静默裁掉半张。
+  final int collapsedItemLimit;
+
   const _TaskEventTimeline({
     super.key,
     required this.taskId,
     required this.eventStreamFor,
     required this.onLatestEvent,
+    this.expanded = false,
+    this.collapsedItemLimit = 4,
   });
 
   @override
@@ -464,13 +496,45 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     return count;
   }
 
+  /// 时间线顶部的临时卡片（流式输出 / 等待提示 / 流错误）。
+  int get _transientItemCount {
+    var count = 0;
+    if (_streamError != null) count++;
+    if (_livePublicDraft != null) count++;
+    if (_modelOutputPending) count++;
+    return count;
+  }
+
+  /// 折叠态只展示"临时卡片 + 最近的历史事件"，且总数不超过
+  /// `widget.collapsedItemLimit`；展开态返回全部条目。
+  List<int> get _visibleItemIndices {
+    final total = _timelineItemCount;
+    if (widget.expanded || total <= widget.collapsedItemLimit) {
+      return List<int>.generate(total, (index) => index);
+    }
+    final transient = _transientItemCount;
+    final visibleEvents =
+        (widget.collapsedItemLimit - transient).clamp(0, _events.length).toInt();
+    final firstEventIndex = transient + _events.length - visibleEvents;
+    return <int>[
+      for (var index = 0; index < transient; index++) index,
+      for (var index = firstEventIndex; index < total; index++) index,
+    ];
+  }
+
   Widget _buildTimelineItem(BuildContext context, int index) {
+    // 折叠态每条动态只占一行（超长省略），展开态才完整显示标题与详情。
+    final singleLine = !widget.expanded;
     var remaining = index;
     final error = _streamError;
     if (error != null) {
       if (remaining == 0) {
         return _TimelineItemPadding(
-          child: _EventStreamError(error: error, onRetry: _retry),
+          child: _EventStreamError(
+            error: error,
+            onRetry: _retry,
+            singleLine: singleLine,
+          ),
         );
       }
       remaining--;
@@ -478,20 +542,27 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     final liveDraft = _livePublicDraft;
     if (liveDraft != null) {
       if (remaining == 0) {
-        return _TimelineItemPadding(child: _LivePublicOutput(text: liveDraft));
+        return _TimelineItemPadding(
+          child: _LivePublicOutput(text: liveDraft, singleLine: singleLine),
+        );
       }
       remaining--;
     }
     if (_modelOutputPending) {
       if (remaining == 0) {
         return _TimelineItemPadding(
-          child: _PendingPublicOutput(text: _modelOutputPendingText),
+          child: _PendingPublicOutput(
+            text: _modelOutputPendingText,
+            singleLine: singleLine,
+          ),
         );
       }
       remaining--;
     }
     final event = _events[remaining];
-    return _TimelineItemPadding(child: _EventCard(event: event));
+    return _TimelineItemPadding(
+      child: _EventCard(event: event, singleLine: singleLine),
+    );
   }
 
   @override
@@ -502,28 +573,48 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
         liveDraft == null &&
         !_modelOutputPending &&
         error == null) {
-      return const Align(
+      return Align(
         alignment: Alignment.centerLeft,
-        child: Text('等待公开执行动态…'),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Icon(
+              Icons.hourglass_empty_rounded,
+              size: 14,
+              color: Theme.of(context).colorScheme.onSurfaceVariant,
+            ),
+            const SizedBox(width: 6),
+            const Text('等待公开执行动态…'),
+          ],
+        ),
       );
     }
+    final indices = _visibleItemIndices;
     return Padding(
       // Keep the event scrollbar in its own hit-test lane. The outer details
       // scrollbar lives at the panel edge; this inset prevents the two thumbs
       // from covering one another while preserving wheel and drag scrolling.
       padding: const EdgeInsets.only(right: 12),
-      child: Scrollbar(
-        key: const Key('work-task-event-scrollbar'),
+      child: _ConditionalScrollbar(
+        enabled: widget.expanded,
+        scrollbarKey: const Key('work-task-event-scrollbar'),
         controller: _eventScrollController,
-        thumbVisibility: true,
-        interactive: true,
         child: ListView.builder(
           key: const Key('work-task-event-timeline'),
           controller: _eventScrollController,
           primary: false,
+          // 折叠态外层不给固定高度：让列表按内容撑开（后续条目都被
+          // `_visibleItemIndices` 砍掉了，所以最多两行），这样面板高度是
+          // 内容驱动的，不会因为固定配额把详情区挤到需要滚动。
+          // 展开态才由外层给固定高度并允许内部滚动。
+          shrinkWrap: !widget.expanded,
+          physics: widget.expanded
+              ? null
+              : const NeverScrollableScrollPhysics(),
           padding: EdgeInsets.zero,
-          itemCount: _timelineItemCount,
-          itemBuilder: _buildTimelineItem,
+          itemCount: indices.length,
+          itemBuilder: (BuildContext context, int index) =>
+              _buildTimelineItem(context, indices[index]),
         ),
       ),
     );
@@ -542,4 +633,261 @@ class _TimelineItemPadding extends StatelessWidget {
       child: child,
     );
   }
+}
+
+/// 标题左侧的品牌标记：渐变圆角块，替代原来的单色星星图标。
+///
+/// 尺寸刻意控制在 30x30 并排在一行里，不改变标题行的高度（行高仍由右侧
+/// IconButton 的 48px 决定）。
+class _PanelBrandMark extends StatelessWidget {
+  const _PanelBrandMark();
+
+  @override
+  Widget build(BuildContext context) {
+    return Container(
+      width: 30,
+      height: 30,
+      decoration: BoxDecoration(
+        gradient: AppTheme.primaryGradient,
+        borderRadius: BorderRadius.circular(9),
+      ),
+      child: const Icon(
+        Icons.auto_awesome_rounded,
+        size: 17,
+        color: Colors.white,
+      ),
+    );
+  }
+}
+
+/// 面板里的信息分组卡片：统一"图标 + 小标题 + 内容"的结构，替代原来一长串
+/// 无分组的裸文本，让用户先看到分区再读细节。
+class _PanelCard extends StatelessWidget {
+  final String title;
+  final IconData icon;
+  final Widget? trailing;
+  final Widget child;
+
+  const _PanelCard({
+    required this.title,
+    required this.icon,
+    required this.child,
+    this.trailing,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return SizedBox(
+      // 外层是竖直 SingleChildScrollView，子级拿到的是松宽度约束，
+      // 不撑满宽度卡片会缩到内容宽度。
+      width: double.infinity,
+      child: DecoratedBox(
+        decoration: BoxDecoration(
+          color: colors.surfaceContainer,
+          borderRadius: BorderRadius.circular(12),
+          border: Border.all(color: colors.outlineVariant),
+        ),
+        child: Padding(
+          padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: <Widget>[
+              Row(
+                children: <Widget>[
+                  Icon(icon, size: 15, color: colors.onSurfaceVariant),
+                  const SizedBox(width: 6),
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: TextStyle(
+                        fontSize: 12,
+                        fontWeight: FontWeight.w600,
+                        letterSpacing: 0.3,
+                        color: colors.onSurfaceVariant,
+                      ),
+                    ),
+                  ),
+                  if (trailing != null) trailing!,
+                ],
+              ),
+              const SizedBox(height: 8),
+              child,
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+}
+
+/// 分组标题行右侧的「详情 / 收起」开关：折叠态只露一行摘要，展开后才显示
+/// 完整内容。执行细节卡与执行动态共用，保证两个入口的样式一致。
+class _PanelToggleButton extends StatelessWidget {
+  final Key toggleKey;
+  final bool expanded;
+  final VoidCallback onPressed;
+
+  const _PanelToggleButton({
+    required this.toggleKey,
+    required this.expanded,
+    required this.onPressed,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return TextButton.icon(
+      key: toggleKey,
+      onPressed: onPressed,
+      style: TextButton.styleFrom(
+        minimumSize: Size.zero,
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        iconSize: 16,
+        foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
+      ),
+      icon: Icon(
+        expanded ? Icons.expand_less_rounded : Icons.expand_more_rounded,
+      ),
+      label: Text(
+        expanded ? '收起' : '详情',
+        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+      ),
+    );
+  }
+}
+
+/// 按需在子树外面套一层 `Scrollbar`。
+///
+/// 折叠（正常）状态下内容本来就放得下，此时挂 `thumbVisibility: true` 的
+/// `Scrollbar` 会画出一条占满轨道的滑块，看起来像"永远没滚到底"。所以折叠态
+/// 直接不渲染 `Scrollbar`，也就不会出现滚动条；展开态才挂上真正可拖的滑块。
+class _ConditionalScrollbar extends StatelessWidget {
+  final bool enabled;
+  final Key scrollbarKey;
+  final ScrollController controller;
+  final Widget child;
+
+  const _ConditionalScrollbar({
+    required this.enabled,
+    required this.scrollbarKey,
+    required this.controller,
+    required this.child,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    if (!enabled) return child;
+    return Scrollbar(
+      key: scrollbarKey,
+      controller: controller,
+      thumbVisibility: true,
+      interactive: true,
+      child: child,
+    );
+  }
+}
+
+/// 任务状态胶囊：状态色 + 圆点 + 短标签，让"跑到哪一步"一眼可见。
+class _StatusBadge extends StatelessWidget {
+  final AgentTaskStatus status;
+
+  const _StatusBadge({required this.status});
+
+  @override
+  Widget build(BuildContext context) {
+    final tone = _statusTone(context, status);
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: tone.background,
+        borderRadius: BorderRadius.circular(999),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 3),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: <Widget>[
+            Container(
+              width: 6,
+              height: 6,
+              decoration: BoxDecoration(
+                color: tone.foreground,
+                shape: BoxShape.circle,
+              ),
+            ),
+            const SizedBox(width: 6),
+            Text(
+              _statusBadgeLabel(status),
+              style: TextStyle(
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+                color: tone.foreground,
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+}
+
+class _StatusTone {
+  const _StatusTone({required this.foreground, required this.background});
+
+  final Color foreground;
+  final Color background;
+}
+
+_StatusTone _statusTone(BuildContext context, AgentTaskStatus status) {
+  final colors = Theme.of(context).colorScheme;
+  final semantic = AppSemanticColors.of(context);
+  Color tinted(Color base) => base.withValues(alpha: 0.14);
+  return switch (status) {
+    AgentTaskStatus.completed => _StatusTone(
+        foreground: semantic.onSuccessContainer,
+        background: semantic.successContainer,
+      ),
+    AgentTaskStatus.partiallyCompleted => _StatusTone(
+        foreground: semantic.success,
+        background: semantic.successContainer,
+      ),
+    AgentTaskStatus.failed => _StatusTone(
+        foreground: colors.onErrorContainer,
+        background: colors.errorContainer,
+      ),
+    AgentTaskStatus.waitingForApproval => _StatusTone(
+        foreground: colors.tertiary,
+        background: tinted(colors.tertiary),
+      ),
+    AgentTaskStatus.paused || AgentTaskStatus.interrupted => _StatusTone(
+        foreground: colors.secondary,
+        background: tinted(colors.secondary),
+      ),
+    AgentTaskStatus.cancelled => _StatusTone(
+        foreground: colors.onSurfaceVariant,
+        background: colors.surfaceContainerHighest,
+      ),
+    AgentTaskStatus.queued ||
+    AgentTaskStatus.planning ||
+    AgentTaskStatus.runningTool =>
+      _StatusTone(
+        foreground: colors.primary,
+        background: tinted(colors.primary),
+      ),
+  };
+}
+
+String _statusBadgeLabel(AgentTaskStatus status) {
+  return switch (status) {
+    AgentTaskStatus.queued => '排队中',
+    AgentTaskStatus.planning => '规划中',
+    AgentTaskStatus.waitingForApproval => '等待审批',
+    AgentTaskStatus.runningTool => '执行中',
+    AgentTaskStatus.completed => '已完成',
+    AgentTaskStatus.failed => '执行失败',
+    AgentTaskStatus.cancelled => '已停止',
+    AgentTaskStatus.partiallyCompleted => '部分完成',
+    AgentTaskStatus.paused => '已暂停',
+    AgentTaskStatus.interrupted => '已中断',
+  };
 }

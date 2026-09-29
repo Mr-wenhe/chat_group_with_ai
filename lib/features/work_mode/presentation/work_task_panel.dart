@@ -2,6 +2,7 @@ import 'dart:async';
 import 'dart:convert';
 
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
@@ -83,6 +84,9 @@ class WorkTaskPanel extends StatefulWidget {
   final WorkTaskExecutorChoice? onConfirmExecutorSwap;
 
   /// 真删除一条任务记录（不可逆）。为 null 时不展示删除入口。
+  ///
+  /// 入口只在历史任务详情里：「删除任务」曾同时放在操作区，但那里紧邻任务标签，
+  /// 用户会把它和标签旁的 ✕ 当成同一件事，而后者只是把标签收起来、记录仍在。
   final WorkTaskAction? onDeleteTask;
 
   /// 把历史任务重新放回标签栏并选中它。
@@ -278,7 +282,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               // Desktop overlays have enough vertical room for a readable live
               // transcript. The details section keeps its own scrollbar, so a
               // taller panel does not make the action buttons unreachable.
-              constraints: const BoxConstraints(maxHeight: 720),
+              constraints: const BoxConstraints(maxHeight: 790),
               child: ScrollConfiguration(
                 // Material's desktop ScrollBehavior adds a scrollbar to every
                 // ScrollView. The task panel deliberately owns two independent
@@ -313,7 +317,6 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
         children: <Widget>[
           _PanelHeader(
             onCollapse: widget.onCollapse,
-            onClose: widget.onClose,
             onOpenHistory: _openHistory,
           ),
           const SizedBox(height: 12),
@@ -335,7 +338,6 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
       children: <Widget>[
         _PanelHeader(
           onCollapse: widget.onCollapse,
-          onClose: widget.onClose,
           onOpenHistory: _openHistory,
         ),
         const SizedBox(height: 10),
@@ -402,7 +404,6 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               undoPreviewFor: widget.undoPreviewFor,
               onConfirmExecutorSwap: widget.onConfirmExecutorSwap,
               characterNameFor: widget.characterNameFor,
-              onDeleteTask: widget.onDeleteTask,
               onStop: widget.onStop,
               onContinue: widget.onContinue,
               onReply: widget.onReply,
@@ -430,7 +431,6 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
         _PanelHeader(
           inHistory: true,
           onCollapse: widget.onCollapse,
-          onClose: widget.onClose,
           onBackFromHistory: detailTask == null
               ? _closeHistory
               : () => setState(() => _historyDetailTaskId = null),
@@ -514,18 +514,21 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
   Future<void> _confirmDeleteHistoryTask(AgentTask task) async {
     final onDelete = widget.onDeleteTask;
     if (onDelete == null) return;
-    widget.onModalVisibilityChanged?.call(false);
-    bool confirmed;
-    try {
-      confirmed = await _confirmWorkTaskDeletion(
-        context,
-        task: task,
-        dialogContext: widget.dialogContext,
-      );
-    } finally {
-      widget.onModalVisibilityChanged?.call(true);
+    // 终态任务已经停手、不会再产生文件改动，删除只影响记录本身，直接删；
+    // 非终态任务会先被停止，且正在执行的工具可能还在写文件，必须让用户确认。
+    if (!task.isTerminal) {
+      widget.onModalVisibilityChanged?.call(false);
+      bool confirmed;
+      try {
+        confirmed = await _confirmWorkTaskDeletion(
+          context,
+          dialogContext: widget.dialogContext,
+        );
+      } finally {
+        widget.onModalVisibilityChanged?.call(true);
+      }
+      if (!confirmed) return;
     }
-    if (!confirmed) return;
     final deleted = await _runAction(onDelete, task.id);
     if (deleted && mounted) {
       // 记录已经不在列表里了，回到列表层，避免停在一个已消失的详情上。
