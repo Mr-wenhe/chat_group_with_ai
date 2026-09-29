@@ -70,6 +70,19 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
             : null;
         _isLoading = false;
       });
+      // Older rooms may already have roundtable mode persisted from before
+      // the built-in news assistant existed. Reconcile membership on load so
+      // the mode has the same search-only role as a newly enabled room.
+      if (_roundtableModeEnabled && !_isDirectChat) {
+        final membership = await RoundtableNewsRoleService.ensureForGroup(
+          _db,
+          widget.groupId,
+        );
+        if (!_canTouchUi) return;
+        if (membership != null) {
+          _applyRoundtableNewsMembership(membership);
+        }
+      }
       _flushPendingMessageChanges();
       unawaited(_reconcileMessageMembership());
 
@@ -395,9 +408,8 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
   }
 
   /// 解析角色的 IP 形象图，供气泡 / @ 浮层共用。null → 文本头像。
-  ImageProvider? _characterAvatarImage(AICharacter? character) => ref
-      .read(databaseServiceProvider)
-      .characterAvatarImage(character);
+  ImageProvider? _characterAvatarImage(AICharacter? character) =>
+      ref.read(databaseServiceProvider).characterAvatarImage(character);
 
   /// 自动发言状态条的展示文案。
   ///
@@ -528,10 +540,38 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       await WorkModeConfigService(db: _db).setWorkMode(widget.groupId, false);
       _workModeSession.setEnabled(false);
     }
+    if (enabled) {
+      final membership = await RoundtableNewsRoleService.ensureForGroup(
+        _db,
+        widget.groupId,
+      );
+      if (membership != null) _applyRoundtableNewsMembership(membership);
+    }
     await RoundtableModeConfigService(db: _db)
         .setEnabled(widget.groupId, enabled);
     _roundtableModeSession.setEnabled(enabled);
+    if (enabled) _searchRuntime.refreshAfterMembersLoaded();
     if (_canTouchUi) setState(() {});
+  }
+
+  void _applyRoundtableNewsMembership(
+    RoundtableNewsRoleMembership membership,
+  ) {
+    if (!_canTouchUi) return;
+    final role = membership.character;
+    _setUiState(() {
+      _group = membership.group;
+      _allGroupCharacters = [
+        ..._allGroupCharacters.where((item) => item.id != role.id),
+        role,
+      ];
+      _characters = role.isActive
+          ? [
+              ..._characters.where((item) => item.id != role.id),
+              role,
+            ]
+          : _characters.where((item) => item.id != role.id).toList();
+    });
   }
 
   /// 构建 AppBar 下方的会话控件（自动发言 / 语音播报 / 工作模式开关）。

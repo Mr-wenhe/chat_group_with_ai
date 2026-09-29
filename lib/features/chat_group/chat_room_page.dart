@@ -74,6 +74,7 @@ import 'package:chat_group/features/chat_group/picked_attachment_payload.dart';
 import 'package:chat_group/features/chat_group/reply_eligibility_policy.dart';
 import 'package:chat_group/features/chat_group/roundtable_mode_config_service.dart';
 import 'package:chat_group/features/chat_group/roundtable_mode_session.dart';
+import 'package:chat_group/features/chat_group/roundtable_news_role_service.dart';
 import 'package:chat_group/features/chat_group/scene_behavior.dart';
 import 'package:chat_group/features/chat_group/streaming_reply_session.dart';
 import 'package:chat_group/features/chat_group/streaming_reply_commit_policy.dart';

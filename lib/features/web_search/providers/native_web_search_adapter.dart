@@ -90,6 +90,7 @@ class NativeWebSearchBinding {
 class NativeWebSearchProvider implements SearchProvider {
   final NativeWebSearchAdapter adapter;
   final NativeWebSearchBinding binding;
+
   /// Kept for source compatibility with the legacy chain. Native-only routes
   /// leave this null and never consult it.
   final SearchProvider? fallback;
@@ -206,9 +207,10 @@ class NativeWebSearchAdapterRegistry {
   }
 }
 
-/// Zhipu's model-owned Web Search API. It uses the character's Zhipu model
-/// credential and returns structured sources; no independent search key or
-/// DuckDuckGo request is involved.
+/// Zhipu's model-owned Web Search API. The caller supplies the dedicated
+/// Zhipu search credential; the adapter never reads a character API config.
+/// It returns structured sources, so no independent search key or DuckDuckGo
+/// request is involved.
 class ZhipuWebSearchAdapter extends NativeWebSearchAdapter {
   static final Uri endpoint = Uri.parse(
     'https://open.bigmodel.cn/api/paas/v4/web_search',
@@ -241,12 +243,14 @@ class ZhipuWebSearchAdapter extends NativeWebSearchAdapter {
   String get providerId => 'zhipu-native';
 
   @override
-  bool supports({required ApiProvider provider, required String model}) =>
-      provider == ApiProvider.zhipu &&
-      model.trim().toLowerCase() == this.model.trim().toLowerCase() &&
-      _capabilities
-          .resolve(provider: provider, modelId: model)
-          .supportsNativeWebSearch;
+  bool supports({required ApiProvider provider, required String model}) {
+    final canonicalModel = _canonicalZhipuModel(model);
+    return provider == ApiProvider.zhipu &&
+        canonicalModel == _canonicalZhipuModel(this.model) &&
+        _capabilities
+            .resolve(provider: provider, modelId: canonicalModel)
+            .supportsNativeWebSearch;
+  }
 
   @override
   Future<SearchProviderResponse> search(
@@ -259,7 +263,11 @@ class ZhipuWebSearchAdapter extends NativeWebSearchAdapter {
       SearchFlowLogger.event(
         'native_request_blocked',
         query: request.query,
-        fields: {'provider': providerId, 'model': model, 'reason': 'unsupported'},
+        fields: {
+          'provider': providerId,
+          'model': model,
+          'reason': 'unsupported'
+        },
       );
       return _failure(SearchFailureType.invalidConfiguration);
     }
@@ -289,7 +297,8 @@ class ZhipuWebSearchAdapter extends NativeWebSearchAdapter {
           'maxResults': request.maxResults,
         },
       );
-      await prepareSearchEndpointConnection(_dio, endpoint, isRelease: _isRelease);
+      await prepareSearchEndpointConnection(_dio, endpoint,
+          isRelease: _isRelease);
       final response = await _dio.postUri<dynamic>(
         endpoint,
         data: {
@@ -345,7 +354,11 @@ class ZhipuWebSearchAdapter extends NativeWebSearchAdapter {
       SearchFlowLogger.event(
         'native_http_error',
         query: request.query,
-        fields: {'provider': providerId, 'model': model, 'reason': error.toString()},
+        fields: {
+          'provider': providerId,
+          'model': model,
+          'reason': error.toString()
+        },
       );
       return _failure(searchFailureTypeFromEndpointDnsException(error));
     } on Object {
@@ -470,7 +483,10 @@ class ZhipuWebSearchAdapter extends NativeWebSearchAdapter {
 
   static String? _credential(String? value) {
     final token = value?.trim();
-    if (token == null || token.isEmpty || token.contains('\r') || token.contains('\n')) {
+    if (token == null ||
+        token.isEmpty ||
+        token.contains('\r') ||
+        token.contains('\n')) {
       return null;
     }
     return token;
@@ -544,9 +560,9 @@ class ZhipuWebSearchAdapter extends NativeWebSearchAdapter {
       caseSensitive: false,
     ).firstMatch(trimmed);
     return (match?.group(0) ?? trimmed).replaceFirst(
-          RegExp(r'[),.;:!?]+$'),
-          '',
-        );
+      RegExp(r'[),.;:!?]+$'),
+      '',
+    );
   }
 
   static DateTime? _publishedAt(dynamic value) {
@@ -554,7 +570,8 @@ class ZhipuWebSearchAdapter extends NativeWebSearchAdapter {
     return DateTime.tryParse(value.trim())?.toUtc();
   }
 
-  static String _text(dynamic value, {String fallback = ''}) => sanitizeSearchText(
+  static String _text(dynamic value, {String fallback = ''}) =>
+      sanitizeSearchText(
         value is String ? value : '',
         maxLength: searchSnippetMaxLength,
         fallback: fallback,
@@ -608,6 +625,11 @@ class ZhipuWebSearchAdapter extends NativeWebSearchAdapter {
         SearchFreshness.month => 'oneMonth',
         SearchFreshness.year => 'oneYear',
       };
+
+  static String _canonicalZhipuModel(String value) {
+    final normalized = value.trim().toLowerCase().replaceAll('_', '-');
+    return normalized == 'glm4.7' ? 'glm-4.7' : normalized;
+  }
 }
 
 /// DashScope native generation API adapter for the explicitly registered Qwen

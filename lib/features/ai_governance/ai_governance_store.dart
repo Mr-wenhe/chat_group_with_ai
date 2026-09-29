@@ -69,6 +69,11 @@ int _compareSearchAuditCandidates(
 
 class AiGovernanceStore implements GovernancePersistence {
   static const globalSearchPolicyKey = 'web_search_policy_v1';
+  /// The policy used when no global policy has been persisted yet.
+  ///
+  /// An explicitly saved policy (including [WebSearchPolicy.off]) always
+  /// takes precedence; this only controls the first-run/missing-key case.
+  static const defaultGlobalSearchPolicy = WebSearchPolicy.auto;
   static const conversationSearchPoliciesKey =
       'conversation_web_search_policies_v1';
   static const searchAuditKey = 'web_search_audit_v1';
@@ -173,7 +178,7 @@ class AiGovernanceStore implements GovernancePersistence {
     final value = db.appSettingsBox.get(_searchPolicyKey)?.toString();
     return WebSearchPolicy.values.firstWhere(
       (policy) => policy.name == value,
-      orElse: () => WebSearchPolicy.off,
+      orElse: () => defaultGlobalSearchPolicy,
     );
   }
 

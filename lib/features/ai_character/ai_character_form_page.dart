@@ -627,7 +627,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                   }),
                   title: const Text('仅使用智谱搜索问答流程'),
                   subtitle: const Text(
-                    '每个问题均先调用智谱网页搜索，再由角色依据编号结果回答；需要 glm-4-flash 配置',
+                    '每个问题均先调用设置中的智谱原生网页搜索，再由角色依据编号结果回答；角色 API 配置仅用于总结',
                   ),
                   secondary: Icon(Icons.newspaper_rounded, color: cs.primary),
                 ),
@@ -697,7 +697,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         : _avatarController.text;
     // 仅在「设为头像」开启时出图：这里是「当前生效头像」预览，不是 IP 形象预览。
     final image = _avatarFromIpImage
-        ? ref.read(databaseServiceProvider).characterAvatarImage(_draftCharacter())
+        ? ref
+            .read(databaseServiceProvider)
+            .characterAvatarImage(_draftCharacter())
         : null;
     return CharacterAvatar(
       fallbackText: displayAvatar,
@@ -739,18 +741,6 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         setState(() {});
         return;
       }
-      if (_zhipuSearchAnswerOnly &&
-          (config.provider != 'zhipu' ||
-              config.modelName.trim().toLowerCase() != 'glm-4-flash')) {
-        if (mounted) {
-          AppToast.show(context, '新闻角色需要选择智谱 glm-4-flash API 配置',
-              icon: Icons.info_outline_rounded);
-        }
-        _isSaving = false;
-        setState(() {});
-        return;
-      }
-
       final age = int.tryParse(_ageController.text) ?? 25;
       final hourlyLimit = int.tryParse(_hourlyLimitController.text) ?? 5;
       final personalityTags = _personalityController.text
