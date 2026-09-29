@@ -71,6 +71,21 @@ class WorkTaskClarification {
     task.executionStateJson = jsonEncode(metadata);
   }
 
+  /// Drops the question because it has been answered through another route.
+  ///
+  /// Without this the marker outlives the answer, and the next time the task
+  /// pauses for an unrelated reason the panel offers a reply box for a question
+  /// that no longer exists — the same "answerable according to one rule, not
+  /// according to another" dead end this class exists to prevent.
+  static void clear(AgentTask task) {
+    final metadata = _decode(task.executionStateJson)
+      ..remove(requiredKey)
+      ..remove(questionKey);
+    // Only this class's own keys are touched; a checkpoint that carried nothing
+    // else legitimately becomes empty.
+    task.executionStateJson = metadata.isEmpty ? '' : jsonEncode(metadata);
+  }
+
   static Map<String, dynamic> _decode(String raw) {
     if (raw.trim().isEmpty) return <String, dynamic>{};
     try {

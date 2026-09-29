@@ -4,6 +4,7 @@ import 'dart:typed_data';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/document/binary_document_parser.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_confirmation.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 
@@ -24,6 +25,18 @@ class WorkArtifactValidationResult {
 
   /// Whether the request carried a file contract at all.
   final bool requiresArtifact;
+
+  /// Whether the user may overrule this rejection by confirming the files that
+  /// were written.
+  ///
+  /// Every rejection that says “no acceptable deliverable was found” is
+  /// overrulable: the user can see the files and is the judge of their own
+  /// request. [unchangedRevisionCode] is not — nothing was produced, so the
+  /// files on hand are the unmodified originals, and confirming them would turn
+  /// the check that catches an idle model into a success message carrying a
+  /// stale file.
+  bool get confirmable =>
+      code != WorkArtifactDeliveryGuard.unchangedRevisionCode;
 
   const WorkArtifactValidationResult.valid({
     this.path,
@@ -60,6 +73,13 @@ class WorkArtifactDeliveryGuard {
   static const int maxValidatedHtmlBytes = 50 * 1024 * 1024;
   static const Duration fileFreshnessTolerance = Duration(seconds: 2);
 
+  /// How many recorded candidates one validation may examine.
+  ///
+  /// The list is bounded by its writer, so this is a cost ceiling rather than a
+  /// window that decides which files are eligible; candidates are ordered by
+  /// contract relevance before it applies.
+  static const int maxValidatedCandidates = 64;
+
   static const String missingArtifactMessage =
       '用户要求文件产物，但没有可读取的真实文件；未将说明文字伪装成附件。'
       '请通过 workspace.patch 或 command.run 写入并核对文件后再完成。';
@@ -73,6 +93,10 @@ class WorkArtifactDeliveryGuard {
 
   static const String unchangedRevisionMessage =
       '修订任务没有检测到目标文件内容变化，未将未修改的原文件标记为完成。';
+
+  /// The validation code behind [unchangedRevisionMessage]. Exposed because it
+  /// is the one rejection the user may not overrule by confirming files.
+  static const String unchangedRevisionCode = 'artifactUnchanged';
 
   /// Returns whether [request] asks for a source-code file rather than merely
   /// asking the model to explain or review code.
@@ -92,32 +116,76 @@ class WorkArtifactDeliveryGuard {
   /// language.
   ///
   /// An extension (`main.dart`) or a source noun (`脚本`, `页面`) names the
-  /// artefact itself, so it always counts. A bare language name (`Python`) does
-  /// not: “生成一份 Python 学习报告” asks for a report, and reading `Python` as a
+  /// artefact itself, so it always counts. So does a short spelling qualifying a
+  /// file noun (“H文件”). A bare language name (`Python`) does not:
+  /// “生成一份 Python 学习报告” asks for a report, and reading `Python` as a
   /// source signal let its generator script stand in for that report.
   static bool _mentionsSourceArtifact(String text) =>
       _sourceExtension.hasMatch(text) ||
+      _sourceFormatWordBeforeFileNoun.hasMatch(text) ||
       !_documentArtifactNoun.hasMatch(text) &&
           (_sourceArtifactNoun.hasMatch(text) ||
               _bareSourceFormatWord.hasMatch(text));
 
   /// A source file named by its extension, in any alias spelling.
+  ///
+  /// This mirrors the source half of [formatAliases] and must stay in step with
+  /// it: an extension listed there but missing here is a request whose
+  /// `.lua`/`.cs`/`.ps1` never counts as source, so the file the run wrote is
+  /// rejected as a generator script. It is a curated list rather than “any
+  /// dotted token” on purpose — `example.com` in a request must not turn an
+  /// ordinary question into a file contract.
   static final RegExp _sourceExtension = RegExp(
-    r'\.(?:py|py3|pyw|ipynb|js|mjs|cjs|jsx|ts|tsx|dart|java|kt|kts|'
-    r'swift|rs|go|rb|php|c|cc|cpp|cxx|h|hpp|sh|bash|zsh|fish|sql)\b',
+    r'\.(?:py|py3|pyw|ipynb|js|mjs|cjs|jsx|ts|tsx|vue|svelte|dart|java|kt|'
+    r'kts|scala|groovy|clj|cljs|swift|rs|go|rb|php|pl|pm|lua|hs|lhs|ex|exs|'
+    r'erl|hrl|ml|mli|fs|fsx|jl|zig|nim|sol|asm|ino|v|sv|vhd|vhdl|ps1|psm1|'
+    r'bat|cmd|sh|bash|zsh|ksh|csh|fish|sql|css|scss|sass|less|styl|'
+    r'c|cc|cpp|cxx|h|hh|hpp|hxx|cs|mm|proto|thrift|graphql|gql|tf|hcl|rmd|'
+    r'tex|gradle|cmake|mk|s)\b',
     caseSensitive: false,
   );
 
   /// A noun that names the artefact itself, so the source reading is explicit.
   static final RegExp _sourceArtifactNoun = RegExp(
-    r'(?:网页|页面|源码|代码|脚本)',
+    r'(?:网页|页面|源码|代码|脚本|程序)',
     caseSensitive: false,
   );
 
-  /// A format or language written as a word rather than as an extension.
+  /// A format or language written as a word rather than as an extension, where
+  /// the word is not also common everyday prose.
+  ///
+  /// This is the *signal* half of source recognition: if any of these appears,
+  /// the request is about source code and a source file may be its deliverable.
+  /// Spellings that double as ordinary words (`c`, `h`, `ml`, `fs`, `rm`) are
+  /// deliberately absent — see [_sourceFormatWordBeforeFileNoun] and
+  /// [_ambiguousBareTokens] for how they are admitted.
+  ///
+  /// The C/C++ abbreviations matter here because they are at least as common as
+  /// `c++` in a real request: without them “生成…的 CPP和H文件” was read as a
+  /// *document* request, so the very source files it asked for were rejected.
   static final RegExp _bareSourceFormatWord = RegExp(
-    r'(?:python|javascript|typescript|dart|java|kotlin|swift|rust|golang|'
-    r'ruby|php|c\+\+|\bc\b|shell|bash|sql|html5?)',
+    r'(?:python|javascript|typescript|coffeescript|dart|java|kotlin|scala|'
+    r'groovy|clojure|swift|rust|golang|ruby|perl|php|csharp|fsharp|objc|'
+    r'objective-c|haskell|elixir|erlang|ocaml|julia|zig|nim|solidity|lua|'
+    r'verilog|vhdl|powershell|assembly|protobuf|thrift|graphql|terraform|'
+    r'latex|arduino|'
+    r'c\+\+|cpp|cxx|hpp|hxx|\bc\b|shell|bash|sql|html5?|css|scss|styl|'
+    r'vue|svelte|makefile|pwsh)',
+    caseSensitive: false,
+  );
+
+  /// A short format spelling sitting directly in front of a file noun, as in
+  /// “H文件”, “JS文件” or “CS文件”.
+  ///
+  /// The noun is what makes a one- or two-letter token safe to read as a
+  /// format: “更新 h 的值” carries the same token without it. These spellings
+  /// stay out of [_bareSourceFormatWord] because matched anywhere in a sentence
+  /// they are far too weak a signal on their own.
+  static final RegExp _sourceFormatWordBeforeFileNoun = RegExp(
+    r'\b(?:jsx|tsx|cpp|hpp|hxx|svelte|vhd|less|sass|ps1|zig|nim|sol|asm|ino|'
+    r'hcl|clj|erl|exs|mli|fsx|psm1|pl|hs|sv|ml|fs|ex|jl|tf|mk|pm|mm|cs|py|'
+    r'js|ts|kt|rs|go|rb|sh|cc|h|v|s)\s*'
+    r'(?:源文件|头文件|脚本文件|文件)',
     caseSensitive: false,
   );
 
@@ -173,6 +241,10 @@ class WorkArtifactDeliveryGuard {
   /// source file must never be accepted in place of the requested output:
   /// “生成一份分析报告” delivered `build_report.py`, because a contract without
   /// a named format accepted any fresh file.
+  ///
+  /// This is the canonical half of the source tables and must list every
+  /// canonical value the source block of [formatAliases] produces; a value
+  /// missing here is a source file the guard stops recognising as source.
   static const Set<String> sourceFormats = <String>{
     'py',
     'ipynb',
@@ -180,20 +252,57 @@ class WorkArtifactDeliveryGuard {
     'jsx',
     'ts',
     'tsx',
+    'vue',
+    'svelte',
     'dart',
     'java',
     'kt',
+    'scala',
+    'groovy',
+    'clj',
     'swift',
     'rs',
     'go',
     'rb',
     'php',
+    'pl',
+    'lua',
+    'hs',
+    'ex',
+    'erl',
+    'ml',
+    'fs',
+    'jl',
+    'zig',
+    'nim',
+    'sol',
+    'asm',
+    'ino',
+    'v',
+    'sv',
+    'vhd',
+    'ps1',
+    'bat',
     'c',
     'cpp',
-    'h',
-    'hpp',
+    'cs',
+    'objc',
+    'proto',
+    'thrift',
+    'graphql',
+    'tf',
     'sh',
     'sql',
+    'rmd',
+    'tex',
+    'gradle',
+    'cmake',
+    'makefile',
+    'css',
+    'scss',
+    'sass',
+    'less',
+    'styl',
   };
 
   /// Whether [path] is source code rather than a deliverable document.
@@ -293,6 +402,24 @@ class WorkArtifactDeliveryGuard {
   }) async {
     final contract = _contractFor(task);
     final request = WorkDiscussionState.currentRequestScope(task);
+    // The user has already answered this question. An accepted delivery is an
+    // explicit decision rather than a re-judged contract: deliver exactly the
+    // files that were shown. The bar stays real — a file that is missing,
+    // unreadable, empty or outside the workspace is still refused, so prose can
+    // never become an attachment — but format and structure do not second-guess
+    // the answer, because recognising the format is the very thing that failed.
+    final accepted = await _confirmedDeliverables(
+      task,
+      pathPolicy,
+      workspaceRoot,
+    );
+    if (accepted.isNotEmpty) {
+      return WorkArtifactValidationResult.valid(
+        path: accepted.first,
+        deliveredPaths: List<String>.unmodifiable(accepted),
+        requiresArtifact: true,
+      );
+    }
     final needsDocx = requiresDocxArtifact(
       request,
       contractFormat: contract?['format']?.toString(),
@@ -314,7 +441,7 @@ class WorkArtifactDeliveryGuard {
     final revisionFailure = _revisionChangeFailure(task);
     if (revisionFailure != null) {
       return WorkArtifactValidationResult.invalid(
-        'artifactUnchanged',
+        unchangedRevisionCode,
         revisionFailure,
       );
     }
@@ -337,8 +464,28 @@ class WorkArtifactDeliveryGuard {
     // validated against the contract and the accepted ones are returned, so
     // callers can deliver the deliverables without guessing from the paths that
     // happened to change.
+    //
+    // Candidates that satisfy a declared output format are tried first. The
+    // loop already retains named-output formats ahead of intermediates, so
+    // order alone would usually do — but this guard is what decides whether the
+    // contract is met, and it must not depend on another component's retention
+    // policy to keep the deliverable inside the window it happens to scan.
+    final candidates = declaredFormats.isEmpty
+        ? task.lastArtifactPaths
+        : <String>[
+            ...task.lastArtifactPaths.where(
+              (path) => declaredFormats.any(
+                (format) => matchesDeclaredFormat(path, format),
+              ),
+            ),
+            ...task.lastArtifactPaths.where(
+              (path) => !declaredFormats.any(
+                (format) => matchesDeclaredFormat(path, format),
+              ),
+            ),
+          ];
     final validatedPaths = <String>[];
-    for (final rawPath in task.lastArtifactPaths.take(64)) {
+    for (final rawPath in candidates.take(maxValidatedCandidates)) {
       final raw = rawPath.trim();
       if (raw.isEmpty) continue;
       try {
@@ -400,7 +547,7 @@ class WorkArtifactDeliveryGuard {
         }
         if (declaredFormats.isNotEmpty &&
             !declaredFormats.any(
-              (format) => _matchesDeclaredFormat(resolved.path, format),
+              (format) => matchesDeclaredFormat(resolved.path, format),
             )) {
           continue;
         }
@@ -431,6 +578,55 @@ class WorkArtifactDeliveryGuard {
               ? htmlContractMessage
               : missingArtifactMessage,
     );
+  }
+
+  /// Validates the paths a user has explicitly confirmed for delivery.
+  ///
+  /// Deliberately narrower than the contract check and deliberately blind to
+  /// format: it accepts a real, readable, non-empty file inside the authorised
+  /// workspace. That is the same bar the delivery step applies when it picks
+  /// the files to offer, so what the user was shown is what gets delivered.
+  /// Freshness is not part of it — the user answered a question about these
+  /// files, and a task that waited for that answer must not invalidate them.
+  static Future<List<String>> _confirmedDeliverables(
+    AgentTask task,
+    WorkspacePathPolicy pathPolicy,
+    String? workspaceRoot,
+  ) async {
+    final confirmed = acceptedArtifactDeliveryPaths(task.executionStateJson);
+    if (confirmed.isEmpty) return const <String>[];
+    final effectiveWorkspaceRoot = await _resolveWorkspaceRoot(
+      workspaceRoot,
+      isWindows: pathPolicy.isWindows,
+    );
+    final accepted = <String>[];
+    for (final rawPath in confirmed.take(maxValidatedCandidates)) {
+      final raw = rawPath.trim();
+      if (raw.isEmpty) continue;
+      try {
+        final lookupPath = _artifactLookupPath(
+          raw,
+          effectiveWorkspaceRoot,
+          isWindows: pathPolicy.isWindows,
+        );
+        final resolved = await pathPolicy.resolveExisting(lookupPath);
+        final requestedType = await FileSystemEntity.type(
+          lookupPath,
+          followLinks: false,
+        );
+        if (!resolved.isFile ||
+            requestedType == FileSystemEntityType.link ||
+            resolved.isLink) {
+          continue;
+        }
+        final stat = await File(resolved.path).stat();
+        if (stat.type != FileSystemEntityType.file || stat.size <= 0) continue;
+        accepted.add(resolved.path);
+      } on Object {
+        continue;
+      }
+    }
+    return accepted;
   }
 
   static String? failureFor({
@@ -700,6 +896,74 @@ class WorkArtifactDeliveryGuard {
     'odt': 'odt',
     'ods': 'ods',
     'odp': 'odp',
+    // --- Documents, data, fonts, media and packages -------------------------
+    // Spellings that are also common English words (`ai`, `fig`, `pages`,
+    // `numbers`, `sketch`) are deliberately left out: a bare token in a
+    // sentence would turn an ordinary request into a file contract for them.
+    // The delivery confirmation covers a request that names one after all.
+    //
+    // `env` is left out for a different reason: `.env` is a file *name*
+    // convention, not an extension, so [extensionOf] reports no format for it
+    // and a contract declared as `env` could never be satisfied by the very
+    // file it describes. “更新 .env” keeps the behaviour it had — the model
+    // writes the file and the task completes — and “生成一个 .env 文件” still
+    // gets a contract from the file noun.
+    'rst': 'rst',
+    'adoc': 'adoc',
+    'asciidoc': 'adoc',
+    'xlsb': 'xlsx',
+    'azw3': 'mobi',
+    'vsdx': 'vsdx',
+    'drawio': 'drawio',
+    'jsonl': 'jsonl',
+    'ndjson': 'jsonl',
+    'json5': 'json5',
+    'toml': 'toml',
+    'ini': 'ini',
+    'conf': 'conf',
+    'parquet': 'parquet',
+    'sqlite': 'sqlite',
+    'db': 'sqlite',
+    'pkl': 'pkl',
+    'pickle': 'pkl',
+    'npy': 'npy',
+    'npz': 'npz',
+    'hdf5': 'hdf5',
+    'onnx': 'onnx',
+    'ttf': 'ttf',
+    'otf': 'otf',
+    'woff': 'woff',
+    'woff2': 'woff2',
+    'psd': 'psd',
+    'stl': 'stl',
+    'gltf': 'gltf',
+    'glb': 'gltf',
+    'fbx': 'fbx',
+    'dmg': 'dmg',
+    'pkg': 'pkg',
+    'deb': 'deb',
+    'rpm': 'rpm',
+    'msi': 'msi',
+    'apk': 'apk',
+    'ipa': 'ipa',
+    'exe': 'exe',
+    'xz': 'xz',
+    'zst': 'zst',
+    'bz2': 'bz2',
+    'flv': 'flv',
+    'm4v': 'm4v',
+    'wmv': 'wmv',
+    'aiff': 'aiff',
+    'opus': 'opus',
+    'wma': 'wma',
+    // --- Source code -------------------------------------------------------
+    // The canonical value is the extension the deliverable is normally written
+    // with. Three tables describe this same set and have to stay in step:
+    // `sourceFormats` lists the canonical names, `_sourceExtension` lists their
+    // spellings as extensions, and `_bareSourceFormatWord` /
+    // `_sourceFormatWordBeforeFileNoun` recognise the words. A spelling missing
+    // from any one of them turns a source request into either a rejected
+    // delivery or a loose prose answer.
     'python': 'py',
     'py': 'py',
     'py3': 'py',
@@ -713,11 +977,18 @@ class WorkArtifactDeliveryGuard {
     'typescript': 'ts',
     'ts': 'ts',
     'tsx': 'tsx',
+    'vue': 'vue',
+    'svelte': 'svelte',
     'dart': 'dart',
     'java': 'java',
     'kotlin': 'kt',
     'kt': 'kt',
     'kts': 'kt',
+    'scala': 'scala',
+    'groovy': 'groovy',
+    'clojure': 'clj',
+    'clj': 'clj',
+    'cljs': 'clj',
     'swift': 'swift',
     'rust': 'rs',
     'rs': 'rs',
@@ -726,22 +997,104 @@ class WorkArtifactDeliveryGuard {
     'ruby': 'rb',
     'rb': 'rb',
     'php': 'php',
+    'perl': 'pl',
+    'pl': 'pl',
+    'pm': 'pl',
+    'lua': 'lua',
+    'haskell': 'hs',
+    'hs': 'hs',
+    'lhs': 'hs',
+    'elixir': 'ex',
+    'ex': 'ex',
+    'exs': 'ex',
+    'erlang': 'erl',
+    'erl': 'erl',
+    'hrl': 'erl',
+    'ocaml': 'ml',
+    'ml': 'ml',
+    'mli': 'ml',
+    'fsharp': 'fs',
+    'fs': 'fs',
+    'fsx': 'fs',
+    'julia': 'jl',
+    'jl': 'jl',
+    'zig': 'zig',
+    'nim': 'nim',
+    'solidity': 'sol',
+    'sol': 'sol',
+    'assembly': 'asm',
+    'asm': 'asm',
+    's': 'asm',
+    'arduino': 'ino',
+    'ino': 'ino',
+    'verilog': 'v',
+    'v': 'v',
+    'sv': 'sv',
+    'vhdl': 'vhd',
+    'vhd': 'vhd',
+    'powershell': 'ps1',
+    'pwsh': 'ps1',
+    'ps1': 'ps1',
+    'psm1': 'ps1',
+    'batch': 'bat',
+    'bat': 'bat',
+    'cmd': 'bat',
     'c': 'c',
+    // A C++ unit is delivered as its header and its implementation, so both
+    // spellings name the same deliverable family — the same reasoning that
+    // makes `.doc` and `.docm` a Word request. Keeping the header separate is
+    // what made “生成…的 CPP和H文件” reject the `.h` it had just written: the
+    // request declared `cpp`, and the format filter then refused everything
+    // that was not `.cpp`.
     'cc': 'cpp',
     'cpp': 'cpp',
     'cxx': 'cpp',
-    'h': 'h',
-    'hpp': 'hpp',
+    'h': 'cpp',
+    'hh': 'cpp',
+    'hpp': 'cpp',
+    'hxx': 'cpp',
+    'csharp': 'cs',
+    'cs': 'cs',
+    'objc': 'objc',
+    'objective-c': 'objc',
+    'mm': 'objc',
+    'protobuf': 'proto',
+    'proto': 'proto',
+    'thrift': 'thrift',
+    'graphql': 'graphql',
+    'gql': 'graphql',
+    'terraform': 'tf',
+    'hcl': 'tf',
+    'tf': 'tf',
     'shell': 'sh',
     'bash': 'sh',
     'sh': 'sh',
     'zsh': 'sh',
+    'ksh': 'sh',
+    'csh': 'sh',
     'fish': 'sh',
     'sql': 'sql',
+    'rmd': 'rmd',
+    'latex': 'tex',
+    'tex': 'tex',
+    'gradle': 'gradle',
+    'cmake': 'cmake',
+    'makefile': 'makefile',
+    'mk': 'makefile',
+    'css': 'css',
+    'scss': 'scss',
+    'sass': 'sass',
+    'less': 'less',
+    'styl': 'styl',
   };
 
   /// Spellings that do name a format but are ordinary words far more often.
-  /// They count only in their extension form (`.go`, `.c`).
+  /// They count only in their extension form (`.go`, `.c`) or right in front of
+  /// a file noun (“LESS文件”) — see [_sourceFormatWordBeforeFileNoun].
+  ///
+  /// Every language whose name or abbreviation is also everyday English or a
+  /// common shorthand belongs here. Without it “生成一份 rust 的说明” would be
+  /// read as a request whose deliverable must be a source file.
   static const Set<String> _ambiguousBareTokens = <String>{
     'c',
     'cc',
@@ -749,6 +1102,24 @@ class WorkArtifactDeliveryGuard {
     'sh',
     'go',
     'rs',
+    'v',
+    's',
+    'mm',
+    'ex',
+    'ml',
+    'fs',
+    'pl',
+    'pm',
+    'hs',
+    'tf',
+    'sv',
+    'mk',
+    'sol',
+    'ino',
+    'less',
+    'sass',
+    'zig',
+    'nim',
   };
 
   /// Chinese spellings that name a deliverable format without an extension.
@@ -870,7 +1241,7 @@ class WorkArtifactDeliveryGuard {
   /// Whether a file satisfies one canonical format. Family aliases such as
   /// `.doc` for `docx` are covered by [formatAliases], because all of them are
   /// the same deliverable to the user.
-  static bool _matchesDeclaredFormat(String path, String format) {
+  static bool matchesDeclaredFormat(String path, String format) {
     final extension = extensionOf(path);
     return extension != null && formatAliases[extension] == format;
   }

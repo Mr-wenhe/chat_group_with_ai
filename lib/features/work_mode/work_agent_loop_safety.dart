@@ -23,6 +23,14 @@ const Set<String> _sensitiveOperationKeys = {
 // ephemeral (model context only); persisted/checkpoint views still redact it.
 const int _maxModelImageDataUriChars = 7 * 1024 * 1024;
 const int _commandFailureHistoryLimit = 128;
+
+/// How many distinct artifact paths one task remembers across its whole run.
+///
+/// The list is durable and is replayed into the model context every turn, so it
+/// needs a bound. Which entries survive a full window is decided where the list
+/// is written, next to the rule that keeps deliverables inside it.
+const int _maxRetainedArtifactPaths = 64;
+
 final RegExp _userActionDiagnostic = RegExp(
   r'权限|permission|access\s+denied|operation\s+not\s+permitted|'
   r'not\s+authorized|unauthorized|administrator|sudo|登录|登入|密码|'
@@ -533,7 +541,59 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
         }
       }
     }
-    return paths.take(64).toList(growable: false);
+    return _retainArtifactPaths(task, paths);
+  }
+
+  /// Keeps a task's artifact history inside its retention window.
+  ///
+  /// The window exists because the list is durable (it is rewritten into the
+  /// task checkpoint on every step) and is replayed into the model context each
+  /// turn, so it cannot grow with the run. What it must not do is drop the
+  /// *newest* entries, which is what `take(64)` did: one recorded run wrote
+  /// 130+ distinct files (scripts, then 70 assets, then the two real
+  /// deliverables), so the deliverables never entered the record at all and the
+  /// completion guard reported "没有可读取的真实文件" while both files sat on
+  /// disk — and no repair round could fix it, because rewriting the same path
+  /// only appended it past the window again.
+  ///
+  /// Two rules keep the window useful:
+  ///  * a path in a format the request (or the discussion contract) named as an
+  ///    output is retained ahead of everything else — that is the deliverable
+  ///    the completion guard has to find;
+  ///  * the remaining slots go to the most recently written paths, because a
+  ///    run writes its intermediates before it writes the deliverable.
+  ///
+  /// Insertion order is preserved so the record still reads as a history.
+  List<String> _retainArtifactPaths(AgentTask task, Set<String> paths) {
+    final ordered = paths.toList(growable: false);
+    if (ordered.length <= _maxRetainedArtifactPaths) return ordered;
+
+    final deliverableFormats =
+        WorkArtifactDeliveryGuard.declaredOutputFormats(task);
+    bool isDeliverable(String path) =>
+        deliverableFormats.isNotEmpty &&
+        deliverableFormats.any(
+          (format) => WorkArtifactDeliveryGuard.matchesDeclaredFormat(
+            path,
+            format,
+          ),
+        );
+
+    // Two passes, both newest-first, so the window never overflows: a request
+    // naming a format (say “生成 50 张 png 图片”) declares the same format for
+    // every file the run writes, and pinning those would otherwise fill the
+    // window past its bound. Deliverables take the slots first because they are
+    // what the completion guard has to find; intermediates take what is left.
+    final retained = <String>{};
+    for (final path in ordered.reversed) {
+      if (retained.length >= _maxRetainedArtifactPaths) break;
+      if (isDeliverable(path)) retained.add(path);
+    }
+    for (final path in ordered.reversed) {
+      if (retained.length >= _maxRetainedArtifactPaths) break;
+      retained.add(path);
+    }
+    return ordered.where(retained.contains).toList(growable: false);
   }
 
   void _recordArtifactChange(

@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/work_mode_workspace.dart';
+import 'package:chat_group/features/work_mode/work_mode_directory_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -196,5 +197,66 @@ void main() {
       await Directory('${desktop.path}/conversations').exists(),
       isFalse,
     );
+  });
+
+  test('reads a requested file path as its folder, never as a workspace root',
+      () async {
+    // 现场（taskId 6f1eefee…，2026-09-29）：修订澄清的答复把目标文件的绝对路径
+    // 折进了请求文本，`requestedWorkspacePath` 把它当作工作区根，于是
+    // `Directory.create` 对着一个文件执行，抛
+    // `Creation failed … Not a directory, errno = 20`，任务在第一个工具调用之前
+    // 就死了。文件所在目录才是工作区，也是这次修订本就该待的地方。
+    final hiveDir = await Directory.systemTemp.createTemp('work-mode-hive-');
+    final grantRoot = await Directory.systemTemp.createTemp('work-mode-root-');
+    final project = await Directory('${grantRoot.path}/project').create();
+    final target = File('${project.path}/AI聊天需求文档.docx');
+    await target.writeAsString('需求');
+    addTearDown(() async {
+      await Hive.close();
+      if (await hiveDir.exists()) await hiveDir.delete(recursive: true);
+      if (await grantRoot.exists()) await grantRoot.delete(recursive: true);
+    });
+
+    Hive.init(hiveDir.path);
+    if (!Hive.isAdapterRegistered(16)) {
+      Hive.registerAdapter(WorkModeWorkspaceAdapter());
+    }
+    await Hive.openBox<dynamic>('app_settings');
+    await Hive.openBox<WorkModeWorkspace>(
+      DatabaseService.workModeWorkspaceBoxName,
+    );
+    final db = DatabaseService();
+    final grants = WorkFolderGrantService(
+      box: db.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      grantRoot.path,
+      consent: (_) async => true,
+    );
+    final service = WorkModeWorkspaceService(db: db, grantService: grants);
+
+    // The request that failed in production, verbatim: the revision-target
+    // answer reaches the runner as an absolute path inside the request text.
+    const directories = WorkModeDirectoryService();
+    final requested = directories.requestedWorkspacePath(
+      '再优化下这个文档，最好加点软件截图，文字增加到6K字\n'
+      '用户明确目标：是的\n'
+      '用户明确目标：是的\n'
+      '用户明确目标：${target.path}',
+    );
+    expect(requested, target.path);
+
+    final workspace = await service.loadOrCreate(
+      conversationId: 'dm:revision',
+      isDirectChat: true,
+      requireWritable: true,
+      preferredRootPath: requested,
+    );
+
+    expect(workspace.workDirPath, project.absolute.path);
+    expect(await target.readAsString(), '需求');
   });
 }

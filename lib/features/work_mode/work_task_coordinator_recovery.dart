@@ -159,6 +159,60 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
     });
   }
 
+  /// Accepts the files a paused task offered for delivery, then runs the task
+  /// so the accepted delivery can be published.
+  ///
+  /// This is the user's answer to the delivery question, not a new instruction:
+  /// the guard is told these files are wanted, so the coming completion
+  /// succeeds and the message carries them as 产物 instead of as intermediates.
+  /// Nothing is re-planned and nothing already written is touched.
+  ///
+  /// No version token is needed the way [confirmExecutorSwap] needs one. The
+  /// button only exists while the offer is pending, and a second offer cannot be
+  /// made while one is on record, so a tap can only ever answer the question it
+  /// was rendered for — a stale one fails the state check below.
+  Future<void> _implConfirmArtifactDelivery(String taskId) {
+    return _serialize(() async {
+      _ensureOpen();
+      final task = _requireWorkTask(taskId);
+      if (_running.containsKey(taskId) || _startingTaskIds.contains(taskId)) {
+        throw StateError('任务正在执行，不能同时确认交付。');
+      }
+      // 「等待群讨论」正是 paused 状态，所以确认交付和群讨论可能同时成立；而
+      // 下面的 `_conversationReservations.remove` 会松开讨论为此保留的会话。这与
+      // 重试路径同一条不变量：讨论还在跑时不能再起一次执行。
+      if (_discussionRuns.containsKey(taskId) ||
+          _discussionStartingIds.contains(taskId)) {
+        throw StateError('群讨论正在进行，不能同时确认交付。');
+      }
+      final offered = artifactDeliveryConfirmationPaths(
+        task.executionStateJson,
+      );
+      if (task.status != AgentTaskStatus.paused ||
+          offered.isEmpty ||
+          !artifactDeliveryConfirmationPending(task.executionStateJson)) {
+        throw StateError('当前任务没有待确认的交付。');
+      }
+      task.executionStateJson = withArtifactDeliveryConfirmationAccepted(
+        task.executionStateJson,
+        offered,
+      );
+      WorkTaskClarification.clear(task);
+      WorkFailure.clearFromTask(task);
+      task
+        ..status = AgentTaskStatus.queued
+        ..resumeRequired = false
+        ..lastError = ''
+        ..pendingToolRequestJson = ''
+        ..updatedAt = _clock();
+      _conversationReservations.remove(task.groupId);
+      await _save(task);
+      _enqueueTask(task);
+      unawaited(_record(task, WorkTaskEventKind.queued, '用户已确认交付产物'));
+      await _schedule();
+    });
+  }
+
   /// Retries a classified failure from the last durable checkpoint.
   ///
   /// The failure marker is intentionally kept while the task is queued so the

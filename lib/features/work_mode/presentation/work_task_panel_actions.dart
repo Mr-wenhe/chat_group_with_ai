@@ -25,6 +25,9 @@ class _TaskActions extends StatelessWidget {
   final WorkTaskExecutorChoice? onConfirmExecutorSwap;
   final WorkTaskUndoPreview? undoPreviewFor;
 
+  /// 确认把本次运行写出的文件当作交付物；只在门禁已经问过、还在等回答时出现。
+  final WorkTaskAction? onConfirmArtifactDelivery;
+
   /// 把角色 id 显示成名字；执行人冲突的确认框必须让用户看清是"哪两个人"。
   final String Function(String characterId)? characterNameFor;
 
@@ -61,6 +64,7 @@ class _TaskActions extends StatelessWidget {
     required this.onLaterVersioned,
     required this.undoPreviewFor,
     this.onConfirmExecutorSwap,
+    this.onConfirmArtifactDelivery,
     this.characterNameFor,
     required this.onStop,
     required this.onContinue,
@@ -88,6 +92,11 @@ class _TaskActions extends StatelessWidget {
     final discussionAllowsApproval = _discussionAllowsApproval(task);
     final canRestartFromBeginning =
         WorkTaskCoordinator.canRestartAfterUserStop(task);
+    // 门禁问过但还没回答的那批文件；回答之后（accepted）按钮就不再出现。
+    final confirmableArtifacts =
+        artifactDeliveryConfirmationPending(task.executionStateJson)
+            ? artifactDeliveryConfirmationPaths(task.executionStateJson)
+            : const <String>[];
     final isSoftLimitPause =
         task.softLimitReached && _isPausedStatus(task.status);
     final hasUserAction = WorkTaskUserAction.forTask(task).isNotEmpty ||
@@ -311,6 +320,17 @@ class _TaskActions extends StatelessWidget {
                     : () => runAction(onSelectVisionModel!),
                 icon: const Icon(Icons.image_search_outlined),
                 label: const Text('选择视觉模型'),
+              ),
+            if (onConfirmArtifactDelivery != null &&
+                task.status == AgentTaskStatus.paused &&
+                confirmableArtifacts.isNotEmpty)
+              FilledButton.icon(
+                key: const Key('work-task-confirm-artifact'),
+                onPressed: actionInFlight
+                    ? null
+                    : () => runAction(onConfirmArtifactDelivery!),
+                icon: const Icon(Icons.verified_outlined),
+                label: Text('确认交付 ${confirmableArtifacts.length} 个文件'),
               ),
             if (onRetry != null &&
                 (canRestartFromBeginning ||

@@ -113,6 +113,11 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         final completionFailure = await completionGuard?.call(task, completion);
         if (completionFailure != null && completionFailure.trim().isNotEmpty) {
           if (state.completionRepairCount >= maxCompletionRepairs) {
+            final offered = await _offerDeliveryConfirmation(
+              state,
+              completionFailure,
+            );
+            if (offered != null) return offered;
             return _fail(
               state,
               completionFailure,
@@ -168,6 +173,82 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         return _handleTool(state, tool, publicUpdate);
     }
   }
+
+  /// Asks the user to confirm a delivery the completion guard could not place,
+  /// and pauses the task on that question.
+  ///
+  /// Returns null when there is nothing to ask about — the run wrote no readable
+  /// file, or the question was already put to the user once — so the caller
+  /// falls through to the ordinary failure report. Asking at most once is what
+  /// keeps this from becoming a loop: a user who resumes or answers with
+  /// something else gets the failure report (and the retry that comes with it),
+  /// not the same question again.
+  Future<WorkAgentLoopResult?> _offerDeliveryConfirmation(
+    _LoopState state,
+    String completionFailure,
+  ) async {
+    final confirm = artifactConfirmation;
+    if (confirm == null) return null;
+    final task = state.task;
+    if (artifactDeliveryConfirmationPaths(task.executionStateJson).isNotEmpty) {
+      return null;
+    }
+    final offered = <String>[];
+    for (final path in await confirm(task)) {
+      final trimmed = path.trim();
+      if (trimmed.isEmpty || offered.contains(trimmed)) continue;
+      offered.add(trimmed);
+    }
+    if (offered.isEmpty) return null;
+
+    final question = _artifactConfirmationQuestion(offered);
+    // The question goes through the one clarification contract, so the panel's
+    // reply box, the chat entry and "继续" all agree that this task is waiting
+    // for an answer.
+    WorkTaskClarification.markPending(task, question);
+    task.executionStateJson = withArtifactDeliveryConfirmationPending(
+      task.executionStateJson,
+      offered,
+    );
+    state.failure = WorkFailure.fromSignalsForUserAction(
+      question,
+      completedContent: _completedContent(state),
+    );
+    task
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..lastError = question
+      ..pendingToolRequestJson = '';
+    state.publicUpdates.add(question);
+    await _emit(
+      state,
+      WorkTaskEventKind.paused,
+      question,
+      detail: completionFailure,
+      safeMetadata: {
+        'reason': 'artifactConfirmation',
+        'fileCount': offered.length,
+      },
+    );
+    await _checkpoint(state);
+    return _result(state, WorkAgentLoopStatus.paused, question);
+  }
+
+  /// Names the files in the question, so the user can tell a deliverable from an
+  /// intermediate the same run happened to leave behind.
+  String _artifactConfirmationQuestion(List<String> offered) {
+    final names = offered
+        .map(_fileNameOf)
+        .map((name) => _publicText(name, maximum: 120))
+        .where((name) => name.isNotEmpty)
+        .take(6)
+        .toList(growable: false);
+    final suffix = offered.length > names.length ? ' 等' : '';
+    return '这次运行写出了 ${names.join('、')}$suffix，'
+        '但完成校验认不出它是否符合你的要求。把它们作为本次交付吗？';
+  }
+
+  String _fileNameOf(String path) => path.replaceAll('\\', '/').split('/').last;
 
   /// Hands a failed or malformed tool call back to the model as one bounded
   /// repair round, and pauses once the task has used up its repair budget or the

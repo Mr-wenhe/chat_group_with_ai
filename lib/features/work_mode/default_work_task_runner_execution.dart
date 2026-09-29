@@ -328,6 +328,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
         onCheckpoint: _persistCheckpoint,
         completionGuard: _validateCompletion,
         artifactCompletion: _autoCompleteAfterArtifact,
+        artifactConfirmation: _offerableDeliverables,
         preflightTool: (task) => _preflightSkillTool(task, character),
         contextCompressionModel: (snapshot) => _compressWorkContext(
           snapshot,

@@ -5,6 +5,7 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_confirmation.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_action_notice.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
@@ -83,6 +84,12 @@ class WorkTaskPanel extends StatefulWidget {
   /// 群推举的执行人与请求里钉定的人不一致时的确认入口。
   final WorkTaskExecutorChoice? onConfirmExecutorSwap;
 
+  /// 确认把本次运行写出的文件当作交付物。为 null 时不展示该入口。
+  ///
+  /// 它回答的是完成门禁提出的问题：门禁认不出这些文件是否符合要求，于是暂停
+  /// 等用户确认。用户也可以用回复框改说要什么，那条路走的是普通追问。
+  final WorkTaskAction? onConfirmArtifactDelivery;
+
   /// 真删除一条任务记录（不可逆）。为 null 时不展示删除入口。
   ///
   /// 入口只在历史任务详情里：「删除任务」曾同时放在操作区，但那里紧邻任务标签，
@@ -147,6 +154,7 @@ class WorkTaskPanel extends StatefulWidget {
     this.onLaterVersioned,
     this.undoPreviewFor,
     this.onConfirmExecutorSwap,
+    this.onConfirmArtifactDelivery,
     this.onDeleteTask,
     this.onOpenInTabStrip,
     this.characterNameFor,
@@ -403,6 +411,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               onLaterVersioned: widget.onLaterVersioned,
               undoPreviewFor: widget.undoPreviewFor,
               onConfirmExecutorSwap: widget.onConfirmExecutorSwap,
+              onConfirmArtifactDelivery: widget.onConfirmArtifactDelivery,
               characterNameFor: widget.characterNameFor,
               onStop: widget.onStop,
               onContinue: widget.onContinue,

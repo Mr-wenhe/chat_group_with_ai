@@ -6,6 +6,8 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/work_mode/agent_decision_parser.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_confirmation.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
@@ -44,6 +46,9 @@ typedef WorkAgentArtifactCompletion = FutureOr<AgentFinishCompletion?> Function(
   WorkToolResult result,
 );
 typedef WorkAgentPreflightTool = FutureOr<AgentToolCall?> Function(
+  AgentTask task,
+);
+typedef WorkAgentArtifactConfirmation = FutureOr<List<String>> Function(
   AgentTask task,
 );
 
@@ -208,6 +213,12 @@ class WorkAgentLoop
   final WorkAgentCompletionGuard? completionGuard;
   final WorkAgentArtifactCompletion? artifactCompletion;
   final WorkAgentPreflightTool? preflightTool;
+
+  /// Names the readable files the run wrote, so a rejected completion can ask
+  /// the user instead of failing when the guard cannot recognise the
+  /// deliverable. Empty means there is nothing to offer, which keeps the plain
+  /// failure for a run that really did write nothing.
+  final WorkAgentArtifactConfirmation? artifactConfirmation;
   final WorkContextBuilder contextBuilder;
   final WorkContextCompressionModel? contextCompressionModel;
   final String Function()? systemPromptBuilder;
@@ -238,6 +249,7 @@ class WorkAgentLoop
     this.completionGuard,
     this.artifactCompletion,
     this.preflightTool,
+    this.artifactConfirmation,
     WorkContextBuilder? contextBuilder,
     this.contextCompressionModel,
     this.systemPromptBuilder,

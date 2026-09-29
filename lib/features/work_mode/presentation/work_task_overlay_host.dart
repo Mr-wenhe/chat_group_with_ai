@@ -307,6 +307,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
                   (_coordinator == null ? null : _selectVisionModel),
               onConfirmExecutorSwap:
                   _coordinator == null ? null : _confirmExecutorSwap,
+              onConfirmArtifactDelivery:
+                  _coordinator == null ? null : _confirmArtifactDelivery,
               onRetry: widget.onRetryTask ??
                   (_coordinator == null ? null : _retryTask),
               onReauthorize: widget.onReauthorizeTask ??
@@ -697,6 +699,16 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
           swap: swap,
         ) ??
         Future<void>.value();
+  }
+
+  /// Accepts the files a paused task offered, answering the delivery question.
+  ///
+  /// This route deliberately does not go through the reply box: an accepted
+  /// delivery is a decision about a known set of files, not free text, and the
+  /// coordinator is the only place that may record it.
+  Future<void> _confirmArtifactDelivery(String taskId) {
+    final coordinator = _coordinator;
+    return coordinator?.confirmArtifactDelivery(taskId) ?? Future<void>.value();
   }
 
   void _scheduleApprovalPrompt(List<AgentTask> tasks) {

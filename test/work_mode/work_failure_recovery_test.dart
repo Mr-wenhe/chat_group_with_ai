@@ -6,6 +6,7 @@ import 'dart:io';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/work_agent_loop.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
@@ -105,7 +106,7 @@ WorkAgentLoop _loop(_ModelQueue model, WorkToolRegistry registry) =>
 
 void main() {
   group('WorkFailure classification and checkpoint recovery', () {
-    test('keeps the fixed ten-category matrix serializable', () {
+    test('keeps the fixed eleven-category matrix serializable', () {
       expect(WorkFailureType.values.map((item) => item.name), <String>[
         'retryableNetwork',
         'modelProtocol',
@@ -117,6 +118,7 @@ void main() {
         'commandFailed',
         'userActionRequired',
         'internal',
+        'completionUnmet',
       ]);
       for (final type in WorkFailureType.values) {
         final failure = WorkFailure.defaults(type);
@@ -1035,6 +1037,36 @@ void main() {
       await pumpPanel(tester, task, onRetry: (_) async => retries++);
 
       expect(find.byKey(const Key('work-task-retry')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('work-task-retry')));
+      expect(retries, 1);
+    });
+
+    testWidgets('offers retry for a rejected completion', (tester) async {
+      var retries = 0;
+      final task = _task('panel-completion-unmet')
+        ..status = AgentTaskStatus.failed;
+      // 现场那条记录：旧版本把完成校验的拒绝存成不可重试的 internal。面板经
+      // `task.workFailure` → `WorkFailure.fromTask` 读取，所以这条历史记录必须
+      // 在读取时被重新分类，否则用户手上失败的任务仍然没有出口。
+      WorkFailure.persistOnTask(
+        task,
+        const WorkFailure(
+          type: WorkFailureType.internal,
+          title: '工作任务内部处理失败',
+          reason: WorkArtifactDeliveryGuard.missingArtifactMessage,
+          technicalDetail: WorkArtifactDeliveryGuard.missingArtifactMessage,
+          completedContent: <String>[],
+          retryable: false,
+          suggestedAction: '先检查任务上下文；确认环境正常后可重新发起任务或停止当前任务。',
+        ),
+      );
+      expect(task.workFailure?.type, WorkFailureType.completionUnmet);
+      expect(task.workFailure?.canRetry, isTrue);
+
+      await pumpPanel(tester, task, onRetry: (_) async => retries++);
+
+      expect(find.byKey(const Key('work-task-retry')), findsOneWidget);
+      expect(find.text('重试'), findsOneWidget);
       await tester.tap(find.byKey(const Key('work-task-retry')));
       expect(retries, 1);
     });

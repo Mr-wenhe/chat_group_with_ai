@@ -6,6 +6,8 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_confirmation.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_task_action_notice.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
@@ -18,6 +20,7 @@ import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_follow_up_policy.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
+import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
@@ -61,6 +64,11 @@ class _FakeWorkTaskRunner
   final List<String> cancelledTaskIds = <String>[];
   final Set<String> throwTaskIds = <String>{};
   final Set<String> failOnCompletion = <String>{};
+
+  /// 任务在 runner 内部被判失败：现场路径是 loop 的完成校验连续拒绝后自己
+  /// `_fail`，runner 正常返回而不是抛错。协调器随后读到的是任务上已持久化的
+  /// [WorkFailure]，与抛错路径的 `fromError(scope: 'runner')` 完全不同。
+  final Set<String> completionUnmetTaskIds = <String>{};
   final Set<String> waitForCancellationTaskIds = <String>{};
 
   /// Error raised for [throwTaskIds]. A transport error exercises the
@@ -132,6 +140,17 @@ class _FakeWorkTaskRunner
       _activeByConversation[task.groupId] = remaining;
     }
     if (failOnCompletion.remove(task.id)) throw StateError('completion failed');
+    if (completionUnmetTaskIds.remove(task.id)) {
+      final failure = WorkFailure.fromLoopMessage(
+        WorkArtifactDeliveryGuard.missingArtifactMessage,
+        scope: 'completion',
+      );
+      task
+        ..status = AgentTaskStatus.failed
+        ..resumeRequired = true
+        ..lastError = failure.reason;
+      WorkFailure.persistOnTask(task, failure);
+    }
   }
 
   Map<String, dynamic> _decode(String raw) {
@@ -866,6 +885,65 @@ void main() {
     runner.complete(task.id);
   });
 
+  test('confirms an offered delivery and runs the task that publishes it',
+      () async {
+    final task = _task(id: 'artifact-confirm', conversationId: 'dm:worker')
+      ..status = AgentTaskStatus.paused
+      ..lastArtifactPaths = const [
+        '/workspace/mac_hardware_info.h',
+        '/workspace/mac_hardware_info.cpp',
+      ];
+    task.executionStateJson = withArtifactDeliveryConfirmationPending(
+      '',
+      const [
+        '/workspace/mac_hardware_info.h',
+        '/workspace/mac_hardware_info.cpp'
+      ],
+    );
+    WorkTaskClarification.markPending(task, '把它们作为本次交付吗？');
+    await taskBox.put(task.id, task);
+
+    await coordinator.confirmArtifactDelivery(task.id);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status != AgentTaskStatus.paused,
+    );
+
+    expect(runner.startedTaskIds, contains(task.id));
+    expect(
+      acceptedArtifactDeliveryPaths(task.executionStateJson),
+      const [
+        '/workspace/mac_hardware_info.h',
+        '/workspace/mac_hardware_info.cpp'
+      ],
+      reason: '门禁要靠这条记录放行，缺了就等于没确认',
+    );
+    expect(
+      artifactDeliveryConfirmationPending(task.executionStateJson),
+      isFalse,
+    );
+    expect(
+      WorkTaskClarification.isPending(task),
+      isFalse,
+      reason: '问题已经答了，不能再留着一个回复框',
+    );
+    runner.complete(task.id);
+  });
+
+  test('refuses to confirm a delivery that was never offered', () async {
+    final task = _task(id: 'artifact-unoffered', conversationId: 'dm:worker')
+      ..status = AgentTaskStatus.paused;
+    await taskBox.put(task.id, task);
+
+    await expectLater(
+      coordinator.confirmArtifactDelivery(task.id),
+      throwsA(isA<StateError>()),
+    );
+    expect(task.status, AgentTaskStatus.paused);
+    expect(acceptedArtifactDeliveryPaths(task.executionStateJson), isEmpty);
+  });
+
   test('refuses to retry a completed task with nothing left to deliver',
       () async {
     final task = _task(id: 'artifact-done', conversationId: 'dm:worker')
@@ -931,6 +1009,44 @@ void main() {
       runner.startedTaskIds.where((id) => id == task.id),
       hasLength(1),
       reason: '内部失败不是链路问题，不能自行重试',
+    );
+  });
+
+  test('keeps a rejected completion manual while its retry stays available',
+      () async {
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      autoResumeDelays: const <Duration>[Duration(milliseconds: 30)],
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'completion-unmet', conversationId: 'dm:worker');
+    runner.completionUnmetTaskIds.add(task.id);
+
+    await localCoordinator.submit(task);
+    // 现场顺序：loop 在运行中把任务判失败并返回，runner 随后正常收尾。
+    await _waitForStartedCount(runner, 1);
+    runner.complete(task.id);
+    await _waitForTaskState(
+      taskBox,
+      task.id,
+      (value) => value.status == AgentTaskStatus.failed,
+    );
+    // 30ms 的续跑节拍落在窗口内：这里证明的是"不会再有下一次启动"。
+    await _drainEventLoop();
+
+    expect(task.workFailure?.type, WorkFailureType.completionUnmet);
+    expect(
+      task.workFailure?.canRetry,
+      isTrue,
+      reason: '面板的“重试”只认这个字段，用户必须还能自己重跑',
+    );
+    expect(_autoResumeCountOf(task), 0);
+    expect(
+      runner.startedTaskIds.where((id) => id == task.id),
+      hasLength(1),
+      reason: '交付物不合格不是链路问题，等待不会让它变合格，不能自行重跑',
     );
   });
 
