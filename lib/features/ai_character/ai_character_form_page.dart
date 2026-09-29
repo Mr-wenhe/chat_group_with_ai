@@ -24,6 +24,18 @@ import '../settings/api_config_form_page.dart';
 /// （Hive 使用 UUID v4 生成 id，不可能是此字符串，故可安全作为唯一占位值。）
 const String _kEmptyConfigValue = '__NO_CONFIG__';
 
+/// 未保存返回确认框的两种「离页」选择。留在本页由遮罩 / 系统返回取消。
+enum _UnsavedExitAction { discard, save }
+
+/// 年龄输入框留空 / 填了非数字时的兜底值，与输入框提示一致。
+const int _kDefaultAge = 25;
+
+/// 「每小时回复上限」输入框留空 / 填了非数字时的兜底值。
+///
+/// 必须与 [AICharacter.hourlyReplyLimit] 的默认值（60）、输入框提示「默认 60 次/小时」
+/// 和备份解码的 `?? 60` 保持一致：这个值就是用户清空输入框后静默落库的上限。
+const int _kDefaultHourlyReplyLimit = 60;
+
 class AICharacterFormPage extends ConsumerStatefulWidget {
   final AICharacter? character;
 
@@ -69,6 +81,10 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   String _workingIpStyle = '';
   final _ipPortraitPanelKey = GlobalKey<IpPortraitPanelState>();
 
+  /// 进入页面时（initState 全部默认值填完之后）的表单快照，用于判断「是否有
+  /// 未保存修改」。存储的是归一化后的值，不是控制器本身 —— 见 [_draftSignature]。
+  late final List<Object?> _initialSignature;
+
   @override
   void initState() {
     super.initState();
@@ -91,8 +107,8 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         TextEditingController(text: c?.systemPrompt ?? '');
     _personalityController = TextEditingController(
         text: c == null ? '' : c.personalityTags.join(', '));
-    _hourlyLimitController =
-        TextEditingController(text: (c?.hourlyReplyLimit ?? 60).toString());
+    _hourlyLimitController = TextEditingController(
+        text: (c?.hourlyReplyLimit ?? _kDefaultHourlyReplyLimit).toString());
 
     _selectedApiConfigId = c?.apiConfigId ?? '';
     _selectedVoiceId = c?.voiceId ?? '';
@@ -132,6 +148,10 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
       _agenticEnabled = true;
       _toolPermissions = bundle.permissions;
     }
+
+    // 必须落在最后：上面的默认值（预选 ApiConfig、默认工具权限、预设填充）都是
+    // 「用户没动过」的状态，基线取早了会一进页面就被判成已修改。
+    _initialSignature = _draftSignature();
   }
 
   AICharacter? _latestPersistedCharacter() {
@@ -312,380 +332,393 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
     final cs = Theme.of(context).colorScheme;
     final hasKnownGender = widget.character?.hasKnownGender ?? true;
 
-    return Scaffold(
-      backgroundColor: cs.surface,
-      appBar: AppBar(
+    return PopScope(
+      // 恒定 false：判脏必须在「按返回」的瞬间现算，取 build 时缓存下来的值
+      // 会因为某个字段忘了 setState 而静默漏判。代价是本页没有 iOS 侧滑返回。
+      canPop: false,
+      onPopInvokedWithResult: (didPop, result) {
+        if (!didPop) _handleBack();
+      },
+      child: Scaffold(
         backgroundColor: cs.surface,
-        surfaceTintColor: Colors.transparent,
-        elevation: 0,
-        title: Text(_isEditing ? '编辑角色' : '创建 AI 角色',
-            style: TextStyle(
-                fontWeight: FontWeight.w600,
-                fontSize: 18,
-                color: cs.onSurface)),
-        actions: [
-          IconButton(
-            icon: const Icon(Icons.auto_awesome_rounded),
-            color: cs.primary,
-            tooltip: '从预设套用',
-            onPressed: _showPresetPicker,
-          ),
-          TextButton.icon(
-            onPressed: _isSaving ? null : _save,
-            icon: Icon(
-                _isEditing ? Icons.check_rounded : Icons.add_circle_rounded,
-                color: cs.primary),
-            label: Text(_isEditing ? '更新' : '创建',
-                style:
-                    TextStyle(color: cs.primary, fontWeight: FontWeight.w600)),
-          ),
-        ],
-      ),
-      body: Form(
-        key: _formKey,
-        child: ListView(
-          padding: const EdgeInsets.all(20),
-          children: [
-            AppSectionHeader(
-                title: '角色信息', icon: Icons.person_outline_rounded, cs: cs),
-            const SizedBox(height: 12),
-            AppCard(
-              cs: cs,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        controller: _nameController,
-                        decoration: appInputDecoration(
-                            '名字 *', 'AI 的名字', Icons.badge_outlined, cs),
-                        onChanged: (_) => setState(() {}),
-                        validator: (v) => v?.isEmpty ?? true ? '请输入名字' : null,
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    _buildAvatarPreview(cs),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                IpPortraitPanel(
-                  key: _ipPortraitPanelKey,
-                  draftBuilder: _draftCharacter,
-                  missingFields: _missingPortraitFields,
-                  characterId: _existingCharacterId,
-                  initialRelPath: _workingIpRelPath,
-                  initialAvatarFromIp: _avatarFromIpImage,
-                  initialStyle: _workingIpStyle,
-                  onChanged: (relPath, avatarFromIp, style) => setState(() {
-                    _workingIpRelPath = relPath;
-                    _avatarFromIpImage = avatarFromIp;
-                    _workingIpStyle = style;
-                  }),
-                ),
-                const SizedBox(height: 14),
-                Row(
-                  crossAxisAlignment: CrossAxisAlignment.start,
-                  children: [
-                    Expanded(
-                      child: TextFormField(
-                        controller: _ageController,
-                        decoration: appInputDecoration(
-                            '年龄', '25', Icons.cake_outlined, cs),
-                        keyboardType: TextInputType.number,
-                        validator: (v) {
-                          if (v?.isEmpty ?? true) return null;
-                          final age = int.tryParse(v!);
-                          if (age == null || age < 1 || age > 150) {
-                            return '1-150';
-                          }
-                          return null;
-                        },
-                      ),
-                    ),
-                    const SizedBox(width: 14),
-                    Expanded(
-                      child: DropdownButtonFormField<CharacterGender>(
-                        value: _selectedGender,
-                        hint: _isEditing && !hasKnownGender
-                            ? const Text('未知（迁移中）')
-                            : null,
-                        decoration: appInputDecoration(
-                          '性别 *',
-                          '请选择',
-                          _isEditing
-                              ? Icons.lock_outline_rounded
-                              : Icons.wc_rounded,
-                          cs,
-                        ).copyWith(
-                          helperText:
-                              _isEditing ? '创建后不可修改' : '保存后不可修改，并会影响角色称谓与表达。',
-                        ),
-                        isExpanded: true,
-                        items: CharacterGender.values
-                            .map((gender) => DropdownMenuItem(
-                                  value: gender,
-                                  child: Text(gender.label),
-                                ))
-                            .toList(growable: false),
-                        onChanged: _isEditing
-                            ? null
-                            : (gender) =>
-                                setState(() => _selectedGender = gender),
-                        validator: (gender) =>
-                            gender == null && !_isEditing ? '请选择性别' : null,
-                      ),
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                TextFormField(
-                  controller: _roleController,
-                  decoration: appInputDecoration(
-                      '角色 *', '游戏达人 / 心理咨询师', Icons.work_outline_rounded, cs),
-                  onChanged: (_) => setState(() {}),
-                  validator: (v) => v?.isEmpty ?? true ? '请输入角色' : null,
-                ),
-                const SizedBox(height: 14),
-                TextFormField(
-                  controller: _personalityController,
-                  decoration: appInputDecoration('性格标签', '话痨, 温柔, 毒舌, 理性...',
-                      Icons.psychology_outlined, cs),
-                  onChanged: (_) => setState(() {}),
-                ),
-                const SizedBox(height: 14),
-                // 朗读音色：音色 id 来自 voice.md / VoicePreset；空 = 未指定，
-                // 播报时使用语音服务配置里的全局默认音色。
-                DropdownButtonFormField<String>(
-                  value: _selectedVoiceId.isEmpty ? null : _selectedVoiceId,
-                  hint: const Text('未指定（播报时用语音服务的默认音色）'),
-                  decoration: appInputDecoration(
-                      '朗读音色',
-                      '在“设置 → 语音服务”配置 API Key 后，群聊开启语音播报会朗读',
-                      Icons.record_voice_over_outlined,
-                      cs),
-                  isExpanded: true,
-                  items: voicePresets
-                      .map((preset) => DropdownMenuItem(
-                            value: preset.id,
-                            child: Text('${preset.name} · ${preset.id}',
-                                overflow: TextOverflow.ellipsis,
-                                style: const TextStyle(fontSize: 14)),
-                          ))
-                      .toList(growable: false),
-                  onChanged: (voiceId) =>
-                      setState(() => _selectedVoiceId = voiceId ?? ''),
-                ),
-              ],
+        appBar: AppBar(
+          backgroundColor: cs.surface,
+          surfaceTintColor: Colors.transparent,
+          elevation: 0,
+          leading: BackButton(onPressed: _handleBack),
+          title: Text(_isEditing ? '编辑角色' : '创建 AI 角色',
+              style: TextStyle(
+                  fontWeight: FontWeight.w600,
+                  fontSize: 18,
+                  color: cs.onSurface)),
+          actions: [
+            IconButton(
+              icon: const Icon(Icons.auto_awesome_rounded),
+              color: cs.primary,
+              tooltip: '从预设套用',
+              onPressed: _showPresetPicker,
             ),
-            const SizedBox(height: 24),
-            AppSectionHeader(
-                title: 'AI 配置', icon: Icons.smart_toy_outlined, cs: cs),
-            const SizedBox(height: 12),
-            AppCard(
-              cs: cs,
-              children: [
-                Row(
-                  children: [
-                    Expanded(
-                      child: Consumer(
-                        builder: (context, ref, child) {
-                          final configs = ref.watch(apiConfigsProvider);
-
-                          return DropdownButtonFormField<String>(
-                            // value 映射：
-                            // - 有真实选中值且该项仍在配置列表中 → 用选中的 id；
-                            // - 关联配置已被删除（id 不在列表）→ 回退为 null，避免 value 不在 items 中触发断言；
-                            // - 完全无配置 → 用哨兵值（仅作占位、不可选）；
-                            // - 有配置但未选择 → null。
-                            value: (configs.isNotEmpty &&
-                                    _selectedApiConfigId.isNotEmpty)
-                                ? (configs.any(
-                                        (c) => c.id == _selectedApiConfigId)
-                                    ? _selectedApiConfigId
-                                    : null)
-                                : (configs.isEmpty ? _kEmptyConfigValue : null),
-                            decoration: appInputDecoration(
-                                'API 配置 *',
-                                '先在设置中创建 API 配置',
-                                Icons.settings_remote_outlined,
-                                cs),
-                            isExpanded: true,
-                            items: [
-                              if (configs.isEmpty)
-                                const DropdownMenuItem(
-                                    value: _kEmptyConfigValue,
-                                    enabled: false,
-                                    child: Text('暂无配置，请先在设置中创建',
-                                        style: TextStyle(fontSize: 13))),
-                              ...configs.map((c) => DropdownMenuItem(
-                                    value: c.id,
-                                    child: Text('${c.name} (${c.provider})',
-                                        overflow: TextOverflow.ellipsis,
-                                        style: const TextStyle(fontSize: 14)),
-                                  )),
-                            ],
-                            onChanged: configs.isEmpty
-                                ? null
-                                : (v) {
-                                    // 过滤掉哨兵值与空值，确保只接受真实配置 id
-                                    if (v != null &&
-                                        v != _kEmptyConfigValue &&
-                                        v.isNotEmpty) {
-                                      setState(() {
-                                        _selectedApiConfigId = v;
-                                      });
-                                    }
-                                  },
-                            validator: (v) => (v == null ||
-                                    v == _kEmptyConfigValue ||
-                                    v.isEmpty)
-                                ? '请选择 API 配置'
-                                : null,
-                          );
-                        },
-                      ),
-                    ),
-                    IconButton(
-                      icon: Icon(Icons.add_circle_outline_rounded,
-                          color: cs.primary, size: 24),
-                      onPressed: () async {
-                        await Navigator.of(context).push(
-                          MaterialPageRoute(
-                              builder: (_) => const ApiConfigFormPage()),
-                        );
-                        setState(() {});
-                      },
-                      tooltip: '新建配置',
-                    ),
-                  ],
-                ),
-                const SizedBox(height: 14),
-                TextFormField(
-                  controller: _hourlyLimitController,
-                  decoration: appInputDecoration(
-                      '每小时回复上限', '默认 60 次/小时', Icons.speed_rounded, cs),
-                  keyboardType: TextInputType.number,
-                ),
-              ],
-            ),
-            const SizedBox(height: 24),
-            AppSectionHeader(title: '行为设定', icon: Icons.tune_rounded, cs: cs),
-            const SizedBox(height: 12),
-            AppCard(
-              cs: cs,
-              children: [
-                TextFormField(
-                  controller: _systemPromptController,
-                  decoration: appInputDecoration(
-                      'System Prompt',
-                      '定义 AI 的行为、风格和知识领域...',
-                      Icons.chat_bubble_outline_rounded,
-                      cs),
-                  maxLines: 8,
-                  onChanged: (_) => setState(() {}),
-                ),
-              ],
-            ),
-            const SizedBox(height: 24),
-            AppSectionHeader(
-                title: '行动能力', icon: Icons.construction_rounded, cs: cs),
-            const SizedBox(height: 12),
-            AppCard(
-              cs: cs,
-              children: [
-                SwitchListTile.adaptive(
-                  contentPadding: EdgeInsets.zero,
-                  value: _proactiveChatEnabled,
-                  onChanged: (value) =>
-                      setState(() => _proactiveChatEnabled = value),
-                  title: const Text('允许主动聊天'),
-                  subtitle: const Text(
-                    '关闭后不会主动发起私信，但仍会回复你主动发送的消息',
-                  ),
-                  secondary:
-                      Icon(Icons.mark_chat_unread_rounded, color: cs.primary),
-                ),
-                const Divider(height: 8),
-                SwitchListTile.adaptive(
-                  contentPadding: EdgeInsets.zero,
-                  value: _webSearchEnabled,
-                  onChanged: (value) =>
-                      setState(() => _webSearchEnabled = value),
-                  title: const Text('允许联网搜索'),
-                  subtitle: const Text(
-                    '回答时可使用全局搜索设置中的来源；启用“使用模型原生联网搜索”后，将只使用角色模型能力',
-                  ),
-                  secondary: Icon(Icons.public_rounded, color: cs.primary),
-                ),
-                const Divider(height: 8),
-                SwitchListTile.adaptive(
-                  contentPadding: EdgeInsets.zero,
-                  value: _zhipuSearchAnswerOnly,
-                  onChanged: (value) => setState(() {
-                    _zhipuSearchAnswerOnly = value;
-                    if (value) _webSearchEnabled = true;
-                  }),
-                  title: const Text('仅使用智谱搜索问答流程'),
-                  subtitle: const Text(
-                    '每个问题均先调用智谱网页搜索，再由角色依据编号结果回答；需要 glm-4-flash 配置',
-                  ),
-                  secondary: Icon(Icons.newspaper_rounded, color: cs.primary),
-                ),
-                const Divider(height: 8),
-                CharacterSkillEditor(
-                  enabled: _agenticEnabled,
-                  onEnabledChanged: (value) {
-                    setState(() {
-                      _agenticEnabled = value;
-                      if (value && _toolPermissions.isEmpty) {
-                        _toolPermissions = CharacterSkillResolver.defaultsFor(
-                          _draftCharacter(),
-                        ).permissions;
-                      }
-                    });
-                  },
-                  inferredSkills:
-                      CharacterSkillResolver.defaultsFor(_draftCharacter())
-                          .skills,
-                  recommendedTemplates:
-                      SkillDownloadService.recommendedTemplatesFor(
-                    _draftCharacter(),
-                  ),
-                  selectedTemplateIds: _selectedSkillTemplateIds,
-                  onTemplateToggle: (id) {
-                    setState(() {
-                      final next = Set<String>.from(_selectedSkillTemplateIds);
-                      if (next.contains(id)) {
-                        next.remove(id);
-                      } else {
-                        next.add(id);
-                      }
-                      _selectedSkillTemplateIds = next;
-                    });
-                  },
-                  selectedPermissions: _toolPermissions,
-                  onPermissionToggle: (permission) {
-                    setState(() {
-                      final next = List<ToolPermission>.from(_toolPermissions);
-                      if (next.contains(permission)) {
-                        next.remove(permission);
-                      } else {
-                        next.add(permission);
-                      }
-                      _toolPermissions = next;
-                    });
-                  },
-                ),
-              ],
-            ),
-            const SizedBox(height: 32),
-            AppPrimaryButton(
+            TextButton.icon(
               onPressed: _isSaving ? null : _save,
-              icon: _isEditing ? Icons.check_rounded : Icons.add_rounded,
-              label: _isEditing ? '更新角色' : '创建角色',
+              icon: Icon(
+                  _isEditing ? Icons.check_rounded : Icons.add_circle_rounded,
+                  color: cs.primary),
+              label: Text(_isEditing ? '更新' : '创建',
+                  style: TextStyle(
+                      color: cs.primary, fontWeight: FontWeight.w600)),
             ),
-            const SizedBox(height: 32),
           ],
+        ),
+        body: Form(
+          key: _formKey,
+          child: ListView(
+            padding: const EdgeInsets.all(20),
+            children: [
+              AppSectionHeader(
+                  title: '角色信息', icon: Icons.person_outline_rounded, cs: cs),
+              const SizedBox(height: 12),
+              AppCard(
+                cs: cs,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: _nameController,
+                          decoration: appInputDecoration(
+                              '名字 *', 'AI 的名字', Icons.badge_outlined, cs),
+                          onChanged: (_) => setState(() {}),
+                          validator: (v) => v?.isEmpty ?? true ? '请输入名字' : null,
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      _buildAvatarPreview(cs),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  IpPortraitPanel(
+                    key: _ipPortraitPanelKey,
+                    draftBuilder: _draftCharacter,
+                    missingFields: _missingPortraitFields,
+                    characterId: _existingCharacterId,
+                    initialRelPath: _workingIpRelPath,
+                    initialAvatarFromIp: _avatarFromIpImage,
+                    initialStyle: _workingIpStyle,
+                    onChanged: (relPath, avatarFromIp, style) => setState(() {
+                      _workingIpRelPath = relPath;
+                      _avatarFromIpImage = avatarFromIp;
+                      _workingIpStyle = style;
+                    }),
+                  ),
+                  const SizedBox(height: 14),
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: _ageController,
+                          decoration: appInputDecoration(
+                              '年龄', '25', Icons.cake_outlined, cs),
+                          keyboardType: TextInputType.number,
+                          validator: (v) {
+                            if (v?.isEmpty ?? true) return null;
+                            final age = int.tryParse(v!);
+                            if (age == null || age < 1 || age > 150) {
+                              return '1-150';
+                            }
+                            return null;
+                          },
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: DropdownButtonFormField<CharacterGender>(
+                          value: _selectedGender,
+                          hint: _isEditing && !hasKnownGender
+                              ? const Text('未知（迁移中）')
+                              : null,
+                          decoration: appInputDecoration(
+                            '性别 *',
+                            '请选择',
+                            _isEditing
+                                ? Icons.lock_outline_rounded
+                                : Icons.wc_rounded,
+                            cs,
+                          ).copyWith(
+                            helperText:
+                                _isEditing ? '创建后不可修改' : '保存后不可修改，并会影响角色称谓与表达。',
+                          ),
+                          isExpanded: true,
+                          items: CharacterGender.values
+                              .map((gender) => DropdownMenuItem(
+                                    value: gender,
+                                    child: Text(gender.label),
+                                  ))
+                              .toList(growable: false),
+                          onChanged: _isEditing
+                              ? null
+                              : (gender) =>
+                                  setState(() => _selectedGender = gender),
+                          validator: (gender) =>
+                              gender == null && !_isEditing ? '请选择性别' : null,
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  TextFormField(
+                    controller: _roleController,
+                    decoration: appInputDecoration(
+                        '角色 *', '游戏达人 / 心理咨询师', Icons.work_outline_rounded, cs),
+                    onChanged: (_) => setState(() {}),
+                    validator: (v) => v?.isEmpty ?? true ? '请输入角色' : null,
+                  ),
+                  const SizedBox(height: 14),
+                  TextFormField(
+                    controller: _personalityController,
+                    decoration: appInputDecoration('性格标签', '话痨, 温柔, 毒舌, 理性...',
+                        Icons.psychology_outlined, cs),
+                    onChanged: (_) => setState(() {}),
+                  ),
+                  const SizedBox(height: 14),
+                  // 朗读音色：音色 id 来自 voice.md / VoicePreset；空 = 未指定，
+                  // 播报时使用语音服务配置里的全局默认音色。
+                  DropdownButtonFormField<String>(
+                    value: _selectedVoiceId.isEmpty ? null : _selectedVoiceId,
+                    hint: const Text('未指定（播报时用语音服务的默认音色）'),
+                    decoration: appInputDecoration(
+                        '朗读音色',
+                        '在“设置 → 语音服务”配置 API Key 后，群聊开启语音播报会朗读',
+                        Icons.record_voice_over_outlined,
+                        cs),
+                    isExpanded: true,
+                    items: voicePresets
+                        .map((preset) => DropdownMenuItem(
+                              value: preset.id,
+                              child: Text('${preset.name} · ${preset.id}',
+                                  overflow: TextOverflow.ellipsis,
+                                  style: const TextStyle(fontSize: 14)),
+                            ))
+                        .toList(growable: false),
+                    onChanged: (voiceId) =>
+                        setState(() => _selectedVoiceId = voiceId ?? ''),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              AppSectionHeader(
+                  title: 'AI 配置', icon: Icons.smart_toy_outlined, cs: cs),
+              const SizedBox(height: 12),
+              AppCard(
+                cs: cs,
+                children: [
+                  Row(
+                    children: [
+                      Expanded(
+                        child: Consumer(
+                          builder: (context, ref, child) {
+                            final configs = ref.watch(apiConfigsProvider);
+
+                            return DropdownButtonFormField<String>(
+                              // value 映射：
+                              // - 有真实选中值且该项仍在配置列表中 → 用选中的 id；
+                              // - 关联配置已被删除（id 不在列表）→ 回退为 null，避免 value 不在 items 中触发断言；
+                              // - 完全无配置 → 用哨兵值（仅作占位、不可选）；
+                              // - 有配置但未选择 → null。
+                              value: (configs.isNotEmpty &&
+                                      _selectedApiConfigId.isNotEmpty)
+                                  ? (configs.any(
+                                          (c) => c.id == _selectedApiConfigId)
+                                      ? _selectedApiConfigId
+                                      : null)
+                                  : (configs.isEmpty
+                                      ? _kEmptyConfigValue
+                                      : null),
+                              decoration: appInputDecoration(
+                                  'API 配置 *',
+                                  '先在设置中创建 API 配置',
+                                  Icons.settings_remote_outlined,
+                                  cs),
+                              isExpanded: true,
+                              items: [
+                                if (configs.isEmpty)
+                                  const DropdownMenuItem(
+                                      value: _kEmptyConfigValue,
+                                      enabled: false,
+                                      child: Text('暂无配置，请先在设置中创建',
+                                          style: TextStyle(fontSize: 13))),
+                                ...configs.map((c) => DropdownMenuItem(
+                                      value: c.id,
+                                      child: Text('${c.name} (${c.provider})',
+                                          overflow: TextOverflow.ellipsis,
+                                          style: const TextStyle(fontSize: 14)),
+                                    )),
+                              ],
+                              onChanged: configs.isEmpty
+                                  ? null
+                                  : (v) {
+                                      // 过滤掉哨兵值与空值，确保只接受真实配置 id
+                                      if (v != null &&
+                                          v != _kEmptyConfigValue &&
+                                          v.isNotEmpty) {
+                                        setState(() {
+                                          _selectedApiConfigId = v;
+                                        });
+                                      }
+                                    },
+                              validator: (v) => (v == null ||
+                                      v == _kEmptyConfigValue ||
+                                      v.isEmpty)
+                                  ? '请选择 API 配置'
+                                  : null,
+                            );
+                          },
+                        ),
+                      ),
+                      IconButton(
+                        icon: Icon(Icons.add_circle_outline_rounded,
+                            color: cs.primary, size: 24),
+                        onPressed: () async {
+                          await Navigator.of(context).push(
+                            MaterialPageRoute(
+                                builder: (_) => const ApiConfigFormPage()),
+                          );
+                          setState(() {});
+                        },
+                        tooltip: '新建配置',
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 14),
+                  TextFormField(
+                    controller: _hourlyLimitController,
+                    decoration: appInputDecoration(
+                        '每小时回复上限', '默认 60 次/小时', Icons.speed_rounded, cs),
+                    keyboardType: TextInputType.number,
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              AppSectionHeader(title: '行为设定', icon: Icons.tune_rounded, cs: cs),
+              const SizedBox(height: 12),
+              AppCard(
+                cs: cs,
+                children: [
+                  TextFormField(
+                    controller: _systemPromptController,
+                    decoration: appInputDecoration(
+                        'System Prompt',
+                        '定义 AI 的行为、风格和知识领域...',
+                        Icons.chat_bubble_outline_rounded,
+                        cs),
+                    maxLines: 8,
+                    onChanged: (_) => setState(() {}),
+                  ),
+                ],
+              ),
+              const SizedBox(height: 24),
+              AppSectionHeader(
+                  title: '行动能力', icon: Icons.construction_rounded, cs: cs),
+              const SizedBox(height: 12),
+              AppCard(
+                cs: cs,
+                children: [
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: _proactiveChatEnabled,
+                    onChanged: (value) =>
+                        setState(() => _proactiveChatEnabled = value),
+                    title: const Text('允许主动聊天'),
+                    subtitle: const Text(
+                      '关闭后不会主动发起私信，但仍会回复你主动发送的消息',
+                    ),
+                    secondary:
+                        Icon(Icons.mark_chat_unread_rounded, color: cs.primary),
+                  ),
+                  const Divider(height: 8),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: _webSearchEnabled,
+                    onChanged: (value) =>
+                        setState(() => _webSearchEnabled = value),
+                    title: const Text('允许联网搜索'),
+                    subtitle: const Text(
+                      '回答时可使用全局搜索设置中的来源；启用“使用模型原生联网搜索”后，将只使用角色模型能力',
+                    ),
+                    secondary: Icon(Icons.public_rounded, color: cs.primary),
+                  ),
+                  const Divider(height: 8),
+                  SwitchListTile.adaptive(
+                    contentPadding: EdgeInsets.zero,
+                    value: _zhipuSearchAnswerOnly,
+                    onChanged: (value) => setState(() {
+                      _zhipuSearchAnswerOnly = value;
+                      if (value) _webSearchEnabled = true;
+                    }),
+                    title: const Text('仅使用智谱搜索问答流程'),
+                    subtitle: const Text(
+                      '每个问题均先调用智谱网页搜索，再由角色依据编号结果回答；需要 glm-4-flash 配置',
+                    ),
+                    secondary: Icon(Icons.newspaper_rounded, color: cs.primary),
+                  ),
+                  const Divider(height: 8),
+                  CharacterSkillEditor(
+                    enabled: _agenticEnabled,
+                    onEnabledChanged: (value) {
+                      setState(() {
+                        _agenticEnabled = value;
+                        if (value && _toolPermissions.isEmpty) {
+                          _toolPermissions = CharacterSkillResolver.defaultsFor(
+                            _draftCharacter(),
+                          ).permissions;
+                        }
+                      });
+                    },
+                    inferredSkills:
+                        CharacterSkillResolver.defaultsFor(_draftCharacter())
+                            .skills,
+                    recommendedTemplates:
+                        SkillDownloadService.recommendedTemplatesFor(
+                      _draftCharacter(),
+                    ),
+                    selectedTemplateIds: _selectedSkillTemplateIds,
+                    onTemplateToggle: (id) {
+                      setState(() {
+                        final next =
+                            Set<String>.from(_selectedSkillTemplateIds);
+                        if (next.contains(id)) {
+                          next.remove(id);
+                        } else {
+                          next.add(id);
+                        }
+                        _selectedSkillTemplateIds = next;
+                      });
+                    },
+                    selectedPermissions: _toolPermissions,
+                    onPermissionToggle: (permission) {
+                      setState(() {
+                        final next =
+                            List<ToolPermission>.from(_toolPermissions);
+                        if (next.contains(permission)) {
+                          next.remove(permission);
+                        } else {
+                          next.add(permission);
+                        }
+                        _toolPermissions = next;
+                      });
+                    },
+                  ),
+                ],
+              ),
+              const SizedBox(height: 32),
+              AppPrimaryButton(
+                onPressed: _isSaving ? null : _save,
+                icon: _isEditing ? Icons.check_rounded : Icons.add_rounded,
+                label: _isEditing ? '更新角色' : '创建角色',
+              ),
+              const SizedBox(height: 32),
+            ],
+          ),
         ),
       ),
     );
@@ -697,7 +730,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         : _avatarController.text;
     // 仅在「设为头像」开启时出图：这里是「当前生效头像」预览，不是 IP 形象预览。
     final image = _avatarFromIpImage
-        ? ref.read(databaseServiceProvider).characterAvatarImage(_draftCharacter())
+        ? ref
+            .read(databaseServiceProvider)
+            .characterAvatarImage(_draftCharacter())
         : null;
     return CharacterAvatar(
       fallbackText: displayAvatar,
@@ -751,8 +786,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         return;
       }
 
-      final age = int.tryParse(_ageController.text) ?? 25;
-      final hourlyLimit = int.tryParse(_hourlyLimitController.text) ?? 5;
+      final age = _parseOrDefault(_ageController.text, _kDefaultAge);
+      final hourlyLimit = _parseOrDefault(
+          _hourlyLimitController.text, _kDefaultHourlyReplyLimit);
       final personalityTags = _personalityController.text
           .split(',')
           .map((t) => t.trim())
@@ -832,6 +868,115 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
         if (_roleController.text.trim().isEmpty) '角色',
       ];
 
+  /// 表单文本 → 落库整数值的唯一解析口径。
+  ///
+  /// [_save] 与 [_draftSignature] 必须共用它：分开写两份时，任何一边改了兜底值都会
+  /// 让「是否已修改」的判定与真正写进 [AICharacter] 的值分叉 —— 要么每次返回都弹
+  /// 确认框，要么改了却不提示。
+  static int _parseOrDefault(String text, int fallback) =>
+      int.tryParse(text) ?? fallback;
+
+  /// 归一化后的表单快照，每一项都是 `String` / `int` / `bool`（可直接按值比较）。
+  ///
+  /// 字段清单必须与 [_save] 写进 [AICharacter] 的项一一对应：
+  /// 漏一项就是「改了却不提示」的静默漏判；多带页面内的缓存态则会让用户
+  /// 一进页面就被判成已修改。[_selectedSkillTemplateIds] 取原始勾选集合而非
+  /// [_mergedSkillIds]：被保留的那些非模板技能 id 来自 `widget.character`，
+  /// 本次会话内不会变，不参与「用户改了什么」。
+  List<Object?> _draftSignature() {
+    final tags = _personalityController.text
+        .split(',')
+        .map((t) => t.trim())
+        .where((t) => t.isNotEmpty)
+        .toList();
+    tags.sort();
+    final skills = _selectedSkillTemplateIds.toList()..sort();
+    final permissions = _toolPermissions.map((p) => p.name).toList()..sort();
+    return <Object?>[
+      _nameController.text.trim(),
+      _avatarController.text.trim(),
+      // 与 [_save] 同一套解析口径（[_parseOrDefault]）：写进库的就是解析结果，
+      // 不是输入框原文，因此「清空年龄」和「填 25」在编辑已有 25 岁角色时不算修改。
+      _parseOrDefault(_ageController.text, _kDefaultAge),
+      _roleController.text.trim(),
+      _systemPromptController.text.trim(),
+      _parseOrDefault(_hourlyLimitController.text, _kDefaultHourlyReplyLimit),
+      tags.join(','),
+      skills.join(','),
+      permissions.join(','),
+      _selectedApiConfigId,
+      _selectedVoiceId,
+      _selectedGender?.name ?? '',
+      _agenticEnabled,
+      _webSearchEnabled,
+      _proactiveChatEnabled,
+      _zhipuSearchAnswerOnly,
+      _workingIpRelPath,
+      _avatarFromIpImage,
+      _workingIpStyle,
+    ];
+  }
+
+  /// 单向比较：快照元素全是标量，逐项 `!=` 即精确相等（刻意不用哈希，
+  /// 「有没有改过」不容许碰撞导致漏判）。
+  static bool _signatureEquals(List<Object?> a, List<Object?> b) {
+    if (a.length != b.length) return false;
+    for (var i = 0; i < a.length; i++) {
+      if (a[i] != b[i]) return false;
+    }
+    return true;
+  }
+
+  bool get _isDirty => !_signatureEquals(_initialSignature, _draftSignature());
+
+  /// 返回：无改动直接退出，有改动先二次确认。确认框的两个按钮都指向「离页」，
+  /// 留在本页靠点遮罩或系统返回。
+  ///
+  /// 保存进行中直接忽略返回：那次保存的续体会自己出栈，此处再 pop 一次会落到
+  /// 表单下面那一页；弹确认框更糟 —— 保存成功后的 `Navigator.pop(context, character)`
+  /// 会先命中栈顶的确认框，用它去 complete `_UnsavedExitAction?` 的 completer
+  /// 会抛类型错误。
+  Future<void> _handleBack() async {
+    if (_isSaving) return;
+
+    if (!_isDirty) {
+      Navigator.pop(context);
+      return;
+    }
+    final name = _nameController.text.trim();
+    final action = await showDialog<_UnsavedExitAction>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        title: const Text('资料尚未保存'),
+        content: Text(name.isEmpty
+            ? '角色资料已修改但尚未保存，返回将丢弃这些修改。'
+            : '「$name」的资料已修改但尚未保存，返回将丢弃这些修改。'),
+        actions: [
+          TextButton(
+            onPressed: () =>
+                Navigator.pop(dialogContext, _UnsavedExitAction.discard),
+            child: Text('放弃保存',
+                style: TextStyle(
+                    color: Theme.of(dialogContext).colorScheme.error)),
+          ),
+          FilledButton(
+            onPressed: () =>
+                Navigator.pop(dialogContext, _UnsavedExitAction.save),
+            child: const Text('保存并返回'),
+          ),
+        ],
+      ),
+    );
+    if (!mounted || action == null) return;
+    if (action == _UnsavedExitAction.discard) {
+      Navigator.pop(context);
+      return;
+    }
+    // 复用正式保存流程：校验/落盘失败时 [_save] 自身不会 pop，用户留在本页，
+    // 这里不需要（也不应该）再补一次退出。
+    await _save();
+  }
+
   AICharacter _draftCharacter() {
     final tags = _personalityController.text
         .split(',')
@@ -844,7 +989,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
           ? '未命名角色'
           : _nameController.text.trim(),
       avatar: _avatarController.text.trim(),
-      age: int.tryParse(_ageController.text) ?? 25,
+      age: _parseOrDefault(_ageController.text, _kDefaultAge),
       role: _roleController.text.trim(),
       personalityTags: tags,
       systemPrompt: _systemPromptController.text.trim(),

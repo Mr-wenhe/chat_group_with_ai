@@ -156,6 +156,15 @@ class WorkTaskPanel extends StatefulWidget {
 }
 
 class _WorkTaskPanelState extends State<WorkTaskPanel> {
+  /// 面板静止（鼠标不在其上）时的不透明度。
+  ///
+  /// 面板覆盖在聊天区之上，全实体时会挡住正在进行的对话。取 0.85 是为了让
+  /// 下方的聊天仍能透出来，同时面板正文不与背景内容糊在一起。
+  static const double _idleOpacity = 0.85;
+
+  /// 悬停切换的过渡时长。过长显得拖沓，过短像闪一下。
+  static const Duration _hoverTransitionDuration = Duration(milliseconds: 160);
+
   final Map<String, WorkTaskEvent> _latestEvents = <String, WorkTaskEvent>{};
   final Map<String, WorkTaskEvent> _latestActionEvents =
       <String, WorkTaskEvent>{};
@@ -172,6 +181,9 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
 
   /// 历史视图里被点开查看详情的任务 id；为空表示仍停在历史列表。
   String? _historyDetailTaskId;
+
+  /// 指针是否停在面板上。只有 [_supportsHoverReveal] 为真时才会改变绘制。
+  bool _isPointerInside = false;
 
   @override
   void didUpdateWidget(covariant WorkTaskPanel oldWidget) {
@@ -216,35 +228,71 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
     return widget.tasks.isEmpty ? null : widget.tasks.first;
   }
 
+  /// 触屏平台收不到 hover 事件，静止态会永远停在半透明，用户无从把它变实体。
+  /// 所以"未悬停半透明"只在桌面平台生效，移动端恒定实体。
+  ///
+  /// 读 Theme 的 platform 而非 defaultTargetPlatform：生产取值完全一致
+  /// （ThemeData.platform 默认就是它），但 Theme 可以被替换，widget 测试因此
+  /// 不必去改 foundation 的调试变量。
+  static bool _supportsHoverReveal(BuildContext context) =>
+      switch (Theme.of(context).platform) {
+        TargetPlatform.macOS ||
+        TargetPlatform.windows ||
+        TargetPlatform.linux =>
+          true,
+        _ => false,
+      };
+
+  double _panelOpacity(BuildContext context) {
+    if (!_supportsHoverReveal(context)) return 1.0;
+    return _isPointerInside ? 1.0 : _idleOpacity;
+  }
+
+  void _setPointerInside(bool inside) {
+    if (!mounted || _isPointerInside == inside) return;
+    setState(() => _isPointerInside = inside);
+  }
+
   @override
   Widget build(BuildContext context) {
-    return Semantics(
-      key: const Key('work-task-panel-semantics'),
-      container: true,
-      explicitChildNodes: true,
-      label: '工作任务面板',
-      child: Material(
-        key: const Key('work-task-panel'),
-        elevation: 12,
-        borderRadius: BorderRadius.circular(20),
-        color: Theme.of(context).colorScheme.surface,
-        child: ConstrainedBox(
-          // Desktop overlays have enough vertical room for a readable live
-          // transcript. The details section keeps its own scrollbar, so a
-          // taller panel does not make the action buttons unreachable.
-          constraints: const BoxConstraints(maxHeight: 720),
-          child: ScrollConfiguration(
-            // Material's desktop ScrollBehavior adds a scrollbar to every
-            // ScrollView. The task panel deliberately owns two independent
-            // scroll regions, so automatic scrollbars would overlap and make
-            // the inner thumb impossible to drag.
-            behavior:
-                ScrollConfiguration.of(context).copyWith(scrollbars: false),
-            child: Padding(
-              padding: const EdgeInsets.all(16),
-              child: _showHistory
-                  ? _buildHistoryBody(context)
-                  : _buildLiveBody(context),
+    // MouseRegion 与 AnimatedOpacity 都是单子代理，不改变面板拿到的约束，
+    // 也不影响命中测试，所以面板照常可点可滚动。
+    return MouseRegion(
+      onEnter: (_) => _setPointerInside(true),
+      onExit: (_) => _setPointerInside(false),
+      child: AnimatedOpacity(
+        key: const Key('work-task-panel-opacity'),
+        opacity: _panelOpacity(context),
+        duration: _hoverTransitionDuration,
+        child: Semantics(
+          key: const Key('work-task-panel-semantics'),
+          container: true,
+          explicitChildNodes: true,
+          label: '工作任务面板',
+          child: Material(
+            key: const Key('work-task-panel'),
+            elevation: 12,
+            borderRadius: BorderRadius.circular(20),
+            color: Theme.of(context).colorScheme.surface,
+            child: ConstrainedBox(
+              // Desktop overlays have enough vertical room for a readable live
+              // transcript. The details section keeps its own scrollbar, so a
+              // taller panel does not make the action buttons unreachable.
+              constraints: const BoxConstraints(maxHeight: 720),
+              child: ScrollConfiguration(
+                // Material's desktop ScrollBehavior adds a scrollbar to every
+                // ScrollView. The task panel deliberately owns two independent
+                // scroll regions, so automatic scrollbars would overlap and make
+                // the inner thumb impossible to drag.
+                behavior:
+                    ScrollConfiguration.of(context).copyWith(scrollbars: false),
+                child: Padding(
+                  padding: const EdgeInsets.all(16),
+                  child: _showHistory
+                      ? _buildHistoryBody(context)
+                      : _buildLiveBody(context),
+                ),
+              ),
             ),
           ),
         ),

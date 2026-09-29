@@ -18,6 +18,7 @@ import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
+import 'package:flutter/gestures.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -2868,6 +2869,79 @@ void main() {
 
       expect(taskBox.get(task.id), isNull);
       expect(database.hiddenWorkTaskIds(), isNot(contains(task.id)));
+    });
+  });
+
+  // 面板覆盖在聊天区之上，静止时半透明以便看见下方内容，指针移入即恢复实体。
+  // 触屏平台收不到 hover 事件，静止态会永远回不到实体，所以只在桌面平台生效。
+  group('WorkTaskPanel 悬停透明度', () {
+    const idleOpacity = 0.85;
+
+    // 面板只占 400x300，画布其余部分是"面板外"，指针才能真的移出去。
+    // 平台通过主题指定：生产里 ThemeData.platform 默认就是运行平台。
+    Future<void> pumpPanel(
+      WidgetTester tester, {
+      required TargetPlatform platform,
+    }) async {
+      await tester.pumpWidget(MaterialApp(
+        theme: ThemeData(platform: platform),
+        home: Scaffold(
+          body: Stack(
+            children: <Widget>[
+              Positioned(
+                left: 0,
+                top: 0,
+                width: 400,
+                height: 300,
+                child: WorkTaskPanel(
+                  tasks: const <AgentTask>[],
+                  eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+                  onSelectTask: (_) {},
+                  onStop: (_) {},
+                  onContinue: (_) {},
+                  onOpenConversation: (_) {},
+                  onCollapse: () {},
+                  onClose: () {},
+                ),
+              ),
+            ],
+          ),
+        ),
+      ));
+      await tester.pump();
+    }
+
+    // 读的是 AnimatedOpacity 的目标值，setState 后无需等动画跑完。
+    double panelOpacity(WidgetTester tester) => tester
+        .widget<AnimatedOpacity>(
+          find.byKey(const Key('work-task-panel-opacity')),
+        )
+        .opacity;
+
+    testWidgets('桌面平台：静止半透明，指针移入变实体，移出又变回半透明', (tester) async {
+      await pumpPanel(tester, platform: TargetPlatform.macOS);
+      expect(panelOpacity(tester), idleOpacity);
+
+      // 指针先落在面板外，避免 addPointer 本身就触发了 onEnter。
+      final mouse = await tester.createGesture(kind: PointerDeviceKind.mouse);
+      await mouse.addPointer(location: const Offset(700, 500));
+      addTearDown(mouse.removePointer);
+
+      await mouse.moveTo(
+        tester.getCenter(find.byKey(const Key('work-task-panel'))),
+      );
+      await tester.pump();
+      expect(panelOpacity(tester), 1.0);
+
+      await mouse.moveTo(const Offset(700, 500));
+      await tester.pump();
+      expect(panelOpacity(tester), idleOpacity);
+    });
+
+    testWidgets('触屏平台：恒定实体，不会停在半透明', (tester) async {
+      await pumpPanel(tester, platform: TargetPlatform.android);
+
+      expect(panelOpacity(tester), 1.0);
     });
   });
 }
