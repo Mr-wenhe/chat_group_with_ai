@@ -77,11 +77,16 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
         onDirectChat: (character) {
           if (mounted) Navigator.of(context).pushNamed('/dm/${character.id}');
         },
-        onAddMember: () {
-          // 先收起成员面板，避免两个底部弹层叠加、且添加后列表不会自动刷新。
-          Navigator.of(sheetContext).pop();
-          unawaited(_showAddMemberDialog());
-        },
+        // 只有主人能改这个群的成员表。客人的客户端不持有该群的任何 AI 角色
+        // （加入时 aiCharacterIds 就是空的），加成员只会往本机那份空名单里
+        // 写，主人那边完全看不到，两边就此分叉。
+        onAddMember: isHost
+            ? () {
+                // 先收起成员面板，避免两个底部弹层叠加、且添加后列表不会自动刷新。
+                Navigator.of(sheetContext).pop();
+                unawaited(_showAddMemberDialog());
+              }
+            : null,
         mutedIds: _muteStore.mutedFor(widget.groupId),
         onToggleMute: _setCharacterMuted,
         onMention: _insertMention,

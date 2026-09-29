@@ -92,6 +92,44 @@ class ApiWarningBanner extends StatelessWidget {
   }
 }
 
+/// 客人端的说明条：本群的 AI 回复不在本机生成。
+///
+/// 客人端按设计不持有、也不该持有该群角色的 API 凭据，所以这里绝不能复用
+/// [ApiWarningBanner] 那套「未配置 API Key，去配置」的措辞——那会把客人引去
+/// 做一件对他设备毫无意义的事（就算配了自己的 Key，AI 也仍由主人端生成）。
+/// 这条只负责说清回复的来源，免得客人把「等了一会儿没人说话」误判成自己的
+/// 网络或配置问题。
+///
+/// 样式刻意做成细条而非带边框的告警块：对客人而言这是长期成立的事实，
+/// 不是需要处理的异常，常驻的告警块只会持续挤占消息空间。
+class GuestAiNoticeBanner extends StatelessWidget {
+  final String message;
+
+  const GuestAiNoticeBanner({super.key, required this.message});
+
+  @override
+  Widget build(BuildContext context) {
+    final colorScheme = Theme.of(context).colorScheme;
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(14, 4, 14, 0),
+      child: Row(
+        children: [
+          Icon(Icons.smart_toy_outlined, size: 13, color: colorScheme.outline),
+          const SizedBox(width: 6),
+          Expanded(
+            child: Text(
+              message,
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+              style: TextStyle(fontSize: 11, color: colorScheme.outline),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+}
+
 /// 多人实时群聊的连接状态条。
 ///
 /// [notice] 非空表示有需要用户处理的问题（未配置 / 连不上 / 协议不一致），
