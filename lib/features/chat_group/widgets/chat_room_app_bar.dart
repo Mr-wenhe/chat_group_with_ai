@@ -24,6 +24,10 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
   final VoidCallback? onClearConversation;
   final VoidCallback? onOpenMembers;
 
+  /// 「邀请客人」入口。只有群主人看得到——客人无权再拉人进来，
+  /// 否则邀请码会变成一张不受控的通行证。
+  final VoidCallback? onInviteGuests;
+
   const ChatRoomAppBar({
     super.key,
     required this.title,
@@ -47,6 +51,7 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
     required this.onConfigureWebSearch,
     this.onClearConversation,
     this.onOpenMembers,
+    this.onInviteGuests,
   });
 
   @override
@@ -130,6 +135,7 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
                 onClearConversation: onClearConversation,
                 onExport: onExport,
                 onOpenMembers: onOpenMembers,
+                onInviteGuests: onInviteGuests,
               ),
               const SizedBox(width: 8),
             ],
@@ -137,7 +143,7 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
   }
 }
 
-enum _ChatRoomMoreAction { webSearch, clearConversation, export, members }
+enum _ChatRoomMoreAction { webSearch, clearConversation, export, members, invite }
 
 class _MoreActionsButton extends StatelessWidget {
   final bool showGroupActions;
@@ -147,6 +153,7 @@ class _MoreActionsButton extends StatelessWidget {
   final VoidCallback? onClearConversation;
   final VoidCallback onExport;
   final VoidCallback? onOpenMembers;
+  final VoidCallback? onInviteGuests;
 
   const _MoreActionsButton({
     required this.showGroupActions,
@@ -156,6 +163,7 @@ class _MoreActionsButton extends StatelessWidget {
     required this.onClearConversation,
     required this.onExport,
     required this.onOpenMembers,
+    required this.onInviteGuests,
   });
 
   @override
@@ -168,8 +176,17 @@ class _MoreActionsButton extends StatelessWidget {
           _ChatRoomMoreAction.clearConversation => onClearConversation?.call(),
           _ChatRoomMoreAction.export => onExport(),
           _ChatRoomMoreAction.members => onOpenMembers?.call(),
+          _ChatRoomMoreAction.invite => onInviteGuests?.call(),
         },
         itemBuilder: (context) => [
+          if (onInviteGuests != null)
+            const PopupMenuItem(
+              value: _ChatRoomMoreAction.invite,
+              child: _MenuAction(
+                icon: Icons.person_add_alt_1_rounded,
+                label: '邀请客人',
+              ),
+            ),
           PopupMenuItem(
             value: _ChatRoomMoreAction.webSearch,
             child: _MenuAction(icon: webSearchIcon, label: webSearchTooltip),

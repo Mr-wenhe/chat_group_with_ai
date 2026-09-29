@@ -8,10 +8,15 @@
       "deviceId": "macos"
     },
     {
-      "name": "chat_group (windows)",
+      "name": "chat_group (windows debug)",
       "request": "launch",
       "type": "dart",
-      "deviceId": "windows"
+    },
+    {
+      "name": "chat_group (windows release)",
+      "request": "launch",
+      "type": "dart",
+      "flutterMode": "release"
     },
     {
       "name": "chat_group (Chrome)",

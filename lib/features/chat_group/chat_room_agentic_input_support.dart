@@ -47,6 +47,8 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
           ? List<MediaAttachment>.from(_pendingAttachments)
           : null,
     );
+    // 广播不在这里做：_appendMessage 是本机所有新消息（本人发言 + AI 回复）
+    // 的统一出口，转发逻辑集中在那边，避免漏掉某个生成路径。
     await _appendMessage(userMessage);
     if (_isDirectChat) {
       // 记录该私聊由用户主动发起，影响后续主动联系的冷却判断。
@@ -62,6 +64,10 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
 
     // 用户开口即重置 burst 计数，让自动聊天重新获得完整额度。
     _autoChatRoundCount = 0;
+
+    // 客人的发言到此为止：只广播给其他真人，不在本机触发任何 AI 生成。
+    // 主人端的 AI 会把回复广播过来，客人这边表现为"对方群里有人接了话"。
+    if (_isRealtimeGuest) return;
 
     // Ordinary chat still needs an active speaker, but work-mode requests must
     // be durably recorded even when the group currently has no usable member;

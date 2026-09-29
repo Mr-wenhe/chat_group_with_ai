@@ -1,3 +1,8 @@
 {
+    "terminal.integrated.env.windows": {
+        "PUB_CACHE": "D:\\development\\ohos_slcache",
+        "PATH": "D:\\development\\ohos_flutter\\flutter_flutter\\bin;${env:PATH}"
+    },
+    "dart.flutterSdkPath": "D:\\development\\ohos_flutter\\flutter_flutter",
     "cmake.sourceDirectory": "D:/code/chat_group_with_ai/windows"
 }

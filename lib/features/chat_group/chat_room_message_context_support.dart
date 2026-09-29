@@ -360,6 +360,14 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
         !_canTouchUi) {
       return;
     }
+    // 广播必须在这里统一发出，而不是各个生成流程各发一次：AI 的回复同样
+    // 走这个漏斗，散在调用点上迟早会漏掉一条路径（比如工作模式）。
+    //
+    // 判据是"这条有没有落过库"，不是"在不在列表里"。AI 的流式回复会先以
+    // 空内容的临时消息插进 _messages 做增量渲染，收尾才走到这里提交——用列表
+    // 判断会把它当成已存在的旧消息，主人端的 AI 回复就一条也广播不出去。
+    // messageBox 是内存态 Hive box，containsKey 是 O(1)。
+    final isNewMessage = !_db.messageBox.containsKey(message.id);
     final visibleIds = _visibleCharacterIdsForMessage();
     if (message.visibleToCharacterIds.isEmpty) {
       message.visibleToCharacterIds = List<String>.from(visibleIds);
@@ -371,6 +379,7 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
       _hasRestrictedHistory = true;
     }
     await _repository.persistNewMessage(message);
+    if (isNewMessage) _relayToRoomIfNeeded(message);
     if (message.senderType == 'ai' || message.senderType == 'system') {
       await _markCurrentConversationRead(throughMessage: message);
     }
@@ -384,17 +393,21 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
       allCharacters: _allGroupCharacters,
     );
     _relationshipStates = _loader.stableGlobalRelationships();
-    unawaited(_observationEntry
-        .distillMessage(
-          message: message,
-          conversationId: widget.groupId,
-          conversationNameSnapshot:
-              _isDirectChat ? _directChatName() : (_group?.name ?? ''),
-          allCharacters: _allGroupCharacters,
-          isGroupChat: !_isDirectChat,
-          userProfile: _userProfile,
-        )
-        .catchError((_) {}));
+    // 客人端一律不调用 LLM，而记忆提炼是这条路径上唯一会真的打接口的一步
+    // （上面的 observeDeterministic 是纯本地计算）。主人端照常执行。
+    if (!_isRealtimeGuest) {
+      unawaited(_observationEntry
+          .distillMessage(
+            message: message,
+            conversationId: widget.groupId,
+            conversationNameSnapshot:
+                _isDirectChat ? _directChatName() : (_group?.name ?? ''),
+            allCharacters: _allGroupCharacters,
+            isGroupChat: !_isDirectChat,
+            userProfile: _userProfile,
+          )
+          .catchError((_) {}));
+    }
     if (!_canTouchUi) return;
     final existingIndex =
         _messages.indexWhere((existing) => existing.id == message.id);

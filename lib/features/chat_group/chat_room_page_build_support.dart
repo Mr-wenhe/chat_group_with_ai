@@ -80,6 +80,11 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
         onConfigureWebSearch: _configureWebSearchPolicy,
         onClearConversation: _showClearConversationDialog,
         onOpenMembers: _isDirectChat ? null : _showMembersSheet,
+        // 只有主人能邀请客人：客人没有房间的注册权，也不该转手扩散邀请码。
+        onInviteGuests:
+            !_isDirectChat && (_group?.isHost(_realtimeUserId) ?? false)
+                ? () => unawaited(_inviteGuests())
+                : null,
       ),
       body: _withRoundtableBackground(
         Column(
@@ -99,6 +104,14 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                 onEdit: () => Navigator.of(context).push(MaterialPageRoute(
                   builder: (_) => ChatGroupFormPage(group: _group),
                 )),
+              ),
+            // 只有已共享的群才谈得上"连没连上"；纯本机的群完全不出现这一条。
+            if (_isRealtimeShared)
+              RealtimeStatusBanner(
+                label: _realtimeStatusLabel,
+                notice: _realtimeNotice,
+                offline: _realtimeState != RealtimeConnectionState.connected,
+                onOpenSettings: () => Navigator.pushNamed(context, '/settings'),
               ),
             ChatRoomSearchStatus(
               state: _webSearchState,
@@ -135,6 +148,7 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                       readUserMessageIds: readUserMessageIds,
                       ownerName: _ownerMentionName,
                       unknownCharacter: _unknownCharacter(),
+                      memberNames: _realtimeMemberNames,
                       editableSenderIds:
                           _characters.map((character) => character.id).toSet(),
                       senderColor: _senderColor,

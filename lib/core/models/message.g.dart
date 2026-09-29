@@ -30,13 +30,15 @@ class MessageAdapter extends TypeAdapter<Message> {
       visibleToCharacterIds:
           fields[10] == null ? [] : (fields[10] as List?)?.cast<String>(),
       webSearchSnapshot: (fields[11] as Map?)?.cast<dynamic, dynamic>(),
+      senderName: fields[12] as String?,
+      remoteSeq: fields[13] as int?,
     );
   }
 
   @override
   void write(BinaryWriter writer, Message obj) {
     writer
-      ..writeByte(12)
+      ..writeByte(14)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -60,7 +62,11 @@ class MessageAdapter extends TypeAdapter<Message> {
       ..writeByte(10)
       ..write(obj.visibleToCharacterIds)
       ..writeByte(11)
-      ..write(obj.webSearchSnapshot);
+      ..write(obj.webSearchSnapshot)
+      ..writeByte(12)
+      ..write(obj.senderName)
+      ..writeByte(13)
+      ..write(obj.remoteSeq);
   }
 
   @override

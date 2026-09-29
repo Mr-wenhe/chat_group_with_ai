@@ -121,12 +121,15 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       }
       // 检查是否有上次异常中断的 agentic 任务需要恢复。
       _scheduleAgentTaskRecovery();
+      // 已共享的群建立实时连接；纯本机的群这里直接返回，不产生任何网络行为。
+      unawaited(_startRealtimeIfNeeded());
       if (ChatActivityPolicy.canStartAutoChat(
         workModeEnabled: _workModeEnabled,
         hasActiveWorkTask: _hasActiveWorkTaskForAutoChat,
         autoChatEnabled: _isAutoChatEnabled,
         hasCharacters: loaded.activeCharacters.isNotEmpty,
         hasApiConfig: loaded.hasAnyApiConfig,
+        isGuest: _isRealtimeGuest,
       )) {
         // 私聊更克制：延迟更久再主动开口，避免一进来就被打扰。
         final delay = loaded.isDirectChat
