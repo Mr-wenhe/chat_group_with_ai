@@ -353,11 +353,15 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
 
   /// 本次响应正文。生产流式路径只放 `message`，供应商形状与测试放在 `content`；
   /// 取值顺序与 [AgentDecisionParser.parseResponse] 保持一致。
+  ///
+  /// 空白 `content` 必须回退 `message`：解析器就是这么选的（`content` 为空白时看
+  /// `message`），这里若把空白 `content` 当正文，抢救就在一份解析器压根没读的文本
+  /// 上找前缀——两边看的不是同一份正文。
   String? _responseBody(Map<String, dynamic> response) {
     final content = response['content'];
-    if (content is String) return content;
+    if (content is String && content.trim().isNotEmpty) return content;
     final message = response['message'];
-    return message is String ? message : null;
+    return message is String && message.trim().isNotEmpty ? message : null;
   }
 
   /// 截断之后的续写指令：告诉模型哪一段已经落盘、从哪里继续、最后怎么合并。
@@ -365,18 +369,23 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
   /// 不写回任务上下文：它是这次重试的指令，不是任务的持久状态，重试成功后即失效。
   /// 与 [_truncatedOutputChunkingAdvice] 的差别只在"抢救是否成功"：没有任何内容
   /// 落盘时，模型只能从头分块写，点名分段文件反而是个不存在的路径。
+  ///
+  /// [rescuedTail] 为空表示这是一条**恢复**出来的指令（[WorkAgentLoop.execute] 的
+  /// 落地判据）：那时运行态里没有模型原文，指令照样可用，只是少了结尾回显——
+  /// 模型手里已经有那个分段文件的路径，读一遍比把上千字原文落进检查点便宜。
   String _continuationHint({
     required String targetPath,
     required String? rescuedPath,
     required int rescuedCharacters,
-    required String rescuedTail,
+    String rescuedTail = '',
   }) {
     if (rescuedPath == null) return _truncatedOutputChunkingAdvice;
     return '上一次输出被上限截断，已把已生成的部分抢救到分段文件 `$rescuedPath`'
         '（$rescuedCharacters 字）。继续用 workspace.patch 的 append 往这个文件'
         '补写余下内容（每次 content 控制在 3000 字以内），不要重写已写入的前缀；'
         '全文写完后用一次 workspace.patch 的 parts 合并到 `$targetPath`，再读回'
-        '验证并交付。已写入内容的结尾是：「$rescuedTail」。';
+        '验证并交付。'
+        '${rescuedTail.isEmpty ? '' : '已写入内容的结尾是：「$rescuedTail」。'}';
   }
 
   Future<String?> _repairModel(

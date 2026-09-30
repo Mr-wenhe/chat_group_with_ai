@@ -603,7 +603,8 @@ void main() {
       expect(result.isSuccess, isTrue, reason: result.detail);
     });
 
-    final invalidCases = <({String name, Map<String, dynamic> args, String detail})>[
+    final invalidCases =
+        <({String name, Map<String, dynamic> args, String detail})>[
       (
         name: 'append without content',
         args: {'path': 'report.md', 'append': true},
@@ -621,7 +622,11 @@ void main() {
       ),
       (
         name: 'parts together with content',
-        args: {'path': 'report.md', 'content': 'x', 'parts': ['a.md']},
+        args: {
+          'path': 'report.md',
+          'content': 'x',
+          'parts': ['a.md']
+        },
         detail: '不能与 content 或 append 同时使用',
       ),
       (
@@ -642,13 +647,23 @@ void main() {
       ),
       (
         name: 'parts with a blank entry',
-        args: {'path': 'report.md', 'parts': ['a.md', ' ']},
+        args: {
+          'path': 'report.md',
+          'parts': ['a.md', ' ']
+        },
         detail: '只能包含非空字符串',
       ),
       (
         name: 'append with a non-boolean flag',
         args: {'path': 'report.md', 'content': 'x', 'append': 'true'},
         detail: '类型不正确',
+      ),
+      // 空白追加是"什么都没写"：放它过去会落到工具侧的"未检测到实际修改"，模型
+      // 收到的解释（内容没有实际变化）与真因对不上。
+      (
+        name: 'append with blank content',
+        args: {'path': 'report.md', 'content': '  \n ', 'append': true},
+        detail: '追加内容不能为空',
       ),
     ];
 

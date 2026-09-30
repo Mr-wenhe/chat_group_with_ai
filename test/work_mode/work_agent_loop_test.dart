@@ -183,9 +183,10 @@ WorkToolDefinition _definition(
           : {
               'path': WorkToolValueType.string,
               'content': WorkToolValueType.string,
-              // 生产 schema 同样声明了它（`default_work_task_runner_tools.dart`）：
+              // 生产 schema 同样声明了它们（`default_work_task_runner_tools.dart`）：
               // 夹具少一个字段，循环合成的追加写就会在校验处被判成"不支持参数"。
               'append': WorkToolValueType.boolean,
+              'overwrite': WorkToolValueType.boolean,
             },
       required: skillDownload ? {'templateId'} : {'path'},
     ),
@@ -208,6 +209,26 @@ WorkToolDefinition _patchDefinition(
     tool,
     access: WorkToolAccess.mutation,
     pipeline: pipeline ?? _recordingPipeline(<String>[]),
+  );
+}
+
+/// 审批通过后协调器重放的那个请求。
+///
+/// 生产里它是 runner 内存中留着的那份完整请求（`_pendingRequests[task.id]`），不是
+/// 持久化检查点——检查点只用于 `canResumeApprovedTool` 的逐字比对，因此这里按抢救
+/// 的真实参数重建：派生路径从检查点取（它是抢救自己算出来的），正文与开关与
+/// `_salvageRequest` 一致，于是两边的 `safeToolRequestCheckpoint` 逐字相同。
+ToolRequest _resumeSalvageRequest(AgentTask task) {
+  final checkpoint = ToolRequest.fromJsonString(task.pendingToolRequestJson)!;
+  return ToolRequest(
+    tool: AgentToolName.workspacePatch,
+    reason: '截断抢救',
+    args: {
+      'path': checkpoint.args['path'],
+      'content': '第一段',
+      'append': true,
+      'overwrite': false,
+    },
   );
 }
 
@@ -1723,6 +1744,10 @@ void main() {
     // 缺了它，暂存分段会立刻满足交付物契约，任务带着被截断的前缀 completed。
     expect(args['append'], isTrue,
         reason: '抢救写入不得被当成交付物已就绪');
+    // `overwrite: false` 把"跨任务同名（哈希只由内容决定）时静默把同一段前缀接两遍"
+    // 换成"放弃这次抢救、退回话术路径"：内容静默翻倍比少救一次危险得多。
+    expect(args['overwrite'], isFalse,
+        reason: '抢救写入必须拒绝覆盖已存在的同名分段');
     expect(
       events.any((event) => event.safeMetadata['salvagedCharacters'] != null),
       isTrue,
@@ -2013,6 +2038,286 @@ void main() {
     expect(retryPrompt, isNot(contains('report.rescue-')),
         reason: '抢救没落盘，不得点名一个不存在的分段文件');
     expect(retryPrompt, contains('拆成多次动作'));
+  });
+
+  test('a salvage that needs approval marks its source before the pause',
+      () async {
+    // 抢救的第一次几乎必然要审批（分段是新路径）。审批一弹，任务就带离循环，而用户
+    // 面前只有一张普通的变更确认卡：`需要批准 workspace.patch：report.rescue-<hash>.md`
+    // ——和"模型主动新建了一个陌生哈希名文件"完全同形。所以来源必须在弹审批之前
+    // 就写进事件流（设计 §4.3）。
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"第一段',
+      })
+      ..responses.add({'success': true, 'content': '还是写坏的正文'});
+    final tool = _FakeTool();
+    final events = <WorkTaskEvent>[];
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _definition(
+            AgentToolName.workspacePatch,
+            tool,
+            access: WorkToolAccess.mutation,
+            pipeline: WorkToolMutationPipeline(
+              approval: (_) => const WorkToolResult.waitingForApproval(
+                message: '需要用户批准',
+              ),
+            ),
+          ),
+        ],
+      ),
+      events: events,
+    );
+
+    final task = _task(id: 'truncation-salvage-source-event');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.waitingForApproval);
+    expect(tool.calls, 0, reason: '审批没过，写入还没发生');
+    final announced = events
+        .where((event) => event.safeMetadata['scope'] == 'truncationSalvage')
+        .toList(growable: false);
+    expect(announced, hasLength(1),
+        reason: '审批之前只该有一条标明来源的事件：'
+            '${events.map((event) => event.title).join(' | ')}');
+    final source = announced.single;
+    expect(source.title, contains('截断'));
+    expect(source.title, contains('抢救'));
+    expect(source.title, contains('3 字'), reason: '要说明救回多少字');
+    expect(source.safeMetadata['partPath'], contains('report.rescue-'));
+    expect(source.safeMetadata['truncatedTargetPath'], 'report.md');
+    expect(source.safeMetadata['salvagedCharacters'], 3);
+    expect(source.safeMetadata['truncated'], isTrue);
+    expect(source.kind, WorkTaskEventKind.toolOutput);
+  });
+
+  test('a salvaged part file keeps its continuation hint across an approval pause',
+      () async {
+    // 抢救落盘要审批 → 任务暂停 → 用户批准 → 恢复运行，而 `execute` 会重新进入：
+    // 续写指令若只活在循环局部变量里，这一刻就没了。模型于是只看到
+    // `committedWrites` 里多了个 `report.rescue-<hash>.md`，没有"从这里接着写"的
+    // 说明，大概率重吐全文、再撞上限、再抢救、再弹审批。
+    var needsApproval = true;
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"第一段',
+      })
+      ..responses.add({'success': true, 'content': '还是写坏的正文'})
+      ..responses.add(_finishDecision('按续写指令补齐并交付。'));
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _definition(
+            AgentToolName.workspacePatch,
+            tool,
+            access: WorkToolAccess.mutation,
+            pipeline: WorkToolMutationPipeline(
+              approval: (_) => needsApproval
+                  ? const WorkToolResult.waitingForApproval(message: '需要用户批准')
+                  : null,
+            ),
+          ),
+        ],
+      ),
+    );
+
+    final task = _task(id: 'truncation-salvage-resume-hint');
+    final first = await loop.execute(task);
+
+    expect(first.status, WorkAgentLoopStatus.waitingForApproval);
+    expect(tool.calls, 0);
+    expect(task.executionStateJson, contains('truncationSalvage'),
+        reason: '运行态必须活过这次暂停，否则恢复后无从重建指令');
+
+    // 用户批准：协调器把任务拨回 queued，并把同一个请求重放回循环。
+    needsApproval = false;
+    final pending = _resumeSalvageRequest(task);
+    expect(pending.args['path'], contains('report.rescue-'));
+    task
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false;
+    final second = await loop.execute(task, approvedPendingTool: pending);
+
+    expect(second.status, WorkAgentLoopStatus.completed,
+        reason: '${second.message}; ${task.lastError}');
+    expect(tool.calls, 1, reason: '重放的就是那次抢救写入');
+    final resumedPrompt = model.requests.last.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    // 用抢救提示独有的措辞钉住指令本身：`report.rescue-` 会经 `committedWrites` 的
+    // 操作键漏进 context，只断言文件名的话，把续写指令整个摘掉也照样绿。
+    expect(resumedPrompt, contains('补写余下内容'),
+        reason: '恢复后仍必须告诉模型从那个分段文件接着写');
+    expect(resumedPrompt, contains('report.rescue-'),
+        reason: '恢复后的指令必须点名已抢救的分段文件');
+  });
+
+  test('a denied salvage approval leaves no continuation hint behind', () async {
+    // 运行态写在发起写入**之前**（否则审批暂停会把它一起丢掉），所以"记录在"不等于
+    // "内容在"。用户拒绝审批时那次写入从未发生：此时若按记录重建指令，模型会以为
+    // 前缀已经在分段文件里，只写余下部分——合并出来的交付物缺了前半截。
+    var needsApproval = true;
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"第一段',
+      })
+      ..responses.add({'success': true, 'content': '还是写坏的正文'})
+      ..responses.add(_finishDecision('按分块指令完成。'));
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _definition(
+            AgentToolName.workspacePatch,
+            tool,
+            access: WorkToolAccess.mutation,
+            pipeline: WorkToolMutationPipeline(
+              approval: (_) => needsApproval
+                  ? const WorkToolResult.waitingForApproval(message: '需要用户批准')
+                  // 生产里的"拒绝"是一次成功的空操作（`rejected: true`），不是失败：
+                  // 模型据此换一条安全路径，任务不该因此判死。
+                  : const WorkToolResult.success(
+                      message: '用户拒绝了该变更，未执行。',
+                      data: {'rejected': true},
+                    ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    final task = _task(id: 'truncation-salvage-resume-denied');
+    await loop.execute(task);
+    expect(task.executionStateJson, contains('truncationSalvage'));
+
+    needsApproval = false;
+    final pending = _resumeSalvageRequest(task);
+    task
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false;
+    final second = await loop.execute(task, approvedPendingTool: pending);
+
+    expect(second.status, WorkAgentLoopStatus.completed,
+        reason: '${second.message}; ${task.lastError}');
+    expect(tool.calls, 0, reason: '被拒的写入从未进 handler');
+    final resumedPrompt = model.requests.last.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(resumedPrompt, isNot(contains('补写余下内容')),
+        reason: '没落盘就没有"已写入的前缀"，不得发续写指令');
+    expect(resumedPrompt, isNot(contains('已写入内容的结尾是')));
+  });
+
+  test('the echoed tail never splits a surrogate pair', () async {
+    // `substring(length - 200)` 可能正好劈开代理对，孤立代理经 `utf8.encode` 会静默
+    // 变成 U+FFFD。这里让那个表情恰好落在切口上：按码元切时提示里一个**完整**表情
+    // 都没有（只剩一个孤立低代理），按 runes 切才原样保留。
+    final content = '${'a' * 198}😀${'a' * 199}';
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"$content',
+      })
+      ..responses.add({'success': true, 'content': '还是写坏的正文'})
+      ..responses.add(_finishDecision('完成。'));
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+    );
+
+    final task = _task(id: 'truncation-salvage-tail-runes');
+    await loop.execute(task);
+
+    final retryPrompt = model.requests.last.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(retryPrompt, contains('已写入内容的结尾是'));
+    expect(retryPrompt.runes.contains(0x1F600), isTrue,
+        reason: '结尾回显里的代理对必须完整');
+    final loneSurrogates = retryPrompt.runes
+        .where((rune) => rune >= 0xD800 && rune <= 0xDFFF)
+        .toList(growable: false);
+    expect(loneSurrogates, isEmpty,
+        reason: '回显里不得出现孤立代理：$loneSurrogates');
+  });
+
+  test('the echoed tail survives the chain-of-thought vocabulary', () async {
+    // 被抢救的正文里出现"思维链"在本 App 的产物主题里很常见，而 `_publicText` 的
+    // 思维链正则从命中处**一直吃到字符串结尾**——续写指令的最后一段正好是结尾回显，
+    // 于是模型拿到的接点变成 `[已隐藏]`，无缝续写没了依据。
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"关于思维链的第 1 段。'
+            '结尾标记-ZZZ',
+      })
+      ..responses.add({'success': true, 'content': '还是写坏的正文'})
+      ..responses.add(_finishDecision('完成。'));
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+    );
+
+    final task = _task(id: 'truncation-salvage-tail-cot');
+    await loop.execute(task);
+
+    final retryPrompt = model.requests.last.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(retryPrompt, contains('已写入内容的结尾是'));
+    expect(retryPrompt, contains('结尾标记-ZZZ'),
+        reason: '结尾回显不得被思维链折叠吃掉');
+    expect(retryPrompt, isNot(contains('[已隐藏]')));
+  });
+
+  test('a blank content field still salvages from the message field',
+      () async {
+    // 解析器在 `content` 为空白时看 `message`；抢救若把空白 `content` 当正文，就是
+    // 在一份解析器压根没读的文本里找前缀——两边看的不是同一份正文。
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '   ',
+        'message': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"第一段',
+      })
+      ..responses.add({'success': true, 'content': '还是写坏的正文'})
+      ..responses.add(_finishDecision('按抢救结果续写完成。'));
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+    );
+
+    final task = _task(id: 'truncation-salvage-message-body');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    expect(tool.calls, 1, reason: '正文在 message 里，抢救照样要发生');
+    expect(tool.arguments.single['content'], '第一段');
   });
 
   test('untruncated malformed response still feeds the raw body back',

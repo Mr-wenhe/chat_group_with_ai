@@ -65,7 +65,8 @@ extension _DefaultWorkTaskRunnerFilePolicy on DefaultWorkTaskRunner {
             ? utf8.encode(replacement).length
             : content is String
                 ? utf8.encode(content).length
-                : 0,
+                : await _stagedPartsBytes(
+                    task, stage02, call.arguments['parts']),
         snapshotAvailable: mutations.snapshotPort != null,
         reversible: mutations.snapshotPort != null,
         riskReason: switch (action) {
@@ -100,6 +101,36 @@ extension _DefaultWorkTaskRunnerFilePolicy on DefaultWorkTaskRunner {
     } on Object {
       return null;
     }
+  }
+
+  /// `parts` 形态的规模提示：各分段字节数之和。
+  ///
+  /// 少算成 0 会让审批弹窗写着「预计 0 字节」——读起来像一次空写入，而用户正要
+  /// 据此判断这次合并的规模。分段本来就要逐个 stat 才能读，所以在计划阶段顺手量
+  /// 一次；量不出来的分段（缺失、越界）按 0 计，由 Stage02 的合并自己报"缺失分段"，
+  /// 计划阶段绝不把这里变成新的失败源。
+  Future<int> _stagedPartsBytes(
+    AgentTask task,
+    Stage02WorkspaceFileTool stage02,
+    Object? parts,
+  ) async {
+    if (parts is! List) return 0;
+    var total = 0;
+    for (final part in parts) {
+      if (part is! String || part.trim().isEmpty) continue;
+      try {
+        final resolved = await stage02.pathPolicy.resolve(
+          _effectivePath(task, stage02.workspaceRoot, part),
+          allowMissing: true,
+        );
+        if (resolved.exists && resolved.isFile) {
+          total += await File(resolved.path).length();
+        }
+      } on Object {
+        continue;
+      }
+    }
+    return total;
   }
 
   bool _isDirectWordPatch(AgentTask task, AgentToolCall call) {

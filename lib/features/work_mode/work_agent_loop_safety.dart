@@ -24,6 +24,12 @@ const Set<String> _sensitiveOperationKeys = {
 const int _maxModelImageDataUriChars = 7 * 1024 * 1024;
 const int _commandFailureHistoryLimit = 128;
 
+/// 截断抢救运行态在 `executionStateJson` 里的键（见 `_TruncationSalvageState`）。
+///
+/// 名字要避开 `_isPrivateField` 的正文黑名单（含 `content` / `raw` / `reasoning`
+/// 之类子串的键会在检查点里被丢掉），否则审批暂停时这份状态活不到恢复。
+const String _truncationSalvageStateKey = 'truncationSalvage';
+
 /// How many distinct artifact paths one task remembers across its whole run.
 ///
 /// The list is durable and is replayed into the model context every turn, so it
@@ -112,6 +118,60 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       execution['unchangedMutationCount'] = bounded;
     }
     task.executionStateJson = jsonEncode(execution);
+  }
+
+  /// 读回一次截断抢救的运行态（见 `_TruncationSalvageState`）。
+  ///
+  /// 逐字段校验而不是 `as`：检查点是可被外部写回的持久数据，缺字段或类型不对时
+  /// 必须退回"没有运行态"，而不是让一次恢复崩在类型转换上。
+  _TruncationSalvageState? _loadTruncationSalvage(AgentTask task) {
+    final value =
+        _safeExistingMap(task.executionStateJson)[_truncationSalvageStateKey];
+    if (value is! Map) return null;
+    final target = value['truncatedTargetPath'];
+    final part = value['partPath'];
+    final characters = value['salvagedCharacters'];
+    if (target is! String || target.trim().isEmpty) return null;
+    if (part is! String || part.trim().isEmpty) return null;
+    if (characters is! int || characters < 1) return null;
+    return _TruncationSalvageState(
+      truncatedTargetPath: target,
+      partPath: part,
+      salvagedCharacters: characters,
+    );
+  }
+
+  void _persistTruncationSalvage(
+    AgentTask task,
+    _TruncationSalvageState salvage,
+  ) {
+    final execution = _decodeMap(task.executionStateJson);
+    execution[_truncationSalvageStateKey] = {
+      'truncatedTargetPath': salvage.truncatedTargetPath,
+      'partPath': salvage.partPath,
+      'salvagedCharacters': salvage.salvagedCharacters,
+    };
+    task.executionStateJson = jsonEncode(execution);
+  }
+
+  void _clearTruncationSalvage(AgentTask task) {
+    final execution = _decodeMap(task.executionStateJson);
+    if (!execution.containsKey(_truncationSalvageStateKey)) return;
+    execution.remove(_truncationSalvageStateKey);
+    task.executionStateJson = execution.isEmpty ? '' : jsonEncode(execution);
+  }
+
+  /// 那次抢救写入是否**确实落盘**：它的分段路径出现在已提交的操作键里。
+  ///
+  /// `committedActionKeys` 的操作键是"工具名 + 规范化参数"，而 `path` 不是敏感字段
+  /// （只有 content 之类被哈希），所以路径明文可比。这是唯一能区分"记录在"与
+  /// "内容在"的现成证据：记录写在发起写入之前（否则审批暂停会把续写指令一起丢掉），
+  /// 而用户拒绝审批、路径被拒或写入失败时记录都还在。
+  bool _salvageLanded(_LoopState state, _TruncationSalvageState salvage) {
+    for (final key in state.committedActionKeys) {
+      if (key.contains(salvage.partPath)) return true;
+    }
+    return false;
   }
 
   /// Returns true only when this exact command/tool and diagnostic state was
@@ -735,32 +795,60 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     return null;
   }
 
-  String _publicText(String value, {int maximum = 1000}) {
-    var safe = value
-        .replaceAll(
-          RegExp(
-            r'<\s*think\b[^>]*>[\s\S]*?<\s*/\s*think\s*>',
-            caseSensitive: false,
-          ),
-          '',
-        )
-        .replaceAll(
-          RegExp(r'<\s*think\b[^>]*>[\s\S]*$', caseSensitive: false),
-          '',
-        )
-        .replaceAll(
-          RegExp(r'<\s*/?\s*think\b[^>]*>', caseSensitive: false),
-          '',
-        )
-        .replaceAll(
-          RegExp(
-            r'(?:chain[- ]of[- ]thought|思维链|隐藏思维|私有思维|内部推理)'
-            r'\s*[:：]?[\s\S]*$',
-            caseSensitive: false,
-          ),
-          '[已隐藏]',
-        )
-        .trim();
+  String _publicText(String value, {int maximum = 1000}) => _boundedText(
+        _foldChainOfThought(_stripThinkBlocks(value)),
+        maximum,
+      );
+
+  /// 续写指令（含其中回显的"已写入内容结尾"）专用的转义。
+  ///
+  /// 与 [_publicText] 只差一处：**不做思维链折叠**。那条正则
+  /// （`chain-of-thought|思维链|隐藏思维|内部推理`）从命中处一直吃到字符串结尾，而
+  /// 续写指令的最后一段正是回显的结尾——被抢救的正文里只要出现"思维链"（本 App 的
+  /// 产物主题里很常见），模型拿到的结尾就整段变成 `[已隐藏]`，无缝续写失去接点。
+  ///
+  /// 密钥与 URL 脱敏照做（回显的是模型原文）。**本地路径刻意不脱敏**：这条指令必须
+  /// 点名分段文件与目标文件的路径，而路径正则会把 `/work/report.rescue-3f9a2b1c.md`
+  /// 整段换成 `[本地路径]`，模型就不知道该往哪个文件续写。事件、检查点与面板各有
+  /// 自己的路径脱敏（事件存储 `_safeText` 那条），不受这里影响——面板详情同样有一条
+  /// "需要点名的路径被脱敏就失去了意义"的既有口径。
+  String _continuationText(String value, {int maximum = 1000}) => _boundedText(
+        const SearchSecretScanner()
+            .redact(_stripThinkBlocks(value), includeOpaqueTokens: true)
+            .replaceAll(RegExp(r'https?://[^\s,;）)]+'), '[外部地址]'),
+        maximum,
+      );
+
+  /// 抹掉模型写在正文里的 think 标记块。
+  String _stripThinkBlocks(String value) => value
+      .replaceAll(
+        RegExp(
+          r'<\s*think\b[^>]*>[\s\S]*?<\s*/\s*think\s*>',
+          caseSensitive: false,
+        ),
+        '',
+      )
+      .replaceAll(
+        RegExp(r'<\s*think\b[^>]*>[\s\S]*$', caseSensitive: false),
+        '',
+      )
+      .replaceAll(
+        RegExp(r'<\s*/?\s*think\b[^>]*>', caseSensitive: false),
+        '',
+      );
+
+  /// 把正文里从思维链标记起（含标记）到结尾的内容换成 `[已隐藏]`。
+  String _foldChainOfThought(String value) => value.replaceAll(
+        RegExp(
+          r'(?:chain[- ]of[- ]thought|思维链|隐藏思维|私有思维|内部推理)'
+          r'\s*[:：]?[\s\S]*$',
+          caseSensitive: false,
+        ),
+        '[已隐藏]',
+      );
+
+  String _boundedText(String value, int maximum) {
+    final safe = value.trim();
     if (safe.length <= maximum) return safe;
     return maximum <= 1 ? '…' : '${safe.substring(0, maximum - 1)}…';
   }

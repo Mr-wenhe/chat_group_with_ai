@@ -166,6 +166,29 @@ class _TruncationSalvageOutcome {
 const _TruncationSalvageOutcome _truncationSalvageFallback =
     _TruncationSalvageOutcome(hint: _truncatedOutputChunkingAdvice);
 
+/// 一次截断抢救的运行态：抢救写进哪个分段、原本要写哪个目标、救回多少字。
+///
+/// 它必须落进 `task.executionStateJson` 的运行态字段，不能只留在循环局部变量里：
+/// 抢救的**第一次几乎必然要审批**（分段是新路径，要补充审批），而"暂停 → 用户批准
+/// → 恢复运行"之间 `execute` 会重新进入，局部变量连同续写指令一起消失。那时模型
+/// 只看到 `committedWrites` 里多了个 `report.rescue-<hash>.md`，没有任何"从这里接着
+/// 写"的说明，于是重吐全文、再撞上限、再抢救、再弹审批——这条路是被设计出来的
+/// 常态路径，不是边角。
+///
+/// 不存回显用的正文结尾：那是模型原文，没必要为了省一次重读而落盘；恢复后的指令
+/// 因此省略结尾回显（见 [_WorkAgentLoopRetry._continuationHint]）。
+class _TruncationSalvageState {
+  final String truncatedTargetPath;
+  final String partPath;
+  final int salvagedCharacters;
+
+  const _TruncationSalvageState({
+    required this.truncatedTargetPath,
+    required this.partPath,
+    required this.salvagedCharacters,
+  });
+}
+
 /// Executes one durable work task using the Stage 03 decision protocol.
 ///
 /// This is the sole production work-mode loop. Ordinary chat and legacy
@@ -467,6 +490,15 @@ class WorkAgentLoop
 
     try {
       var protocolRetryCount = 0;
+      // 这一次决策要带的续写指令（截断之后才非空）。它要跨迭代保留：截断说明
+      // "一次写完"这个策略不可行，下一次决策必须换成分块/续写指令，否则只是原样
+      // 再撞一次上限。抢救成功时它是"接着哪个分段文件写"的具体指令，失败时退回
+      // 通用的分块话术。`salvaged` 与它同寿命，只用来给事件标题选措辞。
+      var continuationHint = '';
+      var salvaged = false;
+      // 上一次运行留下的抢救运行态。审批暂停会把这次 execute 打断，所以它不在
+      // 局部变量里，而在检查点的运行态字段里（[_TruncationSalvageState]）。
+      final salvage = _loadTruncationSalvage(task);
       if (canResumeApprovedTool) {
         // The coordinator changes a waiting task back to queued after approval.
         // Replaying the exact in-memory request keeps the same model turn and
@@ -500,6 +532,16 @@ class WorkAgentLoop
         );
         if (resumed != null) return resumed;
       }
+      // 恢复"从这里续写"的指令：只有当那次抢救写入**确实已经落盘**时才重建。
+      // 记录写得比写入早（否则审批暂停会把指令一起丢掉），所以"记录在"不等于
+      // "内容在"——用户拒绝审批、写入失败时记录仍在，此时重建指令会告诉模型
+      // "前缀已经在分段文件里"，它就只写余下部分，合并出来的交付物缺了前半截，
+      // 比不救更糟。已提交的落地痕迹（`committedActionKeys` 里的操作键带明文
+      // 路径）是这里唯一的判据，重放刚提交的那次写入同样落进来。
+      if (salvage != null && _salvageLanded(state, salvage)) {
+        continuationHint = _restoredContinuationHint(salvage);
+        salvaged = true;
+      }
       final preflight = await preflightTool?.call(task);
       if (preflight != null) {
         const publicUpdate = '已找到匹配的专业技能，正在启用并按技能执行。';
@@ -513,12 +555,6 @@ class WorkAgentLoop
         );
         if (preflightResult != null) return preflightResult;
       }
-      // 这一次决策要带的续写指令（截断之后才非空）。它要跨迭代保留：截断说明
-      // "一次写完"这个策略不可行，下一次决策必须换成分块/续写指令，否则只是原样
-      // 再撞一次上限。抢救成功时它是"接着哪个分段文件写"的具体指令，失败时退回
-      // 通用的分块话术。`salvaged` 与它同寿命，只用来给事件标题选措辞。
-      var continuationHint = '';
-      var salvaged = false;
       while (true) {
         final boundary = await _checkBoundary(state);
         if (boundary != null) return boundary;
@@ -645,6 +681,9 @@ class WorkAgentLoop
         protocolRetryCount = 0;
         continuationHint = '';
         salvaged = false;
+        // 这一次决策成功了：续写指令已经送达并被采纳，运行态随之作废。留着它会让
+        // 后续任何一次恢复都重新念一遍"从那个分段文件接着写"。
+        _clearTruncationSalvage(task);
         final decision = parsed.decision!;
         // `raw` is intentionally discarded here. Only public_update and
         // validated tool data can cross the event/checkpoint boundary.
@@ -694,8 +733,12 @@ class WorkAgentLoop
   /// 任务带着被截断的前缀 `completed`、交付一个残缺文件，而这条续写指令永远等不
   /// 到下一轮。
   ///
-  /// 不带 `overwrite`：派生路径按内容哈希命名，首次必然不存在；同内容重复抢救的
-  /// 参数逐字相同，会被 `committedActionKeys` 在进 handler 之前去重。
+  /// 抢救写入带 `overwrite: false`。"派生路径按内容哈希命名，首次必然不存在"
+  /// 只在**任务内**成立：哈希只由内容决定，所以同一目录、同一目标名、字节级相同的
+  /// 前缀若在更早的任务里写过同名文件，`append` 会把这段**再接一遍**——静默的内容
+  /// 翻倍比少救一次危险得多，于是改成 `overwrite: false`（`_overwriteRefusal` 对每种
+  /// 形态同义）：撞名时这次抢救失败、退回话术路径，任务照常继续。任务内的重复抢救
+  /// 仍由 `committedActionKeys` 在进 handler 之前去重，不受影响。
   AgentToolCall _salvageRequest(String rescuedPath, String content) =>
       AgentToolCall(
         name: AgentToolName.workspacePatch,
@@ -703,6 +746,7 @@ class WorkAgentLoop
           'path': rescuedPath,
           'content': content,
           'append': true,
+          'overwrite': false,
         },
       );
 
@@ -724,7 +768,35 @@ class WorkAgentLoop
       salvage.targetPath,
       salvage.content,
     );
-    const notice = '已抢救被截断的输出，先写入分段文件再继续。';
+    final characters = salvage.content.length;
+    // 运行态先落盘、再发起写入：写入会弹审批、把任务带离循环，而"从这里续写"的
+    // 指令必须活过那次暂停（[_TruncationSalvageState]）。
+    _persistTruncationSalvage(
+      state.task,
+      _TruncationSalvageState(
+        truncatedTargetPath: salvage.targetPath,
+        partPath: rescuedPath,
+        salvagedCharacters: characters,
+      ),
+    );
+    // 抢救的来源必须**在弹审批之前**就写进事件流。只把它放进 `ToolRequest.reason`
+    // 不够——那条字段不进事件，于是任务暂停在审批上时，用户看到的弹窗与"模型主动
+    // 创建了一个陌生 hash 名文件"完全同形（设计 §4.3：审批与事件的文案都要标明
+    // 来源是截断抢救）。
+    await _emit(
+      state,
+      WorkTaskEventKind.toolOutput,
+      '模型输出被上限截断，正在抢救已生成的 $characters 字：先落入分段文件再续写余下部分。',
+      detail: rescuedPath,
+      safeMetadata: {
+        'scope': 'truncationSalvage',
+        'truncated': true,
+        'partPath': rescuedPath,
+        'truncatedTargetPath': salvage.targetPath,
+        'salvagedCharacters': characters,
+      },
+    );
+    final notice = '截断抢救（不是新的交付物）：把已生成的 $characters 字先写入分段文件，随后续写余下部分。';
     final stop = await _handleDecision(
       state,
       AgentToolDecision(
@@ -795,7 +867,12 @@ class WorkAgentLoop
         'truncatedTargetPath': salvage.targetPath,
       },
     );
-    if (!committed) return _truncationSalvageFallback;
+    if (!committed) {
+      // 没落盘就把运行态撤掉：留着它等于让下一次恢复（或下一个任务）被告知"前缀
+      // 已经在那个分段文件里"（见 [execute] 里的落地判据）。
+      _clearTruncationSalvage(state.task);
+      return _truncationSalvageFallback;
+    }
     return _TruncationSalvageOutcome(
       hint: _continuationHint(
         targetPath: salvage.targetPath,
@@ -807,6 +884,17 @@ class WorkAgentLoop
       rescuedCharacters: characters,
     );
   }
+
+  /// 恢复运行时的续写指令。
+  ///
+  /// 与抢救当场那条只差结尾回显：运行态里没有（也不该有）模型原文，恢复后的模型
+  /// 手里已有那份分段文件的路径，重读一遍比把上千字原文落进检查点便宜得多。
+  String _restoredContinuationHint(_TruncationSalvageState salvage) =>
+      _continuationHint(
+        targetPath: salvage.truncatedTargetPath,
+        rescuedPath: salvage.partPath,
+        rescuedCharacters: salvage.salvagedCharacters,
+      );
 
   /// 抢救没落盘时的公开原因。
   ///
@@ -843,7 +931,15 @@ class WorkAgentLoop
 
   /// 抢救内容的结尾片段，用来让模型无缝接上：只取有界的一段，绝不把整份
   /// 已生成内容回灌进 prompt。
-  String _boundedTail(String content) => content.length <= _salvageTailCharacters
-      ? content
-      : content.substring(content.length - _salvageTailCharacters);
+  ///
+  /// 按 `runes` 切，不按 UTF-16 码元：`substring(length - 200)` 可能正好劈开一个
+  /// 代理对，产出的孤立代理在 `utf8.encode` 时静默变成 U+FFFD——而这段回显的用途
+  /// 恰恰是让模型接上原文，凭空多出一个字符比少两个字更糟。
+  String _boundedTail(String content) {
+    final runes = content.runes.toList(growable: false);
+    if (runes.length <= _salvageTailCharacters) return content;
+    return String.fromCharCodes(
+      runes.sublist(runes.length - _salvageTailCharacters),
+    );
+  }
 }

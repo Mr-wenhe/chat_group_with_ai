@@ -115,6 +115,49 @@ void main() {
       expect(WorkTruncationSalvage.extract('陆教授：我先把报告写到桌面'), isNull);
       expect(WorkTruncationSalvage.extract(''), isNull);
     });
+
+    test('ignores a workspace.patch example that is not the action', () {
+      // 模型写"怎么做"的文档时把工具调用抄进正文是常见场景。这份文档一旦被截断，
+      // 缺了 `action=tool` 的判据就会把**文档片段**当成本次动作的内容落盘，再让
+      // 模型把它合并进真实交付物——比不抢救更糟。
+      expect(
+        WorkTruncationSalvage.extract(
+          '{"action":"plan","tool":null,"completion":{"steps":["用 '
+          '{"name":"workspace.patch","arguments":{"path":"report.md",'
+          '"content":"这是文档里的示例',
+        ),
+        isNull,
+      );
+      // 有 workspace.patch 与一对 path/content，但压根没有 action 字段。
+      expect(
+        WorkTruncationSalvage.extract(
+          '写文件时用 {"name":"workspace.patch","arguments":{"path":"report.md",'
+          '"content":"示例正文',
+        ),
+        isNull,
+      );
+    });
+
+    test('ignores an action that comes after the path', () {
+      // 动作自己的 `action` 字段在 `path` 之前；后面的那个属于正文里的另一段示例。
+      expect(
+        WorkTruncationSalvage.extract(
+          '{"tool":{"name":"workspace.patch","arguments":{"path":"report.md",'
+          '"content":"正文"},"action":"tool"}',
+        ),
+        isNull,
+      );
+    });
+
+    test('tolerates whitespace around the action field', () {
+      expect(
+        WorkTruncationSalvage.extract(
+          '{"action" : "tool", "tool":{"name":"workspace.patch","arguments":'
+          '{"path":"report.md","content":"正文',
+        )?.content,
+        '正文',
+      );
+    });
   });
 
   group('WorkTruncationSalvage.rescuePath', () {

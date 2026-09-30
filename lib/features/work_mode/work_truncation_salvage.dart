@@ -22,12 +22,21 @@ class WorkTruncationSalvage {
   /// 从被截断的正文里取出「workspace.patch 动作的大字符串参数」。
   ///
   /// 只在能确定是这类前缀时返回结果：正文不是决策 JSON、动作不是
-  /// workspace.patch、或没有大字符串参数时一律返回 null，由调用方退回话术路径。
+  /// `action=tool` 的 workspace.patch、或没有大字符串参数时一律返回 null，由调用方
+  /// 退回话术路径。
   static WorkTruncationSalvage? extract(String body) {
     if (body.trim().isEmpty) return null;
     if (!body.contains('workspace.patch')) return null;
-    final path = _readStringField(body, 'path');
-    if (path == null || path.trim().isEmpty) return null;
+    final pathField = _firstStringField(body, 'path');
+    if (pathField == null) return null;
+    final (pathKeyAt, path) = pathField;
+    if (path.trim().isEmpty) return null;
+    // `action=tool` 必须**出现在 path 之前**（设计 §4.1）。这条判据不是形式主义：
+    // 模型写文档时把工具调用当示例抄进正文是常见场景
+    // （`{"name":"workspace.patch","arguments":{"path":"report.md","content":"…"}}`），
+    // 这份文档一旦被截断，缺了它就等于把**文档片段**当成这次动作的内容落盘，
+    // 再让模型把它合并进真实交付物——比不抢救更糟。
+    if (!_declaresToolActionBefore(body, pathKeyAt)) return null;
     // 按列表优先级取第一个非空者：content（整文件写 / 追加的正文）优先于
     // replacement（精确补丁的正文）。这两者在解析器里是互斥形态，固定这个先后
     // 顺序即可与工具侧一致。
@@ -38,6 +47,18 @@ class WorkTruncationSalvage {
       }
     }
     return null;
+  }
+
+  /// `action` 字段出现在 [before] 之前，且值为 `tool`。
+  ///
+  /// 超过 [before] 的 `action` 一律不看：动作自己的那个字段在 `path` 之前，再往后
+  /// 出现的是正文里别的示例。
+  static bool _declaresToolActionBefore(String body, int before) {
+    for (final (keyAt, value) in _stringFields(body, 'action')) {
+      if (keyAt > before) break;
+      if (value.trim() == 'tool') return true;
+    }
+    return false;
   }
 
   /// 抢救内容的落盘路径。
@@ -94,29 +115,48 @@ class WorkTruncationSalvage {
       _isHex4(value.substring(0, 4)) && _isHex4(value.substring(4, 8));
 
   /// 从残缺 JSON 里读一个字符串字段：找到 `"key"` 后的冒号与开引号，按 JSON
-  /// 字符串规则解码到闭合引号或正文结束。
+  /// 字符串规则解码到闭合引号或正文结束。取**第一个**命中的字段。
+  static String? _readStringField(String body, String key) {
+    for (final field in _stringFields(body, key)) {
+      return field.$2;
+    }
+    return null;
+  }
+
+  /// 同 [_readStringField]，但同时给出键标记（`"key"`）在正文里的起点，供调用方
+  /// 判断字段之间的先后顺序。
+  static (int, String)? _firstStringField(String body, String key) {
+    for (final field in _stringFields(body, key)) {
+      return field;
+    }
+    return null;
+  }
+
+  /// 按出现顺序枚举名为 [key] 的字符串字段：`(键标记起点, 解码后的值)`。
   ///
   /// 尾部的残缺转义（半个 `\`、半截 `\uXX`）一律丢弃——留下半个转义会让落盘
   /// 内容出现非法字符或反斜杠字面量。
-  static String? _readStringField(String body, String key) {
+  static Iterable<(int, String)> _stringFields(String body, String key) sync* {
     final marker = '"$key"';
     var searchFrom = 0;
     while (true) {
       final keyAt = body.indexOf(marker, searchFrom);
-      if (keyAt < 0) return null;
+      if (keyAt < 0) return;
       searchFrom = keyAt + marker.length;
-      var index = searchFrom;
-      while (index < body.length && body[index].trim().isEmpty) {
-        index++;
-      }
+      var index = _skipWhitespace(body, searchFrom);
       if (index >= body.length || body[index] != ':') continue;
-      index++;
-      while (index < body.length && body[index].trim().isEmpty) {
-        index++;
-      }
+      index = _skipWhitespace(body, index + 1);
       if (index >= body.length || body[index] != '"') continue;
-      return _decodeJsonString(body, index + 1);
+      yield (keyAt, _decodeJsonString(body, index + 1));
     }
+  }
+
+  static int _skipWhitespace(String body, int index) {
+    var next = index;
+    while (next < body.length && body[next].trim().isEmpty) {
+      next++;
+    }
+    return next;
   }
 
   static String _decodeJsonString(String body, int start) {

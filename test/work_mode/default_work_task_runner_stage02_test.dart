@@ -1641,6 +1641,11 @@ void main() {
 
     await runner.run(task, WorkTaskCancellation());
     expect(task.status, AgentTaskStatus.waitingForApproval);
+    // 合并的规模提示是各分段字节数之和：算不出来只会写成「预计 0 字节」，读起来像
+    // 一次空写入。'第一段' / '第二段' 各 9 字节。
+    final checkpoint =
+        Map<String, dynamic>.from(jsonDecode(task.executionStateJson) as Map);
+    expect((checkpoint['approvalPlan'] as Map)['estimatedBytes'], 18);
     await _approveAndRun(database: database, runner: runner, task: task);
 
     expect(task.status, AgentTaskStatus.completed, reason: task.lastError);

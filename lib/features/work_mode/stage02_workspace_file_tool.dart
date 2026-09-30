@@ -611,8 +611,8 @@ class Stage02WorkspaceFileTool {
         },
       );
     }
-    final sensitive = files.isSensitivePath(absolute) ||
-        files.isSensitivePath(resolved.path);
+    final sensitive =
+        files.isSensitivePath(absolute) || files.isSensitivePath(resolved.path);
     final plan = _filePlan(
       action: resolved.exists
           ? WorkChangeActionType.modify
@@ -1113,7 +1113,8 @@ class _MergePart {
 /// Outcome of the shared mutation preamble: either the prepared [plan] (with
 /// its [resolvedPath] and raw [sensitive] flag), or a [refusal] the caller must
 /// return verbatim. Exactly one side is set.
-class _PreparedMutation {  final WorkChangePlan? plan;
+class _PreparedMutation {
+  final WorkChangePlan? plan;
   final String? resolvedPath;
   final bool sensitive;
   final Map<String, dynamic>? refusal;

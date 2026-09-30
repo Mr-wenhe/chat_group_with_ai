@@ -308,9 +308,10 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
         ),
       },
       // 续写指令不放进检查点：检查点超预算时会被压缩，压缩一次这条指令就静默
-      // 消失，模型会退回"一次写完整份"的老动作。
+      // 消失，模型会退回"一次写完整份"的老动作。它也不走 [_publicText]：那条会
+      // 折叠思维链并吃掉指令末尾的结尾回显（见 [_continuationText]）。
       if (continuationHint.trim().isNotEmpty)
-        {'role': 'system', 'content': _publicText(continuationHint)},
+        {'role': 'system', 'content': _continuationText(continuationHint)},
       {
         'role': 'system',
         'content': '公开任务检查点：${jsonEncode(promptContext)}',

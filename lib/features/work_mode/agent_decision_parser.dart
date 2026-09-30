@@ -651,8 +651,15 @@ class AgentDecisionParser {
       return null;
     }
     if (append == true) {
-      if (args['content'] is! String) {
+      final content = args['content'];
+      if (content is! String) {
         return 'workspace.patch 的 append 必须与 content 一起使用。';
+      }
+      // 空白追加是"什么都没写"。放它过去会落到工具侧的"未检测到实际修改"分支：
+      // 模型收到的是"内容没有实际变化，请补充修改点"，与真因（这次追加本来就是
+      // 空的）对不上，它于是去改内容而不是补上这一段。
+      if (content.trim().isEmpty) {
+        return 'workspace.patch 的追加内容不能为空。';
       }
       return null;
     }
