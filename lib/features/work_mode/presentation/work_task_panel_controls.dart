@@ -361,7 +361,12 @@ class _TaskEventTimeline extends StatefulWidget {
 
 class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   /// 贴着底部多少像素内仍算"在看最新"。
-  static const double _followThreshold = 48.0;
+  ///
+  /// 只要用户往上滚一点点就立刻交出控制权。旧值 48px 是个"死区"：
+  /// Windows 滚轮单档位移常常不到 48px，用户还没滚出死区，下一条流式动态
+  /// 就把他拽回底部，表现为"怎么往上翻都会被拉回最下面"。收紧到 8px 后，
+  /// 任意一次真实滚动都会立即停止跟随，只有重新滚回最底部才恢复跟随。
+  static const double _followThreshold = 8.0;
 
   final List<WorkTaskEvent> _events = <WorkTaskEvent>[];
   final Set<int> _seenSequences = <int>{};
