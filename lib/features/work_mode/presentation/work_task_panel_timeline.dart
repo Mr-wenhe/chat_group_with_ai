@@ -34,6 +34,7 @@ class _EventStreamError extends StatelessWidget {
                 '执行动态读取失败：${_safePanelText(error)}',
                 maxLines: singleLine ? 1 : null,
                 overflow: singleLine ? TextOverflow.ellipsis : null,
+                style: const TextStyle(fontSize: 12.5),
               ),
             ),
             TextButton(
@@ -83,6 +84,7 @@ class _PendingPublicOutput extends StatelessWidget {
                 text,
                 maxLines: singleLine ? 1 : null,
                 overflow: singleLine ? TextOverflow.ellipsis : null,
+                style: const TextStyle(fontSize: 12.5),
               ),
             ),
           ],
@@ -136,13 +138,14 @@ class _EventCard extends StatelessWidget {
                           title,
                           maxLines: singleLine ? 1 : null,
                           overflow: singleLine ? TextOverflow.ellipsis : null,
+                          style: const TextStyle(fontSize: 12.5),
                         ),
                       ),
                       const SizedBox(width: 8),
                       Text(
                         _eventTimeLabel(event.timestamp),
                         style: TextStyle(
-                          fontSize: 11,
+                          fontSize: 10,
                           color: colors.onSurfaceVariant,
                         ),
                       ),
@@ -153,7 +156,10 @@ class _EventCard extends StatelessWidget {
                     const SizedBox(height: 2),
                     Text(
                       detail,
-                      style: TextStyle(color: colors.onSurfaceVariant),
+                      style: TextStyle(
+                        fontSize: 12,
+                        color: colors.onSurfaceVariant,
+                      ),
                     ),
                   ],
                 ],
@@ -231,7 +237,10 @@ class _LivePublicOutput extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final colorScheme = Theme.of(context).colorScheme;
-    final bodyStyle = TextStyle(color: colorScheme.onPrimaryContainer);
+    final bodyStyle = TextStyle(
+      fontSize: 12.5,
+      color: colorScheme.onPrimaryContainer,
+    );
     return DecoratedBox(
       key: const Key('work-task-live-output'),
       decoration: BoxDecoration(
@@ -255,6 +264,7 @@ class _LivePublicOutput extends StatelessWidget {
                 Text(
                   'AI 正在输出公开进度',
                   style: Theme.of(context).textTheme.labelLarge?.copyWith(
+                        fontSize: 12.5,
                         color: colorScheme.onPrimaryContainer,
                       ),
                 ),

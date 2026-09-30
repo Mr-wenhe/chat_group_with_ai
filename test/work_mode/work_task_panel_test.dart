@@ -104,6 +104,49 @@ AgentTask _task({
 
 void main() {
   group('WorkTaskPanel', () {
+    testWidgets('hides the task summary section by default', (tester) async {
+      final task = _task(
+        id: 'summary-hidden-task',
+        conversationId: 'group-one',
+        characterId: 'developer',
+        request: '整理需求',
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      // 默认布局只留任务标签、执行动态与底部操作按钮：上半区整块（「任务详情」
+      // 开关、任务需求 / 运行状态 / 执行细节三卡、失败提示与「异常与日志」卡）
+      // 都不挂载。代码保留在 `_showSummarySection` 后面，显式传
+      // `showTaskSummarySection: true` 才恢复（见下方依赖上半区的用例）。
+      expect(find.byKey(const Key('work-task-details-toggle')), findsNothing);
+      expect(find.byKey(const Key('work-task-request')), findsNothing);
+      expect(
+        find.byKey(const Key('work-task-details-scrollbar')),
+        findsNothing,
+      );
+      expect(find.text('任务需求'), findsNothing);
+      expect(find.text('运行状态'), findsNothing);
+      expect(find.text('执行细节'), findsNothing);
+      expect(find.text('异常与日志'), findsNothing);
+      expect(
+        find.byKey(const Key('work-task-event-timeline')),
+        findsOneWidget,
+      );
+    });
+
     testWidgets('shows elapsed time for the current attempt', (tester) async {
       final task = _task(
         id: 'attempt-duration',
@@ -114,6 +157,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: WorkTaskPanel(
+            showTaskSummarySection: true,
             tasks: [task],
             eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
             onSelectTask: (_) {},
@@ -126,6 +170,9 @@ void main() {
           ),
         ),
       ));
+      // 上半区默认收起，耗时属于「运行状态」卡的内容，要先展开「任务详情」。
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('已执行 2 分钟'), findsOneWidget);
       expect(find.textContaining('1 小时'), findsNothing);
     });
@@ -143,6 +190,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: WorkTaskPanel(
+            showTaskSummarySection: true,
             tasks: [task],
             eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
             onSelectTask: (_) {},
@@ -156,6 +204,9 @@ void main() {
           ),
         ),
       ));
+      // 上半区默认收起，耗时属于「运行状态」卡的内容，要先展开「任务详情」。
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('已执行 2 分钟'), findsOneWidget);
     });
 
@@ -173,6 +224,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: WorkTaskPanel(
+            showTaskSummarySection: true,
             tasks: <AgentTask>[task],
             eventStreamFor: (_) => events.stream,
             onSelectTask: (_) {},
@@ -186,19 +238,18 @@ void main() {
         ),
       ));
 
+      // 上半区默认收起：三张卡各只占一行，内容要点「详情」才补出来。
+      expect(find.byKey(const Key('work-task-request')), findsNothing);
+      expect(find.text('执行角色：product-owner'), findsNothing);
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
+      expect(find.text('执行角色：product-owner'), findsOneWidget);
+      expect(find.text('步骤 3 / 8'), findsOneWidget);
+      expect(find.text('已执行 2 分钟'), findsOneWidget);
       expect(
         tester.widget<Text>(find.byKey(const Key('work-task-request'))).data,
         '整理发布说明',
       );
-      expect(find.text('执行角色：product-owner'), findsOneWidget);
-      expect(find.text('步骤 3 / 8'), findsOneWidget);
-      expect(find.text('已执行 2 分钟'), findsOneWidget);
-      // 执行细节卡默认折叠，只有点开「详情」后才补出计划摘要与结论。
-      await tester.ensureVisible(
-        find.byKey(const Key('work-task-details-toggle')),
-      );
-      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
-      await tester.pump();
       expect(find.text('先读取项目结构，再整理发布说明。'), findsOneWidget);
       expect(find.text('发布说明已整理完成。'), findsOneWidget);
 
@@ -229,11 +280,12 @@ void main() {
       expect(find.text('当前动作：正在读取项目配置'), findsOneWidget);
       expect(find.text('工具：read_text'), findsOneWidget);
       expect(find.text('已读取 pubspec.yaml'), findsOneWidget);
-      // 折叠态每条动态只占一行：标题还在，详情整行不渲染。
-      expect(find.text('发现 3 个待确认配置。'), findsNothing);
+      // 执行动态默认展开：每条动态完整显示标题与详情。
+      expect(find.text('发现 3 个待确认配置。'), findsOneWidget);
       await tester.tap(find.byKey(const Key('work-task-timeline-toggle')));
       await tester.pump();
-      expect(find.text('发现 3 个待确认配置。'), findsOneWidget);
+      // 收起后每条只占一行：标题还在，详情整行不渲染。
+      expect(find.text('发现 3 个待确认配置。'), findsNothing);
       expect(
         tester.getTopLeft(find.text('正在读取项目配置')).dy,
         lessThan(tester.getTopLeft(find.text('已读取 pubspec.yaml')).dy),
@@ -254,6 +306,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: WorkTaskPanel(
+            showTaskSummarySection: true,
             tasks: <AgentTask>[task],
             eventStreamFor: (_) => events.stream,
             onSelectTask: (_) {},
@@ -277,16 +330,15 @@ void main() {
       await tester.pump();
       await tester.pump();
 
-      expect(find.text('当前动作：任务已完成。'), findsOneWidget);
+      // 上半区默认收起，连「当前动作」都不渲染；展开「详情」后才补齐。
+      expect(find.text('当前动作：任务已完成。'), findsNothing);
       expect(find.text('当前动作：已读取项目关键文件'), findsNothing);
       expect(find.text('工具：workspace.read'), findsNothing);
       // 结论是展开态内容，折叠时不应出现在面板上。
       expect(find.text('项目分析结论已整理完成。'), findsNothing);
-      await tester.ensureVisible(
-        find.byKey(const Key('work-task-details-toggle')),
-      );
       await tester.tap(find.byKey(const Key('work-task-details-toggle')));
       await tester.pump();
+      expect(find.text('当前动作：任务已完成。'), findsOneWidget);
       expect(find.text('项目分析结论已整理完成。'), findsOneWidget);
       expect(find.text('工具：workspace.read'), findsNothing);
     });
@@ -568,6 +620,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: WorkTaskPanel(
+            showTaskSummarySection: true,
             tasks: <AgentTask>[task],
             eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
             onSelectTask: (_) {},
@@ -580,6 +633,9 @@ void main() {
         ),
       ));
 
+      // 上半区默认收起，「讨论理解进度 / 待解决」都在「运行状态」卡内容里。
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('讨论理解进度：65% · 第2轮'), findsOneWidget);
       expect(find.text('待解决：请确认最终桌面目录'), findsOneWidget);
     });
@@ -661,6 +717,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: WorkTaskPanel(
+            showTaskSummarySection: true,
             tasks: <AgentTask>[task],
             eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
             onSelectTask: (_) {},
@@ -673,6 +730,9 @@ void main() {
         ),
       ));
 
+      // 上半区默认收起，步骤数在「运行状态」卡内容里。
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('步骤 2 / 8'), findsOneWidget);
       expect(find.text('步骤 99 / 8'), findsNothing);
     });
@@ -782,6 +842,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: WorkTaskPanel(
+            showTaskSummarySection: true,
             tasks: <AgentTask>[task],
             eventStreamFor: (_) => events.stream,
             onSelectTask: (_) {},
@@ -806,15 +867,21 @@ void main() {
       }
       await tester.pump();
 
-      // 折叠态两个卡片都放得下，不渲染任何滚动条。
-      expect(find.byType(Scrollbar), findsNothing);
+      // 执行动态默认展开：一开始就只渲染事件区滚动条，上半区仍收起无滚动条。
+      expect(
+        find.byKey(const Key('work-task-event-scrollbar')),
+        findsOneWidget,
+      );
+      expect(
+        find.byKey(const Key('work-task-details-scrollbar')),
+        findsNothing,
+      );
+      expect(find.byType(Scrollbar), findsOneWidget);
 
       await tester.ensureVisible(
         find.byKey(const Key('work-task-details-toggle')),
       );
       await tester.tap(find.byKey(const Key('work-task-details-toggle')));
-      await tester.pump();
-      await tester.tap(find.byKey(const Key('work-task-timeline-toggle')));
       await tester.pump();
 
       final detailsScrollbar = tester.widget<Scrollbar>(
@@ -835,13 +902,16 @@ void main() {
         matching: find.byType(Scrollable),
       );
       expect(innerScrollable, findsOneWidget);
-      final before =
-          tester.state<ScrollableState>(innerScrollable).position.pixels;
-      await tester.drag(timeline, const Offset(0, -120));
+      // 默认展开且自动跟随到最新一条：视口已贴在列表底部，
+      // 向上能翻回更早的动态说明这个列表是可拖动的。
+      final position = tester.state<ScrollableState>(innerScrollable).position;
+      final before = position.pixels;
+      expect(before, greaterThan(0.0));
+      await tester.drag(timeline, const Offset(0, 180));
       await tester.pump();
       final after =
           tester.state<ScrollableState>(innerScrollable).position.pixels;
-      expect(after, greaterThan(before));
+      expect(after, lessThan(before));
     });
 
     testWidgets('switches between two tasks and keeps task details isolated',
@@ -864,6 +934,7 @@ void main() {
         home: Scaffold(
           body: StatefulBuilder(
             builder: (context, setState) => WorkTaskPanel(
+              showTaskSummarySection: true,
               tasks: <AgentTask>[taskOne, taskTwo],
               selectedTaskId: selectedTaskId,
               eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
@@ -878,6 +949,10 @@ void main() {
         ),
       ));
 
+      // 默认收起时任务需求不可见，展开「详情」后才校验当前任务的内容。
+      expect(find.byKey(const Key('work-task-request')), findsNothing);
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(
         tester.widget<Text>(find.byKey(const Key('work-task-request'))).data,
         '整理需求',
@@ -886,6 +961,10 @@ void main() {
       await tester.tap(find.byKey(const Key('work-task-tab-task-two')));
       await tester.pump();
 
+      // 切任务后回到收起态，「详情」需要重新展开。
+      expect(find.byKey(const Key('work-task-request')), findsNothing);
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(
         tester.widget<Text>(find.byKey(const Key('work-task-request'))).data,
         '实现面板',
@@ -909,6 +988,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: WorkTaskPanel(
+            showTaskSummarySection: true,
             tasks: <AgentTask>[task],
             eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
             onSelectTask: (_) {},
@@ -927,6 +1007,9 @@ void main() {
         ),
       ));
 
+      // 上半区默认收起，「执行角色」在「运行状态」卡内容里。
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('执行角色：产品经理'), findsOneWidget);
       expect(find.text('执行角色：worker-id'), findsNothing);
       expect(find.byKey(const Key('work-task-approve')), findsOneWidget);
@@ -1590,6 +1673,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: WorkTaskPanel(
+            showTaskSummarySection: true,
             tasks: <AgentTask>[task],
             eventStreamFor: (_) => events.stream,
             onSelectTask: (_) {},
@@ -1611,6 +1695,10 @@ void main() {
       await tester.pump();
       await tester.pump();
 
+      // 默认收起时三张卡都只占一行，「当前动作」要展开「任务详情」才可见。
+      expect(find.text('当前动作：正在规划下一步。'), findsNothing);
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('当前动作：正在规划下一步。'), findsOneWidget);
       expect(find.byKey(const Key('work-task-failure')), findsNothing);
       expect(find.byKey(const Key('work-task-continue')), findsNothing);
@@ -2276,6 +2364,7 @@ void main() {
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
           body: WorkTaskPanel(
+            showTaskSummarySection: true,
             tasks: [task],
             historyTasks: [task],
             hiddenTaskIds: {task.id},
@@ -2293,6 +2382,10 @@ void main() {
       await tester.pump();
       expect(find.textContaining('已从标签栏隐藏'), findsOneWidget);
       await tester.tap(find.byKey(Key('work-task-history-item-${task.id}')));
+      await tester.pump();
+      // 历史详情同样默认收起，展开「详情」后才看得到任务需求卡。
+      expect(find.byKey(const Key('work-task-request')), findsNothing);
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
       await tester.pump();
       expect(find.byKey(const Key('work-task-request')), findsOneWidget);
     });
@@ -2321,6 +2414,7 @@ void main() {
 
       await tester.pumpWidget(MaterialApp(
         home: WorkTaskOverlayHost(
+          showTaskSummarySection: true,
           taskStream: taskUpdates.stream,
           eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
           onStopTask: (_) async {},
@@ -2339,6 +2433,9 @@ void main() {
 
       expect(find.byKey(const Key('work-task-tab-hidden-old-task')),
           findsOneWidget);
+      // 上半区默认收起，「执行角色」在「运行状态」卡内容里，需要先展开。
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('执行角色：developer'), findsOneWidget);
 
       // A later task-stream delta must not replace the exact task selected
@@ -2566,6 +2663,7 @@ void main() {
 
       await tester.pumpWidget(MaterialApp(
         home: WorkTaskOverlayHost(
+          showTaskSummarySection: true,
           taskStream: taskUpdates.stream,
           eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
           onStopTask: (_) async {},
@@ -2581,6 +2679,9 @@ void main() {
           findsOneWidget);
       expect(find.byKey(const Key('work-task-tab-switch-two-task')),
           findsNothing);
+      // 上半区默认收起，「执行角色」在「运行状态」卡内容里，需要先展开。
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('执行角色：developer'), findsOneWidget);
 
       ConversationPresenceService.instance.enter('dm:switch-two');
@@ -2592,6 +2693,9 @@ void main() {
       expect(find.byKey(const Key('work-task-tab-switch-one-task')),
           findsNothing);
       // 选中项也必须跟着走：上个会话选过的任务不能继续占着详情。
+      // 换任务会回到收起态，所以这里要重新展开「任务详情」。
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('执行角色：tester'), findsOneWidget);
     });
 
@@ -2610,6 +2714,7 @@ void main() {
 
       await tester.pumpWidget(MaterialApp(
         home: WorkTaskOverlayHost(
+          showTaskSummarySection: true,
           taskStream: taskUpdates.stream,
           eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
           onStopTask: (_) async {},
@@ -2638,6 +2743,9 @@ void main() {
 
       // 关掉的标签必须自己回来，用户才能接着操作这条旧任务。
       expect(find.byKey(tabKey), findsOneWidget);
+      // 上半区默认收起，「执行角色」在「运行状态」卡内容里，需要先展开。
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('执行角色：developer'), findsOneWidget);
     });
   });
