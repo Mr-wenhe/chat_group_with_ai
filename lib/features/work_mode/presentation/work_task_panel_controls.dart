@@ -261,7 +261,7 @@ class _TaskTabs extends StatelessWidget {
                 key: Key('work-task-tab-${task.id}'),
                 label: Text(workTaskTabLabel(task)),
                 labelStyle: TextStyle(
-                  fontSize: 12,
+                  fontSize: 11,
                   fontWeight: FontWeight.w500,
                   color: selected
                       ? colors.onPrimaryContainer
@@ -305,7 +305,9 @@ class _PublicDetail extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    if (inline) return Text('$title：$text');
+    if (inline) {
+      return Text('$title：$text', style: const TextStyle(fontSize: 12.5));
+    }
     final colors = Theme.of(context).colorScheme;
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
@@ -313,13 +315,13 @@ class _PublicDetail extends StatelessWidget {
         Text(
           title,
           style: TextStyle(
-            fontSize: 13,
+            fontSize: 12,
             fontWeight: FontWeight.w600,
             color: colors.onSurfaceVariant,
           ),
         ),
         const SizedBox(height: 2),
-        Text(text),
+        Text(text, style: const TextStyle(fontSize: 12.5)),
       ],
     );
   }
@@ -358,6 +360,9 @@ class _TaskEventTimeline extends StatefulWidget {
 }
 
 class _TaskEventTimelineState extends State<_TaskEventTimeline> {
+  /// 贴着底部多少像素内仍算"在看最新"。
+  static const double _followThreshold = 48.0;
+
   final List<WorkTaskEvent> _events = <WorkTaskEvent>[];
   final Set<int> _seenSequences = <int>{};
   final ScrollController _eventScrollController = ScrollController();
@@ -367,6 +372,12 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   WorkTaskEvent? _livePublicEvent;
   bool _modelOutputPending = false;
   String _modelOutputPendingText = 'AI 正在整理公开进度…';
+
+  /// 新动态到达时是否自动滚到最新一条。
+  ///
+  /// 展开默认贴底（面板一打开就停在最新进度）；用户主动往上翻历史时置为
+  /// false，不再把他拽回底部，翻回底部后自动恢复跟随。
+  bool _followLatest = true;
 
   /// 本次"等待首段公开输出"的起点。
   ///
@@ -378,13 +389,20 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   @override
   void initState() {
     super.initState();
+    _eventScrollController.addListener(_syncFollowLatest);
     _listen();
   }
 
   @override
   void didUpdateWidget(covariant _TaskEventTimeline oldWidget) {
     super.didUpdateWidget(oldWidget);
-    if (oldWidget.taskId == widget.taskId) return;
+    if (oldWidget.taskId == widget.taskId) {
+      if (widget.expanded && !oldWidget.expanded) {
+        _followLatest = true;
+        _scrollToLatest();
+      }
+      return;
+    }
     _events.clear();
     _seenSequences.clear();
     _streamError = null;
@@ -392,15 +410,39 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     _livePublicEvent = null;
     _modelOutputPending = false;
     _modelOutputPendingText = 'AI 正在整理公开进度…';
+    _followLatest = true;
     unawaited(_subscription?.cancel());
     _listen();
   }
 
   @override
   void dispose() {
+    _eventScrollController.removeListener(_syncFollowLatest);
     unawaited(_subscription?.cancel());
     _eventScrollController.dispose();
     super.dispose();
+  }
+
+  /// 只有本来就贴着底部才继续跟随最新动态。
+  void _syncFollowLatest() {
+    if (!_eventScrollController.hasClients) return;
+    final position = _eventScrollController.position;
+    _followLatest = position.pixels >= position.maxScrollExtent - _followThreshold;
+  }
+
+  /// 展开态把视口滚到最新一条。
+  ///
+  /// 必须在布局之后执行：新动态到达时 `maxScrollExtent` 这一帧才更新，
+  /// 提前滚会停在旧的底部。
+  void _scrollToLatest() {
+    if (!widget.expanded) return;
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted || !_followLatest) return;
+      if (!_eventScrollController.hasClients) return;
+      final position = _eventScrollController.position;
+      if (position.maxScrollExtent <= 0) return;
+      _eventScrollController.jumpTo(position.maxScrollExtent);
+    });
   }
 
   void _listen() {
@@ -468,6 +510,8 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
             );
           }
         });
+        // 新动态落到列表尾部后贴底跟随，保证用户看到的始终是最新一条。
+        _scrollToLatest();
         WidgetsBinding.instance.addPostFrameCallback((_) {
           if (mounted) widget.onLatestEvent(event);
         });
@@ -492,6 +536,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
       _livePublicEvent = null;
       _modelOutputPending = false;
       _modelOutputPendingText = 'AI 正在整理公开进度…';
+      _followLatest = true;
     });
     _listen();
   }
@@ -614,6 +659,10 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
 
   @override
   Widget build(BuildContext context) {
+    // 每次重建都补一次"贴底"：首次打开面板、切换任务、流式卡片变高这些时机
+    // 不会有新事件经过监听回调，只有在这里调度才能保证视口一定落在最新一条。
+    // `_followLatest` 为 false（用户正在翻阅历史）时该方法内部直接返回。
+    _scrollToLatest();
     final error = _streamError;
     final liveDraft = _livePublicDraft;
     if (_events.isEmpty &&
@@ -631,7 +680,10 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
               color: Theme.of(context).colorScheme.onSurfaceVariant,
             ),
             const SizedBox(width: 6),
-            const Text('等待公开执行动态…'),
+            const Text(
+              '等待公开执行动态…',
+              style: TextStyle(fontSize: 12.5),
+            ),
           ],
         ),
       );
@@ -707,6 +759,12 @@ class _PanelBrandMark extends StatelessWidget {
   }
 }
 
+/// 上半区收起态单张卡片的固定高度。
+///
+/// 收起时只渲染标题行，把这行钉在 30 高里（行内容垂直居中），比展开态紧凑
+/// 得多；三张卡加上间距就是收起态上半区的全部可见内容。
+const double _collapsedSummaryRowHeight = 30.0;
+
 /// 面板里的信息分组卡片：统一"图标 + 小标题 + 内容"的结构，替代原来一长串
 /// 无分组的裸文本，让用户先看到分区再读细节。
 class _PanelCard extends StatelessWidget {
@@ -715,11 +773,18 @@ class _PanelCard extends StatelessWidget {
   final Widget? trailing;
   final Widget child;
 
+  /// 收起态：只留标题行，内容不挂载，整张卡固定 [_collapsedSummaryRowHeight] 高。
+  ///
+  /// 上半区的三张卡（任务需求 / 运行状态 / 执行细节）都由顶部那个开关统一
+  /// 控制，收起时它们仍然各占一行，用来提示"这里有这几块信息"。
+  final bool collapsed;
+
   const _PanelCard({
     required this.title,
     required this.icon,
     required this.child,
     this.trailing,
+    this.collapsed = false,
   });
 
   @override
@@ -736,31 +801,42 @@ class _PanelCard extends StatelessWidget {
           border: Border.all(color: colors.outlineVariant),
         ),
         child: Padding(
-          padding: const EdgeInsets.fromLTRB(12, 10, 12, 12),
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: <Widget>[
-              Row(
-                children: <Widget>[
-                  Icon(icon, size: 15, color: colors.onSurfaceVariant),
-                  const SizedBox(width: 6),
-                  Expanded(
-                    child: Text(
-                      title,
-                      style: TextStyle(
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
-                        letterSpacing: 0.3,
-                        color: colors.onSurfaceVariant,
+          // 收起态没有内容，横向留白即可，纵向高度由外层固定值决定。
+          padding: collapsed
+              ? const EdgeInsets.symmetric(horizontal: 12)
+              : const EdgeInsets.fromLTRB(12, 10, 12, 12),
+          child: SizedBox(
+            height: collapsed ? _collapsedSummaryRowHeight : null,
+            child: Column(
+              mainAxisAlignment: collapsed
+                  ? MainAxisAlignment.center
+                  : MainAxisAlignment.start,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: <Widget>[
+                Row(
+                  children: <Widget>[
+                    Icon(icon, size: 14, color: colors.onSurfaceVariant),
+                    const SizedBox(width: 6),
+                    Expanded(
+                      child: Text(
+                        title,
+                        style: TextStyle(
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                          letterSpacing: 0.3,
+                          color: colors.onSurfaceVariant,
+                        ),
                       ),
                     ),
-                  ),
-                  if (trailing != null) trailing!,
+                    if (trailing != null) trailing!,
+                  ],
+                ),
+                if (!collapsed) ...<Widget>[
+                  const SizedBox(height: 8),
+                  child,
                 ],
-              ),
-              const SizedBox(height: 8),
-              child,
-            ],
+              ],
+            ),
           ),
         ),
       ),
@@ -768,8 +844,10 @@ class _PanelCard extends StatelessWidget {
   }
 }
 
-/// 分组标题行右侧的「详情 / 收起」开关：折叠态只露一行摘要，展开后才显示
-/// 完整内容。执行细节卡与执行动态共用，保证两个入口的样式一致。
+/// 分组标题行右侧的「详情 / 收起」开关。
+///
+/// 上半区整体（任务需求 / 运行状态 / 执行细节）与执行动态共用同一个样式，
+/// 保证两个入口看起来是同一套交互。
 class _PanelToggleButton extends StatelessWidget {
   final Key toggleKey;
   final bool expanded;
@@ -790,7 +868,7 @@ class _PanelToggleButton extends StatelessWidget {
         minimumSize: Size.zero,
         padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
         tapTargetSize: MaterialTapTargetSize.shrinkWrap,
-        iconSize: 16,
+        iconSize: 15,
         foregroundColor: Theme.of(context).colorScheme.onSurfaceVariant,
       ),
       icon: Icon(
@@ -798,7 +876,7 @@ class _PanelToggleButton extends StatelessWidget {
       ),
       label: Text(
         expanded ? '收起' : '详情',
-        style: const TextStyle(fontSize: 12, fontWeight: FontWeight.w600),
+        style: const TextStyle(fontSize: 11, fontWeight: FontWeight.w600),
       ),
     );
   }
@@ -866,7 +944,7 @@ class _StatusBadge extends StatelessWidget {
             Text(
               _statusBadgeLabel(status),
               style: TextStyle(
-                fontSize: 12,
+                fontSize: 11,
                 fontWeight: FontWeight.w600,
                 color: tone.foreground,
               ),

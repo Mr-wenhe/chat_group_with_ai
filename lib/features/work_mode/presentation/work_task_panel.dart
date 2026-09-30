@@ -113,6 +113,14 @@ class WorkTaskPanel extends StatefulWidget {
   /// 当前会话的历史任务（含已被用户关掉标签的任务），按时间倒序。
   final List<AgentTask> historyTasks;
 
+  /// 是否渲染面板上半区（「任务详情」开关、任务需求 / 运行状态 / 执行细节三张卡、
+  /// 失败提示与「异常与日志」卡）。
+  ///
+  /// 默认关闭：面板自上而下只保留任务标签、执行动态与底部操作按钮，把高度全部
+  /// 让给执行动态。上半区代码仍完整保留，显式传 true 即可整块恢复
+  /// （回归测试覆盖上半区内容时就是这么打开的）。
+  final bool showTaskSummarySection;
+
   /// 已被用户从标签栏隐藏的任务 id；历史列表用它标注"已从标签栏隐藏"，
   /// 让用户知道记录还在、可以继续基于它追加要求。
   final Set<String> hiddenTaskIds;
@@ -161,6 +169,7 @@ class WorkTaskPanel extends StatefulWidget {
     this.characterNameFor,
     this.historyTasks = const <AgentTask>[],
     this.onHideTask,
+    this.showTaskSummarySection = false,
     DateTime Function()? clock,
   }) : clock = clock ?? DateTime.now;
 
@@ -376,6 +385,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
             latestAction: latestAction,
             toolName: toolName,
             actionError: _actionError,
+            showSummarySection: widget.showTaskSummarySection,
             characterNameFor: widget.characterNameFor,
             eventStreamFor: widget.eventStreamFor,
             onLatestEvent: _rememberLatestEvent,
@@ -462,6 +472,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               latestAction: null,
               toolName: null,
               actionError: null,
+              showSummarySection: widget.showTaskSummarySection,
               characterNameFor: widget.characterNameFor,
               eventStreamFor: widget.eventStreamFor,
               onLatestEvent: (_) {},

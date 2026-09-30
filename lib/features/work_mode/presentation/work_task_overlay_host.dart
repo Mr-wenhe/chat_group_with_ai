@@ -62,6 +62,13 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
   final WorkSnapshotService? snapshotService;
   final String Function(String characterId)? characterNameFor;
 
+  /// 是否渲染面板上半区（「任务详情」开关、任务需求 / 运行状态 / 执行细节三张卡、
+  /// 失败提示与「异常与日志」卡）。
+  ///
+  /// 默认 false：面板自上而下只剩任务标签、执行动态与底部操作按钮，高度全给
+  /// 执行动态。透传给 [WorkTaskPanel.showTaskSummarySection]，置 true 即可整块恢复。
+  final bool showTaskSummarySection;
+
   const WorkTaskOverlayHost({
     super.key,
     required this.child,
@@ -88,6 +95,7 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
     this.undoPreviewFor,
     this.snapshotService,
     this.characterNameFor,
+    this.showTaskSummarySection = false,
   });
 
   @override
@@ -314,6 +322,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
             isWide: isWide,
             viewportHeight: viewport.height,
             child: WorkTaskPanel(
+              showTaskSummarySection: widget.showTaskSummarySection,
               tasks: _tasks,
               hiddenTaskCount: _hiddenTaskCount,
               historyTasks: _historyTasksForActiveConversation(),

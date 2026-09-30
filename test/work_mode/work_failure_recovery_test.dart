@@ -987,6 +987,8 @@ void main() {
         MaterialApp(
           home: Scaffold(
             body: WorkTaskPanel(
+              // 上半区（失败原因 / 下一步提示）默认不渲染，这组用例要校验里面的文案。
+              showTaskSummarySection: true,
               tasks: <AgentTask>[task],
               eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
               onSelectTask: (_) {},
@@ -1097,6 +1099,9 @@ void main() {
 
       await pumpPanel(tester, task, onReauthorize: (_) async {});
 
+      // 上半区默认收起，失败块的「下一步」提示要先展开「任务详情」。
+      await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+      await tester.pump();
       expect(find.text('重新生成计划'), findsOneWidget);
       expect(find.textContaining('点击“重新生成计划”'), findsOneWidget);
     });
