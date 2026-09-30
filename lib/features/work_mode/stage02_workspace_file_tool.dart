@@ -11,6 +11,10 @@ import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:crypto/crypto.dart';
 
+/// 一次合并允许的分段数量上限。合并要按顺序把分段全部读进内存再原子写回，
+/// 没有上限的话一个被写坏的动作就能要求读进任意多个文件。
+const int maxWorkspaceMergeParts = 64;
+
 /// In-process Stage 02 tool boundary. No cross-process service is created
 /// here: every path is resolved against the configured grant and every
 /// mutation is checked against a task-scoped approval scope.
@@ -399,6 +403,141 @@ class Stage02WorkspaceFileTool {
     } on FileSystemException {
       return {'ok': false, 'error': 'io', 'message': '无法读取目标文件。'};
     }
+  }
+
+  /// 合并：按给定顺序把各分段拼成一个文件，用与 [write] 相同的原子替换路径
+  /// 写入 [path]。
+  ///
+  /// 顺序是模型的契约，因此刻意不排序、不去重。目标文件在整个过程中要么是旧
+  /// 版本、要么是新版本，不会出现"写到一半"的产物。
+  Future<Map<String, dynamic>> merge({
+    required String path,
+    required List<String> parts,
+  }) async {
+    if (parts.isEmpty || parts.length > maxWorkspaceMergeParts) {
+      return {
+        'ok': false,
+        'error': 'invalid_merge',
+        'message': parts.isEmpty
+            ? '合并至少需要一个分段文件。'
+            : '合并的分段数量超过上限 $maxWorkspaceMergeParts。',
+      };
+    }
+    try {
+      final partsPlan = await _resolveMergeParts(parts);
+      if (partsPlan.missing.isNotEmpty) {
+        return {
+          'ok': false,
+          'error': 'invalid_merge',
+          'message': '以下分段文件不存在或不可读，合并未执行：'
+              '${partsPlan.missing.join('、')}',
+          'missingParts': partsPlan.missing,
+        };
+      }
+      return _mergeResolvedParts(
+        path: path,
+        parts: partsPlan.paths,
+        estimatedBytes: partsPlan.estimatedBytes,
+      );
+    } on WorkspacePathException catch (error) {
+      return _pathError(error, path);
+    } on WorkspaceFileException catch (error) {
+      return _fileError(error);
+    } on FileSystemException {
+      return {'ok': false, 'error': 'io', 'message': '无法读取分段文件。'};
+    }
+  }
+
+  /// 解析 [parts] 中每个分段的真实路径与字节数。
+  ///
+  /// 只做路径解析与 stat，**不读内容**：敏感门必须先于任何分段读取，而路径
+  /// 解析与 stat 都不会把文件内容带进进程。缺失或不可读的分段按模型给出的原始
+  /// 拼写点名返回，好让错误信息直接对上模型的输入。
+  Future<({List<String> paths, List<String> missing, int estimatedBytes})>
+      _resolveMergeParts(List<String> parts) async {
+    final paths = <String>[];
+    final missing = <String>[];
+    var estimatedBytes = 0;
+    for (final part in parts) {
+      try {
+        final resolved = await pathPolicy.resolveExisting(_absolutePath(part));
+        if (resolved.isFile) {
+          paths.add(resolved.path);
+          estimatedBytes += await File(resolved.path).length();
+        } else {
+          missing.add(part);
+        }
+      } on WorkspacePathException {
+        missing.add(part);
+      }
+    }
+    return (paths: paths, missing: missing, estimatedBytes: estimatedBytes);
+  }
+
+  /// 敏感门通过之后才把分段读全并原子写回 [path]。
+  ///
+  /// [estimatedBytes] 只是计划的规模提示，从不参与审批比较。合并是整份替换，
+  /// 所以目标只需哈希（供 CAS）而不必读回；读回它反而会多一条无谓的字节上限。
+  Future<Map<String, dynamic>> _mergeResolvedParts({
+    required String path,
+    required List<String> parts,
+    required int estimatedBytes,
+  }) async {
+    final prepared = await _prepareMutation(
+      path: path,
+      notAFileMessage: '合并目标不是普通文件，未执行合并。',
+      estimatedBytes: estimatedBytes,
+    );
+    final refusal = prepared.refusal;
+    if (refusal != null) return refusal;
+    final plan = prepared.plan!;
+    final target = prepared.resolvedPath!;
+    // 敏感门必须覆盖全部分段：读敏感分段同样会把内容带进进程。此刻分段的路径
+    // 都已解析，但一处内容都还没读。
+    final sensitive = prepared.sensitive || parts.any(files.isSensitivePath);
+    final gateRefusal = _refuseSensitiveMutation(
+      plan: plan,
+      sensitive: sensitive,
+      path: target,
+    );
+    if (gateRefusal != null) return gateRefusal;
+    final buffer = StringBuffer();
+    for (final part in parts) {
+      // 与 append 同理：分段的完整性只能用字节级判据，面向模型的 12000 字符
+      // 输出上限会把长分段误判成截断，让分块合并整体失效。
+      final read = await _withReadLock(
+        part,
+        () => files.readTextForMutation(part),
+      );
+      if (read.truncated) {
+        return {
+          'ok': false,
+          'error': 'append_requires_full_read',
+          'message': '分段文件超过读取上限，无法安全合并：$part',
+          'path': part,
+        };
+      }
+      buffer.write(read.text);
+    }
+    final combined = buffer.toString();
+    final expectedSha = plan.actionType == WorkChangeActionType.modify
+        ? await _hashFile(File(target))
+        : null;
+    return _execute(
+      _filePlan(
+        action: plan.actionType,
+        path: target,
+        directory: plan.knownAffectedDirectories.first,
+        bytes: utf8.encode(combined).length,
+      ),
+      WorkspaceMutationRequest(
+        path: target,
+        contents: combined,
+        expectedSha256: expectedSha,
+        approvalDecision: approvalDecision,
+      ),
+      sensitivePath: sensitive,
+    );
   }
 
   /// Shared mutation preamble for [write] and [append] (and any later merge):

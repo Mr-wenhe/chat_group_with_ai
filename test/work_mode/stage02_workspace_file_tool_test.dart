@@ -524,4 +524,86 @@ void main() {
     expect(result['changed'], isTrue);
     expect(await File(path).readAsString(), '$original尾部');
   });
+
+  test('merge promotes a single part into the deliverable', () async {
+    final current = task('stage02-merge-single');
+    final tool = toolFor(current);
+    await File('${root.path}/report.part1.md').writeAsString('全文');
+
+    final result = await tool.merge(
+      path: '${root.path}/report.md',
+      parts: ['${root.path}/report.part1.md'],
+    );
+
+    expect(result['ok'], isTrue, reason: '${result['message']}');
+    expect(await File('${root.path}/report.md').readAsString(), '全文');
+  });
+
+  test('merge concatenates parts in the given order', () async {
+    final current = task('stage02-merge-order');
+    final tool = toolFor(current);
+    await File('${root.path}/p1.md').writeAsString('一');
+    await File('${root.path}/p2.md').writeAsString('二');
+
+    final result = await tool.merge(
+      path: '${root.path}/out.md',
+      parts: ['${root.path}/p2.md', '${root.path}/p1.md'],
+    );
+
+    expect(result['ok'], isTrue, reason: '${result['message']}');
+    // 顺序是模型的契约：这里刻意不排序、不去重。
+    expect(await File('${root.path}/out.md').readAsString(), '二一');
+  });
+
+  test('merge replaces an existing deliverable', () async {
+    final current = task('stage02-merge-replace');
+    final tool = toolFor(current);
+    final target = '${root.path}/report.md';
+    await File(target).writeAsString('旧版本');
+    await File('${root.path}/report.part1.md').writeAsString('新版本');
+
+    final result = await tool.merge(
+      path: target,
+      parts: ['${root.path}/report.part1.md'],
+    );
+
+    expect(result['ok'], isTrue, reason: '${result['message']}');
+    expect(await File(target).readAsString(), '新版本');
+  });
+
+  test('merge names the missing parts and keeps the target untouched',
+      () async {
+    final current = task('stage02-merge-missing');
+    final tool = toolFor(current);
+    final target = '${root.path}/report.md';
+    await File(target).writeAsString('旧版本');
+    await File('${root.path}/report.part1.md').writeAsString('一');
+
+    final result = await tool.merge(
+      path: target,
+      parts: ['${root.path}/report.part1.md', '${root.path}/report.part9.md'],
+    );
+
+    expect(result['ok'], isFalse);
+    expect(result['error'], 'invalid_merge');
+    expect(result['missingParts'], ['${root.path}/report.part9.md']);
+    expect(await File(target).readAsString(), '旧版本');
+  });
+
+  test('merge refuses more parts than the cap allows', () async {
+    final current = task('stage02-merge-cap');
+    final tool = toolFor(current);
+    await File('${root.path}/p1.md').writeAsString('一');
+
+    final result = await tool.merge(
+      path: '${root.path}/out.md',
+      parts: List<String>.filled(
+        maxWorkspaceMergeParts + 1,
+        '${root.path}/p1.md',
+      ),
+    );
+
+    expect(result['ok'], isFalse);
+    expect(result['error'], 'invalid_merge');
+  });
 }
