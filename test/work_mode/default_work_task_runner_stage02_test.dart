@@ -52,12 +52,14 @@ class _TestCredentials implements ApiCredentialResolver {
 class _SequencedGateway extends AiRequestGateway {
   final String patchPath;
   final String patchContent;
+  final Map<String, dynamic>? patchArguments;
   final bool repeatToolOnSecondModelCall;
   final String? finishSummary;
 
   _SequencedGateway({
     this.patchPath = 'notes.txt',
     this.patchContent = 'production-stage02',
+    this.patchArguments,
     this.repeatToolOnSecondModelCall = false,
     this.finishSummary,
   }) : super(
@@ -112,10 +114,8 @@ class _SequencedGateway extends AiRequestGateway {
               'public_update': '准备写入授权目录文件。',
               'tool': {
                 'name': 'workspace.patch',
-                'arguments': {
-                  'path': patchPath,
-                  'content': patchContent,
-                },
+                'arguments':
+                    patchArguments ?? {'path': patchPath, 'content': patchContent},
               },
               'completion': null,
             })
@@ -128,6 +128,72 @@ class _SequencedGateway extends AiRequestGateway {
                 'evidence': ['文件可重新读取'],
               },
             }),
+    };
+  }
+}
+
+/// 连续三次追加同一个交付物，然后收尾；用来钉住"create 一次 + modify 一次
+/// 之后同路径免费"的审批次数。
+class _AppendGateway extends AiRequestGateway {
+  _AppendGateway()
+      : super(
+          store: MemoryGovernanceStore(),
+          client: _UnusedClient(),
+        );
+
+  int calls = 0;
+  static const List<String> chunks = ['第一段', '第二段', '第三段'];
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required AiRequestPurpose purpose,
+    required String conversationId,
+    required String characterId,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    bool requiresTools = false,
+    bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) async {
+    calls++;
+    if (calls <= chunks.length) {
+      return {
+        'success': true,
+        'message': jsonEncode({
+          'action': 'tool',
+          'public_update': '正在追加第 $calls 段。',
+          'tool': {
+            'name': 'workspace.patch',
+            'arguments': {
+              'path': 'report.md',
+              'content': chunks[calls - 1],
+              'append': true,
+            },
+          },
+          'completion': null,
+        }),
+      };
+    }
+    return {
+      'success': true,
+      'message': jsonEncode({
+        'action': 'finish',
+        'public_update': '分块写入已完成。',
+        'tool': null,
+        'completion': {
+          'summary': '已生成 report.md。',
+          'evidence': ['文件可重新读取'],
+        },
+      }),
     };
   }
 }
@@ -1175,6 +1241,16 @@ void main() {
     expect(gateway.requestTokens.every((token) => token.isCancelled), isTrue);
     expect(task.workFailure?.type, WorkFailureType.retryableNetwork);
     expect(task.workFailure?.retryable, isTrue);
+    // 停滞必须自证成因：只写 `failure.type.name` 的话它和上游 5xx 都是
+    // retryableNetwork，事件里那条「准备重试」事后无法定性。
+    final stallRetries = (await eventStore.read(task.id))
+        .events
+        .where((event) => event.title == '模型请求暂时失败，准备重试。');
+    expect(stallRetries, isNotEmpty);
+    expect(
+      stallRetries.map((event) => event.safeMetadata['failureCode']).toSet(),
+      {'modelFirstByteStall'},
+    );
     // 每次都必须在总时限（3 秒）之前就被放弃：50 毫秒的停滞时限生效了。
     expect(gateway.cancellationDelays, hasLength(attempts));
     expect(
@@ -1346,6 +1422,360 @@ void main() {
         isTrue);
     expect((await snapshots.undo(task.id)).succeeded, isTrue);
     expect(await output.exists(), isFalse);
+  });
+
+  test('production runner appends through Stage02 without re-prompting',
+      () async {
+    // 追加序列的第一次是 create（文件不存在），第二次起是 modify；第二次因为
+    // 动作不在已批准集合里必须补一次审批，此后同路径不再弹窗。
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    expect(
+      await grants.authorizeDirectory(
+        authorizedDirectory.path,
+        consent: (_) async => true,
+      ),
+      isNotNull,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final snapshots = WorkSnapshotService(
+      appSupportDirectory: Directory('${hiveDirectory.path}/app-support-append'),
+      pathPolicy: pathPolicy,
+    );
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: snapshots,
+    );
+    final gateway = _AppendGateway();
+    final config = ApiConfig(
+      id: 'stage02-append-config',
+      name: 'Stage02 append config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'stage02-append-character',
+      name: 'Stage02 append character',
+      avatar: 'A',
+      age: 30,
+      role: '测试追加角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+    );
+    final task = AgentTask(
+      id: 'stage02-append-runner-task',
+      groupId: 'stage02-append-group',
+      characterId: character.id,
+      // 请求刻意不带"文件/报告"这类交付物措辞：带产物契约的请求会在第一个
+      // workspace.patch 写出交付物之后被产物契约自动判定完成（
+      // `_autoCompleteAfterArtifact`），任务根本走不到第二段追加。
+      userRequest: '把这几段内容按顺序接起来',
+      workModeTask: true,
+    );
+
+    Future<void> approveAndRun() async {
+      final checkpoint = jsonDecode(task.executionStateJson) as Map;
+      task.executionStateJson = jsonEncode({
+        ...checkpoint,
+        'approvalDecision': 'approved',
+      });
+      task.status = AgentTaskStatus.queued;
+      await database.agentTaskBox.put(task.id, task);
+      await runner.run(task, WorkTaskCancellation());
+    }
+
+    await runner.run(task, WorkTaskCancellation());
+    expect(task.status, AgentTaskStatus.waitingForApproval,
+        reason: '首次追加是 create，必须审批');
+    await approveAndRun();
+    expect(task.status, AgentTaskStatus.waitingForApproval,
+        reason: '第二次追加是 modify，动作不在已批准集合内，需要补充审批');
+    await approveAndRun();
+    expect(task.status, AgentTaskStatus.completed,
+        reason: '第三次追加落在已批准范围内，不再弹窗：${task.lastError}');
+
+    final output = File(
+      '${authorizedDirectory.path}/conversations/group_stage02-append-group/report.md',
+    );
+    expect(await output.readAsString(), '第一段第二段第三段');
+  });
+
+  test('production runner merges staged parts onto the deliverable path',
+      () async {
+    // 合并在私聊里就是"新建交付物且可能重名"的场景：此时 autoRenameIfExists
+    // 是开的，但目标路径本身就是交付物，改名只会造出"报告 (1).md"，而模型随后
+    // 按原路径读回的是旧文件。
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    expect(
+      await grants.authorizeDirectory(
+        authorizedDirectory.path,
+        consent: (_) async => true,
+      ),
+      isNotNull,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: WorkSnapshotService(
+        appSupportDirectory:
+            Directory('${hiveDirectory.path}/app-support-merge'),
+        pathPolicy: pathPolicy,
+      ),
+    );
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    final workspace = await workspaceService.loadOrCreate(
+      conversationId: 'stage02-merge-group',
+      isDirectChat: false,
+      requireWritable: true,
+    );
+    final root = workspace.workDirPath;
+    await File('$root/report.md').writeAsString('旧文');
+    await File('$root/part1.md').writeAsString('第一段');
+    await File('$root/part2.md').writeAsString('第二段');
+
+    final gateway = _SequencedGateway(
+      patchPath: 'report.md',
+      patchArguments: const {
+        'path': 'report.md',
+        'overwrite': false,
+        'parts': ['part1.md', 'part2.md'],
+      },
+    );
+    final config = ApiConfig(
+      id: 'stage02-merge-config',
+      name: 'Stage02 merge config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'stage02-merge-character',
+      name: 'Stage02 merge character',
+      avatar: 'M',
+      age: 30,
+      role: '测试合并角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+    );
+    final task = AgentTask(
+      id: 'stage02-merge-task',
+      groupId: 'stage02-merge-group',
+      characterId: character.id,
+      userRequest: '把分段合并成报告',
+      workModeTask: true,
+    )..executionStateJson = jsonEncode({'autoRenameIfExists': true});
+
+    await runner.run(task, WorkTaskCancellation());
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    task.executionStateJson = jsonEncode({
+      ...Map<String, dynamic>.from(jsonDecode(task.executionStateJson) as Map),
+      'approvalDecision': 'approved',
+    });
+    task.status = AgentTaskStatus.queued;
+    await database.agentTaskBox.put(task.id, task);
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(task.status, AgentTaskStatus.completed,
+        reason: '${task.lastError}');
+    expect(await File('$root/report.md').readAsString(), '第一段第二段');
+    expect(await File('$root/report (1).md').exists(), isFalse);
+    // 分段是中间产物，合并后保留。
+    expect(await File('$root/part1.md').exists(), isTrue);
+  });
+
+  test('production runner refuses to merge a sensitive part', () async {
+    // 审批检查点一次只带一个 approvalCapability：敏感分段要 sensitiveRead，
+    // 写目标要 mutation。生产里这条路径注定先弹一次读取、写还是失败，所以在
+    // 动手之前就拒掉，并且不为它弹任何审批。
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    expect(
+      await grants.authorizeDirectory(
+        authorizedDirectory.path,
+        consent: (_) async => true,
+      ),
+      isNotNull,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: WorkSnapshotService(
+        appSupportDirectory:
+            Directory('${hiveDirectory.path}/app-support-sensitive-merge'),
+        pathPolicy: pathPolicy,
+      ),
+    );
+    final workspaceService = WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    );
+    final workspace = await workspaceService.loadOrCreate(
+      conversationId: 'stage02-sensitive-merge-group',
+      isDirectChat: false,
+      requireWritable: true,
+    );
+    final root = workspace.workDirPath;
+    await File('$root/part1.md').writeAsString('第一段');
+    await File('$root/credentials.txt').writeAsString('TOKEN=do-not-merge');
+
+    final gateway = _SequencedGateway(
+      patchPath: 'report.md',
+      patchArguments: const {
+        'path': 'report.md',
+        'parts': ['part1.md', 'credentials.txt'],
+      },
+    );
+    final config = ApiConfig(
+      id: 'stage02-sensitive-merge-config',
+      name: 'Stage02 sensitive merge config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'stage02-sensitive-merge-character',
+      name: 'Stage02 sensitive merge character',
+      avatar: 'SM',
+      age: 30,
+      role: '测试敏感合并角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: workspaceService,
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+    );
+    final task = AgentTask(
+      id: 'stage02-sensitive-merge-task',
+      groupId: 'stage02-sensitive-merge-group',
+      characterId: character.id,
+      userRequest: '把分段接起来',
+      workModeTask: true,
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    // 第一次暂停只请求写目标的变更审批：敏感分段的读取审批压根不该被请求，
+    // 因为它在生产里注定作废（检查点一次只能带一个 approvalCapability）。
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    final sensitiveCheckpoint =
+        Map<String, dynamic>.from(jsonDecode(task.executionStateJson) as Map);
+    expect(sensitiveCheckpoint['approvalCapability'], 'mutation');
+    expect(
+      (sensitiveCheckpoint['approvalPlan'] as Map)['actionType'],
+      'create',
+    );
+
+    task.executionStateJson = jsonEncode({
+      ...sensitiveCheckpoint,
+      'approvalDecision': 'approved',
+    });
+    task.status = AgentTaskStatus.queued;
+    await database.agentTaskBox.put(task.id, task);
+    await runner.run(task, WorkTaskCancellation());
+
+    final events = (await eventStore.read(task.id)).events;
+    expect(
+      events.any(
+        (event) =>
+            event.kind == WorkTaskEventKind.toolOutput &&
+            event.detail.contains('不支持把敏感文件合并进产物'),
+      ),
+      isTrue,
+      reason: events.map((event) => event.detail).join(' | '),
+    );
+    expect(
+      events
+          .where((event) => event.kind == WorkTaskEventKind.approvalRequired)
+          .length,
+      1,
+      reason: '审批只该有写目标那一次；批准之后不再为分段读取弹注定作废的审批',
+    );
+    expect(
+      task.executionStateJson,
+      isNot(contains('sensitive_read_requires_approval')),
+    );
+    expect(await File('$root/report.md').exists(), isFalse);
+    expect(task.contextSummary, isNot(contains('do-not-merge')));
   });
 
   test('a revision task still lets the model create an auxiliary file',

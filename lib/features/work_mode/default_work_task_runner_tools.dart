@@ -347,6 +347,8 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
           fields: {
             'path': WorkToolValueType.string,
             'content': WorkToolValueType.string,
+            'append': WorkToolValueType.boolean,
+            'parts': WorkToolValueType.stringList,
             'expectedSha256': WorkToolValueType.string,
             'expectedFragment': WorkToolValueType.string,
             'replacement': WorkToolValueType.string,
@@ -368,10 +370,40 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
             task,
             stage02,
             args['path'],
-            allowAutoRename: !_isExactPatch(args),
+            allowAutoRename: !_isExactPatch(args) && !_isMergePatch(args),
           );
+          final parts = args['parts'];
+          if (parts is List && parts.every((part) => part is String)) {
+            // 合并目标就是交付物：自动改名会造出"报告 (1).md"这类近似重复，
+            // 而模型随后会按原路径去读它，见到的却是旧文件。
+            final sensitivePart = await _sensitiveMergePart(
+              task,
+              stage02,
+              parts.cast<String>(),
+            );
+            if (sensitivePart != null) {
+              return WorkToolResult.failed(
+                message: '工作模式不支持把敏感文件合并进产物；'
+                    '请改用 command.run 或先把内容复制成普通文件。',
+                data: {'path': sensitivePart},
+                failureCode: 'sensitivePartUnsupported',
+              );
+            }
+            final effective = parts
+                .map((part) => _effectivePath(task, workspaceRoot, part))
+                .toList(growable: false);
+            return _mapFileResult(
+              await stage02.merge(
+                path: path,
+                parts: effective,
+              ),
+            );
+          }
           final content = args['content'];
           if (content is String) {
+            if (args['append'] == true) {
+              return _mapFileResult(await stage02.append(path, content));
+            }
             if (args['overwrite'] == false && await File(path).exists()) {
               return const WorkToolResult.failed(
                 message: '目标文件已存在且 overwrite=false，未执行写入。',

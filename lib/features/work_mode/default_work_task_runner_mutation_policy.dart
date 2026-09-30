@@ -111,6 +111,13 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
             currentDecision?.permitsExecution == true &&
                 currentCapability == WorkApprovalCapability.mutation &&
                 currentScope != null;
+        // 已批准路径范围内的重复写入不弹审批（2026-09-20 落地的范围语义）：
+        // 计划被范围覆盖时，本轮的 Stage 02 授权必须留着。清掉它会让"同一路径
+        // 的第二次写入"在 gate 已经放行（result == null 表示不需要新审批）之后
+        // 被 handler 以 `notApproved` 拒绝——长产物分块追加因此会在第二段之后
+        // 断掉，而任务还会以"已完成"收尾。只有在计划不被保留范围覆盖（陈旧或
+        // 外来批准）时才清。
+        final coveredByRetainedScope = currentScope?.allows(plan) == true;
         // Keep an explicit mutation scope when it is still present in the
         // durable checkpoint. If it does not cover this plan, Stage 02 must
         // reject it; falling back to the ordinary-write setting would turn a
@@ -118,7 +125,8 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
         if (result == null &&
             !approvalAccepted &&
             stage02.approvalDecision != null &&
-            !retainsMutationApproval) {
+            !retainsMutationApproval &&
+            !coveredByRetainedScope) {
           // The registry is created once per runner invocation, while the
           // task checkpoint is consumed after each approved mutation. Clear
           // the old Stage 02 scope before the next handler uses it.

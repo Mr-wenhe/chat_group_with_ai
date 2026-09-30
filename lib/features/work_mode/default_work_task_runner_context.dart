@@ -174,6 +174,10 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
       args['expectedFragment'] is String &&
       args['replacement'] is String;
 
+  /// 合并形态（`parts`）与精确补丁一样不接受自动改名：它的 `path` 是交付物
+  /// 本身，改名只会让模型随后读回旧文件。
+  bool _isMergePatch(Map<String, dynamic> args) => args['parts'] is List;
+
   /// Whether a model-supplied path spells the same file as the revision target.
   ///
   /// Only the basename decides — the directory spelling varies (relative vs

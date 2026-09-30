@@ -15,7 +15,8 @@ extension _DefaultWorkTaskRunnerFilePolicy on DefaultWorkTaskRunner {
         stage02,
         rawPath,
         allowAutoRename: call.name == AgentToolName.workspacePatch &&
-            !_isExactPatch(call.arguments),
+            !_isExactPatch(call.arguments) &&
+            !_isMergePatch(call.arguments),
       );
       final target = await stage02.pathPolicy.resolve(
         targetPath,
@@ -176,6 +177,45 @@ extension _DefaultWorkTaskRunnerFilePolicy on DefaultWorkTaskRunner {
     metadata['resolvedMutationPath'] = allocated;
     task.executionStateJson = jsonEncode(metadata);
     return allocated;
+  }
+
+  /// 合并的分段里若含敏感文件，会在进入 Stage02 之前直接失败。
+  ///
+  /// 审批检查点一次只携带一个 `approvalCapability`：敏感分段要求
+  /// `sensitiveRead`，而写目标要求 `mutation`。生产里这条路径因此是死结——
+  /// 用户先被要求批准一次读取，写目标时仍然失败。与其让用户批准一次注定作废
+  /// 的读取，不如在动手之前明确拒绝，并给出可行的替代做法。
+  ///
+  /// 返回第一个敏感分段的绝对路径；全部普通时返回 null。越界或非法拼写的分段
+  /// 不在这里判定，交给合并自己按"缺失分段"报出。
+  Future<String?> _sensitiveMergePart(
+    AgentTask task,
+    Stage02WorkspaceFileTool stage02,
+    List<String> parts,
+  ) async {
+    for (final part in parts) {
+      final String candidate;
+      try {
+        candidate = _effectivePath(task, stage02.workspaceRoot, part);
+      } on FormatException {
+        continue;
+      }
+      // 与 Stage02 的敏感门同一口径：既看模型给的拼写，也看解析后的真实路径
+      // （符号链接可以把敏感文件换成一个普通文件名）。
+      if (stage02.files.isSensitivePath(candidate)) return candidate;
+      try {
+        final resolved = await stage02.pathPolicy.resolve(
+          candidate,
+          allowMissing: true,
+        );
+        if (stage02.files.isSensitivePath(resolved.path)) {
+          return resolved.path;
+        }
+      } on WorkspacePathException {
+        // 不可解析的分段由合并自己报"缺失分段"。
+      }
+    }
+    return null;
   }
 
   Future<String> _nextAvailablePath(
