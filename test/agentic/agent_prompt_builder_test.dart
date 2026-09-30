@@ -83,6 +83,9 @@ void main() {
     expect(prompt, contains('parts'));
     // 纯文本拼接不再要求 shell：合并是受治理的工具动作。
     expect(prompt, isNot(contains('pandoc 一次吃多个分段')));
+    // 旧配方可能以另一种措辞回潮：分段写成"独立的分段文件"就是把合并交给
+    // 外部命令的写法，必须继续被挡在外面。
+    expect(prompt, isNot(contains('独立的分段文件')));
   });
 
   test('Stage 03 prompt documents the workspace.list root default', () {

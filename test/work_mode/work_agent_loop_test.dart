@@ -1624,6 +1624,9 @@ void main() {
     // 只要求"输出合法 JSON"没有用：被截断的正是"一次写完整份文件"这个动作，
     // 修复指令必须把策略换成"分块写"，否则模型原样重试还会再撞一次上限。
     expect(repairPrompt, contains('拆成多次动作'));
+    // 合并只写纯文本：分块指令必须说明"先合并成 Markdown 源、需要 DOCX 时再
+    // 转换"，否则要 Word 的任务会把合并目标直接写成 .docx，得到改了名的文本。
+    expect(repairPrompt, contains('pandoc'));
     expect(repairPrompt, isNot(contains(repeated)));
   });
 
