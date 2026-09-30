@@ -626,12 +626,7 @@ class AgentDecisionParser {
     if (path is! String || path.trim().isEmpty) {
       return 'tool.arguments.path 必须是非空字符串。';
     }
-    const patchKeys = {
-      'expectedSha256',
-      'expectedFragment',
-      'replacement',
-    };
-    final hasExactPatch = args.keys.any(patchKeys.contains);
+    final hasExactPatch = args.keys.any(_exactPatchArgumentKeys.contains);
     final append = args['append'];
     // `_validateFields` 已保证 parts（若存在）的元素全是字符串；这里必须给出静态
     // 类型，否则 `parts.any(...)` 是 dynamic 调用，闭包会被推断成
@@ -661,11 +656,20 @@ class AgentDecisionParser {
       }
       return null;
     }
-    if (!hasExactPatch && args['content'] is! String) {
+    return _validateExactPatchShape(args, args['content'] as String?);
+  }
+
+  /// 校验「整文件写 / 精确补丁」这两支的形状。
+  ///
+  /// 与 append / parts 的互斥判定已由调用方完成；这里只判凭现有参数能否构成
+  /// 两种形态之一，并把各自缺失或残缺的原因原样交回。
+  String? _validateExactPatchShape(Map<String, dynamic> args, String? content) {
+    final hasExactPatch = args.keys.any(_exactPatchArgumentKeys.contains);
+    if (!hasExactPatch && content == null) {
       return 'workspace.patch 必须提供 content 或完整精确补丁字段。';
     }
     if (hasExactPatch) {
-      if (args['content'] != null ||
+      if (content != null ||
           args['expectedSha256'] is! String ||
           args['expectedFragment'] is! String ||
           args['replacement'] is! String) {
@@ -795,6 +799,16 @@ class AgentDecisionParser {
     ).hasMatch(value);
   }
 }
+
+/// `workspace.patch` 精确补丁的三个键。
+///
+/// 「精确补丁是否在场」与「精确补丁是否完整」分别由主校验与
+/// [_validateExactPatchShape] 判定，两处必须认同一个键集合。
+const Set<String> _exactPatchArgumentKeys = {
+  'expectedSha256',
+  'expectedFragment',
+  'replacement',
+};
 
 enum _ArgumentType { string, integer, boolean, stringList }
 
