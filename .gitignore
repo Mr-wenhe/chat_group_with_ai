@@ -13,6 +13,8 @@ pubspec.lock
 data/*.lock
 # The development API-config Hive may contain credentials; never commit it.
 data/api_configs.hive
+# Debug-only plaintext credential mirror (macOS ad-hoc signing workaround).
+data/dev_credentials.hive
 
 # Symbolication / obfuscation
 app.*.symbols

@@ -1,6 +1,9 @@
+import 'package:flutter/foundation.dart';
+
 import '../models/ai_character.dart';
 import '../models/api_config.dart';
 import 'credential_repository.dart';
+import 'debug_credential_cache.dart';
 
 typedef SaveApiConfig = Future<void> Function(ApiConfig config);
 typedef SaveAiCharacter = Future<void> Function(AICharacter character);
@@ -22,6 +25,8 @@ class LegacyApiCredentialMigrator {
     final configList = configs.toList(growable: false);
     final characterList = characters.toList(growable: false);
     final configsById = {for (final config in configList) config.id: config};
+
+    await seedDevelopmentCredentialCache(configList);
 
     // 旧角色明文密钥先分组：这一步只读内存，不触碰安全存储。
     final legacyGroups = <_CredentialFingerprint, List<AICharacter>>{};
@@ -65,6 +70,29 @@ class LegacyApiCredentialMigrator {
       for (final character in group) {
         await _linkAndClearCharacter(character, config, saveCharacter);
       }
+    }
+  }
+
+  /// 把记录里现成的旧明文密钥灌进调试镜像，必须在任何读取之前执行。
+  ///
+  /// [_migrateConfig] 会先读一次安全存储再写；macOS 上那次读取就是一次钥匙串
+  /// 密码框，而这段代码每次启动都会跑。待迁移配置的明文就在自己的
+  /// `_legacyApiKey` 里，先镜像一次就能让那次读取落在 Hive 上，弹窗归零。
+  ///
+  /// 镜像不可用时 [DebugCredentialCache.mirror] 返回 false，流程照旧退化到
+  /// 钥匙串，不会丢值。
+  @visibleForTesting
+  Future<void> seedDevelopmentCredentialCache(
+    Iterable<ApiConfig> configs,
+  ) async {
+    if (!DebugCredentialCache.enabled) return;
+    for (final config in configs) {
+      final legacy = config.legacyApiKeyForMigration ?? '';
+      if (legacy.isEmpty) continue;
+      await DebugCredentialCache.mirror(
+        credentials.credentialIdFor(config.id),
+        legacy,
+      );
     }
   }
 

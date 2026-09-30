@@ -7,6 +7,7 @@ import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
+import 'package:chat_group/core/storage/debug_credential_cache.dart';
 import 'package:chat_group/core/storage/legacy_api_credential_migrator.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -432,5 +433,72 @@ void main() {
     expect(harness.configs, hasLength(1));
     expect(character.apiConfigId, 'shared-config');
     expect(character.apiKey, isEmpty);
+  });
+
+  group('调试镜像', () {
+    late Directory directory;
+
+    setUp(() async {
+      directory = await Directory.systemTemp.createTemp('migrator_mirror_');
+      Hive.init(directory.path);
+      await Hive.openBox<dynamic>(DebugCredentialCache.boxName);
+    });
+
+    tearDown(() async {
+      DebugCredentialCache.bind(null);
+      await Hive.close();
+      await directory.delete(recursive: true);
+    });
+
+    test('旧明文密钥在迁移读取之前就已镜像', () async {
+      // 迁移会先读一次安全存储；macOS 上那次读取就是一次钥匙串密码框。
+      // 明文就在记录里，镜像后那次读取不必再问钥匙串。
+      final repository = CredentialRepository();
+      final config = ApiConfig(
+        id: 'pending-mirror',
+        name: 'pending',
+        provider: 'custom',
+        apiKey: 'pending-secret',
+      );
+      final migrator = LegacyApiCredentialMigrator(repository);
+
+      await migrator.seedDevelopmentCredentialCache([config]);
+
+      expect(
+        await DebugCredentialCache.read(
+          repository.credentialIdFor(config.id),
+          () async => fail('迁移前那次读取落到了钥匙串，会弹密码框'),
+        ),
+        'pending-secret',
+      );
+    });
+
+    test('开发回退配置在无钥匙串的环境里也能完成迁移', () async {
+      // 测试环境没有钥匙串插件，任何真正走到平台的调用都会抛
+      // MissingPluginException。因此「迁移成功」本身就等价于「一次也没问过
+      // 钥匙串」——这正是 macOS ad-hoc 签名下最想要的结果。
+      final repository = CredentialRepository();
+      final config = ApiConfig(
+        id: 'dev-fallback',
+        name: 'dev',
+        provider: 'custom',
+        apiKey: 'dev-secret',
+        credentialId: CredentialRepository.developmentHiveCredentialId,
+        hasCredential: true,
+      );
+      final configs = {config.id: config};
+
+      await LegacyApiCredentialMigrator(repository).migrate(
+        configs: configs.values,
+        characters: const [],
+        saveConfig: (value) async => configs[value.id] = value,
+        saveCharacter: (_) async {},
+      );
+
+      expect(config.legacyApiKeyForMigration, isEmpty);
+      expect(config.hasCredential, isTrue);
+      expect(config.credentialId, repository.credentialIdFor(config.id));
+      expect((await repository.read(config.id)).value, 'dev-secret');
+    });
   });
 }

@@ -12,6 +12,7 @@ import 'package:video_player/video_player.dart';
 import 'package:chat_group/core/audio/voice_service_config.dart';
 import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
+import 'package:chat_group/core/storage/debug_credential_cache.dart';
 import 'package:chat_group/core/storage/legacy_api_credential_migrator.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -237,6 +238,7 @@ class DatabaseService {
     await _openBoxSafely<UserProfile>(_userProfileBox);
     await _openBoxSafely<PermanentMemory>(_permanentMemoryBox);
     await _openBoxSafely<RelationshipEvent>(_relationshipEventBox);
+    await _openDebugCredentialCacheBox();
     // 在初始化阶段就把实时身份落实盘，而不是等第一次用到才懒生成：
     // 群记录与身份存在同一台设备的同一份 data 目录里，若身份的首次写入
     // 因进程退出而丢失，重启后主人会把自已的群认成「别人的群」（降级为客人）。
@@ -249,6 +251,19 @@ class DatabaseService {
     );
     await workModeMigrator.migrate();
     await workModeMigrator.markInFlightWorkTasksInterrupted();
+  }
+
+  /// 打开调试凭据镜像 box（仅非 release）。
+  ///
+  /// 刻意不走 [_openBoxSafely]：这个 box 只是本机开发便利，打不开时
+  /// [DebugCredentialCache] 会自动退化为直读钥匙串，不该因此让整个启动失败。
+  Future<void> _openDebugCredentialCacheBox() async {
+    if (!DebugCredentialCache.enabled) return;
+    try {
+      await Hive.openBox<dynamic>(DebugCredentialCache.boxName);
+    } on Object {
+      // 退化为直通安全存储，不做任何处理。
+    }
   }
 
   /// Never clears a legacy value until the new secure entry can be read back.
