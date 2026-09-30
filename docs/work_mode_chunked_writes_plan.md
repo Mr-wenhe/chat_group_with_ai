@@ -1146,9 +1146,11 @@ void main() {
     });
 
     test('drops a half-written escape sequence', () {
+      // 正文以**单个**反斜杠结尾（Dart 里写成 \\，即一个反斜杠字符）：半个转义
+      // 必须被丢掉，留下反斜杠字面量或半个转义都是错的。
       final salvage = WorkTruncationSalvage.extract(
         '{"action":"tool","tool":{"name":"workspace.patch","arguments":'
-        '{"path":"a.md","content":"正文\\\\',
+        '{"path":"a.md","content":"正文\\',
       );
 
       expect(salvage?.content, '正文');
