@@ -892,13 +892,9 @@ void main() {
       ));
       await tester.pump();
 
-      // 折叠态的时间线每条动态只占一行、只渲染标题，公开草稿正文要展开才看得到；
+      // 时间线默认展开，完整展示公开草稿正文；
       // 而第二个事件（纯传输进度）会把上一张 live 卡片交接成历史卡片，正文随之
-      // 从折叠态消失。本条用例要验的是"面板展示的是模型公开正文，不是传输字符数"，
-      // 所以先展开时间线再断言。
-      await tester.tap(find.byKey(const Key('work-task-timeline-toggle')));
-      await tester.pump();
-
+      // 保持可见。本条用例要验的是"面板展示的是模型公开正文，不是传输字符数"。
       expect(find.text('正在检查授权目录并准备写入文件。'), findsOneWidget);
       expect(find.textContaining('已接收约'), findsNothing);
       expect(find.text('AI 正在整理公开进度…'), findsNothing);

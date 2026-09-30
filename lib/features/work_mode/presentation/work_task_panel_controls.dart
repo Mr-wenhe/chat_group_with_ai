@@ -670,6 +670,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
         !_modelOutputPending &&
         error == null) {
       return Align(
+        key: const Key('work-task-event-timeline'),
         alignment: Alignment.centerLeft,
         child: Row(
           mainAxisSize: MainAxisSize.min,

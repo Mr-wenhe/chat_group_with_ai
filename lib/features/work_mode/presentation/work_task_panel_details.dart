@@ -219,7 +219,8 @@ class _TaskDetailsState extends State<_TaskDetails> {
                 ),
                 const SizedBox(height: _summaryHeaderGap),
                 ConstrainedBox(
-                  constraints: BoxConstraints(maxHeight: summaryScrollMaxHeight),
+                  constraints:
+                      BoxConstraints(maxHeight: summaryScrollMaxHeight),
                   child: _ConditionalScrollbar(
                     enabled: _summaryExpanded,
                     scrollbarKey: const Key('work-task-details-scrollbar'),
@@ -409,6 +410,15 @@ class _TaskDetailsState extends State<_TaskDetails> {
                   ),
                 ),
               ],
+              if (!_showSummarySection &&
+                  widget.actionError?.trim().isNotEmpty == true) ...<Widget>[
+                const SizedBox(height: 10),
+                Text(
+                  '操作失败：${_safePanelText(widget.actionError!)}',
+                  key: const Key('work-task-action-error'),
+                  style: TextStyle(color: colors.error),
+                ),
+              ],
               if (showTimeline) ...<Widget>[
                 if (_showSummarySection) const SizedBox(height: _sectionGap),
                 SizedBox(
@@ -466,6 +476,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                   ),
                 ),
               ],
+            ],
           ),
         );
       },
