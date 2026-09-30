@@ -83,6 +83,7 @@
 ### 3.2 边界与既有语义
 
 - **只吃 UTF-8 文本**，与 `workspace.read`（`stage02_workspace_file_tool.dart:147`）同界。追加/合并遇到二进制或敏感文件时，沿用既有的拒绝与审批口径（`sensitive_mutation_requires_approval`）。
+- **变更路径读的是整文**：追加/合并走 `WorkspaceFileService.readTextForMutation`，不套用面向模型的 12000 字符输出上限，只受字节上限约束（超上限即拒绝，绝不在残缺内容上拼接）。这条边界与 `write` 略有不同：`append` 会把旧文整份读进本进程，因此它只在已获准写入该文件的变更审批下执行，且内容不回显给模型。
 - **计划与路径**：追加是「存在则 modify、不存在则 create」，与整文件写一致；合并是「目标 create/modify + 只读各分段」。路径解析仍走 `_mutationPath`，`_isExactPatch`（`default_work_task_runner_context.dart:172`）的自动改名开关按新形态决定：追加允许自动改名（与整文件写同类），合并不允许（目标路径是交付物，改名会造出近似重复）。
 - **修订钉定不变**：同名文件仍被钉到存储的交付物绝对路径（`_namesSameFile`，`default_work_task_runner_context.dart:184`）。分段文件名与交付物不同名，不会被钉——这正是要的：钉定只作用于交付物本身，脚本与分段各按普通规则解析（见 CLAUDE.md「工作模式连续修改红线」的 2026-09-30 现场）。
 - **去重语义不变**：`_operationKey`（`work_agent_loop_safety.dart:387`）是「工具名 + 规范化参数」，逐字相同的追加会被判为重复并跳过（`_skipCommittedTool`，`work_agent_loop_actions.dart:625`），模型会收到「已跳过已提交的重复变更」。这是刻意取舍：拿「偶发合法重复被拦（可见、可改写法）」换「重复内容静默翻倍」。**本设计不改去重键**；若将来要支持"同内容追加两次"，那是一次独立的去重键改造。

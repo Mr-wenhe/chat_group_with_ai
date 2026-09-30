@@ -320,56 +320,27 @@ class Stage02WorkspaceFileTool {
 
   Future<Map<String, dynamic>> write(String path, String content) async {
     try {
-      final absolute = _absolutePath(path);
-      final resolved = await pathPolicy.resolve(absolute, allowMissing: true);
-      final action = resolved.exists
-          ? WorkChangeActionType.modify
-          : WorkChangeActionType.create;
-      if (resolved.exists && !resolved.isFile) {
-        return {
-          'ok': false,
-          'error': 'not_a_file',
-          'message': '目标不是普通文件，未执行写入。',
-          'path': resolved.path,
-        };
-      }
-      final sensitive = files.isSensitivePath(absolute) ||
-          files.isSensitivePath(resolved.path);
-      final plan = _filePlan(
-        action: action,
-        path: resolved.path,
-        directory: resolved.authorizedRoot,
-        bytes: utf8.encode(content).length,
+      final prepared = await _prepareMutation(
+        path: path,
+        notAFileMessage: '目标不是普通文件，未执行写入。',
+        estimatedBytes: utf8.encode(content).length,
       );
-      // Do not hash a sensitive file until the task carries both an explicit
-      // approval and an exact scope covering this concrete plan. Hashing reads
-      // old contents before the mutation boundary can return its redacted
-      // approval response, so the scope check must precede it.
-      final sensitiveApproved = approvalDecision?.permitsExecution == true &&
-          approvalScope?.allows(plan) == true;
-      if (sensitive && !sensitiveApproved) {
-        return {
-          'ok': false,
-          'error': 'sensitive_mutation_requires_approval',
-          'requiresApproval': true,
-          'sensitive': true,
-          'redacted': true,
-          'message': '修改、重命名或删除敏感文件必须再次确认。',
-          'path': resolved.path,
-        };
-      }
-      final expectedSha = action == WorkChangeActionType.modify
-          ? await _hashFile(File(resolved.path))
+      final refusal = prepared.refusal;
+      if (refusal != null) return refusal;
+      final plan = prepared.plan!;
+      final target = prepared.resolvedPath!;
+      final expectedSha = plan.actionType == WorkChangeActionType.modify
+          ? await _hashFile(File(target))
           : null;
       return _execute(
         plan,
         WorkspaceMutationRequest(
-          path: resolved.path,
+          path: target,
           contents: content,
           expectedSha256: expectedSha,
           approvalDecision: approvalDecision,
         ),
-        sensitivePath: sensitive,
+        sensitivePath: prepared.sensitive,
       );
     } on WorkspacePathException catch (error) {
       return _pathError(error, path);
@@ -385,75 +356,41 @@ class Stage02WorkspaceFileTool {
   /// `content` 会被上游截断、整条动作作废。
   Future<Map<String, dynamic>> append(String path, String chunk) async {
     try {
-      final absolute = _absolutePath(path);
-      final resolved = await pathPolicy.resolve(absolute, allowMissing: true);
-      if (resolved.exists && !resolved.isFile) {
+      final prepared = await _prepareMutation(
+        path: path,
+        notAFileMessage: '目标不是普通文件，未执行追加。',
+        estimatedBytes: utf8.encode(chunk).length,
+      );
+      final refusal = prepared.refusal;
+      if (refusal != null) return refusal;
+      final plan = prepared.plan!;
+      final target = prepared.resolvedPath!;
+      final fullRead = plan.actionType == WorkChangeActionType.modify
+          ? await _readWholeForMutation(target)
+          : null;
+      if (fullRead?.truncated == true) {
         return {
           'ok': false,
-          'error': 'not_a_file',
-          'message': '目标不是普通文件，未执行追加。',
-          'path': resolved.path,
+          'error': 'append_requires_full_read',
+          'message': '目标文件超过读取上限，无法安全读回后追加；请改用分段文件。',
+          'path': target,
         };
       }
-      final sensitive = files.isSensitivePath(absolute) ||
-          files.isSensitivePath(resolved.path);
-      // 敏感路径的批准必须在**读取旧内容之前**拿到：读出旧文就等于把文件内容
-      // 带进本进程，边界和 write 里哈希前置检查是同一条。
-      final plan = _filePlan(
-        action: resolved.exists
-            ? WorkChangeActionType.modify
-            : WorkChangeActionType.create,
-        path: resolved.path,
-        directory: resolved.authorizedRoot,
-        bytes: utf8.encode(chunk).length,
-      );
-      final sensitiveApproved = approvalDecision?.permitsExecution == true &&
-          approvalScope?.allows(plan) == true;
-      if (sensitive && !sensitiveApproved) {
-        return {
-          'ok': false,
-          'error': 'sensitive_mutation_requires_approval',
-          'requiresApproval': true,
-          'sensitive': true,
-          'redacted': true,
-          'message': '修改、重命名或删除敏感文件必须再次确认。',
-          'path': resolved.path,
-        };
-      }
-      var existing = '';
-      String? expectedSha;
-      if (resolved.exists) {
-        final read = await _withReadLock(
-          resolved.path,
-          () => files.readTextRange(resolved.path),
-        );
-        if (read.truncated) {
-          return {
-            'ok': false,
-            'error': 'append_requires_full_read',
-            'message': '目标文件超过读取上限，无法安全读回后追加；请改用分段文件。',
-            'path': resolved.path,
-          };
-        }
-        existing = read.text;
-        expectedSha = await _hashFile(File(resolved.path));
-      }
-      final combined = '$existing$chunk';
-      final writePlan = _filePlan(
-        action: plan.actionType,
-        path: resolved.path,
-        directory: resolved.authorizedRoot,
-        bytes: utf8.encode(combined).length,
-      );
+      final combined = '${fullRead?.text ?? ''}$chunk';
       return _execute(
-        writePlan,
+        _filePlan(
+          action: plan.actionType,
+          path: target,
+          directory: plan.knownAffectedDirectories.first,
+          bytes: utf8.encode(combined).length,
+        ),
         WorkspaceMutationRequest(
-          path: resolved.path,
+          path: target,
           contents: combined,
-          expectedSha256: expectedSha,
+          expectedSha256: fullRead?.sha256,
           approvalDecision: approvalDecision,
         ),
-        sensitivePath: sensitive,
+        sensitivePath: prepared.sensitive,
       );
     } on WorkspacePathException catch (error) {
       return _pathError(error, path);
@@ -463,6 +400,106 @@ class Stage02WorkspaceFileTool {
       return {'ok': false, 'error': 'io', 'message': '无法读取目标文件。'};
     }
   }
+
+  /// Shared mutation preamble for [write] and [append] (and any later merge):
+  /// resolves [path] inside the granted root, rejects a non-file target, builds
+  /// the create/modify [WorkChangePlan], and runs the sensitive gate — all
+  /// **before** the caller reads or hashes any old content, so a sensitive file
+  /// never enters this process ahead of the redacted approval response.
+  ///
+  /// [estimatedBytes] only tunes the plan's size hint, never the approval
+  /// comparison. Returns either the prepared [plan] (with its resolved path and
+  /// raw sensitive flag) or a [refusal] the caller must return verbatim.
+  Future<_PreparedMutation> _prepareMutation({
+    required String path,
+    required String notAFileMessage,
+    required int estimatedBytes,
+  }) async {
+    final absolute = _absolutePath(path);
+    final resolved = await pathPolicy.resolve(absolute, allowMissing: true);
+    if (resolved.exists && !resolved.isFile) {
+      return _PreparedMutation(
+        refusal: {
+          'ok': false,
+          'error': 'not_a_file',
+          'message': notAFileMessage,
+          'path': resolved.path,
+        },
+      );
+    }
+    final sensitive = files.isSensitivePath(absolute) ||
+        files.isSensitivePath(resolved.path);
+    final plan = _filePlan(
+      action: resolved.exists
+          ? WorkChangeActionType.modify
+          : WorkChangeActionType.create,
+      path: resolved.path,
+      directory: resolved.authorizedRoot,
+      bytes: estimatedBytes,
+    );
+    final refusal = _refuseSensitiveMutation(
+      plan: plan,
+      sensitive: sensitive,
+      path: resolved.path,
+    );
+    if (refusal != null) return _PreparedMutation(refusal: refusal);
+    return _PreparedMutation(
+      plan: plan,
+      resolvedPath: resolved.path,
+      sensitive: sensitive,
+    );
+  }
+
+  /// Shared sensitive-file gate. Returns the redacted refusal when the task
+  /// lacks both an explicit approval and an exact scope covering [plan], or
+  /// null when the mutation may proceed.
+  ///
+  /// Callers must run this before touching old content: reading or hashing a
+  /// sensitive file would pull it into this process ahead of the mutation
+  /// boundary's redacted response.
+  Map<String, dynamic>? _refuseSensitiveMutation({
+    required WorkChangePlan plan,
+    required bool sensitive,
+    required String path,
+  }) {
+    final approved = approvalDecision?.permitsExecution == true &&
+        approvalScope?.allows(plan) == true;
+    if (!sensitive || approved) return null;
+    return {
+      'ok': false,
+      'error': 'sensitive_mutation_requires_approval',
+      'requiresApproval': true,
+      'sensitive': true,
+      'redacted': true,
+      'message': '修改、重命名或删除敏感文件必须再次确认。',
+      'path': path,
+    };
+  }
+
+  /// Reads the whole target for an append/merge and hashes it **under the same
+  /// read lock**: a hash taken outside the lock could match content another
+  /// task wrote in the window between the read and the hash, letting the CAS
+  /// pass and a stale prefix plus the new chunk silently overwrite that task's
+  /// text.
+  ///
+  /// Uses [WorkspaceFileService.readTextForMutation], which is bounded by bytes
+  /// only — never by the model-facing character cap, which would misreport
+  /// every file over 12000 characters as truncated. A truncated result carries
+  /// no text and no hash; the caller must refuse rather than concatenate.
+  Future<({String text, String? sha256, bool truncated})> _readWholeForMutation(
+    String path,
+  ) =>
+      _withReadLock(path, () async {
+        final read = await files.readTextForMutation(path);
+        if (read.truncated) {
+          return (text: '', sha256: null, truncated: true);
+        }
+        return (
+          text: read.text,
+          sha256: await _hashFile(File(path)),
+          truncated: false,
+        );
+      });
 
   Future<Map<String, dynamic>> applyPatch(String patch) async {
     // A diff is always a multi-file/overwrite operation; unlike a simple
@@ -877,6 +914,23 @@ class _DigestSink implements Sink<Digest> {
 
   @override
   void close() {}
+}
+
+/// Outcome of the shared mutation preamble: either the prepared [plan] (with
+/// its [resolvedPath] and raw [sensitive] flag), or a [refusal] the caller must
+/// return verbatim. Exactly one side is set.
+class _PreparedMutation {
+  final WorkChangePlan? plan;
+  final String? resolvedPath;
+  final bool sensitive;
+  final Map<String, dynamic>? refusal;
+
+  const _PreparedMutation({
+    this.plan,
+    this.resolvedPath,
+    this.sensitive = false,
+    this.refusal,
+  });
 }
 
 class _PostconditionResult {

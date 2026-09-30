@@ -508,4 +508,20 @@ void main() {
     expect(result['error'], 'append_requires_full_read');
     expect(await File(path).readAsString(), '0123456789abcdef');
   });
+
+  test('append extends a long file past the model output cap', () async {
+    // 13000 字符超过面向模型的 12000 字符输出上限。追加读的是整文，不能因此
+    // 被判成"读取被截断"而拒绝——那会让 5 万字级产物的分块写入整体失效。
+    final current = task('stage02-append-long');
+    final tool = toolFor(current);
+    final path = '${root.path}/long.md';
+    final original = 'a' * 13000;
+    await File(path).writeAsString(original);
+
+    final result = await tool.append(path, '尾部');
+
+    expect(result['ok'], isTrue, reason: '${result['message']}');
+    expect(result['changed'], isTrue);
+    expect(await File(path).readAsString(), '$original尾部');
+  });
 }
