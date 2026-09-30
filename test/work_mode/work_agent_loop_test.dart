@@ -14,6 +14,8 @@ import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
+import 'package:chat_group/features/work_mode/work_failure.dart';
+import 'package:chat_group/features/work_mode/work_model_deadline.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -1888,6 +1890,231 @@ void main() {
     expect(model.requests, hasLength(3));
     expect(model.requests[1].isRepair, isTrue);
     expect(model.requests[2].isRepair, isFalse);
+  });
+
+  test(
+      'a transient failure of the repair request is retried at the model level',
+      () async {
+    // 真实故障（2026-09-30，sensenova-6.8-flash-lite）：一次可重试的链路停滞
+    // 发生在修复请求上时，它原本直接冒泡成协议错误——白吃掉一次协议重试额度，
+    // 还把这轮记成"模型不会写 JSON"。修复请求必须和普通决策一样走模型级重试。
+    final model = _FakeModel()
+      ..responses.add(<String, dynamic>{
+        'success': true,
+        'content': '{"action":"不完整的 JSON"',
+        'completionTokens': 120,
+        'requestedMaxTokens': 8192,
+      })
+      ..responses.add(<String, dynamic>{
+        'success': false,
+        'failureCode': 'timeout',
+        'message': '工作模式模型请求首字节超时。',
+        'retryable': true,
+      })
+      ..responses.add(_finishDecision('修复后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final task = _task(id: 'repair-transient-retry');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    expect(model.requests.where((request) => request.isRepair), hasLength(2));
+    final titles = result.events.map((event) => event.title).join('\n');
+    expect(titles, contains('模型请求暂时失败，准备重试。'));
+    expect(titles, isNot(contains('模型返回格式无效，正在自动重试。')));
+    expect(titles, isNot(contains('修复请求失败')));
+  });
+
+  test('a stalled repair request is retried like any transient model failure',
+      () async {
+    // 上一条用的是失败响应体，这条用生产形状：停滞是从模型调用里抛出的
+    // TimeoutException（首字节看门狗掐断的请求就是这样冒出来的）。
+    final model = _FakeModel()
+      ..responses.add(<String, dynamic>{
+        'success': true,
+        'content': '{"action":"不完整的 JSON"',
+        'completionTokens': 120,
+        'requestedMaxTokens': 8192,
+      })
+      ..responses.add(TimeoutException('工作模式模型请求首字节超时。'))
+      ..responses.add(_finishDecision('修复后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final task = _task(id: 'repair-stall-retry');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    expect(model.requests.where((request) => request.isRepair), hasLength(2));
+  });
+
+  test('a model retry records the failure cause in the event metadata',
+      () async {
+    // 这条气泡原本不带成因：「上游 5xx」「链路断」「首字节停滞」在面板上完全
+    // 同形，事后只能去翻 ai_request_diagnostics_v1 反查（网关口径还不同源）。
+    // 成因随事件落盘后，光看事件日志就能定性。
+    final model = _FakeModel()
+      ..responses.add(<String, dynamic>{
+        'success': false,
+        'failureCode': 'retryableNetwork',
+        'statusCode': 503,
+        'message': '模型服务暂时不可用。',
+        'retryable': true,
+      })
+      ..responses.add(_finishDecision('重试后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final result = await loop.execute(_task(id: 'retry-cause-metadata'));
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: result.message);
+    final retry = result.events
+        .firstWhere((event) => event.title == '模型请求暂时失败，准备重试。');
+    expect(retry.safeMetadata['retry'], 1);
+    expect(retry.safeMetadata['scope'], 'model');
+    expect(retry.safeMetadata['failureCode'], 'retryableNetwork');
+  });
+
+  test('a first-byte stall names itself instead of the generic network code',
+      () async {
+    // 生产形状：首字节看门狗（2026-09-30 现场是 180 秒零输出）抛的是
+    // WorkModelDeadlineException。它必须带着专属码走完这一路——只按
+    // `failure.type.name` 写响应体，停滞与上游 5xx 就是同一个 retryableNetwork。
+    final model = _FakeModel()
+      ..responses.add(WorkModelDeadlineException.firstByteStall)
+      ..responses.add(_finishDecision('重试后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final result = await loop.execute(_task(id: 'retry-cause-stall'));
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: result.message);
+    final retry = result.events
+        .firstWhere((event) => event.title == '模型请求暂时失败，准备重试。');
+    expect(retry.safeMetadata['failureCode'], 'modelFirstByteStall');
+  });
+
+  test('a first-byte stall still classifies as a retryable network failure',
+      () async {
+    // 专属码必须被分类表认出来。认不出来就会掉进 `scope == 'model'` 那条兜底
+    // 变成 modelProtocol——面板会把"上游一个字符都没吐"说成"模型写坏了 JSON"，
+    // 重试标题也跟着变。
+    final model = _FakeModel()
+      ..responses.add(WorkModelDeadlineException.firstByteStall);
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      maxModelRetries: 0,
+    );
+
+    final result = await loop.execute(_task(id: 'stall-final-classification'));
+
+    expect(result.failure?.type, WorkFailureType.retryableNetwork);
+    expect(result.failure?.retryable, isTrue);
+  });
+
+  test('an exhausted repair request names the repair failure, not the format',
+      () async {
+    // 与上一条相反：模型级重试都用完时，用户看到的必须是"修复请求失败"，
+    // 因为这次的成因是链路，不是模型的 JSON。
+    final model = _FakeModel()
+      ..responses.add(<String, dynamic>{
+        'success': true,
+        'content': '{"action":"不完整的 JSON"',
+        'completionTokens': 120,
+        'requestedMaxTokens': 8192,
+      })
+      ..responses.add(<String, dynamic>{
+        'success': false,
+        'failureCode': 'timeout',
+        'message': '工作模式模型请求首字节超时。',
+        'retryable': true,
+      })
+      ..responses.add(<String, dynamic>{
+        'success': false,
+        'failureCode': 'timeout',
+        'message': '工作模式模型请求首字节超时。',
+        'retryable': true,
+      })
+      ..responses.add(_finishDecision('重试后完成。'));
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      maxModelRetries: 1,
+    );
+
+    final task = _task(id: 'repair-failure-label');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    final retry = result.events
+        .firstWhere((event) => event.title == '模型响应无法解析，修复请求失败，正在重试。');
+    expect(retry.detail, contains('协议重试'));
+    expect(retry.safeMetadata['reason'], contains('首字节超时'));
+    expect(result.events.map((event) => event.title),
+        isNot(contains('模型返回格式无效，正在自动重试。')));
+  });
+
+  test('a protocol retry records a bounded snippet of the unparseable body',
+      () async {
+    // 反复出现的"模型写到一半就停"只能靠形状定性：计数与解析器文案都看不出
+    // JSON 是在哪一步被切断的。片段必须短（事件存储另有 512 字上限）又保留
+    // 开头，所以显式截断并标出省略。
+    final body = '甲' * 400;
+    final model = _FakeModel()
+      ..responses.add(<String, dynamic>{
+        'success': true,
+        'content': body,
+        'completionTokens': 400,
+        'requestedMaxTokens': 8192,
+      })
+      ..responses.add(<String, dynamic>{
+        'success': true,
+        'content': 'still-not-json',
+      })
+      ..responses.add(_finishDecision('协议重试后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final result = await loop.execute(_task(id: 'protocol-retry-snippet'));
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; '
+            '${result.events.map((event) => event.title).join('|')}');
+    final retry =
+        result.events.firstWhere((event) => event.title == '模型返回格式无效，正在自动重试。');
+    final snippet = retry.safeMetadata['responseSnippet'] as String;
+    expect(snippet, startsWith('甲甲甲'));
+    expect(snippet.length, lessThanOrEqualTo(301));
+    expect(snippet, endsWith('…'));
+    expect(retry.safeMetadata['responseCharacters'], body.length);
+  });
+
+  test('a protocol retry records the repaired body as well as the original',
+      () async {
+    // 关键的对不上：`reason` 描述的多半是**修复后**那次解析的失败，而
+    // responseCharacters / responseSnippet 都属于首次决策响应。只留首次正文会
+    // 让人按错误的形状去推断（2026-09-30 那 29 次协议重试里，27 次的 reason
+    // 来自修复后的正文）。
+    const broken = '{"action":"tool","public_update":"正在写文件。"';
+    final model = _FakeModel()
+      ..responses.add(<String, dynamic>{'success': true, 'content': broken})
+      ..responses.add(<String, dynamic>{'success': true, 'content': '修了一半'})
+      ..responses.add(_finishDecision('协议重试后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final result =
+        await loop.execute(_task(id: 'protocol-retry-repaired-body'));
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; '
+            '${result.events.map((event) => event.title).join('|')}');
+    final retry =
+        result.events.firstWhere((event) => event.title == '模型返回格式无效，正在自动重试。');
+    expect(retry.safeMetadata['reason'], '响应不是单个合法 JSON object。');
+    expect(retry.safeMetadata['responseSnippet'], broken);
+    expect(retry.safeMetadata['repairResponseSnippet'], '修了一半');
   });
 
   test('automatically retries a second fresh protocol decision', () async {
