@@ -186,26 +186,19 @@ extension _DefaultWorkTaskRunnerFilePolicy on DefaultWorkTaskRunner {
   /// 用户先被要求批准一次读取，写目标时仍然失败。与其让用户批准一次注定作废
   /// 的读取，不如在动手之前明确拒绝，并给出可行的替代做法。
   ///
-  /// 返回第一个敏感分段的绝对路径；全部普通时返回 null。越界或非法拼写的分段
-  /// 不在这里判定，交给合并自己按"缺失分段"报出。
+  /// [effectiveParts] 是已经解析过的分段绝对路径（调用方负责把非法拼写挡在
+  /// 前面）。返回第一个敏感分段的路径，全部普通时返回 null。
   Future<String?> _sensitiveMergePart(
-    AgentTask task,
     Stage02WorkspaceFileTool stage02,
-    List<String> parts,
+    List<String> effectiveParts,
   ) async {
-    for (final part in parts) {
-      final String candidate;
-      try {
-        candidate = _effectivePath(task, stage02.workspaceRoot, part);
-      } on FormatException {
-        continue;
-      }
-      // 与 Stage02 的敏感门同一口径：既看模型给的拼写，也看解析后的真实路径
-      // （符号链接可以把敏感文件换成一个普通文件名）。
-      if (stage02.files.isSensitivePath(candidate)) return candidate;
+    for (final part in effectiveParts) {
+      // 与 Stage02 的敏感门同一口径：既看解析后的路径，也看符号链接指向的真实
+      // 文件——链接可以把敏感文件换成一个普通文件名。
+      if (stage02.files.isSensitivePath(part)) return part;
       try {
         final resolved = await stage02.pathPolicy.resolve(
-          candidate,
+          part,
           allowMissing: true,
         );
         if (stage02.files.isSensitivePath(resolved.path)) {

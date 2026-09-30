@@ -532,6 +532,10 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
   /// reports the files it created.
   bool _artifactToolChanged(AgentToolCall call, WorkToolResult result) {
     if (call.name == AgentToolName.workspacePatch) {
+      // 追加只是把文件变长：一份长产物写没写完只有模型自己知道，一次 append
+      // 不能算"交付物已就绪"，否则第一段落地就判任务完成，交付物静默缺内容。
+      // 整文件写与 `parts` 合并都是"这一次就把文件写成最终形态"，仍然算满足。
+      if (call.arguments['append'] == true) return false;
       return result.data['changed'] == true;
     }
     final artifacts = result.data['artifactPaths'];
