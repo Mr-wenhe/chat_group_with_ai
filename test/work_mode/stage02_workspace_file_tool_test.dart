@@ -606,4 +606,115 @@ void main() {
     expect(result['ok'], isFalse);
     expect(result['error'], 'invalid_merge');
   });
+
+  test('merge refuses a sensitive part without a sensitive-read approval',
+      () async {
+    // 变更审批只覆盖目标。若敏感分段的读取借用它，"合并进一个非敏感目标"就会
+    // 变成读取任意敏感文件的旁路——内容落进非敏感目标后，模型一次普通
+    // workspace.read 就拿到了它。所以这里给足目标侧的变更批准，分段仍必须被拒。
+    final current = task('stage02-merge-sensitive-part');
+    final events = <String>[];
+    final target = '${root.path}/report.md';
+    await File(target).writeAsString('旧版本');
+    final part = '${root.path}/.env';
+    await File(part).writeAsString('TOKEN=part-secret');
+    final plan = WorkChangePlan(
+      taskId: current.id,
+      actionType: WorkChangeActionType.modify,
+      exactPaths: [File(target).resolveSymbolicLinksSync()],
+      knownAffectedDirectories: [Directory(root.path).resolveSymbolicLinksSync()],
+      estimatedBytes: 4,
+      snapshotAvailable: true,
+      reversible: true,
+      riskReason: 'merge sensitive-part fixture',
+    );
+    final tool = Stage02WorkspaceFileTool(
+      files: files,
+      mutations: mutations,
+      pathPolicy: pathPolicy,
+      task: current,
+      workspaceRoot: root.path,
+      allowImplicitScope: true,
+      approvalDecision: WorkChangeApprovalDecision.approved,
+      approvalScope: WorkApprovalScope.fromPlan(plan),
+      onSensitiveRead: (path, operation) => events.add('$path:$operation'),
+      resourceLockManager: resourceLocks,
+    );
+
+    final result = await tool.merge(path: target, parts: [part]);
+
+    expect(result['ok'], isFalse);
+    expect(result['error'], 'sensitive_read_requires_approval');
+    expect(result['requiresApproval'], isTrue);
+    expect(result['redacted'], isTrue);
+    expect(result['content'], isNot(contains('part-secret')));
+    expect(events, hasLength(1));
+    expect(events.single, contains('.env'));
+    expect(events.single, endsWith(':readTextRange'));
+    expect(await File(target).readAsString(), '旧版本');
+  });
+
+  test('merge reads a sensitive part once its exact read is approved', () async {
+    // 令牌按模型给出的原始拼写铸造——与 workspace.read 的审批同一条口径。
+    final current = task('stage02-merge-sensitive-approved');
+    final target = '${root.path}/report.md';
+    await File(target).writeAsString('旧版本');
+    final part = '${root.path}/.env';
+    await File(part).writeAsString('TOKEN=approved-secret');
+    final plan = WorkChangePlan(
+      taskId: current.id,
+      actionType: WorkChangeActionType.modify,
+      exactPaths: [File(target).resolveSymbolicLinksSync()],
+      knownAffectedDirectories: [Directory(root.path).resolveSymbolicLinksSync()],
+      estimatedBytes: 4,
+      snapshotAvailable: true,
+      reversible: true,
+      riskReason: 'approved merge sensitive-part fixture',
+    );
+    final tool = Stage02WorkspaceFileTool(
+      files: files,
+      mutations: mutations,
+      pathPolicy: pathPolicy,
+      task: current,
+      workspaceRoot: root.path,
+      allowImplicitScope: true,
+      approvalDecision: WorkChangeApprovalDecision.approved,
+      approvalScope: WorkApprovalScope.fromPlan(plan),
+      approvalCapability: WorkApprovalCapability.sensitiveRead,
+      approvedSensitiveOperation: toolFor(current).sensitiveReadFingerprint(
+        operation: 'readTextRange',
+        path: part,
+      ),
+      resourceLockManager: resourceLocks,
+    );
+
+    final result = await tool.merge(path: target, parts: [part]);
+
+    expect(result['ok'], isTrue, reason: '${result['message']}');
+    expect(result['sensitive'], isTrue);
+    expect(await File(target).readAsString(), 'TOKEN=approved-secret');
+  });
+
+  test('merge refuses a part whose read is truncated', () async {
+    // 在残缺分段上拼接会把中间内容永久丢掉，所以必须在读取阶段拒绝，
+    // 而不是写出一份被截短的产物。
+    final current = task('stage02-merge-truncated-part');
+    final smallReads = WorkspaceFileService(
+      pathPolicy: pathPolicy,
+      limits: const WorkspaceReadLimits(maxReadBytes: 8),
+    );
+    final tool = toolFor(current, fileService: smallReads);
+    final target = '${root.path}/report.md';
+    await File(target).writeAsString('旧版本');
+    await File('${root.path}/part1.md').writeAsString('0123456789abcdef');
+
+    final result = await tool.merge(
+      path: target,
+      parts: ['${root.path}/part1.md'],
+    );
+
+    expect(result['ok'], isFalse);
+    expect(result['error'], 'append_requires_full_read');
+    expect(await File(target).readAsString(), '旧版本');
+  });
 }

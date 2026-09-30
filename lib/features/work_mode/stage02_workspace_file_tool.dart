@@ -436,7 +436,7 @@ class Stage02WorkspaceFileTool {
       }
       return _mergeResolvedParts(
         path: path,
-        parts: partsPlan.paths,
+        parts: partsPlan.parts,
         estimatedBytes: partsPlan.estimatedBytes,
       );
     } on WorkspacePathException catch (error) {
@@ -453,16 +453,17 @@ class Stage02WorkspaceFileTool {
   /// 只做路径解析与 stat，**不读内容**：敏感门必须先于任何分段读取，而路径
   /// 解析与 stat 都不会把文件内容带进进程。缺失或不可读的分段按模型给出的原始
   /// 拼写点名返回，好让错误信息直接对上模型的输入。
-  Future<({List<String> paths, List<String> missing, int estimatedBytes})>
+  Future<({List<_MergePart> parts, List<String> missing, int estimatedBytes})>
       _resolveMergeParts(List<String> parts) async {
-    final paths = <String>[];
+    final resolvedParts = <_MergePart>[];
     final missing = <String>[];
     var estimatedBytes = 0;
     for (final part in parts) {
       try {
         final resolved = await pathPolicy.resolveExisting(_absolutePath(part));
         if (resolved.isFile) {
-          paths.add(resolved.path);
+          resolvedParts
+              .add(_MergePart(requested: part, resolved: resolved.path));
           estimatedBytes += await File(resolved.path).length();
         } else {
           missing.add(part);
@@ -471,7 +472,11 @@ class Stage02WorkspaceFileTool {
         missing.add(part);
       }
     }
-    return (paths: paths, missing: missing, estimatedBytes: estimatedBytes);
+    return (
+      parts: resolvedParts,
+      missing: missing,
+      estimatedBytes: estimatedBytes,
+    );
   }
 
   /// 敏感门通过之后才把分段读全并原子写回 [path]。
@@ -480,7 +485,7 @@ class Stage02WorkspaceFileTool {
   /// 所以目标只需哈希（供 CAS）而不必读回；读回它反而会多一条无谓的字节上限。
   Future<Map<String, dynamic>> _mergeResolvedParts({
     required String path,
-    required List<String> parts,
+    required List<_MergePart> parts,
     required int estimatedBytes,
   }) async {
     final prepared = await _prepareMutation(
@@ -492,37 +497,10 @@ class Stage02WorkspaceFileTool {
     if (refusal != null) return refusal;
     final plan = prepared.plan!;
     final target = prepared.resolvedPath!;
-    // 敏感门必须覆盖全部分段：读敏感分段同样会把内容带进进程。此刻分段的路径
-    // 都已解析，但一处内容都还没读。
-    final sensitive = prepared.sensitive || parts.any(files.isSensitivePath);
-    final gateRefusal = _refuseSensitiveMutation(
-      plan: plan,
-      sensitive: sensitive,
-      path: target,
-    );
-    if (gateRefusal != null) return gateRefusal;
-    final buffer = StringBuffer();
-    for (final part in parts) {
-      // 与 append 同理：分段的完整性只能用字节级判据，面向模型的 12000 字符
-      // 输出上限会把长分段误判成截断，让分块合并整体失效。
-      final read = await _withReadLock(
-        part,
-        () => files.readTextForMutation(part),
-      );
-      if (read.truncated) {
-        return {
-          'ok': false,
-          'error': 'append_requires_full_read',
-          'message': '分段文件超过读取上限，无法安全合并：$part',
-          'path': part,
-        };
-      }
-      buffer.write(read.text);
-    }
-    final combined = buffer.toString();
-    final expectedSha = plan.actionType == WorkChangeActionType.modify
-        ? await _hashFile(File(target))
-        : null;
+    final read = await _readMergeParts(parts);
+    final readRefusal = read.refusal;
+    if (readRefusal != null) return readRefusal;
+    final combined = read.text;
     return _execute(
       _filePlan(
         action: plan.actionType,
@@ -533,11 +511,78 @@ class Stage02WorkspaceFileTool {
       WorkspaceMutationRequest(
         path: target,
         contents: combined,
-        expectedSha256: expectedSha,
+        expectedSha256: plan.actionType == WorkChangeActionType.modify
+            ? await _hashFile(File(target))
+            : null,
         approvalDecision: approvalDecision,
       ),
-      sensitivePath: sensitive,
+      // 任一分段敏感时同样标记：合并的结果里带着敏感内容。
+      sensitivePath: prepared.sensitive ||
+          parts.any((part) => files.isSensitivePath(part.resolved)),
     );
+  }
+
+  /// 按序读全每个分段，返回拼接好的正文；某个分段需要敏感读取批准或读回被
+  /// 字节上限截断时返回 [refusal]，调用方必须原样返回且不得改动目标文件。
+  Future<({String text, Map<String, dynamic>? refusal})> _readMergeParts(
+    List<_MergePart> parts,
+  ) async {
+    final buffer = StringBuffer();
+    for (final part in parts) {
+      if (files.isSensitivePath(part.resolved)) {
+        final refusal = _refuseSensitivePartRead(part);
+        if (refusal != null) return (text: '', refusal: refusal);
+      }
+      // 与 append 同理：分段的完整性只能用字节级判据，面向模型的 12000 字符
+      // 输出上限会把长分段误判成截断，让分块合并整体失效。
+      final read = await _withReadLock(
+        part.resolved,
+        () => files.readTextForMutation(part.resolved),
+      );
+      if (read.truncated) {
+        return (
+          text: '',
+          refusal: {
+            'ok': false,
+            'error': 'append_requires_full_read',
+            'message': '分段文件超过读取上限，无法安全合并：${part.resolved}',
+            'path': part.resolved,
+          },
+        );
+      }
+      buffer.write(read.text);
+    }
+    return (text: buffer.toString(), refusal: null);
+  }
+
+  /// 敏感分段的读取必须走与 [readWithOptions] 同一条敏感读取审批：只有用户为
+  /// 这个具体分段批准过一次精确的整文读取，才允许把它的内容读进本次合并。
+  ///
+  /// 刻意不借用目标的变更审批：那会让"合并进一个非敏感目标"变成读取任意敏感
+  /// 文件的旁路——内容落进非敏感目标后，模型一次普通 `workspace.read` 就拿到了
+  /// 它。指纹按模型给出的原始拼写计算，与 `workspace.read` 铸造的令牌同一口径。
+  Map<String, dynamic>? _refuseSensitivePartRead(_MergePart part) {
+    final allowed = approvalDecision?.permitsExecution == true &&
+        approvalCapability == WorkApprovalCapability.sensitiveRead &&
+        approvedSensitiveOperation ==
+            sensitiveReadFingerprint(
+              operation: 'readTextRange',
+              path: part.requested,
+              startByte: 0,
+              byteLength: null,
+            );
+    if (allowed) return null;
+    onSensitiveRead?.call(part.resolved, 'readTextRange');
+    return {
+      'ok': false,
+      'error': 'sensitive_read_requires_approval',
+      'requiresApproval': true,
+      'path': part.resolved,
+      'sensitive': true,
+      'redacted': true,
+      'content': '[敏感文件内容已隐藏]',
+      'bytesRead': 0,
+    };
   }
 
   /// Shared mutation preamble for [write] and [append] (and any later merge):
@@ -1055,11 +1100,20 @@ class _DigestSink implements Sink<Digest> {
   void close() {}
 }
 
+/// 一个已解析的合并分段。[requested] 保留模型给出的原始拼写（敏感读取审批的
+/// 指纹按原始拼写计算，与 `workspace.read` 铸造的令牌同一口径），[resolved]
+/// 是解析后的真实路径，用于读取、报错与敏感判定。
+class _MergePart {
+  final String requested;
+  final String resolved;
+
+  const _MergePart({required this.requested, required this.resolved});
+}
+
 /// Outcome of the shared mutation preamble: either the prepared [plan] (with
 /// its [resolvedPath] and raw [sensitive] flag), or a [refusal] the caller must
 /// return verbatim. Exactly one side is set.
-class _PreparedMutation {
-  final WorkChangePlan? plan;
+class _PreparedMutation {  final WorkChangePlan? plan;
   final String? resolvedPath;
   final bool sensitive;
   final Map<String, dynamic>? refusal;
