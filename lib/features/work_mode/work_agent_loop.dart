@@ -686,13 +686,34 @@ class WorkAgentLoop
     }
   }
 
+  /// 抢救写入合成的工具请求：一次 `workspace.patch` **追加写**。
+  ///
+  /// `append: true` 不只是"文件不存在就创建"：它正是**"这次写还不是交付物的最终
+  /// 形态"这个契约标记**（`_artifactToolChanged`，`default_work_task_runner_delivery.dart`）。
+  /// 缺了它，与目标同目录、同扩展名、mtime 新鲜的暂存分段会立刻满足交付物契约，
+  /// 任务带着被截断的前缀 `completed`、交付一个残缺文件，而这条续写指令永远等不
+  /// 到下一轮。
+  ///
+  /// 不带 `overwrite`：派生路径按内容哈希命名，首次必然不存在；同内容重复抢救的
+  /// 参数逐字相同，会被 `committedActionKeys` 在进 handler 之前去重。
+  AgentToolCall _salvageRequest(String rescuedPath, String content) =>
+      AgentToolCall(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': rescuedPath,
+          'content': content,
+          'append': true,
+        },
+      );
+
   /// 把一次被截断的写入抢救成分段文件，并给出下一次决策的续写指令。
   ///
   /// 抢救走 [_handleDecision]，于是审批、快照、事件、检查点与去重全部沿用模型
   /// 自己写文件时的那条管线——它是**真实的工具请求**，不是直写文件。
   ///
   /// 它同时是一次止损：提取不出内容、写入被拒或没落盘时，返回的 `hint` 仍是
-  /// 通用的分块话术，任务照常重试，绝不因为抢救没成功而失败。
+  /// 通用的分块话术，任务照常重试，绝不因为抢救没成功而失败。落盘走
+  /// [_salvageRequest]（一次追加写），它不是交付物。
   Future<_TruncationSalvageOutcome> _salvageTruncatedOutput(
     _LoopState state,
     Map<String, dynamic> response,
@@ -708,10 +729,7 @@ class WorkAgentLoop
       state,
       AgentToolDecision(
         publicUpdate: notice,
-        tool: AgentToolCall(
-          name: AgentToolName.workspacePatch,
-          arguments: {'path': rescuedPath, 'content': salvage.content},
-        ),
+        tool: _salvageRequest(rescuedPath, salvage.content),
       ),
       notice,
     );
@@ -726,23 +744,35 @@ class WorkAgentLoop
         hint: _truncationSalvageFallback.hint,
       );
     }
-    // 抢救写入自己失败（典型：派生路径不在授权目录，或目标是 Word 这类不能直接
-    // patch 的交付物）。抢救只是止损，不能成为新的失败源：拨回 `_fail` 写下的
-    // 终态，退回话术路径继续，而不是让一次补救动作判死任务。
+    // 抢救写入自己失败（`pathRejected`，或工具根本不在注册表里）。抢救只是止损，
+    // 不能成为新的失败源：拨回 `_fail` 写下的终态，退回话术路径继续，而不是让一次
+    // 补救动作判死任务。注意此时**不能**用 `recentResults.last` 判断落盘结果：
+    // 这个分支可能在结果被记录之前就返回（`registry.validate` 失败），那读到的会
+    // 是更早的一次成功写入，于是发出一条点名不存在文件的续写指令。
     await _clearSalvageFailure(state);
-    return _reportSalvageOutcome(state, salvage, rescuedPath);
+    return _reportSalvageOutcome(
+      state,
+      salvage,
+      rescuedPath,
+      failedReason: _publicText(stop.message),
+    );
   }
 
   /// 公布一次抢救的结果，并给出下一次决策要带的续写指令。
+  ///
+  /// [failedReason] 非空表示写入工具自身失败（结果未必进过 `recentResults`），
+  /// 此时一律按未落盘处理。
   Future<_TruncationSalvageOutcome> _reportSalvageOutcome(
     _LoopState state,
     WorkTruncationSalvage salvage,
-    String rescuedPath,
-  ) async {
+    String rescuedPath, {
+    String failedReason = '',
+  }) async {
     final characters = salvage.content.length;
-    final committed = state.recentResults.isNotEmpty &&
+    final committed = failedReason.isEmpty &&
+        state.recentResults.isNotEmpty &&
         state.recentResults.last['committed'] == true;
-    final reason = state.recentResults.isEmpty
+    final resultReason = state.recentResults.isEmpty
         ? ''
         : _publicText(state.recentResults.last['message']?.toString() ?? '');
     await _emit(
@@ -753,7 +783,10 @@ class WorkAgentLoop
           : '抢救被截断的输出未落盘，将按精简指令重试。',
       detail: committed
           ? rescuedPath
-          : (reason.isEmpty ? '分段文件未能写入。' : reason),
+          : _salvageFailureDetail(
+              failedReason: failedReason,
+              resultReason: resultReason,
+            ),
       safeMetadata: {
         'scope': 'truncationSalvage',
         'salvaged': committed,
@@ -773,6 +806,22 @@ class WorkAgentLoop
       rescuedPath: rescuedPath,
       rescuedCharacters: characters,
     );
+  }
+
+  /// 抢救没落盘时的公开原因。
+  ///
+  /// 写入工具自身失败时，`_handleDecision` 已经先落了一条「任务未完成。」——那是
+  /// 这次止损动作留下的，不是任务的结局（[`_clearSalvageFailure`] 已把状态拨回）。
+  /// 撤销不了那条事件，就在这条里把口径点明，免得用户把红色失败读成本任务的结局。
+  String _salvageFailureDetail({
+    required String failedReason,
+    required String resultReason,
+  }) {
+    final reason = failedReason.isNotEmpty ? failedReason : resultReason;
+    final base = reason.isEmpty ? '分段文件未能写入。' : reason;
+    if (failedReason.isEmpty) return base;
+    return '$base 抢救写入只是止损：上一条「任务未完成。」来自这次抢救本身，'
+        '可以忽略，任务会按精简指令继续。';
   }
 
   /// 撤掉一次失败抢救留在任务上的终态。

@@ -183,11 +183,31 @@ WorkToolDefinition _definition(
           : {
               'path': WorkToolValueType.string,
               'content': WorkToolValueType.string,
+              // 生产 schema 同样声明了它（`default_work_task_runner_tools.dart`）：
+              // 夹具少一个字段，循环合成的追加写就会在校验处被判成"不支持参数"。
+              'append': WorkToolValueType.boolean,
             },
       required: skillDownload ? {'templateId'} : {'path'},
     ),
     handler: fake.call,
     mutationPipeline: pipeline,
+  );
+}
+
+/// `workspace.patch` 的变更工具夹具，闸门默认全部放行。
+///
+/// 生产里它是 **mutation**；夹具若用默认的只读形态，`_safeResult` 的 `committed`
+/// 恒为 false，抢救会一直落在"没落盘"的兜底分支上——续写指令根本不会被构造出来，
+/// 相关断言就只能在别处漏出来的文件名上碰巧通过。
+WorkToolDefinition _patchDefinition(
+  _FakeTool tool, {
+  WorkToolMutationPipeline? pipeline,
+}) {
+  return _definition(
+    AgentToolName.workspacePatch,
+    tool,
+    access: WorkToolAccess.mutation,
+    pipeline: pipeline ?? _recordingPipeline(<String>[]),
   );
 }
 
@@ -1684,7 +1704,7 @@ void main() {
     final loop = _loop(
       model: model,
       registry: WorkToolRegistry(
-        definitions: [_definition(AgentToolName.workspacePatch, tool)],
+        definitions: [_patchDefinition(tool)],
       ),
       events: events,
     );
@@ -1699,6 +1719,10 @@ void main() {
     expect(args['path'], startsWith('report.rescue-'));
     // 落盘的必须是模型原本要写的字符，而不是带反斜杠的 JSON 字面量。
     expect(args['content'], '第一段\n第二段');
+    // `append` 是"这次写还不是交付物的最终形态"的契约标记（`_artifactToolChanged`）：
+    // 缺了它，暂存分段会立刻满足交付物契约，任务带着被截断的前缀 completed。
+    expect(args['append'], isTrue,
+        reason: '抢救写入不得被当成交付物已就绪');
     expect(
       events.any((event) => event.safeMetadata['salvagedCharacters'] != null),
       isTrue,
@@ -1706,8 +1730,60 @@ void main() {
     final retryPrompt = model.requests.last.messages
         .map((message) => message['content']?.toString() ?? '')
         .join('\n');
+    // 钉"续写指令装上"必须用抢救提示独有的措辞：`committedActionKeys` 的操作键里
+    // `path` 是明文，它经 `committedWrites` 进 context 时会带出 `report.rescue-…`，
+    // 用文件名断言的话，把 `continuationHint` 整个摘掉这两条用例仍然会绿。
+    expect(retryPrompt, contains('补写余下内容'),
+        reason: '续写指令必须告诉模型往已抢救的分段文件接着写');
     expect(retryPrompt, contains('report.rescue-'),
         reason: '续写指令必须点名已抢救的分段文件');
+  });
+
+  test('a salvaged part file never satisfies the artifact contract', () async {
+    // 抢救文件与目标同目录、同扩展名、内容非空、mtime 新鲜，因此"这次写是不是
+    // 交付物"完全由 `append` 标记决定（生产判据见
+    // `default_work_task_runner_delivery.dart` 的 `_artifactToolChanged`；该判据
+    // 本身由 `default_work_task_runner_stage02_test.dart` 的
+    // 'an append alone never satisfies the deliverable contract' 用真实 runner
+    // 钉住）。这里盯住循环这一侧：抢救写入一旦被判成交付物已就绪，任务会在只写了
+    // 一段残缺内容时 completed，摘要与交付附件都指向 `report.rescue-<hash>.md`。
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"被截断的正文',
+      })
+      ..responses.add({'success': true, 'content': '还是写坏的正文'})
+      ..responses.add(_finishDecision('按续写指令补齐并交付。'));
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_patchDefinition(tool)],
+      ),
+      // 生产契约判定的替身：`append` 写入不算"交付物已就绪"，其余成功的整文件写
+      // 就算（回读校验由真实 runner 那条用例负责）。
+      artifactCompletion: (task, call, result) {
+        if (call.arguments['append'] == true) return null;
+        final path = call.arguments['path']?.toString() ?? '';
+        return AgentFinishCompletion(summary: '文件已写入并通过回读校验：$path。');
+      },
+    );
+
+    final task = _task(id: 'truncation-salvage-contract');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    // 先钉行为：完成必须来自模型自己的 finish，而不是抢救写入触发的契约自动收尾。
+    expect(task.resultSummary, isNot(contains('rescue-')),
+        reason: '暂存分段不得成为被交付的产物：${task.resultSummary}');
+    expect(task.resultSummary, contains('按续写指令补齐并交付'),
+        reason: '任务不得因一次抢救写入就自动收尾：${task.resultSummary}');
+    // 再钉机制：挡住自动收尾的就是这个标记。
+    expect(tool.arguments.single['append'], isTrue,
+        reason: '抢救写入必须带 append，否则会被判成交付物已就绪');
   });
 
   test('the continuation hint survives context compaction', () async {
@@ -1727,18 +1803,34 @@ void main() {
     final loop = _loop(
       model: model,
       registry: WorkToolRegistry(
-        definitions: [_definition(AgentToolName.workspacePatch, tool)],
+        definitions: [_patchDefinition(tool)],
       ),
       promptCompactionBudgetTokens: 1,
     );
 
     final task = _task(id: 'truncation-salvage-compaction');
-    await loop.execute(task);
+    // 先给出一段会被压缩丢掉的对话历史（预算 1 时 `conversationHistory` 只留最后
+    // 两条），否则这条用例只在"压根没压缩"的世界里验证指令还在——续写指令混进
+    // 检查点也一样能通过。
+    final history = <Map<String, dynamic>>[
+      for (var index = 0; index < 5; index++)
+        {
+          'role': 'user',
+          'content': '压缩前的历史消息编号 $index，应当被丢掉。',
+        },
+    ];
+    await loop.execute(task, conversationHistory: history);
 
     final retryPrompt = model.requests.last.messages
         .map((message) => message['content']?.toString() ?? '')
         .join('\n');
-    expect(retryPrompt, contains('report.rescue-'),
+    expect(retryPrompt, isNot(contains('压缩前的历史消息编号 0')),
+        reason: '压缩必须真的发生，否则这条用例证明不了什么');
+    expect(retryPrompt, contains('压缩前的历史消息编号 4'),
+        reason: '压缩只丢旧的，最近两条要留下');
+    // 用抢救提示独有的措辞，而不是 `report.rescue-`：后者会经 `committedWrites`
+    // 从操作键里漏进 context（`path` 是明文），摘掉 `continuationHint` 也照样绿。
+    expect(retryPrompt, contains('已写入内容的结尾是'),
         reason: '检查点被压缩后续写指令仍必须到达模型');
   });
 
@@ -1794,6 +1886,7 @@ void main() {
       ..responses.add({'success': true, 'content': '还是写坏的正文'})
       ..responses.add(_finishDecision('按分块指令完成。'));
     final tool = _FakeTool();
+    final events = <WorkTaskEvent>[];
     final loop = _loop(
       model: model,
       registry: WorkToolRegistry(
@@ -1810,6 +1903,7 @@ void main() {
           ),
         ],
       ),
+      events: events,
     );
 
     final task = _task(id: 'truncation-salvage-rejected');
@@ -1824,6 +1918,70 @@ void main() {
     // 退回话术路径：不提"已抢救"，只给分块配方。
     expect(retryPrompt, contains('拆成多次动作'));
     expect(retryPrompt, isNot(contains('report.rescue-')));
+    // 拨回终态撤不回 `_fail` 已落的那条「任务未完成。」，所以抢救失败那条事件必须
+    // 自己把口径点明，免得用户把红色失败读成本任务的结局。
+    final salvageEvent = events.lastWhere(
+      (event) => event.safeMetadata['scope'] == 'truncationSalvage',
+    );
+    expect(salvageEvent.safeMetadata['salvaged'], isFalse);
+    expect(salvageEvent.detail, contains('无法在授权目录内解析精确文件路径。'));
+    expect(salvageEvent.detail, contains('任务未完成。'));
+    expect(salvageEvent.detail, contains('可以忽略'));
+  });
+
+  test('a salvage rejected before its result is recorded invents no part file',
+      () async {
+    // 抢救写入可能连 handler 都没进就被 `registry.validate` 拒掉（合成参数不在
+    // 工具 schema 里）。那条分支在把结果写进 `recentResults` **之前**就 `_fail`
+    // 了：若照旧读 `recentResults.last`，读到的会是更早那次成功写入，于是发出一条
+    // 点名根本不存在的分段文件的续写指令。
+    final model = _FakeModel()
+      ..responses.add(
+        _toolDecision(name: AgentToolName.workspacePatch, path: 'notes.txt'),
+      )
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"第一段',
+      })
+      ..responses.add({'success': true, 'content': '还是写坏的正文'})
+      ..responses.add(_finishDecision('按分块指令完成。'));
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          WorkToolDefinition(
+            name: AgentToolName.workspacePatch,
+            access: WorkToolAccess.mutation,
+            // 刻意不声明 `append`：合成的抢救参数会被 schema 拒绝。
+            schema: const WorkToolSchema(
+              fields: {
+                'path': WorkToolValueType.string,
+                'content': WorkToolValueType.string,
+              },
+              required: {'path'},
+            ),
+            handler: tool.call,
+            mutationPipeline: _recordingPipeline(<String>[]),
+          ),
+        ],
+      ),
+    );
+
+    final task = _task(id: 'truncation-salvage-invalid-args');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    expect(tool.calls, 1, reason: '只有模型自己那次写入进了 handler');
+    final retryPrompt = model.requests.last.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(retryPrompt, isNot(contains('report.rescue-')),
+        reason: '抢救没落盘，不得点名一个不存在的分段文件');
+    expect(retryPrompt, contains('拆成多次动作'));
   });
 
   test('untruncated malformed response still feeds the raw body back',
