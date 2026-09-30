@@ -3262,6 +3262,110 @@ void main() {
     expect(runner.startedTaskIds, ['clarification-answer']);
   });
 
+  test('replying with an option number resumes on that candidate', () async {
+    final task =
+        _task(id: 'clarification-number', conversationId: 'group-clarify-num')
+          ..status = AgentTaskStatus.completed
+          ..lastArtifactPaths = [
+            '/workspace/report.md',
+            '/workspace/summary.md',
+          ];
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '请修改当前文件');
+    expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+
+    // 面板上的按钮和这行「2」是同一条路径：都走清单序号，落到第 2 个候选。
+    await coordinator.enqueueFollowUp(task.id, '2');
+
+    final resumed = taskBox.get(task.id)!;
+    expect(resumed.status, AgentTaskStatus.planning);
+    expect(resumed.queuedUserRequests, isEmpty);
+    expect(resumed.executionStateJson, contains('/workspace/summary.md'));
+    expect(resumed.executionStateJson, isNot(contains('/workspace/report.md')));
+    expect(runner.startedTaskIds, ['clarification-number']);
+  });
+
+  test('an unusable answer is reported back instead of re-asking silently',
+      () async {
+    final task =
+        _task(id: 'clarification-rejected', conversationId: 'group-clarify-no')
+          ..status = AgentTaskStatus.completed
+          ..lastArtifactPaths = [
+            '/workspace/report.md',
+            '/workspace/summary.md',
+          ];
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '请修改当前文件');
+    // 第一次提问不是"回答没被采纳"：用户还没答过。
+    expect(
+      WorkTaskClarification.answerRejected(taskBox.get(task.id)!),
+      isFalse,
+    );
+
+    await coordinator.enqueueFollowUp(task.id, '不知道');
+
+    final stored = taskBox.get(task.id)!;
+    expect(stored.status, AgentTaskStatus.paused);
+    expect(WorkTaskClarification.answerRejected(stored), isTrue);
+    // 清单里没有第 9 项：越界序号同样解不开，同样如实说。
+    await coordinator.enqueueFollowUp(task.id, '9');
+    expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+    expect(
+      WorkTaskClarification.answerRejected(taskBox.get(task.id)!),
+      isTrue,
+    );
+
+    final titles = (await eventStore.read(task.id))
+        .events
+        .where((event) => event.kind == WorkTaskEventKind.paused)
+        .map((event) => event.title)
+        .toList();
+    // 同一条提示重复两遍，用户分不清系统是没收到还是没看懂。
+    expect(titles.first, '需要明确修订目标');
+    expect(titles.last, '仍未确定修订目标');
+  });
+
+  test('a paused clarification persists the options the panel renders',
+      () async {
+    final task = _task(
+      id: 'clarification-options',
+      conversationId: 'group-clarify-options',
+    )
+      ..status = AgentTaskStatus.completed
+      ..lastArtifactPaths = [
+        '/workspace/report.md',
+        '/workspace/summary.md',
+      ];
+    await taskBox.put(task.id, task);
+
+    await coordinator.enqueueFollowUp(task.id, '请修改当前文件');
+
+    final paused = taskBox.get(task.id)!;
+    expect(paused.status, AgentTaskStatus.paused);
+    // 面板不查聊天历史：重启后按钮只能从检查点重建，所以候选必须落盘，
+    // 且要带完整路径 —— 短名区分不了不同目录下的同名文件。
+    final options = WorkTaskClarification.options(paused);
+    expect(
+      options.map((option) => option.index),
+      <int>[1, 2],
+    );
+    expect(
+      options.map((option) => option.path),
+      <String>['/workspace/report.md', '/workspace/summary.md'],
+    );
+    expect(WorkTaskClarification.question(paused), contains('1. report.md'));
+
+    // 目标一旦确定，选项必须随之消失：留着它，面板会为一个已经解决的问题
+    // 继续摆一排按下去就报错的按钮。
+    await coordinator.enqueueFollowUp(task.id, 'report.md');
+    expect(
+      WorkTaskClarification.options(taskBox.get(task.id)!),
+      isEmpty,
+    );
+  });
+
   test('a vague answer keeps the clarification open instead of running it',
       () async {
     // 答复评审发现：把"答复本身只要不是澄清就放行"当作逃逸口，等于让任务带着

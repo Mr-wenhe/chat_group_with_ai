@@ -290,6 +290,119 @@ void main() {
     expect(decision.kind, WorkFollowUpKind.clarification);
     expect(decision.artifactPath, isNull);
     expect(decision.clarificationQuestion, contains('文件路径'));
+    expect(decision.clarificationOptions, isEmpty);
+  });
+
+  test('ambiguous target carries numbered options the user can pick', () {
+    final decision = policy.resolve(
+      request: '请修改当前文件',
+      lastArtifactPaths: const [
+        '/workspace/report.md',
+        '/workspace/summary.md',
+      ],
+    );
+
+    expect(decision.kind, WorkFollowUpKind.clarification);
+    expect(
+      decision.clarificationOptions.map((option) => option.index),
+      <int>[1, 2],
+    );
+    // 选项带的是可执行的完整路径：同名候选（不同目录下的 report.md）只有靠
+    // 路径才能区分，点选必须比手打文件名更精确。
+    expect(
+      decision.clarificationOptions.map((option) => option.path),
+      <String>['/workspace/report.md', '/workspace/summary.md'],
+    );
+  });
+
+  test('the question lists every candidate in option order', () {
+    final decision = policy.resolve(
+      request: '请修改当前文件',
+      lastArtifactPaths: const [
+        '/workspace/report.md',
+        '/workspace/summary.md',
+      ],
+    );
+
+    final question = decision.clarificationQuestion!;
+    // 清单与选项一一对应：用户读到第几条，就该点到第几个按钮。
+    expect(question, contains('1. report.md'));
+    expect(question, contains('2. summary.md'));
+    // 序号是能用的答复形态之一，文案里不写，用户就只能照着抄文件名。
+    expect(question, contains('序号'));
+    expect(
+      question.indexOf('1. report.md'),
+      lessThan(question.indexOf('2. summary.md')),
+    );
+  });
+
+  test('an answer that names an option by its number picks that option', () {
+    const options = <WorkFollowUpOption>[
+      WorkFollowUpOption(index: 1, path: '/workspace/report.md'),
+      WorkFollowUpOption(index: 2, path: '/workspace/summary.md'),
+    ];
+
+    for (final answer in const [
+      '1',
+      ' 1 ',
+      '1.',
+      '第1个',
+      '选1',
+      '选择第 1 项',
+      '"1"',
+      '１',
+    ]) {
+      expect(
+        WorkFollowUpOption.selectedBy(options, answer)?.path,
+        '/workspace/report.md',
+        reason: '「$answer」应当被读成清单第 1 项',
+      );
+    }
+    expect(
+      WorkFollowUpOption.selectedBy(options, '第2个')?.path,
+      '/workspace/summary.md',
+    );
+  });
+
+  test('an answer that is not a bare option number picks nothing', () {
+    const options = <WorkFollowUpOption>[
+      WorkFollowUpOption(index: 1, path: '/workspace/report.md'),
+      WorkFollowUpOption(index: 2, path: '/workspace/summary.md'),
+    ];
+
+    for (final answer in const [
+      '',
+      '0',
+      '3', // 清单只有两项：越界序号不是选择，是打错
+      'report.md',
+      '/workspace/report.md',
+      '生成3个文件',
+      '第2个方案改成 docx',
+      '1 2',
+    ]) {
+      expect(
+        WorkFollowUpOption.selectedBy(options, answer),
+        isNull,
+        reason: '「$answer」不是点选清单某一项',
+      );
+    }
+  });
+
+  test('same-named candidates stay distinguishable in the question list', () {
+    final decision = policy.resolve(
+      request: '请修复之前的转换问题',
+      lastArtifactPaths: const [
+        '/workspace/first/create_ppt.py',
+        '/workspace/second/create_ppt.py',
+      ],
+      failedArtifactPath: 'create_ppt.py',
+    );
+
+    expect(decision.kind, WorkFollowUpKind.clarification);
+    expect(
+      decision.clarificationOptions.map((option) => option.path),
+      <String>['/workspace/first/create_ppt.py', '/workspace/second/create_ppt.py'],
+    );
   });
 
   test('ordinary follow-up remains a normal continuation', () {

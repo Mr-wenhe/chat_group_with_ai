@@ -16,6 +16,8 @@ class WorkTaskClarification {
 
   static const String requiredKey = 'clarificationRequired';
   static const String questionKey = 'clarificationQuestion';
+  static const String optionsKey = 'clarificationOptions';
+  static const String answerRejectedKey = 'clarificationAnswerRejected';
 
   /// 协调器写入的跟进分类字段与"澄清"取值（见 [WorkFollowUpKind]）。
   static const String followUpKindKey = 'followUpKind';
@@ -64,6 +66,23 @@ class WorkTaskClarification {
   /// 可回答问题的展示文案（模型问题与追问澄清共用同一读取路径）。
   static String answerableQuestion(AgentTask task) => question(task);
 
+  /// 追问澄清的候选目标，供面板渲染点击按钮。
+  ///
+  /// 与 [question] 同源：问题清单里的第几条就是这里的第几个选项，所以两者必须
+  /// 一起落盘、一起清除。模型提问没有结构化候选，这里恒为空。
+  static List<WorkFollowUpOption> options(AgentTask task) =>
+      WorkFollowUpOption.listFromJson(
+        _decode(task.executionStateJson)[optionsKey],
+      );
+
+  /// 上一次答复没能被采纳（读不出目标，问题原样再问一遍）。
+  ///
+  /// 没有这个标记，用户看到的就是同一句话重复出现，分不清系统是没收到答复，
+  /// 还是收到了但看不懂。缺省为 false：旧检查点写下时还没有这个字段，
+  /// 按"还没答过"读比按"答错了"读更保守 —— 后者会凭空指责用户。
+  static bool answerRejected(AgentTask task) =>
+      _decode(task.executionStateJson)[answerRejectedKey] == true;
+
   static void markPending(AgentTask task, String question) {
     final metadata = _decode(task.executionStateJson)
       ..[requiredKey] = true
@@ -80,7 +99,12 @@ class WorkTaskClarification {
   static void clear(AgentTask task) {
     final metadata = _decode(task.executionStateJson)
       ..remove(requiredKey)
-      ..remove(questionKey);
+      ..remove(questionKey)
+      // 选项是问题的一部分，跟着问题一起走：留下的按钮属于一个已经不存在的
+      // 提问，点下去只会提交一个没人认领的路径。
+      ..remove(optionsKey)
+      // "上次答复没看懂"同理：问题都解开了，这句指责必须一起消失。
+      ..remove(answerRejectedKey);
     // Only this class's own keys are touched; a checkpoint that carried nothing
     // else legitimately becomes empty.
     task.executionStateJson = metadata.isEmpty ? '' : jsonEncode(metadata);

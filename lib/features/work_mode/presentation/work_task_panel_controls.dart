@@ -34,6 +34,13 @@ class _TaskReplyBox extends StatelessWidget {
     final isDiscussionQuestion = discussionQuestion != null;
     final question = discussionQuestion ??
         WorkTaskClarification.answerableQuestion(task);
+    // 只有追问澄清带结构化候选。模型提问没有可点的目标，给一排按钮等于把
+    // 用户的选择权换成我们的猜测。
+    final options = isFollowUpClarification
+        ? WorkTaskClarification.options(task)
+        : const <WorkFollowUpOption>[];
+    final answerRejected = isFollowUpClarification &&
+        WorkTaskClarification.answerRejected(task);
     final prompt = isDiscussionQuestion
         ? '请回答群讨论的问题'
         : isFollowUpClarification
@@ -56,7 +63,30 @@ class _TaskReplyBox extends StatelessWidget {
               style: Theme.of(context).textTheme.labelLarge,
             ),
             const SizedBox(height: 4),
-            Text(_safePanelText(question)),
+            SelectableText(
+              _safePanelText(question),
+              key: const Key('work-task-reply-question'),
+            ),
+            if (answerRejected) ...[
+              const SizedBox(height: 6),
+              // 问题原样再问一遍时，用户分不清系统是没收到答复还是读不懂答复。
+              // 只有真有候选时才提"点选"：没有候选的任务里那排按钮不存在。
+              Text(
+                options.isEmpty
+                    ? '没能从上次回复里认出要改的文件，请回复完整路径。'
+                    : '没能从上次回复里认出要改的文件，请点选下面的选项，或回复完整路径。',
+                key: const Key('work-task-reply-rejected'),
+                style: TextStyle(color: colors.error),
+              ),
+            ],
+            if (isFollowUpClarification && options.isNotEmpty) ...[
+              const SizedBox(height: 6),
+              _CandidateButtons(
+                options: options,
+                enabled: !actionInFlight,
+                onSubmit: onSubmit,
+              ),
+            ],
             const SizedBox(height: 8),
             Semantics(
               container: true,
@@ -907,4 +937,46 @@ String _statusBadgeLabel(AgentTaskStatus status) {
     AgentTaskStatus.paused => '已暂停',
     AgentTaskStatus.interrupted => '已中断',
   };
+}
+
+/// 追问澄清的候选按钮：点一下等于把该候选的完整路径回给任务。
+///
+/// 单独的 widget 而不是内联 `Wrap`，是因为"同名候选要显示完整路径"这条判据
+/// 需要看到整个候选列表，内联在 `build` 里会把它拆成两处。
+class _CandidateButtons extends StatelessWidget {
+  final List<WorkFollowUpOption> options;
+  final bool enabled;
+  final Future<void> Function(String reply) onSubmit;
+
+  const _CandidateButtons({
+    required this.options,
+    required this.enabled,
+    required this.onSubmit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 4,
+      children: <Widget>[
+        for (final option in options)
+          OutlinedButton(
+            key: Key('work-task-reply-option-${option.index}'),
+            onPressed: enabled ? () => unawaited(onSubmit(option.path)) : null,
+            child: Text(_labelFor(option)),
+          ),
+      ],
+    );
+  }
+
+  /// 提交的永远是完整路径（同名候选只有路径能区分），但按钮文案默认只用短名。
+  /// 短名撞车时退回完整路径 —— 两个长得一模一样的按钮等于没有给出选择，而这
+  /// 正是这次澄清要解决的问题。
+  String _labelFor(WorkFollowUpOption option) {
+    final sameName = options
+        .where((other) => other.displayName == option.displayName)
+        .length;
+    return sameName > 1 ? option.path : option.displayName;
+  }
 }
