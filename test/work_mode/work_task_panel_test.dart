@@ -4,8 +4,11 @@ import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+// 任务胶囊与聊天页共用右上角，几何断言要量会话控件行的真实高度。
+import 'package:chat_group/features/chat_group/widgets/compact_conversation_controls.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_host.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_pill_position.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_change_policy.dart';
 import 'package:chat_group/features/work_mode/work_task_action_notice.dart';
@@ -127,6 +130,23 @@ Future<void> _pumpOverlayHostWithTask(WidgetTester tester, Size viewport) async 
     ),
   ]);
   await tester.pump();
+  await tester.pump();
+}
+
+/// 拖动折叠胶囊。
+///
+/// 先用一段大于触摸 slop 的移动把识别器喂饱——`DragStartBehavior.start` 下这段
+/// 会被折进起手位置、不产生位移，所以只有 [delta] 会真的落在胶囊上，断言才能
+/// 按精确位移写。
+Future<void> _dragMiniBar(WidgetTester tester, Offset delta) async {
+  final bar = find.byKey(const Key('work-task-mini-bar'));
+  final gesture = await tester.startGesture(tester.getCenter(bar));
+  await tester.pump();
+  await gesture.moveBy(const Offset(0, kTouchSlop * 2));
+  await tester.pump();
+  await gesture.moveBy(delta);
+  await tester.pump();
+  await gesture.up();
   await tester.pump();
 }
 
@@ -1575,6 +1595,12 @@ void main() {
         find.textContaining('请明确要修改的文件路径（report.md、summary.md）？'),
         findsOneWidget,
       );
+      // 首次提问时不能出现"上次答复没被采纳"的措辞：那时用户还没答过任何东西，
+      // 凭空虚指一句会让用户怀疑自己根本没发出去。
+      expect(
+        find.byKey(const Key('work-task-reply-rejected')),
+        findsNothing,
+      );
       // 澄清期间"继续"必须可见地不可用：既不能答、也不能继续才是原来的死角。
       expect(
         tester
@@ -1592,6 +1618,267 @@ void main() {
       await tester.tap(find.byKey(const Key('work-task-reply-send')));
       await tester.pumpAndSettle();
       expect(submittedReply, '桌面');
+    });
+
+    testWidgets('a revision clarification offers its candidates as buttons',
+        (tester) async {
+      // 候选本来就摆在问题文案里，但用户只能照着抄一遍。按钮把"清单第几条"
+      // 和"点哪个"对上，并且提交的是完整路径 —— 同名文件手打文件名必错。
+      final task = _task(
+        id: 'follow-up-clarification-options-panel',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..lastError = '请明确要修改的文件路径（点击选项，或回复序号／文件名）？\n'
+            '1. report.md\n2. summary.md'
+        ..executionStateJson = jsonEncode({
+          'followUpKind': 'clarification',
+          'clarificationQuestion':
+              '请明确要修改的文件路径（点击选项，或回复序号／文件名）？\n'
+                  '1. report.md\n2. summary.md',
+          'clarificationOptions': [
+            {'index': 1, 'path': '/workspace/report.md'},
+            {'index': 2, 'path': '/workspace/summary.md'},
+          ],
+        });
+      String? submittedReply;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onReply: (_, reply) async => submittedReply = reply,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-reply-option-1')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-reply-option-2')), findsOneWidget);
+      expect(find.text('report.md'), findsOneWidget);
+      expect(find.text('summary.md'), findsOneWidget);
+
+      await tester
+          .ensureVisible(find.byKey(const Key('work-task-reply-option-2')));
+      await tester.tap(find.byKey(const Key('work-task-reply-option-2')));
+      await tester.pumpAndSettle();
+
+      expect(submittedReply, '/workspace/summary.md');
+    });
+
+    testWidgets('same-named candidates are labelled with their full paths',
+        (tester) async {
+      // 文件名撞车正是这次澄清要解决的场景（不同目录下的同名脚本）。两个长得
+      // 一模一样的按钮等于没给出选择，所以这类候选必须显示完整路径。
+      final task = _task(
+        id: 'follow-up-clarification-same-name',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = jsonEncode({
+          'followUpKind': 'clarification',
+          'clarificationQuestion':
+              '请明确要修改的文件路径（点击选项，或回复序号／文件名）？\n'
+                  '1. create_ppt.py\n2. create_ppt.py',
+          'clarificationOptions': [
+            {'index': 1, 'path': '/workspace/first/create_ppt.py'},
+            {'index': 2, 'path': '/workspace/second/create_ppt.py'},
+          ],
+        });
+      String? submittedReply;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onReply: (_, reply) async => submittedReply = reply,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.text('create_ppt.py'), findsNothing);
+      expect(find.text('/workspace/first/create_ppt.py'), findsOneWidget);
+      expect(find.text('/workspace/second/create_ppt.py'), findsOneWidget);
+
+      await tester.ensureVisible(
+        find.byKey(const Key('work-task-reply-option-2')),
+      );
+      await tester.tap(find.byKey(const Key('work-task-reply-option-2')));
+      await tester.pumpAndSettle();
+
+      expect(submittedReply, '/workspace/second/create_ppt.py');
+    });
+
+    testWidgets('a model question offers no candidate buttons', (tester) async {
+      // 模型提问没有结构化候选。这里不给按钮，是因为没有可点的目标 ——
+      // 凭空造一排"是/否"会把用户的选择权换成我们的猜测。
+      final task = _task(
+        id: 'model-clarification-no-options',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = true
+        ..lastError = '你要生成 PPTX 还是其他格式？'
+        ..executionStateJson = jsonEncode({
+          'clarificationRequired': true,
+          'clarificationQuestion': '你要生成 PPTX 还是其他格式？',
+        });
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onReply: (_, __) async {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-reply-box')), findsOneWidget);
+      expect(
+        find.byKey(const Key('work-task-reply-option-1')),
+        findsNothing,
+      );
+    });
+
+    testWidgets('a re-asked clarification says the last answer was not taken',
+        (tester) async {
+      // 问题原样再问一遍时，用户分不清系统是没收到答复，还是收到了但读不懂。
+      final task = _task(
+        id: 'clarification-answer-rejected',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = jsonEncode({
+          'followUpKind': 'clarification',
+          'clarificationQuestion':
+              '请明确要修改的文件路径（点击选项，或回复序号／文件名）？\n1. report.md',
+          'clarificationOptions': [
+            {'index': 1, 'path': '/workspace/report.md'},
+          ],
+          'clarificationAnswerRejected': true,
+        });
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onReply: (_, __) async {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(
+        find.byKey(const Key('work-task-reply-rejected')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('没能从上次回复里认出'), findsOneWidget);
+    });
+
+    testWidgets(
+        'a path-only re-ask does not point at buttons that are not there',
+        (tester) async {
+      // 没有候选的澄清（任务里一个产物路径都没有）若仍写"请点选下面的选项"，
+      // 用户会去找一排不存在的按钮。
+      final task = _task(
+        id: 'clarification-rejected-no-options',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..executionStateJson = jsonEncode({
+          'followUpKind': 'clarification',
+          'clarificationQuestion': '请明确要修改的文件路径（例如：/workspace/report.md）？',
+          'clarificationAnswerRejected': true,
+        });
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onReply: (_, __) async {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-reply-rejected')), findsOneWidget);
+      expect(find.textContaining('没能从上次回复里认出'), findsOneWidget);
+      expect(find.textContaining('点选'), findsNothing);
+    });
+
+    testWidgets('the clarification question can be selected and copied',
+        (tester) async {
+      // 问题里带着文件路径，用户经常要把它贴到别处去；纯 Text 连选都选不中。
+      final task = _task(
+        id: 'clarification-copyable',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = true
+        ..lastError = '你要生成 PPTX 还是其他格式？'
+        ..executionStateJson = jsonEncode({
+          'clarificationRequired': true,
+          'clarificationQuestion': '你要生成 PPTX 还是其他格式？',
+        });
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onReply: (_, __) async {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      final question = tester.widget<SelectableText>(
+        find.byKey(const Key('work-task-reply-question')),
+      );
+      expect(question.data, '你要生成 PPTX 还是其他格式？');
     });
 
     testWidgets(
@@ -2237,6 +2524,277 @@ void main() {
       expect(bar.bottom, lessThan(viewport.height - 84));
       expect(bar.left, greaterThan(viewport.width / 2));
       expect(bar.right, lessThanOrEqualTo(viewport.width));
+    });
+
+    testWidgets('collapsed bar parks below the conversation controls band',
+        (tester) async {
+      // 会话页在 AppBar 之下还有一行会话控件（自动发言 / 语音播报 / 圆桌会议 /
+      // 工作模式）。胶囊曾经停在 kToolbarHeight + 16，正好压住这行的右端——
+      // 「工作模式」开关被盖住就点不到，所以这里必须让开。
+      const viewport = Size(800, 800);
+      final bandKey = GlobalKey();
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          appBar: AppBar(title: const Text('群聊')),
+          body: CompactConversationControls(
+            key: bandKey,
+            showAutoChat: true,
+            autoChatEnabled: true,
+            autoChatAvailable: true,
+            autoChatTooltip: '',
+            workModeEnabled: true,
+            workModeTooltip: '',
+            onAutoChatChanged: (_) {},
+            onWorkModeChanged: (_) {},
+            showRoundtableMode: true,
+            onRoundtableModeChanged: (_) {},
+            showVoiceBroadcast: true,
+            voiceBroadcastAvailable: true,
+            voiceBroadcastTooltip: '',
+            onVoiceBroadcastChanged: (_) {},
+          ),
+        ),
+      ));
+      // 下边界取真实控件的布局结果：控件行改高（图标或内边距调整）时，宿主里
+      // 那个常量会跟着失真，这条断言必须一起失败，否则胶囊会重新压上去。
+      final bandBottom = tester.getRect(find.byKey(bandKey)).bottom;
+      ConversationPresenceService.instance.enter('group-one');
+      addTearDown(() => ConversationPresenceService.instance.leave('group-one'));
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+
+      final bar = tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      expect(bar.top, greaterThanOrEqualTo(bandBottom));
+      expect(bar.left, greaterThan(viewport.width / 2));
+
+      // 展开后的宽屏面板与胶囊共用同一个顶锚点：只挪胶囊的话，展开那一下面板
+      // 会跳回原处，再把「工作模式」开关压住。
+      await tester.tap(find.byKey(const Key('work-task-mini-bar')));
+      await tester.pump();
+      expect(
+        tester.getRect(find.byKey(const Key('work-task-panel-wide'))).top,
+        greaterThanOrEqualTo(bandBottom),
+      );
+    });
+
+    testWidgets('collapsed bar keeps the AppBar anchor outside a conversation',
+        (tester) async {
+      // 角色列表、设置页没有那条控件行，胶囊不该为它空出一段距离。
+      const viewport = Size(800, 800);
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+
+      final bar = tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      expect(bar.top, kToolbarHeight + 16);
+    });
+
+    testWidgets('collapsed bar still shows a non-zero count', (tester) async {
+      const viewport = Size(800, 800);
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+
+      final bar = find.byKey(const Key('work-task-mini-bar'));
+      expect(
+        find.descendant(of: bar, matching: find.text('1')),
+        findsOneWidget,
+      );
+      expect(find.byTooltip('工作任务 1 项 · 点击展开'), findsOneWidget);
+    });
+
+    testWidgets('collapsed bar drops a meaningless zero count', (tester) async {
+      // 「0」不代表还有零个任务，而是本会话没有可盯的标签：记录收在历史里，
+      // 或者标签被用户自己关掉了。这时胶囊只当入口用，不该报一个 0 出来。
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      final task = _task(
+        id: 'hidden-only-task',
+        conversationId: 'group-one',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.completed;
+      ConversationPresenceService.instance.enter('group-one');
+      addTearDown(() => ConversationPresenceService.instance.leave('group-one'));
+
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          taskStream: taskUpdates.stream,
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onStopTask: (_) async {},
+          onContinueTask: (_) async {},
+          child: const SizedBox.expand(),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[task]);
+      await tester.pump();
+      await tester.pump();
+
+      // 关掉唯一的标签后本会话再没有可展示的标签，但记录仍在历史里，
+      // 所以面板（连带胶囊）必须留着，只是不该再报数。
+      await tester.tap(find.descendant(
+        of: find.byKey(const Key('work-task-tab-hidden-only-task')),
+        matching: find.byIcon(Icons.close_rounded),
+      ));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+
+      final bar = find.byKey(const Key('work-task-mini-bar'));
+      expect(bar, findsOneWidget);
+      expect(find.descendant(of: bar, matching: find.text('0')), findsNothing);
+      expect(find.byTooltip('打开任务面板'), findsOneWidget);
+      expect(find.byTooltip('工作任务 0 项 · 点击展开'), findsNothing);
+    });
+
+    testWidgets('wide panel starts at the conversation controls band',
+        (tester) async {
+      // 「填满聊天窗口高度」：面板顶边紧贴控件行下沿，不再空出 _topAnchorGap 那
+      // 16px；底边仍停在输入区之上，发送按钮照样点得到。
+      const viewport = Size(1000, 800);
+      final bandKey = GlobalKey();
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          appBar: AppBar(title: const Text('群聊')),
+          body: CompactConversationControls(
+            key: bandKey,
+            showAutoChat: true,
+            autoChatEnabled: true,
+            autoChatAvailable: true,
+            autoChatTooltip: '',
+            workModeEnabled: true,
+            workModeTooltip: '',
+            onAutoChatChanged: (_) {},
+            onWorkModeChanged: (_) {},
+            showRoundtableMode: true,
+            onRoundtableModeChanged: (_) {},
+            showVoiceBroadcast: true,
+            voiceBroadcastAvailable: true,
+            voiceBroadcastTooltip: '',
+            onVoiceBroadcastChanged: (_) {},
+          ),
+        ),
+      ));
+      final bandBottom = tester.getRect(find.byKey(bandKey)).bottom;
+      ConversationPresenceService.instance.enter('group-one');
+      addTearDown(() => ConversationPresenceService.instance.leave('group-one'));
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      final panel =
+          tester.getRect(find.byKey(const Key('work-task-panel-wide')));
+      expect(panel.top, closeTo(bandBottom, 0.5));
+      expect(panel.bottom, lessThanOrEqualTo(viewport.height - 84));
+    });
+
+    testWidgets('narrow panel also clears the conversation controls band',
+        (tester) async {
+      // 窄布局的面板不比宽屏面板特殊：它的顶边原本落在 96，而控件行下沿在 106，
+      // 面板头正压着「工作模式」开关的最后十来个像素——两个宽布局入口都让开了，
+      // 这条路径漏了。
+      const viewport = Size(600, 844);
+      final bandKey = GlobalKey();
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          appBar: AppBar(title: const Text('群聊')),
+          body: CompactConversationControls(
+            key: bandKey,
+            showAutoChat: true,
+            autoChatEnabled: true,
+            autoChatAvailable: true,
+            autoChatTooltip: '',
+            workModeEnabled: true,
+            workModeTooltip: '',
+            onAutoChatChanged: (_) {},
+            onWorkModeChanged: (_) {},
+            showRoundtableMode: true,
+            onRoundtableModeChanged: (_) {},
+            showVoiceBroadcast: true,
+            voiceBroadcastAvailable: true,
+            voiceBroadcastTooltip: '',
+            onVoiceBroadcastChanged: (_) {},
+          ),
+        ),
+      ));
+      final bandBottom = tester.getRect(find.byKey(bandKey)).bottom;
+      ConversationPresenceService.instance.enter('group-one');
+      addTearDown(() => ConversationPresenceService.instance.leave('group-one'));
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      final panel =
+          tester.getRect(find.byKey(const Key('work-task-panel-bottom')));
+      expect(panel.top, greaterThanOrEqualTo(bandBottom));
+      expect(panel.bottom, lessThanOrEqualTo(viewport.height - 84));
+    });
+
+    testWidgets('collapsed bar follows a drag', (tester) async {
+      const viewport = Size(800, 800);
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+
+      final bar = find.byKey(const Key('work-task-mini-bar'));
+      final before = tester.getRect(bar);
+      await _dragMiniBar(tester, const Offset(-200, 120));
+
+      final after = tester.getRect(bar);
+      expect(after.left, closeTo(before.left - 200, 1));
+      expect(after.top, closeTo(before.top + 120, 1));
+    });
+
+    testWidgets('dragging the collapsed bar keeps it inside the window',
+        (tester) async {
+      const viewport = Size(800, 800);
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+
+      await _dragMiniBar(tester, const Offset(4000, 4000));
+      final pushed = tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      expect(pushed.right, lessThanOrEqualTo(viewport.width));
+      expect(pushed.bottom, lessThanOrEqualTo(viewport.height));
+
+      await _dragMiniBar(tester, const Offset(-4000, -4000));
+      final pulled = tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      expect(pulled.left, greaterThanOrEqualTo(0));
+      expect(pulled.top, greaterThanOrEqualTo(0));
+    });
+
+    testWidgets('dragging the collapsed bar does not expand the panel',
+        (tester) async {
+      const viewport = Size(800, 800);
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+
+      await _dragMiniBar(tester, const Offset(-120, 90));
+
+      expect(find.byKey(const Key('work-task-mini-bar')), findsOneWidget);
+      expect(find.byKey(const Key('work-task-panel-wide')), findsNothing);
+    });
+
+    testWidgets('a dragged bar does not move the wide panel', (tester) async {
+      // 面板不跟随胶囊：拖到哪儿，展开后的面板都还在右侧默认锚点铺满。
+      const viewport = Size(1000, 800);
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+      await _dragMiniBar(tester, const Offset(-400, 300));
+
+      final barBefore = tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      await tester.tap(find.byKey(const Key('work-task-mini-bar')));
+      await tester.pump();
+
+      final panel =
+          tester.getRect(find.byKey(const Key('work-task-panel-wide')));
+      expect(panel.right, closeTo(viewport.width - 16, 0.5));
+      expect(panel.top, lessThan(barBefore.top));
     });
 
     testWidgets('wide panel stops above the composer row', (tester) async {
@@ -3056,6 +3614,176 @@ void main() {
 
       expect(taskBox.get(task.id), isNull);
       expect(database.hiddenWorkTaskIds(), isNot(contains(task.id)));
+    });
+  });
+
+  group('WorkTaskOverlayHost 胶囊位置持久化', () {
+    // 拖过的位置要记住：不落盘的话每次开 App 都得重新拖一遍。
+    late Directory hiveDirectory;
+    late DatabaseService database;
+
+    setUpAll(() async {
+      hiveDirectory = await openLifecycleHive();
+      database = DatabaseService();
+    });
+
+    tearDownAll(() async {
+      await closeLifecycleHive(hiveDirectory, database).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {},
+      );
+    });
+
+    setUp(() async {
+      await database.appSettingsBox.delete(WorkTaskPillPosition.storageKey);
+    });
+
+    Future<void> pumpHost(
+      WidgetTester tester, {
+      required Size viewport,
+      AgentTask? task,
+      Future<void> Function(String taskId)? onDeleteTask,
+    }) async {
+      tester.view.physicalSize = viewport;
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+      final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+      addTearDown(taskUpdates.close);
+      addTearDown(() async {
+        await tester.pumpWidget(const SizedBox.shrink());
+        await tester.pump();
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 50)),
+        );
+      });
+      await tester.pumpWidget(ProviderScope(
+        overrides: [databaseServiceProvider.overrideWithValue(database)],
+        child: MaterialApp(
+          home: WorkTaskOverlayHost(
+            taskStream: taskUpdates.stream,
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onStopTask: (_) async {},
+            onContinueTask: (_) async {},
+            onDeleteTask: onDeleteTask,
+            child: const SizedBox.expand(),
+          ),
+        ),
+      ));
+      taskUpdates.add(<AgentTask>[
+        task ??
+            _task(
+              id: 'pill-position-task',
+              conversationId: 'group-one',
+              characterId: 'developer',
+            ),
+      ]);
+      await tester.pump();
+      await tester.pump();
+    }
+
+    testWidgets('drag end writes the pill position into app_settings',
+        (tester) async {
+      await pumpHost(tester, viewport: const Size(800, 800));
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+
+      final before = tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      // 拖动手势要在真时钟区里做完：松手会同步发起一次 Hive 写，在假时钟区发起
+      // 会让这个 box 的写队列再也推不动，tearDown 的 Hive.close() 直接挂到超时。
+      await tester.runAsync(() async {
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byKey(const Key('work-task-mini-bar'))),
+        );
+        await gesture.moveBy(const Offset(0, kTouchSlop * 2));
+        await gesture.moveBy(const Offset(-150, 100));
+        await gesture.up();
+      });
+      await tester.pump();
+
+      final stored = WorkTaskPillPosition.read(database.appSettingsBox);
+      expect(stored, isNotNull, reason: '松手后必须把位置写进 app_settings');
+      expect(stored!.dx, closeTo(before.left - 150, 1));
+      expect(stored.dy, closeTo(before.top + 100, 1));
+    });
+
+    testWidgets('a host reads the stored position back on start',
+        (tester) async {
+      // 重启后必须回到用户放下的地方。写与读分开验：上一条管拖完落盘，这条管
+      // 新宿主起来时从 app_settings 里读回来。
+      //
+      // 不写成「同一条用例里拖动 → 卸掉宿主 → 重建」：那会在假区里留下一个
+      // 尚未完成的 Hive 写，紧接着的 pumpWidget 撞上它，整条用例挂到超时。
+      await tester.runAsync(() async {
+        await WorkTaskPillPosition.write(
+          database.appSettingsBox,
+          const Offset(240, 300),
+        );
+      });
+
+      await pumpHost(tester, viewport: const Size(800, 800));
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+
+      final restored =
+          tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      expect(restored.left, closeTo(240, 0.5));
+      expect(restored.top, closeTo(300, 0.5));
+    });
+
+    testWidgets('the reopen button stays inside a window the user shrank',
+        (tester) async {
+      // 面板被弹窗要求让位时收起（见 _setPanelModalVisibility），只剩右下角那颗
+      // 圆钮。它比胶囊小，夹取必须按它自己的尺寸算：按胶囊算会停在窗口外，而这时
+      // 胶囊根本不在树上，读不到尺寸就再也修不回来——它是重新打开面板的唯一入口。
+      ConversationPresenceService.instance.enter('group-one');
+      addTearDown(() => ConversationPresenceService.instance.leave('group-one'));
+      final task = _task(
+        id: 'reopen-clamp-task',
+        conversationId: 'group-one',
+        characterId: 'developer',
+      )..status = AgentTaskStatus.runningTool;
+
+      await pumpHost(
+        tester,
+        viewport: const Size(800, 800),
+        task: task,
+        // 删除入口必须存在，历史详情才会去弹确认框；弹框正是让位的那条路径。
+        onDeleteTask: (_) async {},
+      );
+
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+      // 拖动同样要在真时钟区里做完：松手会发起一次 Hive 写。
+      await tester.runAsync(() async {
+        final gesture = await tester.startGesture(
+          tester.getCenter(find.byKey(const Key('work-task-mini-bar'))),
+        );
+        await gesture.moveBy(const Offset(0, kTouchSlop * 2));
+        await gesture.moveBy(const Offset(4000, 4000));
+        await gesture.up();
+      });
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('work-task-mini-bar')));
+      await tester.pump();
+
+      await tester.tap(find.byKey(const Key('work-task-history-open')));
+      await tester.pump();
+      await tester.tap(find.byKey(Key('work-task-history-item-${task.id}')));
+      await tester.pump();
+      await tester.tap(find.byKey(const Key('work-task-history-delete')));
+      await tester.pumpAndSettle();
+      expect(find.byKey(const Key('work-task-reopen')), findsOneWidget);
+
+      // 用户把窗口拖小：圆钮必须跟着被夹回窗口内。
+      tester.view.physicalSize = const Size(420, 520);
+      await tester.pump();
+
+      final reopen = tester.getRect(find.byKey(const Key('work-task-reopen')));
+      expect(reopen.left, greaterThanOrEqualTo(0));
+      expect(reopen.top, greaterThanOrEqualTo(0));
+      expect(reopen.right, lessThanOrEqualTo(420));
+      expect(reopen.bottom, lessThanOrEqualTo(520));
     });
   });
 

@@ -1,6 +1,7 @@
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/chat_group/group_mute_store.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_pill_position.dart';
 import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 
 /// `.cgbak` 会携带的 `app_settings` 键。
@@ -31,6 +32,8 @@ const Set<String> backupCarriedSettingKeys = {
   // 能力声明决定工作模式能否启动（工具/流式）以及一次能写多长，且内置快照
   // 覆盖不到的模型只能靠它；丢了就要用户逐条重填。
   AiGovernanceStore.customCapabilitiesKey,
+  // 用户把任务胶囊拖到哪儿是明确的偏好设置，不带走在恢复后要重摆一次。
+  WorkTaskPillPosition.storageKey,
 };
 
 /// 按房间维度、每间一个键的设置前缀；这些键随「会话范围」备份。
@@ -62,6 +65,8 @@ const Set<String> backupConfigurationOnlySettingKeys = {
   // 能力声明按 provider/model 存、由用户逐条填写，属于配置而非某个房间的状态，
   // 因此不随「会话范围」备份，只随「全部」与「仅配置」。
   AiGovernanceStore.customCapabilitiesKey,
+  // 同上的理由：胶囊位置是全局偏好，不属于任何一间房。
+  WorkTaskPillPosition.storageKey,
 };
 
 /// 该 `app_settings` 键是否由备份携带。

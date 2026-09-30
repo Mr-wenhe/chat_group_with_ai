@@ -22,6 +22,7 @@ import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/presentation/work_folder_grant_consent_dialog.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_pill_position.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_tab_visibility.dart';
 import 'package:chat_group/services/conversation_presence_service.dart';
 import 'package:flutter/material.dart';
@@ -105,19 +106,46 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   /// 顶部锚点与 AppBar 之间留出的空隙。
   static const _topAnchorGap = 16.0;
 
-  /// 折叠胶囊与隐藏态圆钮的顶边偏移：落在 AppBar 之下。
+  /// 会话页在 AppBar 之下自己画的那条会话控件行（自动发言 / 语音播报 / 圆桌会议 /
+  /// 工作模式）的高度。
   ///
-  /// 全局宿主读不到具体路由的 AppBar，按状态栏 + 标准工具栏高度推算。桌面端
-  /// 状态栏为 0，落点 72 与宽屏面板的 top 一致 —— 收起与展开停在同一个角落，
-  /// 而顶部那一行留给 AppBar 自己的按钮，两者不会互相遮挡。
+  /// 全局宿主读不到具体路由的布局，只能照抄 CompactConversationControls 的常量：
+  /// 外框上下内边距 6 + 2，内层 3 + 36 的按钮 + 3。折叠胶囊与宽屏面板若落在
+  /// AppBar 正下方，压住的正是这条行右端的「工作模式」开关——被盖住就点不到。
+  ///
+  /// 它**不含**会话页顶部的横幅（未配置 Key / 群公告 / 联机状态 / 搜索状态）：
+  /// 那些横幅高度随文案换行变化，数量也不定，一个常量兜不住，所以这里只让开会
+  /// 话控件行本身。有横幅时控件行会被顶下去：胶囊可以拖走，面板则仍会压住它。
+  static const double _conversationControlsBand = 50.0;
+
+  /// 折叠胶囊、隐藏态圆钮与宽屏面板的顶边偏移：落在 AppBar 之下，会话页还要再
+  /// 让开会话控件行。
+  ///
+  /// 全局宿主读不到具体路由的 AppBar 与布局，按状态栏 + 标准工具栏高度推算。
+  /// 桌面端状态栏为 0，非会话页落点 72，收起与展开停在同一个角落，而顶部那一
+  /// 行留给 AppBar 自己的按钮。会话页之外的页面（角色列表、设置页等）没有这条
+  /// 控件行，所以只有会话内才需要让位。
   double _topAnchor(BuildContext context) =>
-      MediaQuery.paddingOf(context).top + kToolbarHeight + _topAnchorGap;
+      _panelTopAnchor(context) + _topAnchorGap;
+
+  /// 宽屏面板的顶边：紧贴会话控件行的下沿。
+  ///
+  /// 「填满聊天窗口高度」要的就是不浪费 [_topAnchorGap] 那一段——胶囊是浮在控件
+  /// 行外面的小球，留空隙才不会显得贴脸；面板是一整块矩形，贴上去既多出十几像素
+  /// 可读高度，也不会盖住任何东西。底边仍停在输入区之上（见 [_composerClearance]）。
+  double _panelTopAnchor(BuildContext context) =>
+      MediaQuery.paddingOf(context).top +
+      kToolbarHeight +
+      (_activeConversationId == null ? 0.0 : _conversationControlsBand);
+
+  /// 面板走右侧宽布局而不是底部窄布局的窗口宽度下限。
+  static const double _wideLayoutMinWidth = 800.0;
 
   /// 折叠态下面板的目标高度上限。
   ///
   /// 面板折起来时要能一眼看全：上半区（任务需求 + 运行状态 + 执行细节）优先拿到
   /// 足够高度，剩下的才分给「执行动态」。这个上限只是给窄屏一个参考值 ——
-  /// 宽屏面板由 `top: 72 / bottom: 16` 撑满视口，此处会被视口高度覆盖。
+  /// 宽屏面板由顶锚点到 `_composerClearance` 撑满视口，此处会被视口高度覆盖。
   static const double _collapsedPanelMaxHeight = 790.0;
 
   /// 面板顶部至少留出的空隙，避免矮窗口下 Positioned 超出 Stack 被裁掉面板头。
@@ -136,6 +164,21 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   /// 关掉后依旧能在历史任务列表里查到。
   final Set<String> _hiddenWorkTaskIds = <String>{};
   Future<void> _hiddenMarkerWrites = Future<void>.value();
+
+  /// 折叠入口被拖到的左上角（窗口逻辑坐标）。null = 没拖过，停在默认锚点。
+  ///
+  /// 用户 2026-09-30 拍板让它可拖动：右上角那个位置同时住着任务入口、会话控件
+  /// 行和各类横幅，任何固定常量都只是把冲突挪个地方；交给用户自己摆，冲突就此
+  /// 结束。
+  Offset? _pillPosition;
+
+  /// 量折叠入口尺寸的锚点：拖动与窗口缩放后都要按真实尺寸夹取。
+  ///
+  /// 键挂在折叠入口的外层而不是胶囊上，隐藏态那颗圆钮也走同一条布局路径——量
+  /// 的是当前实际渲染的那一块。挂在胶囊上时圆钮按零尺寸夹取，约束退化成"左上角
+  /// 留在窗口内"，窗口变窄后它能整块落到屏幕外，而那时胶囊没在树上，读不到尺寸
+  /// 也就永远修不回来。读不到时仍退回零尺寸（重启后第一帧），够把胶囊抓回来。
+  final GlobalKey _pillEntryKey = GlobalKey();
   bool _isVisible = true;
   bool _isCollapsed = false;
   WorkSnapshotService? _snapshotService;
@@ -149,6 +192,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     super.initState();
     // 必须在订阅任务流之前载入隐藏状态，否则首帧会把已关掉的标签又画出来。
     _loadHiddenWorkTaskIds();
+    _loadPillPosition();
     try {
       _overlayController = ref.read(workTaskOverlayControllerProvider);
     } on Object {
@@ -261,7 +305,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     // 用户就再也看不到那些被关掉的任务。
     final hasTasks = _panelHasContent;
     final viewport = MediaQuery.sizeOf(context);
-    final isWide = viewport.width >= 800;
+    final isWide = viewport.width >= _wideLayoutMinWidth;
     return Stack(
       children: <Widget>[
         Positioned.fill(child: widget.child),
@@ -348,18 +392,18 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
             ),
           ),
         if (hasTasks && _isVisible && _isCollapsed)
-          _positionedMiniBar(
+          _positionedPillEntry(
             isWide: isWide,
-            top: _topAnchor(context),
             child: _WorkTaskMiniBar(
               taskCount: _tasks.length + _hiddenTaskCount,
               onExpand: () => setState(() => _isCollapsed = false),
+              onDragUpdate: _dragMiniBar,
+              onDragEnd: _endMiniBarDrag,
             ),
           ),
         if (hasTasks && !_isVisible)
-          Positioned(
-            right: isWide ? 16 : 12,
-            top: _topAnchor(context),
+          _positionedPillEntry(
+            isWide: isWide,
             child: FloatingActionButton.small(
               key: const Key('work-task-reopen'),
               tooltip: '显示执行面板（任务仍在继续）',
@@ -383,7 +427,10 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       return Positioned(
         key: const Key('work-task-panel-wide'),
         right: 16,
-        top: 72,
+        // 与折叠胶囊同一个角落，但贴着控件行下沿而不是落在胶囊那一行（见
+        // [_panelTopAnchor]）：面板展开那一下不该跳回 AppBar 正下方，也不该
+        // 白白空出一段高度。
+        top: _panelTopAnchor(context),
         // 面板打开时用户照样要能在会话里发言：下边界必须停在输入区之上，
         // 否则它盖住的正是输入框右端的发送按钮。
         bottom: _composerClearance,
@@ -393,7 +440,14 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     }
     // 底部面板不再钉死 470：折叠态内容（含两条单行动态）在 470 下放不下，
     // 执行细节必须拨滚轮才能看到。改为"视口给足 + 上限保护"。
-    final panelHeight = (viewportHeight - _panelTopClearance - _composerClearance)
+    //
+    // 顶部净空同样要让开会话控件行：窄布局下面板头原本落在 96，而控件行下沿在
+    // 106，正好盖住「工作模式」开关的最后十来个像素——和宽屏面板、折叠胶囊是同一
+    // 个冲突，只是这条路径漏了。窗口太矮时 400 的下限仍会把它顶回去，那是既有
+    // 取舍（面板头一旦被 Stack 裁掉就什么都没了）。
+    final panelTopClearance = _panelTopClearance +
+        (_activeConversationId == null ? 0.0 : _conversationControlsBand);
+    final panelHeight = (viewportHeight - panelTopClearance - _composerClearance)
         .clamp(400.0, _collapsedPanelMaxHeight)
         .toDouble();
     return Positioned(
@@ -406,16 +460,30 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     );
   }
 
-  Widget _positionedMiniBar({
+  /// 折叠入口（胶囊与关闭后的圆钮）落在哪儿。
+  ///
+  /// 拖过就停在用户放下的位置，并按窗口边界夹取——留着半个在屏幕外，用户就再也
+  /// 抓不回来了；没拖过则钉在右上角默认锚点，与过去完全一致。
+  Widget _positionedPillEntry({
     required bool isWide,
-    required double top,
     required Widget child,
   }) {
-    return Positioned(
-      right: isWide ? 16 : 12,
-      top: top,
-      child: child,
+    // 量的是当前实际渲染的那一块（见 [_pillEntryKey]）：隐藏态下也是它。
+    final entry = KeyedSubtree(key: _pillEntryKey, child: child);
+    final stored = _pillPosition;
+    if (stored == null) {
+      return Positioned(
+        right: isWide ? 16 : 12,
+        top: _topAnchor(context),
+        child: entry,
+      );
+    }
+    final position = clampWorkTaskPillPosition(
+      position: stored,
+      pillSize: _pillEntrySize(),
+      viewport: MediaQuery.sizeOf(context),
     );
+    return Positioned(left: position.dx, top: position.dy, child: entry);
   }
 
   /// Selects an exact task from a chat action and makes the panel visible.
@@ -452,6 +520,69 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       // 轻量宿主（widget 测试）可能没有 ProviderScope / 数据库，
       // 此时隐藏状态只在本次会话内生效。
     }
+  }
+
+  /// 读回用户拖到的胶囊位置。
+  void _loadPillPosition() {
+    try {
+      _pillPosition = WorkTaskPillPosition.read(
+        ref.read(databaseServiceProvider).appSettingsBox,
+      );
+    } on Object {
+      // 见 [_loadHiddenWorkTaskIds]：轻量宿主里位置只在本次会话内生效。
+    }
+  }
+
+  /// 折叠入口最近一次布局的尺寸；还没布局过时返回零尺寸。
+  Size _pillEntrySize() {
+    final renderObject = _pillEntryKey.currentContext?.findRenderObject();
+    if (renderObject is RenderBox && renderObject.hasSize) {
+      return renderObject.size;
+    }
+    return Size.zero;
+  }
+
+  /// 拖动中：把位移累加到当前位置上。
+  ///
+  /// 第一次拖动从默认锚点起步，之后就在用户放下的地方继续走；夹取用胶囊的真实
+  /// 尺寸，拖到哪儿都不会只剩半个在窗口里。
+  void _dragMiniBar(Offset delta) {
+    final viewport = MediaQuery.sizeOf(context);
+    final current = _pillPosition ?? _defaultPillTopLeft(viewport);
+    final moved = clampWorkTaskPillPosition(
+      position: current + delta,
+      pillSize: _pillEntrySize(),
+      viewport: viewport,
+    );
+    if (moved == _pillPosition) return;
+    setState(() => _pillPosition = moved);
+  }
+
+  /// 松手才落盘：拖动过程每帧都是一次写，没必要。
+  void _endMiniBarDrag() {
+    final position = _pillPosition;
+    if (position == null) return;
+    unawaited(_persistPillPosition(position));
+  }
+
+  Future<void> _persistPillPosition(Offset position) async {
+    try {
+      await WorkTaskPillPosition.write(
+        ref.read(databaseServiceProvider).appSettingsBox,
+        position,
+      );
+    } on Object {
+      // 界面已经更新，位置最差只在本次会话生效。
+    }
+  }
+
+  /// 没拖过时胶囊该待的左上角：右上角默认锚点。
+  Offset _defaultPillTopLeft(Size viewport) {
+    final isWide = viewport.width >= _wideLayoutMinWidth;
+    return Offset(
+      viewport.width - _pillEntrySize().width - (isWide ? 16 : 12),
+      _topAnchor(context),
+    );
   }
 
   /// 当前会话的历史任务（含被用户关掉标签的任务），按创建时间倒序。
@@ -1156,18 +1287,38 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
 
 /// 折叠后的常驻入口。
 ///
-/// 只留图标、任务数与展开箭头：它浮在聊天页右上角，文字越长占掉的横向空间越
-/// 大，越容易压住下面的内容。完整含义放进 tooltip，需要时仍可读到。
+/// 只留图标、任务数与展开箭头：它默认浮在聊天页右上角，可以拖到任意位置。
+///
+/// 文字越长占掉的横向空间越大，越容易压住下面的内容，所以完整含义放进 tooltip，
+/// 需要时仍可读到。
+///
+/// 任务数为 0 时不画数字：那不代表「还有 0 个任务」，而是本会话没有可盯的标签
+/// （记录都收在「历史任务」里，或者被用户自己关掉了标签），写一个 0 出来只会让
+/// 人以为出了问题。面板自己那条队列提示用的也是同一个口径（只在计数大于 0 时
+/// 出现），隐藏态的圆钮本来就没有数字，三者由此对齐。
 class _WorkTaskMiniBar extends StatelessWidget {
   final int taskCount;
   final VoidCallback onExpand;
 
-  const _WorkTaskMiniBar({required this.taskCount, required this.onExpand});
+  /// 拖动回调：`onDragUpdate` 收位移增量，`onDragEnd` 在松手时落盘。
+  ///
+  /// 手势与点击共存：没挪动的话由内层 InkWell 的 tap 拿走（展开面板），越过触摸
+  /// slop 才归 pan 识别器——拖动不会被误判成展开。
+  final ValueChanged<Offset>? onDragUpdate;
+  final VoidCallback? onDragEnd;
+
+  const _WorkTaskMiniBar({
+    required this.taskCount,
+    required this.onExpand,
+    this.onDragUpdate,
+    this.onDragEnd,
+  });
 
   @override
   Widget build(BuildContext context) {
-    return Tooltip(
-      message: '工作任务 $taskCount 项 · 点击展开',
+    final showsCount = taskCount > 0;
+    final bar = Tooltip(
+      message: showsCount ? '工作任务 $taskCount 项 · 点击展开' : '打开任务面板',
       child: Material(
         key: const Key('work-task-mini-bar'),
         elevation: 8,
@@ -1183,14 +1334,25 @@ class _WorkTaskMiniBar extends StatelessWidget {
               children: <Widget>[
                 const Icon(Icons.auto_awesome_rounded, size: 16),
                 const SizedBox(width: 6),
-                Text('$taskCount'),
-                const SizedBox(width: 2),
+                if (showsCount) ...<Widget>[
+                  Text('$taskCount'),
+                  const SizedBox(width: 2),
+                ],
                 const Icon(Icons.keyboard_arrow_up_rounded, size: 18),
               ],
             ),
           ),
         ),
       ),
+    );
+    if (onDragUpdate == null && onDragEnd == null) return bar;
+    return GestureDetector(
+      // 只给工具提示留的默认行为不受影响：桌面端 Tooltip 走悬停，触屏端长按
+      // （没有位移）仍由长按识别器拿走。
+      behavior: HitTestBehavior.deferToChild,
+      onPanUpdate: (details) => onDragUpdate?.call(details.delta),
+      onPanEnd: onDragEnd == null ? null : (_) => onDragEnd!(),
+      child: bar,
     );
   }
 }
