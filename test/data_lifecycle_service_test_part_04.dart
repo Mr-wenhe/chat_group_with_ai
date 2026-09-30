@@ -193,6 +193,7 @@ void _registerDataLifecycleServiceTestPart4() {
       'group_chat_read_at': {'g1': 'old-read'},
       'pinned_group_ids': ['g1'],
       'work_mode_enabled:g1': true,
+      'work_mode_context_boundary:g1': '2026-09-30T10:00:00.000',
       'memory_pinned_keys_v1': ['group:g1:old'],
       'memory_retry_queue_v1': [
         {
@@ -225,6 +226,10 @@ void _registerDataLifecycleServiceTestPart4() {
     });
     await db.appSettingsBox.put('pinned_group_ids', ['g1', 'g2']);
     await db.appSettingsBox.put('work_mode_enabled:g2', true);
+    await db.appSettingsBox.put(
+      'work_mode_context_boundary:g2',
+      '2026-09-30T11:00:00.000',
+    );
     await db.appSettingsBox.put('memory_pinned_keys_v1', [
       'group:g1:old',
       'group:g2:new',
@@ -255,6 +260,15 @@ void _registerDataLifecycleServiceTestPart4() {
     });
     expect(db.appSettingsBox.get('pinned_group_ids'), ['g2']);
     expect(db.appSettingsBox.get('work_mode_enabled:g2'), isTrue);
+    expect(
+      db.appSettingsBox.containsKey('work_mode_context_boundary:g1'),
+      isFalse,
+      reason: '删除会话必须带走它的工作上下文分界线，否则键会成为孤儿',
+    );
+    expect(
+      db.appSettingsBox.get('work_mode_context_boundary:g2'),
+      '2026-09-30T11:00:00.000',
+    );
     expect(db.appSettingsBox.get('memory_pinned_keys_v1'), ['group:g2:new']);
     expect(db.appSettingsBox.get('memory_retry_queue_v1'), [
       {

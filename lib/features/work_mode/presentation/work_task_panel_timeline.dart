@@ -49,13 +49,29 @@ class _EventStreamError extends StatelessWidget {
   }
 }
 
+/// "已等待 N 分钟"；不足一分钟返回空串。
+///
+/// 面板每 30 秒重绘一次（见 `WorkTaskPanel` 的 elapsed ticker），分钟数因此会
+/// 自己往前走，不必为这段等待新增一个 Timer——那正是 CLAUDE.md 里"Timer 与测试
+/// frame 相互拖挂"的那条红线。
+String _pendingWaitLabel(DateTime? since, DateTime now) {
+  if (since == null) return '';
+  final waited = now.difference(since);
+  if (waited.inMinutes < 1) return '';
+  return '已等待 ${waited.inMinutes} 分钟';
+}
+
 class _PendingPublicOutput extends StatelessWidget {
   final String text;
   final bool singleLine;
 
+  /// "已等待 N 分钟"；由调用方按面板时钟算好，空串表示不展示。
+  final String waitLabel;
+
   const _PendingPublicOutput({
     this.text = 'AI 正在整理公开进度…',
     this.singleLine = false,
+    this.waitLabel = '',
   });
 
   @override
@@ -87,6 +103,18 @@ class _PendingPublicOutput extends StatelessWidget {
                 style: const TextStyle(fontSize: 12.5),
               ),
             ),
+            if (waitLabel.isNotEmpty) ...<Widget>[
+              const SizedBox(width: 8),
+              // 放在 Expanded 之外：折叠态正文会被省略号截掉，而等待时长正是这段
+              // 静默里唯一在动的东西，不能跟着一起被截掉。
+              Text(
+                waitLabel,
+                style: Theme.of(context).textTheme.labelSmall?.copyWith(
+                      color: colorScheme.onSurfaceVariant,
+                    ),
+                softWrap: false,
+              ),
+            ],
           ],
         ),
       ),

@@ -283,10 +283,16 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
             !message.id.startsWith('agent-progress:'))
         .toList()
       ..sort((left, right) => left.timestamp.compareTo(right.timestamp));
+    // 分界线之前的历史属于已被删除的任务，不该再作为当前任务的上下文。
+    final visible = WorkContextBoundary.visible(
+      database.appSettingsBox,
+      task.groupId,
+      messages,
+    );
     return AgentAttachmentContext.buildHistory(
-      messages: messages.length <= 24
-          ? messages
-          : messages.sublist(messages.length - 24),
+      messages: visible.length <= 24
+          ? visible
+          : visible.sublist(visible.length - 24),
       currentUserRequest: WorkDiscussionState.currentRequestScope(task),
     );
   }

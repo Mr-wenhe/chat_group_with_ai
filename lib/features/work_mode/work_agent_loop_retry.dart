@@ -14,6 +14,12 @@ const String _truncatedOutputChunkingAdvice =
     '一起交给 pandoc），然后读回并交付；'
     '不要反复往目标文件写，也不要把整份内容放进一次动作。';
 
+/// 输出预算的判定余量（取 1/N）。供应商的计数不会与请求预算精确对齐，所以
+/// "用满"必须按"基本用满"判定。实测（2026-09-30，SensoNova 6.8 flash-lite）：
+/// 请求上限 20480，模型输出 20331 token 后被切断，正文 JSON 没有收尾，供应商
+/// 既没给 `finish_reason=length`，计数也停在预算以下 149。
+const int _outputBudgetMarginDivisor = 20;
+
 extension _WorkAgentLoopRetry on WorkAgentLoop {
   Future<WorkToolResult> _callToolWithRetries(
     _LoopState state,
@@ -148,17 +154,46 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
   ///
   /// `truncated` 只有 OpenAI 兼容解析器会给出（`finish_reason == length`）；
   /// 协议通道（Anthropic / Responses / Gemini）只回 usage，所以再比一次
-  /// "已输出 token 是否达到本次请求的 max_tokens"。协议解析器将来若映射
-  /// stop reason，这条兜底可以保留，代价只是极少数恰好用满预算的正常响应会多
-  /// 走一次修复。
+  /// "已输出 token 是否基本用满本次请求的 max_tokens"。余量是必需的：计数不会
+  /// 与预算精确对齐（见 [_outputBudgetMarginDivisor]），按"必须用满"判定会把
+  /// 真实截断判成格式错误，任务就在"原样重发同一个巨无霸动作"里空转到超时。
+  /// 代价只是极少数恰好用满预算的正常响应会多走一次修复，而解析成功时这个
+  /// 判定根本不生效。
   bool _responseHitsOutputLimit(Map<String, dynamic> response) {
     if (response['truncated'] == true) return true;
     final completion = response['completionTokens'];
     final requested = response['requestedMaxTokens'];
-    return completion is int &&
-        requested is int &&
-        requested > 0 &&
-        completion >= requested;
+    if (completion is! int || requested is! int || requested <= 0) return false;
+    return completion >= requested - requested ~/ _outputBudgetMarginDivisor;
+  }
+
+  /// 解析失败的原因与本次输出的规模/预算，随协议重试事件一起落盘。
+  ///
+  /// 只记解析器自己的固定文案与计数，**绝不记正文**：原始响应按设计不落盘，
+  /// 而这条事件是用户唯一看得到的失败线索——缺了它，"为什么格式无效"只能靠
+  /// 事后反推（2026-09-30 的截断漏判就是这么查出来的）。
+  Map<String, Object?> _protocolFailureDiagnostics(
+    Map<String, dynamic> response,
+    String reason,
+  ) {
+    final characters = _responseCharacterCount(response);
+    final completion = response['completionTokens'];
+    final requested = response['requestedMaxTokens'];
+    return <String, Object?>{
+      'reason': reason,
+      if (characters != null) 'responseCharacters': characters,
+      if (completion is int) 'completionTokens': completion,
+      if (requested is int) 'requestedMaxTokens': requested,
+    };
+  }
+
+  /// 本次响应正文的字符数。生产流式路径只放 `message`，供应商形状与测试放在
+  /// `content`；取值顺序与 [AgentDecisionParser.parseResponse] 保持一致。
+  int? _responseCharacterCount(Map<String, dynamic> response) {
+    final content = response['content'];
+    if (content is String) return content.length;
+    final message = response['message'];
+    return message is String ? message.length : null;
   }
 
   /// 截断之后的协议重试要给模型换策略，而不是原样重试同一个巨无霸动作。

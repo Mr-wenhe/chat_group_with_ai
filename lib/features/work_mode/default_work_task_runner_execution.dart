@@ -328,6 +328,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
         onCheckpoint: _persistCheckpoint,
         completionGuard: _validateCompletion,
         artifactCompletion: _autoCompleteAfterArtifact,
+        artifactConfirmation: _offerableDeliverables,
         preflightTool: (task) => _preflightSkillTool(task, character),
         contextCompressionModel: (snapshot) => _compressWorkContext(
           snapshot,
@@ -336,6 +337,16 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           config: config,
           apiKey: apiKey,
           cancellation: cancellation,
+        ),
+        // 提示词一旦超过模型有效窗口的 80%（窗口不足 20 万时按 20 万算）就先做
+        // 结构化收缩，而不是等装不下时再被硬裁剪。实际发送仍然受输入预算约束。
+        promptCompactionBudgetTokens:
+            ContextWindowManager.workPromptCompactionBudget(
+          contextWindow: capability.contextWindow,
+          inputBudget: workModeRequestInputBudget(
+            capabilityMaxOutput: capability.maxOutput,
+            capabilityContextWindow: capability.contextWindow,
+          ),
         ),
         systemPrompt: systemPrompt,
         // Skill creation/download is a normal in-task mutation. Rebuild the

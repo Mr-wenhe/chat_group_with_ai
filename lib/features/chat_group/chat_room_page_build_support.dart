@@ -214,6 +214,9 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                         label: const Text('停止生成'),
                         style: TextButton.styleFrom(
                           foregroundColor: cs.error,
+                          // iconColor 不从 foregroundColor 派生，缺省时图标会退回
+                          // M3 的 colorScheme.primary，与红色文字不一致。
+                          iconColor: cs.error,
                           visualDensity: VisualDensity.compact,
                           padding: EdgeInsets.zero,
                         ),

@@ -20,6 +20,134 @@ void main() {
     expect(manager.shouldSummarize(messages), isTrue);
   });
 
+  test('工作模式压缩阈值按「标准窗口」计算，声明窗口不足 20 万时兜底到 20 万', () {
+    // 两个常量现在数值相同但用途无关，刻意写成两份。这条断言就是那道闸：
+    // 改动任一侧都会先在这里失败，逼人显式决定另一侧怎么办。
+    expect(kStandardContextWindowTokens, kContextCompressThresholdTokens);
+
+    // 8192 / 32768 / 131072 三档都兜底到 200000，阈值同为 160000。
+    for (final declared in [8192, 32768, 131072, 200000]) {
+      expect(
+        ContextWindowManager.effectiveContextWindow(contextWindow: declared),
+        200000,
+        reason: '声明窗口 $declared 未兜底到标准窗口',
+      );
+      expect(
+        ContextWindowManager.workContextCompactionTokens(
+          contextWindow: declared,
+        ),
+        160000,
+      );
+    }
+
+    // 超过标准窗口的声明值按原值算。
+    expect(
+      ContextWindowManager.workContextCompactionTokens(contextWindow: 250000),
+      200000,
+    );
+    expect(
+      ContextWindowManager.workContextCompactionTokens(contextWindow: 1000000),
+      800000,
+    );
+  });
+
+  test('损坏的窗口声明不会让阈值计算抛错或回退到 0', () {
+    for (final declared in [0, -1, -1000000]) {
+      expect(
+        ContextWindowManager.workContextCompactionTokens(
+          contextWindow: declared,
+        ),
+        160000,
+      );
+    }
+  });
+
+  test('压缩预算取阈值与输入预算的较小者，小窗口模型完全不受影响', () {
+    // 8192 窗口、内置默认 8192 输出的实际执行预算：阈值 160000 被压到 3840，
+    // 于是这条规则对小窗口模型是空操作，行为与改动前完全一致。
+    expect(
+      ContextWindowManager.workPromptCompactionBudget(
+        contextWindow: 8192,
+        inputBudget: ContextWindowManager.inputBudget(
+          contextWindow: 8192,
+          maxOutput: 4096,
+        ),
+      ),
+      3840,
+    );
+
+    // 现场模型（声明 200000 / maxOutput 20480）：179264 被压到 160000。
+    expect(
+      ContextWindowManager.workPromptCompactionBudget(
+        contextWindow: 200000,
+        inputBudget: ContextWindowManager.inputBudget(
+          contextWindow: 200000,
+          maxOutput: 20480,
+        ),
+      ),
+      160000,
+    );
+
+    // 输入预算为 0 时不能返回负数——那会让压缩器把提示词清空。
+    expect(
+      ContextWindowManager.workPromptCompactionBudget(
+        contextWindow: 128,
+        inputBudget: 0,
+      ),
+      0,
+    );
+  });
+
+  test('群讨论字符预算取窗口预算与既有固定上限的较小者', () {
+    const fallback = 24 * 1024;
+
+    // 8k 窗口 + 4096 输出：输入预算只有 3840 token，固定上限 24576 字符
+    // （约 8192 token）必然超窗，这里收紧到 11520 字符。
+    expect(
+      ContextWindowManager.workDiscussionPromptCharacters(
+        contextWindow: 8192,
+        maxOutput: 4096,
+        fallbackCharacters: fallback,
+      ),
+      11520,
+    );
+
+    // 现场模型（声明 200000）：窗口预算远大于固定上限，保持 24576 不变——
+    // 群讨论的字段本来就各自有界，放宽它只会让一次讨论请求更大更慢。
+    expect(
+      ContextWindowManager.workDiscussionPromptCharacters(
+        contextWindow: 200000,
+        maxOutput: 4096,
+        fallbackCharacters: fallback,
+      ),
+      fallback,
+    );
+
+    // 输入预算按**实际发送的**输出预算算，不按窗口一半折算：这条预算的职责是
+    // 「提示词 + 4096 输出」不超过窗口。折算会让 4352～8192 这一档（原本跑得通）
+    // 算出更大的提示词预算，把讨论推成超窗。
+    expect(
+      ContextWindowManager.workDiscussionPromptCharacters(
+        contextWindow: 6000,
+        maxOutput: 4096,
+        fallbackCharacters: fallback,
+      ),
+      4944,
+      reason: '6000 窗口只容得下 1648 token 的提示词，放大到窗口一半就会超窗',
+    );
+
+    // 窗口连输出预算都容不下时输入预算算成 0，提示词只剩 1 个字符。这一档本来就
+    // 是 inputTokens + maxTokens > contextWindow、必然被网关拒绝，所以不做补偿。
+    expect(
+      ContextWindowManager.workDiscussionPromptCharacters(
+        contextWindow: 128,
+        maxOutput: 4096,
+        fallbackCharacters: fallback,
+      ),
+      1,
+    );
+  });
+
   test('压缩后保留摘要和最后一条用户消息', () {
     const manager = ContextWindowManager(complete: _unusedCompletion);
     final compacted = manager.compact(

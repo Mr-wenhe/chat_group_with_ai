@@ -616,6 +616,33 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     }
   }
 
+  /// The readable files this run wrote, named so a rejected completion can ask
+  /// the user to confirm them.
+  ///
+  /// This is the same set the failure report attaches as intermediates, which is
+  /// deliberate: what the user is offered is exactly what the app was willing to
+  /// hand over anyway, and the confirmation only changes whether it is called a
+  /// deliverable or an intermediate.
+  ///
+  /// Not every rejection is offerable. “修订任务内容没变化” says the model changed
+  /// nothing, so the files on hand are the *unmodified originals*: letting the
+  /// user confirm those would turn the one check that catches an idle model into
+  /// a success message carrying the stale file. That rejection keeps the plain
+  /// failure and its retry.
+  Future<List<String>> _offerableDeliverables(AgentTask task) async {
+    final files = workspaceFileService;
+    if (files == null) return const <String>[];
+    final validation = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: files.pathPolicy,
+      workspaceRoot: _workspaceRootForTask(task),
+      now: clock(),
+    );
+    if (validation.valid || !validation.confirmable) return const <String>[];
+    final selection = await _safeArtifactsForAttachment(task);
+    return selection.files.map((file) => file.path).toList(growable: false);
+  }
+
   /// A source-code request is successful only when a real readable file was
   /// produced. The guard intentionally does not synthesize a path or recover
   /// prose into code; that fallback belonged to the removed legacy work-mode

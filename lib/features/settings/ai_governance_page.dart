@@ -9,6 +9,7 @@ import 'package:chat_group/features/web_search/application/search_cache_controll
 import 'package:chat_group/features/web_search/presentation/web_search_audit_card.dart';
 import 'package:chat_group/features/web_search/presentation/web_search_settings_section.dart';
 import 'package:chat_group/features/web_search/presentation/web_search_runtime_settings_card.dart';
+import 'package:chat_group/features/settings/widgets/model_capability_fields.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/services.dart';
@@ -292,15 +293,40 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
     String model,
     CustomModelCapability? current,
   ) async {
-    final saved = await showDialog<CustomModelCapability>(
+    final effective = _registry.resolve(
+      provider: provider,
+      modelId: model,
+      custom: current,
+    );
+    final result = await showDialog<ModelCapabilityEditResult>(
       context: context,
       builder: (_) => _CustomModelCapabilityDialog(
         model: model,
-        initialValue: current ?? const CustomModelCapability(),
+        effective: effective,
+        builtin: _registry.resolve(provider: provider, modelId: model),
+        hasDeclaration: current != null,
       ),
     );
-    if (saved == null) return;
-    await _store.saveCustomCapability(provider.name, model, saved);
+    if (result == null) return;
+    switch (modelCapabilityPersistAction(
+      restoreBuiltin: result.restoreBuiltin,
+      declared: result.capability,
+      registry: _registry,
+      provider: provider,
+      modelId: model,
+      effective: effective,
+    )) {
+      case ModelCapabilityPersistAction.clear:
+        await _store.clearCustomCapability(provider.name, model);
+      case ModelCapabilityPersistAction.save:
+        await _store.saveCustomCapability(
+          provider.name,
+          model,
+          result.capability!,
+        );
+      case ModelCapabilityPersistAction.keep:
+        break;
+    }
     if (mounted) setState(() {});
   }
 
@@ -322,15 +348,24 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
   static String _yes(bool value) => value ? '支持' : '不支持';
 }
 
-/// Owns its text controllers so they stay alive until the dialog route has
+/// Owns its capability controller so it stays alive until the dialog route has
 /// fully removed the widget, including the reverse transition after a pop.
 class _CustomModelCapabilityDialog extends StatefulWidget {
   final String model;
-  final CustomModelCapability initialValue;
+
+  /// 当前生效值（内置快照与已存声明的合并结果），也是字段的初始值。
+  final ModelCapability effective;
+
+  /// 该模型的内置快照值，用于提示「低于内置值不会生效」。
+  final ModelCapability builtin;
+
+  final bool hasDeclaration;
 
   const _CustomModelCapabilityDialog({
     required this.model,
-    required this.initialValue,
+    required this.effective,
+    required this.builtin,
+    required this.hasDeclaration,
   });
 
   @override
@@ -340,17 +375,35 @@ class _CustomModelCapabilityDialog extends StatefulWidget {
 
 class _CustomModelCapabilityDialogState
     extends State<_CustomModelCapabilityDialog> {
-  late CustomModelCapability _value = widget.initialValue;
-  late final TextEditingController _contextController =
-      TextEditingController(text: _value.contextWindow.toString());
-  late final TextEditingController _outputController =
-      TextEditingController(text: _value.maxOutput.toString());
+  final _formKey = GlobalKey<FormState>();
+  late final ModelCapabilityController _controller =
+      ModelCapabilityController(widget.effective);
+  bool _restoreBuiltin = false;
+
+  @override
+  void initState() {
+    super.initState();
+    _controller.addListener(_onCapabilityEdited);
+  }
 
   @override
   void dispose() {
-    _contextController.dispose();
-    _outputController.dispose();
+    _controller.removeListener(_onCapabilityEdited);
+    _controller.dispose();
     super.dispose();
+  }
+
+  /// 用户动手改过字段，就不再是「恢复内置默认」待执行状态。
+  void _onCapabilityEdited() {
+    if (_restoreBuiltin) _restoreBuiltin = false;
+  }
+
+  void _restoreBuiltinTapped() {
+    setState(() {
+      _controller.seed(widget.builtin);
+      // 必须在 seed 之后置位：seed 的 notifyListeners 会走 _onCapabilityEdited。
+      _restoreBuiltin = true;
+    });
   }
 
   @override
@@ -358,41 +411,15 @@ class _CustomModelCapabilityDialogState
     return AlertDialog(
       title: Text('声明 ${widget.model} 能力'),
       content: SingleChildScrollView(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            SwitchListTile(
-              title: const Text('流式'),
-              value: _value.supportsStreaming,
-              onChanged: (next) => setState(() {
-                _value = _value.copyWith(supportsStreaming: next);
-              }),
-            ),
-            SwitchListTile(
-              title: const Text('视觉'),
-              value: _value.supportsVision,
-              onChanged: (next) => setState(() {
-                _value = _value.copyWith(supportsVision: next);
-              }),
-            ),
-            SwitchListTile(
-              title: const Text('工具'),
-              value: _value.supportsTools,
-              onChanged: (next) => setState(() {
-                _value = _value.copyWith(supportsTools: next);
-              }),
-            ),
-            TextField(
-              controller: _contextController,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: '上下文 Token'),
-            ),
-            TextField(
-              controller: _outputController,
-              keyboardType: TextInputType.number,
-              decoration: const InputDecoration(labelText: '最大输出 Token'),
-            ),
-          ],
+        child: Form(
+          key: _formKey,
+          child: ModelCapabilityFields(
+            cs: Theme.of(context).colorScheme,
+            controller: _controller,
+            builtin: widget.builtin,
+            onRestoreBuiltin:
+                widget.hasDeclaration ? _restoreBuiltinTapped : null,
+          ),
         ),
       ),
       actions: [
@@ -409,21 +436,13 @@ class _CustomModelCapabilityDialogState
   }
 
   void _save() {
-    final contextWindow = int.tryParse(_contextController.text);
-    final maxOutput = int.tryParse(_outputController.text);
-    if (contextWindow == null ||
-        maxOutput == null ||
-        contextWindow <= 0 ||
-        maxOutput <= 0 ||
-        maxOutput > contextWindow) {
+    if (!_formKey.currentState!.validate()) return;
+    if (_restoreBuiltin) {
+      Navigator.pop(context, const ModelCapabilityEditResult.restoreBuiltin());
       return;
     }
-    Navigator.pop(
-      context,
-      _value.copyWith(
-        contextWindow: contextWindow,
-        maxOutput: maxOutput,
-      ),
-    );
+    final declared = _controller.declared;
+    if (declared == null) return;
+    Navigator.pop(context, ModelCapabilityEditResult.declared(declared));
   }
 }

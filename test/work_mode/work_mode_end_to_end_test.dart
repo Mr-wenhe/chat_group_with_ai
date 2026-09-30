@@ -156,6 +156,10 @@ class _Store implements GovernancePersistence {
       customCapabilities['$provider/$model'] = capability;
 
   @override
+  Future<void> clearCustomCapability(String provider, String model) async =>
+      customCapabilities.remove('$provider/$model');
+
+  @override
   Future<void> saveGlobalSearchPolicy(WebSearchPolicy policy) async =>
       globalSearchPolicy = policy;
 }

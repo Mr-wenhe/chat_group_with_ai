@@ -245,10 +245,34 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
     };
   }
 
+  /// 装配本次模型请求的提示词；超过压缩预算时先用结构化收缩把上下文压下来。
+  ///
+  /// 收缩只作用于**文本通道**。多模态载荷按原生 content-part 单独发出，既不参与
+  /// 度量也不参与裁剪：它的字符数远大于 token 数（一张图的数据 URI 动辄几万字符），
+  /// 按字符计入会让每一次带图的请求都被误判成超预算。
   List<Map<String, dynamic>> _buildMessages(
     AgentTask task,
     Map<String, dynamic> context,
   ) {
+    final budget = promptCompactionBudgetTokens;
+    final effective = budget == null
+        ? context
+        : const WorkPromptContextCompactor().compactIfNeeded(
+            context,
+            budgetTokens: budget,
+            measureTokens: (candidate) =>
+                ContextWindowManager.estimateRequestTokens(
+              _assembleMessages(task, candidate, includeNativeImages: false),
+            ),
+          );
+    return _assembleMessages(task, effective);
+  }
+
+  List<Map<String, dynamic>> _assembleMessages(
+    AgentTask task,
+    Map<String, dynamic> context, {
+    bool includeNativeImages = true,
+  }) {
     final imageParts = _nativeImageParts(context);
     final promptContext =
         imageParts == null ? context : _replaceImagePayloadsWithMarker(context);
@@ -276,7 +300,7 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
         'content': '公开任务检查点：${jsonEncode(promptContext)}',
       },
     ];
-    if (imageParts != null) {
+    if (includeNativeImages && imageParts != null) {
       // Image bytes must remain a native content-part message. Embedding the
       // list in the JSON checkpoint would turn it into text and bypass the
       // gateway's vision capability guard.

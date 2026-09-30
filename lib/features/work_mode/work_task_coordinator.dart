@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:hive/hive.dart';
 
+import 'work_artifact_delivery_confirmation.dart';
 import 'work_artifact_delivery_notice.dart';
 import 'work_task_action_notice.dart';
 import 'work_task_event.dart';
@@ -114,6 +115,7 @@ class WorkTaskCoordinator {
   final List<Duration> autoResumeDelays;
   final Duration autoResumeRoundTimeout;
   final WorkTaskActionNotifier? _userActionNotifier;
+  final WorkTaskContextBoundaryWriter? _contextBoundaryWriter;
   final bool? _installerIsWindows;
   final bool? _installerIsMacOS;
   final StreamController<AgentTask> _taskUpdates =
@@ -173,6 +175,7 @@ class WorkTaskCoordinator {
     WorkContextBuilder? contextBuilder,
     WorkFollowUpPolicy? followUpPolicy,
     WorkTaskActionNotifier? userActionNotifier,
+    WorkTaskContextBoundaryWriter? contextBoundaryWriter,
     bool? installerIsWindows,
     bool? installerIsMacOS,
     DateTime Function()? clock,
@@ -192,6 +195,7 @@ class WorkTaskCoordinator {
         _contextBuilder = contextBuilder ?? const WorkContextBuilder(),
         _followUpPolicy = followUpPolicy ?? const WorkFollowUpPolicy(),
         _userActionNotifier = userActionNotifier,
+        _contextBoundaryWriter = contextBoundaryWriter,
         _installerIsWindows = installerIsWindows,
         _installerIsMacOS = installerIsMacOS,
         _clock = clock ?? DateTime.now,
@@ -298,6 +302,14 @@ class WorkTaskCoordinator {
     required bool swap,
   }) =>
       _implConfirmExecutorSwap(taskId, version: version, swap: swap);
+
+  /// Accepts the files a paused task offered for delivery, answering the
+  /// question the completion guard asked when it could not recognise them.
+  ///
+  /// The alternative the user always has is to say what they actually want
+  /// instead, which is an ordinary follow-up reply rather than this call.
+  Future<void> confirmArtifactDelivery(String taskId) =>
+      _implConfirmArtifactDelivery(taskId);
 
   /// Leaves a blocker paused and records that the user deliberately deferred
   /// it. This is an explicit, idempotent panel action rather than an implicit

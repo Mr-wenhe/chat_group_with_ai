@@ -67,10 +67,23 @@ class WorkModeWorkspaceService {
   }) async {
     final grants = grantService;
     final isWindows = grants?.isWindows ?? Platform.isWindows;
-    final path = WorkFolderGrantService.normalizePath(
+    var path = WorkFolderGrantService.normalizePath(
       rawPath,
       isWindows: isWindows,
     );
+    // A request may name the file it wants changed rather than a directory —
+    // the revision-target answer is folded into the request text as an absolute
+    // path. The workspace is the folder holding that file: calling
+    // `Directory.create` on the file itself throws
+    // `Creation failed … Not a directory` (errno 20) and ended the run before
+    // its first tool call. Resolving the folder first also keeps the
+    // authorization check below covering the path actually returned.
+    if (await FileSystemEntity.isFile(path)) {
+      path = WorkFolderGrantService.normalizePath(
+        File(path).parent.path,
+        isWindows: isWindows,
+      );
+    }
     if (grants != null) {
       await grants.load();
       final authorized = requireWritable

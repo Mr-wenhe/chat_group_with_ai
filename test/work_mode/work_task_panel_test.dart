@@ -102,6 +102,34 @@ AgentTask _task({
   );
 }
 
+/// 在指定视口里挂一个带单条任务的全局宿主，供几何断言测算面板/折叠条位置。
+Future<void> _pumpOverlayHostWithTask(WidgetTester tester, Size viewport) async {
+  tester.view.physicalSize = viewport;
+  tester.view.devicePixelRatio = 1;
+  addTearDown(tester.view.resetPhysicalSize);
+  addTearDown(tester.view.resetDevicePixelRatio);
+  final taskUpdates = StreamController<List<AgentTask>>.broadcast();
+  addTearDown(taskUpdates.close);
+  await tester.pumpWidget(MaterialApp(
+    home: WorkTaskOverlayHost(
+      taskStream: taskUpdates.stream,
+      eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+      onStopTask: (_) async {},
+      onContinueTask: (_) async {},
+      child: const SizedBox.expand(),
+    ),
+  ));
+  taskUpdates.add(<AgentTask>[
+    _task(
+      id: 'geometry-task',
+      conversationId: 'group-one',
+      characterId: 'developer',
+    ),
+  ]);
+  await tester.pump();
+  await tester.pump();
+}
+
 void main() {
   group('WorkTaskPanel', () {
     testWidgets('hides the task summary section by default', (tester) async {
@@ -290,6 +318,61 @@ void main() {
         tester.getTopLeft(find.text('正在读取项目配置')).dy,
         lessThan(tester.getTopLeft(find.text('已读取 pubspec.yaml')).dy),
       );
+    });
+
+    testWidgets('shows how long the model has been silent', (tester) async {
+      // 现场：上游停滞时面板连续几分钟只有一行静态占位，看不出是在等还是卡死。
+      final events = StreamController<WorkTaskEvent>.broadcast();
+      addTearDown(events.close);
+      final task = _task(
+        id: 'waiting-task',
+        conversationId: 'group-one',
+        characterId: 'developer',
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => events.stream,
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+            clock: () => DateTime.utc(2026, 9, 30, 10, 50),
+          ),
+        ),
+      ));
+
+      WorkTaskEvent pendingSince(DateTime timestamp, int sequence) =>
+          WorkTaskEvent(
+            taskId: task.id,
+            sequence: sequence,
+            timestamp: timestamp,
+            kind: WorkTaskEventKind.toolOutput,
+            title: 'AI 正在生成公开进度',
+            detail: '已连接模型，正在等待第一段公开进度…',
+            safeMetadata: const <String, Object?>{
+              'stream': 'model',
+              'pending': true,
+              'pendingText': '已连接模型，正在等待第一段公开进度…',
+            },
+          );
+
+      // 刚发出请求的半分钟内不该跳出"已等待 0 分钟"这种噪音。
+      events.add(pendingSince(DateTime.utc(2026, 9, 30, 10, 49, 30), 1));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('已连接模型，正在等待第一段公开进度…'), findsOneWidget);
+      expect(find.textContaining('已等待'), findsNothing);
+
+      // 等待起点取事件自己的时间戳，而不是"面板看到它的时刻"。
+      events.add(pendingSince(DateTime.utc(2026, 9, 30, 10, 47), 2));
+      await tester.pump();
+      await tester.pump();
+      expect(find.text('已等待 3 分钟'), findsOneWidget);
     });
 
     testWidgets('shows terminal status instead of a stale last action',
@@ -787,6 +870,13 @@ void main() {
           'characters': 128,
         },
       ));
+      await tester.pump();
+
+      // 折叠态的时间线每条动态只占一行、只渲染标题，公开草稿正文要展开才看得到；
+      // 而第二个事件（纯传输进度）会把上一张 live 卡片交接成历史卡片，正文随之
+      // 从折叠态消失。本条用例要验的是"面板展示的是模型公开正文，不是传输字符数"，
+      // 所以先展开时间线再断言。
+      await tester.tap(find.byKey(const Key('work-task-timeline-toggle')));
       await tester.pump();
 
       expect(find.text('正在检查授权目录并准备写入文件。'), findsOneWidget);
@@ -2219,6 +2309,42 @@ void main() {
 
       expect(find.byKey(const Key('work-task-panel-bottom')), findsOneWidget);
       expect(find.byKey(const Key('work-task-panel-wide')), findsNothing);
+    });
+
+    testWidgets('collapsed bar parks in the top-right corner, clear of the composer',
+        (tester) async {
+      const viewport = Size(800, 800);
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      await tester.tap(find.byKey(const Key('work-task-collapse')));
+      await tester.pump();
+
+      final bar = tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      // 折叠条曾经钉在 bottom:16 —— 正是输入框右端「发送」所在的位置。
+      expect(bar.top, greaterThanOrEqualTo(kToolbarHeight));
+      expect(bar.bottom, lessThan(viewport.height - 84));
+      expect(bar.left, greaterThan(viewport.width / 2));
+      expect(bar.right, lessThanOrEqualTo(viewport.width));
+    });
+
+    testWidgets('wide panel stops above the composer row', (tester) async {
+      const viewport = Size(1000, 800);
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      final panel = tester.getRect(find.byKey(const Key('work-task-panel-wide')));
+      // 面板曾一路铺到 bottom:16，右下角压住发送按钮。
+      expect(panel.bottom, lessThanOrEqualTo(viewport.height - 84));
+    });
+
+    testWidgets('narrow panel stops above the composer row', (tester) async {
+      const viewport = Size(600, 1000);
+      await _pumpOverlayHostWithTask(tester, viewport);
+
+      final panel =
+          tester.getRect(find.byKey(const Key('work-task-panel-bottom')));
+      expect(panel.bottom, lessThanOrEqualTo(viewport.height - 84));
+      // 让出底部净空后不得为了塞满而往顶部溢出，否则面板头会被 Stack 裁掉。
+      expect(panel.top, greaterThan(0));
     });
 
     testWidgets('keeps discussion reply actions visible in a short window',

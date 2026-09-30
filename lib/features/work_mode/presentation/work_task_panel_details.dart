@@ -457,6 +457,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                           taskId: widget.task.id,
                           eventStreamFor: widget.eventStreamFor,
                           onLatestEvent: widget.onLatestEvent,
+                          clock: widget.clock,
                           expanded: _timelineExpanded,
                           collapsedItemLimit: collapsedTimelineRows,
                         ),
@@ -465,7 +466,6 @@ class _TaskDetailsState extends State<_TaskDetails> {
                   ),
                 ),
               ],
-            ],
           ),
         );
       },

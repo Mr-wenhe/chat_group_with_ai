@@ -22,21 +22,36 @@ class LegacyApiCredentialMigrator {
     final configList = configs.toList(growable: false);
     final characterList = characters.toList(growable: false);
     final configsById = {for (final config in configList) config.id: config};
-    final reusable = <_CredentialFingerprint, ApiConfig>{};
 
-    for (final config in configList) {
-      final secret = await _migrateConfig(config, saveConfig);
-      if (secret != null) {
-        reusable[_fingerprintForConfig(config, secret)] = config;
-      }
-    }
-
+    // 旧角色明文密钥先分组：这一步只读内存，不触碰安全存储。
     final legacyGroups = <_CredentialFingerprint, List<AICharacter>>{};
     for (final character in characterList) {
       if (character.apiKey.isEmpty) continue;
       legacyGroups
           .putIfAbsent(_fingerprintForCharacter(character), () => [])
           .add(character);
+    }
+
+    // 只有 provider/model/baseUrl 与某个待迁移角色相同的配置，才可能被它复用为
+    // ApiConfig。其余配置即便读出密钥，也只是往 reusable 里塞一条无人查询的记录。
+    final reusableTriples = {
+      for (final fingerprint in legacyGroups.keys)
+        (fingerprint.provider, fingerprint.model, fingerprint.baseUrl),
+    };
+
+    final reusable = <_CredentialFingerprint, ApiConfig>{};
+
+    for (final config in configList) {
+      final mayBeReused = reusableTriples.contains(
+        (config.provider, config.modelName, config.customBaseUrl),
+      );
+      // 已迁移完成的配置没有可写字段，跳过即可省掉一次安全存储读取。macOS 上
+      // 每次读取都可能弹出一次钥匙串密码框，而这段代码每次启动都会执行。
+      if (!mayBeReused && _isFullyMigrated(config)) continue;
+      final secret = await _migrateConfig(config, saveConfig);
+      if (secret != null) {
+        reusable[_fingerprintForConfig(config, secret)] = config;
+      }
     }
 
     for (final entry in legacyGroups.entries) {
@@ -51,6 +66,18 @@ class LegacyApiCredentialMigrator {
         await _linkAndClearCharacter(character, config, saveCharacter);
       }
     }
+  }
+
+  /// 记录已指向安全存储、且没有待迁移的旧明文密钥——迁移对它无事可做。
+  ///
+  /// 判据与 [_migrateConfig] 的快速返回保持一致：旧明文密钥非 null 时只要为空即可
+  /// （读取后必然走快速返回），为 null 时才需要复核 `hasCredential` 与
+  /// `credentialId`。判据偏严只会多读一次安全存储，偏松则会漏掉迁移。
+  bool _isFullyMigrated(ApiConfig config) {
+    final legacy = config.legacyApiKeyForMigration;
+    if (legacy != null) return legacy.isEmpty;
+    return config.hasCredential &&
+        config.credentialId == credentials.credentialIdFor(config.id);
   }
 
   Future<String?> _migrateConfig(

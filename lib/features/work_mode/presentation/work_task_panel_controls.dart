@@ -311,11 +311,16 @@ class _TaskEventTimeline extends StatefulWidget {
   /// 不会因为 `shrinkWrap + NeverScrollableScrollPhysics` 被 SizedBox 静默裁掉半张。
   final int collapsedItemLimit;
 
+  /// 面板的"现在"。等待时长按它计算，而不是各自 `DateTime.now()`：面板每 30 秒
+  /// 重绘一次，这个值跟着走，等待分钟数就自己往前跳。
+  final DateTime Function() clock;
+
   const _TaskEventTimeline({
     super.key,
     required this.taskId,
     required this.eventStreamFor,
     required this.onLatestEvent,
+    required this.clock,
     this.expanded = false,
     this.collapsedItemLimit = 4,
   });
@@ -343,6 +348,13 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   /// 展开默认贴底（面板一打开就停在最新进度）；用户主动往上翻历史时置为
   /// false，不再把他拽回底部，翻回底部后自动恢复跟随。
   bool _followLatest = true;
+
+  /// 本次"等待首段公开输出"的起点。
+  ///
+  /// 只有 [_modelOutputPending] 为真时才有意义，所以清空 pending 的地方不需要
+  /// 跟着清它——每次进入等待都会用事件自己的时间戳覆盖。刻意不用 `??=`：那会
+  /// 让上一次等待的起点漏到下一次。
+  DateTime? _modelOutputPendingSince;
 
   @override
   void initState() {
@@ -447,6 +459,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
               _modelOutputPendingText = 'AI 正在整理公开进度…';
             } else if (_livePublicDraft == null) {
               _modelOutputPending = true;
+              _modelOutputPendingSince = event.timestamp;
               _modelOutputPendingText = _pendingTextFromEvent(event);
             }
           } else {
@@ -599,6 +612,10 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
           child: _PendingPublicOutput(
             text: _modelOutputPendingText,
             singleLine: singleLine,
+            // 等待时长必须可见：上游停滞时面板会连续几分钟只有一行静态占位，
+            // 用户分不清"在等"和"卡死"（2026-09-30 现场）。
+            waitLabel:
+                _pendingWaitLabel(_modelOutputPendingSince, widget.clock()),
           ),
         );
       }
