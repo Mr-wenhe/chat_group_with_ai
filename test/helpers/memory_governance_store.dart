@@ -97,6 +97,11 @@ class MemoryGovernanceStore implements GovernancePersistence {
   }
 
   @override
+  Future<void> clearCustomCapability(String provider, String model) async {
+    customCapabilities.remove('$provider/$model');
+  }
+
+  @override
   Future<void> saveGlobalSearchPolicy(WebSearchPolicy policy) async {
     globalSearchPolicy = policy;
   }

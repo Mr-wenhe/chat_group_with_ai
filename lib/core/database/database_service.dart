@@ -475,7 +475,8 @@ class DatabaseService {
       _realtimeUserIdCache = existing;
       return;
     }
-    final minted = const Uuid().v4();
+    // 若本次运行已经懒生成过一个标识，就沿用它：一次运行只该有一个身份。
+    final minted = _realtimeUserIdCache ?? const Uuid().v4();
     _realtimeUserIdCache = minted;
     await appSettingsBox.put(_realtimeUserIdKey, minted);
   }
@@ -491,15 +492,12 @@ class DatabaseService {
   }
 
   /// 仅在 [_ensureRealtimeIdentity] 没能跑到时兜底（主要是测试）。
-  String _mintRealtimeUserId() {
-    final minted = const Uuid().v4();
-    try {
-      unawaited(appSettingsBox.put(_realtimeUserIdKey, minted).catchError((Object _) {}));
-    } on Object {
-      // 写不进去只意味着下次启动换个标识，不该让调用方的 build 失败。
-    }
-    return minted;
-  }
+  ///
+  /// 刻意**不落盘**：这个 getter 会被 widget 的 `build` 调用（判断「我是不是主人」），
+  /// 而构建所在的异步区在 flutter_test 里是假时钟区——在那里发起的 Hive 写永远
+  /// 等不到落盘，会卡住该 box 的写队列，让后续每一次写与 `Hive.close()` 一起挂死。
+  /// 持久化只留给 `init()` 里 await 的那条路径。
+  String _mintRealtimeUserId() => const Uuid().v4();
 
   static const String _aiProcessingDirKey = 'ai_processing_dir';
 

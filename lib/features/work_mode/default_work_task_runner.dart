@@ -33,6 +33,7 @@ import 'package:chat_group/features/work_mode/work_approval_decision.dart';
 import 'package:chat_group/features/work_mode/work_approval_fingerprint.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
+import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
@@ -115,7 +116,38 @@ class DefaultWorkTaskRunner
   /// successful delivery. Tests can leave this disabled to avoid UI side
   /// effects; the production provider enables it.
   final bool autoOpenHtml;
+
+  /// 一次模型请求的**总**时限：它管的是"这一轮请求的整体耗时"。
   final Duration modelCompletionTimeout;
+
+  /// 首字节停滞时限：请求发出后这么久还没收到任何字符，判定为上游停滞。
+  ///
+  /// 与 [modelCompletionTimeout] 分开是刻意的。总时限**不能**缩短——它必须同时
+  /// 容下"生成很慢但正在输出"的请求，缩短会砍掉正常的那一类（既有决定）。
+  /// 而"一个字符都没有"是另一回事：此刻不存在任何已生成内容，取消并重试不会
+  /// 丢掉任何工作。这正是此前缺的那个判别器。
+  ///
+  /// 现场证据（2026-09-30，`sensenova-6.8-flash-lite`）：一个 16.8k 输入的请求
+  /// 连续三次整整 300 秒零输出——事件日志里那三段窗口没有任何 token 事件——客户端
+  /// 每次都白等到总时限；三次空等占掉整轮 23 分钟里的 15 分钟。同一天命中快路径的
+  /// 请求，首段输出只要 7～10 秒。
+  ///
+  /// 取值必须大于正常模型的首字节耗时，否则会把"慢启动但能成"的请求误杀成必败。
+  /// 现成数据里没有首字节分布（补 `firstTokenMs` 正是为了拿到它），所以 180 秒是
+  /// 一个保守起点：高于当天所有已观测到的首段输出，同时把最坏情况从 300 秒压到
+  /// 180 秒。真实分布到手后再校准这个值。
+  final Duration modelFirstTokenTimeout;
+
+  /// 生效的首字节停滞时限：不会晚于总时限。
+  ///
+  /// 调用方把总时限设得更短时（测试常这么做），停滞退化成与总时限同点触发，而
+  /// 不是让构造失败——否则每个只关心总时限的调用方都得额外声明一个它并不关心
+  /// 的值。钳制而不是断言，保证"停滞归因不会永远被总时限盖住"这条性质永远成立。
+  Duration get effectiveFirstTokenTimeout =>
+      modelFirstTokenTimeout < modelCompletionTimeout
+          ? modelFirstTokenTimeout
+          : modelCompletionTimeout;
+
   final DateTime Function() clock;
 
   void Function(AgentTask task)? _taskUpdateSink;
@@ -149,6 +181,7 @@ class DefaultWorkTaskRunner
     // produce a tool plan and content; keep the deadline bounded but above the
     // previous 120s ceiling that aborted valid HTML generations.
     this.modelCompletionTimeout = const Duration(seconds: 300),
+    this.modelFirstTokenTimeout = const Duration(seconds: 180),
     DateTime Function()? clock,
   })  : credentials = credentials ?? SecureApiCredentialResolver(),
         gateway = gateway ??

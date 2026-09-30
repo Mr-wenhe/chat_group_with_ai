@@ -293,6 +293,7 @@ class _Snapshot {
           result[key] = {conversationId: value[conversationId]};
         }
       } else if (key == 'work_mode_enabled:$conversationId' ||
+          key == WorkContextBoundary.storageKey(conversationId) ||
           key.startsWith('context_compressed_through:$conversationId:')) {
         result[key] = value;
       }

@@ -8,6 +8,8 @@ void _registerBackupRestoreServiceTestPart2() {
     await db.appSettingsBox.putAll({
       'work_mode_enabled:group-1': true,
       'work_mode_enabled:other': true,
+      'work_mode_context_boundary:group-1': '2026-09-30T10:00:00.000',
+      'work_mode_context_boundary:other': '2026-09-30T09:00:00.000',
       'group_chat_read_at': {
         'group-1': '2026-07-16T00:00:00.000Z',
         'other': '2026-07-15T00:00:00.000Z',
@@ -32,6 +34,11 @@ void _registerBackupRestoreServiceTestPart2() {
 
     expect(settings['work_mode_enabled:group-1'], isTrue);
     expect(settings, isNot(contains('work_mode_enabled:other')));
+    expect(
+      settings['work_mode_context_boundary:group-1'],
+      '2026-09-30T10:00:00.000',
+    );
+    expect(settings, isNot(contains('work_mode_context_boundary:other')));
     expect(settings['group_chat_read_at'], {
       'group-1': '2026-07-16T00:00:00.000Z',
     });

@@ -1,6 +1,7 @@
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/chat_group/group_mute_store.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
+import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 
 /// `.cgbak` 会携带的 `app_settings` 键。
 ///
@@ -27,12 +28,18 @@ const Set<String> backupCarriedSettingKeys = {
   SearchProviderConfigStore.runtimeSettingsKey,
   AiGovernanceStore.globalSearchPolicyKey,
   AiGovernanceStore.conversationSearchPoliciesKey,
+  // 能力声明决定工作模式能否启动（工具/流式）以及一次能写多长，且内置快照
+  // 覆盖不到的模型只能靠它；丢了就要用户逐条重填。
+  AiGovernanceStore.customCapabilitiesKey,
 };
 
 /// 按房间维度、每间一个键的设置前缀；这些键随「会话范围」备份。
 const List<String> backupCarriedSettingKeyPrefixes = [
   'work_mode_enabled:',
   'context_compressed_through:',
+  // 删除任务划下的工作上下文分界线：必须随备份走。它是会话状态（不是用户配置），
+  // 不带走的话，恢复后那段已被删掉的上下文会重新进入模型提示。
+  WorkContextBoundary.storageKeyPrefix,
 ];
 
 /// 其中属于「用户配置」的子集，随 `configurationOnly` 范围一起备份。
@@ -52,6 +59,9 @@ const Set<String> backupConfigurationOnlySettingKeys = {
   SearchProviderConfigStore.runtimeSettingsKey,
   AiGovernanceStore.globalSearchPolicyKey,
   AiGovernanceStore.conversationSearchPoliciesKey,
+  // 能力声明按 provider/model 存、由用户逐条填写，属于配置而非某个房间的状态，
+  // 因此不随「会话范围」备份，只随「全部」与「仅配置」。
+  AiGovernanceStore.customCapabilitiesKey,
 };
 
 /// 该 `app_settings` 键是否由备份携带。

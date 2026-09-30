@@ -6,11 +6,14 @@ import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
+import 'package:chat_group/features/ai_governance/model_capability_registry.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/ai_providers/ai_api_service.dart';
 import './providers/api_config_providers.dart';
+import './widgets/model_capability_fields.dart';
 
 class ApiConfigFormPage extends ConsumerStatefulWidget {
   final ApiConfig? config;
@@ -24,12 +27,17 @@ class ApiConfigFormPage extends ConsumerStatefulWidget {
 class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   final _formKey = GlobalKey<FormState>();
   late final AiApiService _apiService;
+  late final AiGovernanceStore _governanceStore;
   final _credentialResolver = SecureApiCredentialResolver();
+  final _registry = ModelCapabilityRegistry();
   late TextEditingController _nameController;
   late TextEditingController _modelController;
   late TextEditingController _apiKeyController;
   late TextEditingController _baseUrlController;
   final FocusNode _baseUrlFocusNode = FocusNode();
+  final FocusNode _modelFocusNode = FocusNode();
+  late final ModelCapabilityController _capabilityController;
+  late ModelCapability _capabilityBuiltin;
   ApiProvider _selectedProvider = ApiProvider.deepseek;
   ApiProtocol _selectedProtocol = ApiProtocol.defaultValue;
   String _selectedModel = '';
@@ -37,13 +45,19 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   bool _isSaving = false;
   bool _isTesting = false;
 
+  /// 能力字段当前是为哪个「提供商/模型」回填的。只在模型身份真的变了才重新回填，
+  /// 否则用户在字段上的编辑会被一次失焦build抹掉。
+  String _capabilitySeededFor = '';
+
+  /// 用户点了「恢复内置默认」：保存时清除声明而不是写入新声明。
+  bool _restoreBuiltin = false;
+
   @override
   void initState() {
     super.initState();
     final db = ref.read(databaseServiceProvider);
-    _apiService = AiApiService(
-      AiRequestGateway(store: AiGovernanceStore.forDatabase(db)),
-    );
+    _governanceStore = AiGovernanceStore.forDatabase(db);
+    _apiService = AiApiService(AiRequestGateway(store: _governanceStore));
     final c = widget.config;
     _nameController = TextEditingController(text: c?.name ?? '');
     _modelController = TextEditingController(text: c?.modelName ?? '');
@@ -57,6 +71,11 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     if (_selectedProvider != ApiProvider.custom) {
       _modelController.text = _selectedModel;
     }
+    _capabilityBuiltin = _resolveBuiltinCapability();
+    _capabilityController = ModelCapabilityController(_effectiveCapability());
+    _capabilitySeededFor = _capabilityModelKey;
+    _capabilityController.addListener(_onCapabilityEdited);
+    _modelFocusNode.addListener(_onModelFocusChanged);
   }
 
   ApiProvider _parseProvider(String? name) {
@@ -79,6 +98,62 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
         : _modelController.text.trim();
   }
 
+  /// 能力字段的回填边界：提供商或模型名任一改变都要重新回填。
+  String get _capabilityModelKey =>
+      '${_selectedProvider.name}/$_configuredModelName';
+
+  bool get _hasStoredDeclaration => _storedDeclaration() != null;
+
+  CustomModelCapability? _storedDeclaration() =>
+      _governanceStore.customCapability(
+        _selectedProvider.name,
+        _configuredModelName,
+      );
+
+  /// 该模型当前生效的能力：内置快照与已存声明的合并结果。
+  ModelCapability _effectiveCapability() => _resolveCapability(
+        _storedDeclaration(),
+      );
+
+  /// 该模型的内置快照值；未知模型会落到保守降级值。
+  ModelCapability _resolveBuiltinCapability() => _resolveCapability(null);
+
+  ModelCapability _resolveCapability(CustomModelCapability? custom) =>
+      _registry.resolve(
+        provider: _selectedProvider,
+        modelId: _configuredModelName,
+        custom: custom,
+      );
+
+  /// 模型身份变了才把字段回填为新模型的生效值。
+  void _reseedCapabilityFields() {
+    if (_capabilityModelKey == _capabilitySeededFor) return;
+    _capabilityController.seed(_effectiveCapability());
+    _capabilityBuiltin = _resolveBuiltinCapability();
+    _capabilitySeededFor = _capabilityModelKey;
+    _restoreBuiltin = false;
+  }
+
+  /// 用户动手改过字段，就不再是「恢复内置默认」待执行状态。
+  void _onCapabilityEdited() {
+    if (_restoreBuiltin) _restoreBuiltin = false;
+  }
+
+  /// 自定义提供商的模型名是手输的，只在失焦时重新回填，避免每个按键都清空编辑。
+  void _onModelFocusChanged() {
+    if (_modelFocusNode.hasFocus) return;
+    if (_capabilityModelKey == _capabilitySeededFor) return;
+    setState(_reseedCapabilityFields);
+  }
+
+  void _restoreCapabilityBuiltin() {
+    setState(() {
+      _capabilityController.seed(_resolveBuiltinCapability());
+      // 必须在 seed 之后置位：seed 的 notifyListeners 会走 _onCapabilityEdited。
+      _restoreBuiltin = true;
+    });
+  }
+
   @override
   void dispose() {
     _nameController.dispose();
@@ -86,6 +161,10 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     _apiKeyController.dispose();
     _baseUrlController.dispose();
     _baseUrlFocusNode.dispose();
+    _modelFocusNode.removeListener(_onModelFocusChanged);
+    _modelFocusNode.dispose();
+    _capabilityController.removeListener(_onCapabilityEdited);
+    _capabilityController.dispose();
     super.dispose();
   }
 
@@ -158,6 +237,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                               ApiProvider.defaultModels[v.name] ?? '';
                           _modelController.text = _selectedModel;
                         }
+                        _reseedCapabilityFields();
                       });
                     }
                   },
@@ -227,6 +307,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                   const SizedBox(height: 14),
                   TextFormField(
                     controller: _modelController,
+                    focusNode: _modelFocusNode,
                     decoration: appInputDecoration(
                         '模型名称 *', '输入模型 ID', Icons.model_training_outlined, cs),
                     validator: (v) =>
@@ -253,8 +334,11 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                                   fontFamily: 'monospace', fontSize: 13)));
                     }).toList(),
                     onChanged: (v) {
-                      _selectedModel = v ?? '';
-                      _modelController.text = _selectedModel;
+                      setState(() {
+                        _selectedModel = v ?? '';
+                        _modelController.text = _selectedModel;
+                        _reseedCapabilityFields();
+                      });
                     },
                     validator: (v) => v == null ? '请选择模型' : null,
                   ),
@@ -287,6 +371,22 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                     }
                     return v?.trim().isEmpty ?? true ? '请输入 API Key' : null;
                   },
+                ),
+              ],
+            ),
+            const SizedBox(height: 16),
+            AppSectionHeader(title: '模型能力', icon: Icons.tune_rounded, cs: cs),
+            const SizedBox(height: 12),
+            AppCard(
+              cs: cs,
+              children: [
+                ModelCapabilityFields(
+                  cs: cs,
+                  controller: _capabilityController,
+                  builtin: _capabilityBuiltin,
+                  onRestoreBuiltin: _hasStoredDeclaration && !_restoreBuiltin
+                      ? _restoreCapabilityBuiltin
+                      : null,
                 ),
               ],
             ),
@@ -359,18 +459,66 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     }
   }
 
+  /// 保存模型能力声明。写不写、写什么，全部由 [modelCapabilityPersistAction]
+  /// 判定——表单里的字段与线上生效值之间隔着内置快照的合并规则，就地重写一遍
+  /// 判据迟早会与治理页那份分叉。
+  Future<void> _persistCapabilityDeclaration(
+    ApiProvider provider,
+    String modelName,
+  ) async {
+    // 字段回填的仍是上一个模型的值：自定义提供商的模型名是手输的，而移动端
+    // 点击按钮不会让输入框失焦，"_onModelFocusChanged" 于是不触发——用户改完
+    // 模型名直接点保存时就会走到这里。这份草稿描述的是另一个模型，写下去等于
+    // 给它凭空固化一份自己从未有过的声明（例如沿用旧模型的"工具/流式"开关，
+    // 让工作模式对着一个未必支持工具的模型启动）。保存模型名本身仍然进行。
+    //
+    // "恢复内置默认"不受这道守卫约束：它是清除、没有草稿可污染，而它自己的按钮
+    // 本就按保存时的模型名决定是否出现；挡住它只会让按钮保持隐藏、用户无从重试。
+    if (!_restoreBuiltin &&
+        _capabilitySeededFor != '${provider.name}/$modelName') {
+      return;
+    }
+    final declared = _capabilityController.declared;
+    final action = modelCapabilityPersistAction(
+      restoreBuiltin: _restoreBuiltin,
+      declared: declared,
+      registry: _registry,
+      provider: provider,
+      modelId: modelName,
+      effective: _registry.resolve(
+        provider: provider,
+        modelId: modelName,
+        custom: _governanceStore.customCapability(provider.name, modelName),
+      ),
+    );
+    switch (action) {
+      case ModelCapabilityPersistAction.clear:
+        await _governanceStore.clearCustomCapability(provider.name, modelName);
+      case ModelCapabilityPersistAction.save:
+        await _governanceStore.saveCustomCapability(
+          provider.name,
+          modelName,
+          declared!,
+        );
+      case ModelCapabilityPersistAction.keep:
+        break;
+    }
+  }
+
   Future<void> _save() async {
     if (!_formKey.currentState!.validate() || _isSaving) return;
     _isSaving = true;
     setState(() {});
 
     try {
+      final provider = _selectedProvider;
+      final modelName = _configuredModelName;
       final config = ApiConfig(
         id: widget.config?.id,
         name: _nameController.text.trim(),
-        provider: _selectedProvider.name,
+        provider: provider.name,
         apiProtocol: _selectedProtocol.name,
-        modelName: _configuredModelName,
+        modelName: modelName,
         apiKey: _apiKeyController.text.trim(),
         customBaseUrl: _baseUrlController.text.trim(),
         createdAt: widget.config?.createdAt,
@@ -381,6 +529,8 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
       } else {
         await ref.read(apiConfigsProvider.notifier).updateConfig(config);
       }
+
+      await _persistCapabilityDeclaration(provider, modelName);
 
       if (mounted) {
         AppToast.show(context, widget.config == null ? '配置已创建' : '配置已更新',

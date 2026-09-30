@@ -370,8 +370,11 @@ class _TaskActions extends StatelessWidget {
                 child: OutlinedButton.icon(
                   key: const Key('work-task-stop'),
                   // 危险动作只改前景色，不改变按钮尺寸与顺序，避免挤动布局。
+                  // iconColor 必须显式给：styleFrom 不会从 foregroundColor 派生，
+                  // 缺省时图标会退回 M3 的 colorScheme.primary，与红色文字不一致。
                   style: OutlinedButton.styleFrom(
                     foregroundColor: colors.error,
+                    iconColor: colors.error,
                   ),
                   onPressed: actionInFlight ? null : () => runAction(onStop),
                   icon: const Icon(Icons.stop_circle_outlined),

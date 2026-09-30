@@ -203,6 +203,7 @@ WorkAgentLoop _loop({
   WorkAgentArtifactCompletion? artifactCompletion,
   WorkAgentCompletionGuard? completionGuard,
   WorkAgentPreflightTool? preflightTool,
+  int? promptCompactionBudgetTokens,
 }) {
   return WorkAgentLoop(
     model: model.call,
@@ -217,6 +218,7 @@ WorkAgentLoop _loop({
     artifactCompletion: artifactCompletion,
     completionGuard: completionGuard,
     preflightTool: preflightTool,
+    promptCompactionBudgetTokens: promptCompactionBudgetTokens,
     onEvent: events == null
         ? null
         : (event) {
@@ -343,6 +345,64 @@ void main() {
         ));
     expect(model.requests.single.context['committedWrites'], isEmpty);
     expect(model.requests.single.context['publicUpdates'], isEmpty);
+  });
+
+  test('超过压缩预算时按结构化收缩提示词，检查点仍是合法 JSON', () async {
+    final model = _FakeModel()..responses.add(_finishDecision());
+    final task = _task(id: 'prompt-compaction')
+      ..lastArtifactPaths = ['/work/report.md']
+      ..executionStateJson = jsonEncode({
+        'publicUpdates': List<String>.generate(
+          20,
+          (index) => '公开进度 $index' * 40,
+        ),
+      })
+      ..contextSummary = jsonEncode({
+        'schemaVersion': WorkContextSnapshot.currentSchemaVersion,
+        'conversationId': 'loop-conversation',
+        'target': '完成工作模式任务',
+        'pendingFollowUps': ['补充图表'],
+        'artifactPaths': ['/work/report.md'],
+        'completedSummaries': const ['已写出大纲'],
+      });
+    // 对话历史由调用方注入，是这里唯一不受持久化脱敏影响的大体积来源。
+    final conversationHistory = List<Map<String, dynamic>>.generate(
+      16,
+      (index) => {'role': 'user', 'content': '群聊消息 $index' * 200},
+    );
+
+    final result = await _loop(
+      model: model,
+      registry: WorkToolRegistry(),
+      promptCompactionBudgetTokens: 1000,
+    ).execute(task, conversationHistory: conversationHistory);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+
+    final request = model.requests.single;
+    final checkpointMessage = request.messages.lastWhere(
+      (message) => (message['content'] as String).startsWith('公开任务检查点：'),
+    );
+    final checkpoint = jsonDecode(
+      (checkpointMessage['content'] as String)
+          .substring('公开任务检查点：'.length),
+    ) as Map<String, dynamic>;
+
+    // 关键回归：收缩发生之后这段 JSON 仍能整体解析。改动前超长提示词是被
+    // fitToTokenBudget 从中间插入裁剪标记的，同一段 JSON 会被剪成两半，
+    // 模型拿到的检查点是残缺的。
+    expect(checkpoint['goal'], '完成工作模式任务');
+    // 确实收缩了：低价值字段被丢掉。
+    expect(checkpoint['publicUpdates'], isEmpty);
+    // 执行状态字段不参与收缩。
+    expect(checkpoint['actionLimit'], isNotNull);
+    expect(checkpoint['artifacts'], contains('/work/report.md'));
+    // 收缩只影响发给模型的那一份，原始上下文不被就地改写。
+    expect((request.context['publicUpdates'] as List), hasLength(20));
+    expect(
+      (request.context['conversationHistory'] as List),
+      hasLength(16),
+    );
   });
 
   test('current QA scope replaces a stale development target in checkpoint',

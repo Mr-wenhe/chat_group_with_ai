@@ -11,6 +11,7 @@ import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart'
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_task_action_notice.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
+import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
@@ -3976,6 +3977,47 @@ void main() {
     await coordinator
         .submit(_task(id: 'fresh-task', conversationId: 'dm:delete-me'));
     expect(coordinator.taskForConversation('dm:delete-me')?.id, 'fresh-task');
+  });
+
+  test('deleting a task cuts the conversation work context at that moment',
+      () async {
+    final settingsBox = await Hive.openBox<dynamic>('app_settings');
+    final localCoordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      contextBoundaryWriter: (conversationId, at) =>
+          WorkContextBoundary.advance(settingsBox, conversationId, at),
+    );
+    addTearDown(localCoordinator.dispose);
+    final task = _task(id: 'boundary-me', conversationId: 'dm:boundary')
+      ..status = AgentTaskStatus.paused;
+    await taskBox.put(task.id, task);
+    final beforeDelete = DateTime.now().subtract(const Duration(seconds: 1));
+
+    await localCoordinator.deleteTask(task.id);
+
+    final boundary = WorkContextBoundary.readAt(settingsBox, 'dm:boundary');
+    expect(
+      boundary,
+      isNotNull,
+      reason: '删除任务必须切断该会话的工作上下文，否则下一个任务仍会读到它',
+    );
+    expect(boundary!.isAfter(beforeDelete), isTrue);
+    expect(
+      WorkContextBoundary.readAt(settingsBox, 'dm:other'),
+      isNull,
+      reason: '分界线只属于被删除任务所在的那个会话',
+    );
+
+    // 单向性：再删一条任务不能把已经推进的分界线拉回去，否则被切断的上下文会复活。
+    final advanced = DateTime.now().add(const Duration(minutes: 5));
+    await WorkContextBoundary.advance(settingsBox, 'dm:boundary', advanced);
+    final second = _task(id: 'boundary-again', conversationId: 'dm:boundary')
+      ..status = AgentTaskStatus.paused;
+    await taskBox.put(second.id, second);
+    await localCoordinator.deleteTask(second.id);
+    expect(WorkContextBoundary.readAt(settingsBox, 'dm:boundary'), advanced);
   });
 
   test('deleting a running task cancels it and frees its conversation',

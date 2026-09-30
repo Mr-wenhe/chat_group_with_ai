@@ -96,6 +96,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
         state: state,
         publicResponses: publicResponses,
         isCoordinator: isCoordinator,
+        maxPromptCharacters: _discussionPromptCharacters(member),
       );
       // Project inventory is asynchronous. A stop can arrive while it is
       // being assembled, so do not start a model request after cancellation.
@@ -302,6 +303,25 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     );
   }
 
+  /// 该成员模型允许的群讨论提示词字符数。
+  ///
+  /// 群讨论的路径此前与模型窗口完全无关：无论接到什么模型，都按
+  /// [WorkDiscussionRunner.maxPromptCharacters] 这一个人工常量截断。对小窗口模型
+  /// 那是必然超窗（24576 字符约合 8192 token，再叠加 4096 的输出预算）。
+  int _discussionPromptCharacters(_DiscussionMember member) {
+    final config = member.config;
+    final provider = member.provider;
+    if (config == null || provider == null) {
+      return WorkDiscussionRunner.maxPromptCharacters;
+    }
+    return ContextWindowManager.workDiscussionPromptCharacters(
+      contextWindow:
+          gateway.capability(provider, config.modelName).contextWindow,
+      maxOutput: WorkDiscussionRunner.discussionMaxTokens,
+      fallbackCharacters: WorkDiscussionRunner.maxPromptCharacters,
+    );
+  }
+
   Future<List<Map<String, dynamic>>> _buildPrompt({
     required AgentTask task,
     required ChatGroup group,
@@ -309,6 +329,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     required WorkDiscussionState state,
     required List<String> publicResponses,
     required bool isCoordinator,
+    required int maxPromptCharacters,
   }) async {
     final messages = <Map<String, dynamic>>[
       {
@@ -336,6 +357,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       {
         'role': 'user',
         'content': _discussionPromptContent(
+          maxPromptCharacters: maxPromptCharacters,
           context: {
             'task': boundedDiscussionText(
               WorkDiscussionState.currentRequestScope(task),
@@ -401,10 +423,10 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
   String _discussionPromptContent({
     required Map<String, dynamic> context,
     required Map<String, String> protocol,
+    required int maxPromptCharacters,
   }) {
     final protocolText = jsonEncode(protocol);
-    final contextBudget =
-        WorkDiscussionRunner.maxPromptCharacters - protocolText.length - 64;
+    final contextBudget = maxPromptCharacters - protocolText.length - 64;
     final contextText = _boundedPrompt(
       jsonEncode(context),
       maximum: contextBudget < 1 ? 1 : contextBudget,
@@ -413,10 +435,8 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
         '$contextText\n输出协议：\n$protocolText';
   }
 
-  String _boundedPrompt(String value,
-      {int maximum = WorkDiscussionRunner.maxPromptCharacters}) {
-    final limit =
-        maximum.clamp(1, WorkDiscussionRunner.maxPromptCharacters).toInt();
+  String _boundedPrompt(String value, {required int maximum}) {
+    final limit = maximum < 1 ? 1 : maximum;
     if (value.length <= limit) return value;
     return '${value.substring(0, limit - 1)}…';
   }
@@ -432,8 +452,14 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       return visible.isNotEmpty && visible.contains(characterId);
     }).toList()
       ..sort((left, right) => left.timestamp.compareTo(right.timestamp));
-    return messages
-        .skip(messages.length > 16 ? messages.length - 16 : 0)
+    // 与执行提示共用同一条分界线：任务被删除后，群讨论也不该再看到被放弃的上下文。
+    final recent = WorkContextBoundary.visible(
+      database.appSettingsBox,
+      groupId,
+      messages,
+    );
+    return recent
+        .skip(recent.length > 16 ? recent.length - 16 : 0)
         .map((message) {
           final attachments = (message.media ?? const [])
               .map((item) => (item.fileName ?? '').trim())

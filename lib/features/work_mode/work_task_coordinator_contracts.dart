@@ -4,6 +4,13 @@ typedef WorkTaskSnapshotStatusUpdater = Future<void> Function(
     String taskId, WorkSnapshotTaskStatus status);
 typedef WorkTaskActionNotifier = Future<void> Function(AgentTask task);
 
+/// 真删除一条任务时，把该会话的工作上下文分界线推到 [at]。
+///
+/// 分界线是工作模式自己的持久状态，而协调器不碰 `app_settings`（宿主才拥有那些
+/// 键），所以这里只暴露"该切断哪个会话"这一个动作，落盘交给注入方。
+typedef WorkTaskContextBoundaryWriter = Future<void> Function(
+    String conversationId, DateTime at);
+
 /// A cancellation handle belongs to exactly one active work task.
 class WorkTaskCancellation {
   final Completer<void> _cancelled = Completer<void>();

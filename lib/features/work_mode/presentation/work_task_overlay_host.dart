@@ -95,11 +95,23 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
 }
 
 class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
-  // Keep the global reopen control above the chat composer. The host overlays
-  // the whole Navigator and cannot measure a route's variable-height footer.
-  // This clearance covers the normal composer row plus a small visual gap;
-  // attachment/quote previews remain a known ceiling for this global host.
-  static const _reopenButtonBottomClearance = 84.0;
+  /// 底部留给聊天输入区的净空。
+  ///
+  /// 宿主覆盖在整个 Navigator 之上，量不到具体路由的输入行高度（附件/引用预览
+  /// 会把它顶得更高），只能取一个覆盖常见形态的高度。面板下边界与隐藏态圆钮都
+  /// 靠它让开输入框和发送按钮：贴到窗口底边时，落点正是「发送」所在的位置。
+  static const _composerClearance = 84.0;
+
+  /// 顶部锚点与 AppBar 之间留出的空隙。
+  static const _topAnchorGap = 16.0;
+
+  /// 折叠胶囊与隐藏态圆钮的顶边偏移：落在 AppBar 之下。
+  ///
+  /// 全局宿主读不到具体路由的 AppBar，按状态栏 + 标准工具栏高度推算。桌面端
+  /// 状态栏为 0，落点 72 与宽屏面板的 top 一致 —— 收起与展开停在同一个角落，
+  /// 而顶部那一行留给 AppBar 自己的按钮，两者不会互相遮挡。
+  double _topAnchor(BuildContext context) =>
+      MediaQuery.paddingOf(context).top + kToolbarHeight + _topAnchorGap;
 
   /// 折叠态下面板的目标高度上限。
   ///
@@ -338,6 +350,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         if (hasTasks && _isVisible && _isCollapsed)
           _positionedMiniBar(
             isWide: isWide,
+            top: _topAnchor(context),
             child: _WorkTaskMiniBar(
               taskCount: _tasks.length + _hiddenTaskCount,
               onExpand: () => setState(() => _isCollapsed = false),
@@ -345,8 +358,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
           ),
         if (hasTasks && !_isVisible)
           Positioned(
-            right: 16,
-            bottom: _reopenButtonBottomClearance,
+            right: isWide ? 16 : 12,
+            top: _topAnchor(context),
             child: FloatingActionButton.small(
               key: const Key('work-task-reopen'),
               tooltip: '显示执行面板（任务仍在继续）',
@@ -371,31 +384,36 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         key: const Key('work-task-panel-wide'),
         right: 16,
         top: 72,
-        bottom: 16,
+        // 面板打开时用户照样要能在会话里发言：下边界必须停在输入区之上，
+        // 否则它盖住的正是输入框右端的发送按钮。
+        bottom: _composerClearance,
         width: 420,
         child: child,
       );
     }
     // 底部面板不再钉死 470：折叠态内容（含两条单行动态）在 470 下放不下，
     // 执行细节必须拨滚轮才能看到。改为"视口给足 + 上限保护"。
-    final panelHeight = (viewportHeight - _panelTopClearance)
+    final panelHeight = (viewportHeight - _panelTopClearance - _composerClearance)
         .clamp(400.0, _collapsedPanelMaxHeight)
         .toDouble();
     return Positioned(
       key: const Key('work-task-panel-bottom'),
       left: 12,
       right: 12,
-      bottom: 12,
+      bottom: _composerClearance,
       height: panelHeight,
       child: child,
     );
   }
 
-  Widget _positionedMiniBar({required bool isWide, required Widget child}) {
+  Widget _positionedMiniBar({
+    required bool isWide,
+    required double top,
+    required Widget child,
+  }) {
     return Positioned(
       right: isWide ? 16 : 12,
-      left: isWide ? null : 12,
-      bottom: 16,
+      top: top,
       child: child,
     );
   }
@@ -1136,6 +1154,10 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   }
 }
 
+/// 折叠后的常驻入口。
+///
+/// 只留图标、任务数与展开箭头：它浮在聊天页右上角，文字越长占掉的横向空间越
+/// 大，越容易压住下面的内容。完整含义放进 tooltip，需要时仍可读到。
 class _WorkTaskMiniBar extends StatelessWidget {
   final int taskCount;
   final VoidCallback onExpand;
@@ -1144,25 +1166,28 @@ class _WorkTaskMiniBar extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Material(
-      key: const Key('work-task-mini-bar'),
-      elevation: 8,
-      borderRadius: BorderRadius.circular(18),
-      color: Theme.of(context).colorScheme.surface,
-      child: InkWell(
+    return Tooltip(
+      message: '工作任务 $taskCount 项 · 点击展开',
+      child: Material(
+        key: const Key('work-task-mini-bar'),
+        elevation: 8,
         borderRadius: BorderRadius.circular(18),
-        onTap: onExpand,
-        child: Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
-          child: Row(
-            mainAxisSize: MainAxisSize.min,
-            children: <Widget>[
-              const Icon(Icons.auto_awesome_rounded, size: 18),
-              const SizedBox(width: 8),
-              Text('工作任务 $taskCount 项 · 点击展开'),
-              const SizedBox(width: 4),
-              const Icon(Icons.keyboard_arrow_up_rounded),
-            ],
+        color: Theme.of(context).colorScheme.surface,
+        child: InkWell(
+          borderRadius: BorderRadius.circular(18),
+          onTap: onExpand,
+          child: Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 10, vertical: 7),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: <Widget>[
+                const Icon(Icons.auto_awesome_rounded, size: 16),
+                const SizedBox(width: 6),
+                Text('$taskCount'),
+                const SizedBox(width: 2),
+                const Icon(Icons.keyboard_arrow_up_rounded, size: 18),
+              ],
+            ),
           ),
         ),
       ),

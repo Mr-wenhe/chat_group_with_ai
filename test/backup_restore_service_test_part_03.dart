@@ -396,6 +396,44 @@ void _registerBackupRestoreServiceTestPart3() {
     );
   });
 
+  test('copy restore remaps the work context boundary to the copied group',
+      () async {
+    final attachment = File('${mediaDirectory.path}/context-boundary.txt');
+    await attachment.writeAsString('context boundary');
+    await _seedCoreData(db, attachment);
+    await db.appSettingsBox.put(
+      'work_mode_context_boundary:group-1',
+      '2026-09-30T10:00:00.000',
+    );
+    final backup = File('${testRoot.path}/context-boundary.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(destination: backup);
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.copyWithNewIds,
+    );
+
+    final copiedGroup =
+        db.chatGroupBox.values.singleWhere((item) => item.id != 'group-1');
+    expect(
+      db.appSettingsBox.get('work_mode_context_boundary:${copiedGroup.id}'),
+      '2026-09-30T10:00:00.000',
+      reason: '分界线键里的会话 id 不重映射，复制出来的会话就没有分界线',
+    );
+    expect(
+      db.appSettingsBox.get('work_mode_context_boundary:group-1'),
+      '2026-09-30T10:00:00.000',
+      reason: '原会话仍在，它自己的分界线不该被改写',
+    );
+  });
+
   test('copy restore preserves and remaps memory pin controls', () async {
     final attachment = File('${mediaDirectory.path}/memory-pins.txt');
     await attachment.writeAsString('memory pins');

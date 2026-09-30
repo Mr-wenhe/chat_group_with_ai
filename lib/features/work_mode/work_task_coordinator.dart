@@ -115,6 +115,7 @@ class WorkTaskCoordinator {
   final List<Duration> autoResumeDelays;
   final Duration autoResumeRoundTimeout;
   final WorkTaskActionNotifier? _userActionNotifier;
+  final WorkTaskContextBoundaryWriter? _contextBoundaryWriter;
   final bool? _installerIsWindows;
   final bool? _installerIsMacOS;
   final StreamController<AgentTask> _taskUpdates =
@@ -174,6 +175,7 @@ class WorkTaskCoordinator {
     WorkContextBuilder? contextBuilder,
     WorkFollowUpPolicy? followUpPolicy,
     WorkTaskActionNotifier? userActionNotifier,
+    WorkTaskContextBoundaryWriter? contextBoundaryWriter,
     bool? installerIsWindows,
     bool? installerIsMacOS,
     DateTime Function()? clock,
@@ -193,6 +195,7 @@ class WorkTaskCoordinator {
         _contextBuilder = contextBuilder ?? const WorkContextBuilder(),
         _followUpPolicy = followUpPolicy ?? const WorkFollowUpPolicy(),
         _userActionNotifier = userActionNotifier,
+        _contextBoundaryWriter = contextBoundaryWriter,
         _installerIsWindows = installerIsWindows,
         _installerIsMacOS = installerIsMacOS,
         _clock = clock ?? DateTime.now,

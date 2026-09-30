@@ -176,6 +176,13 @@ Map<String, dynamic> _remapSettings(
     if (key.startsWith('work_mode_enabled:')) {
       key = 'work_mode_enabled:${conversation(key.substring(18))}';
     }
+    if (key.startsWith(WorkContextBoundary.storageKeyPrefix)) {
+      // 键的整段后缀就是会话 id，所以不像 context_compressed_through 那样还要
+      // 拆出角色：DM 键 `dm:<id>` 里的冒号属于会话 id 本身。
+      final oldConversation =
+          key.substring(WorkContextBoundary.storageKeyPrefix.length);
+      key = WorkContextBoundary.storageKey(conversation(oldConversation));
+    }
     const checkpointPrefix = 'context_compressed_through:';
     if (key.startsWith(checkpointPrefix)) {
       final payload = key.substring(checkpointPrefix.length);

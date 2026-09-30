@@ -13,6 +13,7 @@ import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/chat_group/group_mute_store.dart';
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
+import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';

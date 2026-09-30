@@ -8,6 +8,23 @@ import 'package:chat_group/features/chat_group/humanized_memory_service.dart';
 
 const int kContextCompressThresholdTokens = 200000;
 
+/// 工作模式计算压缩阈值时使用的**标准窗口下限**。
+///
+/// 窗口声明小于它时按它算——声明的窗口值来自用户在设置里填写的模型能力，
+/// 常常远小于厂商实际能力，直接用会把阈值压得极低。
+///
+/// 刻意写成独立的字面量而不是 [kContextCompressThresholdTokens] 的别名：两者现在
+/// 数值相同，但用途无关（那个是聊天侧写死的摘要触发点，不读模型窗口）。别名会让
+/// 聊天侧的任何调整悄悄改掉工作模式的阈值；写成两份并由单测断言相等，改到任一侧
+/// 都会先撞上一条明确的失败。
+const int kStandardContextWindowTokens = 200000;
+
+/// 工作模式上下文压缩的触发比例（百分比）。
+///
+/// 用整数百分比而不是 0.8，是为了 `200005 * 0.8` 这类边界不掉进浮点误差里
+/// 少算一个 token。
+const int kWorkContextCompactionPercent = 80;
+
 typedef ContextCompletion = Future<Map<String, dynamic>> Function(
   List<Map<String, dynamic>> messages,
 );
@@ -51,10 +68,74 @@ class ContextWindowManager {
     return math.max(0, available - reserve);
   }
 
+  /// 工作模式压缩阈值所用的**有效窗口**：声明窗口不足
+  /// [kStandardContextWindowTokens] 时按标准窗口算。损坏的声明值（0、负数）
+  /// 同样落到标准窗口，绝不返回 0——那会把阈值算成 0 并清空整个提示词。
+  static int effectiveContextWindow({required int contextWindow}) {
+    return contextWindow < kStandardContextWindowTokens
+        ? kStandardContextWindowTokens
+        : contextWindow;
+  }
+
+  /// 工作模式的上下文压缩触发点：有效窗口的
+  /// [kWorkContextCompactionPercent]。
+  static int workContextCompactionTokens({required int contextWindow}) {
+    final effective = effectiveContextWindow(contextWindow: contextWindow);
+    return effective * kWorkContextCompactionPercent ~/ 100;
+  }
+
+  /// 工作模式提示词压缩预算：触发点与 [inputBudget] 的较小者。
+  ///
+  /// 输入预算是模型窗口扣掉输出预留后的硬上限，触发点只在比它更小时才起作用。
+  /// 小窗口模型（8192、32768）因此完全不受这条规则影响：它们的输入预算本来就
+  /// 低于 160000，取较小者等于原值，行为与改动前逐字一致。
+  static int workPromptCompactionBudget({
+    required int contextWindow,
+    required int inputBudget,
+  }) {
+    final trigger = workContextCompactionTokens(contextWindow: contextWindow);
+    if (inputBudget < 1) return 0;
+    return trigger < inputBudget ? trigger : inputBudget;
+  }
+
+  /// 群讨论提示词的字符预算：模型窗口算出的预算与既有的固定上限取较小者。
+  ///
+  /// 保留固定上限 [fallbackCharacters] 是有意的——群讨论的每个字段本来就各自有界，
+  /// 放宽它只会让一次讨论请求更大更慢，而不是更完整。这条预算真正起作用的地方是
+  /// **小窗口模型**：24576 字符约合 8192 token，8k 窗口的模型再算上 4096 的输出
+  /// 预算必然超窗，讨论会整轮失败。
+  ///
+  /// 输入预算按**实际发送的** [maxOutput] 算，不按窗口一半折算。折算只在
+  /// 「窗口连这个输出预算都容不下」（≤ maxOutput + 256）时才把结果从 0 抬起来，
+  /// 而那一档里 `inputTokens + maxTokens > contextWindow` 本来就成立、请求必然
+  /// 被网关拒绝；抬起来反而会把 4352～8192 这一档原本跑得通的讨论推成超窗。
+  static int workDiscussionPromptCharacters({
+    required int contextWindow,
+    required int maxOutput,
+    required int fallbackCharacters,
+  }) {
+    final budget = workPromptCompactionBudget(
+      contextWindow: contextWindow,
+      inputBudget: inputBudget(
+        contextWindow: contextWindow,
+        maxOutput: maxOutput,
+      ),
+    );
+    final derived = budget * charactersPerEstimatedToken;
+    // 0 只意味着"这次讨论必然超窗"，不是"可以随便放大"。
+    if (derived < 1) return 1;
+    return derived < fallbackCharacters ? derived : fallbackCharacters;
+  }
+
   /// A conservative request estimator used when a caller must fit a complete
   /// prompt before it reaches the provider guard. The guard uses roughly four
   /// characters per token; three keeps JSON keys and message framing from
   /// pushing an already bounded request back over the provider limit.
+  ///
+  /// 反过来的换算（token 预算 → 字符上限）必须用同一个比率，否则"按窗口算出
+  /// 多少 token"和"实际允许多少字符"会各说各话。
+  static const int charactersPerEstimatedToken = 3;
+
   static int estimateRequestTokens(List<Map<String, dynamic>> messages) {
     int characters(Object? value) {
       if (value is String) return value.length;
@@ -74,7 +155,7 @@ class ContextWindowManager {
       0,
       (sum, message) => sum + characters(message),
     );
-    return (count / 3).ceil();
+    return (count / charactersPerEstimatedToken).ceil();
   }
 
   /// Fits a provider prompt without relying on another model call.
