@@ -546,6 +546,7 @@ class WorkAgentLoop
                 'scope': 'modelProtocol',
                 'retry': protocolRetryCount,
                 if (truncated) 'truncated': true,
+                ..._protocolFailureDiagnostics(response, detail),
               },
             );
             continue;

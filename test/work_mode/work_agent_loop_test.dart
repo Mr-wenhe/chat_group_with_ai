@@ -1720,6 +1720,93 @@ void main() {
     expect(result.message, contains('8192'));
   });
 
+  test('a response that stops just short of the output budget is a spent budget',
+      () async {
+    // 实测故障（2026-09-30）：模型在 20480 的预算上输出 20331 token 后被切断，
+    // 供应商没给 finish_reason=length，也没把预算用满。按"必须 >= 预算"判定时
+    // 这条恢复链完全不触发：任务拿着"一次写完整篇"的原策略原样重发，每轮 300 秒。
+    final model = _FakeModel()
+      ..responses.add(<String, dynamic>{
+        'success': true,
+        'content': '{"action":"tool","public_update":"我来重新生成一份完整的文档。"',
+        'completionTokens': 20331,
+        'requestedMaxTokens': 20480,
+      })
+      ..responses.add(_finishDecision('按分块指令完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final task = _task(id: 'near-budget-truncation');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    final repair = model.requests.firstWhere((request) => request.isRepair);
+    final repairPrompt = repair.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(repairPrompt, contains('拆成多次动作'));
+    // 判成截断就必须按截断走：正文是半截的，回灌对修 JSON 没有价值。
+    expect(repair.malformedResponse, isNull);
+  });
+
+  test('a broken response well below the output budget keeps the raw body repair',
+      () async {
+    // 负例（守住阈值另一侧）：预算只用到 85% 的格式错误不能判成截断，否则
+    // "原文回灌修 JSON"这条更有依据的路径会被一起关掉。
+    final model = _FakeModel()
+      ..responses.add(<String, dynamic>{
+        'success': true,
+        'content': '{"action":"不完整的 JSON"',
+        'completionTokens': 7000,
+        'requestedMaxTokens': 8192,
+      })
+      ..responses.add(_finishDecision('按原文修复后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final task = _task(id: 'far-below-budget-format-error');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    final repair = model.requests.firstWhere((request) => request.isRepair);
+    expect(repair.malformedResponse, isNotNull);
+    final repairPrompt = repair.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(repairPrompt, isNot(contains('拆成多次动作')));
+  });
+
+  test('a protocol retry records why the response failed to parse', () async {
+    // 这条事件是用户唯一看得到的失败线索，而原始响应按设计不落盘：原因、输出
+    // 规模和本次预算必须随事件一起记下，否则"为什么格式无效"只能靠反推。
+    const broken = '{"action":"tool","public_update":"正在写文件。"';
+    final model = _FakeModel()
+      ..responses.add(<String, dynamic>{
+        'success': true,
+        'content': broken,
+        'completionTokens': 120,
+        'requestedMaxTokens': 8192,
+      })
+      ..responses.add(<String, dynamic>{
+        'success': true,
+        'content': broken,
+      })
+      ..responses.add(_finishDecision('协议重试后完成。'));
+    final loop = _loop(model: model, registry: WorkToolRegistry());
+
+    final result = await loop.execute(_task(id: 'protocol-retry-diagnostic'));
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; '
+            '${result.events.map((event) => event.title).join('|')}');
+    final retry = result.events.firstWhere(
+        (event) => event.title == '模型返回格式无效，正在自动重试。');
+    expect(retry.safeMetadata['reason'], '响应不是单个合法 JSON object。');
+    expect(retry.safeMetadata['responseCharacters'], broken.length);
+    expect(retry.safeMetadata['completionTokens'], 120);
+    expect(retry.safeMetadata['requestedMaxTokens'], 8192);
+  });
+
   test('retries a fresh model decision when protocol repair is empty',
       () async {
     final model = _FakeModel()
