@@ -378,6 +378,92 @@ class Stage02WorkspaceFileTool {
     }
   }
 
+  /// 追加写：读出当前内容，把 [chunk] 接到末尾，再走与 [write] 相同的原子
+  /// 替换路径落盘。
+  ///
+  /// 这是长产物唯一可行的分块方式：一次决策的输出有上限，整份正文塞进一次
+  /// `content` 会被上游截断、整条动作作废。
+  Future<Map<String, dynamic>> append(String path, String chunk) async {
+    try {
+      final absolute = _absolutePath(path);
+      final resolved = await pathPolicy.resolve(absolute, allowMissing: true);
+      if (resolved.exists && !resolved.isFile) {
+        return {
+          'ok': false,
+          'error': 'not_a_file',
+          'message': '目标不是普通文件，未执行追加。',
+          'path': resolved.path,
+        };
+      }
+      final sensitive = files.isSensitivePath(absolute) ||
+          files.isSensitivePath(resolved.path);
+      // 敏感路径的批准必须在**读取旧内容之前**拿到：读出旧文就等于把文件内容
+      // 带进本进程，边界和 write 里哈希前置检查是同一条。
+      final plan = _filePlan(
+        action: resolved.exists
+            ? WorkChangeActionType.modify
+            : WorkChangeActionType.create,
+        path: resolved.path,
+        directory: resolved.authorizedRoot,
+        bytes: utf8.encode(chunk).length,
+      );
+      final sensitiveApproved = approvalDecision?.permitsExecution == true &&
+          approvalScope?.allows(plan) == true;
+      if (sensitive && !sensitiveApproved) {
+        return {
+          'ok': false,
+          'error': 'sensitive_mutation_requires_approval',
+          'requiresApproval': true,
+          'sensitive': true,
+          'redacted': true,
+          'message': '修改、重命名或删除敏感文件必须再次确认。',
+          'path': resolved.path,
+        };
+      }
+      var existing = '';
+      String? expectedSha;
+      if (resolved.exists) {
+        final read = await _withReadLock(
+          resolved.path,
+          () => files.readTextRange(resolved.path),
+        );
+        if (read.truncated) {
+          return {
+            'ok': false,
+            'error': 'append_requires_full_read',
+            'message': '目标文件超过读取上限，无法安全读回后追加；请改用分段文件。',
+            'path': resolved.path,
+          };
+        }
+        existing = read.text;
+        expectedSha = await _hashFile(File(resolved.path));
+      }
+      final combined = '$existing$chunk';
+      final writePlan = _filePlan(
+        action: plan.actionType,
+        path: resolved.path,
+        directory: resolved.authorizedRoot,
+        bytes: utf8.encode(combined).length,
+      );
+      return _execute(
+        writePlan,
+        WorkspaceMutationRequest(
+          path: resolved.path,
+          contents: combined,
+          expectedSha256: expectedSha,
+          approvalDecision: approvalDecision,
+        ),
+        sensitivePath: sensitive,
+      );
+    } on WorkspacePathException catch (error) {
+      return _pathError(error, path);
+    } on WorkspaceFileException catch (error) {
+      return _fileError(error);
+    } on FileSystemException {
+      return {'ok': false, 'error': 'io', 'message': '无法读取目标文件。'};
+    }
+  }
+
   Future<Map<String, dynamic>> applyPatch(String patch) async {
     // A diff is always a multi-file/overwrite operation; unlike a simple
     // create in a fixture, it needs a task scope unless the user has

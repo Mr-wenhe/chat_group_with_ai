@@ -59,13 +59,15 @@ void main() {
 
   Stage02WorkspaceFileTool toolFor(
     AgentTask task, {
+    WorkspaceFileService? fileService,
     void Function(String path, String operation)? onSensitiveRead,
     bool allowWithoutUndo = false,
     WorkChangeApprovalDecision? approvalDecision,
     String? approvedSensitiveOperation,
   }) {
+    final service = fileService ?? files;
     return Stage02WorkspaceFileTool(
-      files: files,
+      files: service,
       mutations: mutations,
       pathPolicy: pathPolicy,
       task: task,
@@ -446,5 +448,64 @@ void main() {
     expect(result['ok'], isFalse);
     expect(result['error'], WorkspaceMutationStatus.notApproved.name);
     expect(await File('${root.path}/missing-decision.txt').exists(), isFalse);
+  });
+
+  test('append creates the file and then extends it without losing text',
+      () async {
+    final current = task('stage02-append');
+    final tool = toolFor(current);
+    final path = '${root.path}/notes.md';
+
+    final created = await tool.append(path, '第一段');
+    expect(created['ok'], isTrue, reason: '${created['message']}');
+    expect(await File(path).readAsString(), '第一段');
+
+    final extended = await tool.append(path, '第二段');
+    expect(extended['ok'], isTrue, reason: '${extended['message']}');
+    expect(await File(path).readAsString(), '第一段第二段');
+    expect(extended['changed'], isTrue);
+  });
+
+  test('append to an existing empty file stays a modification', () async {
+    final current = task('stage02-append-empty');
+    final tool = toolFor(current);
+    final path = '${root.path}/empty.md';
+    await File(path).writeAsString('');
+
+    final result = await tool.append(path, '内容');
+
+    expect(result['ok'], isTrue, reason: '${result['message']}');
+    expect(await File(path).readAsString(), '内容');
+  });
+
+  test('append refuses a directory target', () async {
+    final current = task('stage02-append-dir');
+    final tool = toolFor(current);
+    final path = '${root.path}/folder';
+    await Directory(path).create();
+
+    final result = await tool.append(path, '内容');
+
+    expect(result['ok'], isFalse);
+    expect(result['error'], 'not_a_file');
+  });
+
+  test('append refuses a target larger than the read limit', () async {
+    // 读回来的只是文件前一段；在残缺内容上拼接会把中间部分永久丢掉，
+    // 所以必须在读取阶段就拒绝，而不是写出一份被截短的文件。
+    final current = task('stage02-append-huge');
+    final smallReads = WorkspaceFileService(
+      pathPolicy: pathPolicy,
+      limits: const WorkspaceReadLimits(maxReadBytes: 8),
+    );
+    final tool = toolFor(current, fileService: smallReads);
+    final path = '${root.path}/big.md';
+    await File(path).writeAsString('0123456789abcdef');
+
+    final result = await tool.append(path, '尾部');
+
+    expect(result['ok'], isFalse);
+    expect(result['error'], 'append_requires_full_read');
+    expect(await File(path).readAsString(), '0123456789abcdef');
   });
 }
