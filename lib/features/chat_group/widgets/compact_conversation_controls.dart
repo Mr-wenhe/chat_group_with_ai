@@ -35,6 +35,7 @@ class CompactConversationControls extends StatelessWidget {
     required this.autoChatTooltip,
     required this.workModeTooltip,
     required this.onAutoChatChanged,
+    this.showWorkMode = true,
     required this.onWorkModeChanged,
     this.showRoundtableMode = false,
     this.roundtableModeEnabled = false,
@@ -56,6 +57,11 @@ class CompactConversationControls extends StatelessWidget {
   final String autoChatTooltip;
   final String workModeTooltip;
   final ValueChanged<bool> onAutoChatChanged;
+
+  /// 是否显示“工作模式”开关。客人端为 false：工作模式会把输入送进会调用
+  /// LLM 的任务链路，而客人端一律不调 LLM。
+  final bool showWorkMode;
+
   final ValueChanged<bool> onWorkModeChanged;
   final bool showRoundtableMode;
   final bool roundtableModeEnabled;
@@ -131,17 +137,18 @@ class CompactConversationControls extends StatelessWidget {
                       ),
                       const SizedBox(width: 2),
                     ],
-                    _toggle(
-                      key: const Key('work-mode-toggle'),
-                      tooltip: workModeTooltip,
-                      enabled: workModeEnabled,
-                      available: true,
-                      icon: workModeEnabled
-                          ? Icons.work_rounded
-                          : Icons.work_outline_rounded,
-                      onPressed: () => onWorkModeChanged(!workModeEnabled),
-                      cs: cs,
-                    ),
+                    if (showWorkMode)
+                      _toggle(
+                        key: const Key('work-mode-toggle'),
+                        tooltip: workModeTooltip,
+                        enabled: workModeEnabled,
+                        available: true,
+                        icon: workModeEnabled
+                            ? Icons.work_rounded
+                            : Icons.work_outline_rounded,
+                        onPressed: () => onWorkModeChanged(!workModeEnabled),
+                        cs: cs,
+                      ),
                     if (showRoundtableMode) ...[
                       const SizedBox(width: 2),
                       _toggle(

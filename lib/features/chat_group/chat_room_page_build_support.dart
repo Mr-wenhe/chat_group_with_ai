@@ -89,8 +89,11 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
       body: _withRoundtableBackground(
         Column(
           children: [
-            // 未配置 API Key 时给出醒目提示，避免「发了消息 AI 不回复」的困惑
-            if (!_hasAnyApiConfig)
+            // 未配置 API Key 时给出醒目提示，避免「发了消息 AI 不回复」的困惑。
+            // 客人端必须排除在外：客人正确地没有、也不该有该群的 API 凭据，
+            // 否则这条会对着「客人因为没配 Key」这件事本身报错，还把他引向一个
+            // 配了也没用的设置页——跑 AI 的是主人端，不是他的设备。
+            if (!_hasAnyApiConfig && !_isRealtimeGuest)
               ApiWarningBanner(
                 message: _isDirectChat
                     ? _replyBlockText(_lastReplyBlockReason)
@@ -112,6 +115,12 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                 notice: _realtimeNotice,
                 offline: _realtimeState != RealtimeConnectionState.connected,
                 onOpenSettings: () => Navigator.pushNamed(context, '/settings'),
+              ),
+            // 客人看到的所有 AI 发言都是主人端生成后广播过来的，本机不参与
+            // 生成。不说明这一点，客人很容易把「回复来得慢」当成自己的问题。
+            if (_isRealtimeGuest)
+              const GuestAiNoticeBanner(
+                message: 'AI 回复由群主生成，收到回复可能需要稍等',
               ),
             ChatRoomSearchStatus(
               state: _webSearchState,

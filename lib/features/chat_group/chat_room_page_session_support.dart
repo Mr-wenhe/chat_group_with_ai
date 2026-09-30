@@ -541,13 +541,21 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
   ///
   /// 私聊只展示工作模式；流式语音播报属于群聊特性，默认关闭。语音服务未
   /// 配置时按钮置灰（Tooltip 引导去设置页绑定 Key）。
+  ///
+  /// 客人端只保留语音播报：自动发言、圆桌会议、工作模式都是主人端才成立的
+  /// 入口——它们各自会让某个环节去调用 LLM，而客人端一次都不调（自动发言
+  /// 由 [ChatActivityPolicy.canStartAutoChat] 拦住，工作模式在输入层就
+  /// return）。把它们留在界面上，客人看到的是三个永远用不了、且暗示"你该
+  /// 去配置点什么"的按钮。语音播报不属于这一类：它朗读的是广播过来的 AI
+  /// 回复，客人的设备正是需要发声的那一端。
   Widget _buildConversationControls(ColorScheme cs) {
     final usable = _voiceBroadcastUsable;
     return CompactConversationControls(
-      showAutoChat: !_isDirectChat,
+      showAutoChat: !_isDirectChat && !_isRealtimeGuest,
       autoChatEnabled: _isAutoChatEnabled && _hasAnyApiConfig,
+      showWorkMode: !_isRealtimeGuest,
       workModeEnabled: _workModeEnabled,
-      showRoundtableMode: !_isDirectChat,
+      showRoundtableMode: !_isDirectChat && !_isRealtimeGuest,
       roundtableModeEnabled: _roundtableModeEnabled,
       roundtableModeAvailable: !_isAiReplying,
       autoChatAvailable: _hasAnyApiConfig,
