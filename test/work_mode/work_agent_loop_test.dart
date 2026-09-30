@@ -1786,6 +1786,37 @@ void main() {
         reason: '抢救写入必须带 append，否则会被判成交付物已就绪');
   });
 
+  test('a salvaged part file never enters the artifact candidates', () async {
+    // 救援分段与目标同目录、同扩展名、内容非空：一旦登记进产物历史，
+    // `WorkArtifactDeliveryGuard.validateTask` 就会把它当交付候选，用户每次遭遇
+    // 截断都会额外收到一个 `xxx.rescue-<hash>.md` 附件（设计 §6：分段不登记）。
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"被截断的正文',
+      })
+      ..responses.add({'success': true, 'content': '还是写坏的正文'})
+      ..responses.add(_finishDecision('按续写指令补齐并交付。'));
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+    );
+
+    final task = _task(id: 'truncation-salvage-artifact-paths');
+    await loop.execute(task);
+
+    expect(tool.calls, 1, reason: '抢救确实写过一次');
+    expect(tool.arguments.single['append'], isTrue);
+    expect(
+      task.lastArtifactPaths.where((path) => path.contains('rescue-')),
+      isEmpty,
+      reason: '救援分段只是中转，不得成为交付候选：${task.lastArtifactPaths}',
+    );
+  });
+
   test('the continuation hint survives context compaction', () async {
     final model = _FakeModel()
       ..responses.add({

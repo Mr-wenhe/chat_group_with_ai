@@ -530,15 +530,20 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     for (final key in const ['path', 'destinationPath']) {
       final value = values[key];
       if (value is String && value.trim().isNotEmpty) {
+        // 截断抢救的暂存分段与目标同目录、同扩展名、内容非空：一旦进产物历史，
+        // `WorkArtifactDeliveryGuard` 就会把它当交付候选，用户每次遭遇截断都会多
+        // 收到一个 `xxx.rescue-<hash>.md` 附件。它只是中转，不登记。
+        // 判据来自命名规则的所有者，不在这里另写一份（见 `WorkTruncationSalvage`）。
+        if (WorkTruncationSalvage.isRescuePath(value)) continue;
         paths.add(_publicText(value, maximum: 1000));
       }
     }
     final reportedArtifacts = result?.data['artifactPaths'];
     if (reportedArtifacts is List) {
       for (final value in reportedArtifacts.whereType<String>()) {
-        if (value.trim().isNotEmpty) {
-          paths.add(_publicText(value, maximum: 1000));
-        }
+        if (value.trim().isEmpty) continue;
+        if (WorkTruncationSalvage.isRescuePath(value)) continue;
+        paths.add(_publicText(value, maximum: 1000));
       }
     }
     return _retainArtifactPaths(task, paths);
@@ -938,6 +943,14 @@ class _LoopState {
   /// checkpointed tool results instead of trusting in-memory text.
   String toolRepairInstruction = '';
   String completionRepairInstruction = '';
+
+  /// 修复请求这一次拿到的正文（有界），只服务于协议失败的诊断。
+  ///
+  /// 协议重试记下的 `reason` 描述的多半是**修复后**那次解析的失败，而诊断里的
+  /// 计数与首次正文都属于首次决策响应；两者对不上时，只留首次正文会让人按错误
+  /// 的形状去推断。turn-scoped：每次修复前重置，不落检查点。
+  String repairResponseSnippet = '';
+
   final List<String> commandFailureKeys = <String>[];
 
   /// Counts identical process outcomes, independent of the command text, so a

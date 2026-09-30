@@ -136,4 +136,62 @@ void main() {
       );
     });
   });
+
+  group('WorkTruncationSalvage.isRescuePath', () {
+    test('recognises the names this module produces', () {
+      expect(
+        WorkTruncationSalvage.isRescuePath(
+          WorkTruncationSalvage.rescuePath('/work/report.md', '内容'),
+        ),
+        isTrue,
+      );
+      expect(
+        WorkTruncationSalvage.isRescuePath(
+          WorkTruncationSalvage.rescuePath('/work/README', 'x'),
+        ),
+        isTrue,
+        reason: '无扩展名形态（`README.rescue-<hash>`）也要认',
+      );
+      expect(
+        WorkTruncationSalvage.isRescuePath('/work/report.rescue-0123abcd.md'),
+        isTrue,
+      );
+      // 抢救过的抢救仍是救援文件：多加一段哈希后第一个标记依然成立。
+      expect(
+        WorkTruncationSalvage.isRescuePath(
+          '/work/report.rescue-0123abcd.rescue-4567890a.md',
+        ),
+        isTrue,
+      );
+      // 只认文件名，目录里带 rescue 字样不算。
+      expect(
+        WorkTruncationSalvage.isRescuePath('/work/rescue-0123abcd/report.md'),
+        isFalse,
+      );
+      // 目标本身无扩展名时，产出的正是这种"哈希即结尾"的形态。
+      expect(WorkTruncationSalvage.isRescuePath('a.rescue-12345678'), isTrue);
+      expect(
+        WorkTruncationSalvage.isRescuePath(
+          WorkTruncationSalvage.rescuePath('a', '内容'),
+        ),
+        isTrue,
+      );
+    });
+
+    test('does not mistake ordinary or lookalike names for rescue files', () {
+      // 误判会把模型自己写的正常产物排除出交付候选，那比漏判更糟。
+      for (final path in const [
+        'report.md',
+        'report.part1.md',
+        'report.rescue.md',
+        'rescue-abc.md',
+        'a.rescue-1234567.md', // 哈希少一位
+        'a.rescue-12345678x.md', // 第 9 位既不是结尾也不是扩展名的点
+        'a.rescue-123456789.md', // 哈希多一位
+        'a.rescue-.md',
+      ]) {
+        expect(WorkTruncationSalvage.isRescuePath(path), isFalse, reason: path);
+      }
+    });
+  });
 }

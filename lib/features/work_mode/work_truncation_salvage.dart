@@ -58,6 +58,41 @@ class WorkTruncationSalvage {
         '${name.substring(dot)}';
   }
 
+  /// 该路径是不是本模块产出的救援分段名（`<stem>.rescue-<8 位十六进制>[.ext]`）。
+  ///
+  /// 判据与 [rescuePath] 同源，所以留在这个模块里、而不是让调用点各写一份正则：
+  /// 命名规则一变，识别规则必须跟着变。调用点用它把救援分段挡在**交付候选**之外
+  /// ——它与目标同目录、同扩展名、内容非空，一旦登记，用户每次遭遇截断都会额外
+  /// 收到一个残缺文件附件。
+  ///
+  /// 刻意只认**本模块自己的命名形状**（点名 `.rescue-`，哈希必须恰好 8 位十六进制，
+  /// 之后要么是文件名结尾、要么是扩展名的点）。放宽（比如"名字里含 rescue"）会把
+  /// 模型自己写的正常产物排除出交付候选——那比漏判更糟，所以宁可窄。
+  static bool isRescuePath(String path) {
+    final normalized = path.replaceAll('\\', '/');
+    final slash = normalized.lastIndexOf('/');
+    final name = slash < 0 ? normalized : normalized.substring(slash + 1);
+    const marker = '.rescue-';
+    var searchFrom = 0;
+    while (true) {
+      final markerAt = name.indexOf(marker, searchFrom);
+      if (markerAt < 0) return false;
+      searchFrom = markerAt + marker.length;
+      if (searchFrom + 8 > name.length) continue;
+      if (!_isHex8(name.substring(searchFrom, searchFrom + 8))) continue;
+      final afterHash = searchFrom + 8;
+      if (afterHash == name.length || name.codeUnitAt(afterHash) == 0x2E) {
+        return true;
+      }
+    }
+  }
+
+  /// 严格匹配 8 位十六进制（救援命名里的内容哈希前缀）。
+  ///
+  /// 复用 [_isHex4]：与它一样"手写而非正则"，同样不抛异常。
+  static bool _isHex8(String value) =>
+      _isHex4(value.substring(0, 4)) && _isHex4(value.substring(4, 8));
+
   /// 从残缺 JSON 里读一个字符串字段：找到 `"key"` 后的冒号与开引号，按 JSON
   /// 字符串规则解码到闭合引号或正文结束。
   ///
