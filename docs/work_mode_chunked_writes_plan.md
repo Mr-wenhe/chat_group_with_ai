@@ -388,9 +388,12 @@ Expected: FAIL —— `The method 'append' isn't defined`。
       var existing = '';
       String? expectedSha;
       if (resolved.exists) {
+        // 变更路径必须读**整文**：`workspace.read` 用的 `readTextRange` 会套用
+        // 面向模型的输出字符上限（默认 12000），用它判断"读完没有"会把所有
+        // 超过 12000 字符的目标文件误判成读取被截断。
         final read = await _withReadLock(
           resolved.path,
-          () => files.readTextRange(resolved.path),
+          () => files.readTextForMutation(resolved.path),
         );
         if (read.truncated) {
           return {
@@ -451,7 +454,7 @@ git commit -m "feat(work-mode): add append mode to the stage 02 file tool"
 - Test: `test/work_mode/stage02_workspace_file_tool_test.dart`
 
 **Interfaces:**
-- Consumes: Task 2 的读锁与 `_filePlan` / `_execute` / `_hashFile` 用法。
+- Consumes: Task 2 的读锁、`_filePlan` / `_execute` / `_hashFile` 用法，以及 Task 2 修复轮抽出的敏感门助手 `_refuseSensitiveMutation({plan, sensitive, path})`（**必须复用**，不要再复制一份敏感判断）与 `WorkspaceFileService.readTextForMutation`（整文读取，不套用 12000 字符的模型输出上限）。
 - Produces: `Future<Map<String, dynamic>> Stage02WorkspaceFileTool.merge({required String path, required List<String> parts})`；失败码 `invalid_merge`（含 `missingParts` 列表，供模型与事件点名缺失分段）、`append_requires_full_read`（分段超读取上限）、`not_a_file`。
 
 - [ ] **Step 1: 写失败测试**
@@ -618,9 +621,11 @@ extension ...
       }
       final buffer = StringBuffer();
       for (final part in resolvedParts) {
+        // 与 append 同理：分段的完整性只能用字节级判据，不能用面向模型的
+        // 12000 字符输出上限。
         final read = await _withReadLock(
           part,
-          () => files.readTextRange(part),
+          () => files.readTextForMutation(part),
         );
         if (read.truncated) {
           return {
