@@ -133,7 +133,10 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
           title: title,
           detail: detail,
           progressCurrent: state.task.actionCount,
-          progressTotal: _effectiveActionLimit(state.task),
+          progressTotal: WorkTaskExecutionPolicy.progressTotal(
+            state.task,
+            _effectiveActionLimit(state.task),
+          ),
           safeMetadata: safeMetadata,
           timestamp: clock(),
         );
@@ -211,7 +214,10 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
         'previousCompletionFailure': state.completionRepairInstruction,
       if (state.failure != null) 'workFailure': state.failure!.toJson(),
       'actionCount': task.actionCount,
-      'actionLimit': _effectiveActionLimit(task),
+      if (WorkTaskExecutionPolicy.enforcesCumulativeLimits(task))
+        'actionLimit': _effectiveActionLimit(task),
+      if (!WorkTaskExecutionPolicy.enforcesCumulativeLimits(task))
+        'cumulativeLimits': false,
       'completedActions':
           task.completedOperations.takeLast(32).map(_publicText).toList(),
       'committedWrites': state.committedActionKeys.take(128).toList(),
@@ -252,8 +258,9 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
   /// 按字符计入会让每一次带图的请求都被误判成超预算。
   List<Map<String, dynamic>> _buildMessages(
     AgentTask task,
-    Map<String, dynamic> context,
-  ) {
+    Map<String, dynamic> context, {
+    String continuationHint = '',
+  }) {
     final budget = promptCompactionBudgetTokens;
     final effective = budget == null
         ? context
@@ -265,13 +272,18 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
               _assembleMessages(task, candidate, includeNativeImages: false),
             ),
           );
-    return _assembleMessages(task, effective);
+    return _assembleMessages(
+      task,
+      effective,
+      continuationHint: continuationHint,
+    );
   }
 
   List<Map<String, dynamic>> _assembleMessages(
     AgentTask task,
     Map<String, dynamic> context, {
     bool includeNativeImages = true,
+    String continuationHint = '',
   }) {
     final imageParts = _nativeImageParts(context);
     final promptContext =
@@ -295,6 +307,10 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
           WorkDiscussionState.currentRequestScope(task),
         ),
       },
+      // 续写指令不放进检查点：检查点超预算时会被压缩，压缩一次这条指令就静默
+      // 消失，模型会退回"一次写完整份"的老动作。
+      if (continuationHint.trim().isNotEmpty)
+        {'role': 'system', 'content': _publicText(continuationHint)},
       {
         'role': 'system',
         'content': '公开任务检查点：${jsonEncode(promptContext)}',
@@ -425,6 +441,7 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
   }
 
   bool _timeBudgetExceeded(AgentTask task) =>
+      WorkTaskExecutionPolicy.enforcesCumulativeLimits(task) &&
       _elapsedBudget(task) >= _effectiveTimeLimit(task);
 
   /// Folds a finished user wait into the excluded budget once the agent is

@@ -304,7 +304,9 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
   String _protocolRetryTitle({
     required bool truncated,
     required bool repairRequestFailed,
+    bool salvaged = false,
   }) {
+    if (salvaged) return '模型输出被上限截断，已抢救已生成部分，按续写指令重试。';
     if (truncated) return '模型输出被上限截断，改用精简指令重试。';
     if (repairRequestFailed) return '模型响应无法解析，修复请求失败，正在重试。';
     return '模型返回格式无效，正在自动重试。';
@@ -358,17 +360,24 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     return message is String ? message : null;
   }
 
-  /// 截断之后的协议重试要给模型换策略，而不是原样重试同一个巨无霸动作。
+  /// 截断之后的续写指令：告诉模型哪一段已经落盘、从哪里继续、最后怎么合并。
   ///
-  /// 指令只加在这一次的提示里（渲染进公开任务检查点），不写回任务上下文：
-  /// 它是这次重试的指令，不是任务的持久状态，重试成功后即失效。**注意它必须经
-  /// `messages` 出站**——运行器只发 `request.messages`，`request.context` 不参与，
-  /// 将来若改成从 context 重建消息，这里要一起改，否则指令会静默丢掉。
-  Map<String, dynamic> _withTruncatedOutputHint(Map<String, dynamic> context) =>
-      <String, dynamic>{
-        ...context,
-        'truncatedOutputHint': _truncatedOutputChunkingAdvice,
-      };
+  /// 不写回任务上下文：它是这次重试的指令，不是任务的持久状态，重试成功后即失效。
+  /// 与 [_truncatedOutputChunkingAdvice] 的差别只在"抢救是否成功"：没有任何内容
+  /// 落盘时，模型只能从头分块写，点名分段文件反而是个不存在的路径。
+  String _continuationHint({
+    required String targetPath,
+    required String? rescuedPath,
+    required int rescuedCharacters,
+    required String rescuedTail,
+  }) {
+    if (rescuedPath == null) return _truncatedOutputChunkingAdvice;
+    return '上一次输出被上限截断，已把已生成的部分抢救到分段文件 `$rescuedPath`'
+        '（$rescuedCharacters 字）。继续用 workspace.patch 的 append 往这个文件'
+        '补写余下内容（每次 content 控制在 3000 字以内），不要重写已写入的前缀；'
+        '全文写完后用一次 workspace.patch 的 parts 合并到 `$targetPath`，再读回'
+        '验证并交付。已写入内容的结尾是：「$rescuedTail」。';
+  }
 
   Future<String?> _repairModel(
     _LoopState state,
@@ -468,6 +477,23 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
   }) async {
     if (state.cancellation.isCancelled) return _interrupt(state);
     final task = state.task;
+    final discussion = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    ).state;
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+        discussion?.collaboration?.pendingInputIds.isNotEmpty == true) {
+      task
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = false
+        ..lastError = '已收到补充要求，正在安全检查点更新需求。';
+      await _checkpoint(state);
+      return _result(state, WorkAgentLoopStatus.paused, task.lastError);
+    }
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+        task.status == AgentTaskStatus.paused && !task.resumeRequired) {
+      await _checkpoint(state);
+      return _result(state, WorkAgentLoopStatus.paused, task.lastError);
+    }
     final limit = _effectiveActionLimit(task);
     task.startedAt ??= clock();
     if (_budgetExceeded(state, includeActionLimit: includeActionLimit)) {

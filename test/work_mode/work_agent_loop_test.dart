@@ -1661,6 +1661,171 @@ void main() {
     expect(retryPrompt, contains('拆成多次动作'));
   });
 
+  test('a truncated write action is salvaged into a staged part file',
+      () async {
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","public_update":"正在写报告。","tool":'
+            '{"name":"workspace.patch","arguments":{"path":"report.md",'
+            '"content":"第一段\\n第二段',
+      })
+      // 截断的正文同样修不出 JSON：修复请求也失败之后才轮到抢救，所以这里必须
+      // 再排一条非 JSON 的响应（否则修复那次就会拿 `_finishDecision` 直接收尾，
+      // 抢救分支根本不会执行）。
+      ..responses.add({
+        'success': true,
+        'content': '还是写坏的正文',
+      })
+      ..responses.add(_finishDecision('按抢救结果续写完成。'));
+    final tool = _FakeTool();
+    final events = <WorkTaskEvent>[];
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspacePatch, tool)],
+      ),
+      events: events,
+    );
+
+    final task = _task(id: 'truncation-salvage');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    expect(tool.calls, 1, reason: '抢救就是一次真实的工具请求');
+    final args = tool.arguments.single;
+    expect(args['path'], startsWith('report.rescue-'));
+    // 落盘的必须是模型原本要写的字符，而不是带反斜杠的 JSON 字面量。
+    expect(args['content'], '第一段\n第二段');
+    expect(
+      events.any((event) => event.safeMetadata['salvagedCharacters'] != null),
+      isTrue,
+    );
+    final retryPrompt = model.requests.last.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(retryPrompt, contains('report.rescue-'),
+        reason: '续写指令必须点名已抢救的分段文件');
+  });
+
+  test('the continuation hint survives context compaction', () async {
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"被截断的正文',
+      })
+      ..responses.add({
+        'success': true,
+        'content': '还是写坏的正文',
+      })
+      ..responses.add(_finishDecision('完成。'));
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspacePatch, tool)],
+      ),
+      promptCompactionBudgetTokens: 1,
+    );
+
+    final task = _task(id: 'truncation-salvage-compaction');
+    await loop.execute(task);
+
+    final retryPrompt = model.requests.last.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(retryPrompt, contains('report.rescue-'),
+        reason: '检查点被压缩后续写指令仍必须到达模型');
+  });
+
+  test('a salvage write that needs approval pauses instead of failing',
+      () async {
+    // 抢救是一次真实的工具请求：它的审批必须按既有语义暂停任务，而不是被跳过。
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"第一段',
+      })
+      ..responses.add({'success': true, 'content': '还是写坏的正文'});
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _definition(
+            AgentToolName.workspacePatch,
+            tool,
+            access: WorkToolAccess.mutation,
+            pipeline: WorkToolMutationPipeline(
+              approval: (_) => const WorkToolResult.waitingForApproval(
+                message: '需要用户批准',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    final task = _task(id: 'truncation-salvage-approval');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.waitingForApproval);
+    expect(tool.calls, 0);
+    expect(task.pendingToolRequestJson, contains('report.rescue-'),
+        reason: '等待审批的必须是抢救写入本身');
+  });
+
+  test('a failed salvage write does not fail the task', () async {
+    // 抢救只是止损：派生路径被策略拒绝时，任务必须退回话术路径继续，而不是被
+    // 这条补救动作判死（设计 §4.6）。
+    final model = _FakeModel()
+      ..responses.add({
+        'success': true,
+        'truncated': true,
+        'content': '{"action":"tool","tool":{"name":"workspace.patch",'
+            '"arguments":{"path":"report.md","content":"第一段',
+      })
+      ..responses.add({'success': true, 'content': '还是写坏的正文'})
+      ..responses.add(_finishDecision('按分块指令完成。'));
+    final tool = _FakeTool();
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _definition(
+            AgentToolName.workspacePatch,
+            tool,
+            access: WorkToolAccess.mutation,
+            pipeline: WorkToolMutationPipeline(
+              policy: (_) => const WorkToolResult.pathRejected(
+                message: '无法在授权目录内解析精确文件路径。',
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+
+    final task = _task(id: 'truncation-salvage-rejected');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${result.message}; ${task.lastError}');
+    expect(tool.calls, 0);
+    final retryPrompt = model.requests.last.messages
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    // 退回话术路径：不提"已抢救"，只给分块配方。
+    expect(retryPrompt, contains('拆成多次动作'));
+    expect(retryPrompt, isNot(contains('report.rescue-')));
+  });
+
   test('untruncated malformed response still feeds the raw body back',
       () async {
     // 对照：非截断的格式错误仍要把原文当数据交回模型，否则修 JSON 就没有依据。

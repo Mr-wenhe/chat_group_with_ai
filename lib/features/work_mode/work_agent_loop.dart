@@ -16,12 +16,15 @@ import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
+import 'package:chat_group/features/work_mode/work_model_deadline.dart';
 import 'package:chat_group/features/work_mode/work_prompt_context_compactor.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_task_budget_wait.dart';
+import 'package:chat_group/features/work_mode/work_task_execution_policy.dart';
+import 'package:chat_group/features/work_mode/work_truncation_salvage.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:crypto/crypto.dart';
 
@@ -29,6 +32,12 @@ part 'work_agent_loop_retry.dart';
 part 'work_agent_loop_checkpoint.dart';
 part 'work_agent_loop_safety.dart';
 part 'work_agent_loop_actions.dart';
+
+/// 续写提示里回显的"已落盘内容结尾"长度。
+///
+/// 它只用来让模型无缝接上下一句，所以取一小段即可。把整份已抢救内容回灌进
+/// prompt 会让窗口先被这次失败烧掉一遍——而那正是要补救的问题。
+const int _salvageTailCharacters = 200;
 
 /// A model call receives a public checkpoint, never a private reasoning trace.
 typedef WorkAgentModel = FutureOr<Map<String, dynamic>> Function(
@@ -133,6 +142,30 @@ class WorkAgentLoopResult {
   bool get isCompleted => status == WorkAgentLoopStatus.completed;
 }
 
+/// 抢救结果：无论成功与否，`hint` 都是下一次决策要带的续写指令。
+///
+/// [stop] 非空表示抢救这次工具请求本身就把任务带离了循环（典型是等待审批），
+/// 调用方必须原样返回它——抢救走的是模型自己写文件时的那条管线，不能绕过它的
+/// 暂停语义。
+class _TruncationSalvageOutcome {
+  final WorkAgentLoopResult? stop;
+  final String hint;
+  final String? rescuedPath;
+  final int rescuedCharacters;
+
+  const _TruncationSalvageOutcome({
+    this.stop,
+    required this.hint,
+    this.rescuedPath,
+    this.rescuedCharacters = 0,
+  });
+}
+
+/// 抢救没能落盘（提取不出内容、被拒、写入失败）时的结果：退回通用的分块话术，
+/// 让模型至少还能从头分块写。
+const _TruncationSalvageOutcome _truncationSalvageFallback =
+    _TruncationSalvageOutcome(hint: _truncatedOutputChunkingAdvice);
+
 /// Executes one durable work task using the Stage 03 decision protocol.
 ///
 /// This is the sole production work-mode loop. Ordinary chat and legacy
@@ -177,6 +210,7 @@ class WorkAgentLoop
   // budget is what bounds the run.
   static const int defaultMaxCompletionRepairs = 2;
   static const int maxRetryCountCap = 5;
+
   /// Fraction by which a model/tool backoff delay is randomly stretched or
   /// shaved (0.2 = ±20%), so two concurrent tasks do not retry in lockstep.
   /// Injected as a 0..1 sample; a server-provided Retry-After is never jittered.
@@ -238,6 +272,7 @@ class WorkAgentLoop
   final int maxToolRetries;
   final int maxToolRepairs;
   final int maxCompletionRepairs;
+
   /// Returns a 0..1 sample used to jitter a backoff delay. Injectable so tests
   /// can pin the delay; production uses [Random.nextDouble].
   final double Function() retryJitter;
@@ -417,9 +452,12 @@ class WorkAgentLoop
         (task.status == AgentTaskStatus.queued ||
             task.status == AgentTaskStatus.planning ||
             task.status == AgentTaskStatus.runningTool)) {
-      WorkFailure.clearFromTask(task);
-      state.failure = null;
-      task.lastError = '';
+      if (!WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) ||
+          WorkProgressGuard.snapshot(task)['stalled'] != true) {
+        WorkFailure.clearFromTask(task);
+        state.failure = null;
+        task.lastError = '';
+      }
     }
     task.startedAt ??= clock();
     // An approval wait that ended before this run resumed must stop counting
@@ -475,9 +513,12 @@ class WorkAgentLoop
         );
         if (preflightResult != null) return preflightResult;
       }
-      // 上一次决策是否因输出上限被截断。它要跨迭代保留：截断说明"一次写完"这个
-      // 策略不可行，下一次决策必须换成分块指令，否则只是原样再撞一次上限。
-      var truncatedOutputRetry = false;
+      // 这一次决策要带的续写指令（截断之后才非空）。它要跨迭代保留：截断说明
+      // "一次写完"这个策略不可行，下一次决策必须换成分块/续写指令，否则只是原样
+      // 再撞一次上限。抢救成功时它是"接着哪个分段文件写"的具体指令，失败时退回
+      // 通用的分块话术。`salvaged` 与它同寿命，只用来给事件标题选措辞。
+      var continuationHint = '';
+      var salvaged = false;
       while (true) {
         final boundary = await _checkBoundary(state);
         if (boundary != null) return boundary;
@@ -489,9 +530,8 @@ class WorkAgentLoop
           task: task,
           messages: _buildMessages(
             task,
-            truncatedOutputRetry
-                ? _withTruncatedOutputHint(context)
-                : context,
+            context,
+            continuationHint: continuationHint,
           ),
           context: context,
         );
@@ -518,6 +558,20 @@ class WorkAgentLoop
         if (_modelFailed(response)) {
           final message =
               _safeText(response['message']?.toString() ?? '模型请求失败。');
+          final stalled = await _observeV2Progress(
+            state,
+            WorkProgressObservation(
+              kind: WorkProgressObservationKind.failure,
+              fingerprint: sha256
+                  .convert(utf8.encode(
+                    '${response['failureCode'] ?? 'model'}|${response['statusCode'] ?? ''}',
+                  ))
+                  .toString(),
+              summary: '模型请求失败（${response['failureCode'] ?? 'model'}）。',
+              missing: '需要可用的模型响应或新的服务条件。',
+            ),
+          );
+          if (stalled != null) return stalled;
           final failure = WorkFailure.fromModelResponse(
             response,
             completedContent: _completedContent(state),
@@ -541,7 +595,16 @@ class WorkAgentLoop
         if (!parsed.isSuccess) {
           // 截断才是这次不可解析的原因，它比解析器的具体校验信息更值得上报：
           // 用户据此才知道该收窄要求或换模型，而不是以为模型不会写 JSON。
-          truncatedOutputRetry = truncated;
+          if (truncated) {
+            final outcome = await _salvageTruncatedOutput(state, response);
+            if (outcome.stop != null) return outcome.stop!;
+            continuationHint = outcome.hint;
+            salvaged = outcome.rescuedPath != null;
+          } else {
+            continuationHint = '';
+            salvaged = false;
+          }
+          final repairRequestFailed = parsed.repairRequestFailed;
           final detail = truncated
               ? _truncatedOutputDetail(response)
               : (parsed.detail ?? '模型返回的 AgentDecision 无法解析。');
@@ -550,13 +613,22 @@ class WorkAgentLoop
             await _emit(
               state,
               WorkTaskEventKind.toolOutput,
-              truncated ? '模型输出被上限截断，改用精简指令重试。' : '模型返回格式无效，正在自动重试。',
+              _protocolRetryTitle(
+                truncated: truncated,
+                repairRequestFailed: repairRequestFailed,
+                salvaged: salvaged,
+              ),
               detail: '第 $protocolRetryCount 次协议重试',
               safeMetadata: {
                 'scope': 'modelProtocol',
                 'retry': protocolRetryCount,
                 if (truncated) 'truncated': true,
-                ..._protocolFailureDiagnostics(response, detail),
+                if (repairRequestFailed) 'repairRequestFailed': true,
+                ..._protocolFailureDiagnostics(
+                  response,
+                  detail,
+                  repairResponseSnippet: state.repairResponseSnippet,
+                ),
               },
             );
             continue;
@@ -571,7 +643,8 @@ class WorkAgentLoop
           );
         }
         protocolRetryCount = 0;
-        truncatedOutputRetry = false;
+        continuationHint = '';
+        salvaged = false;
         final decision = parsed.decision!;
         // `raw` is intentionally discarded here. Only public_update and
         // validated tool data can cross the event/checkpoint boundary.
@@ -586,6 +659,14 @@ class WorkAgentLoop
           },
         );
         if (stop.isCancelled) return await _interrupt(state);
+
+        // _emit yields to the event store. A supplement may land in that
+        // window after the model returned but before its tool action starts.
+        final changedBeforeAction = await _checkBoundary(
+          state,
+          includeActionLimit: false,
+        );
+        if (changedBeforeAction != null) return changedBeforeAction;
 
         final next = await _handleDecision(state, decision, publicUpdate);
         if (next != null) return next;
@@ -604,4 +685,116 @@ class WorkAgentLoop
       );
     }
   }
+
+  /// 把一次被截断的写入抢救成分段文件，并给出下一次决策的续写指令。
+  ///
+  /// 抢救走 [_handleDecision]，于是审批、快照、事件、检查点与去重全部沿用模型
+  /// 自己写文件时的那条管线——它是**真实的工具请求**，不是直写文件。
+  ///
+  /// 它同时是一次止损：提取不出内容、写入被拒或没落盘时，返回的 `hint` 仍是
+  /// 通用的分块话术，任务照常重试，绝不因为抢救没成功而失败。
+  Future<_TruncationSalvageOutcome> _salvageTruncatedOutput(
+    _LoopState state,
+    Map<String, dynamic> response,
+  ) async {
+    final salvage = WorkTruncationSalvage.extract(_responseBody(response) ?? '');
+    if (salvage == null) return _truncationSalvageFallback;
+    final rescuedPath = WorkTruncationSalvage.rescuePath(
+      salvage.targetPath,
+      salvage.content,
+    );
+    const notice = '已抢救被截断的输出，先写入分段文件再继续。';
+    final stop = await _handleDecision(
+      state,
+      AgentToolDecision(
+        publicUpdate: notice,
+        tool: AgentToolCall(
+          name: AgentToolName.workspacePatch,
+          arguments: {'path': rescuedPath, 'content': salvage.content},
+        ),
+      ),
+      notice,
+    );
+    if (stop == null) {
+      return _reportSalvageOutcome(state, salvage, rescuedPath);
+    }
+    if (stop.status != WorkAgentLoopStatus.failed) {
+      // 需要审批（或到达软上限）时，这次抢救和模型的工具请求一样把任务带离循环，
+      // 按既有语义原样返回，不绕过它的暂停。
+      return _TruncationSalvageOutcome(
+        stop: stop,
+        hint: _truncationSalvageFallback.hint,
+      );
+    }
+    // 抢救写入自己失败（典型：派生路径不在授权目录，或目标是 Word 这类不能直接
+    // patch 的交付物）。抢救只是止损，不能成为新的失败源：拨回 `_fail` 写下的
+    // 终态，退回话术路径继续，而不是让一次补救动作判死任务。
+    await _clearSalvageFailure(state);
+    return _reportSalvageOutcome(state, salvage, rescuedPath);
+  }
+
+  /// 公布一次抢救的结果，并给出下一次决策要带的续写指令。
+  Future<_TruncationSalvageOutcome> _reportSalvageOutcome(
+    _LoopState state,
+    WorkTruncationSalvage salvage,
+    String rescuedPath,
+  ) async {
+    final characters = salvage.content.length;
+    final committed = state.recentResults.isNotEmpty &&
+        state.recentResults.last['committed'] == true;
+    final reason = state.recentResults.isEmpty
+        ? ''
+        : _publicText(state.recentResults.last['message']?.toString() ?? '');
+    await _emit(
+      state,
+      WorkTaskEventKind.toolOutput,
+      committed
+          ? '已抢救被截断的输出：$characters 字写入分段文件。'
+          : '抢救被截断的输出未落盘，将按精简指令重试。',
+      detail: committed
+          ? rescuedPath
+          : (reason.isEmpty ? '分段文件未能写入。' : reason),
+      safeMetadata: {
+        'scope': 'truncationSalvage',
+        'salvaged': committed,
+        'salvagedCharacters': characters,
+        'partPath': rescuedPath,
+        'truncatedTargetPath': salvage.targetPath,
+      },
+    );
+    if (!committed) return _truncationSalvageFallback;
+    return _TruncationSalvageOutcome(
+      hint: _continuationHint(
+        targetPath: salvage.targetPath,
+        rescuedPath: rescuedPath,
+        rescuedCharacters: characters,
+        rescuedTail: _boundedTail(salvage.content),
+      ),
+      rescuedPath: rescuedPath,
+      rescuedCharacters: characters,
+    );
+  }
+
+  /// 撤掉一次失败抢救留在任务上的终态。
+  ///
+  /// 抢救必须经 [_handleDecision] 才能拿到审批、快照与去重，而那条管线的失败
+  /// 分支会把任务判成 `failed` 并持久化失败——那不是一次止损动作该有的结局。
+  /// 这里把失败标记、状态与错误文案逐项拨回可继续的样子，让循环退回话术路径。
+  Future<void> _clearSalvageFailure(_LoopState state) async {
+    final task = state.task;
+    state.failure = null;
+    WorkFailure.clearFromTask(task);
+    task
+      ..status = AgentTaskStatus.runningTool
+      ..resumeRequired = false
+      ..lastError = ''
+      ..pendingToolRequestJson = '';
+    await _checkpoint(state);
+  }
+
+  /// 抢救内容的结尾片段，用来让模型无缝接上：只取有界的一段，绝不把整份
+  /// 已生成内容回灌进 prompt。
+  String _boundedTail(String content) => content.length <= _salvageTailCharacters
+      ? content
+      : content.substring(content.length - _salvageTailCharacters);
 }
