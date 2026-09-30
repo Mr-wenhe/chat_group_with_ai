@@ -120,7 +120,15 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     // A revision target is a durable capability boundary. The model may use a
     // relative or absolute spelling, but it cannot redirect the mutation to a
     // different basename after the user queued “modify the same file”.
-    if (enforceRevision && revision != null) {
+    //
+    // Only a path naming that same file is rewritten. Applying the pin to every
+    // mutation made the deliverable the only writable file in the task, so the
+    // scripts and part files the prompt contract asks for silently landed on
+    // the deliverable instead of existing — the model then re-listed, saw no
+    // script, and wrote another one, forever.
+    if (enforceRevision &&
+        revision != null &&
+        _namesSameFile(value, revision)) {
       final normalizedRoot = workspaceRoot.replaceAll('\\', '/');
       // A public contract may say Desktop/foo.html while the authorized root
       // is already /Users/.../Desktop. Do not resolve that as Desktop/Desktop.
@@ -165,6 +173,23 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
       args['expectedSha256'] is String &&
       args['expectedFragment'] is String &&
       args['replacement'] is String;
+
+  /// Whether a model-supplied path spells the same file as the revision target.
+  ///
+  /// Only the basename decides — the directory spelling varies (relative vs
+  /// absolute, with or without the authorized-root leaf) and is resolved by the
+  /// caller. Case is folded so a differently-cased spelling of the deliverable
+  /// pins to the stored path instead of creating a near-duplicate beside it,
+  /// matching how the delivery guard compares artifact paths.
+  static bool _namesSameFile(String requested, String revisionTarget) {
+    String basename(String path) {
+      final normalized = path.replaceAll('\\', '/');
+      return normalized.substring(normalized.lastIndexOf('/') + 1);
+    }
+
+    return basename(requested).toLowerCase() ==
+        basename(revisionTarget).toLowerCase();
+  }
 
   bool _isAbsolutePath(String value) {
     final path = value.trim();

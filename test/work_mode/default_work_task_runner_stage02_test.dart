@@ -876,6 +876,106 @@ class _WorkspaceListPathGateway extends AiRequestGateway {
   }
 }
 
+/// Drives one `reviseArtifact` follow-up to completion.
+///
+/// Seeds `<authorized>/conversations/group_<groupId>/<targetName>` and has the
+/// model ask to patch [patchPath], so callers can assert where the write
+/// actually landed. Returns the workspace root and the pinned target.
+Future<({String conversationRoot, String revisionTarget})> _runRevisionTask({
+  required DatabaseService database,
+  required WorkTaskEventStore eventStore,
+  required Directory authorizedDirectory,
+  required Directory hiveDirectory,
+  required String groupId,
+  required String targetName,
+  required String patchPath,
+}) async {
+  final grants = WorkFolderGrantService(
+    box: database.appSettingsBox,
+    directoryValidator: (_) async => true,
+    isWindows: false,
+  );
+  await grants.authorizeDirectory(
+    authorizedDirectory.path,
+    consent: (_) async => true,
+  );
+  final pathPolicy = WorkspacePathPolicy(grantService: grants);
+  final config = ApiConfig(
+    id: 'revision-config',
+    name: 'Revision test config',
+    provider: ApiProvider.deepseek.name,
+    modelName: 'deepseek-chat',
+  );
+  final character = AICharacter(
+    id: 'revision-character',
+    name: 'Revision character',
+    avatar: 'R',
+    age: 30,
+    role: '测试执行角色',
+    personalityTags: const [],
+    systemPrompt: '只按工具协议工作。',
+    apiKey: '',
+    apiProvider: ApiProvider.deepseek.name,
+    modelName: 'deepseek-chat',
+    apiConfigId: config.id,
+    toolPermissions: const [
+      ToolPermission.workspaceRead,
+      ToolPermission.workspacePatch,
+    ],
+  );
+  await database.apiConfigBox.put(config.id, config);
+  await database.aiCharacterBox.put(character.id, character);
+
+  final runner = DefaultWorkTaskRunner(
+    database: database,
+    eventStore: eventStore,
+    credentials: _TestCredentials(),
+    gateway: _SequencedGateway(patchPath: patchPath),
+    workspaceService: WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    ),
+    folderGrantService: grants,
+    workspaceFileService: WorkspaceFileService(pathPolicy: pathPolicy),
+    mutationService: WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: WorkSnapshotService(
+        appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+        pathPolicy: pathPolicy,
+      ),
+    ),
+  );
+  final conversationRoot =
+      '${authorizedDirectory.path}/conversations/group_$groupId';
+  final revisionTarget = '$conversationRoot/$targetName';
+  await Directory(conversationRoot).create(recursive: true);
+  await File(revisionTarget).writeAsString('原来的报告内容');
+  final task = AgentTask(
+    id: 'revision-task-$groupId',
+    groupId: groupId,
+    characterId: character.id,
+    userRequest: '给这份报告补一段公司背景',
+    workModeTask: true,
+    executionStateJson: jsonEncode({
+      'schemaVersion': 1,
+      'followUpKind': 'reviseArtifact',
+      'revisionTargetPath': revisionTarget,
+    }),
+  );
+
+  await runner.run(task, WorkTaskCancellation());
+  final checkpoint = jsonDecode(task.executionStateJson) as Map;
+  task.executionStateJson = jsonEncode({
+    ...checkpoint,
+    'approvalDecision': 'approved',
+  });
+  task.status = AgentTaskStatus.queued;
+  await database.agentTaskBox.put(task.id, task);
+  await runner.run(task, WorkTaskCancellation());
+
+  return (conversationRoot: conversationRoot, revisionTarget: revisionTarget);
+}
+
 void main() {
   late DatabaseService database;
   late WorkTaskEventStore eventStore;
@@ -1246,6 +1346,50 @@ void main() {
         isTrue);
     expect((await snapshots.undo(task.id)).succeeded, isTrue);
     expect(await output.exists(), isFalse);
+  });
+
+  test('a revision task still lets the model create an auxiliary file',
+      () async {
+    final harness = await _runRevisionTask(
+      database: database,
+      eventStore: eventStore,
+      authorizedDirectory: authorizedDirectory,
+      hiveDirectory: hiveDirectory,
+      groupId: 'stage02-revision-aux',
+      targetName: 'report.md',
+      patchPath: 'notes.txt',
+    );
+
+    // The revision target is pinned so the model cannot silently deliver to a
+    // different basename, but it must not swallow every auxiliary write: the
+    // prompt contract requires scripts and part files beside the deliverable.
+    expect(
+      await File('${harness.conversationRoot}/notes.txt').readAsString(),
+      'production-stage02',
+    );
+    expect(await File(harness.revisionTarget).readAsString(), '原来的报告内容');
+  });
+
+  test('a revision target still pins a differently spelled deliverable',
+      () async {
+    final harness = await _runRevisionTask(
+      database: database,
+      eventStore: eventStore,
+      authorizedDirectory: authorizedDirectory,
+      hiveDirectory: hiveDirectory,
+      groupId: 'stage02-revision-pin',
+      targetName: 'report.md',
+      patchPath: 'elsewhere/report.md',
+    );
+
+    expect(
+      await File(harness.revisionTarget).readAsString(),
+      'production-stage02',
+    );
+    expect(
+      File('${harness.conversationRoot}/elsewhere/report.md').existsSync(),
+      isFalse,
+    );
   });
 
   test('a work task ignores chat messages from before the context boundary',
