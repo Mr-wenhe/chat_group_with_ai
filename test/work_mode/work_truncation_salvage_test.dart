@@ -1,3 +1,5 @@
+import 'dart:convert';
+
 import 'package:chat_group/features/work_mode/work_truncation_salvage.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -33,6 +35,59 @@ void main() {
       );
 
       expect(salvage?.content, '正文');
+    });
+
+    test('recombines a complete surrogate pair into one character', () {
+      final salvage = WorkTruncationSalvage.extract(
+        '{"action":"tool","tool":{"name":"workspace.patch","arguments":'
+        '{"path":"a.md","content":"\\uD83D\\uDE00',
+      );
+
+      expect(salvage?.content, '😀');
+      expect(utf8.encode(salvage!.content), [240, 159, 152, 128]);
+      expect(salvage.content.contains('\uFFFD'), isFalse);
+    });
+
+    test('drops a lone high surrogate', () {
+      // 断点落在代理对的两个转义之间：只写出高代理会让字符串成为非法 UTF-16，
+      // 下游 utf8.encode 会静默写成 U+FFFD——模型从没写过这个字符。
+      final salvage = WorkTruncationSalvage.extract(
+        '{"action":"tool","tool":{"name":"workspace.patch","arguments":'
+        '{"path":"a.md","content":"正文\\uD83D',
+      );
+
+      expect(salvage?.content, '正文');
+      expect(salvage!.content.contains('\uFFFD'), isFalse);
+    });
+
+    test('drops a lone low surrogate', () {
+      final salvage = WorkTruncationSalvage.extract(
+        '{"action":"tool","tool":{"name":"workspace.patch","arguments":'
+        '{"path":"a.md","content":"正文\\uDE00',
+      );
+
+      expect(salvage?.content, '正文');
+      expect(salvage!.content.contains('\uFFFD'), isFalse);
+    });
+
+    test('drops a malformed unicode escape instead of throwing', () {
+      // `\u-123` 会被十六进制解析成负数 → writeCharCode 抛 RangeError。这条路径
+      // 运行在截断失败路径上，抛异常会把「输出被截断」变成一次崩溃。
+      final salvage = WorkTruncationSalvage.extract(
+        '{"action":"tool","tool":{"name":"workspace.patch","arguments":'
+        '{"path":"a.md","content":"正文\\u-123',
+      );
+
+      expect(salvage?.content, '正文-123');
+    });
+
+    test('keeps the backslash of an unknown escape', () {
+      final salvage = WorkTruncationSalvage.extract(
+        '{"action":"tool","tool":{"name":"workspace.patch","arguments":'
+        '{"path":"a.md","content":"a\\xb',
+      );
+
+      expect(salvage?.content, 'a\\xb');
     });
 
     test('recovers the replacement argument of an exact patch', () {

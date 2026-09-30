@@ -28,8 +28,9 @@ class WorkTruncationSalvage {
     if (!body.contains('workspace.patch')) return null;
     final path = _readStringField(body, 'path');
     if (path == null || path.trim().isEmpty) return null;
-    // content 是整文件写/追加的正文，replacement 是精确补丁的正文；两者都可能
-    // 长到撞上限，取先出现且非空的那个。
+    // 按列表优先级取第一个非空者：content（整文件写 / 追加的正文）优先于
+    // replacement（精确补丁的正文）。这两者在解析器里是互斥形态，固定这个先后
+    // 顺序即可与工具侧一致。
     for (final key in const ['content', 'replacement']) {
       final value = _readStringField(body, key);
       if (value != null && value.trim().isNotEmpty) {
@@ -115,18 +116,68 @@ class WorkTruncationSalvage {
         case '/':
           buffer.write('/');
         case 'u':
-          if (index + 4 >= body.length) return buffer.toString();
-          final hex = body.substring(index + 1, index + 5);
-          final code = int.tryParse(hex, radix: 16);
-          if (code == null) return buffer.toString();
-          buffer.writeCharCode(code);
-          index += 4;
+          final decoded = _decodeUnicodeEscape(body, index);
+          // null 表示正文在半截 `\uXX` 处结束，到此为止。
+          if (decoded == null) return buffer.toString();
+          final (text, consumed) = decoded;
+          if (text != null) buffer.write(text);
+          index += consumed - 1; // 公共的 index++ 再补 1
         default:
-          // 未知转义：按字面量保留反斜杠后的字符，不猜测。
+          // 未知转义：抢救路径面对的本就是写坏的正文，忠实保留反斜杠 + 字符
+          // 比丢掉反斜杠更接近模型的原文。
+          buffer.write('\\');
           buffer.write(escape);
       }
       index++;
     }
     return buffer.toString();
+  }
+
+  /// 解码从 [uAt]（指向 `u`）开始的 `\uXXXX` 转义。
+  ///
+  /// 返回 `(text, consumed)`：`text` 是要写入的字符，null 表示这个转义被丢弃、
+  /// 不写任何内容；`consumed` 是从 `uAt` 起消费的字符数。正文在半截转义处结束
+  /// 时返回 null，由调用方结束解码。
+  static (String?, int)? _decodeUnicodeEscape(String body, int uAt) {
+    if (uAt + 4 >= body.length) return null; // 尾部半截 `\uXX`
+    final hex = body.substring(uAt + 1, uAt + 5);
+    // 必须是 4 位十六进制：`\u-123` 之类写坏的正文既不能静默解出错误码点，
+    // 也不能抛异常——这条路径本就运行在截断失败路径上，抢救不能再变成新失败源。
+    if (!_isHex4(hex)) return (null, 1); // 只丢弃 `\u` 这两个字符
+    final unit = int.parse(hex, radix: 16);
+    if (unit >= 0xD800 && unit <= 0xDFFF) {
+      // 代理区码点必须成对出现。孤立的半个代理对会产出非法 UTF-16，下游
+      // `utf8.encode` 不抛异常、静默写成 U+FFFD，等于凭空捏造一个字符。
+      final low = unit <= 0xDBFF ? _lowSurrogateUnitAt(body, uAt + 5) : null;
+      if (low == null) return (null, 5); // 孤立代理：整个转义丢弃
+      final code = 0x10000 + ((unit - 0xD800) << 10) + (low - 0xDC00);
+      return (String.fromCharCode(code), 11); // 高 + 低两个转义一起消费
+    }
+    return (String.fromCharCode(unit), 5);
+  }
+
+  /// `backslashAt` 指向一个候选转义的反斜杠：它是低代理 `\uDC00`–`\uDFFF`
+  /// 时返回其码元，否则返回 null。
+  static int? _lowSurrogateUnitAt(String body, int backslashAt) {
+    if (backslashAt + 5 >= body.length) return null;
+    if (body[backslashAt] != '\\' || body[backslashAt + 1] != 'u') return null;
+    final hex = body.substring(backslashAt + 2, backslashAt + 6);
+    if (!_isHex4(hex)) return null;
+    final unit = int.parse(hex, radix: 16);
+    if (unit < 0xDC00 || unit > 0xDFFF) return null;
+    return unit;
+  }
+
+  /// 严格匹配 `^[0-9a-fA-F]{4}$`（手写而非正则：既要严格，也绝不抛异常）。
+  static bool _isHex4(String value) {
+    if (value.length != 4) return false;
+    for (var i = 0; i < 4; i++) {
+      final c = value.codeUnitAt(i);
+      final isDigit = c >= 0x30 && c <= 0x39;
+      final isLower = c >= 0x61 && c <= 0x66;
+      final isUpper = c >= 0x41 && c <= 0x46;
+      if (!isDigit && !isLower && !isUpper) return false;
+    }
+    return true;
   }
 }
