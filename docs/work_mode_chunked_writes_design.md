@@ -114,7 +114,7 @@
 
 ### 4.3 落盘
 
-- 目标路径：由模型自己的动作目标派生——同目录、`stem.partN.ext`（如 `三国杀.html` → `三国杀.part1.html`），`N` 取不与既有文件冲突的最小正整数；无扩展名则 `stem.partN`。与提示词里既有的 `report.part1.md` 约定一致。
+- 目标路径：由模型自己的动作目标派生——同目录、`stem.rescue-<内容 sha256 前 8 位><扩展名>`（如 `三国杀.rescue-3f9a2b1c.html`）。用内容哈希而不是 `partN`：模型自己的分段文件也在 `partN` 命名空间里，撞名会把两次尝试的内容拼进同一个文件；哈希后缀让"同内容同名、不同内容不同名"，无需探测文件是否存在，任务恢复后依然幂等。
 - **执行方式**：以一次真实的工具请求执行，而不是直写文件——即由循环合成 `workspace.patch {path: <派生分段路径>, content: <抢救文本>, append: true, overwrite: false}`，走与模型工具调用**完全相同**的动作管线（`work_agent_loop_actions.dart`）。
   - 好处：审批（`_mutationApprovalGate`）、快照、事件、检查点、去重全部原样生效；新路径按既有规则弹一次确认，已批准路径不重复弹窗。
   - 需要审批时按既有语义暂停任务（`waitingForApproval` + `pendingToolRequestJson`），用户批准后按既有恢复路径执行，不新造审批面。
