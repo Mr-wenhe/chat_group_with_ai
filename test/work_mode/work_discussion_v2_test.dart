@@ -594,7 +594,14 @@ void main() {
           // 要求（材料/实现工作项 + 验证命令）如果没在方案里补齐，production 门禁
           // 随后会把任务退回群讨论并请用户补齐——那是设计好的下一步，不是"讨论
           // 还没跑完"，所以这里只认"已经就绪过"这一个单调事实。
-          return collaboration != null && collaboration.phase == 'ready';
+          //
+          // 就绪与"已经退回暂停"不是同一时刻：协调器在讨论返回后还会把任务置为
+          // queued 并调度一次，由 production 门禁读取工作区和项目文件后才写回暂停。
+          // 只等 phase 会在那个 queued 窗口里提前返回（CI 负载下必现），所以状态必须
+          // 与阶段一起等。
+          return collaboration != null &&
+              collaboration.phase == 'ready' &&
+              task.status == AgentTaskStatus.paused;
         });
         expect(called.contains('qa'), choice == 'qa');
         if (choice == 'human-review') {
