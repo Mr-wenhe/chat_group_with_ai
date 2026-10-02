@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:collection';
 import 'dart:convert';
+import 'dart:io';
+import 'work_candidate_test_support.dart';
+import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -212,6 +215,34 @@ WorkToolDefinition _patchDefinition(
   );
 }
 
+/// 一次"从头写第一段"的 workspace.patch。
+///
+/// 文件名刻意每次不同（[path]），正文开头刻意相同（`<!DOCTYPE html>…<title>三国杀`）：
+/// 2026-09-30 那次私聊三国杀任务就是靠这两点区分于普通多文件生成的——13 个分段
+/// 文件名毫无同族关系（`sanguosha_v2.part1.html`、`sg_final.part1.html`、`sg9_p1.html`），
+/// 只有正文开头一致。
+Map<String, dynamic> _stagedWriteDecision(String path, String title) =>
+    _toolDecision(
+      name: AgentToolName.workspacePatch,
+      arguments: {
+        'path': path,
+        'content': '<!DOCTYPE html><html lang="zh-CN"><head>'
+            '<meta charset="UTF-8"><title>三国杀 · $title</title><style>',
+      },
+    );
+
+/// `command.run` 的最小定义：只用它验证"成功命令会清掉重建计数"。
+WorkToolDefinition _commandRunFixture(_FakeTool tool) => WorkToolDefinition(
+      name: AgentToolName.commandRun,
+      access: WorkToolAccess.mutation,
+      schema: const WorkToolSchema(
+        fields: {'executable': WorkToolValueType.string},
+        required: {'executable'},
+      ),
+      handler: tool.call,
+      mutationPipeline: _recordingPipeline(<String>[]),
+    );
+
 /// 审批通过后协调器重放的那个请求。
 ///
 /// 生产里它是 runner 内存中留着的那份完整请求（`_pendingRequests[task.id]`），不是
@@ -240,6 +271,7 @@ WorkAgentLoop _loop({
   Future<void> Function(Duration)? sleep,
   double Function()? retryJitter,
   int? maxModelRetries,
+  int? maxProtocolRetries,
   int? maxToolRetries,
   int? maxToolRepairs,
   int? maxCompletionRepairs,
@@ -255,6 +287,7 @@ WorkAgentLoop _loop({
     sleep: sleep ?? (_) async {},
     retryJitter: retryJitter ?? () => 0.5,
     maxModelRetries: maxModelRetries,
+    maxProtocolRetries: maxProtocolRetries,
     maxToolRetries: maxToolRetries,
     maxToolRepairs: maxToolRepairs,
     maxCompletionRepairs: maxCompletionRepairs,
@@ -271,6 +304,119 @@ WorkAgentLoop _loop({
 }
 
 void main() {
+
+  test('REREVIEW2 whitespace-sensitive distinct HTML files complete', () async {
+    final model=_FakeModel();
+    for (var i=1;i<=6;i++) {
+      model.responses.add(_toolDecision(name:AgentToolName.workspacePatch,arguments:{'path':'spacing_$i.html','content':'<!DOCTYPE html><html><body><pre>A${List.filled(i," ").join()}B</pre></body></html>'}));
+    }
+    model.responses.add(_finishDecision());
+    final tool=_FakeTool()..behavior=(invocation)=>WorkToolResult.success(message:'文件已写入。',data:{'path':invocation.arguments['path'],'changed':true});
+    final task=_task(id:'rereview2-significant-whitespace')..userRequest='创建六个 HTML 页面，用 pre 分别演示一个至六个空格的显示效果';
+    final result=await _loop(model:model,registry:WorkToolRegistry(definitions:[_patchDefinition(tool)])).execute(task);
+    expect(result.status,WorkAgentLoopStatus.completed,reason:'${task.lastError}; 实际工具调用 ${tool.calls} 次');
+    expect(tool.calls,6);
+  });
+
+  test('six independent new files complete without a rebuild pause', () async {
+    final model = _FakeModel();
+    for (var i = 0; i < 6; i++) {
+      model.responses.add(_toolDecision(
+          name: AgentToolName.workspacePatch,
+          arguments: {
+            'path': 'feature_$i.txt',
+            'content': 'Independent feature $i complete body'
+          }));
+    }
+    model.responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+          message: '文件已写入。',
+          data: {'path': invocation.arguments['path'], 'changed': true});
+    final loop = _loop(
+        model: model,
+        registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]));
+    final task = _task(id: 'review-distinct-files');
+    task.userRequest = '创建六个独立文件，每个文件都需要完成';
+
+    final result = await loop.execute(task);
+
+    // 开头各不相同的新文件是正常的多文件交付，不是"在原地重建分段"：护栏只认真实
+    // 重复，按新建文件个数拦截会让这个请求在第三个文件之后就被要求直接 finish。
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: task.lastError);
+  });
+
+  test(
+      'P8 crash after mutation before receipt preserves intent and blocks replay',
+      () async {
+    final root = await Directory.systemTemp.createTemp('p8-crash-window-');
+    final store = WorkTaskEventStore(appSupportDirectory: root);
+    addTearDown(() async {
+      await store.close();
+      await root.delete(recursive: true);
+    });
+    final task = candidateTestTask(candidateTestState());
+    task.executionStateJson = jsonEncode({
+      ...jsonDecode(task.executionStateJson) as Map,
+      'workItemExecution': {
+        'stage': 'produce',
+        'workItemId': 'produce',
+        'iterationId': 'unpublished',
+        'requestRevision': 1,
+        'teamRevision': 1,
+        'verificationRevision': 1,
+        'actorId': 'a'
+      }
+    });
+    final output = File('${root.path}/result.txt');
+    var mutations = 0;
+    var intentFlushed = false;
+    final fake = _FakeTool()
+      ..behavior = (_) {
+        expect(intentFlushed, isTrue);
+        mutations++;
+        output.writeAsStringSync('完成内容');
+        return const WorkToolResult.success(message: '已写入');
+      };
+    final model = _FakeModel()
+      ..responses.add(
+          _toolDecision(path: output.path, name: AgentToolName.workspacePatch));
+    final registry = WorkToolRegistry(definitions: [
+      _definition(AgentToolName.workspacePatch, fake,
+          access: WorkToolAccess.mutation, pipeline: _recordingPipeline([]))
+    ]);
+    final loop = WorkAgentLoop(
+        model: model.call,
+        registry: registry,
+        eventStore: store,
+        onCheckpoint: (task) async {
+          if ((jsonDecode(task.executionStateJson) as Map)
+              .containsKey('uncertainAction')) {
+            await File('${root.path}/checkpoint.json')
+                .writeAsString(task.executionStateJson, flush: true);
+            intentFlushed = true;
+          }
+        },
+        onToolResult: (_, __, ___) async => throw StateError('模拟副作用后进程消失'));
+    final crashed = await loop.execute(task);
+    expect(crashed.status, WorkAgentLoopStatus.failed);
+    expect(mutations, 1);
+    expect(await output.readAsString(), '完成内容');
+    final saved = await File('${root.path}/checkpoint.json').readAsString();
+    expect(jsonDecode(saved)['uncertainAction']['expectedSha256'], isNotEmpty);
+    task.executionStateJson = saved;
+    task.status = AgentTaskStatus
+        .planning; // Reload the pre-crash checkpoint, not the caught failure.
+    final replay = _FakeModel();
+    final stopped = await WorkAgentLoop(
+            model: replay.call, registry: registry, eventStore: store)
+        .execute(task);
+    expect(stopped.status, WorkAgentLoopStatus.paused);
+    expect(replay.requests, isEmpty);
+    expect(mutations, 1);
+  });
+
   test('discussion gate blocks model decisions and tools before readiness',
       () async {
     final model = _FakeModel();
@@ -427,8 +573,7 @@ void main() {
       (message) => (message['content'] as String).startsWith('公开任务检查点：'),
     );
     final checkpoint = jsonDecode(
-      (checkpointMessage['content'] as String)
-          .substring('公开任务检查点：'.length),
+      (checkpointMessage['content'] as String).substring('公开任务检查点：'.length),
     ) as Map<String, dynamic>;
 
     // 关键回归：收缩发生之后这段 JSON 仍能整体解析。改动前超长提示词是被
@@ -1531,6 +1676,337 @@ void main() {
     );
   });
 
+  test('a repeated rebuild gets one corrective round and a natural finish',
+      () async {
+    final events = <WorkTaskEvent>[];
+    final model = _FakeModel()
+      // 第二次换个文件名但正文开头一模一样：这才是"在原地重建"，命中纠正。
+      ..responses.add(_stagedWriteDecision('sanguosha.part1.html', '经典版'))
+      ..responses.add(_stagedWriteDecision('sg2.part1.html', '经典版'))
+      // 纠正之后另起一份新交付物是允许的，直接 finish 就能收尾。
+      ..responses.add(_stagedWriteDecision('sg_final.part1.html', '身份局'))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {
+              'path': invocation.arguments['path'],
+              'changed': true,
+            },
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+      events: events,
+    );
+    final task = _task(id: 'staged-rewrite-corrective');
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: task.lastError);
+    expect(tool.calls, 3);
+    final corrective =
+        events.where((event) => event.title.contains('反复重建分段文件')).toList();
+    expect(corrective, hasLength(1));
+    expect(corrective.single.safeMetadata['automaticRepair'], isTrue);
+    expect(corrective.single.safeMetadata['stagedWrites'], 2);
+    // 纠正指令必须真的到达下一次模型请求，否则只是面板上好看。
+    final prompt = model.requests.last.messages
+        .map((message) => '${message['content']}')
+        .join('\n');
+    expect(prompt, contains('从未续写'));
+    expect(prompt, contains('sg2.part1.html'));
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)['stagedRewrite']
+          ['corrected'],
+      isTrue,
+    );
+  });
+
+  test('a repeated rebuild after the corrective round pauses the task',
+      () async {
+    final events = <WorkTaskEvent>[];
+    final model = _FakeModel()
+      // 同一份开头重建两次 → 纠正；之后换个开头重建两次 → 仍在原地重建，暂停。
+      ..responses.add(_stagedWriteDecision('a1.html', '一'))
+      ..responses.add(_stagedWriteDecision('a2.html', '一'))
+      ..responses.add(_stagedWriteDecision('a3.html', '二'))
+      ..responses.add(_stagedWriteDecision('a4.html', '二'));
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {
+              'path': invocation.arguments['path'],
+              'changed': true,
+            },
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+      events: events,
+    );
+    final task = _task(id: 'staged-rewrite-pause');
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.paused);
+    expect(task.lastError, contains('从未续写'));
+    expect(tool.calls, 4);
+    expect(
+      events.where((event) => event.title.contains('反复重建分段文件')),
+      hasLength(1),
+      reason: '纠正只发一次，第二次命中必须是暂停',
+    );
+    expect(
+      events
+          .where((event) => event.kind == WorkTaskEventKind.paused)
+          .last
+          .safeMetadata['reason'],
+      'stagedRewrite',
+    );
+  });
+
+  test('a continuation or a successful command clears the rebuild counter',
+      () async {
+    final events = <WorkTaskEvent>[];
+    final model = _FakeModel()
+      ..responses.add(_stagedWriteDecision('p1.html', '一'))
+      ..responses.add(_stagedWriteDecision('p2.html', '二'))
+      // 续写：这是分块合约里的正确动作，必须把计数清零。
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'p2.html',
+          'content': '更多内容',
+          'append': true,
+        },
+      ))
+      ..responses.add(_toolDecision(
+        name: AgentToolName.commandRun,
+        arguments: {'executable': 'cat'},
+      ))
+      ..responses.add(_stagedWriteDecision('q1.html', '三'))
+      ..responses.add(_stagedWriteDecision('q2.html', '四'))
+      ..responses.add(_finishDecision());
+    final patchTool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {
+              'path': invocation.arguments['path'],
+              'changed': true,
+            },
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [
+          _patchDefinition(patchTool),
+          _commandRunFixture(_FakeTool()),
+        ],
+      ),
+      events: events,
+    );
+    final task = _task(id: 'staged-rewrite-reset');
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: task.lastError);
+    expect(
+      events.where((event) => event.title.contains('反复重建分段文件')),
+      isEmpty,
+      reason: '清零后不该命中',
+    );
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)['stagedRewrite']['count'],
+      2,
+      reason: '两次分段写各 +1；若续写/命令没清零，这里早该到 3',
+    );
+  });
+
+  test('the rebuild counter survives a soft-limit continuation', () async {
+    final events = <WorkTaskEvent>[];
+    final model = _FakeModel()
+      ..responses.add(_stagedWriteDecision('r1.html', '一'))
+      // 第二次运行故意复用同一份开头：命中"两次同一开头"的快路，就同时证明了
+      // 计数和开头指纹都活着穿过了那次暂停。
+      ..responses.add(_stagedWriteDecision('r2.html', '一'))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {
+              'path': invocation.arguments['path'],
+              'changed': true,
+            },
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+      clock: _FakeClock(DateTime.utc(2026, 9, 30, 9)),
+      events: events,
+    );
+    final task = _task(id: 'staged-rewrite-across-runs', actionLimit: 2);
+
+    final first = await loop.execute(task);
+    expect(first.status, WorkAgentLoopStatus.paused);
+    expect(task.lastError, contains('动作上限'));
+    expect(
+      (jsonDecode(task.executionStateJson) as Map)['stagedRewrite']['count'],
+      greaterThan(0),
+      reason: '判定态必须在第一次运行结束时就已经落盘',
+    );
+
+    task
+      ..actionCount = 0
+      ..softLimitReached = false
+      // 第一次运行刻意把上限压到 1 次动作，好让判定态在两次运行之间真的落盘。
+      ..actionLimit = AgentTask.defaultActionLimit
+      ..status = AgentTaskStatus.queued
+      ..resumeRequired = false
+      ..startedAt = DateTime.utc(2026, 9, 30, 9);
+    final second = await loop.execute(task);
+
+    expect(second.status, WorkAgentLoopStatus.completed,
+        reason: task.lastError);
+    expect(
+      events.where((event) => event.title.contains('反复重建分段文件')),
+      hasLength(1),
+      reason: '两次运行连起来必须命中一次，否则判定态根本没落检查点',
+    );
+  });
+
+  test('rewriting the same existing file is not a rebuild', () async {
+    final events = <WorkTaskEvent>[];
+    final model = _FakeModel()
+      ..responses.add(_stagedWriteDecision('report.html', '经典版'))
+      // 同一路径、不同正文：逐字相同的重写会被"已提交变更"去重，压根到不了护栏，
+      // 而真实的重写就是在同一路径上换一版正文。
+      ..responses.add(_stagedWriteDecision('report.html', '经典版 v2'))
+      ..responses.add(_stagedWriteDecision('report.html', '经典版 v3'))
+      ..responses.add(_finishDecision());
+    var writes = 0;
+    final tool = _FakeTool()
+      // 第二次起目标文件已存在：`beforeSha256` 是"这次写入覆盖了已有内容"的事实
+      // 信号（新建时该键缺失）。整份重写同一个交付物是正常迭代，不是"新建完就丢"。
+      ..behavior = (invocation) {
+        writes++;
+        return WorkToolResult.success(
+          message: '文件已写入。',
+          data: {
+            'path': invocation.arguments['path'],
+            'changed': true,
+            if (writes > 1) 'beforeSha256': 'sha-of-previous-version',
+          },
+        );
+      };
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+      events: events,
+    );
+    final task = _task(id: 'staged-rewrite-overwrite');
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: task.lastError);
+    expect(tool.calls, 3);
+    expect(
+      events.where((event) => event.title.contains('反复重建分段文件')),
+      isEmpty,
+      reason: '覆盖已有文件不是原地重建，不该给纠正指令',
+    );
+    final prompt = model.requests.last.messages
+        .map((message) => '${message['content']}')
+        .join('\n');
+    expect(prompt, isNot(contains('从未续写')));
+  });
+
+  test('a salvage append does not clear the rebuild counter', () async {
+    final events = <WorkTaskEvent>[];
+    final model = _FakeModel()
+      ..responses.add(_stagedWriteDecision('a1.html', '一'))
+      // 抢救写入：客户端合成的一次 `append`，落在 rescue- 派生命名上。它由模型被
+      // 截断触发，恰恰是"还在原地重建"的产物，不是模型改用分块了。
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'a2.rescue-61196b99.html',
+          'content': '抢救下来的正文',
+          'append': true,
+        },
+      ))
+      // 抢救写入既不算进展也不算重建：它后面这次"同一份正文再来一遍"仍然必须命中。
+      ..responses.add(_stagedWriteDecision('a2.html', '一'))
+      ..responses.add(_stagedWriteDecision('a3.html', '二'))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {
+              'path': invocation.arguments['path'],
+              'changed': true,
+            },
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+      events: events,
+    );
+    final task = _task(id: 'staged-rewrite-salvage-append');
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: task.lastError);
+    expect(
+      events.where((event) => event.title.contains('反复重建分段文件')),
+      hasLength(1),
+      reason: '抢救写入把判定态清零的话，同一份正文再来一遍就认不出来——护栏在自己要抓的场景里失效',
+    );
+  });
+
+  test('independent files sharing a long template header still complete',
+      () async {
+    // 判据取**整份**正文：共用版权头或 `<!DOCTYPE html>…` 模板头的独立文件开头
+    // 长得一模一样，按开头判会把正常的"创建六个独立文件"在第二个文件就判成
+    // 原地重建，纠正一次后直接暂停。
+    final model = _FakeModel();
+    for (var i = 0; i < 6; i++) {
+      model.responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {
+          'path': 'feature_$i.txt',
+          'content': '${List.filled(20, "/* shared license header */").join()}'
+              ' Independent feature $i complete body',
+        },
+      ));
+    }
+    model.responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {
+              'path': invocation.arguments['path'],
+              'changed': true,
+            },
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+    );
+    final task = _task(id: 'staged-rewrite-shared-header')
+      ..userRequest = '创建六个独立文件，每个文件都需要完成';
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: task.lastError);
+    expect(tool.calls, 6);
+  });
+
   test('a verified artifact can finish without a second model decision',
       () async {
     final model = _FakeModel()
@@ -1742,12 +2218,10 @@ void main() {
     expect(args['content'], '第一段\n第二段');
     // `append` 是"这次写还不是交付物的最终形态"的契约标记（`_artifactToolChanged`）：
     // 缺了它，暂存分段会立刻满足交付物契约，任务带着被截断的前缀 completed。
-    expect(args['append'], isTrue,
-        reason: '抢救写入不得被当成交付物已就绪');
+    expect(args['append'], isTrue, reason: '抢救写入不得被当成交付物已就绪');
     // `overwrite: false` 把"跨任务同名（哈希只由内容决定）时静默把同一段前缀接两遍"
     // 换成"放弃这次抢救、退回话术路径"：内容静默翻倍比少救一次危险得多。
-    expect(args['overwrite'], isFalse,
-        reason: '抢救写入必须拒绝覆盖已存在的同名分段');
+    expect(args['overwrite'], isFalse, reason: '抢救写入必须拒绝覆盖已存在的同名分段');
     expect(
       events.any((event) => event.safeMetadata['salvagedCharacters'] != null),
       isTrue,
@@ -1758,10 +2232,96 @@ void main() {
     // 钉"续写指令装上"必须用抢救提示独有的措辞：`committedActionKeys` 的操作键里
     // `path` 是明文，它经 `committedWrites` 进 context 时会带出 `report.rescue-…`，
     // 用文件名断言的话，把 `continuationHint` 整个摘掉这两条用例仍然会绿。
-    expect(retryPrompt, contains('补写余下内容'),
-        reason: '续写指令必须告诉模型往已抢救的分段文件接着写');
-    expect(retryPrompt, contains('report.rescue-'),
-        reason: '续写指令必须点名已抢救的分段文件');
+    expect(retryPrompt, contains('补写余下内容'), reason: '续写指令必须告诉模型往已抢救的分段文件接着写');
+    expect(retryPrompt, contains('report.rescue-'), reason: '续写指令必须点名已抢救的分段文件');
+  });
+
+  test('the run-scoped artifact record excludes earlier runs', () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.workspacePatch,
+        arguments: {'path': 'this-run.html', 'content': '内容'},
+      ))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+            message: '文件已写入。',
+            data: {
+              'path': invocation.arguments['path'],
+              'changed': true,
+            },
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+    );
+    final task = _task(id: 'run-artifact-scope')
+      // 更早的运行已经往整条血缘里放过文件。私聊里一条记录就是长期血缘
+      // （2026-10-01 现场那条横跨 9-11 到当天），失败报告曾经的附件清单就是它。
+      ..lastArtifactPaths = <String>['/workspace/earlier.html'];
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: task.lastError);
+    expect(task.lastArtifactPaths, contains('/workspace/earlier.html'),
+        reason: '血缘候选不受影响：产物契约与完成校验仍要看到更早写出的文件');
+    final scoped = workRunScopedArtifactPaths(task);
+    expect(scoped, contains('this-run.html'));
+    expect(scoped, isNot(contains('/workspace/earlier.html')),
+        reason: '「本次运行写出的」不得把更早运行的中间分段再列一遍');
+  });
+
+  test('without a run record the scope falls back to the lineage', () {
+    final task = _task(id: 'run-artifact-legacy')
+      ..lastArtifactPaths = <String>['/workspace/earlier.html'];
+
+    // 本次改动之前落下的检查点没有运行记录，行为必须与改动前一致，而不是
+    // 因为读不到记录就一个文件都不附。
+    expect(
+        workRunScopedArtifactPaths(task), <String>['/workspace/earlier.html']);
+  });
+
+  test(
+      'a successful salvage earns a continuation after the protocol budget is spent',
+      () async {
+    Map<String, dynamic> truncated(String content) => {
+          'success': true,
+          'truncated': true,
+          'content': '{"action":"tool","public_update":"正在写报告。","tool":'
+              '{"name":"workspace.patch","arguments":{"path":"report.md",'
+              '"content":"$content',
+        };
+    const malformed = {'success': true, 'content': '还是写坏的正文'};
+    final model = _FakeModel()
+      // 第一次截断：抢救落盘，并用掉唯一的协议重试额度。
+      ..responses.add(truncated('第一段'))
+      ..responses.add(malformed)
+      // 第二次截断：额度已经耗尽。抢救的收益必须靠它自己的额度兑现，否则就是
+      // "落盘一次分段 + 计一次动作数 + 同一秒判失败"。
+      ..responses.add(truncated('第二段'))
+      ..responses.add(malformed)
+      ..responses.add(_finishDecision('按抢救结果续写完成。'));
+    final tool = _FakeTool();
+    final events = <WorkTaskEvent>[];
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]),
+      events: events,
+      maxProtocolRetries: 1,
+    );
+
+    final task = _task(id: 'salvage-continuation-budget');
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '抢救落盘之后不得立刻判失败：${task.lastError}');
+    expect(tool.calls, 2, reason: '两次抢救各是一次真实工具请求');
+    expect(
+      events.any((event) => event.safeMetadata['salvageContinuation'] == true),
+      isTrue,
+      reason: '额度耗尽的续写要留下可辨认的事件，不能和普通协议重试同形',
+    );
   });
 
   test('a salvaged part file never satisfies the artifact contract', () async {
@@ -1882,12 +2442,10 @@ void main() {
         .join('\n');
     expect(retryPrompt, isNot(contains('压缩前的历史消息编号 0')),
         reason: '压缩必须真的发生，否则这条用例证明不了什么');
-    expect(retryPrompt, contains('压缩前的历史消息编号 4'),
-        reason: '压缩只丢旧的，最近两条要留下');
+    expect(retryPrompt, contains('压缩前的历史消息编号 4'), reason: '压缩只丢旧的，最近两条要留下');
     // 用抢救提示独有的措辞，而不是 `report.rescue-`：后者会经 `committedWrites`
     // 从操作键里漏进 context（`path` 是明文），摘掉 `continuationHint` 也照样绿。
-    expect(retryPrompt, contains('已写入内容的结尾是'),
-        reason: '检查点被压缩后续写指令仍必须到达模型');
+    expect(retryPrompt, contains('已写入内容的结尾是'), reason: '检查点被压缩后续写指令仍必须到达模型');
   });
 
   test('a salvage write that needs approval pauses instead of failing',
@@ -2097,7 +2655,8 @@ void main() {
     expect(source.kind, WorkTaskEventKind.toolOutput);
   });
 
-  test('a salvaged part file keeps its continuation hint across an approval pause',
+  test(
+      'a salvaged part file keeps its continuation hint across an approval pause',
       () async {
     // 抢救落盘要审批 → 任务暂停 → 用户批准 → 恢复运行，而 `execute` 会重新进入：
     // 续写指令若只活在循环局部变量里，这一刻就没了。模型于是只看到
@@ -2157,13 +2716,13 @@ void main() {
         .join('\n');
     // 用抢救提示独有的措辞钉住指令本身：`report.rescue-` 会经 `committedWrites` 的
     // 操作键漏进 context，只断言文件名的话，把续写指令整个摘掉也照样绿。
-    expect(resumedPrompt, contains('补写余下内容'),
-        reason: '恢复后仍必须告诉模型从那个分段文件接着写');
+    expect(resumedPrompt, contains('补写余下内容'), reason: '恢复后仍必须告诉模型从那个分段文件接着写');
     expect(resumedPrompt, contains('report.rescue-'),
         reason: '恢复后的指令必须点名已抢救的分段文件');
   });
 
-  test('a denied salvage approval leaves no continuation hint behind', () async {
+  test('a denied salvage approval leaves no continuation hint behind',
+      () async {
     // 运行态写在发起写入**之前**（否则审批暂停会把它一起丢掉），所以"记录在"不等于
     // "内容在"。用户拒绝审批时那次写入从未发生：此时若按记录重建指令，模型会以为
     // 前缀已经在分段文件里，只写余下部分——合并出来的交付物缺了前半截。
@@ -2255,8 +2814,7 @@ void main() {
     final loneSurrogates = retryPrompt.runes
         .where((rune) => rune >= 0xD800 && rune <= 0xDFFF)
         .toList(growable: false);
-    expect(loneSurrogates, isEmpty,
-        reason: '回显里不得出现孤立代理：$loneSurrogates');
+    expect(loneSurrogates, isEmpty, reason: '回显里不得出现孤立代理：$loneSurrogates');
   });
 
   test('the echoed tail survives the chain-of-thought vocabulary', () async {
@@ -2286,13 +2844,11 @@ void main() {
         .map((message) => message['content']?.toString() ?? '')
         .join('\n');
     expect(retryPrompt, contains('已写入内容的结尾是'));
-    expect(retryPrompt, contains('结尾标记-ZZZ'),
-        reason: '结尾回显不得被思维链折叠吃掉');
+    expect(retryPrompt, contains('结尾标记-ZZZ'), reason: '结尾回显不得被思维链折叠吃掉');
     expect(retryPrompt, isNot(contains('[已隐藏]')));
   });
 
-  test('a blank content field still salvages from the message field',
-      () async {
+  test('a blank content field still salvages from the message field', () async {
     // 解析器在 `content` 为空白时看 `message`；抢救若把空白 `content` 当正文，就是
     // 在一份解析器压根没读的文本里找前缀——两边看的不是同一份正文。
     final model = _FakeModel()
@@ -2444,7 +3000,8 @@ void main() {
     expect(result.message, contains('8192'));
   });
 
-  test('a response that stops just short of the output budget is a spent budget',
+  test(
+      'a response that stops just short of the output budget is a spent budget',
       () async {
     // 实测故障（2026-09-30）：模型在 20480 的预算上输出 20331 token 后被切断，
     // 供应商没给 finish_reason=length，也没把预算用满。按"必须 >= 预算"判定时
@@ -2473,7 +3030,8 @@ void main() {
     expect(repair.malformedResponse, isNull);
   });
 
-  test('a broken response well below the output budget keeps the raw body repair',
+  test(
+      'a broken response well below the output budget keeps the raw body repair',
       () async {
     // 负例（守住阈值另一侧）：预算只用到 85% 的格式错误不能判成截断，否则
     // "原文回灌修 JSON"这条更有依据的路径会被一起关掉。
@@ -2523,8 +3081,8 @@ void main() {
     expect(result.status, WorkAgentLoopStatus.completed,
         reason: '${result.message}; '
             '${result.events.map((event) => event.title).join('|')}');
-    final retry = result.events.firstWhere(
-        (event) => event.title == '模型返回格式无效，正在自动重试。');
+    final retry =
+        result.events.firstWhere((event) => event.title == '模型返回格式无效，正在自动重试。');
     expect(retry.safeMetadata['reason'], '响应不是单个合法 JSON object。');
     expect(retry.safeMetadata['responseCharacters'], broken.length);
     expect(retry.safeMetadata['completionTokens'], 120);
@@ -2631,8 +3189,8 @@ void main() {
 
     expect(result.status, WorkAgentLoopStatus.completed,
         reason: result.message);
-    final retry = result.events
-        .firstWhere((event) => event.title == '模型请求暂时失败，准备重试。');
+    final retry =
+        result.events.firstWhere((event) => event.title == '模型请求暂时失败，准备重试。');
     expect(retry.safeMetadata['retry'], 1);
     expect(retry.safeMetadata['scope'], 'model');
     expect(retry.safeMetadata['failureCode'], 'retryableNetwork');
@@ -2652,8 +3210,8 @@ void main() {
 
     expect(result.status, WorkAgentLoopStatus.completed,
         reason: result.message);
-    final retry = result.events
-        .firstWhere((event) => event.title == '模型请求暂时失败，准备重试。');
+    final retry =
+        result.events.firstWhere((event) => event.title == '模型请求暂时失败，准备重试。');
     expect(retry.safeMetadata['failureCode'], 'modelFirstByteStall');
   });
 

@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:chat_group/core/models/work_delivery_metadata.dart';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
@@ -17,6 +18,7 @@ import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';

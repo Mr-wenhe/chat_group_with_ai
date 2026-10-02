@@ -77,6 +77,7 @@ class WorkDocumentTool {
         fields: {
           'path': WorkToolValueType.string,
           'query': WorkToolValueType.string,
+          'startChunk': WorkToolValueType.integer,
         },
         required: {'path'},
       ),
@@ -287,22 +288,35 @@ class WorkDocumentTool {
     final failure = _documentFailure(fileName, parsed);
     if (failure != null) return failure;
 
+    final start = invocation.arguments['startChunk'];
+    if (start != null &&
+        (start is! int || start < 0 || start >= parsed.chunks.length)) {
+      return const WorkToolResult.failed(
+          message: '文档分块范围无效，未声明完整读取。', failureCode: 'invalidInput');
+    }
     final query = _query(invocation);
+    final relevant = start is int
+        ? parsed.chunks
+            .skip(start)
+            .take(DocumentUnderstandingService.maxRetrievedChunks)
+            .toList()
+        : DocumentUnderstandingService.selectRelevantChunks(
+            query: query, chunks: parsed.chunks);
     final context = DocumentUnderstandingService.buildPromptContextFromChunks(
-      query: query,
-      chunks: parsed.chunks,
-    );
+        query: start is int ? '' : query, chunks: relevant);
     if (invocation.context.isCancelled) {
       return const WorkToolResult.paused(message: '工具执行已停止。');
     }
-    final relevant = DocumentUnderstandingService.selectRelevantChunks(
-      query: query,
-      chunks: parsed.chunks,
-    );
     return WorkToolResult.success(
       message: _documentMessage(fileName, relevant),
       data: {
         'content': context,
+        'path': path,
+        'truncated': relevant.length != parsed.chunks.length,
+        if (start is int) 'chunkStart': start,
+        'totalChunkCount': parsed.chunks.length,
+        if (start is int && start + relevant.length < parsed.chunks.length)
+          'nextChunkStart': start + relevant.length,
         'fileName': fileName,
         'format': _extension(fileName),
         'chunkCount': relevant.length,

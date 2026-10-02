@@ -1,11 +1,24 @@
 part of 'work_task_coordinator.dart';
 
 extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
+  /// 这份讨论状态是否携带 v2 协作记录。
+  ///
+  /// v2 只能通过带 `expectedRevision` 的增量入口（`applyCollaborationUpdate`）推进。
+  /// 旧讨论入口产出的都是 v1，用它覆盖 v2 会把认可、待决事项与验收整块丢掉；而
+  /// `mergeIntoExecutionState` 的降级守卫在"先清空检查点再合并"的调用方那里看不到
+  /// 上一份 v2 状态，只有这里能提前拦住。
+  bool _carriesV2Collaboration(WorkDiscussionState? state) =>
+      state?.schemaVersion == WorkDiscussionState.currentSchemaVersion &&
+      state?.collaboration != null;
+
   WorkDiscussionState _renewDiscussionForRequest(
       WorkDiscussionState previous, String request,
       {WorkFollowUpDecision? decision,
       String? contractRequest,
       String? activeScopeOverride}) {
+    if (_carriesV2Collaboration(previous)) {
+      throw StateError('v2 协作状态不能通过旧讨论入口重建。');
+    }
     final revision = previous.requestRevision + 1;
     final pinnedExecutor = _contractExecutorId(previous.deliverableContract);
     final parsed = WorkRoleRouter.deliverableContractForRequest(
@@ -159,8 +172,20 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
       task.executionStateJson,
     );
     if (!decoded.isValid ||
+        (decoded.state!.schemaVersion ==
+                WorkDiscussionState.currentSchemaVersion &&
+            (runner is! WorkTaskCollaborationDiscussionRunner ||
+                decoded.state!.isPlanReady &&
+                    decoded.state!.collaboration!.phase != 'reviewing' ||
+                decoded.state!.collaboration!.hasBlockingDecision ||
+                decoded.state!.collaboration!.hasPendingDecision &&
+                    decoded.state!.collaboration!.workItems.isNotEmpty &&
+                    decoded.state!.collaboration!.workItems
+                        .every((i) => i['status'] == 'done'))) ||
         decoded.state!.isExecutionReady ||
-        decoded.state!.phase == WorkDiscussionPhase.blocked ||
+        (decoded.state!.schemaVersion ==
+                WorkDiscussionState.legacySchemaVersion &&
+            decoded.state!.phase == WorkDiscussionPhase.blocked) ||
         _discussionWaitsForUser(decoded.state!)) {
       // A blocked discussion is a durable user-facing checkpoint.  It may be
       // renewed by a follow-up or explicit retry, but restore/submit must not
@@ -197,6 +222,55 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
       WorkTaskCancellation cancellation,
       {required int expectedRevision}) async {
     try {
+      while (!cancellation.isCancelled && !_disposed) {
+        final acquired = await _serialize(() async {
+          if (_occupiedSlots >= WorkTaskCoordinator.maximumConcurrentTasks) {
+            return false;
+          }
+          _discussionSlotIds.add(task.id);
+          return true;
+        });
+        if (acquired) break;
+        await Future.any([_waitForSlot(), cancellation.whenCancelled]);
+      }
+      if (cancellation.isCancelled || _disposed || task.isTerminal) return;
+      final state =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson);
+      if (state?.schemaVersion == WorkDiscussionState.currentSchemaVersion &&
+          runner is WorkTaskCollaborationDiscussionRunner) {
+        await (runner as WorkTaskCollaborationDiscussionRunner)
+            .runCollaboration(
+          task,
+          cancellation,
+          (update) =>
+              _applyCollaborationUpdate(update, fromDiscussionRunner: true),
+        );
+        await _serialize(() async {
+          final stored = _taskBox.get(task.id);
+          if (stored == null ||
+              stored.isTerminal ||
+              cancellation.isCancelled ||
+              _disposed) {
+            return;
+          }
+          final collaboration =
+              WorkDiscussionState.fromExecutionState(stored.executionStateJson)
+                  ?.collaboration;
+          if (collaboration != null &&
+              collaboration.productionReady &&
+              (collaboration.phase == 'ready' || collaboration.deliveryReady)) {
+            stored
+              ..status = AgentTaskStatus.queued
+              ..resumeRequired = false
+              ..lastError = '';
+            await _save(stored);
+            _conversationReservations.remove(stored.groupId);
+            _enqueueTask(stored);
+            await _schedule();
+          }
+        });
+        return;
+      }
       await runner.runDiscussion(
         task,
         cancellation,
@@ -215,6 +289,12 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
           stored.executionStateJson,
         ).state;
         if (current == null) return;
+        if (current.schemaVersion == WorkDiscussionState.currentSchemaVersion) {
+          stored.lastError = '协作讨论未完成：${sanitizeWorkTaskError(error)}';
+          stored.resumeRequired = true;
+          await _save(stored);
+          return;
+        }
         // A cancelled/late model callback may fail while a newer request
         // revision is already durable.  That failure belongs to the old run;
         // never turn the current revision into a blocked state or overwrite
@@ -238,17 +318,24 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
         // The task's last durable state remains authoritative if even the
         // failure checkpoint cannot be written during shutdown/recovery.
       }
+    } finally {
+      _discussionSlotIds.remove(task.id);
+      _notifySlotAvailable();
+      if (!_disposed && !_dataClearInProgress) unawaited(_schedule());
     }
   }
 
-  bool _discussionWaitsForUser(WorkDiscussionState state) => state.blockers.any(
-        (blocker) =>
-            blocker == 'mentionClarification' ||
-            blocker == 'missingUserInformation' ||
-            blocker == 'executorUnavailable' ||
-            blocker == 'missingQualifiedRole' ||
-            blocker == 'groupUnavailable',
-      );
+  bool _discussionWaitsForUser(WorkDiscussionState state) =>
+      state.schemaVersion == WorkDiscussionState.currentSchemaVersion
+          ? state.collaboration!.hasBlockingDecision
+          : state.blockers.any(
+              (blocker) =>
+                  blocker == 'mentionClarification' ||
+                  blocker == 'missingUserInformation' ||
+                  blocker == 'executorUnavailable' ||
+                  blocker == 'missingQualifiedRole' ||
+                  blocker == 'groupUnavailable',
+            );
 
   void _restartPendingDiscussion(String taskId) {
     unawaited(_serialize(() async {
@@ -256,15 +343,22 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
       final stored = _taskBox.get(taskId);
       if (stored == null ||
           stored.isTerminal ||
-          stored.status != AgentTaskStatus.paused) {
+          stored.status != AgentTaskStatus.paused ||
+          stored.resumeRequired) {
         return;
       }
+      if (_hasPendingV2Input(stored)) await _applyPendingV2Inputs(stored);
       final decoded = WorkDiscussionState.decodeExecutionState(
         stored.executionStateJson,
       );
       if (!decoded.isValid ||
           decoded.state!.isExecutionReady ||
-          decoded.state!.phase == WorkDiscussionPhase.blocked ||
+          decoded.state!.isPlanReady &&
+              decoded.state!.collaboration!.phase != 'reviewing' ||
+          decoded.state!.collaboration?.hasBlockingDecision == true ||
+          (decoded.state!.schemaVersion ==
+                  WorkDiscussionState.legacySchemaVersion &&
+              decoded.state!.phase == WorkDiscussionPhase.blocked) ||
           _discussionWaitsForUser(decoded.state!)) {
         return;
       }
@@ -306,6 +400,9 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
   }
 
   String _discussionWaitingReason(WorkDiscussionState state) {
+    if (state.collaboration != null) {
+      return state.isPlanReady ? '方案已确认，等待工作项调度。' : '等待相关团队查证问题并逐人确认当前方案。';
+    }
     if (state.executorId == null || state.executorId!.trim().isEmpty) {
       return '等待群内确定符合职业资格的最终执行角色。';
     }
@@ -367,6 +464,23 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     if (state.conversationId != task.groupId) {
       return '讨论状态属于另一个群组，已阻止执行。';
     }
+    if (state.collaboration != null) {
+      final root = _decodeExecutionMap(task.executionStateJson);
+      if (state.collaboration!.productionReady &&
+          (root['startupRecoveryPending'] == true ||
+              root.containsKey('uncertainAction'))) {
+        // Prepare only after recovery proves local receipts under a fresh lease.
+        return null;
+      }
+      if (_isArtifactDeliveryRetryOnly(task)) return null;
+      if (_runner case final WorkTaskCollaborationExecutor executor) {
+        if (state.collaboration!.productionReady &&
+            await executor.prepareCollaborationWork(task)) {
+          return null;
+        }
+      }
+      return _discussionWaitingReason(state);
+    }
     if (!state.isExecutionReady) return _discussionWaitingReason(state);
     final identityError = _discussionIdentityError(task, state);
     if (identityError != null) return identityError;
@@ -404,8 +518,7 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     if (_disposed || _dataClearInProgress) return;
     while (!_disposed &&
         !_dataClearInProgress &&
-        _running.length + _startingTaskIds.length <
-            WorkTaskCoordinator.maximumConcurrentTasks) {
+        _occupiedSlots < WorkTaskCoordinator.maximumConcurrentTasks) {
       final task = _takeNextTask();
       if (task == null) return;
       // A native directory picker is user-driven and can remain open for an

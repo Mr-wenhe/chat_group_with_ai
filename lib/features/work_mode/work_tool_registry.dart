@@ -1,7 +1,10 @@
 import 'dart:async';
+import 'dart:convert';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/retry_handler.dart';
+import 'work_discussion_state.dart';
+import 'work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
@@ -374,6 +377,12 @@ class WorkToolValidationResult {
 /// A closed registry for structured work-mode tools. There is deliberately no
 /// shell fallback: a tool must be explicitly registered before it can run.
 class WorkToolRegistry {
+  static const investigationToolNames = {
+    AgentToolName.workspaceList,
+    AgentToolName.workspaceRead,
+    AgentToolName.workspaceSearch,
+    AgentToolName.workspaceDocument,
+  };
   final Map<String, WorkToolDefinition> _definitions =
       <String, WorkToolDefinition>{};
   final WorkToolMutationPipeline? mutationPipeline;
@@ -439,6 +448,57 @@ class WorkToolRegistry {
         message: validation.error ?? '工具校验失败。',
         failureCode: 'toolMissing',
       );
+    }
+    final discussion = WorkDiscussionState.decodeExecutionState(
+        context.task.executionStateJson);
+    if (discussion.present && !discussion.isValid) {
+      return const WorkToolResult.permissionDenied(
+          message: '讨论检查点损坏，工具未执行。', failureCode: 'discussionInvalid');
+    }
+    if (discussion.state?.collaboration != null &&
+        !discussion.state!.collaboration!.productionReady &&
+        (!definition.isReadOnly ||
+            !investigationToolNames.contains(call.name))) {
+      return const WorkToolResult.permissionDenied(
+        message: '方案确认前只允许受控文件调查；命令、安装、写入和浏览器操作未执行。',
+        failureCode: 'discussionPhaseDenied',
+      );
+    }
+    final binding = discussion.state?.collaboration == null
+        ? null
+        : ((jsonDecode(context.task.executionStateJson)
+            as Map)['workItemExecution'] as Map?);
+    if (binding?['stage'] == 'verify' &&
+        definition.isMutation &&
+        call.name != AgentToolName.commandRun) {
+      return const WorkToolResult.permissionDenied(
+          message: '审查阶段不能改写产物或测试断言；请回群讨论修订。',
+          failureCode: 'discussionPhaseDenied');
+    }
+    if (binding?['stage'] == 'verify' &&
+        call.name == AgentToolName.commandRun) {
+      final approved = discussion.state!.collaboration!
+              .artifactContract['verificationCommands'] as List? ??
+          const [];
+      final command = jsonEncode({
+        'executable': call.arguments['executable'],
+        'arguments': call.arguments['arguments']
+      });
+      final contractFiles =
+          discussion.state!.collaboration!.artifactContract['files'] as List? ??
+              const [];
+      final scripts = (call.arguments['arguments'] as List? ?? const [])
+          .whereType<String>()
+          .where((arg) =>
+              RegExp(r'\.(?:[cm]?js|py|sh|dart)$', caseSensitive: false)
+                  .hasMatch(arg));
+      final unpinned = scripts.any((arg) => !contractFiles.contains(
+          arg.replaceAll('\\', '/').replaceFirst(RegExp(r'^\./'), '')));
+      if (!approved.contains(command) || unpinned) {
+        return const WorkToolResult.permissionDenied(
+            message: '测试命令不属于全员确认的验证基线，请回群审查测试或断言变更。',
+            failureCode: 'discussionPhaseDenied');
+      }
     }
     if (context.isCancelled) {
       return const WorkToolResult.paused(message: '工具执行已停止。');

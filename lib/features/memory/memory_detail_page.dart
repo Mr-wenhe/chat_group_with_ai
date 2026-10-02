@@ -115,6 +115,13 @@ class _MemoryDetailPageState extends ConsumerState<MemoryDetailPage> {
     return Column(crossAxisAlignment: CrossAxisAlignment.start, children: [
       Text(
           '${MemoryAuditLabels.originType(memory.originType).label} · ${_originName(memory)}'),
+      if (memory.workSource != null) ...[
+        Text(memory.workSource!['scopeId'] == null
+            ? '历史工作方法，当前项目仍需验证'
+            : '仅适用于来源项目'),
+        if (memory.workSource!['applicability'] is String)
+          Text(memory.workSource!['applicability'] as String),
+      ],
       const SizedBox(height: 12),
       if (memory.sourceMessageIds.isEmpty)
         Text(_emptySourceLabel(memory.originType))
@@ -238,6 +245,8 @@ class _MemoryDetailPageState extends ConsumerState<MemoryDetailPage> {
         children: [
           _DetailRow('记忆 ID', memory.id),
           _DetailRow('观察者 ID', memory.observerCharacterId),
+          if (memory.workSource != null)
+            _DetailRow('工作来源', memory.workSource.toString()),
           if (memory.originConversationId != null)
             _DetailRow('来源场合 ID', memory.originConversationId!),
         ],

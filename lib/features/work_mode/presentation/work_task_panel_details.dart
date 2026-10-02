@@ -43,6 +43,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
   /// 把面板剩余高度尽量让给「执行动态」；点「详情」才把三张卡的内容补出来
   /// （超出上限时在区域内部滚动）。异常块与「异常与日志」卡同样受这个开关控制。
   bool _summaryExpanded = false;
+  bool _discussionExpanded = false;
 
   /// 执行动态默认展开，打开面板就能看到最新一条公开进度。
   ///
@@ -91,6 +92,17 @@ class _TaskDetailsState extends State<_TaskDetails> {
 
   /// 低于这个高度就整块收起「执行动态」，先保住上半区（够放两条单行动态）。
   static const double _minTimelineListHeight = 88.0;
+
+  String _v2ApprovalLabel(
+      WorkCollaborationState state, Map<String, dynamic> approval) {
+    if (approval['requestRevision'] != state.requestRevision ||
+        approval['teamRevision'] != state.teamRevision ||
+        approval['verificationRevision'] != state.verificationRevision ||
+        approval['artifactDigest'] != state.currentIteration?['artifactDigest']) {
+      return '已失效';
+    }
+    return approval['approved'] == true ? '同意' : '异议';
+  }
 
   @override
   void didUpdateWidget(covariant _TaskDetails oldWidget) {
@@ -145,7 +157,9 @@ class _TaskDetailsState extends State<_TaskDetails> {
     final hintStyle = TextStyle(fontSize: 11, color: colors.onSurfaceVariant);
     // 进度条必须始终拿到确定值：value 为 null 时 LinearProgressIndicator 会
     // 无限 repeat，测试里的 pumpAndSettle 会因此超时。
-    final progress = widget.task.actionLimit <= 0
+    final hasCumulativeLimit =
+        WorkTaskExecutionPolicy.enforcesCumulativeLimits(widget.task);
+    final progress = !hasCumulativeLimit || widget.task.actionLimit <= 0
         ? 0.0
         : (widget.task.actionCount / widget.task.actionLimit)
             .clamp(0.0, 1.0)
@@ -192,6 +206,57 @@ class _TaskDetailsState extends State<_TaskDetails> {
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
+              if (discussionState?.collaboration != null) ...[
+                Align(
+                    alignment: Alignment.centerLeft,
+                    child: TextButton(
+                      key: const Key('work-v2-discussion-details'),
+                      onPressed: () => setState(
+                          () => _discussionExpanded = !_discussionExpanded),
+                      child: Text(_discussionExpanded ? '收起问题与方案' : '问题与方案详情'),
+                    )),
+                if (_discussionExpanded)
+                  ConstrainedBox(
+                    constraints: const BoxConstraints(maxHeight: 160),
+                    child: SingleChildScrollView(
+                        child: Column(
+                            crossAxisAlignment: CrossAxisAlignment.start,
+                            children: [
+                          SelectableText(WorkPublicUpdateStream.sanitize(
+                              discussionState!.collaboration!.plan)),
+                          Text(
+                              '阶段：${discussionState.collaboration!.phase} · 当前成员：${widget.characterNameFor?.call(widget.task.characterId) ?? widget.task.characterId}'),
+                          for (final iteration
+                              in discussionState.collaboration!.iterations)
+                            SelectableText(
+                                '候选 ${iteration['id']} · ${iteration['status']}\n${iteration['artifactDigest']}\n审查 ${iteration['reviewRef']}'),
+                          for (final approval in discussionState
+                              .collaboration!.approvals
+                              .where((a) =>
+                                  a['kind'] == 'delivery' &&
+                                  a['subjectId'] ==
+                                      discussionState.collaboration!
+                                          .currentIteration?['id']))
+                            Text(
+                                '认可 ${widget.characterNameFor?.call(approval['memberId'] as String) ?? approval['memberId']}：${_v2ApprovalLabel(discussionState.collaboration!, approval)} · ${approval['iterationId']} · 验证版本 ${approval['verificationRevision']}'),
+                          for (final issue
+                              in discussionState.collaboration!.issues)
+                            Padding(
+                                padding: const EdgeInsets.only(top: 8),
+                                child: SelectableText(
+                                    WorkPublicUpdateStream.sanitize(
+                                        '${issue['problem']}\n处置：${issue['resolution']}\n核查条件：${issue['retestCondition']}\n依据：${issue['resolutionRef'] == '' ? issue['evidenceRef'] : issue['resolutionRef']}'))),
+                          for (final item
+                              in discussionState.collaboration!.workItems)
+                            Text(
+                                '工作项 ${item['id']}：${widget.characterNameFor?.call(item['ownerId'] as String) ?? item['ownerId']} · ${item['status']}\n交接依据：${item['resultRef'] ?? ''}'),
+                          for (final item
+                              in discussionState.collaboration!.acceptances)
+                            SelectableText(WorkPublicUpdateStream.sanitize(
+                                '验收：${item['method']} · ${item['status']}\n版本 ${item['verificationRevision']} · 证据 ${item['evidenceRef']}')),
+                        ])),
+                  ),
+              ],
               // 上半区整块可关：关掉后（默认）面板自上而下只剩任务标签、
               // 执行动态与底部操作按钮，见 `_showSummarySection`。
               if (_showSummarySection) ...<Widget>[
@@ -256,7 +321,8 @@ class _TaskDetailsState extends State<_TaskDetails> {
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: <Widget>[
                                 Text('执行角色：$executorLabel'),
-                                if (discussionState != null) ...<Widget>[
+                                if (discussionState != null &&
+                                    hasCumulativeLimit) ...<Widget>[
                                   const SizedBox(height: 4),
                                   Text(
                                     '讨论理解进度：${discussionState.understandingPercent}% · 第${discussionState.round}轮',
@@ -275,32 +341,37 @@ class _TaskDetailsState extends State<_TaskDetails> {
                                   ],
                                 ],
                                 const SizedBox(height: 10),
-                                Row(
-                                  children: <Widget>[
-                                    Expanded(
-                                      child: ClipRRect(
-                                        borderRadius:
-                                            BorderRadius.circular(999),
-                                        child: LinearProgressIndicator(
-                                          value: progress,
-                                          minHeight: 6,
-                                          backgroundColor:
-                                              colors.surfaceContainerHighest,
-                                          color: colors.primary,
+                                if (hasCumulativeLimit)
+                                  Row(
+                                    children: <Widget>[
+                                      Expanded(
+                                        child: ClipRRect(
+                                          borderRadius:
+                                              BorderRadius.circular(999),
+                                          child: LinearProgressIndicator(
+                                            value: progress,
+                                            minHeight: 6,
+                                            backgroundColor:
+                                                colors.surfaceContainerHighest,
+                                            color: colors.primary,
+                                          ),
                                         ),
                                       ),
-                                    ),
-                                    const SizedBox(width: 10),
-                                    // currentStep is the index of the current
-                                    // tool operation and may intentionally lag
-                                    // behind model decisions. The user-facing
-                                    // budget must reflect every counted action.
-                                    Text(
-                                      '步骤 ${widget.task.actionCount} / ${widget.task.actionLimit}',
-                                      style: hintStyle,
-                                    ),
-                                  ],
-                                ),
+                                      const SizedBox(width: 10),
+                                      // currentStep is the index of the current
+                                      // tool operation and may intentionally lag
+                                      // behind model decisions. The user-facing
+                                      // budget must reflect every counted action.
+                                      Text(
+                                        '步骤 ${widget.task.actionCount} / ${widget.task.actionLimit}',
+                                        style: hintStyle,
+                                      ),
+                                    ],
+                                  ),
+                                if (!hasCumulativeLimit)
+                                  Text(
+                                      '已执行 ${widget.task.actionCount} 个动作 · 按有效进展继续',
+                                      style: hintStyle),
                                 const SizedBox(height: 4),
                                 Text(
                                   _durationLabel(widget.task, widget.clock()),

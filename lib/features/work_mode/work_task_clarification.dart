@@ -3,6 +3,8 @@ import 'dart:convert';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/work_follow_up_policy.dart';
 
+import 'work_task_decision.dart';
+
 /// Identifies a work task that is paused because the model needs a textual
 /// answer from the user before it can safely continue.
 ///
@@ -54,7 +56,9 @@ class WorkTaskClarification {
 
   /// 面板与聊天是否需要为此任务提供回答入口。
   static bool isAnswerable(AgentTask task) =>
-      isPending(task) || isFollowUpPending(task);
+      isPending(task) ||
+      isFollowUpPending(task) ||
+      WorkTaskDecision.forTask(task).any((decision) => decision.isOpen);
 
   static String question(AgentTask task) {
     final raw = _decode(task.executionStateJson)[questionKey];
@@ -64,7 +68,11 @@ class WorkTaskClarification {
   }
 
   /// 可回答问题的展示文案（模型问题与追问澄清共用同一读取路径）。
-  static String answerableQuestion(AgentTask task) => question(task);
+  static String answerableQuestion(AgentTask task) {
+    final decision =
+        WorkTaskDecision.forTask(task).where((item) => item.isOpen).firstOrNull;
+    return decision?.reason ?? question(task);
+  }
 
   /// 追问澄清的候选目标，供面板渲染点击按钮。
   ///

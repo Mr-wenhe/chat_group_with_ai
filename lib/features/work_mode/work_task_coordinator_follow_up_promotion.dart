@@ -52,6 +52,19 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
     }
     final previousDiscussion =
         _requiresDiscussionForTask(task) ? discussionMarker.state : null;
+    if (_carriesV2Collaboration(previousDiscussion)) {
+      // 下面会先清空执行检查点、再写入 _renewDiscussionForRequest 的 v1 状态：
+      // v2 协作记录会连同它一起消失，而这一步没有任何报错。保持原检查点不动，
+      // 把处置交回用户。v2 的输入由 `_enqueueV2Input` 维护，走不到这里，所以这是
+      // 一条防线而不是主路径。
+      await _pauseForDiscussion(
+        task,
+        '该任务使用协作（v2）状态，不能通过追问入口重置，请在任务面板处理待决事项。',
+      );
+      await _save(task);
+      await _markSnapshotStatus(task);
+      return;
+    }
     final decision = _followUpDecisionForPromotion(
       task,
       nextRequest,
@@ -208,7 +221,17 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
     await _save(task);
     _enqueueTask(task);
     unawaited(
-      _record(task, WorkTaskEventKind.queued, '开始处理已排队的追问'),
+      _record(
+        task,
+        WorkTaskEventKind.queued,
+        '开始处理已排队的追问',
+        // 这条事件是面板把时间线切成"运行段"的唯一依据：标签栏的文字已经被新请求
+        // 覆盖，只有它能让执行动态知道"上面的那条历史属于上一次请求"。
+        metadata: const <String, Object?>{
+          WorkTaskRunBoundary.metadataKey:
+              WorkTaskRunBoundary.followUpPromotion,
+        },
+      ),
     );
   }
 
@@ -271,6 +294,13 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
         discussion,
       ),
     );
+
+    if (_requiresDiscussionForTask(fresh) &&
+        _discussionRunner is WorkTaskCollaborationDiscussionRunner) {
+      fresh.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          fresh.executionStateJson,
+          WorkDiscussionState.forNewTask(fresh, routed: discussion));
+    }
 
     // Keep the completed source as a diagnostic checkpoint while transferring
     // the rest of its FIFO to the new lineage. Revision requests later carry

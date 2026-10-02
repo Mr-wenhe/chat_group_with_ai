@@ -67,6 +67,12 @@ extension ObservationEntryRetry on ObservationEntry {
     final observerId = (item['observerId'] ?? '') as String;
     final message = db.messageBox.get(messageId);
     if (message == null) return RetryTaskOutcome.drop;
+    if (message.isWorkMode) {
+      if (message.senderId != observerId) return RetryTaskOutcome.drop;
+      return await writeWorkExperience(message)
+          ? RetryTaskOutcome.completed
+          : RetryTaskOutcome.keep;
+    }
 
     final character = charactersById[observerId];
     if (character == null) return RetryTaskOutcome.drop;

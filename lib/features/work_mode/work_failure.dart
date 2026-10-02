@@ -7,6 +7,7 @@ import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 
 import 'work_task_error_sanitizer.dart';
 import 'work_command_policy.dart';
+import 'work_model_deadline.dart';
 import 'work_tool_registry.dart';
 
 /// The only failure categories that may cross the work-mode task boundary.
@@ -1017,6 +1018,10 @@ class WorkFailure {
         normalizedCode == 'serviceunavailable' ||
         normalizedCode == 'temporarilyunavailable' ||
         normalizedCode == 'temporaryfailure' ||
+        // 客户端自己的两个时限（见 [WorkModelDeadlineException]）：它们与上游
+        // 5xx 同属"可重试的网络/超时"一类，落到下面那条 modelProtocol 兜底会把
+        // 一次停滞说成"模型写坏了 JSON"。
+        WorkModelDeadlineException.matches(normalizedCode) ||
         normalized.contains('网络') ||
         normalized.contains('connection') ||
         normalized.contains('timed out') ||

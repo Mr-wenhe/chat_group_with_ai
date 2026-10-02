@@ -495,6 +495,7 @@ class AgentDecisionParser {
         return _validateRequiredFields(args, const {
           'path': _ArgumentType.string,
           'query': _ArgumentType.string,
+          'startChunk': _ArgumentType.integer,
         }, const {
           'path'
         });

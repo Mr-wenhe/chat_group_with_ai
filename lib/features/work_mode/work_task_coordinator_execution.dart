@@ -24,6 +24,9 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
     Object? error;
     StackTrace? stackTrace;
     final automaticResume = _autoResumeTaskIds.remove(task.id);
+    final runRequestRevision = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    ).state?.requestRevision;
     try {
       if ((_folderGrantService != null || _requireFolderGrant) &&
           !await _ensureFolderGrant(task, cancellation)) {
@@ -48,9 +51,48 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
         });
         return;
       }
-      if (automaticResume) {
+      var recoveryBlocked = false;
+      final root = _decodeExecutionMap(task.executionStateJson);
+      if (root['startupRecoveryPending'] == true ||
+          root.containsKey('uncertainAction')) {
+        final validator = _runner;
+        String? reason;
+        try {
+          reason = validator is WorkTaskRecoveryValidator
+              ? await (validator as WorkTaskRecoveryValidator)
+                  .validateRecovery(task)
+              : '执行器无法核对恢复现场，等待人工处理。';
+        } on Object {
+          reason = '恢复核对失败，原文件与检查点保留，等待人工处理。';
+        }
+        if (_disposed || cancellation.isCancelled || task.isTerminal) return;
+        if (reason != null) {
+          task
+            ..status = AgentTaskStatus.paused
+            ..resumeRequired = true
+            ..lastError = reason;
+          await _save(task);
+          await _notifyUserAction(task);
+          recoveryBlocked = true;
+        } else {
+          final checked = _decodeExecutionMap(task.executionStateJson)
+            ..remove('startupRecoveryPending');
+          task.executionStateJson = jsonEncode(checked);
+          await _save(task);
+          if (_runner case final WorkTaskCollaborationExecutor executor) {
+            if (!await executor.prepareCollaborationWork(task)) {
+              task.status = AgentTaskStatus.paused;
+              await _save(task);
+              recoveryBlocked = true;
+            }
+          }
+        }
+      }
+      if (!recoveryBlocked &&
+          automaticResume &&
+          WorkTaskExecutionPolicy.enforcesCumulativeLimits(task)) {
         await _runWithAutomaticResumeDeadline(task, cancellation);
-      } else {
+      } else if (!recoveryBlocked) {
         await _runner.run(task, cancellation);
       }
     } on Object catch (caught, trace) {
@@ -90,10 +132,52 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
         return;
       }
 
+      if (_hasPendingV2Input(stored)) {
+        // The tool result has already been checkpointed. Apply each durable
+        // message in FIFO order before considering a terminal runner result.
+        try {
+          await _applyPendingV2Inputs(stored);
+        } on Object {
+          stored
+            ..status = AgentTaskStatus.paused
+            ..resumeRequired = false
+            ..lastError = '待处理输入无法安全纳入，原消息和附件仍保留在队列中。';
+          await _save(stored);
+        }
+        error = null; // An old model result cannot diagnose the new baseline.
+      }
+      final v2 = WorkDiscussionState.decodeExecutionState(
+        stored.executionStateJson,
+      ).state?.collaboration;
+      if (v2 != null &&
+          runRequestRevision != null &&
+          v2.requestRevision > runRequestRevision) {
+        error = null; // Late failure belongs to the old request revision.
+      }
+      if (v2 != null &&
+          v2.taskId == stored.id &&
+          (!v2.deliveryReady ||
+              stored.queuedUserRequests.isNotEmpty ||
+              (_arrivingInputCounts[stored.id] ?? 0) > 0) &&
+          !{
+            AgentTaskStatus.queued,
+            AgentTaskStatus.paused,
+            AgentTaskStatus.interrupted,
+            AgentTaskStatus.waitingForApproval,
+            AgentTaskStatus.failed,
+            AgentTaskStatus.cancelled
+          }.contains(stored.status)) {
+        stored
+          ..status = AgentTaskStatus.paused
+          ..resumeRequired = false
+          ..lastError = '仍有未完成的验收、认可或补充要求。';
+        await _save(stored);
+      }
+
       WorkFailure? failureToReport;
       if (error != null && !stored.isTerminal) {
         final failure = WorkFailure.fromError(
-          error,
+          error!,
           scope: 'runner',
           completedContent: _completedContentForTask(stored),
         );
@@ -106,25 +190,66 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
           '任务执行失败',
           detail: failure.technicalDetail,
         ));
-      } else if (!stored.isTerminal &&
+      } else if ((v2 == null ||
+              v2.deliveryReady &&
+                  stored.queuedUserRequests.isEmpty &&
+                  (_decodeExecutionMap(stored.executionStateJson)[
+                          'v2DeliveryPrepared'] as Map?)?['revision'] ==
+                      v2.revision) &&
+          !stored.isTerminal &&
           stored.status != AgentTaskStatus.queued &&
           stored.status != AgentTaskStatus.paused &&
           stored.status != AgentTaskStatus.interrupted &&
           stored.status != AgentTaskStatus.waitingForApproval) {
-        stored
-          ..status = AgentTaskStatus.completed
-          ..updatedAt = _clock();
-        await _save(stored);
-        unawaited(
-          _record(stored, WorkTaskEventKind.completed, '任务已完成'),
-        );
+        try {
+          if (v2 != null) {
+            final executor = _runner;
+            if (executor is! WorkTaskCollaborationExecutor) {
+              throw StateError('群 v2 缺少正式交付边界。');
+            }
+            await (executor as WorkTaskCollaborationExecutor)
+                .commitCollaborationDelivery(stored,
+                    hasArrivingInput: () =>
+                        (_arrivingInputCounts[stored.id] ?? 0) > 0);
+            if ((_arrivingInputCounts[stored.id] ?? 0) > 0) {
+              throw StateError('新增输入待纳入，未正式完成。');
+            }
+          }
+          stored
+            ..status = AgentTaskStatus.completed
+            ..updatedAt = _clock();
+          await _save(stored);
+          final completion = _decodeExecutionMap(stored.executionStateJson);
+          if (v2 == null || completion['v2CompletionRecorded'] != true) {
+            if (v2 != null) {
+              completion['v2CompletionRecorded'] = true;
+              stored.executionStateJson = jsonEncode(completion);
+              await _save(stored);
+            }
+            unawaited(_record(stored, WorkTaskEventKind.completed, '任务已完成'));
+          }
+        } on Object catch (deliveryError) {
+          stored
+            ..status = AgentTaskStatus.paused
+            ..resumeRequired = (_arrivingInputCounts[stored.id] ?? 0) == 0 &&
+                !(_carriesV2Collaboration(
+                        WorkDiscussionState.fromExecutionState(
+                            stored.executionStateJson)) &&
+                    WorkDiscussionState.fromExecutionState(
+                            stored.executionStateJson)!
+                        .collaboration!
+                        .hasBlockingDecision)
+            ..lastError = sanitizeWorkTaskError(deliveryError);
+          await _save(stored);
+        }
       }
 
       // Fake and production runners may finish on different persistence
       // boundaries. Refresh the canonical Task 15 summary after the terminal
       // status is known so a result/error is still recoverable when a runner
       // did not publish its own checkpoint callback.
-      final handedOff = _advanceCompletedHandoff(stored);
+      final handedOff = v2 != null && stored.status == AgentTaskStatus.queued ||
+          _advanceCompletedHandoff(stored);
       if (!handedOff) {
         await _applyQueuedAuthorizationRootCorrection(stored);
       }
@@ -188,6 +313,10 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
         // previous role's resource lease. This remains serial even when a
         // stage has no explicit file lock plan (for example a skill-only
         // stage), so the next role cannot start in the same microtask.
+        _taskLockPlans.remove(task.id);
+        final checkpoint = _decodeExecutionMap(stored.executionStateJson)
+          ..remove('resourceLocks');
+        stored.executionStateJson = jsonEncode(checkpoint);
         _handoffsAwaitingLease.add(task.id);
         _enqueueTask(stored);
         unawaited(_record(
@@ -198,6 +327,11 @@ extension _WorkTaskCoordinatorExecution on WorkTaskCoordinator {
         ));
       } else {
         _makeConversationReady(task.groupId);
+      }
+      if (v2 != null &&
+          stored.status == AgentTaskStatus.paused &&
+          !stored.resumeRequired) {
+        _maybeStartDiscussion(stored);
       }
       await _schedule();
     });

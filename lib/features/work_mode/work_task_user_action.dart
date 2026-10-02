@@ -4,6 +4,7 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_task_decision.dart';
 import 'package:crypto/crypto.dart';
 
 /// The small set of user actions that can be advertised in a group message.
@@ -21,6 +22,9 @@ enum WorkTaskUserActionKind {
 
 class WorkTaskUserAction {
   static const String messagePrefix = 'work-task-action';
+
+  static String decisionBlockerId(String decisionId, String reminderKind) =>
+      'decision_${sha256.convert(utf8.encode(decisionId)).toString().substring(0, 24)}_$reminderKind';
 
   final String taskId;
   final String blockerId;
@@ -87,6 +91,11 @@ class WorkTaskUserAction {
     }
     final actions = <WorkTaskUserAction>[];
     final metadata = _metadata(task.executionStateJson);
+    if (metadata.containsKey('uncertainAction')) {
+      actions.add(_openAction(task, 'uncertainAction', material: [
+        jsonEncode(metadata['uncertainAction']),
+      ]));
+    }
     final discussion = _discussionMap(task.executionStateJson);
     final parsedDiscussion = discussion?['state'] is Map
         ? WorkDiscussionState.tryParse(discussion!['state'])
@@ -144,11 +153,12 @@ class WorkTaskUserAction {
       // state with no other explanation) should @ the user to add a member.
       // This prevents a fresh task from flashing a false "补角色" reminder
       // before the discussion runner has had a chance to elect one.
-      final hasRoleGap = roleBlocker.isNotEmpty ||
-          (executor.isEmpty &&
-              candidates.isEmpty &&
-              phase == 'blocked' &&
-              blockers.isEmpty);
+      final hasRoleGap = state.collaboration == null &&
+          (roleBlocker.isNotEmpty ||
+              (executor.isEmpty &&
+                  candidates.isEmpty &&
+                  phase == 'blocked' &&
+                  blockers.isEmpty));
       if (hasRoleGap) {
         final blockerId =
             roleBlocker.isEmpty ? 'missingQualifiedRole' : roleBlocker;
@@ -211,7 +221,18 @@ class WorkTaskUserAction {
       }
     }
 
-    if (WorkTaskClarification.isAnswerable(task)) {
+    for (final decision in WorkTaskDecision.forTask(task)) {
+      final reminderKind = decision.reminderKind;
+      if (reminderKind == null) continue;
+      actions.add(WorkTaskUserAction(
+        taskId: task.id,
+        blockerId: decisionBlockerId(decision.id, reminderKind),
+        version: decision.revision,
+        kind: WorkTaskUserActionKind.answerQuestion,
+      ));
+    }
+    if (WorkTaskClarification.isPending(task) ||
+        WorkTaskClarification.isFollowUpPending(task)) {
       actions.add(_openAction(task, 'clarificationRequired',
           kind: WorkTaskUserActionKind.answerQuestion));
     }
@@ -447,6 +468,9 @@ class WorkTaskUserAction {
   }
 
   static WorkTaskUserActionKind _kindForBlocker(String blockerId) {
+    if (blockerId.startsWith('decision_')) {
+      return WorkTaskUserActionKind.answerQuestion;
+    }
     if (_executorConflictBlockers.contains(blockerId)) {
       return WorkTaskUserActionKind.confirmExecutorSwap;
     }

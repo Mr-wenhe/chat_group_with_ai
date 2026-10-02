@@ -4,19 +4,25 @@ import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/models/message.dart';
 // 任务胶囊与聊天页共用右上角，几何断言要量会话控件行的真实高度。
 import 'package:chat_group/features/chat_group/widgets/compact_conversation_controls.dart';
+import 'package:chat_group/features/chat_group/widgets/chat_message_bubble.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_host.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_decision_dialog.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_pill_position.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_change_policy.dart';
 import 'package:chat_group/features/work_mode/work_task_action_notice.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_task_run_boundary.dart';
+import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -105,8 +111,69 @@ AgentTask _task({
   );
 }
 
+AgentTask _decisionTask(String id, String conversationId) {
+  final task =
+      _task(id: id, conversationId: conversationId, characterId: 'worker')
+        ..status = AgentTaskStatus.paused;
+  final raw = WorkCollaborationState.fromLegacy(
+    taskId: id,
+    conversationId: conversationId,
+    projectScopeId: 'scope-$id',
+    requestRevision: 1,
+    requestMessageId: 'request-$id',
+    scope: task.userRequest,
+    artifactContract: {
+      'type': 'document',
+      'format': 'txt',
+      'location': 'out.txt',
+      'revisionTarget': ''
+    },
+  ).toJson();
+  raw
+    ..['coordinatorId'] = 'worker'
+    ..['team'] = [
+      {
+        'memberId': 'worker',
+        'role': 'writer',
+        'qualificationRef': 'skill',
+        'qualified': true,
+        'available': true
+      }
+    ]
+    ..['decisions'] = [
+      {
+        'id': 'format',
+        'revision': 1,
+        'status': 'pending',
+        'reason': '交付格式选哪一种？',
+        'answer': '',
+        'impact': '影响打开方式',
+        'responseRef': '',
+        'kind': 'choice',
+        'targetId': 'format',
+        'missingCondition': '需要明确格式',
+        'options': [
+          {'id': 'txt', 'label': '纯文本', 'impact': '可直接打开'},
+          {'id': 'md', 'label': 'Markdown', 'impact': '可保留标题'},
+        ]
+      }
+    ];
+  final collaboration = WorkCollaborationState.tryParse(raw)!;
+  task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      '',
+      WorkDiscussionState(
+        schemaVersion: 2,
+        conversationId: conversationId,
+        phase: WorkDiscussionPhase.blocked,
+        requestRevision: 1,
+        collaboration: collaboration,
+      ));
+  return task;
+}
+
 /// 在指定视口里挂一个带单条任务的全局宿主，供几何断言测算面板/折叠条位置。
-Future<void> _pumpOverlayHostWithTask(WidgetTester tester, Size viewport) async {
+Future<void> _pumpOverlayHostWithTask(
+    WidgetTester tester, Size viewport) async {
   tester.view.physicalSize = viewport;
   tester.view.devicePixelRatio = 1;
   addTearDown(tester.view.resetPhysicalSize);
@@ -151,6 +218,35 @@ Future<void> _dragMiniBar(WidgetTester tester, Offset delta) async {
 }
 
 void main() {
+  testWidgets('P3 chat reminder button opens its exact decision task',
+      (tester) async {
+    final task = _decisionTask('p3-chat-button', 'p3-chat');
+    final action = WorkTaskUserAction.forTask(task).single;
+    WorkTaskUserAction? opened;
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: ChatMessageBubble(
+          message: Message(
+            id: action.messageId,
+            groupId: task.groupId,
+            senderId: 'system',
+            senderType: Message.senderTypeSystem,
+            content: '请选择交付格式',
+          ),
+          characters: const [],
+          cs: const ColorScheme.light(),
+          senderColor: (_) => Colors.blue,
+          ownerName: '我',
+          onTaskAction: (item) => opened = item,
+        ),
+      ),
+    ));
+    await tester.tap(find.byKey(ValueKey(action.messageId)));
+    expect(opened?.taskId, task.id);
+    expect(opened?.blockerId, action.blockerId);
+    expect(opened?.version, action.version);
+  });
+
   group('WorkTaskPanel', () {
     testWidgets('hides the task summary section by default', (tester) async {
       final task = _task(
@@ -337,6 +433,85 @@ void main() {
       expect(
         tester.getTopLeft(find.text('正在读取项目配置')).dy,
         lessThan(tester.getTopLeft(find.text('已读取 pubspec.yaml')).dy),
+      );
+    });
+
+    testWidgets('hides the previous request progress behind a toggle',
+        (tester) async {
+      // 现场：私聊里新请求被并入旧记录，标签写着新请求，执行动态却还是 9/11 那次
+      // 江苏攻略的运行。默认只显示当前这一段，旧历史要点开才铺出来。
+      final events = StreamController<WorkTaskEvent>.broadcast();
+      addTearDown(events.close);
+      final task = _task(
+        id: 'joined-lineage',
+        conversationId: 'dm-character-one',
+        characterId: 'character-one',
+      );
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => events.stream,
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+            clock: () => DateTime.utc(2026, 9, 30, 17, 50),
+          ),
+        ),
+      ));
+
+      events.add(WorkTaskEvent(
+        taskId: task.id,
+        sequence: 1,
+        timestamp: DateTime.utc(2026, 9, 11, 19, 20),
+        kind: WorkTaskEventKind.toolOutput,
+        title: '文件交付进度',
+        detail: '已处理 1/1 个文件，4603/4603 字节。',
+      ));
+      events.add(WorkTaskEvent(
+        taskId: task.id,
+        sequence: 2,
+        timestamp: DateTime.utc(2026, 9, 30, 17, 47),
+        kind: WorkTaskEventKind.queued,
+        title: '开始处理已排队的追问',
+        safeMetadata: const <String, Object?>{
+          WorkTaskRunBoundary.metadataKey:
+              WorkTaskRunBoundary.followUpPromotion,
+        },
+      ));
+      events.add(WorkTaskEvent(
+        taskId: task.id,
+        sequence: 3,
+        timestamp: DateTime.utc(2026, 9, 30, 17, 48),
+        kind: WorkTaskEventKind.toolOutput,
+        title: '正在读取已生成的 Markdown 攻略文件',
+      ));
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('正在读取已生成的 Markdown 攻略文件'), findsOneWidget);
+      // 旧请求那一段默认不渲染，只留一行入口。
+      expect(find.text('文件交付进度'), findsNothing);
+      expect(find.text('之前的 1 条动态'), findsOneWidget);
+
+      await tester.tap(
+        find.byKey(const Key('work-task-timeline-earlier-toggle')),
+      );
+      await tester.pump();
+      await tester.pump();
+
+      expect(find.text('文件交付进度'), findsOneWidget);
+      expect(find.text('收起之前的 1 条动态'), findsOneWidget);
+      // 顺序仍是时间序：旧的一段在前面。
+      expect(
+        tester.getTopLeft(find.text('文件交付进度')).dy,
+        lessThan(
+          tester.getTopLeft(find.text('正在读取已生成的 Markdown 攻略文件')).dy,
+        ),
       );
     });
 
@@ -1309,7 +1484,8 @@ void main() {
       expect(find.byKey(const Key('work-task-reject')), findsNothing);
     });
 
-    testWidgets('names the required directory when the folder choice is refused',
+    testWidgets(
+        'names the required directory when the folder choice is refused',
         (tester) async {
       final task = _task(
         id: 'folder-refused-task',
@@ -1633,8 +1809,7 @@ void main() {
       );
     });
 
-    testWidgets(
-        'shows a reply editor for an unresolved revision clarification',
+    testWidgets('shows a reply editor for an unresolved revision clarification',
         (tester) async {
       // 追问澄清（无法确定要改哪个既有产物）过去只写 clarificationQuestion，
       // 不写 clarificationRequired，于是 isPending 为 false：面板不给回复框，
@@ -1713,9 +1888,8 @@ void main() {
             '1. report.md\n2. summary.md'
         ..executionStateJson = jsonEncode({
           'followUpKind': 'clarification',
-          'clarificationQuestion':
-              '请明确要修改的文件路径（点击选项，或回复序号／文件名）？\n'
-                  '1. report.md\n2. summary.md',
+          'clarificationQuestion': '请明确要修改的文件路径（点击选项，或回复序号／文件名）？\n'
+              '1. report.md\n2. summary.md',
           'clarificationOptions': [
             {'index': 1, 'path': '/workspace/report.md'},
             {'index': 2, 'path': '/workspace/summary.md'},
@@ -1764,9 +1938,8 @@ void main() {
         ..status = AgentTaskStatus.paused
         ..executionStateJson = jsonEncode({
           'followUpKind': 'clarification',
-          'clarificationQuestion':
-              '请明确要修改的文件路径（点击选项，或回复序号／文件名）？\n'
-                  '1. create_ppt.py\n2. create_ppt.py',
+          'clarificationQuestion': '请明确要修改的文件路径（点击选项，或回复序号／文件名）？\n'
+              '1. create_ppt.py\n2. create_ppt.py',
           'clarificationOptions': [
             {'index': 1, 'path': '/workspace/first/create_ppt.py'},
             {'index': 2, 'path': '/workspace/second/create_ppt.py'},
@@ -1853,8 +2026,7 @@ void main() {
         ..status = AgentTaskStatus.paused
         ..executionStateJson = jsonEncode({
           'followUpKind': 'clarification',
-          'clarificationQuestion':
-              '请明确要修改的文件路径（点击选项，或回复序号／文件名）？\n1. report.md',
+          'clarificationQuestion': '请明确要修改的文件路径（点击选项，或回复序号／文件名）？\n1. report.md',
           'clarificationOptions': [
             {'index': 1, 'path': '/workspace/report.md'},
           ],
@@ -2424,8 +2596,7 @@ void main() {
   });
 
   group('WorkTaskOverlayHost', () {
-    testWidgets('collapse does not stop the running task',
-        (tester) async {
+    testWidgets('collapse does not stop the running task', (tester) async {
       final task = _task(
         id: 'running-task',
         conversationId: 'group-one',
@@ -2594,7 +2765,8 @@ void main() {
       expect(find.byKey(const Key('work-task-panel-wide')), findsNothing);
     });
 
-    testWidgets('collapsed bar parks in the top-right corner, clear of the composer',
+    testWidgets(
+        'collapsed bar parks in the top-right corner, clear of the composer',
         (tester) async {
       const viewport = Size(800, 800);
       await _pumpOverlayHostWithTask(tester, viewport);
@@ -2643,7 +2815,8 @@ void main() {
       // 那个常量会跟着失真，这条断言必须一起失败，否则胶囊会重新压上去。
       final bandBottom = tester.getRect(find.byKey(bandKey)).bottom;
       ConversationPresenceService.instance.enter('group-one');
-      addTearDown(() => ConversationPresenceService.instance.leave('group-one'));
+      addTearDown(
+          () => ConversationPresenceService.instance.leave('group-one'));
       await _pumpOverlayHostWithTask(tester, viewport);
 
       await tester.tap(find.byKey(const Key('work-task-collapse')));
@@ -2702,7 +2875,8 @@ void main() {
         characterId: 'developer',
       )..status = AgentTaskStatus.completed;
       ConversationPresenceService.instance.enter('group-one');
-      addTearDown(() => ConversationPresenceService.instance.leave('group-one'));
+      addTearDown(
+          () => ConversationPresenceService.instance.leave('group-one'));
 
       await tester.pumpWidget(MaterialApp(
         home: WorkTaskOverlayHost(
@@ -2764,7 +2938,8 @@ void main() {
       ));
       final bandBottom = tester.getRect(find.byKey(bandKey)).bottom;
       ConversationPresenceService.instance.enter('group-one');
-      addTearDown(() => ConversationPresenceService.instance.leave('group-one'));
+      addTearDown(
+          () => ConversationPresenceService.instance.leave('group-one'));
       await _pumpOverlayHostWithTask(tester, viewport);
 
       final panel =
@@ -2804,7 +2979,8 @@ void main() {
       ));
       final bandBottom = tester.getRect(find.byKey(bandKey)).bottom;
       ConversationPresenceService.instance.enter('group-one');
-      addTearDown(() => ConversationPresenceService.instance.leave('group-one'));
+      addTearDown(
+          () => ConversationPresenceService.instance.leave('group-one'));
       await _pumpOverlayHostWithTask(tester, viewport);
 
       final panel =
@@ -2838,12 +3014,14 @@ void main() {
       await tester.pump();
 
       await _dragMiniBar(tester, const Offset(4000, 4000));
-      final pushed = tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      final pushed =
+          tester.getRect(find.byKey(const Key('work-task-mini-bar')));
       expect(pushed.right, lessThanOrEqualTo(viewport.width));
       expect(pushed.bottom, lessThanOrEqualTo(viewport.height));
 
       await _dragMiniBar(tester, const Offset(-4000, -4000));
-      final pulled = tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      final pulled =
+          tester.getRect(find.byKey(const Key('work-task-mini-bar')));
       expect(pulled.left, greaterThanOrEqualTo(0));
       expect(pulled.top, greaterThanOrEqualTo(0));
     });
@@ -2871,7 +3049,8 @@ void main() {
       await tester.pump();
       await _dragMiniBar(tester, const Offset(-400, 300));
 
-      final barBefore = tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      final barBefore =
+          tester.getRect(find.byKey(const Key('work-task-mini-bar')));
       await tester.tap(find.byKey(const Key('work-task-mini-bar')));
       await tester.pump();
 
@@ -2885,7 +3064,8 @@ void main() {
       const viewport = Size(1000, 800);
       await _pumpOverlayHostWithTask(tester, viewport);
 
-      final panel = tester.getRect(find.byKey(const Key('work-task-panel-wide')));
+      final panel =
+          tester.getRect(find.byKey(const Key('work-task-panel-wide')));
       // 面板曾一路铺到 bottom:16，右下角压住发送按钮。
       expect(panel.bottom, lessThanOrEqualTo(viewport.height - 84));
     });
@@ -3283,11 +3463,13 @@ void main() {
             ..updatedAt = DateTime.utc(2026, 5, day);
       final tasks = <AgentTask>[
         for (var index = 0; index < 4; index++)
-          inConversation('count-task-$index', AgentTaskStatus.queued, 1 + index),
+          inConversation(
+              'count-task-$index', AgentTaskStatus.queued, 1 + index),
         // 第 5 条未结束的任务排不进标签栏，才是这行提示真正要说的那一条。
         inConversation('folded-paused-task', AgentTaskStatus.paused, 1),
         // 本会话已结束的任务和别的会话的失败任务都不算队列。
-        inConversation('terminal-in-conversation', AgentTaskStatus.completed, 1),
+        inConversation(
+            'terminal-in-conversation', AgentTaskStatus.completed, 1),
         _task(
           id: 'terminal-elsewhere',
           conversationId: 'group-elsewhere',
@@ -3357,8 +3539,8 @@ void main() {
 
       expect(find.byKey(const Key('work-task-tab-switch-one-task')),
           findsOneWidget);
-      expect(find.byKey(const Key('work-task-tab-switch-two-task')),
-          findsNothing);
+      expect(
+          find.byKey(const Key('work-task-tab-switch-two-task')), findsNothing);
       // 上半区默认收起，「执行角色」在「运行状态」卡内容里，需要先展开。
       await tester.tap(find.byKey(const Key('work-task-details-toggle')));
       await tester.pump();
@@ -3370,8 +3552,8 @@ void main() {
 
       expect(find.byKey(const Key('work-task-tab-switch-two-task')),
           findsOneWidget);
-      expect(find.byKey(const Key('work-task-tab-switch-one-task')),
-          findsNothing);
+      expect(
+          find.byKey(const Key('work-task-tab-switch-one-task')), findsNothing);
       // 选中项也必须跟着走：上个会话选过的任务不能继续占着详情。
       // 换任务会回到收起态，所以这里要重新展开「任务详情」。
       await tester.tap(find.byKey(const Key('work-task-details-toggle')));
@@ -3408,7 +3590,8 @@ void main() {
 
       const tabKey = Key('work-task-tab-history-restore-task');
       await tester.tap(
-        find.descendant(of: find.byKey(tabKey), matching: find.byIcon(Icons.close_rounded)),
+        find.descendant(
+            of: find.byKey(tabKey), matching: find.byIcon(Icons.close_rounded)),
       );
       await tester.pump();
       expect(find.byKey(tabKey), findsNothing);
@@ -3536,6 +3719,158 @@ void main() {
           await eventStore.close();
         });
       }
+    });
+  });
+
+  group('WorkTaskOverlayHost P3 decision prompt', () {
+    late Directory hiveDirectory;
+    late WorkTaskEventStore eventStore;
+    late WorkTaskCoordinator coordinator;
+    late Box<AgentTask> taskBox;
+
+    setUpAll(() async {
+      hiveDirectory = await openLifecycleHive();
+      taskBox = Hive.box<AgentTask>(DatabaseService.agentTaskBoxName);
+      eventStore = WorkTaskEventStore(appSupportDirectory: hiveDirectory);
+      coordinator = WorkTaskCoordinator(
+        taskBox: taskBox,
+        eventStore: eventStore,
+        runner: _HoldingWorkTaskRunner(),
+      );
+    });
+
+    tearDownAll(() async {
+      await closeLifecycleHive(hiveDirectory).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {},
+      );
+    });
+
+    testWidgets(
+        'P3 active task auto-prompts once and panel reopens the same decision',
+        (tester) async {
+      const conversation = 'group-p3-dialog';
+      ConversationPresenceService.instance.enter(conversation);
+      addTearDown(
+          () => ConversationPresenceService.instance.leave(conversation));
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          coordinator: coordinator,
+          eventStore: eventStore,
+          child: const Scaffold(body: SizedBox.expand()),
+        ),
+      ));
+      final task = _decisionTask('p3-dialog', conversation);
+      await tester.runAsync(() => coordinator.submit(task));
+      await _pumpUntilFound(
+          tester, find.byKey(const Key('work-task-decision-dialog')));
+      expect(find.text('交付格式选哪一种？'), findsOneWidget);
+      expect(find.text('可保留标题'), findsOneWidget);
+      await tester.tap(find.byKey(const Key('work-task-decision-close')));
+      await tester.pump();
+      expect(find.byKey(const Key('work-task-decision-dialog')), findsNothing);
+      expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+      await tester.pump();
+      expect(find.byKey(const Key('work-task-decision-dialog')), findsNothing);
+      await _pumpUntilFound(
+          tester, find.byKey(const Key('work-task-open-decision')));
+      await tester
+          .ensureVisible(find.byKey(const Key('work-task-open-decision')));
+      await tester.tap(find.byKey(const Key('work-task-open-decision')));
+      await tester.pump();
+      expect(
+          find.byKey(const Key('work-task-decision-dialog')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('work-task-decision-option-md')));
+      await _pumpUntil(
+          tester,
+          () =>
+              WorkDiscussionState.fromExecutionState(
+                      taskBox.get(task.id)!.executionStateJson)!
+                  .collaboration!
+                  .decisions
+                  .single['status'] ==
+              'answered');
+      expect(
+          WorkDiscussionState.fromExecutionState(
+                  taskBox.get(task.id)!.executionStateJson)!
+              .collaboration!
+              .decisions
+              .single['answer'],
+          'Markdown');
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
+  });
+
+  group('WorkTaskOverlayHost P3 conversation focus', () {
+    late Directory hiveDirectory;
+    late WorkTaskEventStore eventStore;
+    late WorkTaskCoordinator coordinator;
+
+    setUpAll(() async {
+      hiveDirectory = await openLifecycleHive();
+      eventStore = WorkTaskEventStore(appSupportDirectory: hiveDirectory);
+      coordinator = WorkTaskCoordinator(
+        taskBox: Hive.box<AgentTask>(DatabaseService.agentTaskBoxName),
+        eventStore: eventStore,
+        runner: _HoldingWorkTaskRunner(),
+      );
+    });
+
+    tearDownAll(() async {
+      await closeLifecycleHive(hiveDirectory).timeout(
+        const Duration(seconds: 5),
+        onTimeout: () {},
+      );
+    });
+
+    testWidgets('P3 other conversations do not replace an open decision',
+        (tester) async {
+      const firstConversation = 'group-p3-focus-first';
+      const secondConversation = 'group-p3-focus-second';
+      final first = _decisionTask('p3-focus-first', firstConversation);
+      final second = _decisionTask('p3-focus-second', secondConversation);
+      await tester.runAsync(() async {
+        await coordinator.submit(first);
+        await coordinator.submit(second);
+      });
+      ConversationPresenceService.instance.enter(firstConversation);
+      addTearDown(
+          () => ConversationPresenceService.instance.leave(secondConversation));
+      await tester.pumpWidget(MaterialApp(
+        home: WorkTaskOverlayHost(
+          coordinator: coordinator,
+          eventStore: eventStore,
+          child: const Scaffold(body: SizedBox.expand()),
+        ),
+      ));
+      await _pumpUntilFound(
+          tester, find.byKey(const Key('work-task-decision-dialog')));
+      ConversationPresenceService.instance.enter(secondConversation);
+      await tester.pump();
+      expect(
+          tester
+              .widget<WorkTaskDecisionDialog>(
+                  find.byType(WorkTaskDecisionDialog))
+              .decisions
+              .first
+              .taskId,
+          first.id);
+      await tester.tap(find.byKey(const Key('work-task-decision-close')));
+      await _pumpUntil(
+          tester,
+          () =>
+              find.byType(WorkTaskDecisionDialog).evaluate().isNotEmpty &&
+              tester
+                      .widget<WorkTaskDecisionDialog>(
+                          find.byType(WorkTaskDecisionDialog))
+                      .decisions
+                      .first
+                      .taskId ==
+                  second.id);
+      await tester.tap(find.byKey(const Key('work-task-decision-close')));
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
     });
   });
 
@@ -3668,7 +4003,8 @@ void main() {
       )..status = AgentTaskStatus.completed;
       ConversationPresenceService.instance.enter('group-overlay-delete');
       addTearDown(
-        () => ConversationPresenceService.instance.leave('group-overlay-delete'),
+        () =>
+            ConversationPresenceService.instance.leave('group-overlay-delete'),
       );
       addTearDown(() async {
         await tester.pumpWidget(const SizedBox.shrink());
@@ -3694,7 +4030,8 @@ void main() {
         ),
       ));
       const tabKey = Key('work-task-tab-overlay-delete-task');
-      await _pumpUntilFound(tester, find.byKey(const Key('work-task-history-open')));
+      await _pumpUntilFound(
+          tester, find.byKey(const Key('work-task-history-open')));
       expect(find.byKey(tabKey), findsNothing, reason: '预置隐藏的标签不应出现');
 
       // 关掉的标签只能在历史任务里找到，删除入口也必须留在那一层。
@@ -3792,7 +4129,8 @@ void main() {
       await tester.tap(find.byKey(const Key('work-task-collapse')));
       await tester.pump();
 
-      final before = tester.getRect(find.byKey(const Key('work-task-mini-bar')));
+      final before =
+          tester.getRect(find.byKey(const Key('work-task-mini-bar')));
       // 拖动手势要在真时钟区里做完：松手会同步发起一次 Hive 写，在假时钟区发起
       // 会让这个 box 的写队列再也推不动，tearDown 的 Hive.close() 直接挂到超时。
       await tester.runAsync(() async {
@@ -3841,7 +4179,8 @@ void main() {
       // 圆钮。它比胶囊小，夹取必须按它自己的尺寸算：按胶囊算会停在窗口外，而这时
       // 胶囊根本不在树上，读不到尺寸就再也修不回来——它是重新打开面板的唯一入口。
       ConversationPresenceService.instance.enter('group-one');
-      addTearDown(() => ConversationPresenceService.instance.leave('group-one'));
+      addTearDown(
+          () => ConversationPresenceService.instance.leave('group-one'));
       final task = _task(
         id: 'reopen-clamp-task',
         conversationId: 'group-one',

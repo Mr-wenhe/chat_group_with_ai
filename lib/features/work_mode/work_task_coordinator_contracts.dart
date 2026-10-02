@@ -44,6 +44,15 @@ abstract interface class WorkTaskDiscussionRunner {
   );
 }
 
+/// V2 uses provenance-checked updates; the v1 sink cannot write this record.
+abstract interface class WorkTaskCollaborationDiscussionRunner {
+  Future<void> runCollaboration(
+    AgentTask task,
+    WorkTaskCancellation cancellation,
+    Future<AgentTask> Function(WorkCollaborationUpdate update) apply,
+  );
+}
+
 /// Optional capability used at the durable task boundary. The panel may list
 /// a candidate, but the coordinator must re-check the selected character
 /// before changing the task's execution identity.
@@ -130,4 +139,19 @@ class _WaitingResourceTask {
   WorkResourceLockLease? lease;
 
   _WaitingResourceTask({required this.task, required this.cancellation});
+}
+
+/// Production v2 adapter prepares exactly one actor before resource planning.
+abstract interface class WorkTaskCollaborationExecutor {
+  Future<bool> prepareCollaborationWork(AgentTask task);
+
+  /// Final transport is serialized with pending input and completion.
+  Future<void> commitCollaborationDelivery(AgentTask task,
+      {bool Function()? hasArrivingInput});
+}
+
+/// Production restart checks run with the task's resource lease held. A runner
+/// without this capability cannot authorize automatic startup execution.
+abstract interface class WorkTaskRecoveryValidator {
+  Future<String?> validateRecovery(AgentTask task);
 }

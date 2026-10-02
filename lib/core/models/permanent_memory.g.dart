@@ -37,13 +37,14 @@ class PermanentMemoryAdapter extends TypeAdapter<PermanentMemory> {
       createdAt: fields[17] as DateTime?,
       updatedAt: fields[18] as DateTime?,
       invalidationReason: fields[19] as String?,
+      workSource: (fields[20] as Map?)?.cast<dynamic, dynamic>(),
     );
   }
 
   @override
   void write(BinaryWriter writer, PermanentMemory obj) {
     writer
-      ..writeByte(20)
+      ..writeByte(21)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -83,7 +84,9 @@ class PermanentMemoryAdapter extends TypeAdapter<PermanentMemory> {
       ..writeByte(18)
       ..write(obj.updatedAt)
       ..writeByte(19)
-      ..write(obj.invalidationReason);
+      ..write(obj.invalidationReason)
+      ..writeByte(20)
+      ..write(obj.workSource);
   }
 
   @override

@@ -6,7 +6,7 @@ import 'package:flutter_test/flutter_test.dart';
 void main() {
   group('WorkTruncationSalvage.extract', () {
     test('recovers the content prefix cut mid-string', () {
-      final body = '{"action":"tool","public_update":"正在写文件。","tool":'
+      const body = '{"action":"tool","public_update":"正在写文件。","tool":'
           '{"name":"workspace.patch","arguments":{"path":"report.md",'
           '"content":"第一行\\n第二行';
 

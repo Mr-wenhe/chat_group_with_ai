@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/document/binary_document_parser.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_confirmation.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'work_task_execution_policy.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 
 /// Result of the final artifact contract check.
@@ -470,7 +471,8 @@ class WorkArtifactDeliveryGuard {
       pathPolicy,
       workspaceRoot,
     );
-    if (accepted.isNotEmpty) {
+    if (accepted.isNotEmpty &&
+        !WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
       return WorkArtifactValidationResult.valid(
         path: accepted.first,
         deliveredPaths: List<String>.unmodifiable(accepted),
@@ -481,7 +483,8 @@ class WorkArtifactDeliveryGuard {
       request,
       contractFormat: contract?['format']?.toString(),
     );
-    final needsFile = needsDocx ||
+    final needsFile = WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) ||
+        needsDocx ||
         isRevisionTask(task) ||
         requiresSourceArtifact(request) ||
         requiresFileArtifact(request);
@@ -708,7 +711,8 @@ class WorkArtifactDeliveryGuard {
     final decoded = WorkDiscussionState.decodeExecutionState(
       task.executionStateJson,
     );
-    final contract = decoded.state?.deliverableContract;
+    final contract = decoded.state?.collaboration?.artifactContract ??
+        decoded.state?.deliverableContract;
     return contract == null ? null : Map<String, dynamic>.from(contract);
   }
 
@@ -1303,11 +1307,46 @@ class WorkArtifactDeliveryGuard {
     return extension != null && formatAliases[extension] == format;
   }
 
+  /// Whether [path] is the正文 file of a contract that declared [format].
+  ///
+  /// Both sides go through [formatAliases] first: the contract carries a format
+  /// word (`markdown`) while the file carries an extension (`report.md`), and
+  /// comparing the two spellings directly made a fully read `.md` deliverable
+  /// look like a missing正文 file.
+  static bool matchesContractFormat(String path, String format) {
+    final expected = _canonicalFormat(format);
+    return expected != null && matchesDeclaredFormat(path, expected);
+  }
+
   static bool _isRedactedLocation(String location) =>
       location.contains('[REDACTED]') || location.contains('[本地路径]');
 
   static bool _isHtmlPath(String path) =>
       RegExp(r'\.html?$', caseSensitive: false).hasMatch(path);
+
+  /// Reused on frozen publication bytes, after the working-path contract gate.
+  static Future<bool> validateFrozenFile(File file) async {
+    try {
+      final size = await file.length();
+      if (size <= 0 || size > maxValidatedDocxBytes) return false;
+      final extension = extensionOf(file.path);
+      if (extension == 'docx') {
+        return BinaryDocumentParser.validateDocxForDelivery(
+                Uint8List.fromList(await file.readAsBytes()))
+            .isNotEmpty;
+      }
+      if (_isHtmlPath(file.path)) {
+        return _isCompleteHtml(await file.readAsBytes());
+      }
+      if ({'txt', 'md'}.contains(extension)) {
+        return (await file.readAsString()).trim().isNotEmpty;
+      }
+      await file.openRead(0, 1).drain<void>();
+      return true;
+    } on Object {
+      return false;
+    }
+  }
 
   static bool _isCompleteHtml(List<int> bytes) {
     final text = String.fromCharCodes(bytes).toLowerCase();
@@ -1318,7 +1357,12 @@ class WorkArtifactDeliveryGuard {
     return htmlOpen >= 0 &&
         bodyOpen > htmlOpen &&
         bodyClose > bodyOpen &&
-        htmlClose > bodyClose;
+        htmlClose > bodyClose &&
+        text
+            .substring(text.indexOf('>', bodyOpen) + 1, bodyClose)
+            .replaceAll(RegExp(r'<!--[\s\S]*?-->'), '')
+            .trim()
+            .isNotEmpty;
   }
 
   static String? _revisionChangeFailure(AgentTask task) {

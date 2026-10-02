@@ -26,6 +26,7 @@ part 'observation_entry_triggers.dart';
 part 'observation_entry_distillation.dart';
 part 'observation_entry_retry.dart';
 part 'observation_entry_helpers.dart';
+part 'observation_entry_work.dart';
 
 // ── 触发器结果 ───────────────────────────────────────────────────
 
@@ -270,6 +271,10 @@ class ObservationEntry {
   }) async {
     if (message.senderType != 'user' && message.senderType != 'ai') return;
     if (!MemoryControls(db).automaticMemoryEnabled) return;
+    if (message.isWorkMode) {
+      await recordWorkExperience(message);
+      return;
+    }
 
     final triggerResult = _runTriggers(
       message,

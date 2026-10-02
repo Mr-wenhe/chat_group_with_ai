@@ -24,11 +24,16 @@ class WorkModeWorkspace extends HiveObject {
   @HiveField(4)
   DateTime updatedAt;
 
+  /// Opaque project binding; changes when this conversation selects another root.
+  @HiveField(5)
+  String? projectScopeId;
+
   WorkModeWorkspace({
     String? id,
     required this.conversationId,
     required this.conversationType,
     this.workDirPath = '',
+    this.projectScopeId,
     DateTime? updatedAt,
   })  : id = id ?? const Uuid().v4(),
         updatedAt = updatedAt ?? DateTime.now();

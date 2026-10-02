@@ -1,5 +1,14 @@
+import 'dart:async';
 import 'dart:convert';
+import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
+import 'package:chat_group/features/work_mode/work_candidate_publication.dart';
+import 'package:chat_group/core/models/work_mode_workspace.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
+import 'work_candidate_test_support.dart';
+import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
 
 import 'package:archive/archive.dart';
 import 'package:chat_group/core/models/agent_task.dart';
@@ -30,6 +39,8 @@ import 'package:chat_group/features/work_mode/work_approval_fingerprint.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_decision.dart';
+import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
@@ -43,6 +54,11 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/lifecycle_hive.dart';
 import '../helpers/memory_governance_store.dart';
+
+part 'default_work_task_runner_stage02_test_part_p6.dart';
+part 'default_work_task_runner_stage02_test_part_p8.dart';
+part 'default_work_task_runner_stage02_test_part_p7.dart';
+part 'default_work_task_runner_stage02_test_part_p7_support.dart';
 
 class _TestCredentials implements ApiCredentialResolver {
   @override
@@ -1176,6 +1192,15 @@ void main() {
     await closeLifecycleHive(hiveDirectory, database);
   });
 
+  _registerP8RunnerTests(
+      () => hiveDirectory, () => authorizedDirectory, () => eventStore);
+
+  _registerP7RunnerTests(
+      () => hiveDirectory, () => authorizedDirectory, () => eventStore);
+
+  _registerP6RunnerTests(
+      () => hiveDirectory, () => authorizedDirectory, () => eventStore);
+
   test('runner does not rewrite a terminal task through discussion validation',
       () async {
     final runner = DefaultWorkTaskRunner(
@@ -1336,7 +1361,8 @@ void main() {
     return task;
   }
 
-  test('a request that yields no first byte is retried before the total deadline',
+  test(
+      'a request that yields no first byte is retried before the total deadline',
       () async {
     // 现场（2026-09-30）：上游对 16.8k 输入连续三次 300 秒零输出，客户端每次
     // 都等满总时限才取消。零输出意味着没有任何已生成内容，提前判停滞是安全的。
@@ -1848,6 +1874,73 @@ void main() {
     );
   });
 
+  test('P5 实际执行适配器按当前成员刷新记忆且不写入检查点', () async {
+    final gateway = _SequencedGateway();
+    final harness = await _runPatchShapeTask(
+        database: database,
+        eventStore: eventStore,
+        authorizedDirectory: authorizedDirectory,
+        hiveDirectory: hiveDirectory,
+        gateway: gateway,
+        groupId: 'p5',
+        userRequest: '读取源码并制作 notes.txt');
+    final actor = database.aiCharacterBox.get(harness.task.characterId)!;
+    actor.personalityTags = ['直接'];
+    await database.permanentMemoryBox.put(
+        'actor-memory',
+        PermanentMemory(
+          observerCharacterId: actor.id,
+          kind: MemoryKind.preference,
+          content: '读取源码报告要先给具体位置',
+          subjectIds: ['user'],
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.manual,
+          originNameSnapshot: '用户偏好',
+        ));
+    await harness.runner.run(harness.task, WorkTaskCancellation());
+    expect(jsonEncode(gateway.observedMessages), contains('读取源码报告要先给具体位置'));
+    expect(jsonEncode(gateway.observedMessages), contains('直接'));
+    expect(harness.task.executionStateJson, isNot(contains('读取源码报告要先给具体位置')));
+    expect(harness.task.contextSummary, isNot(contains('读取源码报告要先给具体位置')));
+    final other = AICharacter(
+        id: 'p5-other',
+        name: '审查者',
+        avatar: 'Q',
+        age: 30,
+        role: '测试工程师',
+        personalityTags: ['谨慎'],
+        systemPrompt: '关注边界',
+        apiKey: '',
+        apiProvider: actor.apiProvider,
+        apiConfigId: actor.apiConfigId,
+        modelName: actor.modelName,
+        toolPermissions: actor.toolPermissions);
+    await database.aiCharacterBox.put(other.id, other);
+    await database.permanentMemoryBox.put(
+        'other-memory',
+        PermanentMemory(
+          observerCharacterId: other.id,
+          kind: MemoryKind.preference,
+          content: '读取源码报告要指出未验证边界',
+          subjectIds: ['user'],
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.manual,
+          originNameSnapshot: '用户偏好',
+        ));
+    final next = AgentTask(
+        id: 'p5-other-task',
+        groupId: 'p5',
+        characterId: other.id,
+        userRequest: '读取源码并制作 next.txt',
+        workModeTask: true);
+    final before = gateway.observedMessages.length;
+    await harness.runner.run(next, WorkTaskCancellation());
+    final received = jsonEncode(gateway.observedMessages.skip(before).toList());
+    expect(received, contains('读取源码报告要指出未验证边界'));
+    expect(received, contains('谨慎'));
+    expect(received, isNot(contains('读取源码报告要先给具体位置')));
+  });
+
   test('a work task ignores chat messages from before the context boundary',
       () async {
     final grants = WorkFolderGrantService(
@@ -1923,7 +2016,8 @@ void main() {
         timestamp: boundary.add(const Duration(minutes: 1)),
       ),
     );
-    await WorkContextBoundary.advance(database.appSettingsBox, groupId, boundary);
+    await WorkContextBoundary.advance(
+        database.appSettingsBox, groupId, boundary);
 
     final runner = DefaultWorkTaskRunner(
       database: database,

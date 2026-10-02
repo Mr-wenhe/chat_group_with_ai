@@ -62,7 +62,8 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     }
     final changed = result.data['changed'] != false &&
         result.status != WorkToolResultStatus.alreadyCommitted;
-    final hasReadEvidence = result.data['ok'] == true &&
+    final hasReadEvidence = (result.data['ok'] == true ||
+            call.name == AgentToolName.workspaceDocument) &&
         result.data['rejected'] != true &&
         (result.data['content'] != null ||
             result.data['entries'] != null ||
@@ -70,7 +71,8 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
             result.data['text'] != null) &&
         (call.name == AgentToolName.workspaceRead ||
             call.name == AgentToolName.workspaceSearch ||
-            call.name == AgentToolName.workspaceList);
+            call.name == AgentToolName.workspaceList ||
+            call.name == AgentToolName.workspaceDocument);
     return WorkProgressObservation(
       kind: changed &&
               (hasReadEvidence ||
@@ -154,7 +156,11 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
           actionStarter: actionStarter,
         ),
       );
-      if (!last.retryable || last.committed || attempt == maxToolRetries) {
+      if (_decodeMap(state.task.executionStateJson)
+              .containsKey('uncertainAction') ||
+          !last.retryable ||
+          last.committed ||
+          attempt == maxToolRetries) {
         return last;
       }
       state.toolRetryCount++;
@@ -499,7 +505,8 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
       return _result(state, WorkAgentLoopStatus.paused, task.lastError);
     }
     if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
-        task.status == AgentTaskStatus.paused && !task.resumeRequired) {
+        task.status == AgentTaskStatus.paused &&
+        !task.resumeRequired) {
       await _checkpoint(state);
       return _result(state, WorkAgentLoopStatus.paused, task.lastError);
     }
@@ -560,6 +567,7 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     _LoopState state,
     String message, {
     WorkFailure? failure,
+    String reason = 'userActionRequired',
   }) async {
     final task = state.task;
     final resolvedFailure = failure ??
@@ -579,7 +587,7 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
       WorkTaskEventKind.paused,
       '等待用户处理后继续。',
       detail: task.lastError,
-      safeMetadata: {'reason': 'userActionRequired'},
+      safeMetadata: {'reason': reason},
     );
     await _checkpoint(state);
     return _result(state, WorkAgentLoopStatus.paused, task.lastError);

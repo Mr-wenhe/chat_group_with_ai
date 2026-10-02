@@ -1,9 +1,10 @@
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/work_mode_workspace.dart';
 import 'package:hive/hive.dart';
+import 'work_discussion_state.dart';
 
-/// Removes retired work-mode records once, then marks interrupted V1 work
-/// tasks as requiring an explicit user resume after a new app process starts.
+/// Preserves historical work and marks only DM work as manually interrupted.
+/// Group recovery and explicit v1 conversion belong to the coordinator.
 class WorkModeV1Migrator {
   static const String schemaVersionKey = 'work_mode_agent_schema_version';
   static const int currentSchemaVersion = 1;
@@ -22,24 +23,21 @@ class WorkModeV1Migrator {
   Future<void> migrate() async {
     if (appSettingsBox.get(schemaVersionKey) == currentSchemaVersion) return;
 
-    final retiredTaskIds = taskBox.values
-        .where((task) => task.workModeTask)
-        .map((task) => task.id)
-        .toList(growable: false);
-    if (retiredTaskIds.isNotEmpty) await taskBox.deleteAll(retiredTaskIds);
-    if (workspaceBox.isNotEmpty) await workspaceBox.clear();
+    // Schema bookkeeping is not permission to erase user work. Both old
+    // artifacts and unknown checkpoints must survive the v2 transition.
     await appSettingsBox.put(schemaVersionKey, currentSchemaVersion);
   }
 
-  /// Running, planning, approval, and queued tasks cannot safely continue
-  /// after a process restart. Paused tasks already await an explicit user
-  /// action and terminal tasks must remain unchanged.
+  /// DM keeps its legacy manual restart boundary. Groups retain their durable
+  /// phase for coordinator revalidation; terminal tasks stay unchanged.
   Future<void> markInFlightWorkTasksInterrupted() async {
     final inFlightTasks = taskBox.values
         .where(
           (task) =>
               task.workModeTask &&
               !task.isTerminal &&
+              !WorkDiscussionState.requiresDiscussionForConversation(
+                  task.groupId) &&
               task.status != AgentTaskStatus.paused,
         )
         .toList(growable: false);

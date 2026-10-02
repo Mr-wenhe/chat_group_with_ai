@@ -211,7 +211,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     return const {
       '模型返回了非结构化公开内容',
       '结构化回复无效',
-      '模型没有提供公开职责意见',
+      '模型没有提供公开回应',
     }.contains(turn.failureReason);
   }
 
@@ -335,21 +335,20 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       {
         'role': 'system',
         'content': [
-          '你是${discussionRoleLabel(character)}，只代表自己的职业职责发言。',
+          '你是${discussionRoleLabel(character)}，只代表自己回应当前问题。',
+          AgentPromptBuilder.replyGuidance,
           if (character.systemPrompt.trim().isNotEmpty)
             boundedDiscussionText(character.systemPrompt, maximum: 4000),
           '当前处于群工作讨论阶段；禁止调用工具、写文件、安装插件、访问浏览器或声称已经执行。',
           '允许从多个模块、风险和替代方案发散思考，但每条意见都必须回扣当前任务主题、项目事实或可验证验收项；禁止把闲聊、饮品、私人安排等无关内容带入工作讨论。',
           isCoordinator
-              ? '你是本轮协调/执行人：要主动收集意见、指出取舍、追问未决项，并公开给出理解百分比。'
-              : '你是参与成员：只提供与你职业相关的可行性、风险、测试或交付建议，不代替其他职业做决定。',
+              ? '你是本轮协调/执行人：要主动收集意见、指出取舍、追问未决项，仅在收敛、决策和交接时简短总结；理解百分比仅用于旧内部协议，不放入公开文本。'
+              : '你是参与成员：直接回应具体疑问，提出有据判断、调查需要或认可，不代替其他职业做决定。',
           '当任务上下文包含 available=true 的 projectDossier 时，它是群主明确授权后本地读取的项目事实。必须据此完成职业判断和方案取舍：不得要求用户粘贴源码、重复授权路径、选择本应由产品经理比较决定的优化方向，或把可由清单推断的问题标为 needs_user。应以可复核的假设和验收标准记录仍然存在的技术风险。',
           '群成员必须优先自行讨论并确定文件名、优先级、阈值、重试次数/间隔、验收口径等普通方案细节；只有确实没有合适的执行角色、需要群主添加或选择角色时，才将 needs_user 设为 true 并 @群主。普通细节问题放入 open_questions，继续由群内角色解决。',
           'groupMembers 中角色名包含“产品”“开发”“测试”“设计”即可提供对应职业意见；不要因为开发角色的专业标签不是 Flutter 就要求群主新增角色，先由该开发成员说明可复用能力、适用边界和需要验证的部分。',
           '不得把 projectDossier、群公开讨论或附件上下文中不存在的文件、日志、指标当作事实或阻塞问题。对于尚未建立的性能基线、遥测值或运行日志，需将其明确为交付后的验收采集项和暂定阈值，而不是向群主追问或因此阻塞需求收敛。',
-          '本任务的项目范围边界优先于角色人格和通用知识：优化候选只能围绕 projectDossier 明确列出的实际目录、代码能力、测试链路和可复核事实提出。区块链、DID、Gas、支付、链上存证等未被清单证实的方案只能在 public_update 中标记为“超出本轮范围，不纳入需求”，不得写入 open_questions、blockers、contract 或最终执行方向。',
           '已明确标注为“本轮不重构”“本轮范围外”或“仅记录当前默认值”的事项必须写入范围边界、风险或验收项；不得继续放入 open_questions、needs_user 或 blockers。参数取舍由群内执行人作暂定决定并在文档中标明复核时点。',
-          '当四个角色均已完成职责意见、open_questions 与 blockers 为空、交付格式/位置/范围已明确且理解证据齐全时，讨论理解度必须返回 100；产品经理后续实际生成 Word 文件属于执行阶段，不得因为文件尚未写入而把已收集完成的讨论停在 99。',
           '只能返回一个 JSON object，字段必须包含 public_update、understanding_percent、understanding_evidence、open_questions、resolved_questions、blockers、resolved_blockers、substantive_progress；已解决的问题必须原样放入 resolved_questions 或 resolved_blockers，理解达到 100 时，understanding_evidence 至少分别说明目标/范围、方案/取舍、格式位置/验收；没有把握时必须保留问题，禁止虚报 100。',
           '输出形状示例（只模仿结构，不要复制示例内容）：{"public_update":"本轮公开结论","understanding_percent":50,"understanding_evidence":["目标/范围"],"open_questions":["待确认项"],"resolved_questions":[],"blockers":[],"resolved_blockers":[],"substantive_progress":true,"needs_user":false,"user_question":""}',
         ].join('\n'),
@@ -417,7 +416,20 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
         ),
       },
     ];
-    return messages;
+    return runWithUnifiedMemory<List<Map<String, dynamic>>>(
+      selector: MemoryContextSelector(database),
+      conversationHistory: messages,
+      observerCharacterId: character.id,
+      actor: character,
+      participantCharacterIds: group.aiCharacterIds,
+      userMessage: WorkDiscussionState.currentRequestScope(task),
+      projectScopeId:
+          database.workModeWorkspaceBox.get(task.groupId)?.projectScopeId,
+      conversationId: task.groupId,
+      contextBoundary:
+          WorkContextBoundary.readAt(database.appSettingsBox, task.groupId),
+      run: (prepared) async => prepared,
+    );
   }
 
   String _discussionPromptContent({
@@ -577,7 +589,8 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       // a system message instead of attaching an invented `system` AI sender;
       // only a real discussion member may speak with `senderType: ai`.
       senderType: senderId == null ? 'system' : 'ai',
-      content: boundedDiscussionText(content, maximum: 2400),
+      isWorkMode: true,
+      content: WorkPublicUpdateStream.sanitize(content),
       isMention: isMention,
       mentionedAiIds: senderId == null ? ids : const [],
       visibleToCharacterIds: ids,

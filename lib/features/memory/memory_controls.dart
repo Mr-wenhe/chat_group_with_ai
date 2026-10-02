@@ -257,6 +257,7 @@ class MemoryControls {
       supersedesIds: List<String>.from(stored.supersedesIds),
       originType: stored.originType,
       originConversationId: stored.originConversationId,
+      workSource: stored.workSource,
       originNameSnapshot: stored.originNameSnapshot,
       sourceMessageIds: List<String>.from(stored.sourceMessageIds),
       participantIds: List<String>.from(stored.participantIds),
@@ -309,6 +310,15 @@ class MemoryControls {
     required List<String> subjectIds,
   }) async {
     final now = DateTime.now();
+    final correctionSource = old.workSource == null
+        ? null
+        : {
+            ...old.workSource!,
+            if (old.workSource!['type'] == 'verifiedMethod') ...{
+              'scopeId': old.workSource!['originScopeId'] ?? 'unbound',
+              'type': 'projectCorrection',
+            },
+          };
     final normalizedContent = correctedContent.trim();
     final normalizedSubjects = _normalizedSubjectIds(subjectIds);
 
@@ -333,6 +343,7 @@ class MemoryControls {
       content: normalizedContent,
       subjectIds: normalizedSubjects,
       excludeId: old.id,
+      workSource: correctionSource,
     );
     if (existing != null) {
       // Save keys and raw snapshots before any writes.
@@ -363,6 +374,7 @@ class MemoryControls {
             ..add(old.id),
           originType: rawExisting.originType,
           originConversationId: rawExisting.originConversationId,
+          workSource: rawExisting.workSource,
           originNameSnapshot: rawExisting.originNameSnapshot,
           sourceMessageIds: List<String>.from(rawExisting.sourceMessageIds),
           participantIds: List<String>.from(rawExisting.participantIds),
@@ -413,6 +425,7 @@ class MemoryControls {
             supersedesIds: List<String>.from(rawExisting.supersedesIds),
             originType: rawExisting.originType,
             originConversationId: rawExisting.originConversationId,
+            workSource: rawExisting.workSource,
             originNameSnapshot: rawExisting.originNameSnapshot,
             sourceMessageIds: List<String>.from(rawExisting.sourceMessageIds),
             participantIds: List<String>.from(rawExisting.participantIds),
@@ -437,6 +450,7 @@ class MemoryControls {
         content: normalizedContent,
         subjectIds: normalizedSubjects,
         supersedesAny: true,
+        workSource: correctionSource,
       );
       if (duplicateCorrection != null) {
         return duplicateCorrection;
@@ -451,14 +465,17 @@ class MemoryControls {
       subjectIds: normalizedSubjects,
       status: MemoryStatus.active,
       originType: MemoryOriginType.manual,
+      workSource: correctionSource,
       originNameSnapshot: old.originNameSnapshot,
       confidence: 1.0,
       explicitlyRequested: false,
       pinned: false,
       supersedesIds: [old.id],
-      originConversationId: null,
-      sourceMessageIds: const [],
-      participantIds: const [],
+      originConversationId:
+          old.workSource == null ? null : old.originConversationId,
+      sourceMessageIds:
+          old.workSource == null ? const [] : old.sourceMessageIds,
+      participantIds: old.workSource == null ? const [] : old.participantIds,
       occurredAt: old.occurredAt,
       createdAt: now,
       updatedAt: now,
@@ -495,9 +512,14 @@ class MemoryControls {
     required List<String> subjectIds,
     String? supersedesOldId,
     bool supersedesAny = false,
+    Map<dynamic, dynamic>? workSource,
   }) {
     for (final m in db.permanentMemoryBox.values) {
       if (m.observerCharacterId != observerCharacterId) continue;
+      if (m.workSource?['scopeId'] != workSource?['scopeId'] ||
+          m.workSource?['type'] != workSource?['type']) {
+        continue;
+      }
       if (m.kind != kind) continue;
       if (m.status != MemoryStatus.active) continue;
       if (m.content != content) continue;
@@ -518,9 +540,14 @@ class MemoryControls {
     required String content,
     required List<String> subjectIds,
     String? excludeId,
+    Map<dynamic, dynamic>? workSource,
   }) {
     for (final m in db.permanentMemoryBox.values) {
       if (m.observerCharacterId != observerCharacterId) continue;
+      if (m.workSource?['scopeId'] != workSource?['scopeId'] ||
+          m.workSource?['type'] != workSource?['type']) {
+        continue;
+      }
       if (m.kind != kind) continue;
       if (m.status != MemoryStatus.active) continue;
       if (m.content != content) continue;
@@ -533,6 +560,15 @@ class MemoryControls {
 
   Future<void> deletePermanent(PermanentMemory memory) async {
     final key = _resolvePermanentKey(memory);
+    // Remove retry input before deleting: replay cannot resurrect forgotten work.
+    if (memory.workSource != null) {
+      for (final messageId in memory.sourceMessageIds) {
+        final message = db.messageBox.get(messageId);
+        if (message == null) continue;
+        message.workMemoryEvidence = null;
+        await db.messageBox.put(messageId, message);
+      }
+    }
     await db.permanentMemoryBox.delete(key);
   }
 

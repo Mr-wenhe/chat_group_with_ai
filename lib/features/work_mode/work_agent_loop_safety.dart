@@ -30,6 +30,51 @@ const int _commandFailureHistoryLimit = 128;
 /// 之类子串的键会在检查点里被丢掉），否则审批暂停时这份状态活不到恢复。
 const String _truncationSalvageStateKey = 'truncationSalvage';
 
+/// 「原地重建分段文件」判定态在 `executionStateJson` 里的键
+/// （见 `_StagedRewriteState`）。同样避开 `_isPrivateField` 的正文黑名单，
+/// 否则一次暂停就能让护栏失忆。
+const String _stagedRewriteKey = 'stagedRewrite';
+
+/// 「本次运行写出的路径」在 `executionStateJson` 里的键。
+///
+/// 与 `task.lastArtifactPaths` 分开：那一份是整条任务血缘的候选集合（产物契约与
+/// 完成校验都要它，见 `_retainArtifactPaths` 的注释），这一份只服务失败报告里
+/// 「本次运行写出的 N 个中间文件」那句话。私聊任务的一条记录是**长期血缘**
+/// （2026-10-01 现场那条从 9-11 跨到当天），整份历史一附就是 19 个文件 /
+/// 350 KB，而真正属于这次失败运行的只有 2 个。
+///
+/// 起算点是"最近一次进入 [WorkAgentLoop.execute]"：审批暂停后恢复、软上限后点
+/// 「继续」都会重进一次，于是那之前写出的文件不计入本次运行——用户在更早那次
+/// 的失败报告里已经见过它们，而且它们仍在磁盘上。
+const String _runArtifactPathsKey = 'runArtifactPaths';
+
+/// 失败报告该附哪些文件。
+///
+/// 有运行记录就用记录，**哪怕它是空的**：那次运行确实什么都没写成，报告就该
+/// 这么说，而不是把更早运行的文件再列一遍。没有记录（本次改动之前落下的检查点、
+/// 或在建立记录之前就返回的调用）才退回整份候选，行为与改动前一致。
+///
+/// 顶层函数而不是扩展成员：读它的那一侧在另一个库里（`default_work_task_runner.dart`），
+/// 拿不到私有的 `_WorkAgentLoopSafety`。它因此自带一次解码，而不是复用扩展里的
+/// `_safeExistingMap`。
+List<String> workRunScopedArtifactPaths(AgentTask task) {
+  final Map<String, dynamic> execution;
+  try {
+    final decoded = jsonDecode(task.executionStateJson);
+    execution = decoded is Map
+        ? Map<String, dynamic>.from(decoded)
+        : const <String, dynamic>{};
+  } on Object {
+    return task.lastArtifactPaths;
+  }
+  if (!execution.containsKey(_runArtifactPathsKey)) {
+    return task.lastArtifactPaths;
+  }
+  final value = execution[_runArtifactPathsKey];
+  if (value is! List) return task.lastArtifactPaths;
+  return value.whereType<String>().toList(growable: false);
+}
+
 /// How many distinct artifact paths one task remembers across its whole run.
 ///
 /// The list is durable and is replayed into the model context every turn, so it
@@ -118,6 +163,76 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       execution['unchangedMutationCount'] = bounded;
     }
     task.executionStateJson = jsonEncode(execution);
+  }
+
+  /// 读回「原地重建分段文件」的判定态。
+  ///
+  /// 逐字段校验而不是 `as`：检查点是可被外部写回的持久数据，缺字段或类型不对时
+  /// 必须退回"没有这个态"，而不是让一次恢复崩在类型转换上。
+  _StagedRewriteState _loadStagedRewrite(AgentTask task) {
+    final value = _safeExistingMap(task.executionStateJson)[_stagedRewriteKey];
+    if (value is! Map) return const _StagedRewriteState();
+    final count = value['count'];
+    final path = value['lastPath'];
+    final contents = value['writeDigests'];
+    return _StagedRewriteState(
+      // 判据只比较"是否达到阈值"，再往上的计数不参与任何决定，落盘时钳住即可。
+      count: count is num
+          ? count.clamp(0, _stagedRewriteRepeatedThreshold).toInt()
+          : 0,
+      corrected: value['corrected'] == true,
+      lastPath: path is String ? path : '',
+      // 旧版落盘的是"正文开头"指纹（`headFingerprints`），在整份正文的判据下
+      // 永远匹配不上，刻意不读回来：留着只会占掉有限的槽位。
+      writeDigests: contents is List          ? contents
+              .whereType<String>()
+              .take(_stagedRewriteFingerprintLimit)
+              .toList(growable: false)
+          : const <String>[],
+    );
+  }
+
+  void _persistStagedRewrite(AgentTask task, _StagedRewriteState staged) {
+    final execution = _decodeMap(task.executionStateJson);
+    if (staged.isEmpty) {
+      execution.remove(_stagedRewriteKey);
+    } else {
+      execution[_stagedRewriteKey] = {
+        'count': staged.count,
+        'corrected': staged.corrected,
+        'lastPath': staged.lastPath,
+        'writeDigests': staged.writeDigests,
+      };
+    }
+    task.executionStateJson = jsonEncode(execution);
+  }
+
+  /// 开始一次新运行：本次运行写出的路径清零。
+  ///
+  /// 放在 `execute` 里终态早退**之后**是刻意的：终态任务上的一次迟到调用不该把
+  /// 记录擦掉，否则紧随其后的失败报告会一个文件都附不出来。
+  void _resetRunArtifactPaths(AgentTask task) {
+    final execution = _decodeMap(task.executionStateJson);
+    execution[_runArtifactPathsKey] = const <String>[];
+    task.executionStateJson = jsonEncode(execution);
+  }
+
+  void _addRunArtifactPaths(AgentTask task, Set<String> written) {
+    if (written.isEmpty) return;
+    final execution = _decodeMap(task.executionStateJson);
+    final merged = <String>{..._loadRunArtifactPaths(task), ...written}
+        .toList(growable: false);
+    execution[_runArtifactPathsKey] = merged.length <= _maxRetainedArtifactPaths
+        ? merged
+        : merged.sublist(merged.length - _maxRetainedArtifactPaths);
+    task.executionStateJson = jsonEncode(execution);
+  }
+
+  List<String> _loadRunArtifactPaths(AgentTask task) {
+    final value =
+        _safeExistingMap(task.executionStateJson)[_runArtifactPathsKey];
+    if (value is! List) return const <String>[];
+    return value.whereType<String>().toList(growable: false);
   }
 
   /// 读回一次截断抢救的运行态（见 `_TruncationSalvageState`）。
@@ -444,9 +559,22 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     }.contains(normalized);
   }
 
-  String _operationKey(AgentToolCall call) {
+  String _operationKey(AgentToolCall call, {AgentTask? task}) {
     final normalized = _canonical(call.arguments);
-    return '${call.name.wireName}:$normalized';
+    final binding = task == null
+        ? null
+        : _decodeMap(task.executionStateJson)['workItemExecution'];
+    final scope = binding is Map
+        ? '${task!.id}:${binding['stage']}:${binding['workItemId']}:${binding['iterationId']}:${binding['requestRevision']}:${binding['verificationRevision']}:'
+        : '';
+    final legacy = '$scope${call.name.wireName}:$normalized';
+    if (task != null && WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+      // Preserve old cached identities; new durable indexes contain hashes only.
+      final cached = _decodeMap(task.executionStateJson)['committedActionKeys'];
+      if (cached is List && cached.contains(legacy)) return legacy;
+      return 'v2-action:${sha256.convert(utf8.encode('$legacy:${binding is Map ? binding['teamRevision'] : ''}:${task.characterId}'))}';
+    }
+    return legacy;
   }
 
   Object? _canonical(Object? value, [String? key]) {
@@ -578,7 +706,22 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     AgentToolCall call, {
     WorkToolResult? result,
   }) {
-    final paths = <String>{...task.lastArtifactPaths};
+    return _retainArtifactPaths(task, <String>{
+      ...task.lastArtifactPaths,
+      ..._writtenArtifactPaths(call, result: result),
+    });
+  }
+
+  /// 这一次工具调用写出的路径，不含已被剔掉的形态（截断抢救的暂存分段）。
+  ///
+  /// 与 [_updatedArtifactPaths] 分开是因为两者的消费者要的东西不同：那一份是
+  /// 整条任务血缘的候选集合（产物契约、完成校验都要它），这一份只服务"本次运行
+  /// 写了什么"（失败报告的附件）。
+  Set<String> _writtenArtifactPaths(
+    AgentToolCall call, {
+    WorkToolResult? result,
+  }) {
+    final paths = <String>{};
     final values = <String, Object?>{
       for (final key in const ['path', 'destinationPath'])
         key: call.arguments[key],
@@ -606,7 +749,7 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
         paths.add(_publicText(value, maximum: 1000));
       }
     }
-    return _retainArtifactPaths(task, paths);
+    return paths;
   }
 
   /// Keeps a task's artifact history inside its retention window.
@@ -1026,11 +1169,18 @@ class _LoopState {
   int completionRepairCount = 0;
   int unchangedMutationCount = 0;
 
+  /// 「原地重建分段文件」判定态，见 [_WorkAgentLoopActions._observeStagedRewrite]。
+  _StagedRewriteState stagedRewrite = const _StagedRewriteState();
+
   /// Turn-scoped instruction describing what the last tool call got wrong. It
   /// is deliberately not durable: a resumed run rebuilds it from the
   /// checkpointed tool results instead of trusting in-memory text.
   String toolRepairInstruction = '';
   String completionRepairInstruction = '';
+
+  /// 重建护栏给出的续写指令。与 [_StagedRewriteState] 同寿命：续写或成功合并
+  /// 才会清掉它，所以"纠正过一次"这件事不会因为中间夹了一次读取就丢失。
+  String stagedRewriteInstruction = '';
 
   /// 修复请求这一次拿到的正文（有界），只服务于协议失败的诊断。
   ///

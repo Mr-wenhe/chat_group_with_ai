@@ -13,6 +13,21 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
             .map(_publicText)
             .where((step) => step.isNotEmpty)
             .toList(growable: false);
+        final planFingerprint = sha256
+            .convert(utf8.encode(
+              safeSteps.join('|').toLowerCase().replaceAll(RegExp(r'\s+'), ''),
+            ))
+            .toString();
+        final stalled = await _observeV2Progress(
+          state,
+          WorkProgressObservation(
+            kind: WorkProgressObservationKind.noProgress,
+            fingerprint: planFingerprint,
+            summary: '模型重复提出方案，尚无新的外部证据。',
+            missing: '需要新的事实、问题处置或真实工作结果。',
+          ),
+        );
+        if (stalled != null) return stalled;
         task
           ..plan = safeSteps.join(' → ')
           ..status = AgentTaskStatus.planning
@@ -47,6 +62,15 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         await _checkpoint(state);
         return _result(state, WorkAgentLoopStatus.paused, task.lastError);
       case AgentHandoffDecision(:final completion):
+        if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+          return _handleDecision(
+              state,
+              AgentFinishDecision(
+                  publicUpdate: publicUpdate,
+                  completion:
+                      AgentFinishCompletion(summary: completion.summary)),
+              publicUpdate);
+        }
         final routedHandoff = WorkHandoffState.fromTask(task);
         if (routedHandoff != null && routedHandoff.needsHandoff) {
           final target = _publicText(completion.target).trim();
@@ -145,6 +169,12 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
           await _checkpoint(state);
           return null;
         }
+        if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+          final root = _safeExistingMap(task.executionStateJson);
+          root['v2WorkItemCompletion'] = completion.toJson();
+          task.executionStateJson = jsonEncode(root);
+          return _completeV2WorkItem(state, completion.summary, publicUpdate);
+        }
         task
           ..resultSummary = _publicText(completion.summary)
           ..status = AgentTaskStatus.completed
@@ -172,6 +202,27 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       case AgentToolDecision(:final tool):
         return _handleTool(state, tool, publicUpdate);
     }
+  }
+
+  /// P6 supplies an explicit signal for P7 scheduling without publishing a
+  /// false root completed event or advancing legacy handoff state.
+  Future<WorkAgentLoopResult> _completeV2WorkItem(
+      _LoopState state, String summary, String publicUpdate) async {
+    final task = state.task;
+    task
+      ..resultSummary = _publicText(summary)
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = false
+      ..lastError = ''
+      ..pendingToolRequestJson = '';
+    state.failure = null;
+    WorkFailure.clearFromTask(task);
+    await _emit(state, WorkTaskEventKind.stepCompleted, publicUpdate,
+        detail: task.resultSummary,
+        safeMetadata: {'reason': 'workItemCompleted'});
+    await _checkpoint(state);
+    return _result(
+        state, WorkAgentLoopStatus.workItemCompleted, task.resultSummary);
   }
 
   /// Asks the user to confirm a delivery the completion guard could not place,
@@ -324,9 +375,12 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       reason: publicUpdate,
       args: call.arguments,
     );
-    final operationKey = _operationKey(call);
+    final operationKey = _operationKey(call, task: task);
     if (definition.isMutation &&
-        state.committedActionKeys.contains(operationKey)) {
+        (state.committedActionKeys.contains(operationKey) ||
+            WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+                (await eventStore?.hasCommittedAction(task.id, operationKey) ??
+                    false))) {
       await _skipCommittedTool(state, call);
       return null;
     }
@@ -336,15 +390,38 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     // therefore remain free, while retry attempts share this one increment.
     var actionStarted = false;
     WorkToolResult? softLimitResult;
-    WorkToolResult? startAction() {
+    Future<WorkToolResult?> startAction() async {
       if (actionStarted) return null;
-      if (task.actionCount >= _effectiveActionLimit(task) ||
-          _timeBudgetExceeded(task)) {
+      if (WorkTaskExecutionPolicy.enforcesCumulativeLimits(task) &&
+          (task.actionCount >= _effectiveActionLimit(task) ||
+              _timeBudgetExceeded(task))) {
         softLimitResult = const WorkToolResult.paused(
           message: '已达到执行软上限，请手点继续。',
           failureCode: 'softLimit',
         );
         return softLimitResult;
+      }
+      if (definition.isMutation &&
+          WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+        final root = _decodeMap(task.executionStateJson);
+        root['mutationRecoveryVersion'] = 1;
+        root['uncertainAction'] = {
+          'operationKey': operationKey,
+          'tool': call.name.wireName,
+          'path':
+              call.arguments['path'] is String ? call.arguments['path'] : '',
+          if (call.name == AgentToolName.workspacePatch &&
+              call.arguments['content'] is String &&
+              call.arguments['append'] != true &&
+              call.arguments['parts'] == null)
+            'expectedSha256': sha256
+                .convert(utf8.encode(call.arguments['content'] as String))
+                .toString(),
+        };
+        task.executionStateJson = jsonEncode(root);
+        // Flush intent after gates, before the handler. A crash before receipt
+        // commit must not make an external call or append look safe to replay.
+        await _checkpoint(state);
       }
       actionStarted = true;
       task
@@ -364,6 +441,34 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     }
     if (softLimitResult != null && identical(toolResult, softLimitResult)) {
       return _pauseForLimit(state, softLimitResult!.message);
+    }
+    // Keep the intent through receipt observers; they may persist independently.
+    await onToolResult?.call(task, call, toolResult);
+    if (!toolResult.succeeded &&
+        actionStarted &&
+        definition.isMutation &&
+        toolResult.data['exitCode'] is int &&
+        WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+      // A returned process exit is an executed attempt, even when QA failed.
+      // Consume its identity; later work may proceed, this call may not replay.
+      await eventStore?.recordCommittedAction(task.id, operationKey);
+      state.committedActionKeys.add(operationKey);
+      final root = _decodeMap(task.executionStateJson)
+        ..remove('uncertainAction');
+      task.executionStateJson = jsonEncode(root);
+    }
+    if (toolResult.isRejected ||
+        !actionStarted ||
+        toolResult.data['changed'] == false ||
+        {
+          'waitingForApproval',
+          'toolMissing',
+          'pathRejected',
+          'blockedByDefault'
+        }.contains(toolResult.data['runStatus'])) {
+      final root = _decodeMap(task.executionStateJson)
+        ..remove('uncertainAction');
+      task.executionStateJson = jsonEncode(root);
     }
     final safeResult = _safeResult(toolResult, call);
     state.recentResults.add(safeResult);
@@ -408,6 +513,11 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
           result: toolResult,
         );
       }
+      final stalled = await _observeV2Progress(
+        state,
+        _toolProgressObservation(call, toolResult),
+      );
+      if (stalled != null) return stalled;
       final message = _publicText(toolResult.message);
       final failure = WorkFailure.fromToolResult(
         toolResult,
@@ -460,6 +570,11 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     }
 
     if (definition.isMutation && toolResult.data['changed'] == false) {
+      final stalled = await _observeV2Progress(
+        state,
+        _toolProgressObservation(call, toolResult),
+      );
+      if (stalled != null) return stalled;
       return _handleUnchangedMutation(state, call, toolResult);
     }
 
@@ -471,6 +586,11 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       isMutation: definition.isMutation,
       result: toolResult,
     );
+    final stalled = await _observeV2Progress(
+      state,
+      _toolProgressObservation(call, toolResult),
+    );
+    if (stalled != null) return stalled;
     if (state.cancellation.isCancelled) return _interrupt(state);
     final autoCompletion = await artifactCompletion?.call(
       task,
@@ -478,7 +598,9 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
       toolResult,
     );
     if (autoCompletion != null) {
-      const update = '文件已写入并验证，任务自动完成。';
+      final update = WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)
+          ? '文件已写入并验证，制作工作项完成，等待候选审查。'
+          : '文件已写入并验证，任务自动完成。';
       return _handleDecision(
         state,
         AgentFinishDecision(
@@ -488,7 +610,191 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
         update,
       );
     }
+    // 判交付物契约之前的分支都跑完了：到这里才谈得上"这次写入是不是原地重建"。
+    return _observeStagedRewrite(state, call, toolResult);
+  }
+
+  /// 「原地重建分段文件」护栏：先给一次纠正，再命中就暂停。
+  ///
+  /// 现场（2026-09-30 私聊三国杀任务）：18:19 第一版合并成功之后，模型又**新建**了 13 个
+  /// 分段文件（`sanguosha_v2.part1.html` … `sg9_p1.html`、`sg10_p1.html`），
+  /// **一个都没续写过、一次 command.run 都没跑**，5 小时里 110 分钟纯粹在等上游首字节。
+  /// 既有的 `_handleUnchangedMutation` 拦不住它——重复的只是"新建完就丢"这个形状。
+  ///
+  /// 判据刻意不看文件名：那 13 个名字互相之间没有任何稳定的同族关系
+  /// （`sg_final.part1.html` 与 `sanguosha_v6.part1.html` 连前缀都不共享），
+  /// 任何名称规则都会漏掉它。可靠的是**正文本身**：这次写入的整份正文与最近几次
+  /// 新建过的某一份相同，就是**真实重复**。
+  ///
+  /// 指纹因此取整份正文而不是开头若干字符。共用版权头、`<!DOCTYPE html>…<title>`
+  /// 这类模板头的独立文件，开头可以一模一样；按开头判会把正常的「创建六个独立
+  /// 文件」在第二个文件就判成原地重建、纠正一次后直接暂停。代价是模型每次重写都
+  /// 产出不同文字时不再命中——正文不同就是不同的文件，这条护栏此刻守的是
+  /// "同一份正文换名字重建"这个形状。
+  ///
+  /// 计数之前必须先确认**这次写入新建了文件**：`content` 写入同时也是整份覆盖已有
+  /// 文件的唯一手段（`stage02.write`），而反复重写同一个交付物是正常迭代。判据是
+  /// 结果里的 `beforeSha256`——它只在写入前目标已存在（modify 计划）时出现，
+  /// 新建（create 计划）时为 null。
+  ///
+  /// 刻意**不**按新建文件的个数拦截：一个接一个写出互不相同的新文件是正常的多文件
+  /// 交付，用计数拦它会让「创建六个独立文件」在第三个之后被要求直接 finish。
+  Future<WorkAgentLoopResult?> _observeStagedRewrite(
+    _LoopState state,
+    AgentToolCall call,
+    WorkToolResult result,
+  ) async {
+    if (result.data['rejected'] == true) return null;
+    final append = call.name == AgentToolName.workspacePatch &&
+        call.arguments['append'] == true;
+    // 抢救写入带 `append: true`，但它是**客户端合成**的续写，由模型被截断触发——
+    // 它恰恰是"还在原地重建"的产物，不是模型改用分块了。把它当进展清零，护栏就会
+    // 在自己要抓的场景里失效（每次抢救都把计数抹掉一次）。所以既不计数也不清零。
+    // 判据取命名规则的所有者，不在这里另写一份正则（见 `WorkTruncationSalvage`）。
+    if (append && WorkTruncationSalvage.isRescuePath(_stagedWritePath(call))) {
+      return null;
+    }
+    // 续写与成功合并都是"在向前推进"，与重建是同一枚硬币的两面。
+    final continuesExistingFile =
+        call.name == AgentToolName.commandRun || append;
+    if (continuesExistingFile) {
+      if (state.stagedRewrite.isEmpty) return null;
+      state.stagedRewrite = const _StagedRewriteState();
+      state.stagedRewriteInstruction = '';
+      _persistStagedRewrite(state.task, state.stagedRewrite);
+      return null;
+    }
+    if (call.name != AgentToolName.workspacePatch) return null;
+    final content = call.arguments['content'];
+    if (content is! String || content.trim().isEmpty) return null;
+    // 覆盖已有文件既不计数也不清零：清零会让"新建一份、改一次"的交替写法绕开判据，
+    // 而计数就会把上一条注释里那种正常重写误判成原地重建。
+    if (result.data['beforeSha256'] is String) return null;
+
+    final previous = state.stagedRewrite;
+    final step = _stepStagedRewrite(
+      previous,
+      _stagedWriteFingerprint(content),
+      _stagedWritePath(call),
+    );
+    if (!step.hit) {
+      state.stagedRewrite = step.next;
+      _persistStagedRewrite(state.task, state.stagedRewrite);
+      return null;
+    }
+    if (previous.corrected) return _pauseForStagedRewrite(state, step.count);
+    state.stagedRewrite = step.next;
+    _persistStagedRewrite(state.task, state.stagedRewrite);
+    state.stagedRewriteInstruction = _stagedRewriteInstruction(
+      state.stagedRewrite.lastPath,
+    );
+    await _emit(
+      state,
+      WorkTaskEventKind.toolOutput,
+      '检测到反复重建分段文件，正在改为续写已有分段。',
+      detail: state.stagedRewriteInstruction,
+      safeMetadata: {
+        'scope': 'stagedRewrite',
+        'automaticRepair': true,
+        'stagedWrites': step.count,
+        'repeatedWrite': step.repeatedContent,
+      },
+    );
+    await _checkpoint(state);
     return null;
+  }
+
+  /// 一次写入之后的判定：命中与否，以及要落盘的下一份判定态。
+  ///
+  /// 纯计算，不碰 state 与 IO——命中的两种后果（纠正、暂停）留在调用处，
+  /// 因为其中一种要发事件、另一种要暂停，都不是这个函数该知道的事。
+  _StagedRewriteStep _stepStagedRewrite(
+    _StagedRewriteState previous,
+    String fingerprint,
+    String path,
+  ) {
+    final repeatedContent = previous.writeDigests.contains(fingerprint);
+    final count = previous.count + 1;
+    final hit = repeatedContent && count >= _stagedRewriteRepeatedThreshold;
+    // 同一份正文只留一条：重建出来的新版会顶掉旧版，不然 4 个槽位会被
+    // 同一份正文占满，真正的新一版反而没地方记。
+    final contents = <String>[
+      ...previous.writeDigests.where((value) => value != fingerprint),
+      fingerprint,
+    ];
+    final bounded = contents.length <= _stagedRewriteFingerprintLimit
+        ? contents
+        : contents.sublist(contents.length - _stagedRewriteFingerprintLimit);
+    return _StagedRewriteStep(
+      hit: hit,
+      repeatedContent: repeatedContent,
+      count: count,
+      // 第一次命中：计数归零但留住"已纠正"标记，于是下一次重复要重新累到阈值才会
+      // 暂停，多文件任务还有一次自然收尾的机会——命中后直接 finish 不会被拦下来。
+      next: hit && !previous.corrected
+          ? _StagedRewriteState(
+              corrected: true,
+              lastPath: path,
+              writeDigests: bounded,
+            )
+          : _StagedRewriteState(
+              count: count,
+              corrected: previous.corrected,
+              lastPath: path,
+              writeDigests: bounded,
+            ),
+    );
+  }
+
+  /// 纠正过一次之后仍然在原地重建：把任务交回用户，别再烧上游。
+  Future<WorkAgentLoopResult?> _pauseForStagedRewrite(
+    _LoopState state,
+    int stagedWrites,
+  ) async {
+    final message = '已连续 $stagedWrites 次新建文件，其中反复写入完全相同的正文，'
+        '且从未续写任何一个，自动改为续写的纠正没有取得进展，任务未完成。'
+        '请确认是要在同一个文件上继续写，还是要生成多个互相独立的文件。';
+    return _pauseForUserAction(
+      state,
+      message,
+      failure: WorkFailure.fromSignalsForUserAction(
+        message,
+        completedContent: _completedContent(state),
+      ),
+      reason: 'stagedRewrite',
+    );
+  }
+
+  /// 写入正文的指纹。存 sha256 而不是正文：检查点是明文持久数据，
+  /// 一条写配置文件的命令不该因为护栏把密钥抄进 `agent_tasks.hive`。
+  ///
+  /// 取**整份**正文而不是开头若干字符：只比开头会把共用版权头或 HTML 模板头的
+  /// 独立文件当成同一份东西，正常的"创建六个文件"就永远走不到 finish。也**不做
+  /// 空白折叠**：`<pre>` 里一个空格与六个空格是两份显示结果不同的正文，折叠成同一
+  /// 份会把"用 pre 演示一至六个空格"这类正常多文件交付在第四次写入后暂停。
+  String _stagedWriteFingerprint(String content) =>
+      sha256.convert(utf8.encode(content)).toString();
+
+  String _stagedWritePath(AgentToolCall call) {
+    final path = call.arguments['path'];
+    return path is String ? path.trim() : '';
+  }
+
+  /// 纠正指令：两种情形都必须自洽，否则会误伤正常的多文件生成。
+  ///
+  /// 只禁止"再新建"，不禁"重写"：重写已有文件本来就不进入判定（见
+  /// [_observeStagedRewrite]），把它写进禁令会逼模型在"必须整份重写"时去 append，
+  /// 那会把第二份正文追加进同一个文件。合并路线与截断抢救共用同一句
+  /// （`_truncatedOutputChunkingAdvice`）：纯文本拼接用 `parts`，不要为它开一次
+  /// 需要用户批准的命令。
+  String _stagedRewriteInstruction(String lastPath) {
+    final anchor = lastPath.isEmpty ? '你最近新建的那个分段文件' : '`$lastPath`';
+    return '本任务已反复新建正文完全相同的分段文件，且从未续写任何一个。'
+        '如果你是在同一个交付物上重做：不要再新建分段文件，改为对已有的 '
+        '$anchor 用 workspace.patch 并带 {"append":true} 续写，每次 content 不超过 3000 字，'
+        '全部写完后用一次 workspace.patch 的 parts 把分段合并成交付物。'
+        '如果你确实在生成多个互相独立的文件：下一次决策直接返回 finish 并列出它们，'
+        '不要再新增文件。';
   }
 
   Future<WorkAgentLoopResult?> _handleUnchangedMutation(
@@ -731,12 +1037,21 @@ extension _WorkAgentLoopActions on WorkAgentLoop {
     if (isMutation && !rejected) {
       clearCommandFailureHistory(state);
       _persistUnchangedMutationCount(task, 0);
+      if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+        await eventStore?.recordCommittedAction(task.id, operationKey);
+        final root = _decodeMap(task.executionStateJson)
+          ..remove('uncertainAction');
+        task.executionStateJson = jsonEncode(root);
+      }
       state.committedActionKeys.add(operationKey);
       task.lastArtifactPaths = _updatedArtifactPaths(
         task,
         call,
         result: result,
       );
+      // 同一批路径同时进两份记录：`lastArtifactPaths` 是整条任务血缘的候选集合
+      // （产物契约、完成校验要用它），运行记录只服务失败报告的附件。
+      _addRunArtifactPaths(task, _writtenArtifactPaths(call, result: result));
       _recordArtifactChange(task, call, result);
     }
     if (isMutation) _clearCompletedMutationApproval(task);

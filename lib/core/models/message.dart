@@ -79,6 +79,38 @@ class Message extends HiveObject {
   @HiveField(13)
   int? remoteSeq;
 
+  /// Work messages never enter the ordinary global fact extractor.
+  @HiveField(14, defaultValue: false)
+  bool isWorkMode;
+
+  /// A successful, actor-owned tool receipt for retryable experience writing.
+  /// This is provenance data, never tool authorization.
+  @HiveField(15)
+  Map<dynamic, dynamic>? workMemoryEvidence;
+
+  /// Portable candidate identity plus managed file references. Never grants
+  /// execution rights; imported records require fresh verification.
+  @HiveField(16)
+  Map<dynamic, dynamic>? workDelivery;
+
+  /// Includes nested candidate/report files in the existing media lifecycle.
+  Iterable<String> get managedMediaPaths sync* {
+    for (final attachment in media ?? const <MediaAttachment>[]) {
+      yield attachment.managedPath;
+      if (workDelivery != null &&
+          attachment.localPath != attachment.managedPath) {
+        yield attachment.localPath;
+      }
+    }
+    final files = workDelivery?['files'];
+    if (files is List) {
+      for (final entry in files.whereType<Map>()) {
+        final path = entry['path'];
+        if (path is String && path.isNotEmpty) yield path;
+      }
+    }
+  }
+
   Message({
     String? id,
     required this.groupId,
@@ -94,6 +126,9 @@ class Message extends HiveObject {
     this.webSearchSnapshot,
     this.senderName,
     this.remoteSeq,
+    this.isWorkMode = false,
+    this.workMemoryEvidence,
+    this.workDelivery,
   })  : id = id ?? const Uuid().v4(),
         timestamp = timestamp ?? DateTime.now(),
         mentionedAiIds = mentionedAiIds ?? const [],

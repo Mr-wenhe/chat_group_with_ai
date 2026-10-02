@@ -37,23 +37,12 @@ int workModeRequestInputBudget({
   required int capabilityContextWindow,
 }) =>
     ContextWindowManager.inputBudget(
-      contextWindow:
-          capabilityContextWindow < 1 ? 1 : capabilityContextWindow,
+      contextWindow: capabilityContextWindow < 1 ? 1 : capabilityContextWindow,
       maxOutput: workModeRequestOutputTokens(
         capabilityMaxOutput: capabilityMaxOutput,
         capabilityContextWindow: capabilityContextWindow,
       ),
     );
-
-/// 总时限到点时的中断原因。
-const String modelCompletionTimeoutMessage = '工作模式模型请求超时。';
-
-/// 首字节停滞时的中断原因。
-///
-/// 与总时限分开措辞，是为了让事件、日志与归因能区分"上游一个字符都没吐"和
-/// "这次请求整体太慢"——两者的处置完全不同。用户看到的失败文案仍会被
-/// `WorkTaskErrorSanitizer` 统一折叠成"任务执行超时"。
-const String modelFirstByteTimeoutMessage = '工作模式模型请求首字节超时。';
 
 extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
   /// 给一次模型请求加上两个时限，并保证两者各自可取消。
@@ -82,7 +71,9 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
         ? null
         : Timer(effectiveFirstTokenTimeout, () {
             firstByteMissing = true;
-            requestToken.cancel(modelFirstByteTimeoutMessage);
+            requestToken.cancel(
+              WorkModelDeadlineException.firstByteStall.message,
+            );
           });
     if (stallTimer != null) {
       unawaited(firstByte!.then((_) => stallTimer.cancel()));
@@ -91,16 +82,17 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
       final result = await request(requestToken).timeout(
         modelCompletionTimeout,
         onTimeout: () {
-          requestToken.cancel(modelCompletionTimeoutMessage);
-          throw TimeoutException(modelCompletionTimeoutMessage);
+          requestToken
+              .cancel(WorkModelDeadlineException.completionDeadline.message);
+          throw WorkModelDeadlineException.completionDeadline;
         },
       );
       // 网关可能把"取消后的结果"包成普通响应交回来（流式适配器就是这么做的），
       // 那样停滞会伪装成一次正常返回。这里把真实原因换回来。
-      if (firstByteMissing) throw TimeoutException(modelFirstByteTimeoutMessage);
+      if (firstByteMissing) throw WorkModelDeadlineException.firstByteStall;
       return result;
     } on Object {
-      if (firstByteMissing) throw TimeoutException(modelFirstByteTimeoutMessage);
+      if (firstByteMissing) throw WorkModelDeadlineException.firstByteStall;
       rethrow;
     } finally {
       stallTimer?.cancel();
@@ -115,11 +107,15 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     required ApiConfig config,
     required String apiKey,
     required String requestText,
+    required String actorCharacterId,
     required CancelToken cancellationToken,
     required WorkTaskCancellation cancellation,
     required int capabilityMaxOutput,
     required int capabilityContextWindow,
   }) async {
+    if (task.characterId != actorCharacterId) {
+      throw StateError('工作成员已切换，需要重新绑定成员模型与个人上下文。');
+    }
     final messages = request.messages.map((message) {
       if (message['role'] == 'user' &&
           message['content'] == WorkDiscussionState.currentRequestScope(task)) {
@@ -148,9 +144,32 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
       capabilityMaxOutput: capabilityMaxOutput,
       capabilityContextWindow: capabilityContextWindow,
     );
-    final boundedMessages = ContextWindowManager.fitToTokenBudget(
+    final coreMessages = ContextWindowManager.fitToTokenBudget(
       messages,
       maxTokens: inputBudget,
+    );
+    final actor = database.aiCharacterBox.get(task.characterId);
+    if (actor == null) throw StateError('当前工作成员已不可用。');
+    final boundedMessages =
+        await runWithUnifiedMemory<List<Map<String, dynamic>>>(
+      selector: MemoryContextSelector(database),
+      conversationHistory: coreMessages,
+      observerCharacterId: actor.id,
+      actor: actor,
+      participantCharacterIds:
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)
+                  ?.collaboration
+                  ?.activeMembers ??
+              database.chatGroupBox.get(task.groupId)?.aiCharacterIds ??
+              [actor.id],
+      userMessage: requestText,
+      projectScopeId:
+          database.workModeWorkspaceBox.get(task.groupId)?.projectScopeId,
+      conversationId: task.groupId,
+      contextBoundary:
+          WorkContextBoundary.readAt(database.appSettingsBox, task.groupId),
+      maximumPromptTokens: inputBudget,
+      run: (prepared) async => prepared,
     );
     final publicUpdateStream = WorkPublicUpdateStream();
     var streamedCharacters = 0;
@@ -442,7 +461,15 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
   Iterable<WorkResourceLockRequest> _implPlanResourceLocks(AgentTask task) {
     final decoded = _decodeMap(task.executionStateJson);
     final raw = decoded['resourceLocks'];
-    if (raw is! List) return const <WorkResourceLockRequest>[];
+    if (raw is! List) {
+      final workspace = _workspaceRootForTask(task);
+      if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+          decoded['workItemExecution'] is Map &&
+          workspace != null) {
+        return [WorkResourceLockRequest.treeWrite(workspace)];
+      }
+      return const <WorkResourceLockRequest>[];
+    }
     final locks = <WorkResourceLockRequest>[];
     for (final item in raw) {
       if (item is! Map || item['path'] is! String) {

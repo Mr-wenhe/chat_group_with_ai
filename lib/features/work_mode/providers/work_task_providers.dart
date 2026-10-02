@@ -83,9 +83,15 @@ final workTaskRunnerProvider = Provider<WorkTaskRunner>((ref) {
 /// it never owns task scheduling or starts tools on its own.
 final workDiscussionRunnerProvider = Provider<WorkTaskDiscussionRunner>((ref) {
   final database = ref.watch(databaseServiceProvider);
+  final taskRunner = ref.watch(workTaskRunnerProvider);
   return WorkDiscussionRunner(
     database: database,
     credentials: SecureApiCredentialResolver(),
+    workspaceService: taskRunner is DefaultWorkTaskRunner
+        ? taskRunner.workspaceService
+        : null,
+    investigate:
+        taskRunner is DefaultWorkTaskRunner ? taskRunner.investigate : null,
     eventStore: ref.watch(workTaskEventStoreProvider),
   );
 });

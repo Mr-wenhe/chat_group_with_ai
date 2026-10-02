@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_follow_up_policy.dart';
 import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
@@ -527,6 +528,157 @@ void main() {
     expect(state.deliverableContract?['format'], 'html');
     expect(coordinator.taskForConversation(source.groupId)?.id, fresh.id);
     expect(await discussion.started.future, fresh.id);
+  });
+
+  test('a released dm record hands a new deliverable to a new task', () async {
+    // 现场：私聊里那条被应用关闭打断的记录一直占着会话，几个月后的新请求被并进
+    // 它，于是标签栏写着新请求、执行动态仍是旧运行的进度。
+    final storage = await _openStorage('work-s4-dm-released-');
+    final coordinator = WorkTaskCoordinator(
+      taskBox: storage.box,
+      eventStore: storage.events,
+      runner: _NoopRunner(),
+    );
+    addTearDown(() => _closeStorage(storage, coordinator));
+
+    final released = _task(
+      'dm-released',
+      'dm:character-one',
+      status: AgentTaskStatus.interrupted,
+    )..lastArtifactPaths = ['/workspace/jiangsu_travel_guide.pdf'];
+    await storage.box.put(released.id, released);
+
+    expect(
+      coordinator
+          .followUpDecisionForTask(released.id, '新建一个 html 三国杀游戏页面')
+          .kind,
+      WorkFollowUpKind.newArtifact,
+    );
+    expect(
+      coordinator.shouldRouteNewTaskForFollowUp(
+        released.id,
+        '新建一个 html 三国杀游戏页面',
+      ),
+      isTrue,
+    );
+    // 修订仍必须回到原记录：产物路径在它身上。
+    expect(
+      coordinator
+          .followUpDecisionForTask(
+            released.id,
+            '请修改 /workspace/jiangsu_travel_guide.pdf 的标题',
+          )
+          .kind,
+      WorkFollowUpKind.reviseArtifact,
+    );
+    expect(
+      coordinator.shouldRouteNewTaskForFollowUp(
+        released.id,
+        '请修改 /workspace/jiangsu_travel_guide.pdf 的标题',
+      ),
+      isFalse,
+    );
+  });
+
+  test('a dm holds the fresh deliverable next to the released record',
+      () async {
+    // 判据为真后页面走的是"新建任务"这条路。这里验证协调器真的装得下两条记录、
+    // 且新的一条拥有会话；否则新记录刚建好，下一次追问又会被旧记录接走。
+    final storage = await _openStorage('work-s4-dm-fork-');
+    final coordinator = WorkTaskCoordinator(
+      taskBox: storage.box,
+      eventStore: storage.events,
+      runner: _NoopRunner(),
+    );
+    addTearDown(() => _closeStorage(storage, coordinator));
+
+    final released = _task(
+      'dm-fork-old',
+      'dm:fork',
+      status: AgentTaskStatus.interrupted,
+    )
+      ..userRequest = '生成江苏旅游攻略 PDF'
+      ..updatedAt = DateTime(2026, 9, 11, 19, 50);
+    await storage.box.put(released.id, released);
+
+    final fresh = _task('dm-fork-new', 'dm:fork', characterId: 'character-one')
+      ..userRequest = '新建一个 html 三国杀游戏页面';
+    await coordinator.submit(fresh);
+
+    expect(storage.box.length, 2);
+    // 旧记录原样留着：分叉不是改写它，也不是取消它。
+    final untouched = storage.box.get(released.id)!;
+    expect(untouched.status, AgentTaskStatus.interrupted);
+    expect(untouched.userRequest, '生成江苏旅游攻略 PDF');
+    expect(coordinator.taskForConversation('dm:fork')?.id, fresh.id);
+  });
+
+  test('a dm record that is still waiting keeps the next request', () async {
+    final storage = await _openStorage('work-s4-dm-waiting-');
+    final coordinator = WorkTaskCoordinator(
+      taskBox: storage.box,
+      eventStore: storage.events,
+      runner: _NoopRunner(),
+    );
+    addTearDown(() => _closeStorage(storage, coordinator));
+
+    final paused = _task(
+      'dm-paused',
+      'dm:character-two',
+      status: AgentTaskStatus.paused,
+    );
+    final asked = _task(
+      'dm-asked',
+      'dm:character-three',
+      status: AgentTaskStatus.interrupted,
+    );
+    WorkTaskClarification.markPending(asked, '你要改哪一个？');
+    final queued = _task(
+      'dm-queued',
+      'dm:character-four',
+      status: AgentTaskStatus.interrupted,
+    )..queuedUserRequests = <String>['先把上一条做完'];
+    for (final task in <AgentTask>[paused, asked, queued]) {
+      await storage.box.put(task.id, task);
+      // 判据先成立、再被"还没交还给你"这一条否掉，否则断言可能只是在重复
+      // 分类器的另一个分支。
+      expect(
+        coordinator.followUpDecisionForTask(task.id, '新建一个 html 页面').kind,
+        WorkFollowUpKind.newArtifact,
+      );
+      expect(
+        coordinator.shouldRouteNewTaskForFollowUp(task.id, '新建一个 html 页面'),
+        isFalse,
+      );
+    }
+  });
+
+  test('conversation lookup prefers the newer task over a released interrupt',
+      () async {
+    final storage = await _openStorage('work-s4-released-lookup-');
+    final coordinator = WorkTaskCoordinator(
+      taskBox: storage.box,
+      eventStore: storage.events,
+      runner: _NoopRunner(),
+    );
+    addTearDown(() => _closeStorage(storage, coordinator));
+
+    final stale = _task(
+      'dm-lookup-stale',
+      'dm:lookup',
+      status: AgentTaskStatus.interrupted,
+    )..updatedAt = DateTime(2026, 9, 11, 19, 50);
+    final fresh = _task(
+      'dm-lookup-fresh',
+      'dm:lookup',
+      status: AgentTaskStatus.completed,
+    )..updatedAt = DateTime(2026, 9, 30, 17, 50);
+    await storage.box.put(stale.id, stale);
+    await storage.box.put(fresh.id, fresh);
+
+    // 已交还的中断记录与新任务同级，谁更近谁拥有会话；否则新记录刚建好，下一次
+    // 追问就又被旧记录接走。
+    expect(coordinator.taskForConversation('dm:lookup')?.id, fresh.id);
   });
 
   test('a group-elected owner is re-elected after a revision', () async {

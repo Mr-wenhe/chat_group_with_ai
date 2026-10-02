@@ -40,6 +40,7 @@ class MemoryConflictResolver {
     final exactDuplicate = db.permanentMemoryBox.values.any(
       (memory) =>
           memory.observerCharacterId == observerId &&
+          memory.workSource == null &&
           memory.kind == kind &&
           memory.status == MemoryStatus.active &&
           memory.content == content &&
@@ -52,6 +53,7 @@ class MemoryConflictResolver {
           .where(
             (memory) =>
                 memory.observerCharacterId == observerId &&
+                memory.workSource == null &&
                 memory.status == MemoryStatus.active &&
                 memory.kind == kind &&
                 !memory.pinned &&
@@ -69,7 +71,8 @@ class MemoryConflictResolver {
 
     final supersededIds = <String>[];
     for (final memory in db.permanentMemoryBox.values) {
-      if (memory.observerCharacterId != observerId ||
+      if (memory.workSource != null ||
+          memory.observerCharacterId != observerId ||
           memory.status != MemoryStatus.active ||
           memory.kind != kind ||
           memory.pinned ||
@@ -85,6 +88,7 @@ class MemoryConflictResolver {
     final isSupplement = db.permanentMemoryBox.values.any(
       (memory) =>
           memory.observerCharacterId == observerId &&
+          memory.workSource == null &&
           memory.status == MemoryStatus.active &&
           memory.kind == kind &&
           _listsOverlap(memory.subjectIds, subjectIds) &&
@@ -128,6 +132,7 @@ class MemoryConflictResolver {
         supersedesIds: memory.supersedesIds,
         originType: memory.originType,
         originConversationId: memory.originConversationId,
+        workSource: memory.workSource,
         originNameSnapshot: memory.originNameSnapshot,
         sourceMessageIds: memory.sourceMessageIds,
         participantIds: memory.participantIds,

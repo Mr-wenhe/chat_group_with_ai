@@ -11,6 +11,10 @@ class _S8Credentials implements ApiCredentialResolver {
 /// quality.
 class _S8ExecutionGateway extends AiRequestGateway {
   int calls = 0;
+  int productionCalls = 0;
+  int reviewCalls = 0;
+  AgentTask Function()? task;
+  String? root;
 
   _S8ExecutionGateway()
       : super(
@@ -39,7 +43,46 @@ class _S8ExecutionGateway extends AiRequestGateway {
     void Function(ChatStreamEvent event)? onEvent,
   }) async {
     calls++;
-    final response = switch (calls) {
+    final work = task?.call();
+    final binding = work == null
+        ? null
+        : (jsonDecode(work.executionStateJson) as Map)['workItemExecution']
+            as Map?;
+    if (binding?['stage'] == 'verify') {
+      final parsed = await DocumentUnderstandingService.parse(MediaAttachment(
+          type: 'file', localPath: '$root/需求文档.docx', fileName: '需求文档.docx'));
+      final start =
+          reviewCalls++ * DocumentUnderstandingService.maxRetrievedChunks;
+      final read = start < parsed.chunks.length;
+      return {
+        'success': true,
+        'message': jsonEncode({
+          'action': read ? 'tool' : 'finish',
+          'public_update': read ? '读取本轮 DOCX 正文与格式。' : '正文、核心能力和验收条目已核对，报告已留存。',
+          'tool': read
+              ? {
+                  'name': 'workspace.document',
+                  'arguments': {'path': '需求文档.docx', 'startChunk': start}
+                }
+              : null,
+          'completion': read
+              ? null
+              : {
+                  'summary': '需求与实际正文一致。',
+                  'evidence': [
+                    jsonEncode({
+                      'method': 'DOCX 正文与格式审查',
+                      'result': 'passed',
+                      'acceptanceIds': ['doc-review'],
+                      'report': '实际读取 DOCX，五项核心能力与验收标准齐全，其他内容标为后续范围。',
+                      'defects': []
+                    })
+                  ]
+                }
+        })
+      };
+    }
+    final response = switch (++productionCalls) {
       1 => <String, dynamic>{
           'action': 'tool',
           'public_update': '已根据讨论结果写入 Word 转换源。',
@@ -232,30 +275,6 @@ AICharacter _s8Character({
     apiConfigId: configId,
     toolPermissions: permissions,
   );
-}
-
-Map<String, dynamic> _s8DiscussionTurn({
-  required String update,
-  required int percent,
-}) {
-  return <String, dynamic>{
-    'success': true,
-    'message': jsonEncode(<String, dynamic>{
-      'public_update': update,
-      'understanding_percent': percent,
-      'understanding_evidence': const <String>[
-        '目标、范围和本期不做项已确认。',
-        '各职业职责、技术取舍和风险已公开记录。',
-        'Word 格式、隔离桌面位置和验收标准已确认。',
-      ],
-      'open_questions': const <String>[],
-      'resolved_questions': const <String>[],
-      'blockers': const <String>[],
-      'resolved_blockers': const <String>[],
-      'recommend_executor_id': 's8-product',
-      'substantive_progress': true,
-    }),
-  };
 }
 
 Future<AgentTask> _s8WaitFor(

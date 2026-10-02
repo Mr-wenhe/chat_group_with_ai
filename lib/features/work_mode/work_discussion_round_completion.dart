@@ -83,7 +83,7 @@ extension _DiscussionRoundCompletion on _DiscussionSession {
       await runner._publish(
         task,
         group,
-        '@${runner._ownerMentionName(group)} 讨论暂未收敛：$question 当前理解进度 ${state.understandingPercent}%，任务等待你的补充。',
+        '@${runner._ownerMentionName(group)} 讨论暂未收敛：$question 任务等待你的补充。',
         isMention: true,
         cancellation: cancellation,
       );

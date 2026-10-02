@@ -8,6 +8,7 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_decision_dialog.dart';
 import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_generic_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
@@ -19,6 +20,7 @@ import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
+import 'package:chat_group/features/work_mode/work_task_decision.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/presentation/work_folder_grant_consent_dialog.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
@@ -191,6 +193,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   bool _isCollapsed = false;
   WorkSnapshotService? _snapshotService;
   final Set<String> _approvalPromptInFlight = <String>{};
+  final Set<String> _decisionPromptInFlight = <String>{};
   late final WorkTaskOverlayController _overlayController;
   late final WorkTaskOverlayOpenTask _overlayOpenCallback;
   String? _pendingOpenTaskId;
@@ -279,12 +282,14 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       // task hidden behind the compact list still needs one host-level modal;
       // the panel remains the durable fallback after the prompt is dismissed.
       _scheduleApprovalPrompt(tasks);
+      _scheduleDecisionPrompt(tasks);
     });
     // 标签栏与队列计数按当前会话收敛，所以会话切换必须主动重算：只跟着任务流
     // 更新重算的话，切到另一个已有历史任务的会话时，标签栏仍旧是上一个会话的，
     // 而且可能一直不刷新（那个会话没有新任务事件）。
-    _conversationSubscription =
-        ConversationPresenceService.instance.activeConversationStream.listen((_) {
+    _conversationSubscription = ConversationPresenceService
+        .instance.activeConversationStream
+        .listen((_) {
       if (!mounted) return;
       // 不带 preferredTaskId：上个会话选中的任务不能跟着带到新会话。
       final visibleTasks = _visibleTasks(_allTasks);
@@ -295,6 +300,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
           _selectedTaskId = _tasks.isEmpty ? null : _tasks.first.id;
         }
       });
+      _scheduleDecisionPrompt(_allTasks);
     });
   }
 
@@ -337,6 +343,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               onStop: _stopTask,
               onContinue: _continueTask,
               onReply: _canReplyToTask ? _replyTask : null,
+              onOpenDecision: _coordinator == null ? null : _openDecision,
               onApprove: widget.onApproveTask ??
                   (_coordinator == null ? null : _approveTask),
               onApproveVersioned:
@@ -456,9 +463,10 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     // 取舍（面板头一旦被 Stack 裁掉就什么都没了）。
     final panelTopClearance = _panelTopClearance +
         (_activeConversationId == null ? 0.0 : _conversationControlsBand);
-    final panelHeight = (viewportHeight - panelTopClearance - _composerClearance)
-        .clamp(400.0, _collapsedPanelMaxHeight)
-        .toDouble();
+    final panelHeight =
+        (viewportHeight - panelTopClearance - _composerClearance)
+            .clamp(400.0, _collapsedPanelMaxHeight)
+            .toDouble();
     return Positioned(
       key: const Key('work-task-panel-bottom'),
       left: 12,
@@ -867,6 +875,102 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   Future<void> _confirmArtifactDelivery(String taskId) {
     final coordinator = _coordinator;
     return coordinator?.confirmArtifactDelivery(taskId) ?? Future<void>.value();
+  }
+
+  void _scheduleDecisionPrompt(List<AgentTask> tasks) {
+    final coordinator = _coordinator;
+    final conversationId = _activeConversationId;
+    if (coordinator == null ||
+        conversationId == null ||
+        _decisionPromptInFlight.isNotEmpty) {
+      return;
+    }
+    final candidate = tasks.where((task) {
+      final current = coordinator.taskById(task.id);
+      return current != null &&
+          current.groupId == conversationId &&
+          WorkTaskDecision.forTask(current).any((item) =>
+              item.reminderKind != null &&
+              item.promptedReminder != item.reminderKind);
+    }).firstOrNull;
+    if (candidate == null) return;
+    _decisionPromptInFlight.add(candidate.id);
+    WidgetsBinding.instance.addPostFrameCallback((_) async {
+      try {
+        if (!mounted || _activeConversationId != candidate.groupId) return;
+        await _presentDecisionDialog(candidate.id, automatic: true);
+      } finally {
+        _decisionPromptInFlight.remove(candidate.id);
+        if (mounted) _scheduleDecisionPrompt(_allTasks);
+      }
+    });
+  }
+
+  Future<void> _openDecision(String taskId) async {
+    if (_decisionPromptInFlight.isNotEmpty) return;
+    if (!_decisionPromptInFlight.add(taskId)) return;
+    try {
+      await _presentDecisionDialog(taskId, automatic: false);
+    } finally {
+      _decisionPromptInFlight.remove(taskId);
+      if (mounted) _scheduleDecisionPrompt(_allTasks);
+    }
+  }
+
+  Future<void> _presentDecisionDialog(String taskId,
+      {required bool automatic}) async {
+    final coordinator = _coordinator;
+    final task = coordinator?.taskById(taskId);
+    if (coordinator == null ||
+        task == null ||
+        !mounted ||
+        task.groupId != _activeConversationId) {
+      return;
+    }
+    final decisions =
+        WorkTaskDecision.forTask(task).where((item) => item.isOpen).toList();
+    if (decisions.isEmpty ||
+        automatic &&
+            !decisions.any((item) =>
+                item.reminderKind != null &&
+                item.promptedReminder != item.reminderKind)) {
+      return;
+    }
+    final wasVisible = _isVisible;
+    if (wasVisible) setState(() => _isVisible = false);
+    try {
+      await showDialog<void>(
+        context: widget.navigatorKey?.currentContext ?? context,
+        builder: (_) => WorkTaskDecisionDialog(
+          decisions: decisions,
+          onReply: (decision, answer, {choiceId, disposition = 'answer'}) =>
+              coordinator.respondToDecision(
+            taskId,
+            decisionId: decision.id,
+            revision: decision.revision,
+            answer: answer,
+            choiceId: choiceId,
+            disposition: disposition,
+          ),
+        ),
+      );
+      // Claim only after the route was actually shown and dismissed. A crash
+      // before presentation must still allow the reminder after restart.
+      // 快照只用来确定"这次弹过哪几条"：用户在弹窗里作答/暂缓后，那条决策的修订与
+      // 提醒种类都变了，按快照去标记会落空，于是同一个弹窗立刻重开。
+      final current = coordinator.taskById(taskId);
+      if (current != null) {
+        for (final decision
+            in WorkTaskDecision.remindersToClaim(decisions, current)) {
+          await coordinator.markDecisionPromptShown(taskId,
+              decisionId: decision.id,
+              revision: decision.revision,
+              reminderKind: decision.reminderKind!);
+        }
+      }
+    } finally {
+      if (mounted && wasVisible) setState(() => _isVisible = true);
+    }
   }
 
   void _scheduleApprovalPrompt(List<AgentTask> tasks) {

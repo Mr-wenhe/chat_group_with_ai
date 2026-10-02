@@ -69,7 +69,7 @@ class WorkContextSnapshot {
         'approvalScope': approvalScope,
         'artifactPaths': artifactPaths,
         'roleHandoff': roleHandoff,
-        'discussionState': discussionState?.compactForContext().toJson(),
+        'discussionState': discussionState?.toPromptJson(),
         'errors': errors,
         'nextStep': nextStep,
       };

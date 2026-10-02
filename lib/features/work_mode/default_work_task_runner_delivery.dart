@@ -66,13 +66,19 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
       failure.technicalDetail,
       fallback: reason,
     );
-    final attachmentSelection = await _safeArtifactsForAttachment(task);
+    // 失败报告只谈"本次运行写出的"：私聊里一条任务记录是长期血缘，整份候选会
+    // 把更早若干次运行留下的中间分段再列一遍、再附一遍。
+    final runArtifactPaths = workRunScopedArtifactPaths(task);
+    final attachmentSelection = await _safeArtifactsForAttachment(
+      task,
+      candidates: runArtifactPaths,
+    );
     final artifactNames = attachmentSelection.files
         .map((file) => _basename(file.path))
         .where((name) => name.trim().isNotEmpty)
         .take(6)
         .toList(growable: false);
-    final recordedArtifactNames = task.lastArtifactPaths
+    final recordedArtifactNames = runArtifactPaths
         .map(_basename)
         .where((name) => name.trim().isNotEmpty)
         .take(6)
@@ -116,6 +122,29 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     bool enforceArtifactContract = true,
     String? existingMessageId,
   }) async {
+    if (enforceArtifactContract &&
+        WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+      try {
+        final metadata = _decodeMap(task.executionStateJson);
+        final publicationId = sha256
+            .convert(utf8.encode(jsonEncode({
+              'request': _candidateState(task).requestRevision,
+              'team': _candidateState(task).teamRevision,
+              'operations': task.completedOperations,
+              'changes': metadata['artifactChanges'],
+            })))
+            .toString();
+        await publishCandidate(task, publicationId: publicationId);
+        if (_artifactDeliveryRetryOnly(task)) {
+          return _ArtifactDeliveryResult.failure('候选已冻结，附件投递失败。',
+              messageId: _artifactDeliveryMessageId(task),
+              retryWithExistingArtifact: true);
+        }
+        return const _ArtifactDeliveryResult.success();
+      } on Object {
+        return const _ArtifactDeliveryResult.failure('候选发布失败，请核对合同文件和存储空间。');
+      }
+    }
     final text = content.trim();
     if (text.isEmpty) return const _ArtifactDeliveryResult.success();
 
@@ -133,6 +162,7 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
             groupId: task.groupId,
             senderId: character.id,
             senderType: 'ai',
+            isWorkMode: true,
             content: '',
           );
 
@@ -484,6 +514,7 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     AgentToolCall call,
     WorkToolResult result,
   ) async {
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) return null;
     if (!_artifactCompletionTools.contains(call.name) ||
         !_artifactToolChanged(call, result) ||
         !_canAutoCompleteSingleArtifact(task)) {
@@ -634,6 +665,9 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
   /// a success message carrying the stale file. That rejection keeps the plain
   /// failure and its retry.
   Future<List<String>> _offerableDeliverables(AgentTask task) async {
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+      return const <String>[];
+    }
     final files = workspaceFileService;
     if (files == null) return const <String>[];
     final validation = await WorkArtifactDeliveryGuard.validateTask(

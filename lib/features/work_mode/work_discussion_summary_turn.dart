@@ -171,8 +171,7 @@ extension _DiscussionSummaryTurn on _DiscussionSession {
         await runner._publish(
           task,
           group,
-          '${state.executorId == null ? '[暂定协调] ' : ''}[理解进度 $percent%] '
-          '$publicSummary${runner._missingSuffix(roundQuestions, roundBlockers)}',
+          publicSummary,
           senderId: chair.character.id,
           cancellation: cancellation,
         );

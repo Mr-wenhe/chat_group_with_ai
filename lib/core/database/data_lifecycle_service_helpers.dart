@@ -75,9 +75,7 @@ extension _DataLifecycleServiceHelpers on DataLifecycleService {
         .where(
             (message) => message.id == messageId && message.groupId == groupId)
         .expand(
-          (message) =>
-              message.media?.map((attachment) => attachment.managedPath) ??
-              const <String>[],
+          (message) => message.managedMediaPaths,
         )
         .toList(growable: false);
     return DeletionTargets(

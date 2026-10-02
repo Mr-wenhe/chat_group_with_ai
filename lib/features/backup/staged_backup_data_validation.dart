@@ -65,6 +65,22 @@ void _validateBackupData(StagedBackupData data, BackupManifest manifest) {
     if (replyId != null && !messageIds.contains(replyId)) {
       throw BackupException('消息引用了不存在的回复：$replyId');
     }
+    if (value.containsKey('workDelivery')) {
+      final delivery = WorkDeliveryMetadata.portable(value['workDelivery']);
+      if (delivery == null ||
+          delivery['conversationId'] != value['groupId'] ||
+          delivery['senderId'] != value['senderId']) {
+        throw const BackupException('交付版本归属无效');
+      }
+      for (final entry in delivery['files'] as List) {
+        final declared = manifest.files[entry['path']];
+        if (declared == null ||
+            declared.bytes != entry['bytes'] ||
+            declared.sha256 != entry['sha256']) {
+          throw const BackupException('交付版本嵌套附件摘要无效');
+        }
+      }
+    }
     for (final media in value['media'] as List? ?? const []) {
       final path = Map<String, dynamic>.from(media as Map)['path'].toString();
       if (!manifest.files.containsKey(path) ||

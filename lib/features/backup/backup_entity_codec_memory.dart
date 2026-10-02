@@ -50,9 +50,8 @@ class _BackupEntityMemoryCodec {
         'recentMood': item.recentMood.name,
         // 心情时效：不带上它，恢复后老心情会一律被判过期。
         // 注意用编码函数 _date（→ISO8601 字符串）；_optionalDate 是解码方向。
-        'recentMoodAt': item.recentMoodAt == null
-            ? null
-            : _date(item.recentMoodAt!),
+        'recentMoodAt':
+            item.recentMoodAt == null ? null : _date(item.recentMoodAt!),
         'notes': item.notes,
         'lastInteractionAt': _date(item.lastInteractionAt),
         'createdAt': _date(item.createdAt),
@@ -105,6 +104,23 @@ class _BackupEntityMemoryCodec {
         'createdAt': _date(item.createdAt),
         'updatedAt': _date(item.updatedAt),
         'invalidationReason': item.invalidationReason,
+        'workSource': item.workSource == null
+            ? null
+            : {
+                for (final key in const [
+                  'scopeId',
+                  'originScopeId',
+                  'type',
+                  'taskId',
+                  'evidenceRef',
+                  'issueId',
+                  'requestRevision',
+                  'verificationRevision',
+                  'applicability'
+                ])
+                  if (item.workSource!.containsKey(key))
+                    key: item.workSource![key],
+              },
       };
 
   static Map<String, dynamic> relationshipEvent(
@@ -209,6 +225,9 @@ class _BackupEntityMemoryCodec {
         createdAt: _dateTime(json, 'createdAt'),
         updatedAt: _dateTime(json, 'updatedAt'),
         invalidationReason: json['invalidationReason']?.toString(),
+        workSource: json['workSource'] is Map
+            ? Map<String, dynamic>.from(json['workSource'] as Map)
+            : null,
       );
 
   static RelationshipEvent decodeRelationshipEvent(
@@ -401,6 +420,8 @@ class _BackupEntityMemoryCodec {
         'id': item.id,
         'conversationId': item.conversationId,
         'conversationType': item.conversationType,
+        // Local project binding is not portable.
+
         'updatedAt': _date(item.updatedAt),
       };
 
@@ -580,12 +601,40 @@ String _safeExecutionStateJson(
         continue;
       }
       if (normalized == 'discussionstate') {
+        if (WorkDiscussionState.tryParse(entry.value) == null) {
+          result['checkpointSchemaUnsupported'] = true;
+        }
         final discussion = _portableDiscussionState(
           entry.value,
           conversationId: conversationId,
         );
         if (discussion != null) {
+          if ((discussion['blockers'] as List? ?? const [])
+              .contains('discussionStateInvalid')) {
+            result['checkpointSchemaUnsupported'] = true;
+          }
           result[WorkDiscussionState.jsonKey] = discussion;
+        }
+        continue;
+      }
+      if ({'attachmentmessageid', 'sourcetaskid'}.contains(normalized)) {
+        final value = entry.value;
+        if (value is String &&
+            RegExp(r'^[A-Za-z0-9_:-]{1,128}$').hasMatch(value)) {
+          result[normalized == 'attachmentmessageid'
+              ? 'attachmentMessageId'
+              : 'sourceTaskId'] = value;
+        }
+        continue;
+      }
+      if (normalized == 'queuedattachmentmessageids' && entry.value is List) {
+        final ids = entry.value as List;
+        if (ids.length <= 64 &&
+            ids.every((id) =>
+                id is String &&
+                (id.isEmpty ||
+                    RegExp(r'^[A-Za-z0-9_:-]{1,128}$').hasMatch(id)))) {
+          result['queuedAttachmentMessageIds'] = ids;
         }
         continue;
       }
@@ -667,6 +716,53 @@ Map<String, dynamic>? _portableDiscussionState(
   }
 
   final portable = parsed.toJson();
+  if (parsed.schemaVersion == WorkDiscussionState.currentSchemaVersion) {
+    final source = parsed.collaboration!;
+    final collaboration =
+        _portableCollaborationValue(source.toJson()) as Map<String, dynamic>;
+    final sourceContract =
+        Map<String, dynamic>.from(collaboration['artifactContract'] as Map);
+    sourceContract['location'] =
+        _portableContractPath(source.artifactContract['location'] as String);
+    sourceContract.remove('verificationCommands');
+    if (source.artifactContract['files'] is List) {
+      final files = (source.artifactContract['files'] as List)
+          .whereType<String>()
+          .where((file) => _portableContractPath(file) == file)
+          .toList();
+      if (files.isEmpty) {
+        sourceContract.remove('files');
+      } else {
+        sourceContract['files'] = files;
+      }
+    }
+    sourceContract['revisionTarget'] = _portableContractPath(
+        source.artifactContract['revisionTarget']?.toString() ?? '');
+    collaboration
+      ..['projectScopeId'] = 'portable-unbound'
+      ..['teamRevision'] = source.teamRevision + 1
+      ..['verificationRevision'] = source.verificationRevision + 1
+      ..['artifactContract'] = sourceContract
+      ..['team'] =
+          source.team.map((member) => {...member, 'available': false}).toList()
+      ..['acceptances'] = source.acceptances
+          .map((item) => {...item, 'evidenceRef': ''})
+          .toList()
+      ..['iterations'] = source.iterations
+          .map((item) => {...item, 'manifestRef': '', 'reviewRef': ''})
+          .toList();
+    if (WorkCollaborationState.tryParse(collaboration) == null) {
+      return WorkDiscussionState(
+        conversationId: parsed.conversationId,
+        phase: WorkDiscussionPhase.blocked,
+        requestRevision: parsed.requestRevision,
+        blockers: const ['discussionStateInvalid'],
+      ).toJson();
+    }
+    portable['collaboration'] = collaboration;
+    portable['phase'] = WorkDiscussionPhase.blocked;
+    portable['blockers'] = ['backupWorkspaceReauthorizationRequired'];
+  }
   final contract = parsed.deliverableContract;
   if (contract == null) return portable;
   final safeContract = <String, dynamic>{
@@ -708,6 +804,55 @@ Map<String, dynamic>? _portableDiscussionState(
     portable['phase'] = WorkDiscussionPhase.blocked;
   }
   return portable;
+}
+
+Object? _portableCollaborationValue(Object? value, {String? key}) {
+  if (value is String) {
+    // Validated public identities/hashes are not opaque credentials. Text still
+    // crosses the secret/path sanitizer; no path can pass this identifier gate.
+    const identities = {
+      'taskId',
+      'conversationId',
+      'requestMessageId',
+      'coordinatorId',
+      'memberId',
+      'ownerId',
+      'subjectId',
+      'eventId',
+      'id',
+      'sourceId',
+      'targetId',
+      'issueId',
+      'resolutionId',
+      'sourceMessageId',
+      'artifactDigest',
+      'pendingInputIds',
+      'dependencyIds',
+      'acceptanceIds',
+      'memberIds',
+      'evidenceRef',
+      'evidenceRefs',
+      'resolutionRef',
+    };
+    if (identities.contains(key) &&
+        RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(value)) {
+      return const SearchSecretScanner().redact(value);
+    }
+    return _safeTaskText(value, maximum: 4096);
+  }
+  if (value is List) {
+    return value
+        .map((item) => _portableCollaborationValue(item, key: key))
+        .toList();
+  }
+  if (value is Map) {
+    return <String, dynamic>{
+      for (final entry in value.entries)
+        entry.key as String:
+            _portableCollaborationValue(entry.value, key: entry.key as String)
+    };
+  }
+  return value;
 }
 
 String _portableContractPath(String raw) {

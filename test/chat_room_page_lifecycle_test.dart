@@ -61,8 +61,10 @@ void main() {
 
   Future<void> pumpUntilTextField(WidgetTester tester) async {
     final textField = find.byType(TextField);
+    // Hive initialization uses real I/O; allow five bounded seconds under the
+    // full-suite load while retaining the 30-second per-test timeout.
     for (var attempt = 0;
-        attempt < 20 && textField.evaluate().isEmpty;
+        attempt < 100 && textField.evaluate().isEmpty;
         attempt++) {
       await tester.runAsync(
         () => Future<void>.delayed(const Duration(milliseconds: 50)),

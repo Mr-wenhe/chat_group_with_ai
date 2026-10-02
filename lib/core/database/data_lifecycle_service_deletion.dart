@@ -7,12 +7,12 @@ extension _DataLifecycleServiceDeletion on DataLifecycleService {
     DeletionTargets targets,
   ) async {
     final incomplete = <String>[];
+    final hasDelivery = db.messageBox.get(messageId)?.workDelivery != null;
     final mediaPaths = targets.mediaPaths.isNotEmpty
         ? targets.mediaPaths
         : db.messageBox
                 .get(messageId)
-                ?.media
-                ?.map((attachment) => attachment.managedPath)
+                ?.managedMediaPaths
                 .toList(growable: false) ??
             const <String>[];
     await _runner.attempt('消息删除失败', incomplete, () async {
@@ -29,7 +29,11 @@ extension _DataLifecycleServiceDeletion on DataLifecycleService {
       targets.keysFor(DeletionTargetNames.groupMemories),
       incomplete,
     );
-    return _finish(incomplete, await cleanupMediaPaths(mediaPaths));
+    return _finish(
+        incomplete,
+        hasDelivery
+            ? await cleanupOrphanMedia()
+            : await cleanupMediaPaths(mediaPaths));
   }
 
   Future<DataLifecycleResult> _runGroupDeletion(

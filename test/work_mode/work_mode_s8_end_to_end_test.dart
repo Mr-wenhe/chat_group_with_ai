@@ -21,6 +21,7 @@ import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart'
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_directory_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
@@ -37,6 +38,9 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/lifecycle_hive.dart';
+import 'work_candidate_test_support.dart';
+import 'package:chat_group/features/document/document_understanding_service.dart';
+import 'package:chat_group/core/models/media_attachment.dart';
 import '../helpers/memory_governance_store.dart';
 
 part 'work_mode_s8_end_to_end_support.dart';
@@ -50,7 +54,7 @@ void main() {
 
   setUp(() async {
     hiveDirectory = await openLifecycleHive();
-    database = DatabaseService();
+    database = CandidateTestDatabase(hiveDirectory);
     eventStore = WorkTaskEventStore(
       appSupportDirectory: Directory('${hiveDirectory.path}/s8-support'),
     );
@@ -159,10 +163,20 @@ void main() {
       participantCharacterIds: route.discussionCharacterIds,
       deliverableContract: route.deliverableContract!.toJson(),
     );
+    final fresh = WorkDiscussionState.forNewTask(task, routed: state);
+    // The dedicated test group explicitly includes these professional reviewers.
+    // No plan/delivery approval is seeded; each actual member turn must sign.
+    final team = WorkRoleRouter.selectTeam(
+        request: request,
+        characters: characters,
+        confirmedMemberIds: const ['s8-front', 's8-qa']);
+    final collaboration = fresh.collaboration!.toJson()
+      ..['team'] = team.team
+      ..['coordinatorId'] = 's8-product';
     task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
-      '',
-      state,
-    );
+        '',
+        fresh.copyWith(
+            collaboration: WorkCollaborationState.tryParse(collaboration)!));
 
     final grants = WorkFolderGrantService(
       box: database.appSettingsBox,
@@ -189,6 +203,7 @@ void main() {
     final workspaceService = WorkModeWorkspaceService(
       db: database,
       grantService: grants,
+      directories: _S8IsolatedDirectoryService(isolatedDesktop.path),
     );
     final pandoc = _S8PandocHarness();
     final commandRunner = WorkCommandRunner(
@@ -200,7 +215,9 @@ void main() {
       pathPolicy: pathPolicy,
       processStarter: pandoc.start,
     );
-    final executionGateway = _S8ExecutionGateway();
+    final executionGateway = _S8ExecutionGateway()
+      ..task = (() => task)
+      ..root = isolatedDesktop.path;
     final runner = DefaultWorkTaskRunner(
       database: database,
       eventStore: eventStore,
@@ -217,6 +234,7 @@ void main() {
     final discussionRunner = WorkDiscussionRunner(
       database: database,
       credentials: _S8Credentials(),
+      workspaceService: workspaceService,
       eventStore: eventStore,
       completion: ({
         required character,
@@ -228,15 +246,71 @@ void main() {
         required timeout,
         cancelToken,
       }) async {
-        final coordinatorPrompt = messages.any(
-          (message) => message['content'].toString().contains('协调/执行人'),
-        );
-        return _s8DiscussionTurn(
-          update: coordinatorPrompt
-              ? '${character.name}已收集前端和测试建议，完成产品取舍，确认只输出 Word 需求文档。'
-              : '${character.name}已从${character.role}职责给出可实现性、风险和验收建议。',
-          percent: coordinatorPrompt ? 100 : 70,
-        );
+        final current =
+            WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+                .collaboration!;
+        final proposing = current.plan.isEmpty;
+        final delivering = current.phase == 'reviewing';
+        return {
+          'success': true,
+          'message': jsonEncode({
+            'schemaVersion': 2,
+            'action': proposing ? 'propose' : 'approve',
+            'public_update': character.id == 's8-front'
+                ? '可实现性已核对；本次只交需求文档。'
+                : character.id == 's8-qa'
+                    ? '范围和验收条目已核对。'
+                    : '核心能力写入需求，其他功能保留在非本期范围。',
+            'issue_id': '',
+            'next_member_id': '',
+            'issues': [],
+            'resolutions': [],
+            'proposal': proposing
+                ? {
+                    'scope': current.scope,
+                    'plan': '先制作 Word 需求文档，再由其他成员核对正文、格式与验收条目。',
+                    'artifactContract': {
+                      ...current.artifactContract,
+                      'files': ['需求文档.docx']
+                    },
+                    'workItems': [
+                      {
+                        'id': 'requirements',
+                        'ownerId': 's8-product',
+                        'kind': 'produce',
+                        'dependencies': []
+                      }
+                    ],
+                    'acceptances': [
+                      {
+                        'id': 'doc-review',
+                        'method': '正文与格式审查',
+                        'requiredCapability': 'read'
+                      }
+                    ]
+                  }
+                : null,
+            'approval': proposing
+                ? null
+                : {
+                    'kind': delivering ? 'delivery' : 'plan',
+                    'subjectId': delivering
+                        ? current.currentIteration!['id']
+                        : current.taskId,
+                    'approved': true,
+                    'requestRevision': current.requestRevision,
+                    'teamRevision': current.teamRevision,
+                    'verificationRevision': current.verificationRevision,
+                    if (delivering)
+                      'iterationId': current.currentIteration!['id'],
+                    if (delivering)
+                      'artifactDigest':
+                          current.currentIteration!['artifactDigest']
+                  },
+            'decision': null,
+            'tool': null
+          })
+        };
       },
     );
     coordinator = WorkTaskCoordinator(
@@ -260,9 +334,9 @@ void main() {
     final discussionState = WorkDiscussionState.fromExecutionState(
       approvalForPatch.executionStateJson,
     );
-    expect(discussionState?.isExecutionReady, isTrue);
-    expect(discussionState?.understandingPercent, 100);
-    expect(discussionState?.executorId, 's8-product');
+    expect(discussionState?.schemaVersion, 2);
+    expect(discussionState?.collaboration?.productionReady, isTrue);
+    expect(discussionState?.collaboration?.team.length, 3);
 
     await coordinator.approve(task.id);
     final approvalForPandoc = await _s8WaitFor(
@@ -289,9 +363,13 @@ void main() {
     // Two tool turns (conversion source, then pandoc) are enough: the DOCX
     // satisfies the contract, so the loop completes from that result instead of
     // spending a third model turn on a finish decision.
-    expect(executionGateway.calls, 2);
+    expect(executionGateway.calls, greaterThanOrEqualTo(5));
     expect(pandoc.conversionCount, 1);
-    expect(completed.characterId, 's8-product');
+    expect(
+        WorkDiscussionState.fromExecutionState(completed.executionStateJson)!
+            .collaboration!
+            .deliveryReady,
+        isTrue);
     expect(completed.lastArtifactPaths, contains(endsWith('需求文档.docx')));
 
     final artifactPath = completed.lastArtifactPaths.firstWhere(
@@ -334,7 +412,7 @@ void main() {
       messages.any(
         (message) =>
             message.senderId == 's8-product' &&
-            message.content.contains('[理解进度 100%]'),
+            !message.content.contains('[理解进度'),
       ),
       isTrue,
     );

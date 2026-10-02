@@ -34,6 +34,7 @@ class _TaskActions extends StatelessWidget {
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
   final WorkTaskReply? onReply;
+  final WorkTaskAction? onOpenDecision;
   final TextEditingController replyController;
   final FocusNode replyFocusNode;
   final ValueChanged<bool>? onModalVisibilityChanged;
@@ -71,6 +72,7 @@ class _TaskActions extends StatelessWidget {
     required this.replyController,
     required this.replyFocusNode,
     this.onReply,
+    this.onOpenDecision,
     this.onModalVisibilityChanged,
     this.dialogContext,
     required this.runAction,
@@ -98,7 +100,9 @@ class _TaskActions extends StatelessWidget {
             ? artifactDeliveryConfirmationPaths(task.executionStateJson)
             : const <String>[];
     final isSoftLimitPause =
-        task.softLimitReached && _isPausedStatus(task.status);
+        WorkTaskExecutionPolicy.enforcesCumulativeLimits(task) &&
+            task.softLimitReached &&
+            _isPausedStatus(task.status);
     final hasUserAction = WorkTaskUserAction.forTask(task).isNotEmpty ||
         _hasPendingDiscussionCheckpoint(task);
     // Recovery controls are meaningful only at a user-resumable boundary. A
@@ -111,8 +115,7 @@ class _TaskActions extends StatelessWidget {
             failure == null ||
             failure.canContinue ||
             failure.canContinueAfterRolePermissionUpdate);
-    final modelClarificationPending =
-        WorkTaskClarification.isPending(task);
+    final modelClarificationPending = WorkTaskClarification.isPending(task);
     final followUpClarificationPending =
         WorkTaskClarification.isFollowUpPending(task);
     // Discussion questions use the same durable follow-up path as model
@@ -126,6 +129,8 @@ class _TaskActions extends StatelessWidget {
         (modelClarificationPending ||
             followUpClarificationPending ||
             discussionQuestion != null);
+    final openDecisions =
+        WorkTaskDecision.forTask(task).where((item) => item.isOpen).toList();
     final laterAction = WorkTaskUserAction.forTask(task).firstOrNull;
     final laterBlockerId = laterAction?.blockerId ?? 'discussionRequired';
     final laterActionVersion = laterAction?.version ??
@@ -139,20 +144,31 @@ class _TaskActions extends StatelessWidget {
     // 合同钉定人与群推举结果不一致是唯一需要用户二选一的讨论检查点。
     final conflictAction = WorkTaskUserAction.forTask(task)
         .where(
-          (action) =>
-              action.kind == WorkTaskUserActionKind.confirmExecutorSwap,
+          (action) => action.kind == WorkTaskUserActionKind.confirmExecutorSwap,
         )
         .firstOrNull;
     final conflictState = WorkDiscussionState.decodeExecutionState(
       task.executionStateJson,
     ).state;
-    final pinnedValue = conflictState?.deliverableContract?['explicitExecutorId'];
+    final pinnedValue =
+        conflictState?.deliverableContract?['explicitExecutorId'];
     final canKeepPinned = conflictState != null &&
         pinnedValue is String &&
         conflictState.candidateCharacterIds.contains(pinnedValue.trim());
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
+        if (openDecisions.isNotEmpty && onOpenDecision != null) ...[
+          FilledButton.icon(
+            key: const Key('work-task-open-decision'),
+            onPressed: actionInFlight ? null : () => onOpenDecision!(task.id),
+            icon: const Icon(Icons.question_answer_outlined),
+            label: Text(openDecisions.length == 1
+                ? '回答待决问题'
+                : '处理 ${openDecisions.length} 项待决事项'),
+          ),
+          const SizedBox(height: 8),
+        ],
         if (canReply) ...<Widget>[
           _TaskReplyBox(
             task: task,

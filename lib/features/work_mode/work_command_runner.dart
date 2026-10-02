@@ -99,14 +99,31 @@ class WorkCommandRunner {
   };
 
   static final RegExp _credentialPrompt = RegExp(
-    r'(?:sudo\s+)?(?:password|passphrase)|(?:enter\s+)?(?:login|username)|'
-    r'验证码|密码|登录|登入|\[[yYnN](?:/[yYnN])?\]|'
-    r'\([yYnN](?:/[yYnN])?\)|'
+    // A credential word on its own is also ordinary output: a generated report
+    // says 量子密码学, a design doc says 账号登录, printed markup says `login`.
+    // Those killed commands that never asked for input, so the word now has to
+    // end its line with a prompt terminator — a blocked prompt stops printing
+    // after the colon, prose and markup carry on. A prompt that omits the
+    // colon is no longer caught here; the run timeout still bounds it.
+    r'(?:password|passphrase|login|username|密码|登录|登入|验证码)'
+    r'[^\r\n]{0,32}[:：][ \t]*(?=[\r\n]|$)|'
+    // A bare `(n)` / `[y]` is a script parameter or an index far more often
+    // than a prompt — `function drawCards(n) {` paused real tasks that were
+    // printing generated code. Only the explicit `(y/n)` / `[y/n]` forms stay.
+    r'\[[yYnN]/[yYnN]\]|\([yYnN]/[yYnN]\)|'
     r'\b(?:do you want to |would you like to |please )?'
-    r'(?:continue|proceed|confirm)\b[^\r\n]{0,48}(?:\?|\[[yYnN]|\([yYnN])|'
-    r'\b(?:select|choose|choice|option)\b[^\r\n]{0,80}(?:[:?]|\[[0-9A-Za-z])|'
-    r'请选择[^\r\n]{0,80}(?:[:：?？]|\[[0-9A-Za-z])|'
-    r'\bpress\s+(?:enter|return)\b',
+    r'(?:continue|proceed|confirm)\b[^\r\n]{0,48}'
+    r'(?:\?|\[[yYnN]/[yYnN]\]|\([yYnN]/[yYnN]\))'
+    // The menu keyword must not be a code token. Printing any stylesheet used
+    // to pause the task and kill the command: `user-select:`, `select:invalid`
+    // and the `.select-card { … }` rule all matched. Requiring a standalone
+    // word and refusing to cross a `{` keeps real menus while rejecting CSS.
+    r'|(?<![\w.\-#])(?:select|choose|choice|option)'
+    r'(?![\w-]|\s*[:{\[\],>])[^\r\n{}]{0,80}(?:[:?]|\[[0-9A-Za-z])'
+    // 请选择 gets the same rule as the credential words: printed UI copy says
+    // 请选择攻击目标： and carries on, a blocking menu stops after the colon.
+    r'|请选择[^\r\n]{0,80}[:：][ \t]*(?=[\r\n]|$)'
+    r'|\bpress\s+(?:enter|return)\b',
     caseSensitive: false,
   );
 

@@ -210,6 +210,10 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
       // is told what to do with the failed result it can already see.
       if (state.toolRepairInstruction.isNotEmpty)
         'previousToolFailure': state.toolRepairInstruction,
+      // 重建护栏的纠正指令：只在"已纠正、还没续写"这段时间里出现，
+      // 续写或成功合并会连同判定态一起清掉。
+      if (state.stagedRewriteInstruction.isNotEmpty)
+        'repeatedStagedWrite': state.stagedRewriteInstruction,
       if (state.completionRepairInstruction.isNotEmpty)
         'previousCompletionFailure': state.completionRepairInstruction,
       if (state.failure != null) 'workFailure': state.failure!.toJson(),
@@ -285,9 +289,11 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
     bool includeNativeImages = true,
     String continuationHint = '',
   }) {
-    final imageParts = _nativeImageParts(context);
-    final promptContext =
-        imageParts == null ? context : _replaceImagePayloadsWithMarker(context);
+    final imageParts = workDocumentImageParts(context,
+        sanitizeText: (text) => _publicText(text, maximum: 12000));
+    final promptContext = imageParts == null
+        ? context
+        : workDocumentContextWithoutImageBytes(context);
     final rawPlan = context['plan'];
     final plan = rawPlan is String ? _publicText(rawPlan).trim() : '';
     final planningInstruction = plan.isEmpty
@@ -324,79 +330,6 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
       messages.add({'role': 'user', 'content': imageParts});
     }
     return messages;
-  }
-
-  List<Map<String, dynamic>>? _nativeImageParts(
-    Map<String, dynamic> context,
-  ) {
-    final recent = context['recentToolResults'];
-    if (recent is! List) return null;
-    for (final rawResult in recent.reversed) {
-      if (!_isDocumentImageResult(rawResult)) continue;
-      final data = rawResult['data'];
-      if (data is! Map || data['content'] is! List) continue;
-      final parts = <Map<String, dynamic>>[];
-      var hasImage = false;
-      for (final rawPart in data['content'] as List) {
-        if (rawPart is! Map) continue;
-        if (rawPart['type'] == 'text' && rawPart['text'] is String) {
-          parts.add({
-            'type': 'text',
-            'text': _publicText(rawPart['text'] as String, maximum: 12000),
-          });
-          continue;
-        }
-        if (rawPart['type'] != 'image_url' || rawPart['image_url'] is! Map) {
-          continue;
-        }
-        final url = (rawPart['image_url'] as Map)['url'];
-        if (url is! String ||
-            !url.startsWith('data:image/') ||
-            url.length > _maxModelImageDataUriChars) {
-          continue;
-        }
-        parts.add({
-          'type': 'image_url',
-          'image_url': {'url': url},
-        });
-        hasImage = true;
-      }
-      if (hasImage) return List<Map<String, dynamic>>.unmodifiable(parts);
-    }
-    return null;
-  }
-
-  Map<String, dynamic> _replaceImagePayloadsWithMarker(
-    Map<String, dynamic> context,
-  ) {
-    final recent = context['recentToolResults'];
-    if (recent is! List) return context;
-    final replaced = recent.map((rawResult) {
-      if (!_isDocumentImageResult(rawResult)) return rawResult;
-      final data = rawResult['data'];
-      if (data is! Map || !_hasImagePart(data['content'])) return rawResult;
-      return <String, dynamic>{
-        ...Map<String, dynamic>.from(rawResult),
-        'data': <String, dynamic>{
-          ...Map<String, dynamic>.from(data),
-          'content': '[图片已作为多模态消息附加]',
-        },
-      };
-    }).toList(growable: false);
-    return <String, dynamic>{...context, 'recentToolResults': replaced};
-  }
-
-  bool _isDocumentImageResult(Object? rawResult) {
-    if (rawResult is! Map) return false;
-    return rawResult['tool'] == AgentToolName.workspaceDocument.wireName &&
-        rawResult['status'] == WorkToolResultStatus.success.name;
-  }
-
-  bool _hasImagePart(Object? content) {
-    if (content is! List) return false;
-    return content.any(
-      (part) => part is Map && part['type'] == 'image_url',
-    );
   }
 
   int _effectiveActionLimit(AgentTask task) {
@@ -489,4 +422,80 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
       failure: state.failure,
     );
   }
+}
+
+// Shared by execution and discussion: native images must cross the gateway
+// as content parts, never as base64 hidden inside a JSON prompt.
+List<Map<String, dynamic>>? workDocumentImageParts(
+  Map<String, dynamic> context, {
+  required String Function(String) sanitizeText,
+}) {
+  final recent = context['recentToolResults'];
+  if (recent is! List) return null;
+  for (final rawResult in recent.reversed) {
+    if (!_isDocumentImageResult(rawResult)) continue;
+    final data = rawResult['data'];
+    if (data is! Map || data['content'] is! List) continue;
+    final parts = <Map<String, dynamic>>[];
+    var hasImage = false;
+    for (final rawPart in data['content'] as List) {
+      if (rawPart is! Map) continue;
+      if (rawPart['type'] == 'text' && rawPart['text'] is String) {
+        parts.add({
+          'type': 'text',
+          'text': sanitizeText(rawPart['text'] as String),
+        });
+        continue;
+      }
+      if (rawPart['type'] != 'image_url' || rawPart['image_url'] is! Map) {
+        continue;
+      }
+      final url = (rawPart['image_url'] as Map)['url'];
+      if (url is! String ||
+          !url.startsWith('data:image/') ||
+          url.length > _maxModelImageDataUriChars) {
+        continue;
+      }
+      parts.add({
+        'type': 'image_url',
+        'image_url': {'url': url},
+      });
+      hasImage = true;
+    }
+    if (hasImage) return List<Map<String, dynamic>>.unmodifiable(parts);
+  }
+  return null;
+}
+
+Map<String, dynamic> workDocumentContextWithoutImageBytes(
+  Map<String, dynamic> context,
+) {
+  final recent = context['recentToolResults'];
+  if (recent is! List) return context;
+  final replaced = recent.map((rawResult) {
+    if (!_isDocumentImageResult(rawResult)) return rawResult;
+    final data = rawResult['data'];
+    if (data is! Map || !_hasImagePart(data['content'])) return rawResult;
+    return <String, dynamic>{
+      ...Map<String, dynamic>.from(rawResult),
+      'data': <String, dynamic>{
+        ...Map<String, dynamic>.from(data),
+        'content': '[图片已作为多模态消息附加]',
+      },
+    };
+  }).toList(growable: false);
+  return <String, dynamic>{...context, 'recentToolResults': replaced};
+}
+
+bool _isDocumentImageResult(Object? rawResult) {
+  if (rawResult is! Map) return false;
+  return rawResult['tool'] == AgentToolName.workspaceDocument.wireName &&
+      rawResult['status'] == WorkToolResultStatus.success.name;
+}
+
+bool _hasImagePart(Object? content) {
+  if (content is! List) return false;
+  return content.any(
+    (part) => part is Map && part['type'] == 'image_url',
+  );
 }

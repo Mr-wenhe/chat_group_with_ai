@@ -1,8 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
+import 'package:path/path.dart' as p;
+import 'work_candidate_publication.dart';
+import 'work_task_execution_policy.dart';
+import 'package:chat_group/features/memory/memory_context_selector.dart';
+import 'work_mode_memory_runner.dart';
+import 'work_collaboration_state.dart';
 
 import 'package:archive/archive_io.dart';
+import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -36,11 +44,13 @@ import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'work_discussion_investigation.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_mode_directory_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
+import 'package:chat_group/features/work_mode/work_model_deadline.dart';
 import 'package:chat_group/features/work_mode/work_document_tool.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
@@ -69,6 +79,11 @@ part 'default_work_task_runner_file_policy.dart';
 part 'default_work_task_runner_command_execution.dart';
 part 'default_work_task_runner_context.dart';
 part 'default_work_task_runner_delivery.dart';
+part 'default_work_task_runner_candidates.dart';
+part 'default_work_task_runner_production.dart';
+part 'default_work_task_runner_recovery.dart';
+part 'default_work_task_runner_production_delivery.dart';
+part 'default_work_task_runner_review.dart';
 part 'default_work_task_runner_attachments.dart';
 
 /// App-scoped adapter between durable work tasks and the one production loop.
@@ -88,7 +103,81 @@ class DefaultWorkTaskRunner
         WorkTaskWorkspaceRebinder,
         WorkTaskVisionModelValidator,
         WorkTaskDiscussionExecutorValidator,
-        WorkTaskFailureReporter {
+        WorkTaskFailureReporter,
+        WorkTaskCollaborationExecutor,
+        WorkTaskRecoveryValidator {
+  static const investigationCredentialTimeout = Duration(seconds: 8);
+
+  /// Reuses production role permissions, Stage02 path/disclosure/sensitive-read
+  /// checks and the sole loop. No command fallback or writable probe exists.
+
+  Future<WorkInvestigationResult> investigate(
+    AgentTask task,
+    AICharacter character,
+    AgentToolCall call,
+    WorkInvestigationBinding binding,
+    WorkTaskCancellation cancellation,
+  ) async {
+    if (character.id != binding.memberId || !binding.matches(task)) {
+      throw StateError('调查成员或需求版本不匹配。');
+    }
+    final current = database.aiCharacterBox.get(character.id);
+    final config = current?.apiConfigId == null
+        ? null
+        : database.apiConfigBox.get(current!.apiConfigId);
+    if (current == null ||
+        !current.isActive ||
+        !current.agenticEnabled ||
+        config == null ||
+        (await credentials
+                    .resolve(config)
+                    .timeout(investigationCredentialTimeout))
+                ?.trim()
+                .isNotEmpty !=
+            true) {
+      throw StateError('调查成员或模型配置已不可用，未自动换人。');
+    }
+    final files = workspaceFileService;
+    final mutations = mutationService;
+    if (files == null || mutations == null) throw StateError('受控文件服务未就绪。');
+    final workspace = await workspaceService.loadOrCreate(
+        conversationId: task.groupId,
+        isDirectChat: false,
+        requireWritable: false,
+        preferredRootPath:
+            directoryService.requestedWorkspacePath(task.userRequest));
+    final collaboration =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)
+            ?.collaboration;
+    if (collaboration != null &&
+        collaboration.projectScopeId != workspace.projectScopeId) {
+      throw StateError('项目绑定已变化，未沿用旧项目调查上下文。');
+    }
+    final token = CancelToken();
+    unawaited(cancellation.whenCancelled.then((_) => token.cancel()));
+    try {
+      final registry = _registryFor(
+          task: task,
+          character: current,
+          workspaceRoot: workspace.workDirPath,
+          files: files,
+          mutations: mutations,
+          cancellationToken: token,
+          approvalDecision: null,
+          approvalScope: null,
+          modelCapability:
+              gateway.capability(_providerFor(config), config.modelName));
+      return await WorkAgentLoop(
+              model: (_) => throw StateError('调查动作已由成员协议选择'),
+              registry: registry,
+              eventStore: eventStore,
+              clock: clock)
+          .investigate(task, call, binding, cancellation);
+    } finally {
+      token.cancel();
+    }
+  }
+
   final DatabaseService database;
   final WorkTaskEventStore eventStore;
   final ApiCredentialResolver credentials;
@@ -152,6 +241,7 @@ class DefaultWorkTaskRunner
 
   void Function(AgentTask task)? _taskUpdateSink;
   Future<void> Function(AgentTask task)? _taskCheckpointSink;
+  final Set<String> _coordinatorDeliveryTasks = {};
 
   /// The full request is retained only while this process is waiting for a
   /// user decision. Durable task fields contain the redacted checkpoint.
@@ -196,6 +286,10 @@ class DefaultWorkTaskRunner
         clock = clock ?? DateTime.now;
 
   @override
+  Future<bool> prepareCollaborationWork(AgentTask task) =>
+      _prepareCollaborationWork(task);
+
+  @override
   void setTaskUpdateSink(void Function(AgentTask task) sink) =>
       _implSetTaskUpdateSink(sink);
 
@@ -225,6 +319,14 @@ class DefaultWorkTaskRunner
     WorkDiscussionState state,
   ) =>
       _implValidateDiscussionExecutor(task, state);
+
+  @override
+  Future<void> commitCollaborationDelivery(AgentTask task,
+          {bool Function()? hasArrivingInput}) =>
+      _commitCollaborationDelivery(task, hasArrivingInput: hasArrivingInput);
+
+  @override
+  Future<String?> validateRecovery(AgentTask task) => _validateRecovery(task);
 
   @override
   Future<void> run(

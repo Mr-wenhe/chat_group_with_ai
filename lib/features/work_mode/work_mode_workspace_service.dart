@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:uuid/uuid.dart';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/work_mode_workspace.dart';
@@ -46,6 +47,10 @@ class WorkModeWorkspaceService {
     if (existing != null &&
         existing.workDirPath == path &&
         existing.conversationType == conversationType) {
+      if (existing.projectScopeId == null) {
+        existing.projectScopeId = const Uuid().v4();
+        await db.workModeWorkspaceBox.put(conversationId, existing);
+      }
       return existing;
     }
     final workspace = existing?.conversationType == conversationType
@@ -55,6 +60,7 @@ class WorkModeWorkspaceService {
             conversationType: conversationType,
           );
     workspace
+      ..projectScopeId = const Uuid().v4()
       ..workDirPath = path
       ..updatedAt = DateTime.now();
     await db.workModeWorkspaceBox.put(conversationId, workspace);
@@ -133,6 +139,10 @@ class WorkModeWorkspaceService {
             conversationId: conversationId,
             conversationType: expectedType,
           );
+    if (workspace.workDirPath != normalizedPath ||
+        workspace.projectScopeId == null) {
+      workspace.projectScopeId = const Uuid().v4();
+    }
     workspace
       ..workDirPath = normalizedPath
       ..updatedAt = DateTime.now();

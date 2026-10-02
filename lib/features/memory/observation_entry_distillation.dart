@@ -305,6 +305,7 @@ extension _ObservationEntryDistillation on ObservationEntry {
           supersedesIds: old.supersedesIds,
           originType: old.originType,
           originConversationId: old.originConversationId,
+          workSource: old.workSource,
           originNameSnapshot: old.originNameSnapshot,
           sourceMessageIds: old.sourceMessageIds,
           participantIds: old.participantIds,

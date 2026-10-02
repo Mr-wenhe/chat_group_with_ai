@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'work_collaboration_state.dart';
 import 'dart:math';
 
 import 'package:chat_group/core/models/agent_task.dart';
@@ -14,6 +15,7 @@ import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'work_discussion_investigation.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_model_deadline.dart';
@@ -105,6 +107,7 @@ class WorkAgentModelRequest {
 
 enum WorkAgentLoopStatus {
   completed,
+  workItemCompleted,
   paused,
   waitingForApproval,
   failed,
@@ -140,6 +143,8 @@ class WorkAgentLoopResult {
   });
 
   bool get isCompleted => status == WorkAgentLoopStatus.completed;
+  bool get isWorkItemCompleted =>
+      status == WorkAgentLoopStatus.workItemCompleted;
 }
 
 /// 抢救结果：无论成功与否，`hint` 都是下一次决策要带的续写指令。
@@ -189,6 +194,79 @@ class _TruncationSalvageState {
   });
 }
 
+/// 「原地重建分段文件」护栏的常量，见
+/// [_WorkAgentLoopActions._observeStagedRewrite]。
+///
+/// 阈值只数**真实重复**，不数新建文件个数：2026-09-30 那次私聊三国杀任务的特点是
+/// 同一份正文被反复重建（13 个分段的文件名毫无同族关系，只有正文一致），而这正是
+/// 普通多文件生成不会有的形状。曾经按"连续新建文件数达到 3"拦截过，结果是
+/// "创建六个独立文件"这类正常请求在第三个文件后就被要求直接 finish 并最终暂停。
+const int _stagedRewriteRepeatedThreshold = 2;
+
+/// 已记录的分段正文指纹上限。只用来判"这一版是不是又在重建同一份东西"，
+/// 保留最近几条就够，不必随步骤数增长。
+const int _stagedRewriteFingerprintLimit = 4;
+
+/// 「原地重建分段文件」的判定态（见 [_WorkAgentLoopActions._observeStagedRewrite]）。
+///
+/// 落检查点，因为护栏必须活着穿过暂停：2026-09-30 那次私聊三国杀任务被软上限
+/// 暂停过三次，每次用户点「继续」都是一轮新的空转。计数只在内存里的话，一个
+/// 60 分钟的暂停就能把它清零。
+class _StagedRewriteState {
+  /// 连续**新建**文件的次数（只有新建计数，见 [_observeStagedRewrite]）。
+  /// 续写或成功的命令把它清零。
+  ///
+  /// 命中条件是 [_stagedRewriteRepeatedThreshold] 与"这次的正文与最近几段相同"：
+  /// 光有新文件、正文各不相同不算重建，只算在做多份互不相同的交付物。
+  final int count;
+
+  /// 已经给过一次纠正指令。第二次命中必须暂停——纠正指令明说了"不要再新建"，
+  /// 再犯就不是没听懂，而是做不动。
+  final bool corrected;
+
+  /// 最近一次新建文件的相对路径，用来把纠正指令钉在一个具体文件上。
+  final String lastPath;
+
+  /// 已记录的一次性写入正文指纹（sha256，**不落正文**）。
+  ///
+  /// 存指纹而不是正文：检查点是明文持久数据，一条写配置文件的命令不该因为护栏
+  /// 把密钥抄进 `agent_tasks.hive`。指纹取**整份原始**正文：只比开头会把共用
+  /// 版权头/HTML 模板头的独立文件误判成同一份东西，折叠空白则会把两份显示结果
+  /// 不同的正文（`<pre>` 里的空格数）判成同一份。
+  ///
+  /// 落盘键叫 `writeDigests`，刻意避开 `_isPrivateField` 的正文黑名单（含
+  /// `content` 子串的键会在检查点里被整体丢掉，护栏就活不过一次暂停）。
+  final List<String> writeDigests;
+
+  const _StagedRewriteState({
+    this.count = 0,
+    this.corrected = false,
+    this.lastPath = '',
+    this.writeDigests = const <String>[],
+  });
+
+  bool get isEmpty =>
+      count == 0 && !corrected && lastPath.isEmpty && writeDigests.isEmpty;
+}
+
+/// [_WorkAgentLoopActions._stepStagedRewrite] 的结果。
+///
+/// [next] 只在没有暂停时使用：第二次命中要暂停，暂停不写状态（记录留给用户
+/// 处置后的下一次运行），所以那一支的 [next] 是可忽略的。
+class _StagedRewriteStep {
+  final _StagedRewriteState next;
+  final bool hit;
+  final bool repeatedContent;
+  final int count;
+
+  const _StagedRewriteStep({
+    required this.next,
+    required this.hit,
+    required this.repeatedContent,
+    required this.count,
+  });
+}
+
 /// Executes one durable work task using the Stage 03 decision protocol.
 ///
 /// This is the sole production work-mode loop. Ordinary chat and legacy
@@ -210,6 +288,14 @@ class WorkAgentLoop
   // decisions after the one bounded repair attempt before surfacing a task
   // failure, while retaining the global retry cap below.
   static const int defaultMaxProtocolRetries = 3;
+  // 一次成功的截断抢救能换来几次「接着写」的续写决策。
+  //
+  // 与协议重试额度**分开**：抢救花的是那份额度，两条线合用一个计数器时会出现
+  // "抢救跑完却立刻判失败"的顺序（`execute` 里判额度的位置见
+  // `WorkAgentLoop` 的截断分支）。分开之后它也要有界——续写指令要求的是每次
+  // ≤3000 字的 `append`，本就不会再撞上限，两次足以覆盖"抢救后又截断一次"，
+  // 而真正的失控由动作数上限兜住（抢救写入计入动作数，是设计刻意如此）。
+  static const int _salvageContinuationBudget = 2;
   // How many times a command the input validator rejected may be replanned
   // before that rejection is surfaced. Deliberately separate from the protocol
   // retry budget: a rejected command carries its own failure text and remedy, so
@@ -269,6 +355,11 @@ class WorkAgentLoop
   final WorkAgentSleep sleep;
   final WorkAgentEventSink? onEvent;
   final WorkAgentCheckpointSink? onCheckpoint;
+
+  /// Full tool results are available only at this real execution boundary;
+  /// public checkpoints still use the existing redacted projection.
+  final FutureOr<void> Function(AgentTask, AgentToolCall, WorkToolResult)?
+      onToolResult;
   final WorkAgentCompletionGuard? completionGuard;
   final WorkAgentArtifactCompletion? artifactCompletion;
   final WorkAgentPreflightTool? preflightTool;
@@ -314,6 +405,7 @@ class WorkAgentLoop
     this.onEvent,
     this.onCheckpoint,
     this.completionGuard,
+    this.onToolResult,
     this.artifactCompletion,
     this.preflightTool,
     this.artifactConfirmation,
@@ -371,6 +463,66 @@ class WorkAgentLoop
     await execute(task, cancellation: cancellation);
   }
 
+  /// One investigation action through the same registry, retry, event and
+  /// progress boundaries. It completes an action, never the parent task.
+  Future<WorkInvestigationResult> investigate(
+    AgentTask task,
+    AgentToolCall call,
+    WorkInvestigationBinding binding,
+    WorkTaskCancellation cancellation,
+  ) async {
+    if (!binding.matches(task) ||
+        cancellation.isCancelled ||
+        !WorkToolRegistry.investigationToolNames.contains(call.name)) {
+      return const WorkInvestigationResult(
+          result: WorkToolResult.permissionDenied(
+              message: '调查归属失效或工具不属于受控只读能力，未执行。'));
+    }
+    final state = _LoopState(
+        task: task,
+        cancellation: cancellation,
+        conversationHistory: const [],
+        committedActionKeys: _loadCommittedActionKeys(task));
+    var started = false;
+    final result = await _callToolWithRetries(state, call, actionStarter: () {
+      if (!binding.matches(task) || cancellation.isCancelled) {
+        return const WorkToolResult.paused(message: '需求或成员版本已变化，调查停止。');
+      }
+      if (!started) {
+        task.actionCount++;
+        started = true;
+      }
+      return null;
+    });
+    if (cancellation.isCancelled || !binding.matches(task)) {
+      return WorkInvestigationResult(
+          result: WorkToolResult.paused(
+              message: '调查结果属于旧版需求，未推进当前问题。', data: result.data));
+    }
+    final observation = _toolProgressObservation(call, result);
+    final guard = WorkProgressGuard.observe(
+        _decodeMap(task.executionStateJson), observation,
+        now: clock());
+    task.executionStateJson = jsonEncode(guard.executionState);
+    await _emit(state, WorkTaskEventKind.toolOutput,
+        result.message.isEmpty ? '调查动作已返回。' : result.message,
+        detail:
+            '调查凭据 investigation:${task.id}:${task.actionCount}；成员 ${binding.memberId}；问题 ${binding.issueId}；需求版本 ${binding.requestRevision}；工具 ${call.name.wireName}；来源 ${call.arguments['path'] ?? ''}；结果摘要 SHA256 ${sha256.convert(utf8.encode(jsonEncode(result.data)))}',
+        safeMetadata: {
+          'evidenceRef': 'investigation:${task.id}:${task.actionCount}',
+          'phase': 'investigation',
+          'memberId': binding.memberId,
+          'issueId': binding.issueId,
+          'requestRevision': binding.requestRevision,
+          'teamRevision': binding.teamRevision,
+          'tool': call.name.wireName
+        });
+    return WorkInvestigationResult(
+        result: result,
+        evidenceRef: 'investigation:${task.id}:${task.actionCount}',
+        stalled: guard.stalled);
+  }
+
   Future<WorkAgentLoopResult> execute(
     AgentTask task, {
     WorkTaskCancellation? cancellation,
@@ -389,6 +541,13 @@ class WorkAgentLoop
     state.handoff = _loadHandoff(task);
     state.commandFailureKeys.addAll(_loadCommandFailureKeys(task));
     state.unchangedMutationCount = _loadUnchangedMutationCount(task);
+    state.stagedRewrite = _loadStagedRewrite(task);
+    // 纠正指令由判定态派生而不是单独落盘：暂停会打断这次 execute，
+    // 恢复时按同样的规则重建即可，两边不会说不一样的话。
+    if (state.stagedRewrite.corrected) {
+      state.stagedRewriteInstruction =
+          _stagedRewriteInstruction(state.stagedRewrite.lastPath);
+    }
     state.failure = task.workFailure;
     // Terminal tasks are immutable from the execution loop's perspective.
     // Check this before inspecting the discussion marker so a late direct
@@ -400,6 +559,17 @@ class WorkAgentLoop
     if (workExecutionCheckpointRequiresReview(task.executionStateJson)) {
       return _pauseForCheckpointReview(state);
     }
+    if (_decodeMap(task.executionStateJson).containsKey('uncertainAction')) {
+      return _pauseForUserAction(state, '上次操作结果不确定，请先核对真实后置条件，未重放副作用。');
+    }
+    // 一次新运行从"本次运行写出的路径"清零开始（失败报告的附件只认这一段）。
+    //
+    // 两处顺序都是判据的一部分，不要挪：①在终态早退之后——终态任务上的一次迟到
+    // 调用不该擦掉上一次运行的记录；②在检查点审查之后——写这条状态要解码再重新
+    // 编码 `executionStateJson`，而 `_decodeMap` 会把畸形检查点悄悄读成 `{}`：
+    // 排在审查之前，就等于抢在审查看见它之前把畸形抹平了，任务会带着损坏的检查点
+    // 直接开跑。
+    _resetRunArtifactPaths(task);
     final discussion = WorkDiscussionState.decodeExecutionState(
       task.executionStateJson,
     );
@@ -409,6 +579,20 @@ class WorkAgentLoop
       String? reason;
       if (gate == null || gate.conversationId != task.groupId) {
         reason = '讨论状态无效，已阻止执行。';
+      } else if (gate.collaboration != null) {
+        final binding =
+            _decodeMap(task.executionStateJson)['workItemExecution'];
+        final collaboration = gate.collaboration!;
+        if (!gate.isExecutionReady ||
+            binding is! Map ||
+            binding['requestRevision'] != collaboration.requestRevision ||
+            binding['teamRevision'] != collaboration.teamRevision ||
+            binding['verificationRevision'] !=
+                collaboration.verificationRevision ||
+            binding['actorId'] != task.characterId ||
+            !collaboration.activeMembers.contains(task.characterId)) {
+          reason = '当前成员工作项或版本未通过执行门槛。';
+        }
       } else if (!gate.isExecutionReady) {
         reason = '群讨论尚未完成，已阻止执行。';
       } else {
@@ -496,6 +680,9 @@ class WorkAgentLoop
       // 通用的分块话术。`salvaged` 与它同寿命，只用来给事件标题选措辞。
       var continuationHint = '';
       var salvaged = false;
+      // 抢救自己那份额度。抢救花的是协议重试的额度，两条线合用一个计数器时会
+      // 出现"抢救跑完却立刻判失败"的顺序——见 `_salvageContinuationBudget`。
+      var salvageContinuations = 0;
       // 上一次运行留下的抢救运行态。审批暂停会把这次 execute 打断，所以它不在
       // 局部变量里，而在检查点的运行态字段里（[_TruncationSalvageState]）。
       final salvage = _loadTruncationSalvage(task);
@@ -644,8 +831,18 @@ class WorkAgentLoop
           final detail = truncated
               ? _truncatedOutputDetail(response)
               : (parsed.detail ?? '模型返回的 AgentDecision 无法解析。');
-          if (protocolRetryCount < maxProtocolRetries) {
-            protocolRetryCount++;
+          final withinProtocolBudget = protocolRetryCount < maxProtocolRetries;
+          if (withinProtocolBudget) protocolRetryCount++;
+          // 抢救成功了就必须有一次续写机会，哪怕协议重试的额度刚好用尽。抢救的
+          // 全部意义就是把"一次写不完"转成"接着写"，而它恰恰花的是协议重试的额度：
+          // 额度先耗尽的顺序下，抢救会落盘一次分段、计一次动作数、多一个附件候选，
+          // 然后同一秒判失败——收益一分不兑现（2026-10-01 00:07 现场：38742 字
+          // 落盘，紧跟着 `failed 任务未完成。模型输出达到上限被截断`）。
+          final withinSalvageBudget = salvaged &&
+              !withinProtocolBudget &&
+              salvageContinuations < _salvageContinuationBudget;
+          if (withinSalvageBudget) salvageContinuations++;
+          if (withinProtocolBudget || withinSalvageBudget) {
             await _emit(
               state,
               WorkTaskEventKind.toolOutput,
@@ -654,10 +851,13 @@ class WorkAgentLoop
                 repairRequestFailed: repairRequestFailed,
                 salvaged: salvaged,
               ),
-              detail: '第 $protocolRetryCount 次协议重试',
+              detail: withinProtocolBudget
+                  ? '第 $protocolRetryCount 次协议重试'
+                  : '抢救后续写（协议重试额度已用尽）',
               safeMetadata: {
                 'scope': 'modelProtocol',
                 'retry': protocolRetryCount,
+                if (!withinProtocolBudget) 'salvageContinuation': true,
                 if (truncated) 'truncated': true,
                 if (repairRequestFailed) 'repairRequestFailed': true,
                 ..._protocolFailureDiagnostics(
@@ -762,7 +962,8 @@ class WorkAgentLoop
     _LoopState state,
     Map<String, dynamic> response,
   ) async {
-    final salvage = WorkTruncationSalvage.extract(_responseBody(response) ?? '');
+    final salvage =
+        WorkTruncationSalvage.extract(_responseBody(response) ?? '');
     if (salvage == null) return _truncationSalvageFallback;
     final rescuedPath = WorkTruncationSalvage.rescuePath(
       salvage.targetPath,
@@ -850,9 +1051,7 @@ class WorkAgentLoop
     await _emit(
       state,
       WorkTaskEventKind.toolOutput,
-      committed
-          ? '已抢救被截断的输出：$characters 字写入分段文件。'
-          : '抢救被截断的输出未落盘，将按精简指令重试。',
+      committed ? '已抢救被截断的输出：$characters 字写入分段文件。' : '抢救被截断的输出未落盘，将按精简指令重试。',
       detail: committed
           ? rescuedPath
           : _salvageFailureDetail(

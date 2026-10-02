@@ -7,19 +7,29 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
   /// every candidate passed that contract, so only those paths are considered.
   /// Without it the run has no contract and the ordinary set of changed files is
   /// used.
+  ///
+  /// [candidates] overrides what "the ordinary set" means. The failure report
+  /// passes the paths written by *this* run (`workRunScopedArtifactPaths`), not
+  /// the task's whole lineage: one private-chat record is a long-lived lineage,
+  /// so the lineage view re-attached 19 intermediates / 350 KB from earlier
+  /// runs under a sentence that says 本次运行写出的.
   Future<_ArtifactAttachmentSelection> _safeArtifactsForAttachment(
     AgentTask task, {
     List<String> deliverablePaths = const <String>[],
+    List<String>? candidates,
   }) async {
     final files = workspaceFileService;
     if (files == null || task.lastArtifactPaths.isEmpty) {
       return const _ArtifactAttachmentSelection();
     }
-    final candidates =
-        deliverablePaths.isEmpty ? task.lastArtifactPaths : deliverablePaths;
+    final effective = candidates ??
+        (deliverablePaths.isEmpty
+            ? task.lastArtifactPaths
+            : deliverablePaths);
+    if (effective.isEmpty) return const _ArtifactAttachmentSelection();
     final entries = <_ArtifactFileEntry>[];
     final skipped = <String>[];
-    for (final raw in candidates) {
+    for (final raw in effective) {
       try {
         final resolved = await files.pathPolicy.resolveExisting(raw);
         // `wasSymbolicLink` also reports harmless platform aliases such as
@@ -64,6 +74,7 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
     List<_ArtifactFileEntry> entries, {
     required List<String> skippedNames,
     required List<String> includedArchivePaths,
+    bool preservePaths = false,
     Future<void> Function(int processedFiles, int processedBytes)?
         onFileProcessed,
   }) async {
@@ -88,8 +99,9 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
             skippedNames.add(_basename(file.path));
             continue;
           }
-          final name =
-              '${index.toString().padLeft(3, '0')}_${entry.archivePath}';
+          final name = preservePaths
+              ? entry.archivePath
+              : '${index.toString().padLeft(3, '0')}_${entry.archivePath}';
           final target = File('${staging.path}/$name');
           await target.parent.create(recursive: true);
           await file.copy(target.path);
@@ -288,6 +300,32 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
   ) async {
     if (cancellation.isCancelled || task.isTerminal) return;
     final messageId = _artifactDeliveryMessageId(task);
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+      final kind = database.messageBox.get(messageId)?.workDelivery?['kind'];
+      try {
+        final delivered = await resendCandidateMessage(task, messageId);
+        if (cancellation.isCancelled ||
+            !database.agentTaskBox.containsKey(task.id)) {
+          return;
+        }
+        task
+          ..status = kind == 'final'
+              ? AgentTaskStatus.runningTool
+              : delivered && _candidateState(task).phase == 'verifying' &&
+                  _decodeMap(task.executionStateJson)['workItemExecution'] is Map
+                  ? AgentTaskStatus.queued
+                  : AgentTaskStatus.paused
+          ..resumeRequired = !delivered;
+        await _persistCheckpoint(task);
+      } on Object {
+        task
+          ..status = AgentTaskStatus.paused
+          ..resumeRequired = true
+          ..lastError = '原候选版本缺失或已变化，请核对后处理，未重新执行制作。';
+        await _persistCheckpoint(task);
+      }
+      return;
+    }
     final character = database.aiCharacterBox.get(task.characterId);
     if (character == null) {
       final failure = WorkFailure.fromToolFailure(
@@ -340,6 +378,7 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
 
   Future<void> _persistCheckpoint(AgentTask task) async {
     task.updatedAt = clock();
+    if (_coordinatorDeliveryTasks.contains(task.id)) return;
     final sink = _taskCheckpointSink;
     if (sink != null) {
       await sink(task);
@@ -397,9 +436,11 @@ extension _DefaultWorkTaskRunnerAttachments on DefaultWorkTaskRunner {
       retryable: true,
     );
     task
-      ..status = result.retryWithExistingArtifact
-          ? AgentTaskStatus.completed
-          : AgentTaskStatus.failed
+      ..status = WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)
+          ? AgentTaskStatus.paused
+          : result.retryWithExistingArtifact
+              ? AgentTaskStatus.completed
+              : AgentTaskStatus.failed
       ..resumeRequired = true
       ..lastError = failure.reason
       ..updatedAt = clock();

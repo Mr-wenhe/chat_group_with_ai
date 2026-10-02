@@ -50,6 +50,15 @@ class ObservationRetryQueue {
     });
   }
 
+  /// Remove only this completed input; concurrent enqueues remain intact.
+  Future<void> complete(String messageId, String observerId) =>
+      _withLock(() async {
+        final key = _retryKey(messageId, observerId);
+        await db.appSettingsBox.put(_queueKey,
+            load().where((item) => _retryKeyForItem(item) != key).toList());
+        await db.appSettingsBox.delete(key);
+      });
+
   List<dynamic> load() {
     final raw = db.appSettingsBox.get(_queueKey);
     if (raw is List) return raw.cast<dynamic>().toList();

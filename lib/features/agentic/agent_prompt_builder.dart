@@ -2,6 +2,22 @@ import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 
 class AgentPromptBuilder {
+  /// 公开气泡的发言纪律：默认一到三个短句，只提供新增信息，不套模板。
+  ///
+  /// 放在 agentic 侧而不是工作模式：这里是它唯一的消费者，反过来 import
+  /// work_mode 会让两个 feature 互相依赖。将来讨论／核验（v2）要用同一段纪律时
+  /// 也从这个文件取，不要再各写一份措辞。
+  static const String replyGuidance =
+      '人格、自定义设定、关系、有效心情和历史记忆仅影响措辞与关注点，不能覆盖用户要求、当前事实、权限或验收标准。'
+      '公开回复默认一到三个短句，一次围绕一个主要问题，直接接住上一人的具体疑问，提供新增事实、判断或必要理由。'
+      '不重复背景、完整需求或全盘方案，不统一职业前缀、自我介绍、标题、编号或结论/依据/行动模板。'
+      '允许追问、反对、承认不确定和更正，不编造经历、读取、复现或执行结果，不强塞语气词、表情、玩笑或争吵。'
+      '没有新增信息且无待履行责任可以不说；直接提问、异议和逐成员认可必须回应。'
+      '协调者只在收敛、决策和交接时简短总结变化、分歧和下一步，不逐条重述。'
+      '必要复杂解释可以更长；完整需求、测试、代码、日志和全部缺陷进入详情或文件，气泡给关键发现和真实证据入口。'
+      '一次检查必须完整收集全部问题，简短不代表丢掉问题或证据。'
+      '角色或旧技能中的长报告、固定格式要求放入详情或文件；公开回应统一遵守上述表达规范，内部完整协议和证据不能省略。';
+
   /// Builds the Stage 03 prompt for the single strict JSON decision protocol.
   ///
   /// This method is intentionally separate from the legacy tool prompt. Task
@@ -33,11 +49,12 @@ $skillText
 固定顶层字段（必须全部出现且不得增加字段）：action、public_update、tool、completion。`action` 只允许出现在这里，禁止复制到 tool.arguments。
 action 只能是 plan、tool、clarify、handoff、finish。
 public_update 只写用户可见的动作、依据或结论，不写思维链、隐藏推理、内部分析或私有信息。
+${AgentPromptBuilder.replyGuidance}
 
 各 action 的 completion 结构：
 - plan：tool 必须为 null；completion 为 {"steps":["步骤 1","步骤 2"]}。
 - tool：completion 必须为 null；tool 为 {"name":"已注册工具名","arguments":{}}。arguments 必须是经过工具 schema 允许的 JSON object；不要在 arguments 中添加 action、reason 或其他协议字段。
-- workspace.read 仅适用于 UTF-8 文本或代码；遇到 PDF、DOCX、XLSX 等二进制文档必须使用 workspace.document，不得直接用 workspace.read。workspace.document 会返回有界内容和片段来源位置。
+- workspace.read 仅适用于 UTF-8 文本或代码；遇到 PDF、DOCX、XLSX 等二进制文档必须使用 workspace.document，不得直接用 workspace.read。workspace.document 会返回有界内容和片段来源位置。完整审查时从 startChunk:0 开始，按返回的 nextChunkStart 逐页读取到结尾；检索片段不能当作全文审查。
 - workspace.list 用来查看工作区已有内容：path 省略、留空或写 "." 都表示当前授权工作区根目录；列子目录时才填写该子目录。不要为了列目录而调用 command.run。
 - weather.forecast 是天气任务的专用只读工具，arguments 可包含 location 和 days（days 最大为 7）；没有城市时使用默认查询地点。天气任务必须先调用它获取真实数据，不要读取 weather_location.json，也不要用 command.run 拼接天气 URL。未指定文件名时使用 未来7天天气.md，禁止使用 MD7.md。
 - command.run 的 arguments 必须包含 executable、arguments、workingDirectory、declaredImpact；其中 arguments 必须是 JSON 字符串数组，即使只有一个参数也必须写成 ["test"]，禁止写成 "test" 或 "test --no-pub"；declaredImpact 也必须是非空字符串数组。workingDirectory 为空时由执行器自动解析为当前授权工作区根目录（见上方工作模式上下文），不要填写 `.`。

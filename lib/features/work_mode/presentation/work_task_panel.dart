@@ -1,5 +1,6 @@
 import 'dart:async';
 import 'dart:convert';
+import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
@@ -7,6 +8,7 @@ import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_confirmation.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
+import 'package:chat_group/features/work_mode/work_task_run_boundary.dart';
 import 'package:chat_group/features/work_mode/work_task_action_notice.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
@@ -15,9 +17,12 @@ import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_task_approval_plan.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
+import 'package:chat_group/features/work_mode/work_task_execution_policy.dart';
 import 'package:chat_group/features/work_mode/work_follow_up_policy.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
+import 'package:chat_group/features/work_mode/work_task_decision.dart';
 import 'package:chat_group/features/chat_group/widgets/blinking_cursor.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:flutter/material.dart';
@@ -63,6 +68,7 @@ class WorkTaskPanel extends StatefulWidget {
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
   final WorkTaskReply? onReply;
+  final WorkTaskAction? onOpenDecision;
   final WorkTaskAction? onApprove;
   final WorkTaskVersionedAction? onApproveVersioned;
   final WorkTaskAction? onApproveWithoutUndo;
@@ -138,6 +144,7 @@ class WorkTaskPanel extends StatefulWidget {
     required this.onStop,
     required this.onContinue,
     this.onReply,
+    this.onOpenDecision,
     required this.onOpenConversation,
     required this.onCollapse,
     required this.onClose,
@@ -427,6 +434,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               onStop: widget.onStop,
               onContinue: widget.onContinue,
               onReply: widget.onReply,
+              onOpenDecision: widget.onOpenDecision,
               replyController: _replyController,
               replyFocusNode: _replyFocusNode,
               onModalVisibilityChanged: widget.onModalVisibilityChanged,
@@ -484,36 +492,36 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
         // 历史任务不再执行，所以这里不接执行类动作；但"重新放回标签栏"和
         // "删除记录"都不是执行动作，而历史列表正是这两件事的唯一入口。
         if (detailTask != null &&
-            (widget.onOpenInTabStrip != null || widget.onDeleteTask != null))
-          ...<Widget>[
-            const SizedBox(height: 12),
-            Align(
-              alignment: Alignment.centerRight,
-              child: Wrap(
-                spacing: 8,
-                children: <Widget>[
-                  if (widget.onOpenInTabStrip != null)
-                    OutlinedButton.icon(
-                      key: const Key('work-task-history-open-in-tabs'),
-                      onPressed: _actionInFlight
-                          ? null
-                          : () => _openHistoryTaskInTabs(detailTask),
-                      icon: const Icon(Icons.tab_unselected_rounded),
-                      label: const Text('在标签栏打开'),
-                    ),
-                  if (widget.onDeleteTask != null)
-                    TextButton.icon(
-                      key: const Key('work-task-history-delete'),
-                      onPressed: _actionInFlight
-                          ? null
-                          : () => _confirmDeleteHistoryTask(detailTask),
-                      icon: const Icon(Icons.delete_outline_rounded),
-                      label: const Text('删除任务'),
-                    ),
-                ],
-              ),
+            (widget.onOpenInTabStrip != null ||
+                widget.onDeleteTask != null)) ...<Widget>[
+          const SizedBox(height: 12),
+          Align(
+            alignment: Alignment.centerRight,
+            child: Wrap(
+              spacing: 8,
+              children: <Widget>[
+                if (widget.onOpenInTabStrip != null)
+                  OutlinedButton.icon(
+                    key: const Key('work-task-history-open-in-tabs'),
+                    onPressed: _actionInFlight
+                        ? null
+                        : () => _openHistoryTaskInTabs(detailTask),
+                    icon: const Icon(Icons.tab_unselected_rounded),
+                    label: const Text('在标签栏打开'),
+                  ),
+                if (widget.onDeleteTask != null)
+                  TextButton.icon(
+                    key: const Key('work-task-history-delete'),
+                    onPressed: _actionInFlight
+                        ? null
+                        : () => _confirmDeleteHistoryTask(detailTask),
+                    icon: const Icon(Icons.delete_outline_rounded),
+                    label: const Text('删除任务'),
+                  ),
+              ],
             ),
-          ],
+          ),
+        ],
       ],
     );
   }

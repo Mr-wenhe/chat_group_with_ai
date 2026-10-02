@@ -14,6 +14,7 @@ import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
@@ -25,6 +26,7 @@ import 'package:chat_group/features/work_mode/work_task_clarification.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
+import 'package:chat_group/features/work_mode/work_task_decision.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -431,6 +433,53 @@ AgentTask _taskWithDiscussion(
   return task;
 }
 
+AgentTask _v2DecisionTask(
+  String id, {
+  required List<Map<String, dynamic>> decisions,
+  List<Map<String, dynamic>> workItems = const [],
+  List<Map<String, dynamic>> acceptances = const [],
+}) {
+  final task = _task(id: id, conversationId: 'group-v2');
+  final raw = WorkCollaborationState.fromLegacy(
+    taskId: id,
+    conversationId: task.groupId,
+    projectScopeId: 'scope-v2',
+    requestRevision: 1,
+    requestMessageId: 'request-$id',
+    scope: task.userRequest,
+    artifactContract: {
+      'type': 'document',
+      'format': 'txt',
+      'location': 'out.txt',
+      'revisionTarget': ''
+    },
+  ).toJson();
+  raw
+    ..['coordinatorId'] = 'worker'
+    ..['team'] = [
+      {
+        'memberId': 'worker',
+        'role': 'writer',
+        'qualificationRef': 'skill',
+        'qualified': true,
+        'available': true
+      }
+    ]
+    ..['decisions'] = decisions
+    ..['workItems'] = workItems
+    ..['acceptances'] = acceptances;
+  final state = WorkCollaborationState.tryParse(raw)!;
+  return _taskWithDiscussion(
+      task,
+      WorkDiscussionState(
+        schemaVersion: 2,
+        conversationId: task.groupId,
+        phase: WorkDiscussionPhase.blocked,
+        requestRevision: 1,
+        collaboration: state,
+      ));
+}
+
 void _markDiscussionReady(AgentTask task) {
   final current = WorkDiscussionState.fromExecutionState(
     task.executionStateJson,
@@ -531,6 +580,26 @@ Future<void> _waitForInstallCall(_FakeWorkTaskRunner runner) async {
   fail('安装器未在限定时间内启动');
 }
 
+/// 只数调用次数的 v2 讨论运行器：用来验证"补充要求之后有没有重新调度讨论"。
+class _CountingV2DiscussionRunner
+    implements WorkTaskDiscussionRunner, WorkTaskCollaborationDiscussionRunner {
+  int calls = 0;
+
+  @override
+  Future<void> runDiscussion(AgentTask task, WorkTaskCancellation cancellation,
+      WorkTaskDiscussionStateSink updateState) async {}
+
+  @override
+  Future<void> runCollaboration(
+      AgentTask task,
+      WorkTaskCancellation cancellation,
+      Future<AgentTask> Function(WorkCollaborationUpdate) apply) async {
+    calls++;
+    // 让这次讨论在协调器的口径里"没有跑完"：调用次数只由本用例自己的等待驱动。
+    task.resumeRequired = true;
+  }
+}
+
 void main() {
   late Directory directory;
   late Box<AgentTask> taskBox;
@@ -569,6 +638,519 @@ void main() {
     await eventStore.close();
     await Hive.close();
     if (await directory.exists()) await directory.delete(recursive: true);
+  });
+
+  test(
+      'P1 v2 checkpoint stays off the legacy runner and commits one checked member event',
+      () async {
+    final task = _task(id: 'v2-controlled', conversationId: 'group-v2');
+    final raw = WorkCollaborationState.fromLegacy(
+      taskId: task.id,
+      conversationId: task.groupId,
+      projectScopeId: 'scope-v2',
+      requestRevision: 1,
+      requestMessageId: '',
+      scope: task.userRequest,
+      artifactContract: {
+        'type': 'document',
+        'format': 'txt',
+        'location': 'out.txt',
+        'revisionTarget': ''
+      },
+    ).toJson();
+    raw
+      ..['coordinatorId'] = 'worker'
+      ..['plan'] = '确认方案'
+      ..['team'] = [
+        {
+          'memberId': 'worker',
+          'role': 'writer',
+          'qualificationRef': 'skill',
+          'qualified': true,
+          'available': true
+        },
+      ];
+    final current = WorkCollaborationState.tryParse(raw)!;
+    final marker = WorkDiscussionState(
+      schemaVersion: 2,
+      conversationId: task.groupId,
+      phase: WorkDiscussionPhase.ready,
+      requestRevision: 1,
+      understandingPercent: 100,
+      collaboration: current,
+    );
+    await coordinator.submit(_taskWithDiscussion(task, marker));
+    expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+    expect(runner.startedTaskIds, isEmpty);
+    final nextRaw = current.toJson();
+    nextRaw['revision'] = 2;
+    nextRaw['appliedEventIds'] = ['member-plan-1'];
+    nextRaw['approvals'] = [
+      {
+        'eventId': 'member-plan-1',
+        'memberId': 'worker',
+        'kind': 'plan',
+        'subjectId': task.id,
+        'requestRevision': 1,
+        'teamRevision': 1,
+        'iterationId': '',
+        'artifactDigest': '',
+        'verificationRevision': 1,
+        'approved': true,
+        'evidenceRef': 'message-1',
+        'source': 'memberModel'
+      },
+    ];
+    final update = WorkCollaborationUpdate(
+      taskId: task.id,
+      conversationId: task.groupId,
+      expectedRevision: 1,
+      eventId: 'member-plan-1',
+      sourceRole: 'member',
+      sourceId: 'worker',
+      next: WorkCollaborationState.tryParse(nextRaw)!,
+    );
+    await coordinator.applyCollaborationUpdate(update);
+    await coordinator.applyCollaborationUpdate(update);
+    expect(
+        coordinator
+            .discussionStateForTask(task.id)
+            .state!
+            .collaboration!
+            .revision,
+        2);
+    expect(runner.startedTaskIds, isEmpty);
+    await expectLater(
+        coordinator.updateDiscussionState(task.id, marker), throwsStateError);
+  });
+
+  test(
+      'P3 decision persists free advice, rejects stale buttons and resolves a choice',
+      () async {
+    final task = _v2DecisionTask('decision-choice', decisions: [
+      {
+        'id': 'color',
+        'revision': 1,
+        'status': 'pending',
+        'reason': '棋子应该是什么颜色？',
+        'evidence': '设计稿缺少色值',
+        'answer': '',
+        'impact': '会影响图标与对比度',
+        'responseRef': '',
+        'kind': 'choice',
+        'targetId': 'color',
+        'missingCondition': '需要选定颜色',
+        'options': [
+          {'id': 'red', 'label': '红色', 'impact': '对比度较高'},
+          {'id': 'blue', 'label': '蓝色', 'impact': '沿用当前配色'},
+        ],
+      }
+    ]);
+    await coordinator.submit(task);
+    final stored = taskBox.get(task.id)!;
+    expect(WorkTaskClarification.isAnswerable(stored), isTrue);
+    final action = WorkTaskUserAction.forTask(stored)
+        .where((item) => item.blockerId.startsWith('decision_'))
+        .single;
+    expect(WorkTaskUserAction.fromMessageId(action.messageId)?.kind,
+        WorkTaskUserActionKind.answerQuestion);
+    expect(
+        await coordinator.markDecisionPromptShown(task.id,
+            decisionId: 'color', revision: 1, reminderKind: 'initial'),
+        isTrue);
+    expect(
+        await coordinator.markDecisionPromptShown(task.id,
+            decisionId: 'color', revision: 1, reminderKind: 'initial'),
+        isFalse);
+    expect(
+        await coordinator.respondToDecision(task.id,
+            decisionId: 'color',
+            revision: 1,
+            answer: '再斟酌一下',
+            responseMessageId: 'reply-1'),
+        isFalse);
+    final unresolved = WorkTaskDecision.forTask(taskBox.get(task.id)!).single;
+    expect(unresolved.status, 'pending');
+    expect(unresolved.answer, '再斟酌一下');
+    expect(unresolved.missingCondition, contains('明确选择'));
+    expect(
+        WorkTaskUserAction.isCurrent(taskBox.get(task.id)!,
+            blockerId: action.blockerId, version: action.version),
+        isFalse);
+    await expectLater(
+        coordinator.respondToDecision(task.id,
+            decisionId: 'color', revision: 1, answer: '红色'),
+        throwsStateError);
+    expect(
+        await coordinator.respondToDecision(task.id,
+            decisionId: 'color',
+            revision: 2,
+            answer: '',
+            choiceId: 'red',
+            responseMessageId: 'reply-2'),
+        isTrue);
+    expect(WorkTaskDecision.forTask(taskBox.get(task.id)!).single.status,
+        'answered');
+    expect(
+        await coordinator.respondToDecision(task.id,
+            decisionId: 'color',
+            revision: 2,
+            answer: '',
+            choiceId: 'red',
+            responseMessageId: 'reply-2'),
+        isTrue);
+  });
+
+  test('P3 defer remains blocked and produces a fresh remainder reminder',
+      () async {
+    final task = _v2DecisionTask('decision-remainder', decisions: [
+      {
+        'id': 'qa',
+        'revision': 1,
+        'status': 'pending',
+        'reason': '浏览器验收缺少环境',
+        'answer': '',
+        'impact': '当前不能声称已运行验证',
+        'responseRef': '',
+        'kind': 'acceptance',
+        'targetId': 'qa',
+      }
+    ], workItems: [
+      {
+        'id': 'content',
+        'ownerId': 'worker',
+        'dependencies': <String>[],
+        'status': 'pending',
+        'requestRevision': 1
+      },
+      {
+        'id': 'qa',
+        'ownerId': 'worker',
+        'dependencies': <String>[],
+        'status': 'blocked',
+        'requestRevision': 1
+      },
+    ], acceptances: [
+      {
+        'id': 'qa',
+        'method': 'browser',
+        'requiredCapability': 'browser',
+        'status': 'pending',
+        'evidenceRef': '',
+        'requestRevision': 1,
+        'verificationRevision': 1
+      },
+    ]);
+    await coordinator.submit(task);
+    expect(
+        await coordinator.respondToDecision(task.id,
+            decisionId: 'qa',
+            revision: 1,
+            answer: '先继续',
+            responseMessageId: 'reply-defer'),
+        isTrue);
+    final stored = taskBox.get(task.id)!;
+    final decision = WorkTaskDecision.forTask(stored).single;
+    expect(decision.status, 'deferred');
+    expect(decision.reminderKind, isNull);
+    final current =
+        WorkDiscussionState.fromExecutionState(stored.executionStateJson)!
+            .collaboration!;
+    final workDoneJson = current.toJson();
+    workDoneJson['revision'] = current.revision + 1;
+    workDoneJson['requestRevision'] = current.requestRevision + 1;
+    workDoneJson['workItems'] = [
+      {...current.workItems.first, 'status': 'done'},
+      current.workItems.last,
+    ];
+    workDoneJson['appliedEventIds'] = [...current.appliedEventIds, 'work-done'];
+    await coordinator.applyCollaborationUpdate(WorkCollaborationUpdate(
+      taskId: task.id,
+      conversationId: task.groupId,
+      expectedRevision: current.revision,
+      eventId: 'work-done',
+      sourceRole: 'coordinator',
+      sourceId: 'worker',
+      next: WorkCollaborationState.tryParse(workDoneJson)!,
+    ));
+    expect(WorkTaskDecision.forTask(taskBox.get(task.id)!).single.reminderKind,
+        'remainderReady');
+    expect(
+        WorkDiscussionState.fromExecutionState(stored.executionStateJson)!
+            .collaboration!
+            .deliveryReady,
+        isFalse);
+    expect(
+        await coordinator.markDecisionPromptShown(task.id,
+            decisionId: 'qa', revision: 2, reminderKind: 'remainderReady'),
+        isTrue);
+    expect(
+        await coordinator.markDecisionPromptShown(task.id,
+            decisionId: 'qa', revision: 2, reminderKind: 'remainderReady'),
+        isFalse);
+    expect(
+        WorkTaskDecision.forTask(taskBox.get(task.id)!).single.promptedReminder,
+        'remainderReady');
+    await coordinator.dispose();
+    coordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      installerIsMacOS: true,
+    );
+    await coordinator.restore();
+    expect(
+        WorkTaskDecision.forTask(taskBox.get(task.id)!).single.promptedReminder,
+        'remainderReady');
+    expect(
+        await coordinator.markDecisionPromptShown(task.id,
+            decisionId: 'qa', revision: 2, reminderKind: 'remainderReady'),
+        isFalse);
+    expect(
+        await coordinator.respondToDecision(task.id,
+            decisionId: 'qa',
+            revision: 2,
+            answer: '我在 Safari 实测通过',
+            disposition: 'manual',
+            responseMessageId: 'manual-result'),
+        isTrue);
+    final resolved = WorkDiscussionState.fromExecutionState(
+            taskBox.get(task.id)!.executionStateJson)!
+        .collaboration!;
+    expect(resolved.acceptances.single['status'], 'manual');
+    expect(resolved.acceptances.single['evidenceRef'], 'manual-result');
+    expect(resolved.deliveryReady, isFalse); // fresh team approval still needed
+  });
+
+  test('暂缓后不再立刻重开：提醒按弹窗关闭后的状态补记', () async {
+    // 弹窗打开时独立工作项已全部完成，决策仍是 pending：提醒种类是 initial，
+    // 而它一旦被暂缓就变成 remainderReady——这正是"关闭后重开"的触发条件。
+    final task = _v2DecisionTask('decision-dialog-loop', decisions: [
+      {
+        'id': 'qa',
+        'revision': 1,
+        'status': 'pending',
+        'reason': '浏览器验收缺少环境',
+        'answer': '',
+        'impact': '当前不能声称已运行验证',
+        'responseRef': '',
+        'kind': 'acceptance',
+        'targetId': 'qa',
+      }
+    ], workItems: [
+      {
+        'id': 'content',
+        'ownerId': 'worker',
+        'dependencies': <String>[],
+        'status': 'done',
+        'requestRevision': 1
+      },
+      {
+        'id': 'qa',
+        'ownerId': 'worker',
+        'dependencies': <String>[],
+        'status': 'done',
+        'requestRevision': 1
+      },
+    ], acceptances: [
+      {
+        'id': 'qa',
+        'method': 'browser',
+        'requiredCapability': 'browser',
+        'status': 'pending',
+        'evidenceRef': '',
+        'requestRevision': 1,
+        'verificationRevision': 1
+      },
+    ]);
+    await coordinator.submit(task);
+    final shown = WorkTaskDecision.forTask(taskBox.get(task.id)!)
+        .where((item) => item.isOpen)
+        .toList();
+    expect(shown.single.reminderKind, 'initial');
+    expect(shown.single.remainderReady, isTrue);
+
+    // 用户在弹窗里点「此项先放着」。
+    expect(
+        await coordinator.respondToDecision(task.id,
+            decisionId: 'qa',
+            revision: 1,
+            answer: '先继续',
+            responseMessageId: 'reply-defer'),
+        isTrue);
+    final deferred = WorkTaskDecision.forTask(taskBox.get(task.id)!).single;
+    expect(deferred.status, 'deferred');
+    expect(deferred.reminderKind, 'remainderReady');
+
+    // 按弹窗前的快照标记：修订已变，标记落空，于是刚弹过的提醒立刻又满足条件。
+    expect(
+        await coordinator.markDecisionPromptShown(task.id,
+            decisionId: shown.single.id,
+            revision: shown.single.revision,
+            reminderKind: shown.single.reminderKind!),
+        isFalse);
+
+    // 按关闭后的当前状态补记：这一次已经弹过，就记这一次。
+    for (final decision
+        in WorkTaskDecision.remindersToClaim(shown, taskBox.get(task.id)!)) {
+      expect(
+          await coordinator.markDecisionPromptShown(task.id,
+              decisionId: decision.id,
+              revision: decision.revision,
+              reminderKind: decision.reminderKind!),
+          isTrue);
+    }
+    final claimed = WorkTaskDecision.forTask(taskBox.get(task.id)!).single;
+    expect(
+      claimed.promptedReminder,
+      claimed.reminderKind,
+      reason: '还有没记上的提醒时，宿主会立刻把同一个弹窗再打开一次',
+    );
+    expect(claimed.promptedReminder, 'remainderReady');
+  });
+
+  test('从头重试不会把 v2 协作状态降级为 v1', () async {
+    final task = _v2DecisionTask('decision-restart', decisions: [
+      {
+        'id': 'color',
+        'revision': 1,
+        'status': 'pending',
+        'reason': '棋子应该是什么颜色？',
+        'answer': '',
+        'impact': '会影响图标与对比度',
+        'responseRef': '',
+        'kind': 'choice',
+        'targetId': 'color',
+        'options': [
+          {'id': 'red', 'label': '红色', 'impact': '对比度较高'},
+        ],
+      }
+    ]);
+    await coordinator.submit(task);
+    // 用户停止过的任务可以"从头开始"重试：那条路径会清空执行检查点并写入一份新的
+    // v1 讨论状态，v2 协作记录（认可、待决事项、验收）会连同它一起消失。
+    final record = taskBox.get(task.id)!;
+    record
+      ..status = AgentTaskStatus.cancelled
+      ..lastError = '用户已停止任务。';
+    await taskBox.put(record.id, record);
+
+    Object? caught;
+    try {
+      await coordinator.retry(task.id);
+    } on Object catch (error) {
+      caught = error;
+    }
+
+    expect(caught, isA<StateError>());
+    expect(caught.toString(), contains('v2'));
+    final restored = WorkDiscussionState.fromExecutionState(
+      taskBox.get(task.id)!.executionStateJson,
+    )!;
+    expect(
+      restored.schemaVersion,
+      WorkDiscussionState.currentSchemaVersion,
+      reason: '降级成 v1 就等于整块协作记录消失',
+    );
+    expect(restored.collaboration!.decisions.single['id'], 'color');
+  });
+
+  test(
+      'P3 free answer resolves an open question but bare continue cannot waive it',
+      () async {
+    final task = _v2DecisionTask('decision-free', decisions: [
+      {
+        'id': 'rule',
+        'revision': 1,
+        'status': 'pending',
+        'reason': '棋子到终点后如何计分？',
+        'answer': '',
+        'impact': '影响游戏规则',
+        'responseRef': '',
+        'kind': 'question',
+        'targetId': '',
+      }
+    ]);
+    await coordinator.submit(task);
+    expect(
+        await coordinator.respondToDecision(task.id,
+            decisionId: 'rule', revision: 1, answer: '先继续'),
+        isFalse);
+    final pending = WorkTaskDecision.forTask(taskBox.get(task.id)!).single;
+    expect(pending.status, 'pending');
+    expect(pending.missingCondition, contains('具体事项'));
+    expect(
+        await coordinator.respondToDecision(task.id,
+            decisionId: 'rule', revision: 2, answer: '不知道'),
+        isFalse);
+    expect(WorkTaskDecision.forTask(taskBox.get(task.id)!).single.status,
+        'pending');
+    expect(
+        await coordinator.respondToDecision(task.id,
+            decisionId: 'rule', revision: 3, answer: '每枚棋子抵达终点得一分；全部到达结束。'),
+        isTrue);
+    final resolved = WorkTaskDecision.forTask(taskBox.get(task.id)!).single;
+    expect(resolved.status, 'answered');
+    expect(resolved.answer, contains('每枚棋子'));
+    expect(WorkTaskClarification.isAnswerable(taskBox.get(task.id)!), isFalse);
+  });
+
+  test('P3 late decision after task deletion cannot restore its record',
+      () async {
+    final task = _v2DecisionTask('decision-deleted', decisions: [
+      {
+        'id': 'format',
+        'revision': 1,
+        'status': 'pending',
+        'reason': '选择交付格式',
+        'answer': '',
+        'impact': '影响打开方式',
+        'responseRef': '',
+        'kind': 'choice',
+        'targetId': 'format',
+        'options': [
+          {'id': 'md', 'label': 'Markdown', 'impact': '可保留标题'},
+        ],
+      }
+    ]);
+    await coordinator.submit(task);
+    await coordinator.deleteTask(task.id);
+    await expectLater(
+        coordinator.respondToDecision(task.id,
+            decisionId: 'format',
+            revision: 1,
+            answer: '',
+            choiceId: 'md',
+            responseMessageId: 'late-message'),
+        throwsStateError);
+    expect(taskBox.get(task.id), isNull);
+  });
+
+  test('P3 queues two attachment-bound supplements in order', () async {
+    final task = _v2DecisionTask('decision-inputs', decisions: []);
+    await coordinator.submit(task);
+    await coordinator.enqueueFollowUp(task.id, '修改同一文件的标题',
+        sourceMessageId: 'message-one', attachmentMessageId: 'attachment-one');
+    await coordinator.enqueueFollowUp(task.id, '再修改同一文件的结尾',
+        sourceMessageId: 'message-two', attachmentMessageId: 'attachment-two');
+    final stored = taskBox.get(task.id)!;
+    final state =
+        WorkDiscussionState.fromExecutionState(stored.executionStateJson)!
+            .collaboration!;
+    expect(state.pendingInputIds, isEmpty);
+    expect(state.requestRevision, 3);
+    expect(stored.userRequest, contains('修改同一文件的标题\n用户补充要求：再修改同一文件的结尾'));
+    expect(jsonDecode(stored.executionStateJson)['attachmentMessageId'],
+        'attachment-two');
+    expect(stored.status, AgentTaskStatus.paused);
+    await coordinator.enqueueFollowUp(task.id, '再修改同一文件的结尾',
+        sourceMessageId: 'message-two', attachmentMessageId: 'attachment-two');
+    expect(
+        WorkDiscussionState.fromExecutionState(
+                taskBox.get(task.id)!.executionStateJson)!
+            .collaboration!
+            .requestRevision,
+        3);
   });
 
   /// 合同钉定人与群推举结果不一致的持久检查点：群已推举 `elected`，合同仍钉 `pinned`。
@@ -1275,7 +1857,8 @@ void main() {
       victim.id,
       (value) => value.status == AgentTaskStatus.failed,
     );
-    final holder = _task(id: 'conversation-holder', conversationId: 'dm:worker');
+    final holder =
+        _task(id: 'conversation-holder', conversationId: 'dm:worker');
     await localCoordinator.submit(holder);
     await _waitForStartedCount(runner, 2);
 
@@ -2008,9 +2591,9 @@ void main() {
     expect(restored.resumeRequired, isTrue);
     expect(runner.startedTaskIds, isEmpty);
     expect(locks.activeLockCount, 0);
-    expect(execution['checkpointSchemaUnsupported'], isTrue);
+    expect(execution['schemaVersion'], 99);
     expect(execution['folderGrantPending'], isTrue);
-    expect(execution, isNot(contains('approvalDecision')));
+    expect(restored.executionStateJson, jsonEncode(state));
   });
 
   test('malformed execution checkpoint is paused before runner start',
@@ -2023,12 +2606,10 @@ void main() {
     await coordinator.submit(task);
 
     final restored = taskBox.get(task.id)!;
-    final execution = jsonDecode(restored.executionStateJson) as Map;
     expect(restored.status, AgentTaskStatus.paused);
     expect(restored.resumeRequired, isTrue);
     expect(runner.startedTaskIds, isEmpty);
-    expect(execution['schemaVersion'], 1);
-    expect(execution['checkpointSchemaUnsupported'], isTrue);
+    expect(restored.executionStateJson, '{malformed execution checkpoint');
   });
 
   test('resuming malformed group checkpoint reopens discussion before runner',
@@ -2442,6 +3023,25 @@ void main() {
     expect(taskBox.get(task.id)!.status, AgentTaskStatus.waitingForApproval);
   });
 
+  test('P8 discussion and execution share global slots and release on stop',
+      () async {
+    final discussion = await useDiscussionRunner();
+    final waiting = _taskWithDiscussion(
+      _task(id: 'p8-discussion', conversationId: 'p8-group'),
+      _discussionState(conversationId: 'p8-group'),
+    );
+    await coordinator.submit(waiting);
+    await discussion.firstStarted.future;
+    await coordinator.submit(_task(id: 'p8-run', conversationId: 'dm:p8'));
+    await coordinator.submit(_task(id: 'p8-next', conversationId: 'dm:next'));
+    expect(runner.startedTaskIds, ['p8-run']);
+    expect(taskBox.get('p8-next')!.status, AgentTaskStatus.queued);
+    await coordinator.stop(waiting.id);
+    await _waitForStartedCount(runner, 2);
+    expect(runner.startedTaskIds, ['p8-run', 'p8-next']);
+    expect(runner.maximumActiveCount, 2);
+  });
+
   test('runs at most two tasks globally and starts the next queued task',
       () async {
     await coordinator.submit(_task(id: 'task-a', conversationId: 'group-a'));
@@ -2468,7 +3068,7 @@ void main() {
     expect(taskBox.get('second')?.status, AgentTaskStatus.queued);
 
     runner.complete('first');
-    await _settle();
+    await _waitForStartedCount(runner, 3);
 
     expect(runner.startedTaskIds, <String>['first', 'other', 'second']);
     expect(runner.maximumActiveForOneConversation, 1);
@@ -4126,8 +4726,8 @@ void main() {
 
   test('deleting a running task cancels it and frees its conversation',
       () async {
-    await coordinator
-        .submit(_task(id: 'delete-running', conversationId: 'dm:delete-running'));
+    await coordinator.submit(
+        _task(id: 'delete-running', conversationId: 'dm:delete-running'));
     expect(runner.startedTaskIds, ['delete-running']);
 
     await coordinator.deleteTask('delete-running');
@@ -4193,7 +4793,9 @@ void main() {
     );
     addTearDown(localCoordinator.dispose);
     addTearDown(() {
-      if (!lateRunner.releaseWrite.isCompleted) lateRunner.releaseWrite.complete();
+      if (!lateRunner.releaseWrite.isCompleted) {
+        lateRunner.releaseWrite.complete();
+      }
     });
     final task = _task(id: 'late-event', conversationId: 'dm:late-event');
     await localCoordinator.submit(task);
@@ -5238,7 +5840,8 @@ void main() {
     final version = WorkTaskUserAction.versionFor(task, 'executorPinConflict');
     expect(version, greaterThan(0), reason: '面板必须能拿到确认入口');
 
-    await coordinator.confirmExecutorSwap(task.id, version: version, swap: true);
+    await coordinator.confirmExecutorSwap(task.id,
+        version: version, swap: true);
     await _settle();
 
     final state = WorkDiscussionState.fromExecutionState(
@@ -5267,7 +5870,8 @@ void main() {
     final task = await storePinConflictTask('pin-keep-group');
     final version = WorkTaskUserAction.versionFor(task, 'executorPinConflict');
 
-    await coordinator.confirmExecutorSwap(task.id, version: version, swap: false);
+    await coordinator.confirmExecutorSwap(task.id,
+        version: version, swap: false);
     await _settle();
 
     final state = WorkDiscussionState.fromExecutionState(
@@ -5322,5 +5926,36 @@ void main() {
           ?.deliverableContract?['explicitExecutorId'],
       'pinned',
     );
+  });
+
+  test('an HTML game request enters the compulsory software lifecycle',
+      () async {
+    final task = _task(id: 'review-html', conversationId: 'group-v2');
+    task.userRequest = '制作一个飞行棋 HTML 游戏';
+    // 入口判定的类型必须与运行期检查同词表：`source` 会让软件闭环材料、测试
+    // 工程师资格和实际测试覆盖这几段检查全部失效，读一遍正文就能宣称通过。
+    final state = WorkDiscussionState.forNewTask(task).collaboration!;
+    expect(state.artifactContract['type'], 'software');
+  });
+
+  test('a supplement on an idle v2 task restarts the discussion', () async {
+    await coordinator.dispose();
+    final discussion = _CountingV2DiscussionRunner();
+    coordinator = WorkTaskCoordinator(
+        taskBox: taskBox,
+        eventStore: eventStore,
+        runner: runner,
+        discussionRunner: discussion);
+    final task = _v2DecisionTask('review-idle', decisions: []);
+    await coordinator.submit(task);
+    await _waitUntil(
+        () => discussion.calls == 1 && !coordinator.isTaskInFlight(task.id));
+
+    await coordinator.enqueueFollowUp(task.id, '修改同一文件的标题',
+        sourceMessageId: 'review-input');
+    await _drainEventLoop();
+
+    expect(taskBox.get(task.id)!.userRequest, contains('修改同一文件的标题'));
+    expect(discussion.calls, 2, reason: '新要求已纳入但应自动重新讨论');
   });
 }

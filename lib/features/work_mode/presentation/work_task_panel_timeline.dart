@@ -179,8 +179,9 @@ class _EventCard extends StatelessWidget {
                       ),
                     ],
                   ),
-                  if (!singleLine && detail.isNotEmpty && detail != title)
-                    ...<Widget>[
+                  if (!singleLine &&
+                      detail.isNotEmpty &&
+                      detail != title) ...<Widget>[
                     const SizedBox(height: 2),
                     Text(
                       detail,
@@ -234,7 +235,8 @@ Color _eventTone(BuildContext context, WorkTaskEventKind kind) {
     WorkTaskEventKind.failed => colors.error,
     WorkTaskEventKind.approvalRequired => colors.tertiary,
     WorkTaskEventKind.paused => colors.secondary,
-    WorkTaskEventKind.toolOutput || WorkTaskEventKind.modelOutput =>
+    WorkTaskEventKind.toolOutput ||
+    WorkTaskEventKind.modelOutput =>
       colors.onSurfaceVariant,
     WorkTaskEventKind.queued ||
     WorkTaskEventKind.planning ||
@@ -443,7 +445,9 @@ String? _continueUnavailableReasonForPanel(AgentTask task) {
     return '请先完成群讨论并确定最终执行角色。';
   }
   final isSoftLimitPause =
-      task.softLimitReached && _isPausedStatus(task.status);
+      WorkTaskExecutionPolicy.enforcesCumulativeLimits(task) &&
+          task.softLimitReached &&
+          _isPausedStatus(task.status);
   if (_taskNeedsVisionModel(task)) return '请先选择支持图片的视觉模型。';
   if (WorkTaskClarification.isPending(task)) return '请先回答上方模型问题。';
   // 追问澄清同样在等用户输入：让"继续"当场可见地不可用，而不是点下去才报错。
@@ -511,8 +515,7 @@ String _durationLabel(AgentTask task, DateTime now) {
   final startedAt = task.attemptStartedAt ?? task.startedAt ?? task.createdAt;
   // 停下来的任务用最后一次状态变更的时间封口：`updatedAt` 随每次状态切换刷新，
   // 正好落在它停手的那一刻。后续的追问/重跑会重置 `attemptStartedAt`，重新归零。
-  final endAt =
-      _isDurationTicking(task.status) ? now : (task.updatedAt ?? now);
+  final endAt = _isDurationTicking(task.status) ? now : (task.updatedAt ?? now);
   final duration = endAt.difference(startedAt);
   if (duration.inMinutes <= 0) return '刚刚开始执行';
   if (duration.inHours > 0) {

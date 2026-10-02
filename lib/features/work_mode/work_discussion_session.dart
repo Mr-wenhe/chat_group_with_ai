@@ -210,7 +210,7 @@ class _DiscussionSession {
         await runner._publish(
           task,
           group,
-          '@${runner._ownerMentionName(group)} 讨论达到 $maxRounds 轮仍未完成：$question 当前理解进度 ${state.understandingPercent}%。',
+          '@${runner._ownerMentionName(group)} 讨论达到 $maxRounds 轮仍未完成：$question',
           isMention: true,
           cancellation: cancellation,
         );

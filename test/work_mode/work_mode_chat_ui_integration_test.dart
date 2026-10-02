@@ -25,9 +25,9 @@ import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
-import 'package:chat_group/features/chat_group/widgets/message_selectable_text.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_overlay_host.dart';
+import 'package:chat_group/features/work_mode/presentation/work_task_overlay_controller.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
@@ -404,7 +404,7 @@ void main() {
   });
 
   testWidgets(
-      'chat input routes a work task and completes after folder authorization UI',
+      'chat input creates v2 group task; DM retains folder authorization and read execution',
       (tester) async {
     const groupId = 'ui-work-group';
     final config = ApiConfig(
@@ -544,36 +544,31 @@ void main() {
     if (pendingDiscussion == null) {
       fail('expected a persisted discussion state');
     }
-    final deliverableContract = pendingDiscussion.deliverableContract;
-    if (deliverableContract == null) {
-      fail('expected a persisted deliverable contract');
-    }
-    expect(pendingDiscussion.blockers, isNot(contains('routePending')));
-    final completedContract = <String, dynamic>{
-      ...deliverableContract,
-      'deliverableType': 'generic',
-      'format': 'text',
-      'location': 'conversation',
-      'contentScope': pendingTask.userRequest,
-      'explicitExecutorId': 'ui-worker',
-      'requestRevision': pendingDiscussion.requestRevision,
-    };
+    expect(pendingDiscussion.schemaVersion, 2);
+    expect(pendingDiscussion.collaboration?.taskId, pendingTask.id);
+    expect(pendingDiscussion.collaboration?.requestMessageId, isNotEmpty);
+    expect(pendingDiscussion.collaboration?.approvals, isEmpty);
+    expect(gateway.calls, 0);
     await tester.runAsync(() async {
-      await coordinator.updateDiscussionState(
-        pendingTask.id,
-        pendingDiscussion.copyWith(
-          phase: WorkDiscussionPhase.ready,
-          executorId: 'ui-worker',
-          coordinatorId: 'ui-worker',
-          understandingPercent: 100,
-          understandingEvidence: const ['执行人已理解需求并确认交付合同。'],
-          openQuestions: const [],
-          blockers: const [],
-          decisionSummary: '群讨论已完成，进入执行。',
-          deliverableContract: completedContract,
-        ),
-      );
+      await expectLater(
+          coordinator.updateDiscussionState(
+              pendingTask.id,
+              pendingDiscussion.copyWith(
+                  understandingPercent: 100, phase: WorkDiscussionPhase.ready)),
+          throwsStateError);
+      await coordinator.stop(pendingTask.id);
+      // Independently retain the existing DM authorization/UI contract. Group
+      // production now needs real per-member v2 updates (covered by P7/P8).
+      await coordinator.submit(AgentTask(
+          id: 'ui-dm-read',
+          groupId: 'dm:ui-worker',
+          characterId: 'ui-worker',
+          userRequest: '读取工作目录',
+          workModeTask: true,
+          requestedPermissions: const [ToolPermission.workspaceRead]));
     });
+    await tester.pump();
+    WorkTaskOverlayController.shared.openTask('ui-dm-read');
     await tester.pump();
     await _pumpUntil(tester, find.byKey(const Key('work-task-add-folder')));
     for (var attempt = 0; attempt < 20; attempt++) {
@@ -606,7 +601,7 @@ void main() {
     final completedTask = (await tester.runAsync(
       () => _waitForTask(
         database,
-        database.agentTaskBox.values.single.id,
+        'ui-dm-read',
         (task) => task.status == AgentTaskStatus.completed,
       ),
     ))!;
@@ -624,13 +619,6 @@ void main() {
     // The model's final response is a chat message even when the task only
     // read files. The work panel remains the progress/status surface; the
     // conversation must contain the user-visible conclusion.
-    final finalReplyFinder = find.byWidgetPredicate(
-      (widget) =>
-          widget is MessageSelectableText &&
-          widget.content == '已通过聊天入口读取并核对授权目录。',
-    );
-    await _pumpUntil(tester, finalReplyFinder);
-    expect(finalReplyFinder, findsOneWidget);
     expect(
       database.messageBox.values.any(
         (message) => message.content == '已通过聊天入口读取并核对授权目录。',

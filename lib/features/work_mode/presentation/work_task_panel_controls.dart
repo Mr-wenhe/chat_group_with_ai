@@ -32,15 +32,15 @@ class _TaskReplyBox extends StatelessWidget {
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final isDiscussionQuestion = discussionQuestion != null;
-    final question = discussionQuestion ??
-        WorkTaskClarification.answerableQuestion(task);
+    final question =
+        discussionQuestion ?? WorkTaskClarification.answerableQuestion(task);
     // 只有追问澄清带结构化候选。模型提问没有可点的目标，给一排按钮等于把
     // 用户的选择权换成我们的猜测。
     final options = isFollowUpClarification
         ? WorkTaskClarification.options(task)
         : const <WorkFollowUpOption>[];
-    final answerRejected = isFollowUpClarification &&
-        WorkTaskClarification.answerRejected(task);
+    final answerRejected =
+        isFollowUpClarification && WorkTaskClarification.answerRejected(task);
     final prompt = isDiscussionQuestion
         ? '请回答群讨论的问题'
         : isFollowUpClarification
@@ -126,7 +126,8 @@ class _TaskReplyBox extends StatelessWidget {
             Row(
               mainAxisAlignment: MainAxisAlignment.end,
               children: <Widget>[
-                if (isDiscussionQuestion)
+                if (isDiscussionQuestion &&
+                    WorkTaskExecutionPolicy.enforcesCumulativeLimits(task))
                   TextButton.icon(
                     key: const Key('work-task-continue-discussion'),
                     onPressed: actionInFlight
@@ -251,43 +252,41 @@ class _TaskTabs extends StatelessWidget {
     return Wrap(
       spacing: 6,
       runSpacing: 6,
-      children: tasks
-          .map(
-            // 只有终态任务允许关掉标签：执行中 / 等待审批的任务一旦隐藏，
-            // 用户就看不到它卡在哪里，因此不提供关闭入口。
-            (task) {
-              final selected = task.id == selectedTaskId;
-              return InputChip(
-                key: Key('work-task-tab-${task.id}'),
-                label: Text(workTaskTabLabel(task)),
-                labelStyle: TextStyle(
-                  fontSize: 11,
-                  fontWeight: FontWeight.w500,
-                  color: selected
-                      ? colors.onPrimaryContainer
-                      : colors.onSurfaceVariant,
-                ),
-                selected: selected,
-                backgroundColor: colors.surfaceContainerHighest,
-                selectedColor: colors.primaryContainer,
-                side: BorderSide(
-                  color: selected
-                      ? colors.primary.withValues(alpha: 0.45)
-                      : colors.outlineVariant,
-                ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(999),
-                ),
-                onSelected: (_) => onSelectTask(task.id),
-                onDeleted: onHideTask == null || !task.isTerminal
-                    ? null
-                    : () => onHideTask!(task.id),
-                deleteIcon: const Icon(Icons.close_rounded, size: 16),
-                deleteButtonTooltipMessage: '关掉这个标签（记录保留在历史任务中）',
-              );
-            },
-          )
-          .toList(growable: false),
+      children: tasks.map(
+        // 只有终态任务允许关掉标签：执行中 / 等待审批的任务一旦隐藏，
+        // 用户就看不到它卡在哪里，因此不提供关闭入口。
+        (task) {
+          final selected = task.id == selectedTaskId;
+          return InputChip(
+            key: Key('work-task-tab-${task.id}'),
+            label: Text(workTaskTabLabel(task)),
+            labelStyle: TextStyle(
+              fontSize: 11,
+              fontWeight: FontWeight.w500,
+              color: selected
+                  ? colors.onPrimaryContainer
+                  : colors.onSurfaceVariant,
+            ),
+            selected: selected,
+            backgroundColor: colors.surfaceContainerHighest,
+            selectedColor: colors.primaryContainer,
+            side: BorderSide(
+              color: selected
+                  ? colors.primary.withValues(alpha: 0.45)
+                  : colors.outlineVariant,
+            ),
+            shape: RoundedRectangleBorder(
+              borderRadius: BorderRadius.circular(999),
+            ),
+            onSelected: (_) => onSelectTask(task.id),
+            onDeleted: onHideTask == null || !task.isTerminal
+                ? null
+                : () => onHideTask!(task.id),
+            deleteIcon: const Icon(Icons.close_rounded, size: 16),
+            deleteButtonTooltipMessage: '关掉这个标签（记录保留在历史任务中）',
+          );
+        },
+      ).toList(growable: false),
     );
   }
 }
@@ -386,6 +385,15 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   /// 让上一次等待的起点漏到下一次。
   DateTime? _modelOutputPendingSince;
 
+  /// 用户是否点开了"更早的运行段"。
+  ///
+  /// 默认关闭：同一条记录里被并入的旧请求可能来自很久以前，一打开面板就铺满当时
+  /// 的进度，会让人以为新请求继承了旧任务。
+  bool _earlierExpanded = false;
+
+  /// 分界行的位置锚点，用于展开后把视口重新对到同一处。
+  final GlobalKey _earlierToggleKey = GlobalKey();
+
   @override
   void initState() {
     super.initState();
@@ -411,6 +419,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     _modelOutputPending = false;
     _modelOutputPendingText = 'AI 正在整理公开进度…';
     _followLatest = true;
+    _earlierExpanded = false;
     unawaited(_subscription?.cancel());
     _listen();
   }
@@ -427,7 +436,8 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   void _syncFollowLatest() {
     if (!_eventScrollController.hasClients) return;
     final position = _eventScrollController.position;
-    _followLatest = position.pixels >= position.maxScrollExtent - _followThreshold;
+    _followLatest =
+        position.pixels >= position.maxScrollExtent - _followThreshold;
   }
 
   /// 展开态把视口滚到最新一条。
@@ -537,6 +547,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
       _modelOutputPending = false;
       _modelOutputPendingText = 'AI 正在整理公开进度…';
       _followLatest = true;
+      _earlierExpanded = false;
     });
     _listen();
   }
@@ -576,14 +587,6 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     _livePublicEvent = null;
   }
 
-  int get _timelineItemCount {
-    var count = _events.length;
-    if (_streamError != null) count++;
-    if (_livePublicDraft != null) count++;
-    if (_modelOutputPending) count++;
-    return count;
-  }
-
   /// 时间线顶部的临时卡片（流式输出 / 等待提示 / 流错误）。
   int get _transientItemCount {
     var count = 0;
@@ -593,6 +596,26 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     return count;
   }
 
+  /// 当前运行段之前还压着多少条历史事件。
+  ///
+  /// 只在展开态折叠：折叠态本来就只画最后几条，按当前段取就够。
+  int get _earlierEventCount =>
+      widget.expanded ? WorkTaskRunBoundary.currentRunStartIndex(_events) : 0;
+
+  bool get _hasEarlierEvents => _earlierEventCount > 0;
+
+  bool get _showEarlierEvents => _hasEarlierEvents && _earlierExpanded;
+
+  /// 当前这次请求产生的事件；更早的属于被并入同一条记录的旧请求。
+  List<WorkTaskEvent> get _currentRunEvents =>
+      _events.sublist(_earlierEventCount);
+
+  List<WorkTaskEvent> get _visibleEvents =>
+      _showEarlierEvents ? _events : _currentRunEvents;
+
+  int get _timelineItemCount =>
+      _transientItemCount + (_hasEarlierEvents ? 1 : 0) + _visibleEvents.length;
+
   /// 折叠态只展示"临时卡片 + 最近的历史事件"，且总数不超过
   /// `widget.collapsedItemLimit`；展开态返回全部条目。
   List<int> get _visibleItemIndices {
@@ -601,13 +624,28 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
       return List<int>.generate(total, (index) => index);
     }
     final transient = _transientItemCount;
+    final eventCount = _visibleEvents.length;
     final visibleEvents =
-        (widget.collapsedItemLimit - transient).clamp(0, _events.length).toInt();
-    final firstEventIndex = transient + _events.length - visibleEvents;
+        (widget.collapsedItemLimit - transient).clamp(0, eventCount).toInt();
+    final firstEventIndex = transient + eventCount - visibleEvents;
     return <int>[
       for (var index = 0; index < transient; index++) index,
       for (var index = firstEventIndex; index < total; index++) index,
     ];
+  }
+
+  void _toggleEarlierEvents() {
+    setState(() => _earlierExpanded = !_earlierExpanded);
+    // 展开会把内容插在当前视口上方，滚动位置是按像素记的，不校正就会把用户甩到
+    // 别处。把分界行重新对到屏幕上，读到的还是刚才那一段。必须在布局之后执行，
+    // 这一帧的新位置还没算出来（与 `_scrollToLatest` 同理）。回调里不改状态，
+    // 因此不会构成 CLAUDE.md 禁止的 postFrame → setState 循环。
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (!mounted) return;
+      final anchor = _earlierToggleKey.currentContext;
+      if (anchor == null) return;
+      unawaited(Scrollable.ensureVisible(anchor, duration: Duration.zero));
+    });
   }
 
   Widget _buildTimelineItem(BuildContext context, int index) {
@@ -651,7 +689,28 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
       }
       remaining--;
     }
-    final event = _events[remaining];
+    // 展开态先画被折叠的旧请求事件，再是分界行，最后才是当前这次运行。
+    final earlierCount = _showEarlierEvents ? _earlierEventCount : 0;
+    if (remaining < earlierCount) {
+      return _TimelineItemPadding(
+        child: _EventCard(event: _events[remaining], singleLine: singleLine),
+      );
+    }
+    remaining -= earlierCount;
+    if (_hasEarlierEvents) {
+      if (remaining == 0) {
+        return _TimelineItemPadding(
+          child: _TimelineEarlierEventsToggle(
+            key: _earlierToggleKey,
+            earlierCount: _earlierEventCount,
+            expanded: _showEarlierEvents,
+            onToggle: _toggleEarlierEvents,
+          ),
+        );
+      }
+      remaining--;
+    }
+    final event = _currentRunEvents[remaining];
     return _TimelineItemPadding(
       child: _EventCard(event: event, singleLine: singleLine),
     );
@@ -708,9 +767,8 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
           // 内容驱动的，不会因为固定配额把详情区挤到需要滚动。
           // 展开态才由外层给固定高度并允许内部滚动。
           shrinkWrap: !widget.expanded,
-          physics: widget.expanded
-              ? null
-              : const NeverScrollableScrollPhysics(),
+          physics:
+              widget.expanded ? null : const NeverScrollableScrollPhysics(),
           padding: EdgeInsets.zero,
           itemCount: indices.length,
           itemBuilder: (BuildContext context, int index) =>
@@ -731,6 +789,53 @@ class _TimelineItemPadding extends StatelessWidget {
     return Padding(
       padding: const EdgeInsets.only(bottom: 6),
       child: child,
+    );
+  }
+}
+
+/// 时间线上"更早的运行段"开关。
+///
+/// 同一条记录里可能并入了好几轮请求，更早的事件默认收起。入口放在两段之间，让
+/// "下面这些才是当前这次请求的进度"一眼可见；点开后才把旧历史铺出来。
+class _TimelineEarlierEventsToggle extends StatelessWidget {
+  /// 被收起来的事件条数。
+  final int earlierCount;
+  final bool expanded;
+  final VoidCallback onToggle;
+
+  const _TimelineEarlierEventsToggle({
+    super.key,
+    required this.earlierCount,
+    required this.expanded,
+    required this.onToggle,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
+    return TextButton(
+      key: const Key('work-task-timeline-earlier-toggle'),
+      onPressed: onToggle,
+      style: TextButton.styleFrom(
+        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 2),
+        minimumSize: Size.zero,
+        tapTargetSize: MaterialTapTargetSize.shrinkWrap,
+        foregroundColor: colors.onSurfaceVariant,
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: <Widget>[
+          Icon(
+            expanded ? Icons.expand_less_rounded : Icons.history_rounded,
+            size: 15,
+          ),
+          const SizedBox(width: 4),
+          Text(
+            expanded ? '收起之前的 $earlierCount 条动态' : '之前的 $earlierCount 条动态',
+            style: const TextStyle(fontSize: 12),
+          ),
+        ],
+      ),
     );
   }
 }

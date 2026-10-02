@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
 
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 
@@ -45,6 +46,7 @@ class WorkTaskEventReadResult {
 
 /// App-support JSONL storage for public work-task progress only.
 class WorkTaskEventStore {
+  static const maxDiscussionDetailBytes = 1024 * 1024;
   static const int defaultMaxTitleCharacters = 240;
   static const int defaultMaxDetailCharacters = 4000;
   static const int defaultMaxMetadataStringCharacters = 512;
@@ -67,6 +69,7 @@ class WorkTaskEventStore {
       StreamController<WorkTaskEvent>.broadcast();
   final Map<String, Future<void>> _writeChains = {};
   final Map<String, int> _lastSequences = {};
+
   /// 已删除日志的任务 id。删除只是删文件，而取消 runner 是异步的：它的收尾
   /// 事件会在删除返回之后到达，把 JSONL 重新建出来。墓碑让这些追加变成空操作。
   final Set<String> _deletedTaskIds = <String>{};
@@ -112,6 +115,75 @@ class WorkTaskEventStore {
   File eventFileFor(String taskId) {
     _validateTaskId(taskId);
     return File('${_eventsDirectory.path}/$taskId.jsonl');
+  }
+
+  /// Hash-only local commit receipts share task deletion/data-clear barriers.
+  /// Unlike the bounded checkpoint cache they survive arbitrary action counts.
+  Future<void> recordCommittedAction(String taskId, String operationKey) async {
+    final digest = sha256.convert(utf8.encode(operationKey)).toString();
+    await writeDiscussionDetail(taskId, digest.substring(0, 24),
+        jsonEncode({'committedActionSha256': digest}));
+  }
+
+  Future<bool> hasCommittedAction(String taskId, String operationKey) async {
+    _validateTaskId(taskId);
+    final digest = sha256.convert(utf8.encode(operationKey)).toString();
+    final file = File(
+        '${_eventsDirectory.path}/$taskId.detail.${digest.substring(0, 24)}.json');
+    if (await FileSystemEntity.type(file.path, followLinks: false) ==
+        FileSystemEntityType.notFound) {
+      return false;
+    }
+    final text = await readDiscussionDetail(taskId, digest.substring(0, 24));
+    if (text != jsonEncode({'committedActionSha256': digest})) {
+      throw StateError('本地提交收据损坏，不能重放操作。');
+    }
+    return true;
+  }
+
+  /// Discussion details share the existing managed event tree and lifecycle.
+  Future<File> writeDiscussionDetail(
+          String taskId, String digest, String text) =>
+      _scheduleMaintenance(() async {
+        _validateTaskId(taskId);
+        if (!RegExp(r'^[a-f0-9]{24}$').hasMatch(digest) ||
+            utf8.encode(text).length > maxDiscussionDetailBytes ||
+            _secretScanner.containsSensitiveData(text) ||
+            _closed ||
+            _appendsSuspendedForDataClear ||
+            _deletedTaskIds.contains(taskId)) {
+          throw StateError('讨论详情不可写入。');
+        }
+        await _ensureEventsDirectory(create: true);
+        final file =
+            File('${_eventsDirectory.path}/$taskId.detail.$digest.json');
+        if (await FileSystemEntity.type(file.path, followLinks: false) ==
+            FileSystemEntityType.link) {
+          throw StateError('讨论详情不能是链接。');
+        }
+        if (await file.exists()) {
+          if (await file.readAsString() != text) {
+            throw StateError('不可变讨论详情已变化。');
+          }
+        } else {
+          await file.writeAsString(text, flush: true);
+        }
+        return file;
+      });
+
+  Future<String> readDiscussionDetail(String taskId, String digest) async {
+    _validateTaskId(taskId);
+    if (!RegExp(r'^[a-f0-9]{24}$').hasMatch(digest) ||
+        !await _ensureEventsDirectory(create: false)) {
+      throw StateError('讨论详情无效。');
+    }
+    final file = File('${_eventsDirectory.path}/$taskId.detail.$digest.json');
+    if (await FileSystemEntity.type(file.path, followLinks: false) !=
+            FileSystemEntityType.file ||
+        await file.length() > maxDiscussionDetailBytes) {
+      throw StateError('讨论详情缺失或越界。');
+    }
+    return file.readAsString();
   }
 
   /// Appends one event after every earlier write for the same task has flushed.
@@ -234,6 +306,16 @@ class WorkTaskEventStore {
     _deletedTaskIds.add(taskId);
     return _scheduleMaintenance(() async {
       if (!await _ensureEventsDirectory(create: false)) return;
+      final details = await _eventsDirectory
+          .list(followLinks: false)
+          .where((entity) => entity.path
+              .split(Platform.pathSeparator)
+              .last
+              .startsWith('$taskId.detail.'))
+          .toList();
+      for (final detail in details) {
+        if (detail is File) await detail.delete();
+      }
       final file = File('${_eventsDirectory.path}/$taskId.jsonl');
       try {
         if (await FileSystemEntity.type(file.path, followLinks: false) ==
@@ -265,9 +347,7 @@ class WorkTaskEventStore {
     return _scheduleMaintenance(() async {
       if (!await _ensureManagedParents(create: false)) return 0;
       final removed = await _deleteTreeNoFollow(_eventsDirectory);
-      // 整棵树都被清掉了，墓碑也就没有意义；留着会挡住清除后重新导入的同 id
-      // 任务的日志。
-      _deletedTaskIds.clear();
+      // 删除日志不解除任务墓碑；导入必须由协调器逐 id 核对并解禁。
       for (final entry in pending.entries) {
         if (identical(_writeChains[entry.key], entry.value)) {
           _writeChains.remove(entry.key);

@@ -106,8 +106,7 @@ class _BackupEntityRecordCodec {
       skillIds: _strings(json['skillIds']),
       toolPermissions: _enums(json['toolPermissions'], ToolPermission.values),
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
-      zhipuSearchAnswerOnly:
-          json['zhipuSearchAnswerOnly'] as bool? ?? false,
+      zhipuSearchAnswerOnly: json['zhipuSearchAnswerOnly'] as bool? ?? false,
       proactiveChatEnabled: json['proactiveChatEnabled'] as bool? ?? true,
       gender: gender ?? CharacterGender.female,
       hasKnownGender: gender != null,
@@ -148,8 +147,9 @@ class _BackupEntityRecordCodec {
 
   static Map<String, dynamic> message(
     Message item,
-    List<Map<String, dynamic>> media,
-  ) =>
+    List<Map<String, dynamic>> media, {
+    Map<String, dynamic>? workDelivery,
+  }) =>
       {
         'id': item.id,
         'groupId': item.groupId,
@@ -163,6 +163,10 @@ class _BackupEntityRecordCodec {
         'media': media,
         'visibleToCharacterIds': item.visibleToCharacterIds,
         'webSearchSnapshot': _snapshotMap(item.webSearchSnapshot),
+        'isWorkMode': item.isWorkMode,
+        if (workDelivery != null)
+          'workDelivery': WorkDeliveryMetadata.portable(workDelivery),
+        // Imported receipts are historical, never trusted for new distillation.
       };
 
   static Message decodeMessage(
@@ -187,7 +191,23 @@ class _BackupEntityRecordCodec {
             .toList(),
         visibleToCharacterIds: _strings(json['visibleToCharacterIds']),
         webSearchSnapshot: _snapshotMap(json['webSearchSnapshot']),
+        isWorkMode: json['isWorkMode'] == true,
+        workDelivery:
+            _decodeWorkDelivery(json['workDelivery'], resolveAttachment),
       );
+
+  static Map<String, dynamic>? _decodeWorkDelivery(
+      Object? raw, String Function(String) resolveAttachment) {
+    final safe = WorkDeliveryMetadata.portable(raw);
+    if (safe == null) return null;
+    safe['files'] = (safe['files'] as List)
+        .map((entry) => {
+              ...Map<String, dynamic>.from(entry as Map),
+              'path': resolveAttachment(entry['path'] as String),
+            })
+        .toList();
+    return safe;
+  }
 
   static Map<String, dynamic>? _snapshotMap(Object? raw) {
     if (raw is! Map) return null;

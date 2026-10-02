@@ -449,6 +449,195 @@ void main() {
     expect(process.terminated, isFalse);
   });
 
+  test('printed HTML containing user-select is not treated as a prompt',
+      () async {
+    final process = _FakeProcess();
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      processStarter: (_, {required env, required shell}) async =>
+          process.asProcess(),
+    );
+
+    final future = runner.run(_command(), taskId: 'task-printed-html');
+    process.stdoutController.add(utf8.encode('<!DOCTYPE html>\n<style>\n'
+        'body { -webkit-user-select: none; user-select: none; }\n'
+        '</style>\n'));
+    process.stderrController
+        .add(utf8.encode('cat: -o: No such file or directory\n'));
+    await process.stdoutController.close();
+    await process.stderrController.close();
+    // A pause kills the tree, which already completes the exit code. Guard so
+    // the assertion fails with the real status instead of a completer error.
+    if (!process.exitCompleter.isCompleted) process.exitCompleter.complete(0);
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.completed);
+    expect(process.terminated, isFalse);
+  });
+
+  test('a trailing selector colon is not treated as a prompt', () async {
+    final process = _FakeProcess();
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      processStarter: (_, {required env, required shell}) async =>
+          process.asProcess(),
+    );
+
+    final future = runner.run(_command(), taskId: 'task-css-selector');
+    process.stdoutController
+        .add(utf8.encode('form select:invalid { border-color: red; }\n'));
+    await process.stdoutController.close();
+    await process.stderrController.close();
+    if (!process.exitCompleter.isCompleted) process.exitCompleter.complete(0);
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.completed);
+    expect(process.terminated, isFalse);
+  });
+
+  test('CSS class names containing select are not treated as a prompt',
+      () async {
+    final process = _FakeProcess();
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      processStarter: (_, {required env, required shell}) async =>
+          process.asProcess(),
+    );
+
+    final future = runner.run(_command(), taskId: 'task-css-class');
+    process.stdoutController.add(utf8.encode(
+        '.select-card { width: 140px; height: 200px; background: #fff; }\n'));
+    await process.stdoutController.close();
+    await process.stderrController.close();
+    if (!process.exitCompleter.isCompleted) process.exitCompleter.complete(0);
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.completed);
+    expect(process.terminated, isFalse);
+  });
+
+  test('a script parameter named n is not treated as a prompt', () async {
+    final process = _FakeProcess();
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      processStarter: (_, {required env, required shell}) async =>
+          process.asProcess(),
+    );
+
+    final future = runner.run(_command(), taskId: 'task-js-parameter');
+    process.stdoutController
+        .add(utf8.encode('function drawCards(n) {\n  const cards = [];\n}\n'));
+    await process.stdoutController.close();
+    await process.stderrController.close();
+    if (!process.exitCompleter.isCompleted) process.exitCompleter.complete(0);
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.completed);
+    expect(process.terminated, isFalse);
+  });
+
+  test('prose containing 密码 is not treated as a credential prompt', () async {
+    final process = _FakeProcess();
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      processStarter: (_, {required env, required shell}) async =>
+          process.asProcess(),
+    );
+
+    final future = runner.run(_command(), taskId: 'task-prose-password');
+    // Verbatim from a generated report: 密码 is part of 密码学 / 密码系统.
+    process.stdoutController.add(utf8.encode(
+        '<p>量子纠缠是量子信息科学的核心资源，在量子计算、量子通信和量子密码学等领域具有广泛的应用前景。</p>\n'
+        '<h3 id="6-5-量子通信与量子密码学">6.5 量子通信与量子密码学</h3>\n'));
+    await process.stdoutController.close();
+    await process.stderrController.close();
+    if (!process.exitCompleter.isCompleted) process.exitCompleter.complete(0);
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.completed);
+    expect(process.terminated, isFalse);
+  });
+
+  test('prose containing 登录 is not treated as a credential prompt', () async {
+    final process = _FakeProcess();
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      processStarter: (_, {required env, required shell}) async =>
+          process.asProcess(),
+    );
+
+    final future = runner.run(_command(), taskId: 'task-prose-login');
+    // Verbatim from a generated design doc, where 登录 is a noun.
+    process.stdoutController.add(utf8.encode(
+        '- 同IP账号标记：同一IP下3个及以上账号登录触发标记，累计异常序列达标后限制匹配\n'));
+    await process.stdoutController.close();
+    await process.stderrController.close();
+    if (!process.exitCompleter.isCompleted) process.exitCompleter.complete(0);
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.completed);
+    expect(process.terminated, isFalse);
+  });
+
+  test('login inside printed markup is not treated as a prompt', () async {
+    final process = _FakeProcess();
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      processStarter: (_, {required env, required shell}) async =>
+          process.asProcess(),
+    );
+
+    final future = runner.run(_command(), taskId: 'task-markup-login');
+    process.stdoutController.add(utf8.encode(
+        '<a href="#login" class="btn btn-secondary">Sign In</a>\n'));
+    await process.stdoutController.close();
+    await process.stderrController.close();
+    if (!process.exitCompleter.isCompleted) process.exitCompleter.complete(0);
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.completed);
+    expect(process.terminated, isFalse);
+  });
+
+  test('a UI hint containing 请选择 is not treated as a prompt', () async {
+    final process = _FakeProcess();
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      processStarter: (_, {required env, required shell}) async =>
+          process.asProcess(),
+    );
+
+    final future = runner.run(_command(), taskId: 'task-zh-ui-hint');
+    // Verbatim shape from a generated game: 请选择 is instruction copy, and
+    // the line carries on after the colon.
+    process.stdoutController.add(utf8.encode(
+        "      showTargetHint('请选择杀的目标（点击对手）');\n"
+        "      addLog('请选择攻击目标：');\n"));
+    await process.stdoutController.close();
+    await process.stderrController.close();
+    if (!process.exitCompleter.isCompleted) process.exitCompleter.complete(0);
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.completed);
+    expect(process.terminated, isFalse);
+  });
+
+  test('a 请选择 prompt still pauses when it ends the line', () async {
+    final process = _FakeProcess();
+    final runner = WorkCommandRunner(
+      policy: _policy(),
+      processStarter: (_, {required env, required shell}) async =>
+          process.asProcess(),
+    );
+
+    final future = runner.run(_command(), taskId: 'task-zh-menu');
+    process.stdoutController.add(utf8.encode('请选择 [1/2]: '));
+    final result = await future;
+
+    expect(result.status, WorkCommandRunStatus.pausedForUser);
+    expect(process.terminated, isTrue);
+  });
+
   test('missing executable returns an install suggestion without installing',
       () async {
     var starts = 0;

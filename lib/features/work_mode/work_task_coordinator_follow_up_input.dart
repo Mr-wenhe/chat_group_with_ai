@@ -26,17 +26,42 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
     );
   }
 
-  /// Tells the chat input whether a completed group checkpoint must be routed
-  /// as a new task.  The boundary conditions live here with the follow-up
-  /// classifier; widgets only use the result to choose the existing route
-  /// entry point.
+  /// Tells the chat input whether a new request must open a new task record
+  /// instead of joining the durable lineage as a follow-up.  The boundary
+  /// conditions live here with the follow-up classifier; widgets only use the
+  /// result to choose the existing route entry point.
   bool _implShouldRouteNewTaskForFollowUp(String taskId, String request) {
     final task = _requireWorkTask(taskId);
     final decision = followUpDecisionForTask(taskId, request);
-    return task.isTerminal &&
-        !isTaskInFlight(task.id) &&
-        task.queuedUserRequests.isEmpty &&
-        _newArtifactRequiresFreshTask(task, decision);
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+        decision.kind == WorkFollowUpKind.newArtifact &&
+        RegExp(r'(?:独立|另外|另一个|新任务|separate\s+task|new\s+task)',
+                caseSensitive: false)
+            .hasMatch(request)) {
+      return true;
+    }
+    if (isTaskInFlight(task.id) || task.queuedUserRequests.isNotEmpty) {
+      return false;
+    }
+    if (decision.kind != WorkFollowUpKind.newArtifact) return false;
+    // 群聊：新交付物必须重开讨论，判据保持"终态才另起一条"不变。
+    if (_requiresDiscussionForTask(task)) return task.isTerminal;
+    // 私聊：没有讨论要重开，固定的执行人也不会因为换交付物而失效，所以判据落在
+    // "这条记录是否已经交还给用户"上。否则一条被应用关闭打断的旧记录会把后来的
+    // 新交付物并进自己的时间线——标签写的是新请求，执行动态却是几个月前的运行。
+    return _isReleasedForNewDeliverable(task);
+  }
+
+  /// 这条记录是否已经交还给用户：不会再自己往下跑，也没有在等用户回答。
+  ///
+  /// 判据刻意很窄。`interrupted` 是应用关闭后写下的"请由用户手动继续"，除此之外
+  /// 的非终态都仍占着会话：排队与执行中的要继续 FIFO（连续修改红线），暂停中的
+  /// 在等授权 / 审批 / 预算，等答复的更要把下一条消息收回来。
+  bool _isReleasedForNewDeliverable(AgentTask task) {
+    if (task.isTerminal) return true;
+    if (task.status != AgentTaskStatus.interrupted) return false;
+    return !WorkTaskClarification.isPending(task) &&
+        !_isFollowUpClarification(task);
   }
 
   bool _newArtifactRequiresFreshTask(
@@ -113,7 +138,28 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
     String taskId,
     String request, {
     String? attachmentMessageId,
+    String? sourceMessageId,
   }) {
+    final tracked = request.trim().isNotEmpty;
+    if (tracked) {
+      _arrivingInputCounts[taskId] = (_arrivingInputCounts[taskId] ?? 0) + 1;
+    }
+    return _enqueueFollowUpSerialized(taskId, request,
+            attachmentMessageId: attachmentMessageId,
+            sourceMessageId: sourceMessageId)
+        .whenComplete(() {
+      if (!tracked) return;
+      final remaining = (_arrivingInputCounts[taskId] ?? 1) - 1;
+      if (remaining == 0) {
+        _arrivingInputCounts.remove(taskId);
+      } else {
+        _arrivingInputCounts[taskId] = remaining;
+      }
+    });
+  }
+
+  Future<void> _enqueueFollowUpSerialized(String taskId, String request,
+      {String? attachmentMessageId, String? sourceMessageId}) {
     return _serialize(() async {
       _ensureOpen();
       final normalized = request.trim();
@@ -121,6 +167,12 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
       final task = _requireWorkTask(taskId);
       if (task.status == AgentTaskStatus.cancelled) {
         throw StateError('已停止的任务不能继续追问，请创建新的工作任务。');
+      }
+      if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+        await _enqueueV2Input(task, normalized,
+            sourceMessageId: sourceMessageId,
+            attachmentMessageId: attachmentMessageId);
+        return;
       }
       // A command/test/build proposal pauses with an explicit authorization
       // marker rather than a replayable tool checkpoint.  Treat the user's

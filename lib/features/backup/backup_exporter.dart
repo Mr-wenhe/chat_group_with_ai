@@ -1,5 +1,6 @@
 import 'dart:convert';
 import 'dart:io';
+import 'package:chat_group/core/models/work_delivery_metadata.dart';
 
 import 'package:archive/archive_io.dart';
 import 'package:chat_group/core/database/database_service.dart';
@@ -57,8 +58,7 @@ class BackupExporter {
     var bytes = 0;
     var missing = 0;
     for (final entry in snapshot.messages) {
-      for (final attachment in entry.value.media ?? const <MediaAttachment>[]) {
-        final managedPath = attachment.managedPath;
+      for (final managedPath in entry.value.managedMediaPaths) {
         if (!paths.add(managedPath)) continue;
         if (isAttachmentDataUri(managedPath)) {
           final decoded = decodeAttachmentDataUri(managedPath);
@@ -284,6 +284,7 @@ class BackupExporter {
           await file.length() != entry.value.bytes) {
         throw BackupException('备份 staging 文件无效：${entry.key}');
       }
+      if (!entry.key.startsWith('data/')) continue;
       if (entry.key.endsWith('.json') || entry.key.endsWith('.jsonl')) {
         jsonFiles.add(file);
       }
@@ -345,7 +346,9 @@ class BackupExporter {
         }
         final record = BackupEntityCodec.record(
           entry.key,
-          BackupEntityCodec.message(entry.value, media),
+          BackupEntityCodec.message(entry.value, media,
+              workDelivery: await _stageWorkDelivery(staging,
+                  entry.value.workDelivery, attachmentsByHash, files, missing)),
         );
         _assertNoSecrets(record);
         writer.writeJsonLine(record);
@@ -359,6 +362,50 @@ class BackupExporter {
     counts['messages'] = snapshot.messages.length;
     counts['attachments'] = attachmentsByHash.length;
     counts['missingAttachments'] = missing.length;
+  }
+
+  Future<Map<String, dynamic>?> _stageWorkDelivery(
+      Directory staging,
+      Object? raw,
+      Map<String, String> byHash,
+      Map<String, BackupFileEntry> files,
+      List<String> missing) async {
+    if (raw is! Map || raw['files'] is! List) return null;
+    final entries = (raw['files'] as List).whereType<Map>().toList();
+    if (entries.length > WorkDeliveryMetadata.maxFiles) {
+      throw const BackupException('交付历史文件引用过多');
+    }
+    final portableFiles = <Map<String, dynamic>>[];
+    for (final entry in entries) {
+      final relative = entry['relative']?.toString() ?? '';
+      final path = await _stageAttachment(
+          staging,
+          MediaAttachment(
+              type: 'file',
+              localPath: entry['path']?.toString() ?? '',
+              fileName: relative),
+          byHash,
+          files);
+      if (path == null) {
+        missing.add('交付版本:$relative');
+        continue;
+      }
+      final actual = files[path]!;
+      if (actual.sha256 != entry['sha256'] || actual.bytes != entry['bytes']) {
+        throw const BackupException('交付版本被外部修改，请核验后备份');
+      }
+      portableFiles.add({
+        'relative': relative,
+        'path': path,
+        'bytes': actual.bytes,
+        'sha256': actual.sha256
+      });
+    }
+    final safe = WorkDeliveryMetadata.portable(
+        {...raw, 'incomplete': portableFiles.length != entries.length},
+        files: portableFiles);
+    if (safe == null) throw const BackupException('交付版本元数据无效');
+    return safe;
   }
 
   Future<String?> _stageAttachment(
