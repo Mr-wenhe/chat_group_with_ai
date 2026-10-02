@@ -1,5 +1,16 @@
 part of 'default_work_task_runner_stage02_test.dart';
 
+/// Ticks the drive-loop below waits before giving up. Each tick sleeps 10ms and
+/// hands the event loop back to the coordinator, whose own retry, review and
+/// delivery stages advance on wall-clock timers — so the tick count a scenario
+/// needs grows with machine load even though its logic never changes. Idle, the
+/// scenarios need 28-96 ticks (`retest-failure` is the slowest at 96); on a
+/// contended CI runner each needs roughly three times its idle count, which put
+/// `retest-failure` at the old 300-tick edge and made it fail intermittently
+/// with `runningTool` still in flight. 600 keeps a ~2x margin over that while
+/// staying well inside the 30s per-test budget.
+const _p7DriveAttempts = 600;
+
 void _registerP7RunnerTests(Directory Function() hive,
     Directory Function() root, WorkTaskEventStore Function() events) {
   for (final scenario in _p7Scenarios) {
@@ -400,7 +411,7 @@ void _registerP7RunnerTests(Directory Function() hive,
       }
 
       for (var attempt = 0;
-          attempt < 300 &&
+          attempt < _p7DriveAttempts &&
               !{AgentTaskStatus.completed, AgentTaskStatus.cancelled}
                   .contains(work.status);
           attempt++) {
@@ -499,7 +510,8 @@ void _registerP7RunnerTests(Directory Function() hive,
         final callsBeforeResend = gateway.actors.length;
         await coordinator.retry(work.id);
         for (var attempt = 0;
-            attempt < 300 && work.status != AgentTaskStatus.completed;
+            attempt < _p7DriveAttempts &&
+                work.status != AgentTaskStatus.completed;
             attempt++) {
           await Future<void>.delayed(const Duration(milliseconds: 10));
         }
