@@ -90,6 +90,7 @@ class AiRequestGateway {
         receiveTimeout: receiveTimeout,
         maxRetries: 0,
         cancelToken: cancelToken,
+        allowReasoningContentFallback: purpose == AiRequestPurpose.agent,
       ),
     );
   }
@@ -145,6 +146,7 @@ class AiRequestGateway {
         cancelToken: cancelToken,
         maxResponseBytes: maxResponseBytes,
         structuredJson: structuredJson,
+        allowReasoningContentFallback: purpose == AiRequestPurpose.agent,
       ),
     );
   }
@@ -262,6 +264,7 @@ class AiRequestGateway {
       maxRetries: 0,
       cancelToken: cancelToken,
       structuredJson: true,
+      allowReasoningContentFallback: true,
       maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
     );
     if (structured['statusCode'] != 400) return structured;
@@ -278,6 +281,7 @@ class AiRequestGateway {
       maxRetries: 0,
       cancelToken: cancelToken,
       structuredJson: false,
+      allowReasoningContentFallback: true,
       maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
     );
   }

@@ -41,6 +41,7 @@ class FakeCompletionClient extends ChatApiService {
     Duration? receiveTimeout,
     int maxRetries = 5,
     CancelToken? cancelToken,
+    bool allowReasoningContentFallback = false,
   }) async {
     sendCount++;
     temperatures.add(temperature);
@@ -68,6 +69,7 @@ class FakeCompletionClient extends ChatApiService {
     int maxRetries = 5,
     CancelToken? cancelToken,
     bool structuredJson = false,
+    bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
   }) async {
     boundedCount++;

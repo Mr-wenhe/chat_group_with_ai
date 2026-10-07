@@ -390,7 +390,8 @@ void main() {
     });
   });
 
-  test('non-stream completion accepts reasoning content when content is empty',
+  test(
+      'non-stream completion hides reasoning content unless explicitly enabled',
       () async {
     final dio = Dio();
     dio.interceptors.add(InterceptorsWrapper(
@@ -422,8 +423,22 @@ void main() {
       maxRetries: 0,
     );
 
-    expect(result['success'], isTrue);
-    expect(result['message'], '<html>reasoning fallback</html>');
+    expect(result['success'], isFalse);
+    expect(result['failureCode'], 'emptyResponse');
+
+    final internalResult = await service.sendChatMessageWithResponseLimit(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [],
+      maxRetries: 0,
+      structuredJson: true,
+      maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
+    );
+
+    expect(internalResult['success'], isTrue);
+    expect(internalResult['message'], '<html>reasoning fallback</html>');
   });
 
   test('non-stream completion does not expose native StepFun reasoning',

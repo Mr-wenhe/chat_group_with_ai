@@ -241,15 +241,18 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
     return null;
   }
 
-  String _responseText(Map<String, dynamic> data, ApiProtocol protocol) {
+  String _responseText(
+    Map<String, dynamic> data,
+    ApiProtocol protocol, {
+    bool allowReasoningContentFallback = false,
+  }) {
     switch (protocol) {
       case ApiProtocol.anthropicMessages:
         final standard = _messageText(data['content']);
         if (standard.trim().isNotEmpty) return standard;
-        // Some compatible Anthropic endpoints expose the assistant payload
-        // only as reasoning_content. Use it only after normal content is
-        // confirmed empty so the public response contract stays deterministic.
-        return _messageText(data['reasoning_content']);
+        return allowReasoningContentFallback
+            ? _messageText(data['reasoning_content'])
+            : '';
       case ApiProtocol.openAiChatCompletions:
         final choices = data['choices'];
         if (choices is List && choices.isNotEmpty && choices.first is Map) {
@@ -257,11 +260,11 @@ extension _ChatApiServiceProtocolSupport on ChatApiService {
           if (message is Map) {
             final standard = _messageText(message['content']);
             if (standard.trim().isNotEmpty) return standard;
-            final reasoningContent = _messageText(message['reasoning_content']);
-            // StepFun's native `reasoning` is private thinking. Only the
-            // explicitly requested compatibility field may be used as a
-            // fallback, and only after standard content is empty.
-            return reasoningContent;
+            // `reasoning_content` is private analysis for ordinary chat. Only
+            // internal structured callers explicitly opt into this fallback.
+            return allowReasoningContentFallback
+                ? _messageText(message['reasoning_content'])
+                : '';
           }
         }
         return '';

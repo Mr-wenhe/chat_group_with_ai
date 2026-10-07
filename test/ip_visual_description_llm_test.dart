@@ -40,6 +40,7 @@ class _FakeChatApiService extends ChatApiService {
     Duration? receiveTimeout,
     int maxRetries = 3,
     CancelToken? cancelToken,
+    bool allowReasoningContentFallback = false,
   }) async {
     calls.add((model: model, messages: messages));
     final failure = error;
@@ -76,7 +77,8 @@ void main() {
       'success': true,
       'message': '```\n"short  silver hair",\n\tamber eyes\n```',
     });
-    final llm = IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
+    final llm =
+        IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
 
     final description = await llm.describe(_character(), _config());
 
@@ -88,7 +90,8 @@ void main() {
       'success': true,
       'message': 'long silver hair',
     });
-    final llm = IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
+    final llm =
+        IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
 
     await llm.describe(
       _character(voiceId: 'zh_female_gaolengyujie_moon_bigtts'),
@@ -105,7 +108,8 @@ void main() {
 
   test('系统提示把脸排在头发前、给头发压词量预算', () async {
     final api = _FakeChatApiService(result: {'success': true, 'message': 'x'});
-    final llm = IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
+    final llm =
+        IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
 
     await llm.describe(_character(), _config());
 
@@ -133,9 +137,11 @@ void main() {
     // 生图模型读不出这是两件事。
     final api = _FakeChatApiService(result: {
       'success': true,
-      'message': 'round cheeks, bright gaze\ntoddler frame, blue overalls\nmessy brown hair',
+      'message':
+          'round cheeks, bright gaze\ntoddler frame, blue overalls\nmessy brown hair',
     });
-    final llm = IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
+    final llm =
+        IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
 
     final description = await llm.describe(_character(), _config());
 
@@ -150,14 +156,17 @@ void main() {
       'success': true,
       'message': 'round cheeks,\n\n\ntoddler frame,\n',
     });
-    final llm = IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
+    final llm =
+        IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
 
-    expect(await llm.describe(_character(), _config()), 'round cheeks, toddler frame');
+    expect(await llm.describe(_character(), _config()),
+        'round cheeks, toddler frame');
   });
 
   test('未指定音色时不写出朗读音色行', () async {
     final api = _FakeChatApiService(result: {'success': true, 'message': 'x'});
-    final llm = IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
+    final llm =
+        IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
 
     await llm.describe(_character(), _config());
 
@@ -170,7 +179,8 @@ void main() {
       'success': true,
       'message': 'A' * (kIpVisualDescriptionMaxChars + 100),
     });
-    final llm = IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
+    final llm =
+        IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
 
     final description = await llm.describe(_character(), _config());
 
@@ -179,7 +189,8 @@ void main() {
 
   test('无 ApiConfig 时直接返回 null，不发起请求', () async {
     final api = _FakeChatApiService();
-    final llm = IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
+    final llm =
+        IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
 
     expect(await llm.describe(_character(), null), isNull);
     expect(api.calls, isEmpty);
@@ -187,15 +198,18 @@ void main() {
 
   test('配置未绑凭据时返回 null，不发起请求', () async {
     final api = _FakeChatApiService();
-    final llm = IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
+    final llm =
+        IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
 
-    expect(await llm.describe(_character(), _config(hasCredential: false)), isNull);
+    expect(await llm.describe(_character(), _config(hasCredential: false)),
+        isNull);
     expect(api.calls, isEmpty);
   });
 
   test('凭据解析不到时返回 null，不发起请求', () async {
     final api = _FakeChatApiService();
-    final llm = IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials(null));
+    final llm =
+        IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials(null));
 
     expect(await llm.describe(_character(), _config()), isNull);
     expect(api.calls, isEmpty);
@@ -208,7 +222,8 @@ void main() {
       (null, StateError('offline')),
     ]) {
       final api = _FakeChatApiService(result: result, error: error);
-      final llm = IpVisualDescriptionLlm(api: api, credentials: _FakeCredentials('sk-x'));
+      final llm = IpVisualDescriptionLlm(
+          api: api, credentials: _FakeCredentials('sk-x'));
 
       expect(
         await llm.describe(_character(), _config()),

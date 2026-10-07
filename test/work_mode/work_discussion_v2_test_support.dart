@@ -23,6 +23,7 @@ class _ModelClient extends ChatApiService {
       int maxRetries = 3,
       CancelToken? cancelToken,
       bool structuredJson = false,
+      bool allowReasoningContentFallback = false,
       required int maxResponseBytes}) {
     expect(maxTokens, WorkDiscussionRunner.discussionMaxTokens);
     expect(apiKey, 'test-key');
@@ -161,7 +162,9 @@ Future<AgentTask> apply(WorkCollaborationUpdate update) async {
       state.copyWith(
           collaboration: next, requestRevision: next.requestRevision),
       expectedCollaborationRevision: update.expectedRevision);
-  if (db.agentTaskBox.containsKey(task.id)) await db.agentTaskBox.put(task.id, task);
+  if (db.agentTaskBox.containsKey(task.id)) {
+    await db.agentTaskBox.put(task.id, task);
+  }
   return task;
 }
 
@@ -366,7 +369,9 @@ void _registerDocumentInvestigationTest() {
             required timeout,
             cancelToken}) async {
           final context = jsonDecode(messages.firstWhere((m) =>
-                  m['role'] == 'user' && m['content'] is String && (m['content'] as String).startsWith('{'))['content']
+                  m['role'] == 'user' &&
+                  m['content'] is String &&
+                  (m['content'] as String).startsWith('{'))['content']
               as String) as Map<String, dynamic>;
           final s = Map<String, dynamic>.from(context['collaboration'] as Map);
           if ((s['issues'] as List).isEmpty) {

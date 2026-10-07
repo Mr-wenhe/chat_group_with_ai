@@ -3,11 +3,23 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/database/data_lifecycle_models.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/features/chat_group/roundtable_news_role_service.dart';
 import '../../../providers/providers.dart';
 
 final aiCharactersProvider =
     StateNotifierProvider<AICharactersNotifier, List<AICharacter>>((ref) {
   return AICharactersNotifier(ref.read(databaseServiceProvider));
+});
+
+/// Character records available for user-facing management and selection.
+///
+/// The roundtable news assistant remains in [aiCharactersProvider] for search
+/// and runtime use, but is not a user-managed group member or persona.
+final userManagedAICharactersProvider = Provider<List<AICharacter>>((ref) {
+  return ref
+      .watch(aiCharactersProvider)
+      .where((character) => character.id != roundtableNewsRoleId)
+      .toList(growable: false);
 });
 
 class AICharactersNotifier extends StateNotifier<List<AICharacter>> {

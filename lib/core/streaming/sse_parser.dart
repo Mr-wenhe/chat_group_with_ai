@@ -73,7 +73,8 @@ class BoundedSseLineTransformer
 
 /// SSE（Server-Sent Events）行解析器：把 LLM 流式返回的字节流按行切分，
 /// 提取 `data:` 行中的 `choices[0].delta.content` 增量 token，并累计完整内容。
-/// 当标准 content 为空时，兼容使用 reasoning_content 作为完整响应回退。
+/// 默认只输出标准 content；仅显式启用的内部结构化调用可以回退到
+/// reasoning_content。
 ///
 /// 设计要点（与架构一致）：
 /// 1. 纯函数式、无副作用、可单测，不依赖 Dio / Flutter。
@@ -84,6 +85,13 @@ class SseParser {
   static const int _maxContentBytes = 2 * 1024 * 1024; // 2 MB
   static const int _maxLineBytes = 512 * 1024;
   static const int _maxWireBytes = 8 * 1024 * 1024;
+
+  /// User-facing streams leave this off so private analysis cannot become a
+  /// visible reply. Internal structured work-mode callers may opt in.
+  final bool allowReasoningContentFallback;
+
+  SseParser({this.allowReasoningContentFallback = false});
+
   String _buffer = '';
   String _fullContent = '';
   String _fullReasoningContent = '';
@@ -254,7 +262,9 @@ class SseParser {
         type: ChatStreamEventType.done,
         content: _fullContent.trim().isNotEmpty
             ? _fullContent
-            : _fullReasoningContent,
+            : allowReasoningContentFallback
+                ? _fullReasoningContent
+                : '',
         promptTokens: _promptTokens,
         completionTokens: _completionTokens,
         cachedTokens: _cachedTokens,

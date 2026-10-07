@@ -114,7 +114,7 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
   Future<void> _showAddMemberDialog() async {
     final group = _group;
     if (group == null) return;
-    final allCharacters = ref.read(aiCharactersProvider);
+    final allCharacters = ref.read(userManagedAICharactersProvider);
     final currentIds = group.aiCharacterIds.toSet();
     final candidates = allCharacters
         .where((character) => !currentIds.contains(character.id))
@@ -151,7 +151,7 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
     final group = _group;
     final ids = newCharacterIds.toList(growable: false);
     if (group == null || ids.isEmpty) return false;
-    final allCharacters = ref.read(aiCharactersProvider);
+    final allCharacters = ref.read(userManagedAICharactersProvider);
     final byId = {
       for (final character in allCharacters) character.id: character,
     };

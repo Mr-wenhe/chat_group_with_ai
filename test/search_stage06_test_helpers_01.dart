@@ -68,6 +68,7 @@ class _PlannerClient extends ChatApiService {
     Duration? receiveTimeout,
     int? maxRetries,
     CancelToken? cancelToken,
+    bool allowReasoningContentFallback = false,
   }) async {
     sendCount++;
     receivedCancelToken = cancelToken;
@@ -113,6 +114,7 @@ class _PlannerClient extends ChatApiService {
     int? maxRetries,
     CancelToken? cancelToken,
     bool structuredJson = false,
+    bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
   }) {
     receivedMaxResponseBytes = maxResponseBytes;
