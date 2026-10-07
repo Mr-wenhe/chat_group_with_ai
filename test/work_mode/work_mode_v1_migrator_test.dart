@@ -43,7 +43,7 @@ void main() {
         appSettingsBox: settingsBox,
       );
 
-  test('first migration removes only legacy work tasks and workspaces',
+  test('first migration preserves old work tasks artifacts and workspaces',
       () async {
     final legacyWorkTask = AgentTask(
       id: 'legacy-work',
@@ -74,9 +74,9 @@ void main() {
 
     await createMigrator().migrate();
 
-    expect(taskBox.containsKey(legacyWorkTask.id), isFalse);
+    expect(taskBox.containsKey(legacyWorkTask.id), isTrue);
     expect(taskBox.get(normalTask.id)?.userRequest, normalTask.userRequest);
-    expect(workspaceBox, isEmpty);
+    expect(workspaceBox.get('group-1')?.workDirPath, '/legacy/workspace');
     expect(settingsBox.get('unrelated_setting'), 'keep-me');
     expect(
       settingsBox.get(WorkModeV1Migrator.schemaVersionKey),
@@ -115,7 +115,7 @@ void main() {
     await createMigrator().migrate();
     final runningTask = AgentTask(
       id: 'running-v1-work',
-      groupId: 'group-1',
+      groupId: 'dm:worker',
       characterId: 'worker',
       userRequest: '正在执行',
       workModeTask: true,
@@ -152,6 +152,23 @@ void main() {
     expect(restored.canResumeInWorkMode, isTrue);
     expect(taskBox.get(pausedTask.id)?.status, AgentTaskStatus.paused);
     expect(taskBox.get(completedTask.id)?.status, AgentTaskStatus.completed);
+  });
+
+  test('startup preserves group in-flight state for v2 recovery', () async {
+    final task = AgentTask(
+      id: 'group-running',
+      groupId: 'group-1',
+      characterId: 'worker',
+      userRequest: '核对后恢复',
+      workModeTask: true,
+      status: AgentTaskStatus.runningTool,
+      executionStateJson: '{"uncertainAction":{"tool":"command.run"}}',
+    );
+    await taskBox.put(task.id, task);
+    await createMigrator().markInFlightWorkTasksInterrupted();
+    expect(taskBox.get(task.id)!.status, AgentTaskStatus.runningTool);
+    expect(taskBox.get(task.id)!.executionStateJson, task.executionStateJson);
+    expect(taskBox.get(task.id)!.resumeRequired, isFalse);
   });
 
   test('V1 task state survives a Hive reopen', () async {

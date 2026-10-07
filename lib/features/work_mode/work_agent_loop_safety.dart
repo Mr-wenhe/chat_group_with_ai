@@ -23,6 +23,65 @@ const Set<String> _sensitiveOperationKeys = {
 // ephemeral (model context only); persisted/checkpoint views still redact it.
 const int _maxModelImageDataUriChars = 7 * 1024 * 1024;
 const int _commandFailureHistoryLimit = 128;
+
+/// 截断抢救运行态在 `executionStateJson` 里的键（见 `_TruncationSalvageState`）。
+///
+/// 名字要避开 `_isPrivateField` 的正文黑名单（含 `content` / `raw` / `reasoning`
+/// 之类子串的键会在检查点里被丢掉），否则审批暂停时这份状态活不到恢复。
+const String _truncationSalvageStateKey = 'truncationSalvage';
+
+/// 「原地重建分段文件」判定态在 `executionStateJson` 里的键
+/// （见 `_StagedRewriteState`）。同样避开 `_isPrivateField` 的正文黑名单，
+/// 否则一次暂停就能让护栏失忆。
+const String _stagedRewriteKey = 'stagedRewrite';
+
+/// 「本次运行写出的路径」在 `executionStateJson` 里的键。
+///
+/// 与 `task.lastArtifactPaths` 分开：那一份是整条任务血缘的候选集合（产物契约与
+/// 完成校验都要它，见 `_retainArtifactPaths` 的注释），这一份只服务失败报告里
+/// 「本次运行写出的 N 个中间文件」那句话。私聊任务的一条记录是**长期血缘**
+/// （2026-10-01 现场那条从 9-11 跨到当天），整份历史一附就是 19 个文件 /
+/// 350 KB，而真正属于这次失败运行的只有 2 个。
+///
+/// 起算点是"最近一次进入 [WorkAgentLoop.execute]"：审批暂停后恢复、软上限后点
+/// 「继续」都会重进一次，于是那之前写出的文件不计入本次运行——用户在更早那次
+/// 的失败报告里已经见过它们，而且它们仍在磁盘上。
+const String _runArtifactPathsKey = 'runArtifactPaths';
+
+/// 失败报告该附哪些文件。
+///
+/// 有运行记录就用记录，**哪怕它是空的**：那次运行确实什么都没写成，报告就该
+/// 这么说，而不是把更早运行的文件再列一遍。没有记录（本次改动之前落下的检查点、
+/// 或在建立记录之前就返回的调用）才退回整份候选，行为与改动前一致。
+///
+/// 顶层函数而不是扩展成员：读它的那一侧在另一个库里（`default_work_task_runner.dart`），
+/// 拿不到私有的 `_WorkAgentLoopSafety`。它因此自带一次解码，而不是复用扩展里的
+/// `_safeExistingMap`。
+List<String> workRunScopedArtifactPaths(AgentTask task) {
+  final Map<String, dynamic> execution;
+  try {
+    final decoded = jsonDecode(task.executionStateJson);
+    execution = decoded is Map
+        ? Map<String, dynamic>.from(decoded)
+        : const <String, dynamic>{};
+  } on Object {
+    return task.lastArtifactPaths;
+  }
+  if (!execution.containsKey(_runArtifactPathsKey)) {
+    return task.lastArtifactPaths;
+  }
+  final value = execution[_runArtifactPathsKey];
+  if (value is! List) return task.lastArtifactPaths;
+  return value.whereType<String>().toList(growable: false);
+}
+
+/// How many distinct artifact paths one task remembers across its whole run.
+///
+/// The list is durable and is replayed into the model context every turn, so it
+/// needs a bound. Which entries survive a full window is decided where the list
+/// is written, next to the rule that keeps deliverables inside it.
+const int _maxRetainedArtifactPaths = 64;
+
 final RegExp _userActionDiagnostic = RegExp(
   r'权限|permission|access\s+denied|operation\s+not\s+permitted|'
   r'not\s+authorized|unauthorized|administrator|sudo|登录|登入|密码|'
@@ -104,6 +163,130 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       execution['unchangedMutationCount'] = bounded;
     }
     task.executionStateJson = jsonEncode(execution);
+  }
+
+  /// 读回「原地重建分段文件」的判定态。
+  ///
+  /// 逐字段校验而不是 `as`：检查点是可被外部写回的持久数据，缺字段或类型不对时
+  /// 必须退回"没有这个态"，而不是让一次恢复崩在类型转换上。
+  _StagedRewriteState _loadStagedRewrite(AgentTask task) {
+    final value = _safeExistingMap(task.executionStateJson)[_stagedRewriteKey];
+    if (value is! Map) return const _StagedRewriteState();
+    final count = value['count'];
+    final path = value['lastPath'];
+    final contents = value['writeDigests'];
+    return _StagedRewriteState(
+      // 判据只比较"是否达到阈值"，再往上的计数不参与任何决定，落盘时钳住即可。
+      count: count is num
+          ? count.clamp(0, _stagedRewriteRepeatedThreshold).toInt()
+          : 0,
+      corrected: value['corrected'] == true,
+      lastPath: path is String ? path : '',
+      // 旧版落盘的是"正文开头"指纹（`headFingerprints`），在整份正文的判据下
+      // 永远匹配不上，刻意不读回来：留着只会占掉有限的槽位。
+      writeDigests: contents is List          ? contents
+              .whereType<String>()
+              .take(_stagedRewriteFingerprintLimit)
+              .toList(growable: false)
+          : const <String>[],
+    );
+  }
+
+  void _persistStagedRewrite(AgentTask task, _StagedRewriteState staged) {
+    final execution = _decodeMap(task.executionStateJson);
+    if (staged.isEmpty) {
+      execution.remove(_stagedRewriteKey);
+    } else {
+      execution[_stagedRewriteKey] = {
+        'count': staged.count,
+        'corrected': staged.corrected,
+        'lastPath': staged.lastPath,
+        'writeDigests': staged.writeDigests,
+      };
+    }
+    task.executionStateJson = jsonEncode(execution);
+  }
+
+  /// 开始一次新运行：本次运行写出的路径清零。
+  ///
+  /// 放在 `execute` 里终态早退**之后**是刻意的：终态任务上的一次迟到调用不该把
+  /// 记录擦掉，否则紧随其后的失败报告会一个文件都附不出来。
+  void _resetRunArtifactPaths(AgentTask task) {
+    final execution = _decodeMap(task.executionStateJson);
+    execution[_runArtifactPathsKey] = const <String>[];
+    task.executionStateJson = jsonEncode(execution);
+  }
+
+  void _addRunArtifactPaths(AgentTask task, Set<String> written) {
+    if (written.isEmpty) return;
+    final execution = _decodeMap(task.executionStateJson);
+    final merged = <String>{..._loadRunArtifactPaths(task), ...written}
+        .toList(growable: false);
+    execution[_runArtifactPathsKey] = merged.length <= _maxRetainedArtifactPaths
+        ? merged
+        : merged.sublist(merged.length - _maxRetainedArtifactPaths);
+    task.executionStateJson = jsonEncode(execution);
+  }
+
+  List<String> _loadRunArtifactPaths(AgentTask task) {
+    final value =
+        _safeExistingMap(task.executionStateJson)[_runArtifactPathsKey];
+    if (value is! List) return const <String>[];
+    return value.whereType<String>().toList(growable: false);
+  }
+
+  /// 读回一次截断抢救的运行态（见 `_TruncationSalvageState`）。
+  ///
+  /// 逐字段校验而不是 `as`：检查点是可被外部写回的持久数据，缺字段或类型不对时
+  /// 必须退回"没有运行态"，而不是让一次恢复崩在类型转换上。
+  _TruncationSalvageState? _loadTruncationSalvage(AgentTask task) {
+    final value =
+        _safeExistingMap(task.executionStateJson)[_truncationSalvageStateKey];
+    if (value is! Map) return null;
+    final target = value['truncatedTargetPath'];
+    final part = value['partPath'];
+    final characters = value['salvagedCharacters'];
+    if (target is! String || target.trim().isEmpty) return null;
+    if (part is! String || part.trim().isEmpty) return null;
+    if (characters is! int || characters < 1) return null;
+    return _TruncationSalvageState(
+      truncatedTargetPath: target,
+      partPath: part,
+      salvagedCharacters: characters,
+    );
+  }
+
+  void _persistTruncationSalvage(
+    AgentTask task,
+    _TruncationSalvageState salvage,
+  ) {
+    final execution = _decodeMap(task.executionStateJson);
+    execution[_truncationSalvageStateKey] = {
+      'truncatedTargetPath': salvage.truncatedTargetPath,
+      'partPath': salvage.partPath,
+      'salvagedCharacters': salvage.salvagedCharacters,
+    };
+    task.executionStateJson = jsonEncode(execution);
+  }
+
+  void _clearTruncationSalvage(AgentTask task) {
+    final execution = _decodeMap(task.executionStateJson);
+    if (!execution.containsKey(_truncationSalvageStateKey)) return;
+    execution.remove(_truncationSalvageStateKey);
+    task.executionStateJson = execution.isEmpty ? '' : jsonEncode(execution);
+  }
+
+  /// 那次抢救写入是否**确实落盘**：它的分段路径出现在已提交的操作键里。
+  ///
+  /// `committedActionKeys` 的操作键是"工具名 + 规范化参数"，而 `path` 不是敏感字段
+  /// （只有 content 之类被哈希），所以路径明文可比。这是唯一能区分"记录在"与
+  /// "内容在"的现成证据：记录写在发起写入之前（否则审批暂停会把续写指令一起丢掉），
+  /// 而用户拒绝审批、路径被拒或写入失败时记录都还在。
+  bool _salvageLanded(_LoopState state, _TruncationSalvageState salvage) {
+    for (final key in state.committedActionKeys) {
+      if (key.contains(salvage.partPath)) return true;
+    }
+    return false;
   }
 
   /// Returns true only when this exact command/tool and diagnostic state was
@@ -376,9 +559,22 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     }.contains(normalized);
   }
 
-  String _operationKey(AgentToolCall call) {
+  String _operationKey(AgentToolCall call, {AgentTask? task}) {
     final normalized = _canonical(call.arguments);
-    return '${call.name.wireName}:$normalized';
+    final binding = task == null
+        ? null
+        : _decodeMap(task.executionStateJson)['workItemExecution'];
+    final scope = binding is Map
+        ? '${task!.id}:${binding['stage']}:${binding['workItemId']}:${binding['iterationId']}:${binding['requestRevision']}:${binding['verificationRevision']}:'
+        : '';
+    final legacy = '$scope${call.name.wireName}:$normalized';
+    if (task != null && WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+      // Preserve old cached identities; new durable indexes contain hashes only.
+      final cached = _decodeMap(task.executionStateJson)['committedActionKeys'];
+      if (cached is List && cached.contains(legacy)) return legacy;
+      return 'v2-action:${sha256.convert(utf8.encode('$legacy:${binding is Map ? binding['teamRevision'] : ''}:${task.characterId}'))}';
+    }
+    return legacy;
   }
 
   Object? _canonical(Object? value, [String? key]) {
@@ -510,7 +706,22 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     AgentToolCall call, {
     WorkToolResult? result,
   }) {
-    final paths = <String>{...task.lastArtifactPaths};
+    return _retainArtifactPaths(task, <String>{
+      ...task.lastArtifactPaths,
+      ..._writtenArtifactPaths(call, result: result),
+    });
+  }
+
+  /// 这一次工具调用写出的路径，不含已被剔掉的形态（截断抢救的暂存分段）。
+  ///
+  /// 与 [_updatedArtifactPaths] 分开是因为两者的消费者要的东西不同：那一份是
+  /// 整条任务血缘的候选集合（产物契约、完成校验都要它），这一份只服务"本次运行
+  /// 写了什么"（失败报告的附件）。
+  Set<String> _writtenArtifactPaths(
+    AgentToolCall call, {
+    WorkToolResult? result,
+  }) {
+    final paths = <String>{};
     final values = <String, Object?>{
       for (final key in const ['path', 'destinationPath'])
         key: call.arguments[key],
@@ -522,18 +733,75 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     for (final key in const ['path', 'destinationPath']) {
       final value = values[key];
       if (value is String && value.trim().isNotEmpty) {
+        // 截断抢救的暂存分段与目标同目录、同扩展名、内容非空：一旦进产物历史，
+        // `WorkArtifactDeliveryGuard` 就会把它当交付候选，用户每次遭遇截断都会多
+        // 收到一个 `xxx.rescue-<hash>.md` 附件。它只是中转，不登记。
+        // 判据来自命名规则的所有者，不在这里另写一份（见 `WorkTruncationSalvage`）。
+        if (WorkTruncationSalvage.isRescuePath(value)) continue;
         paths.add(_publicText(value, maximum: 1000));
       }
     }
     final reportedArtifacts = result?.data['artifactPaths'];
     if (reportedArtifacts is List) {
       for (final value in reportedArtifacts.whereType<String>()) {
-        if (value.trim().isNotEmpty) {
-          paths.add(_publicText(value, maximum: 1000));
-        }
+        if (value.trim().isEmpty) continue;
+        if (WorkTruncationSalvage.isRescuePath(value)) continue;
+        paths.add(_publicText(value, maximum: 1000));
       }
     }
-    return paths.take(64).toList(growable: false);
+    return paths;
+  }
+
+  /// Keeps a task's artifact history inside its retention window.
+  ///
+  /// The window exists because the list is durable (it is rewritten into the
+  /// task checkpoint on every step) and is replayed into the model context each
+  /// turn, so it cannot grow with the run. What it must not do is drop the
+  /// *newest* entries, which is what `take(64)` did: one recorded run wrote
+  /// 130+ distinct files (scripts, then 70 assets, then the two real
+  /// deliverables), so the deliverables never entered the record at all and the
+  /// completion guard reported "没有可读取的真实文件" while both files sat on
+  /// disk — and no repair round could fix it, because rewriting the same path
+  /// only appended it past the window again.
+  ///
+  /// Two rules keep the window useful:
+  ///  * a path in a format the request (or the discussion contract) named as an
+  ///    output is retained ahead of everything else — that is the deliverable
+  ///    the completion guard has to find;
+  ///  * the remaining slots go to the most recently written paths, because a
+  ///    run writes its intermediates before it writes the deliverable.
+  ///
+  /// Insertion order is preserved so the record still reads as a history.
+  List<String> _retainArtifactPaths(AgentTask task, Set<String> paths) {
+    final ordered = paths.toList(growable: false);
+    if (ordered.length <= _maxRetainedArtifactPaths) return ordered;
+
+    final deliverableFormats =
+        WorkArtifactDeliveryGuard.declaredOutputFormats(task);
+    bool isDeliverable(String path) =>
+        deliverableFormats.isNotEmpty &&
+        deliverableFormats.any(
+          (format) => WorkArtifactDeliveryGuard.matchesDeclaredFormat(
+            path,
+            format,
+          ),
+        );
+
+    // Two passes, both newest-first, so the window never overflows: a request
+    // naming a format (say “生成 50 张 png 图片”) declares the same format for
+    // every file the run writes, and pinning those would otherwise fill the
+    // window past its bound. Deliverables take the slots first because they are
+    // what the completion guard has to find; intermediates take what is left.
+    final retained = <String>{};
+    for (final path in ordered.reversed) {
+      if (retained.length >= _maxRetainedArtifactPaths) break;
+      if (isDeliverable(path)) retained.add(path);
+    }
+    for (final path in ordered.reversed) {
+      if (retained.length >= _maxRetainedArtifactPaths) break;
+      retained.add(path);
+    }
+    return ordered.where(retained.contains).toList(growable: false);
   }
 
   void _recordArtifactChange(
@@ -670,32 +938,60 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     return null;
   }
 
-  String _publicText(String value, {int maximum = 1000}) {
-    var safe = value
-        .replaceAll(
-          RegExp(
-            r'<\s*think\b[^>]*>[\s\S]*?<\s*/\s*think\s*>',
-            caseSensitive: false,
-          ),
-          '',
-        )
-        .replaceAll(
-          RegExp(r'<\s*think\b[^>]*>[\s\S]*$', caseSensitive: false),
-          '',
-        )
-        .replaceAll(
-          RegExp(r'<\s*/?\s*think\b[^>]*>', caseSensitive: false),
-          '',
-        )
-        .replaceAll(
-          RegExp(
-            r'(?:chain[- ]of[- ]thought|思维链|隐藏思维|私有思维|内部推理)'
-            r'\s*[:：]?[\s\S]*$',
-            caseSensitive: false,
-          ),
-          '[已隐藏]',
-        )
-        .trim();
+  String _publicText(String value, {int maximum = 1000}) => _boundedText(
+        _foldChainOfThought(_stripThinkBlocks(value)),
+        maximum,
+      );
+
+  /// 续写指令（含其中回显的"已写入内容结尾"）专用的转义。
+  ///
+  /// 与 [_publicText] 只差一处：**不做思维链折叠**。那条正则
+  /// （`chain-of-thought|思维链|隐藏思维|内部推理`）从命中处一直吃到字符串结尾，而
+  /// 续写指令的最后一段正是回显的结尾——被抢救的正文里只要出现"思维链"（本 App 的
+  /// 产物主题里很常见），模型拿到的结尾就整段变成 `[已隐藏]`，无缝续写失去接点。
+  ///
+  /// 密钥与 URL 脱敏照做（回显的是模型原文）。**本地路径刻意不脱敏**：这条指令必须
+  /// 点名分段文件与目标文件的路径，而路径正则会把 `/work/report.rescue-3f9a2b1c.md`
+  /// 整段换成 `[本地路径]`，模型就不知道该往哪个文件续写。事件、检查点与面板各有
+  /// 自己的路径脱敏（事件存储 `_safeText` 那条），不受这里影响——面板详情同样有一条
+  /// "需要点名的路径被脱敏就失去了意义"的既有口径。
+  String _continuationText(String value, {int maximum = 1000}) => _boundedText(
+        const SearchSecretScanner()
+            .redact(_stripThinkBlocks(value), includeOpaqueTokens: true)
+            .replaceAll(RegExp(r'https?://[^\s,;）)]+'), '[外部地址]'),
+        maximum,
+      );
+
+  /// 抹掉模型写在正文里的 think 标记块。
+  String _stripThinkBlocks(String value) => value
+      .replaceAll(
+        RegExp(
+          r'<\s*think\b[^>]*>[\s\S]*?<\s*/\s*think\s*>',
+          caseSensitive: false,
+        ),
+        '',
+      )
+      .replaceAll(
+        RegExp(r'<\s*think\b[^>]*>[\s\S]*$', caseSensitive: false),
+        '',
+      )
+      .replaceAll(
+        RegExp(r'<\s*/?\s*think\b[^>]*>', caseSensitive: false),
+        '',
+      );
+
+  /// 把正文里从思维链标记起（含标记）到结尾的内容换成 `[已隐藏]`。
+  String _foldChainOfThought(String value) => value.replaceAll(
+        RegExp(
+          r'(?:chain[- ]of[- ]thought|思维链|隐藏思维|私有思维|内部推理)'
+          r'\s*[:：]?[\s\S]*$',
+          caseSensitive: false,
+        ),
+        '[已隐藏]',
+      );
+
+  String _boundedText(String value, int maximum) {
+    final safe = value.trim();
     if (safe.length <= maximum) return safe;
     return maximum <= 1 ? '…' : '${safe.substring(0, maximum - 1)}…';
   }
@@ -873,11 +1169,26 @@ class _LoopState {
   int completionRepairCount = 0;
   int unchangedMutationCount = 0;
 
+  /// 「原地重建分段文件」判定态，见 [_WorkAgentLoopActions._observeStagedRewrite]。
+  _StagedRewriteState stagedRewrite = const _StagedRewriteState();
+
   /// Turn-scoped instruction describing what the last tool call got wrong. It
   /// is deliberately not durable: a resumed run rebuilds it from the
   /// checkpointed tool results instead of trusting in-memory text.
   String toolRepairInstruction = '';
   String completionRepairInstruction = '';
+
+  /// 重建护栏给出的续写指令。与 [_StagedRewriteState] 同寿命：续写或成功合并
+  /// 才会清掉它，所以"纠正过一次"这件事不会因为中间夹了一次读取就丢失。
+  String stagedRewriteInstruction = '';
+
+  /// 修复请求这一次拿到的正文（有界），只服务于协议失败的诊断。
+  ///
+  /// 协议重试记下的 `reason` 描述的多半是**修复后**那次解析的失败，而诊断里的
+  /// 计数与首次正文都属于首次决策响应；两者对不上时，只留首次正文会让人按错误
+  /// 的形状去推断。turn-scoped：每次修复前重置，不落检查点。
+  String repairResponseSnippet = '';
+
   final List<String> commandFailureKeys = <String>[];
 
   /// Counts identical process outcomes, independent of the command text, so a

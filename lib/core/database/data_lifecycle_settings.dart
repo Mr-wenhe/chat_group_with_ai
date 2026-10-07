@@ -3,6 +3,7 @@ import 'package:chat_group/core/database/data_lifecycle_models.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 
 part 'data_lifecycle_settings_operations.dart';
 part 'data_lifecycle_settings_target_builder.dart';
@@ -58,6 +59,7 @@ class DataLifecycleSettings {
       builder.listValue(_pinnedGroupKey, conversationId);
     }
     builder.exactKey('$_workModePrefix$conversationId');
+    builder.exactKey(WorkContextBoundary.storageKey(conversationId));
     builder.exactKeysWithPrefix('$_checkpointPrefix$conversationId:');
     builder.nestedMapEntry(
       _tokenUsageKey,
@@ -103,6 +105,7 @@ class DataLifecycleSettings {
     builder.mapEntry(_directProactiveKey, characterId);
     builder.nestedMapEntry(_tokenUsageKey, 'byCharacter', characterId);
     builder.exactKey('$_workModePrefix$conversationId');
+    builder.exactKey(WorkContextBoundary.storageKey(conversationId));
     builder.exactKeysWithPrefix('$_checkpointPrefix$conversationId:');
     for (final pin in _memoryPins()) {
       if (pin == 'legacy:$characterId' || !_memoryPinExists(pin)) {
@@ -155,6 +158,7 @@ class DataLifecycleSettings {
       builder.exactKey(_messageIndexCountKey);
       builder.exactKey(_messageIndexSchemaVersionKey);
       builder.exactKeysWithPrefix(_workModePrefix);
+      builder.exactKeysWithPrefix(WorkContextBoundary.storageKeyPrefix);
       builder.exactKeysWithPrefix(_checkpointPrefix);
       builder.exactKeysWithPrefix(_retryPrefix);
       for (final item in _retryItems()) {
@@ -206,6 +210,9 @@ class DataLifecycleSettings {
         db.appSettingsBox.get(isGroup ? _pinnedGroupKey : _pinnedCharacterKey);
     if (pins is List && pins.contains(id)) count++;
     if (db.appSettingsBox.containsKey('$_workModePrefix$id')) count++;
+    if (db.appSettingsBox.containsKey(WorkContextBoundary.storageKey(id))) {
+      count++;
+    }
     count += db.appSettingsBox.keys
         .whereType<String>()
         .where((key) => key.startsWith('$_checkpointPrefix$id:'))

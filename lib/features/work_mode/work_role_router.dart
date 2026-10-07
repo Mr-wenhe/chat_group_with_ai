@@ -91,6 +91,125 @@ class WorkRoleRouter {
     );
   }
 
+  /// v2 `artifactContract.type` 的唯一词表：v1 写的 `source` 就是 v2 的
+  /// `software`，运行期判据（软件闭环材料、测试覆盖、独立审查资格）只认后者。
+  ///
+  /// 两套词表并存过一次的后果是整段软件检查失效：真实入口把「制作 HTML 游戏」
+  /// 判成 `source`，而闭环检查、测试覆盖与专业审查资格分支都在比 `software`，
+  /// 于是读一遍正文就能宣称这个游戏通过审查。
+  static String canonicalArtifactType(String? raw) {
+    final value = raw ?? '';
+    return value.trim().toLowerCase() == 'source' ? 'software' : value;
+  }
+
+  /// Delivery intent wins over topic words: a game's requirements document
+  /// does not create implementation or execution-test responsibilities.
+  static bool requestsSoftwareImplementation(String request) {
+    final clauses = request.split(RegExp(r'[；;。\n]|并且|同时|然后|以及|并'));
+    return clauses.any((clause) =>
+        !RegExp(r'需求文档|需求说明|技术文档|调研报告|requirements document|specification',
+                caseSensitive: false)
+            .hasMatch(clause) &&
+        RegExp(r'(?:(?:开发|实现|制作|构建|编写|修复|修改|做)|\b(?:build|develop|implement|make|fix|repair)\b).{0,48}(?:软件|程序|应用|游戏|网页|网站|代码|html|flutter|python|app|game|website|code)',
+                caseSensitive: false)
+            .hasMatch(clause));
+  }
+
+  /// Minimal relevant team from current membership. Missing responsibilities
+  /// remain gaps; library candidates require a persisted user decision.
+  static WorkTeamSelection selectTeam(
+      {required String request,
+      required List<AICharacter> characters,
+      Iterable<CharacterSkill> skills = const [],
+      List<String> confirmedMemberIds = const []}) {
+    final availableSkills = skills.toList();
+    final contract = _deliverableContract(request, requestRevision: 1);
+    final software = requestsSoftwareImplementation(request);
+    final documentOnly = !software &&
+        RegExp(r'需求文档|需求说明|技术文档|调研报告|requirements document|specification',
+                caseSensitive: false)
+            .hasMatch(request);
+    final kinds = documentOnly
+        ? <WorkRoleStageKind>[WorkRoleStageKind.product]
+        : _inferStages(request,
+            deliverableFormat: software ? 'unspecified' : contract.format);
+    if (requestsSoftwareImplementation(request) &&
+        !kinds.contains(WorkRoleStageKind.testing)) {
+      kinds.add(WorkRoleStageKind.testing);
+    }
+    final mentions = analyzeMentionedCharacterIds(request, characters);
+    final intent = _workRoleMentionIntent(request, characters);
+    final errors = <String>[
+      if (intent.ambiguousExecutorIds.isNotEmpty) '指定多个最终执行人，请明确责任，未自动选择。',
+      if (mentions.ambiguousNames.isNotEmpty)
+        '成员重名：${mentions.ambiguousNames.join('、')}，请使用唯一名称。',
+      if (mentions.unknownNames.isNotEmpty)
+        '指定成员不存在：${mentions.unknownNames.join('、')}，未自动替换。',
+    ];
+    final selected = <Map<String, dynamic>>[];
+    final used = <String>{};
+    final missing = <WorkRoleStageKind>[];
+    final explicit = intent.explicitMentionedIds;
+    for (var i = 0; i < kinds.length; i++) {
+      final kind = kinds[i];
+      final pinned =
+          i < explicit.length ? _findUnique(characters, explicit[i]) : null;
+      final member = pinned ??
+          _bestCandidate(_eligible(characters), kind, availableSkills, used);
+      if (member == null ||
+          !_isSuitable(member, kind, availableSkills) ||
+          _availabilityFailure(member) != null ||
+          used.contains(member.id)) {
+        missing.add(kind);
+        if (pinned != null) {
+          errors.add(
+              '指定成员 ${pinned.name}：${_availabilityFailure(pinned) ?? '不具备${_stageLabel(kind)}资格'}，未自动替换。');
+        }
+        continue;
+      }
+      used.add(member.id);
+      selected.add({
+        'memberId': member.id,
+        'role': kind.name,
+        'qualificationRef': 'role:${member.id}:${kind.name}',
+        'qualified': true,
+        'available': true
+      });
+    }
+    for (final id in {...intent.consultedCharacterIds, ...confirmedMemberIds}) {
+      final member = _findUnique(characters, id);
+      if (member == null || _availabilityFailure(member) != null) {
+        errors.add('指定成员 $id 不可用，责任保留，需用户处理。');
+      } else if (used.add(id)) {
+        selected.add({
+          'memberId': id,
+          'role': 'consultation',
+          'qualificationRef': 'role:$id',
+          'qualified': true,
+          'available': true
+        });
+      }
+    }
+    return WorkTeamSelection(selected, missing, errors);
+  }
+
+  static bool qualifiesForResponsibility(AICharacter character, String role,
+          Iterable<CharacterSkill> skills) =>
+      _availabilityFailure(character) == null &&
+      _isSuitable(
+          character,
+          WorkRoleStageKind.values
+                  .where((k) =>
+                      k.name ==
+                      (role == 'developer'
+                          ? 'development'
+                          : role == 'tester'
+                              ? 'testing'
+                              : role))
+                  .firstOrNull ??
+              WorkRoleStageKind.general,
+          skills.toList());
+
   Future<WorkRoleRouteResult> route({
     required String request,
     bool hasAttachments = false,
@@ -652,3 +771,10 @@ String _candidateDisplayName(AICharacter character) {
 }
 
 String _modelText(Object? value) => value is String ? value.trim() : '';
+
+class WorkTeamSelection {
+  final List<Map<String, dynamic>> team;
+  final List<WorkRoleStageKind> missing;
+  final List<String> errors;
+  const WorkTeamSelection(this.team, this.missing, this.errors);
+}

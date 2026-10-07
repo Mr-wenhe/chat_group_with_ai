@@ -12,6 +12,11 @@ set(BINARY_NAME "伴伴")
 # OUTPUT_NAME in runner/CMakeLists.txt.
 set(BINARY_TARGET "chat_group")
 
+# The executable name, exported under its own variable because BINARY_NAME is
+# reassigned to the target name just before generated_plugins.cmake is included
+# (see below). runner/CMakeLists.txt reads this one for OUTPUT_NAME.
+set(APP_EXE_NAME "${BINARY_NAME}")
+
 # Explicitly opt in to modern CMake behaviors to avoid warnings with recent
 # versions of CMake.
 cmake_policy(VERSION 3.14...3.25)
@@ -61,6 +66,13 @@ add_subdirectory("runner")
 
 # Generated plugin build rules, which manage building the plugins and adding
 # them to the application.
+#
+# The generated file links every plugin with `target_link_libraries(${BINARY_NAME} ...)`,
+# so BINARY_NAME has to name the real CMake target at that point — it is 伴伴 for
+# the executable (see APP_EXE_NAME above). flutter_tools reads the executable
+# name from the first `set(BINARY_NAME "...")` line of this file, so the
+# lookup is unaffected by this reassignment. BINARY_NAME is unused below.
+set(BINARY_NAME "${BINARY_TARGET}")
 include(flutter/generated_plugins.cmake)
 
 

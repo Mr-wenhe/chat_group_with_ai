@@ -26,7 +26,10 @@ import 'package:chat_group/features/ai_character/character_gender_migration_stat
 import 'package:chat_group/features/chat_group/group_mute_store.dart';
 import 'package:chat_group/features/memory/memory_migrator.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:crypto/crypto.dart';
+import 'package:chat_group/features/work_mode/work_candidate_publication.dart';
+import 'work_mode/work_candidate_test_support.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 import 'helpers/lifecycle_hive.dart';
@@ -38,6 +41,7 @@ part 'backup_restore_service_test_part_02.dart';
 part 'backup_restore_service_test_part_03.dart';
 part 'backup_restore_service_test_part_04.dart';
 part 'backup_restore_service_test_part_05.dart';
+part 'backup_restore_service_test_part_p6.dart';
 
 class _FakeGenderMigrator extends CharacterGenderMigrator {
   final bool complete;
@@ -102,4 +106,5 @@ void main() {
   _registerBackupRestoreServiceTestPart3();
   _registerBackupRestoreServiceTestPart4();
   _registerBackupRestoreServiceTestPart5();
+  _registerP6BackupTests();
 }

@@ -1,6 +1,8 @@
 import 'dart:convert';
+import 'work_role_router.dart';
 
 import 'package:chat_group/core/models/agent_task.dart';
+import 'work_collaboration_state.dart';
 
 part 'work_discussion_state_metadata.dart';
 part 'work_discussion_state_validation.dart';
@@ -11,7 +13,8 @@ part 'work_discussion_state_validation.dart';
 /// executionStateJson. It is not a second task model or a general workflow
 /// engine. Unknown/malformed state must fail closed at the coordinator.
 class WorkDiscussionState {
-  static const int currentSchemaVersion = 1;
+  static const int currentSchemaVersion = 2;
+  static const int legacySchemaVersion = 1;
   static const String jsonKey = 'discussionState';
 
   /// Returns the current revision's scope only when its durable discussion
@@ -21,10 +24,17 @@ class WorkDiscussionState {
     final state = decoded.state;
     if (!decoded.isValid ||
         state == null ||
-        state.conversationId != task.groupId ||
-        state.requestRevision <= 1) {
+        state.conversationId != task.groupId) {
       return task.userRequest;
     }
+    if (state.schemaVersion == currentSchemaVersion) {
+      final collaboration = state.collaboration;
+      return collaboration?.taskId == task.id &&
+              collaboration!.scope.trim().isNotEmpty
+          ? collaboration.scope.trim()
+          : task.userRequest;
+    }
+    if (state.requestRevision <= 1) return task.userRequest;
     final contract = state.deliverableContract;
     final revision = contract?['requestRevision'];
     final scope = contract?['contentScope'];
@@ -89,9 +99,10 @@ class WorkDiscussionState {
   final List<String> blockers;
   final Map<String, dynamic>? deliverableContract;
   final String decisionSummary;
+  final WorkCollaborationState? collaboration;
 
   WorkDiscussionState({
-    this.schemaVersion = currentSchemaVersion,
+    this.schemaVersion = legacySchemaVersion,
     required this.conversationId,
     required this.phase,
     required this.requestRevision,
@@ -106,6 +117,7 @@ class WorkDiscussionState {
     Iterable<String> blockers = const [],
     Map<String, dynamic>? deliverableContract,
     this.decisionSummary = '',
+    this.collaboration,
   })  : candidateCharacterIds = List.unmodifiable(candidateCharacterIds),
         participants = List.unmodifiable(participants),
         understandingEvidence = List.unmodifiable(understandingEvidence),
@@ -155,11 +167,90 @@ class WorkDiscussionState {
     ).bounded();
   }
 
+  /// Fresh group tasks start with the same conservative, unsigned v2 baseline
+  /// as migration. Team and project identity are checked by the real runner.
+  factory WorkDiscussionState.forNewTask(AgentTask task,
+      {WorkDiscussionState? routed, String requestMessageId = ''}) {
+    final legacy = routed ??
+        WorkDiscussionState.initial(
+          conversationId: task.groupId,
+          deliverableContract: WorkRoleRouter.deliverableContractForRequest(
+                  task.userRequest,
+                  requestRevision: 1)
+              .toJson(),
+        );
+    return WorkDiscussionState.fromLegacyTask(task, legacy,
+            projectScopeId: 'unbound', requestMessageId: requestMessageId)
+        .copyWith(
+      phase: WorkDiscussionPhase.awaitingDiscussion,
+      blockers: const [],
+    );
+  }
+
+  /// Explicit conversion for an unfinished v1 task. No legacy percentage,
+  /// decision summary, or handoff is promoted into a v2 approval.
+  factory WorkDiscussionState.fromLegacyTask(
+    AgentTask task,
+    WorkDiscussionState legacy, {
+    required String projectScopeId,
+    String requestMessageId = '',
+  }) {
+    if (legacy.schemaVersion != legacySchemaVersion ||
+        legacy.conversationId != task.groupId ||
+        task.status == AgentTaskStatus.completed ||
+        !requiresDiscussionForConversation(task.groupId)) {
+      throw StateError('旧讨论状态与任务不匹配。');
+    }
+    final contract = legacy.deliverableContract;
+    final collaboration = WorkCollaborationState.fromLegacy(
+      taskId: task.id,
+      conversationId: task.groupId,
+      projectScopeId: projectScopeId,
+      requestRevision: legacy.requestRevision,
+      requestMessageId: requestMessageId,
+      scope: currentRequestScope(task),
+      artifactContract: {
+        'type': WorkRoleRouter.canonicalArtifactType(
+            contract?['deliverableType'] as String?),
+        'format': contract?['format'] ?? '',
+        'location': contract?['location'] ?? '',
+        'revisionTarget': contract?['revisionTarget'] ?? '',
+      },
+    );
+    return legacy.copyWith(
+      schemaVersion: currentSchemaVersion,
+      phase: WorkDiscussionPhase.blocked,
+      blockers: const ['v2ReviewRequired'],
+      collaboration: collaboration,
+    );
+  }
+
   bool get hasExecutor => _nullableId(executorId) != null;
 
   /// Only this exact state is eligible to cross into the execution runner.
   /// Approval, installation, and folder permissions remain separate gates.
-  bool get isExecutionReady =>
+  bool get isPlanReady =>
+      schemaVersion == currentSchemaVersion &&
+      isWithinBounds &&
+      collaboration != null &&
+      collaboration!.planReady;
+
+  // Ready plans still need an explicit member work item. No v2 executor
+  // election or legacy handoff is inferred from the discussion shell.
+  bool get isExecutionReady => schemaVersion == legacySchemaVersion
+      ? _legacyExecutionReady
+      : collaboration?.productionReady == true &&
+          ({'producing', 'verifying'}.contains(collaboration!.phase) ||
+              collaboration!.deliveryReady);
+
+  bool get isDeliveryReady =>
+      schemaVersion == currentSchemaVersion &&
+      isWithinBounds &&
+      phase == WorkDiscussionPhase.ready &&
+      collaboration != null &&
+      collaboration!.deliveryReady;
+
+  bool get _legacyExecutionReady =>
       isWithinBounds &&
       conversationId.trim().isNotEmpty &&
       phase == WorkDiscussionPhase.ready &&
@@ -181,7 +272,14 @@ class WorkDiscussionState {
   /// silently clamping an invalid value before the gate could turn a forged
   /// transition (for example, 101% understanding) into an executable one.
   bool get isWithinBounds {
-    if (schemaVersion != currentSchemaVersion ||
+    if (schemaVersion != currentSchemaVersion &&
+            schemaVersion != legacySchemaVersion ||
+        (schemaVersion == currentSchemaVersion &&
+            (collaboration == null ||
+                !collaboration!.isValid ||
+                collaboration!.conversationId != conversationId ||
+                collaboration!.requestRevision != requestRevision)) ||
+        (schemaVersion == legacySchemaVersion && collaboration != null) ||
         !_boundedText(conversationId, maximum: 256, required: true) ||
         !_boundedText(phase, maximum: 64, required: true) ||
         !WorkDiscussionPhase.values.contains(phase) ||
@@ -230,6 +328,8 @@ class WorkDiscussionState {
         'blockers': blockers,
         'deliverableContract': deliverableContract,
         'decisionSummary': decisionSummary,
+        if (schemaVersion == currentSchemaVersion)
+          'collaboration': collaboration?.toJson(),
       };
 
   WorkDiscussionState bounded() => WorkDiscussionState(
@@ -253,7 +353,17 @@ class WorkDiscussionState {
         blockers: _cleanList(blockers, maximum: 256),
         deliverableContract: _safeContract(deliverableContract),
         decisionSummary: _cleanText(decisionSummary, maximum: 1024),
+        collaboration: collaboration,
       );
+
+  /// 仅用于模型上下文的序列化；权威存储继续使用 [toJson]。
+  Map<String, dynamic> toPromptJson() {
+    final json = compactForContext().toJson();
+    if (collaboration != null) {
+      json['collaboration'] = collaboration!.toPromptJson();
+    }
+    return json;
+  }
 
   /// A compact form used in WorkContextSnapshot. The full value remains in
   /// executionStateJson; the summary only needs enough data to keep recovery
@@ -267,6 +377,9 @@ class WorkDiscussionState {
     int textLimit = 128,
     int contractScopeLimit = 512,
   }) {
+    // The v2 record is authority-bearing. A context summary may retain it,
+    // but must never clip approvals, issues or pending input into a new gate.
+    if (schemaVersion == currentSchemaVersion) return this;
     final boundedCandidateLimit = candidateLimit.clamp(1, 32).toInt();
     final boundedParticipantLimit = participantLimit.clamp(0, 16).toInt();
     final boundedEvidenceLimit = evidenceLimit.clamp(0, 4).toInt();
@@ -352,6 +465,7 @@ class WorkDiscussionState {
     bool clearCoordinatorId = false,
     bool clearExecutorId = false,
     String? decisionSummary,
+    WorkCollaborationState? collaboration,
   }) {
     return WorkDiscussionState(
       schemaVersion: schemaVersion ?? this.schemaVersion,
@@ -374,6 +488,7 @@ class WorkDiscussionState {
           ? null
           : deliverableContract ?? this.deliverableContract,
       decisionSummary: decisionSummary ?? this.decisionSummary,
+      collaboration: collaboration ?? this.collaboration,
     );
   }
 
@@ -421,7 +536,7 @@ class WorkDiscussionState {
       final round = _wholeInt(raw['round'], maximum: 100000);
       final understanding =
           _wholeInt(raw['understandingPercent'], maximum: 100);
-      if (version != currentSchemaVersion ||
+      if (version != currentSchemaVersion && version != legacySchemaVersion ||
           conversationId == null ||
           conversationId.isEmpty ||
           phase == null ||
@@ -490,6 +605,13 @@ class WorkDiscussionState {
           ? ''
           : _strictText(raw['decisionSummary'], maximum: 1024);
       if (decisionSummary == null) return null;
+      final collaboration = version == currentSchemaVersion
+          ? WorkCollaborationState.tryParse(raw['collaboration'])
+          : null;
+      if (version == currentSchemaVersion && collaboration == null ||
+          version == legacySchemaVersion && raw.containsKey('collaboration')) {
+        return null;
+      }
       return WorkDiscussionState(
         schemaVersion: version!,
         conversationId: conversationId,
@@ -506,6 +628,7 @@ class WorkDiscussionState {
         blockers: _cleanList(blockersValue, maximum: 256),
         deliverableContract: contract,
         decisionSummary: decisionSummary,
+        collaboration: collaboration,
       ).bounded();
     } on Object {
       return null;
@@ -514,22 +637,53 @@ class WorkDiscussionState {
 
   /// Preserves existing approval/resource/attachment metadata while replacing
   /// only the typed discussion extension.
-  static String mergeIntoExecutionState(
-    String raw,
-    WorkDiscussionState state,
-  ) {
+  static String mergeIntoExecutionState(String raw, WorkDiscussionState state,
+      {int? expectedCollaborationRevision}) {
     if (!state.isWithinBounds) {
       throw StateError('讨论状态字段越界或未规范化，不能写入执行门禁。');
     }
     Map<String, dynamic> metadata = <String, dynamic>{};
     try {
       final decoded = raw.trim().isEmpty ? null : jsonDecode(raw);
-      if (decoded is Map) metadata = Map<String, dynamic>.from(decoded);
+      if (decoded is Map) {
+        metadata = Map<String, dynamic>.from(decoded);
+      } else if (decoded != null &&
+          state.schemaVersion == currentSchemaVersion) {
+        throw StateError('损坏的执行检查点不能被 v2 状态覆盖。');
+      }
     } on Object {
-      // An invalid legacy payload cannot be trusted as metadata. The typed
-      // state is still persisted so the coordinator fails closed safely.
+      if (state.schemaVersion == currentSchemaVersion) rethrow;
     }
-    metadata[jsonKey] = state.bounded().toJson();
+    if (state.schemaVersion == currentSchemaVersion &&
+        workExecutionCheckpointRequiresReview(raw)) {
+      throw StateError('未知执行检查点不能被 v2 状态覆盖。');
+    }
+    final previous = tryParse(metadata[jsonKey]);
+    if (state.schemaVersion == currentSchemaVersion &&
+        metadata.containsKey(jsonKey) &&
+        previous == null) {
+      throw StateError('未知或损坏的讨论状态不能被 v2 状态覆盖。');
+    }
+    if (previous?.schemaVersion == currentSchemaVersion &&
+        state.schemaVersion != currentSchemaVersion) {
+      throw StateError('v2 状态不能降级为 v1。');
+    }
+    if (previous?.schemaVersion == currentSchemaVersion &&
+        (expectedCollaborationRevision == null ||
+            previous!.collaboration!.revision !=
+                expectedCollaborationRevision ||
+            state.collaboration!.revision !=
+                expectedCollaborationRevision + 1)) {
+      throw StateError('v2 协作状态必须按预期版本递增。');
+    }
+    final bounded = state.bounded();
+    // 问题与决策台账在这里收口成有界镜像：内存状态始终完整（按下标比对新旧问题的
+    // 校验必须看到完整台账），只有写进任务检查点的历史被裁到上限。
+    final collaboration = bounded.collaboration?.boundedHistory();
+    metadata[jsonKey] = (collaboration == null
+            ? bounded
+            : bounded.copyWith(collaboration: collaboration))
+        .toJson();
     return jsonEncode(metadata);
   }
 }

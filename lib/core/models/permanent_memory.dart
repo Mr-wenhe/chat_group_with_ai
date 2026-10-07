@@ -142,6 +142,11 @@ class PermanentMemory extends HiveObject {
   @HiveField(19)
   final String? invalidationReason;
 
+  /// Null for ordinary memories; work provenance survives corrections/audit.
+  /// scopeId is null only for verified general methods, not project assertions.
+  @HiveField(20)
+  final Map<dynamic, dynamic>? workSource;
+
   PermanentMemory({
     String? id,
     required this.observerCharacterId,
@@ -163,6 +168,7 @@ class PermanentMemory extends HiveObject {
     DateTime? createdAt,
     DateTime? updatedAt,
     this.invalidationReason,
+    this.workSource,
   })  : id = id ?? const Uuid().v4(),
         subjectIds = subjectIds ?? const [],
         supersedesIds = supersedesIds ?? const [],

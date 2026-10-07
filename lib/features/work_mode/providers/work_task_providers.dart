@@ -6,6 +6,7 @@ import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
+import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_task_action_message_service.dart';
@@ -82,9 +83,15 @@ final workTaskRunnerProvider = Provider<WorkTaskRunner>((ref) {
 /// it never owns task scheduling or starts tools on its own.
 final workDiscussionRunnerProvider = Provider<WorkTaskDiscussionRunner>((ref) {
   final database = ref.watch(databaseServiceProvider);
+  final taskRunner = ref.watch(workTaskRunnerProvider);
   return WorkDiscussionRunner(
     database: database,
     credentials: SecureApiCredentialResolver(),
+    workspaceService: taskRunner is DefaultWorkTaskRunner
+        ? taskRunner.workspaceService
+        : null,
+    investigate:
+        taskRunner is DefaultWorkTaskRunner ? taskRunner.investigate : null,
     eventStore: ref.watch(workTaskEventStoreProvider),
   );
 });
@@ -219,6 +226,11 @@ final workTaskCoordinatorProvider = Provider<WorkTaskCoordinator>((ref) {
     snapshotStatusUpdater: (taskId, status) =>
         ref.read(workSnapshotServiceProvider).markTaskStatus(taskId, status),
     userActionNotifier: actionMessages.notify,
+    contextBoundaryWriter: (conversationId, at) => WorkContextBoundary.advance(
+      database.appSettingsBox,
+      conversationId,
+      at,
+    ),
   );
   unawaited(coordinator.restore());
   ref.onDispose(coordinator.dispose);

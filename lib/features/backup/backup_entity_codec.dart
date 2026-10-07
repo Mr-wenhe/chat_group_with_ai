@@ -1,4 +1,5 @@
 import 'dart:convert';
+import 'package:chat_group/core/models/work_delivery_metadata.dart';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -19,6 +20,7 @@ import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 
 part 'backup_entity_codec_records.dart';
@@ -69,9 +71,10 @@ class BackupEntityCodec {
 
   static Map<String, dynamic> message(
     Message item,
-    List<Map<String, dynamic>> media,
-  ) =>
-      _BackupEntityRecordCodec.message(item, media);
+    List<Map<String, dynamic>> media, {
+    Map<String, dynamic>? workDelivery,
+  }) =>
+      _BackupEntityRecordCodec.message(item, media, workDelivery: workDelivery);
 
   static Message decodeMessage(
     Map<String, dynamic> json,

@@ -30,6 +30,9 @@ abstract class GovernancePersistence {
     String model,
     CustomModelCapability capability,
   );
+
+  /// 清除该模型的用户声明，使其回落到内置快照（或未知模型的保守降级）。
+  Future<void> clearCustomCapability(String provider, String model);
   Future<void> addLedgerEntry(UsageLedgerEntry entry);
   Future<void> addDiagnostic(AiRequestDiagnostic diagnostic);
 
@@ -87,7 +90,10 @@ class AiGovernanceStore implements GovernancePersistence {
   static const _searchPolicyKey = globalSearchPolicyKey;
   static const _searchAuditKey = searchAuditKey;
   static const _conversationSearchPoliciesKey = conversationSearchPoliciesKey;
-  static const _customCapabilitiesKey = 'custom_model_capabilities_v1';
+
+  /// 用户声明的模型能力，按 `provider/model` 为键。公开是因为备份必须携带它：
+  /// 这是用户逐条填写、决定工作模式能否跑起来的配置，丢了只能重填。
+  static const customCapabilitiesKey = 'custom_model_capabilities_v1';
   static const _diagnosticLimit = 200;
   static const _searchAuditLimit = 100;
   static const _searchAuditRawScanLimit = 10000;
@@ -196,7 +202,7 @@ class AiGovernanceStore implements GovernancePersistence {
 
   @override
   CustomModelCapability? customCapability(String provider, String model) {
-    final raw = db.appSettingsBox.get(_customCapabilitiesKey);
+    final raw = db.appSettingsBox.get(customCapabilitiesKey);
     if (raw is! Map) return null;
     final value = raw[_modelKey(provider, model)];
     return value is Map ? CustomModelCapability.fromMap(value) : null;
@@ -277,11 +283,21 @@ class AiGovernanceStore implements GovernancePersistence {
     CustomModelCapability capability,
   ) =>
       _mutationGate.run(() async {
-        final raw = db.appSettingsBox.get(_customCapabilitiesKey);
+        final raw = db.appSettingsBox.get(customCapabilitiesKey);
         final values =
             raw is Map ? Map<String, dynamic>.from(raw) : <String, dynamic>{};
         values[_modelKey(provider, model)] = capability.toMap();
-        await db.appSettingsBox.put(_customCapabilitiesKey, values);
+        await db.appSettingsBox.put(customCapabilitiesKey, values);
+      });
+
+  @override
+  Future<void> clearCustomCapability(String provider, String model) =>
+      _mutationGate.run(() async {
+        final raw = db.appSettingsBox.get(customCapabilitiesKey);
+        if (raw is! Map) return;
+        final values = Map<String, dynamic>.from(raw);
+        values.remove(_modelKey(provider, model));
+        await db.appSettingsBox.put(customCapabilitiesKey, values);
       });
 
   @override

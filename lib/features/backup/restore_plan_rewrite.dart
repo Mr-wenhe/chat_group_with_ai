@@ -176,6 +176,13 @@ Map<String, dynamic> _remapSettings(
     if (key.startsWith('work_mode_enabled:')) {
       key = 'work_mode_enabled:${conversation(key.substring(18))}';
     }
+    if (key.startsWith(WorkContextBoundary.storageKeyPrefix)) {
+      // 键的整段后缀就是会话 id，所以不像 context_compressed_through 那样还要
+      // 拆出角色：DM 键 `dm:<id>` 里的冒号属于会话 id 本身。
+      final oldConversation =
+          key.substring(WorkContextBoundary.storageKeyPrefix.length);
+      key = WorkContextBoundary.storageKey(conversation(oldConversation));
+    }
     const checkpointPrefix = 'context_compressed_through:';
     if (key.startsWith(checkpointPrefix)) {
       final payload = key.substring(checkpointPrefix.length);
@@ -320,19 +327,36 @@ String _remapTaskExecutionState(
   String raw, {
   required String Function(String id) conversation,
   required Map<String, String> characterMap,
+  required Map<String, String> taskMap,
+  required Map<String, String> messageMap,
 }) {
   if (raw.trim().isEmpty) return raw;
   try {
     final decoded = jsonDecode(raw);
     if (decoded is! Map) return raw;
     final output = Map<String, dynamic>.from(decoded);
+    for (final key in ['attachmentMessageId']) {
+      final id = output[key];
+      if (id is String) output[key] = messageMap[id] ?? id;
+    }
+    final sourceTaskId = output['sourceTaskId'];
+    if (sourceTaskId is String) {
+      output['sourceTaskId'] = taskMap[sourceTaskId] ?? sourceTaskId;
+    }
+    final queued = output['queuedAttachmentMessageIds'];
+    if (queued is List) {
+      output['queuedAttachmentMessageIds'] =
+          queued.map((id) => messageMap[id] ?? id).toList();
+    }
     final discussion = output[WorkDiscussionState.jsonKey];
     final state = WorkDiscussionState.tryParse(discussion);
-    if (state == null) return raw;
+    if (state == null) return jsonEncode(output);
     output[WorkDiscussionState.jsonKey] = _remapDiscussionState(
       state,
       conversation: conversation,
       characterMap: characterMap,
+      taskMap: taskMap,
+      messageMap: messageMap,
     ).toJson();
     return jsonEncode(output);
   } on Object {
@@ -344,6 +368,8 @@ String _remapTaskContextSummary(
   String raw, {
   required String Function(String id) conversation,
   required Map<String, String> characterMap,
+  required Map<String, String> taskMap,
+  required Map<String, String> messageMap,
 }) {
   if (raw.trim().isEmpty) return raw;
   try {
@@ -361,6 +387,8 @@ String _remapTaskContextSummary(
         state,
         conversation: conversation,
         characterMap: characterMap,
+        taskMap: taskMap,
+        messageMap: messageMap,
       ).compactForContext().toJson();
     }
     return jsonEncode(output);
@@ -373,7 +401,76 @@ WorkDiscussionState _remapDiscussionState(
   WorkDiscussionState state, {
   required String Function(String id) conversation,
   required Map<String, String> characterMap,
+  required Map<String, String> taskMap,
+  required Map<String, String> messageMap,
 }) {
+  WorkCollaborationState? remappedCollaboration;
+  final collaboration = state.collaboration;
+  if (collaboration != null) {
+    String member(String id) => characterMap[id] ?? id;
+    String message(String id) => messageMap[id] ?? id;
+    final value = collaboration.toJson();
+    value['taskId'] = taskMap[collaboration.taskId] ?? collaboration.taskId;
+    value['conversationId'] = conversation(collaboration.conversationId);
+    value['requestMessageId'] = collaboration.requestMessageId.isEmpty
+        ? ''
+        : message(collaboration.requestMessageId);
+    value['coordinatorId'] = collaboration.coordinatorId.isEmpty
+        ? ''
+        : member(collaboration.coordinatorId);
+    value['team'] = collaboration.team
+        .map((e) => {...e, 'memberId': member(e['memberId'] as String)})
+        .toList();
+    value['workItems'] = collaboration.workItems
+        .map((e) => {...e, 'ownerId': member(e['ownerId'] as String)})
+        .toList();
+    value['approvals'] = collaboration.approvals
+        .map((e) => {
+              ...e,
+              'memberId': member(e['memberId'] as String),
+              'subjectId': e['kind'] == 'plan'
+                  ? taskMap[e['subjectId']] ?? e['subjectId']
+                  : e['subjectId'],
+              'evidenceRef': message(e['evidenceRef'] as String)
+            })
+        .toList();
+    value['issues'] = collaboration.issues
+        .map((e) => {
+              ...e,
+              'sourceId': member(e['sourceId'] as String),
+              'evidenceRef': e['evidenceRef'] == ''
+                  ? ''
+                  : message(e['evidenceRef'] as String),
+              'resolutionRef': e['resolutionRef'] == ''
+                  ? ''
+                  : message(e['resolutionRef'] as String)
+            })
+        .toList();
+    value['decisions'] = collaboration.decisions
+        .map((e) => {
+              ...e,
+              if (e['kind'] == 'member' && e['options'] is List)
+                'options': [
+                  for (final option in e['options'] as List)
+                    {...option as Map, 'id': member(option['id'] as String)}
+                ],
+              if (e['kind'] == 'member' &&
+                  !(e['targetId'] as String).startsWith('role:'))
+                'targetId': member(e['targetId'] as String),
+              'responseRef': e['responseRef'] == ''
+                  ? ''
+                  : message(e['responseRef'] as String)
+            })
+        .toList();
+    value['pendingInputIds'] =
+        collaboration.pendingInputIds.map(message).toList();
+    remappedCollaboration = WorkCollaborationState.tryParse(value);
+    if (remappedCollaboration == null) {
+      return state.copyWith(
+          phase: WorkDiscussionPhase.blocked,
+          blockers: const ['discussionStateInvalid']);
+    }
+  }
   final contract = state.deliverableContract == null
       ? null
       : <String, dynamic>{
@@ -403,5 +500,6 @@ WorkDiscussionState _remapDiscussionState(
       ),
     ),
     deliverableContract: contract,
+    collaboration: remappedCollaboration,
   );
 }

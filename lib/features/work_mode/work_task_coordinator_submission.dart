@@ -80,7 +80,7 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
     _folderGrantConsent = consent;
   }
 
-  /// Persists and schedules a new V1 work task. The task is queued before a
+  /// Persists and schedules a new work task; production group entries use v2. The task is queued before a
   /// runner can observe it, which makes state recoverable at every boundary.
   Future<AgentTask> _implSubmit(
     AgentTask task, {
@@ -101,6 +101,16 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
       if (workExecutionCheckpointRequiresReview(task.executionStateJson)) {
         await _pauseForCheckpointReview(task);
         return task;
+      }
+      if (_requiresDiscussionForTask(task) &&
+          _discussionRunner is WorkTaskCollaborationDiscussionRunner) {
+        final routed =
+            WorkDiscussionState.decodeExecutionState(task.executionStateJson);
+        if (!routed.present || routed.state?.schemaVersion == 1) {
+          task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+              task.executionStateJson,
+              WorkDiscussionState.forNewTask(task, routed: routed.state));
+        }
       }
       final discussion = WorkDiscussionState.decodeExecutionState(
         task.executionStateJson,
@@ -125,7 +135,9 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
           await _save(task);
           return task;
         }
-        if (state.isExecutionReady) {
+        if (state.collaboration != null && state.isExecutionReady) {
+          // The adapter selects the actual work-item actor before locks.
+        } else if (state.isExecutionReady) {
           final identityError = _discussionIdentityError(task, state);
           if (identityError != null) {
             await _pauseForDiscussion(task, identityError);
@@ -178,6 +190,9 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
       }
       if (!_requiresDiscussionForTask(task)) {
         throw StateError('私聊任务不支持群讨论状态。');
+      }
+      if (next.schemaVersion == WorkDiscussionState.currentSchemaVersion) {
+        throw StateError('v2 协作状态必须通过带来源和 expectedRevision 的增量入口。');
       }
       if (_running.containsKey(taskId) || _startingTaskIds.contains(taskId)) {
         throw StateError('任务正在执行，不能并发修改讨论状态。');
@@ -281,6 +296,81 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
       return task;
     });
   }
+
+  Future<AgentTask> _implApplyCollaborationUpdate(
+    WorkCollaborationUpdate update,
+  ) =>
+      _applyCollaborationUpdate(update, fromDiscussionRunner: false);
+
+  Future<AgentTask> _applyCollaborationUpdate(WorkCollaborationUpdate update,
+          {required bool fromDiscussionRunner}) =>
+      _serialize(() async {
+        _ensureOpen();
+        if ({
+              'router',
+              'memberResolution',
+              'projectBinding',
+              'review',
+              'workItem'
+            }.contains(update.sourceRole) &&
+            !fromDiscussionRunner) {
+          throw StateError('团队资格只能由实际讨论路由核验。');
+        }
+        final task = _requireWorkTask(update.taskId);
+        if (task.isTerminal ||
+            !_requiresDiscussionForTask(task) ||
+            task.groupId != update.conversationId ||
+            _running.containsKey(task.id) ||
+            _startingTaskIds.contains(task.id)) {
+          throw StateError('任务不可接收此协作增量。');
+        }
+        final decoded =
+            WorkDiscussionState.decodeExecutionState(task.executionStateJson);
+        final state = decoded.state;
+        if (state?.schemaVersion != WorkDiscussionState.currentSchemaVersion ||
+            state?.collaboration == null ||
+            state!.collaboration!.taskId != task.id) {
+          throw StateError('任务没有可写的 v2 协作状态。');
+        }
+        final current = state.collaboration!;
+        // 公开增量只能**原样**携带已有签字，新增或改写一条 delivery 签字都必须来自
+        // 实际成员请求与响应。只比 eventId 挡不住改写：id 由调用方给出，台账解析时
+        // 又会归档被同键新签字顶掉的旧记录，于是旧 id 一旦滚出索引，换个验证版本的
+        // 同 id 记录就被当成全新签字放行（见 WorkCollaborationState.approvalFingerprint）。
+        final knownApprovals = {
+          for (final approval in current.approvals)
+            WorkCollaborationState.approvalFingerprint(approval)
+        };
+        if (!fromDiscussionRunner &&
+            update.next.approvals.any((approval) =>
+                approval['kind'] == 'delivery' &&
+                !knownApprovals.contains(
+                    WorkCollaborationState.approvalFingerprint(approval)))) {
+          throw StateError('最终认可必须来自实际成员请求与响应，不能由外部增量代签。');
+        }
+        final next = current.apply(update);
+        if (identical(next, current)) return task;
+        final updated = state.copyWith(
+          requestRevision: next.requestRevision,
+          phase: next.planReady
+              ? WorkDiscussionPhase.ready
+              : next.hasPendingDecision || !next.teamQualified
+                  ? WorkDiscussionPhase.blocked
+                  : WorkDiscussionPhase.awaitingDiscussion,
+          coordinatorId: next.coordinatorId.isEmpty ? null : next.coordinatorId,
+          collaboration: next,
+        );
+        task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+            task.executionStateJson, updated,
+            expectedCollaborationRevision: current.revision);
+        task.plan = next.plan;
+        // 这句会经面板与事件直接展示给用户：不要写内部阶段编号。
+        task.lastError = next.planReady ? '方案已确认，等待后续调度。' : '';
+        _refreshTaskContext(task);
+        await _save(task);
+
+        return task;
+      });
 
   /// Read-only helper used by panels/tests to avoid parsing the untrusted JSON
   /// extension in more than one place.
@@ -453,6 +543,11 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
       }
       if (task.isTerminal) return 0;
       if (_conversationReservations.contains(normalized)) return 2;
+      // 已经交还给用户的中断记录不再"占着"会话：它和终态记录同级，谁更近谁优先。
+      // 否则一条被应用关闭打断的旧记录会永远压过今天新建的任务，让新交付物又被
+      // 并回旧时间线（2026-09-30 现场：9/11 中断的记录吃掉了当天的请求）。仍在等
+      // 用户回答的中断记录由上面的保留位与 [_isReleasedForNewDeliverable] 兜住。
+      if (_isReleasedForNewDeliverable(task)) return 0;
       return 1;
     }
 

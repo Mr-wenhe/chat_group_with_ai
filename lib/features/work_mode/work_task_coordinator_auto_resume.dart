@@ -21,6 +21,11 @@ extension _WorkTaskCoordinatorAutoResume on WorkTaskCoordinator {
         !failure.retryable) {
       return;
     }
+    // 完成校验的拒绝是"这次写出的东西不合格"，不是链路问题：等待重试的这段时间
+    // 不会让交付物变得更合格，重跑只是把同一堵墙再撞一次，而事件里的
+    // "链路暂时失败"对用户就是假话。它同样是 [retryable] 的——面板的"重试"按钮
+    // 只认这一个字段——但重跑必须由用户决定，见 [WorkFailureType.completionUnmet]。
+    if (failure.type != WorkFailureType.retryableNetwork) return;
     final attempt = _autoResumeCount(task);
     if (attempt >= autoResumeDelays.length) return;
     final delay = autoResumeDelays[attempt];
@@ -49,7 +54,8 @@ extension _WorkTaskCoordinatorAutoResume on WorkTaskCoordinator {
       if (task == null ||
           task.status != AgentTaskStatus.failed ||
           failure == null ||
-          !failure.retryable) {
+          !failure.retryable ||
+          failure.type != WorkFailureType.retryableNetwork) {
         return;
       }
       final attempt = _autoResumeCount(task);

@@ -6,7 +6,7 @@ extension _DiscussionMemberTurn on _DiscussionSession {
     await runner._recordEvent(
       task,
       WorkTaskEventKind.stepStarted,
-      '正在收集${member.character.name}的职业意见',
+      '正在收集${member.character.name}的回应',
       current: calls,
       total: WorkDiscussionRunner.maxCalls,
       metadata: <String, Object?>{
@@ -81,10 +81,7 @@ extension _DiscussionMemberTurn on _DiscussionSession {
       question: turn.userQuestion,
     );
     if (turn.publicUpdate.isNotEmpty || contractSuggestion.isNotEmpty) {
-      final text = turn.publicUpdate.isEmpty
-          ? '交付合同建议（待执行人取舍）：$contractSuggestion'
-          : '职责意见：${turn.publicUpdate}'
-              '${contractSuggestion.isEmpty ? '' : '\n交付合同建议（待执行人取舍）：$contractSuggestion'}';
+      final text = turn.publicUpdate;
       await runner._publish(
         task,
         group,
@@ -95,7 +92,7 @@ extension _DiscussionMemberTurn on _DiscussionSession {
       await runner._recordEvent(
         task,
         WorkTaskEventKind.modelOutput,
-        '${member.character.name}已发表公开职责意见',
+        '${member.character.name}已发表公开回应',
         current: calls,
         total: WorkDiscussionRunner.maxCalls,
         metadata: <String, Object?>{

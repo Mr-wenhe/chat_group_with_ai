@@ -66,13 +66,19 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
       failure.technicalDetail,
       fallback: reason,
     );
-    final attachmentSelection = await _safeArtifactsForAttachment(task);
+    // 失败报告只谈"本次运行写出的"：私聊里一条任务记录是长期血缘，整份候选会
+    // 把更早若干次运行留下的中间分段再列一遍、再附一遍。
+    final runArtifactPaths = workRunScopedArtifactPaths(task);
+    final attachmentSelection = await _safeArtifactsForAttachment(
+      task,
+      candidates: runArtifactPaths,
+    );
     final artifactNames = attachmentSelection.files
         .map((file) => _basename(file.path))
         .where((name) => name.trim().isNotEmpty)
         .take(6)
         .toList(growable: false);
-    final recordedArtifactNames = task.lastArtifactPaths
+    final recordedArtifactNames = runArtifactPaths
         .map(_basename)
         .where((name) => name.trim().isNotEmpty)
         .take(6)
@@ -116,6 +122,29 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     bool enforceArtifactContract = true,
     String? existingMessageId,
   }) async {
+    if (enforceArtifactContract &&
+        WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+      try {
+        final metadata = _decodeMap(task.executionStateJson);
+        final publicationId = sha256
+            .convert(utf8.encode(jsonEncode({
+              'request': _candidateState(task).requestRevision,
+              'team': _candidateState(task).teamRevision,
+              'operations': task.completedOperations,
+              'changes': metadata['artifactChanges'],
+            })))
+            .toString();
+        await publishCandidate(task, publicationId: publicationId);
+        if (_artifactDeliveryRetryOnly(task)) {
+          return _ArtifactDeliveryResult.failure('候选已冻结，附件投递失败。',
+              messageId: _artifactDeliveryMessageId(task),
+              retryWithExistingArtifact: true);
+        }
+        return const _ArtifactDeliveryResult.success();
+      } on Object {
+        return const _ArtifactDeliveryResult.failure('候选发布失败，请核对合同文件和存储空间。');
+      }
+    }
     final text = content.trim();
     if (text.isEmpty) return const _ArtifactDeliveryResult.success();
 
@@ -133,6 +162,7 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
             groupId: task.groupId,
             senderId: character.id,
             senderType: 'ai',
+            isWorkMode: true,
             content: '',
           );
 
@@ -484,6 +514,7 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     AgentToolCall call,
     WorkToolResult result,
   ) async {
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) return null;
     if (!_artifactCompletionTools.contains(call.name) ||
         !_artifactToolChanged(call, result) ||
         !_canAutoCompleteSingleArtifact(task)) {
@@ -532,6 +563,10 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
   /// reports the files it created.
   bool _artifactToolChanged(AgentToolCall call, WorkToolResult result) {
     if (call.name == AgentToolName.workspacePatch) {
+      // 追加只是把文件变长：一份长产物写没写完只有模型自己知道，一次 append
+      // 不能算"交付物已就绪"，否则第一段落地就判任务完成，交付物静默缺内容。
+      // 整文件写与 `parts` 合并都是"这一次就把文件写成最终形态"，仍然算满足。
+      if (call.arguments['append'] == true) return false;
       return result.data['changed'] == true;
     }
     final artifacts = result.data['artifactPaths'];
@@ -614,6 +649,36 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
         safeMetadata: const {'browserPreview': true, 'opened': false},
       );
     }
+  }
+
+  /// The readable files this run wrote, named so a rejected completion can ask
+  /// the user to confirm them.
+  ///
+  /// This is the same set the failure report attaches as intermediates, which is
+  /// deliberate: what the user is offered is exactly what the app was willing to
+  /// hand over anyway, and the confirmation only changes whether it is called a
+  /// deliverable or an intermediate.
+  ///
+  /// Not every rejection is offerable. “修订任务内容没变化” says the model changed
+  /// nothing, so the files on hand are the *unmodified originals*: letting the
+  /// user confirm those would turn the one check that catches an idle model into
+  /// a success message carrying the stale file. That rejection keeps the plain
+  /// failure and its retry.
+  Future<List<String>> _offerableDeliverables(AgentTask task) async {
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+      return const <String>[];
+    }
+    final files = workspaceFileService;
+    if (files == null) return const <String>[];
+    final validation = await WorkArtifactDeliveryGuard.validateTask(
+      task: task,
+      pathPolicy: files.pathPolicy,
+      workspaceRoot: _workspaceRootForTask(task),
+      now: clock(),
+    );
+    if (validation.valid || !validation.confirmable) return const <String>[];
+    final selection = await _safeArtifactsForAttachment(task);
+    return selection.files.map((file) => file.path).toList(growable: false);
   }
 
   /// A source-code request is successful only when a real readable file was

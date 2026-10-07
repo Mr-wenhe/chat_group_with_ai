@@ -25,14 +25,16 @@ class _TaskActions extends StatelessWidget {
   final WorkTaskExecutorChoice? onConfirmExecutorSwap;
   final WorkTaskUndoPreview? undoPreviewFor;
 
+  /// 确认把本次运行写出的文件当作交付物；只在门禁已经问过、还在等回答时出现。
+  final WorkTaskAction? onConfirmArtifactDelivery;
+
   /// 把角色 id 显示成名字；执行人冲突的确认框必须让用户看清是"哪两个人"。
   final String Function(String characterId)? characterNameFor;
 
-  /// 真删除任务记录（不可逆）。为 null 时不展示删除入口。
-  final WorkTaskAction? onDeleteTask;
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
   final WorkTaskReply? onReply;
+  final WorkTaskAction? onOpenDecision;
   final TextEditingController replyController;
   final FocusNode replyFocusNode;
   final ValueChanged<bool>? onModalVisibilityChanged;
@@ -63,13 +65,14 @@ class _TaskActions extends StatelessWidget {
     required this.onLaterVersioned,
     required this.undoPreviewFor,
     this.onConfirmExecutorSwap,
+    this.onConfirmArtifactDelivery,
     this.characterNameFor,
-    this.onDeleteTask,
     required this.onStop,
     required this.onContinue,
     required this.replyController,
     required this.replyFocusNode,
     this.onReply,
+    this.onOpenDecision,
     this.onModalVisibilityChanged,
     this.dialogContext,
     required this.runAction,
@@ -77,6 +80,7 @@ class _TaskActions extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
+    final colors = Theme.of(context).colorScheme;
     final failure = _visibleWorkFailure(task);
     final continueReason = _continueUnavailableReasonForPanel(task);
     final stopReason = task.isTerminal ? '任务已结束，无法停止。' : null;
@@ -90,8 +94,15 @@ class _TaskActions extends StatelessWidget {
     final discussionAllowsApproval = _discussionAllowsApproval(task);
     final canRestartFromBeginning =
         WorkTaskCoordinator.canRestartAfterUserStop(task);
+    // 门禁问过但还没回答的那批文件；回答之后（accepted）按钮就不再出现。
+    final confirmableArtifacts =
+        artifactDeliveryConfirmationPending(task.executionStateJson)
+            ? artifactDeliveryConfirmationPaths(task.executionStateJson)
+            : const <String>[];
     final isSoftLimitPause =
-        task.softLimitReached && _isPausedStatus(task.status);
+        WorkTaskExecutionPolicy.enforcesCumulativeLimits(task) &&
+            task.softLimitReached &&
+            _isPausedStatus(task.status);
     final hasUserAction = WorkTaskUserAction.forTask(task).isNotEmpty ||
         _hasPendingDiscussionCheckpoint(task);
     // Recovery controls are meaningful only at a user-resumable boundary. A
@@ -104,8 +115,7 @@ class _TaskActions extends StatelessWidget {
             failure == null ||
             failure.canContinue ||
             failure.canContinueAfterRolePermissionUpdate);
-    final modelClarificationPending =
-        WorkTaskClarification.isPending(task);
+    final modelClarificationPending = WorkTaskClarification.isPending(task);
     final followUpClarificationPending =
         WorkTaskClarification.isFollowUpPending(task);
     // Discussion questions use the same durable follow-up path as model
@@ -119,6 +129,8 @@ class _TaskActions extends StatelessWidget {
         (modelClarificationPending ||
             followUpClarificationPending ||
             discussionQuestion != null);
+    final openDecisions =
+        WorkTaskDecision.forTask(task).where((item) => item.isOpen).toList();
     final laterAction = WorkTaskUserAction.forTask(task).firstOrNull;
     final laterBlockerId = laterAction?.blockerId ?? 'discussionRequired';
     final laterActionVersion = laterAction?.version ??
@@ -132,20 +144,31 @@ class _TaskActions extends StatelessWidget {
     // 合同钉定人与群推举结果不一致是唯一需要用户二选一的讨论检查点。
     final conflictAction = WorkTaskUserAction.forTask(task)
         .where(
-          (action) =>
-              action.kind == WorkTaskUserActionKind.confirmExecutorSwap,
+          (action) => action.kind == WorkTaskUserActionKind.confirmExecutorSwap,
         )
         .firstOrNull;
     final conflictState = WorkDiscussionState.decodeExecutionState(
       task.executionStateJson,
     ).state;
-    final pinnedValue = conflictState?.deliverableContract?['explicitExecutorId'];
+    final pinnedValue =
+        conflictState?.deliverableContract?['explicitExecutorId'];
     final canKeepPinned = conflictState != null &&
         pinnedValue is String &&
         conflictState.candidateCharacterIds.contains(pinnedValue.trim());
     return Column(
       crossAxisAlignment: CrossAxisAlignment.stretch,
       children: <Widget>[
+        if (openDecisions.isNotEmpty && onOpenDecision != null) ...[
+          FilledButton.icon(
+            key: const Key('work-task-open-decision'),
+            onPressed: actionInFlight ? null : () => onOpenDecision!(task.id),
+            icon: const Icon(Icons.question_answer_outlined),
+            label: Text(openDecisions.length == 1
+                ? '回答待决问题'
+                : '处理 ${openDecisions.length} 项待决事项'),
+          ),
+          const SizedBox(height: 8),
+        ],
         if (canReply) ...<Widget>[
           _TaskReplyBox(
             task: task,
@@ -314,6 +337,17 @@ class _TaskActions extends StatelessWidget {
                 icon: const Icon(Icons.image_search_outlined),
                 label: const Text('选择视觉模型'),
               ),
+            if (onConfirmArtifactDelivery != null &&
+                task.status == AgentTaskStatus.paused &&
+                confirmableArtifacts.isNotEmpty)
+              FilledButton.icon(
+                key: const Key('work-task-confirm-artifact'),
+                onPressed: actionInFlight
+                    ? null
+                    : () => runAction(onConfirmArtifactDelivery!),
+                icon: const Icon(Icons.verified_outlined),
+                label: Text('确认交付 ${confirmableArtifacts.length} 个文件'),
+              ),
             if (onRetry != null &&
                 (canRestartFromBeginning ||
                     !isSoftLimitPause && failure?.canRetry == true))
@@ -351,6 +385,13 @@ class _TaskActions extends StatelessWidget {
                 message: stopReason ?? '停止当前任务。',
                 child: OutlinedButton.icon(
                   key: const Key('work-task-stop'),
+                  // 危险动作只改前景色，不改变按钮尺寸与顺序，避免挤动布局。
+                  // iconColor 必须显式给：styleFrom 不会从 foregroundColor 派生，
+                  // 缺省时图标会退回 M3 的 colorScheme.primary，与红色文字不一致。
+                  style: OutlinedButton.styleFrom(
+                    foregroundColor: colors.error,
+                    iconColor: colors.error,
+                  ),
                   onPressed: actionInFlight ? null : () => runAction(onStop),
                   icon: const Icon(Icons.stop_circle_outlined),
                   label: const Text('停止'),
@@ -381,17 +422,6 @@ class _TaskActions extends StatelessWidget {
                 label: const Text('撤销'),
               ),
             ),
-            if (onDeleteTask != null)
-              Tooltip(
-                message: '删除任务记录与执行日志；已生成的文件不受影响。',
-                child: TextButton.icon(
-                  key: const Key('work-task-delete'),
-                  onPressed:
-                      actionInFlight ? null : () => _confirmDelete(context),
-                  icon: const Icon(Icons.delete_outline_rounded),
-                  label: const Text('删除任务'),
-                ),
-              ),
           ],
         ),
       ],

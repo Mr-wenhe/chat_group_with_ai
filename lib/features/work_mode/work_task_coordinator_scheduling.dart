@@ -54,6 +54,7 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
       if (discussionError != null) {
         await _pauseForDiscussion(task, discussionError);
         await _save(task);
+        _maybeStartDiscussion(task);
         await _schedule();
         return;
       }
@@ -120,15 +121,11 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
     _removeQueuedTask(task);
     _taskLockPlans.remove(task.id);
     const reason = '任务检查点版本不受支持，已暂停，请确认后重新继续。';
-    final decoded = _decodeExecutionMap(task.executionStateJson);
     task
       ..status = AgentTaskStatus.paused
       ..resumeRequired = true
       ..pendingToolRequestJson = ''
       ..lastError = task.lastError.trim().isEmpty ? reason : task.lastError
-      ..executionStateJson = jsonEncode(
-        workExecutionCheckpointReviewMetadata(decoded),
-      )
       ..updatedAt = _clock();
     _conversationReservations.add(task.groupId);
     _refreshTaskContext(
@@ -155,6 +152,10 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
     bool resetSoftLimit = false,
   }) async {
     if (!_requiresDiscussionForTask(task)) return false;
+    if (_runner is WorkTaskRecoveryValidator &&
+        workExecutionCheckpointRequiresReview(task.executionStateJson)) {
+      throw StateError('未知或损坏检查点需要修复原始状态，不能通过继续降级为空任务。');
+    }
     final discussion = WorkDiscussionState.decodeExecutionState(
       task.executionStateJson,
     );

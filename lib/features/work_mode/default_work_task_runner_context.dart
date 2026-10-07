@@ -120,7 +120,15 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     // A revision target is a durable capability boundary. The model may use a
     // relative or absolute spelling, but it cannot redirect the mutation to a
     // different basename after the user queued “modify the same file”.
-    if (enforceRevision && revision != null) {
+    //
+    // Only a path naming that same file is rewritten. Applying the pin to every
+    // mutation made the deliverable the only writable file in the task, so the
+    // scripts and part files the prompt contract asks for silently landed on
+    // the deliverable instead of existing — the model then re-listed, saw no
+    // script, and wrote another one, forever.
+    if (enforceRevision &&
+        revision != null &&
+        _namesSameFile(value, revision)) {
       final normalizedRoot = workspaceRoot.replaceAll('\\', '/');
       // A public contract may say Desktop/foo.html while the authorized root
       // is already /Users/.../Desktop. Do not resolve that as Desktop/Desktop.
@@ -165,6 +173,27 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
       args['expectedSha256'] is String &&
       args['expectedFragment'] is String &&
       args['replacement'] is String;
+
+  /// 合并形态（`parts`）与精确补丁一样不接受自动改名：它的 `path` 是交付物
+  /// 本身，改名只会让模型随后读回旧文件。
+  bool _isMergePatch(Map<String, dynamic> args) => args['parts'] is List;
+
+  /// Whether a model-supplied path spells the same file as the revision target.
+  ///
+  /// Only the basename decides — the directory spelling varies (relative vs
+  /// absolute, with or without the authorized-root leaf) and is resolved by the
+  /// caller. Case is folded so a differently-cased spelling of the deliverable
+  /// pins to the stored path instead of creating a near-duplicate beside it,
+  /// matching how the delivery guard compares artifact paths.
+  static bool _namesSameFile(String requested, String revisionTarget) {
+    String basename(String path) {
+      final normalized = path.replaceAll('\\', '/');
+      return normalized.substring(normalized.lastIndexOf('/') + 1);
+    }
+
+    return basename(requested).toLowerCase() ==
+        basename(revisionTarget).toLowerCase();
+  }
 
   bool _isAbsolutePath(String value) {
     final path = value.trim();
@@ -283,10 +312,15 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
             !message.id.startsWith('agent-progress:'))
         .toList()
       ..sort((left, right) => left.timestamp.compareTo(right.timestamp));
+    // 分界线之前的历史属于已被删除的任务，不该再作为当前任务的上下文。
+    final visible = WorkContextBoundary.visible(
+      database.appSettingsBox,
+      task.groupId,
+      messages,
+    );
     return AgentAttachmentContext.buildHistory(
-      messages: messages.length <= 24
-          ? messages
-          : messages.sublist(messages.length - 24),
+      messages:
+          visible.length <= 24 ? visible : visible.sublist(visible.length - 24),
       currentUserRequest: WorkDiscussionState.currentRequestScope(task),
     );
   }
@@ -415,12 +449,16 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
         .map((definition) =>
             '${definition.name.wireName}(${definition.access.name})')
         .join('、');
-    final summary = task.contextSummary.trim();
+    final summary = WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)
+        ? const WorkContextBuilder().fromTask(task).toJsonString()
+        : task.contextSummary.trim();
     final handoff = WorkHandoffState.fromTask(task);
     final targetsDesktop =
         WorkModeDirectoryService.requestTargetsDesktop(currentRequest);
     return [
       base,
+      if (_decodeMap(task.executionStateJson)['workItemExecution'] is Map)
+        '当前成员工作项：${jsonEncode(_decodeMap(task.executionStateJson)['workItemExecution'])}；协作方案与验收：${jsonEncode(WorkDiscussionState.fromExecutionState(task.executionStateJson)?.collaboration?.toPromptJson())}。只完成当前工作项，不代表整个任务完成。material 工作项须写本任务必要且可打开的工作材料；软件包含需求/技术/测试材料，produce 工作项按合同文件制作。verify 工作项须实际读取或执行验证，禁止改产物和断言；finish.evidence 仅含一个 JSON 字符串 {method,result:"passed|failed|blocked",acceptanceIds:[全部覆盖项],report:"完整报告",defects:[{acceptanceId,reproduction,expected,actual,retestCondition}]}。软件测试命令标准输出须为 JSON {artifactDigest:"当前候选摘要",tests:[{id,status:"passed|failed",method:"对应 requiredCapability",reproduction,expected,actual}]}；必须实际执行对应测试，退出码0或 HTML 结构/打开不能替代交互覆盖，能力缺失返回 blocked。不删失败用例刷绿。',
       '角色可发现技能目录（全局技能按需加载；角色已绑定技能正文会注入；权限仍需通过角色授权与工具策略交集校验）：\n$skillCatalog',
       if (skillPreflight != null) skillPreflight,
       '当前生产 WorkAgentLoop 已注册工具：$tools。',
@@ -428,9 +466,11 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
       if (targetsDesktop)
         '用户明确指定“桌面”：当前工作区已绑定到授权的桌面根目录；请直接使用相对文件名，不要再添加 Desktop/ 或 conversations/ 前缀。',
       if (task.plan.trim().isNotEmpty) '公开角色路由计划：${task.plan.trim()}',
-      if (handoff != null)
+      if (handoff != null &&
+          !WorkTaskExecutionPolicy.isValidatedV2GroupTask(task))
         '当前接力阶段：${handoff.stageLabel}；交付物：${handoff.deliverables.join('、')}；完成标准：${handoff.completionCriteria.join('、')}。',
-      if (handoff?.lastSummary.trim().isNotEmpty == true)
+      if (!WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+          handoff?.lastSummary.trim().isNotEmpty == true)
         '上一阶段公开摘要：${handoff!.lastSummary}',
       _runtimeToolAvailabilityContext(),
       if (summary.isNotEmpty) '持久化任务上下文（公开摘要）：$summary',

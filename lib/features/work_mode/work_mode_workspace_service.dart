@@ -1,4 +1,5 @@
 import 'dart:io';
+import 'package:uuid/uuid.dart';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/work_mode_workspace.dart';
@@ -46,6 +47,10 @@ class WorkModeWorkspaceService {
     if (existing != null &&
         existing.workDirPath == path &&
         existing.conversationType == conversationType) {
+      if (existing.projectScopeId == null) {
+        existing.projectScopeId = const Uuid().v4();
+        await db.workModeWorkspaceBox.put(conversationId, existing);
+      }
       return existing;
     }
     final workspace = existing?.conversationType == conversationType
@@ -55,6 +60,7 @@ class WorkModeWorkspaceService {
             conversationType: conversationType,
           );
     workspace
+      ..projectScopeId = const Uuid().v4()
       ..workDirPath = path
       ..updatedAt = DateTime.now();
     await db.workModeWorkspaceBox.put(conversationId, workspace);
@@ -67,10 +73,23 @@ class WorkModeWorkspaceService {
   }) async {
     final grants = grantService;
     final isWindows = grants?.isWindows ?? Platform.isWindows;
-    final path = WorkFolderGrantService.normalizePath(
+    var path = WorkFolderGrantService.normalizePath(
       rawPath,
       isWindows: isWindows,
     );
+    // A request may name the file it wants changed rather than a directory —
+    // the revision-target answer is folded into the request text as an absolute
+    // path. The workspace is the folder holding that file: calling
+    // `Directory.create` on the file itself throws
+    // `Creation failed … Not a directory` (errno 20) and ended the run before
+    // its first tool call. Resolving the folder first also keeps the
+    // authorization check below covering the path actually returned.
+    if (await FileSystemEntity.isFile(path)) {
+      path = WorkFolderGrantService.normalizePath(
+        File(path).parent.path,
+        isWindows: isWindows,
+      );
+    }
     if (grants != null) {
       await grants.load();
       final authorized = requireWritable
@@ -120,6 +139,10 @@ class WorkModeWorkspaceService {
             conversationId: conversationId,
             conversationType: expectedType,
           );
+    if (workspace.workDirPath != normalizedPath ||
+        workspace.projectScopeId == null) {
+      workspace.projectScopeId = const Uuid().v4();
+    }
     workspace
       ..workDirPath = normalizedPath
       ..updatedAt = DateTime.now();

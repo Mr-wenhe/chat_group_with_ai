@@ -1,3 +1,4 @@
+import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/backup/backup_setting_keys.dart';
 import 'package:flutter_test/flutter_test.dart';
 
@@ -22,10 +23,34 @@ void main() {
       isTrue,
     );
     expect(
+      isBackupCarriedSettingKey('work_mode_context_boundary:g1'),
+      isTrue,
+      reason: '删除任务划下的分界线是会话状态，不随备份走会在恢复后复活旧上下文',
+    );
+    expect(
+      isBackupCarriedSettingKey('work_mode_context_boundary'),
+      isFalse,
+      reason: '缺少冒号的前缀不应被误判携带',
+    );
+    expect(
       isBackupCarriedSettingKey('work_mode_enabled'),
       isFalse,
       reason: '缺少冒号的前缀不应被误判携带',
     );
     expect(isBackupCarriedSettingKey('some_unrelated_key'), isFalse);
+  });
+
+  test('能力声明在携带清单与「仅配置」子集里', () {
+    expect(
+      backupCarriedSettingKeys,
+      contains(AiGovernanceStore.customCapabilitiesKey),
+      reason: '不携带的话，换设备恢复后用户要逐条重填，'
+          '重填之前工作模式会被能力拦截卡住',
+    );
+    expect(
+      backupConfigurationOnlySettingKeys,
+      contains(AiGovernanceStore.customCapabilitiesKey),
+      reason: '它是用户逐条填写的配置（不是会话状态），应随「仅配置」一起走',
+    );
   });
 }

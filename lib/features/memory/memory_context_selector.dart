@@ -7,7 +7,8 @@ import 'package:chat_group/features/memory/memory_conflict_resolver.dart';
 /// 统一全局记忆上下文选择器。
 ///
 /// 按 **observerCharacterId**（当前发言 AI）读取永久记忆和关系，
-/// 不按 conversationId 隔离。同一 AI 在群 1 / 群 2 / DM 中看到的是同一份记忆。
+/// 普通聊天复用全局记忆；工作消息的项目来源须匹配 scope、会话和删除分界。
+/// 通用已验证方法仍按成员复用，并标明适用条件。
 ///
 /// 隐私隔离由 [visibleToCharacterIds] 保证：
 /// - 群聊消息可见范围内的 AI 才能建立观察者记忆；
@@ -43,6 +44,10 @@ class MemoryContextSelector {
     String? currentTargetId,
     String? userMessage,
     int characterBudget = defaultPermanentMemoryBudget,
+    bool forWork = false,
+    String? projectScopeId,
+    String? conversationId,
+    DateTime? contextBoundary,
   }) async {
     final profile = _loadUserProfile();
     final relations = _selectRelationships(
@@ -58,12 +63,16 @@ class MemoryContextSelector {
       userMessage: userMessage,
       userProfile: profile,
       budget: characterBudget,
+      forWork: forWork,
+      projectScopeId: projectScopeId,
+      conversationId: conversationId,
+      contextBoundary: contextBoundary,
     );
 
     final parts = <String>[];
 
     // ── 优先级 1：人物信息卡（权威事实） ──
-    if (profile != null) {
+    if (profile != null && !forWork) {
       parts.add(_profilePromptSection(profile));
     }
 
@@ -167,6 +176,10 @@ class MemoryContextSelector {
     String? userMessage,
     required UserProfile? userProfile,
     required int budget,
+    required bool forWork,
+    String? projectScopeId,
+    String? conversationId,
+    DateTime? contextBoundary,
   }) {
     final visibleCharacterIds = participantCharacterIds.toSet();
     // 先构建被 supersede 的 ID 集合。
@@ -184,9 +197,36 @@ class MemoryContextSelector {
     for (final memory in db.permanentMemoryBox.values) {
       if (memory.observerCharacterId != observerCharacterId) continue;
       if (memory.status != MemoryStatus.active) continue;
+      final source = memory.workSource;
+      if (source != null) {
+        final scope = source['scopeId'];
+        if (scope != null &&
+            (!forWork ||
+                projectScopeId == null ||
+                scope != projectScopeId ||
+                memory.originConversationId != conversationId ||
+                contextBoundary != null &&
+                    !memory.occurredAt.isAfter(contextBoundary))) {
+          continue;
+        }
+        if (scope == null &&
+            (!{'verifiedMethod', 'stablePreference'}.contains(source['type']) ||
+                source['type'] == 'verifiedMethod' &&
+                    (source['evidenceRef'] is! String ||
+                        source['applicability'] is! String) ||
+                !memory.participantIds.contains(observerCharacterId))) {
+          continue;
+        }
+      } else if (forWork &&
+          !(memory.kind == MemoryKind.preference &&
+              memory.originType == MemoryOriginType.manual &&
+              memory.subjectIds.contains('user'))) {
+        // Unknown legacy work assertions cannot become this project's facts.
+        continue;
+      }
       // 排除被其他有效记录 supersede 的旧记录。
       if (supersededIds.contains(memory.id)) continue;
-      if (!memory.pinned &&
+      if ((!memory.pinned || forWork) &&
           MemoryConflictResolver.conflictsWithProfile(
             memory.content,
             memory.subjectIds,
@@ -214,6 +254,9 @@ class MemoryContextSelector {
 
     // 结构化排序。
     final keywords = _tokenize(userMessage ?? '');
+    if (forWork) {
+      allMemories.removeWhere((m) => _keywordOverlap(m, keywords) == 0);
+    }
     allMemories.sort((a, b) {
       // pinned / explicitlyRequested 优先。
       final aPin = (a.pinned ? 4 : 0) + (a.explicitlyRequested ? 3 : 0);
@@ -251,7 +294,7 @@ class MemoryContextSelector {
       final line = _memoryLine(memory);
       final needed = line.length + (lines.isEmpty ? 0 : 1); // +1 for separator
       // 预算不足：不加入本条，也不加入后续更长的记录。
-      if (used + needed > budget) break;
+      if (used + needed > budget) continue;
       lines.add(line);
       used += needed;
     }
@@ -276,7 +319,9 @@ class MemoryContextSelector {
   /// 记忆内容与用户消息关键词重合度。
   int _keywordOverlap(PermanentMemory memory, Set<String> keywords) {
     if (keywords.isEmpty) return 0;
-    final content = memory.content.toLowerCase();
+    final content =
+        '${memory.content} ${memory.workSource?['applicability'] ?? ''}'
+            .toLowerCase();
     var count = 0;
     for (final kw in keywords) {
       if (kw.length < 2) continue;
@@ -323,6 +368,10 @@ class MemoryContextSelector {
       MemoryOriginType.manual => '手动',
       MemoryOriginType.legacyMigration => '历史',
     };
+    final source = memory.workSource;
+    if (source?['type'] == 'verifiedMethod') {
+      return '历史查证方法（不是本项目已验证事实）：${memory.content}；适用条件：${source!['applicability']}；来源：${source['evidenceRef']}';
+    }
     return '$kindLabel[$originLabel]${memory.content}';
   }
 

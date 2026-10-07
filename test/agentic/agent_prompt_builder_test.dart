@@ -50,8 +50,8 @@ void main() {
   test('Stage 03 prompt requires chunked writes for long content', () {
     // 回归：用户要 5000+ 字报告时，模型把整篇正文塞进一次 workspace.patch 必然
     // 撞输出上限（实测 8192 token），动作 JSON 被截断、任务失败。提示词必须给出
-    // 分块写法：每个分段各写独立文件 + 一次合并，并明确"不要反复写目标文件"
-    // （workspace.patch 是整文件覆盖写，第二次写会把前一段冲掉）。
+    // 分块写法：建一个分段文件 + append 续写 + 一次 parts 合并，并明确"不要反复
+    // 往交付物本身写"（交付物应由合并这一步一次性产生，而不是被 append 成半成品）。
     final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
       rolePlaySystemPrompt: '你是工作助手。',
       skills: const [],
@@ -61,13 +61,31 @@ void main() {
     expect(prompt, contains('单次决策的输出有上限'));
     expect(prompt, contains('3000 字以内'));
     expect(prompt, contains('report.part1.md'));
-    expect(prompt, contains('整文件覆盖写、没有追加'));
+    expect(prompt, contains('反复往交付物本身写'));
     expect(prompt, contains('pandoc'));
     expect(prompt, contains('declaredImpact'));
     // 触发条件写成可观察的单位，而不是"明显短于上限"这类无法据以决策的说法。
     expect(prompt, isNot(contains('明显短于上限')));
     // 旧的"一次写完"说法必须消失，否则模型仍会一次塞满。
     expect(prompt, isNot(contains('文件的完整内容**直接放进')));
+  });
+
+  test('chunked writing contract uses append and a tool merge, not pandoc',
+      () {
+    final prompt = AgentPromptBuilder.buildAgentDecisionPrompt(
+      rolePlaySystemPrompt: '角色提示',
+      skills: const [],
+      userRequest: '把报告写到桌面',
+    );
+
+    expect(prompt, contains('拆成多次动作'));
+    expect(prompt, contains('append'));
+    expect(prompt, contains('parts'));
+    // 纯文本拼接不再要求 shell：合并是受治理的工具动作。
+    expect(prompt, isNot(contains('pandoc 一次吃多个分段')));
+    // 旧配方可能以另一种措辞回潮：分段写成"独立的分段文件"就是把合并交给
+    // 外部命令的写法，必须继续被挡在外面。
+    expect(prompt, isNot(contains('独立的分段文件')));
   });
 
   test('Stage 03 prompt documents the workspace.list root default', () {

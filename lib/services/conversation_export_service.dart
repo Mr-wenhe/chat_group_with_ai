@@ -63,17 +63,31 @@ class ConversationExportService {
         'theme': group.theme,
       },
       'exportedAt': DateTime.now().toIso8601String(),
-      'messages': sorted.map((m) {
-        final c = m.senderType == 'user' ? null : charById[m.senderId];
-        return {
-          'sender': m.senderId,
-          'senderType': m.senderType,
-          'name': c?.name ?? (m.senderType == 'user' ? '用户' : m.senderId),
-          'role': c?.role ?? (m.senderType == 'user' ? '用户' : ''),
-          'content': m.content,
-          'timestamp': m.timestamp.toIso8601String(),
-        };
-      }).toList(),
+      'messages': sorted.map((m) => _encodeMessage(m, charById)).toList(),
+    };
+  }
+
+  /// 导出一条消息的字段。只读展示字段，绝不涉及 apiKey / apiProvider / apiConfigId。
+  Map<String, Object?> _encodeMessage(
+    Message m,
+    Map<String, AICharacter> charById,
+  ) {
+    // 多人联机里的真人成员不在角色表里，名字走消息自带的昵称快照；
+    // 否则导出的 JSON 里会出现一串 userId。
+    final isMember = m.senderType == Message.senderTypeMember;
+    final character =
+        m.senderType == 'user' || isMember ? null : charById[m.senderId];
+    return {
+      'sender': m.senderId,
+      'senderType': m.senderType,
+      'name': isMember
+          ? _senderName(m, charById)
+          : character?.name ?? (m.senderType == 'user' ? '用户' : m.senderId),
+      'role': isMember
+          ? _senderRole(m, charById)
+          : character?.role ?? (m.senderType == 'user' ? '用户' : ''),
+      'content': m.content,
+      'timestamp': m.timestamp.toIso8601String(),
     };
   }
 
@@ -108,15 +122,21 @@ class ConversationExportService {
       List<Message>.from(messages)
         ..sort((a, b) => a.timestamp.compareTo(b.timestamp));
 
-  /// 发送者展示名：用户统一显示「用户」，已删除 AI 使用稳定占位名。
+  /// 发送者展示名：用户统一显示「用户」，多人联机的真人成员用昵称快照，
+  /// 已删除 AI 使用稳定占位名。
   String _senderName(Message m, Map<String, AICharacter> charById) {
     if (m.senderType == 'user') return '用户';
+    if (m.senderType == Message.senderTypeMember) {
+      final snapshot = m.senderName?.trim();
+      return snapshot == null || snapshot.isEmpty ? '群成员' : snapshot;
+    }
     return charById[m.senderId]?.name ?? '已删除角色';
   }
 
-  /// 发送者角色：用户为「用户」，AI 取角色 role（未知则空）。
+  /// 发送者角色：用户为「用户」，真人成员为「群成员」，AI 取角色 role（未知则空）。
   String _senderRole(Message m, Map<String, AICharacter> charById) {
     if (m.senderType == 'user') return '用户';
+    if (m.senderType == Message.senderTypeMember) return '群成员';
     return charById[m.senderId]?.role ?? '';
   }
 

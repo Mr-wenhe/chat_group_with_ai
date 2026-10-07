@@ -347,6 +347,8 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
           fields: {
             'path': WorkToolValueType.string,
             'content': WorkToolValueType.string,
+            'append': WorkToolValueType.boolean,
+            'parts': WorkToolValueType.stringList,
             'expectedSha256': WorkToolValueType.string,
             'expectedFragment': WorkToolValueType.string,
             'replacement': WorkToolValueType.string,
@@ -368,15 +370,24 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
             task,
             stage02,
             args['path'],
-            allowAutoRename: !_isExactPatch(args),
+            allowAutoRename: !_isExactPatch(args) && !_isMergePatch(args),
           );
+          final parts = args['parts'];
+          if (parts is List && parts.every((part) => part is String)) {
+            return _mergeStagedParts(
+              task,
+              stage02,
+              args,
+              path,
+              parts.cast<String>(),
+            );
+          }
           final content = args['content'];
           if (content is String) {
-            if (args['overwrite'] == false && await File(path).exists()) {
-              return const WorkToolResult.failed(
-                message: '目标文件已存在且 overwrite=false，未执行写入。',
-                failureCode: 'targetExists',
-              );
+            final refusal = await _overwriteRefusal(args, path);
+            if (refusal != null) return refusal;
+            if (args['append'] == true) {
+              return _mapFileResult(await stage02.append(path, content));
             }
             final raw = await stage02.write(path, content);
             return _mapFileResult(raw);
@@ -473,5 +484,59 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
       ..._skillDefinitions(task, character, permission),
     ];
     return WorkToolRegistry(definitions: definitions);
+  }
+
+  /// `overwrite:false` 在 `workspace.patch` 的每种形态下同义：不许碰已存在的
+  /// 文件。
+  ///
+  /// 让整文件写遵守它、而追加与合并照样覆盖，等于把模型写下的"别碰已有文件"
+  /// 静默丢掉——同一个参数在工具各形态下必须同义，否则模型无法用它保护旧产物。
+  Future<WorkToolResult?> _overwriteRefusal(
+    Map<String, dynamic> args,
+    String path,
+  ) async {
+    if (args['overwrite'] != false || !await File(path).exists()) return null;
+    return const WorkToolResult.failed(
+      message: '目标文件已存在且 overwrite=false，未执行写入。',
+      failureCode: 'targetExists',
+    );
+  }
+
+  /// `parts` 形态：把模型给的分段按顺序合并成 [path]。
+  ///
+  /// 目标路径（含"合并形态不自动改名"）已由 handler 解析完，这里只管分段：
+  /// 先过 `overwrite` 闸门，再解析分段路径，最后才碰 stage02。分段路径非法时
+  /// 必须按"路径被拒"返回：裸抛 `FormatException` 会被注册表兜成 `internal`，
+  /// 模型看到的是一句"工具执行失败"，而不是"这个路径不允许"。
+  Future<WorkToolResult> _mergeStagedParts(
+    AgentTask task,
+    Stage02WorkspaceFileTool stage02,
+    Map<String, dynamic> args,
+    String path,
+    List<String> parts,
+  ) async {
+    final refusal = await _overwriteRefusal(args, path);
+    if (refusal != null) return refusal;
+    final effective = <String>[];
+    for (final part in parts) {
+      try {
+        effective.add(_effectivePath(task, stage02.workspaceRoot, part));
+      } on FormatException catch (error) {
+        final reason = error.message.toString().trim();
+        return WorkToolResult.pathRejected(
+          message: reason.isEmpty ? '分段文件路径无效。' : reason,
+        );
+      }
+    }
+    final sensitivePart = await _sensitiveMergePart(stage02, effective);
+    if (sensitivePart != null) {
+      return WorkToolResult.failed(
+        message: '工作模式不支持把敏感文件合并进产物；'
+            '请改用 command.run 或先把内容复制成普通文件。',
+        data: {'path': sensitivePart},
+        failureCode: 'sensitivePartUnsupported',
+      );
+    }
+    return _mapFileResult(await stage02.merge(path: path, parts: effective));
   }
 }

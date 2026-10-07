@@ -105,7 +105,9 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       );
       if (_requiresDiscussionForTask(task) &&
           discussion.present &&
-          (discussion.state == null || !discussion.state!.isExecutionReady)) {
+          (discussion.state == null ||
+              discussion.state!.collaboration == null &&
+                  !discussion.state!.isExecutionReady)) {
         throw StateError('请先完成群讨论并确定最终执行角色。');
       }
       if (task.status == AgentTaskStatus.paused &&
@@ -115,8 +117,10 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
         // leaving the ambiguous FIFO head untouched.
         throw StateError('请先明确要修改的文件路径，再继续任务。');
       }
-      if (WorkTaskClarification.isPending(task)) {
-        throw StateError('请先在任务面板回答模型的问题。');
+      if (WorkTaskClarification.isAnswerable(task)) {
+        throw StateError(WorkTaskClarification.isPending(task)
+            ? '请先在任务面板回答模型的问题。'
+            : '请先回答当前任务的待决问题。');
       }
       if (_requiresExplicitCommandRequest(task)) {
         throw StateError('请发送明确的测试、构建或分析请求后再继续任务。');
@@ -151,10 +155,65 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       // creation and would otherwise keep a newly granted role permission
       // excluded by the runner's safety intersection.
       task.requestedPermissions.clear();
+      _autoResumeTaskIds.remove(task.id);
       _conversationReservations.remove(task.groupId);
       await _save(task);
       _enqueueTask(task);
       unawaited(_record(task, WorkTaskEventKind.queued, '用户已继续任务'));
+      await _schedule();
+    });
+  }
+
+  /// Accepts the files a paused task offered for delivery, then runs the task
+  /// so the accepted delivery can be published.
+  ///
+  /// This is the user's answer to the delivery question, not a new instruction:
+  /// the guard is told these files are wanted, so the coming completion
+  /// succeeds and the message carries them as 产物 instead of as intermediates.
+  /// Nothing is re-planned and nothing already written is touched.
+  ///
+  /// No version token is needed the way [confirmExecutorSwap] needs one. The
+  /// button only exists while the offer is pending, and a second offer cannot be
+  /// made while one is on record, so a tap can only ever answer the question it
+  /// was rendered for — a stale one fails the state check below.
+  Future<void> _implConfirmArtifactDelivery(String taskId) {
+    return _serialize(() async {
+      _ensureOpen();
+      final task = _requireWorkTask(taskId);
+      if (_running.containsKey(taskId) || _startingTaskIds.contains(taskId)) {
+        throw StateError('任务正在执行，不能同时确认交付。');
+      }
+      // 「等待群讨论」正是 paused 状态，所以确认交付和群讨论可能同时成立；而
+      // 下面的 `_conversationReservations.remove` 会松开讨论为此保留的会话。这与
+      // 重试路径同一条不变量：讨论还在跑时不能再起一次执行。
+      if (_discussionRuns.containsKey(taskId) ||
+          _discussionStartingIds.contains(taskId)) {
+        throw StateError('群讨论正在进行，不能同时确认交付。');
+      }
+      final offered = artifactDeliveryConfirmationPaths(
+        task.executionStateJson,
+      );
+      if (task.status != AgentTaskStatus.paused ||
+          offered.isEmpty ||
+          !artifactDeliveryConfirmationPending(task.executionStateJson)) {
+        throw StateError('当前任务没有待确认的交付。');
+      }
+      task.executionStateJson = withArtifactDeliveryConfirmationAccepted(
+        task.executionStateJson,
+        offered,
+      );
+      WorkTaskClarification.clear(task);
+      WorkFailure.clearFromTask(task);
+      task
+        ..status = AgentTaskStatus.queued
+        ..resumeRequired = false
+        ..lastError = ''
+        ..pendingToolRequestJson = ''
+        ..updatedAt = _clock();
+      _conversationReservations.remove(task.groupId);
+      await _save(task);
+      _enqueueTask(task);
+      unawaited(_record(task, WorkTaskEventKind.queued, '用户已确认交付产物'));
       await _schedule();
     });
   }
@@ -205,6 +264,12 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
         }
         final existingDiscussion =
             _requiresDiscussionForTask(task) ? discussionMarker.state : null;
+        if (_carriesV2Collaboration(existingDiscussion)) {
+          // 「从头开始」会清空执行检查点并写入一份新的 v1 讨论状态。对 v2 任务来说
+          // 那等于丢掉整块协作记录（认可、待决事项、验收、候选迭代），而且不会报错。
+          // 在**清空之前**拒绝，检查点因此保持原样。
+          throw StateError('该任务使用协作（v2）状态，不能通过「从头开始」重置，请在任务面板处理待决事项。');
+        }
         final currentScope = existingDiscussion == null
             ? task.userRequest
             : WorkDiscussionState.currentRequestScope(task);
@@ -407,10 +472,12 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       // Remove that stale action marker now so the panel does not offer an
       // invalid second continuation while the discussion gate is still open.
       WorkFailure.clearFromTask(task);
+      final cumulativeLimits =
+          WorkTaskExecutionPolicy.enforcesCumulativeLimits(task);
       task
         ..status = AgentTaskStatus.queued
-        ..actionCount = 0
-        ..startedAt = _clock()
+        ..actionCount = cumulativeLimits ? 0 : task.actionCount
+        ..startedAt = cumulativeLimits ? _clock() : task.startedAt
         ..softLimitReached = false
         ..resumeRequired = false
         ..lastError = ''
@@ -437,6 +504,18 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
     return _serialize(() async {
       _ensureOpen();
       for (final task in _allWorkTasks()) {
+        if (await _restoreCollaboration(task)) continue;
+        if (!task.isTerminal && _hasPendingV2Input(task)) {
+          try {
+            await _applyPendingV2Inputs(task);
+          } on Object {
+            task
+              ..status = AgentTaskStatus.paused
+              ..resumeRequired = false
+              ..lastError = '待处理输入无法安全纳入，原消息和附件仍保留在队列中。';
+            await _save(task);
+          }
+        }
         final needsCheckpointReview =
             workExecutionCheckpointRequiresReview(task.executionStateJson);
         if (needsCheckpointReview && !task.isTerminal) {
@@ -537,8 +616,7 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
         }
         if ((task.status == AgentTaskStatus.paused ||
                 task.status == AgentTaskStatus.interrupted) &&
-            (_isFollowUpClarification(task) ||
-                WorkTaskClarification.isPending(task))) {
+            WorkTaskClarification.isAnswerable(task)) {
           // An unanswered target question still owns this conversation. A
           // second task must not bypass it while the user is deciding which
           // artifact the queued revision may overwrite.

@@ -70,6 +70,14 @@ class WorkModeDirectoryService {
     return dir;
   }
 
+  /// Frozen deliveries share media lifecycle, never the snapshot retention tree.
+  Directory deliveryTaskDir(Directory mediaRoot, String taskId) {
+    if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(taskId)) {
+      throw const FormatException('交付任务标识无效');
+    }
+    return Directory('${mediaRoot.path}/work-deliveries/$taskId');
+  }
+
   static String _safeSegment(String value) {
     final normalized = value
         .trim()

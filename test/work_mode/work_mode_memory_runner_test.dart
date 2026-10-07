@@ -1,4 +1,12 @@
 import 'dart:io';
+import 'package:hive/hive.dart';
+import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/models/work_mode_workspace.dart';
+import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/features/memory/observation_entry.dart';
+import 'package:chat_group/features/memory/memory_controls.dart';
+import 'package:chat_group/features/backup/backup_entity_codec.dart';
+import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -11,6 +19,8 @@ import 'package:flutter_test/flutter_test.dart';
 
 import '../helpers/lifecycle_hive.dart';
 
+part 'work_mode_memory_runner_test_part_p5.dart';
+
 void main() {
   late Directory tempDir;
   late DatabaseService db;
@@ -21,6 +31,7 @@ void main() {
   });
 
   tearDown(() => closeLifecycleHive(tempDir));
+  registerP5Tests(() => db, () => tempDir);
 
   test('work mode production boundary injects memory before runtime callback',
       () async {

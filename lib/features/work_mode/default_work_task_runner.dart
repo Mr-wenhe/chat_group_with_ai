@@ -1,8 +1,16 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
+import 'package:path/path.dart' as p;
+import 'work_candidate_publication.dart';
+import 'work_task_execution_policy.dart';
+import 'package:chat_group/features/memory/memory_context_selector.dart';
+import 'work_mode_memory_runner.dart';
+import 'work_collaboration_state.dart';
 
 import 'package:archive/archive_io.dart';
+import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -33,13 +41,16 @@ import 'package:chat_group/features/work_mode/work_approval_decision.dart';
 import 'package:chat_group/features/work_mode/work_approval_fingerprint.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
+import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'work_discussion_investigation.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_mode_directory_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
+import 'package:chat_group/features/work_mode/work_model_deadline.dart';
 import 'package:chat_group/features/work_mode/work_document_tool.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
@@ -68,6 +79,11 @@ part 'default_work_task_runner_file_policy.dart';
 part 'default_work_task_runner_command_execution.dart';
 part 'default_work_task_runner_context.dart';
 part 'default_work_task_runner_delivery.dart';
+part 'default_work_task_runner_candidates.dart';
+part 'default_work_task_runner_production.dart';
+part 'default_work_task_runner_recovery.dart';
+part 'default_work_task_runner_production_delivery.dart';
+part 'default_work_task_runner_review.dart';
 part 'default_work_task_runner_attachments.dart';
 
 /// App-scoped adapter between durable work tasks and the one production loop.
@@ -87,7 +103,81 @@ class DefaultWorkTaskRunner
         WorkTaskWorkspaceRebinder,
         WorkTaskVisionModelValidator,
         WorkTaskDiscussionExecutorValidator,
-        WorkTaskFailureReporter {
+        WorkTaskFailureReporter,
+        WorkTaskCollaborationExecutor,
+        WorkTaskRecoveryValidator {
+  static const investigationCredentialTimeout = Duration(seconds: 8);
+
+  /// Reuses production role permissions, Stage02 path/disclosure/sensitive-read
+  /// checks and the sole loop. No command fallback or writable probe exists.
+
+  Future<WorkInvestigationResult> investigate(
+    AgentTask task,
+    AICharacter character,
+    AgentToolCall call,
+    WorkInvestigationBinding binding,
+    WorkTaskCancellation cancellation,
+  ) async {
+    if (character.id != binding.memberId || !binding.matches(task)) {
+      throw StateError('调查成员或需求版本不匹配。');
+    }
+    final current = database.aiCharacterBox.get(character.id);
+    final config = current?.apiConfigId == null
+        ? null
+        : database.apiConfigBox.get(current!.apiConfigId);
+    if (current == null ||
+        !current.isActive ||
+        !current.agenticEnabled ||
+        config == null ||
+        (await credentials
+                    .resolve(config)
+                    .timeout(investigationCredentialTimeout))
+                ?.trim()
+                .isNotEmpty !=
+            true) {
+      throw StateError('调查成员或模型配置已不可用，未自动换人。');
+    }
+    final files = workspaceFileService;
+    final mutations = mutationService;
+    if (files == null || mutations == null) throw StateError('受控文件服务未就绪。');
+    final workspace = await workspaceService.loadOrCreate(
+        conversationId: task.groupId,
+        isDirectChat: false,
+        requireWritable: false,
+        preferredRootPath:
+            directoryService.requestedWorkspacePath(task.userRequest));
+    final collaboration =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)
+            ?.collaboration;
+    if (collaboration != null &&
+        collaboration.projectScopeId != workspace.projectScopeId) {
+      throw StateError('项目绑定已变化，未沿用旧项目调查上下文。');
+    }
+    final token = CancelToken();
+    unawaited(cancellation.whenCancelled.then((_) => token.cancel()));
+    try {
+      final registry = _registryFor(
+          task: task,
+          character: current,
+          workspaceRoot: workspace.workDirPath,
+          files: files,
+          mutations: mutations,
+          cancellationToken: token,
+          approvalDecision: null,
+          approvalScope: null,
+          modelCapability:
+              gateway.capability(_providerFor(config), config.modelName));
+      return await WorkAgentLoop(
+              model: (_) => throw StateError('调查动作已由成员协议选择'),
+              registry: registry,
+              eventStore: eventStore,
+              clock: clock)
+          .investigate(task, call, binding, cancellation);
+    } finally {
+      token.cancel();
+    }
+  }
+
   final DatabaseService database;
   final WorkTaskEventStore eventStore;
   final ApiCredentialResolver credentials;
@@ -115,11 +205,43 @@ class DefaultWorkTaskRunner
   /// successful delivery. Tests can leave this disabled to avoid UI side
   /// effects; the production provider enables it.
   final bool autoOpenHtml;
+
+  /// 一次模型请求的**总**时限：它管的是"这一轮请求的整体耗时"。
   final Duration modelCompletionTimeout;
+
+  /// 首字节停滞时限：请求发出后这么久还没收到任何字符，判定为上游停滞。
+  ///
+  /// 与 [modelCompletionTimeout] 分开是刻意的。总时限**不能**缩短——它必须同时
+  /// 容下"生成很慢但正在输出"的请求，缩短会砍掉正常的那一类（既有决定）。
+  /// 而"一个字符都没有"是另一回事：此刻不存在任何已生成内容，取消并重试不会
+  /// 丢掉任何工作。这正是此前缺的那个判别器。
+  ///
+  /// 现场证据（2026-09-30，`sensenova-6.8-flash-lite`）：一个 16.8k 输入的请求
+  /// 连续三次整整 300 秒零输出——事件日志里那三段窗口没有任何 token 事件——客户端
+  /// 每次都白等到总时限；三次空等占掉整轮 23 分钟里的 15 分钟。同一天命中快路径的
+  /// 请求，首段输出只要 7～10 秒。
+  ///
+  /// 取值必须大于正常模型的首字节耗时，否则会把"慢启动但能成"的请求误杀成必败。
+  /// 现成数据里没有首字节分布（补 `firstTokenMs` 正是为了拿到它），所以 180 秒是
+  /// 一个保守起点：高于当天所有已观测到的首段输出，同时把最坏情况从 300 秒压到
+  /// 180 秒。真实分布到手后再校准这个值。
+  final Duration modelFirstTokenTimeout;
+
+  /// 生效的首字节停滞时限：不会晚于总时限。
+  ///
+  /// 调用方把总时限设得更短时（测试常这么做），停滞退化成与总时限同点触发，而
+  /// 不是让构造失败——否则每个只关心总时限的调用方都得额外声明一个它并不关心
+  /// 的值。钳制而不是断言，保证"停滞归因不会永远被总时限盖住"这条性质永远成立。
+  Duration get effectiveFirstTokenTimeout =>
+      modelFirstTokenTimeout < modelCompletionTimeout
+          ? modelFirstTokenTimeout
+          : modelCompletionTimeout;
+
   final DateTime Function() clock;
 
   void Function(AgentTask task)? _taskUpdateSink;
   Future<void> Function(AgentTask task)? _taskCheckpointSink;
+  final Set<String> _coordinatorDeliveryTasks = {};
 
   /// The full request is retained only while this process is waiting for a
   /// user decision. Durable task fields contain the redacted checkpoint.
@@ -149,6 +271,7 @@ class DefaultWorkTaskRunner
     // produce a tool plan and content; keep the deadline bounded but above the
     // previous 120s ceiling that aborted valid HTML generations.
     this.modelCompletionTimeout = const Duration(seconds: 300),
+    this.modelFirstTokenTimeout = const Duration(seconds: 180),
     DateTime Function()? clock,
   })  : credentials = credentials ?? SecureApiCredentialResolver(),
         gateway = gateway ??
@@ -161,6 +284,10 @@ class DefaultWorkTaskRunner
               grantService: folderGrantService,
             ),
         clock = clock ?? DateTime.now;
+
+  @override
+  Future<bool> prepareCollaborationWork(AgentTask task) =>
+      _prepareCollaborationWork(task);
 
   @override
   void setTaskUpdateSink(void Function(AgentTask task) sink) =>
@@ -192,6 +319,14 @@ class DefaultWorkTaskRunner
     WorkDiscussionState state,
   ) =>
       _implValidateDiscussionExecutor(task, state);
+
+  @override
+  Future<void> commitCollaborationDelivery(AgentTask task,
+          {bool Function()? hasArrivingInput}) =>
+      _commitCollaborationDelivery(task, hasArrivingInput: hasArrivingInput);
+
+  @override
+  Future<String?> validateRecovery(AgentTask task) => _validateRecovery(task);
 
   @override
   Future<void> run(

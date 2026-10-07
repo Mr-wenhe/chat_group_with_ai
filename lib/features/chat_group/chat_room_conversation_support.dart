@@ -100,11 +100,14 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
   /// senderId → 展示名的映射（用于把消息转写成带说话人的文字稿）。
   ///
   /// 含停用成员，历史消息里的角色才不会显示成未知；`user` 映射为群主名。
+  /// 多人实时群聊里的真人成员也要进来，否则客人说的话会被模型当成
+  /// "其他角色"说的——AI 会以为群里多了一个它不认识的设定角色。
   Map<String, String> _senderNameMap() {
     return {
       'user': _ownerMentionName,
       for (final c in _allGroupCharacters) c.id: c.name,
       for (final c in _characters) c.id: c.name,
+      ..._realtimeMemberNames,
     };
   }
 
@@ -375,8 +378,12 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
           'role': 'system',
           'content': '已有压缩摘要：${transient.summary}',
         },
+      // 只有 AI 角色的发言是 assistant；真人（本人或多人联机里的其他成员）
+      // 都算 user，否则压缩摘要会把客人说的话记成"助手说过"。
       ...pending.map((message) => <String, dynamic>{
-            'role': message.senderType == 'user' ? 'user' : 'assistant',
+            'role': message.senderType == Message.senderTypeAi
+                ? 'assistant'
+                : 'user',
             'content': message.content,
           }),
     ];

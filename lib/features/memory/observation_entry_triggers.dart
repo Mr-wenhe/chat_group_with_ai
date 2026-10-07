@@ -83,6 +83,11 @@ extension _ObservationEntryTriggers on ObservationEntry {
     required String conversationNameSnapshot,
   }) async {
     final now = DateTime.now();
+    final stableWorkPreference = message.isWorkMode &&
+        RegExp(r'^记住(?:所有项目的稳定偏好|跨项目的稳定偏好|全局偏好)[:：]我(?:更)?喜欢[^。；;\n]{1,80}[。]?$')
+            .hasMatch(message.content.trim()) &&
+        !RegExp(r'本项目|该项目|项目[A-Za-z0-9]|已验证|已实现|猜想|假设')
+            .hasMatch(message.content);
     for (final observerId in observers) {
       final stableId = _explicitMemoryId(
         observerId: observerId,
@@ -106,6 +111,19 @@ extension _ObservationEntryTriggers on ObservationEntry {
         observerCharacterId: observerId,
         kind: MemoryKind.explicitInstruction,
         content: message.content,
+        workSource: message.isWorkMode
+            ? {
+                'scopeId': stableWorkPreference
+                    ? null
+                    : db.workModeWorkspaceBox
+                            .get(conversationId)
+                            ?.projectScopeId ??
+                        'unbound',
+                'type': stableWorkPreference
+                    ? 'stablePreference'
+                    : 'projectInstruction',
+              }
+            : null,
         status: MemoryStatus.active,
         importance: 80,
         confidence: 1.0,
@@ -180,6 +198,7 @@ extension _ObservationEntryTriggers on ObservationEntry {
         supersedesIds: memory.supersedesIds,
         originType: memory.originType,
         originConversationId: memory.originConversationId,
+        workSource: memory.workSource,
         originNameSnapshot: memory.originNameSnapshot,
         sourceMessageIds: memory.sourceMessageIds,
         participantIds: memory.participantIds,

@@ -63,6 +63,7 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
 
   /// 弹出群成员列表面板（可查看状态、进角色设置、发起私聊、添加成员）。
   void _showMembersSheet() {
+    final isHost = _group?.isHost(_realtimeUserId) ?? true;
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -76,15 +77,24 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
         onDirectChat: (character) {
           if (mounted) Navigator.of(context).pushNamed('/dm/${character.id}');
         },
-        onAddMember: () {
-          // 先收起成员面板，避免两个底部弹层叠加、且添加后列表不会自动刷新。
-          Navigator.of(sheetContext).pop();
-          unawaited(_showAddMemberDialog());
-        },
+        // 只有主人能改这个群的成员表。客人的客户端不持有该群的任何 AI 角色
+        // （加入时 aiCharacterIds 就是空的），加成员只会往本机那份空名单里
+        // 写，主人那边完全看不到，两边就此分叉。
+        onAddMember: isHost
+            ? () {
+                // 先收起成员面板，避免两个底部弹层叠加、且添加后列表不会自动刷新。
+                Navigator.of(sheetContext).pop();
+                unawaited(_showAddMemberDialog());
+              }
+            : null,
         mutedIds: _muteStore.mutedFor(widget.groupId),
         onToggleMute: _setCharacterMuted,
         onMention: _insertMention,
         avatarImageOf: _characterAvatarImage,
+        // 之前这里一律写死「群主」，客人打开成员列表会以为自己是群主。
+        ownerRole: isHost ? '群主' : '客人',
+        ownerIsHost: isHost,
+        sharedMembers: _sharedMemberViews(),
       ),
     );
   }
@@ -186,6 +196,27 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
       icon: Icons.check_circle_outline_rounded,
     );
     return true;
+  }
+
+  /// 把实时花名册整理成成员列表要展示的真人条目。
+  ///
+  /// 只保留有名字的成员：早期落库的花名册可能带空名（比如对方还没设昵称），
+  /// 渲染出一行空白的成员没有任何意义。主人端能认出哪一个是主人
+  /// （[ChatGroup.hostUserId] 是客人加入时一起存下来的），据此标注身份。
+  List<SharedGroupMember> _sharedMemberViews() {
+    final hostUserId = _group?.hostUserId;
+    final views = <SharedGroupMember>[];
+    for (final entry in _realtimeMemberNames.entries) {
+      if (entry.key == _realtimeUserId) continue;
+      final name = entry.value.trim();
+      if (name.isEmpty) continue;
+      views.add(SharedGroupMember(
+        name: name,
+        label: entry.key == hostUserId ? '主人' : '客人',
+      ));
+    }
+    views.sort((a, b) => a.name.compareTo(b.name));
+    return views;
   }
 
   /// 清空当前群聊或私聊，并让用户明确选择是否删除来源永久数据。

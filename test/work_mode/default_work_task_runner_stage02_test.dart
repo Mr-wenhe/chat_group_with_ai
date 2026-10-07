@@ -1,10 +1,20 @@
+import 'dart:async';
 import 'dart:convert';
+import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'dart:io';
+import 'package:crypto/crypto.dart';
+import 'package:chat_group/features/work_mode/work_candidate_publication.dart';
+import 'package:chat_group/core/models/work_mode_workspace.dart';
+import 'package:chat_group/core/database/data_lifecycle_service.dart';
+import 'work_candidate_test_support.dart';
+import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
+import 'package:chat_group/core/models/permanent_memory.dart';
 
 import 'package:archive/archive.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/features/work_mode/work_agent_loop.dart';
+import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -13,6 +23,7 @@ import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
+import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
@@ -28,6 +39,8 @@ import 'package:chat_group/features/work_mode/work_approval_fingerprint.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_task_decision.dart';
+import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
@@ -42,6 +55,11 @@ import 'package:flutter_test/flutter_test.dart';
 import '../helpers/lifecycle_hive.dart';
 import '../helpers/memory_governance_store.dart';
 
+part 'default_work_task_runner_stage02_test_part_p6.dart';
+part 'default_work_task_runner_stage02_test_part_p8.dart';
+part 'default_work_task_runner_stage02_test_part_p7.dart';
+part 'default_work_task_runner_stage02_test_part_p7_support.dart';
+
 class _TestCredentials implements ApiCredentialResolver {
   @override
   Future<String?> resolve(ApiConfig config) async => 'test-key';
@@ -50,12 +68,14 @@ class _TestCredentials implements ApiCredentialResolver {
 class _SequencedGateway extends AiRequestGateway {
   final String patchPath;
   final String patchContent;
+  final Map<String, dynamic>? patchArguments;
   final bool repeatToolOnSecondModelCall;
   final String? finishSummary;
 
   _SequencedGateway({
     this.patchPath = 'notes.txt',
     this.patchContent = 'production-stage02',
+    this.patchArguments,
     this.repeatToolOnSecondModelCall = false,
     this.finishSummary,
   }) : super(
@@ -66,6 +86,12 @@ class _SequencedGateway extends AiRequestGateway {
   int calls = 0;
   final observedModels = <String>[];
   final observedCharacters = <String>[];
+
+  /// 每次模型调用收到的完整消息列表（按调用顺序，逐条复制）。
+  ///
+  /// 逐条复制是必要的：agent loop 会在同一个列表上继续追加自己的轮次，存引用会
+  /// 让第一次调用的断言看到后来的内容。
+  final observedMessages = <List<Map<String, dynamic>>>[];
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
@@ -90,6 +116,11 @@ class _SequencedGateway extends AiRequestGateway {
     calls++;
     observedModels.add(model);
     observedCharacters.add(characterId);
+    observedMessages.add(
+      messages
+          .map((message) => Map<String, dynamic>.from(message))
+          .toList(growable: false),
+    );
     final returnsTool = repeatToolOnSecondModelCall ? calls <= 2 : calls == 1;
     return {
       'success': true,
@@ -99,10 +130,8 @@ class _SequencedGateway extends AiRequestGateway {
               'public_update': '准备写入授权目录文件。',
               'tool': {
                 'name': 'workspace.patch',
-                'arguments': {
-                  'path': patchPath,
-                  'content': patchContent,
-                },
+                'arguments': patchArguments ??
+                    {'path': patchPath, 'content': patchContent},
               },
               'completion': null,
             })
@@ -119,6 +148,78 @@ class _SequencedGateway extends AiRequestGateway {
   }
 }
 
+/// 连续三次追加同一个交付物，然后收尾；用来钉住"create 一次 + modify 一次
+/// 之后同路径免费"的审批次数。
+class _AppendGateway extends AiRequestGateway {
+  _AppendGateway({this.chunks = defaultChunks})
+      : super(
+          store: MemoryGovernanceStore(),
+          client: _UnusedClient(),
+        );
+
+  static const List<String> defaultChunks = ['第一段', '第二段', '第三段'];
+  final List<String> chunks;
+  int calls = 0;
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required AiRequestPurpose purpose,
+    required String conversationId,
+    required String characterId,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    bool requiresTools = false,
+    bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) async {
+    calls++;
+    if (calls <= chunks.length) {
+      return {
+        'success': true,
+        'message': jsonEncode({
+          'action': 'tool',
+          'public_update': '正在追加第 $calls 段。',
+          'tool': {
+            'name': 'workspace.patch',
+            'arguments': {
+              'path': 'report.md',
+              'content': chunks[calls - 1],
+              'append': true,
+            },
+          },
+          'completion': null,
+        }),
+      };
+    }
+    return {
+      'success': true,
+      'message': jsonEncode({
+        'action': 'finish',
+        'public_update': '分块写入已完成。',
+        'tool': null,
+        'completion': {
+          'summary': '已生成 report.md。',
+          'evidence': ['文件可重新读取'],
+        },
+      }),
+    };
+  }
+}
+
+/// 只等取消的 gateway 夹具（[_StallsAfterFirstTokenGateway] 会先吐一个 token）。
+///
+/// [_HangingModelGateway] 与 [_StallsAfterFirstTokenGateway] 都记录
+/// `cancellationDelays`（发出请求 → 被取消的间隔）：那是区分两个时限唯一可靠的
+/// 判据，因为失败文案会被 WorkTaskErrorSanitizer 统一折叠成"任务执行超时"。
 class _HangingModelGateway extends AiRequestGateway {
   _HangingModelGateway()
       : super(
@@ -127,6 +228,8 @@ class _HangingModelGateway extends AiRequestGateway {
         );
 
   final requestTokens = <CancelToken>[];
+
+  final cancellationDelays = <Duration>[];
 
   @override
   Future<Map<String, dynamic>> sendChatMessageStreamed({
@@ -150,9 +253,54 @@ class _HangingModelGateway extends AiRequestGateway {
   }) {
     final token = cancelToken!;
     requestTokens.add(token);
-    return token.whenCancel.then<Map<String, dynamic>>(
-      (_) => {'success': false, 'message': '请求已取消'},
-    );
+    final requestedAt = DateTime.now();
+    return token.whenCancel.then<Map<String, dynamic>>((_) {
+      cancellationDelays.add(DateTime.now().difference(requestedAt));
+      return {'success': false, 'message': '请求已取消'};
+    });
+  }
+}
+
+class _StallsAfterFirstTokenGateway extends AiRequestGateway {
+  _StallsAfterFirstTokenGateway()
+      : super(
+          store: MemoryGovernanceStore(),
+          client: _UnusedClient(),
+        );
+
+  final requestTokens = <CancelToken>[];
+
+  final cancellationDelays = <Duration>[];
+
+  @override
+  Future<Map<String, dynamic>> sendChatMessageStreamed({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+    required String model,
+    required List<Map<String, dynamic>> messages,
+    required AiRequestPurpose purpose,
+    required String conversationId,
+    required String characterId,
+    double temperature = 0.85,
+    int maxTokens = 1024,
+    Duration receiveTimeout = const Duration(seconds: 120),
+    int maxRetries = 5,
+    CancelToken? cancelToken,
+    bool requiresTools = false,
+    bool userInitiated = false,
+    void Function(ChatStreamEvent event)? onEvent,
+  }) {
+    final token = cancelToken!;
+    requestTokens.add(token);
+    // 先给一个 token（这个请求已经"活着"），随后永久挂起：只有总时限能结束它。
+    onEvent?.call(ChatStreamEvent.token('检查'));
+    final requestedAt = DateTime.now();
+    return token.whenCancel.then<Map<String, dynamic>>((_) {
+      cancellationDelays.add(DateTime.now().difference(requestedAt));
+      return {'success': false, 'message': '请求已取消'};
+    });
   }
 }
 
@@ -811,6 +959,218 @@ class _WorkspaceListPathGateway extends AiRequestGateway {
   }
 }
 
+/// Drives one `reviseArtifact` follow-up to completion.
+///
+/// Seeds `<authorized>/conversations/group_<groupId>/<targetName>` and has the
+/// model ask to patch [patchPath], so callers can assert where the write
+/// actually landed. Returns the workspace root and the pinned target.
+Future<({String conversationRoot, String revisionTarget})> _runRevisionTask({
+  required DatabaseService database,
+  required WorkTaskEventStore eventStore,
+  required Directory authorizedDirectory,
+  required Directory hiveDirectory,
+  required String groupId,
+  required String targetName,
+  required String patchPath,
+}) async {
+  final grants = WorkFolderGrantService(
+    box: database.appSettingsBox,
+    directoryValidator: (_) async => true,
+    isWindows: false,
+  );
+  await grants.authorizeDirectory(
+    authorizedDirectory.path,
+    consent: (_) async => true,
+  );
+  final pathPolicy = WorkspacePathPolicy(grantService: grants);
+  final config = ApiConfig(
+    id: 'revision-config',
+    name: 'Revision test config',
+    provider: ApiProvider.deepseek.name,
+    modelName: 'deepseek-chat',
+  );
+  final character = AICharacter(
+    id: 'revision-character',
+    name: 'Revision character',
+    avatar: 'R',
+    age: 30,
+    role: '测试执行角色',
+    personalityTags: const [],
+    systemPrompt: '只按工具协议工作。',
+    apiKey: '',
+    apiProvider: ApiProvider.deepseek.name,
+    modelName: 'deepseek-chat',
+    apiConfigId: config.id,
+    toolPermissions: const [
+      ToolPermission.workspaceRead,
+      ToolPermission.workspacePatch,
+    ],
+  );
+  await database.apiConfigBox.put(config.id, config);
+  await database.aiCharacterBox.put(character.id, character);
+
+  final runner = DefaultWorkTaskRunner(
+    database: database,
+    eventStore: eventStore,
+    credentials: _TestCredentials(),
+    gateway: _SequencedGateway(patchPath: patchPath),
+    workspaceService: WorkModeWorkspaceService(
+      db: database,
+      grantService: grants,
+    ),
+    folderGrantService: grants,
+    workspaceFileService: WorkspaceFileService(pathPolicy: pathPolicy),
+    mutationService: WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: WorkSnapshotService(
+        appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+        pathPolicy: pathPolicy,
+      ),
+    ),
+  );
+  final conversationRoot =
+      '${authorizedDirectory.path}/conversations/group_$groupId';
+  final revisionTarget = '$conversationRoot/$targetName';
+  await Directory(conversationRoot).create(recursive: true);
+  await File(revisionTarget).writeAsString('原来的报告内容');
+  final task = AgentTask(
+    id: 'revision-task-$groupId',
+    groupId: groupId,
+    characterId: character.id,
+    userRequest: '给这份报告补一段公司背景',
+    workModeTask: true,
+    executionStateJson: jsonEncode({
+      'schemaVersion': 1,
+      'followUpKind': 'reviseArtifact',
+      'revisionTargetPath': revisionTarget,
+    }),
+  );
+
+  await runner.run(task, WorkTaskCancellation());
+  final checkpoint = jsonDecode(task.executionStateJson) as Map;
+  task.executionStateJson = jsonEncode({
+    ...checkpoint,
+    'approvalDecision': 'approved',
+  });
+  task.status = AgentTaskStatus.queued;
+  await database.agentTaskBox.put(task.id, task);
+  await runner.run(task, WorkTaskCancellation());
+
+  return (conversationRoot: conversationRoot, revisionTarget: revisionTarget);
+}
+
+/// 标准 Stage02 夹具：授权目录 + 可写工作区 + 有 workspace.patch 权限的角色。
+///
+/// 各用例只关心 gateway、初始文件与请求文案；把 60 行样板留在用例里，"哪一条
+/// 断言失败"会被淹没在夹具里。
+Future<({DefaultWorkTaskRunner runner, AgentTask task, String root})>
+    _runPatchShapeTask({
+  required DatabaseService database,
+  required WorkTaskEventStore eventStore,
+  required Directory authorizedDirectory,
+  required Directory hiveDirectory,
+  required AiRequestGateway gateway,
+  required String groupId,
+  required String userRequest,
+  Map<String, String> initialFiles = const {},
+  Map<String, dynamic> initialCheckpoint = const {},
+}) async {
+  final grants = WorkFolderGrantService(
+    box: database.appSettingsBox,
+    directoryValidator: (_) async => true,
+    writeDirectoryValidator: (_) async => true,
+    isWindows: false,
+  );
+  await grants.authorizeDirectory(
+    authorizedDirectory.path,
+    consent: (_) async => true,
+  );
+  final pathPolicy = WorkspacePathPolicy(grantService: grants);
+  final config = ApiConfig(
+    id: '$groupId-config',
+    name: '$groupId config',
+    provider: ApiProvider.deepseek.name,
+    modelName: 'deepseek-chat',
+  );
+  final character = AICharacter(
+    id: '$groupId-character',
+    name: '$groupId character',
+    avatar: 'P',
+    age: 30,
+    role: '测试执行角色',
+    personalityTags: const [],
+    systemPrompt: '只按工具协议工作。',
+    apiKey: '',
+    apiProvider: ApiProvider.deepseek.name,
+    modelName: 'deepseek-chat',
+    apiConfigId: config.id,
+    toolPermissions: const [
+      ToolPermission.workspaceRead,
+      ToolPermission.workspacePatch,
+    ],
+  );
+  await database.apiConfigBox.put(config.id, config);
+  await database.aiCharacterBox.put(character.id, character);
+
+  final workspaceService = WorkModeWorkspaceService(
+    db: database,
+    grantService: grants,
+  );
+  final runner = DefaultWorkTaskRunner(
+    database: database,
+    eventStore: eventStore,
+    credentials: _TestCredentials(),
+    gateway: gateway,
+    workspaceService: workspaceService,
+    folderGrantService: grants,
+    workspaceFileService: WorkspaceFileService(pathPolicy: pathPolicy),
+    mutationService: WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: WorkSnapshotService(
+        appSupportDirectory:
+            Directory('${hiveDirectory.path}/app-support-$groupId'),
+        pathPolicy: pathPolicy,
+      ),
+    ),
+  );
+  final workspace = await workspaceService.loadOrCreate(
+    conversationId: groupId,
+    isDirectChat: false,
+    requireWritable: true,
+  );
+  for (final entry in initialFiles.entries) {
+    await File('${workspace.workDirPath}/${entry.key}')
+        .writeAsString(entry.value);
+  }
+  final task = AgentTask(
+    id: '$groupId-task',
+    groupId: groupId,
+    characterId: character.id,
+    userRequest: userRequest,
+    workModeTask: true,
+  );
+  if (initialCheckpoint.isNotEmpty) {
+    task.executionStateJson = jsonEncode(initialCheckpoint);
+  }
+  return (runner: runner, task: task, root: workspace.workDirPath);
+}
+
+/// 模拟用户点"批准"后继续：把决策写进检查点，再把任务放回队列跑一次。
+Future<void> _approveAndRun({
+  required DatabaseService database,
+  required DefaultWorkTaskRunner runner,
+  required AgentTask task,
+}) async {
+  final checkpoint = jsonDecode(task.executionStateJson) as Map;
+  task.executionStateJson = jsonEncode({
+    ...checkpoint,
+    'approvalDecision': 'approved',
+  });
+  task.status = AgentTaskStatus.queued;
+  await database.agentTaskBox.put(task.id, task);
+  await runner.run(task, WorkTaskCancellation());
+}
+
 void main() {
   late DatabaseService database;
   late WorkTaskEventStore eventStore;
@@ -831,6 +1191,15 @@ void main() {
     await eventStore.close();
     await closeLifecycleHive(hiveDirectory, database);
   });
+
+  _registerP8RunnerTests(
+      () => hiveDirectory, () => authorizedDirectory, () => eventStore);
+
+  _registerP7RunnerTests(
+      () => hiveDirectory, () => authorizedDirectory, () => eventStore);
+
+  _registerP6RunnerTests(
+      () => hiveDirectory, () => authorizedDirectory, () => eventStore);
 
   test('runner does not rewrite a terminal task through discussion validation',
       () async {
@@ -922,6 +1291,140 @@ void main() {
     expect(gateway.requestTokens.every((token) => token.isCancelled), isTrue);
     expect(task.workFailure?.type, WorkFailureType.retryableNetwork);
     expect(task.workFailure?.retryable, isTrue);
+  });
+
+  /// 用"只挂起"的 gateway 跑一次工作模式任务，返回被消耗的取消 token。
+  ///
+  /// 两种超时都必须用真 runner 验证：要断言的判据是"这次失败被归类成可重试"，
+  /// 而不是"某个常量等于多少"。
+  Future<AgentTask> runStalledModelTask({
+    required String taskId,
+    required AiRequestGateway gateway,
+    required Duration completionTimeout,
+    required Duration firstTokenTimeout,
+  }) async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      writeDirectoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final config = ApiConfig(
+      id: '$taskId-config',
+      name: 'Model stall test config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: '$taskId-character',
+      name: 'Model stall character',
+      avatar: 'S',
+      age: 30,
+      role: '测试超时处理',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: WorkspaceFileService(pathPolicy: pathPolicy),
+      mutationService: WorkspaceMutationService(pathPolicy: pathPolicy),
+      modelCompletionTimeout: completionTimeout,
+      modelFirstTokenTimeout: firstTokenTimeout,
+    );
+    final task = AgentTask(
+      id: taskId,
+      groupId: '$taskId-group',
+      characterId: character.id,
+      userRequest: '验证模型请求超时后能够安全重试',
+      workModeTask: true,
+    );
+    await runner.run(task, WorkTaskCancellation());
+    return task;
+  }
+
+  test(
+      'a request that yields no first byte is retried before the total deadline',
+      () async {
+    // 现场（2026-09-30）：上游对 16.8k 输入连续三次 300 秒零输出，客户端每次
+    // 都等满总时限才取消。零输出意味着没有任何已生成内容，提前判停滞是安全的。
+    final gateway = _HangingModelGateway();
+    final task = await runStalledModelTask(
+      taskId: 'first-byte-stall-task',
+      gateway: gateway,
+      completionTimeout: const Duration(seconds: 3),
+      firstTokenTimeout: const Duration(milliseconds: 50),
+    );
+
+    expect(task.status, AgentTaskStatus.failed);
+    const attempts = WorkAgentLoop.defaultMaxModelRetries + 1;
+    expect(gateway.requestTokens, hasLength(attempts));
+    expect(gateway.requestTokens.every((token) => token.isCancelled), isTrue);
+    expect(task.workFailure?.type, WorkFailureType.retryableNetwork);
+    expect(task.workFailure?.retryable, isTrue);
+    // 停滞必须自证成因：只写 `failure.type.name` 的话它和上游 5xx 都是
+    // retryableNetwork，事件里那条「准备重试」事后无法定性。
+    final stallRetries = (await eventStore.read(task.id))
+        .events
+        .where((event) => event.title == '模型请求暂时失败，准备重试。');
+    expect(stallRetries, isNotEmpty);
+    expect(
+      stallRetries.map((event) => event.safeMetadata['failureCode']).toSet(),
+      {'modelFirstByteStall'},
+    );
+    // 每次都必须在总时限（3 秒）之前就被放弃：50 毫秒的停滞时限生效了。
+    expect(gateway.cancellationDelays, hasLength(attempts));
+    expect(
+      gateway.cancellationDelays.every(
+        (delay) => delay < const Duration(seconds: 1),
+      ),
+      isTrue,
+      reason: '停滞没有被识别，这次尝试一直等到了总时限',
+    );
+  });
+
+  test('a request that already streamed a byte keeps its full deadline',
+      () async {
+    // 不变量：首字节到达之后就不再是"停滞"。此时只能由总时限结束，否则
+    // "生成很慢但正常"的请求会被误杀——那正是既有决定不允许缩短总时限的原因。
+    final gateway = _StallsAfterFirstTokenGateway();
+    final task = await runStalledModelTask(
+      taskId: 'first-byte-progress-task',
+      gateway: gateway,
+      completionTimeout: const Duration(milliseconds: 500),
+      firstTokenTimeout: const Duration(milliseconds: 20),
+    );
+
+    expect(task.status, AgentTaskStatus.failed);
+    const attempts = WorkAgentLoop.defaultMaxModelRetries + 1;
+    expect(gateway.requestTokens, hasLength(attempts));
+    // 每次都跑满总时限才被取消，而不是 20 毫秒就被判成停滞。
+    expect(gateway.cancellationDelays, hasLength(attempts));
+    expect(
+      gateway.cancellationDelays.every(
+        (delay) => delay >= const Duration(milliseconds: 400),
+      ),
+      isTrue,
+      reason: '首字节已经到达，停滞看门狗本应被撤销',
+    );
   });
 
   test('production runner routes approved workspace.patch through Stage02',
@@ -1058,6 +1561,501 @@ void main() {
         isTrue);
     expect((await snapshots.undo(task.id)).succeeded, isTrue);
     expect(await output.exists(), isFalse);
+  });
+
+  test('production runner appends through Stage02 without re-prompting',
+      () async {
+    // 追加序列的第一次是 create（文件不存在），第二次起是 modify；第二次因为
+    // 动作不在已批准集合里必须补一次审批，此后同路径不再弹窗。
+    //
+    // 请求刻意不带"文件/报告"这类交付物措辞：带产物契约的请求会在交付物成形时
+    // 触发契约判定，夹具要观察的是审批链，不是契约（契约那条见下面专门用例）。
+    final fixture = await _runPatchShapeTask(
+      database: database,
+      eventStore: eventStore,
+      authorizedDirectory: authorizedDirectory,
+      hiveDirectory: hiveDirectory,
+      gateway: _AppendGateway(),
+      groupId: 'stage02-append-group',
+      userRequest: '把这几段内容按顺序接起来',
+    );
+    final runner = fixture.runner;
+    final task = fixture.task;
+
+    await runner.run(task, WorkTaskCancellation());
+    expect(task.status, AgentTaskStatus.waitingForApproval,
+        reason: '首次追加是 create，必须审批');
+    await _approveAndRun(database: database, runner: runner, task: task);
+    expect(task.status, AgentTaskStatus.waitingForApproval,
+        reason: '第二次追加是 modify，动作不在已批准集合内，需要补充审批');
+    await _approveAndRun(database: database, runner: runner, task: task);
+    expect(task.status, AgentTaskStatus.completed,
+        reason: '第三次追加落在已批准范围内，不再弹窗：${task.lastError}');
+
+    expect(
+      await File('${fixture.root}/report.md').readAsString(),
+      '第一段第二段第三段',
+    );
+  });
+
+  test('an append alone never satisfies the deliverable contract', () async {
+    // 追加只是把文件变长：写没写完只有模型自己知道。若一次 append 就算"交付物
+    // 已就绪"，带单产物契约的请求会在第一段落地时就 completed，交付物静默缺
+    // 内容——模型必须自己 finish 才算交付。
+    final fixture = await _runPatchShapeTask(
+      database: database,
+      eventStore: eventStore,
+      authorizedDirectory: authorizedDirectory,
+      hiveDirectory: hiveDirectory,
+      gateway: _AppendGateway(chunks: const ['第一段', '第二段']),
+      groupId: 'stage02-contract-append-group',
+      userRequest: '把报告分块写入',
+    );
+    final runner = fixture.runner;
+    final task = fixture.task;
+
+    await runner.run(task, WorkTaskCancellation());
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    await _approveAndRun(database: database, runner: runner, task: task);
+    expect(task.status, AgentTaskStatus.waitingForApproval,
+        reason: '第一段之后不得判定完成，必须继续写第二段');
+    await _approveAndRun(database: database, runner: runner, task: task);
+    expect(task.status, AgentTaskStatus.completed,
+        reason: '模型自己 finish 才是交付：${task.lastError}');
+
+    expect(
+      await File('${fixture.root}/report.md').readAsString(),
+      '第一段第二段',
+    );
+    expect(
+      (await eventStore.read(task.id))
+          .events
+          .where((event) => event.kind == WorkTaskEventKind.approvalRequired)
+          .length,
+      2,
+    );
+  });
+
+  test('production runner merges staged parts onto the deliverable path',
+      () async {
+    // 合并在私聊里就是"新建交付物且可能重名"的场景：autoRenameIfExists 开着，
+    // 但目标本身就是交付物，改名只会造出"报告 (1).md"，而模型随后按原路径读回
+    // 的是旧文件；合并就是要原子替换它。
+    final fixture = await _runPatchShapeTask(
+      database: database,
+      eventStore: eventStore,
+      authorizedDirectory: authorizedDirectory,
+      hiveDirectory: hiveDirectory,
+      gateway: _SequencedGateway(
+        patchPath: 'report.md',
+        patchArguments: const {
+          'path': 'report.md',
+          'parts': ['part1.md', 'part2.md'],
+        },
+      ),
+      groupId: 'stage02-merge-group',
+      userRequest: '把分段接起来',
+      initialFiles: {
+        'report.md': '旧文',
+        'part1.md': '第一段',
+        'part2.md': '第二段',
+      },
+      initialCheckpoint: const {'autoRenameIfExists': true},
+    );
+    final runner = fixture.runner;
+    final task = fixture.task;
+
+    await runner.run(task, WorkTaskCancellation());
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    // 合并的规模提示是各分段字节数之和：算不出来只会写成「预计 0 字节」，读起来像
+    // 一次空写入。'第一段' / '第二段' 各 9 字节。
+    final checkpoint =
+        Map<String, dynamic>.from(jsonDecode(task.executionStateJson) as Map);
+    expect((checkpoint['approvalPlan'] as Map)['estimatedBytes'], 18);
+    await _approveAndRun(database: database, runner: runner, task: task);
+
+    expect(task.status, AgentTaskStatus.completed, reason: task.lastError);
+    expect(
+      await File('${fixture.root}/report.md').readAsString(),
+      '第一段第二段',
+    );
+    expect(await File('${fixture.root}/report (1).md').exists(), isFalse);
+    // 分段是中间产物，合并后保留。
+    expect(await File('${fixture.root}/part1.md').exists(), isTrue);
+  });
+
+  test('production runner honours overwrite=false when merging staged parts',
+      () async {
+    // 同一个参数在工具各形态下必须同义：模型写 overwrite=false 就是在说"别碰
+    // 已有文件"，合并不能默认覆盖它。
+    final fixture = await _runPatchShapeTask(
+      database: database,
+      eventStore: eventStore,
+      authorizedDirectory: authorizedDirectory,
+      hiveDirectory: hiveDirectory,
+      gateway: _SequencedGateway(
+        patchPath: 'report.md',
+        patchArguments: const {
+          'path': 'report.md',
+          'overwrite': false,
+          'parts': ['part1.md'],
+        },
+      ),
+      groupId: 'stage02-merge-overwrite-group',
+      userRequest: '把分段接起来',
+      initialFiles: {'report.md': '旧文', 'part1.md': '第一段'},
+    );
+    final runner = fixture.runner;
+    final task = fixture.task;
+
+    await runner.run(task, WorkTaskCancellation());
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    await _approveAndRun(database: database, runner: runner, task: task);
+
+    final events = (await eventStore.read(task.id)).events;
+    expect(
+      events.any(
+        (event) =>
+            event.kind == WorkTaskEventKind.toolOutput &&
+            event.detail.contains('目标文件已存在且 overwrite=false'),
+      ),
+      isTrue,
+      reason: events.map((event) => event.detail).join(' | '),
+    );
+    expect(await File('${fixture.root}/report.md').readAsString(), '旧文');
+    expect(await File('${fixture.root}/report (1).md').exists(), isFalse);
+  });
+
+  test('production runner refuses to merge a sensitive part', () async {
+    // 审批检查点一次只带一个 approvalCapability：敏感分段要 sensitiveRead，
+    // 写目标要 mutation。生产里这条路径注定先弹一次读取、写还是失败，所以在
+    // 动手之前就拒掉，并且不为它弹任何审批。
+    final fixture = await _runPatchShapeTask(
+      database: database,
+      eventStore: eventStore,
+      authorizedDirectory: authorizedDirectory,
+      hiveDirectory: hiveDirectory,
+      gateway: _SequencedGateway(
+        patchPath: 'report.md',
+        patchArguments: const {
+          'path': 'report.md',
+          'parts': ['part1.md', 'credentials.txt'],
+        },
+      ),
+      groupId: 'stage02-sensitive-merge-group',
+      userRequest: '把分段接起来',
+      initialFiles: {
+        'part1.md': '第一段',
+        'credentials.txt': 'TOKEN=do-not-merge'
+      },
+    );
+    final runner = fixture.runner;
+    final task = fixture.task;
+
+    await runner.run(task, WorkTaskCancellation());
+
+    // 第一次暂停只请求写目标的变更审批：敏感分段的读取审批压根不该被请求，
+    // 因为它在生产里注定作废。
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    final checkpoint =
+        Map<String, dynamic>.from(jsonDecode(task.executionStateJson) as Map);
+    expect(checkpoint['approvalCapability'], 'mutation');
+    expect((checkpoint['approvalPlan'] as Map)['actionType'], 'create');
+
+    await _approveAndRun(database: database, runner: runner, task: task);
+
+    final events = (await eventStore.read(task.id)).events;
+    expect(
+      events.any(
+        (event) =>
+            event.kind == WorkTaskEventKind.toolOutput &&
+            event.detail.contains('不支持把敏感文件合并进产物'),
+      ),
+      isTrue,
+      reason: events.map((event) => event.detail).join(' | '),
+    );
+    expect(
+      events
+          .where((event) => event.kind == WorkTaskEventKind.approvalRequired)
+          .length,
+      1,
+      reason: '审批只该有写目标那一次；不再为分段读取弹注定作废的审批',
+    );
+    expect(
+      task.executionStateJson,
+      isNot(contains('sensitive_read_requires_approval')),
+    );
+    expect(await File('${fixture.root}/report.md').exists(), isFalse);
+    expect(task.contextSummary, isNot(contains('do-not-merge')));
+  });
+
+  test(
+      'production runner rejects a staged part path that escapes the workspace',
+      () async {
+    // 分段路径非法要按"路径被拒"返回：裸抛 FormatException 会被注册表兜成
+    // `internal`，模型看到的是"工具执行失败"，而不是"这个路径不允许"。
+    final fixture = await _runPatchShapeTask(
+      database: database,
+      eventStore: eventStore,
+      authorizedDirectory: authorizedDirectory,
+      hiveDirectory: hiveDirectory,
+      gateway: _SequencedGateway(
+        patchPath: 'report.md',
+        patchArguments: const {
+          'path': 'report.md',
+          'parts': ['part1.md', '../outside.md'],
+        },
+      ),
+      groupId: 'stage02-escape-merge-group',
+      userRequest: '把分段接起来',
+      initialFiles: {'part1.md': '第一段'},
+    );
+    final runner = fixture.runner;
+    final task = fixture.task;
+
+    await runner.run(task, WorkTaskCancellation());
+    expect(task.status, AgentTaskStatus.waitingForApproval);
+    await _approveAndRun(database: database, runner: runner, task: task);
+
+    // 失败原因是路径本身，而不是注册表兜底的"工具执行失败"。
+    final events = (await eventStore.read(task.id)).events;
+    expect(
+      events.any((event) => event.detail.contains('工作区路径不能包含 ..')),
+      isTrue,
+      reason: events
+          .map((event) => '${event.kind.name}|${event.detail}')
+          .join(' ; '),
+    );
+    expect(task.status, AgentTaskStatus.failed);
+    expect(await File('${fixture.root}/report.md').exists(), isFalse);
+  });
+
+  test('a revision task still lets the model create an auxiliary file',
+      () async {
+    final harness = await _runRevisionTask(
+      database: database,
+      eventStore: eventStore,
+      authorizedDirectory: authorizedDirectory,
+      hiveDirectory: hiveDirectory,
+      groupId: 'stage02-revision-aux',
+      targetName: 'report.md',
+      patchPath: 'notes.txt',
+    );
+
+    // The revision target is pinned so the model cannot silently deliver to a
+    // different basename, but it must not swallow every auxiliary write: the
+    // prompt contract requires scripts and part files beside the deliverable.
+    expect(
+      await File('${harness.conversationRoot}/notes.txt').readAsString(),
+      'production-stage02',
+    );
+    expect(await File(harness.revisionTarget).readAsString(), '原来的报告内容');
+  });
+
+  test('a revision target still pins a differently spelled deliverable',
+      () async {
+    final harness = await _runRevisionTask(
+      database: database,
+      eventStore: eventStore,
+      authorizedDirectory: authorizedDirectory,
+      hiveDirectory: hiveDirectory,
+      groupId: 'stage02-revision-pin',
+      targetName: 'report.md',
+      patchPath: 'elsewhere/report.md',
+    );
+
+    expect(
+      await File(harness.revisionTarget).readAsString(),
+      'production-stage02',
+    );
+    expect(
+      File('${harness.conversationRoot}/elsewhere/report.md').existsSync(),
+      isFalse,
+    );
+  });
+
+  test('P5 实际执行适配器按当前成员刷新记忆且不写入检查点', () async {
+    final gateway = _SequencedGateway();
+    final harness = await _runPatchShapeTask(
+        database: database,
+        eventStore: eventStore,
+        authorizedDirectory: authorizedDirectory,
+        hiveDirectory: hiveDirectory,
+        gateway: gateway,
+        groupId: 'p5',
+        userRequest: '读取源码并制作 notes.txt');
+    final actor = database.aiCharacterBox.get(harness.task.characterId)!;
+    actor.personalityTags = ['直接'];
+    await database.permanentMemoryBox.put(
+        'actor-memory',
+        PermanentMemory(
+          observerCharacterId: actor.id,
+          kind: MemoryKind.preference,
+          content: '读取源码报告要先给具体位置',
+          subjectIds: ['user'],
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.manual,
+          originNameSnapshot: '用户偏好',
+        ));
+    await harness.runner.run(harness.task, WorkTaskCancellation());
+    expect(jsonEncode(gateway.observedMessages), contains('读取源码报告要先给具体位置'));
+    expect(jsonEncode(gateway.observedMessages), contains('直接'));
+    expect(harness.task.executionStateJson, isNot(contains('读取源码报告要先给具体位置')));
+    expect(harness.task.contextSummary, isNot(contains('读取源码报告要先给具体位置')));
+    final other = AICharacter(
+        id: 'p5-other',
+        name: '审查者',
+        avatar: 'Q',
+        age: 30,
+        role: '测试工程师',
+        personalityTags: ['谨慎'],
+        systemPrompt: '关注边界',
+        apiKey: '',
+        apiProvider: actor.apiProvider,
+        apiConfigId: actor.apiConfigId,
+        modelName: actor.modelName,
+        toolPermissions: actor.toolPermissions);
+    await database.aiCharacterBox.put(other.id, other);
+    await database.permanentMemoryBox.put(
+        'other-memory',
+        PermanentMemory(
+          observerCharacterId: other.id,
+          kind: MemoryKind.preference,
+          content: '读取源码报告要指出未验证边界',
+          subjectIds: ['user'],
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.manual,
+          originNameSnapshot: '用户偏好',
+        ));
+    final next = AgentTask(
+        id: 'p5-other-task',
+        groupId: 'p5',
+        characterId: other.id,
+        userRequest: '读取源码并制作 next.txt',
+        workModeTask: true);
+    final before = gateway.observedMessages.length;
+    await harness.runner.run(next, WorkTaskCancellation());
+    final received = jsonEncode(gateway.observedMessages.skip(before).toList());
+    expect(received, contains('读取源码报告要指出未验证边界'));
+    expect(received, contains('谨慎'));
+    expect(received, isNot(contains('读取源码报告要先给具体位置')));
+  });
+
+  test('a work task ignores chat messages from before the context boundary',
+      () async {
+    final grants = WorkFolderGrantService(
+      box: database.appSettingsBox,
+      directoryValidator: (_) async => true,
+      isWindows: false,
+    );
+    final grant = await grants.authorizeDirectory(
+      authorizedDirectory.path,
+      consent: (_) async => true,
+    );
+    expect(grant, isNotNull);
+    final pathPolicy = WorkspacePathPolicy(grantService: grants);
+    final files = WorkspaceFileService(pathPolicy: pathPolicy);
+    final snapshots = WorkSnapshotService(
+      appSupportDirectory: Directory('${hiveDirectory.path}/app-support'),
+      pathPolicy: pathPolicy,
+    );
+    final mutations = WorkspaceMutationService(
+      pathPolicy: pathPolicy,
+      snapshotPort: snapshots,
+    );
+    final gateway = _SequencedGateway();
+    final config = ApiConfig(
+      id: 'boundary-config',
+      name: 'Boundary test config',
+      provider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+    );
+    final character = AICharacter(
+      id: 'boundary-character',
+      name: 'Boundary character',
+      avatar: 'BD',
+      age: 30,
+      role: '测试执行角色',
+      personalityTags: const [],
+      systemPrompt: '只按工具协议工作。',
+      apiKey: '',
+      apiProvider: ApiProvider.deepseek.name,
+      modelName: 'deepseek-chat',
+      apiConfigId: config.id,
+      toolPermissions: const [
+        ToolPermission.workspaceRead,
+        ToolPermission.workspacePatch,
+      ],
+    );
+    await database.apiConfigBox.put(config.id, config);
+    await database.aiCharacterBox.put(character.id, character);
+
+    // 分界线之前那条消息代表已被删除的任务，之后那条代表会话继续产生的内容：
+    // 删除之后的下一个任务应当只看到后者。
+    const groupId = 'boundary-history-group';
+    final boundary = DateTime(2026, 9, 30, 10);
+    await database.messageBox.put(
+      'before-boundary',
+      Message(
+        id: 'before-boundary',
+        groupId: groupId,
+        senderId: 'user',
+        senderType: Message.senderTypeUser,
+        content: '被删除任务留下的旧内容',
+        timestamp: boundary.subtract(const Duration(minutes: 1)),
+      ),
+    );
+    await database.messageBox.put(
+      'after-boundary',
+      Message(
+        id: 'after-boundary',
+        groupId: groupId,
+        senderId: 'boundary-character',
+        senderType: Message.senderTypeAi,
+        content: '分界线之后新产生的内容',
+        timestamp: boundary.add(const Duration(minutes: 1)),
+      ),
+    );
+    await WorkContextBoundary.advance(
+        database.appSettingsBox, groupId, boundary);
+
+    final runner = DefaultWorkTaskRunner(
+      database: database,
+      eventStore: eventStore,
+      credentials: _TestCredentials(),
+      gateway: gateway,
+      workspaceService: WorkModeWorkspaceService(
+        db: database,
+        grantService: grants,
+      ),
+      folderGrantService: grants,
+      workspaceFileService: files,
+      mutationService: mutations,
+    );
+    final task = AgentTask(
+      id: 'boundary-history-task',
+      groupId: groupId,
+      characterId: character.id,
+      userRequest: '请处理这个需求',
+      workModeTask: true,
+    );
+
+    await runner.run(task, WorkTaskCancellation());
+
+    expect(gateway.observedMessages, isNotEmpty);
+    final sentToModel = gateway.observedMessages.first
+        .map((message) => message['content']?.toString() ?? '')
+        .join('\n');
+    expect(
+      sentToModel,
+      isNot(contains('被删除任务留下的旧内容')),
+      reason: '删除任务划下的分界线之前的消息不能再进入模型提示',
+    );
+    expect(
+      sentToModel,
+      contains('分界线之后新产生的内容'),
+      reason: '分界线只切掉它之前的历史，之后的对话仍应作为上下文',
+    );
   });
 
   test('QA revision can write its report but cannot mutate the HTML input',
@@ -2312,6 +3310,15 @@ void main() {
       lessThan(20),
       reason: '每个 token 都落盘会阻塞任务推进',
     );
+    // 首字节耗时是校准 modelFirstTokenTimeout 的唯一依据：阈值定高了会白等，
+    // 定低了会把"慢启动但能成"的请求误杀，所以它必须落进事件流。
+    final livenessEvents = events.where(
+      (event) =>
+          event.safeMetadata['stream'] == 'model' &&
+          event.safeMetadata['pending'] != true,
+    );
+    expect(livenessEvents, isNotEmpty);
+    expect(livenessEvents.first.safeMetadata['firstTokenMs'], isA<int>());
   });
 
   test('drops final model progress after the gateway is cancelled', () async {

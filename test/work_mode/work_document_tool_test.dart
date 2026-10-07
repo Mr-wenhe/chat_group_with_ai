@@ -188,6 +188,18 @@ void main() {
     final docxResult = await runTool(tool(), docxPath, query: '项目负责人');
     expect(docxResult.status, WorkToolResultStatus.success);
     expect(docxResult.data['content'], contains('项目负责人是小薇'));
+    expect(
+        docxResult.data['path'], await File(docxPath).resolveSymbolicLinks());
+    expect(docxResult.data['truncated'], isTrue);
+    final complete = await tool().execute(WorkToolInvocation(
+        task: task('完整核对'),
+        call: AgentToolCall(
+            name: AgentToolName.workspaceDocument,
+            arguments: {'path': docxPath, 'startChunk': 0}),
+        context: WorkToolExecutionContext(task: task('完整核对'))));
+    expect(complete.data['chunkStart'], 0);
+    expect(complete.data['chunkCount'], complete.data['totalChunkCount']);
+    expect(complete.data['truncated'], isFalse);
     expect(docxResult.message, contains('plan.docx'));
     expect(docxResult.message, contains('段落 1'));
 

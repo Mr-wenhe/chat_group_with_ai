@@ -12,6 +12,7 @@ import 'package:video_player/video_player.dart';
 import 'package:chat_group/core/audio/voice_service_config.dart';
 import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
+import 'package:chat_group/core/storage/debug_credential_cache.dart';
 import 'package:chat_group/core/storage/legacy_api_credential_migrator.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -237,6 +238,11 @@ class DatabaseService {
     await _openBoxSafely<UserProfile>(_userProfileBox);
     await _openBoxSafely<PermanentMemory>(_permanentMemoryBox);
     await _openBoxSafely<RelationshipEvent>(_relationshipEventBox);
+    await _openDebugCredentialCacheBox();
+    // 在初始化阶段就把实时身份落实盘，而不是等第一次用到才懒生成：
+    // 群记录与身份存在同一台设备的同一份 data 目录里，若身份的首次写入
+    // 因进程退出而丢失，重启后主人会把自已的群认成「别人的群」（降级为客人）。
+    await _ensureRealtimeIdentity();
     await _migrateApiConfigCredentials();
     final workModeMigrator = WorkModeV1Migrator(
       taskBox: agentTaskBox,
@@ -245,6 +251,19 @@ class DatabaseService {
     );
     await workModeMigrator.migrate();
     await workModeMigrator.markInFlightWorkTasksInterrupted();
+  }
+
+  /// 打开调试凭据镜像 box（仅非 release）。
+  ///
+  /// 刻意不走 [_openBoxSafely]：这个 box 只是本机开发便利，打不开时
+  /// [DebugCredentialCache] 会自动退化为直读钥匙串，不该因此让整个启动失败。
+  Future<void> _openDebugCredentialCacheBox() async {
+    if (!DebugCredentialCache.enabled) return;
+    try {
+      await Hive.openBox<dynamic>(DebugCredentialCache.boxName);
+    } on Object {
+      // 退化为直通安全存储，不做任何处理。
+    }
   }
 
   /// Never clears a legacy value until the new secure entry can be read back.
@@ -453,6 +472,47 @@ class DatabaseService {
   }
 
   String? get dataDirPath => _dataDir?.path;
+
+  static const String _realtimeUserIdKey = 'realtime_user_id';
+
+  String? _realtimeUserIdCache;
+
+  /// 本机用户在多人实时群聊中的稳定唯一标识。
+  ///
+  /// 刻意只做「标识」，不做注册登录：群聊需要的是能区分"谁说的"，
+  /// 不需要密码、会话或用户表，后者对小组作业场景是纯成本。
+  /// 代价是这个标识绑定本次安装——重装应用会变成新用户。
+  String get realtimeUserId => _realtimeUserIdCache ??= _readRealtimeUserId() ?? _mintRealtimeUserId();
+
+  Future<void> _ensureRealtimeIdentity() async {
+    final existing = _readRealtimeUserId();
+    if (existing != null) {
+      _realtimeUserIdCache = existing;
+      return;
+    }
+    // 若本次运行已经懒生成过一个标识，就沿用它：一次运行只该有一个身份。
+    final minted = _realtimeUserIdCache ?? const Uuid().v4();
+    _realtimeUserIdCache = minted;
+    await appSettingsBox.put(_realtimeUserIdKey, minted);
+  }
+
+  String? _readRealtimeUserId() {
+    try {
+      final raw = appSettingsBox.get(_realtimeUserIdKey);
+      return raw is String && raw.trim().isNotEmpty ? raw.trim() : null;
+    } on Object {
+      // app_settings 尚未打开（测试环境）：当作从未生成过。
+      return null;
+    }
+  }
+
+  /// 仅在 [_ensureRealtimeIdentity] 没能跑到时兜底（主要是测试）。
+  ///
+  /// 刻意**不落盘**：这个 getter 会被 widget 的 `build` 调用（判断「我是不是主人」），
+  /// 而构建所在的异步区在 flutter_test 里是假时钟区——在那里发起的 Hive 写永远
+  /// 等不到落盘，会卡住该 box 的写队列，让后续每一次写与 `Hive.close()` 一起挂死。
+  /// 持久化只留给 `init()` 里 await 的那条路径。
+  String _mintRealtimeUserId() => const Uuid().v4();
 
   static const String _aiProcessingDirKey = 'ai_processing_dir';
 
@@ -1175,6 +1235,10 @@ class DatabaseService {
 
   bool _isIncomingConversationMessage(Message message) =>
       message.senderType == 'ai' ||
+      // 多人实时群聊里真人成员的发言也是"别人说的"，同样要计未读，否则客人
+      // 说的话在群列表上悄无声息。（此处不能用「不是我就算未读」，那会连带把
+      // 下面那条 system 规则一起放宽。）
+      message.senderType == Message.senderTypeMember ||
       // System messages are also used for local status/toast-style notices.
       // Only an explicit @-addressed system reminder belongs in the inbox's
       // unread stream; otherwise every internal status update would create a

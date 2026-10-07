@@ -7,6 +7,7 @@ import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
+import 'package:chat_group/core/storage/debug_credential_cache.dart';
 import 'package:chat_group/core/storage/legacy_api_credential_migrator.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -16,11 +17,18 @@ class _MemoryCredentialStore implements CredentialStore {
   final values = <String, String>{};
   bool failWrites = false;
 
+  /// 安全存储读取次数。macOS 上每次读取都可能触发一次钥匙串密码框，
+  /// 启动路径的读取次数因此是可直接断言的用户可见行为。
+  int readCount = 0;
+
   @override
   Future<void> delete(String key) async => values.remove(key);
 
   @override
-  Future<String?> read(String key) async => values[key];
+  Future<String?> read(String key) async {
+    readCount++;
+    return values[key];
+  }
 
   @override
   Future<void> write(String key, String value) async {
@@ -82,6 +90,25 @@ AICharacter _character(String id, String apiKey) => AICharacter(
       hourlyReplyLimit: 7,
       isActive: true,
       createdAt: DateTime.utc(2026, 1, 2),
+    );
+
+/// 与 [_character] 的 provider/model/baseUrl 对齐，便于构造「可被旧角色复用」的配置。
+ApiConfig _migratedConfig(CredentialRepository repository, String id) =>
+    ApiConfig(
+      id: id,
+      name: id,
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      customBaseUrl: 'https://example.invalid/v1',
+      credentialId: repository.credentialIdFor(id),
+      hasCredential: true,
+    );
+
+CredentialRepository _repositoryFor(_MemoryCredentialStore store) =>
+    CredentialRepository(
+      store: store,
+      legacyStorage: _NoopLegacyStorage(),
+      secureStorageAvailable: true,
     );
 
 void main() {
@@ -344,5 +371,134 @@ void main() {
     expect(characters.get('a')!.apiKey, 'shared-secret');
     expect(groups.get('group')!.name, 'unchanged group');
     expect(messages.get('message')!.content, 'unchanged message');
+  });
+
+  test('already-migrated configs cost no secure storage read at startup',
+      () async {
+    final store = _MemoryCredentialStore();
+    final repository = _repositoryFor(store);
+    final ids = ['a1', 'a2', 'a3', 'a4'];
+    for (final id in ids) {
+      store.values[repository.credentialIdFor(id)] = 'secret-$id';
+    }
+    final harness = _MigrationHarness(
+      store: store,
+      configs: [for (final id in ids) _migratedConfig(repository, id)],
+      characters: [],
+    );
+
+    await harness.migrate();
+
+    // 每个已迁移配置在 macOS 上都会触发一次钥匙串授权弹窗，启动路径必须为零。
+    expect(store.readCount, 0);
+  });
+
+  test('a config with a pending legacy key is still read and migrated',
+      () async {
+    final config = ApiConfig(
+      id: 'pending',
+      name: 'pending',
+      provider: 'deepseek',
+      apiKey: 'pending-secret',
+    );
+    final harness = _MigrationHarness(
+      store: _MemoryCredentialStore(),
+      configs: [config],
+      characters: [],
+    );
+
+    await harness.migrate();
+
+    expect(harness.store.readCount, greaterThan(0));
+    expect(config.legacyApiKeyForMigration, isEmpty);
+    expect(config.hasCredential, isTrue);
+    expect(config.credentialId, harness.repository.credentialIdFor(config.id));
+  });
+
+  test('a legacy character still reuses a matching migrated config', () async {
+    final store = _MemoryCredentialStore();
+    final repository = _repositoryFor(store);
+    final config = _migratedConfig(repository, 'shared-config');
+    store.values[repository.credentialIdFor(config.id)] = 'shared-secret';
+    final character = _character('a', 'shared-secret');
+    final harness = _MigrationHarness(
+      store: store,
+      configs: [config],
+      characters: [character],
+    );
+
+    await harness.migrate();
+
+    // 旧角色必须挂到已有配置上；跳过该配置的读取会让它退化成重复配置。
+    expect(harness.configs, hasLength(1));
+    expect(character.apiConfigId, 'shared-config');
+    expect(character.apiKey, isEmpty);
+  });
+
+  group('调试镜像', () {
+    late Directory directory;
+
+    setUp(() async {
+      directory = await Directory.systemTemp.createTemp('migrator_mirror_');
+      Hive.init(directory.path);
+      await Hive.openBox<dynamic>(DebugCredentialCache.boxName);
+    });
+
+    tearDown(() async {
+      DebugCredentialCache.bind(null);
+      await Hive.close();
+      await directory.delete(recursive: true);
+    });
+
+    test('旧明文密钥在迁移读取之前就已镜像', () async {
+      // 迁移会先读一次安全存储；macOS 上那次读取就是一次钥匙串密码框。
+      // 明文就在记录里，镜像后那次读取不必再问钥匙串。
+      final repository = CredentialRepository();
+      final config = ApiConfig(
+        id: 'pending-mirror',
+        name: 'pending',
+        provider: 'custom',
+        apiKey: 'pending-secret',
+      );
+      final migrator = LegacyApiCredentialMigrator(repository);
+
+      await migrator.seedDevelopmentCredentialCache([config]);
+
+      expect(
+        await DebugCredentialCache.read(
+          repository.credentialIdFor(config.id),
+          () async => fail('迁移前那次读取落到了钥匙串，会弹密码框'),
+        ),
+        'pending-secret',
+      );
+    });
+
+    test('开发回退配置在无钥匙串的环境里也能完成迁移', () async {
+      // 测试环境没有钥匙串插件，任何真正走到平台的调用都会抛
+      // MissingPluginException。因此「迁移成功」本身就等价于「一次也没问过
+      // 钥匙串」——这正是 macOS ad-hoc 签名下最想要的结果。
+      final repository = CredentialRepository();
+      final config = ApiConfig(
+        id: 'dev-fallback',
+        name: 'dev',
+        provider: 'custom',
+        apiKey: 'dev-secret',
+        credentialId: CredentialRepository.developmentHiveCredentialId,
+        hasCredential: true,
+      );
+      final configs = {config.id: config};
+
+      await LegacyApiCredentialMigrator(repository).migrate(
+        configs: configs.values,
+        characters: const [],
+        saveConfig: (value) async => configs[value.id] = value,
+        saveCharacter: (_) async {},
+      );
+
+      expect(config.legacyApiKeyForMigration, isEmpty);
+      expect(config.hasCredential, isTrue);
+      expect(config.credentialId, repository.credentialIdFor(config.id));
+      expect((await repository.read(config.id)).value, 'dev-secret');
+    });
   });
 }

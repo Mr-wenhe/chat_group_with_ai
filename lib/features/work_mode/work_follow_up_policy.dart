@@ -11,6 +11,7 @@ class WorkFollowUpDecision {
   final String request;
   final String? artifactPath;
   final String? clarificationQuestion;
+  final List<WorkFollowUpOption> clarificationOptions;
   final String reason;
   final bool autoRenameIfExists;
 
@@ -19,6 +20,7 @@ class WorkFollowUpDecision {
     required this.request,
     this.artifactPath,
     this.clarificationQuestion,
+    this.clarificationOptions = const <WorkFollowUpOption>[],
     this.reason = '',
     this.autoRenameIfExists = false,
   });
@@ -29,6 +31,97 @@ class WorkFollowUpDecision {
 
   /// A descriptive alias for callers that treat this as a collision policy.
   bool get allowCollisionRename => autoRenameIfExists;
+}
+
+/// 澄清的候选项：序号把问题里的清单和面板上的按钮对起来，`path` 是点选后
+/// 要提交的**完整路径**。
+///
+/// 存完整路径而不是清单上显示的短名：同名候选（不同目录下的 `report.md`）
+/// 只有路径能区分，而点选本来就是为了比手打文件名更精确。
+class WorkFollowUpOption {
+  final int index;
+  final String path;
+
+  const WorkFollowUpOption({required this.index, required this.path});
+
+  /// 清单与按钮上的短名。同名候选要靠 [path] 才能区分，所以它只用于展示。
+  String get displayName {
+    final normalized = path.replaceAll('\\', '/');
+    final segments = normalized.split('/');
+    return segments.last.isEmpty ? normalized : segments.last;
+  }
+
+  Map<String, Object?> toJson() => <String, Object?>{
+        'index': index,
+        'path': path,
+      };
+
+  /// 答复按清单序号点名了哪一个候选；读不出、或序号落在清单外都返回 null。
+  ///
+  /// 判据故意很窄：**整句就是一个序号指代**才算数。放宽到"句子里出现数字"，
+  /// 就会把"生成 3 个文件"读成"改清单第 3 项"——猜错等于替用户改了另一个文件，
+  /// 而这次澄清存在的全部理由就是不再猜。
+  static WorkFollowUpOption? selectedBy(
+    List<WorkFollowUpOption> options,
+    String answer,
+  ) {
+    final index = _indexFromAnswer(answer);
+    if (index == null) return null;
+    for (final option in options) {
+      if (option.index == index) return option;
+    }
+    return null;
+  }
+
+  /// 句首句尾的引号与标点、以及"选/第…个"这类包装词都不算内容；数字本身可以
+  /// 是半角或全角 —— 中文输入法下全角数字是常态。
+  static int? _indexFromAnswer(String answer) {
+    var normalized = answer.trim();
+    if (normalized.isEmpty) return null;
+    normalized = normalized.replaceAllMapped(
+      RegExp('[０-９]'),
+      (match) => String.fromCharCode(match.group(0)!.codeUnitAt(0) - 0xFEE0),
+    );
+    normalized = normalized.replaceFirst(_leadingDecoration, '');
+    normalized = normalized.replaceFirst(_trailingDecoration, '');
+    normalized = normalized.replaceFirst(_selectionVerbPrefix, '');
+    normalized = normalized.replaceFirst(RegExp(r'^第\s*'), '');
+    normalized = normalized.replaceFirst(_measureWordSuffix, '');
+    normalized = normalized.trim();
+    if (!RegExp(r'^\d{1,2}$').hasMatch(normalized)) return null;
+    final index = int.tryParse(normalized);
+    // 清单序号从 1 起：0 不是"第一项"的另一种写法，是没在选项里。
+    return index == null || index < 1 ? null : index;
+  }
+
+  static final RegExp _leadingDecoration =
+      RegExp(r'''^[\s"'「」『』（(【]+''');
+  static final RegExp _trailingDecoration =
+      RegExp(r'''[\s"'「」『』）)】。，、,.:：;；!！?？]+$''');
+  // 「选择」必须排在「选」前面：交替是从左往右试的，先试「选」会把它切成
+  // 「择第 1 项」，整句就再也读不出序号了。
+  static final RegExp _selectionVerbPrefix = RegExp(r'^(?:选择|选|要|改)\s*');
+  static final RegExp _measureWordSuffix = RegExp(r'\s*(?:个|项|条|份|种)$');
+
+  /// 从检查点元数据读回候选；形状不对的条目一律丢弃 —— 面板宁可少给一个
+  /// 按钮，也不能渲染出一个提交不了路径的按钮。
+  ///
+  /// 序号重复的条目按同一个理由丢弃：按钮的 widget key 取自序号，两个一样的
+  /// 序号会让面板在构建时直接报"重复 key"整块画不出来，比少一个按钮糟得多。
+  static List<WorkFollowUpOption> listFromJson(Object? raw) {
+    if (raw is! List) return const <WorkFollowUpOption>[];
+    final options = <WorkFollowUpOption>[];
+    final seenIndices = <int>{};
+    for (final entry in raw) {
+      if (entry is! Map) continue;
+      final index = entry['index'];
+      final path = entry['path'];
+      if (index is! int || path is! String || path.trim().isEmpty) continue;
+      if (!seenIndices.add(index)) continue;
+      options.add(WorkFollowUpOption(index: index, path: path));
+    }
+    return options;
+  }
 }
 
 /// Decides whether a follow-up continues, revises an existing artifact, or
@@ -382,22 +475,30 @@ class WorkFollowUpPolicy {
     List<String> candidates,
     String reason,
   ) {
-    final display = candidates.isEmpty
-        ? '例如：/workspace/report.md'
-        : candidates.map(_displayPath).join('、');
+    final options = <WorkFollowUpOption>[
+      for (var index = 0; index < candidates.length; index++)
+        WorkFollowUpOption(index: index + 1, path: candidates[index]),
+    ];
     return WorkFollowUpDecision(
       kind: WorkFollowUpKind.clarification,
       request: request,
       reason: reason,
-      clarificationQuestion: '请明确要修改的文件路径（$display）？',
+      clarificationOptions: options,
+      clarificationQuestion: _clarificationQuestion(options),
     );
   }
 
-  String _displayPath(String path) {
-    final normalized = path.replaceAll('\\', '/');
-    return normalized.split('/').last.isEmpty
-        ? normalized
-        : normalized.split('/').last;
+  /// 一个问题加一份候选清单：清单让用户看见有哪些目标，序号让清单与面板按钮
+  /// 一一对应。没有候选时退回只索要路径的文案 —— 那时没有可点的东西，列一份
+  /// 空清单只会让用户以为漏加载了。
+  String _clarificationQuestion(List<WorkFollowUpOption> options) {
+    if (options.isEmpty) {
+      return '请明确要修改的文件路径（例如：/workspace/report.md）？';
+    }
+    final list = options
+        .map((option) => '${option.index}. ${option.displayName}')
+        .join('\n');
+    return '请明确要修改的文件路径（点击选项，或回复序号／文件名）？\n$list';
   }
 
   bool _containsToken(String text, String token) {

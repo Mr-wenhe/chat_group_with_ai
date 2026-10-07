@@ -11,6 +11,10 @@ import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:crypto/crypto.dart';
 
+/// 一次合并允许的分段数量上限。合并要按顺序把分段全部读进内存再原子写回，
+/// 没有上限的话一个被写坏的动作就能要求读进任意多个文件。
+const int maxWorkspaceMergeParts = 64;
+
 /// In-process Stage 02 tool boundary. No cross-process service is created
 /// here: every path is resolved against the configured grant and every
 /// mutation is checked against a task-scoped approval scope.
@@ -320,56 +324,27 @@ class Stage02WorkspaceFileTool {
 
   Future<Map<String, dynamic>> write(String path, String content) async {
     try {
-      final absolute = _absolutePath(path);
-      final resolved = await pathPolicy.resolve(absolute, allowMissing: true);
-      final action = resolved.exists
-          ? WorkChangeActionType.modify
-          : WorkChangeActionType.create;
-      if (resolved.exists && !resolved.isFile) {
-        return {
-          'ok': false,
-          'error': 'not_a_file',
-          'message': '目标不是普通文件，未执行写入。',
-          'path': resolved.path,
-        };
-      }
-      final sensitive = files.isSensitivePath(absolute) ||
-          files.isSensitivePath(resolved.path);
-      final plan = _filePlan(
-        action: action,
-        path: resolved.path,
-        directory: resolved.authorizedRoot,
-        bytes: utf8.encode(content).length,
+      final prepared = await _prepareMutation(
+        path: path,
+        notAFileMessage: '目标不是普通文件，未执行写入。',
+        estimatedBytes: utf8.encode(content).length,
       );
-      // Do not hash a sensitive file until the task carries both an explicit
-      // approval and an exact scope covering this concrete plan. Hashing reads
-      // old contents before the mutation boundary can return its redacted
-      // approval response, so the scope check must precede it.
-      final sensitiveApproved = approvalDecision?.permitsExecution == true &&
-          approvalScope?.allows(plan) == true;
-      if (sensitive && !sensitiveApproved) {
-        return {
-          'ok': false,
-          'error': 'sensitive_mutation_requires_approval',
-          'requiresApproval': true,
-          'sensitive': true,
-          'redacted': true,
-          'message': '修改、重命名或删除敏感文件必须再次确认。',
-          'path': resolved.path,
-        };
-      }
-      final expectedSha = action == WorkChangeActionType.modify
-          ? await _hashFile(File(resolved.path))
+      final refusal = prepared.refusal;
+      if (refusal != null) return refusal;
+      final plan = prepared.plan!;
+      final target = prepared.resolvedPath!;
+      final expectedSha = plan.actionType == WorkChangeActionType.modify
+          ? await _hashFile(File(target))
           : null;
       return _execute(
         plan,
         WorkspaceMutationRequest(
-          path: resolved.path,
+          path: target,
           contents: content,
           expectedSha256: expectedSha,
           approvalDecision: approvalDecision,
         ),
-        sensitivePath: sensitive,
+        sensitivePath: prepared.sensitive,
       );
     } on WorkspacePathException catch (error) {
       return _pathError(error, path);
@@ -377,6 +352,338 @@ class Stage02WorkspaceFileTool {
       return {'ok': false, 'error': 'io', 'message': '无法读取目标文件。'};
     }
   }
+
+  /// 追加写：读出当前内容，把 [chunk] 接到末尾，再走与 [write] 相同的原子
+  /// 替换路径落盘。
+  ///
+  /// 这是长产物唯一可行的分块方式：一次决策的输出有上限，整份正文塞进一次
+  /// `content` 会被上游截断、整条动作作废。
+  Future<Map<String, dynamic>> append(String path, String chunk) async {
+    try {
+      final prepared = await _prepareMutation(
+        path: path,
+        notAFileMessage: '目标不是普通文件，未执行追加。',
+        estimatedBytes: utf8.encode(chunk).length,
+      );
+      final refusal = prepared.refusal;
+      if (refusal != null) return refusal;
+      final plan = prepared.plan!;
+      final target = prepared.resolvedPath!;
+      final fullRead = plan.actionType == WorkChangeActionType.modify
+          ? await _readWholeForMutation(target)
+          : null;
+      if (fullRead?.truncated == true) {
+        return {
+          'ok': false,
+          'error': 'append_requires_full_read',
+          'message': '目标文件超过读取上限，无法安全读回后追加；请改用分段文件。',
+          'path': target,
+        };
+      }
+      final combined = '${fullRead?.text ?? ''}$chunk';
+      return _execute(
+        _filePlan(
+          action: plan.actionType,
+          path: target,
+          directory: plan.knownAffectedDirectories.first,
+          bytes: utf8.encode(combined).length,
+        ),
+        WorkspaceMutationRequest(
+          path: target,
+          contents: combined,
+          expectedSha256: fullRead?.sha256,
+          approvalDecision: approvalDecision,
+        ),
+        sensitivePath: prepared.sensitive,
+      );
+    } on WorkspacePathException catch (error) {
+      return _pathError(error, path);
+    } on WorkspaceFileException catch (error) {
+      return _fileError(error);
+    } on FileSystemException {
+      return {'ok': false, 'error': 'io', 'message': '无法读取目标文件。'};
+    }
+  }
+
+  /// 合并：按给定顺序把各分段拼成一个文件，用与 [write] 相同的原子替换路径
+  /// 写入 [path]。
+  ///
+  /// 顺序是模型的契约，因此刻意不排序、不去重。目标文件在整个过程中要么是旧
+  /// 版本、要么是新版本，不会出现"写到一半"的产物。
+  Future<Map<String, dynamic>> merge({
+    required String path,
+    required List<String> parts,
+  }) async {
+    if (parts.isEmpty || parts.length > maxWorkspaceMergeParts) {
+      return {
+        'ok': false,
+        'error': 'invalid_merge',
+        'message': parts.isEmpty
+            ? '合并至少需要一个分段文件。'
+            : '合并的分段数量超过上限 $maxWorkspaceMergeParts。',
+      };
+    }
+    try {
+      final partsPlan = await _resolveMergeParts(parts);
+      if (partsPlan.missing.isNotEmpty) {
+        return {
+          'ok': false,
+          'error': 'invalid_merge',
+          'message': '以下分段文件不存在或不可读，合并未执行：'
+              '${partsPlan.missing.join('、')}',
+          'missingParts': partsPlan.missing,
+        };
+      }
+      return _mergeResolvedParts(
+        path: path,
+        parts: partsPlan.parts,
+        estimatedBytes: partsPlan.estimatedBytes,
+      );
+    } on WorkspacePathException catch (error) {
+      return _pathError(error, path);
+    } on WorkspaceFileException catch (error) {
+      return _fileError(error);
+    } on FileSystemException {
+      return {'ok': false, 'error': 'io', 'message': '无法读取分段文件。'};
+    }
+  }
+
+  /// 解析 [parts] 中每个分段的真实路径与字节数。
+  ///
+  /// 只做路径解析与 stat，**不读内容**：敏感门必须先于任何分段读取，而路径
+  /// 解析与 stat 都不会把文件内容带进进程。缺失或不可读的分段按模型给出的原始
+  /// 拼写点名返回，好让错误信息直接对上模型的输入。
+  Future<({List<_MergePart> parts, List<String> missing, int estimatedBytes})>
+      _resolveMergeParts(List<String> parts) async {
+    final resolvedParts = <_MergePart>[];
+    final missing = <String>[];
+    var estimatedBytes = 0;
+    for (final part in parts) {
+      try {
+        final resolved = await pathPolicy.resolveExisting(_absolutePath(part));
+        if (resolved.isFile) {
+          resolvedParts
+              .add(_MergePart(requested: part, resolved: resolved.path));
+          estimatedBytes += await File(resolved.path).length();
+        } else {
+          missing.add(part);
+        }
+      } on WorkspacePathException {
+        missing.add(part);
+      }
+    }
+    return (
+      parts: resolvedParts,
+      missing: missing,
+      estimatedBytes: estimatedBytes,
+    );
+  }
+
+  /// 敏感门通过之后才把分段读全并原子写回 [path]。
+  ///
+  /// [estimatedBytes] 只是计划的规模提示，从不参与审批比较。合并是整份替换，
+  /// 所以目标只需哈希（供 CAS）而不必读回；读回它反而会多一条无谓的字节上限。
+  Future<Map<String, dynamic>> _mergeResolvedParts({
+    required String path,
+    required List<_MergePart> parts,
+    required int estimatedBytes,
+  }) async {
+    final prepared = await _prepareMutation(
+      path: path,
+      notAFileMessage: '合并目标不是普通文件，未执行合并。',
+      estimatedBytes: estimatedBytes,
+    );
+    final refusal = prepared.refusal;
+    if (refusal != null) return refusal;
+    final plan = prepared.plan!;
+    final target = prepared.resolvedPath!;
+    final read = await _readMergeParts(parts);
+    final readRefusal = read.refusal;
+    if (readRefusal != null) return readRefusal;
+    final combined = read.text;
+    return _execute(
+      _filePlan(
+        action: plan.actionType,
+        path: target,
+        directory: plan.knownAffectedDirectories.first,
+        bytes: utf8.encode(combined).length,
+      ),
+      WorkspaceMutationRequest(
+        path: target,
+        contents: combined,
+        expectedSha256: plan.actionType == WorkChangeActionType.modify
+            ? await _hashFile(File(target))
+            : null,
+        approvalDecision: approvalDecision,
+      ),
+      // 任一分段敏感时同样标记：合并的结果里带着敏感内容。
+      sensitivePath: prepared.sensitive ||
+          parts.any((part) => files.isSensitivePath(part.resolved)),
+    );
+  }
+
+  /// 按序读全每个分段，返回拼接好的正文；某个分段需要敏感读取批准或读回被
+  /// 字节上限截断时返回 [refusal]，调用方必须原样返回且不得改动目标文件。
+  Future<({String text, Map<String, dynamic>? refusal})> _readMergeParts(
+    List<_MergePart> parts,
+  ) async {
+    final buffer = StringBuffer();
+    for (final part in parts) {
+      if (files.isSensitivePath(part.resolved)) {
+        final refusal = _refuseSensitivePartRead(part);
+        if (refusal != null) return (text: '', refusal: refusal);
+      }
+      // 与 append 同理：分段的完整性只能用字节级判据，面向模型的 12000 字符
+      // 输出上限会把长分段误判成截断，让分块合并整体失效。
+      final read = await _withReadLock(
+        part.resolved,
+        () => files.readTextForMutation(part.resolved),
+      );
+      if (read.truncated) {
+        return (
+          text: '',
+          refusal: {
+            'ok': false,
+            'error': 'append_requires_full_read',
+            'message': '分段文件超过读取上限，无法安全合并：${part.resolved}',
+            'path': part.resolved,
+          },
+        );
+      }
+      buffer.write(read.text);
+    }
+    return (text: buffer.toString(), refusal: null);
+  }
+
+  /// 敏感分段的读取必须走与 [readWithOptions] 同一条敏感读取审批：只有用户为
+  /// 这个具体分段批准过一次精确的整文读取，才允许把它的内容读进本次合并。
+  ///
+  /// 刻意不借用目标的变更审批：那会让"合并进一个非敏感目标"变成读取任意敏感
+  /// 文件的旁路——内容落进非敏感目标后，模型一次普通 `workspace.read` 就拿到了
+  /// 它。指纹按模型给出的原始拼写计算，与 `workspace.read` 铸造的令牌同一口径。
+  Map<String, dynamic>? _refuseSensitivePartRead(_MergePart part) {
+    final allowed = approvalDecision?.permitsExecution == true &&
+        approvalCapability == WorkApprovalCapability.sensitiveRead &&
+        approvedSensitiveOperation ==
+            sensitiveReadFingerprint(
+              operation: 'readTextRange',
+              path: part.requested,
+              startByte: 0,
+              byteLength: null,
+            );
+    if (allowed) return null;
+    onSensitiveRead?.call(part.resolved, 'readTextRange');
+    return {
+      'ok': false,
+      'error': 'sensitive_read_requires_approval',
+      'requiresApproval': true,
+      'path': part.resolved,
+      'sensitive': true,
+      'redacted': true,
+      'content': '[敏感文件内容已隐藏]',
+      'bytesRead': 0,
+    };
+  }
+
+  /// Shared mutation preamble for [write] and [append] (and any later merge):
+  /// resolves [path] inside the granted root, rejects a non-file target, builds
+  /// the create/modify [WorkChangePlan], and runs the sensitive gate — all
+  /// **before** the caller reads or hashes any old content, so a sensitive file
+  /// never enters this process ahead of the redacted approval response.
+  ///
+  /// [estimatedBytes] only tunes the plan's size hint, never the approval
+  /// comparison. Returns either the prepared [plan] (with its resolved path and
+  /// raw sensitive flag) or a [refusal] the caller must return verbatim.
+  Future<_PreparedMutation> _prepareMutation({
+    required String path,
+    required String notAFileMessage,
+    required int estimatedBytes,
+  }) async {
+    final absolute = _absolutePath(path);
+    final resolved = await pathPolicy.resolve(absolute, allowMissing: true);
+    if (resolved.exists && !resolved.isFile) {
+      return _PreparedMutation(
+        refusal: {
+          'ok': false,
+          'error': 'not_a_file',
+          'message': notAFileMessage,
+          'path': resolved.path,
+        },
+      );
+    }
+    final sensitive =
+        files.isSensitivePath(absolute) || files.isSensitivePath(resolved.path);
+    final plan = _filePlan(
+      action: resolved.exists
+          ? WorkChangeActionType.modify
+          : WorkChangeActionType.create,
+      path: resolved.path,
+      directory: resolved.authorizedRoot,
+      bytes: estimatedBytes,
+    );
+    final refusal = _refuseSensitiveMutation(
+      plan: plan,
+      sensitive: sensitive,
+      path: resolved.path,
+    );
+    if (refusal != null) return _PreparedMutation(refusal: refusal);
+    return _PreparedMutation(
+      plan: plan,
+      resolvedPath: resolved.path,
+      sensitive: sensitive,
+    );
+  }
+
+  /// Shared sensitive-file gate. Returns the redacted refusal when the task
+  /// lacks both an explicit approval and an exact scope covering [plan], or
+  /// null when the mutation may proceed.
+  ///
+  /// Callers must run this before touching old content: reading or hashing a
+  /// sensitive file would pull it into this process ahead of the mutation
+  /// boundary's redacted response.
+  Map<String, dynamic>? _refuseSensitiveMutation({
+    required WorkChangePlan plan,
+    required bool sensitive,
+    required String path,
+  }) {
+    final approved = approvalDecision?.permitsExecution == true &&
+        approvalScope?.allows(plan) == true;
+    if (!sensitive || approved) return null;
+    return {
+      'ok': false,
+      'error': 'sensitive_mutation_requires_approval',
+      'requiresApproval': true,
+      'sensitive': true,
+      'redacted': true,
+      'message': '修改、重命名或删除敏感文件必须再次确认。',
+      'path': path,
+    };
+  }
+
+  /// Reads the whole target for an append/merge and hashes it **under the same
+  /// read lock**: a hash taken outside the lock could match content another
+  /// task wrote in the window between the read and the hash, letting the CAS
+  /// pass and a stale prefix plus the new chunk silently overwrite that task's
+  /// text.
+  ///
+  /// Uses [WorkspaceFileService.readTextForMutation], which is bounded by bytes
+  /// only — never by the model-facing character cap, which would misreport
+  /// every file over 12000 characters as truncated. A truncated result carries
+  /// no text and no hash; the caller must refuse rather than concatenate.
+  Future<({String text, String? sha256, bool truncated})> _readWholeForMutation(
+    String path,
+  ) =>
+      _withReadLock(path, () async {
+        final read = await files.readTextForMutation(path);
+        if (read.truncated) {
+          return (text: '', sha256: null, truncated: true);
+        }
+        return (
+          text: read.text,
+          sha256: await _hashFile(File(path)),
+          truncated: false,
+        );
+      });
 
   Future<Map<String, dynamic>> applyPatch(String patch) async {
     // A diff is always a multi-file/overwrite operation; unlike a simple
@@ -791,6 +1098,33 @@ class _DigestSink implements Sink<Digest> {
 
   @override
   void close() {}
+}
+
+/// 一个已解析的合并分段。[requested] 保留模型给出的原始拼写（敏感读取审批的
+/// 指纹按原始拼写计算，与 `workspace.read` 铸造的令牌同一口径），[resolved]
+/// 是解析后的真实路径，用于读取、报错与敏感判定。
+class _MergePart {
+  final String requested;
+  final String resolved;
+
+  const _MergePart({required this.requested, required this.resolved});
+}
+
+/// Outcome of the shared mutation preamble: either the prepared [plan] (with
+/// its [resolvedPath] and raw [sensitive] flag), or a [refusal] the caller must
+/// return verbatim. Exactly one side is set.
+class _PreparedMutation {
+  final WorkChangePlan? plan;
+  final String? resolvedPath;
+  final bool sensitive;
+  final Map<String, dynamic>? refusal;
+
+  const _PreparedMutation({
+    this.plan,
+    this.resolvedPath,
+    this.sensitive = false,
+    this.refusal,
+  });
 }
 
 class _PostconditionResult {

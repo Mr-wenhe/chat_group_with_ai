@@ -99,12 +99,17 @@ class AppTheme {
     shadow: const Color(0xFF000000),
   );
 
-  static ThemeData _base(ColorScheme cs, Brightness brightness) {
+  static ThemeData _base(
+    ColorScheme cs,
+    Brightness brightness,
+    AppSemanticColors semantic,
+  ) {
     final isDark = brightness == Brightness.dark;
     return ThemeData(
       useMaterial3: true,
       brightness: brightness,
       colorScheme: cs,
+      extensions: <ThemeExtension<dynamic>>[semantic],
       scaffoldBackgroundColor: cs.surface,
       appBarTheme: AppBarTheme(
         backgroundColor: Colors.transparent,
@@ -206,9 +211,21 @@ class AppTheme {
     );
   }
 
-  static final ThemeData darkTheme = _base(dark, Brightness.dark);
-  static final ThemeData lightTheme = _base(light, Brightness.light);
-  static final ThemeData goldenTheme = _base(golden, Brightness.dark);
+  static final ThemeData darkTheme = _base(
+    dark,
+    Brightness.dark,
+    AppSemanticColors.dark,
+  );
+  static final ThemeData lightTheme = _base(
+    light,
+    Brightness.light,
+    AppSemanticColors.light,
+  );
+  static final ThemeData goldenTheme = _base(
+    golden,
+    Brightness.dark,
+    AppSemanticColors.golden,
+  );
 
   static ThemeMode materialThemeModeFor(AppSkinMode skin) {
     return switch (skin) {
@@ -216,5 +233,78 @@ class AppTheme {
       AppSkinMode.system => ThemeMode.system,
       AppSkinMode.dark || AppSkinMode.golden => ThemeMode.dark,
     };
+  }
+}
+
+/// `ColorScheme` 没有 success 档，但"任务完成 / 部分完成"需要正向语义色，
+/// 因此用 `ThemeExtension` 单独承载一档成功色，随皮肤一起切换。
+@immutable
+class AppSemanticColors extends ThemeExtension<AppSemanticColors> {
+  const AppSemanticColors({
+    required this.success,
+    required this.onSuccess,
+    required this.successContainer,
+    required this.onSuccessContainer,
+  });
+
+  final Color success;
+  final Color onSuccess;
+  final Color successContainer;
+  final Color onSuccessContainer;
+
+  static const AppSemanticColors dark = AppSemanticColors(
+    success: Color(0xFF34D399),
+    onSuccess: Color(0xFF04231A),
+    successContainer: Color(0xFF123528),
+    onSuccessContainer: Color(0xFFA7F3D0),
+  );
+
+  static const AppSemanticColors light = AppSemanticColors(
+    success: Color(0xFF15803D),
+    onSuccess: Color(0xFFFFFFFF),
+    successContainer: Color(0xFFDCFCE7),
+    onSuccessContainer: Color(0xFF14532D),
+  );
+
+  static const AppSemanticColors golden = AppSemanticColors(
+    success: Color(0xFF7BD88F),
+    onSuccess: Color(0xFF07230F),
+    successContainer: Color(0xFF1B3320),
+    onSuccessContainer: Color(0xFFC6F0CD),
+  );
+
+  /// 测试会用不带 AppTheme 的裸 `MaterialApp` 挂载组件，此时扩展并不存在，
+  /// 因此这里必须先回退到暗色档，不能让调用方拿到 null。
+  static AppSemanticColors of(BuildContext context) =>
+      Theme.of(context).extension<AppSemanticColors>() ?? dark;
+
+  @override
+  AppSemanticColors copyWith({
+    Color? success,
+    Color? onSuccess,
+    Color? successContainer,
+    Color? onSuccessContainer,
+  }) {
+    return AppSemanticColors(
+      success: success ?? this.success,
+      onSuccess: onSuccess ?? this.onSuccess,
+      successContainer: successContainer ?? this.successContainer,
+      onSuccessContainer: onSuccessContainer ?? this.onSuccessContainer,
+    );
+  }
+
+  @override
+  AppSemanticColors lerp(
+    covariant AppSemanticColors? other,
+    double t,
+  ) {
+    if (other == null) return this;
+    return AppSemanticColors(
+      success: Color.lerp(success, other.success, t)!,
+      onSuccess: Color.lerp(onSuccess, other.onSuccess, t)!,
+      successContainer: Color.lerp(successContainer, other.successContainer, t)!,
+      onSuccessContainer:
+          Color.lerp(onSuccessContainer, other.onSuccessContainer, t)!,
+    );
   }
 }

@@ -52,6 +52,19 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
     }
     final previousDiscussion =
         _requiresDiscussionForTask(task) ? discussionMarker.state : null;
+    if (_carriesV2Collaboration(previousDiscussion)) {
+      // 下面会先清空执行检查点、再写入 _renewDiscussionForRequest 的 v1 状态：
+      // v2 协作记录会连同它一起消失，而这一步没有任何报错。保持原检查点不动，
+      // 把处置交回用户。v2 的输入由 `_enqueueV2Input` 维护，走不到这里，所以这是
+      // 一条防线而不是主路径。
+      await _pauseForDiscussion(
+        task,
+        '该任务使用协作（v2）状态，不能通过追问入口重置，请在任务面板处理待决事项。',
+      );
+      await _save(task);
+      await _markSnapshotStatus(task);
+      return;
+    }
     final decision = _followUpDecisionForPromotion(
       task,
       nextRequest,
@@ -76,6 +89,9 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
         ..executionStateJson = _withFollowUpDecision(
           task.executionStateJson,
           decision,
+          // 走到这里还被判成澄清，说明这一轮是答复且仍没解开目标。首次提问
+          // （任务刚被澄清拦下）没有这回事：那时用户还没答过任何东西。
+          answerRejected: canPromotePausedClarification,
         )
         ..updatedAt = _clock();
       _conversationReservations.add(task.groupId);
@@ -88,7 +104,8 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
       await _record(
         task,
         WorkTaskEventKind.paused,
-        '需要明确修订目标',
+        // 同一条提示重复出现，用户分不清是没收到答复还是看不懂答复。
+        canPromotePausedClarification ? '仍未确定修订目标' : '需要明确修订目标',
         detail: task.lastError,
       );
       return;
@@ -204,7 +221,17 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
     await _save(task);
     _enqueueTask(task);
     unawaited(
-      _record(task, WorkTaskEventKind.queued, '开始处理已排队的追问'),
+      _record(
+        task,
+        WorkTaskEventKind.queued,
+        '开始处理已排队的追问',
+        // 这条事件是面板把时间线切成"运行段"的唯一依据：标签栏的文字已经被新请求
+        // 覆盖，只有它能让执行动态知道"上面的那条历史属于上一次请求"。
+        metadata: const <String, Object?>{
+          WorkTaskRunBoundary.metadataKey:
+              WorkTaskRunBoundary.followUpPromotion,
+        },
+      ),
     );
   }
 
@@ -268,6 +295,13 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
       ),
     );
 
+    if (_requiresDiscussionForTask(fresh) &&
+        _discussionRunner is WorkTaskCollaborationDiscussionRunner) {
+      fresh.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+          fresh.executionStateJson,
+          WorkDiscussionState.forNewTask(fresh, routed: discussion));
+    }
+
     // Keep the completed source as a diagnostic checkpoint while transferring
     // the rest of its FIFO to the new lineage. Revision requests later carry
     // their exact original path through WorkFollowUpPolicy.
@@ -301,7 +335,7 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
     );
   }
 
-  /// 澄清答复的判决分两级。
+  /// 澄清答复的判决分三级。
   ///
   /// 第一级沿用历史行为——对「原句 + 答复」分类。答复只指明目标时
   /// （原句"请修改当前文件" + 答复"report.md"），原句里的修订意图必须保留，
@@ -313,6 +347,10 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
   /// 是唯一能自洽地绕开歧义的意图。含糊的答复（"不知道"、"随便"）会落到
   /// `continueTask`，那不是解开了目标歧义——放行它等于让任务带着未确定的目标
   /// 开跑，原句的修订意图最终落到哪个文件上仍然没人知道。
+  ///
+  /// 第三级认清单序号（"2"、"第2个"），对应面板上那排候选按钮。按钮自己提交的是
+  /// 完整路径，第一级就解得开；序号是手打才有的形态，只有这里能读。三级都判不出
+  /// 目标时任务继续暂停，并由调用方标记"这次的答复没被采纳"。
   ///
   /// 分级而不是直接只看答复，是为了不丢第一级已经能判定的目标。
   WorkFollowUpDecision _followUpDecisionForPromotion(
@@ -338,7 +376,20 @@ extension _WorkTaskCoordinatorFollowUpPromotion on WorkTaskCoordinator {
     final answer = _clarificationAnswerOf(nextRequest);
     if (answer == nextRequest) return merged;
     final answered = resolveFor(answer);
-    return answered.kind == WorkFollowUpKind.newArtifact ? answered : merged;
+    if (answered.kind == WorkFollowUpKind.newArtifact) return answered;
+    // 第三级：答复整句就是清单序号（"2"、"第2个"、"选3"）。按钮走的是第一级
+    // ——它提交的是完整路径；只有手打序号需要在这里认。认不出就落下游原样再问。
+    final selected = WorkFollowUpOption.selectedBy(
+      WorkTaskClarification.options(task),
+      answer,
+    );
+    if (selected == null) return merged;
+    return WorkFollowUpDecision(
+      kind: WorkFollowUpKind.reviseArtifact,
+      request: nextRequest.trim(),
+      artifactPath: selected.path,
+      reason: '用户按序号选中了澄清清单里的修订目标。',
+    );
   }
 
   /// 「原句\n用户明确目标：答复」里最新一段答复；没有标记时原样返回。

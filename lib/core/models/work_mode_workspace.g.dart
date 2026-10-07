@@ -21,6 +21,7 @@ class WorkModeWorkspaceAdapter extends TypeAdapter<WorkModeWorkspace> {
       conversationId: fields[1] as String,
       conversationType: fields[2] as String,
       workDirPath: fields[3] as String,
+      projectScopeId: fields[5] as String?,
       updatedAt: fields[4] as DateTime?,
     );
   }
@@ -28,7 +29,7 @@ class WorkModeWorkspaceAdapter extends TypeAdapter<WorkModeWorkspace> {
   @override
   void write(BinaryWriter writer, WorkModeWorkspace obj) {
     writer
-      ..writeByte(5)
+      ..writeByte(6)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -38,7 +39,9 @@ class WorkModeWorkspaceAdapter extends TypeAdapter<WorkModeWorkspace> {
       ..writeByte(3)
       ..write(obj.workDirPath)
       ..writeByte(4)
-      ..write(obj.updatedAt);
+      ..write(obj.updatedAt)
+      ..writeByte(5)
+      ..write(obj.projectScopeId);
   }
 
   @override

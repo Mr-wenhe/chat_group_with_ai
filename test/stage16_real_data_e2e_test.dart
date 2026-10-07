@@ -34,6 +34,7 @@ const _kRealDataDir = 'data';
 /// 排除的 box 文件（含 API Key 凭据，禁止复制）。
 const _kExcludedBoxes = <String>{
   'api_configs.hive',
+  'dev_credentials.hive',
 };
 
 void main() {

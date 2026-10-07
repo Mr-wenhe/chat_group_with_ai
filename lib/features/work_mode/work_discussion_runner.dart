@@ -1,6 +1,23 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'work_candidate_publication.dart';
+import 'package:chat_group/features/memory/memory_context_selector.dart';
+import 'package:chat_group/features/memory/observation_entry.dart';
+import 'work_mode_memory_runner.dart';
+import 'work_mode_workspace_service.dart';
+import 'package:chat_group/core/models/media_attachment.dart';
+import 'package:crypto/crypto.dart';
+import 'package:chat_group/features/agentic/agent_prompt_builder.dart';
+import 'work_collaboration_state.dart';
+import 'work_context_builder.dart';
+import 'package:chat_group/features/web_search/models/search_models.dart'
+    as search;
+import 'package:chat_group/features/web_search/application/search_context_formatter.dart';
+import 'work_discussion_investigation.dart';
+import 'work_agent_loop.dart';
+import 'work_discussion_v2_protocol.dart';
+import 'work_task_execution_policy.dart';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
@@ -10,9 +27,12 @@ import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
+import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
+import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
+import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_discussion_protocol.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
@@ -34,6 +54,11 @@ part 'work_discussion_runner_setup.dart';
 part 'work_discussion_runner_model_io.dart';
 part 'work_discussion_project_dossier.dart';
 part 'work_discussion_runner_decisions.dart';
+part 'work_discussion_v2_session.dart';
+part 'work_discussion_v2_requests.dart';
+part 'work_discussion_v2_team.dart';
+part 'work_discussion_v2_actions.dart';
+part 'work_discussion_v2_approvals.dart';
 
 typedef WorkDiscussionCompletion = Future<Map<String, dynamic>> Function({
   required AICharacter character,
@@ -67,7 +92,8 @@ class _DiscussionMember {
 /// Runs the S3 public discussion rounds inside the existing task coordinator.
 /// It only asks models for bounded, structured public contributions; tools and
 /// file side effects remain behind the S2 `updateDiscussionState` gate.
-class WorkDiscussionRunner implements WorkTaskDiscussionRunner {
+class WorkDiscussionRunner
+    implements WorkTaskDiscussionRunner, WorkTaskCollaborationDiscussionRunner {
   // Complex work-mode prompts can legitimately take longer than a short chat turn.
   // Keep the bound finite while allowing the configured providers to finish.
   static const Duration defaultRoleTimeout = Duration(seconds: 90);
@@ -100,6 +126,8 @@ class WorkDiscussionRunner implements WorkTaskDiscussionRunner {
   final AiRequestGateway gateway;
   final WorkTaskEventStore? eventStore;
   final WorkDiscussionCompletion? completion;
+  final WorkDiscussionInvestigation? investigate;
+  final WorkModeWorkspaceService? workspaceService;
   final Duration roleTimeout;
   final Duration credentialTimeout;
   final DateTime Function() clock;
@@ -110,6 +138,8 @@ class WorkDiscussionRunner implements WorkTaskDiscussionRunner {
     AiRequestGateway? gateway,
     this.eventStore,
     this.completion,
+    this.investigate,
+    this.workspaceService,
     this.roleTimeout = defaultRoleTimeout,
     this.credentialTimeout = defaultCredentialTimeout,
     DateTime Function()? clock,
@@ -117,6 +147,13 @@ class WorkDiscussionRunner implements WorkTaskDiscussionRunner {
         gateway = gateway ??
             AiRequestGateway(store: AiGovernanceStore.forDatabase(database)),
         clock = clock ?? DateTime.now;
+
+  @override
+  Future<void> runCollaboration(
+          AgentTask task,
+          WorkTaskCancellation cancellation,
+          Future<AgentTask> Function(WorkCollaborationUpdate update) apply) =>
+      _V2DiscussionSession(this, task, cancellation, apply).run();
 
   /// Returns the endpoint used for machine-readable discussion turns.
   ///

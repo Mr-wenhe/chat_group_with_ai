@@ -19,12 +19,28 @@ class ManagedMediaStore {
     final rootPath = await _safeRootPath();
     if (rootPath == null) return MediaUsage.empty;
     final referenced = <String>{};
+    final candidateRoots = <String>{};
     var scannedMessages = 0;
     for (final message in db.messageBox.values) {
       if (!excludedMessageIds.contains(message.id)) {
-        for (final attachment in message.media ?? const []) {
+        if (message.workDelivery?['verified'] == true) {
+          for (final entry
+              in (message.workDelivery?['files'] as List? ?? const [])
+                  .whereType<Map>()) {
+            final path = entry['path'];
+            if (path is String &&
+                entry['relative'] ==
+                    '${message.workDelivery?['iterationId']}/candidate.json') {
+              try {
+                final parent = await File(path).parent.resolveSymbolicLinks();
+                if (_isInside(rootPath, parent)) candidateRoots.add('$parent/');
+              } on Object {/* Missing candidates cannot pin unrelated files. */}
+            }
+          }
+        }
+        for (final mediaPath in message.managedMediaPaths) {
           try {
-            final file = File(attachment.managedPath);
+            final file = File(mediaPath);
             if (!await file.exists()) continue;
             final path = await file.resolveSymbolicLinks();
             if (_isInside(rootPath, path)) referenced.add(path);
@@ -51,7 +67,8 @@ class ManagedMediaStore {
         final length = await entity.length();
         totalFiles++;
         totalBytes += length;
-        if (!referenced.contains(path)) {
+        if (!referenced.contains(path) &&
+            !candidateRoots.any(path.startsWith)) {
           orphans.add(entity.path);
           orphanBytes += length;
         }
@@ -107,9 +124,9 @@ class ManagedMediaStore {
     // ponytail: scan message references only; add an attachment-reference
     // index in phase 03 if message-volume profiling shows this is still hot.
     for (final message in db.messageBox.values) {
-      for (final attachment in message.media ?? const []) {
-        if (candidates.contains(attachment.managedPath)) {
-          referenced.add(attachment.managedPath);
+      for (final mediaPath in message.managedMediaPaths) {
+        if (candidates.contains(mediaPath)) {
+          referenced.add(mediaPath);
         }
       }
       if (++scannedMessages % HiveDeletionRunner.batchSize == 0) {

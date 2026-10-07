@@ -18,7 +18,7 @@ add_executable(${BINARY_TARGET} WIN32
 
 # The executable ships under the application's name; the CMake target keeps the
 # ASCII name above because CMake rejects non-ASCII target names.
-set_target_properties(${BINARY_TARGET} PROPERTIES OUTPUT_NAME "${BINARY_NAME}")
+set_target_properties(${BINARY_TARGET} PROPERTIES OUTPUT_NAME "${APP_EXE_NAME}")
 
 # Apply the standard set of build settings. This can be removed for applications
 # that need different build settings.

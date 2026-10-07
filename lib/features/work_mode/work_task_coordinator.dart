@@ -5,7 +5,9 @@ import 'dart:convert';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:hive/hive.dart';
+import 'package:crypto/crypto.dart';
 
+import 'work_artifact_delivery_confirmation.dart';
 import 'work_artifact_delivery_notice.dart';
 import 'work_task_action_notice.dart';
 import 'work_task_event.dart';
@@ -14,6 +16,7 @@ import 'work_task_error_sanitizer.dart';
 import 'work_folder_grant_service.dart';
 import 'work_task_clarification.dart';
 import 'work_task_budget_wait.dart';
+import 'work_task_execution_policy.dart';
 import 'work_resource_lock_manager.dart';
 import 'work_snapshot_manifest.dart';
 import 'work_approval_decision.dart';
@@ -21,18 +24,22 @@ import 'work_change_plan.dart';
 import 'work_command_runner.dart';
 import 'work_context_builder.dart';
 import 'work_discussion_state.dart';
+import 'work_collaboration_state.dart';
 import 'work_follow_up_policy.dart';
 import 'work_handoff_state.dart';
 import 'work_failure.dart';
 import 'work_mode_directory_service.dart';
 import 'work_role_router.dart';
+import 'work_task_run_boundary.dart';
 import 'work_tool_registry.dart';
 import 'work_task_user_action.dart';
+import 'work_task_decision.dart';
 
 part 'work_task_coordinator_submission.dart';
 part 'work_task_coordinator_follow_up_input.dart';
 part 'work_task_coordinator_permission_actions.dart';
 part 'work_task_coordinator_recovery.dart';
+part 'work_task_coordinator_startup_recovery.dart';
 part 'work_task_coordinator_auto_resume.dart';
 part 'work_task_coordinator_discussion_lifecycle.dart';
 part 'work_task_coordinator_executor_conflict.dart';
@@ -44,6 +51,7 @@ part 'work_task_coordinator_follow_up_promotion.dart';
 part 'work_task_coordinator_checkpoint_policy.dart';
 part 'work_task_coordinator_contracts.dart';
 part 'work_task_coordinator_deletion.dart';
+part 'work_task_coordinator_decisions.dart';
 
 /// Owns work-task scheduling independently from every chat-room widget.
 ///
@@ -61,6 +69,7 @@ class WorkTaskCoordinator {
     Duration(seconds: 30),
     Duration(seconds: 90),
   ];
+
   /// Upper bound on one automatic-resume attempt.
   ///
   /// An app-initiated retry must not be able to sit on a slot for the whole
@@ -114,6 +123,7 @@ class WorkTaskCoordinator {
   final List<Duration> autoResumeDelays;
   final Duration autoResumeRoundTimeout;
   final WorkTaskActionNotifier? _userActionNotifier;
+  final WorkTaskContextBoundaryWriter? _contextBoundaryWriter;
   final bool? _installerIsWindows;
   final bool? _installerIsMacOS;
   final StreamController<AgentTask> _taskUpdates =
@@ -140,6 +150,7 @@ class WorkTaskCoordinator {
   final Map<String, Future<void>> _approvalRuns = <String, Future<void>>{};
   final Map<String, Future<void>> _folderActionRuns = <String, Future<void>>{};
   final Set<String> _conversationReservations = <String>{};
+
   /// 本进程内已被真删除的任务 id。
   ///
   /// 删除要走异步收尾（取消 runner、删日志），期间可能有迟到的 `_save` 把记录
@@ -149,7 +160,13 @@ class WorkTaskCoordinator {
   final Set<String> _deletedTaskIds = <String>{};
   final Set<String> _handoffsAwaitingLease = <String>{};
   final Set<String> _autoResumeTaskIds = <String>{};
+  // Arrival barrier only; durable input remains in the existing serialized FIFO.
+  final Map<String, int> _arrivingInputCounts = {};
   final Set<String> _startingTaskIds = <String>{};
+  final Set<String> _discussionSlotIds = <String>{};
+  int get _occupiedSlots =>
+      {..._running.keys, ..._startingTaskIds, ..._discussionSlotIds}.length;
+
   final Queue<Completer<void>> _slotWaiters = Queue<Completer<void>>();
   Future<WorkFolderRequestResult>? _folderRequest;
 
@@ -173,6 +190,7 @@ class WorkTaskCoordinator {
     WorkContextBuilder? contextBuilder,
     WorkFollowUpPolicy? followUpPolicy,
     WorkTaskActionNotifier? userActionNotifier,
+    WorkTaskContextBoundaryWriter? contextBoundaryWriter,
     bool? installerIsWindows,
     bool? installerIsMacOS,
     DateTime Function()? clock,
@@ -192,6 +210,7 @@ class WorkTaskCoordinator {
         _contextBuilder = contextBuilder ?? const WorkContextBuilder(),
         _followUpPolicy = followUpPolicy ?? const WorkFollowUpPolicy(),
         _userActionNotifier = userActionNotifier,
+        _contextBoundaryWriter = contextBoundaryWriter,
         _installerIsWindows = installerIsWindows,
         _installerIsMacOS = installerIsMacOS,
         _clock = clock ?? DateTime.now,
@@ -256,6 +275,41 @@ class WorkTaskCoordinator {
   ) =>
       _implUpdateDiscussionState(taskId, next);
 
+  /// P1 controlled entry point; production v2 creation/routing is wired in P8.
+  Future<AgentTask> applyCollaborationUpdate(WorkCollaborationUpdate update) =>
+      _implApplyCollaborationUpdate(update);
+
+  /// Resolves one exact v2 user decision. A stale modal or chat button cannot
+  /// apply its answer to a later revision or another task.
+  Future<bool> respondToDecision(
+    String taskId, {
+    required String decisionId,
+    required int revision,
+    required String answer,
+    String? choiceId,
+    String disposition = 'answer',
+    String? responseMessageId,
+  }) =>
+      _implRespondToDecision(taskId,
+          decisionId: decisionId,
+          revision: revision,
+          answer: answer,
+          choiceId: choiceId,
+          disposition: disposition,
+          responseMessageId: responseMessageId);
+
+  /// Records that the app-level dialog was presented for this reminder kind.
+  Future<bool> markDecisionPromptShown(
+    String taskId, {
+    required String decisionId,
+    required int revision,
+    required String reminderKind,
+  }) =>
+      _implMarkDecisionPromptShown(taskId,
+          decisionId: decisionId,
+          revision: revision,
+          reminderKind: reminderKind);
+
   /// Read-only helper used by panels/tests to avoid parsing the untrusted JSON
   /// extension in more than one place.
   WorkDiscussionDecodeResult discussionStateForTask(String taskId) =>
@@ -299,6 +353,14 @@ class WorkTaskCoordinator {
   }) =>
       _implConfirmExecutorSwap(taskId, version: version, swap: swap);
 
+  /// Accepts the files a paused task offered for delivery, answering the
+  /// question the completion guard asked when it could not recognise them.
+  ///
+  /// The alternative the user always has is to say what they actually want
+  /// instead, which is an ordinary follow-up reply rather than this call.
+  Future<void> confirmArtifactDelivery(String taskId) =>
+      _implConfirmArtifactDelivery(taskId);
+
   /// Leaves a blocker paused and records that the user deliberately deferred
   /// it. This is an explicit, idempotent panel action rather than an implicit
   /// downgrade or a hidden retry.
@@ -333,10 +395,9 @@ class WorkTaskCoordinator {
   ) =>
       _implFollowUpDecisionForTask(taskId, request);
 
-  /// Tells the chat input whether a completed group checkpoint must be routed
-  /// as a new task.  The boundary conditions live here with the follow-up
-  /// classifier; widgets only use the result to choose the existing route
-  /// entry point.
+  /// Tells the chat input whether a new request must be routed as a new task
+  /// record.  The boundary conditions live here with the follow-up classifier;
+  /// widgets only use the result to choose the existing route entry point.
   bool shouldRouteNewTaskForFollowUp(String taskId, String request) =>
       _implShouldRouteNewTaskForFollowUp(taskId, request);
 
@@ -345,9 +406,11 @@ class WorkTaskCoordinator {
     String taskId,
     String request, {
     String? attachmentMessageId,
+    String? sourceMessageId,
   }) =>
       _implEnqueueFollowUp(taskId, request,
-          attachmentMessageId: attachmentMessageId);
+          attachmentMessageId: attachmentMessageId,
+          sourceMessageId: sourceMessageId);
 
   /// Persists a tool-approval checkpoint without requiring a chat page to
   /// retain the pending request in memory.
@@ -486,7 +549,9 @@ class WorkTaskCoordinator {
       _implContinueAfterSoftLimit(taskId);
 
   /// Reloads durable task state without invoking any runner automatically.
-  Future<void> restore() => _implRestore();
+  Future<void>? _restoration;
+
+  Future<void> restore() => _restoration ??= _implRestore();
 
   Stream<AgentTask> watchTask(String taskId) => _implWatchTask(taskId);
 

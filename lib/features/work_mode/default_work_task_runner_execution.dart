@@ -164,10 +164,19 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
     // validates the optional discussion marker. The coordinator normally
     // filters these tasks, but the runner is also a public recovery boundary.
     if (cancellation.isCancelled || task.isTerminal) return;
+    if (task.status == AgentTaskStatus.queued &&
+        _artifactDeliveryRetryOnly(task) &&
+        WorkTaskExecutionPolicy.isValidatedV2GroupTask(task)) {
+      await _retryArtifactDelivery(task, cancellation);
+      return;
+    }
     final discussion = WorkDiscussionState.decodeExecutionState(
       task.executionStateJson,
     );
-    if (WorkDiscussionState.requiresDiscussionForConversation(task.groupId) &&
+    final v2 = discussion.state?.collaboration;
+    if (v2 != null && await _runProductionTransportStage(task)) return;
+    if (v2 == null &&
+        WorkDiscussionState.requiresDiscussionForConversation(task.groupId) &&
         discussion.present) {
       final state = discussion.state;
       if (state == null ||
@@ -306,6 +315,9 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           workspaceRoot: workspace.workDirPath,
         ),
       );
+      final review = v2 == null ? null : await _prepareProductionReview(task);
+      final effectiveRegistry =
+          review == null ? registry : _reviewRegistry(task, registry, review);
       final loop = WorkAgentLoop(
         model: (request) => _completeModelTurn(
           request,
@@ -314,21 +326,41 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           config: config,
           apiKey: apiKey,
           requestText: requestText,
+          actorCharacterId: character.id,
           cancellationToken: cancellationToken,
           cancellation: cancellation,
           capabilityMaxOutput: capability.maxOutput,
           capabilityContextWindow: capability.contextWindow,
         ),
-        registry: registry,
+        registry: effectiveRegistry,
+        onToolResult: review == null
+            ? null
+            : (task, call, result) async {
+                if (!cancellation.isCancelled) {
+                  await _recordProductionReviewReceipt(
+                      task, review, call, result);
+                }
+              },
         parser: AgentDecisionParser(
           defaultCommandWorkingDirectory: defaultCommandWorkingDirectory,
         ),
         eventStore: eventStore,
         clock: clock,
         onCheckpoint: _persistCheckpoint,
-        completionGuard: _validateCompletion,
+        completionGuard: review != null
+            ? (task, completion) =>
+                _validateProductionReview(task, review, completion)
+            : (_decodeMap(task.executionStateJson)['workItemExecution']
+                        as Map?)?['stage'] ==
+                    'material'
+                ? (task, completion) =>
+                    _validateProductionMaterials(task, completion)
+                : _validateCompletion,
         artifactCompletion: _autoCompleteAfterArtifact,
-        preflightTool: (task) => _preflightSkillTool(task, character),
+        artifactConfirmation: _offerableDeliverables,
+        preflightTool: review == null
+            ? (task) => _preflightSkillTool(task, character)
+            : null,
         contextCompressionModel: (snapshot) => _compressWorkContext(
           snapshot,
           task: task,
@@ -336,6 +368,16 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           config: config,
           apiKey: apiKey,
           cancellation: cancellation,
+        ),
+        // 提示词一旦超过模型有效窗口的 80%（窗口不足 20 万时按 20 万算）就先做
+        // 结构化收缩，而不是等装不下时再被硬裁剪。实际发送仍然受输入预算约束。
+        promptCompactionBudgetTokens:
+            ContextWindowManager.workPromptCompactionBudget(
+          contextWindow: capability.contextWindow,
+          inputBudget: workModeRequestInputBudget(
+            capabilityMaxOutput: capability.maxOutput,
+            capabilityContextWindow: capability.contextWindow,
+          ),
         ),
         systemPrompt: systemPrompt,
         // Skill creation/download is a normal in-task mutation. Rebuild the
@@ -359,21 +401,26 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
         task,
         cancellation: cancellation,
         conversationHistory: history,
-        // Only a full in-memory request may be replayed. A persisted request
-        // is a display-safe checkpoint and may omit sensitive payloads; the
-        // install recovery path can populate this map only for a complete,
-        // sanitized command.run checkpoint after the installer succeeds.
         approvedPendingTool: inMemoryPending,
       );
       if (cancellation.isCancelled) return;
       if (result.pendingToolRequest != null) {
         _pendingRequests[task.id] = result.pendingToolRequest!;
       }
-      if (result.status == WorkAgentLoopStatus.completed) {
+      if (result.status == WorkAgentLoopStatus.completed ||
+          result.isWorkItemCompleted) {
         _pendingRequests.remove(task.id);
         task.executionStateJson = _withoutApprovalCheckpoint(
           task.executionStateJson,
         );
+        if (v2 != null) {
+          if (review != null) {
+            await _finishProductionReview(task, review, character);
+          } else {
+            await _completeProductionItem(task, character);
+          }
+          return;
+        }
         final delivery = await _appendPublicMessage(
           task,
           character,
@@ -389,6 +436,16 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
         await _persistCheckpoint(task);
       } else if (result.status != WorkAgentLoopStatus.waitingForApproval) {
         _pendingRequests.remove(task.id);
+        if (review != null &&
+            !cancellation.isCancelled &&
+            task.status != AgentTaskStatus.cancelled &&
+            !_candidateState(task).hasPendingDecision) {
+          await _productionDecision(
+              task,
+              'acceptance',
+              _candidateState(task).acceptances.first['id'] as String,
+              '实际验证未取得有效结论：${task.lastError}。请补充能力、人工验收、明确豁免或暂缓；未记为通过。');
+        }
       }
     } finally {
       // Do not await a cancellation future that only completes on stop; this

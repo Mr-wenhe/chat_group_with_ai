@@ -13,7 +13,7 @@ class WorkPublicUpdateStream {
   );
   static final RegExp _urlPattern = RegExp(r'https?://[^\s"<>]+');
   static final RegExp _localPathPattern = RegExp(
-    r'(?:(?:/Users|/Volumes|/home|/tmp|[A-Za-z]:\\)[^\s"<>]+)',
+    r'(?<![A-Za-z0-9_.-])(?:/[^\s"<>]+|[A-Za-z]:[\\/][^\s"<>]+|\\\\[^\s"<>]+)',
   );
 
   static const int maximumDraftCharacters = 1200;

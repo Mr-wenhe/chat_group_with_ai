@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:convert';
 
 import 'package:chat_group/core/database/database_service.dart';
@@ -310,6 +311,44 @@ void main() {
     expect(original, malformed);
   });
 
+  test('a repair request that failed is not reported as an empty repair',
+      () async {
+    // 真实故障（2026-09-30，sensenova-6.8-flash-lite）：唯一一次修复请求撞上
+    // 上游停滞，客户端 180 秒后自己取消。把它说成"修复响应为空"等于告诉用户
+    // 模型没写出东西——事实是链路一个字符都没回，归因错了处置也就错了。
+    final result = await parser.parse(
+      'not-json',
+      repair: (_) => throw TimeoutException('上游毫无响应'),
+    );
+
+    expect(result.failure, AgentDecisionParseFailure.modelProtocol);
+    expect(result.repairAttempted, isTrue);
+    expect(result.repairRequestFailed, isTrue);
+    expect(result.detail, contains('修复请求'));
+    expect(result.detail, isNot(contains('修复响应为空')));
+    // 未知异常的 toString 会带上对象与耗时，不能原样落到用户可见的失败文案里。
+    expect(result.detail, isNot(contains('上游毫无响应')));
+  });
+
+  test('a blank repair response is not a failed repair request', () async {
+    final result = await parser.parse('not-json', repair: (_) => null);
+
+    expect(result.repairAttempted, isTrue);
+    expect(result.repairRequestFailed, isFalse);
+    expect(result.detail, contains('修复响应为空'));
+  });
+
+  test('a repair failure reason from the runner is preserved verbatim',
+      () async {
+    final result = await parser.parse(
+      'not-json',
+      repair: (_) => throw const AgentDecisionRepairFailure('工作模式模型请求首字节超时。'),
+    );
+
+    expect(result.repairRequestFailed, isTrue);
+    expect(result.detail, contains('首字节超时'));
+  });
+
   test('second parse failure returns modelProtocol and never retries again',
       () async {
     var repairCalls = 0;
@@ -533,6 +572,109 @@ void main() {
       'tool',
       'completion',
     });
+  });
+
+  group('workspace.patch append and merge arguments', () {
+    String patchJson(Map<String, dynamic> args) => _json({
+          'action': 'tool',
+          'public_update': '正在写文件。',
+          'tool': {'name': 'workspace.patch', 'arguments': args},
+          'completion': null,
+        });
+
+    test('accepts append with content', () async {
+      final result = await parser.parse(
+        patchJson({'path': 'report.md', 'content': '第二段', 'append': true}),
+      );
+
+      expect(result.isSuccess, isTrue, reason: result.detail);
+      final decision = result.decision! as AgentToolDecision;
+      expect(decision.tool.arguments['append'], isTrue);
+    });
+
+    test('accepts a merge plan with parts only', () async {
+      final result = await parser.parse(
+        patchJson({
+          'path': 'report.md',
+          'parts': ['report.part1.md', 'report.part2.md'],
+        }),
+      );
+
+      expect(result.isSuccess, isTrue, reason: result.detail);
+    });
+
+    final invalidCases =
+        <({String name, Map<String, dynamic> args, String detail})>[
+      (
+        name: 'append without content',
+        args: {'path': 'report.md', 'append': true},
+        detail: '必须与 content 一起使用',
+      ),
+      (
+        name: 'append together with parts',
+        args: {
+          'path': 'report.md',
+          'content': 'x',
+          'append': true,
+          'parts': ['a.md'],
+        },
+        detail: '不能与 content 或 append 同时使用',
+      ),
+      (
+        name: 'parts together with content',
+        args: {
+          'path': 'report.md',
+          'content': 'x',
+          'parts': ['a.md']
+        },
+        detail: '不能与 content 或 append 同时使用',
+      ),
+      (
+        name: 'parts together with an exact patch',
+        args: {
+          'path': 'report.md',
+          'parts': ['a.md'],
+          'expectedSha256': 'abc',
+          'expectedFragment': 'x',
+          'replacement': 'y',
+        },
+        detail: '不能与 append 或 parts 同时使用',
+      ),
+      (
+        name: 'empty parts',
+        args: {'path': 'report.md', 'parts': <String>[]},
+        detail: '必须是非空字符串数组',
+      ),
+      (
+        name: 'parts with a blank entry',
+        args: {
+          'path': 'report.md',
+          'parts': ['a.md', ' ']
+        },
+        detail: '只能包含非空字符串',
+      ),
+      (
+        name: 'append with a non-boolean flag',
+        args: {'path': 'report.md', 'content': 'x', 'append': 'true'},
+        detail: '类型不正确',
+      ),
+      // 空白追加是"什么都没写"：放它过去会落到工具侧的"未检测到实际修改"，模型
+      // 收到的解释（内容没有实际变化）与真因对不上。
+      (
+        name: 'append with blank content',
+        args: {'path': 'report.md', 'content': '  \n ', 'append': true},
+        detail: '追加内容不能为空',
+      ),
+    ];
+
+    for (final testCase in invalidCases) {
+      test('rejects ${testCase.name}', () async {
+        final result = await parser.parse(patchJson(testCase.args));
+
+        expect(result.isFailure, isTrue);
+        expect(result.detail, contains(testCase.detail));
+      });
+    }
   });
 }
 

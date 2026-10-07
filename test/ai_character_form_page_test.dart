@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
@@ -6,6 +7,7 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/character_presets.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/features/ai_character/ai_character_form_page.dart';
+import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
 import 'package:chat_group/features/ai_character/widgets/ip_portrait_panel.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/providers/providers.dart';
@@ -16,16 +18,41 @@ import 'package:flutter_test/flutter_test.dart';
 import 'helpers/async_pump.dart';
 import 'helpers/lifecycle_hive.dart';
 
+/// 把指定角色的保存永久挂起，用来在测试里固定住「保存进行中」这一瞬：
+/// 真实 Hive 写盘在假时钟下既跑不完也收不了尾（见 CLAUDE.md 的 `runAsync` 规则），
+/// 换成永不完成的 Future 就既不需要真实区、也不会给 tearDown 留下待写记录。
+class _StallingSaveCharactersNotifier extends AICharactersNotifier {
+  _StallingSaveCharactersNotifier(super.db, this.stallingIds);
+
+  final Set<String> stallingIds;
+
+  @override
+  Future<void> updateCharacter(AICharacter character) {
+    if (stallingIds.contains(character.id)) return Completer<void>().future;
+    return super.updateCharacter(character);
+  }
+}
+
 void main() {
   late Directory hiveDirectory;
   late DatabaseService db;
   late ProviderContainer providerContainer;
+  final stallingSaveIds = <String>{};
 
   setUp(() async {
     hiveDirectory = await openLifecycleHive();
     db = DatabaseService();
+    stallingSaveIds.clear();
     providerContainer = ProviderContainer(
-      overrides: [databaseServiceProvider.overrideWithValue(db)],
+      overrides: [
+        databaseServiceProvider.overrideWithValue(db),
+        aiCharactersProvider.overrideWith(
+          (ref) => _StallingSaveCharactersNotifier(
+            ref.read(databaseServiceProvider),
+            stallingSaveIds,
+          ),
+        ),
+      ],
     );
     await db.apiConfigBox.put(
       'config-1',
@@ -48,6 +75,34 @@ void main() {
         container: providerContainer,
         child: MaterialApp(home: page),
       );
+
+  /// 从宿主页 push 表单页，使「返回」真的是一次出栈 —— 直接用
+  /// `MaterialApp(home: page)` 时表单是根路由，pop 掉之后没有任何页面可留，
+  /// 「有没有退出」无从断言。
+  Future<void> pumpFormPage(
+      WidgetTester tester, AICharacterFormPage page) async {
+    await tester.pumpWidget(
+      UncontrolledProviderScope(
+        container: providerContainer,
+        child: MaterialApp(
+          home: Builder(
+            builder: (context) => Scaffold(
+              body: Center(
+                child: ElevatedButton(
+                  onPressed: () => Navigator.of(context).push(
+                    MaterialPageRoute(builder: (_) => page),
+                  ),
+                  child: const Text('打开'),
+                ),
+              ),
+            ),
+          ),
+        ),
+      ),
+    );
+    await tester.tap(find.text('打开'));
+    await tester.pumpAndSettle();
+  }
 
   /// 等「聚焦输入框触发的自动回滚」跑完，再点同一 ListView 里的其它控件。
   ///
@@ -202,9 +257,11 @@ void main() {
     await tester.pumpWidget(app(const AICharacterFormPage()));
     await tester.ensureVisible(find.text('允许主动聊天'));
     expect(
-      tester.widget<SwitchListTile>(
-        find.widgetWithText(SwitchListTile, '允许主动聊天'),
-      ).value,
+      tester
+          .widget<SwitchListTile>(
+            find.widgetWithText(SwitchListTile, '允许主动聊天'),
+          )
+          .value,
       isTrue,
     );
     await tester.tap(find.text('允许主动聊天'));
@@ -517,8 +574,7 @@ void main() {
     expect(identical(before, after), isTrue);
   });
 
-  testWidgets('草稿带全 apiConfigId / voiceId，LLM 外观改写不再静默失效',
-      (tester) async {
+  testWidgets('草稿带全 apiConfigId / voiceId，LLM 外观改写不再静默失效', (tester) async {
     // 这两项曾被 _draftCharacter() 漏带：拼 prompt 用的是草稿，于是
     // _describeVisual 看到空 apiConfigId 直接返回 null，外观改写 100% 静默
     // 走本地模板，音色线索也不出现 —— 出图全是头发却无从排查。
@@ -663,5 +719,201 @@ void main() {
     expect(rebuilt.ipImageStyle, 'ink');
     // 顺带守住 voiceId 同类事故的回归。
     expect(rebuilt.voiceId, source.voiceId);
+  });
+
+  group('未保存返回确认', () {
+    testWidgets('编辑角色没改动时直接退出，不弹确认框', (tester) async {
+      final saved = character();
+      await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+      await pumpFormPage(tester, AICharacterFormPage(character: saved));
+      expect(find.text('编辑角色'), findsOneWidget);
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+
+      expect(find.text('资料尚未保存'), findsNothing);
+      expect(find.text('编辑角色'), findsNothing);
+    });
+
+    testWidgets('新建角色没改动时直接退出，不弹确认框', (tester) async {
+      // 新建态在 initState 里会预选 ApiConfig、填默认工具权限，这些都不是
+      // 「用户改了什么」——基线取错位置会让这里立刻弹框。
+      await pumpFormPage(tester, const AICharacterFormPage());
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+
+      expect(find.text('资料尚未保存'), findsNothing);
+      expect(find.text('创建 AI 角色'), findsNothing);
+    });
+
+    testWidgets('预设快速创建没改动时直接退出，不弹确认框', (tester) async {
+      await pumpFormPage(
+        tester,
+        AICharacterFormPage(preset: CharacterPreset.presets.first),
+      );
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+
+      expect(find.text('资料尚未保存'), findsNothing);
+      expect(find.text('创建 AI 角色'), findsNothing);
+    });
+
+    testWidgets('保存进行中按返回不弹确认框', (tester) async {
+      // 保存的续体会自己出栈；此时再弹确认框，保存成功后的
+      // `Navigator.pop(context, character)` 会先命中栈顶的确认框，拿角色对象去
+      // complete `_UnsavedExitAction?` 的 completer 直接抛类型错误。
+      final saved = character();
+      await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+      await pumpFormPage(tester, AICharacterFormPage(character: saved));
+      await tester.enterText(find.byType(TextFormField).at(0), '小萌');
+      await tester.pump();
+
+      // 让这次保存卡在 `await updateCharacter` 上：`_isSaving` 保持 true。
+      stallingSaveIds.add(saved.id);
+      await tester.tap(find.text('更新').first);
+      await tester.pump();
+      expect(find.text('编辑角色'), findsOneWidget);
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+
+      expect(find.text('资料尚未保存'), findsNothing);
+      expect(find.text('编辑角色'), findsOneWidget);
+      expect(db.aiCharacterBox.get(saved.id)!.name, 'Amy');
+    });
+
+    testWidgets('确认框点遮罩取消后留在本页，且返回键仍然可用', (tester) async {
+      final saved = character();
+      await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+      await pumpFormPage(tester, AICharacterFormPage(character: saved));
+      await tester.enterText(find.byType(TextFormField).at(0), '小萌');
+      await tester.pump();
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+      expect(find.text('资料尚未保存'), findsOneWidget);
+
+      // 点对话框之外（遮罩）取消这次返回。
+      await tester.tapAt(const Offset(10, 10));
+      await tester.pumpAndSettle();
+
+      expect(find.text('资料尚未保存'), findsNothing);
+      expect(find.text('编辑角色'), findsOneWidget);
+
+      // 重入防护必须已放行，否则返回键会永久失效。
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+      expect(find.text('资料尚未保存'), findsOneWidget);
+      expect(db.aiCharacterBox.get(saved.id)!.name, 'Amy');
+    });
+
+    testWidgets('改过资料后返回弹确认框，选放弃保存则不落库', (tester) async {
+      final saved = character();
+      await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+      await pumpFormPage(tester, AICharacterFormPage(character: saved));
+      await tester.enterText(find.byType(TextFormField).at(0), '小萌');
+      await tester.pump();
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+
+      expect(find.text('资料尚未保存'), findsOneWidget);
+      expect(find.text('放弃保存'), findsOneWidget);
+      expect(find.text('保存并返回'), findsOneWidget);
+
+      await tester.tap(find.text('放弃保存'));
+      await tester.pumpAndSettle();
+
+      expect(find.text('编辑角色'), findsNothing);
+      expect(db.aiCharacterBox.get(saved.id)!.name, 'Amy');
+    });
+
+    testWidgets('确认框选保存并返回会落库并退出', (tester) async {
+      final saved = character();
+      await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+      await pumpFormPage(tester, AICharacterFormPage(character: saved));
+      await tester.enterText(find.byType(TextFormField).at(0), '小萌');
+      await tester.pump();
+
+      // 「返回」的点击必须放进 runAsync：确认框是 [_handleBack] 弹的，谁弹的
+      // 决定 `showDialog` 的 future 属于哪个 zone，也就决定了随后 [_save] 跑在
+      // 哪个 zone。若落在 fake 区，`box.put` 也在 fake 区发起，Hive 内部落盘
+      // 回调依赖假时钟 —— 测试体全部通过，tearDown 的 `Hive.close()` 却会一直
+      // 等它而挂死。放进真实区后，保存链路与既有用例里点「更新」完全同路。
+      await tester.runAsync(
+        () => tester.tap(find.byType(BackButton)),
+      );
+      await tester.pumpAndSettle();
+      await tester.tap(find.text('保存并返回'));
+
+      // 点下按钮后要同时满足两件事，缺一不可，所以轮询条件而不是猜时长：
+      //   1. [_save] 的续体是真实区的微任务，只在 runAsync 窗口里推进；
+      //   2. 确认框退场与出栈动画只吃 fake 时钟，得靠带时长的 pump 推进。
+      for (var i = 0; i < 40; i++) {
+        if (find.text('编辑角色').evaluate().isEmpty) break;
+        await tester.runAsync(
+          () => Future<void>.delayed(const Duration(milliseconds: 25)),
+        );
+        await tester.pump(const Duration(milliseconds: 100));
+      }
+
+      expect(db.aiCharacterBox.get(saved.id)!.name, '小萌');
+      expect(find.text('编辑角色'), findsNothing);
+    });
+
+    testWidgets('只切换「设为头像」也算未保存修改', (tester) async {
+      // 头像是 IP 形象面板单向上报的草稿态，不经过任何 TextField。
+      final saved = character(ipImageRelPath: 'character-1/missing.png');
+      await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+      await pumpFormPage(tester, AICharacterFormPage(character: saved));
+      await tester.tap(find.byKey(const ValueKey('ip-portrait-toggle-avatar')));
+      await tester.pump();
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+
+      expect(find.text('资料尚未保存'), findsOneWidget);
+    });
+
+    testWidgets('只改画风也算未保存修改', (tester) async {
+      final saved = character(ipImageStyle: 'watercolor');
+      await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+      await pumpFormPage(tester, AICharacterFormPage(character: saved));
+      await tester.tap(find.byKey(const ValueKey('ip-portrait-style')));
+      await tester.pump();
+      await tester.tap(find.text('水墨').last);
+      await tester.pump();
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+
+      expect(find.text('资料尚未保存'), findsOneWidget);
+    });
+
+    testWidgets('改了又改回原值后返回不再弹确认框', (tester) async {
+      final saved = character();
+      await tester.runAsync(() => db.aiCharacterBox.put(saved.id, saved));
+
+      await pumpFormPage(tester, AICharacterFormPage(character: saved));
+      await tester.enterText(find.byType(TextFormField).at(0), '小萌');
+      await tester.pump();
+      await tester.enterText(find.byType(TextFormField).at(0), 'Amy');
+      await tester.pump();
+
+      await tester.tap(find.byType(BackButton));
+      await tester.pumpAndSettle();
+
+      expect(find.text('资料尚未保存'), findsNothing);
+      expect(find.text('编辑角色'), findsNothing);
+    });
   });
 }

@@ -187,9 +187,27 @@ void main() {
         findsOneWidget);
     expect(find.text('已连接模型，正在等待第一段公开进度…'), findsOneWidget);
     expect(find.text('等待公开执行动态…'), findsNothing);
+    // 执行动态默认展开：一开始就渲染事件滚动条。上下半区各占一块固定高度，
+    // 收起/展开只在时间线内部生效，时间线高度与面板总高度都不变。
+    final panelHeightBefore =
+        tester.getSize(find.byKey(const Key('work-task-panel'))).height;
+    final timelineHeightBefore =
+        tester.getSize(find.byKey(const Key('work-task-event-timeline'))).height;
+    expect(find.byKey(const Key('work-task-event-scrollbar')), findsOneWidget);
+
+    await tester.tap(find.byKey(const Key('work-task-timeline-toggle')));
+    await tester.pump();
+
+    expect(find.byKey(const Key('work-task-public-output-pending')),
+        findsOneWidget);
+    expect(find.byKey(const Key('work-task-event-scrollbar')), findsNothing);
     expect(
       tester.getSize(find.byKey(const Key('work-task-event-timeline'))).height,
-      greaterThan(180),
+      timelineHeightBefore,
+    );
+    expect(
+      tester.getSize(find.byKey(const Key('work-task-panel'))).height,
+      panelHeightBefore,
     );
   });
 

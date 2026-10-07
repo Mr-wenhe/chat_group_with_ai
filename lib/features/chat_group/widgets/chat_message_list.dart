@@ -5,6 +5,7 @@ import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_message_bubble.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
+import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
 import 'package:flutter/material.dart';
 
 class ChatMessageListController {
@@ -51,6 +52,12 @@ class ChatMessageList extends StatelessWidget {
   /// 为 null 时进度气泡不展示实时耗时。
   final Map<String, int>? progressStartTimes;
 
+  /// 群内其他真人的昵称：userId -> displayName。
+  ///
+  /// 只作为兜底：消息自己带昵称快照（[Message.senderName]），退群或改名之后
+  /// 历史消息仍显示当时的名字，查不到时才回退到这张实时花名册。
+  final Map<String, String> memberNames;
+
   const ChatMessageList({
     super.key,
     required this.messages,
@@ -76,6 +83,7 @@ class ChatMessageList extends StatelessWidget {
     required this.onQuotedTap,
     this.onTaskAction,
     this.progressStartTimes,
+    this.memberNames = const <String, String>{},
   });
 
   @override
@@ -87,8 +95,13 @@ class ChatMessageList extends StatelessWidget {
       itemCount: messages.length,
       itemBuilder: (context, index) {
         final message = messages[index];
+        final isMember = message.senderType == Message.senderTypeMember;
+        // 真人成员不是角色：绝不能用 unknownCharacter 顶上，否则会渲染成
+        // 一个"未知角色"的头像，还会被当成角色接上点击进角色详情页。
         final resolvedSender =
-            message.senderType == 'user' || message.senderType == 'system'
+            message.senderType == Message.senderTypeUser ||
+                    message.senderType == Message.senderTypeSystem ||
+                    isMember
                 ? null
                 : characterIndex[message.senderId] ?? unknownCharacter;
         final sender = resolvedSender;
@@ -96,6 +109,7 @@ class ChatMessageList extends StatelessWidget {
                 editableSenderIds.contains(resolvedSender.id)
             ? resolvedSender
             : null;
+        final memberName = isMember ? _memberDisplayName(message) : null;
         final quotedMessage = message.replyToMessageId == null
             ? null
             : messageIndex[message.replyToMessageId];
@@ -106,9 +120,11 @@ class ChatMessageList extends StatelessWidget {
 
         // P2：进度消息解析 taskId（去 "agent-progress:" 前缀）查表得到
         // runStartedAtMs，传入气泡以展示实时总耗时；非进度消息为 null。
-        final isProgressMessage = message.id.startsWith('agent-progress:');
+        final isProgressMessage =
+            WorkModeTaskLifecycle.isProgressMessageId(message.id);
         final taskId = isProgressMessage
-            ? message.id.substring('agent-progress:'.length)
+            ? message.id
+                .substring(WorkModeTaskLifecycle.progressMessageIdPrefix.length)
             : message.id;
         final startTimes = progressStartTimes;
         final runStartedAtMs = startTimes == null ? null : startTimes[taskId];
@@ -122,6 +138,7 @@ class ChatMessageList extends StatelessWidget {
               ChatMessageBubble(
                 message: message,
                 sender: sender,
+                memberName: memberName,
                 characters: characters,
                 cs: colorScheme,
                 isStreaming: streamingMessageId == message.id,
@@ -139,7 +156,9 @@ class ChatMessageList extends StatelessWidget {
                 quotedMessage: quotedMessage,
                 quotedSenderName: quotedMessage == null
                     ? null
-                    : senderNameById(quotedMessage.senderId),
+                    : quotedMessage.senderType == Message.senderTypeMember
+                        ? _memberDisplayName(quotedMessage)
+                        : senderNameById(quotedMessage.senderId),
                 onQuotedTap: quotedMessage == null
                     ? null
                     : () => onQuotedTap(quotedMessage),
@@ -158,6 +177,14 @@ class ChatMessageList extends StatelessWidget {
         );
       },
     );
+  }
+
+  /// 真人成员的展示名：优先用消息自带的昵称快照，退群/改名后历史仍然正确；
+  /// 只有更早的、没有快照的数据才回退到实时花名册。
+  String _memberDisplayName(Message message) {
+    final snapshot = message.senderName?.trim();
+    if (snapshot != null && snapshot.isNotEmpty) return snapshot;
+    return memberNames[message.senderId] ?? '群成员';
   }
 }
 

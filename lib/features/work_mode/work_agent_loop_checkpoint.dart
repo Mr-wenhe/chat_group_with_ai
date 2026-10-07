@@ -133,7 +133,10 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
           title: title,
           detail: detail,
           progressCurrent: state.task.actionCount,
-          progressTotal: _effectiveActionLimit(state.task),
+          progressTotal: WorkTaskExecutionPolicy.progressTotal(
+            state.task,
+            _effectiveActionLimit(state.task),
+          ),
           safeMetadata: safeMetadata,
           timestamp: clock(),
         );
@@ -207,11 +210,18 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
       // is told what to do with the failed result it can already see.
       if (state.toolRepairInstruction.isNotEmpty)
         'previousToolFailure': state.toolRepairInstruction,
+      // 重建护栏的纠正指令：只在"已纠正、还没续写"这段时间里出现，
+      // 续写或成功合并会连同判定态一起清掉。
+      if (state.stagedRewriteInstruction.isNotEmpty)
+        'repeatedStagedWrite': state.stagedRewriteInstruction,
       if (state.completionRepairInstruction.isNotEmpty)
         'previousCompletionFailure': state.completionRepairInstruction,
       if (state.failure != null) 'workFailure': state.failure!.toJson(),
       'actionCount': task.actionCount,
-      'actionLimit': _effectiveActionLimit(task),
+      if (WorkTaskExecutionPolicy.enforcesCumulativeLimits(task))
+        'actionLimit': _effectiveActionLimit(task),
+      if (!WorkTaskExecutionPolicy.enforcesCumulativeLimits(task))
+        'cumulativeLimits': false,
       'completedActions':
           task.completedOperations.takeLast(32).map(_publicText).toList(),
       'committedWrites': state.committedActionKeys.take(128).toList(),
@@ -245,13 +255,45 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
     };
   }
 
+  /// 装配本次模型请求的提示词；超过压缩预算时先用结构化收缩把上下文压下来。
+  ///
+  /// 收缩只作用于**文本通道**。多模态载荷按原生 content-part 单独发出，既不参与
+  /// 度量也不参与裁剪：它的字符数远大于 token 数（一张图的数据 URI 动辄几万字符），
+  /// 按字符计入会让每一次带图的请求都被误判成超预算。
   List<Map<String, dynamic>> _buildMessages(
     AgentTask task,
-    Map<String, dynamic> context,
-  ) {
-    final imageParts = _nativeImageParts(context);
-    final promptContext =
-        imageParts == null ? context : _replaceImagePayloadsWithMarker(context);
+    Map<String, dynamic> context, {
+    String continuationHint = '',
+  }) {
+    final budget = promptCompactionBudgetTokens;
+    final effective = budget == null
+        ? context
+        : const WorkPromptContextCompactor().compactIfNeeded(
+            context,
+            budgetTokens: budget,
+            measureTokens: (candidate) =>
+                ContextWindowManager.estimateRequestTokens(
+              _assembleMessages(task, candidate, includeNativeImages: false),
+            ),
+          );
+    return _assembleMessages(
+      task,
+      effective,
+      continuationHint: continuationHint,
+    );
+  }
+
+  List<Map<String, dynamic>> _assembleMessages(
+    AgentTask task,
+    Map<String, dynamic> context, {
+    bool includeNativeImages = true,
+    String continuationHint = '',
+  }) {
+    final imageParts = workDocumentImageParts(context,
+        sanitizeText: (text) => _publicText(text, maximum: 12000));
+    final promptContext = imageParts == null
+        ? context
+        : workDocumentContextWithoutImageBytes(context);
     final rawPlan = context['plan'];
     final plan = rawPlan is String ? _publicText(rawPlan).trim() : '';
     final planningInstruction = plan.isEmpty
@@ -271,91 +313,23 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
           WorkDiscussionState.currentRequestScope(task),
         ),
       },
+      // 续写指令不放进检查点：检查点超预算时会被压缩，压缩一次这条指令就静默
+      // 消失，模型会退回"一次写完整份"的老动作。它也不走 [_publicText]：那条会
+      // 折叠思维链并吃掉指令末尾的结尾回显（见 [_continuationText]）。
+      if (continuationHint.trim().isNotEmpty)
+        {'role': 'system', 'content': _continuationText(continuationHint)},
       {
         'role': 'system',
         'content': '公开任务检查点：${jsonEncode(promptContext)}',
       },
     ];
-    if (imageParts != null) {
+    if (includeNativeImages && imageParts != null) {
       // Image bytes must remain a native content-part message. Embedding the
       // list in the JSON checkpoint would turn it into text and bypass the
       // gateway's vision capability guard.
       messages.add({'role': 'user', 'content': imageParts});
     }
     return messages;
-  }
-
-  List<Map<String, dynamic>>? _nativeImageParts(
-    Map<String, dynamic> context,
-  ) {
-    final recent = context['recentToolResults'];
-    if (recent is! List) return null;
-    for (final rawResult in recent.reversed) {
-      if (!_isDocumentImageResult(rawResult)) continue;
-      final data = rawResult['data'];
-      if (data is! Map || data['content'] is! List) continue;
-      final parts = <Map<String, dynamic>>[];
-      var hasImage = false;
-      for (final rawPart in data['content'] as List) {
-        if (rawPart is! Map) continue;
-        if (rawPart['type'] == 'text' && rawPart['text'] is String) {
-          parts.add({
-            'type': 'text',
-            'text': _publicText(rawPart['text'] as String, maximum: 12000),
-          });
-          continue;
-        }
-        if (rawPart['type'] != 'image_url' || rawPart['image_url'] is! Map) {
-          continue;
-        }
-        final url = (rawPart['image_url'] as Map)['url'];
-        if (url is! String ||
-            !url.startsWith('data:image/') ||
-            url.length > _maxModelImageDataUriChars) {
-          continue;
-        }
-        parts.add({
-          'type': 'image_url',
-          'image_url': {'url': url},
-        });
-        hasImage = true;
-      }
-      if (hasImage) return List<Map<String, dynamic>>.unmodifiable(parts);
-    }
-    return null;
-  }
-
-  Map<String, dynamic> _replaceImagePayloadsWithMarker(
-    Map<String, dynamic> context,
-  ) {
-    final recent = context['recentToolResults'];
-    if (recent is! List) return context;
-    final replaced = recent.map((rawResult) {
-      if (!_isDocumentImageResult(rawResult)) return rawResult;
-      final data = rawResult['data'];
-      if (data is! Map || !_hasImagePart(data['content'])) return rawResult;
-      return <String, dynamic>{
-        ...Map<String, dynamic>.from(rawResult),
-        'data': <String, dynamic>{
-          ...Map<String, dynamic>.from(data),
-          'content': '[图片已作为多模态消息附加]',
-        },
-      };
-    }).toList(growable: false);
-    return <String, dynamic>{...context, 'recentToolResults': replaced};
-  }
-
-  bool _isDocumentImageResult(Object? rawResult) {
-    if (rawResult is! Map) return false;
-    return rawResult['tool'] == AgentToolName.workspaceDocument.wireName &&
-        rawResult['status'] == WorkToolResultStatus.success.name;
-  }
-
-  bool _hasImagePart(Object? content) {
-    if (content is! List) return false;
-    return content.any(
-      (part) => part is Map && part['type'] == 'image_url',
-    );
   }
 
   int _effectiveActionLimit(AgentTask task) {
@@ -401,6 +375,7 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
   }
 
   bool _timeBudgetExceeded(AgentTask task) =>
+      WorkTaskExecutionPolicy.enforcesCumulativeLimits(task) &&
       _elapsedBudget(task) >= _effectiveTimeLimit(task);
 
   /// Folds a finished user wait into the excluded budget once the agent is
@@ -447,4 +422,80 @@ extension _WorkAgentLoopCheckpoint on WorkAgentLoop {
       failure: state.failure,
     );
   }
+}
+
+// Shared by execution and discussion: native images must cross the gateway
+// as content parts, never as base64 hidden inside a JSON prompt.
+List<Map<String, dynamic>>? workDocumentImageParts(
+  Map<String, dynamic> context, {
+  required String Function(String) sanitizeText,
+}) {
+  final recent = context['recentToolResults'];
+  if (recent is! List) return null;
+  for (final rawResult in recent.reversed) {
+    if (!_isDocumentImageResult(rawResult)) continue;
+    final data = rawResult['data'];
+    if (data is! Map || data['content'] is! List) continue;
+    final parts = <Map<String, dynamic>>[];
+    var hasImage = false;
+    for (final rawPart in data['content'] as List) {
+      if (rawPart is! Map) continue;
+      if (rawPart['type'] == 'text' && rawPart['text'] is String) {
+        parts.add({
+          'type': 'text',
+          'text': sanitizeText(rawPart['text'] as String),
+        });
+        continue;
+      }
+      if (rawPart['type'] != 'image_url' || rawPart['image_url'] is! Map) {
+        continue;
+      }
+      final url = (rawPart['image_url'] as Map)['url'];
+      if (url is! String ||
+          !url.startsWith('data:image/') ||
+          url.length > _maxModelImageDataUriChars) {
+        continue;
+      }
+      parts.add({
+        'type': 'image_url',
+        'image_url': {'url': url},
+      });
+      hasImage = true;
+    }
+    if (hasImage) return List<Map<String, dynamic>>.unmodifiable(parts);
+  }
+  return null;
+}
+
+Map<String, dynamic> workDocumentContextWithoutImageBytes(
+  Map<String, dynamic> context,
+) {
+  final recent = context['recentToolResults'];
+  if (recent is! List) return context;
+  final replaced = recent.map((rawResult) {
+    if (!_isDocumentImageResult(rawResult)) return rawResult;
+    final data = rawResult['data'];
+    if (data is! Map || !_hasImagePart(data['content'])) return rawResult;
+    return <String, dynamic>{
+      ...Map<String, dynamic>.from(rawResult),
+      'data': <String, dynamic>{
+        ...Map<String, dynamic>.from(data),
+        'content': '[图片已作为多模态消息附加]',
+      },
+    };
+  }).toList(growable: false);
+  return <String, dynamic>{...context, 'recentToolResults': replaced};
+}
+
+bool _isDocumentImageResult(Object? rawResult) {
+  if (rawResult is! Map) return false;
+  return rawResult['tool'] == AgentToolName.workspaceDocument.wireName &&
+      rawResult['status'] == WorkToolResultStatus.success.name;
+}
+
+bool _hasImagePart(Object? content) {
+  if (content is! List) return false;
+  return content.any(
+    (part) => part is Map && part['type'] == 'image_url',
+  );
 }

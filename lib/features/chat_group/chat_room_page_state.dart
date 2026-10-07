@@ -77,6 +77,37 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 当前群信息；私聊场景为 loader 构造出的"展示用"伪群对象。
   ChatGroup? _group;
 
+  /// 多人实时群聊的长连接。只有已共享的群（[ChatGroup.isShared]）才会创建，
+  /// 纯本机的群永远是 null——这是新老兼容的关键：老群完全不走这条路。
+  RealtimeClient? _realtimeClient;
+
+  StreamSubscription<RealtimeServerEvent>? _realtimeEvents;
+
+  /// 连接状态，用于在顶部显示"连接中 / 已断开"。
+  RealtimeConnectionState _realtimeState = RealtimeConnectionState.idle;
+
+  /// 群里其他真人的昵称：userId -> displayName。来自 joined / presence 事件。
+  final Map<String, String> _realtimeMemberNames = <String, String>{};
+
+  /// 连接层的问题（未配置服务、令牌无效等），展示在顶部提示条上。
+  /// 刻意不写进消息历史——它是本机的连接状况，不是群里的对话内容。
+  String? _realtimeNotice;
+
+  /// 本机用户标识；未共享的群也用它判断"我是不是主人"。
+  String get _realtimeUserId => _db.realtimeUserId;
+
+  /// 当前群是否已共享到实时服务。
+  bool get _isRealtimeShared => !_isDirectChat && (_group?.isShared ?? false);
+
+  /// 本机用户在当前群里是不是客人（共享群，且主人不是我）。
+  ///
+  /// 客人端不调用任何 LLM，也不启动自动聊天；AI 回复由主人端生成后广播过来。
+  bool get _isRealtimeGuest {
+    final group = _group;
+    if (group == null || _isDirectChat || !group.isShared) return false;
+    return !group.isHost(_realtimeUserId);
+  }
+
   /// 全局用户人物信息卡（来自 UserProfile box）。
   UserProfile? _userProfile;
 

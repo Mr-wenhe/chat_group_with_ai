@@ -354,7 +354,7 @@ extension _WorkTaskCoordinatorWorkspaceQueue on WorkTaskCoordinator {
 
   Future<void> _waitForSlot() {
     if (_disposed ||
-        _running.length < WorkTaskCoordinator.maximumConcurrentTasks) {
+        _occupiedSlots < WorkTaskCoordinator.maximumConcurrentTasks) {
       return Future<void>.value();
     }
     final waiter = Completer<void>();
@@ -364,7 +364,7 @@ extension _WorkTaskCoordinatorWorkspaceQueue on WorkTaskCoordinator {
 
   void _notifySlotAvailable() {
     if (!_disposed &&
-        _running.length >= WorkTaskCoordinator.maximumConcurrentTasks) {
+        _occupiedSlots >= WorkTaskCoordinator.maximumConcurrentTasks) {
       return;
     }
     while (_slotWaiters.isNotEmpty) {

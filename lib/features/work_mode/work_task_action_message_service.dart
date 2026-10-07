@@ -11,6 +11,7 @@ import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 
 import 'work_task_user_action.dart';
+import 'work_task_decision.dart';
 
 /// Persists one chat entry for each currently actionable task blocker.
 ///
@@ -252,6 +253,24 @@ class WorkTaskActionMessageService {
     final mention = '@${ownerName.trim().isEmpty ? '我' : ownerName.trim()}';
     final prefix = sender == null ? '系统任务提醒' : '工作任务提醒';
     final taskName = _conversationLabel(task, group);
+    if (action.blockerId.startsWith('decision_')) {
+      final decisions = WorkTaskDecision.forTask(task);
+      final decision = decisions
+          .where((item) =>
+              item.reminderKind != null &&
+              WorkTaskUserAction.decisionBlockerId(
+                      item.id, item.reminderKind!) ==
+                  action.blockerId &&
+              item.revision == action.version)
+          .firstOrNull;
+      if (decision != null) {
+        final remainder = decision.reminderKind == 'remainderReady';
+        return '$mention $prefix：$taskName '
+            '${remainder ? '其他可完成工作已结束，仍需处理：' : '需要你决定：'}'
+            '${decision.reason} ${decision.impact} '
+            '请点击“${action.label}”打开任务。';
+      }
+    }
     final reason = switch (action.kind) {
       WorkTaskUserActionKind.addMember => '任务需要符合目标职业能力的群成员，当前角色资格或执行人仍未确认。',
       WorkTaskUserActionKind.answerQuestion => '任务还缺少必要信息或需要你回答讨论问题。',

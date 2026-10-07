@@ -28,25 +28,74 @@ int workModeRequestOutputTokens({
 /// 只能在这里挡住明显超出厂商能力的配置，避免直接收到 400。
 const int maxWorkRequestOutputTokens = 32768;
 
+/// 工作模式单次请求的输入预算：模型窗口扣掉本次输出上限与帧开销。
+///
+/// 装配提示词（决定何时压缩）与实际发送（决定何时硬裁剪）都必须用它，否则两者
+/// 会按不同的上限判断同一份上下文。
+int workModeRequestInputBudget({
+  required int capabilityMaxOutput,
+  required int capabilityContextWindow,
+}) =>
+    ContextWindowManager.inputBudget(
+      contextWindow: capabilityContextWindow < 1 ? 1 : capabilityContextWindow,
+      maxOutput: workModeRequestOutputTokens(
+        capabilityMaxOutput: capabilityMaxOutput,
+        capabilityContextWindow: capabilityContextWindow,
+      ),
+    );
+
 extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
+  /// 给一次模型请求加上两个时限，并保证两者各自可取消。
+  ///
+  /// - [DefaultWorkTaskRunner.modelCompletionTimeout]：整轮请求的总时限，语义
+  ///   与从前完全一致。
+  /// - [DefaultWorkTaskRunner.modelFirstTokenTimeout]：只在**还没收到任何字符**
+  ///   时计时；只有传入 [firstByte] 才启用，首字节一到即撤销，此后该请求只受
+  ///   总时限约束。
+  ///
+  /// 停滞必须单独归类的原因：取消一个零输出的请求不会丢掉任何已生成内容，所以
+  /// 可以安全地提前放弃并重试；总时限做不到这么激进——它必须容下"生成很慢但
+  /// 正在输出"的请求。
   Future<T> _withModelCompletionDeadline<T>({
     required Future<T> Function(CancelToken cancelToken) request,
     required WorkTaskCancellation cancellation,
     required CancelToken requestToken,
+    Future<void>? firstByte,
   }) async {
     final cancellationSubscription =
         Stream<void>.fromFuture(cancellation.whenCancelled).listen((_) {
       requestToken.cancel('用户已停止任务');
     });
+    var firstByteMissing = false;
+    final stallTimer = firstByte == null
+        ? null
+        : Timer(effectiveFirstTokenTimeout, () {
+            firstByteMissing = true;
+            requestToken.cancel(
+              WorkModelDeadlineException.firstByteStall.message,
+            );
+          });
+    if (stallTimer != null) {
+      unawaited(firstByte!.then((_) => stallTimer.cancel()));
+    }
     try {
-      return await request(requestToken).timeout(
+      final result = await request(requestToken).timeout(
         modelCompletionTimeout,
         onTimeout: () {
-          requestToken.cancel('工作模式模型请求超时');
-          throw TimeoutException('工作模式模型请求超时。');
+          requestToken
+              .cancel(WorkModelDeadlineException.completionDeadline.message);
+          throw WorkModelDeadlineException.completionDeadline;
         },
       );
+      // 网关可能把"取消后的结果"包成普通响应交回来（流式适配器就是这么做的），
+      // 那样停滞会伪装成一次正常返回。这里把真实原因换回来。
+      if (firstByteMissing) throw WorkModelDeadlineException.firstByteStall;
+      return result;
+    } on Object {
+      if (firstByteMissing) throw WorkModelDeadlineException.firstByteStall;
+      rethrow;
     } finally {
+      stallTimer?.cancel();
       await cancellationSubscription.cancel();
     }
   }
@@ -58,11 +107,15 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     required ApiConfig config,
     required String apiKey,
     required String requestText,
+    required String actorCharacterId,
     required CancelToken cancellationToken,
     required WorkTaskCancellation cancellation,
     required int capabilityMaxOutput,
     required int capabilityContextWindow,
   }) async {
+    if (task.characterId != actorCharacterId) {
+      throw StateError('工作成员已切换，需要重新绑定成员模型与个人上下文。');
+    }
     final messages = request.messages.map((message) {
       if (message['role'] == 'user' &&
           message['content'] == WorkDiscussionState.currentRequestScope(task)) {
@@ -83,19 +136,40 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
             '$boundedRaw',
       });
     }
-    final contextWindow =
-        capabilityContextWindow < 1 ? 1 : capabilityContextWindow;
     final outputTokens = workModeRequestOutputTokens(
       capabilityMaxOutput: capabilityMaxOutput,
       capabilityContextWindow: capabilityContextWindow,
     );
-    final inputBudget = ContextWindowManager.inputBudget(
-      contextWindow: contextWindow,
-      maxOutput: outputTokens,
+    final inputBudget = workModeRequestInputBudget(
+      capabilityMaxOutput: capabilityMaxOutput,
+      capabilityContextWindow: capabilityContextWindow,
     );
-    final boundedMessages = ContextWindowManager.fitToTokenBudget(
+    final coreMessages = ContextWindowManager.fitToTokenBudget(
       messages,
       maxTokens: inputBudget,
+    );
+    final actor = database.aiCharacterBox.get(task.characterId);
+    if (actor == null) throw StateError('当前工作成员已不可用。');
+    final boundedMessages =
+        await runWithUnifiedMemory<List<Map<String, dynamic>>>(
+      selector: MemoryContextSelector(database),
+      conversationHistory: coreMessages,
+      observerCharacterId: actor.id,
+      actor: actor,
+      participantCharacterIds:
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)
+                  ?.collaboration
+                  ?.activeMembers ??
+              database.chatGroupBox.get(task.groupId)?.aiCharacterIds ??
+              [actor.id],
+      userMessage: requestText,
+      projectScopeId:
+          database.workModeWorkspaceBox.get(task.groupId)?.projectScopeId,
+      conversationId: task.groupId,
+      contextBoundary:
+          WorkContextBoundary.readAt(database.appSettingsBox, task.groupId),
+      maximumPromptTokens: inputBudget,
+      run: (prepared) async => prepared,
     );
     final publicUpdateStream = WorkPublicUpdateStream();
     var streamedCharacters = 0;
@@ -115,9 +189,15 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
       },
     );
     final modelRequestToken = CancelToken();
+    final requestStartedAt = clock();
+    var firstTokenMs = -1;
+    // 首个字符到达就完成它，撤掉首字节停滞看门狗。看门狗本身与总时限一起住在
+    // _withModelCompletionDeadline 里，两处时限共用一个撤销点。
+    final firstByte = Completer<void>();
     final response = await _withModelCompletionDeadline(
       cancellation: cancellation,
       requestToken: modelRequestToken,
+      firstByte: firstByte.future,
       request: (requestCancelToken) => gateway.sendChatMessageStreamed(
         apiKey: apiKey,
         provider: provider,
@@ -145,6 +225,10 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
           }
           if (event.type != ChatStreamEventType.token) return;
           final delta = event.delta ?? '';
+          if (delta.isNotEmpty && !firstByte.isCompleted) {
+            firstTokenMs = clock().difference(requestStartedAt).inMilliseconds;
+            firstByte.complete();
+          }
           streamedCharacters += delta.length;
           final now = clock();
 
@@ -197,6 +281,9 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
             final safeMetadata = <String, Object?>{
               'stream': 'model',
               'characters': characters,
+              // 首字节耗时的现场记录：modelFirstTokenTimeout 这个阈值必须靠真实
+              // 分布校准，靠推断会把"慢启动但能成"的请求误杀。
+              if (firstTokenMs >= 0) 'firstTokenMs': firstTokenMs,
             };
             if (publicUpdate.isNotEmpty) {
               safeMetadata['publicDraft'] = publicUpdate;
@@ -374,7 +461,15 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
   Iterable<WorkResourceLockRequest> _implPlanResourceLocks(AgentTask task) {
     final decoded = _decodeMap(task.executionStateJson);
     final raw = decoded['resourceLocks'];
-    if (raw is! List) return const <WorkResourceLockRequest>[];
+    if (raw is! List) {
+      final workspace = _workspaceRootForTask(task);
+      if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+          decoded['workItemExecution'] is Map &&
+          workspace != null) {
+        return [WorkResourceLockRequest.treeWrite(workspace)];
+      }
+      return const <WorkResourceLockRequest>[];
+    }
     final locks = <WorkResourceLockRequest>[];
     for (final item in raw) {
       if (item is! Map || item['path'] is! String) {

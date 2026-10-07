@@ -11,6 +11,9 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
     );
     var initial = decoded.state;
     if (!decoded.present || initial == null || cancellation.isCancelled) return;
+    if (initial.schemaVersion == WorkDiscussionState.currentSchemaVersion) {
+      return;
+    }
     final group = database.chatGroupBox.get(task.groupId);
     if (group == null) {
       await _finishBlocked(
@@ -186,7 +189,7 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
       await _publish(
         task,
         group,
-        '群讨论已启动：首轮邀请所有已配置且启用的成员分别从自己的职业职责发言；当前理解进度 ${state.understandingPercent}%。',
+        '群讨论已启动：首轮邀请所有已配置且启用的成员分别从自己的职业职责发言。',
         cancellation: cancellation,
       );
       if (state.executorId == null && state.coordinatorId != null) {
@@ -239,6 +242,16 @@ extension _WorkDiscussionRunnerSetup on WorkDiscussionRunner {
     return Future.wait(
       characters.map((character) => _resolveMember(character)),
     );
+  }
+
+  Future<_DiscussionMember> _resolveV2Member(AICharacter character) async {
+    final id = character.apiConfigId;
+    if (id.trim().isEmpty || database.apiConfigBox.get(id) == null) {
+      return _DiscussionMember(
+          character: character,
+          unavailableReason: '该成员绑定的 API 配置缺失，请恢复或绑定自己的模型配置。');
+    }
+    return _resolveMember(character);
   }
 
   Future<_DiscussionMember> _resolveMember(AICharacter character) async {

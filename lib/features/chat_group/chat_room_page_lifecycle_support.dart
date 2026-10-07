@@ -65,6 +65,9 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
     ConversationPresenceService.instance.enter(widget.groupId);
     _flushPendingMessageChanges();
     _reloadSearchRuntimeIfChanged();
+    // 连接在 deactivate 时刻意不断开：页面被别的东西盖住（弹窗、切到别的页）
+    // 不代表人离开了群。已经连上时这里是空操作，只兜底"上次激活时配置还没读出来"。
+    unawaited(_startRealtimeIfNeeded());
     if (!_isLoading && !_autoChatPausedByWorkMode) {
       _startAutoChat();
     }
@@ -103,6 +106,7 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
     _mentionSearchController.dispose();
     // 浮层先移除再释放控制器，避免滚动位置在弹窗消失后仍被引用。
     _mentionListController.dispose();
+    unawaited(_stopRealtime());
     unawaited(_speech.dispose());
     unawaited(_disposeVoiceBroadcast());
     unawaited(_disposeVoiceInput());

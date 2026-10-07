@@ -17,6 +17,7 @@ import 'package:chat_group/core/models/group_memory.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
+import 'package:chat_group/core/storage/debug_credential_cache.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
@@ -106,6 +107,9 @@ class DataLifecycleService {
             CredentialRepository.developmentHiveCredentialId &&
         config.legacyApiKeyForMigration?.isNotEmpty == true;
     if (!hasCredentialBinding || isDevelopmentHiveCredential) {
+      // 开发回退的密钥存在记录自身的 `_legacyApiKey` 里，随记录一起删。但调试
+      // 镜像可能已有一份来自种子化的副本，必须一并丢掉，否则机密留在磁盘上。
+      await DebugCredentialCache.forget(credentials.credentialIdFor(configId));
       return;
     }
     // Only repository-owned identifiers can be deleted from secure storage.

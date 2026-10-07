@@ -2,16 +2,23 @@ part of 'work_task_coordinator.dart';
 
 extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
   Future<void> _checkpointFromRunner(AgentTask task) async {
-    if (_disposed || _dataClearInProgress || task.isTerminal) return;
+    if (_disposed ||
+        _dataClearInProgress ||
+        task.isTerminal && !_hasPendingV2Input(task)) {
+      return;
+    }
     await _serialize(() async {
       final running = _running[task.id];
       if (_disposed ||
           _dataClearInProgress ||
-          task.isTerminal ||
+          task.isTerminal && !_hasPendingV2Input(task) ||
           running == null ||
           !identical(running.task, task) ||
           running.cancellation.isCancelled) {
         return;
+      }
+      if (task.isTerminal && _hasPendingV2Input(task)) {
+        task.status = AgentTaskStatus.paused;
       }
       await _save(task);
     });
@@ -279,8 +286,9 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
 
   String _withFollowUpDecision(
     String raw,
-    WorkFollowUpDecision decision,
-  ) {
+    WorkFollowUpDecision decision, {
+    bool answerRejected = false,
+  }) {
     final metadata = _decodeExecutionMap(raw)
       ..['followUpKind'] = decision.kind.name
       ..['followUpReason'] = decision.reason;
@@ -295,6 +303,20 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
     } else {
       metadata.remove('clarificationQuestion');
     }
+    // 候选随问题一起进出：面板重启后只认这一个字段来重建按钮，而问题清单里
+    // 的序号与这里的顺序必须始终一致。
+    if (decision.clarificationOptions.isEmpty) {
+      metadata.remove(WorkTaskClarification.optionsKey);
+    } else {
+      metadata[WorkTaskClarification.optionsKey] = decision.clarificationOptions
+          .map((option) => option.toJson())
+          .toList(growable: false);
+    }
+    if (answerRejected) {
+      metadata[WorkTaskClarification.answerRejectedKey] = true;
+    } else {
+      metadata.remove(WorkTaskClarification.answerRejectedKey);
+    }
     return jsonEncode(metadata);
   }
 
@@ -304,7 +326,9 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
       ..remove('followUpReason')
       ..remove('revisionTargetPath')
       ..remove('autoRenameIfExists')
-      ..remove('clarificationQuestion');
+      ..remove('clarificationQuestion')
+      ..remove(WorkTaskClarification.optionsKey)
+      ..remove(WorkTaskClarification.answerRejectedKey);
     return metadata.isEmpty ? '' : jsonEncode(metadata);
   }
 
@@ -359,6 +383,7 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
     WorkTaskEventKind kind,
     String title, {
     String detail = '',
+    Map<String, Object?>? metadata,
   }) async {
     // Data clear owns a hard lifecycle barrier. Late runner callbacks must not
     // recreate event files after the clear has removed the app-managed tree.
@@ -374,6 +399,7 @@ extension _WorkTaskCoordinatorFailureCheckpoint on WorkTaskCoordinator {
         kind: kind,
         title: title,
         detail: detail,
+        safeMetadata: metadata,
       );
     } on Object catch (error) {
       // Event persistence is diagnostic only; never replace a valid task

@@ -173,4 +173,22 @@ void main() {
     expect(reader.isSensitivePath('${root.path}/access_token.txt'), isTrue);
     expect(reader.isSensitivePath('${root.path}/private_key.pem'), isTrue);
   });
+
+  test('separates the mutation whole-read from the model-bounded view',
+      () async {
+    // 变更路径要的是整文（追加/合并必须拿到完整旧内容），模型路径要的才是有界
+    // 视图。readTextRange 的 truncated 里混了面向模型的 12000 字符上限，用它
+    // 判断"文件读完没有"会把所有长文件误判成读取被截断。
+    final long =
+        await File('${root.path}/long.txt').writeAsString('a' * 13000);
+    final reader = service();
+
+    final forMutation = await reader.readTextForMutation(long.path);
+    expect(forMutation.truncated, isFalse);
+    expect(forMutation.text, hasLength(13000));
+
+    final forModel = await reader.readTextRange(long.path);
+    expect(forModel.truncated, isTrue);
+    expect(forModel.text, hasLength(12000));
+  });
 }

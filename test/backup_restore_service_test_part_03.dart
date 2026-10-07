@@ -1,6 +1,215 @@
 part of 'backup_restore_service_test.dart';
 
 void _registerBackupRestoreServiceTestPart3() {
+  test('P5 真实备份导入保留工作来源、重写身份、解绑项目且不恢复可写收据', () async {
+    final attachment = File('${mediaDirectory.path}/p5.txt');
+    await attachment.writeAsString('工作证据');
+    await _seedCoreData(db, attachment);
+    final task = AgentTask(
+        id: 'p5-task',
+        groupId: 'group-1',
+        characterId: 'char-1',
+        userRequest: '读取文件',
+        workModeTask: true);
+    await db.agentTaskBox.put(task.id, task);
+    final message = db.messageBox.get('msg-1')!;
+    message.isWorkMode = true;
+    message.workMemoryEvidence = {
+      'taskId': task.id,
+      'scopeId': 'A',
+      'tool': 'workspace.read',
+      'evidenceRef': 'investigation:p5-task:1'
+    };
+    await db.messageBox.put(message.id, message);
+    await db.permanentMemoryBox.put(
+        'p5-method',
+        PermanentMemory(
+          id: 'p5-method',
+          observerCharacterId: 'char-1',
+          kind: MemoryKind.personaGrowth,
+          content: '曾实际使用 workspace.read 完成授权材料查证。',
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.group,
+          originConversationId: 'group-1',
+          originNameSnapshot: '来源群',
+          sourceMessageIds: ['msg-1'],
+          participantIds: ['char-1'],
+          workSource: {
+            'type': 'verifiedMethod',
+            'scopeId': null,
+            'originScopeId': 'A',
+            'taskId': task.id,
+            'evidenceRef': 'investigation:p5-task:1',
+            'applicability': '当前项目重新读取'
+          },
+        ));
+    await db.permanentMemoryBox.put(
+        'p5-rule',
+        PermanentMemory(
+          id: 'p5-rule',
+          observerCharacterId: 'char-1',
+          kind: MemoryKind.explicitInstruction,
+          content: '本项目读取规则',
+          status: MemoryStatus.active,
+          originType: MemoryOriginType.group,
+          originConversationId: 'group-1',
+          originNameSnapshot: '来源群',
+          subjectIds: ['user'],
+          sourceMessageIds: ['msg-1'],
+          participantIds: ['char-1'],
+          workSource: {'type': 'projectInstruction', 'scopeId': 'A'},
+        ));
+    final service = BackupRestoreService(
+        db: db, mediaDirectory: mediaDirectory, tempRoot: testRoot);
+    final backup = File('${testRoot.path}/p5.cgbak');
+    await service.createBackup(destination: backup);
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+    await service.restore(prepared,
+        strategy: RestoreConflictStrategy.copyWithNewIds);
+    final copy = db.permanentMemoryBox.values.singleWhere((m) =>
+        m.id != 'p5-method' && m.workSource?['type'] == 'verifiedMethod');
+    final copiedTaskId = copy.workSource!['taskId'] as String;
+    expect(copiedTaskId, isNot(task.id));
+    expect(db.agentTaskBox.get(copiedTaskId), isNotNull);
+    expect(copy.workSource!['evidenceRef'], 'investigation:$copiedTaskId:1');
+    expect(copy.workSource!['originScopeId'], 'portable-unbound');
+    final copiedMessage = db.messageBox.get(copy.sourceMessageIds.single)!;
+    expect(copiedMessage.isWorkMode, isTrue);
+    expect(copiedMessage.workMemoryEvidence, isNull);
+    expect(
+        copy.observerCharacterId, copiedMessage.visibleToCharacterIds.single);
+    expect(copy.originConversationId, copiedMessage.groupId);
+    expect(
+        db.permanentMemoryBox.values
+            .singleWhere((m) =>
+                m.id != 'p5-rule' &&
+                m.workSource?['type'] == 'projectInstruction')
+            .workSource!['scopeId'],
+        'portable-unbound');
+  });
+
+  test('v2 copy restore remaps nested identities and remains blocked',
+      () async {
+    final attachment = File('${mediaDirectory.path}/collaboration.txt');
+    await attachment.writeAsString('fixture');
+    await _seedCoreData(db, attachment);
+    final base = WorkCollaborationState.fromLegacy(
+      taskId: 'task-v2',
+      conversationId: 'group-1',
+      projectScopeId: 'workspace-1',
+      requestRevision: 1,
+      requestMessageId: 'msg-1',
+      scope: '制作文档',
+      artifactContract: {
+        'type': 'document',
+        'format': 'txt',
+        'location': '/private/device/report.txt',
+        'revisionTarget': '',
+        'files': ['chapters/report.txt']
+      },
+    ).toJson();
+    base
+      ..['coordinatorId'] = 'char-1'
+      ..['team'] = [
+        {
+          'memberId': 'char-1',
+          'role': 'writer',
+          'qualificationRef': 'skill-1',
+          'qualified': true,
+          'available': true
+        },
+      ]
+      ..['iterations'] = [
+        {
+          'id': 'r001',
+          'artifactDigest': '0123456789abcdef' * 4,
+          'requestRevision': 1,
+          'teamRevision': 1,
+          'manifestRef': 'candidate:r001',
+          'reviewRef': '',
+          'status': 'candidate'
+        }
+      ]
+      ..['pendingInputIds'] = ['msg-2']
+      ..['approvals'] = [
+        {
+          'eventId': 'approval-1',
+          'memberId': 'char-1',
+          'kind': 'plan',
+          'subjectId': 'task-v2',
+          'requestRevision': 1,
+          'teamRevision': 1,
+          'iterationId': '',
+          'artifactDigest': '',
+          'verificationRevision': 1,
+          'approved': true,
+          'evidenceRef': 'msg-2',
+          'source': 'memberModel'
+        },
+      ];
+    final collaboration = WorkCollaborationState.tryParse(base)!;
+    final state = WorkDiscussionState(
+      schemaVersion: 2,
+      conversationId: 'group-1',
+      phase: WorkDiscussionPhase.blocked,
+      requestRevision: 1,
+      blockers: const ['v2ReviewRequired'],
+      collaboration: collaboration,
+    );
+    final task = AgentTask(
+      id: 'task-v2',
+      groupId: 'group-1',
+      characterId: 'char-1',
+      userRequest: '制作文档',
+      workModeTask: true,
+      status: AgentTaskStatus.paused,
+      executionStateJson:
+          WorkDiscussionState.mergeIntoExecutionState('', state),
+    );
+    task.executionStateJson = jsonEncode({
+      ...jsonDecode(task.executionStateJson) as Map,
+      'attachmentMessageId': 'msg-1',
+      'queuedAttachmentMessageIds': ['msg-1', 'msg-2'],
+      'sourceTaskId': task.id,
+    });
+    await db.agentTaskBox.put(task.id, task);
+    final backup = File('${testRoot.path}/task-v2-copy.cgbak');
+    final service = BackupRestoreService(
+        db: db, mediaDirectory: mediaDirectory, tempRoot: testRoot);
+    await service.createBackup(destination: backup);
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+    await service.restore(prepared,
+        strategy: RestoreConflictStrategy.copyWithNewIds);
+    final copiedTask =
+        db.agentTaskBox.values.singleWhere((e) => e.id != task.id);
+    final copied =
+        WorkDiscussionState.fromExecutionState(copiedTask.executionStateJson)!;
+    final v2 = copied.collaboration!;
+    final rootRefs = jsonDecode(copiedTask.executionStateJson) as Map;
+    expect(rootRefs['attachmentMessageId'], v2.requestMessageId);
+    expect(rootRefs['queuedAttachmentMessageIds'],
+        [v2.requestMessageId, v2.pendingInputIds.single]);
+    expect(rootRefs['sourceTaskId'], copiedTask.id);
+    expect(v2.taskId, copiedTask.id);
+    expect(v2.conversationId, copiedTask.groupId);
+    expect(v2.requestMessageId, isNot('msg-1'));
+    expect(v2.pendingInputIds.single, isNot('msg-2'));
+    expect(v2.team.single['memberId'], copiedTask.characterId);
+    expect(v2.approvals.single['memberId'], copiedTask.characterId);
+    expect(v2.approvals.single['subjectId'], copiedTask.id);
+    expect(v2.approvals.single['evidenceRef'], v2.pendingInputIds.single);
+    expect(v2.projectScopeId, 'portable-unbound');
+    expect(v2.artifactContract['location'], '');
+    expect(v2.artifactContract['files'], ['chapters/report.txt']);
+    expect(v2.iterations.single['artifactDigest'], '0123456789abcdef' * 4);
+    expect(v2.iterations.single['manifestRef'], '');
+    expect(v2.team.single['available'], isFalse);
+    expect(copied.isDeliveryReady, isFalse);
+    expect(copied.isExecutionReady, isFalse);
+  });
+
   test('portable task backup keeps the per-attempt elapsed start', () async {
     final attachment = File('${mediaDirectory.path}/attempt-start.txt');
     await attachment.writeAsString('task attachment');
@@ -393,6 +602,44 @@ void _registerBackupRestoreServiceTestPart3() {
       GroupMuteStore(db).mutedFor(copiedGroup.id),
       contains(copiedCharacter.id),
       reason: '禁言是「群 + 角色」两层引用，只映射其中一层就会静默失效',
+    );
+  });
+
+  test('copy restore remaps the work context boundary to the copied group',
+      () async {
+    final attachment = File('${mediaDirectory.path}/context-boundary.txt');
+    await attachment.writeAsString('context boundary');
+    await _seedCoreData(db, attachment);
+    await db.appSettingsBox.put(
+      'work_mode_context_boundary:group-1',
+      '2026-09-30T10:00:00.000',
+    );
+    final backup = File('${testRoot.path}/context-boundary.cgbak');
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    await service.createBackup(destination: backup);
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+
+    await service.restore(
+      prepared,
+      strategy: RestoreConflictStrategy.copyWithNewIds,
+    );
+
+    final copiedGroup =
+        db.chatGroupBox.values.singleWhere((item) => item.id != 'group-1');
+    expect(
+      db.appSettingsBox.get('work_mode_context_boundary:${copiedGroup.id}'),
+      '2026-09-30T10:00:00.000',
+      reason: '分界线键里的会话 id 不重映射，复制出来的会话就没有分界线',
+    );
+    expect(
+      db.appSettingsBox.get('work_mode_context_boundary:group-1'),
+      '2026-09-30T10:00:00.000',
+      reason: '原会话仍在，它自己的分界线不该被改写',
     );
   });
 

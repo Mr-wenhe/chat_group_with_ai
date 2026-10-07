@@ -7,6 +7,7 @@ import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 
 import 'work_task_error_sanitizer.dart';
 import 'work_command_policy.dart';
+import 'work_model_deadline.dart';
 import 'work_tool_registry.dart';
 
 /// The only failure categories that may cross the work-mode task boundary.
@@ -24,6 +25,17 @@ enum WorkFailureType {
   commandFailed,
   userActionRequired,
   internal,
+
+  /// The run claimed completion and its own completion guard rejected the
+  /// claim — the deliverable contract is unmet, the message is the loop's own
+  /// prose, and the checkpoint is safe to resume.
+  ///
+  /// It is separate from [internal] because a rejection is retryable and
+  /// [internal] is not: classified as [internal], a failed completion hid the
+  /// panel's retry action and told the user to re-file the task. Only the
+  /// DOCX wording of this failure was ever patched around, by a text-matching
+  /// legacy migration; classifying it by scope closes the whole family.
+  completionUnmet,
 }
 
 const _retryFromCheckpointAction = '点击“重试”，从最近安全检查点继续；已提交的写入不会重复执行。';
@@ -175,6 +187,7 @@ class WorkFailure {
       failure = _migrateLegacyMissingTargetFailure(task, failure);
       failure = _migrateLegacyEmptyModelResponse(task, failure);
       failure = _migrateLegacyArtifactValidationFailure(task, failure);
+      failure = _migrateLegacyCompletionFailure(task, failure);
       final inferredTarget =
           failure.failureTargetPath ?? _inferFailureTargetPath(task, failure);
       if (inferredTarget != null && failure.failureTargetPath == null) {
@@ -277,6 +290,33 @@ class WorkFailure {
       message: failure.reason,
       technicalDetail: failure.technicalDetail,
       scope: 'model',
+      completedContent: failure.completedContent,
+      retryableHint: true,
+    );
+  }
+
+  /// Older builds persisted a rejected completion whose deliverable was
+  /// missing or not a real file as an internal failure, which hid the
+  /// checkpoint retry action.
+  ///
+  /// The DOCX wording is covered by [_migrateLegacyArtifactValidationFailure];
+  /// this is the rest of the family, which that text-matching rule never
+  /// reached. Retrying is safe: nothing was delivered, and everything the run
+  /// wrote is still on disk and still checkpointed.
+  static WorkFailure _migrateLegacyCompletionFailure(
+    AgentTask task,
+    WorkFailure failure,
+  ) {
+    if (failure.type != WorkFailureType.internal) return failure;
+    final text =
+        '${failure.reason} ${failure.technicalDetail} ${task.lastError}';
+    if (!text.contains('没有可读取的真实文件') && !text.contains('未将说明文字伪装成附件')) {
+      return failure;
+    }
+    return _fromSignals(
+      message: failure.reason,
+      technicalDetail: failure.technicalDetail,
+      scope: 'completion',
       completedContent: failure.completedContent,
       retryableHint: true,
     );
@@ -752,6 +792,15 @@ class WorkFailure {
           retryable: false,
           suggestedAction: '先检查任务上下文；确认环境正常后可重新发起任务或停止当前任务。',
         ),
+      WorkFailureType.completionUnmet => const WorkFailure(
+          type: WorkFailureType.completionUnmet,
+          title: '交付物没有通过完成校验',
+          reason: '任务声称完成，但本次运行写出的文件里没有满足交付要求的产物。',
+          technicalDetail: '完成校验连续未通过，最近安全检查点与已写出的文件均已保留。',
+          completedContent: <String>[],
+          retryable: true,
+          suggestedAction: _retryFromCheckpointAction,
+        ),
     };
   }
 
@@ -813,6 +862,10 @@ class WorkFailure {
   }) {
     final normalizedCode = code?.trim().toLowerCase() ?? '';
     final normalized = '$normalizedCode ${message.toLowerCase()}';
+    // The completion guard authors its message itself, so its prose is not a
+    // provider, command, path or permission signal. Resolve it by scope before
+    // any rule below can match an incidental word in that prose.
+    if (scope == 'completion') return WorkFailureType.completionUnmet;
     // HTTP status semantics are authoritative at the model boundary: a 401
     // means the saved credential/session is no longer valid, while 403 means
     // the caller is authenticated but lacks permission. Resolve these before
@@ -965,6 +1018,10 @@ class WorkFailure {
         normalizedCode == 'serviceunavailable' ||
         normalizedCode == 'temporarilyunavailable' ||
         normalizedCode == 'temporaryfailure' ||
+        // 客户端自己的两个时限（见 [WorkModelDeadlineException]）：它们与上游
+        // 5xx 同属"可重试的网络/超时"一类，落到下面那条 modelProtocol 兜底会把
+        // 一次停滞说成"模型写坏了 JSON"。
+        WorkModelDeadlineException.matches(normalizedCode) ||
         normalized.contains('网络') ||
         normalized.contains('connection') ||
         normalized.contains('timed out') ||
@@ -987,7 +1044,8 @@ class WorkFailure {
     required String scope,
   }) {
     if (type == WorkFailureType.retryableNetwork ||
-        type == WorkFailureType.modelProtocol) {
+        type == WorkFailureType.modelProtocol ||
+        type == WorkFailureType.completionUnmet) {
       return true;
     }
     if (type == WorkFailureType.commandFailed) {

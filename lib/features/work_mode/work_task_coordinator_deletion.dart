@@ -23,6 +23,10 @@ extension _WorkTaskCoordinatorDeletion on WorkTaskCoordinator {
       final wasTerminal = task.isTerminal;
       if (wasTerminal) await _markSnapshotStatus(task);
       _releaseTaskResourcesForDeletion(task);
+      // 分界线取自这一刻，因此必须在释放之后：那一刻起该任务的 runner 已被取消，
+      // 不会再有待删任务的消息落在分界线之后。同会话的下一个任务从此只看到自己
+      // 的请求，而不是接续一段已经被放弃的上下文。
+      await _contextBoundaryWriter?.call(task.groupId, _clock());
       await _taskBox.delete(taskId);
       // 列表流只把这次写入当作"回读 Hive"的信号，因此这里不校验对象本身。
       _publishTaskListChanged(task);

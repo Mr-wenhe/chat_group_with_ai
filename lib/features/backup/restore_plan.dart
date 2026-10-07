@@ -161,6 +161,16 @@ class _RestorePlan {
       value['mentionedAiIds'] = _mapList(value['mentionedAiIds'], characterMap);
       value['visibleToCharacterIds'] =
           _mapList(value['visibleToCharacterIds'], characterMap);
+      final delivery = WorkDeliveryMetadata.portable(value['workDelivery']);
+      if (delivery != null) {
+        delivery['taskId'] = taskMap[delivery['taskId']] ?? delivery['taskId'];
+        delivery['conversationId'] =
+            conversation(delivery['conversationId'] as String);
+        for (final key in const ['producerId', 'senderId']) {
+          delivery[key] = characterMap[delivery[key]] ?? delivery[key];
+        }
+        value['workDelivery'] = delivery;
+      }
     });
     final groupMemories = _rewriteStorage(
         data.groupMemories,
@@ -204,6 +214,27 @@ class _RestorePlan {
           _mapList(value['sourceMessageIds'], messageMap);
       value['supersedesIds'] =
           _mapList(value['supersedesIds'], permanentMemoryMap);
+      if (value['workSource'] is Map) {
+        final source = Map<String, dynamic>.from(value['workSource'] as Map);
+        if (source['scopeId'] != null) {
+          source['scopeId'] = 'portable-unbound';
+        }
+        if (source['originScopeId'] != null) {
+          source['originScopeId'] = 'portable-unbound';
+        }
+        final oldTaskId = source['taskId'];
+        final oldRef = source['evidenceRef'];
+        source['taskId'] = taskMap[oldTaskId] ?? oldTaskId;
+        if (oldTaskId is String &&
+            oldRef is String &&
+            oldRef.startsWith('investigation:$oldTaskId:')) {
+          source['evidenceRef'] =
+              'investigation:${source['taskId']}:${oldRef.substring('investigation:$oldTaskId:'.length)}';
+        }
+        source['evidenceRef'] =
+            messageMap[source['evidenceRef']] ?? source['evidenceRef'];
+        value['workSource'] = source;
+      }
       value['originConversationId'] =
           optionalConversation(value['originConversationId']);
     });
@@ -255,11 +286,15 @@ class _RestorePlan {
         value['executionStateJson']?.toString() ?? '',
         conversation: conversation,
         characterMap: characterMap,
+        taskMap: taskMap,
+        messageMap: messageMap,
       );
       value['contextSummary'] = _remapTaskContextSummary(
         value['contextSummary']?.toString() ?? '',
         conversation: conversation,
         characterMap: characterMap,
+        taskMap: taskMap,
+        messageMap: messageMap,
       );
     });
     final workspaces = _rewriteStorage(
@@ -318,5 +353,7 @@ class _RestorePlan {
       .expand((record) =>
           BackupEntityCodec.value(record)['media'] as List? ?? const [])
       .map((item) => Map<String, dynamic>.from(item as Map)['path'].toString())
-      .toSet();
+      .toSet()
+    ..addAll(messages.expand((record) => WorkDeliveryMetadata.attachmentPaths(
+        BackupEntityCodec.value(record)['workDelivery'])));
 }

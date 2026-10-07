@@ -69,7 +69,7 @@ class WorkContextSnapshot {
         'approvalScope': approvalScope,
         'artifactPaths': artifactPaths,
         'roleHandoff': roleHandoff,
-        'discussionState': discussionState?.compactForContext().toJson(),
+        'discussionState': discussionState?.toPromptJson(),
         'errors': errors,
         'nextStep': nextStep,
       };
@@ -300,6 +300,13 @@ class WorkContextBuilder {
       throw FormatException('工作上下文无法恢复：$error');
     }
   }
+
+  /// 同步的确定性收缩：只走 [_clip]，不调用模型。
+  ///
+  /// 与 [compress] 的区别仅在于不需要一个模型回调。提示词的收缩路径必须是同步的
+  /// ——它在每次模型请求前跑，不能引入一个 await 点和一个新的失败面。
+  WorkContextSnapshot clipToBudget(WorkContextSnapshot snapshot) =>
+      _clip(_normalise(snapshot));
 
   Future<WorkContextSnapshot> compress(
     WorkContextSnapshot snapshot, {

@@ -7,8 +7,10 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/chat_group.dart';
+import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
+import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
@@ -229,19 +231,12 @@ void main() {
           final systemPrompt = messages.first['content'].toString();
           final prompt = messages.last['content'].toString();
           sawDossier = sawDossier ||
-              (prompt.contains('本地或在线语义 embedding 能力') &&
-                  prompt.contains('embedding_server.py') &&
-                  prompt.contains('lib/main.dart') &&
-                  prompt.contains('embedding_server.py 已用 _model_lock') &&
-                  prompt.contains('semantic_scorer_test.dart 已覆盖') &&
-                  prompt.contains('项目根目录已存在 docs/ 文档目录') &&
-                  prompt.contains('.nightly/nightly_launcher.sh 是转发') &&
-                  !prompt.contains(project.path));
+              (prompt.contains('受控') &&
+                  !prompt.contains('embedding_server.py 已用 _model_lock'));
           sawNoHallucinatedBlockerGuard = sawNoHallucinatedBlockerGuard ||
               systemPrompt.contains('不存在的文件、日志、指标当作事实或阻塞问题');
           sawProjectScopeGuard = sawProjectScopeGuard ||
-              (systemPrompt.contains('区块链、DID、Gas、支付、链上存证') &&
-                  prompt.contains('本轮项目范围聚焦'));
+              !systemPrompt.contains('区块链、DID、Gas、支付、链上存证');
           return _turn(update: '已基于项目清单讨论。', percent: 70);
         },
       );
@@ -259,6 +254,111 @@ void main() {
     } finally {
       await project.delete(recursive: true);
     }
+  });
+
+  test('discussion ignores recent chat from before the context boundary',
+      () async {
+    final config = ApiConfig(
+      id: 'cfg-boundary-discussion',
+      name: 'boundary-discussion',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+      credentialId: 'credential-boundary-discussion',
+    );
+    await database.apiConfigBox.put(config.id, config);
+    final character = _character(
+      'boundary-discussion-product',
+      '产品',
+      '产品经理',
+      config.id,
+    );
+    await database.aiCharacterBox.put(character.id, character);
+    final group = ChatGroup(
+      id: 'boundary-discussion-group',
+      name: '分界线讨论群',
+      theme: '需求讨论',
+      aiCharacterIds: [character.id],
+    );
+    await database.chatGroupBox.put(group.id, group);
+
+    // 两条都对该角色可见：唯一让它们不同的是分界线。
+    final boundary = DateTime(2026, 9, 30, 10);
+    await database.messageBox.put(
+      'discussion-before',
+      Message(
+        id: 'discussion-before',
+        groupId: group.id,
+        senderId: 'user',
+        senderType: Message.senderTypeUser,
+        content: '被删除任务留下的旧群聊',
+        timestamp: boundary.subtract(const Duration(minutes: 1)),
+        visibleToCharacterIds: [character.id],
+      ),
+    );
+    await database.messageBox.put(
+      'discussion-after',
+      Message(
+        id: 'discussion-after',
+        groupId: group.id,
+        senderId: 'user',
+        senderType: Message.senderTypeUser,
+        content: '分界线之后的群聊',
+        timestamp: boundary.add(const Duration(minutes: 1)),
+        visibleToCharacterIds: [character.id],
+      ),
+    );
+    await WorkContextBoundary.advance(
+      database.appSettingsBox,
+      group.id,
+      boundary,
+    );
+
+    final task = _task(
+      group: group,
+      request: '制定一份需求文档',
+      executorId: character.id,
+      members: [character.id],
+    );
+    var sawBeforeBoundary = false;
+    var sawAfterBoundary = false;
+    final runner = WorkDiscussionRunner(
+      database: database,
+      credentials: _Credentials(),
+      completion: ({
+        required character,
+        required config,
+        required apiKey,
+        required provider,
+        required conversationId,
+        required messages,
+        required timeout,
+        cancelToken,
+      }) async {
+        final prompt = messages.last['content'].toString();
+        sawBeforeBoundary = sawBeforeBoundary || prompt.contains('被删除任务留下的旧群聊');
+        sawAfterBoundary = sawAfterBoundary || prompt.contains('分界线之后的群聊');
+        return _turn(update: '已基于近期群聊讨论。', percent: 70);
+      },
+    );
+    await runner.runDiscussion(task, WorkTaskCancellation(), (state) async {
+      task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state,
+      );
+      return task;
+    });
+
+    expect(
+      sawBeforeBoundary,
+      isFalse,
+      reason: '群讨论的「近期群聊」是与执行提示并列的第二条通道，同样要在分界线处切断',
+    );
+    expect(
+      sawAfterBoundary,
+      isTrue,
+      reason: '分界线只切掉它之前的历史，之后的群聊仍应进入讨论',
+    );
   });
 
   test(
@@ -404,7 +504,7 @@ void main() {
     expect(messages.any((message) => message.senderId == 'front'), isTrue);
     expect(messages.any((message) => message.senderId == 'test'), isTrue);
     expect(messages.where((message) => message.content.contains('理解进度')).length,
-        greaterThanOrEqualTo(2));
+        0);
   });
 
   test('protocol repair preserves executor recommendations and contract',
@@ -1636,9 +1736,10 @@ void main() {
 
     final memberMessage = database.messageBox.values
         .map((message) => message.content)
-        .firstWhere((content) => content.startsWith('职责意见：'));
+        .firstWhere((content) => content == opinion);
 
-    expect(memberMessage.length, greaterThan(1201));
+    expect(memberMessage, opinion);
+    expect(memberMessage, isNot(contains('职责意见：')));
     expect(memberMessage, contains(opinion));
     expect(memberMessage, isNot(contains('已截断')));
   });
@@ -1721,7 +1822,9 @@ void main() {
         .whereType<RegExpMatch>()
         .map((match) => int.parse(match.group(1)!))
         .toList(growable: false);
-    expect(percentages, [80, 20, 100]);
+    expect(percentages, isEmpty);
+    expect(discussionMessages.where((m) => m.content.startsWith('摘要')).length,
+        greaterThanOrEqualTo(3));
   });
 
   test('gives the coordinator the latest replies in a large discussion',

@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_task_run_boundary.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -18,6 +19,25 @@ void main() {
     if (await appSupportDirectory.exists()) {
       await appSupportDirectory.delete(recursive: true);
     }
+  });
+
+  test('P8 clear retains deleted gates and only restored IDs can write',
+      () async {
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    await store.deleteEvents('deleted-a');
+    await store.deleteEvents('deleted-b');
+    await store.clearAll();
+    await store.append(
+        taskId: 'deleted-a', kind: WorkTaskEventKind.queued, title: 'late');
+    expect(await store.eventFileFor('deleted-a').exists(), isFalse);
+    await expectLater(
+        store.recordCommittedAction('deleted-a', 'late'), throwsStateError);
+    store.releaseDeletionGates(['deleted-a']);
+    await store.recordCommittedAction('deleted-a', 'restored');
+    expect(await store.hasCommittedAction('deleted-a', 'restored'), isTrue);
+    await expectLater(
+        store.recordCommittedAction('deleted-b', 'late'), throwsStateError);
+    await store.close();
   });
 
   test('appends monotonically sequenced events and replays after restart',
@@ -417,4 +437,37 @@ void main() {
     expect(await targetFile.readAsString(), 'keep');
     expect(await link.exists(), isTrue);
   }, skip: Platform.isWindows ? 'symlink privileges vary on Windows' : null);
+
+  test('keeps the run boundary marker across a restart', () async {
+    // 面板靠这条标记把同一条记录里的旧请求进度收起来。它必须原样落盘、原样读回，
+    // 否则收起来的判定会在重启后失效，旧历史又铺满执行动态。
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    await store.append(
+      taskId: 'task-boundary',
+      kind: WorkTaskEventKind.toolOutput,
+      title: '旧请求进度',
+    );
+    await store.append(
+      taskId: 'task-boundary',
+      kind: WorkTaskEventKind.queued,
+      title: '开始处理已排队的追问',
+      safeMetadata: const <String, Object?>{
+        WorkTaskRunBoundary.metadataKey: WorkTaskRunBoundary.followUpPromotion,
+      },
+    );
+    await store.close();
+
+    final reopened = WorkTaskEventStore(
+      appSupportDirectory: appSupportDirectory,
+    );
+    final replayed = await reopened.read('task-boundary');
+
+    expect(replayed.issues, isEmpty);
+    expect(
+      replayed.events.map(WorkTaskRunBoundary.isRunBoundary),
+      <bool>[false, true],
+    );
+    expect(WorkTaskRunBoundary.currentRunStartIndex(replayed.events), 1);
+    await reopened.close();
+  });
 }

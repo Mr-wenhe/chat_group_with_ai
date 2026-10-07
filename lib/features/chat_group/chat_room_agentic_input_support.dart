@@ -42,11 +42,14 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       senderId: 'user',
       senderType: 'user',
       content: text,
+      isWorkMode: routeToWorkMode,
       replyToMessageId: _quotedMessage?.id,
       media: hasAttachments
           ? List<MediaAttachment>.from(_pendingAttachments)
           : null,
     );
+    // 广播不在这里做：_appendMessage 是本机所有新消息（本人发言 + AI 回复）
+    // 的统一出口，转发逻辑集中在那边，避免漏掉某个生成路径。
     await _appendMessage(userMessage);
     if (_isDirectChat) {
       // 记录该私聊由用户主动发起，影响后续主动联系的冷却判断。
@@ -62,6 +65,10 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
 
     // 用户开口即重置 burst 计数，让自动聊天重新获得完整额度。
     _autoChatRoundCount = 0;
+
+    // 客人的发言到此为止：只广播给其他真人，不在本机触发任何 AI 生成。
+    // 主人端的 AI 会把回复广播过来，客人这边表现为"对方群里有人接了话"。
+    if (_isRealtimeGuest) return;
 
     // Ordinary chat still needs an active speaker, but work-mode requests must
     // be durably recorded even when the group currently has no usable member;
@@ -83,6 +90,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         mentionedIds: mentionedIds,
         hasAttachments: hasAttachments,
         attachmentMessageId: hasAttachments ? userMessage.id : null,
+        sourceMessageId: userMessage.id,
       );
       return;
     }
@@ -136,6 +144,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         hasAttachments: userMessage?.media?.isNotEmpty == true,
         attachmentMessageId:
             userMessage?.media?.isNotEmpty == true ? userMessage?.id : null,
+        sourceMessageId: userMessage?.id,
       );
       return;
     }
@@ -189,6 +198,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     required List<String> mentionedIds,
     bool hasAttachments = false,
     String? attachmentMessageId,
+    String? sourceMessageId,
   }) async {
     final coordinator = ref.read(workTaskCoordinatorProvider);
     final activeTask = _latestWorkTaskForConversation();
@@ -209,10 +219,81 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         followUpRequest,
       );
       if (!startsNewTask) {
+        final openDecisions = WorkTaskDecision.forTask(activeTask)
+            .where((item) => item.isOpen)
+            .toList();
+        final progressQuestion = RegExp(
+          r'^(进度|到哪了|做到哪了|现在怎么样|status|progress)[？?。\s]*$',
+          caseSensitive: false,
+        ).hasMatch(followUpRequest.trim());
+        if (openDecisions.isNotEmpty && progressQuestion) {
+          await _appendMessage(Message(
+            groupId: widget.groupId,
+            senderId: 'system',
+            senderType: 'system',
+            content: '当前任务仍有 ${openDecisions.length} 项待决；可在任务面板查看进度和具体问题。',
+          ));
+          return;
+        }
+        if (openDecisions.length == 1 &&
+            decision.kind == WorkFollowUpKind.continueTask &&
+            !hasAttachments) {
+          final target = openDecisions.single;
+          final bool resolved;
+          try {
+            resolved = await coordinator.respondToDecision(
+              activeTask.id,
+              decisionId: target.id,
+              revision: target.revision,
+              answer: followUpRequest,
+              responseMessageId: sourceMessageId,
+            );
+          } on Object catch (error) {
+            // 面板弹窗对同一调用已有兜底。会话入口若直接抛出，用户消息已经落库，
+            // 却既没有回应也没有提示，看起来像被吞掉。
+            await _appendMessage(Message(
+              groupId: widget.groupId,
+              senderId: 'system',
+              senderType: 'system',
+              content: '这条答复没能应用（${sanitizeWorkTaskError(error)}）；'
+                  '问题可能已经更新，请在任务面板查看最新待决事项。',
+            ));
+            return;
+          }
+          final updated = coordinator.taskById(activeTask.id);
+          final missing = updated == null
+              ? ''
+              : WorkTaskDecision.forTask(updated)
+                      .where((item) => item.id == target.id)
+                      .firstOrNull
+                      ?.missingCondition ??
+                  '';
+          await _appendMessage(Message(
+            groupId: widget.groupId,
+            senderId: 'system',
+            senderType: 'system',
+            content: resolved
+                ? '已收到针对原问题的答复，正在重新核对受影响条件。'
+                : '已保存建议，原问题仍未解决：$missing',
+          ));
+          return;
+        }
+        if (openDecisions.length > 1 &&
+            RegExp(r'^(先继续|其他先做|先放着|稍后处理)[。.!！\s]*$')
+                .hasMatch(followUpRequest.trim())) {
+          await _appendMessage(Message(
+            groupId: widget.groupId,
+            senderId: 'system',
+            senderType: 'system',
+            content: '目前有多项待决，请从任务面板指定要暂缓的事项。',
+          ));
+          return;
+        }
         await coordinator.enqueueFollowUp(
           activeTask.id,
           followUpRequest,
           attachmentMessageId: hasAttachments ? attachmentMessageId : null,
+          sourceMessageId: sourceMessageId,
         );
         final discussion = coordinator.discussionStateForTask(activeTask.id);
         final discussionPending =
@@ -314,6 +395,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         text: text,
         hasAttachments: hasAttachments,
         attachmentMessageId: attachmentMessageId,
+        sourceMessageId: sourceMessageId,
         route: route,
         charactersById: charactersById,
       );
@@ -350,6 +432,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         text: text,
         hasAttachments: hasAttachments,
         attachmentMessageId: attachmentMessageId,
+        sourceMessageId: sourceMessageId,
         route: route,
         charactersById: charactersById,
         additionalBlockers: const ['executorUnavailable'],
@@ -364,6 +447,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         text: text,
         hasAttachments: hasAttachments,
         attachmentMessageId: attachmentMessageId,
+        sourceMessageId: sourceMessageId,
         route: route,
         charactersById: charactersById,
         additionalBlockers: const ['executorUnavailable'],
@@ -416,6 +500,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         text: text,
         hasAttachments: hasAttachments,
         attachmentMessageId: attachmentMessageId,
+        sourceMessageId: sourceMessageId,
         route: route,
         charactersById: charactersById,
         additionalBlockers: const ['executorUnavailable'],
@@ -488,11 +573,14 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       );
       task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
         task.executionStateJson,
-        discussionState,
+        WorkDiscussionState.forNewTask(task,
+            routed: discussionState, requestMessageId: sourceMessageId ?? ''),
       );
     }
     final handoff = route.handoffState;
-    if (handoff != null) WorkHandoffState.persistToTask(task, handoff);
+    if (_isDirectChat && handoff != null) {
+      WorkHandoffState.persistToTask(task, handoff);
+    }
     await _appendMessage(Message(
       groupId: widget.groupId,
       senderId: 'system',
@@ -509,6 +597,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     required String text,
     required bool hasAttachments,
     required String? attachmentMessageId,
+    String? sourceMessageId,
     required WorkRoleRouteResult route,
     required Map<String, AICharacter> charactersById,
     Iterable<String> additionalBlockers = const [],
@@ -597,10 +686,13 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     }
     task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
       jsonEncode(execution),
-      state,
+      WorkDiscussionState.forNewTask(task,
+          routed: state, requestMessageId: sourceMessageId ?? ''),
     );
     final handoff = route.handoffState;
-    if (handoff != null) WorkHandoffState.persistToTask(task, handoff);
+    if (_isDirectChat && handoff != null) {
+      WorkHandoffState.persistToTask(task, handoff);
+    }
     // Keep this lookup in the helper's contract so callers cannot accidentally
     // manufacture a candidate that is absent from the current group map.
     if (route.characterId != null &&
@@ -619,6 +711,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     required String text,
     required bool hasAttachments,
     required String? attachmentMessageId,
+    String? sourceMessageId,
     required WorkRoleRouteResult route,
     required Map<String, AICharacter> charactersById,
     Iterable<String> additionalBlockers = const [],
@@ -633,6 +726,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       text: text,
       hasAttachments: hasAttachments,
       attachmentMessageId: attachmentMessageId,
+      sourceMessageId: sourceMessageId,
       route: route,
       charactersById: charactersById,
       additionalBlockers: extraBlockers,

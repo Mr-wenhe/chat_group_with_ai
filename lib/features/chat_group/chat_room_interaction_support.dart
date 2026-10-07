@@ -7,6 +7,9 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
   /// 朗读项受 TTS 总开关控制；推送到企业微信对所有消息可用。
   void _showMessageActionSheet(Message message, AICharacter? sender) {
     final cs = Theme.of(context).colorScheme;
+    // 真人成员的消息没有 sender，本来就不会出现生成类入口；主人端则是
+    // 唯一被允许调用 LLM 的一方。
+    final canRegenerate = sender != null && !_isRealtimeGuest;
     showModalBottomSheet(
       context: context,
       backgroundColor: Colors.transparent,
@@ -39,29 +42,35 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
             ),
             const SizedBox(height: 14),
             if (sender != null) ...[
-              SheetButton(ctx, cs, Icons.refresh_rounded, '重新生成', () {
-                Navigator.pop(ctx);
-                _regenerateAiReply(message, sender);
-              }),
-              if (_searchTurnController.contextForRegeneration(message.id) !=
-                      null ||
-                  _snapshotFromMessage(message) != null ||
-                  _userMessageBefore(message) != null) ...[
-                const SizedBox(height: 8),
-                SheetButton(
-                  ctx,
-                  cs,
-                  Icons.public_rounded,
-                  '刷新来源并重新生成',
-                  () {
-                    Navigator.pop(ctx);
-                    _regenerateAiReply(
-                      message,
-                      sender,
-                      forceRefresh: true,
-                    );
-                  },
-                ),
+              // 客人端一律不调用 LLM，所以直接触发本机生成的入口都要藏掉。
+              // 「引用回复」「@角色」「查看本条来源」保留：前两者只是把文本发出去，
+              // 真正的生成发生在主人端——客人 @ 某个角色，主人端会看到这条消息并
+              // 让该角色接话；「查看来源」是纯本地读取。
+              if (canRegenerate) ...[
+                SheetButton(ctx, cs, Icons.refresh_rounded, '重新生成', () {
+                  Navigator.pop(ctx);
+                  _regenerateAiReply(message, sender);
+                }),
+                if (_searchTurnController.contextForRegeneration(message.id) !=
+                        null ||
+                    _snapshotFromMessage(message) != null ||
+                    _userMessageBefore(message) != null) ...[
+                  const SizedBox(height: 8),
+                  SheetButton(
+                    ctx,
+                    cs,
+                    Icons.public_rounded,
+                    '刷新来源并重新生成',
+                    () {
+                      Navigator.pop(ctx);
+                      _regenerateAiReply(
+                        message,
+                        sender,
+                        forceRefresh: true,
+                      );
+                    },
+                  ),
+                ],
               ],
               if (_searchTurnController.contextForReply(message.id) != null ||
                   _snapshotFromMessage(message) != null) ...[
@@ -78,11 +87,6 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
                 ),
               ],
               const SizedBox(height: 8),
-              SheetButton(ctx, cs, Icons.format_quote_rounded, '引用回复', () {
-                Navigator.pop(ctx);
-                _quoteMessage(message);
-              }),
-              const SizedBox(height: 8),
               SheetButton(
                   ctx, cs, Icons.alternate_email_rounded, '@${sender.name}',
                   () {
@@ -91,6 +95,13 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
               }),
               const SizedBox(height: 8),
             ],
+            // 引用回复对真人成员的消息同样可用：它只负责把文本带出去，
+            // 真正读到这句话并决定谁来接话的是主人端。
+            SheetButton(ctx, cs, Icons.format_quote_rounded, '引用回复', () {
+              Navigator.pop(ctx);
+              _quoteMessage(message);
+            }),
+            const SizedBox(height: 8),
             if (_isTtsEnabled) ...[
               SheetButton(
                   ctx,
@@ -488,6 +499,9 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
   /// 按 senderId 取展示名；历史角色优先使用删除时保存的身份快照。
   String _senderNameById(String id) {
     if (id == 'user') return _ownerMentionName;
+    // 真人成员不在角色表里，先查实时花名册，否则引用他们的消息会显示成"未知角色"。
+    final memberName = _realtimeMemberNames[id];
+    if (memberName != null) return memberName;
     return _displayCharacterById(id)?.name ?? _unknownCharacter().name;
   }
 

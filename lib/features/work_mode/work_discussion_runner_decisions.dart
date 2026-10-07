@@ -251,11 +251,6 @@ extension _WorkDiscussionRunnerDecisions on WorkDiscussionRunner {
     return result;
   }
 
-  String _missingSuffix(List<String> questions, List<String> blockers) {
-    final values = <String>[...questions.take(3), ...blockers.take(2)];
-    return values.isEmpty ? '' : '\n待解决：${values.join('；')}';
-  }
-
   String _formatContractSuggestion(Map<String, dynamic>? patch) {
     if (patch == null || patch.isEmpty) return '';
     try {

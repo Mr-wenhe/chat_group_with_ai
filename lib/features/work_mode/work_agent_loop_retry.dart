@@ -5,16 +5,125 @@ part of 'work_agent_loop.dart';
 /// 只要求"输出合法 JSON"没有用——被截断的正是"一次写完整份文件"这个动作，
 /// 原样重试必然再撞上限。截断修复与协议重试共用同一句话，避免两处措辞漂移。
 ///
-/// 措辞里刻意不提"追加"：`workspace.patch` 是整文件覆盖写、没有追加，让模型
-/// "再往目标文件写一段"会把前一段冲掉，而它还以为拼好了。
+/// 措辞现在可以（也必须）让模型用 `append` 分块：`workspace.patch` 支持
+/// `{"append":true}`，段与段之间不会互相覆盖，所以"再写一段"本身是安全动作。
+/// 但不能让模型往**目标文件**追加——目标文件同时是交付物，而带 `append` 的写
+/// 入刻意不算"交付物已就绪"（否则第一段落地就判任务完成，产物静默缺内容），
+/// 边追加边当交付物这条路因此是堵死的：追加到一半被截断时，工作区里留下一个
+/// 既内容不全、又永远不会被认作产物的半成品。分段文件只作中转，交付物必须由
+/// 最后那一步一次性产生——`parts` 合并（需要 DOCX 时再加一次转换，合并只写
+/// 纯文本，直接把 `.docx` 当合并目标只会得到改了名的文本）——模型才有"要么
+/// 完整、要么没有"这一个明确的目标状态。
 const String _truncatedOutputChunkingAdvice =
-    '这一次的输出太大：把内容拆成多次动作——每个分段各写一个**独立的分段文件**'
-    '（workspace.patch，每次 content 控制在 3000 字以内），'
-    '全部写完后再用一次 command.run 合并成目标文件（Markdown 转 DOCX 可把各分段'
-    '一起交给 pandoc），然后读回并交付；'
+    '这一次的输出太大：把内容拆成多次动作——先用 workspace.patch 写一个分段文件'
+    '（每次 content 控制在 3000 字以内），再用 append 把后续各段追加到同一个'
+    '分段文件，全部写完后用一次 workspace.patch 的 parts 合并成 Markdown 源文件，'
+    '需要 DOCX 时再用 pandoc 转换，然后读回并交付；'
     '不要反复往目标文件写，也不要把整份内容放进一次动作。';
 
+/// 输出预算的判定余量（取 1/N）。供应商的计数不会与请求预算精确对齐，所以
+/// "用满"必须按"基本用满"判定。实测（2026-09-30，SensoNova 6.8 flash-lite）：
+/// 请求上限 20480，模型输出 20331 token 后被切断，正文 JSON 没有收尾，供应商
+/// 既没给 `finish_reason=length`，计数也停在预算以下 149。
+const int _outputBudgetMarginDivisor = 20;
+
+/// 协议失败诊断里记录的正文开头长度。
+///
+/// 比事件存储的元数据上限（512 字）小一截，保证这里截出来的片段不会再被存储层
+/// 二次截断，读者能确定"省略号是这里加的"。
+const int _responseSnippetCharacters = 300;
+
 extension _WorkAgentLoopRetry on WorkAgentLoop {
+  WorkProgressObservation _toolProgressObservation(
+    AgentToolCall call,
+    WorkToolResult result,
+  ) {
+    final tool = call.name.wireName;
+    final inputHash = sha256.convert(utf8.encode(jsonEncode(call.arguments)));
+    final stableData = Map<String, dynamic>.from(result.data)
+      ..remove('elapsedMs')
+      ..remove('timestamp')
+      ..remove('durationMs');
+    final outputHash = sha256.convert(utf8.encode(jsonEncode(stableData)));
+    final fingerprint = '$tool:$inputHash:$outputHash';
+    if (!result.succeeded) {
+      return WorkProgressObservation(
+        kind: WorkProgressObservationKind.failure,
+        fingerprint: sha256
+            .convert(utf8.encode(
+              '$tool|${result.failureCode}|${result.status.name}|'
+              '${result.data['exitCode'] ?? ''}|${result.data['runStatus'] ?? ''}',
+            ))
+            .toString(),
+        summary: '$tool 执行失败（${result.failureCode ?? result.status.name}）。',
+        missing: '需要处理工具错误或改变输入条件。',
+        conditionFingerprint: inputHash.toString(),
+      );
+    }
+    final changed = result.data['changed'] != false &&
+        result.status != WorkToolResultStatus.alreadyCommitted;
+    final hasReadEvidence = (result.data['ok'] == true ||
+            call.name == AgentToolName.workspaceDocument) &&
+        result.data['rejected'] != true &&
+        (result.data['content'] != null ||
+            result.data['entries'] != null ||
+            result.data['matches'] != null ||
+            result.data['text'] != null) &&
+        (call.name == AgentToolName.workspaceRead ||
+            call.name == AgentToolName.workspaceSearch ||
+            call.name == AgentToolName.workspaceList ||
+            call.name == AgentToolName.workspaceDocument);
+    return WorkProgressObservation(
+      kind: changed &&
+              (hasReadEvidence ||
+                  call.name == AgentToolName.workspacePatch ||
+                  call.name == AgentToolName.workspaceRename ||
+                  call.name == AgentToolName.workspaceDelete)
+          ? WorkProgressObservationKind.progress
+          : WorkProgressObservationKind.noProgress,
+      fingerprint: fingerprint,
+      summary: '$tool 返回${hasReadEvidence ? '新的读取结果' : '执行结果'}。',
+      missing: '需要新的相关事实、文件变化或验收结果。',
+    );
+  }
+
+  Future<WorkAgentLoopResult?> _observeV2Progress(
+    _LoopState state,
+    WorkProgressObservation observation,
+  ) async {
+    if (!WorkTaskExecutionPolicy.isValidatedV2GroupTask(state.task)) {
+      return null;
+    }
+    final updated = WorkProgressGuard.observe(
+      _safeExistingMap(state.task.executionStateJson),
+      observation,
+      now: clock(),
+    );
+    state.task.executionStateJson = jsonEncode(updated.executionState);
+    if (!updated.stalled) return null;
+    final guard = WorkProgressGuard.snapshot(state.task);
+    final message = '任务停滞：${updated.reason}仍缺：${guard['missing'] ?? '新的有效证据'}';
+    state.failure = WorkFailure.fromSignalsForUserAction(
+      message,
+      completedContent: _completedContent(state),
+    );
+    state.task
+      ..status = AgentTaskStatus.paused
+      ..resumeRequired = true
+      ..lastError = message
+      ..pendingToolRequestJson = '';
+    WorkFailure.persistOnTask(state.task, state.failure!);
+    await _emit(
+      state,
+      WorkTaskEventKind.paused,
+      '任务停滞，等待新的处理信息。',
+      detail: message,
+      safeMetadata: {'reason': 'stalled'},
+    );
+    await _checkpoint(state);
+    return _result(state, WorkAgentLoopStatus.paused, message);
+  }
+
   Future<WorkToolResult> _callToolWithRetries(
     _LoopState state,
     AgentToolCall call, {
@@ -47,7 +156,11 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
           actionStarter: actionStarter,
         ),
       );
-      if (!last.retryable || last.committed || attempt == maxToolRetries) {
+      if (_decodeMap(state.task.executionStateJson)
+              .containsKey('uncertainAction') ||
+          !last.retryable ||
+          last.committed ||
+          attempt == maxToolRetries) {
         return last;
       }
       state.toolRetryCount++;
@@ -92,7 +205,7 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
           // a separate statusCode field; those must pause for reauthorization
           // instead of becoming an opaque internal failure.
           'message': failure.reason,
-          'failureCode': failure.type.name,
+          'failureCode': _modelFailureCode(error, failure),
           // WorkFailure extends the old retry helper to include all 5xx
           // responses and keeps the classification identical at the final
           // checkpoint.
@@ -107,12 +220,20 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
         return response;
       }
       state.modelRetryCount++;
+      final retryFailureCode = _retryFailureCode(response);
       await _emit(
         state,
         WorkTaskEventKind.toolOutput,
         '模型请求暂时失败，准备重试。',
         detail: '第 ${attempt + 1} 次重试',
-        safeMetadata: {'retry': attempt + 1, 'scope': 'model'},
+        safeMetadata: {
+          'retry': attempt + 1,
+          'scope': 'model',
+          // 成因必须随事件落盘：没有它，「链路断」「上游 5xx」「首字节停滞」
+          // 在面板上完全同形，事后只能去翻 ai_request_diagnostics_v1——那里记的
+          // 是网关口径（如 cancelled），与这里的分类并不同源。
+          if (retryFailureCode != null) 'failureCode': retryFailureCode,
+        },
       );
       await _delayFor(
         state,
@@ -121,6 +242,25 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
       );
     }
     return last ?? const {};
+  }
+
+  /// 异常分支写进响应体的稳定分类码。
+  ///
+  /// 客户端自己的两个时限有专属码（[WorkModelDeadlineException]），必须优先于
+  /// `failure.type.name`：后者只会给出笼统的 `retryableNetwork`，与上游 5xx
+  /// 同码——一旦被它覆盖，"是首字节停滞还是上游 5xx"就再也分不出来，事件里
+  /// 那条「准备重试」也就无法自证成因。
+  String _modelFailureCode(Object error, WorkFailure failure) =>
+      error is WorkModelDeadlineException ? error.code : failure.type.name;
+
+  /// 这次可重试失败的稳定分类，供事件自证成因。
+  ///
+  /// 适配器失败的响应体和 [WorkFailure.fromError] 的异常分支都会填
+  /// `failureCode`，所以这里只做归一化。空值不落盘：写一个空字符串会让
+  /// 「模型没给分类」和「分类为空」在事件里长得一样。
+  String? _retryFailureCode(Map<String, dynamic>? response) {
+    final code = response?['failureCode']?.toString().trim();
+    return code == null || code.isEmpty ? null : code;
   }
 
   Duration? _retryAfter(Map<String, dynamic>? response) {
@@ -148,30 +288,111 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
   ///
   /// `truncated` 只有 OpenAI 兼容解析器会给出（`finish_reason == length`）；
   /// 协议通道（Anthropic / Responses / Gemini）只回 usage，所以再比一次
-  /// "已输出 token 是否达到本次请求的 max_tokens"。协议解析器将来若映射
-  /// stop reason，这条兜底可以保留，代价只是极少数恰好用满预算的正常响应会多
-  /// 走一次修复。
+  /// "已输出 token 是否基本用满本次请求的 max_tokens"。余量是必需的：计数不会
+  /// 与预算精确对齐（见 [_outputBudgetMarginDivisor]），按"必须用满"判定会把
+  /// 真实截断判成格式错误，任务就在"原样重发同一个巨无霸动作"里空转到超时。
+  /// 代价只是极少数恰好用满预算的正常响应会多走一次修复，而解析成功时这个
+  /// 判定根本不生效。
   bool _responseHitsOutputLimit(Map<String, dynamic> response) {
     if (response['truncated'] == true) return true;
     final completion = response['completionTokens'];
     final requested = response['requestedMaxTokens'];
-    return completion is int &&
-        requested is int &&
-        requested > 0 &&
-        completion >= requested;
+    if (completion is! int || requested is! int || requested <= 0) return false;
+    return completion >= requested - requested ~/ _outputBudgetMarginDivisor;
   }
 
-  /// 截断之后的协议重试要给模型换策略，而不是原样重试同一个巨无霸动作。
+  /// 协议重试事件的标题。
   ///
-  /// 指令只加在这一次的提示里（渲染进公开任务检查点），不写回任务上下文：
-  /// 它是这次重试的指令，不是任务的持久状态，重试成功后即失效。**注意它必须经
-  /// `messages` 出站**——运行器只发 `request.messages`，`request.context` 不参与，
-  /// 将来若改成从 context 重建消息，这里要一起改，否则指令会静默丢掉。
-  Map<String, dynamic> _withTruncatedOutputHint(Map<String, dynamic> context) =>
-      <String, dynamic>{
-        ...context,
-        'truncatedOutputHint': _truncatedOutputChunkingAdvice,
-      };
+  /// 三种成因必须分开：输出被上限截断（该换策略分块写）、修复请求失败（链路
+  /// 问题，该重试）、模型写坏了 JSON（模型问题，该收窄要求或换模型）。合成一句
+  /// 「格式无效」会让用户按错误的类别处置——2026-09-30 的现场就是把上游停滞
+  /// 报成了格式错误。
+  String _protocolRetryTitle({
+    required bool truncated,
+    required bool repairRequestFailed,
+    bool salvaged = false,
+  }) {
+    if (salvaged) return '模型输出被上限截断，已抢救已生成部分，按续写指令重试。';
+    if (truncated) return '模型输出被上限截断，改用精简指令重试。';
+    if (repairRequestFailed) return '模型响应无法解析，修复请求失败，正在重试。';
+    return '模型返回格式无效，正在自动重试。';
+  }
+
+  /// 解析失败的原因与本次输出的规模/预算，随协议重试事件一起落盘。
+  ///
+  /// 只记解析器自己的固定文案、计数与有界的正文开头，**不记完整正文**：原始响应
+  /// 按设计不落盘，而这条事件是用户唯一看得到的失败线索——缺了它，"为什么格式
+  /// 无效"只能靠事后反推（2026-09-30 的截断漏判就是这么查出来的）。
+  ///
+  /// [repairResponseSnippet] 是修复后那次拿到的正文：`reason` 多数时候描述的正是
+  /// 它，而其余字段都属于首次决策响应，缺了它就会按错误的形状去推断。
+  Map<String, Object?> _protocolFailureDiagnostics(
+    Map<String, dynamic> response,
+    String reason, {
+    String repairResponseSnippet = '',
+  }) {
+    final body = _responseBody(response);
+    final completion = response['completionTokens'];
+    final requested = response['requestedMaxTokens'];
+    return <String, Object?>{
+      'reason': reason,
+      if (body != null) 'responseCharacters': body.length,
+      if (body != null && body.trim().isNotEmpty)
+        'responseSnippet': _boundedSnippet(body),
+      if (repairResponseSnippet.isNotEmpty)
+        'repairResponseSnippet': repairResponseSnippet,
+      if (completion is int) 'completionTokens': completion,
+      if (requested is int) 'requestedMaxTokens': requested,
+    };
+  }
+
+  /// 正文开头的有界片段，用来给"模型写到一半就停"这类失败定性。
+  ///
+  /// 计数与解析器文案都看不出 JSON 是在哪一步断的（public_update 之后断的，还是
+  /// 压根没进 JSON），而这一类反复出现、又只有形状能区分。事件存储落盘前会先做
+  /// 密钥/URL/本地路径脱敏，这里再截一次是为了让"这就是原始开头"的语义不依赖
+  /// 存储层更宽的上限。完整正文仍然不落盘。
+  String _boundedSnippet(String body) =>
+      body.length <= _responseSnippetCharacters
+          ? body
+          : '${body.substring(0, _responseSnippetCharacters)}…';
+
+  /// 本次响应正文。生产流式路径只放 `message`，供应商形状与测试放在 `content`；
+  /// 取值顺序与 [AgentDecisionParser.parseResponse] 保持一致。
+  ///
+  /// 空白 `content` 必须回退 `message`：解析器就是这么选的（`content` 为空白时看
+  /// `message`），这里若把空白 `content` 当正文，抢救就在一份解析器压根没读的文本
+  /// 上找前缀——两边看的不是同一份正文。
+  String? _responseBody(Map<String, dynamic> response) {
+    final content = response['content'];
+    if (content is String && content.trim().isNotEmpty) return content;
+    final message = response['message'];
+    return message is String && message.trim().isNotEmpty ? message : null;
+  }
+
+  /// 截断之后的续写指令：告诉模型哪一段已经落盘、从哪里继续、最后怎么合并。
+  ///
+  /// 不写回任务上下文：它是这次重试的指令，不是任务的持久状态，重试成功后即失效。
+  /// 与 [_truncatedOutputChunkingAdvice] 的差别只在"抢救是否成功"：没有任何内容
+  /// 落盘时，模型只能从头分块写，点名分段文件反而是个不存在的路径。
+  ///
+  /// [rescuedTail] 为空表示这是一条**恢复**出来的指令（[WorkAgentLoop.execute] 的
+  /// 落地判据）：那时运行态里没有模型原文，指令照样可用，只是少了结尾回显——
+  /// 模型手里已经有那个分段文件的路径，读一遍比把上千字原文落进检查点便宜。
+  String _continuationHint({
+    required String targetPath,
+    required String? rescuedPath,
+    required int rescuedCharacters,
+    String rescuedTail = '',
+  }) {
+    if (rescuedPath == null) return _truncatedOutputChunkingAdvice;
+    return '上一次输出被上限截断，已把已生成的部分抢救到分段文件 `$rescuedPath`'
+        '（$rescuedCharacters 字）。继续用 workspace.patch 的 append 往这个文件'
+        '补写余下内容（每次 content 控制在 3000 字以内），不要重写已写入的前缀；'
+        '全文写完后用一次 workspace.patch 的 parts 合并到 `$targetPath`，再读回'
+        '验证并交付。'
+        '${rescuedTail.isEmpty ? '' : '已写入内容的结尾是：「$rescuedTail」。'}';
+  }
 
   Future<String?> _repairModel(
     _LoopState state,
@@ -203,9 +424,22 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
       // copyWith 用 `??` 合并，传 null 不会清空，所以只在非截断时回灌原文。
       repair = repair.copyWith(malformedResponse: raw);
     }
-    final response = await model(repair);
-    if (_modelFailed(response)) return null;
-    return _responseContent(response);
+    // 修复请求与普通决策走同一条模型级重试：停滞、断链、供应商背压都是瞬态的，
+    // 直接冒泡会把它记成协议错误，还白吃掉一次协议重试额度。重试用完仍失败时才
+    // 如实报成"修复请求失败"，把成因交回给协议重试的措辞。
+    state.repairResponseSnippet = '';
+    final response = await _callModelWithRetries(state, repair);
+    if (_modelFailed(response)) {
+      throw AgentDecisionRepairFailure(
+        _safeText(response['message']?.toString() ?? '模型请求失败。'),
+      );
+    }
+    final repaired = _responseContent(response);
+    // 修复后这次解析的失败才是多数 reason 的来源，它的形状必须一起留下。
+    state.repairResponseSnippet = repaired == null || repaired.trim().isEmpty
+        ? ''
+        : _boundedSnippet(repaired);
+    return repaired;
   }
 
   /// Counts the model's next decision as a budgeted agent step before the
@@ -258,6 +492,24 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
   }) async {
     if (state.cancellation.isCancelled) return _interrupt(state);
     final task = state.task;
+    final discussion = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    ).state;
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+        discussion?.collaboration?.pendingInputIds.isNotEmpty == true) {
+      task
+        ..status = AgentTaskStatus.paused
+        ..resumeRequired = false
+        ..lastError = '已收到补充要求，正在安全检查点更新需求。';
+      await _checkpoint(state);
+      return _result(state, WorkAgentLoopStatus.paused, task.lastError);
+    }
+    if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+        task.status == AgentTaskStatus.paused &&
+        !task.resumeRequired) {
+      await _checkpoint(state);
+      return _result(state, WorkAgentLoopStatus.paused, task.lastError);
+    }
     final limit = _effectiveActionLimit(task);
     task.startedAt ??= clock();
     if (_budgetExceeded(state, includeActionLimit: includeActionLimit)) {
@@ -274,6 +526,7 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
   }) {
     final task = state.task;
     task.startedAt ??= clock();
+    if (!WorkTaskExecutionPolicy.enforcesCumulativeLimits(task)) return false;
     return (includeActionLimit &&
             task.actionCount >= _effectiveActionLimit(task)) ||
         _timeBudgetExceeded(task);
@@ -314,6 +567,7 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     _LoopState state,
     String message, {
     WorkFailure? failure,
+    String reason = 'userActionRequired',
   }) async {
     final task = state.task;
     final resolvedFailure = failure ??
@@ -333,7 +587,7 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
       WorkTaskEventKind.paused,
       '等待用户处理后继续。',
       detail: task.lastError,
-      safeMetadata: {'reason': 'userActionRequired'},
+      safeMetadata: {'reason': reason},
     );
     await _checkpoint(state);
     return _result(state, WorkAgentLoopStatus.paused, task.lastError);

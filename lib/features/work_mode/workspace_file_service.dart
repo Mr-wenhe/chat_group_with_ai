@@ -125,6 +125,31 @@ class WorkspaceFileService {
     int startByte = 0,
     int? byteLength,
     WorkspaceReadCancellation? cancellation,
+  }) =>
+      _readText(
+        rawPath,
+        startByte: startByte,
+        byteLength: byteLength,
+        cancellation: cancellation,
+        boundOutputCharacters: true,
+      );
+
+  /// 变更路径专用的整文读取（追加/合并用）。
+  ///
+  /// 与 [readTextRange] 唯一的区别是**不套用** [WorkspaceReadLimits.maxOutputCharacters]：
+  /// 那是面向模型的输出预算，用它判断"文件是否读完"会把所有超过 12000 字符的
+  /// 文件误判成读取被截断。字节上限（[WorkspaceReadLimits.maxReadBytes]）照旧生效，
+  /// 超上限时 [WorkspaceTextReadResult.truncated] 为 true，调用方必须拒绝而不是在
+  /// 残缺内容上拼接。
+  Future<WorkspaceTextReadResult> readTextForMutation(String rawPath) =>
+      _readText(rawPath, boundOutputCharacters: false);
+
+  Future<WorkspaceTextReadResult> _readText(
+    String rawPath, {
+    int startByte = 0,
+    int? byteLength,
+    WorkspaceReadCancellation? cancellation,
+    required bool boundOutputCharacters,
   }) async {
     if (startByte < 0 || (byteLength != null && byteLength < 0)) {
       throw const WorkspaceFileException(
@@ -211,7 +236,9 @@ class WorkspaceFileService {
       );
       text = _decodeStrict(expanded.bytes);
     }
-    final output = _truncateCharacters(text, limits.maxOutputCharacters);
+    final output = boundOutputCharacters
+        ? _truncateCharacters(text, limits.maxOutputCharacters)
+        : _CharacterLimit(text, false);
     return WorkspaceTextReadResult(
       path: resolved.path,
       text: output.text,

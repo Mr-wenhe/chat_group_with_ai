@@ -9,6 +9,28 @@ import 'package:chat_group/features/work_mode/agent_decision.dart';
 /// It receives the original response as data and may be invoked at most once.
 typedef AgentDecisionRepair = FutureOr<String?> Function(String rawResponse);
 
+/// 修复请求**本身**失败（超时、断链、达上限等）时由修复通道抛出。
+///
+/// 与"修复响应为空"分开是必需的：后者是模型又写了一次坏 JSON，前者是上游什么
+/// 都没给。用户按"模型不会写 JSON"处置前者只会换模型白折腾；按"链路停滞"处置
+/// 后者则会一直重试一份语法错误的响应。两者在事件与失败文案里必须可区分，所以
+/// 由解析器定义类型、由调用方给出已经过工作模式脱敏的原因文本。
+class AgentDecisionRepairFailure implements Exception {
+  /// 面向用户的原因，调用方负责脱敏与截断。
+  final String reason;
+
+  const AgentDecisionRepairFailure(this.reason);
+
+  @override
+  String toString() => 'AgentDecisionRepairFailure: $reason';
+}
+
+/// 修复通道抛出非 [AgentDecisionRepairFailure] 异常时的固定文案。
+///
+/// 未知异常的 `toString()` 带对象标识与耗时，既不适合给用户看，也无助于排查，
+/// 所以不透传。
+const String _unknownRepairFailureReason = '修复请求异常';
+
 class AgentDecisionParseResult {
   final AgentDecision? decision;
   final AgentDecisionParseFailure? failure;
@@ -16,18 +38,26 @@ class AgentDecisionParseResult {
   final bool usedReasoningContent;
   final bool repairAttempted;
 
+  /// 修复请求**自身**失败（超时/断链），而不是模型又写了一次坏 JSON。
+  ///
+  /// 调用方据此选择措辞：把上游停滞报成"模型返回格式无效"会让用户按错误的
+  /// 类别处置（换模型），而真正该做的是重试链路。
+  final bool repairRequestFailed;
+
   const AgentDecisionParseResult.success(
     this.decision, {
     this.usedReasoningContent = false,
     this.repairAttempted = false,
   })  : failure = null,
-        detail = null;
+        detail = null,
+        repairRequestFailed = false;
 
   const AgentDecisionParseResult.failure({
     required this.failure,
     required this.detail,
     this.usedReasoningContent = false,
     this.repairAttempted = false,
+    this.repairRequestFailed = false,
   }) : decision = null;
 
   bool get isSuccess => decision != null;
@@ -52,6 +82,7 @@ class AgentDecisionParseResult {
       detail: detail!,
       usedReasoningContent: usedReasoningContent ?? this.usedReasoningContent,
       repairAttempted: repairAttempted ?? this.repairAttempted,
+      repairRequestFailed: repairRequestFailed,
     );
   }
 }
@@ -123,20 +154,29 @@ class AgentDecisionParser {
     if (first.isSuccess || repair == null) return first;
 
     String? repaired;
+    String? repairFailureReason;
     try {
       // Exactly one call. The malformed response is an untrusted data value,
       // not a prompt fragment interpreted by this parser.
       repaired = await repair(raw);
+    } on AgentDecisionRepairFailure catch (failure) {
+      repairFailureReason = failure.reason;
     } on Object {
-      repaired = null;
+      repairFailureReason = _unknownRepairFailureReason;
     }
     if (repaired == null || repaired.trim().isEmpty) {
       final firstDetail = first.detail ?? '模型 JSON 校验失败。';
+      // 修复请求失败的措辞必须与"修复响应为空"分开：前者是上游没给任何东西
+      // （链路问题），后者是模型又写了一次坏 JSON（模型问题）。
+      final repairDetail = repairFailureReason == null
+          ? '修复响应为空'
+          : '修复请求失败（$repairFailureReason）';
       return AgentDecisionParseResult.failure(
         failure: AgentDecisionParseFailure.modelProtocol,
-        detail: '模型 JSON 修复失败：修复响应为空。首次校验失败：$firstDetail',
+        detail: '模型 JSON 修复失败：$repairDetail。首次校验失败：$firstDetail',
         usedReasoningContent: selected.usedReasoningContent,
         repairAttempted: true,
+        repairRequestFailed: repairFailureReason != null,
       );
     }
     return parseJson(repaired).withMetadata(
@@ -455,6 +495,7 @@ class AgentDecisionParser {
         return _validateRequiredFields(args, const {
           'path': _ArgumentType.string,
           'query': _ArgumentType.string,
+          'startChunk': _ArgumentType.integer,
         }, const {
           'path'
         });
@@ -575,6 +616,8 @@ class AgentDecisionParser {
       'path': _ArgumentType.string,
       'content': _ArgumentType.string,
       'overwrite': _ArgumentType.boolean,
+      'append': _ArgumentType.boolean,
+      'parts': _ArgumentType.stringList,
       'expectedSha256': _ArgumentType.string,
       'expectedFragment': _ArgumentType.string,
       'replacement': _ArgumentType.string,
@@ -584,17 +627,57 @@ class AgentDecisionParser {
     if (path is! String || path.trim().isEmpty) {
       return 'tool.arguments.path 必须是非空字符串。';
     }
-    const patchKeys = {
-      'expectedSha256',
-      'expectedFragment',
-      'replacement',
-    };
-    final hasExactPatch = args.keys.any(patchKeys.contains);
-    if (!hasExactPatch && args['content'] is! String) {
+    final hasExactPatch = args.keys.any(_exactPatchArgumentKeys.contains);
+    final append = args['append'];
+    // `_validateFields` 已保证 parts（若存在）的元素全是字符串；这里必须给出静态
+    // 类型，否则 `parts.any(...)` 是 dynamic 调用，闭包会被推断成
+    // `(dynamic) => dynamic`，运行时报 "is not a subtype of (dynamic) => bool"。
+    final parts =
+        args['parts'] == null ? null : List<String>.from(args['parts'] as List);
+    // 四种形态互斥：整文件写 / 精确补丁 / 追加 / 合并。混用会被执行层按不同
+    // 语义解析，只有在这里拒绝才能保证模型看到确切原因。
+    if (hasExactPatch && (append == true || parts != null)) {
+      return 'workspace.patch 的精确补丁不能与 append 或 parts 同时使用。';
+    }
+    if (parts != null) {
+      if (args['content'] != null || append != null) {
+        return 'workspace.patch 的 parts 不能与 content 或 append 同时使用。';
+      }
+      if (parts.isEmpty) {
+        return 'workspace.patch.parts 必须是非空字符串数组。';
+      }
+      if (parts.any((part) => part.trim().isEmpty)) {
+        return 'workspace.patch.parts 只能包含非空字符串。';
+      }
+      return null;
+    }
+    if (append == true) {
+      final content = args['content'];
+      if (content is! String) {
+        return 'workspace.patch 的 append 必须与 content 一起使用。';
+      }
+      // 空白追加是"什么都没写"。放它过去会落到工具侧的"未检测到实际修改"分支：
+      // 模型收到的是"内容没有实际变化，请补充修改点"，与真因（这次追加本来就是
+      // 空的）对不上，它于是去改内容而不是补上这一段。
+      if (content.trim().isEmpty) {
+        return 'workspace.patch 的追加内容不能为空。';
+      }
+      return null;
+    }
+    return _validateExactPatchShape(args, args['content'] as String?);
+  }
+
+  /// 校验「整文件写 / 精确补丁」这两支的形状。
+  ///
+  /// 与 append / parts 的互斥判定已由调用方完成；这里只判凭现有参数能否构成
+  /// 两种形态之一，并把各自缺失或残缺的原因原样交回。
+  String? _validateExactPatchShape(Map<String, dynamic> args, String? content) {
+    final hasExactPatch = args.keys.any(_exactPatchArgumentKeys.contains);
+    if (!hasExactPatch && content == null) {
       return 'workspace.patch 必须提供 content 或完整精确补丁字段。';
     }
     if (hasExactPatch) {
-      if (args['content'] != null ||
+      if (content != null ||
           args['expectedSha256'] is! String ||
           args['expectedFragment'] is! String ||
           args['replacement'] is! String) {
@@ -724,6 +807,16 @@ class AgentDecisionParser {
     ).hasMatch(value);
   }
 }
+
+/// `workspace.patch` 精确补丁的三个键。
+///
+/// 「精确补丁是否在场」与「精确补丁是否完整」分别由主校验与
+/// [_validateExactPatchShape] 判定，两处必须认同一个键集合。
+const Set<String> _exactPatchArgumentKeys = {
+  'expectedSha256',
+  'expectedFragment',
+  'replacement',
+};
 
 enum _ArgumentType { string, integer, boolean, stringList }
 
