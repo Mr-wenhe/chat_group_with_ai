@@ -124,7 +124,8 @@ jobs:
           channel: "stable"
           cache: true
       - run: flutter config --enable-windows-desktop
-      - run: flutter pub get
+      # 与 CI 同源：发布产物必须跑在测试过的那套依赖版本上，锁文件不匹配就失败
+      - run: flutter pub get --enforce-lockfile
       - name: 写入版本号到 pubspec.yaml
         shell: bash
         env:
@@ -176,7 +177,7 @@ jobs:
           flutter-version: "3.27.1"
           channel: "stable"
           cache: true
-      - run: flutter pub get
+      - run: flutter pub get --enforce-lockfile
       - name: Build verification APK (debug-signed, not publishable)
         env:
           ALLOW_DEBUG_SIGNING: "true"

@@ -45,7 +45,9 @@ jobs:
           cache: true
 
       - name: 安装依赖
-        run: flutter pub get
+        # 必须严格按 pubspec.lock 解析：锁文件不满足时直接失败，而不是静默换一套
+        # 版本继续跑——那样 CI 与开发机就会各跑各的依赖版本。
+        run: flutter pub get --enforce-lockfile
 
       - name: 生成代码 (Hive 适配器 / Riverpod provider / JSON 序列化)
         # 项目所有 *.g.dart 均为自动生成，analyze 与 test 依赖它们，必须先生成
