@@ -799,14 +799,17 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
     );
   }
 
-  /// 与 [_targetAvatar] 同源的 IP 形象解析。用户目标没有 IP 形象，
-  /// `characterAvatarImage` 对合成的 `_userProfileCharacter` 天然返回 null。
+  /// 与 [_targetAvatar] 同源的 IP 形象解析。
+  ///
+  /// 用户目标走 [DatabaseService.userAvatarImage]：合成的 `_userProfileCharacter`
+  /// 没有 IP 形象字段，`characterAvatarImage` 对它恒返回 null，会让「我」的头像
+  /// 永远停在文字上。
   ImageProvider? _targetAvatarImage(
     RelationshipState relationship,
     Map<String, AICharacter> characters,
   ) {
     if (relationship.targetType == RelationshipTargetType.user) {
-      return _db.characterAvatarImage(_userProfileCharacter);
+      return _db.userAvatarImage(_userProfile);
     }
     return _db.characterAvatarImage(characters[relationship.targetId]);
   }

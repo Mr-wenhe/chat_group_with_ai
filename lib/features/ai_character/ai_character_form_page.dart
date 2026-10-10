@@ -15,6 +15,7 @@ import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:chat_group/features/agentic/skill_download_service.dart';
 import 'package:chat_group/features/agentic/widgets/character_skill_editor.dart';
 import 'package:chat_group/features/ai_character/widgets/ip_portrait_panel.dart';
+import 'package:chat_group/features/ai_character/widgets/ip_portrait_source.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'providers/ai_character_providers.dart';
 import '../settings/providers/api_config_providers.dart';
@@ -398,9 +399,9 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
                   const SizedBox(height: 14),
                   IpPortraitPanel(
                     key: _ipPortraitPanelKey,
-                    draftBuilder: _draftCharacter,
+                    draftBuilder: () =>
+                        IpPortraitSource.fromCharacter(_draftCharacter()),
                     missingFields: _missingPortraitFields,
-                    characterId: _existingCharacterId,
                     initialRelPath: _workingIpRelPath,
                     initialAvatarFromIp: _avatarFromIpImage,
                     initialStyle: _workingIpStyle,
@@ -857,7 +858,7 @@ class _AICharacterFormPageState extends ConsumerState<AICharacterFormPage> {
   ///
   /// 只看与出图有关的三项。API 配置**不拦**：它服务的是聊天补全，生图走独立的
   /// 图像服务配置（面板自己查 `imageServiceConfig`）；为出图强制先配聊天是反
-  /// 直觉的。年龄 / 性格标签 / 人设也不拦 —— [buildIpImagePrompt] 对三者都有
+  /// 直觉的。年龄 / 性格标签 / 人设也不拦 —— [buildIpPortraitPrompt] 对三者都有
   /// 降级，缺了照样拼得出可用 prompt。
   ///
   /// 性别仅新建时拦：编辑态性别被锁死（下面的下拉 `onChanged` 为 null），且

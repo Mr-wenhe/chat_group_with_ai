@@ -1,6 +1,8 @@
 import 'package:chat_group/core/database/database_service.dart';
+import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/user_profile.dart';
+import 'package:chat_group/features/ai_character/widgets/ip_portrait_panel.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/features/settings/user_profile_page.dart';
 import 'package:flutter/material.dart';
@@ -32,6 +34,17 @@ void main() {
         overrides: [databaseServiceProvider.overrideWithValue(db)],
         child: MaterialApp(home: home),
       );
+
+  /// 打开「性别」下拉并选中 [label]。走真实交互路径：下拉的 onChanged 会
+  /// 调 `setState`，门禁提示行才随之刷新 —— 直接改字段不会触发重建。
+  Future<void> selectGender(WidgetTester tester, String label) async {
+    final dropdown = find.byType(DropdownButtonFormField<CharacterGender>);
+    await tester.ensureVisible(dropdown);
+    await tester.tap(dropdown);
+    await tester.pump(const Duration(milliseconds: 300));
+    await tester.tap(find.text(label).last);
+    await tester.pump(const Duration(milliseconds: 300));
+  }
 
   group('UserProfilePage rendering', () {
     testWidgets('renders with default display name and privacy notice',
@@ -189,6 +202,173 @@ void main() {
       expect(saved.displayName, '新名');
       expect(saved.createdAt, originalCreatedAt);
       expect(saved.updatedAt.isAfter(originalCreatedAt), isTrue);
+    });
+  });
+
+  group('我的资料 IP 形象', () {
+    testWidgets('性别下拉出现在「个人详情」，选择后随 doSave 落库', (tester) async {
+      final pageKey = GlobalKey<UserProfilePageState>();
+      await tester.pumpWidget(app(UserProfilePage(key: pageKey)));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // 组标题与 `IpPortraitPanel` 自带的标题各一处，故 findsWidgets。
+      expect(find.text('IP 形象'), findsWidgets);
+      expect(
+        find.byType(DropdownButtonFormField<CharacterGender>),
+        findsOneWidget,
+      );
+
+      await selectGender(tester, '男');
+
+      expect(pageKey.currentState!.selectedGender, CharacterGender.male);
+      final result = await tester
+          .runAsync(() => pageKey.currentState!.doSave(skipToast: true));
+      expect(result, isTrue);
+      expect(db.userProfileBox.get('me')!.gender, CharacterGender.male);
+    });
+
+    testWidgets('缺性别时禁用生成并点名缺什么', (tester) async {
+      final pageKey = GlobalKey<UserProfilePageState>();
+      await tester.pumpWidget(app(UserProfilePage(key: pageKey)));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // 默认显示名「我」已填，只缺性别。
+      expect(find.text('请先填写：性别'), findsOneWidget);
+      expect(
+        tester
+            .widget<FilledButton>(
+                find.byKey(const ValueKey('ip-portrait-generate')))
+            .onPressed,
+        isNull,
+      );
+
+      // 把名字也清空，提示必须同时点名两项；走真实输入路径，
+      // 这样 onChanged 的 setState 会把提示行一起刷新。
+      await tester.ensureVisible(find.byType(TextFormField).first);
+      await tester.enterText(find.byType(TextFormField).first, '   ');
+      await tester.pump(const Duration(milliseconds: 100));
+
+      expect(find.text('请先填写：名字、性别'), findsOneWidget);
+      expect(
+        tester
+            .widget<FilledButton>(
+                find.byKey(const ValueKey('ip-portrait-generate')))
+            .onPressed,
+        isNull,
+      );
+    });
+
+    testWidgets('门禁填齐后生成按钮启用，提示换回参考说明', (tester) async {
+      final pageKey = GlobalKey<UserProfilePageState>();
+      await tester.pumpWidget(app(UserProfilePage(key: pageKey)));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      // 只断门禁文案与按钮状态，绝不点「生成」—— 那会走 AppToast 与生图网络调用。
+      await selectGender(tester, '女');
+
+      expect(
+        tester
+            .widget<FilledButton>(
+                find.byKey(const ValueKey('ip-portrait-generate')))
+            .onPressed,
+        isNotNull,
+      );
+      expect(
+        find.text('自动从性别、简介、性格标签、兴趣、重要背景提炼长相'),
+        findsOneWidget,
+      );
+    });
+
+    testWidgets('「设为头像」开关只翻 bool，不动形象路径', (tester) async {
+      await tester.runAsync(
+        () => db.userProfileBox.put(
+          'me',
+          UserProfile(
+            displayName: '小明',
+            preferredAddress: '',
+            avatar: '',
+            bio: '',
+            ipImageRelPath: 'me/ip.png',
+            avatarFromIpImage: false,
+          ),
+        ),
+      );
+
+      final pageKey = GlobalKey<UserProfilePageState>();
+      await tester.pumpWidget(app(UserProfilePage(key: pageKey)));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final state = pageKey.currentState!;
+      // 已有形象路径 + 开关关闭：按钮才出现，此时才谈得上「生成 ≠ 设为头像」。
+      expect(state.workingIpRelPath, 'me/ip.png');
+      expect(state.avatarFromIpImage, isFalse);
+      expect(find.text('设为头像'), findsOneWidget);
+
+      final toggle = find.byKey(const ValueKey('ip-portrait-toggle-avatar'));
+      await tester.ensureVisible(toggle);
+      await tester.tap(toggle);
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(state.avatarFromIpImage, isTrue);
+      expect(state.workingIpRelPath, 'me/ip.png');
+      expect(find.text('取消头像'), findsOneWidget);
+
+      await tester.ensureVisible(toggle);
+      await tester.tap(toggle);
+      await tester.pump(const Duration(milliseconds: 300));
+
+      expect(state.avatarFromIpImage, isFalse);
+      expect(state.workingIpRelPath, 'me/ip.png');
+    });
+
+    testWidgets('面板滚出视口后不被卸载，生成状态得以存活', (tester) async {
+      // 缩到小窗把面板甩出视口，才真的考验「卸载」。
+      tester.view.physicalSize = const Size(320, 640);
+      tester.view.devicePixelRatio = 1;
+      addTearDown(tester.view.resetPhysicalSize);
+      addTearDown(tester.view.resetDevicePixelRatio);
+
+      final pageKey = GlobalKey<UserProfilePageState>();
+      await tester.pumpWidget(app(UserProfilePage(key: pageKey)));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final before =
+          tester.state<IpPortraitPanelState>(find.byType(IpPortraitPanel));
+
+      await tester.drag(
+          find.byType(SingleChildScrollView).first, const Offset(0, -4000));
+      await tester.pumpAndSettle();
+      await tester.drag(
+          find.byType(SingleChildScrollView).first, const Offset(0, 4000));
+      await tester.pumpAndSettle();
+
+      final after =
+          tester.state<IpPortraitPanelState>(find.byType(IpPortraitPanel));
+      expect(identical(before, after), isTrue);
+    });
+
+    testWidgets('doSave 带上 IP 形象与外观改写配置', (tester) async {
+      final pageKey = GlobalKey<UserProfilePageState>();
+      await tester.pumpWidget(app(UserProfilePage(key: pageKey)));
+      await tester.pump(const Duration(milliseconds: 300));
+
+      final state = pageKey.currentState!;
+      // 直接写字段即可：doSave 读的是这些字段，它自己会 setState。
+      state.selectedGender = CharacterGender.male;
+      state.selectedRewriteConfigId = 'cfg-rewrite';
+      state.workingIpRelPath = 'me/ip.png';
+      state.avatarFromIpImage = true;
+      state.workingIpStyle = 'watercolor';
+
+      final result = await tester.runAsync(() => state.doSave(skipToast: true));
+      expect(result, isTrue);
+
+      final saved = db.userProfileBox.get('me')!;
+      expect(saved.gender, CharacterGender.male);
+      expect(saved.apiConfigId, 'cfg-rewrite');
+      expect(saved.ipImageRelPath, 'me/ip.png');
+      expect(saved.avatarFromIpImage, isTrue);
+      expect(saved.ipImageStyle, 'watercolor');
     });
   });
 }

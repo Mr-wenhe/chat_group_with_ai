@@ -402,6 +402,23 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
       .read(databaseServiceProvider)
       .characterAvatarImage(character);
 
+  /// 解析「我」的 IP 形象图，用户气泡右侧头像用。null → 文本头像。
+  ///
+  /// 与 [_characterAvatarImage] 同源同语义，只是主体换成 `UserProfile`。
+  ImageProvider? _userAvatarImage() {
+    final db = ref.read(databaseServiceProvider);
+    return db.userAvatarImage(db.userProfileBox.get('me'));
+  }
+
+  /// 「我」的文本头像（`UserProfile.avatar`，一般是 emoji）。
+  ///
+  /// 只回原文，不做首字兜底 —— 兜底在气泡里和 AI 侧共用同一条回落
+  /// （`_avatarTextFrom`），两边分开判就会出现「资料页 emoji、气泡首字」。
+  String _userAvatarText() {
+    final db = ref.read(databaseServiceProvider);
+    return db.userProfileBox.get('me')?.avatar ?? '';
+  }
+
   /// 自动发言状态条的展示文案。
   ///
   /// 工作模式与总开关的优先级高于具体运行状态——它们是"为什么不发言"的根因。

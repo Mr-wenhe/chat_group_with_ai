@@ -22,6 +22,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:open_filex/open_filex.dart';
 
+part 'chat_message_media.dart';
 part 'progress_log_bubble.dart';
 
 /// 头像占位字：取昵称的第一个字形。
@@ -32,6 +33,16 @@ String _firstDisplayGlyph(String name) {
   final trimmed = name.trim();
   if (trimmed.isEmpty) return '?';
   return String.fromCharCode(trimmed.runes.first);
+}
+
+/// 头像的文本形态：`avatar` 字段（emoji / 单字）优先，空则取名字首字。
+///
+/// AI 与「我」两侧**必须**共用这一条回落，否则资料页显示 emoji、
+/// 群里气泡却只显示首字，同一个人两个样。
+String _avatarTextFrom(String? avatar, String? name) {
+  final glyph = avatar?.trim() ?? '';
+  if (glyph.isNotEmpty) return glyph;
+  return _firstDisplayGlyph(name ?? '');
 }
 
 /// A single chat message bubble — user or AI.
@@ -67,6 +78,17 @@ class ChatMessageBubble extends StatelessWidget {
   /// 纯 data/callback 契约的一部分：本类不碰 DatabaseService。
   final ImageProvider? senderAvatarImage;
 
+  /// 「我」的已解析 IP 形象图；null → 回落文本头像。
+  ///
+  /// 只有用户消息使用。头像在气泡**右侧**（微信/企微风格），与 AI 的左侧相对。
+  final ImageProvider? userAvatarImage;
+
+  /// 「我」的文本头像（`UserProfile.avatar`，一般是 emoji）。
+  ///
+  /// 与 AI 侧的 `sender.avatar` 对位：图缺失时先取它，再退回名字首字。
+  /// 漏传就会退回首字，于是资料页显示 emoji、气泡里显示「我」。
+  final String userAvatarText;
+
   /// 群里的其他真人成员昵称，仅 `Message.senderTypeMember` 的消息传入。
   ///
   /// 真人没有 [AICharacter]，不能塞进 [sender] 冒充角色——那会让
@@ -96,6 +118,8 @@ class ChatMessageBubble extends StatelessWidget {
     this.onTaskAction,
     this.runStartedAtMs,
     this.senderAvatarImage,
+    this.userAvatarImage,
+    this.userAvatarText = '',
   });
 
   @override
@@ -103,15 +127,15 @@ class ChatMessageBubble extends StatelessWidget {
     final isUser = message.senderType == 'user';
     // 昵称有两种来源：AI 角色走 sender，真人成员走 memberName。
     final displayName = sender?.name ?? memberName;
+    // 头像与昵称分开判：用户消息**有头像无昵称**（自己的气泡不需要署名），
+    // AI/成员消息两者都有。用户头像落在气泡右侧，见下方 `if (isUser)` 分支。
     final hasSender = !isUser && displayName != null;
     // 角色按 id 取稳定配色；真人成员没有角色配色，统一用主题色
     // （微信里其他人的昵称也是同一个颜色，不做人各一色）。
     final accent = sender != null ? senderColor(sender!) : cs.primary;
     final avatarText = hasSender
-        ? (sender != null && sender!.avatar.isNotEmpty
-            ? sender!.avatar
-            : _firstDisplayGlyph(displayName))
-        : '';
+        ? _avatarTextFrom(sender?.avatar, displayName)
+        : (isUser ? _avatarTextFrom(userAvatarText, ownerName) : '');
     final isSystem = message.senderType == 'system';
     final taskAction = message.senderType == 'ai' || isSystem
         ? WorkTaskUserAction.fromMessageId(message.id)
@@ -153,18 +177,11 @@ class ChatMessageBubble extends StatelessWidget {
               InkWell(
                 onTap: onSenderTap,
                 borderRadius: BorderRadius.circular(4),
-                child: CharacterAvatar(
+                child: _buildAvatar(
                   fallbackText: avatarText,
-                  size: 40,
                   // 真人在本机没有档案，只有 AI 角色才有 IP 形象图。
                   image: sender == null ? null : senderAvatarImage,
-                  shape: BoxShape.rectangle,
-                  borderRadius: const BorderRadius.all(Radius.circular(4)),
-                  background: accent.withValues(alpha: 0.14),
-                  textStyle: TextStyle(
-                      fontSize: 14,
-                      fontWeight: FontWeight.w600,
-                      color: accent),
+                  accent: accent,
                 ),
               ),
               const SizedBox(width: 8),
@@ -217,7 +234,13 @@ class ChatMessageBubble extends StatelessWidget {
                             quotedSenderName,
                             isUser,
                           ),
-                        _buildMediaContent(context, message, cs, isUser),
+                        // 媒体渲染见 `chat_message_media.dart`：图片网格 / 视频 /
+                        // 文件卡片自成一块，与气泡排版分开。
+                        ChatMessageMedia(
+                          message: message,
+                          isUser: isUser,
+                          cs: cs,
+                        ),
                         _buildContent(context, message),
                         if (taskAction != null)
                           _buildTaskAction(context, taskAction),
@@ -238,10 +261,35 @@ class ChatMessageBubble extends StatelessWidget {
                 ],
               ),
             ),
-            if (isUser) const SizedBox(width: 8),
+            if (isUser) ...[
+              const SizedBox(width: 8),
+              _buildAvatar(
+                fallbackText: avatarText,
+                image: userAvatarImage,
+                accent: cs.primary,
+              ),
+            ],
           ],
         ),
       ),
+    );
+  }
+
+  /// 气泡两侧共用的头像块。AI 在左、用户在右，尺寸与圆角保持一致。
+  Widget _buildAvatar({
+    required String fallbackText,
+    required ImageProvider? image,
+    required Color accent,
+  }) {
+    return CharacterAvatar(
+      fallbackText: fallbackText,
+      size: 40,
+      image: image,
+      shape: BoxShape.rectangle,
+      borderRadius: const BorderRadius.all(Radius.circular(4)),
+      background: accent.withValues(alpha: 0.14),
+      textStyle: TextStyle(
+          fontSize: 14, fontWeight: FontWeight.w600, color: accent),
     );
   }
 
@@ -315,252 +363,6 @@ class ChatMessageBubble extends StatelessWidget {
         ),
       ),
     );
-  }
-
-  /// Media rendering inside the bubble: image grid + video player, stacked above text.
-  Widget _buildMediaContent(
-      BuildContext context, Message message, ColorScheme cs, bool isUser) {
-    final media = message.media ?? [];
-    if (media.isEmpty) return const SizedBox.shrink();
-    return Padding(
-      padding: const EdgeInsets.only(bottom: 8),
-      child: Wrap(
-        spacing: 6,
-        runSpacing: 6,
-        alignment: isUser ? WrapAlignment.end : WrapAlignment.start,
-        children: media.map((att) {
-          if (att.type == 'image') {
-            return _buildImageThumb(context, att, cs);
-          }
-          if (att.type == 'video') {
-            return VideoBubble(localPath: att.localPath, isUser: isUser);
-          }
-          return _buildFileAttachment(context, att, cs, isUser);
-        }).toList(),
-      ),
-    );
-  }
-
-  /// Image thumbnail — tap to open fullscreen preview with InteractiveViewer.
-  Widget _buildImageThumb(
-      BuildContext context, MediaAttachment att, ColorScheme cs) {
-    final data = uiAttachmentDataUriCache.decode(att.localPath);
-    return GestureDetector(
-      onTap: () => unawaited(_openImageFullscreen(context, att.localPath)),
-      onLongPress: () => _showAttachmentActions(context, att),
-      onSecondaryTap: () => _showAttachmentActions(context, att),
-      child: ClipRRect(
-        borderRadius: BorderRadius.circular(10),
-        child: data == null
-            ? Image.file(
-                File(att.localPath),
-                width: 140,
-                height: 140,
-                fit: BoxFit.cover,
-              )
-            : Image.memory(
-                data.bytes,
-                width: 140,
-                height: 140,
-                fit: BoxFit.cover,
-              ),
-      ),
-    );
-  }
-
-  /// Fullscreen image preview: black background + InteractiveViewer for pinch-zoom.
-  Future<void> _openImageFullscreen(BuildContext context, String path) async {
-    if (uiAttachmentDataUriCache.decode(path) == null) {
-      final inspected = await inspectAttachmentPath(path);
-      if (!inspected.success) {
-        if (context.mounted) {
-          AppToast.show(context, inspected.message,
-              icon: Icons.error_outline_rounded);
-        }
-        return;
-      }
-    }
-    if (!context.mounted) return;
-    final data = uiAttachmentDataUriCache.decode(path);
-    await showDialog(
-      context: context,
-      builder: (_) => Dialog(
-        backgroundColor: Colors.black,
-        insetPadding: const EdgeInsets.all(0),
-        child: Stack(
-          children: [
-            InteractiveViewer(
-              child: data == null
-                  ? Image.file(File(path))
-                  : Image.memory(data.bytes),
-            ),
-            Positioned(
-              top: 16,
-              right: 16,
-              child: IconButton(
-                icon: const Icon(Icons.close_rounded, color: Colors.white),
-                onPressed: () => Navigator.of(context).pop(),
-                tooltip: '关闭',
-              ),
-            ),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Widget _buildFileAttachment(
-    BuildContext context,
-    MediaAttachment att,
-    ColorScheme cs,
-    bool isUser,
-  ) {
-    final textColor = WeComChatTokens.text(context);
-    final subtleColor = textColor.withValues(alpha: 0.62);
-    final fillColor = isUser
-        ? WeComChatTokens.lightText.withValues(alpha: 0.07)
-        : WeComChatTokens.chatBackground(context).withValues(alpha: 0.7);
-    return InkWell(
-      onTap: () => _openAttachment(context, att),
-      onLongPress: () => _showAttachmentActions(context, att),
-      onSecondaryTap: () => _showAttachmentActions(context, att),
-      borderRadius: BorderRadius.circular(8),
-      child: Container(
-        width: 240,
-        padding: const EdgeInsets.all(10),
-        decoration: BoxDecoration(
-          color: fillColor,
-          borderRadius: BorderRadius.circular(8),
-        ),
-        child: Row(
-          children: [
-            Icon(fileIconFor(att), size: 30, color: subtleColor),
-            const SizedBox(width: 10),
-            Expanded(
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                mainAxisSize: MainAxisSize.min,
-                children: [
-                  Text(
-                    att.fileName ?? fileNameFromPath(att.localPath),
-                    maxLines: 2,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(
-                      fontSize: 13,
-                      fontWeight: FontWeight.w600,
-                      color: textColor,
-                    ),
-                  ),
-                  const SizedBox(height: 2),
-                  Text(
-                    '${formatAttachmentSize(att.fileSize)} · '
-                    '${DocumentUnderstandingService.statusLabel(att)}',
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                    style: TextStyle(fontSize: 11, color: subtleColor),
-                  ),
-                ],
-              ),
-            ),
-            const SizedBox(width: 8),
-            Icon(Icons.open_in_new_rounded, size: 18, color: subtleColor),
-          ],
-        ),
-      ),
-    );
-  }
-
-  Future<void> _openAttachment(
-      BuildContext context, MediaAttachment att) async {
-    try {
-      if (isAttachmentDataUri(att.localPath)) {
-        final opened = await openDataAttachment(
-          att.localPath,
-          att.fileName ?? fileNameFromPath(att.localPath),
-        );
-        if (!opened && context.mounted) {
-          AppToast.show(context, '浏览器未能打开附件',
-              icon: Icons.error_outline_rounded);
-        }
-        return;
-      }
-      final inspected = await inspectAttachmentPath(att.localPath);
-      if (!inspected.success) {
-        if (context.mounted) {
-          AppToast.show(context, inspected.message,
-              icon: Icons.error_outline_rounded);
-        }
-        return;
-      }
-      final result = await OpenFilex.open(att.localPath, type: att.mimeType);
-      if (result.type.name != 'done' && context.mounted) {
-        AppToast.show(context, '打开失败：${result.message}',
-            icon: Icons.error_outline_rounded);
-      }
-    } catch (e) {
-      if (context.mounted) {
-        AppToast.show(context, '打开失败：$e', icon: Icons.error_outline_rounded);
-      }
-    }
-  }
-
-  Future<void> _showAttachmentActions(
-      BuildContext context, MediaAttachment att) async {
-    final action = await showModalBottomSheet<String>(
-      context: context,
-      builder: (sheetContext) => SafeArea(
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            ListTile(
-              leading: const Icon(Icons.open_in_new_rounded),
-              title: const Text('打开文件'),
-              onTap: () => Navigator.of(sheetContext).pop('open'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.folder_open_rounded),
-              title: const Text('在 Finder/资源管理器中显示'),
-              onTap: () => Navigator.of(sheetContext).pop('reveal'),
-            ),
-            ListTile(
-              leading: const Icon(Icons.copy_rounded),
-              title: const Text('复制绝对路径'),
-              onTap: () => Navigator.of(sheetContext).pop('copy'),
-            ),
-          ],
-        ),
-      ),
-    );
-    if (!context.mounted || action == null) return;
-    switch (action) {
-      case 'open':
-        await _openAttachment(context, att);
-      case 'reveal':
-        final result = await revealAttachmentPath(att.localPath);
-        if (context.mounted && !result.success) {
-          AppToast.show(context, result.message,
-              icon: Icons.error_outline_rounded);
-        }
-      case 'copy':
-        final result = await inspectAttachmentPath(att.localPath);
-        if (!context.mounted) return;
-        if (!result.success || result.absolutePath == null) {
-          AppToast.show(context, result.message,
-              icon: Icons.error_outline_rounded);
-          return;
-        }
-        try {
-          await Clipboard.setData(ClipboardData(text: result.absolutePath!));
-          if (context.mounted) {
-            AppToast.show(context, '已复制附件绝对路径', icon: Icons.check_rounded);
-          }
-        } on Object {
-          if (context.mounted) {
-            AppToast.show(context, '系统未能复制附件路径，请稍后重试。',
-                icon: Icons.error_outline_rounded);
-          }
-        }
-    }
   }
 
   Widget _buildContent(BuildContext context, Message message) {

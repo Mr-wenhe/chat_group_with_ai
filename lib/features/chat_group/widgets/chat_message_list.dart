@@ -42,6 +42,16 @@ class ChatMessageList extends StatelessWidget {
   /// 按发送者解析 IP 形象图；返回 null 则气泡回落文本头像。
   /// 与 [senderColor] 同构的纯回调，本类不碰 DatabaseService。
   final ImageProvider? Function(AICharacter? sender) avatarImageOf;
+
+  /// 「我」的 IP 形象图（`UserProfile.avatarFromIpImage` 门控后的结果）；
+  /// null → 气泡回落文本头像。可选参数，旧调用（无用户头像）保持不变。
+  final ImageProvider? userAvatarImage;
+
+  /// 「我」的文本头像（`UserProfile.avatar`，一般是 emoji）。
+  ///
+  /// 图缺失时先取它再退回名字首字，与 AI 侧 `sender.avatar` 同一条回落。
+  /// 留空 = 直接用名字首字（旧调用的行为）。
+  final String userAvatarText;
   final void Function(Message message, AICharacter? sender) onLongPress;
   final void Function(AICharacter sender) onSenderTap;
   final void Function(AICharacter sender) onMentionSender;
@@ -77,6 +87,8 @@ class ChatMessageList extends StatelessWidget {
     required this.senderColor,
     required this.senderNameById,
     required this.avatarImageOf,
+    this.userAvatarImage,
+    this.userAvatarText = '',
     required this.onLongPress,
     required this.onSenderTap,
     required this.onMentionSender,
@@ -147,6 +159,8 @@ class ChatMessageList extends StatelessWidget {
                 onLongPress: () => onLongPress(message, actionSender),
                 senderColor: senderColor,
                 senderAvatarImage: avatarImageOf(sender),
+                userAvatarImage: userAvatarImage,
+                userAvatarText: userAvatarText,
                 onSenderTap: actionSender == null
                     ? null
                     : () => onSenderTap(actionSender),

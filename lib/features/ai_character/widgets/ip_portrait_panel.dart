@@ -1,19 +1,18 @@
 import 'dart:async';
 
-import 'package:chat_group/core/audio/voice_catalog.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/database/database_service_image.dart';
 import 'package:chat_group/core/database/database_service_provider.dart';
 import 'package:chat_group/core/images/image_generation_service.dart';
 import 'package:chat_group/core/images/image_style_presets.dart';
 import 'package:chat_group/core/images/ip_image_prompt_builder.dart';
-import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/ai_character/ip_visual_description_llm.dart';
 import 'package:chat_group/features/ai_character/widgets/ip_image_prompt_dialog.dart';
 import 'package:chat_group/features/ai_character/widgets/ip_portrait_draft_tracker.dart';
+import 'package:chat_group/features/ai_character/widgets/ip_portrait_source.dart';
 import 'package:chat_group/features/settings/image_service_settings_page.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
 import 'package:chat_group/services/chat_api_service.dart';
@@ -31,17 +30,17 @@ const String kIpImageGenericFailedMessage = 'IP 形象生成失败，请重试';
 String ipPortraitMissingFieldsMessage(List<String> missing) =>
     '请先填写：${missing.join('、')}';
 
-/// 角色表单内的「IP 形象」面板：按角色定义自动生成形象，并可一键设为头像。
+/// 「IP 形象」面板：按人物定义自动生成形象，并可一键设为头像。
 ///
-/// 生成**即落盘**（[DatabaseService.writeBytesToAiCharacterDir]），因为生成是
-/// 用户等待 30–120s 的产出，丢弃代价高。文件回收决策交给 [IpPortraitDraftTracker]，
+/// 生成**即落盘**（[DatabaseService.writeBytesToAiCharacterDir] /
+/// [DatabaseService.writeBytesToUserProfileDir]），因为生成是用户等待
+/// 30–120s 的产出，丢弃代价高。文件回收决策交给 [IpPortraitDraftTracker]，
 /// 本类只负责调用它并执行删除 —— 见该类注释里的两条回收底线。
 class IpPortraitPanel extends ConsumerStatefulWidget {
   const IpPortraitPanel({
     super.key,
     required this.draftBuilder,
     required this.missingFields,
-    required this.characterId,
     required this.initialRelPath,
     required this.initialAvatarFromIp,
     required this.initialStyle,
@@ -49,16 +48,13 @@ class IpPortraitPanel extends ConsumerStatefulWidget {
   });
 
   /// 取表单**当前草稿**（姓名/年龄/职业/性格/人设都还在内存里），拼 prompt 用。
-  final AICharacter Function() draftBuilder;
+  final IpPortraitSource Function() draftBuilder;
 
   /// 返回「缺失的必填项」的显示名；空列表才允许生成。
   ///
   /// 由表单页提供而不是本面板自判：只有表单知道哪些字段是必填、以及编辑态下
   /// 哪些被锁死。做成 `required` 而非可选，避免「忘了传就永远放行」的暗门。
   final List<String> Function() missingFields;
-
-  /// 落盘目录名含角色 id，因此新建角色也必须先预分配 id（见表单页）。
-  final String characterId;
 
   /// 以下三项**仅在 initState 读取一次**；此后变更一律经 [onChanged] 单向上报。
   final String initialRelPath;
@@ -291,8 +287,14 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel>
   String _referenceHint() {
     final missing = widget.missingFields();
     if (missing.isNotEmpty) return ipPortraitMissingFieldsMessage(missing);
-    final voiceName = voicePresetById(widget.draftBuilder().voiceId)?.name;
-    final suffix = voiceName == null ? '' : '、朗读音色（$voiceName）';
+    final subject = widget.draftBuilder().subject;
+    if (!subject.describesAi) {
+      // 真人资料没有音色与人设，用户会找「人设」框找不到。
+      return '自动从性别、简介、性格标签、兴趣、重要背景提炼长相';
+    }
+    final voiceName = subject.voiceName;
+    final suffix =
+        (voiceName == null || voiceName.isEmpty) ? '' : '、朗读音色（$voiceName）';
     return '自动从性格、人设$suffix 提炼长相';
   }
 
@@ -346,8 +348,8 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel>
   void _showPrompt(BuildContext context) {
     showIpImagePromptDialog(
       context,
-      previewPrompt: buildIpImagePrompt(
-        widget.draftBuilder(),
+      previewPrompt: buildIpPortraitPrompt(
+        widget.draftBuilder().subject,
         style: resolveImageStylePreset(_style),
       ),
       sentPrompt: _lastPrompt,
@@ -384,10 +386,10 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel>
       _errorMessage = null;
     });
     try {
-      final draft = widget.draftBuilder();
-      final description = await _describeVisual(draft);
-      final prompt = buildIpImagePrompt(
-        draft,
+      final source = widget.draftBuilder();
+      final description = await _describeVisual(source);
+      final prompt = buildIpPortraitPrompt(
+        source.subject,
         style: resolveImageStylePreset(_style),
         visualDescription: description,
       );
@@ -415,35 +417,44 @@ class IpPortraitPanelState extends ConsumerState<IpPortraitPanel>
     }
   }
 
-  /// 让角色绑定的聊天模型把人设提炼成视觉描述。
+  /// 让绑定的聊天模型把人物资料提炼成视觉描述。
   ///
-  /// **任何失败都返回 null**，由 [buildIpImagePrompt] 的本地模板兜住：改写是
-  /// 增益项，不该让整次生成失败。没绑聊天 ApiConfig 的角色直接走本地模板。
-  Future<String?> _describeVisual(AICharacter draft) async {
-    final configId = draft.apiConfigId;
+  /// **任何失败都返回 null**，由 [buildIpPortraitPrompt] 的本地模板兜住：改写是
+  /// 增益项，不该让整次生成失败。没绑聊天 ApiConfig 的主体直接走本地模板。
+  Future<String?> _describeVisual(IpPortraitSource source) async {
+    final configId = source.apiConfigId;
     if (configId.isEmpty) return null;
-    final config =
-        ref.read(apiConfigsProvider.notifier).getById(configId);
+    final config = ref.read(apiConfigsProvider.notifier).getById(configId);
     if (config == null) return null;
     try {
       return await IpVisualDescriptionLlm(
         api: ChatApiService(),
         credentials: SecureApiCredentialResolver(),
-      ).describe(draft, config);
+      ).describeFacts(source.facts, config);
     } on Object {
       return null;
     }
   }
 
   Future<String> _writePortrait(List<int> bytes) async {
-    final draft = widget.draftBuilder();
-    final attachment = await _db.writeBytesToAiCharacterDir(
-      bytes: bytes,
-      fileName: kIpImageFileName,
-      characterId: widget.characterId,
-      characterName: draft.name,
-      type: 'image',
-    );
+    final source = widget.draftBuilder();
+    // 落盘目录按主体分两条路：真人信息卡走 `me` 的受管目录，角色走自己 id 的
+    // 目录。分叉判据取 `subject.describesAi`（谁在生成）而不是猜 id 字符串 ——
+    // 角色 id 撞上 `me` 时后者会写错目录。
+    final attachment = source.subject.describesAi
+        ? await _db.writeBytesToAiCharacterDir(
+            bytes: bytes,
+            fileName: kIpImageFileName,
+            characterId: source.directoryId,
+            characterName: source.ownerName,
+            type: 'image',
+          )
+        : await _db.writeBytesToUserProfileDir(
+            bytes: bytes,
+            fileName: kIpImageFileName,
+            ownerName: source.ownerName,
+            type: 'image',
+          );
     final relPath = _db.aiCharacterMediaRelPath(attachment.localPath);
     if (relPath == null || relPath.isEmpty) {
       throw const ImageGenerationException(kIpImageWriteFailedMessage);

@@ -62,20 +62,31 @@ class _BackupEntityMemoryCodec {
         'updatedAt': _date(item.updatedAt),
       };
 
-  static Map<String, dynamic> userProfile(UserProfile item) => {
-        'id': item.id,
-        'displayName': item.displayName,
-        'preferredAddress': item.preferredAddress,
-        'avatar': item.avatar,
-        'pronouns': item.pronouns,
-        'age': item.age,
-        'bio': item.bio,
-        'personality': item.personality,
-        'interests': item.interests,
-        'importantBackground': item.importantBackground,
-        'updatedAt': _date(item.updatedAt),
-        'createdAt': _date(item.createdAt),
-      };
+  static Map<String, dynamic> userProfile(UserProfile item) {
+    final value = <String, dynamic>{
+      'id': item.id,
+      'displayName': item.displayName,
+      'preferredAddress': item.preferredAddress,
+      'avatar': item.avatar,
+      'pronouns': item.pronouns,
+      'age': item.age,
+      'bio': item.bio,
+      'personality': item.personality,
+      'interests': item.interests,
+      'importantBackground': item.importantBackground,
+      'updatedAt': _date(item.updatedAt),
+      'createdAt': _date(item.createdAt),
+      // IP 形象同角色：只带相对路径，图片二进制不进 .cgbak，跨设备文件缺失
+      // 由渲染层静默回落文本头像。apiConfigId 是聊天配置 id，不是凭据。
+      'ipImageRelPath': item.ipImageRelPath,
+      'avatarFromIpImage': item.avatarFromIpImage,
+      'ipImageStyle': item.ipImageStyle,
+      'apiConfigId': item.apiConfigId,
+    };
+    // 未选择性别时连键都不写：解码端 `null` 与「写了 null」在旧版本语义不同。
+    if (item.gender != null) value['gender'] = item.gender!.name;
+    return value;
+  }
 
   static Map<String, dynamic> permanentMemory(
     PermanentMemory item, {
@@ -183,6 +194,13 @@ class _BackupEntityMemoryCodec {
         importantBackground: _strings(json['importantBackground']),
         updatedAt: _dateTime(json, 'updatedAt'),
         createdAt: _dateTime(json, 'createdAt'),
+        // 旧备份缺这些键时回落默认值：性别未选 = null（提示词整段省略），
+        // 其余与 AI 角色同构。apiConfigId 还原后仍需重新绑定 Key。
+        gender: _decodeGender(json['gender']),
+        ipImageRelPath: json['ipImageRelPath']?.toString() ?? '',
+        avatarFromIpImage: json['avatarFromIpImage'] as bool? ?? false,
+        ipImageStyle: json['ipImageStyle']?.toString() ?? '',
+        apiConfigId: json['apiConfigId']?.toString() ?? '',
       );
 
   static PermanentMemory decodePermanentMemory(
