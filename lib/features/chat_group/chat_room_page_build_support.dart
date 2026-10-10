@@ -163,6 +163,8 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                       senderColor: _senderColor,
                       senderNameById: _senderNameById,
                       avatarImageOf: _characterAvatarImage,
+                      userAvatarImage: _userAvatarImage(),
+                      userAvatarText: _userAvatarText(),
                       onLongPress: _showMessageActionSheet,
                       onSenderTap: _openCharacterSettings,
                       onMentionSender: _insertMention,

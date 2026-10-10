@@ -271,7 +271,12 @@ class _RestorePlan {
       value['originConversationId'] =
           optionalConversation(value['originConversationId']);
     });
-    final userProfiles = _rewriteUserProfiles(data.userProfiles, db, skipped);
+    final userProfiles = _rewriteUserProfiles(
+      data.userProfiles,
+      db,
+      skipped,
+      apiMap: apiMap,
+    );
     final tasks = _rewrite(
         data.tasks, taskMap, db.agentTaskBox.containsKey, strategy, (value) {
       value['id'] = taskMap[value['id']]!;

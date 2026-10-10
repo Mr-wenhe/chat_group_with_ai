@@ -5,6 +5,8 @@ import 'package:flutter/painting.dart';
 
 import 'package:chat_group/core/images/image_service_config.dart';
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/media_attachment.dart';
+import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/storage/credential_repository.dart';
 
 import 'database_service.dart';
@@ -16,6 +18,9 @@ import 'database_service.dart';
 extension ImageServiceSettingsAccess on DatabaseService {
   // 仅非 Release 使用；不得加入备份/导出白名单。
   static const _imageApiKeyDebugFallbackKey = 'image_api_key_debug_only';
+
+  /// 真人信息卡的受管目录 id，与 `UserProfile` 的单例 key 同值。
+  static const _userProfileOwnerId = 'me';
 
   /// 全局图像服务配置。见 [imageServiceSettingsKey]。
   ///
@@ -161,6 +166,42 @@ extension ImageServiceSettingsAccess on DatabaseService {
   ImageProvider? characterAvatarImage(AICharacter? character) {
     if (character == null || !character.avatarFromIpImage) return null;
     return characterMediaImage(character.ipImageRelPath);
+  }
+
+  /// 真人信息卡的头像路径入口，与 [characterAvatarPath] 同构。
+  ///
+  /// 门控字段换成 `UserProfile.avatarFromIpImage`；未生成 / 文件缺失 /
+  /// 资料为空一律返回 null，渲染层据此回落文本头像。
+  String? userAvatarPath(UserProfile? profile) {
+    if (profile == null || !profile.avatarFromIpImage) return null;
+    return resolveAiCharacterMediaPath(profile.ipImageRelPath);
+  }
+
+  /// 真人信息卡的头像图入口，与 [characterAvatarImage] 同构。
+  ///
+  /// 存在性检查同样放在数据层，理由见 [characterAvatarImage]。
+  ImageProvider? userAvatarImage(UserProfile? profile) {
+    if (profile == null || !profile.avatarFromIpImage) return null;
+    return characterMediaImage(profile.ipImageRelPath);
+  }
+
+  /// 真人 IP 形象的落盘入口，委托 [DatabaseService.writeBytesToAiCharacterDir]。
+  ///
+  /// 目录按 `characterId: 'me'` 复用角色那套受管目录 —— 单人信息卡是固定单例，
+  /// 用同一个 id 换目录只会多一套路径换算，没有隔离收益。
+  Future<MediaAttachment> writeBytesToUserProfileDir({
+    required List<int> bytes,
+    required String fileName,
+    required String ownerName,
+    String type = 'image',
+  }) {
+    return writeBytesToAiCharacterDir(
+      bytes: bytes,
+      fileName: fileName,
+      characterId: _userProfileOwnerId,
+      characterName: ownerName,
+      type: type,
+    );
   }
 
   /// 不看 [AICharacter.avatarFromIpImage] 开关，直接按相对路径出图。
