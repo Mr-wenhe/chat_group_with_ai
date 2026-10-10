@@ -208,13 +208,15 @@ void _registerBackupRestoreServiceTestPart2() {
       'missingAttachments': <String>[],
       'credentialsIncluded': false,
     };
-    final archive = Archive()
-      // Deliberately understate the uncompressed size in the ZIP header. The
-      // decoder must enforce the limit on bytes actually emitted by inflate.
-      ..addFile(ArchiveFile('data/settings.json', 1, payload))
-      ..addFile(ArchiveFile.string('manifest.json', jsonEncode(manifest)));
     final fixture = File('${testRoot.path}/understated-entry-size.cgbak');
-    await fixture.writeAsBytes(ZipEncoder().encodeBytes(archive));
+    // The entry emits `entryByteLimit + 1` bytes while both of its headers
+    // declare a single byte, so anything that trusts the declared size lets the
+    // output through. The bytes are built by hand because `archive` >= 4.4
+    // records the real size when it encodes and can no longer be told to lie.
+    await _writeRawStoredZip(fixture, [
+      _RawZipEntry('data/settings.json', payload, declaredSize: 1),
+      _RawZipEntry('manifest.json', utf8.encode(jsonEncode(manifest))),
+    ]);
 
     await expectLater(
       BackupInspector(
@@ -257,14 +259,17 @@ void _registerBackupRestoreServiceTestPart2() {
       'missingAttachments': <String>[],
       'credentialsIncluded': false,
     };
-    final archive = Archive()
-      // Both entries stay below the per-entry cap. Their deliberately tiny
-      // ZIP size declarations must not bypass the aggregate actual-byte cap.
-      ..addFile(ArchiveFile('data/settings.json', 1, firstPayload))
-      ..addFile(ArchiveFile('data/api_configs.json', 1, secondPayload))
-      ..addFile(ArchiveFile.string('manifest.json', jsonEncode(manifest)));
     final fixture = File('${testRoot.path}/understated-expanded-size.cgbak');
-    await fixture.writeAsBytes(ZipEncoder().encodeBytes(archive));
+    // Both entries stay below the per-entry cap and declare a single byte each,
+    // so the declared-size pre-check lets them through. The aggregate cap has to
+    // catch the bytes the entries actually emit — 1800 from the two data files
+    // plus the manifest that is extracted after them. See the sibling fixture
+    // above for why these headers are written by hand.
+    await _writeRawStoredZip(fixture, [
+      _RawZipEntry('data/settings.json', firstPayload, declaredSize: 1),
+      _RawZipEntry('data/api_configs.json', secondPayload, declaredSize: 1),
+      _RawZipEntry('manifest.json', utf8.encode(jsonEncode(manifest))),
+    ]);
 
     await expectLater(
       BackupInspector(

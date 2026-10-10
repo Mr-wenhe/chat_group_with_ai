@@ -1,50 +1,79 @@
 part of 'backup_restore_service_test.dart';
 
-/// Writes a minimal stored (uncompressed) ZIP whose central-directory entry
-/// name is [entryName], bypassing the `archive` package encoder. The encoder
-/// normalises `../` path segments on some platforms (notably the GitHub
-/// Actions Linux runner), which would strip the traversal payload before
-/// [ZipPreflight] can see it. Building the raw ZIP bytes directly guarantees
-/// the entry name reaches the validator verbatim on every platform.
-Future<void> _writeRawZip(
-  File target, {
-  required String entryName,
-  required String content,
-}) async {
-  final nameBytes = utf8.encode(entryName);
-  final contentBytes = utf8.encode(content);
-  final crc = getCrc32(contentBytes);
-  final size = contentBytes.length;
+/// One stored (uncompressed) entry of a hand-built ZIP.
+///
+/// [declaredSize] is what both headers claim as the uncompressed size; it is
+/// deliberately allowed to disagree with [bytes], because that is exactly the
+/// shape of a hostile archive: the declared size stays under a limit while the
+/// entry actually emits far more. Handing the payload to `ArchiveFile` cannot
+/// express that any more — `archive` >= 4.4 re-derives the real size from the
+/// content when it encodes, instead of echoing the size passed in.
+class _RawZipEntry {
+  _RawZipEntry(this.name, this.bytes, {int? declaredSize})
+      : declaredSize = declaredSize ?? bytes.length;
 
-  final local = <int>[
-    ..._u32le(0x04034b50), // local file header signature
-    ..._u16le(20), ..._u16le(0), ..._u16le(0), // version, flags, stored
-    ..._u16le(0), ..._u16le(0x0021), // mod time, mod date
-    ..._u32le(crc), ..._u32le(size), ..._u32le(size), // crc, sizes
-    ..._u16le(nameBytes.length), ..._u16le(0), // name len, extra len
-    ...nameBytes, ...contentBytes,
-  ];
-  final cd = <int>[
-    ..._u32le(0x02014b50), // central directory header signature
-    ..._u16le(20), ..._u16le(20), ..._u16le(0),
-    ..._u16le(0), // versions, flags, stored
-    ..._u16le(0), ..._u16le(0x0021), // mod time, mod date
-    ..._u32le(crc), ..._u32le(size), ..._u32le(size), // crc, sizes
-    ..._u16le(nameBytes.length), ..._u16le(0),
-    ..._u16le(0), // name, extra, comment
-    ..._u16le(0), ..._u16le(0), ..._u32le(0),
-    ..._u32le(0), // disk, attrs, local offset
-    ...nameBytes,
-  ];
+  final String name;
+  final List<int> bytes;
+  final int declaredSize;
+}
+
+/// Writes a ZIP carrying [entries] verbatim, bypassing the `archive` encoder.
+///
+/// Besides the understated-size fixtures described on [_RawZipEntry], the
+/// encoder normalises `../` path segments on some platforms (notably the
+/// GitHub Actions Linux runner), which would strip a traversal payload before
+/// [ZipPreflight] can see it. Building the raw ZIP bytes directly guarantees
+/// each entry name reaches the validator verbatim on every platform.
+Future<void> _writeRawStoredZip(File target, List<_RawZipEntry> entries) async {
+  final local = <int>[];
+  final cd = <int>[];
+  for (final entry in entries) {
+    final nameBytes = utf8.encode(entry.name);
+    final crc = getCrc32(entry.bytes);
+    final size = entry.bytes.length;
+    final declared = entry.declaredSize;
+    final localOffset = local.length;
+
+    local.addAll([
+      ..._u32le(0x04034b50), // local file header signature
+      ..._u16le(20), ..._u16le(0), ..._u16le(0), // version, flags, stored
+      ..._u16le(0), ..._u16le(0x0021), // mod time, mod date
+      ..._u32le(crc), ..._u32le(size), ..._u32le(declared), // crc, sizes
+      ..._u16le(nameBytes.length), ..._u16le(0), // name len, extra len
+      ...nameBytes, ...entry.bytes,
+    ]);
+    cd.addAll([
+      ..._u32le(0x02014b50), // central directory header signature
+      ..._u16le(20), ..._u16le(20), ..._u16le(0),
+      ..._u16le(0), // versions, flags, stored
+      ..._u16le(0), ..._u16le(0x0021), // mod time, mod date
+      ..._u32le(crc), ..._u32le(size), ..._u32le(declared), // crc, sizes
+      ..._u16le(nameBytes.length), ..._u16le(0),
+      ..._u16le(0), // name, extra, comment
+      ..._u16le(0), ..._u16le(0), ..._u32le(0),
+      ..._u32le(localOffset), // disk, attrs, local offset
+      ...nameBytes,
+    ]);
+  }
   final eocd = <int>[
     ..._u32le(0x06054b50), // EOCD signature
     ..._u16le(0), ..._u16le(0), // disk numbers
-    ..._u16le(1), ..._u16le(1), // cd record counts
+    ..._u16le(entries.length), ..._u16le(entries.length),
     ..._u32le(cd.length), ..._u32le(local.length), // cd size, cd offset
     ..._u16le(0), // comment length
   ];
   await target.writeAsBytes(Uint8List.fromList([...local, ...cd, ...eocd]));
 }
+
+Future<void> _writeRawZip(
+  File target, {
+  required String entryName,
+  required String content,
+}) =>
+    _writeRawStoredZip(
+      target,
+      [_RawZipEntry(entryName, utf8.encode(content))],
+    );
 
 List<int> _u16le(int value) => [value & 0xff, (value >> 8) & 0xff];
 
@@ -80,8 +109,12 @@ Future<void> _corruptZipEntryData(
     );
     if (name != entryName) continue;
 
-    final compressedSize = _readU32le(bytes, offset + 18);
-    if (compressedSize <= 0 || dataStart + compressedSize > bytes.length) {
+    // The local header's compressed size is not a usable length: `archive`
+    // >= 4.4 always writes zero sizes there and appends a data descriptor
+    // instead, and a header is allowed to declare nothing anyway. The first
+    // byte after the header always belongs to this entry, so flipping it
+    // corrupts this entry's data without touching the next header.
+    if (dataStart >= bytes.length) {
       throw StateError('ZIP entry has no mutable data: $entryName');
     }
     bytes[dataStart] ^= 0xff;
