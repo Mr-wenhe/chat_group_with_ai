@@ -1014,6 +1014,36 @@ void _registerDiscussionHistoryRegressions() {
     expect(state.artifactContract['location'], 'game.html');
     expect(state.planReady, isTrue);
   });
+  // `calls` can only come back as 0 when `runCollaboration` returns before its
+  // first turn, and which early return fired is not visible in the count: a
+  // changed project binding, a blocking decision or pending input already on
+  // the state, and a team gap that was never resolved all stop the session the
+  // same way. This case failed that way once on CI while every local rerun
+  // passed, so the failure now carries enough state to tell them apart.
+  String stopReason(AgentTask subject) {
+    final collaboration =
+        WorkDiscussionState.fromExecutionState(subject.executionStateJson)
+            ?.collaboration;
+    if (collaboration == null) return '没有协作状态';
+    String rows(List<Map<String, dynamic>> items, List<String> keys) => items
+        .map((item) => keys.map((key) => item[key]).join('/'))
+        .join(', ');
+    return [
+      'phase=${collaboration.phase}',
+      'projectScope=${collaboration.projectScopeId}',
+      'workspaceScope='
+          '${db.workModeWorkspaceBox.get(subject.groupId)?.projectScopeId}',
+      'blockingDecision=${collaboration.hasBlockingDecision}',
+      'pendingInputs=${collaboration.pendingInputIds.length}',
+      'deliveryReady=${collaboration.deliveryReady}',
+      'productionReady=${collaboration.productionReady}',
+      'team=[${rows(collaboration.team, ['memberId', 'role', 'available'])}]',
+      'issues=[${rows(collaboration.issues, ['kind', 'status'])}]',
+      'decisions='
+          '[${rows(collaboration.decisions, ['kind', 'status', 'answerKind'])}]',
+    ].join(' ');
+  }
+
   for (final failure in [
     '429',
     'timeout',
@@ -1096,7 +1126,8 @@ void _registerDiscussionHistoryRegressions() {
                       // 再耗尽就如实记为成员缺口。
                       : failure == 'empty-budget'
                           ? 2
-                          : 1);
+                          : 1,
+          reason: calls == 0 ? stopReason(task) : null);
       final state =
           WorkDiscussionState.fromExecutionState(task.executionStateJson)!
               .collaboration!;
