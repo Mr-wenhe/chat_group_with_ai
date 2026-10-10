@@ -21,10 +21,68 @@ void _registerDiscussionHistoryRegressions() {
   });
 
   test('v2 协议把内部标识符与编号清单挡在公开正文外', () {
-    expect(WorkDiscussionV2Turn.protocol, contains('不出现 artifactContract'));
-    expect(WorkDiscussionV2Turn.protocol, contains('①②③④ 式清单'));
-    expect(WorkDiscussionV2Turn.protocol, contains('协议标识'));
+    expect(WorkDiscussionV2Turn.protocolFor(''), contains('不出现 artifactContract'));
+    expect(WorkDiscussionV2Turn.protocolFor(''), contains('①②③④ 式清单'));
+    expect(WorkDiscussionV2Turn.protocolFor(''), contains('协议标识'));
   });
+
+  test('单产物请求不再强制材料工作项，多产物与不确定仍强制', () {
+    final single =
+        WorkDiscussionV2Turn.protocolFor('生成一份 飞行棋游戏的HTML，第一版只需要和AI对战即可');
+    expect(single, contains('只需 kind=produce 的实现工作项'));
+    expect(single, isNot(contains('必须有 kind=material')));
+    // 放宽的只有材料要求：文件清单与验证命令一项不能少。
+    expect(single, contains('artifactContract.files'));
+    expect(single, contains('verificationCommands'));
+
+    final multi =
+        WorkDiscussionV2Turn.protocolFor('生成一份 飞行棋游戏的HTML 和一份说明文档');
+    expect(multi, contains('必须有 kind=material'));
+    expect(multi, contains('verificationCommands'));
+
+    // 判定不确定时回到材料版——判错的方向必须偏保守。
+    expect(WorkDiscussionV2Turn.protocolFor(''), contains('必须有 kind=material'));
+  });
+
+  test('单产物请求不要求材料工作项，多产物仍要求', () async {
+    await db.agentTaskBox.put(task.id, task);
+    final discussion = modelRunner(confirm);
+    await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
+
+    // 只留一个 produce 工作项并补齐 files/verificationCommands，把材料要求单独
+    // 隔离出来——否则 files 为空会让两种请求都失败，测不出这条分流。
+    Future<bool> preparedFor(String request) async {
+      task.userRequest = request;
+      final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+      final collaboration = root[WorkDiscussionState.jsonKey]['collaboration']
+          as Map<String, dynamic>;
+      final contract =
+          collaboration['artifactContract'] as Map<String, dynamic>;
+      contract['files'] = ['game.html'];
+      contract['verificationCommands'] = [
+        '{"executable":"node","arguments":["verify.js"]}'
+      ];
+      collaboration['workItems'] = [
+        {
+          'id': 'implementation',
+          'ownerId': 'dev',
+          'dependencies': <String>[],
+          'kind': 'produce',
+          'status': 'pending',
+          'requestRevision': collaboration['requestRevision'],
+        }
+      ];
+      task.executionStateJson = jsonEncode(root);
+      await db.agentTaskBox.put(task.id, task);
+      return execution.prepareCollaborationWork(task);
+    }
+
+    expect(await preparedFor('生成一份 飞行棋游戏的HTML，第一版只需要和AI对战即可'),
+        isTrue,
+        reason: '单产物请求只剩 produce 工作项不应再被材料要求拦下：${task.lastError}');
+    expect(await preparedFor('生成一份 飞行棋游戏的HTML 和一份说明文档'), isFalse,
+        reason: '多产物请求仍必须补齐材料工作项');
+  }, timeout: const Timeout(Duration(seconds: 30)));
 
   test('协议可从前置说明中读取唯一 JSON 对象，仍拒绝尾随正文', () {
     final response = _turn('respond');
@@ -187,8 +245,8 @@ void _registerDiscussionHistoryRegressions() {
             onInvalid: (value) => reason = value),
         isNull);
     expect(reason, contains('verificationRevision'));
-    expect(WorkDiscussionV2Turn.protocol, contains('六个字段'));
-    expect(WorkDiscussionV2Turn.protocol, contains('JSON 整数'));
+    expect(WorkDiscussionV2Turn.protocolFor(''), contains('六个字段'));
+    expect(WorkDiscussionV2Turn.protocolFor(''), contains('JSON 整数'));
   });
 
   test('verificationCommands 要求 command.run 的紧凑 JSON 字符串', () {
@@ -234,8 +292,8 @@ void _registerDiscussionHistoryRegressions() {
             onInvalid: (value) => reason = value),
         isNull);
     expect(reason, contains('verificationCommands'));
-    expect(WorkDiscussionV2Turn.protocol, contains('紧凑 JSON 参数字符串'));
-    expect(WorkDiscussionV2Turn.protocol, contains('相对路径字符串'));
+    expect(WorkDiscussionV2Turn.protocolFor(''), contains('紧凑 JSON 参数字符串'));
+    expect(WorkDiscussionV2Turn.protocolFor(''), contains('相对路径字符串'));
 
     proposal['artifactContract'] = {
       ...proposal['artifactContract'] as Map<String, dynamic>,
@@ -573,7 +631,8 @@ void _registerDiscussionHistoryRegressions() {
         isNotEmpty);
   });
 
-  test('精简指令也救不回来时如实记为成员缺口，不无限重试', () async {
+  test('精简指令也救不回来时给诚实阻塞项，不无限重试也不换人', () async {
+    await db.agentTaskBox.put(task.id, task);
     var calls = 0;
     final runner = WorkDiscussionRunner(
         database: db,
@@ -605,6 +664,157 @@ void _registerDiscussionHistoryRegressions() {
     await runner.runCollaboration(task, WorkTaskCancellation(), apply);
     // 首次 + 精简指令各一次，不因为再失败而继续试。
     expect(calls, 2);
+    final pending = _pendingDecisions();
+    expect(pending, hasLength(1));
+    expect(pending.single['reason'], isNot(contains('请确认补人')),
+        reason: '成员本身可用，不能把上游失败说成成员不可用');
+    expect(pending.single['reason'], contains('dev'));
+    expect(pending.single['reason'], contains('推理'));
+    expect(pending.single['reason'], contains('精简指令'));
+    expect(pending.single['reason'], contains('原成员与责任保持不变'));
+    expect(pending.single['evidence'], contains('finishReason=length'));
+    expect(_teamRecord('dev')['available'], isTrue,
+        reason: '本轮失败不能把成员的可用性标记改掉');
+    expect(_optionLabels().first, '保留原成员与原模型，重试');
+  });
+
+  test('成员请求失败不再记为成员缺口，团队可用性保持不变', () async {
+    await db.agentTaskBox.put(task.id, task);
+    var calls = 0;
+    final runner = WorkDiscussionRunner(
+        database: db,
+        credentials: _Credentials(),
+        eventStore: events,
+        investigate: execution.investigate,
+        completion: (
+            {required character,
+            required config,
+            required apiKey,
+            required provider,
+            required conversationId,
+            required messages,
+            required timeout,
+            cancelToken}) async {
+          calls++;
+          return {
+            'success': false,
+            'statusCode': 400,
+            'failureCode': 'providerError',
+            'message': '模型请求被上游拒绝'
+          };
+        });
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(calls, 1, reason: '400 不是可重试状态码，不该反复重发');
+    final pending = _pendingDecisions();
+    expect(pending, hasLength(1));
+    expect(pending.single['reason'], isNot(contains('请确认补人')));
+    expect(pending.single['reason'], contains('dev'));
+    expect(pending.single['reason'], contains('HTTP 400'));
+    expect(_teamRecord('dev')['available'], isTrue);
+  });
+
+  test('成员模型请求超时不再记为成员缺口', () async {
+    await db.agentTaskBox.put(task.id, task);
+    final runner = WorkDiscussionRunner(
+        database: db,
+        credentials: _Credentials(),
+        eventStore: events,
+        investigate: execution.investigate,
+        completion: (
+            {required character,
+            required config,
+            required apiKey,
+            required provider,
+            required conversationId,
+            required messages,
+            required timeout,
+            cancelToken}) async {
+          throw TimeoutException('member turn timeout');
+        });
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+    final pending = _pendingDecisions();
+    expect(pending, hasLength(1));
+    expect(pending.single['reason'], isNot(contains('请确认补人')));
+    expect(pending.single['reason'], contains('单次时限'));
+    expect(_teamRecord('dev')['available'], isTrue);
+  });
+
+  test('成员配置缺失仍走成员缺口换人确认', () async {
+    await db.agentTaskBox.put(task.id, task);
+    // 与 dev 同一个模型的合格候选：配置坏掉时模型不是原因，按模型筛会错杀真候选。
+    await _addLibraryMember('helper', '备选开发', '软件开发工程师');
+    await db.apiConfigBox.delete('config-dev');
+    await modelRunner(confirm)
+        .runCollaboration(task, WorkTaskCancellation(), apply);
+    final pending = _pendingDecisions();
+    expect(pending, hasLength(1));
+    expect(pending.single['reason'], contains('请确认补人'),
+        reason: '真正的不可用必须保留换人出路，不能被本轮失败的收口改掉');
+    expect(pending.single['reason'], contains('API 配置缺失'));
+    expect(_optionIds(), contains('helper'),
+        reason: '成员不可用不是模型的问题，同模型的候选不能被筛掉');
+  });
+
+  test('有别的模型可选时不列同模型的候选，并在依据里说明', () async {
+    await db.agentTaskBox.put(task.id, task);
+    await _addLibraryMember('helper', '备选开发', '软件开发工程师');
+    await _addLibraryMember('fresh', '换模开发', '软件开发工程师',
+        modelName: 'deepseek-reasoner');
+    await db.agentTaskBox.put(task.id, task);
+    final runner = WorkDiscussionRunner(
+        database: db,
+        credentials: _Credentials(),
+        eventStore: events,
+        investigate: execution.investigate,
+        completion: (
+            {required character,
+            required config,
+            required apiKey,
+            required provider,
+            required conversationId,
+            required messages,
+            required timeout,
+            cancelToken}) async =>
+            {'success': false, 'statusCode': 400, 'message': '模型请求被上游拒绝'});
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+    final ids = _optionIds();
+    expect(ids.take(2), ['retry-same-member', 'member-config-updated']);
+    expect(ids, contains('fresh'));
+    expect(ids, isNot(contains('helper')),
+        reason: '与失败成员同一个模型的候选换上去也不会改变上游失败');
+    expect(_pendingEvidence(), contains('另有 1 个候选'));
+    expect(_pendingEvidence(), contains('未列出'));
+  });
+
+  test('合格候选全与失败成员同模型时仍然列出，并写明换人无用', () async {
+    await db.agentTaskBox.put(task.id, task);
+    await _addLibraryMember('helper', '备选开发', '软件开发工程师');
+    await db.agentTaskBox.put(task.id, task);
+    final runner = WorkDiscussionRunner(
+        database: db,
+        credentials: _Credentials(),
+        eventStore: events,
+        investigate: execution.investigate,
+        completion: (
+            {required character,
+            required config,
+            required apiKey,
+            required provider,
+            required conversationId,
+            required messages,
+            required timeout,
+            cancelToken}) async =>
+            {'success': false, 'statusCode': 400, 'message': '模型请求被上游拒绝'});
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+    final options = _pendingDecisions().single['options'] as List;
+    expect((options.first as Map)['label'], '保留原成员与原模型，重试');
+    final replacement = options.whereType<Map>().last;
+    expect(replacement['id'], 'helper');
+    expect(replacement['label'], contains('备选开发'),
+        reason: '全部候选都撞同一个模型时必须保留，否则应用内就没有换人入口了');
+    expect(replacement['impact'], contains('换人不改变上游失败'));
+    expect(_pendingEvidence(), isNot(contains('未列出')),
+        reason: '没有筛掉任何候选时不该说"未列出"');
   });
 
   test('协议失败诊断区分首次与修复响应，并标明正文是否含 JSON 起点', () async {

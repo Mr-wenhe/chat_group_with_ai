@@ -4,6 +4,7 @@ import 'dart:convert';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
+import 'package:chat_group/features/work_mode/lenient_json_object.dart';
 
 /// The repair callback is supplied by the caller that owns the current model.
 /// It receives the original response as data and may be invoked at most once.
@@ -44,10 +45,17 @@ class AgentDecisionParseResult {
   /// 类别处置（换模型），而真正该做的是重试链路。
   final bool repairRequestFailed;
 
+  /// 协议正文外还有散文，本次是靠抽取唯一 object 才解析成功的。
+  ///
+  /// 解析成功不代表模型守约。调用方把这个标志写进事件元数据，用来量出违约频
+  /// 率——只看"成功/失败"永远发现不了提示词在慢慢失效。
+  final bool extractedFromProse;
+
   const AgentDecisionParseResult.success(
     this.decision, {
     this.usedReasoningContent = false,
     this.repairAttempted = false,
+    this.extractedFromProse = false,
   })  : failure = null,
         detail = null,
         repairRequestFailed = false;
@@ -58,6 +66,7 @@ class AgentDecisionParseResult {
     this.usedReasoningContent = false,
     this.repairAttempted = false,
     this.repairRequestFailed = false,
+    this.extractedFromProse = false,
   }) : decision = null;
 
   bool get isSuccess => decision != null;
@@ -69,12 +78,14 @@ class AgentDecisionParseResult {
   AgentDecisionParseResult withMetadata({
     bool? usedReasoningContent,
     bool? repairAttempted,
+    bool? extractedFromProse,
   }) {
     if (isSuccess) {
       return AgentDecisionParseResult.success(
         decision,
         usedReasoningContent: usedReasoningContent ?? this.usedReasoningContent,
         repairAttempted: repairAttempted ?? this.repairAttempted,
+        extractedFromProse: extractedFromProse ?? this.extractedFromProse,
       );
     }
     return AgentDecisionParseResult.failure(
@@ -83,18 +94,21 @@ class AgentDecisionParseResult {
       usedReasoningContent: usedReasoningContent ?? this.usedReasoningContent,
       repairAttempted: repairAttempted ?? this.repairAttempted,
       repairRequestFailed: repairRequestFailed,
+      extractedFromProse: extractedFromProse ?? this.extractedFromProse,
     );
   }
 }
 
 /// Strict parser for the Stage 03 decision protocol.
 ///
-/// This parser deliberately does not extract JSON from surrounding text. It
-/// accepts either bare JSON or one exact Markdown fence containing only JSON;
-/// XML, surrounding prose, and multiple objects remain invalid. A malformed
-/// non-empty response may be sent to the same model once through
-/// [AgentDecisionRepair]; the caller owns that model identity and the parser
-/// never retries it itself.
+/// The protocol body must be one JSON object, either bare or wrapped in one
+/// exact Markdown fence. Surrounding prose is tolerated only when the text
+/// contains exactly one top-level object ([findSingleJsonObject]) — that
+/// tolerance also covers an XML-ish wrapper (`<result>{...}</result>`), since
+/// the wrapper is just prose around the single object. Multiple objects remain
+/// invalid. A malformed non-empty response may be sent
+/// to the same model once through [AgentDecisionRepair]; the caller owns that
+/// model identity and the parser never retries it itself.
 class AgentDecisionParser {
   static const Set<String> _topLevelFields = {
     'action',
@@ -229,24 +243,43 @@ class AgentDecisionParser {
     );
   }
 
-  /// Parses exactly one JSON object. This method never repairs or extracts a
-  /// nested object; callers that need repair must use [parse].
+  /// Parses exactly one JSON object. A prose-wrapped object is unwrapped only
+  /// when it is the sole top-level object; this method never repairs the body
+  /// and never picks one of several objects. Callers that need repair must use
+  /// [parse].
   AgentDecisionParseResult parseJson(String raw) {
     final trimmed = raw.trim();
     if (trimmed.isEmpty) {
       return _protocolFailure('JSON 响应不能为空。');
     }
     final fencedJson = _extractSingleJsonCodeFence(trimmed);
-    if (trimmed.startsWith('```') && fencedJson == null) {
-      return _protocolFailure('Markdown code fence 必须只包裹一个 JSON object。');
-    }
+    // 围栏在开头但形状不对时，把围栏专用文案留作兜底而不是立刻返回：模型把围栏
+    // 连同尾部寒暄一起写出来（```json\n{...}\n```\n希望有帮助）与"正文前加一句
+    // 铺垫"是同一类违约，应当走同一条抽取路径。
+    final fenceDiagnostic = trimmed.startsWith('```') && fencedJson == null
+        ? 'Markdown code fence 必须只包裹一个 JSON object。'
+        : null;
     final jsonText = fencedJson ?? trimmed;
 
     Object? decoded;
+    var extractedFromProse = false;
     try {
       decoded = jsonDecode(jsonText);
     } on FormatException {
-      return _protocolFailure('响应不是单个合法 JSON object。');
+      // 模型在协议正文前加一句口语解释是现场最常见的违约形状（"先看看工作区现状，
+      // 然后开始写材料。\n\n{...}"）。放开的只是外层包裹：抽出的对象仍要过下面
+      // 全部字段与取值校验，且必须**唯一**——第二处顶层 object 会让这里保持原判，
+      // 因为工具执行路径上照着模型的第一版草稿执行比报错更糟。
+      final embedded = findSingleJsonObject(jsonText);
+      if (embedded == null) {
+        return _protocolFailure(fenceDiagnostic ?? '响应不是单个合法 JSON object。');
+      }
+      try {
+        decoded = jsonDecode(embedded);
+      } on FormatException {
+        return _protocolFailure(fenceDiagnostic ?? '响应不是单个合法 JSON object。');
+      }
+      extractedFromProse = true;
     }
     final object = _stringMap(decoded);
     if (object == null) {
@@ -270,18 +303,20 @@ class AgentDecisionParser {
       return _protocolFailure('public_update 只能描述公开动作、依据或结论。');
     }
 
-    return switch (action) {
+    final result = switch (action) {
       AgentDecisionAction.plan => _parsePlan(publicUpdate, object),
       AgentDecisionAction.tool => _parseTool(publicUpdate, object),
       AgentDecisionAction.clarify => _parseClarify(publicUpdate, object),
       AgentDecisionAction.handoff => _parseHandoff(publicUpdate, object),
       AgentDecisionAction.finish => _parseFinish(publicUpdate, object),
     };
+    return result.withMetadata(extractedFromProse: extractedFromProse);
   }
 
-  /// Unwraps only a complete outer fence. Returning null for any other shape
-  /// prevents the parser from accidentally extracting JSON from prose or from
-  /// accepting a partial/multiple Markdown response.
+  /// Unwraps only a complete outer fence. Any other shape returns null so the
+  /// caller falls back to [findSingleJsonObject], which still requires exactly
+  /// one top-level object and therefore cannot accept a partial or multiple
+  /// Markdown response.
   String? _extractSingleJsonCodeFence(String trimmed) {
     if (!trimmed.startsWith('```')) return null;
     final lines = trimmed.split('\n');

@@ -481,4 +481,39 @@ void main() {
     );
     expect(compressed.discussionState!.executorId, 'worker');
   });
+
+  test('多行请求正文新建群任务时不能让讨论状态越界', () {
+    final pending = WorkDiscussionState.initial(
+      conversationId: 'group-newline',
+      requestRevision: 1,
+      executorId: 'worker',
+      candidateCharacterIds: const ['worker'],
+      participantCharacterIds: const ['worker'],
+      deliverableContract: <String, dynamic>{
+        'deliverableType': 'document',
+        'format': 'docx',
+        'location': 'desktop',
+        'contentScope': '在 /tmp/out 生成一份 docx',
+        'explicitExecutorId': 'worker',
+        'revisionTarget': '',
+        'requestRevision': 1,
+      },
+    );
+    final task = AgentTask(
+      groupId: 'group-newline',
+      characterId: 'worker',
+      // Shift+Enter 换行、语音输入断句或直接粘贴多行需求，正文里都会带 \n。
+      userRequest: '在\n/tmp/out 生成一份 docx',
+      assignedCharacterIds: const ['worker'],
+      workModeTask: true,
+    );
+    final routed = WorkDiscussionState.forNewTask(task, routed: pending);
+    expect(routed.isWithinBounds, isTrue);
+    // 散文保留换行：用户分行写的需求不该在落盘时被抹平。
+    expect(routed.collaboration!.scope, '在\n/tmp/out 生成一份 docx');
+    expect(
+      WorkDiscussionState.mergeIntoExecutionState('{}', routed),
+      isNotEmpty,
+    );
+  });
 }

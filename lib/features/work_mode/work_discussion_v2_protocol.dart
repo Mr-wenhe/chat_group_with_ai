@@ -1,6 +1,7 @@
 import 'dart:convert';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'agent_decision.dart';
+import 'work_artifact_scope.dart';
 import 'work_public_update_stream.dart';
 import 'work_tool_registry.dart';
 
@@ -141,7 +142,7 @@ class WorkDiscussionV2Turn {
     return jsonDecode(raw);
   }
 
-  static const protocol = '''只返回严格 JSON object，不输出 Markdown 或私有推理。
+  static const _protocolHead = '''只返回严格 JSON object，不输出 Markdown 或私有推理。
 全部顶层字段必须出现：schemaVersion:2、action、public_update、issue_id、next_member_id、issues、resolutions、proposal、approval、decision、tool。无内容字段用空字符串、空数组或 null。
 完整顶层结构示例（内容需按你的真实判断填写）：{"schemaVersion":2,"action":"respond","public_update":"本轮公开意见","issue_id":"","next_member_id":"","issues":[],"resolutions":[],"proposal":null,"approval":null,"decision":null,"tool":null}。不增加其他顶层字段，不把公开说明放在 JSON 外。
 action: respond/investigate/propose/approve/decide/silent。respond 与 silent 时 proposal/approval/decision/tool 全部为 null；propose 只填 proposal，approve 只填 approval（包括本人不认可 approved:false），decide 只填 decision，investigate 只填 tool，其余三个为 null。public_update 是自然公开回应，不展示合同 JSON，不写理解百分比，不出现版本整数、approved:true|false、阶段名或 proposal 摘要等协议标识，不出现 artifactContract、requiredCapability、V-08 这类内部标识符，也不排 ①②③④ 式清单——那些值只填进对应字段，缺陷与补丁要求写进 issues 或详情，气泡只给你的判断和依据。公开气泡目标是 ${WorkPublicUpdateStream.bubbleTargetCharacters} 字以内（一到三个短句），按目标写而不是写到它的边上；超出部分会被截断并标注，完整正文转存为详情附件，所以只写当前结论、依据或异议，明细交给 issues 与详情。
@@ -154,7 +155,17 @@ resolutions 是 {id,resolution,evidenceRef} 数组，只引用真实工具/成�
 proposal={scope,plan,artifactContract:{type,format,location,revisionTarget,files:[相对路径字符串]},workItems:[{id,ownerId,dependencies,kind:"material|produce"}],acceptances:[{id,method,requiredCapability}]}。workItems 只允许 id/ownerId/dependencies/kind 四个字段，kind 可省略或为 material/produce；acceptances 只允许 id/method/requiredCapability 三个字段。不要把执行状态、说明文字或额外字段放进这些对象，运行时会生成状态字段。files 必须是相对路径字符串数组，不是对象数组。只协调成员可建立/修改当前方案，不默许原型；制作和测试工作项这里只规划，不声称已经执行。仅要求软件需求文档时不得扩展交付成软件。工作项、验收的 requestRevision 必须匹配当前需求；用户裁决/补充后旧版工作项必须由协调成员重新形成 proposal，不能只重新签字。
 形成原范围方案时，proposal.scope 必须逐字复制 collaboration.scope（包含用户补充、禁止事项及原语言），不能翻译、摘要或重述；自然语言整理写在 plan 和 public_update。只有关联既有 open idea 的完整范围提案才能改变 scope 或既有验收，仍需逐人确认，不能用“意思相同”绕过。
 proposal.artifactContract 从 collaboration.artifactContract 完整复制并保留全部现有字段，不只复制上方示例字段。非空且已明确的字段值必须保持原样（尤其 location 的绝对路径、format、revisionTarget）；不能换成 basename、相对路径或中文描述。只有尚未明确的空值、unspecified、generic 可以补齐；files 使用相对路径清单不意味着可以改写 location。
-软件实现方案必须有 kind=material 的需求/技术/测试材料工作项以及 kind=produce 的实现工作项，完整的 artifactContract.files 实现文件清单和 verificationCommands 独立测试命令计划。只写“前端制作、测试验收”两行不足以启动软件制作；冻结候选后独立验证由运行时安排，讨论中不自称测试已通过。工具不足应明确提出能力问题，不虚构测试命令或批准收据。
+''';
+
+  /// 默认合同规则：软件方案必须自备需求/技术/测试材料工作项。
+  static const _protocolMaterialsRule =
+      '软件实现方案必须有 kind=material 的需求/技术/测试材料工作项以及 kind=produce 的实现工作项，完整的 artifactContract.files 实现文件清单和 verificationCommands 独立测试命令计划。';
+
+  /// 用户只点名一个交付文件时的合同规则：不强制材料，验证合同一项不少。
+  static const _protocolSingleArtifactRule =
+      '用户只点名了一个交付文件：软件方案只需 kind=produce 的实现工作项，但完整的 artifactContract.files 实现文件清单和 verificationCommands 独立测试命令计划一项都不能少。';
+
+  static const _protocolTail = '''只写“前端制作、测试验收”两行不足以启动软件制作；冻结候选后独立验证由运行时安排，讨论中不自称测试已通过。工具不足应明确提出能力问题，不虚构测试命令或批准收据。
 verificationCommands 必须放在 proposal.artifactContract 内，不能成为 proposal 的第六个字段。它必须是非空字符串数组；每项都是 command.run 的紧凑 JSON 参数字符串，只能包含 executable 与 arguments，键顺序固定为 executable、arguments，例如元素文本为 {"executable":"node","arguments":["verify.js"]}。不得把元素写成对象，不得在命令字符串内添加编号或环境字段；V-01 等用例编号、每条命令的运行环境及其映射写在 plan 中。每条字符串不超过 1024 字符。proposal 本身只包含 scope、plan、artifactContract、workItems、acceptances。
 已有方案非空时，补充原来没有的 verificationCommands 也属于验收修改；必须先登记 kind=idea 的问题，完整 proposal 用 issue_id 关联它，再由全员确认后采纳。可在同轮 issues 登记该提案问题并提交关联 proposal，但不能自称已被认可。既有 acceptances 的 id、method、requiredCapability 必须逐字保留；更新需求版本不意味着允许改写验收口径。任何新增或修改同样要关联提案。
 新增范围作为 kind=idea 的问题，全体成员对该提案明确认可后再更新范围、计划和验收；有分歧用 decide 交用户。保留用户原始范围和所有禁止事项，不能扩大工具授权。
@@ -162,6 +173,18 @@ approval={kind:"plan|idea|delivery",subjectId,approved:true|false,requestRevisio
 approval 结构必须逐字包含 kind、subjectId、approved、requestRevision、teamRevision、verificationRevision 六个字段；版本必须是 JSON 整数而非字符串。plan 的 subjectId=taskId；idea 的 subjectId=对应问题 id；delivery 另加 iterationId 与 artifactDigest，且 subjectId=iterationId=当前候选 id、摘要原样复制当前候选。例：{"kind":"idea","subjectId":"ISS-VC-01","approved":true,"requestRevision":2,"teamRevision":1,"verificationRevision":3}。示例中的 ID 与版本仅说明类型和结构，必须替换为当前上下文的真实值，不能照抄。只代表自己，对当前完整方案或指定提案逐人确认；沉默、百分比、总结不是认可，不能返回他人签字。
 decision={kind:"question|choice|dispute",targetId,reason,evidence,impact,options:[{id,label,impact}]}，用户偏好、未知规则与真实分歧走用户决策；不要把普通实现取舍推给用户。
 next_member_id 可请求当前团队具体成员回应当前问题，不能用它调入群外成员。没有新增信息且无必要答复可以 silent。''';
+
+  /// 按用户原话取协议文本。
+  ///
+  /// 运行时一律走这里，不要直接用 `_protocolHead`/`_protocolTail` 拼默认版：
+  /// 用户只点名一个交付文件时不强制材料工作项，否则那三份文档会把一个"生成
+  /// 一份 HTML"的请求放大成五份产物（2026-10-10 现场）。
+  static String protocolFor(String userRequest) =>
+      _protocolHead +
+      (requestsSingleArtifact(userRequest)
+          ? _protocolSingleArtifactRule
+          : _protocolMaterialsRule) +
+      _protocolTail;
 
   static WorkDiscussionV2Turn? parse(Map<String, dynamic> response,
       {void Function(String)? onInvalid}) {

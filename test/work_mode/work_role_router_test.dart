@@ -75,6 +75,25 @@ void main() {
     expect(result.publicReason, contains('前端'));
   });
 
+  test('生成式软件请求也要拉起测试阶段，不能只剩一个前端自签', () {
+    final front = _character('front', '小前', '前端工程师');
+    final result = WorkRoleRouter.selectTeam(
+      request: '在\n/Users/fengye/Desktop/chat_group_out 这个文件家中 创建一个目录，'
+          '目录中的内容生成一份 飞行棋游戏的HTML，第一版只需要和AI对战即可',
+      characters: [product, front, tester],
+      skills: [
+        _skill('front-skill', front.id, 'frontend'),
+        _skill('testing-skill', tester.id, 'testing'),
+      ],
+    );
+    final roles = result.team.map((m) => m['role']).toList();
+
+    // 「生成/创建」曾经不在动词表里，requestsSoftwareImplementation 判 false，
+    // selectTeam 就不追加 testing 阶段：整队只剩前端一人，讨论退化为自提案自签字。
+    expect(roles, contains('frontend'));
+    expect(roles, contains('testing'));
+  });
+
   test('QA of an existing HTML file routes to testing and the report output',
       () async {
     final front = _character('front', '小前', '前端工程师');
@@ -435,6 +454,26 @@ void main() {
     expect(result.deliverableContract?.format, 'html');
   });
 
+  test('候选推举的公开说明给出"无需操作"与真的可用出口', () async {
+    final front = _character('front', '小前', '前端工程师');
+    final result = await router.route(
+      request: '生成一个 HTML 页面',
+      conversationId: 'group:html-nominate',
+      characters: [front, tester],
+      skills: [
+        _skill('front-skill', front.id, 'frontend'),
+        _skill('testing-skill', tester.id, 'testing'),
+      ],
+    );
+
+    // 旧文案「请由群内讨论后推举一位」在描述 App 会自动做的事，却写成了给用户的
+    // 指令：用户既不知道要不要回、也不知道从哪推举。
+    expect(result.needsExecutorSelection, isTrue);
+    expect(result.publicReason, contains('你无需操作'));
+    expect(result.publicReason, contains('@'));
+    expect(result.publicReason, isNot(contains('请由群内讨论后推举一位')));
+  });
+
   test('a test role cannot be explicitly assigned to HTML work', () async {
     final result = await router.route(
       request: '@小测 生成一个 HTML 页面',
@@ -619,6 +658,49 @@ void main() {
     expect(result.isSuccess, isFalse);
     expect(result.candidateCharacterIds, [product.id]);
     expect(result.publicReason, contains('格式无效'));
+  });
+
+  test('model selection failure names its cause instead of one blanket phrase',
+      () async {
+    final routed = WorkRoleRouter(
+      modelSelector: (_) async => throw const WorkRoleModelSelectionException(
+        kind: WorkRoleModelFailureKind.truncated,
+        outputTokenLimit: 256,
+      ),
+    );
+    final result = await routed.route(
+      request: '请写一份产品需求文档',
+      conversationId: 'group:model-truncated',
+      characters: characters,
+      skills: skills,
+    );
+
+    expect(result.isSuccess, isFalse);
+    // 本地合格候选必须保留：模型那一路失败不该把群内推举也一起取消。
+    expect(result.candidateCharacterIds, [product.id]);
+    expect(result.needsExecutorSelection, isTrue);
+    expect(result.publicReason, contains('截断'));
+    expect(result.publicReason, contains('256'));
+    expect(result.publicReason, isNot(contains('暂不可用')));
+  });
+
+  test('an unclassified selection error still carries a redacted cause',
+      () async {
+    final routed = WorkRoleRouter(
+      modelSelector: (_) async =>
+          throw StateError('无法读取 /Users/fengye/keys 下的模型凭据'),
+    );
+    final result = await routed.route(
+      request: '请写一份产品需求文档',
+      conversationId: 'group:model-unclassified',
+      characters: characters,
+      skills: skills,
+    );
+
+    expect(result.isSuccess, isFalse);
+    expect(result.publicReason, contains('[本地路径]'));
+    expect(result.publicReason, isNot(contains('/Users/fengye')));
+    expect(result.publicReason, isNot(contains('暂不可用')));
   });
 
   test('explicit final owner carries a Word contract and request revision',

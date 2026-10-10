@@ -40,11 +40,7 @@ extension _ChatRoomTaskActionSupport on _ChatRoomPageState {
       return;
     }
     if (!mounted) return;
-    await Navigator.of(context).push(
-      MaterialPageRoute<void>(
-        builder: (_) => ChatGroupFormPage(group: group),
-      ),
-    );
+    await _openGroupSettings(group);
     if (!mounted) return;
     overlay.openTask(action.taskId);
     try {

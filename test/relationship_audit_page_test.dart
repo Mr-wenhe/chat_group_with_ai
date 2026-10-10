@@ -625,6 +625,42 @@ void main() {
     expect(current.targetAiId, isNull);
   });
 
+  testWidgets('a search that matches nothing renders the empty state',
+      (tester) async {
+    await tester.runAsync(() async {
+      await db.aiCharacterBox.put('a', character('a', '阿月'));
+      await db.aiCharacterBox.put('b', character('b', '小明'));
+      final aToB = state(
+        source: 'a',
+        targetType: RelationshipTargetType.ai,
+        target: 'b',
+      );
+      await db.relationshipStateBox.put(aToB.id, aToB);
+    });
+
+    await tester.pumpWidget(app());
+    await tester.pump(const Duration(milliseconds: 200));
+    final rowKey = ValueKey(
+      'relationship-row-${RelationshipState.stableGlobalId('a', RelationshipTargetType.ai, 'b')}',
+    );
+    expect(find.byKey(rowKey), findsOneWidget);
+
+    // 空状态本身就是一个 sliver；再把它套进 SliverToBoxAdapter 会让滚动视图
+    // 在布局期抛类型断言，并用 ErrorWidget 顶替子树。那次替换会 detach 掉一棵
+    // 仍然存活的渲染子树，使悬停行的水波纹留在 Scaffold 的 Material 上，下一次
+    // 重绘就会因 referenceBox 脱离而黑屏。这里钉死这条路径。
+    await tester.enterText(
+      find.byKey(const ValueKey('relationship-audit-search')),
+      '没有这个角色',
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.pump(const Duration(milliseconds: 300));
+
+    expect(tester.takeException(), isNull);
+    expect(find.text('没有找到匹配的关系'), findsOneWidget);
+    expect(find.byKey(rowKey), findsNothing);
+  });
+
   testWidgets('source trace uses real message group and degrades safely',
       (tester) async {
     final relationId = RelationshipState.stableGlobalId(

@@ -895,6 +895,9 @@ class WorkAgentLoop
           safeMetadata: {
             'action': decision.action.wireName,
             'actionCount': task.actionCount,
+            // 模型在协议正文外又加了一句散文，这次是靠抽取唯一 object 才解析成功的。
+            // 解析成功会掩盖提示词在慢慢失效，所以违约本身也要留痕。
+            if (parsed.extractedFromProse) 'extractedFromProse': true,
           },
         );
         if (stop.isCancelled) return await _interrupt(state);

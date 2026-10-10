@@ -138,11 +138,15 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   double _topAnchor(BuildContext context) =>
       _panelTopAnchor(context) + _topAnchorGap;
 
-  /// 宽屏面板的顶边：紧贴会话控件行的下沿。
+  /// 面板的顶边（宽屏与窄布局共用）：紧贴会话控件行的下沿。
   ///
   /// 「填满聊天窗口高度」要的就是不浪费 [_topAnchorGap] 那一段——胶囊是浮在控件
   /// 行外面的小球，留空隙才不会显得贴脸；面板是一整块矩形，贴上去既多出十几像素
   /// 可读高度，也不会盖住任何东西。底边仍停在输入区之上（见 [_composerClearance]）。
+  ///
+  /// 两条布局路径都从这里取顶边：窄布局曾自己用一个「状态栏 + AppBar」的估算常量
+  /// 96，而桌面端状态栏为 0，算出来比控件行下沿还低 40px，顶边于是在半空中多悬
+  /// 了一段。凡是需要面板顶边的地方都问这个函数，别再各写一份。
   double _panelTopAnchor(BuildContext context) =>
       MediaQuery.paddingOf(context).top +
       kToolbarHeight +
@@ -157,9 +161,6 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   /// 足够高度，剩下的才分给「执行动态」。这个上限只是给窄屏一个参考值 ——
   /// 宽屏面板由顶锚点到 `_composerClearance` 撑满视口，此处会被视口高度覆盖。
   static const double _collapsedPanelMaxHeight = 790.0;
-
-  /// 面板顶部至少留出的空隙，避免矮窗口下 Positioned 超出 Stack 被裁掉面板头。
-  static const double _panelTopClearance = 96.0;
 
   StreamSubscription<List<AgentTask>>? _tasksSubscription;
   StreamSubscription<String?>? _conversationSubscription;
@@ -459,12 +460,11 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     // 底部面板不再钉死 470：折叠态内容（含两条单行动态）在 470 下放不下，
     // 执行细节必须拨滚轮才能看到。改为"视口给足 + 上限保护"。
     //
-    // 顶部净空同样要让开会话控件行：窄布局下面板头原本落在 96，而控件行下沿在
-    // 106，正好盖住「工作模式」开关的最后十来个像素——和宽屏面板、折叠胶囊是同一
-    // 个冲突，只是这条路径漏了。窗口太矮时 400 的下限仍会把它顶回去，那是既有
-    // 取舍（面板头一旦被 Stack 裁掉就什么都没了）。
-    final panelTopClearance = _panelTopClearance +
-        (_activeConversationId == null ? 0.0 : _conversationControlsBand);
+    // 顶边与宽屏面板共用 [_panelTopAnchor]：窄布局原本自算一个「状态栏 + AppBar」
+    // 的常量 96 再加上控件行 50，桌面端状态栏为 0，顶边就落在 146，比控件行下沿
+    // 还低 40px——面板已经左右撑满，顶上再悬着一段空档只会显得没对齐。窗口太矮时
+    // 400 的下限仍会把它顶回去，那是既有取舍（面板头一旦被 Stack 裁掉就什么都没了）。
+    final panelTopClearance = _panelTopAnchor(context);
     final panelHeight =
         (viewportHeight - panelTopClearance - _composerClearance)
             .clamp(400.0, _collapsedPanelMaxHeight)

@@ -95,6 +95,52 @@ class HumanizedChatOrchestrator {
     return scored.take(limit).map((s) => s.intent).toList();
   }
 
+  /// 为**已经确定的**发言者生成发言意图。
+  ///
+  /// 与 [selectReplyIntents] 的差别只有一处：不做"本轮愿不愿意开口"的筛选。
+  /// 发言者已经由 AI 选人器、明确点名或私聊路由定下来了，此时让它沉默就等于
+  /// 让整轮没有人接话；动作、对象、语气、长度与关系规则仍照常计算，所以最终
+  /// 意图一定对应当前这位角色和它看到的最新对话。
+  static ReplyIntent intentForSpeaker({
+    required AICharacter character,
+    required List<AICharacter> allCharacters,
+    required List<Message> recentMessages,
+    required String groupId,
+    required String groupTheme,
+    required String? userMessage,
+    required List<String> mentionedIds,
+    required List<CharacterMemory> memories,
+    required List<RelationshipState> relationships,
+    required Random random,
+    bool isAutoChat = false,
+    UserMessageSentiment? userSentiment,
+  }) {
+    final scored = _intentForCharacter(
+      character: character,
+      allCharacters: allCharacters,
+      recentMessages: recentMessages,
+      groupId: groupId,
+      groupTheme: groupTheme,
+      userMessage: userMessage,
+      mentionedIds: mentionedIds,
+      memories: memories,
+      relationships: relationships,
+      random: random,
+      isAutoChat: isAutoChat,
+      userSentiment: userSentiment,
+      forceSpeak: true,
+    );
+    // forceSpeak 保证非空；这里的兜底只是让类型收敛，不改变行为。
+    return scored?.intent ??
+        ReplyIntent(
+          speakerId: character.id,
+          action: ReplyAction.answer,
+          lengthHint: ReplyLengthHint.short,
+          toneHint: '自然、口语、像群友',
+          reason: 'forced-speaker',
+        );
+  }
+
   static _ScoredIntent? _intentForCharacter({
     required AICharacter character,
     required List<AICharacter> allCharacters,
@@ -108,6 +154,7 @@ class HumanizedChatOrchestrator {
     required Random random,
     required bool isAutoChat,
     UserMessageSentiment? userSentiment,
+    bool forceSpeak = false,
   }) {
     var score = isAutoChat ? 24 : 18;
     final reasons = <String>[];
@@ -252,7 +299,10 @@ class HumanizedChatOrchestrator {
       }
     }
 
-    if (mentionedIds.isEmpty && score < 35 && random.nextDouble() < 0.28) {
+    if (!forceSpeak &&
+        mentionedIds.isEmpty &&
+        score < 35 &&
+        random.nextDouble() < 0.28) {
       reasons.add('silence');
       return null;
     }

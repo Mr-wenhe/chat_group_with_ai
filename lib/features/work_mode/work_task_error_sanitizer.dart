@@ -36,8 +36,22 @@ String sanitizeWorkTaskError(Object? error) {
       ?.group(1);
   if (status != null) return '任务请求失败（HTTP $status）';
 
-  var safe = raw.replaceFirst(_dartExceptionPrefix, '').trim();
+  var safe = redactSensitiveText(raw);
   if (safe.isEmpty) return '任务执行失败';
+  return safe;
+}
+
+/// 把任意文本压成一行可以进用户文案的内容。
+///
+/// 剥掉 Dart 异常前缀，遮掉密钥、外部地址与本地路径，折叠空白并截断。凡是
+/// 要落进任务记录或聊天记录的自由文本都必须先过这里——这些记录是持久化的、
+/// 会被导出的，不能变成第二份原始错误日志。
+///
+/// 返回值可能为空（原文只有前缀或空白），是否给兜底文案由调用方决定。
+String redactSensitiveText(Object? value, {int maximum = 600}) {
+  var safe =
+      (value?.toString() ?? '').replaceFirst(_dartExceptionPrefix, '').trim();
+  if (safe.isEmpty) return '';
   safe = const SearchSecretScanner().redact(
     safe,
     includeOpaqueTokens: true,
@@ -53,7 +67,9 @@ String sanitizeWorkTaskError(Object? error) {
     '[本地路径]',
   );
   safe = safe.replaceAll(RegExp(r'\s+'), ' ').trim();
-  if (safe.isEmpty) return '任务执行失败';
-  const maximum = 600;
-  return safe.length <= maximum ? safe : '${safe.substring(0, maximum - 1)}…';
+  // maximum <= 0 时 substring 的下标会越界。目前没有调用方会传这么小，
+  // 但这是一个纯函数边界，按"截断到 0 个字符"处理而不是抛 RangeError。
+  if (maximum <= 0) return '';
+  if (safe.length <= maximum) return safe;
+  return '${safe.substring(0, maximum - 1)}…';
 }

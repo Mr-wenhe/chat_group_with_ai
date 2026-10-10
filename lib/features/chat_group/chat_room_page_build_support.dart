@@ -104,9 +104,7 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                 (_group?.announcement.trim().isNotEmpty ?? false))
               AnnouncementBanner(
                 announcement: _group!.announcement.trim(),
-                onEdit: () => Navigator.of(context).push(MaterialPageRoute(
-                  builder: (_) => ChatGroupFormPage(group: _group),
-                )),
+                onEdit: () => _openGroupSettings(_group!),
               ),
             // 只有已共享的群才谈得上"连没连上"；纯本机的群完全不出现这一条。
             if (_isRealtimeShared)

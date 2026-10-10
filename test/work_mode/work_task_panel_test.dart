@@ -3319,11 +3319,12 @@ void main() {
       expect(panel.bottom, lessThanOrEqualTo(viewport.height - 84));
     });
 
-    testWidgets('narrow panel also clears the conversation controls band',
+    testWidgets('narrow panel starts at the conversation controls band',
         (tester) async {
-      // 窄布局的面板不比宽屏面板特殊：它的顶边原本落在 96，而控件行下沿在 106，
-      // 面板头正压着「工作模式」开关的最后十来个像素——两个宽布局入口都让开了，
-      // 这条路径漏了。
+      // 窄布局的面板不比宽屏面板特殊：它曾经自己算一个「状态栏 + AppBar」的常量
+      // 96 再加上控件行 50，桌面端状态栏为 0，顶边就落在 146——比控件行下沿低
+      // 40px，面板已经左右撑满，顶上那段空档纯属没对齐。两边现在共用同一个锚点，
+      // 断言也照宽屏那条钉死：贴齐下沿，不是"不低于"。
       const viewport = Size(600, 844);
       final bandKey = GlobalKey();
       await tester.pumpWidget(MaterialApp(
@@ -3356,7 +3357,7 @@ void main() {
 
       final panel =
           tester.getRect(find.byKey(const Key('work-task-panel-bottom')));
-      expect(panel.top, greaterThanOrEqualTo(bandBottom));
+      expect(panel.top, closeTo(bandBottom, 0.5));
       expect(panel.bottom, lessThanOrEqualTo(viewport.height - 84));
     });
 

@@ -160,16 +160,6 @@ void main() {
         detail: 'public_update',
       ),
       (
-        name: 'markdown fence with surrounding prose',
-        raw: '模型输出如下：\n```json\n${_json({
-              'action': 'finish',
-              'public_update': '已完成。',
-              'tool': null,
-              'completion': {'summary': '完成'},
-            })}\n```',
-        detail: '单个合法 JSON',
-      ),
-      (
         name: 'multiple JSON objects',
         raw: '${_json({
               'action': 'finish',
@@ -254,6 +244,53 @@ void main() {
 
     expect(result.isSuccess, isTrue, reason: result.detail);
     expect(result.decision, isA<AgentFinishDecision>());
+    expect(result.extractedFromProse, isFalse);
+  });
+
+  test('accepts a decision object preceded by one spoken sentence', () async {
+    final result = await parser.parse('先看看工作区现状，然后开始写材料。\n\n'
+        '${_validFinishJson()}');
+
+    expect(result.isSuccess, isTrue, reason: result.detail);
+    expect(result.decision, isA<AgentFinishDecision>());
+    // 解析成功不等于模型守约，调用方要靠这个标志量违约频率。
+    expect(result.extractedFromProse, isTrue);
+  });
+
+  test('accepts a fenced decision object wrapped in prose', () async {
+    final result = await parser.parse(
+      '模型输出如下：\n```json\n${_validFinishJson()}\n```\n希望有帮助。',
+    );
+
+    expect(result.isSuccess, isTrue, reason: result.detail);
+    expect(result.decision, isA<AgentFinishDecision>());
+    expect(result.extractedFromProse, isTrue);
+  });
+
+  test('accepts a fenced decision object with trailing prose after the fence',
+      () async {
+    final result = await parser.parse(
+      '```json\n${_validFinishJson()}\n```\n希望有帮助。',
+    );
+
+    expect(result.isSuccess, isTrue, reason: result.detail);
+    expect(result.decision, isA<AgentFinishDecision>());
+    expect(result.extractedFromProse, isTrue);
+  });
+
+  test('a broken fence keeps its own diagnostic', () async {
+    // 没有闭合围栏，也没有可抽取的 object：围栏专用文案仍是更准确的归因。
+    final result = await parser.parse('```json\n我先看看工作区。');
+
+    expect(result.isFailure, isTrue);
+    expect(result.detail, contains('Markdown code fence'));
+  });
+
+  test('a bare decision object is not reported as extracted', () async {
+    final result = await parser.parse(_validFinishJson());
+
+    expect(result.isSuccess, isTrue, reason: result.detail);
+    expect(result.extractedFromProse, isFalse);
   });
 
   test('uses reasoning_content only when standard content is empty', () async {

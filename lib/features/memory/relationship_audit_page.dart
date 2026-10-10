@@ -367,7 +367,7 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
           ),
         ),
         if (filtered.isEmpty)
-          SliverToBoxAdapter(child: _emptyState(context))
+          _emptyState(context)
         else
           for (final section in sections) ...[
             SliverToBoxAdapter(

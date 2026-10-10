@@ -6,6 +6,7 @@ import 'package:chat_group/features/chat_group/chat_room_utils.dart';
 
 import 'work_handoff_state.dart';
 import 'work_mode_policy.dart';
+import 'work_task_error_sanitizer.dart';
 
 part 'work_role_router_models.dart';
 part 'work_role_router_planner.dart';
@@ -110,7 +111,11 @@ class WorkRoleRouter {
         !RegExp(r'需求文档|需求说明|技术文档|调研报告|requirements document|specification',
                 caseSensitive: false)
             .hasMatch(clause) &&
-        RegExp(r'(?:(?:开发|实现|制作|构建|编写|修复|修改|做)|\b(?:build|develop|implement|make|fix|repair)\b).{0,48}(?:软件|程序|应用|游戏|网页|网站|代码|html|flutter|python|app|game|website|code)',
+        // 动词表必须与 _hasFrontendImplementationBeforeTesting 保持一致。少
+        // 「生成/创建」会让"生成一份飞行棋游戏的HTML"判成非软件实现，于是
+        // selectTeam 不追加 testing 阶段、测试工程师整队不进人，讨论退化成
+        // 一人自提案自签字（2026-10-10 现场）。
+        RegExp(r'(?:(?:开发|实现|制作|构建|编写|创建|生成|修复|修改|做)|\b(?:build|create|develop|implement|make|generate|fix|repair)\b).{0,48}(?:软件|程序|应用|游戏|网页|网站|代码|html|flutter|python|app|game|website|code)',
                 caseSensitive: false)
             .hasMatch(clause));
   }
@@ -625,12 +630,20 @@ class WorkRoleRouter {
               selected,
               ...qualified.where((character) => character.id != selected.id),
             ];
-            modelNote =
-                '模型建议「${selected.name}」作为首位候选（${decision.publicReason.trim()}），仍需群内推举。';
+            final reason = decision.publicReason.trim();
+            modelNote = reason.isEmpty
+                ? '模型建议「${selected.name}」作为首位候选，仍需群内推举。'
+                : '模型建议「${selected.name}」作为首位候选（$reason），仍需群内推举。';
           }
         }
-      } on Object {
-        modelNote = '模型候选推荐暂不可用，保留本地资格候选并等待群内推举。';
+      } on WorkRoleModelSelectionException catch (error) {
+        modelNote = _modelFailureNote(error);
+      } on Object catch (error) {
+        // 未分类的异常也必须把原因带回公开说明：一句固定文案会让现场无法归因
+        // ——网络失败、凭据读不出来、模型写坏 JSON 在用户侧长得一模一样。
+        final cause = redactSensitiveText(error, maximum: 160);
+        modelNote = '模型候选推荐未完成：'
+            '${cause.isEmpty ? error.runtimeType : cause}，未采纳模型选择。';
       }
     }
     final names = ordered.map(_candidateDisplayName).join('、');
@@ -639,7 +652,9 @@ class WorkRoleRouter {
       characterId: null,
       source: WorkRoleRouteSource.candidateSelection,
       publicReason:
-          '${modelNote == null ? '' : '$modelNote '}尚未指定最终执行人。候选角色：$names；任务需要$stageName能力，请由群内讨论后推举一位。',
+          '${modelNote == null ? '' : '$modelNote '}尚未指定最终执行人。候选角色：$names；'
+          '任务需要$stageName能力，已交给群内讨论自动推举，你无需操作；'
+          '想自己指定，直接在群里 @ 一位候选角色即可。',
       confidence: 0,
       needsHandoff: false,
       deliverableContract: contract,
@@ -649,6 +664,30 @@ class WorkRoleRouter {
           List<String>.unmodifiable(ordered.map((character) => character.id)),
       needsExecutorSelection: true,
     );
+  }
+
+  /// 把选人失败翻译成一句可归因的公开说明。
+  ///
+  /// 每一类都要能指向不同的下一步：截断是预算/策略问题，凭据要去配置，超时
+  /// 可以重试，形状不对要换模型。写死一句"暂不可用"等于把处置权也一起藏起来。
+  static String _modelFailureNote(WorkRoleModelSelectionException error) {
+    final clause = switch (error.kind) {
+      WorkRoleModelFailureKind.credential => '没有可用的模型凭据',
+      WorkRoleModelFailureKind.timeout => '模型请求超时',
+      WorkRoleModelFailureKind.request =>
+        '模型请求失败（${redactSensitiveText(error.detail, maximum: 120)}）',
+      WorkRoleModelFailureKind.empty => '模型没有返回内容',
+      WorkRoleModelFailureKind.oversized => '模型响应过大',
+      WorkRoleModelFailureKind.truncated => error.outputTokenLimit == null
+          ? '模型输出被截断'
+          : '模型输出被截断（用满 ${error.outputTokenLimit} token 上限）',
+      WorkRoleModelFailureKind.malformed => '模型响应无法解析为决策 JSON',
+    };
+    final snippet = error.responseSnippet;
+    // 证据片段一律放到句末：夹在从句里会让"—（（））"这种嵌套括号读不出来。
+    final evidence =
+        snippet == null || snippet.isEmpty ? '' : '（响应开头：$snippet）';
+    return '模型候选推荐未完成：$clause，未采纳模型选择。$evidence';
   }
 
   static List<AICharacter> _qualifiedCandidates(

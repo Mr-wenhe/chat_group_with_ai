@@ -144,6 +144,23 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
     if (added && _canTouchUi) _showMembersSheet();
   }
 
+  /// 打开群设置，并在返回后把最新群配置读回本页。
+  ///
+  /// 固定共同设定（共同背景 / 群公告与约定）必须"编辑后对下一次请求生效"，
+  /// 而 [_group] 是进入会话时加载的快照。不重新读取的话，同一次进入会话会一直
+  /// 用编辑前的旧设定，直到重启 App——这与"每次聊天生效"的承诺相反。
+  Future<void> _openGroupSettings(ChatGroup group) async {
+    await Navigator.of(context).push(
+      MaterialPageRoute<void>(
+        builder: (_) => ChatGroupFormPage(group: group),
+      ),
+    );
+    if (!mounted) return;
+    final refreshed = _db.chatGroupBox.get(widget.groupId);
+    if (refreshed == null) return;
+    _setUiState(() => _group = refreshed);
+  }
+
   /// 把新成员 id 合入群成员列表并持久化，随后刷新页面内存态。
   ///
   /// 返回是否真的写入了新成员（无候选 / 角色已不存在时返回 false）。

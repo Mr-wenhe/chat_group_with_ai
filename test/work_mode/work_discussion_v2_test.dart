@@ -649,6 +649,14 @@ void main() {
         WorkRoleRouter.requestsSoftwareImplementation('编写需求文档，并开发软件'), isTrue);
     expect(
         WorkRoleRouter.requestsSoftwareImplementation('编写开发游戏的需求文档'), isFalse);
+    // 「生成/创建」是与「制作」等价的实现动词，漏掉它们会让整类请求丢掉测试阶段。
+    expect(
+        WorkRoleRouter.requestsSoftwareImplementation('生成一份 飞行棋游戏的HTML'),
+        isTrue);
+    expect(
+        WorkRoleRouter.requestsSoftwareImplementation(
+            '创建一个目录，目录中的内容生成一份 飞行棋游戏的HTML'),
+        isTrue);
   });
   test('ready 前即便已有授权或命令伪装只读也不会进入 handler', () async {
     var invoked = 0;

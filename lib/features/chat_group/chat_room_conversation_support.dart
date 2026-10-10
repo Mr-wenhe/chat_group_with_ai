@@ -3,6 +3,8 @@ part of 'chat_room_page.dart';
 extension _ChatRoomConversationSupport on _ChatRoomPageState {
   Future<void> _maybeUpdateMemory() async {
     if (_isDirectChat) return;
+    // 摘要是一次真实的模型调用，必须在发出前复检"用户还在看这个群"。
+    if (!_roomWorkAllowed) return;
     if (!_memoryControls.canAutoUpdateGroup(_groupMemory)) return;
     final now = DateTime.now();
     if (!ChatOrchestrator.shouldUpdateGroupMemory(
@@ -39,7 +41,9 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
       previousSummary:
           hasRestrictedMessages ? '' : _groupMemory?.topicSummary ?? '',
     );
-    if (summary.isNotEmpty && _groupMemory != null) {
+    // 摘要是外围模型调用，可能在用户离开很久之后才返回：迟到的结果不许再
+    // 改写旧群上下文（用户已经在看别的群或别的页面了）。
+    if (summary.isNotEmpty && _groupMemory != null && _roomWorkAllowed) {
       _groupMemory!.topicSummary = summary;
       await _groupMemory!.save();
       _setUiState(() {});
@@ -54,6 +58,7 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     String recentText, {
     String previousSummary = '',
   }) async {
+    if (!_roomWorkAllowed) return '';
     // 摘要只需要一个可用的 API 通道，借用首个角色的配置即可。
     final character = _characters.isNotEmpty ? _characters.first : null;
     if (character == null) return '';
@@ -61,7 +66,9 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     final config = _resolveApiConfig(character);
     if (config == null) return '';
     final apiKey = await _credentialResolver.resolve(config);
-    if (apiKey == null) return '';
+    // 凭据解析是异步的，期间用户可能已经离开这个群。摘要是这一刻才发起的新
+    // 请求，必须在真正发出前复检，否则切走后仍在后台调用模型。
+    if (apiKey == null || !_roomWorkAllowed) return '';
 
     final msgs = [
       {
@@ -228,15 +235,13 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     return parseMentionedCharacterIds(content, _characters);
   }
 
-  /// 把发言意图列表映射为对应的角色对象。
-  ///
-  /// 用 [Iterable.whereType] 过滤掉找不到角色的意图（角色可能刚被删除/停用）。
-  List<AICharacter> _charactersForIntents(List<ReplyIntent> intents) {
-    final byId = {for (final c in _characters) c.id: c};
-    return intents
-        .map((intent) => byId[intent.speakerId])
-        .whereType<AICharacter>()
-        .toList();
+  /// 私聊本轮的回复者：固定为会话对方角色（前提是它有资格回复）。
+  List<AICharacter> _directReplyCharacters() {
+    return DirectChatSession.selectReplyCharacters(
+      characters: _allGroupCharacters,
+      directCharacterId: _directCharacterId ?? '',
+      isEligible: _isEligibleToReply,
+    );
   }
 
   /// The search runs once for the user turn; search-only roles provide no
@@ -255,67 +260,6 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
         )
         .toList();
     return eligible;
-  }
-
-  /// 私聊本轮的回复者：固定为会话对方角色（前提是它有资格回复）。
-  ///
-  /// 私聊没有意图编排，故顺手清空 [_pendingReplyIntents]。
-  List<AICharacter> _directReplyCharacters() {
-    _pendingReplyIntents.clear();
-    return DirectChatSession.selectReplyCharacters(
-      characters: _allGroupCharacters,
-      directCharacterId: _directCharacterId ?? '',
-      isEligible: _isEligibleToReply,
-    );
-  }
-
-  /// 为群聊本轮挑选发言者及其发言意图，并缓存到 [_pendingReplyIntents]。
-  ///
-  /// 若本轮没有被 @ 的人，则尽量排除上一条的发言者，避免同一角色连说两轮；
-  /// 但过滤后为空时保留原结果（宁可连说，也不要整轮没人回应）。
-  List<ReplyIntent> _selectGroupReplyIntents({
-    required String? userMessage,
-    required List<String>? mentionedIds,
-    required bool isAutoChat,
-    UserMessageSentiment? userSentiment,
-  }) {
-    // 被禁言的角色退出自动挑选，除非本轮被明确 @ 点名。
-    final mentionedSet = (mentionedIds ?? const <String>[]).toSet();
-    var replyIntents = HumanizedChatOrchestrator.selectReplyIntents(
-      characters: _characters,
-      recentMessages: _recentMessagesForContext(),
-      recentMessagesForCharacter: (character) => _visibleContextForCharacter(
-        character.id,
-        _recentMessagesForContext(),
-      ),
-      groupId: widget.groupId,
-      groupTheme: _group?.theme ?? '日常聊天',
-      userMessage: userMessage,
-      mentionedIds: mentionedIds ?? const [],
-      memories: _characterMemories,
-      relationships: _relationshipStates,
-      isEligible: (character) =>
-          _isEligibleToReply(character) &&
-          _mayAutoPick(character, mentionedIds: mentionedSet),
-      random: _random,
-      isAutoChat: isAutoChat,
-      userSentiment: userSentiment,
-    );
-    final lastAiSenderId = _lastAiSenderId;
-    // 被 @ 点名时必须让被点的人回答，此时不做"避免连说"的过滤。
-    if (lastAiSenderId != null &&
-        (mentionedIds == null || mentionedIds.isEmpty)) {
-      final filtered = replyIntents
-          .where((intent) => intent.speakerId != lastAiSenderId)
-          .toList();
-      // 过滤后为空则保留原列表，宁可连说也不要本轮无人回应。
-      if (filtered.isNotEmpty) replyIntents = filtered;
-    }
-    _pendingReplyIntents
-      ..clear()
-      ..addEntries(
-          replyIntents.map((intent) => MapEntry(intent.speakerId, intent)));
-    return replyIntents;
   }
 
   /// 取最近 20 条消息作为 LLM 上下文（够连贯，又不过度消耗 token）。
@@ -398,12 +342,20 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     final manager = ContextWindowManager(
       maxRetries: 0,
       complete: (messages) async {
+        if (!_roomWorkAllowed) {
+          return const {'success': false, 'message': '页面已离开'};
+        }
         if (!_mayAutoPick(character, mentionedIds: mentionedIds)) {
           return const {'success': false, 'message': '角色已禁言'};
         }
         final apiKey = await _credentialResolver.resolve(config);
         if (apiKey == null) {
           return const {'success': false, 'message': 'API 凭据不可用'};
+        }
+        // 凭据解析是异步的，期间页面可能已经不可见；压缩是回合新触发的
+        // 请求，同样必须在发出前复检。
+        if (!_roomWorkAllowed) {
+          return const {'success': false, 'message': '页面已离开'};
         }
         if (!_mayAutoPick(character, mentionedIds: mentionedIds)) {
           return const {'success': false, 'message': '角色已禁言'};
@@ -439,6 +391,11 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
         boundedHistory,
         isDirectChat: _isDirectChat,
       );
+      // 压缩摘要可能在页面离开期间才返回，此时不得写进会话内缓存：它属于
+      // "旧群的上下文"，用户已经不在看它了。
+      if (!_roomWorkAllowed) {
+        return (messages: visibleFallbackContext, summary: transient?.summary);
+      }
       // ponytail: transient-only compression, restore durable summaries if
       // cross-session context compression becomes a measured bottleneck.
       _transientContextCompression[character.id] = (

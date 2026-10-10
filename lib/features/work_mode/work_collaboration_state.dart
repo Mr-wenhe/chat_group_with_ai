@@ -155,6 +155,17 @@ class WorkCollaborationState {
       value is String &&
       value.length <= max &&
       !value.contains(RegExp(r'[\u0000-\u001f\u007f]'));
+
+  /// 散文字段（scope、plan、问题与裁决正文）允许换行与制表符。
+  ///
+  /// 讨论协议早就把 \t \n \r 放行给模型，用户原话也常带换行；把身份字段那套
+  /// 全严格判据套到散文上，一条多行方案就会让整份记录判非法。字符集与
+  /// `WorkDiscussionV2Protocol` 的正文判据保持一致：除 \t \n \r 外的控制字符
+  /// 仍然一律拒绝。身份、路径与引用字段继续用 [_text]。
+  static bool _multilineText(Object? value, {int max = 4096}) =>
+      value is String &&
+      value.length <= max &&
+      !value.contains(RegExp(r'[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]'));
   static bool _revision(Object? value) =>
       value is int && value >= 1 && value <= 2147483647;
   // 每类最多 64 条**当前**记录，账台在构造前先归一化，不让历史把容量占满：

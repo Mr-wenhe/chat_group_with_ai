@@ -320,9 +320,16 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
   void _stopStreaming() {
     _cancelActiveSearch();
     if (!_isStreaming) {
+      // 选人阶段没有活跃的 stream，但同样属于"这一轮还在跑"：取消正在飞的
+      // 选择请求，让迟到的结果作废（见 `_isSpeakerRoundInvalidated`）。
+      _cancelActiveSpeakerPick();
       // There is no completion callback left to consume a discard latch. Clear
       // it here so a later, unrelated automatic reply cannot be dropped.
       _discardCurrentStream = false;
+      // 工作模式的任务由协调器持有，页面上的"停止"不能碰它。
+      if (_conversationController.state.run?.type != ConversationRunType.work) {
+        _conversationController.requestStop();
+      }
       return;
     }
     final runType = _conversationController.state.run?.type;

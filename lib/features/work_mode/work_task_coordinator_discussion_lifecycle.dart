@@ -423,7 +423,12 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
 
   String _discussionWaitingReason(WorkDiscussionState state) {
     if (state.collaboration != null) {
-      return state.isPlanReady ? '方案已确认，等待工作项调度。' : '等待相关团队查证问题并逐人确认当前方案。';
+      // v2 讨论在后台自动推进，此刻用户没有任何可执行的动作。旧文案只写"等待…"，
+      // 读起来像在催用户做事——他没被告知该回复什么，也没被告知不必回复。
+      return state.isPlanReady
+          ? '方案已确认，等待工作项调度。讨论与调度自动进行，你无需操作。'
+          : '等待相关团队查证问题并逐人确认当前方案。讨论自动进行，你无需操作；'
+              '要补充要求直接在群里说。';
     }
     if (state.executorId == null || state.executorId!.trim().isEmpty) {
       return '等待群内确定符合职业资格的最终执行角色。';

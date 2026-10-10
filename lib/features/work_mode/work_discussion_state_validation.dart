@@ -8,6 +8,19 @@ String _cleanText(Object? value, {required int maximum}) {
   return '${cleaned.substring(0, maximum - 1)}…';
 }
 
+/// 与 [_cleanText] 相同，但保留换行与制表符。
+///
+/// 协作记录的散文字段（如 scope）允许换行，只有身份、路径与引用字段才必须
+/// 压成单行；用户用 Shift+Enter 分行写的需求不应该在落盘时被抹平。
+String _cleanMultilineText(Object? value, {required int maximum}) {
+  if (value is! String) return '';
+  final cleaned = value
+      .replaceAll(RegExp(r'[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]'), ' ')
+      .trim();
+  if (cleaned.length <= maximum) return cleaned;
+  return '${cleaned.substring(0, maximum - 1)}…';
+}
+
 String _cleanId(Object? value) => _cleanText(value, maximum: 128);
 
 String? _nullableId(Object? value) {

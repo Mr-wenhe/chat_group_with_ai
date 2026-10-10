@@ -139,6 +139,16 @@ extension _SettingsPageBuild on _SettingsPageState {
             children: [
               _SettingTile(
                 cs: cs,
+                icon: Icons.multiple_stop_rounded,
+                iconColor: cs.primary,
+                title: 'AI 接话选人器',
+                subtitle: _speakerPickerSubtitle,
+                onTap: _chooseSpeakerPickerConfig,
+              ),
+              Divider(
+                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+              _SettingTile(
+                cs: cs,
                 icon: Icons.manage_search_rounded,
                 iconColor: cs.primary,
                 title: '全局搜索',

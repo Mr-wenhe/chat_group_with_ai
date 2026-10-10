@@ -202,13 +202,18 @@ class WorkDiscussionState {
       throw StateError('旧讨论状态与任务不匹配。');
     }
     final contract = legacy.deliverableContract;
+    // 协作记录的 scope / requestMessageId 是落盘门禁字段，而 [currentRequestScope]
+    // 在没有可用的当前版本合同时直接回吐 task.userRequest。用户在群里用 Shift+Enter
+    // 换行、语音输入断句或粘贴多行需求都会带上 \n，不清洗就会在写入检查点时越界
+    // 抛错，整条输入被静默吞掉。scope 是散文，保换行；requestMessageId 是身份，
+    // 压成单行。
     final collaboration = WorkCollaborationState.fromLegacy(
       taskId: task.id,
       conversationId: task.groupId,
       projectScopeId: projectScopeId,
       requestRevision: legacy.requestRevision,
-      requestMessageId: requestMessageId,
-      scope: currentRequestScope(task),
+      requestMessageId: _cleanText(requestMessageId, maximum: 128),
+      scope: _cleanMultilineText(currentRequestScope(task), maximum: 4096),
       artifactContract: {
         'type': WorkRoleRouter.canonicalArtifactType(
             contract?['deliverableType'] as String?),

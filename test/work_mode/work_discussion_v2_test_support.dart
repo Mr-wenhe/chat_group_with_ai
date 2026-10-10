@@ -205,6 +205,64 @@ Future<AgentTask> apply(WorkCollaborationUpdate update) async {
   return task;
 }
 
+/// 当前待答事项。v2 讨论的阻塞项都落在这里，断言时不必各自展开状态。
+List<Map<String, dynamic>> _pendingDecisions() =>
+    WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+        .collaboration!
+        .decisions
+        .where((d) => const {'pending', 'deferred'}.contains(d['status']))
+        .map((d) => Map<String, dynamic>.from(d))
+        .toList();
+
+Map<String, dynamic> _teamRecord(String memberId) =>
+    WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+        .collaboration!
+        .team
+        .firstWhere((m) => m['memberId'] == memberId);
+
+List<String> _optionLabels() => (_pendingDecisions().single['options'] as List)
+    .whereType<Map>()
+    .map((o) => o['label'] as String)
+    .toList();
+
+List<String> _optionIds() => (_pendingDecisions().single['options'] as List)
+    .whereType<Map>()
+    .map((o) => o['id'] as String)
+    .toList();
+
+String _pendingEvidence() => _pendingDecisions().single['evidence'] as String;
+
+/// 往角色库里补一个真实可用的成员。
+///
+/// 换人候选来自**整个角色库**，不要求已经在群里——现场那次弹窗列出的正是两个
+/// 群外角色。默认模型与 fixture 的 `dev` 相同，便于构造"同一个模型"的候选。
+Future<void> _addLibraryMember(String id, String name, String role,
+    {String modelName = 'deepseek-chat'}) async {
+  final config = ApiConfig(
+      id: 'config-$id',
+      name: id,
+      provider: 'deepseek',
+      modelName: modelName,
+      hasCredential: true,
+      credentialId: 'credential-$id');
+  await db.apiConfigBox.put(config.id, config);
+  await db.aiCharacterBox.put(
+      id,
+      AICharacter(
+          id: id,
+          name: name,
+          avatar: 'X',
+          age: 30,
+          role: role,
+          personalityTags: const [],
+          systemPrompt: '我是$name。',
+          apiKey: '',
+          apiProvider: 'deepseek',
+          modelName: modelName,
+          apiConfigId: config.id,
+          toolPermissions: const [ToolPermission.workspaceRead]));
+}
+
 Map<String, dynamic> proposal(Map<String, dynamic> s) => {
       'scope': s['scope'],
       'plan': '按钮移动中禁用，工作项执行后再验收。',
@@ -314,9 +372,17 @@ void _registerFailureBoundaryTest() {
     final state =
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .collaboration!;
+    // 掉线说的只是"这一次没产出正文"。把成员标成不可用会让系统请用户换人，而
+    // 换上去的候选往往还是同一个模型——责任保留、可用性不动，只如实报出成因。
     expect(state.team.singleWhere((m) => m['memberId'] == 'dev')['available'],
-        false);
+        true);
     expect(state.hasPendingDecision, true);
+    expect(
+        state.decisions.any((d) =>
+            d['status'] == 'pending' &&
+            d['reason'].toString().contains('请确认补人')),
+        isFalse,
+        reason: '掉线不能报成成员不可用');
     expect(state.approvals, isEmpty);
     expect(db.messageBox.values, isEmpty);
   });

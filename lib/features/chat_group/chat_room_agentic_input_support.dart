@@ -85,7 +85,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
     // 工作任务由全局协调器串行化。即使普通聊天页仍在处理旧回合，新的
     // 工作指令也必须立即进入持久任务队列，不能被页面队列或取消逻辑吞掉。
     if (routeToWorkMode) {
-      await _runWorkModeTask(
+      await _runWorkModeTaskWithFailureReport(
         text: text,
         mentionedIds: mentionedIds,
         hasAttachments: hasAttachments,
@@ -118,15 +118,29 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       return;
     }
 
-    await _dispatchUserRequest(
+    final dispatched = await _dispatchUserRequest(
       text: text,
       mentionedIds: mentionedIds,
       userMessage: userMessage,
     );
+    if (!dispatched) {
+      // 消息已落库，但派发时页面已经不可见（例如刚落库就被别的页面盖住）。
+      // 放回队列等回到本群再处理，否则这条输入既没有回复、也不会被重新排队。
+      _conversationController.enqueue(PendingUserMessage(
+        text,
+        mentionedIds,
+        message: userMessage,
+      ));
+    }
   }
 
   /// 根据当前模式把用户请求派发给"工作模式任务"或"普通聊天回合"。
-  Future<void> _dispatchUserRequest({
+  ///
+  /// 返回是否已经派发。普通聊天要求用户真的看着本群：页面不可见时返回 false，
+  /// 排队调用方据此把这条输入放回队列——取走了却不回复，用户看到的就是"消息
+  /// 发出去了，却一直没有回应"，而返回页面的恢复逻辑再也找不回已经被消费的
+  /// 那一项。工作任务不受此限：它由全局协调器执行，与群页面可见性无关。
+  Future<bool> _dispatchUserRequest({
     required String text,
     required List<String> mentionedIds,
     Message? userMessage,
@@ -138,7 +152,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       hasAttachments: userMessage?.media?.isNotEmpty == true,
     );
     if (routeToWorkMode) {
-      await _runWorkModeTask(
+      await _runWorkModeTaskWithFailureReport(
         text: text,
         mentionedIds: mentionedIds,
         hasAttachments: userMessage?.media?.isNotEmpty == true,
@@ -146,12 +160,15 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
             userMessage?.media?.isNotEmpty == true ? userMessage?.id : null,
         sourceMessageId: userMessage?.id,
       );
-      return;
+      return true;
     }
+    // 普通聊天一律等到用户重新看着本群再派发：这里连"工作模式提示"也不写，
+    // 因为那同样是在用户看不见的群里留下内容。
+    if (!_roomWorkAllowed) return false;
     // A queued work-like message may reach this method after the page toggle
     // changed while an earlier normal round was draining. The send path has
     // already published the hint; never leak it into ordinary chat now.
-    if (WorkModePolicy.looksLikeWorkRequest(text)) return;
+    if (WorkModePolicy.looksLikeWorkRequest(text)) return true;
     final sentiment = UserMessageSentimentAnalyzer.analyze(text);
     await _runAiRound(
       userMessage: text,
@@ -159,11 +176,12 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       currentUserMessage: userMessage,
       userSentiment: sentiment,
     );
+    return true;
   }
 
   /// Drains one queued user message once the previous run has released the
-  /// controller. Queued input is retained while a page is inactive and is
-  /// resumed by the lifecycle activation hook.
+  /// controller. Queued input is retained while a page is invisible and is
+  /// resumed by the lifecycle activation hook or the next drained round.
   Future<void> _drainQueuedUserMessage() async {
     if (!_canTouchUi || _isAiReplying) return;
     final next = _conversationController.takeNext();
@@ -177,17 +195,50 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       return;
     }
     try {
-      await _dispatchUserRequest(
+      final dispatched = await _dispatchUserRequest(
         text: next.text,
         mentionedIds: next.mentionedIds,
         userMessage: next.message,
       );
+      // 页面在等待期间变得不可见：这条普通聊天输入还没开始执行，
+      // 放回队首等下一次激活，而不是当作"已经处理过"丢掉。
+      if (!dispatched) _conversationController.requeueFirst(next);
     } on Object {
       // A page can be disposed or a transient dispatch failure can happen
       // after the message was taken. Return it to the queue so the next active
       // lifecycle can retry instead of losing user input.
       _conversationController.requeueFirst(next);
       rethrow;
+    }
+  }
+
+  /// 提交工作指令，并把提交阶段的异常变成一条可见的系统消息。
+  ///
+  /// 用户消息此时已经落库；静默吞掉异常只会表现为"消息发出去了、却什么也没
+  /// 发生"。提交失败必须回到聊天里，否则用户既没有任务也没有任何回应。
+  Future<void> _runWorkModeTaskWithFailureReport({
+    required String text,
+    required List<String> mentionedIds,
+    bool hasAttachments = false,
+    String? attachmentMessageId,
+    String? sourceMessageId,
+  }) async {
+    try {
+      await _runWorkModeTask(
+        text: text,
+        mentionedIds: mentionedIds,
+        hasAttachments: hasAttachments,
+        attachmentMessageId: attachmentMessageId,
+        sourceMessageId: sourceMessageId,
+      );
+    } on Object catch (error) {
+      await _appendMessage(Message(
+        groupId: widget.groupId,
+        senderId: 'system',
+        senderType: 'system',
+        content: '这条工作指令没能提交成功（${sanitizeWorkTaskError(error)}）；'
+            '消息已保留，可重发或到任务面板确认。',
+      ));
     }
   }
 
@@ -347,6 +398,9 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
       characters: routableCharacters,
       credentials: _credentialResolver,
       resolveApiConfig: _resolveApiConfig,
+      // 选人判定"输出是否用满上限"要知道本次请求的实际预算，所以两边同源取一个
+      // 常量：改了 maxTokens 却漏改这里，会被误判成"模型写坏了 JSON"。
+      maxOutputTokens: WorkRoleModelSelectorService.defaultOutputTokens,
       complete: ({
         required character,
         required config,
@@ -362,7 +416,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         customBaseUrl: config.customBaseUrl,
         model: config.modelName,
         messages: messages,
-        maxTokens: 256,
+        maxTokens: WorkRoleModelSelectorService.defaultOutputTokens,
         receiveTimeout: timeout,
         maxRetries: 0,
         purpose: AiRequestPurpose.agent,

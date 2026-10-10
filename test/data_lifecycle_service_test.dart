@@ -25,6 +25,7 @@ import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/search_audit_entry.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
+import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
 import 'package:chat_group/features/web_search/data/search_credential_repository.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 import 'package:flutter_test/flutter_test.dart';

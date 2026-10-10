@@ -80,15 +80,24 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
 
   Future<bool> _productionContractAvailable(
       AgentTask task, WorkCollaborationState state) async {
-    if (state.artifactContract['type'] == 'software' &&
-        ((state.artifactContract['files'] as List? ?? const []).isEmpty ||
-            (state.artifactContract['verificationCommands'] as List? ??
-                    const [])
-                .isEmpty ||
-            !state.workItems.any((i) => i['kind'] == 'material') ||
-            !state.workItems.any((i) => i['kind'] == 'produce'))) {
+    if (state.artifactContract['type'] != 'software') return true;
+    // 用户只点名一个交付文件时不强制材料工作项：验证力来自 acceptances、下面的
+    // verificationCommands 与独立审查，那三样一项没少；材料文档只是过程证据，在
+    // 单文件交付上会把任务放大数倍（2026-10-10 现场：一个 HTML 变成五份产物）。
+    final singleArtifact = requestsSingleArtifact(task.userRequest);
+    if ((state.artifactContract['files'] as List? ?? const []).isEmpty ||
+        (state.artifactContract['verificationCommands'] as List? ?? const [])
+            .isEmpty ||
+        !state.workItems.any((i) => i['kind'] == 'produce') ||
+        (!singleArtifact &&
+            !state.workItems.any((i) => i['kind'] == 'material'))) {
       await _productionDecision(
-          task, 'question', '', '软件方案缺少需求、技术、测试材料工作项或完整实现文件合同，请回群补齐后逐人确认。',
+          task,
+          'question',
+          '',
+          singleArtifact
+              ? '软件方案缺少完整的实现文件清单或验证命令，请回群补齐后逐人确认。'
+              : '软件方案缺少需求、技术、测试材料工作项或完整实现文件合同，请回群补齐后逐人确认。',
           persist: false);
       return false;
     }

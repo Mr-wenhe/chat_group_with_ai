@@ -191,24 +191,7 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
 
   Future<void> _missingRole(String role,
       {String? replaceId, String? reason}) async {
-    final candidates = runner.database.aiCharacterBox.values
-        .where((c) =>
-            !state.team.any((m) => m['memberId'] == c.id) &&
-            WorkRoleRouter.qualifiesForResponsibility(
-                c, role, runner.database.characterSkillBox.values))
-        .toList();
-    final options = <Map<String, dynamic>>[];
-    for (final candidate in candidates) {
-      if (options.length == 12) break;
-      final member = await runner._resolveV2Member(candidate);
-      if (!member.available) continue;
-      options.add({
-        'id': candidate.id,
-        'label':
-            '${candidate.name}（${candidate.role}，${member.config!.modelName}）',
-        'impact': '只加入本次任务的 $role 责任；保留目录、工具和模型治理边界。'
-      });
-    }
+    final options = (await _replacementOptions(role)).options;
     if (replaceId == null && role == 'testing') {
       options.add({
         'id': 'human-review',
@@ -223,6 +206,72 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
         options.isEmpty ? '角色库中没有同时具备资格和可用模型的候选。' : '候选来自已有角色库，资格与模型配置已核验。',
         options: options,
         router: true);
+  }
+
+  /// 具备该责任资格、凭据可解析、且不在当前团队里的候选成员，以及因与失败成员
+  /// 同模型而未列出的条数。
+  ///
+  /// [avoidModelOf] 是刚刚失败的成员：与它同 provider、同模型名的候选换上去也不会
+  /// 改变上游那边的失败，所以只要还有别的选择就不列它们；但合格候选全部撞同一个
+  /// 模型时不能清空列表——那样用户就只剩改配置一条路，应用内没有换人入口了。判据按
+  /// provider + 模型名比，不按 `apiConfigId`：两张配置指向同一个上游模型时，换配置号
+  /// 不改变结果。换人确认与「本轮模型失败」的诚实阻塞项共用这一份枚举，两处各维护
+  /// 一遍时总有一边列不出候选来。
+  Future<({List<Map<String, dynamic>> options, int hiddenSameModel})>
+      _replacementOptions(String role, {_DiscussionMember? avoidModelOf}) async {
+    final failingModel = avoidModelOf == null
+        ? null
+        : '${avoidModelOf.provider}/${avoidModelOf.config?.modelName}';
+    final sameModel = <Map<String, dynamic>>[];
+    final options = <Map<String, dynamic>>[];
+    // 循环里每轮都要 await 凭据解析（最长凭据超时），必须先对角色库取快照：
+    // 期间用户增删角色会让惰性迭代撞上并发修改。
+    final candidates = runner.database.aiCharacterBox.values
+        .where((c) =>
+            !state.team.any((m) => m['memberId'] == c.id) &&
+            WorkRoleRouter.qualifiesForResponsibility(
+                c, role, runner.database.characterSkillBox.values))
+        .toList();
+    // 与 `_resolveV2Members` 同一条理由：逐个 await 凭据解析时，一个挂住的
+    // 凭据提供方会让这个阻塞弹窗推迟 N × 凭据超时（几十个角色就是几分钟）。
+    // 先并发解析整份候选，再按原顺序组装——顺序即用户看到的顺序。
+    final resolved = await Future.wait(
+      candidates.map(runner._resolveV2Member),
+    );
+    for (var index = 0; index < candidates.length; index++) {
+      if (options.length + sameModel.length ==
+          WorkDiscussionRunner.maxReplacementOptions) {
+        break;
+      }
+      final candidate = candidates[index];
+      final member = resolved[index];
+      if (!member.available) continue;      final option = {
+        'id': candidate.id,
+        'label':
+            '${candidate.name}（${candidate.role}，${member.config!.modelName}）',
+        'impact': '只加入本次任务的 $role 责任；保留目录、工具和模型治理边界。'
+      };
+      if (failingModel != null &&
+          failingModel == '${member.provider}/${member.config!.modelName}') {
+        sameModel.add(option);
+        continue;
+      }
+      options.add(option);
+    }
+    if (options.isNotEmpty || sameModel.isEmpty) {
+      return (options: options, hiddenSameModel: sameModel.length);
+    }
+    return (
+      options: [
+        for (final option in sameModel)
+          {
+            ...option,
+            'impact': '与你现有成员是同一个模型，换人不改变上游失败；'
+                '请优先调整该成员的模型配置或缩小本轮回应要求。'
+          }
+      ],
+      hiddenSameModel: 0,
+    );
   }
 
   Future<void> _memberGap(String id, String reason) async {
@@ -243,7 +292,8 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
   Future<void> _decision(
       String kind, String target, String reason, String facts,
       {List<Map<String, dynamic>> options = const [],
-      bool router = false}) async {
+      bool router = false,
+      String impact = '待答事项未解决前不开始制作；用户答复后重新核对方案。'}) async {
     final pending = state.decisions.any((d) =>
         d['kind'] == kind &&
         d['targetId'] == target &&
@@ -262,7 +312,7 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
       'status': 'pending',
       'reason': reason,
       'answer': '',
-      'impact': '待答事项未解决前不开始制作；用户答复后重新核对方案。',
+      'impact': impact,
       'responseRef': '',
       'evidence': facts,
       'options': options,

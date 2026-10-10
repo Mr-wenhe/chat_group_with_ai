@@ -530,7 +530,6 @@ void main() {
         character: c,
         groupName: '夜谈会',
         groupTheme: '情绪支持',
-        groupDescription: '睡前聊天',
         groupMemory: '大家最近在聊工作压力。',
       );
 
@@ -538,6 +537,8 @@ void main() {
       expect(context, contains('温柔、敏锐'));
       expect(context, contains('夜谈会'));
       expect(context, contains('大家最近在聊工作压力'));
+      // 群描述不再从这里注入：它由 GroupSharedContext 单独成块，避免重复。
+      expect(context, isNot(contains('群说明')));
       expect(context, contains('缓慢形成'));
     });
 

@@ -113,6 +113,8 @@ class WorkDiscussionRunner
   static const int maxCollaborationPreviewCharacters = 600;
   static const int preferredDiscussionFinalTokens = 8192;
   static const int maxMembers = 32;
+  // 换人候选是给用户点的，不是给人滚的；超出之后先解决资格问题再谈换谁。
+  static const int maxReplacementOptions = 12;
   // ponytail: 32 members need two broad turns plus a bounded summary; 96
   // leaves room for targeted follow-up without creating an unbounded loop.
   static const int maxCalls = 96;

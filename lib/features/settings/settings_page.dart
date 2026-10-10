@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:chat_group/core/models/api_config.dart';
@@ -9,6 +10,7 @@ import 'package:chat_group/features/settings/providers/api_config_providers.dart
 import 'package:chat_group/features/ai_character/providers/ai_character_providers.dart';
 import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 import 'package:chat_group/features/settings/ai_processing_directory_policy.dart';
+import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
 import 'package:chat_group/features/settings/api_config_form_page.dart';
 import 'package:chat_group/features/memory/memory_management_page.dart';
 import 'package:chat_group/features/memory/memory_audit_filter.dart';
@@ -208,6 +210,16 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _loadAppVersion();
     _loadAiProcessingDirPath();
     _loadLifecycleState();
+    // 恢复备份不含选人器的设备本地引用，旧值会残留并指向不存在的配置；
+    // 进设置页时收敛一次，让存储状态与界面显示一致。
+    unawaited(_pruneDanglingSpeakerPickerReference());
+  }
+
+  Future<void> _pruneDanglingSpeakerPickerReference() async {
+    final pruned = await AiSpeakerPickerSettings(
+      ref.read(databaseServiceProvider),
+    ).pruneDangling();
+    if (pruned && mounted) _safeSetState(() {});
   }
 
   Future<void> _loadLifecycleState() async {

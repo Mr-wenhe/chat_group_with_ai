@@ -193,23 +193,26 @@ class ChatOrchestrator {
     return thursday.difference(firstWeekThursday).inDays ~/ 7 + 1;
   }
 
+  /// 人格成长规则。
+  ///
+  /// **不注入群描述/公告**：本群的固定共同设定由 `GroupSharedContext` 单独成块
+  /// 注入一次（见 `chat_room_message_context_support.dart`）。此前这里也拼了一份
+  /// 「群说明」，同一段用户文本会在请求里出现两次、占两份窗口预算，还可能因为
+  /// 位置不同而给出不一致的语气。
   static String buildPersonaGrowthContext({
     required AICharacter character,
     required String groupName,
     required String groupTheme,
-    required String groupDescription,
     required String groupMemory,
   }) {
     final tags = character.personalityTags.isEmpty
         ? '暂无显式标签'
         : character.personalityTags.join('、');
-    final desc =
-        groupDescription.trim().isEmpty ? '' : '\n群说明：$groupDescription';
     final memory = groupMemory.trim().isEmpty ? '暂无稳定群体记忆' : groupMemory;
     return '${FactDisciplinePrompt.rules}\n'
         '【人格成长规则】'
         '\n初始性格标签：$tags。'
-        '\n你所在的群是「$groupName」，主题「$groupTheme」。$desc'
+        '\n你所在的群是「$groupName」，主题「$groupTheme」。'
         '\n群体记忆：$memory'
         '\n请把职业知识、群氛围、初始设定和已经形成的记忆融合成稳定个性：'
         '说话要有自己的偏好、关系感、情绪余温、表达习惯和边界感；'

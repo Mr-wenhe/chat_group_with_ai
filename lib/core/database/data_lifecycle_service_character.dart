@@ -167,6 +167,14 @@ extension _DataLifecycleServiceCharacter on DataLifecycleService {
         }
       },
     );
+    // 设备本地的选人器引用必须在**配置确实已经不存在**之后才清理。
+    // 凭据删除失败时上面已经提前返回，配置原封不动，此时清掉引用会让一次
+    // 失败的删除顺带改掉全局选择；反过来，删成功却不清理会留下悬空引用，
+    // 日后同 id 的配置（例如从备份恢复）回来就会重新启用这个旧绑定。
+    await _runner.attempt('AI 接话选人器引用清理失败', incomplete, () async {
+      if (db.apiConfigBox.containsKey(configId)) return;
+      await AiSpeakerPickerSettings(db).clearIfReferencing(configId);
+    });
     return _finish(incomplete);
   }
 }

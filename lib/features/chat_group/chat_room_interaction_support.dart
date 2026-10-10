@@ -261,6 +261,9 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       final apiKey =
           config == null ? null : await _credentialResolver.resolve(config);
       if (config == null || apiKey == null) return;
+      // 凭据解析之后、真正发出请求之前复检：重新生成是一次新的模型调用，
+      // 不能用 _pageActive（被别的全屏页面盖住或 App 进后台时它仍然为真）。
+      if (!_roomWorkAllowed || _disposed) return;
 
       final searchTurnContext = await _regenerationSearchContext(
         original,
@@ -298,8 +301,18 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       final boundedApiMessages = ContextWindowManager.fitToTokenBudget(
         apiMessages,
         maxTokens: inputBudget,
+        // 与 _generateAiReply 同一条规则：共同设定是必需区块，先让可选内容让位。
+        isProtected: GroupSharedContext.carriesBlock,
       );
-      if (!_pageActive || _disposed) return;
+      if (!_roomWorkAllowed || _disposed) return;
+      // 与 _generateAiReply 同一条规则：共同设定放不进窗口就明确失败，
+      // 不静默丢设定后照常重新生成。
+      if (!GroupSharedContext.survives(
+          boundedApiMessages, _groupSharedContextBlock)) {
+        await _reportSharedContextDidNotFit(character);
+        return;
+      }
+      if (!_roomWorkAllowed || _disposed) return;
 
       temp = Message(
           groupId: widget.groupId,
@@ -350,7 +363,9 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
           _discardCurrentStream ||
           shouldDiscardStreamingReply(
             stopped: result.stopped,
-            pageActive: _pageActive,
+            // 与普通回合同口径：用"用户还在看这个群"而不是"widget 还在树上"，
+            // 切到别的群或别的页面时这一轮结果不该落回旧群。
+            pageActive: _roomWorkAllowed,
             conversationStopping: _conversationController.state.phase ==
                 ConversationPhase.stopping,
           );

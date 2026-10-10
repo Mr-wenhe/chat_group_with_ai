@@ -249,4 +249,78 @@ void main() {
     await tester.tap(button);
     expect(received?.taskId, 'task-dm');
   });
+
+  testWidgets('系统提示居中显示，不会被读成角色发言', (tester) async {
+    final character = AICharacter(
+      id: 'worker',
+      name: '程序媛',
+      avatar: '媛',
+      age: 0,
+      role: '前端工程师',
+      personalityTags: const [],
+      systemPrompt: '',
+      apiKey: '',
+      apiProvider: 'deepseek',
+    );
+    final aiMessage = Message(
+      id: 'ai-1',
+      groupId: 'group-1',
+      senderId: 'worker',
+      senderType: 'ai',
+      content: '我起草了方案',
+    );
+    final systemMessage = Message(
+      id: 'sys-1',
+      groupId: 'group-1',
+      senderId: 'system',
+      senderType: 'system',
+      content: '群讨论已启动',
+    );
+
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: ChatMessageList(
+            messages: [aiMessage, systemMessage],
+            characters: [character],
+            messageIndex: {
+              aiMessage.id: aiMessage,
+              systemMessage.id: systemMessage,
+            },
+            characterIndex: {character.id: character},
+            scrollController: ScrollController(),
+            controller: ChatMessageListController(),
+            streamingMessageId: null,
+            regeneratingMessageId: null,
+            highlightedMentionMessageId: null,
+            isDirectChat: false,
+            readUserMessageIds: const {},
+            ownerName: '我',
+            unknownCharacter: character,
+            senderColor: (_) => Colors.blue,
+            avatarImageOf: (_) => null,
+            senderNameById: (_) => '系统',
+            onLongPress: (_, __) {},
+            onSenderTap: (_) {},
+            onMentionSender: (_) {},
+            onQuotedTap: (_) {},
+          ),
+        ),
+      ),
+    );
+
+    // 系统提示没有头像和昵称，只有居中排版能把它和左侧的 AI 气泡分开；两者
+    // 都在左边时，用户读到的是"一个不署名的人在说话"。
+    final middle = tester.getSize(find.byType(ChatMessageList)).width / 2;
+    expect(
+      (tester.getCenter(find.text('群讨论已启动')).dx - middle).abs(),
+      lessThan(8),
+      reason: '系统提示应落在页面中线上',
+    );
+    expect(
+      tester.getCenter(find.text('我起草了方案')).dx,
+      lessThan(middle - 60),
+      reason: 'AI 气泡仍应靠左',
+    );
+  });
 }

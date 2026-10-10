@@ -35,7 +35,11 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
   }
 
   /// 启动空闲自动聊天调度器（首次延迟带随机抖动）。
+  ///
+  /// 只有用户真的在看这个群时才启动：被别的页面盖住或 App 退到后台时
+  /// [_roomWorkAllowed] 为假，此时连调度器都不该存在。
   void _startAutoChat() {
+    if (!_roomWorkAllowed) return;
     if (!ChatActivityPolicy.canStartAutoChat(
       workModeEnabled: _workModeEnabled,
       hasActiveWorkTask: _hasActiveWorkTaskForAutoChat,
@@ -80,11 +84,15 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
   ///
   /// 多重让位条件（任一命中则本轮跳过或进入冷却）：
   /// - 策略层不允许（工作模式 / 开关关闭 / 无角色 / 无 API 配置）；
+  /// - 用户已经看不见这个群（切走页面、App 进后台）；
   /// - 已有回复在跑、正在流式输出、或用户正在输入（不打断用户）；
   /// - 私聊里 AI 已连说 3 条而用户没回（避免单方面刷屏）；
   /// - 本 burst 轮数达上限 → 停止并冷却 [_autoChatBurstPause]。
+  ///
+  /// 一轮内的发言者**逐次**选出：上一位说完再决定下一位，因此候补是基于最新
+  /// 对话算出来的，而不是开场时一次锁定。
   Future<void> _tryAutoChatRound() async {
-    if (!_pageActive) return;
+    if (!_roomWorkAllowed) return;
     if (_hasActiveWorkTaskForAutoChat) {
       _stopAutoChat();
       return;
@@ -123,52 +131,8 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
       return;
     }
 
-    // 由拟人化编排器根据记忆、关系、话题契合度挑选本轮发言者及其发言意图。
-    final autoIntents = HumanizedChatOrchestrator.selectReplyIntents(
-      characters: _characters,
-      recentMessages: _messages.toList(),
-      recentMessagesForCharacter: (character) => _visibleContextForCharacter(
-        character.id,
-        _recentMessagesForContext(),
-      ),
-      groupId: widget.groupId,
-      groupTheme: _group?.theme ?? '日常聊天',
-      userMessage: null,
-      mentionedIds: const [],
-      memories: _characterMemories,
-      relationships: _relationshipStates,
-      // 空闲自动聊天没有 @ 点名，禁言角色因此被整轮排除。
-      isEligible: (character) =>
-          _isEligibleToReply(character) &&
-          _mayAutoPick(character, mentionedIds: const {}),
-      random: _autoChatRandom,
-      isAutoChat: true,
-    );
-    // 排除正在跑 agentic 任务的角色，防止同一角色重入产生重复消息/文件。
-    var speakers = _charactersForIntents(autoIntents)
-        .where((c) => !_agenticRunningCharacterIds.contains(c.id))
-        .toList();
-    final lastAiSenderId = _lastAiSenderId;
-    // 有多个候选时避免让上一条的发言者连说两轮；只剩一个候选就不再过滤。
-    final speakersToUse = speakers.length <= 1
-        ? speakers
-        : speakers.where((c) => c.id != lastAiSenderId).toList();
-    _pendingReplyIntents
-      ..clear()
-      ..addEntries(
-          autoIntents.map((intent) => MapEntry(intent.speakerId, intent)));
-
-    if (speakersToUse.isEmpty) {
-      if (_canTouchUi) {
-        _setUiState(() {
-          _autoChatStatus = AutoChatStatus.unavailable;
-          _lastReplyBlockReason = _eligibleCharacters.isEmpty
-              ? _firstBlockReason(_characters)
-              : null;
-        });
-      }
-      return;
-    }
+    // 每一轮空闲自动聊天重新给选人器一次机会。
+    _speakerPickerDisabledForTurn = false;
 
     // beginAutoGuard 返回 null 表示已有回合占用，本轮直接放弃。其完成
     // 不依赖 UI 活跃状态，避免页面切出后把会话永久留在 generating。
@@ -180,17 +144,44 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
         _autoChatRoundCount++;
         _autoChatStatus = AutoChatStatus.generating;
       });
-      for (final speaker in speakersToUse) {
-        // 循环内逐次复检开关：用户可能中途关闭自动聊天或切到工作模式。
+      final alreadySpoken = <String>[];
+      var spokeAny = false;
+      for (var step = 0;
+          step < GroupSpeakerSelection.maxRepliesPerAutoRound;
+          step++) {
+        // 循环内逐次复检：用户可能中途关闭自动聊天、切到工作模式或离开本群。
         if (!_isAutoChatEnabled || _autoChatPausedByWorkMode) break;
-        if (!_isEligibleToReply(speaker)) continue;
+        if (!_roomWorkAllowed) break;
+        if (_conversationController.state.phase == ConversationPhase.stopping) {
+          break;
+        }
+        final picked = await _selectNextGroupSpeaker(
+          userMessage: null,
+          mentionedIds: const [],
+          isAutoChat: true,
+          alreadySpoken: alreadySpoken,
+          userSentiment: null,
+        );
+        if (picked == null) {
+          if (!spokeAny && _canTouchUi) {
+            _setUiState(() {
+              _autoChatStatus = AutoChatStatus.unavailable;
+              _lastReplyBlockReason = _eligibleCharacters.isEmpty
+                  ? _firstBlockReason(_characters)
+                  : null;
+            });
+          }
+          break;
+        }
+        alreadySpoken.add(picked.character.id);
         final replyContent = await _generateAiReply(
-          speaker,
+          picked.character,
           _messages.toList(),
           null,
           isAutoChat: true,
-          intent: _pendingReplyIntents[speaker.id],
+          intent: picked.intent,
         );
+        spokeAny = true;
         if (_autoChatPausedByWorkMode) break;
         if (_conversationController.state.phase == ConversationPhase.stopping) {
           break;

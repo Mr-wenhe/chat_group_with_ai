@@ -401,6 +401,7 @@ extension _WorkAgentLoopRetry on WorkAgentLoop {
     bool wasTruncated = false,
   }) async {
     const decisionRules = '只返回一个合法 AgentDecision JSON object；'
+        '响应必须以 { 开头、以 } 结尾，禁止任何前后缀说明、口语铺垫或 Markdown 围栏；'
         'action 只能放在顶层，禁止把 action、reason 或 public_update 放进 tool.arguments；'
         'tool.arguments 只能包含对应工具 schema 声明的字段；'
         'command.run 的 arguments 必须是 JSON 字符串数组，'

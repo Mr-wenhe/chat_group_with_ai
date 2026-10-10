@@ -12,6 +12,42 @@ enum WorkRoleRouteSource {
 
 enum WorkRoleStageKind { product, frontend, development, testing, general }
 
+/// 模型候选推荐失败的成因。
+///
+/// 路由器据此给出可区分的公开说明。旧实现把所有成因压成一句「暂不可用」，
+/// 现场只能看到"模型没帮上忙"，看不出是超时、缺凭据还是输出被截断。
+enum WorkRoleModelFailureKind {
+  credential,
+  timeout,
+  request,
+  empty,
+  oversized,
+  truncated,
+  malformed,
+}
+
+/// 选人模型失败的成因与现场证据。
+///
+/// [detail] 是未脱敏的原始说明，只供排查；[responseSnippet] 在构造时就已经过
+/// 脱敏与截断，可以直接展示（它会随路由说明写进任务记录与聊天记录）。
+class WorkRoleModelSelectionException implements Exception {
+  const WorkRoleModelSelectionException({
+    required this.kind,
+    this.detail = '',
+    this.responseSnippet,
+    this.outputTokenLimit,
+  });
+
+  final WorkRoleModelFailureKind kind;
+  final String detail;
+  final String? responseSnippet;
+  final int? outputTokenLimit;
+
+  @override
+  String toString() => 'WorkRoleModelSelectionException(${kind.name})'
+      '${detail.isEmpty ? '' : ': $detail'}';
+}
+
 /// The user-facing contract extracted before a role can be selected.
 ///
 /// This is deliberately a small value object rather than a second task model.
@@ -75,6 +111,10 @@ String _effectiveDeliverableFormat(String? override, String inferred) {
 /// Structured output accepted from the short model-based routing request.
 class WorkRoleModelDecision {
   final String characterId;
+
+  /// 模型给的理由。**可选**：它是唯一会长到撑破输出上限的字段，为了保住
+  /// [characterId] 与 [confidence]，缺理由时留空字符串而不是让整条选择作废。
+  /// 展示方必须容忍空串，不能写出空括号。
   final String publicReason;
   final double confidence;
   final bool needsHandoff;
@@ -90,7 +130,7 @@ class WorkRoleModelDecision {
     final id = _modelText(json['characterId'] ?? json['roleId']);
     final reason = _modelText(json['publicReason'] ?? json['reason']);
     final confidence = json['confidence'];
-    if (id.isEmpty || reason.isEmpty || confidence is! num) {
+    if (id.isEmpty || confidence is! num) {
       throw const FormatException('模型角色路由结果缺少必需字段');
     }
     return WorkRoleModelDecision(

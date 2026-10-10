@@ -22,6 +22,7 @@ import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
+import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
 import 'package:chat_group/features/web_search/application/search_cache_controller.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
 import 'package:flutter/foundation.dart';

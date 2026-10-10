@@ -131,6 +131,37 @@ void _replaceRecord(Map<String, dynamic> fixture, String key, int index,
 void main() {
   _registerCollaborationHistoryRegressions();
 
+  test('散文字段放行换行，身份与路径字段仍然拒绝换行', () {
+    // 讨论协议本来就把 \t \n \r 放行给模型，用户原话也常带换行；散文里出现
+    // 换行不能把整份记录判非法。
+    final prose = _fixture()
+      ..['scope'] = '在 /tmp/out 建目录\n生成一份 game.html'
+      ..['plan'] = '第一步：写 game.html\n第二步：补 verify.js'
+      ..['issues'] = [
+        _issue('i-1', 'open')..['problem'] = '第一行\n第二行',
+      ];
+    expect(WorkCollaborationState.tryParse(prose), isNotNull);
+
+    // 身份与路径字段不能靠一个换行改写：畸形记录必须继续 fail-closed。
+    String? section;
+    final path = _fixture()
+      ..['artifactContract'] = {
+        'type': 'software',
+        'format': 'html',
+        'location': 'game.html\nimportant.html',
+        'revisionTarget': ''
+      };
+    expect(
+      WorkCollaborationState.tryParse(path,
+          onInvalid: (value) => section = value),
+      isNull,
+    );
+    expect(section, 'artifactContract.location');
+
+    final reference = _fixture()..['requestMessageId'] = 'a\nb';
+    expect(WorkCollaborationState.tryParse(reference), isNull);
+  });
+
   test('REREVIEW2 obsolete delivery iterations do not exhaust approvals', () {
     final raw = _fixture()
       ..['verificationRevision'] = 31

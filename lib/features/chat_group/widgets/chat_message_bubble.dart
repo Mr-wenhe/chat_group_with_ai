@@ -24,6 +24,12 @@ import 'package:open_filex/open_filex.dart';
 
 part 'progress_log_bubble.dart';
 
+/// 系统提示的居中窄条宽度。
+///
+/// 比 AI 气泡（屏宽 72%，上限 640）窄，配合居中排版一眼能看出这不是某个角色
+/// 的发言；系统提示没有头像和昵称，靠左时会被读成"一个不署名的人在说话"。
+const double _systemNoticeMaxWidth = 560;
+
 /// 头像占位字：取昵称的第一个字形。
 ///
 /// 用 `runes` 而不是 `name[0]`，否则 emoji 昵称会被截成半个代理对，
@@ -117,21 +123,29 @@ class ChatMessageBubble extends StatelessWidget {
         ? WorkTaskUserAction.fromMessageId(message.id)
         : null;
 
-    if (isSystem && taskAction != null) {
-      return Padding(
-        padding: const EdgeInsets.only(bottom: 16),
-        child: Center(
-          child: ConstrainedBox(
-            constraints: const BoxConstraints(maxWidth: 560),
-            child: WeComBubbleSurface(
-              isUser: false,
-              isHighlighted: isHighlightedMention,
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.stretch,
-                children: [
-                  _buildContent(context, message),
-                  _buildTaskAction(context, taskAction),
-                ],
+    // 系统提示统一走居中窄条：它不代表任何角色发言，不能和左侧带头像与昵称的
+    // AI 气泡共用一套排版。带任务按钮的提醒只是在这一条上多挂一个动作。
+    if (isSystem) {
+      return GestureDetector(
+        onLongPress: onLongPress,
+        onSecondaryTap: onLongPress,
+        child: Padding(
+          padding: const EdgeInsets.only(bottom: 16),
+          child: Center(
+            child: ConstrainedBox(
+              constraints:
+                  const BoxConstraints(maxWidth: _systemNoticeMaxWidth),
+              child: WeComBubbleSurface(
+                isUser: false,
+                isHighlighted: isHighlightedMention,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.stretch,
+                  children: [
+                    _buildContent(context, message),
+                    if (taskAction != null)
+                      _buildTaskAction(context, taskAction),
+                  ],
+                ),
               ),
             ),
           ),

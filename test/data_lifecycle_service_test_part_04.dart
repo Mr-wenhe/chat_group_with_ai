@@ -417,4 +417,55 @@ void _registerDataLifecycleServiceTestPart4() {
     expect(credentialStore.values[config.credentialId], 'unmanaged-secret');
     expect(service.hasPendingOperation, isTrue);
   });
+
+  test('API config deletion clears the speaker-picker reference', () async {
+    final config = ApiConfig(
+      id: 'picker-bound',
+      name: 'picker-bound',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+    );
+    await db.apiConfigBox.put(config.id, config);
+    final settings = AiSpeakerPickerSettings(db);
+    await settings.select(config.id);
+    credentialStore.values[service.credentials.credentialIdFor(config.id)] =
+        'key';
+
+    final result = await service.deleteApiConfig(config.id);
+
+    expect(result.isComplete, isTrue, reason: result.incompleteItems.join(', '));
+    expect(db.apiConfigBox.containsKey(config.id), isFalse);
+    expect(
+      settings.selectedConfigId(),
+      isNull,
+      reason: '集中删除之后设备引用仍残留，恢复同 ID 配置会复活旧绑定',
+    );
+  });
+
+  test('凭据删除失败时不动选人器引用', () async {
+    final config = ApiConfig(
+      id: 'picker-kept',
+      name: 'picker-kept',
+      provider: 'deepseek',
+      modelName: 'deepseek-chat',
+      hasCredential: true,
+    );
+    await db.apiConfigBox.put(config.id, config);
+    final settings = AiSpeakerPickerSettings(db);
+    await settings.select(config.id);
+    credentialStore.values[service.credentials.credentialIdFor(config.id)] =
+        'key';
+    credentialStore.failNextDelete = true;
+
+    final result = await service.deleteApiConfig(config.id);
+
+    expect(result.isComplete, isFalse);
+    expect(db.apiConfigBox.containsKey(config.id), isTrue);
+    expect(
+      settings.selectedConfigId(),
+      config.id,
+      reason: '配置还在，一次失败的删除不该顺带改掉全局选择',
+    );
+  });
 }

@@ -16,8 +16,8 @@ extension WorkCollaborationGate on WorkCollaborationState {
         !WorkCollaborationState._revision(teamRevision) ||
         !WorkCollaborationState._revision(verificationRevision) ||
         !WorkCollaborationState._text(requestMessageId, max: 128) ||
-        !WorkCollaborationState._text(scope) ||
-        !WorkCollaborationState._text(plan) ||
+        !WorkCollaborationState._multilineText(scope) ||
+        !WorkCollaborationState._multilineText(plan) ||
         !WorkCollaborationState._text(coordinatorId, max: 128) ||
         !WorkCollaborationState.phases.contains(phase) ||
         !WorkCollaborationState._refs(pendingInputIds) ||
@@ -140,12 +140,12 @@ extension WorkCollaborationGate on WorkCollaborationState {
                 WorkCollaborationState._id(e['sourceId']) &&
                 WorkCollaborationState.issueKinds.contains(e['kind']) &&
                 WorkCollaborationState.issueStatuses.contains(e['status']) &&
-                WorkCollaborationState._text(e['target']) &&
-                WorkCollaborationState._text(e['problem']) &&
+                WorkCollaborationState._multilineText(e['target']) &&
+                WorkCollaborationState._multilineText(e['problem']) &&
                 WorkCollaborationState._text(e['evidenceRef'], max: 128) &&
-                WorkCollaborationState._text(e['resolution']) &&
+                WorkCollaborationState._multilineText(e['resolution']) &&
                 WorkCollaborationState._text(e['resolutionRef'], max: 128) &&
-                WorkCollaborationState._text(e['retestCondition']) &&
+                WorkCollaborationState._multilineText(e['retestCondition']) &&
                 WorkCollaborationState._revision(e['requestRevision']),
             max: null) ||
         !WorkCollaborationState._unique(issues, 'id')) {
@@ -254,12 +254,12 @@ extension WorkCollaborationGate on WorkCollaborationState {
                 WorkCollaborationState._revision(e['revision']) &&
                 {'pending', 'answered', 'deferred', 'waived'}
                     .contains(e['status']) &&
-                WorkCollaborationState._text(e['reason']) &&
-                WorkCollaborationState._text(e['answer']) &&
-                WorkCollaborationState._text(e['impact']) &&
+                WorkCollaborationState._multilineText(e['reason']) &&
+                WorkCollaborationState._multilineText(e['answer']) &&
+                WorkCollaborationState._multilineText(e['impact']) &&
                 WorkCollaborationState._text(e['responseRef'], max: 128) &&
                 (e['evidence'] == null ||
-                    WorkCollaborationState._text(e['evidence'])) &&
+                    WorkCollaborationState._multilineText(e['evidence'])) &&
                 (e['targetId'] == null ||
                     WorkCollaborationState._text(e['targetId'], max: 128)) &&
                 (e['kind'] == null ||
@@ -269,7 +269,8 @@ extension WorkCollaborationGate on WorkCollaborationState {
                     {'text', 'choice', 'manual', 'waiver'}
                         .contains(e['answerKind'])) &&
                 (e['missingCondition'] == null ||
-                    WorkCollaborationState._text(e['missingCondition'])) &&
+                    WorkCollaborationState._multilineText(
+                        e['missingCondition'])) &&
                 (e['promptedReminder'] == null ||
                     {'initial', 'remainderReady'}
                         .contains(e['promptedReminder'])) &&
@@ -288,9 +289,11 @@ extension WorkCollaborationGate on WorkCollaborationState {
                                 Map<String, dynamic>.from(option),
                                 {'id', 'label', 'impact'}) &&
                             WorkCollaborationState._id(option['id']) &&
-                            WorkCollaborationState._text(option['label'],
+                            WorkCollaborationState._multilineText(
+                                option['label'],
                                 max: 256) &&
-                            WorkCollaborationState._text(option['impact'],
+                            WorkCollaborationState._multilineText(
+                                option['impact'],
                                 max: 1024))),
             max: null) ||
         !WorkCollaborationState._unique(decisions, 'id')) {

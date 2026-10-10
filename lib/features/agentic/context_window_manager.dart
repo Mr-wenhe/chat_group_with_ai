@@ -164,9 +164,16 @@ class ContextWindowManager {
   /// the newest dialogue entry are retained. If system text or the newest
   /// entry is itself too large, text is clipped (or a multimodal payload is
   /// replaced with a safe marker) until the conservative estimate fits.
+  ///
+  /// [isProtected] marks **required** entries that must survive: optional
+  /// content (old dialogue, optional summaries, optional profiles) yields
+  /// first, and a protected entry is clipped only once no ordinary entry is
+  /// left to shrink. Leaving it null treats every entry alike, which is the
+  /// behaviour every caller had before this parameter existed.
   static List<Map<String, dynamic>> fitToTokenBudget(
     List<Map<String, dynamic>> messages, {
     required int maxTokens,
+    bool Function(Map<String, dynamic> message)? isProtected,
   }) {
     if (messages.isEmpty || maxTokens <= 0) return const [];
     final candidate = messages
@@ -194,7 +201,15 @@ class ContextWindowManager {
     while (estimateRequestTokens(candidate) > maxTokens &&
         candidate.isNotEmpty &&
         iterations++ < 128) {
-      final index = _largestPromptEntry(candidate);
+      // 先让可选内容让位；只剩受保护条目时才动它们，否则请求必然超窗。
+      var index = _largestPromptEntry(
+        candidate,
+        isProtected: isProtected,
+        includeProtected: false,
+      );
+      if (index < 0) {
+        index = _largestPromptEntry(candidate, isProtected: isProtected);
+      }
       if (index < 0) break;
       final message = candidate[index];
       final content = message['content'];
@@ -372,11 +387,19 @@ class ContextWindowManager {
 
   static Future<void> _defaultSleep(Duration delay) => Future.delayed(delay);
 
-  static int _largestPromptEntry(List<Map<String, dynamic>> messages) {
+  static int _largestPromptEntry(
+    List<Map<String, dynamic>> messages, {
+    bool Function(Map<String, dynamic> message)? isProtected,
+    bool includeProtected = true,
+  }) {
     var largestIndex = -1;
     var largestLength = 0;
     for (var index = 0; index < messages.length; index++) {
-      final length = _promptValueLength(messages[index]['content']);
+      final message = messages[index];
+      if (!includeProtected && isProtected != null && isProtected(message)) {
+        continue;
+      }
+      final length = _promptValueLength(message['content']);
       if (length > largestLength) {
         largestLength = length;
         largestIndex = index;

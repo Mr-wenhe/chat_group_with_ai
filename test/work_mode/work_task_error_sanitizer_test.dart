@@ -65,4 +65,11 @@ void main() {
     expect(sanitizeWorkTaskError('   '), '任务执行失败');
     expect(sanitizeWorkTaskError(StateError('   ')), '任务执行失败');
   });
+
+  test('redactSensitiveText 的截断边界不越界', () {
+    // 纯函数边界：maximum <= 1 时 substring 的下标会越界，必须返回而不是抛。
+    expect(redactSensitiveText('一段有内容的文本', maximum: 0), '');
+    expect(redactSensitiveText('一段有内容的文本', maximum: 1), '…');
+    expect(redactSensitiveText('一段有内容的文本', maximum: 4), '一段有…');
+  });
 }

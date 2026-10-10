@@ -41,7 +41,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     final config = _resolveApiConfig(character);
     final apiKey =
         config == null ? null : await _credentialResolver.resolve(config);
-    if (!_pageActive || _disposed) return '';
+    if (!_roomWorkAllowed) return '';
     if (!_mayAutoPick(character, mentionedIds: userMentionedIds)) return '';
     if (config == null || apiKey == null) {
       if (_canTouchUi) {
@@ -127,14 +127,25 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     final boundedApiMessages = ContextWindowManager.fitToTokenBudget(
       apiMessages,
       maxTokens: replyInputBudget,
+      // 共同设定是「每次聊天都生效」的必需区块：窗口紧张时先让可选摘要、
+      // 旧历史和其他说明让位，真装不下才判失败（见下面的 survives 核对）。
+      isProtected: GroupSharedContext.carriesBlock,
     );
-    // 上面的 await 期间用户可能切到工作模式，此时放弃这次自动聊天回复。
+    // 上面的 await 期间用户可能切到工作模式、离开本群或点了停止：这些情况下
+    // 本轮都不该再产生任何输出，包括下面那条"设定放不下"的失败气泡——它同样
+    // 是在用户看不见的群里留下内容。
     if (isAutoChat && _autoChatPausedByWorkMode) {
       _discardCurrentStream = false;
       return '';
     }
-    if (!_pageActive || _disposed) return '';
+    if (!_roomWorkAllowed) return '';
     if (!_mayAutoPick(character, mentionedIds: userMentionedIds)) return '';
+    // 窗口裁剪会按比例缩短最长的 system 文本。共同设定是"每次聊天都生效"的
+    // 承诺：它放不下就明确失败，绝不静默丢设定后照常生成一段看起来正常的回复。
+    if (!GroupSharedContext.survives(
+        boundedApiMessages, _groupSharedContextBlock)) {
+      return _reportSharedContextDidNotFit(character);
+    }
     // —— 内存态临时消息：先以空内容入列用于增量渲染，整条完成后再落库一次 ——
     final temp = Message(
       groupId: widget.groupId,
@@ -208,7 +219,9 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
         _discardCurrentStream ||
         shouldDiscardStreamingReply(
           stopped: result.stopped,
-          pageActive: _pageActive,
+          // 用"用户还在看这个群"而不是"widget 还在树上"：切到别的群或别的
+          // 页面时 widget 仍然 mounted，但这一轮的结果已经不该落进旧群。
+          pageActive: _roomWorkAllowed,
           conversationStopping:
               _conversationController.state.phase == ConversationPhase.stopping,
         );
@@ -333,8 +346,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     _registerUserMentionIfNeeded(temp);
     // 关系态与角色记忆只在成功回复后更新，失败占位不该污染长期状态。
     if (!failed) {
-      // 私聊中 _directReplyCharacters 清空了 _pendingReplyIntents，但实际
-      // 传进来的 intent 可能 targetId=null（来源待查），需同时兜底这两种情况。
+      // 私聊路径不传发言意图（固定由对方回答，不需要动作/语气编排）；
+      // 这里为它补一个中性的回答意图，其余场景沿用选人阶段算好的意图。
       final effectiveIntent = (intent == null || intent.targetId == null)
           ? (_isDirectChat
               ? ReplyIntent(
@@ -361,6 +374,33 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     return fullContent;
   }
 
+  /// 共同设定放不进模型窗口时的明确失败。
+  ///
+  /// 有界：写一条可见说明后立刻结束这次回复，不重试、不进循环，也不假装
+  /// 设定已经生效。用户按提示缩短设定或换用窗口更大的模型即可。
+  ///
+  /// 同一份设定只提示一次：放不下的是"设定 × 模型窗口"，同一位角色的后续步骤、
+  /// 空闲自动聊天的每一轮都会撞上同一堵墙，重复贴同样的气泡只是噪音。用户手动
+  /// 发起的回合会在轮次开始时复位，因此每轮仍能看到一次明确解释。
+  Future<String> _reportSharedContextDidNotFit(AICharacter character) async {
+    final block = _groupSharedContextBlock;
+    if (_sharedContextOverflowReportedBlock == block) return '';
+    _sharedContextOverflowReportedBlock = block;
+    final content = '[${character.name} 未回复：本群「共同背景」与「群公告与约定」'
+        '过长，放不进当前模型的输入窗口。请缩短这两项内容，'
+        '或为这个角色换用上下文窗口更大的模型。]';
+    await _appendMessage(Message(
+      groupId: widget.groupId,
+      senderId: character.id,
+      senderType: 'ai',
+      content: content,
+    ));
+    if (_canTouchUi) {
+      _setUiState(() => _autoChatStatus = AutoChatStatus.unavailable);
+    }
+    return content;
+  }
+
   /// Removes a streaming placeholder without touching persistence.
   ///
   /// This also updates the in-memory list while the page is inactive so a
@@ -376,6 +416,9 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
   /// 对失败的回复做一次非流式重试，成功返回内容，否则返回 null。
   ///
   /// 用非流式接口重试是为了简化逻辑：此时 UI 上已有占位气泡，只需拿到完整文本替换。
+  ///
+  /// 重试同样是一次真实请求，且没有任何流与之绑定，因此可见性必须在这里自己
+  /// 复检：页面在失败与重试之间离开时，这次调用不该再发出去。
   Future<String?> _retryFailedReply({
     required AICharacter character,
     required ApiConfig config,
@@ -385,12 +428,14 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     required bool userInitiated,
     Set<String>? autoPickMentionedIds,
   }) async {
+    if (!_roomWorkAllowed) return null;
     if (autoPickMentionedIds != null &&
         !_mayAutoPick(character, mentionedIds: autoPickMentionedIds)) {
       return null;
     }
     final apiKey = await _credentialResolver.resolve(config);
     if (apiKey == null) return null;
+    if (!_roomWorkAllowed) return null;
     if (autoPickMentionedIds != null &&
         !_mayAutoPick(character, mentionedIds: autoPickMentionedIds)) {
       return null;

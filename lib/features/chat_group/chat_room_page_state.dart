@@ -67,6 +67,21 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 群内禁言状态（app_settings 轻量存储）；只作用于自动挑选。
   late final GroupMuteStore _muteStore;
 
+  /// 全局「AI 接话选人器」使用的 API 配置引用（app_settings，设备本地）。
+  ///
+  /// 只保存一个已有 ApiConfig 的 id；引用失效时解析成 null 并回落到本地编排器。
+  late final AiSpeakerPickerSettings _speakerPickerSettings;
+
+  /// 本轮是否已放弃模型选人。
+  ///
+  /// 选择器一旦失败（未配置 / 凭据缺失 / 超时 / 断网 / 非法响应 / 指向不存在的
+  /// 成员），本轮的后续步骤一律走本地编排器，避免为同一次接话反复请求模型。
+  /// 每个用户回合或每轮空闲自动聊天开始时复位。
+  bool _speakerPickerDisabledForTurn = false;
+
+  /// 正在飞的选择请求的取消令牌；页面不可见或停止时取消它。
+  CancelToken? _activeSpeakerPickerCancelToken;
+
   /// 会话串行控制器：保证同一时刻只有一轮 AI 回复在跑，并支持中断。
   final ConversationController _conversationController =
       ConversationController();
@@ -167,9 +182,6 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 圆桌模式按群聊持久化；模式状态只在当前页面会话中缓存。
   final RoundtableModeSession _roundtableModeSession = RoundtableModeSession();
 
-  /// 本轮已为各角色决策好但尚未消费的发言意图：characterId -> 意图。
-  final Map<String, ReplyIntent> _pendingReplyIntents = {};
-
   /// 自动聊天轮次计数器，用于按固定节奏（而非每轮）触发记忆更新，降低成本。
   int _autoChatMemoryTick = 0;
 
@@ -235,6 +247,25 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 页面是否在前台活跃（deactivate 时置 false，防止异步回调在路由弹出后重建页面）。
   bool _pageActive = true;
 
+  /// 路由是否可见：本页是否没被**另一个全屏页面**盖住。
+  ///
+  /// 由 [TickerMode] 判定（见 `_refreshRoomActivity` 的说明），而不是 widget 是否
+  /// mounted——路由被别的页面盖住时 widget 仍在树上，`deactivate` 也不一定触发。
+  bool _routeVisible = true;
+
+  /// App 是否在前台。
+  bool _appForeground = true;
+
+  /// 本群是否可以继续自动工作（空闲自动聊天、逐次选人、自动续接、回合内的
+  /// 摘要与压缩请求）。
+  ///
+  /// 与 [_pageActive] 分开：后者只表达"页面对象还在"，`deactivate` 之外的离开
+  /// 方式（切到别的群、打开别的页面、App 进后台）都改不动它。这里额外要求
+  /// "用户真的在看这个群"，是全部后台自动行为的唯一开关。由
+  /// `_refreshRoomActivity` 维护，只在翻转时起停调度，因此不会在暂停期间积累
+  /// 计时器，恢复时也不会补跑过期回合。
+  bool _roomWorkAllowed = false;
+
   /// 当前 burst 内已执行的自动聊天轮数。
   int _autoChatRoundCount = 0;
 
@@ -267,6 +298,15 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
 
   /// 最近一次"无人可回复"的原因，用于给用户明确提示（如未配置 API Key）。
   ReplyBlockReason? _lastReplyBlockReason;
+
+  /// 最近一次已提示「共同设定放不进窗口」的那份设定内容。
+  ///
+  /// 放不下是「设定 × 模型窗口」的性质，不是某一位角色的问题：同一轮里其他
+  /// 角色、以及空闲自动聊天的每一轮都会撞上同一堵墙。不记下来就会把同一条气泡
+  /// 反复贴进会话（自动聊天里更是每轮一条）。内容一变（用户改短了设定）就允许
+  /// 再提示一次；用户手动发起的回合每轮也重新提示一次，免得"改了没反应"让人
+  /// 以为消息丢了。
+  String? _sharedContextOverflowReportedBlock;
 
   // 待回应 @ 列表
   /// 用户 @ 到但尚未回复的角色 id 队列，下一轮优先让这些角色发言。
@@ -472,6 +512,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     _observationEntry = ObservationEntry(db: _db);
     _relationshipEventService = RelationshipEventService(_db);
     _muteStore = GroupMuteStore(_db);
+    _speakerPickerSettings = AiSpeakerPickerSettings(_db);
     _replyEligibility = ReplyEligibilityPolicy(
       resolveApiConfig: _resolveApiConfig,
     );

@@ -113,6 +113,9 @@ extension _SettingsPageConfigSupport on _SettingsPageState {
     );
 
     if (selection != null && context.mounted) {
+      // 悬空引用的清理由共享删除入口负责——它知道配置是否真的被移除，
+      // 而这里只看调用是否返回是不够的：凭据删除失败时配置仍然存在，
+      // 那时清掉引用等于让一次失败的删除顺带改掉全局选择。
       final result = await ref.read(apiConfigsProvider.notifier).deleteConfig(
             config.id,
             replacementConfigId: selection.isEmpty ? null : selection,
@@ -126,6 +129,99 @@ extension _SettingsPageConfigSupport on _SettingsPageState {
         }
       }
     }
+  }
+
+  /// 设置页上「AI 接话选人器」的当前状态描述。
+  ///
+  /// 引用失效（配置被删除、导入备份后指向了不存在的 id、存储值损坏）一律显示
+  /// 成"未选择"，与实际行为一致：解析不到配置时不调用模型选人。
+  String get _speakerPickerSubtitle {
+    final db = ref.read(databaseServiceProvider);
+    final id = AiSpeakerPickerSettings(db).selectedConfigId();
+    if (id == null) return '未选择 · 使用本地规则选人，不额外调用模型';
+    final config = db.apiConfigBox.get(id);
+    if (config == null) {
+      return '引用的配置已不存在 · 已回落本地规则，请重新选择';
+    }
+    if (!config.hasCredential) {
+      return '${config.name} · 缺少凭据，暂时回落本地规则';
+    }
+    return '${config.name} · ${config.modelName}';
+  }
+
+  /// 选择选人器使用的 API 配置。
+  ///
+  /// 只把所选配置的 **id** 写进 app_settings：不保存明文 Key、凭据对象或配置
+  /// 副本，也不要求为选人器新增任何 API Key。选人不影响各角色自己的发言配置。
+  Future<void> _chooseSpeakerPickerConfig() async {
+    final db = ref.read(databaseServiceProvider);
+    final settings = AiSpeakerPickerSettings(db);
+    final configs = ref.read(apiConfigsProvider);
+    final validIds = {for (final config in configs) config.id};
+    final selectedId = settings.selectedConfigId();
+    // 失效引用按"未选择"呈现：给一个点了必然报错的选项比不给更糟。
+    var draft = validIds.contains(selectedId) ? selectedId : null;
+
+    final saved = await showDialog<String>(
+      context: context,
+      builder: (dialogContext) => StatefulBuilder(
+        builder: (dialogContext, setDialogState) => AlertDialog(
+          title: const Text('AI 接话选人器'),
+          content: SizedBox(
+            width: 420,
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text(
+                  '选人器按最新对话决定下一位由谁说。它是幕后的选人步骤，不是群成员，'
+                  '不会产生聊天气泡；每位角色的实际发言仍使用各自绑定的配置。',
+                  style: TextStyle(
+                      fontSize: 13,
+                      color: Theme.of(dialogContext).colorScheme.onSurfaceVariant),
+                ),
+                const SizedBox(height: 16),
+                DropdownButtonFormField<String>(
+                  value: draft ?? '',
+                  decoration: const InputDecoration(
+                    labelText: '选人器使用的配置',
+                    border: OutlineInputBorder(),
+                  ),
+                  items: [
+                    const DropdownMenuItem(
+                      value: '',
+                      child: Text('不启用（使用本地规则）'),
+                    ),
+                    ...configs.map(
+                      (config) => DropdownMenuItem(
+                        value: config.id,
+                        child: Text(config.name),
+                      ),
+                    ),
+                  ],
+                  onChanged: (value) => setDialogState(
+                    () => draft = (value ?? '').isEmpty ? null : value,
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(
+                onPressed: () => Navigator.pop(dialogContext),
+                child: const Text('取消')),
+            FilledButton(
+              onPressed: () => Navigator.pop(dialogContext, draft ?? ''),
+              child: const Text('保存'),
+            ),
+          ],
+        ),
+      ),
+    );
+    // null 表示用户取消；空串表示"不启用"。
+    if (saved == null) return;
+    await settings.select(saved);
+    if (mounted) _safeSetState(() {});
   }
 
   Future<void> _testApiKey(BuildContext context, ApiConfig config) async {

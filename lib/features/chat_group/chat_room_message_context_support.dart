@@ -37,6 +37,15 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
     _relationshipStates = _loader.stableGlobalRelationships();
   }
 
+  /// 本群的固定共同设定区块；两个字段都为空时为空串（整块不注入）。
+  ///
+  /// 每次请求现算，用户改完群设置后下一个请求立即生效，不需要重启 App。
+  String get _groupSharedContextBlock => GroupSharedContext.build(
+        groupName: _group?.name ?? '',
+        description: _group?.description ?? '',
+        announcement: _group?.announcement ?? '',
+      );
+
   /// 解析角色可用的 API 配置；未绑定或没有凭据时返回 null（视为不可回复）。
   ApiConfig? _resolveApiConfig(AICharacter character) {
     if (character.apiConfigId.isNotEmpty) {
@@ -94,6 +103,15 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
 
     final msgs = <Map<String, dynamic>>[];
 
+    // ── 0. 本群固定共同设定（每次聊天生效） ──────────────────────────
+    // 集中成一个小区块，且只出现一次：它由用户填写、AI 不改写，也不参与
+    // 群记忆/关系/永久记忆的任何写入。放在最前面是因为它是本群最稳定、
+    // 优先级最高的共享事实（与旧摘要冲突时以此为准）。
+    final sharedContextBlock = _groupSharedContextBlock;
+    if (sharedContextBlock.isNotEmpty) {
+      msgs.add({'role': 'system', 'content': sharedContextBlock});
+    }
+
     // ── 1. 群聊记忆摘要 ───────────────────────────────────────────────
     // 群记忆是共享摘要；只要当前上下文存在角色不可见的消息，就不能把
     // 这份摘要继续发给该角色，避免摘要成为绕过消息可见性的旁路。
@@ -141,8 +159,6 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
     // ── 3. 群聊场景 + 当前对话焦点 ─────────────────────────────────
     final groupName = _group?.name ?? '这个群';
     final groupTheme = _group?.theme ?? '日常聊天';
-    final groupDescription = _group?.description ?? '';
-    final announcement = _group?.announcement.trim() ?? '';
     final groupMemory = selectedGroupMemory;
     final isGroupAddressed = userMessage != null &&
         ChatActivityPolicy.isGroupAddressedMessage(userMessage);
@@ -154,14 +170,12 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
       character: character,
       groupName: groupName,
       groupTheme: groupTheme,
-      groupDescription: groupDescription,
       groupMemory: groupMemory,
     );
     msgs.add({
       'role': 'system',
       'content': '$personaContext\n\n'
           '你正在参加一个高活跃度群聊「$groupName」，主题是「$groupTheme」。'
-          '${announcement.isEmpty ? '' : '群公告：$announcement。'}'
           '回复要像真实聊天群：自然接话、简短、有个人观点，可以顺手回应上一位成员或点名邀请别人，但不要每次都长篇总结。'
           '${HumanizedPromptBuilder.ownerMentionInstruction(_ownerMentionName)}'
           '当前真实时间：${DateTime.now().toLocal().toIso8601String()}。'

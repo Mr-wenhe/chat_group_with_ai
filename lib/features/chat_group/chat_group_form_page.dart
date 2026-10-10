@@ -127,17 +127,29 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
                 TextFormField(
                   controller: _descriptionController,
                   decoration: appInputDecoration(
-                      '描述', '可选，描述群聊的背景设定', Icons.description_outlined, cs),
+                      '共同背景', '例如：我们都叫群主“老大”；小林是阿宽的姐姐',
+                      Icons.description_outlined, cs),
                   maxLines: 3,
+                ),
+                _sharedSettingHint(
+                  '每次群聊都会把这段设定告诉本群所有角色：称呼、固定人物关系、'
+                  '共同约定都可以写在这里。它由你填写、AI 不会自动改动，'
+                  '也不会变成聊天记忆或人物信息卡。',
+                  cs,
                 ),
                 const SizedBox(height: 14),
                 TextFormField(
                   controller: _announcementController,
-                  decoration: appInputDecoration('群公告', '例如：本周冲刺目标、协作规则或禁忌话题',
-                      Icons.campaign_outlined, cs),
+                  decoration: appInputDecoration('群公告与约定',
+                      '例如：本周冲刺目标、协作规则或禁忌话题', Icons.campaign_outlined, cs),
                   maxLines: 3,
                 ),
-                const SizedBox(height: 18),
+                _sharedSettingHint(
+                  '同样每次群聊都生效，适合放“群内约定”这类所有角色都要遵守的内容。'
+                  '内容过长可能放不进模型窗口，届时会明确提示你缩短。',
+                  cs,
+                ),
+                const SizedBox(height: 4),
                 Row(
                   children: [
                     Icon(Icons.speed_rounded, size: 18, color: cs.primary),
@@ -251,6 +263,21 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
             const SizedBox(height: 32),
           ],
         ),
+      ),
+    );
+  }
+
+  /// 固定共同设定两个字段下方的小字说明。
+  ///
+  /// 单独一行而不是塞进 `hintText`：提示语在用户开始输入后会消失，而"这段设定
+  /// 每次群聊都生效、AI 不会改动它"正是填写时最需要知道的事。
+  Widget _sharedSettingHint(String text, ColorScheme cs) {
+    return Padding(
+      padding: const EdgeInsets.fromLTRB(4, 6, 4, 0),
+      child: Text(
+        text,
+        style: TextStyle(
+            fontSize: 12, height: 1.4, color: cs.onSurfaceVariant),
       ),
     );
   }
