@@ -57,7 +57,9 @@ extension _WorkTaskCoordinatorDeletion on WorkTaskCoordinator {
     _handoffsAwaitingLease.remove(task.id);
     _taskLockPlans.remove(task.id);
     _autoResumeTaskIds.remove(task.id);
-    _conversationReservations.remove(task.groupId);
+    // 删掉的这条任务只交还自己握着的槽：同会话里另一条任务（例如正停在等用户
+    // 的那条）可能才是当前持有者，连带松开它会让接下来的调度与它并发跑。
+    _releaseConversationReservationFor(task);
     // 启动流程可能正停在一个 await 上（讨论门禁、执行资格校验），而它的取消
     // 令牌要等那个 await 返回后才登记——上面那几行取消不到它。把内存对象标成
     // 终态并清空可执行状态，这些续跑恢复后就会看到"已终止"而自行退出。

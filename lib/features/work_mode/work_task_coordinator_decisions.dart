@@ -150,6 +150,57 @@ extension _WorkTaskCoordinatorDecisions on WorkTaskCoordinator {
     }
   }
 
+  /// 放弃被停止打断的追加输入时，把它们的待处理引用一起清掉。
+  ///
+  /// `pendingInputIds` 与 `queuedUserRequests` 是并排的 FIFO：`_applyPendingV2Inputs`
+  /// 要求两者同时有值，只剩引用而没有原文时会抛"待处理输入缺少原文"并停住推进，
+  /// 任务因此既跑不动也退不出。用户已经在继续时明确放弃这批输入，引用必须一起清。
+  ///
+  /// 清空整条列表是安全的：能兑现这些引用的原文只可能来自被一起清掉的队列，留下
+  /// 任何一条都只会让恢复后的第一轮就撞上那条报错。
+  Future<void> _dropAbandonedPendingInputs(AgentTask task) async {
+    final decoded = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    );
+    final state = decoded.state;
+    final current = state?.collaboration;
+    if (!decoded.isValid ||
+        state == null ||
+        current == null ||
+        current.pendingInputIds.isEmpty) {
+      return;
+    }
+    final eventId = _v2EventKey('dropInputs', '${task.id}:${current.revision}');
+    final nextJson = current.toJson()
+      ..['revision'] = current.revision + 1
+      ..['pendingInputIds'] = <String>[]
+      ..['appliedEventIds'] = [
+        ...current.appliedEventIds
+            .skip(current.appliedEventIds.length == 64 ? 1 : 0),
+        eventId,
+      ];
+    final next = WorkCollaborationState.tryParse(nextJson);
+    if (next == null) {
+      throw StateError('待处理输入引用无法安全清除，原检查点已保留。');
+    }
+    // 用户身份落盘：放弃的是用户自己发出的输入。校验走的是统一入口，字段越界
+    // 或越权改写会在这里被拒绝，不会写进检查点。
+    current.apply(WorkCollaborationUpdate(
+      taskId: task.id,
+      conversationId: task.groupId,
+      expectedRevision: current.revision,
+      eventId: eventId,
+      sourceRole: 'user',
+      sourceId: 'user',
+      next: next,
+    ));
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      task.executionStateJson,
+      state.copyWith(collaboration: next),
+      expectedCollaborationRevision: current.revision,
+    );
+  }
+
   WorkDiscussionState _v2DecisionState(AgentTask task) {
     final decoded = WorkDiscussionState.decodeExecutionState(
       task.executionStateJson,

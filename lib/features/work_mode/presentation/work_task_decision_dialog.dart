@@ -12,11 +12,13 @@ typedef WorkDecisionReply = Future<bool> Function(
 class WorkTaskDecisionDialog extends StatefulWidget {
   final List<WorkTaskDecision> decisions;
   final WorkDecisionReply onReply;
+  final ValueChanged<WorkTaskDecision>? onDecisionShown;
 
   const WorkTaskDecisionDialog({
     super.key,
     required this.decisions,
     required this.onReply,
+    this.onDecisionShown,
   });
 
   @override
@@ -29,6 +31,12 @@ class _WorkTaskDecisionDialogState extends State<WorkTaskDecisionDialog> {
   bool _busy = false;
   bool _answeredUnresolved = false;
   String? _error;
+
+  @override
+  void initState() {
+    super.initState();
+    widget.onDecisionShown?.call(widget.decisions.first);
+  }
 
   @override
   void dispose() {
@@ -62,6 +70,7 @@ class _WorkTaskDecisionDialogState extends State<WorkTaskDecisionDialog> {
           _index++;
           _controller.clear();
         });
+        widget.onDecisionShown?.call(widget.decisions[_index]);
       }
     } on Object catch (error) {
       if (mounted) setState(() => _error = error.toString());

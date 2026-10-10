@@ -134,6 +134,12 @@ class WorkTaskPanel extends StatefulWidget {
   /// 关掉某个任务的标签；只影响面板展示，不删除任务记录。
   final WorkTaskAction? onHideTask;
 
+  /// 「继续」的第二个答案：不带回被停止打断的那批追问。
+  ///
+  /// 为 null 时面板不做这一步确认，直接把 [onContinue] 交给宿主决定；
+  /// 生产宿主总是接上它，所以在真实面板上停止后的继续一定会问一次。
+  final WorkTaskAction? onContinueWithoutFollowUps;
+
   const WorkTaskPanel({
     super.key,
     required this.tasks,
@@ -143,6 +149,7 @@ class WorkTaskPanel extends StatefulWidget {
     required this.onSelectTask,
     required this.onStop,
     required this.onContinue,
+    this.onContinueWithoutFollowUps,
     this.onReply,
     this.onOpenDecision,
     required this.onOpenConversation,
@@ -433,6 +440,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               characterNameFor: widget.characterNameFor,
               onStop: widget.onStop,
               onContinue: widget.onContinue,
+              onContinueWithoutFollowUps: widget.onContinueWithoutFollowUps,
               onReply: widget.onReply,
               onOpenDecision: widget.onOpenDecision,
               replyController: _replyController,

@@ -670,6 +670,44 @@ void main() {
     expect(state.workItems.single['dependencies'], ['item-a']);
   });
 
+  test('状态边界拒绝时只返回具体字段路径诊断', () {
+    final raw = _fixture()
+      ..['artifactContract'] = {
+        ..._fixture()['artifactContract'] as Map,
+        'files': [42]
+      };
+    String? section;
+    expect(
+        WorkCollaborationState.tryParse(raw,
+            onInvalid: (value) => section = value),
+        isNull);
+    expect(section, 'artifactContract.files');
+
+    final invalidLocation = _fixture()
+      ..['artifactContract'] = {
+        ..._fixture()['artifactContract'] as Map,
+        'location': 42
+      };
+    section = null;
+    expect(
+        WorkCollaborationState.tryParse(invalidLocation,
+            onInvalid: (value) => section = value),
+        isNull);
+    expect(section, 'artifactContract.location');
+
+    final unexpectedContractField = _fixture()
+      ..['artifactContract'] = {
+        ..._fixture()['artifactContract'] as Map,
+        'verificationEnvironment': 'node+jsdom'
+      };
+    section = null;
+    expect(
+        WorkCollaborationState.tryParse(unexpectedContractField,
+            onInvalid: (value) => section = value),
+        isNull);
+    expect(section, 'artifactContract.fields(verificationEnvironment)');
+  });
+
   test('成员新问题保存来源并使旧认可失效，决策不能沿用旧需求版本', () {
     final current = _state(_fixture());
     final issueRaw = _fixture();

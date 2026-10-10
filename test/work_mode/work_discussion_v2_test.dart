@@ -1,10 +1,13 @@
+import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/services/chat_api_service.dart';
 import 'package:dio/dio.dart';
 import '../helpers/memory_governance_store.dart';
@@ -13,6 +16,7 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/chat_group.dart';
+import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
@@ -20,6 +24,7 @@ import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_discussion_v2_protocol.dart';
+import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
@@ -28,6 +33,7 @@ import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:crypto/crypto.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
@@ -850,6 +856,77 @@ void main() {
     expect(s.team.length, 2);
     expect(s.planReady, isFalse);
   });
+  for (final smallWindow in [false, true]) {
+    test('必要讨论超过旧字符上限只按真实模型窗口阻塞：$smallWindow', () async {
+      task.userRequest += '；${'完整且必须保留的任务约束。' * 2200}';
+      final governance = MemoryGovernanceStore();
+      if (smallWindow) {
+        for (final id in ['dev', 'qa']) {
+          final config = db.apiConfigBox.get('config-$id')!
+            ..modelName = 'small-$id';
+          await db.apiConfigBox.put(config.id, config);
+          await governance.saveCustomCapability(
+              'deepseek',
+              config.modelName,
+              const CustomModelCapability(
+                  contextWindow: 8192, maxOutput: 2048));
+        }
+      }
+      var calls = 0;
+      final gateway = AiRequestGateway(
+          store: governance,
+          client: _ModelClient((context, model) async {
+            calls++;
+            expect(context['userRequest'], task.userRequest);
+            return confirm(
+                db.aiCharacterBox.get(context['memberId'])!, context);
+          }));
+      await WorkDiscussionRunner(
+              database: db,
+              credentials: _Credentials(),
+              eventStore: events,
+              gateway: gateway,
+              investigate: execution.investigate)
+          .runCollaboration(task, WorkTaskCancellation(), apply);
+      final result =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+      expect(result.isPlanReady, !smallWindow);
+      expect(result.collaboration!.hasPendingDecision, smallWindow);
+      expect(calls, smallWindow ? 0 : greaterThanOrEqualTo(3));
+    });
+  }
+  for (final budget in [2048, 16384, 65536]) {
+    test('讨论请求遵守模型能力输出预算及绝对上限：$budget', () async {
+      final governance = MemoryGovernanceStore();
+      for (final id in ['dev', 'qa']) {
+        final config = db.apiConfigBox.get('config-$id')!
+          ..modelName = 'declared-$id';
+        await db.apiConfigBox.put(config.id, config);
+        await governance.saveCustomCapability('deepseek', config.modelName,
+            CustomModelCapability(contextWindow: 262144, maxOutput: budget));
+      }
+      var calls = 0;
+      final gateway = AiRequestGateway(
+          store: governance,
+          client: _ModelClient((context, model) async {
+            calls++;
+            return confirm(
+                db.aiCharacterBox.get(context['memberId'])!, context);
+          }, expectedMaxTokens: budget > 32768 ? 32768 : budget));
+      await WorkDiscussionRunner(
+              database: db,
+              credentials: _Credentials(),
+              eventStore: events,
+              gateway: gateway,
+              investigate: execution.investigate)
+          .runCollaboration(task, WorkTaskCancellation(), apply);
+      expect(calls, greaterThanOrEqualTo(3));
+      expect(
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .isPlanReady,
+          isTrue);
+    });
+  }
   test('生产 gateway 实际接收不同角色自己的模型配置', () async {
     final seen = <String, String>{};
     final governance = MemoryGovernanceStore();
@@ -923,7 +1000,16 @@ void main() {
     expect(s.issues.length, 3);
     expect(s.hasPendingDecision, isTrue);
     expect(s.planReady, isFalse);
-    expect(db.messageBox.values.map((m) => m.content), contains(longText));
+    // 长解释不再原样进气泡——气泡有发言纪律的长度上限——但一个字都不能丢：
+    // 完整正文随这条消息转存为详情附件。
+    final bubble = db.messageBox.values
+        .map((m) => m.content)
+        .firstWhere((c) => c.startsWith('需要说明这个边界：'));
+    expect(bubble, contains('已截断，原文 ${longText.length} 字'));
+    final detail = db.messageBox.values
+        .expand((m) => m.media ?? [])
+        .singleWhere((a) => a.fileName == '完整公开正文.json');
+    expect(await File(detail.localPath).readAsString(), contains(longText));
     expect(models['dev'], 'deepseek-chat');
   });
   test('旧回复、他人签字、100% 和错误提案均不形成协议', () {

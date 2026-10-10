@@ -40,7 +40,11 @@ extension _WorkTaskCoordinatorFollowUpInput on WorkTaskCoordinator {
             .hasMatch(request)) {
       return true;
     }
-    if (isTaskInFlight(task.id) || task.queuedUserRequests.isNotEmpty) {
+    // 终态记录不会再排空自己的队列（`_promoteQueuedFollowUp` 在 cancelled 上
+    // 直接早退），所以队列绝不能把新请求钉在它上面——那会让用户下一句直接撞上
+    // "已停止的任务不能继续追问"。非终态记录仍然靠队列守住连续修改红线。
+    if (isTaskInFlight(task.id) ||
+        !task.isTerminal && task.queuedUserRequests.isNotEmpty) {
       return false;
     }
     if (decision.kind != WorkFollowUpKind.newArtifact) return false;

@@ -39,9 +39,11 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
     }
     final kind = approval['kind'] as String;
     final subject = approval['subjectId'] as String;
+    if (kind == 'plan' && subject != task.id) {
+      throw StateError('方案认可 subjectId 必须逐字使用当前 taskId，不能使用方案名称或版本号');
+    }
     if (kind == 'plan' &&
-        (subject != task.id ||
-            state.plan.isEmpty ||
+        (state.plan.isEmpty ||
             state.acceptances.isEmpty ||
             state.workItems.isEmpty ||
             state.workItems
@@ -179,10 +181,48 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
       throw StateError('提案详情已变化');
     }
     if (_scopeConflicts(proposal)) {
-      throw StateError('用户明确禁止事项仍受保护，需补充明确范围条件。');
+      final originalIssue = issue['problem'] as String;
+      await _decision(
+          'dispute',
+          issue['id'] as String,
+          '当前提案与用户明确禁止事项冲突，请裁决或要求修改提案。',
+          '关联提案 ${issue['resolutionRef']} 仍含与当前用户范围冲突的内容：$originalIssue',
+          options: [
+            {
+              'id': 'reject-idea',
+              'label': '保留原要求，不采用当前提案',
+              'impact': '记录拒绝理由，回到原范围重新确认方案。'
+            },
+            {
+              'id': 'revise-idea',
+              'label': '修改提案后重新讨论',
+              'impact': '当前提案认可失效，成员按保留的原要求重新确认。'
+            }
+          ]);
+      return;
     }
-    _validateProposal(proposal);
-    _validateContract(proposal);
+    try {
+      _validateProposal(proposal);
+      _validateContract(proposal);
+    } on Object catch (error) {
+      final detail =
+          error is StateError ? error.message.toString() : '提案不符合当前协作状态结构';
+      await _decision('dispute', issue['id'] as String,
+          '关联提案不符合当前协作状态结构，需要修改后重新讨论。', '旧提案 $ref 校验失败：$detail',
+          options: [
+            {
+              'id': 'reject-idea',
+              'label': '保留原要求，不采用这份提案',
+              'impact': '作废当前提案，按原范围重新确认方案。'
+            },
+            {
+              'id': 'revise-idea',
+              'label': '修改提案后重新讨论',
+              'impact': '旧提案认可失效，协调成员提交新的完整提案。'
+            }
+          ]);
+      return;
+    }
     await _installProposal(proposal, issues: [
       for (final i in current.issues)
         i['id'] == subject

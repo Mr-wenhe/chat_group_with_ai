@@ -178,6 +178,7 @@ class WorkModeAgentSettings {
 class WorkFolderGrantService {
   static const String grantsStorageKey = 'work_mode_folder_grants_v1';
   static const String settingsStorageKey = 'work_mode_agent_settings_v1';
+  static const directoryValidationTimeout = Duration(seconds: 5);
 
   final Box<dynamic> box;
   final DateTime Function() clock;
@@ -242,28 +243,9 @@ class WorkFolderGrantService {
 
   Future<void> _refreshValidation() async {
     if (_grants.isEmpty) return;
-    final now = clock();
     final checked = <WorkFolderGrant>[];
     for (final grant in _grants) {
-      bool available;
-      bool writable;
-      try {
-        available = await _directoryValidator(grant.path);
-      } on Object {
-        available = false;
-      }
-      try {
-        writable = available && await _writeDirectoryValidator(grant.path);
-      } on Object {
-        writable = false;
-      }
-      checked.add(
-        grant.copyWith(
-          lastValidatedAt: now,
-          available: available,
-          writable: writable,
-        ),
-      );
+      checked.add(await _validatedGrant(grant));
     }
     _grants = checked;
     await _persistGrants();
@@ -705,12 +687,18 @@ class WorkFolderGrantService {
     bool available;
     bool writable;
     try {
-      available = await _directoryValidator(grant.path);
+      // A disconnected volume can leave native directory enumeration pending
+      // indefinitely. Fail closed without deleting consent or trusting a late
+      // result; all load, refresh and picker previews share this boundary.
+      available = await _directoryValidator(grant.path)
+          .timeout(directoryValidationTimeout, onTimeout: () => false);
     } on Object {
       available = false;
     }
     try {
-      writable = available && await _writeDirectoryValidator(grant.path);
+      writable = available &&
+          await _writeDirectoryValidator(grant.path)
+              .timeout(directoryValidationTimeout, onTimeout: () => false);
     } on Object {
       writable = false;
     }

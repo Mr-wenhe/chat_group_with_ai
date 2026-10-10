@@ -33,6 +33,9 @@ class _TaskActions extends StatelessWidget {
 
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
+
+  /// 「继续」的第二个答案：不带回被停止打断的那批追问。为 null 时不问这一步。
+  final WorkTaskAction? onContinueWithoutFollowUps;
   final WorkTaskReply? onReply;
   final WorkTaskAction? onOpenDecision;
   final TextEditingController replyController;
@@ -69,6 +72,7 @@ class _TaskActions extends StatelessWidget {
     this.characterNameFor,
     required this.onStop,
     required this.onContinue,
+    this.onContinueWithoutFollowUps,
     required this.replyController,
     required this.replyFocusNode,
     this.onReply,
@@ -108,13 +112,18 @@ class _TaskActions extends StatelessWidget {
     // Recovery controls are meaningful only at a user-resumable boundary. A
     // terminal failure may still expose retry/reauthorize/conflict actions,
     // but must not also present a misleading generic Continue button.
-    final canShowContinue = !task.isTerminal &&
-        (task.status == AgentTaskStatus.paused ||
-            task.status == AgentTaskStatus.interrupted) &&
-        (isSoftLimitPause ||
-            failure == null ||
-            failure.canContinue ||
-            failure.canContinueAfterRolePermissionUpdate);
+    //
+    // 用户停止是唯一的例外：它仍是终态，却带着一个完整检查点，可以接着跑。
+    // 那条路不重放已提交变更，判据交给 `_continueUnavailableReasonForPanel`。
+    final canShowContinue = task.isUserStopped
+        ? continueReason == null
+        : !task.isTerminal &&
+            (task.status == AgentTaskStatus.paused ||
+                task.status == AgentTaskStatus.interrupted) &&
+            (isSoftLimitPause ||
+                failure == null ||
+                failure.canContinue ||
+                failure.canContinueAfterRolePermissionUpdate);
     final modelClarificationPending = WorkTaskClarification.isPending(task);
     final followUpClarificationPending =
         WorkTaskClarification.isFollowUpPending(task);
@@ -348,9 +357,13 @@ class _TaskActions extends StatelessWidget {
                 icon: const Icon(Icons.verified_outlined),
                 label: Text('确认交付 ${confirmableArtifacts.length} 个文件'),
               ),
+            // 停止后的记录只有"从头开始"这一条重试路径（`canRestartAfterUserStop`
+            // 为假时 `_implRetry` 会拒绝），所以别给它摆一个点下去必然报错的重试。
             if (onRetry != null &&
                 (canRestartFromBeginning ||
-                    !isSoftLimitPause && failure?.canRetry == true))
+                    !task.isUserStopped &&
+                        !isSoftLimitPause &&
+                        failure?.canRetry == true))
               FilledButton.icon(
                 key: const Key('work-task-retry'),
                 onPressed: actionInFlight ? null : () => runAction(onRetry!),
@@ -403,7 +416,7 @@ class _TaskActions extends StatelessWidget {
                 child: FilledButton.icon(
                   key: const Key('work-task-continue'),
                   onPressed: continueReason == null && !actionInFlight
-                      ? () => runAction(onContinue)
+                      ? () => _startContinue(context)
                       : null,
                   icon: const Icon(Icons.play_arrow_rounded),
                   label: const Text('继续'),

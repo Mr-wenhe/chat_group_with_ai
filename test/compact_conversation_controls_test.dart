@@ -93,6 +93,64 @@ void main() {
     expect(tapped, 1);
   });
 
+  testWidgets('中性提示与胶囊同一行，贴在胶囊左侧', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: CompactConversationControls(
+            showAutoChat: true,
+            autoChatEnabled: true,
+            workModeEnabled: true,
+            autoChatAvailable: true,
+            autoChatTooltip: '自动发言已暂停',
+            workModeTooltip: '工作模式已开启',
+            onAutoChatChanged: (_) {},
+            onWorkModeChanged: (_) {},
+            statusAlert: const ConversationStatusAlert(
+              message: '工作模式中，自动发言已暂停',
+              isWarning: false,
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final alertRect = tester.getRect(find.text('工作模式中，自动发言已暂停'));
+    final pillRect = tester.getRect(find.byKey(const Key('work-mode-toggle')));
+
+    // 同一行：两者的垂直中心重合，而不是提示条独占一行把胶囊顶下去。
+    expect((alertRect.center.dy - pillRect.center.dy).abs(), lessThan(4));
+    // 贴在胶囊左侧，不覆盖也不落在胶囊上。
+    expect(alertRect.right, lessThanOrEqualTo(pillRect.left));
+  });
+
+  testWidgets('警示态提示仍独占一行，压在胶囊之上', (tester) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: CompactConversationControls(
+            showAutoChat: true,
+            autoChatEnabled: true,
+            workModeEnabled: false,
+            autoChatAvailable: true,
+            autoChatTooltip: '自动发言',
+            workModeTooltip: '工作模式',
+            onAutoChatChanged: (_) {},
+            onWorkModeChanged: (_) {},
+            statusAlert: const ConversationStatusAlert(
+              message: '自动发言异常，请检查网络或 API 配置',
+            ),
+          ),
+        ),
+      ),
+    );
+
+    final alertRect = tester.getRect(find.text('自动发言异常，请检查网络或 API 配置'));
+    final pillRect = tester.getRect(find.byKey(const Key('work-mode-toggle')));
+
+    expect(alertRect.bottom, lessThanOrEqualTo(pillRect.top));
+  });
+
   testWidgets('私聊即使有自动发言状态也不显示自动发言提示', (tester) async {
     await tester.pumpWidget(
       MaterialApp(

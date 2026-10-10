@@ -86,15 +86,28 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
     task.requestedPermissions.clear();
   }
 
-  /// Queues an interrupted or paused task only after an explicit user action.
-  Future<void> _implResumeByUser(String taskId) {
+  /// Queues an interrupted, paused, or user-stopped task after an explicit
+  /// user action.
+  ///
+  /// A user stop is terminal for the conversation but keeps a complete durable
+  /// checkpoint, so it is the one `cancelled` record the user can pick back up.
+  /// Continuing never resets that checkpoint — that is what distinguishes it
+  /// from [retry]'s "从头开始" path.
+  Future<void> _implResumeByUser(
+    String taskId, {
+    bool restoreQueuedFollowUps = true,
+  }) {
     return _serialize(() async {
       _ensureOpen();
       final task = _requireWorkTask(taskId);
       if (task.status != AgentTaskStatus.interrupted &&
-          task.status != AgentTaskStatus.paused) {
+          task.status != AgentTaskStatus.paused &&
+          !task.isUserStopped) {
         throw StateError('当前任务不需要手动继续。');
       }
+      // 下面那条级联会把 lastError 清空，而 `isUserStopped` 正是靠 lastError
+      // 认出来的，所以这次继续的性质必须在任何改写之前固定下来。
+      final userStopped = task.isUserStopped;
       // A malformed/unsupported checkpoint is normalized to a safe marker.
       // Once the user explicitly opens that checkpoint, a group task still
       // needs the same discussion gate as a fresh task; never let the
@@ -134,6 +147,17 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
         throw StateError('请先选择支持图片的视觉模型后再继续任务。');
       }
       WorkFailure.clearFromTask(task);
+      if (userStopped && task.softLimitReached) {
+        // 停止前正卡在软超限暂停上，那个标记会跟着 cancelled 一起留下。
+        // 继续是用户显式再给的一次预算，不能刚起步就被旧标记挡回去；
+        // 普通停止不带超限标记，预算必须原样保留（继续不是重新开始）。
+        final cumulativeLimits =
+            WorkTaskExecutionPolicy.enforcesCumulativeLimits(task);
+        task
+          ..softLimitReached = false
+          ..actionCount = cumulativeLimits ? 0 : task.actionCount
+          ..startedAt = cumulativeLimits ? _clock() : task.startedAt;
+      }
       task
         ..status = AgentTaskStatus.queued
         ..resumeRequired = false
@@ -156,10 +180,37 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       // excluded by the runner's safety intersection.
       task.requestedPermissions.clear();
       _autoResumeTaskIds.remove(task.id);
-      _conversationReservations.remove(task.groupId);
+      // 只有这条任务自己握着的槽才能松：同会话里可能已经有新任务接过这条会话
+      // （停止时旧任务的槽已经交还，见 `_implStop`），那条占用是它的。
+      _releaseConversationReservationFor(task);
+      final discardedFollowUps = restoreQueuedFollowUps
+          ? const <String>[]
+          : List<String>.unmodifiable(task.queuedUserRequests);
+      if (discardedFollowUps.isNotEmpty) {
+        // 用户在继续时选择不带回被停止打断的追问。队列、与它并排的附件 id，以及
+        // 协作状态里的待处理引用必须一起清：只清队列会让下一轮撞上"待处理输入
+        // 缺少原文"而停住推进。
+        task
+          ..queuedUserRequests = <String>[]
+          ..executionStateJson = _withQueuedAttachmentMessageIds(
+            task.executionStateJson,
+            const <String>[],
+          );
+        await _dropAbandonedPendingInputs(task);
+      }
       await _save(task);
       _enqueueTask(task);
       unawaited(_record(task, WorkTaskEventKind.queued, '用户已继续任务'));
+      if (discardedFollowUps.isNotEmpty) {
+        unawaited(
+          _record(
+            task,
+            WorkTaskEventKind.queued,
+            '已放弃 ${discardedFollowUps.length} 条待处理的追问',
+            detail: discardedFollowUps.join('\n'),
+          ),
+        );
+      }
       await _schedule();
     });
   }
@@ -248,6 +299,17 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       // delivery marker is pending.
       final deliveryRetryPending =
           workArtifactDeliveryRetryPending(task.executionStateJson);
+      // 「从头开始」会清空执行检查点并写入一份新的 v1 讨论状态。对 v2 任务来说
+      // 那等于丢掉整块协作记录（认可、待决事项、验收、候选迭代），而且不会报错。
+      // 在**清空之前**拒绝，检查点因此保持原样。
+      //
+      // 必须排在下面的通用拒绝之前：`canRestartAfterUserStop` 已经把 v2 任务从
+      // 「从头开始」的判据里排除，落到通用分支只会给出"已停止或已完成的任务不能
+      // 重试"，用户看不出真正的原因和出路。
+      if (task.isUserStopped &&
+          WorkTaskCoordinator._carriesV2CollaborationState(task)) {
+        throw StateError('该任务使用协作（v2）状态，不能通过「从头开始」重置，请在任务面板处理待决事项。');
+      }
       if ((task.status == AgentTaskStatus.cancelled && !restartFromBeginning) ||
           task.status == AgentTaskStatus.completed && !deliveryRetryPending) {
         throw StateError('已停止或已完成的任务不能重试。');
@@ -264,12 +326,6 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
         }
         final existingDiscussion =
             _requiresDiscussionForTask(task) ? discussionMarker.state : null;
-        if (_carriesV2Collaboration(existingDiscussion)) {
-          // 「从头开始」会清空执行检查点并写入一份新的 v1 讨论状态。对 v2 任务来说
-          // 那等于丢掉整块协作记录（认可、待决事项、验收、候选迭代），而且不会报错。
-          // 在**清空之前**拒绝，检查点因此保持原样。
-          throw StateError('该任务使用协作（v2）状态，不能通过「从头开始」重置，请在任务面板处理待决事项。');
-        }
         final currentScope = existingDiscussion == null
             ? task.userRequest
             : WorkDiscussionState.currentRequestScope(task);

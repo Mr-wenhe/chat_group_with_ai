@@ -291,8 +291,11 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       purpose: AiRequestPurpose.agent,
       conversationId: conversationId,
       characterId: character.id,
-      temperature: 0.35,
-      maxTokens: WorkDiscussionRunner.discussionMaxTokens,
+      // 讨论是方案/审阅任务，统一用同一个保守采样温度。曾对
+      // sensenova-6.8-flash-lite 单独抬到 1.0，但那个模型在讨论路径上的协议失败
+      // 远高于它在执行路径（0.2）上的表现，抬高采样没有任何实测依据。
+      temperature: WorkDiscussionRunner.defaultDiscussionTemperature,
+      maxTokens: _discussionOutputTokens(provider, config.modelName),
       receiveTimeout: timeout,
       maxRetries: 0,
       cancelToken: cancelToken,
@@ -303,11 +306,32 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     );
   }
 
+  // 推理 token 也占输出预算；固定 4096 会使推理模型耗尽预算却没有正文。
+  // 与执行共用能力上限，并在提示词装配时预留同一份输出空间。
+  int _discussionOutputTokens(ApiProvider provider, String model) {
+    final capability = gateway.capability(provider, model);
+    return workModeRequestOutputTokens(
+      capabilityMaxOutput: capability.maxOutput,
+      capabilityContextWindow: capability.contextWindow,
+    );
+  }
+
+  /// 必要协议和未决义务只按真实窗口判定；可选记忆仍用较小装配预算。
+  int _discussionInputCharacters(_DiscussionMember member) {
+    final config = member.config;
+    final provider = member.provider;
+    if (config == null || provider == null) {
+      return WorkDiscussionRunner.maxPromptCharacters;
+    }
+    final capability = gateway.capability(provider, config.modelName);
+    return workModeRequestInputBudget(
+          capabilityMaxOutput: capability.maxOutput,
+          capabilityContextWindow: capability.contextWindow,
+        ) *
+        ContextWindowManager.charactersPerEstimatedToken;
+  }
+
   /// 该成员模型允许的群讨论提示词字符数。
-  ///
-  /// 群讨论的路径此前与模型窗口完全无关：无论接到什么模型，都按
-  /// [WorkDiscussionRunner.maxPromptCharacters] 这一个人工常量截断。对小窗口模型
-  /// 那是必然超窗（24576 字符约合 8192 token，再叠加 4096 的输出预算）。
   int _discussionPromptCharacters(_DiscussionMember member) {
     final config = member.config;
     final provider = member.provider;
@@ -317,7 +341,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     return ContextWindowManager.workDiscussionPromptCharacters(
       contextWindow:
           gateway.capability(provider, config.modelName).contextWindow,
-      maxOutput: WorkDiscussionRunner.discussionMaxTokens,
+      maxOutput: _discussionOutputTokens(provider, config.modelName),
       fallbackCharacters: WorkDiscussionRunner.maxPromptCharacters,
     );
   }
@@ -453,7 +477,8 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     return '${value.substring(0, limit - 1)}…';
   }
 
-  List<String> _recentChatMessages(String groupId, String characterId) {
+  List<String> _recentChatMessages(String groupId, String characterId,
+      {int maximum = 16}) {
     final messages = database.messageBox.values.where((message) {
       if (message.groupId != groupId ||
           (message.content.trim().isEmpty &&
@@ -471,7 +496,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       messages,
     );
     return recent
-        .skip(recent.length > 16 ? recent.length - 16 : 0)
+        .skip(recent.length > maximum ? recent.length - maximum : 0)
         .map((message) {
           final attachments = (message.media ?? const [])
               .map((item) => (item.fileName ?? '').trim())
@@ -623,14 +648,19 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     }
   }
 
-  Future<void> _recordDiagnostic(AgentTask task, String detail) async {
+  Future<void> _recordDiagnostic(
+    AgentTask task,
+    String detail, {
+    WorkTaskEventKind kind = WorkTaskEventKind.failed,
+    String title = '讨论成员调用未完成',
+  }) async {
     final store = eventStore;
     if (store == null) return;
     try {
       await store.append(
         taskId: task.id,
-        kind: WorkTaskEventKind.failed,
-        title: '讨论成员调用未完成',
+        kind: kind,
+        title: title,
         detail: detail,
       );
     } on Object {

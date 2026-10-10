@@ -44,6 +44,8 @@ class _TaskDetailsState extends State<_TaskDetails> {
   /// （超出上限时在区域内部滚动）。异常块与「异常与日志」卡同样受这个开关控制。
   bool _summaryExpanded = false;
   bool _discussionExpanded = false;
+  static const double _discussionHeaderHeight = 48;
+  static const double _discussionBodyMaxHeight = 160;
 
   /// 执行动态默认展开，打开面板就能看到最新一条公开进度。
   ///
@@ -98,7 +100,8 @@ class _TaskDetailsState extends State<_TaskDetails> {
     if (approval['requestRevision'] != state.requestRevision ||
         approval['teamRevision'] != state.teamRevision ||
         approval['verificationRevision'] != state.verificationRevision ||
-        approval['artifactDigest'] != state.currentIteration?['artifactDigest']) {
+        approval['artifactDigest'] !=
+            state.currentIteration?['artifactDigest']) {
       return '已失效';
     }
     return approval['approved'] == true ? '同意' : '异议';
@@ -183,16 +186,33 @@ class _TaskDetailsState extends State<_TaskDetails> {
         // 上半区不渲染时不必为它预留高度，阈值只剩「执行动态」自己那份。
         final summaryRegionReserve =
             _showSummarySection ? _summaryRegionMinHeight + _sectionGap : 0.0;
+        final hasDiscussion = discussionState?.collaboration != null;
+        final discussionHeaderHeight = hasDiscussion
+            ? availableHeight.clamp(0.0, _discussionHeaderHeight).toDouble()
+            : 0.0;
+        // The collaboration details share this viewport with the timeline.
+        // Their former fixed 160px cap ignored the timeline header and caused
+        // a RenderFlex overflow in the real desktop overlay.
+        final discussionBodyHeight = hasDiscussion && _discussionExpanded
+            ? (availableHeight -
+                    discussionHeaderHeight -
+                    summaryRegionReserve -
+                    minTimelineRegionHeight)
+                .clamp(0.0, _discussionBodyMaxHeight)
+                .toDouble()
+            : 0.0;
+        final remainingHeight =
+            availableHeight - discussionHeaderHeight - discussionBodyHeight;
         final showTimeline =
-            availableHeight >= summaryRegionReserve + minTimelineRegionHeight;
+            remainingHeight >= summaryRegionReserve + minTimelineRegionHeight;
         // summaryRegionHeight 是上半区（含顶部开关行）能占的最大高度。
         // 这里只是"展开态"的上限：收起态内容更矮，外层 ConstrainedBox 会按内容收，
         // 不会把这份上限当成占位高度。
         final summaryRegionHeight = _showSummarySection && showTimeline
-            ? (availableHeight - _sectionGap - minTimelineRegionHeight)
+            ? (remainingHeight - _sectionGap - minTimelineRegionHeight)
                 .clamp(_summaryRegionMinHeight, _summaryRegionMaxHeight)
                 .toDouble()
-            : availableHeight;
+            : remainingHeight;
         // 卡片区（可滚动部分）要扣掉顶部那行开关：开关放在滚动区外面，
         // 展开后把卡片滚到底时它依然可点。
         final summaryScrollMaxHeight =
@@ -207,17 +227,21 @@ class _TaskDetailsState extends State<_TaskDetails> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: <Widget>[
               if (discussionState?.collaboration != null) ...[
-                Align(
-                    alignment: Alignment.centerLeft,
-                    child: TextButton(
-                      key: const Key('work-v2-discussion-details'),
-                      onPressed: () => setState(
-                          () => _discussionExpanded = !_discussionExpanded),
-                      child: Text(_discussionExpanded ? '收起问题与方案' : '问题与方案详情'),
-                    )),
+                SizedBox(
+                    height: discussionHeaderHeight,
+                    child: Align(
+                        alignment: Alignment.centerLeft,
+                        child: TextButton(
+                          key: const Key('work-v2-discussion-details'),
+                          onPressed: () => setState(
+                              () => _discussionExpanded = !_discussionExpanded),
+                          child:
+                              Text(_discussionExpanded ? '收起问题与方案' : '问题与方案详情'),
+                        ))),
                 if (_discussionExpanded)
                   ConstrainedBox(
-                    constraints: const BoxConstraints(maxHeight: 160),
+                    constraints:
+                        BoxConstraints(maxHeight: discussionBodyHeight),
                     child: SingleChildScrollView(
                         child: Column(
                             crossAxisAlignment: CrossAxisAlignment.start,

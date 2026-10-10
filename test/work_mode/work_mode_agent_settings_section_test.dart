@@ -55,6 +55,8 @@ void main() {
     expect(find.textContaining('2 GB'), findsOneWidget);
     expect(find.textContaining('100 步'), findsOneWidget);
     expect(find.textContaining('60 分钟'), findsOneWidget);
+    expect(find.textContaining('群聊协作任务不设累计步数或总时长上限'), findsOneWidget);
+    expect(find.textContaining('私聊和旧版任务的软上限'), findsOneWidget);
     expect(find.textContaining('删除文件和不可撤销覆盖始终需要确认'), findsOneWidget);
     expect(find.textContaining('移除授权只停止 App 访问'), findsOneWidget);
     expect(find.byKey(const Key('work-folder-confirm-writes')), findsOneWidget);

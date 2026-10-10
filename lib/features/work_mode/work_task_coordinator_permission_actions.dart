@@ -465,7 +465,10 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
       '$taskId\u001f$blockerId\u001f${version ?? 0}';
 
   /// Stops only the requested task. Other conversations keep their slots.
-  Future<void> _implStop(String taskId, {String reason = '用户已停止任务。'}) {
+  Future<void> _implStop(
+    String taskId, {
+    String reason = AgentTask.userStopReason,
+  }) {
     return _serialize(() async {
       _ensureOpen();
       final task = _requireWorkTask(taskId);
@@ -489,13 +492,11 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
       // A stop ends any pending automatic attempt for this task, so a later
       // restart cannot inherit its round deadline.
       _autoResumeTaskIds.remove(taskId);
-      final droppedFollowUps =
-          List<String>.unmodifiable(task.queuedUserRequests);
+      final keptFollowUps = List<String>.unmodifiable(task.queuedUserRequests);
       task
         ..status = AgentTaskStatus.cancelled
         ..resumeRequired = false
         ..pendingToolRequestJson = ''
-        ..queuedUserRequests = <String>[]
         ..lastError = sanitizeWorkTaskError(reason)
         ..updatedAt = _clock();
       await _save(task);
@@ -503,16 +504,15 @@ extension _WorkTaskCoordinatorPermissionActions on WorkTaskCoordinator {
       unawaited(
         _record(task, WorkTaskEventKind.failed, '任务已停止', detail: reason),
       );
-      if (droppedFollowUps.isNotEmpty) {
-        // Stopping is terminal for this task, but the user's queued amendments
-        // must not vanish without a trace. Record exactly what was discarded so
-        // the task history explains why those messages never ran.
+      if (keptFollowUps.isNotEmpty) {
+        // 停止仍然是终态，但不再吞掉用户已经发出的输入：队列留在记录上，
+        // 「继续」时由用户决定一并执行还是丢弃。这里只留证，不执行。
         unawaited(
           _record(
             task,
             WorkTaskEventKind.failed,
-            '已停止任务：${droppedFollowUps.length} 条待处理的追问未执行',
-            detail: droppedFollowUps.join('\n'),
+            '已停止任务：${keptFollowUps.length} 条追问已保留',
+            detail: keptFollowUps.join('\n'),
           ),
         );
       }

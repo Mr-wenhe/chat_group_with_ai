@@ -2,7 +2,12 @@ part of 'work_collaboration_state.dart';
 
 /// Deterministic plan and delivery gates over the one durable v2 record.
 extension WorkCollaborationGate on WorkCollaborationState {
-  bool get isValid {
+  bool get isValid => invalidSection == null;
+
+  /// Returns a field-only diagnostic for an invalid persisted record.
+  ///
+  /// Keep values out of this message: it can be surfaced in a task timeline.
+  String? get invalidSection {
     if (!WorkCollaborationState._id(taskId) ||
         !WorkCollaborationState._id(conversationId) ||
         !WorkCollaborationState._id(projectScopeId) ||
@@ -16,21 +21,42 @@ extension WorkCollaborationGate on WorkCollaborationState {
         !WorkCollaborationState._text(coordinatorId, max: 128) ||
         !WorkCollaborationState.phases.contains(phase) ||
         !WorkCollaborationState._refs(pendingInputIds) ||
-        !WorkCollaborationState._refs(appliedEventIds) ||
-        !WorkCollaborationState._text(artifactContract['type'], max: 128) ||
-        !WorkCollaborationState._text(artifactContract['format'], max: 128) ||
-        !WorkCollaborationState._text(artifactContract['location'], max: 512) ||
-        !WorkCollaborationState._text(artifactContract['revisionTarget'],
-            max: 512) ||
-        !WorkCollaborationState._only(artifactContract, {
-          'type',
-          'format',
-          'location',
-          'revisionTarget',
-          'files',
-          'verificationCommands'
-        })) {
-      return false;
+        !WorkCollaborationState._refs(appliedEventIds)) {
+      return 'header';
+    }
+    if (!WorkCollaborationState._text(artifactContract['type'], max: 128)) {
+      return 'artifactContract.type';
+    }
+    if (!WorkCollaborationState._text(artifactContract['format'], max: 128)) {
+      return 'artifactContract.format';
+    }
+    if (!WorkCollaborationState._text(artifactContract['location'], max: 512)) {
+      return 'artifactContract.location';
+    }
+    if (!WorkCollaborationState._text(artifactContract['revisionTarget'],
+        max: 512)) {
+      return 'artifactContract.revisionTarget';
+    }
+    const artifactContractFields = {
+      'type',
+      'format',
+      'location',
+      'revisionTarget',
+      'files',
+      'verificationCommands'
+    };
+    final unexpectedContractFields = artifactContract.keys
+        .where((key) => !artifactContractFields.contains(key))
+        .toList();
+    if (unexpectedContractFields.isNotEmpty) {
+      final safeNames = unexpectedContractFields
+          .take(8)
+          .map((key) => RegExp(r'^[A-Za-z][A-Za-z0-9_]{0,63}$').hasMatch(key)
+              ? key
+              : 'unknown')
+          .toSet()
+          .join(',');
+      return 'artifactContract.fields($safeNames)';
     }
     final commands = artifactContract['verificationCommands'];
     if (commands != null &&
@@ -39,7 +65,7 @@ extension WorkCollaborationGate on WorkCollaborationState {
             commands.length > 64 ||
             !commands
                 .every((c) => WorkCollaborationState._text(c, max: 1024)))) {
-      return false;
+      return 'artifactContract.verificationCommands';
     }
     final files = artifactContract['files'];
     if (files != null &&
@@ -47,7 +73,7 @@ extension WorkCollaborationGate on WorkCollaborationState {
             files.isEmpty ||
             files.length > 64 ||
             !files.every(WorkCollaborationState._id))) {
-      return false;
+      return 'artifactContract.files';
     }
     if (!WorkCollaborationState._records(
             team,
@@ -65,7 +91,7 @@ extension WorkCollaborationGate on WorkCollaborationState {
                 e['qualified'] is bool &&
                 e['available'] is bool) ||
         !WorkCollaborationState._unique(team, 'memberId')) {
-      return false;
+      return 'team';
     }
     if (!WorkCollaborationState._records(
             workItems,
@@ -92,7 +118,7 @@ extension WorkCollaborationGate on WorkCollaborationState {
                     .contains(e['status']) &&
                 WorkCollaborationState._revision(e['requestRevision'])) ||
         !WorkCollaborationState._unique(workItems, 'id')) {
-      return false;
+      return 'workItems';
     }
     if (!WorkCollaborationState._records(
             issues,
@@ -123,7 +149,7 @@ extension WorkCollaborationGate on WorkCollaborationState {
                 WorkCollaborationState._revision(e['requestRevision']),
             max: null) ||
         !WorkCollaborationState._unique(issues, 'id')) {
-      return false;
+      return 'issues';
     }
     if (!WorkCollaborationState._records(
             acceptances,
@@ -147,7 +173,7 @@ extension WorkCollaborationGate on WorkCollaborationState {
                 WorkCollaborationState._revision(e['requestRevision']) &&
                 WorkCollaborationState._revision(e['verificationRevision'])) ||
         !WorkCollaborationState._unique(acceptances, 'id')) {
-      return false;
+      return 'acceptances';
     }
     if (!WorkCollaborationState._records(
             iterations,
@@ -169,7 +195,7 @@ extension WorkCollaborationGate on WorkCollaborationState {
                 WorkCollaborationState._text(e['reviewRef'], max: 128) &&
                 {'candidate', 'reviewed', 'delivered'}.contains(e['status'])) ||
         !WorkCollaborationState._unique(iterations, 'id')) {
-      return false;
+      return 'iterations';
     }
     if (!WorkCollaborationState._records(
             approvals,
@@ -203,7 +229,7 @@ extension WorkCollaborationGate on WorkCollaborationState {
             max: null) ||
         !WorkCollaborationState._unique(approvals, 'eventId') ||
         liveApprovalGroups > 64) {
-      return false;
+      return 'approvals';
     }
     if (!WorkCollaborationState._records(
             decisions,
@@ -268,9 +294,9 @@ extension WorkCollaborationGate on WorkCollaborationState {
                                 max: 1024))),
             max: null) ||
         !WorkCollaborationState._unique(decisions, 'id')) {
-      return false;
+      return 'decisions';
     }
-    return true;
+    return null;
   }
 
   List<String> get activeMembers => [

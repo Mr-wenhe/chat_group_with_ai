@@ -342,6 +342,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
                   setState(() => _selectedTaskId = taskId),
               onStop: _stopTask,
               onContinue: _continueTask,
+              onContinueWithoutFollowUps: (taskId) =>
+                  _continueTask(taskId, restoreQueuedFollowUps: false),
               onReply: _canReplyToTask ? _replyTask : null,
               onOpenDecision: _coordinator == null ? null : _openDecision,
               onApprove: widget.onApproveTask ??
@@ -719,7 +721,15 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     return widget.onStopTask?.call(taskId) ?? _coordinator!.stop(taskId);
   }
 
-  Future<void> _continueTask(String taskId) {
+  /// 面板两个「继续」入口共用这一条：默认连被打断的追问一起带回，另一个是
+  /// 用户在确认框里选择丢弃。
+  ///
+  /// [onContinueTask] 是外部覆盖钩子（测试与嵌入用法），它只接任务 id，因此
+  /// 走它时追问一定按默认口径带回。
+  Future<void> _continueTask(
+    String taskId, {
+    bool restoreQueuedFollowUps = true,
+  }) {
     final callback = widget.onContinueTask;
     if (callback != null) return callback(taskId);
     AgentTask? task;
@@ -730,10 +740,13 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       }
     }
     if (task == null) return Future<void>.value();
-    if (task.softLimitReached) {
+    if (WorkTaskCoordinator.continueNeedsFreshSoftLimitBudget(task)) {
       return _coordinator!.continueAfterSoftLimit(taskId);
     }
-    return _coordinator!.resumeByUser(taskId);
+    return _coordinator!.resumeByUser(
+      taskId,
+      restoreQueuedFollowUps: restoreQueuedFollowUps,
+    );
   }
 
   bool get _canReplyToTask =>
@@ -927,22 +940,25 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         task.groupId != _activeConversationId) {
       return;
     }
-    final decisions =
-        WorkTaskDecision.forTask(task).where((item) => item.isOpen).toList();
-    if (decisions.isEmpty ||
-        automatic &&
-            !decisions.any((item) =>
+    final decisions = WorkTaskDecision.forTask(task)
+        .where((item) =>
+            item.isOpen &&
+            (!automatic ||
                 item.reminderKind != null &&
-                item.promptedReminder != item.reminderKind)) {
+                    item.promptedReminder != item.reminderKind))
+        .toList();
+    if (decisions.isEmpty) {
       return;
     }
     final wasVisible = _isVisible;
     if (wasVisible) setState(() => _isVisible = false);
+    final shownDecisions = <WorkTaskDecision>[];
     try {
       await showDialog<void>(
         context: widget.navigatorKey?.currentContext ?? context,
         builder: (_) => WorkTaskDecisionDialog(
           decisions: decisions,
+          onDecisionShown: shownDecisions.add,
           onReply: (decision, answer, {choiceId, disposition = 'answer'}) =>
               coordinator.respondToDecision(
             taskId,
@@ -961,7 +977,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
       final current = coordinator.taskById(taskId);
       if (current != null) {
         for (final decision
-            in WorkTaskDecision.remindersToClaim(decisions, current)) {
+            in WorkTaskDecision.remindersToClaim(shownDecisions, current)) {
           await coordinator.markDecisionPromptShown(taskId,
               decisionId: decision.id,
               revision: decision.revision,

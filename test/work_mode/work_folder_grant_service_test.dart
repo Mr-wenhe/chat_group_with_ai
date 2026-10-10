@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
@@ -83,6 +84,31 @@ void main() {
     expect(service.grants.single.path, Directory(root.path).absolute.path);
     expect(service.isPathAuthorized('${child.path}/report.md'), isTrue);
   });
+
+  for (final stalledRead in [true, false]) {
+    test('CUA stalled directory check cannot block grant loading: $stalledRead',
+        () async {
+      final root = await Directory('${hiveDirectory.path}/project').create();
+      final initial = WorkFolderGrantService(box: settingsBox);
+      await initial.authorizeDirectory(root.path, consent: (_) async => true);
+      final stalled = Completer<bool>();
+      final service = WorkFolderGrantService(
+          box: settingsBox,
+          directoryValidator: (_) async =>
+              stalledRead ? await stalled.future : true,
+          writeDirectoryValidator: (_) => stalled.future);
+      final grants = await service.load().timeout(const Duration(seconds: 7));
+      expect(grants, hasLength(1));
+      expect(grants.single.available, !stalledRead);
+      expect(grants.single.writable, false);
+      expect(grants.single.cloudDisclosureConfirmedAt, isNotNull);
+      stalled.complete(true);
+      await Future<void>.delayed(Duration.zero);
+      expect(service.grants.single.writable, false,
+          reason:
+              'A late filesystem result must not revive the timed-out grant.');
+    }, timeout: const Timeout(Duration(seconds: 30)));
+  }
 
   test('opens the picker at the directory the task asked for', () async {
     final needed = await Directory('${hiveDirectory.path}/needed').create();

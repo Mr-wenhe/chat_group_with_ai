@@ -85,88 +85,35 @@ class CompactConversationControls extends StatelessWidget {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final alert = showAutoChat ? statusAlert : null;
+    // 中性提示（isWarning=false，如「工作模式中，自动发言已暂停」）说的是长期成立的
+    // 事实，不是等用户处置的例外态：它跟胶囊排同一行、贴在胶囊左侧。此前它和警示态
+    // 一样独占一行，于是工作模式一开就把胶囊顶下去一整行，右侧看着空出一块。
+    // 警示态（警示色、往往还带「去设置」这类动作）仍独占一行压在胶囊之上。
+    final inlineAlert = alert != null && !alert.isWarning ? alert : null;
+    final bannerAlert = alert != null && alert.isWarning ? alert : null;
     return Padding(
       padding: const EdgeInsets.fromLTRB(12, 6, 12, 2),
       child: Column(
         mainAxisSize: MainAxisSize.min,
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          if (alert != null) ...[
-            _alertBanner(context, alert),
+          if (bannerAlert != null) ...[
+            _alertBanner(context, bannerAlert),
             const SizedBox(height: 4),
           ],
           Align(
             alignment: Alignment.centerRight,
-            child: DecoratedBox(
-              decoration: BoxDecoration(
-                color: cs.surfaceContainerHighest.withValues(alpha: 0.72),
-                borderRadius: BorderRadius.circular(10),
-                border:
-                    Border.all(color: cs.outlineVariant.withValues(alpha: 0.5)),
-              ),
-              child: Padding(
-                padding: const EdgeInsets.all(3),
-                child: Row(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    if (showAutoChat)
-                      _toggle(
-                        key: const Key('auto-chat-toggle'),
-                        tooltip: autoChatTooltip,
-                        enabled: autoChatEnabled,
-                        available: autoChatAvailable,
-                        icon: autoChatEnabled
-                            ? Icons.forum_rounded
-                            : Icons.forum_outlined,
-                        onPressed: () => onAutoChatChanged(!autoChatEnabled),
-                        cs: cs,
-                      ),
-                    if (showAutoChat) const SizedBox(width: 2),
-                    if (showVoiceBroadcast) ...[
-                      _toggle(
-                        key: const Key('voice-broadcast-toggle'),
-                        tooltip: voiceBroadcastTooltip,
-                        enabled: voiceBroadcastEnabled,
-                        available: voiceBroadcastAvailable,
-                        icon: voiceBroadcastEnabled
-                            ? Icons.record_voice_over_rounded
-                            : Icons.record_voice_over_outlined,
-                        onPressed: () => onVoiceBroadcastChanged
-                            ?.call(!voiceBroadcastEnabled),
-                        cs: cs,
-                      ),
-                      const SizedBox(width: 2),
-                    ],
-                    if (showWorkMode)
-                      _toggle(
-                        key: const Key('work-mode-toggle'),
-                        tooltip: workModeTooltip,
-                        enabled: workModeEnabled,
-                        available: true,
-                        icon: workModeEnabled
-                            ? Icons.work_rounded
-                            : Icons.work_outline_rounded,
-                        onPressed: () => onWorkModeChanged(!workModeEnabled),
-                        cs: cs,
-                      ),
-                    if (showRoundtableMode) ...[
-                      const SizedBox(width: 2),
-                      _toggle(
-                        key: const Key('roundtable-mode-toggle'),
-                        tooltip: roundtableModeTooltip,
-                        enabled: roundtableModeEnabled,
-                        available: roundtableModeAvailable,
-                        icon: roundtableModeEnabled
-                            ? Icons.table_restaurant_rounded
-                            : Icons.table_restaurant_outlined,
-                        onPressed: () => onRoundtableModeChanged
-                            ?.call(!roundtableModeEnabled),
-                        cs: cs,
-                      ),
-                    ],
-                  ],
-                ),
-              ),
+            child: Row(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                if (inlineAlert != null) ...[
+                  Flexible(
+                    child: _alertBanner(context, inlineAlert, singleLine: true),
+                  ),
+                  const SizedBox(width: 8),
+                ],
+                _toggles(cs),
+              ],
             ),
           ),
         ],
@@ -174,8 +121,89 @@ class CompactConversationControls extends StatelessWidget {
     );
   }
 
+  /// 会话开关本体：一枚圆角容器里的若干 36×36 开关。
+  Widget _toggles(ColorScheme cs) {
+    return DecoratedBox(
+      decoration: BoxDecoration(
+        color: cs.surfaceContainerHighest.withValues(alpha: 0.72),
+        borderRadius: BorderRadius.circular(10),
+        border: Border.all(color: cs.outlineVariant.withValues(alpha: 0.5)),
+      ),
+      child: Padding(
+        padding: const EdgeInsets.all(3),
+        child: Row(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            if (showAutoChat)
+              _toggle(
+                key: const Key('auto-chat-toggle'),
+                tooltip: autoChatTooltip,
+                enabled: autoChatEnabled,
+                available: autoChatAvailable,
+                icon: autoChatEnabled
+                    ? Icons.forum_rounded
+                    : Icons.forum_outlined,
+                onPressed: () => onAutoChatChanged(!autoChatEnabled),
+                cs: cs,
+              ),
+            if (showAutoChat) const SizedBox(width: 2),
+            if (showVoiceBroadcast) ...[
+              _toggle(
+                key: const Key('voice-broadcast-toggle'),
+                tooltip: voiceBroadcastTooltip,
+                enabled: voiceBroadcastEnabled,
+                available: voiceBroadcastAvailable,
+                icon: voiceBroadcastEnabled
+                    ? Icons.record_voice_over_rounded
+                    : Icons.record_voice_over_outlined,
+                onPressed: () =>
+                    onVoiceBroadcastChanged?.call(!voiceBroadcastEnabled),
+                cs: cs,
+              ),
+              const SizedBox(width: 2),
+            ],
+            if (showWorkMode)
+              _toggle(
+                key: const Key('work-mode-toggle'),
+                tooltip: workModeTooltip,
+                enabled: workModeEnabled,
+                available: true,
+                icon: workModeEnabled
+                    ? Icons.work_rounded
+                    : Icons.work_outline_rounded,
+                onPressed: () => onWorkModeChanged(!workModeEnabled),
+                cs: cs,
+              ),
+            if (showRoundtableMode) ...[
+              const SizedBox(width: 2),
+              _toggle(
+                key: const Key('roundtable-mode-toggle'),
+                tooltip: roundtableModeTooltip,
+                enabled: roundtableModeEnabled,
+                available: roundtableModeAvailable,
+                icon: roundtableModeEnabled
+                    ? Icons.table_restaurant_rounded
+                    : Icons.table_restaurant_outlined,
+                onPressed: () =>
+                    onRoundtableModeChanged?.call(!roundtableModeEnabled),
+                cs: cs,
+              ),
+            ],
+          ],
+        ),
+      ),
+    );
+  }
+
   /// 例外态提示条。用警示色表示需要介入，中性色表示"被你自己暂停了"。
-  Widget _alertBanner(BuildContext context, ConversationStatusAlert alert) {
+  ///
+  /// [singleLine] 为 true 时用在胶囊左侧那一行：宽度由胶囊让出来的剩余空间决定，
+  /// 文案长了就省略，不换行——换行会把这一行顶高，等于又把胶囊推下去。
+  Widget _alertBanner(
+    BuildContext context,
+    ConversationStatusAlert alert, {
+    bool singleLine = false,
+  }) {
     final cs = Theme.of(context).colorScheme;
     final accent = alert.isWarning ? cs.error : cs.onSurfaceVariant;
     return DecoratedBox(
@@ -202,6 +230,8 @@ class CompactConversationControls extends StatelessWidget {
             Flexible(
               child: Text(
                 alert.message,
+                maxLines: singleLine ? 1 : null,
+                overflow: singleLine ? TextOverflow.ellipsis : null,
                 style: TextStyle(
                   fontSize: 12,
                   color: alert.isWarning

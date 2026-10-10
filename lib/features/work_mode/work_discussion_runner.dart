@@ -1,6 +1,9 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:math';
+import 'package:chat_group/core/retry_handler.dart';
+import 'package:chat_group/services/chat_api_service.dart';
 import 'work_candidate_publication.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
 import 'package:chat_group/features/memory/observation_entry.dart';
@@ -16,6 +19,8 @@ import 'package:chat_group/features/web_search/models/search_models.dart'
 import 'package:chat_group/features/web_search/application/search_context_formatter.dart';
 import 'work_discussion_investigation.dart';
 import 'work_agent_loop.dart';
+import 'default_work_task_runner.dart'
+    show workModeRequestOutputTokens, workModeRequestInputBudget;
 import 'work_discussion_v2_protocol.dart';
 import 'work_task_execution_policy.dart';
 
@@ -56,6 +61,7 @@ part 'work_discussion_project_dossier.dart';
 part 'work_discussion_runner_decisions.dart';
 part 'work_discussion_v2_session.dart';
 part 'work_discussion_v2_requests.dart';
+part 'work_discussion_v2_turn_focus.dart';
 part 'work_discussion_v2_team.dart';
 part 'work_discussion_v2_actions.dart';
 part 'work_discussion_v2_approvals.dart';
@@ -96,15 +102,16 @@ class WorkDiscussionRunner
     implements WorkTaskDiscussionRunner, WorkTaskCollaborationDiscussionRunner {
   // Complex work-mode prompts can legitimately take longer than a short chat turn.
   // Keep the bound finite while allowing the configured providers to finish.
-  static const Duration defaultRoleTimeout = Duration(seconds: 90);
+  static const Duration defaultRoleTimeout = Duration(seconds: 300);
+  static const int invalidFinalPreviewCharacters = 300;
   static const Duration defaultCredentialTimeout = Duration(seconds: 8);
-  static const int maxResponseBytes = 48 * 1024;
+  // 上游响应还含推理、usage 与转义开销；最终 v2 JSON 仍由协议层限制为 48K 字符。
+  static const int maxResponseBytes = ChatApiService.defaultMaxResponseBytes;
   static const int maxPromptCharacters = 24 * 1024;
-  // Step Plan reasoning tokens count toward the provider output budget. Keep
-  // enough room for both hidden reasoning and the final JSON object; a small
-  // budget can truncate the machine-readable content and make a valid account
-  // look like a plain-text protocol failure.
-  static const int discussionMaxTokens = 4096;
+  static const double defaultDiscussionTemperature = 0.35;
+  static const int maxCollaborationChatPreviews = 6;
+  static const int maxCollaborationPreviewCharacters = 600;
+  static const int preferredDiscussionFinalTokens = 8192;
   static const int maxMembers = 32;
   // ponytail: 32 members need two broad turns plus a bounded summary; 96
   // leaves room for targeted follow-up without creating an unbounded loop.
@@ -113,6 +120,12 @@ class WorkDiscussionRunner
   static const int minimumEvidenceItems = 3;
   static const int maxComplexityExtensionRounds = 2;
   static const String discussionExtensionPrefix = 'extendDiscussion:';
+
+  /// 未被采纳的成员发言在群里留下的中性说明。
+  ///
+  /// 正文是在状态校验之前发布的（问题证据要绑定这条消息的 id、详情附件也挂在它
+  /// 上面），所以被拒绝的那一轮只能事后收回：换成这句话，消息和它的引用都还在。
+  static const String rejectedTurnNotice = '本轮意见未被采纳，未计入讨论结论。';
   static const Set<String> userDecisionBlockers = <String>{
     'mentionClarification',
     'missingUserInformation',

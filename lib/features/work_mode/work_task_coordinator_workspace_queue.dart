@@ -1,5 +1,18 @@
 part of 'work_task_coordinator.dart';
 
+/// 仍然握着会话槽的状态：正在执行（planning / runningTool）或停在等用户
+/// （waitingForApproval / paused / interrupted）。
+///
+/// `queued` 刻意不在其中——排队中的任务什么也没握住，把它算成占用方会让刚被恢复
+/// 的任务卡在自己留下的旧槽后面，谁也跑不起来。
+const Set<AgentTaskStatus> _conversationHoldingStatuses = <AgentTaskStatus>{
+  AgentTaskStatus.planning,
+  AgentTaskStatus.runningTool,
+  AgentTaskStatus.waitingForApproval,
+  AgentTaskStatus.paused,
+  AgentTaskStatus.interrupted,
+};
+
 extension _WorkTaskCoordinatorWorkspaceQueue on WorkTaskCoordinator {
   Future<bool> _ensureFolderGrant(
     AgentTask task,
@@ -336,6 +349,28 @@ extension _WorkTaskCoordinatorWorkspaceQueue on WorkTaskCoordinator {
   bool _hasRunningConversation(String conversationId) =>
       _conversationReservations.contains(conversationId) ||
       _running.values.any((running) => running.task.groupId == conversationId);
+
+  /// 会话槽此刻是否握在**另一个**任务手里。
+  ///
+  /// 槽的持有者就是"正在跑"或"停在等用户"的那条任务（`_pauseForDiscussion` 里那条
+  /// 串行所有权注释）。恢复、启动恢复与删除都必须先问这一句，再决定要不要松开它。
+  bool _conversationHeldByAnotherTask(AgentTask task) =>
+      _taskBox.values.any((other) =>
+          other.id != task.id &&
+          other.workModeTask &&
+          other.groupId == task.groupId &&
+          _conversationHoldingStatuses.contains(other.status));
+
+  /// 释放一条任务**自己**握着的会话槽。
+  ///
+  /// 无条件 `remove(task.groupId)` 会连同**别人**的占用一起松开：同会话的新任务
+  /// 正在讨论（或停在等用户）时，旧任务恢复或删除会把这个槽让出来，调度器于是
+  /// 让两个任务并发跑在同一个群里——群工作上下文、产物路径与文件锁都是共享的。
+  /// 槽属于别人时保持不动，调用方的排队请求自然等对方交还后再跑。
+  void _releaseConversationReservationFor(AgentTask task) {
+    if (_conversationHeldByAnotherTask(task)) return;
+    _conversationReservations.remove(task.groupId);
+  }
 
   bool _hasPendingDiscussionForConversation(String conversationId) {
     return _taskBox.values.any((candidate) {

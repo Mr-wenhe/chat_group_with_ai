@@ -164,11 +164,25 @@ class _V2DiscussionSession {
     final response = await _publish(character, turn.publicUpdate);
     final responseRef = response?.id ??
         _key('response', '${task.id}:${state.revision}:$calls:$memberId');
+    await _reportFormattedUpdate(memberId, turn.publicUpdateFull);
+    if (response != null && turn.publicUpdateFull != turn.publicUpdate) {
+      try {
+        await _attachTruncatedUpdate(response, turn.publicUpdateFull);
+      } on Object catch (error) {
+        await runner._recordDiagnostic(
+            task, '完整公开正文转存失败：${sanitizeWorkTaskError(error)}');
+      }
+    }
     try {
       await _consume(character, turn, responseRef);
       lastValidationError = '';
     } on Object catch (error) {
       lastValidationError = sanitizeWorkTaskError(error);
+      await runner._recordDiagnostic(task, '成员协作增量未被采纳：$lastValidationError');
+      if (response != null) {
+        await _withdrawRejectedTurn(
+            response, character.name, turn.publicUpdate);
+      }
       // 用户在自己原话里点名改写了产物目标（"把 A 改名为 B"）：模型这次提案仍被判
       // 越权（它是在旧合同下写的），但用户授权本身必须由用户身份落盘，否则任务会
       // 永远钉在旧目标上。落盘成功就是有效进展，不再算一次无进展失败。
@@ -181,6 +195,70 @@ class _V2DiscussionSession {
       return false;
     }
     return true;
+  }
+
+  /// 公开正文像台账而不是发言时只记诊断，不改写正文。
+  ///
+  /// 两种形态：协议标识进气泡（`req=48 / team=22 / ver=10 下我仍判 approved:false`、
+  /// `V-08 的 requiredCapability`），或被排成 ①②③④ 清单。改写正文会丢掉成员真实
+  /// 说过的内容，所以这里只留下可供统计的痕迹，正文照常发布。判据取完整正文：落在
+  /// 被截断的后半段同样是模型的问题，不该因为气泡收短就看不见。
+  Future<void> _reportFormattedUpdate(String memberId, String text) async {
+    final notations = WorkPublicUpdateStream.protocolNotations(text);
+    final markers = WorkPublicUpdateStream.listMarkerCount(text);
+    if (notations.isEmpty && markers < WorkPublicUpdateStream.listMarkerLimit) {
+      return;
+    }
+    await runner._recordDiagnostic(
+      task,
+      '成员 $memberId 的公开正文像台账而不是发言：'
+      '协议标识 ${notations.isEmpty ? '无' : notations.join('、')}，编号清单 $markers 处。',
+      kind: WorkTaskEventKind.modelOutput,
+      title: '公开正文过于台账化',
+    );
+  }
+
+  /// 收回未被采纳的那一轮发言。
+  ///
+  /// 正文发布在状态校验之前（问题证据要绑定这条消息的 id、详情附件也挂在它上面），
+  /// 所以拒绝只能事后处理：保留消息与它的引用，把内容换成中性说明，并同步替换
+  /// 本轮预览与群列表摘要——否则被拒绝的判断还会经 `recentDiscussion` 或会话列表
+  /// 的预览传给下一位成员。摘要只由 `updateMessage` 刷新，`persistMessage` 对已
+  /// 索引的消息只会原样覆盖记录。
+  ///
+  /// 一轮发言是**逐项落盘**的（`_validateHumanMember` 只允许一次追加一条 issue），
+  /// 所以"第二项被拒绝"并不等于"整轮都没被采纳"：第一条 issue 可能已经提交，并把
+  /// 这条消息记为它的 `evidenceRef`。这时改写正文会把已采纳问题的依据换成一句中性
+  /// 说明，"依据是用户要求防止重复"就此失真。已被落盘记录引用的发言必须原样保留，
+  /// 拒绝本身仍由诊断事件记录。
+  Future<void> _withdrawRejectedTurn(
+      Message message, String speaker, String text) async {
+    if (_isAdoptedEvidence(message.id)) return;
+    message.content = WorkDiscussionRunner.rejectedTurnNotice;
+    await runner.database.updateMessage(message);
+    final preview = '$speaker: $text';
+    final index = replies.lastIndexOf(preview);
+    if (index >= 0) {
+      replies[index] = '$speaker: ${WorkDiscussionRunner.rejectedTurnNotice}';
+    }
+  }
+
+  /// 落盘状态是否已经把这条发言当作依据引用。
+  ///
+  /// 引用字段就是各台账里指向群消息的那几个 `*Ref`。用它们而不是 `message.content`
+  /// 判断，是因为被引用的事实与正文当前长什么样无关：引用一旦写入，正文就不再是
+  /// 可以随意替换的展示文本。
+  bool _isAdoptedEvidence(String messageId) {
+    if (messageId.isEmpty) return false;
+    if (evidence.containsKey(messageId)) return true;
+    bool references(Map<String, dynamic> record) =>
+        const <String>['evidenceRef', 'resolutionRef', 'responseRef', 'resultRef']
+            .any((key) => record[key] == messageId);
+    return state.issues.any(references) ||
+        state.decisions.any(references) ||
+        state.acceptances.any(references) ||
+        state.approvals.any(references) ||
+        state.workItems.any(references);
   }
 
   String _speaker() {
@@ -273,7 +351,11 @@ class _V2DiscussionSession {
             fingerprint: fingerprint,
             conditionFingerprint:
                 '${state.requestRevision}:${state.teamRevision}',
-            summary: progress ? '问题、方案或成员认可发生有效变化。' : '成员响应未提供可验证的新进展。',
+            summary: progress
+                ? '问题、方案或成员认可发生有效变化。'
+                : failure && lastValidationError.isNotEmpty
+                    ? '成员响应被拒绝：${boundedDiscussionText(lastValidationError, maximum: WorkDiscussionRunner.invalidFinalPreviewCharacters)}'
+                    : '成员响应未提供可验证的新进展。',
             missing: '需要真实调查依据、问题处置或新的用户条件。'),
         now: runner.clock());
     task.executionStateJson = jsonEncode(result.executionState);
@@ -297,8 +379,14 @@ class _V2DiscussionSession {
           .skip(current.appliedEventIds.length == 64 ? 1 : 0),
       eventId
     ];
-    final next = WorkCollaborationState.tryParse(nextJson);
-    if (next == null) throw StateError('协作响应越界；保留完整原问题等待处理。');
+    String? invalidSection;
+    final next = WorkCollaborationState.tryParse(nextJson,
+        onInvalid: (section) => invalidSection = section);
+    if (next == null) {
+      final changedFields = patch.keys.toList()..sort();
+      throw StateError(
+          '协作响应未通过状态边界校验（${invalidSection ?? 'record'}）；本次更新字段：${changedFields.join('、')}；保留完整原问题等待处理。');
+    }
     task = await apply(WorkCollaborationUpdate(
         taskId: task.id,
         conversationId: task.groupId,
@@ -362,16 +450,34 @@ class _V2DiscussionSession {
         'userRequest': task.userRequest,
         'currentTaskContext': task.contextSummary.trim().isEmpty
             ? ''
-            : const WorkContextBuilder().fromTask(task).toJsonString(),
+            // The authoritative collaboration is sent once below. Including
+            // it again inside the snapshot doubles every obligation and vote.
+            : const WorkContextBuilder()
+                .fromTask(task)
+                .copyWith(clearDiscussionState: true)
+                .toJsonString(),
         'lastValidationError': lastValidationError,
+        'turnFocus': _turnFocus(member.character.id),
+        'outputGuidance': _outputGuidance(member),
         'collaboration': state.toPromptJson(),
         'currentIssue':
             state.issues.where((i) => i['status'] == 'open').firstOrNull,
         'evidence': promptEvidence,
         'authorizedSearchEvidence': _searchEvidence(member.character.id),
-        'recentDiscussion': replies,
-        'recentChatMessages':
-            runner._recentChatMessages(task.groupId, member.character.id),
+        // 预览只供自然衔接；完整义务、认可和证据仍来自上方权威台账。
+        'recentDiscussion': replies
+            .skip(replies.length >
+                    WorkDiscussionRunner.maxCollaborationChatPreviews
+                ? replies.length -
+                    WorkDiscussionRunner.maxCollaborationChatPreviews
+                : 0)
+            .map((text) => boundedDiscussionText(text,
+                maximum:
+                    WorkDiscussionRunner.maxCollaborationPreviewCharacters))
+            .toList(),
+        'recentChatMessages': runner._recentChatMessages(
+            task.groupId, member.character.id,
+            maximum: WorkDiscussionRunner.maxCollaborationChatPreviews),
         'attachments': runner._attachmentContext(task),
         'skills': runner.database.characterSkillBox.values
             .where((s) =>

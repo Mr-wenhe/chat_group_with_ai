@@ -369,6 +369,50 @@ extension _TaskActionRecovery on _TaskActions {
     }
   }
 
+  /// 「继续」的入口。
+  ///
+  /// 被停止打断的追问是有主的数据：继续之前必须问一次要不要一并执行，不能由
+  /// 面板替用户决定。宿主没提供第二个答案时（纯展示用法）保持原样直接继续。
+  Future<void> _startContinue(BuildContext context) async {
+    final discard = onContinueWithoutFollowUps;
+    if (!task.isUserStopped ||
+        task.queuedUserRequests.isEmpty ||
+        discard == null) {
+      await runAction(onContinue);
+      return;
+    }
+    final interrupted = task.queuedUserRequests.length;
+    final keep = await _showTaskModal<bool>(
+      () => showDialog<bool>(
+        context: dialogContext ?? context,
+        barrierDismissible: true,
+        builder: (dialogContext) => AlertDialog(
+          key: const Key('work-task-continue-dialog'),
+          title: const Text('继续这个任务'),
+          content: Text('停止时有 $interrupted 条待处理的追问被打断，要一并执行吗？'),
+          actions: <Widget>[
+            TextButton(
+              onPressed: () => Navigator.of(dialogContext).pop(),
+              child: const Text('取消'),
+            ),
+            TextButton(
+              key: const Key('work-task-continue-drop-follow-ups'),
+              onPressed: () => Navigator.of(dialogContext).pop(false),
+              child: const Text('只继续，丢弃追问'),
+            ),
+            FilledButton(
+              key: const Key('work-task-continue-keep-follow-ups'),
+              onPressed: () => Navigator.of(dialogContext).pop(true),
+              child: const Text('一并执行'),
+            ),
+          ],
+        ),
+      ),
+    );
+    if (keep == null) return;
+    await runAction(keep ? onContinue : discard);
+  }
+
   /// The app-scoped panel is painted above the route Navigator. Hide it while
   /// any task modal is open so approval, cancellation, and undo controls stay
   /// reachable in narrow windows as well as wide windows.

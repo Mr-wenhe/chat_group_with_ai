@@ -175,6 +175,32 @@ void _registerP8RunnerTests(Directory Function() hive,
         isFalse);
   });
 
+  test('P8 恢复通道的转换失败会被记成事件，而不是只写 lastError', () async {
+    final runner = await recoveryRunner(_HangingModelGateway());
+    final task = candidateTestTask(candidateTestState())
+      ..status = AgentTaskStatus.paused;
+    // 讨论状态合法但属于另一个会话：转换时必然抛错，而过去这条分支只写
+    // lastError、事件日志里一片空白。
+    final raw = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    raw['discussionState'] = WorkDiscussionState.initial(
+      conversationId: 'another-conversation',
+      deliverableContract: const <String, dynamic>{
+        'contentScope': '另一个会话的任务',
+      },
+    ).toJson();
+    task.executionStateJson = jsonEncode(raw);
+    await runner.database.agentTaskBox.put(task.id, task);
+    await coordinator(runner).restore();
+    await Future<void>.delayed(const Duration(milliseconds: 20));
+    expect(task.lastError, contains('恢复现场核对失败'));
+    expect(
+        (await events().read(task.id))
+            .events
+            .any((e) => e.title == '恢复现场核对失败'),
+        isTrue,
+        reason: '恢复通道失败必须能在事件日志里看到，否则永远查不出它跑没跑过');
+  });
+
   for (final status in [
     AgentTaskStatus.paused,
     AgentTaskStatus.waitingForApproval,

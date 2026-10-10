@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/database/data_lifecycle_models.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
 import 'package:chat_group/features/settings/providers/api_config_providers.dart';
@@ -32,6 +33,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive/hive.dart';
+import 'package:package_info_plus/package_info_plus.dart';
 import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/data_lifecycle_result_dialog.dart';
@@ -175,6 +177,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   bool _isTtsEnabled = true;
   Map<String, dynamic> _tokenUsage = {};
   String _aiProcessingDirPath = '';
+  String _appVersionLabel = '本地存储';
   MediaUsage _mediaUsage = MediaUsage.empty;
   bool _hasPendingDeletion = false;
   bool _isCleaningMedia = false;
@@ -202,6 +205,7 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
     _currentSkinMode = db.savedAppSkinMode;
     _isTtsEnabled = db.isTtsEnabled;
     _tokenUsage = db.getTokenUsage();
+    _loadAppVersion();
     _loadAiProcessingDirPath();
     _loadLifecycleState();
   }
@@ -214,6 +218,17 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
       _mediaUsage = usage;
       _hasPendingDeletion = service.hasPendingOperation;
     });
+  }
+
+  Future<void> _loadAppVersion() async {
+    try {
+      final info = await PackageInfo.fromPlatform();
+      if (!mounted) return;
+      final build = info.buildNumber.isEmpty ? '' : '+${info.buildNumber}';
+      setState(() => _appVersionLabel = 'v${info.version}$build · 本地存储');
+    } on Object {
+      // Keep settings usable when package metadata is unavailable.
+    }
   }
 
   Future<void> _loadAiProcessingDirPath() async {

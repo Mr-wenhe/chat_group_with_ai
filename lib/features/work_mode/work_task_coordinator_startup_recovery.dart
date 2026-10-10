@@ -6,7 +6,7 @@ extension _WorkTaskCoordinatorStartupRecovery on WorkTaskCoordinator {
   Future<bool> _restoreCollaboration(AgentTask task) async {
     try {
       return await _restoreCollaborationChecked(task);
-    } on Object {
+    } on Object catch (error) {
       if (_disposed ||
           !_taskBox.containsKey(task.id) ||
           task.status == AgentTaskStatus.cancelled) {
@@ -18,6 +18,11 @@ extension _WorkTaskCoordinatorStartupRecovery on WorkTaskCoordinator {
         ..lastError = '恢复现场核对失败，原检查点、文件与输入保留，等待处理。';
       _conversationReservations.add(task.groupId);
       await _save(task);
+      // 静默的失败等于无法排查：转换/核对抛错时过去只写 lastError，事件日志里
+      // 一片空白。2026-10-10 排查一条永远走 legacy 的任务时，恢复通道有没有跑过、
+      // 是不是在这里失败的，从日志里完全看不出。
+      await _record(task, WorkTaskEventKind.paused, '恢复现场核对失败',
+          detail: sanitizeWorkTaskError(error));
       return true;
     }
   }
@@ -127,7 +132,9 @@ extension _WorkTaskCoordinatorStartupRecovery on WorkTaskCoordinator {
       if (!task.resumeRequired) _maybeStartDiscussion(task);
     } else {
       task.status = AgentTaskStatus.queued;
-      _conversationReservations.remove(task.groupId);
+      // 启动恢复同样要问一句槽属于谁：同会话的另一条任务可能正停在等用户，
+      // 那条占用是它的，松开就等于让两条任务并发跑在同一个群里。
+      _releaseConversationReservationFor(task);
       await _save(task);
       _enqueueTask(task);
     }

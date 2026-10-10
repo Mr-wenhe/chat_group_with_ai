@@ -265,11 +265,18 @@ class WorkCollaborationState {
         'appliedEventIds': appliedEventIds
       };
 
-  static WorkCollaborationState? tryParse(Object? value) {
-    if (value is! Map || value.keys.any((k) => k is! String)) return null;
+  static WorkCollaborationState? tryParse(Object? value,
+      {void Function(String section)? onInvalid}) {
+    if (value is! Map || value.keys.any((k) => k is! String)) {
+      onInvalid?.call('record');
+      return null;
+    }
     try {
       final m = Map<String, dynamic>.from(value);
-      if (!_only(m, _fields)) return null;
+      if (!_only(m, _fields)) {
+        onInvalid?.call('record');
+        return null;
+      }
       List<Map<String, dynamic>> list(String key) => (m[key] as List)
           .map((e) => Map<String, dynamic>.from(e as Map))
           .toList();
@@ -297,8 +304,14 @@ class WorkCollaborationState {
           decisions: list('decisions'),
           pendingInputIds: List<String>.from(m['pendingInputIds'] as List),
           appliedEventIds: List<String>.from(m['appliedEventIds'] as List));
-      return state.isValid ? state : null;
+      final invalidSection = state.invalidSection;
+      if (invalidSection != null) {
+        onInvalid?.call(invalidSection);
+        return null;
+      }
+      return state;
     } on Object {
+      onInvalid?.call('record');
       return null;
     }
   }

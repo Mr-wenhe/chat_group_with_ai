@@ -87,12 +87,16 @@ class WorkTaskCoordinator {
   /// A user stop is terminal by design, but a task that has not committed a
   /// mutation can safely be restarted from zero.  This narrow predicate keeps
   /// the recovery affordance from replaying a task after a real file change.
+  ///
+  /// The panel renders its "从头开始" button from this same predicate, so a
+  /// visible button always works. v2 collaboration tasks are therefore excluded
+  /// here: restarting them would wipe the whole collaboration record, and
+  /// [retry] already refuses that at the action.
   static bool canRestartAfterUserStop(AgentTask task) {
-    if (task.status != AgentTaskStatus.cancelled ||
-        task.lastError.trim() != '用户已停止任务。' ||
-        task.lastArtifactPaths.isNotEmpty) {
+    if (!task.isUserStopped || task.lastArtifactPaths.isNotEmpty) {
       return false;
     }
+    if (_carriesV2CollaborationState(task)) return false;
     if (task.completedOperations.isEmpty) return true;
     try {
       final decoded = jsonDecode(task.executionStateJson);
@@ -103,6 +107,28 @@ class WorkTaskCoordinator {
       return false;
     }
   }
+
+  /// 与 `_carriesV2Collaboration` 同一判据的静态版本：这条记录是否带着一块
+  /// 有效的协作状态。旧讨论入口对它是拒绝的，重置入口也必须一致。
+  static bool _carriesV2CollaborationState(AgentTask task) {
+    if (!WorkDiscussionState.requiresDiscussionForConversation(task.groupId)) {
+      return false;
+    }
+    final state =
+        WorkDiscussionState.decodeExecutionState(task.executionStateJson).state;
+    return state != null &&
+        state.schemaVersion == WorkDiscussionState.currentSchemaVersion &&
+        state.collaboration != null;
+  }
+
+  /// 「继续」该不该走"再给一次预算"那条入口（[continueAfterSoftLimit]），
+  /// 还是从检查点接着跑（[resumeByUser]）。
+  ///
+  /// 用户停止的任务优先：停止前若正卡在软超限暂停上，两个标记会同时成立，而
+  /// 此刻按钮表达的是"接着跑"。反过来会撞上 [continueAfterSoftLimit] 的状态
+  /// 守卫——它对 `cancelled` 直接抛错，用户点了继续却什么也没发生。
+  static bool continueNeedsFreshSoftLimitBudget(AgentTask task) =>
+      !task.isUserStopped && task.softLimitReached;
 
   final Box<AgentTask> _taskBox;
   final WorkTaskEventStore _eventStore;
@@ -525,8 +551,17 @@ class WorkTaskCoordinator {
     _eventStore.releaseDeletionGates(restored);
   }
 
-  /// Queues an interrupted or paused task only after an explicit user action.
-  Future<void> resumeByUser(String taskId) => _implResumeByUser(taskId);
+  /// Queues an interrupted, paused, or user-stopped task only after an explicit
+  /// user action.
+  ///
+  /// [restoreQueuedFollowUps] answers the stop-time question about the follow-up
+  /// requests that were interrupted: `true` keeps them and the resumed run
+  /// picks them up from the FIFO, `false` discards them for good.
+  Future<void> resumeByUser(
+    String taskId, {
+    bool restoreQueuedFollowUps = true,
+  }) =>
+      _implResumeByUser(taskId, restoreQueuedFollowUps: restoreQueuedFollowUps);
 
   /// Retries a classified failure from the last durable checkpoint.
   ///

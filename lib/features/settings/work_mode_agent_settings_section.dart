@@ -263,7 +263,8 @@ class _WorkModeAgentSettingsSectionState
           style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
         ),
         Text(
-          '单任务软上限：${_settings.actionLimit} 步或 ${_settings.timeLimitMinutes} 分钟，达到任一项会暂停并等待继续。',
+          '群聊协作任务不设累计步数或总时长上限；单次请求超时、有限重试和无进展保护仍有效。'
+          '私聊和旧版任务的软上限：${_settings.actionLimit} 步或 ${_settings.timeLimitMinutes} 分钟，达到任一项会暂停并等待继续。',
           style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
         ),
         if (widget.snapshotService != null) ...[

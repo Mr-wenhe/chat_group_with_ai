@@ -480,6 +480,53 @@ AgentTask _v2DecisionTask(
       ));
 }
 
+/// 一条带 v2 协作记录、讨论仍未完成的任务（`phase: blocked`）。
+///
+/// 与 `_v2DecisionTask` 的差别只在台账内容与会话：这里要的是"讨论没跑完"以及
+/// "还有待处理输入"这两个事实本身。
+AgentTask _v2PendingDiscussionTask(
+  String id, {
+  String conversationId = 'group-v2',
+  List<String> pendingInputIds = const <String>[],
+}) {
+  final task = _task(id: id, conversationId: conversationId);
+  final raw = WorkCollaborationState.fromLegacy(
+    taskId: id,
+    conversationId: task.groupId,
+    projectScopeId: 'scope-$conversationId',
+    requestRevision: 1,
+    requestMessageId: 'request-$id',
+    scope: task.userRequest,
+    artifactContract: {
+      'type': 'document',
+      'format': 'txt',
+      'location': 'out.txt',
+      'revisionTarget': ''
+    },
+  ).toJson();
+  raw
+    ..['coordinatorId'] = 'worker'
+    ..['pendingInputIds'] = pendingInputIds
+    ..['team'] = [
+      {
+        'memberId': 'worker',
+        'role': 'writer',
+        'qualificationRef': 'skill',
+        'qualified': true,
+        'available': true
+      }
+    ];
+  return _taskWithDiscussion(
+      task,
+      WorkDiscussionState(
+        schemaVersion: 2,
+        conversationId: task.groupId,
+        phase: WorkDiscussionPhase.blocked,
+        requestRevision: 1,
+        collaboration: WorkCollaborationState.tryParse(raw)!,
+      ));
+}
+
 void _markDiscussionReady(AgentTask task) {
   final current = WorkDiscussionState.fromExecutionState(
     task.executionStateJson,
@@ -4164,28 +4211,212 @@ void main() {
     );
   });
 
-  test('stopping records the queued follow-ups it discards', () async {
-    await coordinator
-        .submit(_task(id: 'stop-drops', conversationId: 'group-a'));
-    await coordinator.enqueueFollowUp('stop-drops', '改成第二版');
-    await coordinator.enqueueFollowUp('stop-drops', '再补一个附录');
+  test('kept follow-ups do not pin a new deliverable to a stopped task',
+      () async {
+    // 停止后队列非空，但终态记录不会再排空它（promotion 在 cancelled 上早退）。
+    // 若让队列把新交付物钉在这条记录上，用户下一句就会撞上"已停止的任务不能继续追问"。
+    final stopped = _task(id: 'stopped-router', conversationId: 'group-a')
+      ..status = AgentTaskStatus.cancelled
+      ..lastError = AgentTask.userStopReason
+      ..queuedUserRequests = <String>['改成第二版'];
+    await taskBox.put(stopped.id, stopped);
     expect(
-      taskBox.get('stop-drops')?.queuedUserRequests,
+      coordinator.shouldRouteNewTaskForFollowUp(stopped.id, '生成一个新的 html 报告'),
+      isTrue,
+    );
+
+    // 非终态记录仍然靠队列把自己钉住，连续修改红线不变。
+    final running = _task(id: 'running-router', conversationId: 'group-a')
+      ..status = AgentTaskStatus.runningTool
+      ..queuedUserRequests = <String>['改成第二版'];
+    await taskBox.put(running.id, running);
+    expect(
+      coordinator.shouldRouteNewTaskForFollowUp(
+        running.id,
+        '生成一个新的 html 报告',
+      ),
+      isFalse,
+    );
+  });
+
+  test('continuing a stopped task keeps its follow-ups for the resumed run',
+      () async {
+    final task = _taskWithDiscussion(
+      _task(id: 'continue-keeps', conversationId: 'group-a')
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason
+        ..queuedUserRequests = <String>['改成第二版'],
+      _discussionState(
+        conversationId: 'group-a',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.resumeByUser(task.id);
+
+    expect(taskBox.get(task.id)?.queuedUserRequests, <String>['改成第二版']);
+    runner.complete(task.id);
+  });
+
+  test('continuing without the interrupted follow-ups discards them once',
+      () async {
+    final task = _taskWithDiscussion(
+      _task(id: 'continue-drops', conversationId: 'group-a')
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason
+        ..queuedUserRequests = <String>['改成第二版', '再补一个附录'],
+      _discussionState(
+        conversationId: 'group-a',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.resumeByUser(task.id, restoreQueuedFollowUps: false);
+
+    expect(taskBox.get(task.id)?.queuedUserRequests, isEmpty);
+    final events = (await eventStore.read(task.id)).events;
+    final discarded =
+        events.where((event) => event.title.contains('已放弃')).toList();
+    expect(discarded, hasLength(1), reason: '放弃的追问仍要留下可追溯的记录。');
+    expect(discarded.single.detail, contains('改成第二版'));
+    expect(discarded.single.detail, contains('再补一个附录'));
+    runner.complete(task.id);
+  });
+
+  test('dropping interrupted follow-ups clears their pending references',
+      () async {
+    // pendingInputIds 与 queuedUserRequests 是并排的 FIFO：只清队列会让恢复后的
+    // 第一轮撞上"待处理输入缺少原文"并停住推进，任务既跑不动也退不出。
+    final task = _v2PendingDiscussionTask(
+      'continue-drops-pending',
+      conversationId: 'group-a',
+      pendingInputIds: const <String>['pending-message'],
+    )
+      ..status = AgentTaskStatus.cancelled
+      ..lastError = AgentTask.userStopReason
+      ..queuedUserRequests = <String>['补充结尾'];
+    await taskBox.put(task.id, task);
+
+    await coordinator.resumeByUser(task.id, restoreQueuedFollowUps: false);
+
+    final stored = taskBox.get(task.id)!;
+    expect(stored.queuedUserRequests, isEmpty);
+    expect(
+      WorkDiscussionState.fromExecutionState(stored.executionStateJson)!
+          .collaboration!
+          .pendingInputIds,
+      isEmpty,
+      reason: '只剩引用没有原文的待处理项会让任务永远推进不下去',
+    );
+  });
+
+  test('resuming a stopped task queues behind the task that owns the room',
+      () async {
+    // 旧任务停止时已经交还会话槽，同会话的新任务接过去开始讨论（paused + 持有槽）。
+    // 继续旧任务若无条件 remove，会把新任务那条占用一起松开，于是旧执行与新讨论
+    // 并发跑在同一个群里——群上下文、产物路径和文件锁都是共享的。
+    final current =
+        _v2PendingDiscussionTask('room-owner', conversationId: 'group-a');
+    await coordinator.submit(current);
+    await _waitUntil(
+        () => taskBox.get('room-owner')?.status == AgentTaskStatus.paused);
+
+    final old = _taskWithDiscussion(
+      _task(id: 'old-stopped', conversationId: 'group-a')
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason,
+      _discussionState(
+        conversationId: 'group-a',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    );
+    await taskBox.put(old.id, old);
+
+    await coordinator.resumeByUser(old.id);
+    await _drainEventLoop();
+
+    expect(runner.startedTaskIds, isNot(contains('old-stopped')),
+        reason: '会话槽仍由另一条任务持有，恢复只能排队');
+    expect(taskBox.get('old-stopped')?.status, AgentTaskStatus.queued);
+    expect(taskBox.get('room-owner')?.status, AgentTaskStatus.paused,
+        reason: '继续旧任务不能改变另一条任务的状态');
+
+    // 排队不是死等：占用方交还后必须有人接手。
+    await coordinator.stop('room-owner');
+    await _waitUntil(() => runner.startedTaskIds.contains('old-stopped'));
+    runner.complete('old-stopped');
+  });
+
+  test('deleting a queued task keeps the room its sibling still holds',
+      () async {
+    // 被删的那条只是排队，会话槽在另一条任务手里（它停在等用户）。删除若连带
+    // 松开那个槽，同会话接下来的任务就会与它并发跑在同一个群里。
+    final waiting =
+        _v2PendingDiscussionTask('room-waiting', conversationId: 'group-a');
+    await coordinator.submit(waiting);
+    await _waitUntil(
+        () => taskBox.get('room-waiting')?.status == AgentTaskStatus.paused);
+
+    final queued = _taskWithDiscussion(
+      _task(id: 'room-queued', conversationId: 'group-a'),
+      _discussionState(
+        conversationId: 'group-a',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    );
+    await taskBox.put(queued.id, queued);
+    await coordinator.deleteTask(queued.id);
+
+    final later = _taskWithDiscussion(
+      _task(id: 'room-later', conversationId: 'group-a'),
+      _discussionState(
+        conversationId: 'group-a',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    );
+    await coordinator.submit(later);
+    await _drainEventLoop();
+
+    // 正向判据优先：槽没被让出来时，新任务停在队列里，而不是进了 planning。
+    expect(taskBox.get('room-later')?.status, AgentTaskStatus.queued,
+        reason: '会话槽仍由等用户的那条任务持有，新任务只能排队');
+    expect(runner.startedTaskIds, isNot(contains('room-later')),
+        reason: '删除不能把别人的占用让出来，新任务必须排队');
+  });
+
+  test('stopping keeps the queued follow-ups for a later continue', () async {
+    await coordinator
+        .submit(_task(id: 'stop-keeps', conversationId: 'group-a'));
+    await coordinator.enqueueFollowUp('stop-keeps', '改成第二版');
+    await coordinator.enqueueFollowUp('stop-keeps', '再补一个附录');
+    expect(
+      taskBox.get('stop-keeps')?.queuedUserRequests,
       ['改成第二版', '再补一个附录'],
     );
 
-    await coordinator.stop('stop-drops');
+    await coordinator.stop('stop-keeps');
     await _settle();
 
-    final stored = taskBox.get('stop-drops');
+    final stored = taskBox.get('stop-keeps');
     expect(stored?.status, AgentTaskStatus.cancelled);
-    expect(stored?.queuedUserRequests, isEmpty);
-    final events = (await eventStore.read('stop-drops')).events;
-    final dropped =
-        events.where((event) => event.title.contains('未执行')).toList();
-    expect(dropped, hasLength(1), reason: '丢弃的追问必须留下可追溯的记录。');
-    expect(dropped.single.detail, contains('改成第二版'));
-    expect(dropped.single.detail, contains('再补一个附录'));
+    // 停止不再吞掉用户输入：追问留在记录上，「继续」时由用户决定是否执行。
+    expect(
+      stored?.queuedUserRequests,
+      ['改成第二版', '再补一个附录'],
+      reason: '停止是可继续的边界，队列必须留给继续按钮处置。',
+    );
+    final events = (await eventStore.read('stop-keeps')).events;
+    final kept = events.where((event) => event.title.contains('已保留')).toList();
+    expect(kept, hasLength(1), reason: '保留的追问必须留下可追溯的记录。');
+    expect(kept.single.detail, contains('改成第二版'));
+    expect(kept.single.detail, contains('再补一个附录'));
   });
 
   test('resets an approval prompt marker after host presentation failure',
@@ -5208,6 +5439,136 @@ void main() {
     );
   });
 
+  test('continues a user-stopped task from its durable checkpoint', () async {
+    final task = _taskWithDiscussion(
+      _task(id: 'stopped-continue', conversationId: 'group-a')
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason
+        ..currentStep = 4
+        ..actionCount = 7
+        ..plan = '旧计划'
+        ..resultSummary = '旧结果'
+        ..completedOperations = <String>[
+          '{"tool":"workspace.list","args":{"path":"."}}',
+        ]
+        ..lastArtifactPaths = <String>['/workspace/report.md'],
+      _discussionState(
+        conversationId: 'group-a',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    );
+    final checkpointBefore = task.executionStateJson;
+    await taskBox.put(task.id, task);
+
+    await coordinator.resumeByUser(task.id);
+
+    final resumed = taskBox.get(task.id)!;
+    expect(resumed.status, isNot(AgentTaskStatus.cancelled));
+    // 继续是「接着上次跑」，不是「从头开始」：运行检查点必须原样保留。
+    expect(resumed.currentStep, 4);
+    expect(resumed.actionCount, 7);
+    expect(resumed.plan, '旧计划');
+    expect(resumed.resultSummary, '旧结果');
+    expect(resumed.completedOperations, hasLength(1));
+    expect(resumed.lastArtifactPaths, <String>['/workspace/report.md']);
+    expect(
+      WorkDiscussionState.fromExecutionState(resumed.executionStateJson)?.phase,
+      WorkDiscussionPhase.ready,
+    );
+    expect(checkpointBefore, isNotEmpty);
+    expect(runner.startedTaskIds, contains(task.id));
+    runner.complete(task.id);
+  });
+
+  test('continuing a stopped task grants a fresh soft-limit budget', () async {
+    // 软超限暂停期间被停止的任务会同时带着 cancelled 与 softLimitReached。
+    // 继续是用户显式再给一次预算，不能刚起步就被旧的超限标记挡回去。
+    final task = _taskWithDiscussion(
+      _task(id: 'stopped-soft-limit', conversationId: 'group-a')
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason
+        ..softLimitReached = true
+        ..actionCount = 40,
+      _discussionState(
+        conversationId: 'group-a',
+        phase: WorkDiscussionPhase.ready,
+        understandingPercent: 100,
+      ),
+    );
+    await taskBox.put(task.id, task);
+
+    await coordinator.resumeByUser(task.id);
+
+    expect(taskBox.get(task.id)?.softLimitReached, isFalse);
+    expect(taskBox.get(task.id)?.status, isNot(AgentTaskStatus.cancelled));
+    runner.complete(task.id);
+  });
+
+  test('refuses to continue a cancelled task that was not a user stop',
+      () async {
+    // 「放弃恢复」当场选的是放弃，删除写下的 cancelled 更是没有记录可续。
+    for (final reason in <String>['用户放弃恢复任务。', '']) {
+      final task = _task(id: 'abandoned-$reason', conversationId: 'group-a')
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = reason;
+      await taskBox.put(task.id, task);
+
+      await expectLater(coordinator.resumeByUser(task.id), throwsStateError);
+      expect(taskBox.get(task.id)?.status, AgentTaskStatus.cancelled);
+    }
+    expect(runner.startedTaskIds, isEmpty);
+  });
+
+  test('continues a stopped v2 collaboration task without resetting it',
+      () async {
+    // 停止一个 v2 任务此前是死局：「从头开始」会被协调器拒绝，而「继续」不显示。
+    final task = _v2DecisionTask(
+      'stopped-v2',
+      decisions: <Map<String, dynamic>>[
+        {
+          'id': 'format',
+          'revision': 1,
+          'status': 'pending',
+          'reason': '交付格式选哪一种？',
+          'answer': '',
+          'impact': '影响打开方式',
+          'responseRef': '',
+          'kind': 'choice',
+          'targetId': 'format',
+          'missingCondition': '需要明确格式',
+          'options': [
+            {'id': 'txt', 'label': '纯文本', 'impact': '可直接打开'},
+          ],
+        },
+      ],
+    )
+      ..status = AgentTaskStatus.cancelled
+      ..lastError = AgentTask.userStopReason;
+    final collaborationBefore = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!
+        .collaboration!
+        .toJson();
+    await taskBox.put(task.id, task);
+
+    expect(WorkTaskCoordinator.canRestartAfterUserStop(task), isFalse);
+    await coordinator.resumeByUser(task.id);
+
+    final resumed = taskBox.get(task.id)!;
+    expect(resumed.status, isNot(AgentTaskStatus.cancelled));
+    final collaborationAfter = WorkDiscussionState.fromExecutionState(
+      resumed.executionStateJson,
+    )!
+        .collaboration!
+        .toJson();
+    expect(
+      collaborationAfter['decisions'],
+      collaborationBefore['decisions'],
+      reason: '继续不能丢掉协作记录里的待决事项。',
+    );
+  });
+
   test('restore publishes interrupted tasks without running them', () async {
     final interrupted = _task(id: 'interrupted', conversationId: 'group-a')
       ..status = AgentTaskStatus.interrupted
@@ -5904,6 +6265,57 @@ void main() {
     )!;
     expect(state.executorId, 'elected');
     expect(state.deliverableContract?['explicitExecutorId'], 'pinned');
+  });
+
+  test('协作（v2）任务不能通过执行人确认重建讨论状态', () async {
+    await useDiscussionRunner();
+    final task = await storePinConflictTask('pin-swap-v2-group');
+    // 把这条任务升级成 v2：保留 phase / blocker / executorId / 合同，只补一份协作记录。
+    // 这条路径原先会把它重建为 v1 基线与新请求版本，整块协作记录随之消失。
+    final legacy = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      task.executionStateJson,
+      legacy.copyWith(
+        schemaVersion: WorkDiscussionState.currentSchemaVersion,
+        collaboration: WorkCollaborationState.fromLegacy(
+          taskId: task.id,
+          conversationId: task.groupId,
+          projectScopeId: 'unbound',
+          requestRevision: legacy.requestRevision,
+          requestMessageId: '',
+          scope: task.userRequest,
+          artifactContract: const <String, dynamic>{
+            'type': 'document',
+            'format': '',
+            'location': '',
+            'revisionTarget': '',
+          },
+        ),
+      ),
+    );
+    await taskBox.put(task.id, task);
+    final version = WorkTaskUserAction.versionFor(task, 'executorPinConflict');
+    expect(version, greaterThan(0), reason: '前置：面板仍看得到确认入口');
+
+    await expectLater(
+      coordinator.confirmExecutorSwap(task.id, version: version, swap: true),
+      throwsA(isA<StateError>().having((e) => e.message, 'message',
+          contains('不能通过旧讨论入口重建'))),
+    );
+    await _settle();
+
+    final after = WorkDiscussionState.fromExecutionState(
+      task.executionStateJson,
+    )!;
+    expect(after.schemaVersion, WorkDiscussionState.currentSchemaVersion);
+    expect(
+      after.collaboration,
+      isNotNull,
+      reason: '拒绝必须是整块拒绝：协作记录不能因为一次确认而消失',
+    );
+    expect(after.deliverableContract?['explicitExecutorId'], 'pinned');
   });
 
   test('a stale executor confirmation cannot rewrite a newer checkpoint',

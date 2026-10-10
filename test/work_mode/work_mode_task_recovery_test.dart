@@ -3,6 +3,7 @@ import 'dart:convert';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/backup/backup_entity_codec.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -106,6 +107,96 @@ void main() {
       expect(task.currentStep, 0, reason: status.name);
       expect(task.completedOperations, isEmpty, reason: status.name);
     }
+  });
+
+  test('only the panel stop reason marks a task as user-stopped', () {
+    AgentTask stopped({required AgentTaskStatus status, required String error}) =>
+        AgentTask(
+          groupId: 'group',
+          characterId: 'worker',
+          userRequest: '任务',
+          workModeTask: true,
+          status: status,
+          lastError: error,
+        );
+
+    expect(
+      stopped(
+        status: AgentTaskStatus.cancelled,
+        error: AgentTask.userStopReason,
+      ).isUserStopped,
+      isTrue,
+    );
+    // 「放弃恢复」也是 cancelled，但那是用户当场选的放弃，不是可继续的停止。
+    expect(
+      stopped(
+        status: AgentTaskStatus.cancelled,
+        error: '用户放弃恢复任务。',
+      ).isUserStopped,
+      isFalse,
+    );
+    // 删除路径写 cancelled 且不留停止原因。
+    expect(
+      stopped(status: AgentTaskStatus.cancelled, error: '').isUserStopped,
+      isFalse,
+    );
+    expect(
+      stopped(
+        status: AgentTaskStatus.completed,
+        error: AgentTask.userStopReason,
+      ).isUserStopped,
+      isFalse,
+    );
+  });
+
+  test('a stopped task continues from its checkpoint, not a fresh budget', () {
+    AgentTask task({
+      required AgentTaskStatus status,
+      required bool softLimit,
+      required String error,
+    }) =>
+        AgentTask(
+          groupId: 'group',
+          characterId: 'worker',
+          userRequest: '任务',
+          workModeTask: true,
+          status: status,
+          softLimitReached: softLimit,
+          lastError: error,
+        );
+
+    // 停止前正卡在软超限暂停上：两个标记会同时成立，而「继续」此刻表达的是
+    // "接着跑"，不是"再给一次预算"——后者在 cancelled 上会被直接拒绝。
+    expect(
+      WorkTaskCoordinator.continueNeedsFreshSoftLimitBudget(
+        task(
+          status: AgentTaskStatus.cancelled,
+          softLimit: true,
+          error: AgentTask.userStopReason,
+        ),
+      ),
+      isFalse,
+    );
+    expect(
+      WorkTaskCoordinator.continueNeedsFreshSoftLimitBudget(
+        task(
+          status: AgentTaskStatus.paused,
+          softLimit: true,
+          error: '',
+        ),
+      ),
+      isTrue,
+    );
+    expect(
+      WorkTaskCoordinator.continueNeedsFreshSoftLimitBudget(
+        task(
+          status: AgentTaskStatus.paused,
+          softLimit: false,
+          error: '',
+        ),
+      ),
+      isFalse,
+    );
   });
 
   test('backup round trip keeps resumable V1 task metadata', () {

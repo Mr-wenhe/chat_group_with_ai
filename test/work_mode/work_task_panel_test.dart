@@ -20,6 +20,7 @@ import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_failure.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
+import 'package:chat_group/features/work_mode/work_task_decision.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_task_run_boundary.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
@@ -171,6 +172,37 @@ AgentTask _decisionTask(String id, String conversationId) {
   return task;
 }
 
+/// 旧 v1 检查点（没有协作记录）+ 一个未完成的讨论阶段。
+///
+/// 「讨论门禁前移」只在 v2 上放开：v1 没有"重开讨论"这条重入路径。
+AgentTask _taskWithLegacyDiscussion(
+    String id, String conversationId, String phase) {
+  final task = _task(
+    id: id,
+    conversationId: conversationId,
+    characterId: 'worker',
+  );
+  task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+    '',
+    WorkDiscussionState.initial(
+      conversationId: conversationId,
+      executorId: 'worker',
+      candidateCharacterIds: const ['worker'],
+      participantCharacterIds: const ['worker'],
+      deliverableContract: const <String, dynamic>{
+        'deliverableType': 'document',
+        'format': 'docx',
+        'location': 'desktop',
+        'contentScope': '输出 Word 文档',
+        'explicitExecutorId': 'worker',
+        'revisionTarget': '',
+        'requestRevision': 1,
+      },
+    ).copyWith(phase: phase),
+  );
+  return task;
+}
+
 /// 在指定视口里挂一个带单条任务的全局宿主，供几何断言测算面板/折叠条位置。
 Future<void> _pumpOverlayHostWithTask(
     WidgetTester tester, Size viewport) async {
@@ -218,6 +250,90 @@ Future<void> _dragMiniBar(WidgetTester tester, Offset delta) async {
 }
 
 void main() {
+  testWidgets('decision dialog reports only pages actually displayed',
+      (tester) async {
+    final task = _decisionTask('shown-pages', 'qa-pages');
+    final state =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final raw = state.collaboration!.toJson();
+    raw['decisions'] = [
+      ...raw['decisions'] as List,
+      {
+        ...state.collaboration!.decisions.single,
+        'id': 'second',
+        'targetId': 'second',
+        'reason': 'Second question'
+      }
+    ];
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState('',
+        state.copyWith(collaboration: WorkCollaborationState.tryParse(raw)!));
+    final decisions = WorkTaskDecision.forTask(task);
+    final seen = <WorkTaskDecision>[];
+    await tester.pumpWidget(MaterialApp(
+        home: Builder(
+            builder: (context) => Scaffold(
+                body: TextButton(
+                    onPressed: () => showDialog<void>(
+                        context: context,
+                        builder: (_) => WorkTaskDecisionDialog(
+                            decisions: decisions,
+                            onDecisionShown: seen.add,
+                            onReply: (_, __,
+                                    {choiceId, disposition = 'answer'}) async =>
+                                true)),
+                    child: const Text('Open'))))));
+    await tester.tap(find.text('Open'));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('work-task-decision-close')));
+    await tester.pump(const Duration(milliseconds: 400));
+    expect(seen.map((d) => d.id), ['format']);
+    expect(WorkTaskDecision.remindersToClaim(seen, task).map((d) => d.id),
+        ['format']);
+    seen.clear();
+    await tester.tap(find.text('Open'));
+    await tester.pump();
+    await tester.tap(find.byKey(const Key('work-task-decision-option-md')));
+    await tester.pump();
+    expect(find.text('Second question'), findsOneWidget);
+    expect(seen.map((d) => d.id), ['format', 'second']);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
+  testWidgets('v2 discussion details preserve timeline space in a short panel',
+      (tester) async {
+    final task = _decisionTask('short-discussion', 'qa-short');
+    final original =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final raw = original.collaboration!.toJson()
+      ..['plan'] =
+          List.filled(30, 'Long requirement and independent review.').join(' ');
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        '',
+        original.copyWith(
+            collaboration: WorkCollaborationState.tryParse(raw)!));
+    await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+            body: Center(
+                child: SizedBox(
+                    width: 420,
+                    height: 500,
+                    child: WorkTaskPanel(
+                      tasks: [task],
+                      eventStreamFor: (_) =>
+                          const Stream<WorkTaskEvent>.empty(),
+                      onSelectTask: (_) {},
+                      onStop: (_) {},
+                      onContinue: (_) {},
+                      onOpenConversation: (_) {},
+                      onCollapse: () {},
+                      onClose: () {},
+                    ))))));
+    await tester.tap(find.byKey(const Key('work-v2-discussion-details')));
+    await tester.pump();
+    expect(tester.takeException(), isNull);
+    expect(find.text('收起问题与方案'), findsOneWidget);
+    expect(find.text('执行动态 · 实时公开输出'), findsOneWidget);
+    await tester.pumpWidget(const SizedBox.shrink());
+  });
   testWidgets('P3 chat reminder button opens its exact decision task',
       (tester) async {
     final task = _decisionTask('p3-chat-button', 'p3-chat');
@@ -2199,6 +2315,261 @@ void main() {
       expect(find.text('从头开始'), findsOneWidget);
       await tester.tap(find.byKey(const Key('work-task-retry')));
       expect(restarted, isTrue);
+    });
+
+    testWidgets('offers continue for a task the user stopped', (tester) async {
+      var continued = false;
+      final task = _task(
+        id: 'stopped-continue',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) async => continued = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-continue')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('work-task-continue')));
+      await tester.pump();
+      expect(continued, isTrue);
+    });
+
+    testWidgets('offers continue instead of a dead retry after a user stop',
+        (tester) async {
+      // 停止后记录上仍可能带着可重试的失败标记（`_implStop` 不清它）。面板过去
+      // 建议"请先点击重试"，而停止的任务走重试会被状态守卫直接拒绝（只允许"从头
+      // 开始"那条路），于是既没有继续入口、又摆着一个点下去必然报错的重试。
+      final task = _task(
+        id: 'stopped-retryable-failure',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason
+        // 已经写出产物：不能"从头开始"，所以重试对这条记录是无效动作。
+        ..lastArtifactPaths = <String>['/workspace/report.md'];
+      WorkFailure.persistOnTask(
+        task,
+        WorkFailure.defaults(WorkFailureType.retryableNetwork),
+      );
+      var continued = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) async => continued = true,
+            onRetry: (_) async {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-continue')), findsOneWidget);
+      expect(
+        tester
+            .widget<FilledButton>(find.byKey(const Key('work-task-continue')))
+            .onPressed,
+        isNotNull,
+        reason: '停止后的任务只能靠「继续」接着跑',
+      );
+      expect(find.byKey(const Key('work-task-retry')), findsNothing,
+          reason: '这条记录既不能从头开始，重试按钮就只会抛错');
+      await tester.tap(find.byKey(const Key('work-task-continue')));
+      await tester.pump();
+      expect(continued, isTrue);
+    });
+
+    testWidgets('offers continue for a stopped v2 task whose discussion never finished',
+        (tester) async {
+      // 停止已经把讨论取消掉，v2 又不允许「从头开始」清空协作记录：这时「继续」
+      // 是重新进入讨论的唯一入口。按"请先完成群讨论"挡掉它，任务既答不了也退不出。
+      final task = _decisionTask('stopped-unfinished', 'group-one')
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason;
+      var continued = false;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) async => continued = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-continue')), findsOneWidget);
+      await tester.tap(find.byKey(const Key('work-task-continue')));
+      await tester.pump();
+      expect(continued, isTrue);
+    });
+
+    testWidgets('keeps the discussion gate in front of a stopped legacy task',
+        (tester) async {
+      // 旧 v1 检查点没有"重开讨论"这条重入路径：继续会直接抛"请先完成群讨论"。
+      // 这里必须与 v2 相反——不摆一个点下去只会报错的入口，出路是「从头开始」。
+      final task = _taskWithLegacyDiscussion(
+        'stopped-legacy-unfinished',
+        'group-one',
+        WorkDiscussionPhase.blocked,
+      )
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) async {},
+            onRetry: (_) async {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-continue')), findsNothing);
+      expect(find.text('从头开始'), findsOneWidget);
+    });
+
+    testWidgets('asks what to do with follow-ups a stop interrupted',
+        (tester) async {
+      var continued = false;
+      var continuedWithoutFollowUps = false;
+      final task = _task(
+        id: 'stopped-with-follow-ups',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason
+        ..queuedUserRequests = <String>['改成第二版', '再补一个附录'];
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) async => continued = true,
+            onContinueWithoutFollowUps: (_) async =>
+                continuedWithoutFollowUps = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      await tester.tap(find.byKey(const Key('work-task-continue')));
+      await tester.pumpAndSettle();
+      expect(
+        find.byKey(const Key('work-task-continue-dialog')),
+        findsOneWidget,
+      );
+      expect(find.textContaining('2 条'), findsOneWidget);
+
+      await tester
+          .tap(find.byKey(const Key('work-task-continue-keep-follow-ups')));
+      await tester.pumpAndSettle();
+      expect(continued, isTrue);
+      expect(continuedWithoutFollowUps, isFalse);
+    });
+
+    testWidgets('lets the user drop the interrupted follow-ups', (tester) async {
+      var continued = false;
+      var continuedWithoutFollowUps = false;
+      final task = _task(
+        id: 'stopped-drop-follow-ups',
+        conversationId: 'group-one',
+        characterId: 'worker-id',
+      )
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason
+        ..queuedUserRequests = <String>['改成第二版'];
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) async => continued = true,
+            onContinueWithoutFollowUps: (_) async =>
+                continuedWithoutFollowUps = true,
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      await tester.tap(find.byKey(const Key('work-task-continue')));
+      await tester.pumpAndSettle();
+      await tester
+          .tap(find.byKey(const Key('work-task-continue-drop-follow-ups')));
+      await tester.pumpAndSettle();
+      expect(continuedWithoutFollowUps, isTrue);
+      expect(continued, isFalse);
+    });
+
+    testWidgets('hides the fresh restart for a v2 collaboration task',
+        (tester) async {
+      // 「从头开始」对 v2 任务会清空整块协作记录，协调器因此拒绝执行。
+      // 按钮不该先展示、再让用户撞上一次报错。
+      final task = _decisionTask('stopped-v2', 'group-one')
+        ..status = AgentTaskStatus.cancelled
+        ..lastError = AgentTask.userStopReason;
+
+      await tester.pumpWidget(MaterialApp(
+        home: Scaffold(
+          body: WorkTaskPanel(
+            tasks: <AgentTask>[task],
+            eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+            onSelectTask: (_) {},
+            onStop: (_) {},
+            onContinue: (_) {},
+            onRetry: (_) async {},
+            onOpenConversation: (_) {},
+            onCollapse: () {},
+            onClose: () {},
+          ),
+        ),
+      ));
+
+      expect(find.byKey(const Key('work-task-retry')), findsNothing);
+      expect(find.text('从头开始'), findsNothing);
     });
 
     testWidgets('hides stale pause details while a resumed task is running',

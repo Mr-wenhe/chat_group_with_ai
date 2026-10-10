@@ -185,6 +185,21 @@ class AgentTask extends HiveObject {
 
   bool get canResumeInWorkMode => workModeTask && !isTerminal;
 
+  /// 面板「停止」按钮写入的固定原因。
+  ///
+  /// 它同时是「用户停止」这一状态的**判据**：`cancelled` 还有别的来源
+  /// （用户当场选择放弃恢复、任务被删除），那些都不该被「继续」复活。
+  static const String userStopReason = '用户已停止任务。';
+
+  /// 用户主动点「停止」留下的终态。
+  ///
+  /// 仍是终态（见 [isTerminal]），但它带着一个完整的安全检查点，可以由用户
+  /// 显式「继续」；用户在恢复对话框里选「放弃恢复」、任务被删除产生的
+  /// `cancelled` 都没有这个性质，区别就在这里。
+  bool get isUserStopped =>
+      status == AgentTaskStatus.cancelled &&
+      lastError.trim() == userStopReason;
+
   bool get requiresUserResume =>
       status == AgentTaskStatus.interrupted && resumeRequired;
 

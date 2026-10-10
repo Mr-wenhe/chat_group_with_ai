@@ -341,8 +341,35 @@ extension _V2DiscussionActions on _V2DiscussionSession {
   }
 
   void _validateContract(Map<String, dynamic> proposal) {
-    final contract =
-        Map<String, dynamic>.from(proposal['artifactContract'] as Map);
+    final rawContract = proposal['artifactContract'];
+    if (rawContract is! Map) {
+      throw StateError('artifactContract 缺失或无效');
+    }
+    final contract = Map<String, dynamic>.from(rawContract);
+    const fields = {
+      'type',
+      'format',
+      'location',
+      'revisionTarget',
+      'files',
+      'verificationCommands'
+    };
+    final unexpected = contract.keys.where((key) => !fields.contains(key));
+    if (unexpected.isNotEmpty) {
+      final safeNames = unexpected
+          .take(8)
+          .map((key) => RegExp(r'^[A-Za-z][A-Za-z0-9_]{0,63}$').hasMatch(key)
+              ? key
+              : 'unknown')
+          .toSet()
+          .join(',');
+      throw StateError('artifactContract.fields($safeNames)');
+    }
+    if (!WorkDiscussionV2Turn.isValidArtifactContractFields(contract) ||
+        !WorkDiscussionV2Turn.isValidArtifactFiles(contract) ||
+        !WorkDiscussionV2Turn.isValidVerificationCommands(contract)) {
+      throw StateError('artifactContract 字段或内容不符合 v2 协议');
+    }
     for (final key in state.artifactContract.keys) {
       final original = state.artifactContract[key];
       if (original is String &&
@@ -350,7 +377,7 @@ extension _V2DiscussionActions on _V2DiscussionSession {
           original != 'unspecified' &&
           original != 'generic' &&
           !_sameContractValue(key, original, contract[key])) {
-        throw StateError('用户产物合同不可覆盖');
+        throw StateError('用户产物合同不可覆盖（$key），请保留当前合同字段原值');
       }
     }
     if (state.artifactContract['type'] == 'document' &&

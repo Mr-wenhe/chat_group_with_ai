@@ -1,0 +1,268 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>伴伴 (chat_group) · GitHub 同类项目对比与优化建议</title>
+<style>
+  :root{
+    --bg:#f6f8fa; --card:#ffffff; --ink:#1f2328; --muted:#57606a;
+    --line:#d0d7de; --accent:#0969da; --accent-soft:#ddf4ff;
+    --good:#1a7f37; --warn:#9a6700; --bad:#cf222e;
+    --tag:#eaeef2;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+    font-family:-apple-system,BlinkMacSystemFont,"Segoe UI","PingFang SC","Hiragino Sans GB","Microsoft YaHei",sans-serif;
+    line-height:1.65;font-size:15px}
+  .wrap{max-width:1080px;margin:0 auto;padding:32px 24px 64px}
+  h1{font-size:26px;margin:0 0 4px}
+  h2{font-size:20px;margin:40px 0 14px;padding-left:10px;border-left:4px solid var(--accent)}
+  h3{font-size:16px;margin:18px 0 8px}
+  .sub{color:var(--muted);margin:0 0 8px}
+  .meta{color:var(--muted);font-size:13px;margin-bottom:24px}
+  .card{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:20px 22px;margin:14px 0;
+    box-shadow:0 1px 2px rgba(27,31,36,.04)}
+  table{border-collapse:collapse;width:100%;font-size:13.5px;margin:6px 0}
+  th,td{border:1px solid var(--line);padding:9px 10px;text-align:left;vertical-align:top}
+  th{background:var(--accent-soft);color:#0a3069;font-weight:600}
+  tr:nth-child(even) td{background:#fafbfc}
+  .pill{display:inline-block;padding:1px 8px;border-radius:999px;font-size:12px;font-weight:600;white-space:nowrap}
+  .p0{background:#ffebe9;color:var(--bad)} .p1{background:#fff5d6;color:var(--warn)}
+  .p2{background:#ddf4ff;color:var(--accent)} .p3{background:#eaeef2;color:var(--muted)}
+  .ok{color:var(--good);font-weight:700} .no{color:var(--bad);font-weight:700} .mid{color:var(--warn);font-weight:700}
+  .rec{background:#fffbe6;border-left:4px solid var(--warn);border-radius:8px;padding:14px 16px;margin:12px 0}
+  .rec .h{display:flex;align-items:center;gap:10px;margin-bottom:6px}
+  .rec .h b{font-size:15px}
+  .rec ul{margin:6px 0 0;padding-left:18px}
+  .rec li{margin:3px 0}
+  .k{color:var(--muted);font-weight:600}
+  .big{font-size:30px;font-weight:800;color:var(--accent);line-height:1}
+  .grid3{display:grid;grid-template-columns:repeat(3,1fr);gap:12px}
+  .stat{background:var(--card);border:1px solid var(--line);border-radius:10px;padding:14px;text-align:center}
+  .stat .n{font-size:22px;font-weight:800}
+  .note{font-size:13px;color:var(--muted)}
+  a{color:var(--accent);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .footer{margin-top:40px;color:var(--muted);font-size:12.5px;border-top:1px solid var(--line);padding-top:14px}
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <h1>伴伴 (chat_group) · GitHub 同类项目对比与优化建议</h1>
+  <p class="sub">多 AI 角色群聊 + 工作模式（agentic 执行）+ 联网搜索的本地优先 Flutter 应用</p>
+  <p class="meta">分析日期：2026-10-10 · 数据来源：GitHub API（实时 star / 最近提交）+ 公开资料交叉核对</p>
+
+  <div class="card">
+    <h3 style="margin-top:4px">你的产品「伴伴」一句话定位</h3>
+    <p>一个<b>本地优先</b>的 Flutter 应用：创建多个 AI 角色，让它们在同一群组里<b>自动互动对话</b>，并额外具备<b>工作模式（让 AI 真正执行文件/命令任务）</b>与<b>生产级联网搜索</b>两个差异化能力。支持 8 家国内主流厂商 + 4 种自定义上游协议，跨 Windows/macOS/iOS/Android 四端，数据全部存本地 Hive，无后端。</p>
+    <div class="grid3">
+      <div class="stat"><div class="n">2.1.0+225</div><div class="note">当前版本</div></div>
+      <div class="stat"><div class="n">4 端</div><div class="note">Win/mac/iOS/安卓</div></div>
+      <div class="stat"><div class="n">8+4</div><div class="note">厂商 + 自定义协议</div></div>
+    </div>
+  </div>
+
+  <h2>一、GitHub 同类项目对比</h2>
+  <p class="note">按"多 AI 角色群聊 / 角色扮演 / 多智能体对话"定位筛选，已用 <code>gh</code> 拉取真实 stars 与最近提交时间。mostaron 为同技术栈（Flutter）竞品但仓库未公开，AutoGen / CAMEL 为后端框架（作群聊引擎参考）。</p>
+  <table>
+    <thead>
+      <tr><th>项目</th><th>Stars</th><th>技术栈</th><th>定位</th><th>群聊 / 角色能力</th><th>状态</th></tr>
+    </thead>
+    <tbody>
+      <tr>
+        <td><b>SillyTavern</b><br><span class="note">SillyTavern/SillyTavern</span></td>
+        <td><b>34.3k</b></td><td>JS</td>
+        <td>角色扮演前端标杆</td>
+        <td>群聊成熟（Natural/List/Manual/Pooled 4 策略 + APPEND 合并角色卡）；Tavern v2 角色卡；世界信息(World Info)递归扫描；最大扩展生态（正则/预设/SD 出图/翻译/搜索）</td>
+        <td><span class="ok">极度活跃</span><br>2026-10</td>
+      </tr>
+      <tr>
+        <td><b>RisuAI</b><br><span class="note">kwaroran/Risuai</span></td>
+        <td><b>1.7k</b></td><td>TS (Tauri)</td>
+        <td>轻量角色聊天（桌面+移动）</td>
+        <td>角色卡 + 世界书 + 群聊 + TTS + 长期记忆；真·iOS/Android 应用；首次运行最轻</td>
+        <td><span class="ok">活跃</span><br>2026-10</td>
+      </tr>
+      <tr>
+        <td><b>Agnaistic (agnai)</b><br><span class="note">agnaistic/agnai</span></td>
+        <td><b>787</b></td><td>TS</td>
+        <td>多用户多 bot 角色聊天</td>
+        <td>群组对话 + 记忆/Lore book + 多租户；<b>唯一可信的多用户/共享服务器</b>选项</td>
+        <td><span class="mid">较活跃</span><br>2026-06</td>
+      </tr>
+      <tr>
+        <td><b>Aithos / WebMultiAgentChat</b><br><span class="note">excing/WebMultiAgentChat</span></td>
+        <td><b>95</b></td><td>HTML (纯前端)</td>
+        <td>轻量多智能体群聊</td>
+        <td>多角色群聊；<b>AI 选择器按上下文决定下一位发言者</b>；细粒度"视野/权限"控制；OpenAI 兼容 + TTS</td>
+        <td><span class="mid">维护中</span><br>2026-09</td>
+      </tr>
+      <tr>
+        <td><b>DynamicTavern</b><br><span class="note">ForgottenHistory/DynamicTavern</span></td>
+        <td><b>3</b></td><td>TS (SvelteKit)</td>
+        <td>角色卡 RP + 动态世界状态</td>
+        <td>多角色场景；世界状态追踪（心情/位置/衣着）；多 LLM 架构（聊天/决策/改写/出图分离）</td>
+        <td><span class="no">停滞</span><br>2026-04</td>
+      </tr>
+      <tr>
+        <td><b>Chimera</b><br><span class="note">meistro57/chimera</span></td>
+        <td><b>2</b></td><td>Python</td>
+        <td>AI 人格互聊模拟</td>
+        <td>多提供商（OpenAI/Claude/DeepSeek/Gemini/Ollama）；实时流式 + 打字指示器；per-persona 模型路由 + API Key 校验</td>
+        <td><span class="no">早期</span><br>2026-09</td>
+      </tr>
+      <tr>
+        <td><b>mostaron</b><br><span class="note">Flutter Android（闭源分发）</span></td>
+        <td>—</td><td><b>Flutter</b></td>
+        <td>本地 AI 角色扮演（移动端即用）</td>
+        <td><b>同技术栈孪生</b>：SillyTavern 角色卡 V1/V2 导入、世界书、长期记忆、多角色群聊（全员/指定/自然 3 模式）、本地 SQLite、单 APK 即用</td>
+        <td>分发中<br>2026-09</td>
+      </tr>
+      <tr>
+        <td><b>Microsoft AutoGen</b><br><span class="note">microsoft/autogen（框架）</span></td>
+        <td><b>~48–61k</b></td><td>Python</td>
+        <td>多 Agent 对话框架</td>
+        <td>GroupChat / Swarm；内置代码执行（Docker/Jupyter）；>5 agent 群聊 selector 易不稳定（已验证坑）</td>
+        <td><span class="ok">活跃</span></td>
+      </tr>
+      <tr>
+        <td><b>CAMEL-AI</b><br><span class="note">camel-ai/camel（框架）</span></td>
+        <td><b>~17.7k</b></td><td>Python</td>
+        <td>角色扮演多智能体</td>
+        <td>RolePlaying + Workforce 层级协作；Inception Prompting；2–3 角色效果最佳，>5 收益递减</td>
+        <td><span class="ok">活跃</span></td>
+      </tr>
+    </tbody>
+  </table>
+
+  <h2>二、核心能力矩阵（你 vs 标杆）</h2>
+  <table>
+    <thead><tr><th>维度</th><th>伴伴</th><th>SillyTavern</th><th>RisuAI</th><th>Agnai</th><th>Aithos</th><th>mostaron</th></tr></thead>
+    <tbody>
+      <tr><td>多角色群聊</td><td class="mid">✓ 随机 1–2 人 / 3 轮</td><td class="ok">✓✓ 4 策略成熟</td><td class="ok">✓</td><td class="ok">✓</td><td class="ok">✓ AI selector</td><td class="ok">✓ 3 模式</td></tr>
+      <tr><td>智能发言选择（谁该接话）</td><td class="no">✗ 纯随机</td><td class="ok">✓ Natural</td><td class="mid">~</td><td class="no">✗</td><td class="ok">✓</td><td class="ok">✓ 自然模式</td></tr>
+      <tr><td>角色卡生态（V2 / 社区）</td><td class="no">✗ 自研表单</td><td class="ok">✓✓ Chub 海量</td><td class="ok">✓</td><td class="ok">✓</td><td class="no">✗</td><td class="ok">✓ V1/V2 导入</td></tr>
+      <tr><td>世界书 / Lore Book</td><td class="no">✗ 仅摘要记忆</td><td class="ok">✓✓ 递归</td><td class="ok">✓</td><td class="ok">✓</td><td class="no">✗</td><td class="ok">✓</td></tr>
+      <tr><td>插件 / 扩展生态</td><td class="no">✗ 全内置封闭</td><td class="ok">✓✓ 最大</td><td class="mid">~</td><td class="mid">~</td><td class="no">✗</td><td class="no">✗</td></tr>
+      <tr><td>多用户 / 共享</td><td class="no">✗ 单用户</td><td class="no">✗</td><td class="no">✗</td><td class="ok">✓✓ 多租户</td><td class="no">✗</td><td class="no">✗</td></tr>
+      <tr><td><b>工作模式（agentic 执行）</b></td><td class="ok">✓✓ 独有</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td><td class="no">✗</td></tr>
+      <tr><td><b>联网搜索</b></td><td class="ok">✓ 生产级 + 防注入</td><td class="mid">△ 靠扩展</td><td class="mid">△</td><td class="mid">△</td><td class="no">✗</td><td class="no">✗</td></tr>
+      <tr><td>本地优先 / 隐私</td><td class="ok">✓ Hive 本地</td><td class="ok">✓</td><td class="ok">✓</td><td class="mid">~ 可联网</td><td class="ok">✓</td><td class="ok">✓✓ 本地 SQLite</td></tr>
+      <tr><td>国内模型友好</td><td class="ok">✓ 8 家内置</td><td class="mid">△ 靠 Ollama/API</td><td class="mid">△</td><td class="mid">△</td><td class="no">✗ 仅 OAI</td><td class="ok">✓</td></tr>
+      <tr><td>移动端"即用"体验</td><td class="mid">△ 重发布</td><td class="no">✗ 需 Node</td><td class="ok">✓ 真应用</td><td class="mid">△</td><td class="ok">✓ 浏览器</td><td class="ok">✓✓ 单 APK</td></tr>
+    </tbody>
+  </table>
+  <p class="note">结论：你在<b>工作模式、联网搜索、国内模型、跨端</b>上领先；在<b>群聊策略智能度、角色卡生态、世界书、插件生态、社区</b>上明显落后。差距几乎全部集中在"群聊沉浸感与生态"，而你的独有护城河（agentic）反而被埋没。</p>
+
+  <h2>三、伴伴的差异化优势（必须守住并放大）</h2>
+  <div class="card">
+    <ol>
+      <li><b>工作模式（agentic 执行文件/命令）</b>—— 所有竞品都没有。角色不只是"聊"，而是能替你干实事（写文件、跑命令、查文档）。这是从"玩具"到"工具"的质变，应作为头号品牌卖点。</li>
+      <li><b>生产级联网搜索</b>—— 内置 Tavily/Brave/Gateway，带查询规划、来源引用、Prompt Injection 防护；竞品多靠扩展且安全责任甩给用户。</li>
+      <li><b>国内模型原生友好</b>—— 8 家国内厂商 + 4 种协议，对中文用户零门槛；多数海外竞品默认面向 Ollama/OpenAI。</li>
+      <li><b>跨 4 端 + 本地优先</b>—— Windows/macOS/iOS/Android 一体，数据全本地；RisuAI 也跨端但 agentic 缺失。</li>
+      <li><b>主动私聊（前台主动联系）</b>—— 角色会按冷却规则主动找你聊，竞品多为被动响应。</li>
+    </ol>
+  </div>
+
+  <h2>四、10 条优化建议（按优先级）</h2>
+
+  <div class="rec">
+    <div class="h"><span class="pill p0">P0</span><b>1. 接入 Tavern v2 角色卡生态（导入 / 导出 / 社区）</b></div>
+    <div><span class="k">对标：</span>SillyTavern / RisuAI / mostaron（均支持 V2 卡，可对接 Chub、AI Character Hub 上海量社区角色）。</div>
+    <div><span class="k">现状：</span>自研人设表单，用户必须自己写人设，无现成角色可用，冷启动成本高。</div>
+    <div><span class="k">建议：</span>支持 PNG/WebP/JSON（V1/V2）角色卡导入与导出；内置"角色广场"入口（可先对接现成社区 API，后期做自有轻量后端）。这是<b>最大获客杠杆</b>——瞬间拥有上万现成角色。</div>
+    <div><span class="k">价值：</span>用户留存与传播的核心飞轮，直接补齐与 mostaron 的短板。</div>
+  </div>
+
+  <div class="rec">
+    <div class="h"><span class="pill p0">P0</span><b>2. 升级群聊发言引擎：加"AI 智能选择器" + "合并角色卡(APPEND)"</b></div>
+    <div><span class="k">对标：</span>SillyTavern（Natural/List/Manual/Pooled 4 策略 + APPEND 合并卡） / Aithos（AI selector 按上下文选发言者）。</div>
+    <div><span class="k">现状：</span>纯随机挑 1–2 人、最多 3 轮；群聊像"抽签"而非"自然接话"，沉浸感弱。</div>
+    <div><span class="k">建议：</span>① 新增"自然模式"——用一个轻量 selector 模型根据上下文决定谁该接话（你已有 HumanizedChatOrchestrator 的意图评分，可升级为发言权仲裁）；② 支持 APPEND 模式把所有在场角色的人设/世界观合并注入，让 AI 区分声音。保留现有随机/手动模式。</div>
+    <div><span class="k">价值：</span>群聊从"演示 toy"变"真·群像戏"，是产品内核的体验跃迁。</div>
+  </div>
+
+  <div class="rec">
+    <div class="h"><span class="pill p0">P0</span><b>3. 引入世界书 / Lore Book（关键词触发背景注入）</b></div>
+    <div><span class="k">对标：</span>mostaron / RisuAI / SillyTavern（World Info 递归扫描）。</div>
+    <div><span class="k">现状：</span>只有群组摘要记忆（年-周），无结构化世界观；长对话易主题漂移。</div>
+    <div><span class="k">建议：</span>增加"世界书"概念——按关键词命中把设定/背景/术语注入上下文；支持分层（置顶常驻 + 关键词触发 + 每角色独立启用）。与现有 GroupMemory 并存而非替换。</div>
+    <div><span class="k">价值：</span>解决"群越聊越散"，是角色扮演沉浸感的刚需，成本远低于自研角色卡。</div>
+  </div>
+
+  <div class="rec">
+    <div class="h"><span class="pill p1">P1</span><b>4. 把"工作模式(agentic)"做成头号差异化卖点并完善移动端</b></div>
+    <div><span class="k">对标：</span>无直接竞品（SillyTavern/Agnai/RisuAI/mostaron 均无 agentic 执行）。</div>
+    <div><span class="k">现状：</span>能力最强但藏在"房间开关"里，用户无感知；移动端审批/文件沙盒体验未打磨。</div>
+    <div><span class="k">建议：</span>① 把 agentic 提升为人设可勾选的"技能"，而非隐藏模式；② 独立产品页/宣传点"会干活的 AI 群"；③ 移动端完善审批流、文件沙盒、任务进度浮层；④ 扩展工具（浏览器、图像生成、定时任务）。</div>
+    <div><span class="k">价值：</span>这是你与所有角色聊天 App 的代差护城河，应全力放大。</div>
+  </div>
+
+  <div class="rec">
+    <div class="h"><span class="pill p1">P1</span><b>5. 联网搜索开放为可插拔 Provider + 社区扩展 SDK</b></div>
+    <div><span class="k">对标：</span>SillyTavern 的扩展生态（正则/预设/出图/翻译/搜索/情感 sprite）。</div>
+    <div><span class="k">现状：</span>搜索/工具全内置封闭，官方维护成本高，用户无法贡献。</div>
+    <div><span class="k">建议：</span>把搜索 Provider、TTS、图像、翻译抽象为可注册插件接口；提供最小扩展 SDK 与示例；官方只维护"生产级网关"，其余交给社区。复用现有 clean-architecture 分层。</div>
+    <div><span class="k">价值：</span>用社区杠杆补生态短板，同时降低官方长期维护负担。</div>
+  </div>
+
+  <div class="rec">
+    <div class="h"><span class="pill p1">P1</span><b>6. 降低安装与分发门槛，主打移动端"即用"</b></div>
+    <div><span class="k">对标：</span>mostaron（单 APK 即用） / RisuAI（真移动应用，5 分钟上手）。</div>
+    <div><span class="k">现状：</span>混合发布流程重（CI + 本地脚本 + 签名），普通用户望而却步；首屏引导偏开发者向。</div>
+    <div><span class="k">建议：</span>① 提供免签名/自包含安装包或一键安装器；② 移动端首屏引导：角色卡一键导入 + API 一键预设（你已有国内厂商，可内置快速配置）；③ 考虑 TestFlight / 直链 APK 分发，缩短"下载→聊天"路径。</div>
+    <div><span class="k">价值：</span>把"本地优先"的优势转化为"装机即用"，直接对线 mostaron 的移动端体验。</div>
+  </div>
+
+  <div class="rec">
+    <div class="h"><span class="pill p2">P2</span><b>7. 构建角色 / 群组 UGC 分享与一键迁移</b></div>
+    <div><span class="k">对标：</span>mostaron 用户的"换手机如何迁移全部角色/记录"痛点；SillyTavern 角色卡可移植。</div>
+    <div><span class="k">现状：</span>有对话导出（已脱敏）与 .cgbak 备份，但角色/群组分享与跨设备迁移路径不顺畅。</div>
+    <div><span class="k">建议：</span>① 角色/群组配置一键导出为可分享文件（含人设、世界书、记忆摘要，不含密钥）；② 导入时自动重绑 API；③ 中期做轻量云端角色广场（见建议 1）。</div>
+    <div><span class="k">价值：</span>降低迁移摩擦，促进用户间自发传播。</div>
+  </div>
+
+  <div class="rec">
+    <div class="h"><span class="pill p2">P2</span><b>8. 群聊规模与稳定性工程（>5 角色防崩）</b></div>
+    <div><span class="k">对标：</span>AutoGen / CAMEL 已验证——超过 5 个 agent 时发言 selector 易抽风、token 暴涨。</div>
+    <div><span class="k">现状：</span>设计面向小规模 demo；缺乏群级预算护栏与长上下文管理。</div>
+    <div><span class="k">建议：</span>① 提供"自定义发言 selector"钩子，避免纯随机在大群里失衡；② 群级轮次/token 预算 + 防刷屏（你已有 hourlyReplyLimit，可扩展为群级）；③ 长对话上下文分层/压缩，保护窗口。</div>
+    <div><span class="k">价值：</span>让"大群戏"可用，避免用户加几个角色就翻车。</div>
+  </div>
+
+  <div class="rec">
+    <div class="h"><span class="pill p2">P2</span><b>9. 记忆系统升级：结构化长期记忆 + 记忆召回 + 跨群统一</b></div>
+    <div><span class="k">对标：</span>SillyTavern（置顶记忆 + 递归世界信息 + 自动清理） / mostaron（置顶+最近记忆双轨）。</div>
+    <div><span class="k">现状：</span>已有 CharacterMemory / RelationshipState / GroupMemory 分层，基础不错，但仍是"整段摘要注入"，无检索式召回。</div>
+    <div><span class="k">建议：</span>① 记忆从"整段注入"升级为"关键词/向量召回"（只取相关片段，省 token）；② 跨群组同角色的统一记忆；③ 关系图谱可视化；④ 记忆达上限自动清理（mostaron 已有，你可做）。</div>
+    <div><span class="k">价值：</span>在已有优势上继续拉开与竞品的记忆体验差距。</div>
+  </div>
+
+  <div class="rec">
+    <div class="h"><span class="pill p3">P3</span><b>10. 多用户 / 协作（中长期可选）</b></div>
+    <div><span class="k">对标：</span>Agnai（唯一可信多租户共享服务器，适合写作小组/朋友圈协作角色扮演）。</div>
+    <div><span class="k">现状：</span>纯本地单用户；与"本地优先"定位一致，但错过协作场景。</div>
+    <div><span class="k">建议：</span>若定位"AI 角色群组社交"，可加轻量可选后端做共享群组/协作写作（可选开启，默认关闭保隐私）；若坚持纯本地，则至少把建议 7 的"导入导出迁移"做扎实。先不做也行，但要预留数据模型。</div>
+    <div><span class="k">价值：</span>潜在第二增长曲线，但优先级最低，避免过早加重发布/合规负担。</div>
+  </div>
+
+  <div class="card" style="border-left:4px solid var(--accent)">
+    <h3 style="margin-top:2px">落地节奏建议</h3>
+    <ul>
+      <li><b>第一波（P0，1–2 个迭代）</b>：角色卡导入（建议1）+ 群聊智能选择器（建议2）+ 世界书（建议3）。这三项直接把"群聊沉浸感"拉到竞品水平，投入可控。</li>
+      <li><b>第二波（P1）</b>：放大 agentic 卖点（建议4）+ 扩展 SDK（建议5）+ 移动端即用（建议6）。把独有护城河变成品牌，并降低装机门槛。</li>
+      <li><b>第三波（P2/P3）</b>：UGC 分享迁移（7）、大群稳定性（8）、记忆召回（9）、多用户（10）。</li>
+    </ul>
+    <p class="note" style="margin-bottom:0">一句话：补"群聊生态三件套"（角色卡/选择器/世界书）追上同行，再把"会干活的 AI 群"这个无人区做成你的招牌。</p>
+  </div>
+
+  <div class="footer">
+    数据说明：Stars / 最近提交时间经 GitHub API 于 2026-10-10 拉取（mostaron 无公开仓库，仅作同技术栈参照；AutoGen/CAMEL 为后端框架，作群聊引擎参考）。能力矩阵基于各项目公开文档与源码结构交叉核对，供产品决策参考，不代表逐功能实测。
+  </div>
+
+</div>
+</body>
+</html>

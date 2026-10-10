@@ -76,7 +76,7 @@ extension _SettingsPageBuild on _SettingsPageState {
                                 fontSize: 16,
                                 fontWeight: FontWeight.w600,
                                 color: cs.onSurface)),
-                        Text('v1.1.0 · 本地存储',
+                        Text(_appVersionLabel,
                             style: TextStyle(
                                 fontSize: 13, color: cs.onSurfaceVariant)),
                       ],
@@ -327,7 +327,8 @@ extension _SettingsPageBuild on _SettingsPageState {
                   icon: Icons.restore_rounded,
                   iconColor: cs.secondary,
                   title: '恢复默认目录',
-                  subtitle: '默认作为 AI 工具服务 workspace，保存在应用数据目录的 ai_files 中',
+                  subtitle:
+                      '恢复用户主目录下的 ${DatabaseService.defaultAiProcessingDirectoryName}；主目录不可用时使用文档目录。',
                   onTap: _resetAiProcessingDir,
                 ),
               ],

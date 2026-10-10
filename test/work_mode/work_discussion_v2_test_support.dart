@@ -5,10 +5,48 @@ class _Credentials implements ApiCredentialResolver {
   Future<String?> resolve(ApiConfig config) async => 'test-key';
 }
 
+class _ReasoningEnvelopeAdapter implements HttpClientAdapter {
+  int calls = 0;
+  final temperatures = <double>[];
+  @override
+  Future<ResponseBody> fetch(RequestOptions options,
+      Stream<Uint8List>? requestStream, Future<void>? cancelFuture) async {
+    calls++;
+    final body = options.data as Map;
+    temperatures.add((body['temperature'] as num).toDouble());
+    final messages = body['messages'] as List;
+    final context =
+        jsonDecode(messages.last['content'] as String) as Map<String, dynamic>;
+    final turn =
+        await confirm(db.aiCharacterBox.get(context['memberId'])!, context);
+    return ResponseBody.fromString(
+        jsonEncode({
+          'choices': [
+            {
+              'finish_reason': 'stop',
+              'message': {
+                'role': 'assistant',
+                'content': turn['message'],
+                'reasoning': 'PRIVATE_REASONING_ENVELOPE' * 4000,
+              }
+            }
+          ]
+        }),
+        200,
+        headers: {
+          Headers.contentTypeHeader: ['application/json']
+        });
+  }
+
+  @override
+  void close({bool force = false}) {}
+}
+
 class _ModelClient extends ChatApiService {
   final Future<Map<String, dynamic>> Function(Map<String, dynamic>, String)
       respond;
-  _ModelClient(this.respond);
+  final int expectedMaxTokens;
+  _ModelClient(this.respond, {this.expectedMaxTokens = 8192});
   @override
   Future<Map<String, dynamic>> sendChatMessageWithResponseLimit(
       {required String apiKey,
@@ -24,7 +62,7 @@ class _ModelClient extends ChatApiService {
       CancelToken? cancelToken,
       bool structuredJson = false,
       required int maxResponseBytes}) {
-    expect(maxTokens, WorkDiscussionRunner.discussionMaxTokens);
+    expect(maxTokens, expectedMaxTokens);
     expect(apiKey, 'test-key');
     return respond(
         jsonDecode(messages.last['content'] as String) as Map<String, dynamic>,
@@ -161,7 +199,9 @@ Future<AgentTask> apply(WorkCollaborationUpdate update) async {
       state.copyWith(
           collaboration: next, requestRevision: next.requestRevision),
       expectedCollaborationRevision: update.expectedRevision);
-  if (db.agentTaskBox.containsKey(task.id)) await db.agentTaskBox.put(task.id, task);
+  if (db.agentTaskBox.containsKey(task.id)) {
+    await db.agentTaskBox.put(task.id, task);
+  }
   return task;
 }
 
@@ -340,6 +380,92 @@ void _registerScopeBoundaryTest() {
       expect(task.requestedPermissions, const [ToolPermission.workspaceRead]);
     });
   }
+
+  test('已签提案采用时发现禁项冲突，应弹出用户裁决而不是静默暂停', () async {
+    task.userRequest = '${task.userRequest}；不要联网';
+    final original =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final current = original.collaboration!;
+    final scope = task.userRequest;
+    final candidate = proposal(current.toJson())..['scope'] = '$scope；增加联网功能';
+    final digest = sha256
+        .convert(utf8.encode(jsonEncode(candidate)))
+        .toString()
+        .substring(0, 24);
+    await events.writeDiscussionDetail(task.id, digest, jsonEncode(candidate));
+    const issueId = 'network-scope-idea';
+    final issueRef = 'proposal:$digest';
+    const adoptionLabel = '采用原提案';
+    final stateJson = current.toJson()
+      ..['revision'] = current.revision + 1
+      ..['requestRevision'] = current.requestRevision + 1
+      ..['scope'] = scope
+      ..['issues'] = [
+        ...current.issues,
+        {
+          'id': issueId,
+          'sourceId': 'dev',
+          'kind': 'idea',
+          'status': 'open',
+          'target': 'development',
+          'problem': '提案新增联网功能',
+          'evidenceRef': 'user-request',
+          'resolution': '',
+          'resolutionRef': issueRef,
+          'retestCondition': '由用户裁决保留原范围或修改提案',
+          'requestRevision': current.requestRevision + 1
+        }
+      ]
+      ..['decisions'] = [
+        ...current.decisions,
+        {
+          'id': 'adopt-network-scope',
+          'revision': 1,
+          'status': 'answered',
+          'reason': '用户此前选择查看此提案',
+          'answer': adoptionLabel,
+          'answerKind': 'choice',
+          'impact': '按用户裁决处理',
+          'responseRef': 'user-adoption-choice',
+          'evidence': '用户选择提案',
+          'targetId': issueId,
+          'kind': 'dispute',
+          'options': [
+            {
+              'id': 'adopt:$issueRef',
+              'label': adoptionLabel,
+              'impact': '经用户裁决采用提案'
+            }
+          ]
+        }
+      ];
+    final changed = WorkCollaborationState.tryParse(stateJson);
+    expect(changed, isNotNull);
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        original.copyWith(
+            collaboration: changed,
+            requestRevision: current.requestRevision + 1),
+        expectedCollaborationRevision: current.revision);
+
+    final runner = modelRunner((_, __) async => fail('已有用户裁决应在请求成员模型前转成待答裁决'));
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+
+    final result =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
+    final pending = result.decisions.last;
+    expect(pending['kind'], 'dispute');
+    expect(pending['targetId'], issueId);
+    expect(pending['status'], 'pending');
+    expect(
+        (pending['options'] as List)
+            .map((option) => (option as Map)['id'])
+            .toList(),
+        ['reject-idea', 'revise-idea']);
+    expect(result.issues.single['status'], 'open');
+    expect(result.approvals, isEmpty);
+  }, timeout: const Timeout(Duration(seconds: 30)));
 }
 
 void _registerDocumentInvestigationTest() {
@@ -366,7 +492,9 @@ void _registerDocumentInvestigationTest() {
             required timeout,
             cancelToken}) async {
           final context = jsonDecode(messages.firstWhere((m) =>
-                  m['role'] == 'user' && m['content'] is String && (m['content'] as String).startsWith('{'))['content']
+                  m['role'] == 'user' &&
+                  m['content'] is String &&
+                  (m['content'] as String).startsWith('{'))['content']
               as String) as Map<String, dynamic>;
           final s = Map<String, dynamic>.from(context['collaboration'] as Map);
           if ((s['issues'] as List).isEmpty) {

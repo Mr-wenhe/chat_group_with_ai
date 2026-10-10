@@ -222,6 +222,19 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
       WorkTaskCancellation cancellation,
       {required int expectedRevision}) async {
     try {
+      await _record(task, WorkTaskEventKind.planning, '正在恢复群讨论',
+          detail: '先核对目录授权与运行槽，再请求成员回应。');
+      // Discussion binds/reads the project before production starts. Reuse
+      // the durable folder gate before taking a slot: waiting for a picker is
+      // user time and must not prevent another group's discussion from running.
+      if (WorkTaskExecutionPolicy.isValidatedV2GroupTask(task) &&
+          (_folderGrantService != null || _requireFolderGrant)) {
+        if (!await _ensureFolderGrant(task, cancellation)) return;
+        if (cancellation.isCancelled || _disposed || task.isTerminal) return;
+        task.status = AgentTaskStatus.paused;
+        await _save(task);
+      }
+      var reportedSlotWait = false;
       while (!cancellation.isCancelled && !_disposed) {
         final acquired = await _serialize(() async {
           if (_occupiedSlots >= WorkTaskCoordinator.maximumConcurrentTasks) {
@@ -231,9 +244,14 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
           return true;
         });
         if (acquired) break;
+        if (!reportedSlotWait) {
+          reportedSlotWait = true;
+          await _record(task, WorkTaskEventKind.queued, '群讨论正在等待运行槽');
+        }
         await Future.any([_waitForSlot(), cancellation.whenCancelled]);
       }
       if (cancellation.isCancelled || _disposed || task.isTerminal) return;
+      await _record(task, WorkTaskEventKind.planning, '群讨论已取得运行槽');
       final state =
           WorkDiscussionState.fromExecutionState(task.executionStateJson);
       if (state?.schemaVersion == WorkDiscussionState.currentSchemaVersion &&
@@ -289,17 +307,21 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
           stored.executionStateJson,
         ).state;
         if (current == null) return;
+        if (current.requestRevision > expectedRevision) return;
         if (current.schemaVersion == WorkDiscussionState.currentSchemaVersion) {
-          stored.lastError = '协作讨论未完成：${sanitizeWorkTaskError(error)}';
-          stored.resumeRequired = true;
+          final failure = WorkFailure.fromError(error,
+              scope: 'discussion',
+              completedContent: _completedContentForTask(stored));
+          _applyFailure(stored, failure, status: AgentTaskStatus.paused);
           await _save(stored);
+          await _record(stored, WorkTaskEventKind.paused, '协作讨论未完成',
+              detail: failure.technicalDetail);
           return;
         }
         // A cancelled/late model callback may fail while a newer request
         // revision is already durable.  That failure belongs to the old run;
         // never turn the current revision into a blocked state or overwrite
         // its progress with an obsolete diagnostic.
-        if (current.requestRevision > expectedRevision) return;
         await _updateDiscussionState(
           task.id,
           current.copyWith(
