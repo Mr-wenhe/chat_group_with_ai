@@ -1,4 +1,4 @@
-import 'package:chat_group/features/work_mode/work_artifact_scope.dart';
+import 'package:chat_group/features/work_mode/work_artifact_count.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {

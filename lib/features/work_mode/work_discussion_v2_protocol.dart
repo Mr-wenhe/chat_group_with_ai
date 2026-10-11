@@ -1,7 +1,7 @@
 import 'dart:convert';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'agent_decision.dart';
-import 'work_artifact_scope.dart';
+import 'work_artifact_count.dart';
 import 'work_public_update_stream.dart';
 import 'work_tool_registry.dart';
 
