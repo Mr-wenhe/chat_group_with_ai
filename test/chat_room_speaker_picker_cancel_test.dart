@@ -57,5 +57,11 @@ void main() {
       isEmpty,
       reason: '回到本群后仍然采纳被取消的旧选择结果',
     );
+
+    // 收尾前再离开一次：回到本群时调度器已经重启，会在推进假时间的过程中不停
+    // 开新回合，最后那一个正好停在选人请求自己的 15 秒时限上。
+    hostKey.currentState!.pushCover();
+    await tester.pump();
+    await settleRoundTimers(tester);
   });
 }

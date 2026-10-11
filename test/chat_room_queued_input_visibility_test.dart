@@ -69,8 +69,7 @@ void main() {
       reason: '被遮挡时排队输入被取走，回到群聊后不再回复',
     );
 
-    // 本轮会产生真实回复，每条后面跟着一段"打字延迟"。flutter_test 在用例体
-    // 结束时就会检查是否还有挂起的计时器（早于 tearDown），所以要在体内走完。
-    await drainRound(tester, rounds: 200);
+    // 本轮会产生真实回复，每条后面跟着一段"打字延迟"；收尾前把计时器走完。
+    await settleRoundTimers(tester);
   });
 }

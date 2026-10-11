@@ -284,14 +284,28 @@ Future<void> drainRound(WidgetTester tester, {int rounds = 12}) async {
 }
 
 Future<void> disposeRoundRoom(WidgetTester tester) async {
-  // 先把"打字延迟"这类假区计时器走完再销毁，否则 Flutter 会以
-  // "A Timer is still pending even after the widget tree was disposed" 判失败。
-  // 延迟按回复长度算且每条回复各算一次（一轮最多三条），所以推进的假时间要
-  // 足够宽裕。
-  await drainRound(tester, rounds: 200);
+  await drainRound(tester);
   await tester.pumpWidget(const SizedBox.shrink());
   await tester.pump();
-  await drainRound(tester, rounds: 12);
+  await drainRound(tester);
+}
+
+/// 结束用例体之前，把本轮挂着的假区计时器走完。
+///
+/// flutter_test 在**用例体结束时**就会检查挂起的计时器（早于 tearDown），而这类
+/// 用例天生带着两种长计时器：选人请求自己的 15 秒时限，以及每条回复后面那段
+/// "打字延迟"。推进超过这两者的假时间两种情形都覆盖——请求已落地则时限计时器
+/// 随即取消，始终没落地就让它超时收场，都不会把挂起的计时器留给收尾。
+///
+/// 并发跑整轮测试时，固定轮数的 `drainRound` 会因为每轮放行的真实 I/O 被拉长而
+/// 不够用，所以这里按**假时间**推进，每步只让出一小段真实时间。
+Future<void> settleRoundTimers(WidgetTester tester) async {
+  for (var round = 0; round < 20; round++) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 20)),
+    );
+    await tester.pump(const Duration(seconds: 1));
+  }
 }
 
 /// 让空闲自动聊天在**假时钟区**重新开始调度。

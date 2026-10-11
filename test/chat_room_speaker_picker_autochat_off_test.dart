@@ -50,5 +50,6 @@ void main() {
       isEmpty,
       reason: '自动发言关闭后仍然启动了角色流式调用',
     );
+    await settleRoundTimers(tester);
   });
 }
