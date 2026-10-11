@@ -162,7 +162,10 @@ class WorkRoleRouter {
       final member = pinned ??
           _bestCandidate(_eligible(characters), kind, availableSkills, used);
       if (member == null ||
-          !_isSuitable(member, kind, availableSkills) ||
+          // 用户点名的人只按候选口径核（引擎/后端开发能担前端责任），自动选出来的
+          // 人仍必须严格对口——`_bestCandidate` 本来就只返回严格合格的人。
+          !_isSuitable(member, kind, availableSkills,
+              allowImplementationBridge: pinned != null) ||
           _availabilityFailure(member) != null ||
           used.contains(member.id)) {
         missing.add(kind);
@@ -213,7 +216,10 @@ class WorkRoleRouter {
                               : role))
                   .firstOrNull ??
               WorkRoleStageKind.general,
-          skills.toList());
+          skills.toList(),
+          // 这条判据同时决定"谁算合格候选""换人时谁可选""已选定的成员是否仍然
+          // 合格"，所以必须与候选口径一致：引擎/后端开发在前端责任上也算合格。
+          allowImplementationBridge: true);
 
   Future<WorkRoleRouteResult> route({
     required String request,
@@ -549,7 +555,8 @@ class WorkRoleRouter {
       );
     }
     final stageKind = _stageKind(state.currentStage.id);
-    if (!_isSuitable(receiver, stageKind, skills)) {
+    if (!_isSuitable(receiver, stageKind, skills,
+        allowImplementationBridge: true)) {
       return _failure(
         WorkRoleRouteSource.handoff,
         '当前接力指定的角色「${receiver.name}」不具备${_stageLabel(stageKind)}所需的职业或 Skill 能力。',
@@ -623,7 +630,8 @@ class WorkRoleRouter {
           } else if (decision.publicReason.trim().isEmpty) {
             modelNote = '模型候选推荐缺少可展示依据，未采纳模型选择。';
           } else if (selected == null ||
-              !_isSuitable(selected, kinds.first, skills)) {
+              !_isSuitable(selected, kinds.first, skills,
+                  allowImplementationBridge: true)) {
             modelNote = '模型推荐角色不满足本任务的${_stageLabel(kinds.first)}资格，未采纳模型选择。';
           } else {
             ordered = [
@@ -703,7 +711,8 @@ class WorkRoleRouter {
     final requiredKind = kinds.first;
     final result = <AICharacter>[];
     for (final candidate in candidates) {
-      if (_isSuitable(candidate, requiredKind, skills)) {
+      if (_isSuitable(candidate, requiredKind, skills,
+          allowImplementationBridge: true)) {
         result.add(candidate);
       }
     }

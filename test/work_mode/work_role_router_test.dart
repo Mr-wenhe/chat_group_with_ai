@@ -438,20 +438,30 @@ void main() {
     expect(result.publicReason, contains('能力'));
   });
 
-  test('pure HTML requires front-end capability and waits when unassigned',
-      () async {
-    final result = await router.route(
+  test('pure HTML 没有实现人时仍报前端缺口，有开发则作为候选列出', () async {
+    final noImplementer = await router.route(
+      request: '生成一个 HTML 页面',
+      conversationId: 'group:html-no-implementer',
+      characters: [product, tester],
+      skills: skills,
+    );
+
+    expect(noImplementer.isSuccess, isFalse);
+    expect(noImplementer.needsExecutorSelection, isFalse);
+    expect(noImplementer.candidateCharacterIds, isEmpty);
+    expect(noImplementer.publicReason, contains('前端'));
+
+    // 前端与开发是同一个实现阶段的两个别名，所以通用开发是合格候选；但自动选人
+    // （selectTeam）仍只认明确的前端职责，不静默把界面派给不做界面的人。
+    final withDeveloper = await router.route(
       request: '生成一个 HTML 页面',
       conversationId: 'group:html-candidates',
       characters: characters,
       skills: skills,
     );
 
-    expect(result.isSuccess, isFalse);
-    expect(result.needsExecutorSelection, isFalse);
-    expect(result.candidateCharacterIds, isEmpty);
-    expect(result.publicReason, contains('前端'));
-    expect(result.deliverableContract?.format, 'html');
+    expect(withDeveloper.candidateCharacterIds, [developer.id]);
+    expect(withDeveloper.deliverableContract?.format, 'html');
   });
 
   test('候选推举的公开说明给出"无需操作"与真的可用出口', () async {
@@ -555,6 +565,99 @@ void main() {
     );
 
     expect(result.isSuccess, isFalse);
+    expect(result.candidateCharacterIds, isEmpty);
+    expect(result.publicReason, contains('前端'));
+  });
+
+  test('游戏引擎开发是 HTML 的合格候选，自动选人仍只认前端职责', () async {
+    final engine = _character('engine', '周鹏飞', '游戏引擎开发')
+      ..systemPrompt = '你是游戏引擎程序员，对渲染管线如数家珍。';
+    final result = await router.route(
+      request: '生成一个 HTML 页面',
+      conversationId: 'group:html-engine',
+      characters: [engine],
+      skills: const [],
+    );
+
+    expect(result.candidateCharacterIds, [engine.id]);
+    expect(
+        WorkRoleRouter.qualifiesForResponsibility(
+            engine, 'frontend', const []),
+        isTrue,
+        reason: '换人候选列表走的就是这条判据，否则周鹏飞根本进不了候选');
+
+    // 岗位与电脑里的现场：群里只有引擎开发时，v2 的 selectTeam 不会静默把界面
+    // 派给他，而是如实报前端缺口让用户定——但候选列表里已经有人可选了。
+    final team = WorkRoleRouter.selectTeam(
+      request: '生成一个 HTML 页面',
+      characters: [engine],
+      skills: const [],
+    );
+    expect(team.team.map((m) => m['role']), isNot(contains('frontend')));
+    expect(team.missing.map((kind) => kind.name), contains('frontend'));
+  });
+
+  test('前端与引擎开发并存时自动选人仍选前端，引擎开发只是候选', () async {
+    final frontend = _character('frontend', '程序媛', '前端工程师')
+      ..systemPrompt = '负责前端 HTML、CSS 和浏览器页面交付';
+    final engine = _character('engine', '周鹏飞', '游戏引擎开发')
+      ..systemPrompt = '你是游戏引擎程序员，对渲染管线如数家珍。';
+    // 引擎开发排在前面，仍然不该被自动选中。
+    final team = WorkRoleRouter.selectTeam(
+      request: '生成一个 HTML 页面',
+      characters: [engine, frontend],
+      skills: const [],
+    );
+
+    expect(team.team.first['memberId'], frontend.id);
+    expect(
+        WorkRoleRouter.qualifiedCandidatesForRequest(
+          request: '生成一个 HTML 页面',
+          characters: [engine, frontend],
+        ).map((c) => c.id),
+        containsAll(<String>[frontend.id, engine.id]));
+  });
+
+  test('可以明确 @ 游戏引擎开发做 HTML，不再判成能力不足', () async {
+    final engine = _character('engine', '周鹏飞', '游戏引擎开发')
+      ..systemPrompt = '你是游戏引擎程序员，对渲染管线如数家珍。';
+    final result = await router.route(
+      request: '@周鹏飞 生成一个 HTML 页面',
+      conversationId: 'group:html-engine-explicit',
+      characters: [engine],
+      skills: const [],
+    );
+
+    expect(result.isSuccess, isTrue);
+    expect(result.characterId, engine.id);
+  });
+
+  test('英文 QA 不会因 engineer 与 bug 被算成 HTML 实现人', () async {
+    final qa = _character('qa', 'QA Owner', 'QA Engineer')
+      ..systemPrompt = 'Owns regression testing and bug reports.';
+    final result = await router.route(
+      request: '生成一个 HTML 页面',
+      conversationId: 'group:html-english-qa',
+      characters: [qa],
+      skills: const [],
+    );
+
+    expect(result.candidateCharacterIds, isEmpty);
+    expect(result.publicReason, contains('前端'));
+  });
+
+  test('中文「测试开发」不会因含「开发」被算成前端实现人', () async {
+    // 测试岗常常带一个实现词（测试开发、自动化开发），但他们不写交付物。
+    // 只拉黑 engineer/bug 那种做法挡得住英文 QA，挡不住这一类中文复合职称。
+    final qaDev = _character('qa-dev', '小测开', '测试开发工程师')
+      ..systemPrompt = '负责自动化测试与回归用例开发。';
+    final result = await router.route(
+      request: '生成一个 HTML 页面',
+      conversationId: 'group:html-qa-dev',
+      characters: [qaDev],
+      skills: const [],
+    );
+
     expect(result.candidateCharacterIds, isEmpty);
     expect(result.publicReason, contains('前端'));
   });

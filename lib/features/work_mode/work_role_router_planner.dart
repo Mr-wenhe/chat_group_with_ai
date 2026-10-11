@@ -15,7 +15,9 @@ _StagePlanResult _stagePlan(
     AICharacter? selected;
     if (index == 0 && forcedFirstRoleId != null) {
       selected = WorkRoleRouter._findUnique(candidates, forcedFirstRoleId);
-      if (selected == null || !_isSuitable(selected, kind, skills)) {
+      if (selected == null ||
+          !_isSuitable(selected, kind, skills,
+              allowImplementationBridge: true)) {
         return _StagePlanResult.failed(
           '角色「${selected?.name ?? forcedFirstRoleId}」不具备${_stageLabel(kind)}所需的职业或 Skill 能力。',
         );
@@ -25,7 +27,9 @@ _StagePlanResult _stagePlan(
         candidates,
         explicitRoleIds[index],
       );
-      if (explicit == null || !_isSuitable(explicit, kind, skills)) {
+      if (explicit == null ||
+          !_isSuitable(explicit, kind, skills,
+              allowImplementationBridge: true)) {
         return _StagePlanResult.failed(
           '被 @ 的角色「${explicitRoleIds[index]}」不具备${_stageLabel(kind)}所需能力，没有静默换人。',
         );
@@ -185,9 +189,37 @@ AICharacter? _bestCandidate(
 bool _isSuitable(
   AICharacter character,
   WorkRoleStageKind kind,
-  List<CharacterSkill> skills,
-) =>
-    kind == WorkRoleStageKind.general || _score(character, kind, skills) > 0;
+  List<CharacterSkill> skills, {
+  bool allowImplementationBridge = false,
+}) {
+  if (kind == WorkRoleStageKind.general) return true;
+  if (_score(character, kind, skills) > 0) return true;
+  // 软件实现类请求里「前端」与「开发」是同一个实现阶段的两个别名，所以引擎、后端
+  // 这类实现人可以**被候选、被换成、被用户点名**。自动选人刻意不开这个口子：
+  // 群里没有明确的前端职责时仍如实报前端缺口，不静默把界面派给不做界面的人。
+  return allowImplementationBridge &&
+      kind == WorkRoleStageKind.frontend &&
+      _implementationBridgeScore(character, skills) > 0;
+}
+
+/// 开发资质里表明"确实写代码实现产物"的那部分关键词，用于前端阶段的实现桥梁。
+///
+/// `engineer` 与 `bug` 太宽：英文 QA（`QA Engineer`、`bug reports`）会被它们判成
+/// 实现人，于是测试角色成了 HTML 的合格候选人。
+const Set<String> _nonImplementationKeywords = {'engineer', 'bug'};
+
+int _implementationBridgeScore(
+    AICharacter character, List<CharacterSkill> skills) {
+  final profile = _profile(character, skills);
+  // 测试岗常常自带一个实现词（「测试开发」「自动化用例开发」「QA Engineer」），
+  // 但他们不写交付物。判据落在"这条 profile 整体像什么角色"上，而不是继续往
+  // 黑名单里逐个加词——中文复合职称那样补是补不完的。
+  if (_keywords(WorkRoleStageKind.testing).any(profile.contains)) return 0;
+  return _keywords(WorkRoleStageKind.development)
+      .where((keyword) => !_nonImplementationKeywords.contains(keyword))
+      .where(profile.contains)
+      .length;
+}
 
 int _score(
   AICharacter character,
