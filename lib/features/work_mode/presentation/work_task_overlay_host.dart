@@ -128,8 +128,11 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
   /// 话控件行本身。有横幅时控件行会被顶下去：胶囊可以拖走，面板则仍会压住它。
   static const double _conversationControlsBand = 50.0;
 
-  /// 折叠胶囊、隐藏态圆钮与宽屏面板的顶边偏移：落在 AppBar 之下，会话页还要再
-  /// 让开会话控件行。
+  /// 折叠胶囊与隐藏态圆钮的顶边偏移：落在 AppBar 之下，会话页还要再让开会话
+  /// 控件行。
+  ///
+  /// 展开的面板**不走这里**：它用 [_panelTopAnchor] 直接贴控件行下沿，不额外留
+  /// [_topAnchorGap] 那段空隙（理由见那边的说明）。
   ///
   /// 全局宿主读不到具体路由的 AppBar 与布局，按状态栏 + 标准工具栏高度推算。
   /// 桌面端状态栏为 0，非会话页落点 72，收起与展开停在同一个角落，而顶部那一
