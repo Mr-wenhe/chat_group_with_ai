@@ -44,18 +44,28 @@ void _registerDiscussionHistoryRegressions() {
     expect(WorkDiscussionV2Turn.protocolFor(''), contains('必须有 kind=material'));
   });
 
-  test('单产物请求不要求材料工作项，多产物仍要求', () async {
+  test('单产物请求不要求材料工作项，多产物仍要求，且不随 userRequest 改写漂移',
+      () async {
     await db.agentTaskBox.put(task.id, task);
     final discussion = modelRunner(confirm);
     await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
 
     // 只留一个 produce 工作项并补齐 files/verificationCommands，把材料要求单独
     // 隔离出来——否则 files 为空会让两种请求都失败，测不出这条分流。
-    Future<bool> preparedFor(String request) async {
-      task.userRequest = request;
-      final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    //
+    // 需求范围写进**协作状态**（`WorkDiscussionState.currentRequestScope` 的冻结
+    // 源），而不是只改 `task.userRequest`：讨论协议与产出闸门都按冻结范围判定，
+    // 这样两个方向都能单独摆布，把"两边读不同源"的漂移也测出来。
+    //
+    // 每次都从讨论结束时的快照重建：被拒的那一次会在检查点里留下待办输入，
+    // 接着拿它当输入就会让下一次卡在更早的守卫上，测不到闸门本身。
+    final pristine = task.executionStateJson;
+    Future<bool> preparedFor(String frozenScope, {String? userRequest}) async {
+      task.userRequest = userRequest ?? frozenScope;
+      final root = jsonDecode(pristine) as Map<String, dynamic>;
       final collaboration = root[WorkDiscussionState.jsonKey]['collaboration']
           as Map<String, dynamic>;
+      collaboration['scope'] = frozenScope;
       final contract =
           collaboration['artifactContract'] as Map<String, dynamic>;
       contract['files'] = ['game.html'];
@@ -73,15 +83,29 @@ void _registerDiscussionHistoryRegressions() {
         }
       ];
       task.executionStateJson = jsonEncode(root);
+      task.lastError = '';
       await db.agentTaskBox.put(task.id, task);
       return execution.prepareCollaborationWork(task);
     }
 
-    expect(await preparedFor('生成一份 飞行棋游戏的HTML，第一版只需要和AI对战即可'),
-        isTrue,
+    const single = '生成一份 飞行棋游戏的HTML，第一版只需要和AI对战即可';
+    const multi = '生成一份 飞行棋游戏的HTML 和一份说明文档';
+
+    expect(await preparedFor(single), isTrue,
         reason: '单产物请求只剩 produce 工作项不应再被材料要求拦下：${task.lastError}');
-    expect(await preparedFor('生成一份 飞行棋游戏的HTML 和一份说明文档'), isFalse,
+    expect(await preparedFor(multi), isFalse,
         reason: '多产物请求仍必须补齐材料工作项');
+    // 判据落在这条协议/闸门独有的文案上：`prepareCollaborationWork` 前面还有
+    // "方案未就绪"等不设 lastError 的早退，只看返回值分不出是谁拦下的。
+    expect(task.lastError, contains('材料工作项'),
+        reason: '这条 false 必须来自材料门禁，而不是更早的守卫');
+
+    // 跟进推广会覆盖 `task.userRequest`，而讨论协议是按冻结范围播出去的：
+    // 闸门必须跟着冻结范围走，否则一次跟进就能让材料门禁静默消失。
+    expect(await preparedFor(multi, userRequest: single), isFalse,
+        reason: '冻结范围是多产物时，改写 userRequest 不得让材料门禁消失');
+    expect(task.lastError, contains('材料工作项'),
+        reason: '改写 userRequest 之后仍应由材料门禁拦下，而不是别的早退');
   }, timeout: const Timeout(Duration(seconds: 30)));
 
   test('协议可从前置说明中读取唯一 JSON 对象，仍拒绝尾随正文', () {

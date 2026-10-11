@@ -84,7 +84,14 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
     // 用户只点名一个交付文件时不强制材料工作项：验证力来自 acceptances、下面的
     // verificationCommands 与独立审查，那三样一项没少；材料文档只是过程证据，在
     // 单文件交付上会把任务放大数倍（2026-10-10 现场：一个 HTML 变成五份产物）。
-    final singleArtifact = requestsSingleArtifact(task.userRequest);
+    //
+    // 判定必须读**冻结**的需求范围，不能读 `task.userRequest`：讨论时播出去的协议
+    // 文本是按冻结范围生成的，而跟进推广会覆盖 `task.userRequest`。两处各读各的
+    // 时候，一次跟进就能让"方案必须有材料工作项"的承诺在这里静默消失——没有状态
+    // 变更、没有事件，只是门禁少了一条。
+    final singleArtifact = requestsSingleArtifact(
+      WorkDiscussionState.currentRequestScope(task),
+    );
     if ((state.artifactContract['files'] as List? ?? const []).isEmpty ||
         (state.artifactContract['verificationCommands'] as List? ?? const [])
             .isEmpty ||

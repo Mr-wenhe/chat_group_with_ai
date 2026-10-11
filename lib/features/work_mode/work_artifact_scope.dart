@@ -59,6 +59,11 @@ final RegExp _pluralArtifact = RegExp(
 ///
 /// 只读用户原话，不看模型提案：合同字段由协调成员填写，用它判定等于让被约束
 /// 的一方自己决定要不要被约束。任何不确定都返回 `false`。
+///
+/// 调用方传进来的原话必须是**冻结**的那份（运行时用
+/// `WorkDiscussionState.currentRequestScope(task)`），不能直接传
+/// `task.userRequest`：后者会被跟进推广覆盖，而这条判据同时决定"讨论时告诉成员
+/// 要不要材料工作项"与"产出时是否要求它"，读不同的源就会各说各话。
 bool requestsSingleArtifact(String request) {
   if (request.trim().isEmpty) return false;
   final lower = request.toLowerCase();
