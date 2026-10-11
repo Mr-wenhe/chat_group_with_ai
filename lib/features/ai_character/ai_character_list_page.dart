@@ -43,7 +43,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
     final db = ref.read(databaseServiceProvider);
-    final characters = ref.watch(aiCharactersProvider);
+    final characters = ref.watch(userManagedAICharactersProvider);
     final query = _searchController.text.trim();
     final filteredCharacters = query.isEmpty
         ? characters
@@ -606,7 +606,7 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
   Future<void> _batchReplaceConfig(BuildContext context, WidgetRef ref) async {
     final cs = Theme.of(context).colorScheme;
     final apiConfigs = ref.read(apiConfigsProvider);
-    final characters = ref.read(aiCharactersProvider);
+    final characters = ref.read(userManagedAICharactersProvider);
     if (apiConfigs.length < 2) {
       AppToast.show(context, '至少需要两个配置才能批量替换',
           icon: Icons.info_outline_rounded);

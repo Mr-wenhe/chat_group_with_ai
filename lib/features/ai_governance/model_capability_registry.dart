@@ -244,6 +244,18 @@ class ModelCapabilityRegistry {
       'qwen/$model': _vision(provider: 'qwen', context: 131072),
     for (final model in ['glm-4-plus', 'glm-4-air'])
       'zhipu/$model': _text(provider: 'zhipu', context: 131072),
+    // GLM-4.7 exposes the same Zhipu Web Search protocol used by the news
+    // role. Keep the capability explicit so arbitrary OpenAI-compatible
+    // model IDs never receive provider-specific search requests.
+    for (final model in ['glm-4.7', 'glm4.7'])
+      'zhipu/$model': _text(
+        provider: 'zhipu',
+        context: 200000,
+        output: 131072,
+        nativeWebSearch: true,
+        nativeWebSearchFreshness: true,
+        source: '智谱 GLM-4.7 / Web Search 协议快照 2026-09-29',
+      ),
     'zhipu/glm-4-flash': _text(
       provider: 'zhipu',
       context: 131072,

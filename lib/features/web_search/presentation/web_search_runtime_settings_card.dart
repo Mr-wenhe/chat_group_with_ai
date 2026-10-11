@@ -123,7 +123,7 @@ class _WebSearchRuntimeSettingsCardState
             SwitchListTile(
               contentPadding: EdgeInsets.zero,
               title: const Text('使用模型原生联网搜索'),
-              subtitle: const Text('可能消耗当前会话的模型额度；仅支持明确声明能力的模型'),
+              subtitle: const Text('使用设置页保存的智谱 API Key；搜索结果再同步给角色回复'),
               value: _nativeSearchEnabled,
               onChanged: _saving
                   ? null

@@ -99,7 +99,10 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         return;
       }
       final repliedIds = <String>[];
-      for (final character in charactersToReply) {
+      for (var characterIndex = 0;
+          characterIndex < charactersToReply.length;
+          characterIndex++) {
+        final character = charactersToReply[characterIndex];
         final wasPendingReply = _pendingMentionedIds.contains(character.id);
         late final String replyContent;
         try {
@@ -112,6 +115,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
             currentUserMessage: currentUserMessage,
             userSentiment: userSentiment,
             searchTurnContext: searchTurnContext,
+            isRoundtableOpeningBrief: roundtableMode && characterIndex == 0,
           );
         } catch (e) {
           // 单个角色失败不中断整轮：写入可见的失败气泡，继续下一个角色。

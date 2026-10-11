@@ -52,6 +52,7 @@ class ChatApiService {
     Duration? receiveTimeout,
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
+    bool allowReasoningContentFallback = false,
   }) async {
     if (kIsWeb) {
       return {
@@ -72,6 +73,7 @@ class ChatApiService {
         receiveTimeout: receiveTimeout,
         cancelToken: cancelToken,
         maxResponseBytes: defaultMaxResponseBytes,
+        allowReasoningContentFallback: allowReasoningContentFallback,
       ),
       shouldRetryResult: RetryHandler.isTransientResult,
       sleep: _retrySleep,
@@ -98,6 +100,7 @@ class ChatApiService {
     int maxRetries = RetryHandler.defaultMaxRetries,
     CancelToken? cancelToken,
     bool structuredJson = false,
+    bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
   }) async {
     if (kIsWeb) {
@@ -123,6 +126,7 @@ class ChatApiService {
         cancelToken: cancelToken,
         maxResponseBytes: maxResponseBytes,
         structuredJson: structuredJson,
+        allowReasoningContentFallback: allowReasoningContentFallback,
         stepPlanLowReasoning: _isStepPlanEndpoint(
           provider: provider,
           customBaseUrl: customBaseUrl,
@@ -226,6 +230,7 @@ class ChatApiService {
     required int? maxResponseBytes,
     bool structuredJson = false,
     bool stepPlanLowReasoning = false,
+    bool allowReasoningContentFallback = false,
   }) async {
     if (kIsWeb) {
       return {
@@ -283,7 +288,11 @@ class ChatApiService {
         if (data == null) {
           return {'success': false, 'message': '响应格式无效'};
         }
-        final reply = _responseText(data, apiProtocol);
+        final reply = _responseText(
+          data,
+          apiProtocol,
+          allowReasoningContentFallback: allowReasoningContentFallback,
+        );
         if (reply.trim().isEmpty) {
           // An empty completion is a typed, bounded model-protocol failure.
           // Work mode can retry the same checkpoint without treating it as an
@@ -459,6 +468,7 @@ class ChatApiService {
             maxTokens: maxTokens,
             receiveTimeout: receiveTimeout,
             cancelToken: cancelToken,
+            allowReasoningContentFallback: structuredJson,
             structuredJson: structuredJson,
             stepPlanLowReasoning: _isStepPlanEndpoint(
               provider: provider,
@@ -620,7 +630,9 @@ class ChatApiService {
       ),
     );
 
-    final parser = SseParser();
+    final parser = SseParser(
+      allowReasoningContentFallback: structuredJson,
+    );
     final protocolParser = apiProtocol == ApiProtocol.openAiChatCompletions
         ? null
         : _ProtocolStreamParser(apiProtocol);

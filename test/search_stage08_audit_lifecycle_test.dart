@@ -23,6 +23,25 @@ void main() {
 
     tearDown(() => closeLifecycleHive(hiveDirectory));
 
+    test('uses automatic search policy when no global policy is persisted',
+        () async {
+      final store = AiGovernanceStore.forDatabase(db);
+
+      expect(
+        store.globalSearchPolicy,
+        AiGovernanceStore.defaultGlobalSearchPolicy,
+      );
+
+      await store.saveGlobalSearchPolicy(WebSearchPolicy.off);
+      expect(store.globalSearchPolicy, WebSearchPolicy.off);
+
+      await store.clearSearchPolicies();
+      expect(
+        store.globalSearchPolicy,
+        AiGovernanceStore.defaultGlobalSearchPolicy,
+      );
+    });
+
     test('retains only fresh, bounded entries and preserves request linkage',
         () async {
       final store = AiGovernanceStore.forDatabase(db);

@@ -53,6 +53,7 @@ class _FakeChatApiService extends ChatApiService {
     Duration? receiveTimeout,
     int maxRetries = 3,
     CancelToken? cancelToken,
+    bool allowReasoningContentFallback = false,
   }) async {
     calls.add((model: model, messages: messages));
     final delay = delaysByModel[model];
