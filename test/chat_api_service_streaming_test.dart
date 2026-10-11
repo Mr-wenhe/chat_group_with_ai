@@ -434,6 +434,9 @@ void main() {
       messages: const [],
       maxRetries: 0,
       structuredJson: true,
+      // 回退是显式契约：structuredJson 不隐含启用（见 AiRequestGateway
+      // 各调用点均显式传参），这里必须单独开启。
+      allowReasoningContentFallback: true,
       maxResponseBytes: ChatApiService.defaultMaxResponseBytes,
     );
 
