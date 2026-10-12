@@ -52,6 +52,12 @@ typedef WorkTaskExecutorChoice = FutureOr<void> Function(
   int version,
   bool swap,
 );
+
+/// 面板里为一条"还没有执行人"的群任务点选接手角色。
+typedef WorkTaskExecutorPick = FutureOr<void> Function(
+  String taskId,
+  String characterId,
+);
 typedef WorkTaskUndoPreview = FutureOr<List<WorkSnapshotUndoItem>> Function(
     String taskId);
 
@@ -90,6 +96,9 @@ class WorkTaskPanel extends StatefulWidget {
 
   /// 群推举的执行人与请求里钉定的人不一致时的确认入口。
   final WorkTaskExecutorChoice? onConfirmExecutorSwap;
+
+  /// 面板里直接指定最终执行人（无执行人但有合格候选时才出现）。
+  final WorkTaskExecutorPick? onSelectExecutor;
 
   /// 确认把本次运行写出的文件当作交付物。为 null 时不展示该入口。
   ///
@@ -177,6 +186,7 @@ class WorkTaskPanel extends StatefulWidget {
     this.onLaterVersioned,
     this.undoPreviewFor,
     this.onConfirmExecutorSwap,
+    this.onSelectExecutor,
     this.onConfirmArtifactDelivery,
     this.onDeleteTask,
     this.onOpenInTabStrip,
@@ -436,6 +446,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               onLaterVersioned: widget.onLaterVersioned,
               undoPreviewFor: widget.undoPreviewFor,
               onConfirmExecutorSwap: widget.onConfirmExecutorSwap,
+              onSelectExecutor: widget.onSelectExecutor,
               onConfirmArtifactDelivery: widget.onConfirmArtifactDelivery,
               characterNameFor: widget.characterNameFor,
               onStop: widget.onStop,

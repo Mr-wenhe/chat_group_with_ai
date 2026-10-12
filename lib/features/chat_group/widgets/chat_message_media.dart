@@ -120,6 +120,12 @@ class ChatMessageMedia extends StatelessWidget {
     );
   }
 
+  /// 文件类附件的卡片。工作模式写给自己的详情留档（方案与验收详情、调查来源
+  /// 与结果、完整公开正文、工作项交接）也走这里，只换掉措辞与点击动作。
+  ///
+  /// 留档不能沿用通用外观：「待解析」是给用户文档用的状态，对内部留档没有
+  /// 意义，正是"这文件是什么"的困惑来源；点击也不该把一份 JSON 甩给系统
+  /// 打开，应用内可读视图才能让正文真正看得见。
   Widget _buildFileAttachment(
     BuildContext context,
     MediaAttachment att,
@@ -131,8 +137,15 @@ class ChatMessageMedia extends StatelessWidget {
     final fillColor = isUser
         ? WeComChatTokens.lightText.withValues(alpha: 0.07)
         : WeComChatTokens.chatBackground(context).withValues(alpha: 0.7);
+    final isDetail = isWorkModeDetailAttachment(att);
     return InkWell(
-      onTap: () => _openAttachment(context, att),
+      onTap: () => isDetail
+          ? unawaited(showReadableJsonDialog(
+              context,
+              title: att.fileName ?? fileNameFromPath(att.localPath),
+              path: att.localPath,
+            ))
+          : _openAttachment(context, att),
       onLongPress: () => _showAttachmentActions(context, att),
       onSecondaryTap: () => _showAttachmentActions(context, att),
       borderRadius: BorderRadius.circular(8),
@@ -142,10 +155,16 @@ class ChatMessageMedia extends StatelessWidget {
         decoration: BoxDecoration(
           color: fillColor,
           borderRadius: BorderRadius.circular(8),
+          // 内部留档用一层弱描边和用户附件区分：它不占用户的空间，
+          // 也不该被读成"别人发来的文件"。
+          border: isDetail
+              ? Border.all(color: subtleColor.withValues(alpha: 0.32))
+              : null,
         ),
         child: Row(
           children: [
-            Icon(fileIconFor(att), size: 30, color: subtleColor),
+            Icon(isDetail ? Icons.receipt_long_outlined : fileIconFor(att),
+                size: isDetail ? 26 : 30, color: subtleColor),
             const SizedBox(width: 10),
             Expanded(
               child: Column(
@@ -164,8 +183,10 @@ class ChatMessageMedia extends StatelessWidget {
                   ),
                   const SizedBox(height: 2),
                   Text(
-                    '${formatAttachmentSize(att.fileSize)} · '
-                    '${DocumentUnderstandingService.statusLabel(att)}',
+                    isDetail
+                        ? '内部记录 · ${formatAttachmentSize(att.fileSize)}'
+                        : '${formatAttachmentSize(att.fileSize)} · '
+                            '${DocumentUnderstandingService.statusLabel(att)}',
                     maxLines: 1,
                     overflow: TextOverflow.ellipsis,
                     style: TextStyle(fontSize: 11, color: subtleColor),
@@ -174,7 +195,12 @@ class ChatMessageMedia extends StatelessWidget {
               ),
             ),
             const SizedBox(width: 8),
-            Icon(Icons.open_in_new_rounded, size: 18, color: subtleColor),
+            Icon(
+                isDetail
+                    ? Icons.visibility_outlined
+                    : Icons.open_in_new_rounded,
+                size: 18,
+                color: subtleColor),
           ],
         ),
       ),

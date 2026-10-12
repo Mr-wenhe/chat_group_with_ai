@@ -4,8 +4,9 @@ enum WorkRoleRouteSource {
   explicitMention,
   privateChat,
   handoff,
-  model,
-  deterministicFallback,
+
+  /// 群内只有一位成员具备本阶段的本职资格，S1 直接指定，不做推举。
+  soleQualifiedCandidate,
   candidateSelection,
   unavailable,
 }

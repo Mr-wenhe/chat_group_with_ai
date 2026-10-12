@@ -43,6 +43,7 @@ part 'work_task_coordinator_startup_recovery.dart';
 part 'work_task_coordinator_auto_resume.dart';
 part 'work_task_coordinator_discussion_lifecycle.dart';
 part 'work_task_coordinator_executor_conflict.dart';
+part 'work_task_coordinator_executor_selection.dart';
 part 'work_task_coordinator_scheduling.dart';
 part 'work_task_coordinator_execution.dart';
 part 'work_task_coordinator_workspace_queue.dart';
@@ -378,6 +379,17 @@ class WorkTaskCoordinator {
     required bool swap,
   }) =>
       _implConfirmExecutorSwap(taskId, version: version, swap: swap);
+
+  /// 用户在面板里为一条"还没有执行人"的群任务点选接手角色。
+  ///
+  /// 与 `confirmExecutorSwap` 的分工：那条路裁决"钉定人 vs 群推举人"的冲突，
+  /// 必须重开请求版本；这条只是把空着的执行人填上，所以不改请求版本、不作废
+  /// 已形成的方案与认可。`characterId` 必须是检查点里的合格候选之一。
+  Future<void> selectDiscussionExecutor(
+    String taskId, {
+    required String characterId,
+  }) =>
+      _implSelectDiscussionExecutor(taskId, characterId: characterId);
 
   /// Accepts the files a paused task offered for delivery, answering the
   /// question the completion guard asked when it could not recognise them.

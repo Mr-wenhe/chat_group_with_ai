@@ -589,6 +589,51 @@ class WorkRoleRouter {
     List<String> discussionCharacterIds = const [],
     List<String> consultedCharacterIds = const [],
   }) async {
+    // 群里**只有一位**成员本职合格时不再走推举：模型推荐只能重排候选，而这里
+    // 连候选都不用排——唯一那个人就是答案。这条分支刻意放在模型选人之前，因为
+    // 那个调用在"唯一匹配"的场景里只买到延迟与失败面（2026-10-12 现场：为一句
+    // "生成一份飞行棋游戏的HTML"多跑一整轮推举，推举结论与模型推荐完全一致）。
+    //
+    // 只认本职合格（不开实现桥梁）：桥接进来的引擎/后端实现人可以当候选、可以被
+    // 用户点名，但不该让"群里唯一一个真做界面的人"变成一个需要讨论的悬念。
+    //
+    // 用户 @ 了某人只是征求意见时不做自动指定：那条路由自己的结论就是"没有人被
+    // 指派"（`_looksLikeConsultation`），把它升级成"唯一合格者接手"等于把一句提问
+    // 静默变成一次派活。判错的方向必须是保守——退回旧行为（群内推举），而不是替
+    // 用户决定谁来干。
+    final native = consultedCharacterIds.isEmpty
+        ? _nativelyQualified(kinds, candidates, skills)
+        : const <AICharacter>[];
+    if (native.length == 1) {
+      final sole = native.single;
+      final plan = _stagePlan(
+        request,
+        kinds,
+        candidates,
+        skills,
+        forcedFirstRoleId: sole.id,
+      );
+      // 后续阶段缺人时落回下面的候选路径：那仍是一条可恢复的推迟，不该在这次
+      // 判定的名义下变成硬失败。
+      if (plan.isSuccess) {
+        return _success(
+          sole.id,
+          WorkRoleRouteSource.soleQualifiedCandidate,
+          '按职业资格指定「${sole.name}」执行本任务：群内只有这一位成员具备'
+          '${_stageLabel(kinds.first)}职责，不再进行群内推举。'
+          '接下来由群讨论确认方案、验收与分工，你无需操作。',
+          1,
+          plan.stages,
+          conversationId,
+          needsHandoff: plan.stages.length > 1,
+          // 刻意不写 explicitExecutorId：那是"用户钉定"，讨论将无权改派，不一致
+          // 时还会要求用户确认。自动指定不是用户声明，讨论仍应有权改派。
+          deliverableContract: contract,
+          discussionCharacterIds: discussionCharacterIds,
+          consultedCharacterIds: consultedCharacterIds,
+        );
+      }
+    }
     final qualified = _qualifiedCandidates(kinds, candidates, skills);
     if (qualified.isEmpty) {
       final label = _stageLabel(kinds.first);
@@ -660,7 +705,10 @@ class WorkRoleRouter {
       publicReason:
           '${modelNote == null ? '' : '$modelNote '}尚未指定最终执行人。候选角色：$names；'
           '任务需要$stageName能力，已交给群内讨论自动推举，你无需操作；'
-          '想自己指定，直接在群里 @ 一位候选角色即可。',
+          // 旧文案写的是"直接在群里 @ 一位候选角色即可"，但那并不是这条路上的
+          // 真出口：任务在讨论中时新消息只走 follow-up（`enqueueFollowUp`），
+          // 不会重跑路由，@ 只会被当成一句补充要求。面板才是真的能指定的地方。
+          '想自己指定，请在任务面板点选一位候选角色。',
       confidence: 0,
       needsHandoff: false,
       deliverableContract: contract,

@@ -202,6 +202,23 @@ bool _isSuitable(
       _implementationBridgeScore(character, skills) > 0;
 }
 
+/// 第一必需阶段里**本专业对口**的成员——`_isSuitable` 的开桥版会把引擎、后端这类
+/// 实现人也算成前端候选，这里只认本职职责命中的那一位。
+///
+/// 判据是 `_qualifiedCandidates` 的严格对偶，用在"唯一明确匹配"这条自动指定上：
+/// 群里只有一位真做界面的人时不需要推举，靠桥接进来的实现人不算匹配。
+List<AICharacter> _nativelyQualified(
+  List<WorkRoleStageKind> kinds,
+  List<AICharacter> candidates,
+  List<CharacterSkill> skills,
+) {
+  if (kinds.isEmpty) return const <AICharacter>[];
+  final requiredKind = kinds.first;
+  return candidates
+      .where((candidate) => _isSuitable(candidate, requiredKind, skills))
+      .toList(growable: false);
+}
+
 /// 开发资质里表明"确实写代码实现产物"的那部分关键词，用于前端阶段的实现桥梁。
 ///
 /// `engineer` 与 `bug` 太宽：英文 QA（`QA Engineer`、`bug reports`）会被它们判成

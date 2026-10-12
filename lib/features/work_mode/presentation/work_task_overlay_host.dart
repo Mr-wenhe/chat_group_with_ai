@@ -385,6 +385,8 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
                   (_coordinator == null ? null : _selectVisionModel),
               onConfirmExecutorSwap:
                   _coordinator == null ? null : _confirmExecutorSwap,
+              onSelectExecutor:
+                  _coordinator == null ? null : _selectExecutor,
               onConfirmArtifactDelivery:
                   _coordinator == null ? null : _confirmArtifactDelivery,
               onRetry: widget.onRetryTask ??
@@ -879,6 +881,17 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
           taskId,
           version: version,
           swap: swap,
+        ) ??
+        Future<void>.value();
+  }
+
+  /// 用户在面板里点选接手角色。协调器负责校验"这位角色确实是本任务的合格候选"，
+  /// 所以这里不做判据，只把选择原样转交——面板里出现过的候选就是它的全部来源。
+  Future<void> _selectExecutor(String taskId, String characterId) {
+    final coordinator = _coordinator;
+    return coordinator?.selectDiscussionExecutor(
+          taskId,
+          characterId: characterId,
         ) ??
         Future<void>.value();
   }

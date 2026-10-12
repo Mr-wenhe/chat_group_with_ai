@@ -1145,15 +1145,15 @@ class _CandidateButtons extends StatelessWidget {
 
   @override
   Widget build(BuildContext context) {
-    return Wrap(
-      spacing: 8,
-      runSpacing: 4,
-      children: <Widget>[
+    return _ChoiceButtons(
+      enabled: enabled,
+      onSubmit: onSubmit,
+      options: <_ChoiceOption>[
         for (final option in options)
-          OutlinedButton(
+          _ChoiceOption(
             key: Key('work-task-reply-option-${option.index}'),
-            onPressed: enabled ? () => unawaited(onSubmit(option.path)) : null,
-            child: Text(_labelFor(option)),
+            label: _labelFor(option),
+            value: option.path,
           ),
       ],
     );
@@ -1168,4 +1168,98 @@ class _CandidateButtons extends StatelessWidget {
         .length;
     return sameName > 1 ? option.path : option.displayName;
   }
+}
+
+/// 执行人候选按钮：点一下等于在面板里指定这位角色接手本任务。
+///
+/// 提交的是角色 id（讨论检查点认 id），按钮文案默认是角色名；两个候选重名时补上
+/// id 前缀——与澄清候选用完整路径去重是同一条判据：两个一模一样的按钮等于没有
+/// 给出选择。
+class _ExecutorCandidateButtons extends StatelessWidget {
+  final List<String> candidateIds;
+  final String Function(String characterId)? characterNameFor;
+  final bool enabled;
+  final Future<void> Function(String characterId) onSubmit;
+
+  const _ExecutorCandidateButtons({
+    required this.candidateIds,
+    required this.characterNameFor,
+    required this.enabled,
+    required this.onSubmit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    final names = <String, String>{
+      for (final id in candidateIds) id: _displayName(id),
+    };
+    final duplicated = <String>{
+      for (final name in names.values)
+        if (names.values.where((other) => other == name).length > 1) name,
+    };
+    return _ChoiceButtons(
+      enabled: enabled,
+      onSubmit: onSubmit,
+      options: <_ChoiceOption>[
+        for (final id in candidateIds)
+          _ChoiceOption(
+            key: Key('work-task-executor-option-$id'),
+            label: duplicated.contains(names[id])
+                ? '${names[id]}（${_shortId(id)}）'
+                : names[id]!,
+            value: id,
+          ),
+      ],
+    );
+  }
+
+  String _displayName(String characterId) {
+    final name = (characterNameFor?.call(characterId) ?? '').trim();
+    return name.isEmpty ? _shortId(characterId) : name;
+  }
+
+  String _shortId(String characterId) =>
+      characterId.length > 8 ? characterId.substring(0, 8) : characterId;
+}
+
+/// 一排可点候选项。澄清候选与执行人候选共用同一套外观与提交语义，只有文案与
+/// 提交值不同——两处各写一份 `Wrap` + `OutlinedButton` 迟早会走样。
+class _ChoiceButtons extends StatelessWidget {
+  final List<_ChoiceOption> options;
+  final bool enabled;
+  final Future<void> Function(String value) onSubmit;
+
+  const _ChoiceButtons({
+    required this.options,
+    required this.enabled,
+    required this.onSubmit,
+  });
+
+  @override
+  Widget build(BuildContext context) {
+    return Wrap(
+      spacing: 8,
+      runSpacing: 4,
+      children: <Widget>[
+        for (final option in options)
+          OutlinedButton(
+            key: option.key,
+            onPressed: enabled ? () => unawaited(onSubmit(option.value)) : null,
+            child: Text(option.label),
+          ),
+      ],
+    );
+  }
+}
+
+class _ChoiceOption {
+  final Key key;
+  final String label;
+  final String value;
+
+  const _ChoiceOption({
+    required this.key,
+    required this.label,
+    required this.value,
+  });
 }

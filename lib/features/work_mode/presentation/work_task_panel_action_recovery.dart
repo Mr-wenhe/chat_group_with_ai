@@ -27,6 +27,36 @@ extension _TaskActionRecovery on _TaskActions {
     return discussion.state?.isExecutionReady == true;
   }
 
+  /// 还没有执行人、但检查点里已经有合格候选时，把候选交给面板列成按钮。
+  ///
+  /// 与 `_hasPendingDiscussionCheckpoint` 同一批"此刻用户能不能动手"的判据：
+  /// 只在这条任务停在可以用力的边界上（等待中/中断/等审批）、讨论状态可解析、
+  /// 执行人为空时给按钮。终态、正在规划或正在跑工具都不给——那几种情况下换
+  /// 执行人要么没有意义，要么得先停下任务。
+  ///
+  /// 协作方案一旦进入制作/审查阶段也不再提供：那时工作项归属与已冻结的候选已经
+  /// 绑定，改执行人该走讨论或换人确认流程，而不是在这里把空位换成另一个人。
+  List<String> _executorCandidates(AgentTask task) {
+    if (task.isTerminal ||
+        (task.status != AgentTaskStatus.paused &&
+            task.status != AgentTaskStatus.interrupted &&
+            task.status != AgentTaskStatus.waitingForApproval)) {
+      return const <String>[];
+    }
+    final state = WorkDiscussionState.decodeExecutionState(
+      task.executionStateJson,
+    ).state;
+    if (state == null) return const <String>[];
+    if ((state.executorId ?? '').trim().isNotEmpty) return const <String>[];
+    final collaboration = state.collaboration;
+    if (collaboration != null &&
+        collaboration.phase != 'forming' &&
+        collaboration.phase != 'clarifying') {
+      return const <String>[];
+    }
+    return state.candidateCharacterIds;
+  }
+
   String? _pendingDiscussionQuestion(AgentTask task) {
     if (task.isTerminal ||
         (task.status != AgentTaskStatus.paused &&

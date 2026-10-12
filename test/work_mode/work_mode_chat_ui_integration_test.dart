@@ -524,9 +524,11 @@ void main() {
       find.byTooltip('工作模式已开启 · 敏感操作需确认'),
       findsOneWidget,
     );
-    // An unmentioned role enters the S3 candidate-selection path. The test
-    // completes that durable discussion state below before exercising the
-    // existing execution/authorization path.
+    // An unmentioned role still enters the discussion path, but a group whose
+    // only member is the sole qualified candidate now gets its executor from
+    // S1 by qualification instead of from a model-ranked candidate list. The
+    // durable discussion state below is completed manually either way; what
+    // matters here is that the owner is already decided.
     await tester.enterText(find.byType(TextField), '读取工作目录');
     await tester.pump();
     await tester.tap(find.byTooltip('发送'));
@@ -549,6 +551,11 @@ void main() {
     expect(pendingDiscussion.collaboration?.taskId, pendingTask.id);
     expect(pendingDiscussion.collaboration?.requestMessageId, isNotEmpty);
     expect(pendingDiscussion.collaboration?.approvals, isEmpty);
+    expect(
+      pendingDiscussion.executorId,
+      character.id,
+      reason: '群里只有这一位本职合格者：执行人由资格直接指定，不留"待推举"的中间态',
+    );
     expect(gateway.calls, 0);
     await tester.runAsync(() async {
       await expectLater(
@@ -613,7 +620,9 @@ void main() {
       completedTask.completedOperations,
       anyElement(contains('workspace.list')),
     );
-    expect(routeApi.calls, 1);
+    // 唯一本职合格者不咨询选人模型：这次输入没有歧义，问一次只会多一次请求和
+    // 一份失败面（模型输出被截断/空完成都曾让这条路更慢）。
+    expect(routeApi.calls, 0);
     expect(pickerCalls, 2);
     expect(gateway.calls, 2);
 

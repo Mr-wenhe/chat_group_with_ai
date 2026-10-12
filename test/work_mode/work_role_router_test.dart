@@ -35,6 +35,10 @@ void main() {
   final developer = _character('developer', '小开', '开发工程师');
   final tester = _character('tester', '小测', '测试工程师');
   final characters = [product, developer, tester];
+  // 只有一位本专业合格成员时 S1 会直接指定执行人，所以"推举仍然存在"的现场必须
+  // 有两个同职业成员才有意义。
+  final secondProduct = _character('product-2', '小需', '产品经理');
+  final twoProducts = [product, secondProduct];
   final skills = [
     _skill('product-skill', product.id, 'product'),
     _skill('coding-skill', developer.id, 'coding'),
@@ -51,11 +55,9 @@ void main() {
           conversationId: 'html-context',
           characters: [product, front]);
       expect(result.deliverableContract?.format, 'html');
-      if (request.contains('@')) {
-        expect(result.characterId, front.id);
-      } else {
-        expect(result.candidateCharacterIds, [front.id]);
-      }
+      // 群里只有这一位前端：按职业资格直接指定，两条路径（显式 @ 与按资格）都
+      // 落到同一个人身上，不再留下"待推举"的中间态。
+      expect(result.characterId, front.id);
     }
   });
 
@@ -71,7 +73,7 @@ void main() {
     );
 
     expect(result.deliverableContract?.format, 'html');
-    expect(result.candidateCharacterIds, [front.id]);
+    expect(result.characterId, front.id);
     expect(result.publicReason, contains('前端'));
   });
 
@@ -107,7 +109,7 @@ void main() {
 
     expect(result.deliverableContract?.format, 'markdown');
     expect(result.deliverableContract?.location, 'doudizhu_test_report.md');
-    expect(result.candidateCharacterIds, [tester.id]);
+    expect(result.characterId, tester.id);
     expect(
       WorkRoleRouter.startsWithTestingStage(
         'Test existing Desktop/doudizhu_game.html and create '
@@ -134,7 +136,7 @@ void main() {
     );
 
     expect(result.deliverableContract?.format, 'unspecified');
-    expect(result.candidateCharacterIds, [tester.id]);
+    expect(result.characterId, tester.id);
   });
 
   test('unknown longer Chinese executor is never shortened to a known role',
@@ -301,6 +303,8 @@ void main() {
     expect(result.isSuccess, isFalse);
     expect(result.source, WorkRoleRouteSource.candidateSelection);
     expect(result.characterId, isNull);
+    // 这条用例也是"自动指定"的守卫：@ 只是征求意见时，即使群里只有一位本专业
+    // 合格者也不能替用户派活（`consultedCharacterIds` 非空时不开自动指定）。
     expect(result.consultedCharacterIds, [developer.id]);
     expect(result.discussionCharacterIds, [developer.id]);
   });
@@ -404,9 +408,7 @@ void main() {
     expect(result.unknownMentionNames, ['不存在']);
   });
 
-  test(
-      'returns qualified candidates instead of silently choosing the first role',
-      () async {
+  test('唯一本专业合格者按资格直接指定执行人', () async {
     final productResult = await router.route(
       request: '写一份需求文档和验收标准',
       conversationId: 'group:auto-product',
@@ -426,15 +428,34 @@ void main() {
       skills: skills,
     );
 
+    expect(productResult.characterId, product.id);
+    expect(codingResult.characterId, developer.id);
+    expect(testingResult.characterId, tester.id);
     for (final result in [productResult, codingResult, testingResult]) {
-      expect(result.characterId, isNull);
-      expect(result.source, WorkRoleRouteSource.candidateSelection);
-      expect(result.needsExecutorSelection, isTrue);
-      expect(result.publicReason, contains('候选角色'));
+      expect(result.isSuccess, isTrue);
+      expect(result.source, WorkRoleRouteSource.soleQualifiedCandidate);
+      expect(result.needsExecutorSelection, isFalse);
+      expect(result.publicReason, contains('按职业资格指定'));
+      expect(result.publicReason, contains('你无需操作'));
+      // 自动指定不是用户声明：合同里不写 explicitExecutorId，讨论仍有权改派。
+      expect(result.deliverableContract?.explicitExecutorId, isNull);
     }
-    expect(productResult.candidateCharacterIds, [product.id]);
-    expect(codingResult.candidateCharacterIds, [developer.id]);
-    expect(testingResult.candidateCharacterIds, [tester.id]);
+  });
+
+  test('两名本专业合格成员仍交回群内推举，不静默选第一个', () async {
+    final result = await router.route(
+      request: '写一份需求文档和验收标准',
+      conversationId: 'group:auto-product-ambiguous',
+      characters: twoProducts,
+      skills: skills,
+    );
+
+    expect(result.isSuccess, isFalse);
+    expect(result.characterId, isNull);
+    expect(result.source, WorkRoleRouteSource.candidateSelection);
+    expect(result.needsExecutorSelection, isTrue);
+    expect(result.candidateCharacterIds, [product.id, secondProduct.id]);
+    expect(result.publicReason, contains('候选角色'));
   });
 
   test('routes an attachment-only request with an internal routing label',
@@ -497,10 +518,11 @@ void main() {
 
   test('候选推举的公开说明给出"无需操作"与真的可用出口', () async {
     final front = _character('front', '小前', '前端工程师');
+    final otherFront = _character('front-2', '小页', '前端工程师');
     final result = await router.route(
       request: '生成一个 HTML 页面',
       conversationId: 'group:html-nominate',
-      characters: [front, tester],
+      characters: [front, otherFront, tester],
       skills: [
         _skill('front-skill', front.id, 'frontend'),
         _skill('testing-skill', tester.id, 'testing'),
@@ -508,10 +530,13 @@ void main() {
     );
 
     // 旧文案「请由群内讨论后推举一位」在描述 App 会自动做的事，却写成了给用户的
-    // 指令：用户既不知道要不要回、也不知道从哪推举。
+    // 指令：用户既不知道要不要回、也不知道从哪推举。它也许诺过一个并不存在的出口
+    // ——"在群里 @ 一位候选角色"在讨论进行中只会走 follow-up，不会重跑角色路由，
+    // 所以 @ 什么都不会发生。真出口是任务面板里的候选按钮。
     expect(result.needsExecutorSelection, isTrue);
     expect(result.publicReason, contains('你无需操作'));
-    expect(result.publicReason, contains('@'));
+    expect(result.publicReason, contains('任务面板'));
+    expect(result.publicReason, isNot(contains('直接在群里 @')));
     expect(result.publicReason, isNot(contains('请由群内讨论后推举一位')));
   });
 
@@ -539,8 +564,17 @@ void main() {
       skills: skills,
     );
 
-    expect(result.needsExecutorSelection, isTrue);
-    expect(result.candidateCharacterIds, [frontend.id]);
+    expect(result.characterId, frontend.id);
+    // 「测试角色不进前端候选」这条保证改由公开的资格判据钉住：成功路径上
+    // candidateCharacterIds 本来就是空的（与显式 @ 一致）。
+    expect(
+      WorkRoleRouter.qualifiedCandidatesForRequest(
+        request: '生成一个 HTML 页面并执行回归测试',
+        characters: [frontend, tester],
+        skills: skills,
+      ).map((candidate) => candidate.id),
+      [frontend.id],
+    );
     expect(result.publicReason, contains('前端'));
   });
 
@@ -554,8 +588,7 @@ void main() {
       skills: const [],
     );
 
-    expect(result.needsExecutorSelection, isTrue);
-    expect(result.candidateCharacterIds, [frontend.id]);
+    expect(result.characterId, frontend.id);
     expect(result.deliverableContract?.format, 'html');
   });
 
@@ -570,8 +603,7 @@ void main() {
       skills: const [],
     );
 
-    expect(result.needsExecutorSelection, isTrue);
-    expect(result.candidateCharacterIds, [fullStack.id]);
+    expect(result.characterId, fullStack.id);
   });
 
   test('a display name or global skill cannot grant front-end qualification',
@@ -742,13 +774,14 @@ void main() {
     final result = await routed.route(
       request: '请写一份产品需求文档',
       conversationId: 'group:model',
-      characters: characters,
+      // 两名同职业成员：有歧义时选人模型才参与，这正是这组用例要覆盖的路径。
+      characters: twoProducts,
       skills: skills,
     );
 
     expect(result.isSuccess, isFalse);
     expect(result.source, WorkRoleRouteSource.candidateSelection);
-    expect(result.candidateCharacterIds, [product.id]);
+    expect(result.candidateCharacterIds, [product.id, secondProduct.id]);
     expect(result.needsExecutorSelection, isTrue);
     expect(modelCalled, isTrue);
     expect(result.publicReason, contains('资格'));
@@ -767,13 +800,13 @@ void main() {
     final result = await routed.route(
       request: '请写一份产品需求文档',
       conversationId: 'group:model-qualified-candidate',
-      characters: characters,
+      characters: twoProducts,
       skills: skills,
     );
 
     expect(result.isSuccess, isFalse);
     expect(result.characterId, isNull);
-    expect(result.candidateCharacterIds, [product.id]);
+    expect(result.candidateCharacterIds, [product.id, secondProduct.id]);
     expect(result.publicReason, contains('仍需群内推举'));
   });
 
@@ -785,12 +818,12 @@ void main() {
     final result = await routed.route(
       request: '请写一份产品需求文档',
       conversationId: 'group:model-malformed-candidate',
-      characters: characters,
+      characters: twoProducts,
       skills: skills,
     );
 
     expect(result.isSuccess, isFalse);
-    expect(result.candidateCharacterIds, [product.id]);
+    expect(result.candidateCharacterIds, [product.id, secondProduct.id]);
     expect(result.publicReason, contains('格式无效'));
   });
 
@@ -805,13 +838,13 @@ void main() {
     final result = await routed.route(
       request: '请写一份产品需求文档',
       conversationId: 'group:model-truncated',
-      characters: characters,
+      characters: twoProducts,
       skills: skills,
     );
 
     expect(result.isSuccess, isFalse);
     // 本地合格候选必须保留：模型那一路失败不该把群内推举也一起取消。
-    expect(result.candidateCharacterIds, [product.id]);
+    expect(result.candidateCharacterIds, [product.id, secondProduct.id]);
     expect(result.needsExecutorSelection, isTrue);
     expect(result.publicReason, contains('截断'));
     expect(result.publicReason, contains('256'));
@@ -827,7 +860,7 @@ void main() {
     final result = await routed.route(
       request: '请写一份产品需求文档',
       conversationId: 'group:model-unclassified',
-      characters: characters,
+      characters: twoProducts,
       skills: skills,
     );
 

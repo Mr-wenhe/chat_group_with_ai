@@ -23,6 +23,9 @@ class _TaskActions extends StatelessWidget {
   final WorkTaskAction? onLater;
   final WorkTaskVersionedAction? onLaterVersioned;
   final WorkTaskExecutorChoice? onConfirmExecutorSwap;
+
+  /// 面板里直接指定最终执行人。为 null 时不展示候选按钮。
+  final WorkTaskExecutorPick? onSelectExecutor;
   final WorkTaskUndoPreview? undoPreviewFor;
 
   /// 确认把本次运行写出的文件当作交付物；只在门禁已经问过、还在等回答时出现。
@@ -68,6 +71,7 @@ class _TaskActions extends StatelessWidget {
     required this.onLaterVersioned,
     required this.undoPreviewFor,
     this.onConfirmExecutorSwap,
+    this.onSelectExecutor,
     this.onConfirmArtifactDelivery,
     this.characterNameFor,
     required this.onStop,
@@ -138,6 +142,8 @@ class _TaskActions extends StatelessWidget {
         (modelClarificationPending ||
             followUpClarificationPending ||
             discussionQuestion != null);
+    // 执行人还没定的群任务：讨论正在自动推举，但用户也可以直接点选。
+    final executorCandidates = _executorCandidates(task);
     final openDecisions =
         WorkTaskDecision.forTask(task).where((item) => item.isOpen).toList();
     final laterAction = WorkTaskUserAction.forTask(task).firstOrNull;
@@ -175,6 +181,29 @@ class _TaskActions extends StatelessWidget {
             label: Text(openDecisions.length == 1
                 ? '回答待决问题'
                 : '处理 ${openDecisions.length} 项待决事项'),
+          ),
+          const SizedBox(height: 8),
+        ],
+        // 无执行人但有候选：讨论此刻正在自动推举，所以文案先说清"你无需操作"——
+        // 这里的点选是抢在推举前面给出答案，不是用户必须做的事。
+        if (executorCandidates.isNotEmpty && onSelectExecutor != null) ...[
+          Text(
+            '指定最终执行人',
+            style: Theme.of(context).textTheme.labelLarge,
+          ),
+          const SizedBox(height: 4),
+          _ExecutorCandidateButtons(
+            candidateIds: executorCandidates,
+            characterNameFor: characterNameFor,
+            enabled: !actionInFlight,
+            onSubmit: (characterId) => runAction(
+              (_) => onSelectExecutor!(task.id, characterId),
+            ),
+          ),
+          const SizedBox(height: 4),
+          Text(
+            '你无需操作；群内也会自动推举。点选即直接指定。',
+            style: Theme.of(context).textTheme.bodySmall,
           ),
           const SizedBox(height: 8),
         ],

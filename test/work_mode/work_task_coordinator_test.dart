@@ -6370,4 +6370,133 @@ void main() {
     expect(taskBox.get(task.id)!.userRequest, contains('修改同一文件的标题'));
     expect(discussion.calls, 2, reason: '新要求已纳入但应自动重新讨论');
   });
+
+  /// 还没有执行人、但检查点里已经有合格候选的群任务：路由把执行人交给群推举
+  /// 之后、结论出来之前的那段中间态，正是面板选择框出现的场景。
+  Future<AgentTask> storeExecutorSelectionTask(
+    String conversationId, {
+    List<String> candidates = const <String>['front', 'engine'],
+    String? collaborationPhase,
+  }) async {
+    final base = _discussionState(
+      conversationId: conversationId,
+      executorId: null,
+    );
+    var state = base.copyWith(candidateCharacterIds: candidates);
+    if (collaborationPhase != null) {
+      final raw = WorkCollaborationState.fromLegacy(
+        taskId: '$conversationId-task',
+        conversationId: conversationId,
+        projectScopeId: 'scope-$conversationId',
+        requestRevision: 1,
+        requestMessageId: 'request-$conversationId',
+        scope: '执行 $conversationId',
+        artifactContract: <String, dynamic>{
+          'type': 'software',
+          'format': 'html',
+          'location': 'out/index.html',
+          'revisionTarget': '',
+        },
+      ).toJson()
+        ..['phase'] = collaborationPhase;
+      state = state.copyWith(
+        schemaVersion: 2,
+        collaboration: WorkCollaborationState.tryParse(raw)!,
+      );
+    }
+    final task = _taskWithDiscussion(
+      _task(id: '$conversationId-task', conversationId: conversationId),
+      state,
+    )..status = AgentTaskStatus.paused;
+    await taskBox.put(task.id, task);
+    return task;
+  }
+
+  test('面板指定的执行人写进检查点并重启讨论，请求版本不变', () async {
+    final discussionRunner = await useDiscussionRunner();
+    final task = await storeExecutorSelectionTask('executor-pick-group');
+    expect(
+      WorkDiscussionState.fromExecutionState(task.executionStateJson)
+          ?.executorId,
+      isNull,
+      reason: '这条任务的执行人本来就该是空的，否则测的不是这条路径',
+    );
+
+    await coordinator.selectDiscussionExecutor(task.id, characterId: 'engine');
+    await _settle();
+
+    final stored = taskBox.get(task.id)!;
+    final state =
+        WorkDiscussionState.fromExecutionState(stored.executionStateJson)!;
+    expect(state.executorId, 'engine');
+    expect(state.coordinatorId, 'engine');
+    expect(state.deliverableContract?['explicitExecutorId'], 'engine');
+    expect(stored.characterId, 'engine');
+    expect(stored.assignedCharacterIds, contains('engine'));
+    expect(stored.status, AgentTaskStatus.paused);
+    expect(
+      state.requestRevision,
+      1,
+      reason: '用户改的是"谁来干"而不是"要干什么"：递增请求版本会把已形成的方案与认可作废',
+    );
+    expect(discussionRunner.runCount, greaterThan(0));
+  });
+
+  test('不在候选里的角色不能被指定为执行人', () async {
+    await useDiscussionRunner();
+    final task = await storeExecutorSelectionTask('executor-pick-stranger');
+
+    await expectLater(
+      coordinator.selectDiscussionExecutor(task.id, characterId: 'stranger'),
+      throwsA(isA<StateError>()),
+    );
+    await _settle();
+    expect(
+      WorkDiscussionState.fromExecutionState(
+        taskBox.get(task.id)!.executionStateJson,
+      )?.executorId,
+      isNull,
+    );
+  });
+
+  test('已经有执行人的任务不接受再次指定', () async {
+    await useDiscussionRunner();
+    final task = await storeExecutorSelectionTask(
+      'executor-pick-twice',
+      candidates: const <String>['worker'],
+    );
+
+    await coordinator.selectDiscussionExecutor(task.id, characterId: 'worker');
+    await _settle();
+
+    await expectLater(
+      coordinator.selectDiscussionExecutor(task.id, characterId: 'worker'),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  test('进入制作阶段之后不能再换执行人', () async {
+    await useDiscussionRunner();
+    final task = await storeExecutorSelectionTask(
+      'executor-pick-producing',
+      collaborationPhase: 'producing',
+    );
+
+    await expectLater(
+      coordinator.selectDiscussionExecutor(task.id, characterId: 'front'),
+      throwsA(isA<StateError>()),
+    );
+  });
+
+  test('终态任务不能再指定执行人', () async {
+    await useDiscussionRunner();
+    final task = await storeExecutorSelectionTask('executor-pick-terminal');
+    task.status = AgentTaskStatus.completed;
+    await taskBox.put(task.id, task);
+
+    await expectLater(
+      coordinator.selectDiscussionExecutor(task.id, characterId: 'front'),
+      throwsA(isA<StateError>()),
+    );
+  });
 }

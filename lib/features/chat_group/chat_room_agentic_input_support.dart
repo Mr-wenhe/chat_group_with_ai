@@ -464,8 +464,11 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
           groupId: widget.groupId,
           senderId: 'system',
           senderType: 'system',
+          // 候选推举是 App 接下来会自己做的事，不是一次失败。把它写成"路由未完成"
+          // 会让用户以为要自己动手（2026-10-12 现场）；真正的路由失败保持原文案。
           content: '${requiresOwnerClarification ? '@$_ownerMentionName ' : ''}'
-              '工作模式角色路由未完成，任务已进入群讨论等待：${route.reason}',
+              '${route.needsExecutorSelection ? '工作模式正在群内推举执行人：' : '工作模式角色路由未完成，任务已进入群讨论等待：'}'
+              '${route.reason}',
           isMention: requiresOwnerClarification,
         ));
         await coordinator.submit(pendingTask);
