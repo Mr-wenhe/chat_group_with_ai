@@ -83,7 +83,7 @@ data/         Hive development fixtures (api_configs.hive is local-only + gitign
 
 ### Data model
 
-Hive models live in `lib/core/models/` and are registered in `DatabaseService.init()` (`lib/core/database/database_service.dart`). Boxes: `ai_characters`, `api_configs`, `chat_groups`, `messages`, `group_memories`, `character_memories`, `relationship_states`, `app_settings`, `character_skills`, `agent_tasks`, `work_mode_workspaces`, `ai_governance_ledger`, `user_profile`, `permanent_memories`, `relationship_events`, plus `dev_credentials` (非 release 才打开的调试凭据镜像，没有 model 类也不注册 adapter).
+Hive models live in `lib/core/models/` and are registered in `DatabaseService.init()` (`lib/core/database/database_service.dart`). Boxes: `ai_characters`, `api_configs`, `chat_groups`, `messages`, `group_memories`, `character_memories`, `relationship_states`, `app_settings`, `character_skills`, `agent_tasks`, `work_mode_workspaces`, `ai_governance_ledger`, `user_profile`, `permanent_memories`, `relationship_events`, plus `dev_credentials` (macOS 上的正式凭据存储 / 其余平台非 release 的调试镜像，见「关键红线」；没有 model 类也不注册 adapter).
 
 - `ApiConfig` — shared API key/URL/model config (1:many with characters). API keys are **not** stored here in plaintext; see Credentials below.
 - `AICharacter` — persona, system prompt, avatar, reply-rate limits, compact `memorySummary`, gender.
@@ -137,7 +137,7 @@ Search is scoped to the **user turn**: multiple AI replies in one round share a 
 ### Credentials and storage
 
 - API keys live in `flutter_secure_storage`, resolved through `ApiCredentialResolver` / `CredentialRepository` (`lib/core/storage/`), not in the `api_configs` Hive box.
-- 所有凭据（聊天 / 图像 / 实时 / 语音 / 搜索 / 企微 / `default_provider`）最终都经过 `SecureStorageService`，它是唯一收口点；非 release 下该层再套一层调试镜像 `DebugCredentialCache`（见「关键红线」）。新增加凭据类型时不需要各自实现回退，但**不要**把新凭据写进 `app_settings`：那个 box 受 git 跟踪，明文密钥会被提交进仓库。
+- 所有凭据（聊天 / 图像 / 实时 / 语音 / 搜索 / 企微 / `default_provider`）最终都经过 `SecureStorageService`，它是唯一收口点；该层内部按平台分流（macOS 走本地 Hive，其余平台走系统安全存储、非 release 再叠一层调试镜像 `DebugCredentialCache`，见「关键红线」）。新增加凭据类型时不需要各自实现回退，但**不要**把新凭据写进 `app_settings`：那个 box 受 git 跟踪，明文密钥会被提交进仓库。
 - Non-release runs read Hive from the repo `data/` directory; release builds create fresh empty boxes under the user app-support directory from `assets/release_templates/seed_manifest.json`.
 - Export and backup paths are engineered to omit credentials.
 - Some tracked `data/*.hive` files are development fixtures; `data/api_configs.hive` and `data/dev_credentials.hive` are local-only and gitignored. `data/autonomous_*.hive` and `data/evidence_memories.hive` are **dead legacy fixtures** with no remaining references in `lib/` — ignore them.
@@ -162,7 +162,7 @@ These four named routes plus two `onGenerateRoute` prefixes are the complete rou
 ## 关键红线（必须遵守）
 
 - **API Key 连接测试红线**：用户在配置表单中新输入的 Key 必须直接用于本次测试，禁止为测试先临时写入/回读/删除 Keychain/Keystore；只有编辑已有配置且 Key 输入留空时，才通过 `ApiCredentialResolver` 读取已保存凭据。持久化仅能由正式保存流程执行。
-- **macOS Debug 凭据兼容**：debug 构建是 ad-hoc 签名，每次重建后二进制指纹都变，钥匙串 ACL 认不出它，于是**每次读取都弹一次登录密码框**——「始终允许」只对点它时那个二进制有效，重建即失效。收敛手段是唯一收口点 `SecureStorageService` 下的调试镜像 `DebugCredentialCache`（`dev_credentials` box）：读取命中镜像即返回、未命中才读一次钥匙串并落盘；**写入只写镜像、不碰钥匙串**（重建后的二进制做任何钥匙串写入同样会弹框）；删除先写**墓碑**再尽力删钥匙串，且删除失败不报错——没有墓碑，下一次读取会回落钥匙串把已删的密钥复活。镜像只在非 release 打开（`DatabaseService._openDebugCredentialCacheBox`，刻意不走 `_openBoxSafely`，打不开就退化为直通），box 被 gitignore、不进 `_releaseHiveFiles` 与备份。`LegacyApiCredentialMigrator` 在任何读取之前必须先 `seedDevelopmentCredentialCache`：待迁移配置的明文就在记录自己的 `legacyApiKey` 里，不先镜像就会在每次启动时读一次钥匙串。安全写入失败后仍可仅在非 release 保留 `legacyApiKey`，并以 `hasCredential=true` 且 `credentialId=CredentialRepository.developmentHiveCredentialId` 作为开发回退标记，`ApiCredentialResolver` 与删除流程必须识别该标记；Release 严禁读取或写入 Hive 明文 Key。
+- **凭据存储：macOS 用 Hive，其余平台用系统安全存储**：macOS 的 debug 与 release **一律**把凭据存进本地 Hive 明文库（`dev_credentials` box，判据 `DebugCredentialCache.isPrimaryStore`），读写删都不碰钥匙串。这是刻意拿系统级加密换确定性：本项目 macOS 构建始终是 ad-hoc 签名，钥匙串 ACL 认不出每次重建后的二进制，debug 下**每次读取都弹一次登录密码框**（「始终允许」只对点它时那个二进制有效），release 下未启用 App Sandbox 时 Data Protection Keychain 直接写入失败。**其余平台维持平台安全存储**：非 release 在其前叠一层 `DebugCredentialCache` 镜像——读取命中镜像即返回、未命中才读一次安全存储并落盘；**写入只写镜像、不碰安全存储**；删除先写**墓碑**再尽力删安全存储，且删除失败不报错（没有墓碑，下一次读取会把已删的密钥复活）；release 在这些平台直接落安全存储。`DatabaseService._openDebugCredentialCacheBox` 的打开条件是 `DebugCredentialCache.isRequired`，**不是** `enabled`——macOS 上 release 也必须打开，用 `enabled` 会让 release 用户所有 API Key 读不到；它刻意不走 `_openBoxSafely`，打不开就退化（其余平台退化为直读安全存储，macOS 退化为读不到、写时报错），不让整个启动失败。box 被 gitignore、不进 `_releaseHiveFiles` 与备份、也在工作模式交付物 denylist 里，**不要**改名（改名要同步这几处安全清单）。`LegacyApiCredentialMigrator` 在任何读取之前必须先 `seedDevelopmentCredentialCache`：待迁移配置的明文就在记录自己的 `legacyApiKey` 里，不先镜像就会在仍用钥匙串的平台上每次启动多读一次。非 macOS 平台安全写入失败后仍可仅在非 release 保留 `legacyApiKey`，并以 `hasCredential=true` 且 `credentialId=CredentialRepository.developmentHiveCredentialId` 作为开发回退标记，`ApiCredentialResolver` 与删除流程必须识别该标记；这些平台的 **Release 严禁读取或写入 Hive 明文 Key**。
 - **工作模式连续修改红线**：恢复中的工作任务必须占用会话控制器，新输入只能排队并在旧任务结束后派发，禁止取消旧任务后静默丢弃新请求。中英文“修改同一/相同/当前/上次文件”等明确修订请求必须覆盖原附件路径；只有新建请求发生重名时才允许自动改名。修订钉定只作用于**同名文件**（`default_work_task_runner_context.dart` 的 `_namesSameFile`）：模型请求的路径与修订目标 basename 相同时才改写为该目标的绝对路径，脚本、素材、分段源文件等其它路径按普通规则解析。把钉定套到每一次写操作会让交付物成为任务里唯一可写的文件——模型要写的脚本静默落到交付物上且工具报 success，`workspace.list` 又看不到它，于是模型换名重写、无限循环（2026-09-30 现场：15 次 patch 全被重定向，`.docx` 被覆盖成 Python 源码，全程 `command.run` 只跑过最初那一次）。流式通道返回空内容时可对同一请求回退一次非流式调用；标准 `content` 为空时才允许读取兼容字段 `reasoning_content`，两者均为空必须报错。源码附件的本地兜底必须有对应语言的可运行模板，否则应明确失败，禁止把说明文本伪装成 `.py/.js/.ts` 等代码附件。
 - **搜索与浏览器安全**：搜索结果一律视为不可信外部数据；生产搜索必须走 `gateway/`，不得让客户端自选目标 URL；浏览器访问默认关闭。Frontend 不得为 Web 构建暴露搜索路由（浏览器端无法提供服务端凭据边界）。
 - **前台主动私聊**：允许在 App 运行期间调用已配置的 LLM API，但冷却时间必须保守；没有明确的通知/推送设计前，禁止后台或离线网络生成。
@@ -231,6 +231,7 @@ Large suites are split into `*_part_NN.dart` and `*_helpers_NN.dart` files (back
 
 ## Known limitations
 
+- macOS 上所有凭据（API Key、企微 corpsecret、`default_provider` 等）以**明文**存于 `dev_credentials` box，不再经过钥匙串，因而没有系统级加密做兜底：能读到该用户数据目录的进程就能读到这些 Key。这是刻意取舍——ad-hoc 签名下钥匙串要么每次重建都弹密码框，要么在 release 里直接写不进去，确定性比加密层级更实用。旧版本存在 macOS 钥匙串里的 Key **不迁移**，升级后需要重新填一次。
 - Backup/restore (`lib/features/backup/`, `.cgbak`) covers every Hive box except `ai_governance_ledger` (the usage audit trail is intentionally device-local). `WorkModeWorkspace.workDirPath` is dropped on import because local paths are not portable. `formatVersion` must match exactly; `schemaVersion` accepts 1 or 2. Backup scopes are `all` / `configurationOnly` / `conversation`. Restored `ApiConfig`s need their key re-bound. 删除消息刻意保留引用指针（界面显示「原消息已删除」），所以活跃数据里存在悬空的 `replyToMessageId`，而导入侧逐条核验"被引用的消息必须在场"：这条归一化因此必须在**导出**侧做（`_writeMessages` 把指向本份备份之外的引用置 null，恢复后该引用条消失），放宽导入核验会连"重映射 id 漏改"一并放过。
 - Fully offline proactive contact is not implemented: closed-app AI generation would need pre-generated local notifications or a server-side push service. Current proactive DMs are foreground-only.
 - Web builds cannot provide the app's credential boundary, so they are not a release target.

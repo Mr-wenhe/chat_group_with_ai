@@ -78,7 +78,8 @@ extension ImageServiceSettingsAccess on DatabaseService {
       );
       return null;
     }
-    // macOS 开发签名等环境可能无法写入 Keychain；仅非 Release 回退。
+    // 非 Release 下安全存储可能写不进去（钥匙串被锁、权限不足等）；仅此时回退。
+    // macOS 走不到这里：它的凭据直接落本地 Hive 库，写入必然成功。
     if (!kReleaseMode) {
       await appSettingsBox.put(_imageApiKeyDebugFallbackKey, trimmed);
       await saveImageServiceConfig(

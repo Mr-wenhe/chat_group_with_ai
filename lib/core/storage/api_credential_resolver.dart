@@ -22,8 +22,9 @@ class SecureApiCredentialResolver implements ApiCredentialResolver {
     if (!config.hasCredential) return null;
     if (config.credentialId ==
         CredentialRepository.developmentHiveCredentialId) {
-      // macOS debug may not have Keychain access. This fallback is deliberately
-      // unavailable in release builds, where a secure credential is mandatory.
+      // 非 release 下安全写入失败时留下的开发回退（见 DatabaseService.saveApiConfig）。
+      // Release 里必须先有安全凭据才允许绑定，所以这条分支刻意关掉。
+      // macOS 本身已不再使用钥匙串（凭据直接落本地 Hive 库），走的是下面的常规路径。
       return !kReleaseMode &&
               (config.legacyApiKeyForMigration?.isNotEmpty ?? false)
           ? (config.legacyApiKeyForMigration ?? '')

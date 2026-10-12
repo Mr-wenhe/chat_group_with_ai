@@ -253,16 +253,20 @@ class DatabaseService {
     await workModeMigrator.markInFlightWorkTasksInterrupted();
   }
 
-  /// 打开调试凭据镜像 box（仅非 release）。
+  /// 打开本地凭据库 box。
   ///
-  /// 刻意不走 [_openBoxSafely]：这个 box 只是本机开发便利，打不开时
-  /// [DebugCredentialCache] 会自动退化为直读钥匙串，不该因此让整个启动失败。
+  /// 打开条件是 [DebugCredentialCache.isRequired]（macOS 任何构建都要，其它平台仅
+  /// 非 release 的镜像要），**不是** [DebugCredentialCache.enabled]：macOS 上这个
+  /// box 就是正式存储，漏开会让 release 用户所有 API Key 读不到。
+  ///
+  /// 刻意不走 [_openBoxSafely]：打不开时不该让整个启动失败——其余平台会退化为直读
+  /// 钥匙串，macOS 则退化为「读不到、写时报错」，两种都比开不了 App 好。
   Future<void> _openDebugCredentialCacheBox() async {
-    if (!DebugCredentialCache.enabled) return;
+    if (!DebugCredentialCache.isRequired) return;
     try {
       await Hive.openBox<dynamic>(DebugCredentialCache.boxName);
     } on Object {
-      // 退化为直通安全存储，不做任何处理。
+      // 退化为直通安全存储（macOS 上则退化为读写均失败），不做任何处理。
     }
   }
 
@@ -372,8 +376,9 @@ class DatabaseService {
       } else if (kReleaseMode) {
         throw StateError('凭据不可用，未保存配置');
       } else {
-        // macOS debug builds can lack Keychain access. Keep the development
-        // credential in Hive so local runs remain usable; release never does.
+        // 非 release 下安全写入仍可能失败（钥匙串被锁、权限不足等）。把开发凭据
+        // 留在记录自己的 Hive 字段里，本地调试仍可用；release 永不这样做。
+        // macOS 不再走这条分支：它的凭据直接落本地 Hive 库，写入必然成功。
         config.hasCredential = true;
         config.credentialId = CredentialRepository.developmentHiveCredentialId;
       }
@@ -1673,8 +1678,9 @@ class DatabaseService {
   Future<String?> readVoiceApiKey() async {
     final result = await CredentialRepository().read(volcVoiceCredentialId);
     if (result.isAvailable) return result.value;
-    // macOS debug 环境可能无法访问 Keychain。仅非 release 回退读取本地
-    // app_settings，避免开发调试被阻断；release 严禁该回退。
+    // 非 release 下安全存储可能读不到（钥匙串被锁、权限不足等）。仅此时回退读取
+    // 本地 app_settings，避免开发调试被阻断；release 严禁该回退。
+    // macOS 走不到这里：它的凭据直接落本地 Hive 库，读取必然命中。
     if (!kReleaseMode) {
       final fallback =
           appSettingsBox.get(_voiceApiKeyDebugFallbackKey)?.toString() ?? '';
