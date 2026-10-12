@@ -154,7 +154,7 @@ resolutions 是 {id,resolution,evidenceRef} 数组，只引用真实工具/成�
 调查：action=investigate，issue_id 指向已有 open 问题，tool={name,arguments}。只允许 workspace.list/read/search/document；调查结果回台账后再讨论，禁止 command.run、写文件、安装、写探针或浏览器。工具能力与权限以运行时为准。
 proposal={scope,plan,artifactContract:{type,format,location,revisionTarget,files:[相对路径字符串]},workItems:[{id,ownerId,dependencies,kind:"material|produce"}],acceptances:[{id,method,requiredCapability}]}。workItems 只允许 id/ownerId/dependencies/kind 四个字段，kind 可省略或为 material/produce；acceptances 只允许 id/method/requiredCapability 三个字段。不要把执行状态、说明文字或额外字段放进这些对象，运行时会生成状态字段。files 必须是相对路径字符串数组，不是对象数组。只协调成员可建立/修改当前方案，不默许原型；制作和测试工作项这里只规划，不声称已经执行。仅要求软件需求文档时不得扩展交付成软件。工作项、验收的 requestRevision 必须匹配当前需求；用户裁决/补充后旧版工作项必须由协调成员重新形成 proposal，不能只重新签字。
 形成原范围方案时，proposal.scope 必须逐字复制 collaboration.scope（包含用户补充、禁止事项及原语言），不能翻译、摘要或重述；自然语言整理写在 plan 和 public_update。只有关联既有 open idea 的完整范围提案才能改变 scope 或既有验收，仍需逐人确认，不能用“意思相同”绕过。
-proposal.artifactContract 从 collaboration.artifactContract 完整复制并保留全部现有字段，不只复制上方示例字段。非空且已明确的字段值必须保持原样（尤其 location 的绝对路径、format、revisionTarget）；不能换成 basename、相对路径或中文描述。只有尚未明确的空值、unspecified、generic 可以补齐；files 使用相对路径清单不意味着可以改写 location。
+proposal.artifactContract 从 collaboration.artifactContract 完整复制并保留全部现有字段，不只复制上方示例字段。字段值能否改写按它的来源判断：把每个值与 collaboration.scope 里的用户原话逐字对照，原话里逐字出现的值属于用户声明，必须原样保留（尤其原话点过的 location 绝对路径、format、revisionTarget）；原话里没有逐字出现、只由平台从上下文推断出来的值（典型：location 只由目录路径推断而出，或已被脱敏成 [本地路径]）允许在完整 proposal 里提案补齐或改写，改写会一并递增需求版本，旧工作项与认可随之失效。任何值都不能换成 basename、相对路径或中文描述；尚未明确的空值、unspecified、generic 可以直接补齐；files 使用相对路径清单不意味着可以改写 location。
 ''';
 
   /// 默认合同规则：软件方案必须自备需求/技术/测试材料工作项。
