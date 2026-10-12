@@ -223,6 +223,113 @@ void main() {
 
   setUp(_openFixture);
   tearDown(_closeFixture);
+  test('推导出来的 location 允许协调成员提案改写', () async {
+    await db.agentTaskBox.put(task.id, task);
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    final collaboration =
+        root[WorkDiscussionState.jsonKey]['collaboration'] as Map<String, dynamic>;
+    // 现场形态：用户给的是目录路径，合同里的 desktop 是兜底推导值。
+    collaboration['scope'] = '在 /Users/fengye/Desktop/chat_group_out 这个文件夹中'
+        '创建一个目录，目录中的内容生成一份 飞行棋游戏的HTML';
+    collaboration['artifactContract']['location'] = 'desktop';
+    task.executionStateJson = jsonEncode(root);
+    final discussion = modelRunner((member, context) async {
+      final state = Map<String, dynamic>.from(context['collaboration'] as Map);
+      if ((state['plan'] as String).isEmpty) {
+        final next = proposal(state);
+        next['artifactContract'] = {
+          ...state['artifactContract'] as Map,
+          'location': '/Users/fengye/Desktop/chat_group_out/flight-chess'
+        };
+        return _turn('propose', text: '按用户给出的目录补齐位置。', proposal: next);
+      }
+      return _turn('approve', approval: approval(state));
+    });
+    await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
+    final after = WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+        .collaboration!;
+    expect(after.artifactContract['location'],
+        '/Users/fengye/Desktop/chat_group_out/flight-chess',
+        reason: task.lastError);
+    expect(after.requestRevision, greaterThan(1),
+        reason: '改写合同必须一并递增需求版本，否则 _validateBaselineChanges 会拒绝这次增量');
+    expect(
+        after.acceptances
+            .every((a) => a['requestRevision'] == after.requestRevision),
+        isTrue,
+        reason: '旧需求版本的验收必须随需求版本递增而失效');
+    expect(
+        after.workItems
+            .every((i) => i['requestRevision'] == after.requestRevision),
+        isTrue,
+        reason: '旧需求版本的工作项必须随需求版本递增而失效');
+  }, timeout: const Timeout(Duration(seconds: 30)));
+  test('用户亲口说出的 location 仍不可覆盖', () async {
+    await db.agentTaskBox.put(task.id, task);
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    final collaboration =
+        root[WorkDiscussionState.jsonKey]['collaboration'] as Map<String, dynamic>;
+    collaboration['scope'] = '生成一份飞行棋游戏的HTML，保存到桌面';
+    collaboration['artifactContract']['location'] = 'desktop';
+    task.executionStateJson = jsonEncode(root);
+    var sawRejection = false;
+    final discussion = modelRunner((member, context) async {
+      sawRejection = sawRejection ||
+          context['lastValidationError']
+              .toString()
+              .contains('用户产物合同不可覆盖');
+      final state = Map<String, dynamic>.from(context['collaboration'] as Map);
+      if ((state['plan'] as String).isEmpty) {
+        final next = proposal(state);
+        next['artifactContract'] = {
+          ...state['artifactContract'] as Map,
+          'location': '/tmp/elsewhere'
+        };
+        return _turn('propose', text: '换个位置。', proposal: next);
+      }
+      return _turn('approve', approval: approval(state));
+    });
+    await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(sawRejection, isTrue,
+        reason: '用户说过"保存到桌面"，模型不得改写这个值');
+    expect(
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!
+            .artifactContract['location'],
+        'desktop');
+  }, timeout: const Timeout(Duration(seconds: 30)));
+
+  test('合同值不在 scope 里时判为推导值', () async {
+    await db.agentTaskBox.put(task.id, task);
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    final collaboration =
+        root[WorkDiscussionState.jsonKey]['collaboration'] as Map<String, dynamic>;
+    // 与"补充要求超过 4096 字符被丢弃"、"location 已被脱敏成 [本地路径]"
+    // 相同的可观测形态：合同里有一个原话从未点过的值。
+    collaboration['scope'] = '生成一份飞行棋游戏的HTML';
+    collaboration['artifactContract']['location'] = '[本地路径]';
+    collaboration['artifactContract']['revisionTarget'] = '';
+    task.executionStateJson = jsonEncode(root);
+    final discussion = modelRunner((member, context) async {
+      final state = Map<String, dynamic>.from(context['collaboration'] as Map);
+      if ((state['plan'] as String).isEmpty) {
+        final next = proposal(state);
+        next['artifactContract'] = {
+          ...state['artifactContract'] as Map,
+          'location': 'flight-chess.html'
+        };
+        return _turn('propose', text: '补齐实际交付位置。', proposal: next);
+      }
+      return _turn('approve', approval: approval(state));
+    });
+    await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!
+            .artifactContract['location'],
+        'flight-chess.html',
+        reason: task.lastError);
+  }, timeout: const Timeout(Duration(seconds: 30)));
   test('用户明确改名后合同随之修订，模型擅改仍被拒', () async {
     await db.agentTaskBox.put(task.id, task);
     final coordinator = WorkTaskCoordinator(

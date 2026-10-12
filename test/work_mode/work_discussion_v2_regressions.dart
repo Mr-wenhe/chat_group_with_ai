@@ -1217,6 +1217,13 @@ void _registerDiscussionHistoryRegressions() {
     expect(state.approvals.every((a) => a['subjectId'] == task.id), isTrue);
   });
   test('合同误写返回具体字段，原成员纠正后才建立方案', () async {
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    // 合同里的 location 必须真的出自用户原话，本用例钉的"误写被拒"才成立：
+    // 基准 fixture 的 scope 只有请求文本，那里没有 game.html，按新的来源分权
+    // 它会判成推导值、允许改写（那正是本任务要放行的情形）。
+    root[WorkDiscussionState.jsonKey]['collaboration']['scope'] =
+        '开发游戏，读取项目 ${task.userRequest}，输出 game.html';
+    task.executionStateJson = jsonEncode(root);
     var calls = 0;
     var feedbackSeen = false;
     await modelRunner((member, context) async {

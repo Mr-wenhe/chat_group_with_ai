@@ -376,6 +376,9 @@ extension _V2DiscussionActions on _V2DiscussionSession {
           original.isNotEmpty &&
           original != 'unspecified' &&
           original != 'generic' &&
+          // 只有"用户亲口说过的值"不可覆盖；平台兜底推导出来的值允许协调成员
+          // 提案改写（改写仍走既有提案路径，需求版本一并递增）。
+          _isUserStatedContractValue(key, original) &&
           !_sameContractValue(key, original, contract[key])) {
         throw StateError('用户产物合同不可覆盖（$key），请保留当前合同字段原值');
       }
@@ -395,6 +398,35 @@ extension _V2DiscussionActions on _V2DiscussionSession {
     if (key != 'type' || proposed is! String) return false;
     return WorkRoleRouter.canonicalArtifactType(proposed) ==
         WorkRoleRouter.canonicalArtifactType(pinned);
+  }
+
+  /// 这个合同值是否出自用户原话本身。
+  ///
+  /// 只认"作为该字段自己的表达"出现：`location` / `revisionTarget` 必须是独立
+  /// 路径词元，`format` 必须是独立格式词或以该扩展名结尾的文件名。平台兜底产生、
+  /// 用户从没亲口说过的值（例如路径片段里的 Desktop 被当成桌面）判为推导值，
+  /// 允许协调成员提案改写。
+  ///
+  /// 判据作用在已落盘的 `state.scope` 上——scope 就是冻结的用户原话，所以
+  /// "来源"不必新增持久化字段。
+  bool _isUserStatedContractValue(String key, String value) {
+    final scope = state.scope;
+    if (scope.trim().isEmpty || value.trim().isEmpty) return true;
+    switch (key) {
+      case 'location':
+        return value.toLowerCase() == 'desktop'
+            ? statesDesktopLocation(scope)
+            : statesToken(scope, value);
+      case 'revisionTarget':
+        return statesToken(scope, value);
+      case 'format':
+        return _valueSpellings(value, asFormat: true).any((spelling) =>
+            statesToken(scope, spelling) || statesExtension(scope, spelling));
+      default:
+        // `type` 等字段仍恒定视为用户声明：交付物的形态由用户原话决定，
+        // 且软件闭环检查键在 `type == 'software'` 上，不放模型改。
+        return true;
+    }
   }
 
   /// 用户在自己的补充要求里点名改写的合同字段：`{字段: 用户点名的新值}`。
