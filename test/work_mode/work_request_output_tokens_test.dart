@@ -31,14 +31,22 @@ void main() {
       );
     });
 
-    test('caps a declaration that exceeds any vendor limit', () {
-      // 声明值不会被上游校验，只能在请求侧挡一道，免得直接收到 400。
+    test('honours a declaration beyond the old absolute ceiling', () {
+      // 32768 绝对天花板已删除：它压住的是用户手工声明的大输出模型，而声明值
+      // 本来就只由设置决定，"声明多少就发多少"的责任交回那份声明。
       expect(
         workModeRequestOutputTokens(
           capabilityMaxOutput: 200000,
           capabilityContextWindow: 1000000,
         ),
-        maxWorkRequestOutputTokens,
+        200000,
+      );
+      expect(
+        workModeRequestOutputTokens(
+          capabilityMaxOutput: 65536,
+          capabilityContextWindow: 262144,
+        ),
+        65536,
       );
     });
 

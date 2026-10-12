@@ -1011,7 +1011,7 @@ void main() {
     });
   }
   for (final budget in [2048, 16384, 65536]) {
-    test('讨论请求遵守模型能力输出预算及绝对上限：$budget', () async {
+    test('讨论请求遵守模型能力输出预算：$budget', () async {
       final governance = MemoryGovernanceStore();
       for (final id in ['dev', 'qa']) {
         final config = db.apiConfigBox.get('config-$id')!
@@ -1027,7 +1027,7 @@ void main() {
             calls++;
             return confirm(
                 db.aiCharacterBox.get(context['memberId'])!, context);
-          }, expectedMaxTokens: budget > 32768 ? 32768 : budget));
+          }, expectedMaxTokens: budget));
       await WorkDiscussionRunner(
               database: db,
               credentials: _Credentials(),

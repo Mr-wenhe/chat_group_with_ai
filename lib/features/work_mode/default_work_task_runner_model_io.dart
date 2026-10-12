@@ -1,15 +1,14 @@
 part of 'default_work_task_runner.dart';
 
-/// 单次工作模式模型请求的输出上限：模型能力声明的上限，与上下文窗口的一半和
-/// [maxWorkRequestOutputTokens] 取较小者。
+/// 单次工作模式模型请求的输出上限：模型能力声明的上限与上下文窗口的一半取较小者。
 ///
-/// 不再硬性截到 8192：那会压住**用户手工声明**（以及将来能力表快照更新后）的
-/// 大输出模型——工作模式要求一次决策写完一份文件，长文档撞上限就被截断作废。
-/// 内置模型目前的声明值都不超过 8192，所以这条改动对它们是空操作。
+/// 不再设绝对天花板：那个值压住的是**用户手工声明**的大输出模型，而声明值本身
+/// 只由设置决定，客户端没有依据替用户判断厂商真实能力——声明超出时上游会返回
+/// 400，这条责任交回设置里的那份声明。
 ///
-/// 同时不再让输出超过窗口的一半：8k 窗口的模型按声明值要 8k 输出时，输入预算会
-/// 被压到 0，请求会带着空 `messages` 发出去（`inputBudget` 的守卫是
-/// `input + maxOutput > window`，输入为 0 时它恰好拦不住）。
+/// 窗口一半这一条是必需的：8k 窗口的模型按声明值要 8k 输出时输入预算会被压到 0，
+/// 请求会带着空 `messages` 发出去（`inputBudget` 的守卫是 `input + maxOutput >
+/// window`，输入为 0 时它恰好拦不住）。
 int workModeRequestOutputTokens({
   required int capabilityMaxOutput,
   required int capabilityContextWindow,
@@ -18,15 +17,8 @@ int workModeRequestOutputTokens({
       capabilityContextWindow < 1 ? 1 : capabilityContextWindow;
   final windowBound = contextWindow ~/ 2 < 1 ? 1 : contextWindow ~/ 2;
   final declared = capabilityMaxOutput < 1 ? 1 : capabilityMaxOutput;
-  final bounded = declared < windowBound ? declared : windowBound;
-  return bounded < maxWorkRequestOutputTokens
-      ? bounded
-      : maxWorkRequestOutputTokens;
+  return declared < windowBound ? declared : windowBound;
 }
-
-/// 输出上限的绝对天花板：声明值不会被上游校验（guard 比的也是同一份声明），
-/// 只能在这里挡住明显超出厂商能力的配置，避免直接收到 400。
-const int maxWorkRequestOutputTokens = 32768;
 
 /// 工作模式单次请求的输入预算：模型窗口扣掉本次输出上限与帧开销。
 ///
