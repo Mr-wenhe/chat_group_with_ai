@@ -264,6 +264,72 @@ void main() {
         isTrue,
         reason: '旧需求版本的工作项必须随需求版本递增而失效');
   }, timeout: const Timeout(Duration(seconds: 30)));
+  test('目录型请求的 unspecified location 由成员补齐后仍能进入方案', () async {
+    await db.agentTaskBox.put(task.id, task);
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    final collaboration =
+        root[WorkDiscussionState.jsonKey]['collaboration'] as Map<String, dynamic>;
+    // 目录型请求（用户给的是目录、不是文件）在词元判据之后 location 落
+    // unspecified，而 planReady 要求它非 unspecified：必须由成员补齐。
+    collaboration['scope'] = '在 /Users/fengye/Desktop/chat_group_out 这个文件夹中'
+        '创建一个目录，目录中的内容生成一份 飞行棋游戏的HTML';
+    collaboration['artifactContract']['location'] = 'unspecified';
+    task.executionStateJson = jsonEncode(root);
+    final discussion = modelRunner((member, context) async {
+      final state = Map<String, dynamic>.from(context['collaboration'] as Map);
+      if ((state['plan'] as String).isEmpty) {
+        final next = proposal(state);
+        next['artifactContract'] = {
+          ...state['artifactContract'] as Map,
+          'location': '/Users/fengye/Desktop/chat_group_out/flight-chess'
+        };
+        return _turn('propose', text: '按用户给出的目录补齐交付位置。', proposal: next);
+      }
+      return _turn('approve', approval: approval(state));
+    });
+    await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
+    final after =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    expect(after.collaboration!.artifactContract['location'],
+        '/Users/fengye/Desktop/chat_group_out/flight-chess');
+    expect(after.isPlanReady, isTrue,
+        reason: 'location 补齐后必须能过 planReady 门禁：${task.lastError}');
+  }, timeout: const Timeout(Duration(seconds: 30)));
+  test('用户用中文说的格式仍不可覆盖', () async {
+    await db.agentTaskBox.put(task.id, task);
+    final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    final collaboration =
+        root[WorkDiscussionState.jsonKey]['collaboration'] as Map<String, dynamic>;
+    // 「网页」不在 formatAliases 里，但它就是路由自己认的 html 格式词：用户
+    // 用中文点名了格式，合同里的 html 属于用户声明，模型不得改写。
+    collaboration['scope'] = '做一个飞行棋的网页';
+    collaboration['artifactContract']['format'] = 'html';
+    task.executionStateJson = jsonEncode(root);
+    var sawRejection = false;
+    final discussion = modelRunner((member, context) async {
+      sawRejection = sawRejection ||
+          context['lastValidationError']
+              .toString()
+              .contains('用户产物合同不可覆盖');
+      final state = Map<String, dynamic>.from(context['collaboration'] as Map);
+      if ((state['plan'] as String).isEmpty) {
+        final next = proposal(state);
+        next['artifactContract'] = {
+          ...state['artifactContract'] as Map,
+          'format': 'docx'
+        };
+        return _turn('propose', text: '换个交付格式。', proposal: next);
+      }
+      return _turn('approve', approval: approval(state));
+    });
+    await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(sawRejection, isTrue, reason: '「网页」就是用户点名的 html 格式');
+    expect(
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!
+            .artifactContract['format'],
+        'html');
+  }, timeout: const Timeout(Duration(seconds: 30)));
   test('用户亲口说出的 location 仍不可覆盖', () async {
     await db.agentTaskBox.put(task.id, task);
     final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;

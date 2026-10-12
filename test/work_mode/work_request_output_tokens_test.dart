@@ -59,5 +59,26 @@ void main() {
         1,
       );
     });
+
+    test('glm-4.7 不再被天花板压住，代价是输入预算被压缩', () {
+      // 删掉 32768 绝对天花板后，内置表里唯一声明超过它的模型（glm-4.7 /
+      // glm4.7，窗口 200000 / 输出 131072）拿到了更大的输出空间，代价是输入
+      // 预算被反向压缩。这条用例把这次分配变化显式化：将来再有人动预算口径，
+      // 这两个数码就会报警，而不是悄悄改掉。
+      expect(
+        workModeRequestOutputTokens(
+          capabilityMaxOutput: 131072,
+          capabilityContextWindow: 200000,
+        ),
+        100000,
+      );
+      expect(
+        workModeRequestInputBudget(
+          capabilityMaxOutput: 131072,
+          capabilityContextWindow: 200000,
+        ),
+        99744,
+      );
+    });
   });
 }

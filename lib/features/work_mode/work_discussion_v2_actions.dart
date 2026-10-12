@@ -420,6 +420,13 @@ extension _V2DiscussionActions on _V2DiscussionSession {
       case 'revisionTarget':
         return statesToken(scope, value);
       case 'format':
+        // 与播种同源：直接问那个推导函数"用户原话指定了什么格式"。只认逐字词元、
+        // 别名族与扩展名会漏掉路由自己认的中文格式词（`网页`/`网站` → html），
+        // 于是用户亲口点名的格式被判成推导值、允许成员改掉——而 `formatAliases`
+        // 里没有 CJK 项，不能靠它补。
+        if (WorkRoleRouter.deliverableContractForRequest(scope).format == value) {
+          return true;
+        }
         return _valueSpellings(value, asFormat: true).any((spelling) =>
             statesToken(scope, spelling) || statesExtension(scope, spelling));
       default:
