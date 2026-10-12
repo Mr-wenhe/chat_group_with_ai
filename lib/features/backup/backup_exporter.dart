@@ -6,6 +6,7 @@ import 'package:archive/archive_io.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
+import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:crypto/crypto.dart';
@@ -324,6 +325,13 @@ class BackupExporter {
     final writer = _BoundedJsonFileWriter(sink, relativePath);
     final attachmentsByHash = <String, String>{};
     final missingAttachmentIds = <String>{};
+    // 被引用的消息已经被删除时，引用方的 `replyToMessageId` 会悬空——删除刻意
+    // 保留引用指针，界面据此显示「原消息已删除」。备份侧要求被引用的消息必须在
+    // 场（导入时逐条核验），所以导出时把指向这份备份之外的引用去掉：在这里归一
+    // 化，而不是放宽导入侧的核验（那条核验同时守着"重映射 id 漏改"这类计划缺陷）。
+    final backedUpMessageIds = <String>{
+      for (final entry in snapshot.messages) (entry.value as Message).id,
+    };
     try {
       for (final entry in snapshot.messages) {
         final media = <Map<String, dynamic>>[];
@@ -344,12 +352,14 @@ class BackupExporter {
           }
           media.add(BackupEntityCodec.attachment(attachment, archivePath));
         }
-        final record = BackupEntityCodec.record(
-          entry.key,
-          BackupEntityCodec.message(entry.value, media,
-              workDelivery: await _stageWorkDelivery(staging,
-                  entry.value.workDelivery, attachmentsByHash, files, missing)),
-        );
+        final value = BackupEntityCodec.message(entry.value, media,
+            workDelivery: await _stageWorkDelivery(staging,
+                entry.value.workDelivery, attachmentsByHash, files, missing));
+        final replyId = value['replyToMessageId'];
+        if (replyId is String && !backedUpMessageIds.contains(replyId)) {
+          value['replyToMessageId'] = null;
+        }
+        final record = BackupEntityCodec.record(entry.key, value);
         _assertNoSecrets(record);
         writer.writeJsonLine(record);
       }

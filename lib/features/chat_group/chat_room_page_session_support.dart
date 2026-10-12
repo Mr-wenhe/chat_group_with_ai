@@ -320,12 +320,52 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
   void _removeExternalMessage(String messageId) {
     final wasKnownMessage = _knownConversationMessageIds.remove(messageId);
     if (!wasKnownMessage) return;
+    _dropMessageFromView(messageId);
+  }
+
+  /// 本机删除一条消息后的视图收尾。
+  ///
+  /// 与 [_removeExternalMessage] 的区别只在入口判据：那条路来自实时同步，
+  /// id 必须先在已知集合里（否则会重复扣计数）。本机删除不能有这层依赖——
+  /// 集合是加载时按索引刷出来的，索引刷新失败时它是空的，消息就会在界面上
+  /// 留着不走：用户看到"已删除"的提示，气泡却还在。
+  void _forgetDeletedMessage(String messageId) {
+    _knownConversationMessageIds.remove(messageId);
+    _dropMessageFromView(messageId);
+  }
+
+  /// 本机删除一批消息后的视图收尾。
+  ///
+  /// 一次 rebuild 收尾整批：逐条走 [_dropMessageFromView] 时，删 200 条就会
+  /// 触发 200 次 setState。判据与单条版一致——不依赖"已知 id"集合，索引刷新
+  /// 失败时那个集合是空的，依赖它会让已删除的气泡留在界面上。
+  void _forgetDeletedMessages(Iterable<String> messageIds) {
+    final removing = messageIds.toSet();
+    if (removing.isEmpty) return;
+    final remaining = _messages
+        .where((message) => !removing.contains(message.id))
+        .toList(growable: false);
+    final dropped = _messages.length - remaining.length;
+    _knownConversationMessageIds.removeAll(removing);
+    _setUiState(() {
+      _messages = remaining;
+      _selectedMessageIds.removeAll(removing);
+      final next = _totalMessageCount - dropped;
+      _totalMessageCount = next < 0 ? 0 : next;
+    });
+  }
+
+  void _dropMessageFromView(String messageId) {
     final existingIndex =
         _messages.indexWhere((message) => message.id == messageId);
     _setUiState(() {
       if (existingIndex >= 0) {
         _messages = List<Message>.from(_messages)..removeAt(existingIndex);
       }
+      // 勾选集合必须跟着走：多选期间另一端删掉一条时，消息已经不在列表里，勾选
+      // 集合却留着它 —— 「已选 N 条」多算一条，删除计划按存在性过滤后又少删
+      // 一条，提示与实际不符。
+      _selectedMessageIds.remove(messageId);
       if (_totalMessageCount > 0) _totalMessageCount--;
     });
   }
@@ -383,7 +423,12 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
   /// 滚动到列表底部。
   ///
   /// 放在 post-frame 回调里执行，确保新消息已完成布局、maxScrollExtent 已更新。
+  ///
+  /// 多选期间整个视口冻结（见 `_shouldFollowNewContent`）：勾选框跟着列表走，
+  /// 列表一动，点下去的就是另一条消息，而删除不可撤销。这里是唯一的收口点——
+  /// 流式跟随、外部同步、发送后回底都经过它。
   void _scrollToBottom({bool animated = true}) {
+    if (!_shouldFollowNewContent) return;
     WidgetsBinding.instance.addPostFrameCallback((_) {
       if (_scrollController.hasClients) {
         final target = _scrollController.position.maxScrollExtent;

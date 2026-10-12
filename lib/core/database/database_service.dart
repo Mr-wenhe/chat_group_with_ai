@@ -1070,20 +1070,29 @@ class DatabaseService {
   Future<void> deleteMessageRecordAndIndex(
     String messageId, {
     required String groupId,
+  }) =>
+      deleteMessageRecordsAndIndex([messageId], groupId: groupId);
+
+  /// 批量版本。逐条走 [deleteMessageRecordAndIndex] 会让"全选删除"退化成
+  /// O(n²)：每删一条都要重写整张 `message_ids_by_group` 与会话摘要。这里
+  /// 只重建一次。
+  ///
+  /// 索引里不存在的 id 同样会被删掉记录——索引可能落后于 box。
+  Future<void> deleteMessageRecordsAndIndex(
+    Iterable<String> messageIds, {
+    required String groupId,
   }) async {
-    await messageBox.delete(messageId);
-    final byGroup = _messageIdsByGroup();
-    final ids = List<String>.from(byGroup[groupId] ?? const <String>[])
-      ..remove(messageId);
-    byGroup[groupId] = ids;
-    _messageIdsCache = Map<String, dynamic>.from(byGroup);
-    _messageIndexCountCache = messageBox.length;
-    await _updateConversationSummary(groupId, ids);
-    await appSettingsBox.putAll({
-      _messageIdsByGroupKey: _messageIdsCache,
-      _messageIndexCountKey: _messageIndexCountCache,
-      _messageIndexSchemaVersionKey: _messageIndexSchemaVersion,
-    });
+    final removing = messageIds.toSet();
+    if (removing.isEmpty) return;
+    // 先让索引可信。索引缺失时下面是拿空列表算"剩余"，而写回的条数恰好等于
+    // 删除后的条数，`ensureMessageIndex` 的重建条件（计数不符）就此永不成立：
+    // 会话会带着空索引留在列表里，消息其实还在 box 中。
+    await ensureMessageIndex();
+    await messageBox.deleteAll(removing);
+    final remaining = (_messageIdsForGroup(groupId) ?? const <String>[])
+        .where((id) => !removing.contains(id))
+        .toList(growable: false);
+    await _saveMessageIdsForGroup(groupId, remaining);
   }
 
   Map<String, dynamic> _messageIdsByGroup() {

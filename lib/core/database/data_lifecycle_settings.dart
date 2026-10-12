@@ -94,6 +94,55 @@ class DataLifecycleSettings {
     return builder.build();
   }
 
+  /// 「清空聊天记录」只抹掉消息，所以要清的设置也必须只限于指向消息的那几项：
+  /// 消息索引、会话摘要、已读位置，以及指向已删消息的记忆重试记录。
+  ///
+  /// 记忆 pin、工作模式开关、上下文分界线与 token 用量都不在这里——它们属于
+  /// 记忆和任务，而这条路径的全部承诺就是"记忆与任务原样保留"。
+  AppSettingsDeletionTargets planConversationMessages(
+    String conversationId, {
+    required bool isGroup,
+  }) {
+    final builder = _AppSettingsTargetBuilder(this);
+    builder.mapEntry(_messageIndexKey, conversationId);
+    builder.mapEntry(_conversationSummariesKey, conversationId);
+    builder.mapEntry(isGroup ? _groupReadKey : _directReadKey, conversationId);
+    for (final item in _retryItems()) {
+      if (item['conversationId']?.toString() != conversationId) continue;
+      builder.recordValue(
+        memoryRetryQueueKey,
+        item,
+        identityKeys: const ['messageId', 'observerId', 'conversationId'],
+      );
+      builder.exactKey(_retryKey(item['messageId'], item['observerId']));
+    }
+    return builder.build();
+  }
+
+  /// 指向这些消息的记忆重试记录。
+  ///
+  /// 消息没了，条目再也提炼不出任何东西——`ObservationEntry._processRetryTask`
+  /// 拿不到消息就直接 `drop`。留着它只是让队列每轮空转一次再丢弃。
+  /// 「清空聊天记录」按会话收口（[planConversationMessages]），这里是同一件事的
+  /// 消息粒度版本，供单条与批量删除共用。
+  AppSettingsDeletionTargets planMessageRetryRecords(
+    Iterable<String> messageIds,
+  ) {
+    final ids = messageIds.map((id) => id.toString()).toSet();
+    if (ids.isEmpty) return const AppSettingsDeletionTargets();
+    final builder = _AppSettingsTargetBuilder(this);
+    for (final item in _retryItems()) {
+      if (!ids.contains(item['messageId']?.toString())) continue;
+      builder.recordValue(
+        memoryRetryQueueKey,
+        item,
+        identityKeys: const ['messageId', 'observerId', 'conversationId'],
+      );
+      builder.exactKey(_retryKey(item['messageId'], item['observerId']));
+    }
+    return builder.build();
+  }
+
   AppSettingsDeletionTargets planCharacter(
     String characterId,
     String conversationId, {

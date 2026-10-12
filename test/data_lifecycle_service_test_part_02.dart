@@ -143,6 +143,52 @@ void _registerDataLifecycleServiceTestPart2() {
     expect(db.groupMemoryBox.get('transient-memory'), isNotNull);
   });
 
+  test('keeping reply references leaves the quoting message untouched',
+      () async {
+    const groupId = 'reply-reference-group';
+    await db.chatGroupBox.put(
+      groupId,
+      ChatGroup(
+        id: groupId,
+        name: '引用群',
+        theme: '',
+        aiCharacterIds: const ['c1'],
+      ),
+    );
+    await db.messageBox.putAll({
+      'quoted-message': Message(
+        id: 'quoted-message',
+        groupId: groupId,
+        senderId: 'user',
+        senderType: 'user',
+        content: '被引用的原话',
+      ),
+      'quoting-message': Message(
+        id: 'quoting-message',
+        groupId: groupId,
+        senderId: 'c1',
+        senderType: 'ai',
+        content: '回复上面那句',
+        replyToMessageId: 'quoted-message',
+      ),
+    });
+
+    final result = await service.deleteMessage(
+      'quoted-message',
+      groupId: groupId,
+      invalidateGroupMemory: false,
+      keepReplyReferences: true,
+    );
+
+    expect(result.isComplete, isTrue);
+    expect(db.messageBox.get('quoted-message'), isNull);
+    // 引用指针原样保留，渲染层据此显示「原消息已删除」。
+    expect(
+      db.messageBox.get('quoting-message')!.replyToMessageId,
+      'quoted-message',
+    );
+  });
+
   test('legacy deleted snapshot without gender does not surface fake female',
       () async {
     await db.appSettingsBox.put(

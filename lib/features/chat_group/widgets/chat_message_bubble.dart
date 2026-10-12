@@ -6,16 +6,19 @@ import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/widgets/character_avatar.dart';
+import 'package:chat_group/core/widgets/readable_json_dialog.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/chat_group/attachment_opener.dart';
 import 'package:chat_group/features/chat_group/attachment_path_actions.dart';
 import 'package:chat_group/features/chat_group/attachment_utils.dart';
 import 'package:chat_group/features/agentic/agent_progress_meta.dart';
+import 'package:chat_group/features/chat_group/message_action_item.dart';
 import 'package:chat_group/features/chat_group/widgets/blinking_cursor.dart';
 import 'package:chat_group/features/chat_group/widgets/message_selectable_text.dart';
 import 'package:chat_group/features/chat_group/widgets/video_bubble.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
+import 'package:chat_group/features/work_mode/work_detail_attachment.dart';
 import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:flutter/material.dart';
@@ -68,6 +71,17 @@ class ChatMessageBubble extends StatelessWidget {
   final VoidCallback? onLongPress;
   final VoidCallback? onSenderTap;
   final VoidCallback? onMentionSender;
+
+  /// 本条消息的操作项清单，长按弹窗与右键菜单共用同一份。
+  ///
+  /// 为 null 表示调用方不提供操作（如无宿主页面）。
+  final MessageActionItemBuilder? messageActions;
+
+  /// 点「我」自己的头像时的入口（打开资料页）。
+  ///
+  /// 不能复用 [onSenderTap]：那个回调只对可编辑的 AI 角色有值，用户消息恒为
+  /// null，绑上去就是一块点不动的头像。
+  final VoidCallback? onUserAvatarTap;
   final Color Function(AICharacter) senderColor;
   final Message? quotedMessage;
   final String? quotedSenderName;
@@ -102,6 +116,12 @@ class ChatMessageBubble extends StatelessWidget {
   /// 角色配色和 @ 提及里。单独开一个入口，让他们只借用"别人的消息"的排版。
   final String? memberName;
 
+  /// 多选进行中：正文交出选择手势，让整行的点击用于勾选。
+  final bool selectionMode;
+
+  /// 点气泡正文。多选时用来切换勾选，其余时候为 null。
+  final VoidCallback? onTap;
+
   const ChatMessageBubble({
     super.key,
     required this.message,
@@ -115,6 +135,8 @@ class ChatMessageBubble extends StatelessWidget {
     this.onLongPress,
     this.onSenderTap,
     this.onMentionSender,
+    this.onUserAvatarTap,
+    this.messageActions,
     required this.senderColor,
     this.quotedMessage,
     this.quotedSenderName,
@@ -126,6 +148,8 @@ class ChatMessageBubble extends StatelessWidget {
     this.senderAvatarImage,
     this.userAvatarImage,
     this.userAvatarText = '',
+    this.selectionMode = false,
+    this.onTap,
   });
 
   @override
@@ -277,10 +301,16 @@ class ChatMessageBubble extends StatelessWidget {
             ),
             if (isUser) ...[
               const SizedBox(width: 8),
-              _buildAvatar(
-                fallbackText: avatarText,
-                image: userAvatarImage,
-                accent: cs.primary,
+              // 与左侧 AI 头像同构：点自己的头像进资料页。中间的 SizedBox 留在
+              // 外面，点击热区不能包含气泡的间距。
+              InkWell(
+                onTap: onUserAvatarTap,
+                borderRadius: BorderRadius.circular(4),
+                child: _buildAvatar(
+                  fallbackText: avatarText,
+                  image: userAvatarImage,
+                  accent: cs.primary,
+                ),
               ),
             ],
           ],
@@ -327,13 +357,51 @@ class ChatMessageBubble extends StatelessWidget {
     );
   }
 
+  /// 被引用的消息已被删除时的引用条。
+  ///
+  /// 不做成可点：目标已经不存在，点了无处可跳。左键条改用中性色，与真实引用
+  /// 的强调色区分——同一条占位在群里可能同时出现好几个，别看着像在指向什么。
+  Widget _buildDeletedQuotedRef(BuildContext context, bool isUser) {
+    return Container(
+      margin: const EdgeInsets.only(bottom: 7),
+      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 5),
+      decoration: BoxDecoration(
+        color: isUser
+            ? WeComChatTokens.lightText.withValues(alpha: 0.08)
+            : WeComChatTokens.lightChatBackground.withValues(alpha: 0.8),
+        borderRadius: BorderRadius.circular(3),
+      ),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          Container(
+            width: 2,
+            height: 18,
+            color: Theme.of(context).colorScheme.outlineVariant,
+          ),
+          const SizedBox(width: 7),
+          Text(
+            '原消息已删除',
+            style: TextStyle(
+              fontSize: 12,
+              fontStyle: FontStyle.italic,
+              color: WeComChatTokens.text(context).withValues(alpha: 0.5),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
   Widget _buildQuotedRef(
     BuildContext context,
     Message? quoted,
     String? senderName,
     bool isUser,
   ) {
-    if (quoted == null) return const SizedBox.shrink();
+    // 调用方只在本条 `replyToMessageId` 非空时才进来，所以查不到就等于被引用的
+    // 那条已被删除（滑出分页窗口的由父页回库补齐，见 `chat_room_page_build_support`）。
+    if (quoted == null) return _buildDeletedQuotedRef(context, isUser);
     final snippet = quoted.content.length > 50
         ? '${quoted.content.substring(0, 50)}...'
         : quoted.content;
@@ -388,9 +456,13 @@ class ChatMessageBubble extends StatelessWidget {
     };
     final textStyle = TextStyle(fontSize: 15, color: textColor, height: 1.45);
 
+    final actions = messageActions;
     final base = MessageSelectableText(
       content: content,
       style: textStyle,
+      messageActions: actions == null ? null : () => actions(message, sender),
+      enableSelection: !selectionMode,
+      onTap: onTap,
       spans: buildWeComMentionSpans(
         content,
         mentionNames: mentionNames,

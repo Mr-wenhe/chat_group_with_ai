@@ -40,11 +40,27 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
   /// 本群的固定共同设定区块；两个字段都为空时为空串（整块不注入）。
   ///
   /// 每次请求现算，用户改完群设置后下一个请求立即生效，不需要重启 App。
-  String get _groupSharedContextBlock => GroupSharedContext.build(
-        groupName: _group?.name ?? '',
-        description: _group?.description ?? '',
-        announcement: _group?.announcement ?? '',
-      );
+  ///
+  /// 私聊恒为空串：私聊没有"本群设定"这回事，它的 `_group` 只是渲染用的合成记录
+  /// （见 `ChatRoomLoadContext.directDisplayGroup`，`description` 是"职业 · 年龄"），
+  /// 而私聊的提示词（`_buildDirectApiMessages`）从不注入这段区块。若把合成文本
+  /// 当成用户填写的共同设定，必需内容守卫就会认定"设定没进请求"，于是每一次私聊
+  /// 回复都被判成装不下窗口——与模型窗口大小、消息长短都无关。
+  String get _groupSharedContextBlock {
+    if (_isDirectChat) return '';
+    return GroupSharedContext.build(
+      groupName: _group?.name ?? '',
+      description: _group?.description ?? '',
+      announcement: _group?.announcement ?? '',
+    );
+  }
+
+  /// 空回复兜底文案里的话题词。
+  ///
+  /// 私聊同样恒为空串：合成展示群的 `theme` 是「一对一私聊」这样的内部标识，拿它
+  /// 当话题会写出「说到一对一私聊，我觉得可以先听听其他人的看法」——一对一里没有
+  /// "其他人"，而这句话是要给用户看的。空串让兜底句退回中性的「这个话题」。
+  String get _fallbackTopicTheme => _isDirectChat ? '' : (_group?.theme ?? '');
 
   /// 解析角色可用的 API 配置；未绑定或没有凭据时返回 null（视为不可回复）。
   ApiConfig? _resolveApiConfig(AICharacter character) {

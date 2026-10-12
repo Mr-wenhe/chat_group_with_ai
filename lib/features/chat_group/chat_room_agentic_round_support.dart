@@ -313,7 +313,8 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       fullContent = ChatActivityPolicy.emptyReplyFallback(
         characterName: character.name,
         role: character.role,
-        groupTheme: _group?.theme ?? '',
+        groupTheme: _fallbackTopicTheme,
+        isDirectChat: _isDirectChat,
         userMessage: userMessage,
         isAutoChat: isAutoChat,
         random: _random,

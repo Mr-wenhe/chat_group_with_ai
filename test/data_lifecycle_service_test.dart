@@ -25,6 +25,7 @@ import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/search_audit_entry.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
+import 'package:chat_group/features/memory/observation_retry_queue.dart';
 import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
 import 'package:chat_group/features/web_search/data/search_credential_repository.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
@@ -39,6 +40,7 @@ part 'data_lifecycle_service_test_part_02.dart';
 part 'data_lifecycle_service_test_part_03.dart';
 part 'data_lifecycle_service_test_part_04.dart';
 part 'data_lifecycle_service_test_part_05.dart';
+part 'data_lifecycle_service_test_part_06.dart';
 
 late Directory hiveDirectory;
 late Directory mediaDirectory;
@@ -68,4 +70,5 @@ void main() {
   _registerDataLifecycleServiceTestPart3();
   _registerDataLifecycleServiceTestPart4();
   _registerDataLifecycleServiceTestPart5();
+  _registerDataLifecycleServiceTestPart6();
 }

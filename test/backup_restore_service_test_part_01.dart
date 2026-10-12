@@ -189,6 +189,47 @@ void _registerBackupRestoreServiceTestPart1() {
     expect(prepared.preview.checksumsValid, isTrue);
   });
 
+  test('导出的备份不带指向已删除消息的悬空引用，因此仍能导入', () async {
+    final attachment = File('${mediaDirectory.path}/quote.txt');
+    await attachment.writeAsString('attachment');
+    // _seedCoreData 建了 msg-1（用户）与引用它的 msg-2（AI）。
+    await _seedCoreData(db, attachment);
+
+    // 删除刻意保留引用指针：被引用方据此显示「原消息已删除」。
+    final deleted = await DataLifecycleService(db: db).deleteMessage(
+      'msg-1',
+      groupId: 'group-1',
+      invalidateGroupMemory: false,
+      keepReplyReferences: true,
+    );
+    expect(deleted.isComplete, isTrue);
+    expect(db.messageBox.get('msg-2')!.replyToMessageId, 'msg-1');
+
+    final service = BackupRestoreService(
+      db: db,
+      mediaDirectory: mediaDirectory,
+      tempRoot: testRoot,
+    );
+    final backup = File('${testRoot.path}/dangling-quote.cgbak');
+    await service.createBackup(destination: backup);
+
+    // 导出侧把指向备份外的引用归一成 null：导入侧逐条核验"被引用的消息必须在场"，
+    // 不归一化就会抛 BackupException，这份备份能导出却永远导不回来。
+    final archive = ZipDecoder().decodeBytes(await backup.readAsBytes());
+    final text = utf8.decode(archive.findFile('data/messages.jsonl')!.content);
+    final records = text
+        .trim()
+        .split('\n')
+        .where((line) => line.trim().isNotEmpty)
+        .map((line) => jsonDecode(line) as Map<String, dynamic>)
+        .toList();
+    expect(records, hasLength(1));
+    expect(records.single['value']['replyToMessageId'], isNull);
+
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+  });
+
   test('export rejects an oversized JSONL message before creating a package',
       () async {
     final attachment = File('${mediaDirectory.path}/oversized-message.txt');

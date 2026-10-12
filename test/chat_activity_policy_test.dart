@@ -149,6 +149,27 @@ void main() {
     expect(fallback, isNot(contains('卡')));
   });
 
+  test('私聊空回复兜底不说“其他人/你们”，也不带内部群标识', () {
+    // 私聊的展示群 theme 是「一对一私聊」，调用方会传空串；这里故意把内部标识
+    // 传进去，确认一对一那套台词根本不读它。
+    for (var seed = 0; seed < 12; seed++) {
+      for (final userMessage in <String?>['你说点有趣的事情呗', null]) {
+        final fallback = ChatActivityPolicy.emptyReplyFallback(
+          characterName: '产品经理',
+          role: '产品经理',
+          groupTheme: '一对一私聊',
+          userMessage: userMessage,
+          isDirectChat: true,
+          random: Random(seed),
+        );
+        expect(fallback.trim(), isNotEmpty);
+        expect(fallback, isNot(contains('一对一私聊')));
+        expect(fallback, isNot(contains('其他人')));
+        expect(fallback, isNot(contains('你们')));
+      }
+    }
+  });
+
   test('reply delay grows with visible reply length', () {
     final shortDelay = ChatActivityPolicy.replyDelayForContent('好');
     final longDelay = ChatActivityPolicy.replyDelayForContent(

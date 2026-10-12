@@ -45,15 +45,31 @@ class ChatRoomRepository {
     return db.updateMessage(message);
   }
 
-  Future<void> deleteMessage(
+  Future<DataLifecycleResult> deleteMessage(
     String messageId, {
     bool invalidateGroupMemory = true,
-  }) async {
-    await DataLifecycleService(db: db).deleteMessage(
+    bool keepReplyReferences = false,
+  }) {
+    return DataLifecycleService(db: db).deleteMessage(
       messageId,
       groupId: conversationId,
       invalidateGroupMemory: invalidateGroupMemory,
+      keepReplyReferences: keepReplyReferences,
     );
+  }
+
+  /// 批量删除这一次勾选的消息，语义与 [deleteMessage] 一致。
+  Future<DataLifecycleResult> deleteMessages(Iterable<String> messageIds) {
+    return DataLifecycleService(db: db).deleteMessages(
+      messageIds,
+      groupId: conversationId,
+    );
+  }
+
+  /// 只清空这个会话的消息，记忆、关系与任务都保留。
+  Future<DataLifecycleResult> clearConversationMessages() {
+    return DataLifecycleService(db: db)
+        .clearConversationMessages(conversationId);
   }
 
   /// Clears this exact group or DM conversation through the lifecycle service.

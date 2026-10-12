@@ -4,8 +4,10 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_message_list.dart';
+import 'package:chat_group/features/settings/user_profile_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
@@ -689,6 +691,56 @@ void main() {
       tester.widget<ChatMessageList>(messageList).highlightedMentionMessageId,
       newestId,
     );
+  });
+
+  testWidgets('点自己消息里的头像打开「我的资料」页', (tester) async {
+    // 回归锁：用户头像的点击入口不能复用 `onSenderTap`（它对用户消息恒为
+    // null），否则头像看得见却点不动。
+    addTearDown(() async {
+      await tester.pumpWidget(const SizedBox.shrink());
+      await tester.pump();
+    });
+    const conversationId = 'g1';
+    await tester.runAsync(() async {
+      await db.messageBox.put(
+        'profile-tap-message',
+        Message(
+          id: 'profile-tap-message',
+          groupId: conversationId,
+          senderId: 'user',
+          senderType: 'user',
+          content: '你好',
+          timestamp: DateTime(2026, 8, 13, 13),
+        ),
+      );
+    });
+
+    await tester.runAsync(() async {
+      await tester.pumpWidget(
+        ProviderScope(
+          overrides: [databaseServiceProvider.overrideWithValue(db)],
+          child: const MaterialApp(
+            home: ChatRoomPage(groupId: conversationId),
+          ),
+        ),
+      );
+      await Future<void>.delayed(const Duration(milliseconds: 100));
+    });
+    await tester.pump(const Duration(milliseconds: 100));
+    await pumpUntilTextField(tester);
+
+    final avatar = find.descendant(
+      of: find.byType(ChatMessageList),
+      matching: find.byType(CharacterAvatar),
+    );
+    expect(avatar, findsOneWidget);
+
+    // 不用 pumpAndSettle：自动发言的 Timer 会让它一直有帧可推进。
+    await tester.tap(avatar);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+
+    expect(find.byType(UserProfilePage), findsOneWidget);
   });
 }
 

@@ -51,41 +51,51 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
     }
     return Scaffold(
       backgroundColor: WeComChatTokens.chatBackground(context),
-      appBar: ChatRoomAppBar(
-        title: _group?.name ?? '群聊',
-        subtitle:
-            !_isDirectChat && (_groupMemory?.topicSummary.isNotEmpty ?? false)
-                ? _groupMemory!.topicSummary
-                : null,
-        isSearching: _isSearching,
-        searchController: _searchController,
-        hasSearchResults: _searchResults.isNotEmpty,
-        searchResultLabel: _searchResultLabel,
-        showGroupActions: !_isDirectChat,
-        onSearchChanged: _performSearch,
-        onEnterSearch: _enterSearch,
-        onPreviousResult: _searchPrev,
-        onNextResult: _searchNext,
-        onExitSearch: _exitSearch,
-        onExport: () => Navigator.of(context).push(MaterialPageRoute(
-          builder: (_) => ExportPage(initialGroupId: widget.groupId),
-        )),
-        onOpenMemory: _openMemoryManagement,
-        onOpenRelationship: _openRelationshipAudit,
-        relationshipTooltip: _isDirectChat ? '查看 AI 对我的关系' : '查看关系',
-        webSearchIcon: _webSearchPolicyIcon,
-        webSearchTooltip: _webSearchUnsupported
-            ? '联网搜索：当前平台不支持'
-            : '联网搜索：${_effectiveWebSearchPolicy.label}',
-        onConfigureWebSearch: _configureWebSearchPolicy,
-        onClearConversation: _showClearConversationDialog,
-        onOpenMembers: _isDirectChat ? null : _showMembersSheet,
-        // 只有主人能邀请客人：客人没有房间的注册权，也不该转手扩散邀请码。
-        onInviteGuests:
-            !_isDirectChat && (_group?.isHost(_realtimeUserId) ?? false)
-                ? () => unawaited(_inviteGuests())
-                : null,
-      ),
+      // 多选进行中整条顶部栏换成"取消 / 已选 N 条 / 全选 / 删除"：多选是模态的，
+      // 留着搜索、记忆、更多这些入口只会让人以为它们还能用。
+      appBar: _messageSelectionActive
+          ? _buildMessageSelectionAppBar(context)
+          : ChatRoomAppBar(
+              title: _group?.name ?? '群聊',
+              subtitle: !_isDirectChat &&
+                      (_groupMemory?.topicSummary.isNotEmpty ?? false)
+                  ? _groupMemory!.topicSummary
+                  : null,
+              isSearching: _isSearching,
+              searchController: _searchController,
+              hasSearchResults: _searchResults.isNotEmpty,
+              searchResultLabel: _searchResultLabel,
+              showGroupActions: !_isDirectChat,
+              onSearchChanged: _performSearch,
+              onEnterSearch: _enterSearch,
+              onPreviousResult: _searchPrev,
+              onNextResult: _searchNext,
+              onExitSearch: _exitSearch,
+              onExport: () => Navigator.of(context).push(MaterialPageRoute(
+                builder: (_) => ExportPage(initialGroupId: widget.groupId),
+              )),
+              onOpenMemory: _openMemoryManagement,
+              onOpenRelationship: _openRelationshipAudit,
+              relationshipTooltip: _isDirectChat ? '查看 AI 对我的关系' : '查看关系',
+              webSearchIcon: _webSearchPolicyIcon,
+              webSearchTooltip: _webSearchUnsupported
+                  ? '联网搜索：当前平台不支持'
+                  : '联网搜索：${_effectiveWebSearchPolicy.label}',
+              onConfigureWebSearch: _configureWebSearchPolicy,
+              onClearConversation: _showClearConversationDialog,
+              // 客人端一条都删不掉（本地删了会被主人端同步写回），入口整个不给：
+              // 这里与批量删除共用同一条判据，漏掉一个入口就等于没有这条规则。
+              onClearMessages:
+                  _isRealtimeGuest ? null : _showClearConversationMessagesDialog,
+              onBatchDelete:
+                  _isRealtimeGuest ? null : () => _enterMessageSelection(),
+              onOpenMembers: _isDirectChat ? null : _showMembersSheet,
+              // 只有主人能邀请客人：客人没有房间的注册权，也不该转手扩散邀请码。
+              onInviteGuests:
+                  !_isDirectChat && (_group?.isHost(_realtimeUserId) ?? false)
+                      ? () => unawaited(_inviteGuests())
+                      : null,
+            ),
       body: _withRoundtableBackground(
         Column(
           children: [
@@ -164,7 +174,13 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                       userAvatarImage: _userAvatarImage(),
                       userAvatarText: _userAvatarText(),
                       onLongPress: _showMessageActionSheet,
+                      messageActions: _messageActionsFor,
+                      selectionMode: _messageSelectionActive,
+                      selectedIds: _selectedMessageIds,
+                      selectableIds: _selectableMessageIds,
+                      onToggleSelection: _toggleMessageSelection,
                       onSenderTap: _openCharacterSettings,
+                      onUserAvatarTap: _openUserProfile,
                       onMentionSender: _insertMention,
                       onQuotedTap: (message) =>
                           unawaited(_focusSearchResult(message)),

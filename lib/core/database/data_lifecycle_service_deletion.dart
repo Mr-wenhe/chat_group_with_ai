@@ -1,6 +1,63 @@
 part of 'data_lifecycle_service.dart';
 
 extension _DataLifecycleServiceDeletion on DataLifecycleService {
+  /// 带任务交付物的消息不能按消息自己的路径清附件：交付物可能仍被任务面板
+  /// 引用，所以整批改走孤儿回收（与单条删除同一判据）。
+  bool _anyMessageHasDelivery(Iterable<String> messageIds) => messageIds
+      .any((id) => db.messageBox.get(id)?.workDelivery != null);
+
+  Future<DataLifecycleResult> _runMessagesDeletion(
+    String groupId, {
+    required DeletionTargets targets,
+  }) async {
+    final incomplete = <String>[];
+    final ids = targets
+        .keysFor(DeletionTargetNames.messages)
+        .whereType<String>()
+        .toList(growable: false);
+    if (ids.isEmpty) return _finish(incomplete);
+    // 判据必须在删除前取：删完再看就永远为 false，交付物的附件会被当普通
+    // 消息附件清掉。
+    final hasDelivery = _anyMessageHasDelivery(ids);
+    await _runner.attempt('消息删除失败', incomplete, () async {
+      await db.deleteMessageRecordsAndIndex(ids, groupId: groupId);
+    });
+    await _applyMessageSettings(targets, incomplete);
+    return _finish(
+      incomplete,
+      hasDelivery
+          ? await cleanupOrphanMedia()
+          : await cleanupMediaPaths(targets.mediaPaths),
+    );
+  }
+
+  /// 「清空聊天记录」：删消息 + 清指向消息的设置，其余一概不动。
+  Future<DataLifecycleResult> _runConversationMessageClear(
+    String conversationId, {
+    required DeletionTargets targets,
+  }) async {
+    final incomplete = <String>[];
+    final ids = targets
+        .keysFor(DeletionTargetNames.messages)
+        .whereType<String>()
+        .toList(growable: false);
+    final hasDelivery = _anyMessageHasDelivery(ids);
+    if (ids.isNotEmpty) {
+      await _runner.attempt('会话消息删除失败', incomplete, () async {
+        await db.deleteMessageRecordsAndIndex(ids, groupId: conversationId);
+      });
+    }
+    await _runner.attempt('会话消息设置清理失败', incomplete, () async {
+      await _settings.applyAppSettingsTargets(targets.appSettings);
+    });
+    return _finish(
+      incomplete,
+      hasDelivery
+          ? await cleanupOrphanMedia()
+          : await cleanupMediaPaths(targets.mediaPaths),
+    );
+  }
+
   Future<DataLifecycleResult> _runMessageDeletion(
     String messageId,
     String groupId,
@@ -29,6 +86,7 @@ extension _DataLifecycleServiceDeletion on DataLifecycleService {
       targets.keysFor(DeletionTargetNames.groupMemories),
       incomplete,
     );
+    await _applyMessageSettings(targets, incomplete);
     return _finish(
         incomplete,
         hasDelivery

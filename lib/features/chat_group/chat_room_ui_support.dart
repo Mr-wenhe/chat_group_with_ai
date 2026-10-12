@@ -332,6 +332,87 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
       deleteAssociatedPermanentData: deleteAssociatedPermanentData,
     );
     if (!_canTouchUi) return;
+    await _reloadConversationAfterClear();
+    if (!_canTouchUi) return;
+    if (!result.isComplete && mounted) {
+      await showIncompleteDeletionDialog(context, result);
+      return;
+    }
+    if (mounted) {
+      final message = deleteAssociatedPermanentData
+          ? '会话已清空，来源永久数据已按选择删除'
+          : '会话已清空，永久记忆和关系事件已保留';
+      ScaffoldMessenger.of(context)
+          .showSnackBar(SnackBar(content: Text(message)));
+    }
+  }
+
+  /// 只删消息的清空，记忆、关系与任务都留下。
+  ///
+  /// 与 [_showClearConversationDialog] 是两个不同的承诺，确认框必须把差别写在
+  /// 明面上：用户点错一个，丢的是角色的记忆和正在跑的任务。
+  Future<void> _showClearConversationMessagesDialog() async {
+    final messageIds = await _db.messageIdsForConversation(widget.groupId);
+    if (!mounted) return;
+    final confirmed = await showDialog<bool>(
+      context: context,
+      builder: (dialogContext) => AlertDialog(
+        icon: const Icon(Icons.cleaning_services_outlined,
+            color: Colors.orange),
+        title: const Text('清空聊天记录？'),
+        content: SizedBox(
+          width: 460,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Text('将删除这个会话的全部 ${messageIds.length} 条消息。'),
+                const SizedBox(height: 8),
+                const Text(
+                  '保留：场合记忆、角色记忆、关系与心情、永久记忆、关系事件、'
+                  '任务与工作区记录。',
+                ),
+                const SizedBox(height: 8),
+                const Text('只清空气泡，AI 之后仍会记得此前发生的事。此操作不可撤销。'),
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(dialogContext, false),
+            child: const Text('取消'),
+          ),
+          FilledButton(
+            onPressed: () => Navigator.pop(dialogContext, true),
+            style: FilledButton.styleFrom(backgroundColor: Colors.red),
+            child: const Text('清空消息'),
+          ),
+        ],
+      ),
+    );
+    if (confirmed != true || !mounted) return;
+
+    final result = await _repository.clearConversationMessages();
+    if (!_canTouchUi) return;
+    await _reloadConversationAfterClear();
+    if (!result.isComplete && mounted) {
+      await showIncompleteDeletionDialog(context, result);
+      return;
+    }
+    if (mounted) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text('聊天记录已清空，记忆与任务已保留')),
+      );
+    }
+  }
+
+  /// 会话内容整批变化后的统一收尾：重新加载并重置所有与消息相关的视图状态。
+  ///
+  /// 两种清空共用一份，否则新加的状态字段只会补在其中一个入口上，另一个入口
+  /// 清空后仍显示已删除的消息。
+  Future<void> _reloadConversationAfterClear() async {
     final loaded = await _loader.load(widget.groupId);
     if (!_canTouchUi) return;
     _setUiState(() {
@@ -350,18 +431,10 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
       _pendingMentionedIds.clear();
       _pendingUserMentionMessageIds.clear();
       _searchResults = const <Message>[];
+      // 消息都没了，多选的勾选集合必须一起作废，否则"已选 N 条"会留下幽灵项。
+      _messageSelectionActive = false;
+      _selectedMessageIds.clear();
     });
-    if (!result.isComplete && mounted) {
-      await showIncompleteDeletionDialog(context, result);
-      return;
-    }
-    if (mounted) {
-      final message = deleteAssociatedPermanentData
-          ? '会话已清空，来源永久数据已按选择删除'
-          : '会话已清空，永久记忆和关系事件已保留';
-      ScaffoldMessenger.of(context)
-          .showSnackBar(SnackBar(content: Text(message)));
-    }
   }
 
   /// 打开只读记忆浏览页；返回时保留聊天页已有的消息和滚动状态。
@@ -409,6 +482,18 @@ extension _ChatRoomUiSupport on _ChatRoomPageState {
   /// 成员面板里的单行状态文案：「性别 · 职业 · 年龄 · 回复状态 · 本小时用量」。
   String _memberStatusText(AICharacter c) {
     return formatMemberStatus(c, _blockReasonFor(c));
+  }
+
+  /// 点消息里「我」的头像 → 打开「我的资料」编辑页。
+  ///
+  /// 返回后只需一次 rebuild：气泡的 `_userAvatarImage` / `_userAvatarText`
+  /// 每次都从 box 现读，重跑 `_loader.load` 只会白白打断进行中的流式回复。
+  Future<void> _openUserProfile() async {
+    await Navigator.of(context).push(
+      MaterialPageRoute(builder: (_) => const UserProfilePage()),
+    );
+    if (!_canTouchUi) return;
+    _setUiState(() {});
   }
 
   /// 跳转到角色编辑页。

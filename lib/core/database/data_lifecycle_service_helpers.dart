@@ -56,15 +56,20 @@ extension _DataLifecycleServiceHelpers on DataLifecycleService {
     String messageId,
     String groupId, {
     bool invalidateGroupMemory = true,
+    bool keepReplyReferences = false,
   }) async {
     final messageKeys = await _runner.matchingKeys<Message>(
       db.messageBox,
       (message) => message.id == messageId && message.groupId == groupId,
     );
-    final replyReferences = await _runner.matchingKeys<Message>(
-      db.messageBox,
-      (message) => message.replyToMessageId == messageId,
-    );
+    // 保留引用时不碰引用方：它的 replyToMessageId 会悬空，渲染层据此显示
+    // 「原消息已删除」，比把引用整条抹掉更能说明这里曾经有内容。
+    final replyReferences = keepReplyReferences
+        ? const <dynamic>[]
+        : await _runner.matchingKeys<Message>(
+            db.messageBox,
+            (message) => message.replyToMessageId == messageId,
+          );
     final groupMemories = invalidateGroupMemory
         ? await _runner.matchingKeys<GroupMemory>(
             db.groupMemoryBox,
@@ -86,6 +91,82 @@ extension _DataLifecycleServiceHelpers on DataLifecycleService {
           DeletionTargetNames.groupMemories: groupMemories,
       },
       mediaPaths: mediaPaths,
+      appSettings: _settings.planMessageRetryRecords([messageId]),
+    );
+  }
+
+  /// 把只指向消息的设置清理应用到盘上。
+  ///
+  /// 单条与批量删除共用：两处各写一遍时，新加的清理项只会落在其中一边。
+  Future<void> _applyMessageSettings(
+    DeletionTargets targets,
+    List<String> incomplete,
+  ) async {
+    if (targets.appSettings.isEmpty) return;
+    await _runner.attempt(
+      '消息重试记录清理失败',
+      incomplete,
+      () => _settings.applyAppSettingsTargets(targets.appSettings),
+    );
+  }
+
+  /// 批量计划：只认属于 [groupId] 且确实存在的 id。
+  ///
+  /// 引用指针一律保留（与单条删除同一承诺），所以计划里根本不出现
+  /// replyReferences —— 被引用方会显示「原消息已删除」，而不是凭空少一截引用条。
+  Future<DeletionTargets> _planMessages(
+    Iterable<String> messageIds,
+    String groupId,
+  ) async {
+    final requested = messageIds.toSet();
+    return _targetsForMessages(
+      db.messageBox.values
+          .where((message) =>
+              message.groupId == groupId && requested.contains(message.id))
+          .toList(growable: false),
+    );
+  }
+
+  /// 一个会话的全部消息，外加只指向消息的那部分设置。
+  Future<DeletionTargets> _planConversationMessages(
+    String conversationId,
+  ) async {
+    // 按会话的重试记录计划是消息粒度版本的超集（它还覆盖已经不在 box 里的消息），
+    // 所以这里不要那份按消息算出来的：它会被整份丢掉，纯属多扫一遍队列。
+    final targets = _targetsForMessages(
+      db.messageBox.values
+          .where((message) => message.groupId == conversationId)
+          .toList(growable: false),
+      includeRetryRecords: false,
+    );
+    return DeletionTargets(
+      boxKeys: targets.boxKeys,
+      mediaPaths: targets.mediaPaths,
+      appSettings: _settings.planConversationMessages(
+        conversationId,
+        isGroup: !DirectChatSession.isDirectConversationId(conversationId),
+      ),
+    );
+  }
+
+  DeletionTargets _targetsForMessages(
+    List<Message> messages, {
+    bool includeRetryRecords = true,
+  }) {
+    if (messages.isEmpty) return const DeletionTargets();
+    return DeletionTargets(
+      boxKeys: {
+        DeletionTargetNames.messages:
+            messages.map((message) => message.id).toList(growable: false),
+      },
+      mediaPaths: messages
+          .expand((message) => message.managedMediaPaths)
+          .toList(growable: false),
+      appSettings: includeRetryRecords
+          ? _settings.planMessageRetryRecords(
+              messages.map((message) => message.id),
+            )
+          : const AppSettingsDeletionTargets(),
     );
   }
 

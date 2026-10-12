@@ -11,6 +11,9 @@ class SheetButton extends StatelessWidget {
   final String label;
   final VoidCallback onTap;
 
+  /// 破坏性操作（删除）用 error 色区分。
+  final bool destructive;
+
   const SheetButton(
     this.ctx,
     this.cs,
@@ -18,10 +21,12 @@ class SheetButton extends StatelessWidget {
     this.label,
     this.onTap, {
     super.key,
+    this.destructive = false,
   });
 
   @override
   Widget build(BuildContext context) {
+    final foreground = destructive ? cs.error : cs.onSurface;
     return InkWell(
       onTap: onTap,
       borderRadius: BorderRadius.circular(12),
@@ -33,9 +38,15 @@ class SheetButton extends StatelessWidget {
         ),
         child: Row(
           children: [
-            Icon(icon, size: 20, color: cs.onSurface),
+            Icon(icon, size: 20, color: foreground),
             const SizedBox(width: 14),
-            Text(label, style: TextStyle(fontSize: 15, color: cs.onSurface)),
+            Expanded(
+              child: Text(
+                label,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: 15, color: foreground),
+              ),
+            ),
           ],
         ),
       ),

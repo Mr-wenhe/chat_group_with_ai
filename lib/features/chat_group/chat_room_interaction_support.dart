@@ -1,136 +1,6 @@
 part of 'chat_room_page.dart';
 
 extension _ChatRoomInteractionSupport on _ChatRoomPageState {
-  /// 长按消息弹出的操作面板。
-  ///
-  /// 仅 AI 消息（[sender] 非空）提供重新生成 / 引用回复 / @ 该角色；
-  /// 朗读项受 TTS 总开关控制；推送到企业微信对所有消息可用。
-  void _showMessageActionSheet(Message message, AICharacter? sender) {
-    final cs = Theme.of(context).colorScheme;
-    // 真人成员的消息没有 sender，本来就不会出现生成类入口；主人端则是
-    // 唯一被允许调用 LLM 的一方。
-    final canRegenerate = sender != null && !_isRealtimeGuest;
-    showModalBottomSheet(
-      context: context,
-      backgroundColor: Colors.transparent,
-      isScrollControlled: true,
-      builder: (ctx) => Container(
-        padding: const EdgeInsets.fromLTRB(20, 8, 20, 24),
-        decoration: BoxDecoration(
-          color: cs.surface,
-          borderRadius: const BorderRadius.vertical(top: Radius.circular(24)),
-        ),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            Center(
-              child: Container(
-                width: 40,
-                height: 4,
-                margin: const EdgeInsets.only(bottom: 16),
-                decoration: BoxDecoration(
-                    color: cs.outlineVariant,
-                    borderRadius: BorderRadius.circular(2)),
-              ),
-            ),
-            Text(
-              sender != null ? '${sender.name} 的消息' : '消息',
-              style: TextStyle(
-                  fontSize: 14,
-                  fontWeight: FontWeight.w600,
-                  color: cs.onSurfaceVariant),
-            ),
-            const SizedBox(height: 14),
-            if (sender != null) ...[
-              // 客人端一律不调用 LLM，所以直接触发本机生成的入口都要藏掉。
-              // 「引用回复」「@角色」「查看本条来源」保留：前两者只是把文本发出去，
-              // 真正的生成发生在主人端——客人 @ 某个角色，主人端会看到这条消息并
-              // 让该角色接话；「查看来源」是纯本地读取。
-              if (canRegenerate) ...[
-                SheetButton(ctx, cs, Icons.refresh_rounded, '重新生成', () {
-                  Navigator.pop(ctx);
-                  _regenerateAiReply(message, sender);
-                }),
-                if (_searchTurnController.contextForRegeneration(message.id) !=
-                        null ||
-                    _snapshotFromMessage(message) != null ||
-                    _userMessageBefore(message) != null) ...[
-                  const SizedBox(height: 8),
-                  SheetButton(
-                    ctx,
-                    cs,
-                    Icons.public_rounded,
-                    '刷新来源并重新生成',
-                    () {
-                      Navigator.pop(ctx);
-                      _regenerateAiReply(
-                        message,
-                        sender,
-                        forceRefresh: true,
-                      );
-                    },
-                  ),
-                ],
-              ],
-              if (_searchTurnController.contextForReply(message.id) != null ||
-                  _snapshotFromMessage(message) != null) ...[
-                const SizedBox(height: 8),
-                SheetButton(
-                  ctx,
-                  cs,
-                  Icons.library_books_outlined,
-                  '查看本条来源',
-                  () {
-                    Navigator.pop(ctx);
-                    _showSourcesForReply(message);
-                  },
-                ),
-              ],
-              const SizedBox(height: 8),
-              SheetButton(
-                  ctx, cs, Icons.alternate_email_rounded, '@${sender.name}',
-                  () {
-                Navigator.pop(ctx);
-                _insertMention(sender);
-              }),
-              const SizedBox(height: 8),
-            ],
-            // 引用回复对真人成员的消息同样可用：它只负责把文本带出去，
-            // 真正读到这句话并决定谁来接话的是主人端。
-            SheetButton(ctx, cs, Icons.format_quote_rounded, '引用回复', () {
-              Navigator.pop(ctx);
-              _quoteMessage(message);
-            }),
-            const SizedBox(height: 8),
-            if (_isTtsEnabled) ...[
-              SheetButton(
-                  ctx,
-                  cs,
-                  _isSpeaking && _speakingMessageId == message.id
-                      ? Icons.stop_circle_rounded
-                      : Icons.volume_up_rounded,
-                  _isSpeaking && _speakingMessageId == message.id
-                      ? '停止朗读'
-                      : '朗读', () {
-                Navigator.pop(ctx);
-                if (_isSpeaking && _speakingMessageId == message.id) {
-                  _ttsStop();
-                } else {
-                  _ttsSpeak(message);
-                }
-              }),
-              const SizedBox(height: 8),
-            ],
-            SheetButton(ctx, cs, Icons.send_to_mobile_rounded, '推送到企业微信', () {
-              Navigator.pop(ctx);
-              _showWeComPushDialog(message.content);
-            }),
-          ],
-        ),
-      ),
-    );
-  }
-
   /// 弹出"推送到企业微信"对话框（可选发给同事 UserID 或群 Webhook）。
   void _showWeComPushDialog(String defaultContent) {
     final service = WeComPushService();
@@ -449,9 +319,10 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
         fullContent = ChatActivityPolicy.emptyReplyFallback(
             characterName: character.name,
             role: character.role,
-            groupTheme: _group?.theme ?? '',
+            groupTheme: _fallbackTopicTheme,
             userMessage: null,
             isAutoChat: false,
+            isDirectChat: _isDirectChat,
             random: _random);
         temp.content = fullContent;
         _flushStreamingUi();

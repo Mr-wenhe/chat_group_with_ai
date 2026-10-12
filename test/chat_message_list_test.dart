@@ -343,6 +343,8 @@ void main() {
       WidgetTester tester, {
       required ImageProvider? userAvatarImage,
       String userAvatarText = '',
+      VoidCallback? onUserAvatarTap,
+      void Function(AICharacter sender)? onSenderTap,
     }) async {
       final message = Message(
         id: 'user-message',
@@ -374,9 +376,10 @@ void main() {
               avatarImageOf: (_) => null,
               senderNameById: (_) => '我',
               onLongPress: (_, __) {},
-              onSenderTap: (_) {},
+              onSenderTap: onSenderTap ?? (_) {},
               onMentionSender: (_) {},
               onQuotedTap: (_) {},
+              onUserAvatarTap: onUserAvatarTap,
             ),
           ),
         ),
@@ -431,6 +434,101 @@ void main() {
         tester.getCenter(find.byType(CharacterAvatar)).dx,
         greaterThan(tester.getCenter(find.text('你好')).dx),
       );
+    });
+
+    testWidgets('点自己的头像打开资料页入口', (tester) async {
+      var openedProfile = false;
+      await pumpUserBubble(
+        tester,
+        userAvatarImage: null,
+        onUserAvatarTap: () => openedProfile = true,
+      );
+
+      await tester.tap(find.byType(CharacterAvatar));
+
+      expect(openedProfile, isTrue);
+    });
+
+    testWidgets('点自己的头像不会落到角色编辑入口', (tester) async {
+      // `onSenderTap` 对用户消息恒为 null，所以资料页入口必须是独立回调；
+      // 曾把两者绑同一个参数，结果点头像要么无反应要么打开不存在的角色页。
+      var tappedSender = false;
+      await pumpUserBubble(
+        tester,
+        userAvatarImage: null,
+        onUserAvatarTap: () {},
+        onSenderTap: (_) => tappedSender = true,
+      );
+
+      await tester.tap(find.byType(CharacterAvatar));
+
+      expect(tappedSender, isFalse);
+    });
+
+    testWidgets('没传资料页回调时点头像不报错', (tester) async {
+      await pumpUserBubble(tester, userAvatarImage: null);
+
+      await tester.tap(find.byType(CharacterAvatar));
+
+      expect(tester.takeException(), isNull);
+    });
+
+    testWidgets('AI 头像不触发资料页入口', (tester) async {
+      // 两个分支共用同一个头像 widget，只有左侧那份该开角色编辑。
+      var openedProfile = false;
+      final character = AICharacter(
+        id: 'character-1',
+        name: '程序媛',
+        avatar: '程',
+        age: 28,
+        role: '工程师',
+        personalityTags: const [],
+        systemPrompt: '帮助用户完成工作。',
+        apiKey: '',
+        apiProvider: 'deepseek',
+      );
+      final message = Message(
+        id: 'character-message',
+        groupId: 'group-1',
+        senderId: character.id,
+        senderType: 'ai',
+        content: '我来帮你处理。',
+      );
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Scaffold(
+            body: ChatMessageList(
+              messages: [message],
+              characters: [character],
+              messageIndex: {message.id: message},
+              characterIndex: {character.id: character},
+              scrollController: ScrollController(),
+              controller: ChatMessageListController(),
+              streamingMessageId: null,
+              regeneratingMessageId: null,
+              highlightedMentionMessageId: null,
+              isDirectChat: false,
+              readUserMessageIds: const {},
+              ownerName: '我',
+              unknownCharacter: character,
+              editableSenderIds: {character.id},
+              senderColor: (_) => Colors.blue,
+              avatarImageOf: (_) => null,
+              senderNameById: (_) => character.name,
+              onLongPress: (_, __) {},
+              onSenderTap: (_) {},
+              onMentionSender: (_) {},
+              onQuotedTap: (_) {},
+              onUserAvatarTap: () => openedProfile = true,
+            ),
+          ),
+        ),
+      );
+
+      await tester.tap(find.byType(CharacterAvatar));
+
+      expect(openedProfile, isFalse);
     });
   });
 }

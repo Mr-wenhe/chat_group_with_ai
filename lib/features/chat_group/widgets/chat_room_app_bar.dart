@@ -22,6 +22,14 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
   final String webSearchTooltip;
   final VoidCallback onConfigureWebSearch;
   final VoidCallback? onClearConversation;
+
+  /// 只删消息、保留记忆与任务的轻量清空。与 [onClearConversation] 是两个不同的
+  /// 承诺，菜单里的措辞必须让用户分得清。
+  final VoidCallback? onClearMessages;
+
+  /// 进入多选删除。
+  final VoidCallback? onBatchDelete;
+
   final VoidCallback? onOpenMembers;
 
   /// 「邀请客人」入口。只有群主人看得到——客人无权再拉人进来，
@@ -50,6 +58,8 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
     required this.webSearchTooltip,
     required this.onConfigureWebSearch,
     this.onClearConversation,
+    this.onClearMessages,
+    this.onBatchDelete,
     this.onOpenMembers,
     this.onInviteGuests,
   });
@@ -133,6 +143,8 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
                 webSearchTooltip: webSearchTooltip,
                 onConfigureWebSearch: onConfigureWebSearch,
                 onClearConversation: onClearConversation,
+                onClearMessages: onClearMessages,
+                onBatchDelete: onBatchDelete,
                 onExport: onExport,
                 onOpenMembers: onOpenMembers,
                 onInviteGuests: onInviteGuests,
@@ -143,7 +155,15 @@ class ChatRoomAppBar extends StatelessWidget implements PreferredSizeWidget {
   }
 }
 
-enum _ChatRoomMoreAction { webSearch, clearConversation, export, members, invite }
+enum _ChatRoomMoreAction {
+  webSearch,
+  clearConversation,
+  clearMessages,
+  batchDelete,
+  export,
+  members,
+  invite,
+}
 
 class _MoreActionsButton extends StatelessWidget {
   final bool showGroupActions;
@@ -151,6 +171,8 @@ class _MoreActionsButton extends StatelessWidget {
   final String webSearchTooltip;
   final VoidCallback onConfigureWebSearch;
   final VoidCallback? onClearConversation;
+  final VoidCallback? onClearMessages;
+  final VoidCallback? onBatchDelete;
   final VoidCallback onExport;
   final VoidCallback? onOpenMembers;
   final VoidCallback? onInviteGuests;
@@ -161,6 +183,8 @@ class _MoreActionsButton extends StatelessWidget {
     required this.webSearchTooltip,
     required this.onConfigureWebSearch,
     required this.onClearConversation,
+    required this.onClearMessages,
+    required this.onBatchDelete,
     required this.onExport,
     required this.onOpenMembers,
     required this.onInviteGuests,
@@ -174,6 +198,8 @@ class _MoreActionsButton extends StatelessWidget {
         onSelected: (action) => switch (action) {
           _ChatRoomMoreAction.webSearch => onConfigureWebSearch(),
           _ChatRoomMoreAction.clearConversation => onClearConversation?.call(),
+          _ChatRoomMoreAction.clearMessages => onClearMessages?.call(),
+          _ChatRoomMoreAction.batchDelete => onBatchDelete?.call(),
           _ChatRoomMoreAction.export => onExport(),
           _ChatRoomMoreAction.members => onOpenMembers?.call(),
           _ChatRoomMoreAction.invite => onInviteGuests?.call(),
@@ -204,12 +230,31 @@ class _MoreActionsButton extends StatelessWidget {
               value: _ChatRoomMoreAction.export,
               child: _MenuAction(icon: Icons.upload_rounded, label: '导出对话'),
             ),
+          if (onBatchDelete != null)
+            const PopupMenuItem(
+              value: _ChatRoomMoreAction.batchDelete,
+              child: _MenuAction(
+                icon: Icons.checklist_rounded,
+                label: '批量删除',
+              ),
+            ),
+          if (onClearMessages != null)
+            const PopupMenuItem(
+              value: _ChatRoomMoreAction.clearMessages,
+              child: _MenuAction(
+                icon: Icons.cleaning_services_outlined,
+                label: '清空聊天记录（保留记忆与任务）',
+              ),
+            ),
           if (onClearConversation != null)
             const PopupMenuItem(
               value: _ChatRoomMoreAction.clearConversation,
               child: _MenuAction(
                 icon: Icons.delete_sweep_outlined,
-                label: '清空对话（保留记忆）',
+                // 这一项连场合记忆、关系、任务和工作区一起删。旧文案叫
+                // 「清空对话（保留记忆）」，与上面那条只删消息的入口并排时
+                // 会被读成"更轻的那个"，正好反了。
+                label: '清空对话（含记忆与任务）',
               ),
             ),
         ],

@@ -434,6 +434,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 高亮自动取消定时器。
   Timer? _mentionHighlightTimer;
 
+  // —— 批量删除 ——
+  /// 多选是否进行中。进入后气泡左侧出现勾选框，整行点击用来切换勾选。
+  bool _messageSelectionActive = false;
+
+  /// 本次多选中已勾选的消息 id。
+  final Set<String> _selectedMessageIds = <String>{};
+
   /// 统一保护异步回调，避免页面离开后继续写入 State。
   bool get _canTouchUi => mounted && !_disposed && _pageActive;
 
@@ -593,5 +600,13 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   }
 
   @override
-  Widget build(BuildContext context) => _buildPage(context);
+  Widget build(BuildContext context) => PopScope(
+        // 多选是模态的：系统返回键（Android 返回手势）先取消多选，而不是把整个
+        // 会话页 pop 掉。页面里没有别的 PopScope，这里就是这条路由的收口点。
+        canPop: !_messageSelectionActive,
+        onPopInvokedWithResult: (didPop, _) {
+          if (!didPop) _exitMessageSelection();
+        },
+        child: _buildPage(context),
+      );
 }

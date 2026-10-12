@@ -161,13 +161,39 @@ class DataLifecycleService {
     String messageId, {
     required String groupId,
     bool invalidateGroupMemory = true,
+    bool keepReplyReferences = false,
   }) =>
       _runLifecycleMutation(
         () => _deleteMessage(
           messageId,
           groupId: groupId,
           invalidateGroupMemory: invalidateGroupMemory,
+          keepReplyReferences: keepReplyReferences,
         ),
+      );
+
+  /// 批量删除同一个会话里的多条消息。
+  ///
+  /// 语义与 [deleteMessage] 完全一致：不动群记忆、角色记忆与心情，引用指针
+  /// 原样保留（被引用方据此显示「原消息已删除」）。计划阶段只接受确实存在且
+  /// 属于 [groupId] 的 id —— 传入集合里混进一个越界 id 就会删掉别的会话的消息。
+  Future<DataLifecycleResult> deleteMessages(
+    Iterable<String> messageIds, {
+    required String groupId,
+  }) =>
+      _runLifecycleMutation(
+        () => _deleteMessages(messageIds, groupId: groupId),
+      );
+
+  /// 清空一个会话的消息，记忆、关系、任务与工作区全部保留。
+  ///
+  /// 与 [clearConversation] 的分界就在这里：那条路连场合记忆、关系、任务和
+  /// 工作区一起删，这条只把气泡清干净。
+  Future<DataLifecycleResult> clearConversationMessages(
+    String conversationId,
+  ) =>
+      _runLifecycleMutation(
+        () => _clearConversationMessages(conversationId),
       );
 
   Future<DataLifecycleResult> deleteGroup(
@@ -224,11 +250,13 @@ class DataLifecycleService {
     String messageId, {
     required String groupId,
     bool invalidateGroupMemory = true,
+    bool keepReplyReferences = false,
   }) async {
     final targets = await _planMessage(
       messageId,
       groupId,
       invalidateGroupMemory: invalidateGroupMemory,
+      keepReplyReferences: keepReplyReferences,
     );
     if (!await _begin({
       'kind': 'message',
@@ -239,6 +267,35 @@ class DataLifecycleService {
       return _pendingOperationConflict();
     }
     return _runMessageDeletion(messageId, groupId, targets);
+  }
+
+  Future<DataLifecycleResult> _deleteMessages(
+    Iterable<String> messageIds, {
+    required String groupId,
+  }) async {
+    final targets = await _planMessages(messageIds, groupId);
+    if (!await _begin({
+      'kind': 'messages',
+      'groupId': groupId,
+      'targets': targets.toMap(),
+    })) {
+      return _pendingOperationConflict();
+    }
+    return _runMessagesDeletion(groupId, targets: targets);
+  }
+
+  Future<DataLifecycleResult> _clearConversationMessages(
+    String conversationId,
+  ) async {
+    final targets = await _planConversationMessages(conversationId);
+    if (!await _begin({
+      'kind': 'conversationMessages',
+      'id': conversationId,
+      'targets': targets.toMap(),
+    })) {
+      return _pendingOperationConflict();
+    }
+    return _runConversationMessageClear(conversationId, targets: targets);
   }
 
   Future<DataLifecycleResult> _deleteGroup(
@@ -364,6 +421,16 @@ class DataLifecycleService {
           deleteAssociatedPermanentData:
               job['deleteAssociatedPermanentData'] == true,
         );
+      case 'messages':
+        // 计划（含 mediaPaths）在 _begin 时就一起落盘了，所以崩溃后能原样重试：
+        // 少了这个分支，一次中断的批量删除会留下永远无法重试的待办标记，
+        // 而它会让此后所有生命周期操作都被 _begin 挡下。
+        return _runMessagesDeletion(
+          job['groupId']?.toString() ?? '',
+          targets: targets,
+        );
+      case 'conversationMessages':
+        return _runConversationMessageClear(id, targets: targets);
       case 'conversation':
         return _runConversationDeletion(
           id,

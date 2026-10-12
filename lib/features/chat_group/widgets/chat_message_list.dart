@@ -2,8 +2,10 @@ import 'dart:async';
 
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/features/chat_group/message_action_item.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_message_bubble.dart';
+import 'package:chat_group/features/chat_group/widgets/message_selection_checkbox.dart';
 import 'package:chat_group/features/chat_group/widgets/wecom_chat_components.dart';
 import 'package:chat_group/features/work_mode/work_mode_task_lifecycle.dart';
 import 'package:flutter/material.dart';
@@ -53,7 +55,24 @@ class ChatMessageList extends StatelessWidget {
   /// 留空 = 直接用名字首字（旧调用的行为）。
   final String userAvatarText;
   final void Function(Message message, AICharacter? sender) onLongPress;
+
+  /// 多选进行中：每条消息左侧出现勾选框，整行的点击用来切换勾选。
+  ///
+  /// 此模式下长按与右键菜单一并关掉——多选是模态的，再叠一层"删除这条消息"
+  /// 只会让人分不清点下去的到底是勾选还是删除。
+  final bool selectionMode;
+  final Set<String> selectedIds;
+
+  /// 本次多选中允许勾选的消息 id；其余消息的勾选框渲染但点不动。
+  final Set<String> selectableIds;
+  final void Function(String messageId) onToggleSelection;
+
+  /// 每条消息的操作项清单，长按弹窗与右键菜单共用同一份。
+  final MessageActionItemBuilder? messageActions;
   final void Function(AICharacter sender) onSenderTap;
+
+  /// 点消息右上角「我」的头像。与 [onSenderTap] 分开：那个只对 AI 角色有效。
+  final VoidCallback? onUserAvatarTap;
   final void Function(AICharacter sender) onMentionSender;
   final void Function(Message message) onQuotedTap;
   final FutureOr<void> Function(WorkTaskUserAction action)? onTaskAction;
@@ -90,13 +109,21 @@ class ChatMessageList extends StatelessWidget {
     this.userAvatarImage,
     this.userAvatarText = '',
     required this.onLongPress,
+    this.messageActions,
     required this.onSenderTap,
+    this.onUserAvatarTap,
     required this.onMentionSender,
     required this.onQuotedTap,
     this.onTaskAction,
     this.progressStartTimes,
     this.memberNames = const <String, String>{},
+    this.selectionMode = false,
+    this.selectedIds = const <String>{},
+    this.selectableIds = const <String>{},
+    this.onToggleSelection = _noopToggleSelection,
   });
+
+  static void _noopToggleSelection(String messageId) {}
 
   @override
   Widget build(BuildContext context) {
@@ -141,51 +168,86 @@ class ChatMessageList extends StatelessWidget {
         final startTimes = progressStartTimes;
         final runStartedAtMs = startTimes == null ? null : startTimes[taskId];
 
+        final selectable = selectableIds.contains(message.id);
+        final bubble = ChatMessageBubble(
+          message: message,
+          sender: sender,
+          memberName: memberName,
+          characters: characters,
+          cs: colorScheme,
+          isStreaming: streamingMessageId == message.id,
+          isRegenerating: regeneratingMessageId == message.id,
+          isHighlightedMention: highlightedMentionMessageId == message.id,
+          selectionMode: selectionMode,
+          onTap: selectionMode && selectable
+              ? () => onToggleSelection(message.id)
+              : null,
+          onLongPress:
+              selectionMode ? null : () => onLongPress(message, actionSender),
+          messageActions: selectionMode ? null : messageActions,
+          senderColor: senderColor,
+          senderAvatarImage: avatarImageOf(sender),
+          userAvatarImage: userAvatarImage,
+          userAvatarText: userAvatarText,
+          onSenderTap: actionSender == null
+              ? null
+              : () => onSenderTap(actionSender),
+          onUserAvatarTap: onUserAvatarTap,
+          onMentionSender: actionSender == null
+              ? null
+              : () => onMentionSender(actionSender),
+          quotedMessage: quotedMessage,
+          quotedSenderName: quotedMessage == null
+              ? null
+              : quotedMessage.senderType == Message.senderTypeMember
+                  ? _memberDisplayName(quotedMessage)
+                  : senderNameById(quotedMessage.senderId),
+          onQuotedTap: quotedMessage == null
+              ? null
+              : () => onQuotedTap(quotedMessage),
+          ownerName: ownerName,
+          readReceiptText: isDirectChat && message.senderType == 'user'
+              ? (readUserMessageIds.contains(message.id) ? '已读' : '未读')
+              : null,
+          // P2：进度消息携带 runStartedAtMs，其它消息为 null（旧调用兼容）。
+          runStartedAtMs: runStartedAtMs,
+          // 私聊同样会收到任务提醒（任务卡在等待审批/授权时），按钮必须
+          // 可点，否则文案让人点、按钮却是灰的。
+          onTaskAction: onTaskAction,
+        );
+
         return KeyedSubtree(
           key: controller.keyFor(message.id),
           child: Column(
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
               if (showDate) _DateDivider(timestamp: message.timestamp),
-              ChatMessageBubble(
-                message: message,
-                sender: sender,
-                memberName: memberName,
-                characters: characters,
-                cs: colorScheme,
-                isStreaming: streamingMessageId == message.id,
-                isRegenerating: regeneratingMessageId == message.id,
-                isHighlightedMention: highlightedMentionMessageId == message.id,
-                onLongPress: () => onLongPress(message, actionSender),
-                senderColor: senderColor,
-                senderAvatarImage: avatarImageOf(sender),
-                userAvatarImage: userAvatarImage,
-                userAvatarText: userAvatarText,
-                onSenderTap: actionSender == null
-                    ? null
-                    : () => onSenderTap(actionSender),
-                onMentionSender: actionSender == null
-                    ? null
-                    : () => onMentionSender(actionSender),
-                quotedMessage: quotedMessage,
-                quotedSenderName: quotedMessage == null
-                    ? null
-                    : quotedMessage.senderType == Message.senderTypeMember
-                        ? _memberDisplayName(quotedMessage)
-                        : senderNameById(quotedMessage.senderId),
-                onQuotedTap: quotedMessage == null
-                    ? null
-                    : () => onQuotedTap(quotedMessage),
-                ownerName: ownerName,
-                readReceiptText: isDirectChat && message.senderType == 'user'
-                    ? (readUserMessageIds.contains(message.id) ? '已读' : '未读')
-                    : null,
-                // P2：进度消息携带 runStartedAtMs，其它消息为 null（旧调用兼容）。
-                runStartedAtMs: runStartedAtMs,
-                // 私聊同样会收到任务提醒（任务卡在等待审批/授权时），按钮必须
-                // 可点，否则文案让人点、按钮却是灰的。
-                onTaskAction: onTaskAction,
-              ),
+              if (!selectionMode)
+                bubble
+              else
+                Row(
+                  crossAxisAlignment: CrossAxisAlignment.center,
+                  children: [
+                    MessageSelectionCheckbox(
+                      key: ValueKey('message-select-${message.id}'),
+                      selected: selectedIds.contains(message.id),
+                      enabled: selectable,
+                      onTap: () => onToggleSelection(message.id),
+                    ),
+                    Expanded(
+                      child: GestureDetector(
+                        // 正文有自己的 onTap，这里兜住正文之外的区域（头像、昵称、
+                        // 引用条、留白），让整行都能切换勾选。translucent 保证
+                        // 它不与气泡内部的点击打架。
+                        behavior: HitTestBehavior.translucent,
+                        onTap: selectable
+                            ? () => onToggleSelection(message.id)
+                            : null,
+                        child: bubble,
+                      ),
+                    ),
+                  ],
+                ),
             ],
           ),
         );

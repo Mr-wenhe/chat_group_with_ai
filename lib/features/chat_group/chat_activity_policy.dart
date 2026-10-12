@@ -99,24 +99,42 @@ class ChatActivityPolicy {
     required String groupTheme,
     String? userMessage,
     bool isAutoChat = false,
+    bool isDirectChat = false,
     Random? random,
   }) {
     final rng = random ?? Random();
     final topic = groupTheme.trim().isEmpty ? '这个话题' : groupTheme.trim();
     final hasUserMsg = userMessage != null && userMessage.trim().isNotEmpty;
-    final templates = hasUserMsg
-        ? [
-            '说到$topic，我觉得可以先听听其他人的看法。',
-            '这个问题嘛，$topic 其实可以从好几个角度来看。',
-            '我接一下，$topic 这个话题挺有意思的，展开聊聊？',
-          ]
-        : [
-            '说到$topic，大家最近有什么新想法吗？',
-            '在$topic 这个话题上，我有点不同的看法，想听听你们的。',
-            '最近$topic 有什么新鲜事吗？聊两句呗。',
-          ];
+    // 一对一的台词里不能出现"其他人""你们"：那指向的是不存在的人。
+    final templates = isDirectChat
+        ? (hasUserMsg ? _directUserTemplates : _directAutoTemplates)
+        : (hasUserMsg
+            ? [
+                '说到$topic，我觉得可以先听听其他人的看法。',
+                '这个问题嘛，$topic 其实可以从好几个角度来看。',
+                '我接一下，$topic 这个话题挺有意思的，展开聊聊？',
+              ]
+            : [
+                '说到$topic，大家最近有什么新想法吗？',
+                '在$topic 这个话题上，我有点不同的看法，想听听你们的。',
+                '最近$topic 有什么新鲜事吗？聊两句呗。',
+              ]);
     return templates[rng.nextInt(templates.length)];
   }
+
+  /// 私聊里用户刚发过话时的兜底台词（[emptyReplyFallback]）。
+  static const List<String> _directUserTemplates = [
+    '说到这个话题，我有点想法，展开聊聊？',
+    '这个问题嘛，我其实可以从几个角度说说。',
+    '我接一下，这个话题挺有意思的。',
+  ];
+
+  /// 私聊里用户没说话（主动/空闲回合）时的兜底台词。
+  static const List<String> _directAutoTemplates = [
+    '最近有什么新鲜事吗？聊两句呗。',
+    '有点想聊聊，你最近怎么样？',
+    '在忙吗？想跟你说件事。',
+  ];
 
   static Duration replyDelayForContent(String content, {Random? random}) {
     final visibleCharacterCount = content.runes
