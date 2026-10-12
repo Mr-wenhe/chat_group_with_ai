@@ -1,5 +1,6 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/chat_group/ai_speaker_selector.dart';
 import 'package:chat_group/features/chat_group/group_shared_context.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -302,6 +303,65 @@ void main() {
         ),
         isNull,
       );
+    });
+
+    test('协议正文被裁短时判定为不完整，完整协议才算幸存', () {
+      final truncated = <Map<String, dynamic>>[
+        {
+          'role': 'system',
+          'content': '${AiSpeakerSelector.protocolBlockMarker}……【上下文已裁剪】…',
+        },
+      ];
+      expect(
+        AiSpeakerSelector.protocolSurvives(truncated),
+        isFalse,
+        reason: '区块标记还在，但模型已经不知道要输出什么形状了',
+      );
+      expect(AiSpeakerSelector.protocolSurvives(messagesFor()), isTrue);
+    });
+
+    test('小窗口枚举：凡返回请求，必是完整协议且不超预算', () {
+      final candidates = [
+        testCharacter('a')..name = '小a',
+        testCharacter('b')..name = '小b',
+      ];
+      final history = [
+        for (var index = 0; index < 8; index++)
+          message(
+            id: 'm$index',
+            senderId: 'a',
+            senderType: 'ai',
+            content: '一段会被裁剪的历史' * 12,
+          ),
+      ];
+
+      // 设置表单允许用户声明很小但为正数的窗口。裁剪只保证**优先级**：协议正文
+      // 与候选名单都可能被按比例截短，而区块标记和候选 ID 仍然幸存——只核对
+      // 后两者就会把半份协议交给模型。
+      for (var budget = 64; budget <= 256; budget++) {
+        final fitted = bounded(
+          candidates: candidates,
+          maxInputTokens: budget,
+          sharedContext: '${GroupSharedContext.marker}\n共同背景：甲是乙的姐姐',
+          history: history,
+        );
+        if (fitted == null) continue;
+        expect(
+          AiSpeakerSelector.protocolSurvives(fitted),
+          isTrue,
+          reason: '预算 $budget 下返回了一份协议被裁短的请求',
+        );
+        expect(
+          AiSpeakerSelector.candidateIdsSurvive(fitted, candidates),
+          isTrue,
+          reason: '预算 $budget 下返回了一份缺成员的名单',
+        );
+        expect(
+          ContextWindowManager.estimateRequestTokens(fitted) <= budget,
+          isTrue,
+          reason: '预算 $budget 下返回了整体超预算的请求',
+        );
+      }
     });
 
     test('候选 ID 的核对按完整 id 匹配，不会被更长 id 的前缀蒙混', () {

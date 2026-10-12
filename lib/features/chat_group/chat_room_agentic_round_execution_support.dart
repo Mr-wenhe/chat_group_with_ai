@@ -20,6 +20,13 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         isAutoChat ? _conversationController.beginAutoGuard() : null;
     if (normalRunGuard == null && autoRunGuard == null) return;
 
+    // 整轮共用一个代际号：中途离开本群（哪怕立刻回来）会让它作废，循环据此收手，
+    // 而不是接着往下一位发言者走。
+    //
+    // 这里刻意**不带**空闲自动发言自己的代际号：这一条路只服务用户发起的回合
+    // （`isAutoChat` 恒为 false）。空闲自动回合走 `_tryAutoChatRound` 自己的循环，
+    // 那里才持有那份代际号并一路传给判据与生成。
+    final roundGeneration = _roomRoundGeneration;
     try {
       // Establishing the run guard precedes every operation that can throw;
       // even a runtime reload or UI bookkeeping failure must release it.
@@ -49,6 +56,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         userSentiment: userSentiment,
         roundtableMode: roundtableMode,
         roundtableParticipants: roundtableParticipants,
+        roundGeneration: roundGeneration,
       );
 
       // widget 可能在 _maybeUpdateMemory 的 await 期间被 dispose。
@@ -87,6 +95,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
     required UserMessageSentiment? userSentiment,
     required bool roundtableMode,
     required List<AICharacter>? roundtableParticipants,
+    required int roundGeneration,
   }) async {
     if (!_isDirectChat && !roundtableMode) {
       await _runGroupSpeakerRounds(
@@ -95,6 +104,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         isAutoChat: isAutoChat,
         currentUserMessage: currentUserMessage,
         userSentiment: userSentiment,
+        roundGeneration: roundGeneration,
       );
       return;
     }
@@ -108,6 +118,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
       currentUserMessage: currentUserMessage,
       userSentiment: userSentiment,
       roundtableMode: roundtableMode,
+      roundGeneration: roundGeneration,
     );
   }
 
@@ -122,10 +133,11 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
     required bool isAutoChat,
     required Message? currentUserMessage,
     required UserMessageSentiment? userSentiment,
+    required int roundGeneration,
   }) async {
-    // 用户手动发起的回合重新允许提示一次"共同设定放不下"：这是本轮唯一会写进
+    // 用户手动发起的回合重新允许提示一次"必需内容放不下"：这是本轮唯一会写进
     // 会话的失败说明，隔了若干轮还不说的话，用户会以为自己的消息被吞了。
-    if (!isAutoChat) _sharedContextOverflowReportedBlock = null;
+    if (!isAutoChat) _promptOverflowReportedKey = null;
     final mentionedSet = (mentionedIds ?? const <String>[]).toSet();
     final candidatesForRound = _eligibleSpeakerCandidates(
       mentionedIds: mentionedSet,
@@ -160,9 +172,12 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
       isAutoChat: isAutoChat,
     );
     for (var step = 0; step < maxReplies; step++) {
-      // 每步之前复检：用户点了停止、切走页面、App 进后台都立刻收手。
-      if (!_roomWorkAllowed) break;
-      if (_conversationController.state.phase == ConversationPhase.stopping) {
+      // 每步之前复检：用户点了停止、切走页面、App 进后台都立刻收手。代际号还管住
+      // "离开又立刻回来"——那时可见性已经恢复为真，但这一轮仍然是离开前那一轮。
+      if (_isReplyRoundInvalidated(
+        isAutoChat: isAutoChat,
+        generation: roundGeneration,
+      )) {
         break;
       }
       final picked = await _selectNextGroupSpeaker(
@@ -171,6 +186,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         isAutoChat: isAutoChat,
         alreadySpoken: alreadySpoken,
         userSentiment: userSentiment,
+        roundGeneration: roundGeneration,
       );
       if (picked == null) break;
       alreadySpoken.add(picked.character.id);
@@ -184,6 +200,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         userSentiment: userSentiment,
         searchTurnContext: searchTurnContext,
         repliedIds: repliedIds,
+        roundGeneration: roundGeneration,
       );
     }
 
@@ -191,7 +208,10 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
       mentionedIds: mentionedIds,
       repliedIds: repliedIds,
     );
-    await _maybeUpdateMemory();
+    await _maybeUpdateMemory(
+      isAutoChat: isAutoChat,
+      roundGeneration: roundGeneration,
+    );
   }
 
   /// 名单已确定的回合（私聊 / 圆桌会议）：按名单依次生成回复。
@@ -203,8 +223,9 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
     required Message? currentUserMessage,
     required UserMessageSentiment? userSentiment,
     required bool roundtableMode,
+    required int roundGeneration,
   }) async {
-    if (!isAutoChat) _sharedContextOverflowReportedBlock = null;
+    if (!isAutoChat) _promptOverflowReportedKey = null;
     if (charactersToReply.isEmpty) {
       _reportNoGroupSpeakerAvailable(isAutoChat: isAutoChat);
       return;
@@ -243,8 +264,10 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
     for (final character in charactersToReply) {
       // 与普通群聊同一条收手口径：用户点了停止、切走页面或 App 进后台，
       // 名单里剩下的角色不再逐个产生回复与"打字延迟"。
-      if (!_roomWorkAllowed) break;
-      if (_conversationController.state.phase == ConversationPhase.stopping) {
+      if (_isReplyRoundInvalidated(
+        isAutoChat: isAutoChat,
+        generation: roundGeneration,
+      )) {
         break;
       }
       // 私聊与圆桌都不走意图编排：私聊固定由对方回答，圆桌每人围绕同一份
@@ -259,6 +282,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         userSentiment: userSentiment,
         searchTurnContext: searchTurnContext,
         repliedIds: repliedIds,
+        roundGeneration: roundGeneration,
       );
     }
 
@@ -266,7 +290,10 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
       mentionedIds: mentionedIds,
       repliedIds: repliedIds,
     );
-    await _maybeUpdateMemory();
+    await _maybeUpdateMemory(
+      isAutoChat: isAutoChat,
+      roundGeneration: roundGeneration,
+    );
   }
 
   /// 让一位角色发言一次，并把结果计入本轮。
@@ -282,6 +309,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
     required UserMessageSentiment? userSentiment,
     required SearchTurnContext? searchTurnContext,
     required List<String> repliedIds,
+    required int roundGeneration,
   }) async {
     final wasPendingReply = _pendingMentionedIds.contains(character.id);
     late final String replyContent;
@@ -295,6 +323,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         currentUserMessage: currentUserMessage,
         userSentiment: userSentiment,
         searchTurnContext: searchTurnContext,
+        roundGeneration: roundGeneration,
       );
     } catch (e) {
       replyContent =

@@ -63,6 +63,11 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
   /// → 4. 自动聊天提示 → 5. 角色人设 → 6. 其他成员信息 → 历史对话。
   ///
   /// [supportsVision] 为 true 时图片附件会拼成多模态内容，否则退化为文字描述。
+  ///
+  /// [onCurrentUserTurn] 在**本轮真人输入**实际拼进请求时被调用一次，交出它
+  /// 在请求里的形态（文本或按多模态策略生成的列表）。必需内容守卫据此保护它：
+  /// 那份内容不能靠"最后一条非 system 消息"反推——群聊里那常常是上一位 AI
+  /// 的发言（见 [ChatReplyPromptGuard]）。
   Future<List<Map<String, dynamic>>> _buildPromptMessagesInternal({
     required AICharacter character,
     required List<Message> context,
@@ -72,6 +77,7 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
     bool supportsVision = false,
     Message? currentUserMessage,
     String? transientContextSummary,
+    void Function(Object? rendered)? onCurrentUserTurn,
   }) {
     return _buildApiMessages(
       character,
@@ -82,6 +88,7 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
       supportsVision: supportsVision,
       currentUserMessage: currentUserMessage,
       transientContextSummary: transientContextSummary,
+      onCurrentUserTurn: onCurrentUserTurn,
     );
   }
 
@@ -91,14 +98,16 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
       ReplyIntent? intent,
       bool supportsVision = false,
       Message? currentUserMessage,
-      String? transientContextSummary}) async {
+      String? transientContextSummary,
+      void Function(Object? rendered)? onCurrentUserTurn}) async {
     final visibleContext = _visibleContextForCharacter(character.id, context);
     if (_isDirectChat) {
       return _buildDirectApiMessages(character, visibleContext, userMessage,
           supportsVision: supportsVision,
           currentUserMessage: currentUserMessage,
           transientContextSummary: transientContextSummary,
-          isAutoChat: isAutoChat);
+          isAutoChat: isAutoChat,
+          onCurrentUserTurn: onCurrentUserTurn);
     }
 
     final msgs = <Map<String, dynamic>>[];
@@ -309,15 +318,16 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
     for (final m in recentHistory) {
       if (m.senderType == 'user') {
         // 真人用户消息 → user 角色；含媒体时按多模态策略生成 content。
-        msgs.add({
-          'role': 'user',
-          'content': await prepareUserMessageContent(
-            m,
-            supportsVision: supportsVision,
-            documentQuery: userMessage,
-            includeDocumentContext: false,
-          ),
-        });
+        final content = await prepareUserMessageContent(
+          m,
+          supportsVision: supportsVision,
+          documentQuery: userMessage,
+          includeDocumentContext: false,
+        );
+        if (currentUserMessage != null && m.id == currentUserMessage.id) {
+          onCurrentUserTurn?.call(content);
+        }
+        msgs.add({'role': 'user', 'content': content});
       } else if (m.senderId == character.id) {
         // 当前角色自己的消息 → assistant 角色（LLM 看到自己的历史发言）。
         msgs.add({'role': 'assistant', 'content': m.content});
@@ -343,6 +353,7 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
           includeDocumentContext: false,
         );
       }
+      onCurrentUserTurn?.call(content);
       msgs.add({'role': 'user', 'content': content});
     }
 

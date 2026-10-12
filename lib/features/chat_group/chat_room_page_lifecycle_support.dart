@@ -39,13 +39,16 @@ extension _ChatRoomPageLifecycleSupport on _ChatRoomPageState {
 
   /// 停止本群的一切自动行为。
   ///
-  /// 停调度器是"不再起新回合"，停流是"已有请求尽力取消"——本地一定不采纳
-  /// 迟到的结果（见 [_generateAiReply] 的复检）。
+  /// 停调度器是"不再起新回合"，停流是"已有请求尽力取消"，推进回合代际是"飞行中的
+  /// 那一轮从此刻起作废"——本地一定不采纳迟到的结果（见 [_generateAiReply] 的复检）。
+  /// 三者缺一不可：代际号管住了"暂停之后又立刻恢复可见性"那段没有 stream、也没有
+  /// 选择器令牌可取消的准备阶段。
   void _pauseRoomAutoWork() {
     _autoChatStartTimer?.cancel();
     _autoChatStartTimer = null;
     _autoChatScheduler.stop();
     _cancelActiveSpeakerPick();
+    _roomRoundGeneration++;
     if (_isStreaming) _stopStreaming();
   }
 

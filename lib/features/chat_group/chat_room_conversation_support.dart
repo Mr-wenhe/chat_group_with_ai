@@ -1,10 +1,24 @@
 part of 'chat_room_page.dart';
 
 extension _ChatRoomConversationSupport on _ChatRoomPageState {
-  Future<void> _maybeUpdateMemory() async {
+  /// 到达门槛时更新群记忆摘要。
+  ///
+  /// 摘要既是一次真实的模型调用，也是一次**持久化写入**，因此两处都必须按
+  /// **原轮次**复检：只看 [_roomWorkAllowed] 挡不住"离开又立刻回来"和
+  /// "关掉自动发言又打开"——那时可见性和开关都已经恢复为真，只有轮次代际号
+  /// 还记得这一轮已经被取消过（见 [_isReplyRoundInvalidated]）。
+  Future<void> _maybeUpdateMemory({
+    required bool isAutoChat,
+    required int roundGeneration,
+    int? autoChatGeneration,
+  }) async {
     if (_isDirectChat) return;
-    // 摘要是一次真实的模型调用，必须在发出前复检"用户还在看这个群"。
-    if (!_roomWorkAllowed) return;
+    bool invalidated() => _isReplyRoundInvalidated(
+          isAutoChat: isAutoChat,
+          generation: roundGeneration,
+          autoChatGeneration: autoChatGeneration,
+        );
+    if (invalidated()) return;
     if (!_memoryControls.canAutoUpdateGroup(_groupMemory)) return;
     final now = DateTime.now();
     if (!ChatOrchestrator.shouldUpdateGroupMemory(
@@ -40,10 +54,13 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
       // 旧摘要可能在可见性快照存在前生成，不能让它把不可见内容续写回来。
       previousSummary:
           hasRestrictedMessages ? '' : _groupMemory?.topicSummary ?? '',
+      isAutoChat: isAutoChat,
+      roundGeneration: roundGeneration,
+      autoChatGeneration: autoChatGeneration,
     );
     // 摘要是外围模型调用，可能在用户离开很久之后才返回：迟到的结果不许再
     // 改写旧群上下文（用户已经在看别的群或别的页面了）。
-    if (summary.isNotEmpty && _groupMemory != null && _roomWorkAllowed) {
+    if (summary.isNotEmpty && _groupMemory != null && !invalidated()) {
       _groupMemory!.topicSummary = summary;
       await _groupMemory!.save();
       _setUiState(() {});
@@ -57,8 +74,16 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
   Future<String> _generateSummary(
     String recentText, {
     String previousSummary = '',
+    required bool isAutoChat,
+    required int roundGeneration,
+    int? autoChatGeneration,
   }) async {
-    if (!_roomWorkAllowed) return '';
+    bool invalidated() => _isReplyRoundInvalidated(
+          isAutoChat: isAutoChat,
+          generation: roundGeneration,
+          autoChatGeneration: autoChatGeneration,
+        );
+    if (invalidated()) return '';
     // 摘要只需要一个可用的 API 通道，借用首个角色的配置即可。
     final character = _characters.isNotEmpty ? _characters.first : null;
     if (character == null) return '';
@@ -66,9 +91,9 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     final config = _resolveApiConfig(character);
     if (config == null) return '';
     final apiKey = await _credentialResolver.resolve(config);
-    // 凭据解析是异步的，期间用户可能已经离开这个群。摘要是这一刻才发起的新
-    // 请求，必须在真正发出前复检，否则切走后仍在后台调用模型。
-    if (apiKey == null || !_roomWorkAllowed) return '';
+    // 凭据解析是异步的，期间用户可能已经离开这个群、或者已经把这一轮取消了。
+    // 摘要是这一刻才发起的新请求，必须在真正发出前复检。
+    if (apiKey == null || invalidated()) return '';
 
     final msgs = [
       {
@@ -293,134 +318,6 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
       final visibleIds = message.visibleToCharacterIds;
       return visibleIds.isNotEmpty && memberIds.every(visibleIds.contains);
     }).toList(growable: false);
-  }
-
-  /// 上下文超出模型窗口时做压缩，返回压缩后的消息与摘要。
-  ///
-  /// 压缩摘要只写入 [_transientContextCompression]（仅本次会话有效）。
-  ///
-  /// 关闭自动记忆时直接返回原始上下文，不做任何压缩调用。
-  Future<({List<Message> messages, String? summary})> _compactContextIfNeeded({
-    required AICharacter character,
-    required ApiConfig config,
-    required ApiProvider provider,
-    required List<Message> fallbackContext,
-    required Set<String> mentionedIds,
-  }) async {
-    final transient = _transientContextCompression[character.id];
-    final visibleFallbackContext = _visibleContextForCharacter(
-      character.id,
-      fallbackContext,
-    );
-    if (!_memoryControls.automaticMemoryEnabled) {
-      return (messages: visibleFallbackContext, summary: transient?.summary);
-    }
-    final pending = _visibleContextForCharacter(character.id, _messages);
-    final apiHistory = <Map<String, dynamic>>[
-      if (transient != null)
-        {
-          'role': 'system',
-          'content': '已有压缩摘要：${transient.summary}',
-        },
-      // 只有 AI 角色的发言是 assistant；真人（本人或多人联机里的其他成员）
-      // 都算 user，否则压缩摘要会把客人说的话记成"助手说过"。
-      ...pending.map((message) => <String, dynamic>{
-            'role': message.senderType == Message.senderTypeAi
-                ? 'assistant'
-                : 'user',
-            'content': message.content,
-          }),
-    ];
-    final capability = _aiGateway.capability(provider, config.modelName);
-    final summaryOutputLimit = max(1, capability.contextWindow);
-    final summaryOutputTokens =
-        capability.maxOutput.clamp(1, min(2048, summaryOutputLimit)).toInt();
-    final summaryInputBudget = ContextWindowManager.inputBudget(
-      contextWindow: capability.contextWindow,
-      maxOutput: summaryOutputTokens,
-    );
-    final manager = ContextWindowManager(
-      maxRetries: 0,
-      complete: (messages) async {
-        if (!_roomWorkAllowed) {
-          return const {'success': false, 'message': '页面已离开'};
-        }
-        if (!_mayAutoPick(character, mentionedIds: mentionedIds)) {
-          return const {'success': false, 'message': '角色已禁言'};
-        }
-        final apiKey = await _credentialResolver.resolve(config);
-        if (apiKey == null) {
-          return const {'success': false, 'message': 'API 凭据不可用'};
-        }
-        // 凭据解析是异步的，期间页面可能已经不可见；压缩是回合新触发的
-        // 请求，同样必须在发出前复检。
-        if (!_roomWorkAllowed) {
-          return const {'success': false, 'message': '页面已离开'};
-        }
-        if (!_mayAutoPick(character, mentionedIds: mentionedIds)) {
-          return const {'success': false, 'message': '角色已禁言'};
-        }
-        return _aiGateway.sendChatMessage(
-          apiKey: apiKey,
-          provider: provider,
-          apiProtocol: config.protocol,
-          customBaseUrl: config.customBaseUrl,
-          model: config.modelName,
-          messages: messages,
-          temperature: 0.3,
-          maxTokens: summaryOutputTokens,
-          purpose: AiRequestPurpose.summary,
-          conversationId: widget.groupId,
-          characterId: character.id,
-        );
-      },
-      thresholdTokens:
-          summaryInputBudget.clamp(1, kContextCompressThresholdTokens).toInt(),
-    );
-    // 没超过阈值就不压缩，省下一次 LLM 调用。
-    if (!manager.shouldSummarize(apiHistory)) {
-      return (messages: visibleFallbackContext, summary: transient?.summary);
-    }
-
-    try {
-      final boundedHistory = ContextWindowManager.fitToTokenBudget(
-        apiHistory,
-        maxTokens: summaryInputBudget,
-      );
-      final summary = await manager.summarize(
-        boundedHistory,
-        isDirectChat: _isDirectChat,
-      );
-      // 压缩摘要可能在页面离开期间才返回，此时不得写进会话内缓存：它属于
-      // "旧群的上下文"，用户已经不在看它了。
-      if (!_roomWorkAllowed) {
-        return (messages: visibleFallbackContext, summary: transient?.summary);
-      }
-      // ponytail: transient-only compression, restore durable summaries if
-      // cross-session context compression becomes a measured bottleneck.
-      _transientContextCompression[character.id] = (
-        checkpoint:
-            pending.isEmpty ? (transient?.checkpoint ?? '') : pending.last.id,
-        summary: summary.summary,
-      );
-      return (
-        messages: _lastUserOnly(visibleFallbackContext),
-        summary: summary.summary,
-      );
-    } catch (_) {
-      // 压缩失败就退回完整上下文：宁可多花 token，也不能丢上下文。
-      return (messages: visibleFallbackContext, summary: transient?.summary);
-    }
-  }
-
-  /// 压缩后仅保留最后一条用户消息作为上下文。
-  ///
-  /// 历史已由摘要代表，这里只需保留"当前要回应的那句话"。
-  List<Message> _lastUserOnly(List<Message> messages) {
-    for (final message in messages.reversed) {
-      if (message.senderType == 'user') return [message];
-    }
-    return const [];
   }
 
   /// 上一条 AI 消息的发送者 id（用于避免同一角色连续发言）。

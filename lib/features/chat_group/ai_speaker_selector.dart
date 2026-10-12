@@ -194,8 +194,14 @@ class AiSpeakerSelector {
         isProtected: isRequiredBlock,
       );
       if (!candidateIdsSurvive(fitted, candidates)) continue;
+      // `isProtected` 是裁剪**优先级**，不等于整体保留：窗口小到连协议本身都装不下
+      // 时，裁剪会按比例缩短最长的 system 文本，协议正文被截短而区块标记与候选 ID
+      // 都还在。拿着半份协议去问模型，它就只能自由发挥。
+      if (!protocolSurvives(fitted)) continue;
       // 设定被裁掉一半比整段不带更糟：模型会照着一份残缺的关系设定选人。
       if (!GroupSharedContext.survives(fitted, sharedContext)) continue;
+      // 病态自定义窗口下拟合仍可能整体超预算，这种请求不发。
+      if (ContextWindowManager.estimateRequestTokens(fitted) > budget) continue;
       return fitted;
     }
     return null;
@@ -222,6 +228,20 @@ class AiSpeakerSelector {
     return candidates.every(
       (character) => sent.contains('id=${character.id}$candidateIdSeparator'),
     );
+  }
+
+  /// 协议正文是否**完整**留在即将发送的请求里。
+  ///
+  /// 与 [candidateIdsSurvive] 同一层校验，但看的是另一半必需内容：区块标记只是
+  /// 协议那条 system 的开头，裁剪保留首尾，所以只查标记会把被截掉中间那句话的
+  /// 协议判成幸存。要求 [protocolInstruction] 也在，模型才知道该输出什么形状。
+  static bool protocolSurvives(List<Map<String, dynamic>> messages) {
+    final sent = messages
+        .map((message) => message['content'])
+        .whereType<String>()
+        .join('\n');
+    return sent.contains(protocolBlockMarker) &&
+        sent.contains(protocolInstruction);
   }
 
   /// 把对话渲染成带说话人名的文字稿，并按条数/字符数从旧到新裁剪。

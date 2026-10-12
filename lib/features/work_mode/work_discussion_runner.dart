@@ -113,8 +113,12 @@ class WorkDiscussionRunner
   static const int maxCollaborationPreviewCharacters = 600;
   static const int preferredDiscussionFinalTokens = 8192;
   static const int maxMembers = 32;
+  // 一条待答决策里允许出现的选项**总数**（与 `WorkCollaborationState` 的
+  // `decisions` 校验一致）。它是整个决策的容量，不是"候选名额"：候选必须先让出
+  // 固定控制项占的位置，拼出来的列表才不会超出这条上限。
+  //
   // 换人候选是给用户点的，不是给人滚的；超出之后先解决资格问题再谈换谁。
-  static const int maxReplacementOptions = 12;
+  static const int maxDecisionOptions = 12;
   // ponytail: 32 members need two broad turns plus a bounded summary; 96
   // leaves room for targeted follow-up without creating an unbounded loop.
   static const int maxCalls = 96;

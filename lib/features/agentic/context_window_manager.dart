@@ -183,16 +183,16 @@ class ContextWindowManager {
       return List<Map<String, dynamic>>.unmodifiable(candidate);
     }
 
-    bool isDialogue(Map<String, dynamic> message) =>
-        message['role'] != 'system';
-    int dialogueCount() => candidate.where(isDialogue).length;
-
-    // Keep the newest user/assistant exchange. Dropping only the oldest
-    // dialogue entries preserves the latest user request even when all system
-    // instructions must remain in the prompt.
-    while (
-        estimateRequestTokens(candidate) > maxTokens && dialogueCount() > 1) {
-      final oldestDialogue = candidate.indexWhere(isDialogue);
+    // Keep the newest dialogue entry and every **required** one: dropping only
+    // the oldest ordinary dialogue entries preserves the latest user request
+    // (and, when the caller marked the human turn as required, that turn too)
+    // even when all system instructions must remain in the prompt.
+    //
+    // 保护标记必须在这一阶段就生效：真人这一轮的需求通常正是**最旧**的那条
+    // 对话（群聊里后面还跟着上一位 AI 的发言），按位置删会先删掉它，而末尾
+    // 那条还在，看起来"最新一轮完好"。
+    while (estimateRequestTokens(candidate) > maxTokens) {
+      final oldestDialogue = _oldestRemovableDialogue(candidate, isProtected);
       if (oldestDialogue < 0) break;
       candidate.removeAt(oldestDialogue);
     }
@@ -233,8 +233,8 @@ class ContextWindowManager {
       // to message keys. Drop an old dialogue entry if one remains; system
       // constraints and the newest dialogue entry are never removed merely
       // to satisfy a pathological custom window.
-      final oldestDialogue = candidate.indexWhere(isDialogue);
-      if (oldestDialogue >= 0 && dialogueCount() > 1) {
+      final oldestDialogue = _oldestRemovableDialogue(candidate, isProtected);
+      if (oldestDialogue >= 0) {
         candidate.removeAt(oldestDialogue);
         continue;
       }
@@ -249,11 +249,38 @@ class ContextWindowManager {
     // final guard handles pathological custom windows without returning an
     // unbounded prompt; the newest message is the last item by construction.
     while (estimateRequestTokens(candidate) > maxTokens) {
-      final oldestDialogue = candidate.indexWhere(isDialogue);
-      if (oldestDialogue < 0 || dialogueCount() <= 1) break;
+      final oldestDialogue = _oldestRemovableDialogue(candidate, isProtected);
+      if (oldestDialogue < 0) break;
       candidate.removeAt(oldestDialogue);
     }
     return List<Map<String, dynamic>>.unmodifiable(candidate);
+  }
+
+  /// 最旧的一条**可安全删除**的对话条目；没有可删的返回 -1。
+  ///
+  /// 两条规则：
+  /// - **最后一条对话永远保留**：它就是"最新这一轮"的接话对象；
+  /// - **受保护条目一律不删**：裁剪的优先级是"先让可选内容让位"，而不是
+  ///   "按位置先删最旧的"。把保护只落在后面的缩放阶段不够——真人这一轮的
+  ///   需求往往就是最旧的那条对话。
+  ///
+  /// [isProtected] 为空（老调用方）时退化为原行为：只要还剩一条以上对话，
+  /// 就删最旧的那条。
+  static int _oldestRemovableDialogue(
+    List<Map<String, dynamic>> messages,
+    bool Function(Map<String, dynamic> message)? isProtected,
+  ) {
+    final dialogueIndexes = <int>[
+      for (var index = 0; index < messages.length; index++)
+        if (messages[index]['role'] != 'system') index,
+    ];
+    if (dialogueIndexes.length <= 1) return -1;
+    for (var position = 0; position < dialogueIndexes.length - 1; position++) {
+      final index = dialogueIndexes[position];
+      if (isProtected != null && isProtected(messages[index])) continue;
+      return index;
+    }
+    return -1;
   }
 
   final ContextCompletion complete;

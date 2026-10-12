@@ -272,6 +272,29 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 丢弃当前流式输出的标记：用户点"停止生成"后置位，让流回调不再写状态。
   bool _discardCurrentStream = false;
 
+  /// 普通回合的代际号：本群每次停止自动工作（离开本群、被全屏页面盖住、App 进
+  /// 后台）就 +1，让所有**飞行中**的回合在下一个 await 之后作废。
+  ///
+  /// 只靠 [_roomWorkAllowed] 挡不住"离开又立刻回来"——它那时已经恢复为真，而旧
+  /// 回合的凭据解析、上下文压缩或提示组装还挂在半路上，放行后就会照常发请求。
+  /// 代际号是单向的：回合在入口记下它，此后每次复检都必须与当前值一致。
+  int _roomRoundGeneration = 0;
+
+  /// 空闲自动发言的代际号：用户每次**关掉**空闲自动发言（或切到工作模式，
+  /// 那同样会让自动发言停摆）就 +1。
+  ///
+  /// 与 [_roomRoundGeneration] 分开的两个理由：
+  /// - **关掉开关不等于离开本群**。只比 `_isAutoChatEnabled` 的当前值挡不住
+  ///   "关掉又打开"——那时布尔值已经恢复为真，停在凭据解析上的旧自动回合会
+  ///   重新被判为有效并照常发言。开关的历史必须由单向的代际号记住。
+  /// - **开关只管空闲自动发言**。用户手头发起的那一轮回复（`isAutoChat: false`）
+  ///   跟这个开关无关，把两者合成一个代际号会让关掉自动发言顺手作废用户自己
+  ///   刚要的回复。
+  ///
+  /// 自动回合在入口记下它（见 [_tryAutoChatRound]），此后每次复检都必须与
+  /// 当前值一致；普通回合不携带它，因此完全不受开关影响。
+  int _autoChatRoundGeneration = 0;
+
   /// 一次空闲自动聊天 burst 的上限；达到后进入冷却，而不是持续灌水。
   static const int _maxAutoChatRounds = 4;
 
@@ -299,14 +322,14 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 最近一次"无人可回复"的原因，用于给用户明确提示（如未配置 API Key）。
   ReplyBlockReason? _lastReplyBlockReason;
 
-  /// 最近一次已提示「共同设定放不进窗口」的那份设定内容。
+  /// 最近一次已提示「必需内容放不进窗口」的那份内容与缺失项的去重键。
   ///
-  /// 放不下是「设定 × 模型窗口」的性质，不是某一位角色的问题：同一轮里其他
+  /// 放不下是「内容 × 模型窗口」的性质，不是某一位角色的问题：同一轮里其他
   /// 角色、以及空闲自动聊天的每一轮都会撞上同一堵墙。不记下来就会把同一条气泡
-  /// 反复贴进会话（自动聊天里更是每轮一条）。内容一变（用户改短了设定）就允许
-  /// 再提示一次；用户手动发起的回合每轮也重新提示一次，免得"改了没反应"让人
-  /// 以为消息丢了。
-  String? _sharedContextOverflowReportedBlock;
+  /// 反复贴进会话（自动聊天里更是每轮一条）。内容一变（用户改短了设定）、或
+  /// 缺的是另一项（设定装得下而角色人设装不下）就允许再提示一次；用户手动发起
+  /// 的回合每轮也重新提示一次，免得"改了没反应"让人以为消息丢了。
+  String? _promptOverflowReportedKey;
 
   // 待回应 @ 列表
   /// 用户 @ 到但尚未回复的角色 id 队列，下一轮优先让这些角色发言。
@@ -465,6 +488,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
     bool supportsVision = false,
     Message? currentUserMessage,
     String? transientContextSummary,
+    void Function(Object? rendered)? onCurrentUserTurn,
   }) {
     return _buildPromptMessagesInternal(
       character: character,
@@ -475,6 +499,7 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
       supportsVision: supportsVision,
       currentUserMessage: currentUserMessage,
       transientContextSummary: transientContextSummary,
+      onCurrentUserTurn: onCurrentUserTurn,
     );
   }
 

@@ -46,6 +46,23 @@ class ScriptedChatApi extends ChatApiService {
   /// 非空时，下一次选人等到这个 Completer 完成才返回（用来制造"正在选人"）。
   Completer<Map<String, dynamic>>? pendingPicker;
 
+  /// 为 true 时，每次流式回复先吐一段增量再挂起，直到 [releaseHeldReply]。
+  ///
+  /// 用来把回合停在"已经开始流式输出但还没收尾"的位置——那一段既没有可取消的
+  /// 选择器令牌，也没有可复检的 await，只有停流与结果判定能拦住它。
+  bool holdReplies = false;
+
+  /// 是否已经有一条被扣住的流式回复吐出了第一段（说明流真的开始了）。
+  bool replyStreaming = false;
+
+  Completer<void>? _heldReply;
+
+  void releaseHeldReply() {
+    final pending = _heldReply;
+    _heldReply = null;
+    if (pending != null && !pending.isCompleted) pending.complete();
+  }
+
   /// 最近一次选人请求的取消令牌，用来确认打断真的取消了它。
   CancelToken? pickerCancelToken;
 
@@ -97,6 +114,13 @@ class ScriptedChatApi extends ChatApiService {
     CancelToken? cancelToken,
   }) async* {
     replyCalls.add(messages);
+    if (holdReplies) {
+      final pending = Completer<void>();
+      _heldReply = pending;
+      replyStreaming = true;
+      yield ChatStreamEvent.token('第一段');
+      await pending.future;
+    }
     yield ChatStreamEvent.done('测试回复');
   }
 }
@@ -112,15 +136,58 @@ class StaticCredentialResolver implements ApiCredentialResolver {
       config.hasCredential ? 'test-key' : null;
 }
 
+/// 可悬停的凭据解析器：只扣住**角色**用的那份配置，选人器照常放行。
+///
+/// 用来把回合停在"选人已完成、角色请求还没发出"的准备阶段——那一段既没有 stream
+/// 也没有选择器取消令牌，是可见性闸门与回合代际号唯一能拦住的地方。
+class HeldCredentialResolver implements ApiCredentialResolver {
+  HeldCredentialResolver({required this.heldConfigId});
+
+  final String heldConfigId;
+  final Completer<void> _gate = Completer<void>();
+
+  /// 角色的凭据解析是否已经开始等在闸门上。
+  bool reached = false;
+
+  void release() {
+    if (!_gate.isCompleted) _gate.complete();
+  }
+
+  @override
+  Future<String?> resolve(ApiConfig config) async {
+    if (config.id == heldConfigId && !_gate.isCompleted) {
+      reached = true;
+      await _gate.future;
+    }
+    return config.hasCredential ? 'test-key' : null;
+  }
+}
+
+/// 推进假时钟直到回合真的走到角色凭据解析那一步。
+Future<void> waitForHeldCredential(
+  WidgetTester tester,
+  HeldCredentialResolver resolver,
+) async {
+  for (var step = 0; step < 80 && !resolver.reached; step++) {
+    await tester.runAsync(
+      () => Future<void>.delayed(const Duration(milliseconds: 10)),
+    );
+    await tester.pump(const Duration(milliseconds: 50));
+  }
+  expect(resolver.reached, isTrue, reason: '回合没有走到角色凭据解析那一步');
+}
+
 class RoundRoomHost extends StatefulWidget {
   const RoundRoomHost({
     super.key,
     required this.groupId,
     required this.chatApi,
+    this.credentialResolver,
   });
 
   final String groupId;
   final ChatApiService chatApi;
+  final ApiCredentialResolver? credentialResolver;
 
   @override
   State<RoundRoomHost> createState() => RoundRoomHostState();
@@ -142,7 +209,8 @@ class RoundRoomHostState extends State<RoundRoomHost> {
   Widget build(BuildContext context) => ChatRoomPage(
         groupId: widget.groupId,
         chatApi: widget.chatApi,
-        credentialResolver: StaticCredentialResolver(),
+        credentialResolver:
+            widget.credentialResolver ?? StaticCredentialResolver(),
       );
 }
 
@@ -229,6 +297,7 @@ Future<void> pumpRoundRoom(
   required ChatApiService api,
   required DatabaseService db,
   required Directory directory,
+  ApiCredentialResolver? credentialResolver,
 }) async {
   await tester.runAsync(() async {
     await tester.pumpWidget(
@@ -249,7 +318,12 @@ Future<void> pumpRoundRoom(
           }),
         ],
         child: MaterialApp(
-          home: RoundRoomHost(key: hostKey, groupId: groupId, chatApi: api),
+          home: RoundRoomHost(
+            key: hostKey,
+            groupId: groupId,
+            chatApi: api,
+            credentialResolver: credentialResolver,
+          ),
         ),
       ),
     );

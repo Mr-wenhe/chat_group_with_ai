@@ -191,7 +191,10 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
 
   Future<void> _missingRole(String role,
       {String? replaceId, String? reason}) async {
-    final options = (await _replacementOptions(role)).options;
+    // 下面可能再追加"我承担本次测试或审查"一项；它和换人候选共享同一个决策容量，
+    // 所以候选必须先把这一个名额让出来。
+    final extraControls = role == 'testing' ? 1 : 0;
+    final options = (await _replacementOptions(role, reserve: extraControls)).options;
     if (replaceId == null && role == 'testing') {
       options.add({
         'id': 'human-review',
@@ -209,7 +212,7 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
   }
 
   /// 具备该责任资格、凭据可解析、且不在当前团队里的候选成员，以及因与失败成员
-  /// 同模型而未列出的条数。
+  /// 同模型而未列出的条数、因决策选项数量上限而未列出的可用候选条数。
   ///
   /// [avoidModelOf] 是刚刚失败的成员：与它同 provider、同模型名的候选换上去也不会
   /// 改变上游那边的失败，所以只要还有别的选择就不列它们；但合格候选全部撞同一个
@@ -217,8 +220,18 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
   /// provider + 模型名比，不按 `apiConfigId`：两张配置指向同一个上游模型时，换配置号
   /// 不改变结果。换人确认与「本轮模型失败」的诚实阻塞项共用这一份枚举，两处各维护
   /// 一遍时总有一边列不出候选来。
-  Future<({List<Map<String, dynamic>> options, int hiddenSameModel})>
-      _replacementOptions(String role, {_DiscussionMember? avoidModelOf}) async {
+  ///
+  /// [reserve] 是调用方在这个决策里固定附带、不由本方法产出的选项数量（保留原成员
+  /// 重试、人工承担等）。候选名额必须先扣掉它：拼出来的决策总数一旦超出
+  /// [WorkDiscussionRunner.maxDecisionOptions]，整条增量会被状态闸门拒绝，用户连
+  /// 最需要的"重试"都看不到。
+  Future<
+      ({
+        List<Map<String, dynamic>> options,
+        int hiddenSameModel,
+        int hiddenDifferentModel,
+      })> _replacementOptions(String role,
+          {_DiscussionMember? avoidModelOf, int reserve = 0}) async {
     final failingModel = avoidModelOf == null
         ? null
         : '${avoidModelOf.provider}/${avoidModelOf.config?.modelName}';
@@ -238,14 +251,14 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
     final resolved = await Future.wait(
       candidates.map(runner._resolveV2Member),
     );
+    // 先在**全量**候选上分流，再对最终展示的列表限名额。名额若在分流之前就被
+    // 消耗，排在前面的同模型候选会把它占满，后面真正换了模型的候选一个都不会被
+    // 遍历——列表看起来"只有同模型可选"，实际可用的替换者根本没被检查过。
     for (var index = 0; index < candidates.length; index++) {
-      if (options.length + sameModel.length ==
-          WorkDiscussionRunner.maxReplacementOptions) {
-        break;
-      }
       final candidate = candidates[index];
       final member = resolved[index];
-      if (!member.available) continue;      final option = {
+      if (!member.available) continue;
+      final option = {
         'id': candidate.id,
         'label':
             '${candidate.name}（${candidate.role}，${member.config!.modelName}）',
@@ -258,19 +271,30 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
       }
       options.add(option);
     }
+    final limit = max(0, WorkDiscussionRunner.maxDecisionOptions - reserve);
+    // 名额之外的候选一律如实计数，且**区分两种原因**：同模型（换人不解决上游失败）
+    // 与单纯装不下（它们确实可用）。只报前者会让用户以为角色库里已经没有别的选择了。
     if (options.isNotEmpty || sameModel.isEmpty) {
-      return (options: options, hiddenSameModel: sameModel.length);
+      final visible = options.take(limit).toList();
+      return (
+        // 可变列表：调用方还会往里追加"我承担"这类控制项。
+        options: visible,
+        hiddenSameModel: sameModel.length,
+        hiddenDifferentModel: options.length - visible.length,
+      );
     }
+    final visibleSameModel = sameModel.take(limit).toList();
     return (
       options: [
-        for (final option in sameModel)
+        for (final option in visibleSameModel)
           {
             ...option,
             'impact': '与你现有成员是同一个模型，换人不改变上游失败；'
                 '请优先调整该成员的模型配置或缩小本轮回应要求。'
           }
       ],
-      hiddenSameModel: 0,
+      hiddenSameModel: sameModel.length - visibleSameModel.length,
+      hiddenDifferentModel: 0,
     );
   }
 

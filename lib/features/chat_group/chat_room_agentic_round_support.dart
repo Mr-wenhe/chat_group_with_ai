@@ -17,7 +17,14 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       ReplyIntent? intent,
       Message? currentUserMessage,
       UserMessageSentiment? userSentiment,
-      SearchTurnContext? searchTurnContext}) async {
+      SearchTurnContext? searchTurnContext,
+      int? roundGeneration,
+      int? autoChatGeneration}) async {
+    // 这一轮的代际号在入口就钉住：此后每次 await 之后都拿它复检，用户在等待期间
+    // 关闭自动发言、离开本群再回来或点了停止，都会让这一轮作废（见
+    // [_isReplyRoundInvalidated]）。调用方（回合循环）会把自己那一轮的值传进来，
+    // 让"整轮"而不是"这一条回复"拥有同一个身份。
+    final generation = roundGeneration ?? _roomRoundGeneration;
     final userMentionedIds = isAutoChat
         ? const <String>{}
         : _parseMentions(userMessage ?? '').toSet();
@@ -41,7 +48,14 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     final config = _resolveApiConfig(character);
     final apiKey =
         config == null ? null : await _credentialResolver.resolve(config);
-    if (!_roomWorkAllowed) return '';
+    // 凭据解析可能让用户等很久（macOS 上每次重建都可能弹钥匙串），放行之后必须
+    // 重新确认这一轮还成立，而不是只看"用户此刻还在看这个群"。
+    if (_isReplyRoundInvalidated(
+        isAutoChat: isAutoChat,
+        generation: generation,
+        autoChatGeneration: autoChatGeneration)) {
+      return '';
+    }
     if (!_mayAutoPick(character, mentionedIds: userMentionedIds)) return '';
     if (config == null || apiKey == null) {
       if (_canTouchUi) {
@@ -86,7 +100,17 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       provider: provider,
       fallbackContext: context,
       mentionedIds: userMentionedIds,
+      isAutoChat: isAutoChat,
+      roundGeneration: generation,
+      autoChatGeneration: autoChatGeneration,
     );
+    // 压缩本身是一次完整的模型请求，用户完全可能在它返回之前就离开或点了停止。
+    if (_isReplyRoundInvalidated(
+        isAutoChat: isAutoChat,
+        generation: generation,
+        autoChatGeneration: autoChatGeneration)) {
+      return '';
+    }
 
     // A roundtable user turn has one shared search snapshot for every member;
     // outside roundtable mode, each character keeps its own search setting.
@@ -99,6 +123,9 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
         : null;
     // 查询模型能力（是否支持图片输入），决定要不要拼多模态内容。
     final capability = _aiGateway.capability(provider, config.modelName);
+    // 构建器把**本轮真人输入**的实际形态交出来：它是必需内容之一，且不能靠
+    // "最后一条非 system 消息"反推——群聊里那常常是上一位 AI 的发言。
+    Object? currentUserTurn;
     final apiMessages = _withWebSearchContext(
       await buildPromptMessages(
         character: character,
@@ -109,6 +136,7 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
         supportsVision: capability.supportsVision,
         currentUserMessage: currentUserMessage,
         transientContextSummary: compactedContext.summary,
+        onCurrentUserTurn: (rendered) => currentUserTurn = rendered,
       ),
       webSearch,
       allowSourceLinks: searchTurnContext?.allowSourceLinks == true,
@@ -124,12 +152,21 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       contextWindow: capability.contextWindow,
       maxOutput: replyOutputTokens,
     );
+    // 从**尚未裁剪**的请求里认出这次必须保住的内容：共同设定、角色人设、本轮
+    // 真人输入与本轮最新一条对话。裁剪优先级与"能不能发"的核对共用这一份判据。
+    final requirements = ChatReplyPromptGuard.collect(
+      apiMessages,
+      sharedContext: _groupSharedContextBlock,
+      personaPrompt: character.rolePlaySystemPrompt,
+      currentUserTurn: currentUserTurn,
+    );
     final boundedApiMessages = ContextWindowManager.fitToTokenBudget(
       apiMessages,
       maxTokens: replyInputBudget,
-      // 共同设定是「每次聊天都生效」的必需区块：窗口紧张时先让可选摘要、
-      // 旧历史和其他说明让位，真装不下才判失败（见下面的 survives 核对）。
-      isProtected: GroupSharedContext.carriesBlock,
+      // 必需内容（共同设定、角色人设、本轮真人输入、本轮最新一条对话）是这次
+      // 回复的底线：窗口紧张时先让可选摘要、旧历史和其他说明让位，真装不下才
+      // 判失败（见下面的 missingFrom 核对）。
+      isProtected: requirements.isRequired,
     );
     // 上面的 await 期间用户可能切到工作模式、离开本群或点了停止：这些情况下
     // 本轮都不该再产生任何输出，包括下面那条"设定放不下"的失败气泡——它同样
@@ -138,13 +175,18 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       _discardCurrentStream = false;
       return '';
     }
-    if (!_roomWorkAllowed) return '';
+    if (_isReplyRoundInvalidated(
+        isAutoChat: isAutoChat,
+        generation: generation,
+        autoChatGeneration: autoChatGeneration)) {
+      return '';
+    }
     if (!_mayAutoPick(character, mentionedIds: userMentionedIds)) return '';
-    // 窗口裁剪会按比例缩短最长的 system 文本。共同设定是"每次聊天都生效"的
-    // 承诺：它放不下就明确失败，绝不静默丢设定后照常生成一段看起来正常的回复。
-    if (!GroupSharedContext.survives(
-        boundedApiMessages, _groupSharedContextBlock)) {
-      return _reportSharedContextDidNotFit(character);
+    // 窗口裁剪会按比例缩短最长的条目。必需内容放不下就明确失败：绝不静默丢掉
+    // 共同设定、角色身份或用户刚说的话之后，再生成一段看起来正常的回复。
+    final missingRequired = requirements.missingFrom(boundedApiMessages);
+    if (missingRequired != null) {
+      return _reportRequiredPromptDidNotFit(character, missingRequired);
     }
     // —— 内存态临时消息：先以空内容入列用于增量渲染，整条完成后再落库一次 ——
     final temp = Message(
@@ -217,6 +259,13 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     // 用户明确取消后仍把部分内容或空回复兜底写入会话。
     bool shouldDiscardResult() =>
         _discardCurrentStream ||
+        // 回合代际换了（离开本群、被全屏页面盖住、App 进后台）：飞行中的这条流
+        // 已经不属于当前这一轮。`_roomWorkAllowed` 那时可能已经恢复为真，只有
+        // 代际号还记得中途离开过。
+        generation != _roomRoundGeneration ||
+        // 空闲自动发言被关掉过也一样：开关可能又被打开，只有它自己的代际号
+        // 记得这一轮已经被取消。
+        (isAutoChat && autoChatGeneration != _autoChatRoundGeneration) ||
         shouldDiscardStreamingReply(
           stopped: result.stopped,
           // 用"用户还在看这个群"而不是"widget 还在树上"：切到别的群或别的
@@ -258,6 +307,9 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
         apiMessages: boundedApiMessages,
         maxTokens: replyOutputTokens,
         userInitiated: !isAutoChat,
+        isAutoChat: isAutoChat,
+        roundGeneration: generation,
+        autoChatGeneration: autoChatGeneration,
         autoPickMentionedIds: userMentionedIds,
       );
       if (retryContent != null && retryContent.trim().isNotEmpty) {
@@ -374,32 +426,34 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     return fullContent;
   }
 
-  /// 共同设定放不进模型窗口时的明确失败。
+  /// 这一轮是否已经失效：失效后一次请求都不该再发出去。
   ///
-  /// 有界：写一条可见说明后立刻结束这次回复，不重试、不进循环，也不假装
-  /// 设定已经生效。用户按提示缩短设定或换用窗口更大的模型即可。
+  /// 全部判据缺一不可：
+  /// - 页面对象还在（[_disposed]）；
+  /// - 用户还在看这个群（[_roomWorkAllowed]）；
+  /// - 本群期间没有停止过自动工作（[generation] 与 [_roomRoundGeneration] 相同）
+  ///   ——只看前者挡不住"离开又立刻回来"，那时可见性已恢复为真，而旧回合的准备
+  ///   阶段还挂在半路上；
+  /// - 空闲自动发言的开关此刻是开着的（[_isAutoChatEnabled]）——关掉开关只停了
+  ///   调度器，飞行中的那一轮仍是"自动回合"；
+  /// - 这一轮的**空闲自动发言代际号**没有被推进过（[autoChatGeneration] 与
+  ///   [_autoChatRoundGeneration] 相同）——只看上面那个布尔值挡不住"关掉又打开"，
+  ///   开关恢复为真之后同一个旧回合会重新被判为有效；
+  /// - 用户没有点停止（会话停在 [ConversationPhase.stopping]）。
   ///
-  /// 同一份设定只提示一次：放不下的是"设定 × 模型窗口"，同一位角色的后续步骤、
-  /// 空闲自动聊天的每一轮都会撞上同一堵墙，重复贴同样的气泡只是噪音。用户手动
-  /// 发起的回合会在轮次开始时复位，因此每轮仍能看到一次明确解释。
-  Future<String> _reportSharedContextDidNotFit(AICharacter character) async {
-    final block = _groupSharedContextBlock;
-    if (_sharedContextOverflowReportedBlock == block) return '';
-    _sharedContextOverflowReportedBlock = block;
-    final content = '[${character.name} 未回复：本群「共同背景」与「群公告与约定」'
-        '过长，放不进当前模型的输入窗口。请缩短这两项内容，'
-        '或为这个角色换用上下文窗口更大的模型。]';
-    await _appendMessage(Message(
-      groupId: widget.groupId,
-      senderId: character.id,
-      senderType: 'ai',
-      content: content,
-    ));
-    if (_canTouchUi) {
-      _setUiState(() => _autoChatStatus = AutoChatStatus.unavailable);
-    }
-    return content;
-  }
+  /// [autoChatGeneration] 为 null 表示这不是空闲自动回合（用户手头发起的那一轮），
+  /// 因此自动发言开关的开合与它无关。
+  bool _isReplyRoundInvalidated({
+    required bool isAutoChat,
+    required int generation,
+    int? autoChatGeneration,
+  }) =>
+      _disposed ||
+      !_roomWorkAllowed ||
+      generation != _roomRoundGeneration ||
+      (isAutoChat && !_isAutoChatEnabled) ||
+      (isAutoChat && autoChatGeneration != _autoChatRoundGeneration) ||
+      _conversationController.state.phase == ConversationPhase.stopping;
 
   /// Removes a streaming placeholder without touching persistence.
   ///
@@ -413,54 +467,6 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
     if (_canTouchUi) _setUiState(() {});
   }
 
-  /// 对失败的回复做一次非流式重试，成功返回内容，否则返回 null。
-  ///
-  /// 用非流式接口重试是为了简化逻辑：此时 UI 上已有占位气泡，只需拿到完整文本替换。
-  ///
-  /// 重试同样是一次真实请求，且没有任何流与之绑定，因此可见性必须在这里自己
-  /// 复检：页面在失败与重试之间离开时，这次调用不该再发出去。
-  Future<String?> _retryFailedReply({
-    required AICharacter character,
-    required ApiConfig config,
-    required ApiProvider provider,
-    required List<Map<String, dynamic>> apiMessages,
-    required int maxTokens,
-    required bool userInitiated,
-    Set<String>? autoPickMentionedIds,
-  }) async {
-    if (!_roomWorkAllowed) return null;
-    if (autoPickMentionedIds != null &&
-        !_mayAutoPick(character, mentionedIds: autoPickMentionedIds)) {
-      return null;
-    }
-    final apiKey = await _credentialResolver.resolve(config);
-    if (apiKey == null) return null;
-    if (!_roomWorkAllowed) return null;
-    if (autoPickMentionedIds != null &&
-        !_mayAutoPick(character, mentionedIds: autoPickMentionedIds)) {
-      return null;
-    }
-    final result = await _aiGateway.sendChatMessageStreamed(
-      apiKey: apiKey,
-      provider: provider,
-      apiProtocol: config.protocol,
-      customBaseUrl: config.customBaseUrl,
-      model: config.modelName,
-      messages: apiMessages,
-      temperature: 0.75,
-      purpose: AiRequestPurpose.retry,
-      conversationId: widget.groupId,
-      characterId: character.id,
-      maxTokens: maxTokens,
-      userInitiated: userInitiated,
-    );
-    if (result['success'] == true) {
-      final content = result['message']?.toString().trim() ?? '';
-      if (content.isNotEmpty) return content;
-    }
-    return null;
-  }
-
   /// 展示 AI 治理网关的告警（预算即将耗尽 / 被限流等）。
   void _showGovernanceWarning(String warning) {
     if (!_canTouchUi) return;
@@ -470,26 +476,4 @@ extension _ChatRoomAgenticRoundSupport on _ChatRoomPageState {
       icon: Icons.account_balance_wallet_outlined,
     );
   }
-}
-
-/// Converts provider-controlled failures into a short, persistence-safe label.
-///
-/// The transport layer already sanitizes its own errors, but this boundary is
-/// also used by test doubles and future clients. Keeping the final message
-/// safe here prevents an accidental raw body from reaching Hive.
-String _safeChatFailureMessage(String? error) {
-  final value = error?.trim() ?? '';
-  if (value.isEmpty) return '请求失败';
-  if (AiRequestGateway.isBlockedMessage(value)) return '请求被治理策略拦截';
-  final status = RegExp(r'\bHTTP\s+(\d{3})\b', caseSensitive: false)
-      .firstMatch(value)
-      ?.group(1);
-  if (status != null) return 'HTTP ${int.parse(status)} 请求失败';
-  if (value.contains('超时') || value.toLowerCase().contains('timeout')) {
-    return '请求超时';
-  }
-  if (value.contains('网络') || value.toLowerCase().contains('connection')) {
-    return '网络连接失败';
-  }
-  return '模型请求失败';
 }

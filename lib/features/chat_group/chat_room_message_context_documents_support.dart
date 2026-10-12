@@ -123,6 +123,7 @@ extension _ChatRoomMessageContextDocumentsSupport on _ChatRoomPageState {
     Message? currentUserMessage,
     String? transientContextSummary,
     bool isAutoChat = false,
+    void Function(Object? rendered)? onCurrentUserTurn,
   }) async {
     final msgs = <Map<String, dynamic>>[];
     // ── 1. 全局永久记忆（跨群/DM，按 observerCharacterId 读取） ─────────
@@ -195,15 +196,16 @@ extension _ChatRoomMessageContextDocumentsSupport on _ChatRoomPageState {
     for (final message in recentHistory) {
       if (message.senderType == 'user') {
         // 含媒体时按多模态策略生成 content。
-        msgs.add({
-          'role': 'user',
-          'content': await prepareUserMessageContent(
-            message,
-            supportsVision: supportsVision,
-            documentQuery: userMessage,
-            includeDocumentContext: false,
-          ),
-        });
+        final content = await prepareUserMessageContent(
+          message,
+          supportsVision: supportsVision,
+          documentQuery: userMessage,
+          includeDocumentContext: false,
+        );
+        if (currentUserMessage != null && message.id == currentUserMessage.id) {
+          onCurrentUserTurn?.call(content);
+        }
+        msgs.add({'role': 'user', 'content': content});
       } else if (message.senderId == character.id) {
         msgs.add({'role': 'assistant', 'content': message.content});
       }
@@ -221,6 +223,7 @@ extension _ChatRoomMessageContextDocumentsSupport on _ChatRoomPageState {
           includeDocumentContext: false,
         );
       }
+      onCurrentUserTurn?.call(content);
       msgs.add({'role': 'user', 'content': content});
     }
 

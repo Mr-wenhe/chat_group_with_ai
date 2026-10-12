@@ -1739,4 +1739,76 @@ void _registerDiscussionHistoryRegressions() {
         .toList();
     expect(rejected, isNotEmpty, reason: '拒绝仍必须留下可追溯的诊断');
   });
+
+  test('同模型候选排满时，排在后面的换模候选仍必须被列出', () async {
+    await db.agentTaskBox.put(task.id, task);
+    // 12 个与失败成员同模型的合格候选在前、1 个换了模型的候选在最后。名额若在
+    // **分流之前**消耗，遍历会在走到最后那一个之前就用完，列表看起来"只有同模型
+    // 可选"，而真正能改变上游失败的候选根本没被检查过。
+    for (var index = 0; index < 12; index++) {
+      await _addLibraryMember('a$index', '同模$index', '软件开发工程师');
+    }
+    await _addLibraryMember('z-fresh', '换模开发', '软件开发工程师',
+        modelName: 'deepseek-reasoner');
+    final runner = WorkDiscussionRunner(
+        database: db,
+        credentials: _Credentials(),
+        eventStore: events,
+        investigate: execution.investigate,
+        completion: (
+            {required character,
+            required config,
+            required apiKey,
+            required provider,
+            required conversationId,
+            required messages,
+            required timeout,
+            cancelToken}) async =>
+            {'success': false, 'statusCode': 400, 'message': '模型请求被上游拒绝'});
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+
+    final ids = _optionIds();
+    expect(ids.take(2), ['retry-same-member', 'member-config-updated']);
+    expect(ids, contains('z-fresh'), reason: '换成另一个模型的候选必须看得到');
+    expect(ids, isNot(contains('a0')),
+        reason: '与失败成员同一个模型的候选换上去也不会改变上游失败');
+    expect(_pendingEvidence(), contains('另有 12 个候选'));
+  });
+
+  test('合格候选超过决策容量时，两项固定控制仍必须留下', () async {
+    await db.agentTaskBox.put(task.id, task);
+    // 11 个换了模型的合格候选 + 2 项固定控制 = 13，超出决策记录的 12 项上限。
+    // 候选名额必须先扣掉控制项，否则整条增量被状态闸门拒绝——用户最需要的
+    // "保留原成员重试"会跟着候选一起消失。
+    for (var index = 0; index < 11; index++) {
+      await _addLibraryMember('b$index', '候选$index', '软件开发工程师',
+          modelName: 'deepseek-reasoner');
+    }
+    final runner = WorkDiscussionRunner(
+        database: db,
+        credentials: _Credentials(),
+        eventStore: events,
+        investigate: execution.investigate,
+        completion: (
+            {required character,
+            required config,
+            required apiKey,
+            required provider,
+            required conversationId,
+            required messages,
+            required timeout,
+            cancelToken}) async =>
+            {'success': false, 'statusCode': 400, 'message': '模型请求被上游拒绝'});
+    await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+
+    final ids = _optionIds();
+    expect(ids.take(2), ['retry-same-member', 'member-config-updated'],
+        reason: '控制项被候选挤出容量时，用户就没有任何出路可点');
+    expect(ids, hasLength(lessThanOrEqualTo(12)));
+    // 被名额截掉的那一个候选是**可用**的，只是这条决策装不下：必须如实说出条数，
+    // 且不能混进"与失败成员同一个模型"的说法（那是"换人不改变上游失败"）。
+    expect(_pendingEvidence(), contains('另有 1 个可用候选因本次决策的选项数量上限未列出'));
+    expect(_pendingEvidence(), isNot(contains('同一个模型')),
+        reason: '被截掉的候选换了模型，说成"换人无用"会让用户放弃本来可行的出路');
+  });
 }

@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
+import 'package:chat_group/features/chat_group/chat_reply_prompt_guard.dart';
 import 'package:chat_group/features/chat_group/chat_room_page.dart';
 import 'package:chat_group/features/chat_group/group_shared_context.dart';
 import 'package:chat_group/features/chat_group/humanized_chat_orchestrator.dart';
@@ -288,5 +289,72 @@ void main() {
     ));
     expect(clearedPrompt, isNot(contains(GroupSharedContext.marker)));
     expect(clearedPrompt, isNot(contains('来源群背景_不得外泄')));
+  });
+
+  testWidgets('构建器交出本轮真人输入的形态，供必需内容守卫保护', (tester) async {
+    addTearDown(() => disposeRoom(tester));
+    final member = character();
+    await seedCharacter(tester, member);
+    await tester.runAsync(() async {
+      await db.chatGroupBox.put(
+        'group-human-turn',
+        ChatGroup(
+          id: 'group-human-turn',
+          name: '多人接话群',
+          theme: '日常聊天',
+          aiCharacterIds: [member.id],
+        ),
+      );
+    });
+    await pumpRoom(tester, 'group-human-turn');
+    final dynamic pageState = tester.state(find.byType(ChatRoomPage));
+
+    // 第二位角色发言前的真实排列：真人这一轮的要求后面跟着上一位 AI 的发言。
+    final human = Message(
+      id: 'm-human',
+      groupId: 'group-human-turn',
+      senderId: 'user',
+      senderType: Message.senderTypeUser,
+      content: '本轮真人要求_今晚只讨论家人',
+      timestamp: DateTime(2026, 1, 1, 10),
+      visibleToCharacterIds: [member.id],
+    );
+    final peer = Message(
+      id: 'm-peer',
+      groupId: 'group-human-turn',
+      senderId: 'char-2',
+      senderType: Message.senderTypeAi,
+      content: '今天我们聊聊旅行吧',
+      timestamp: DateTime(2026, 1, 1, 10, 1),
+      visibleToCharacterIds: [member.id],
+    );
+
+    Object? captured;
+    final messages = await pageState.buildPromptMessages(
+      character: member,
+      context: [human, peer],
+      userMessage: human.content,
+      currentUserMessage: human,
+      onCurrentUserTurn: (rendered) => captured = rendered,
+    );
+
+    expect(
+      captured,
+      human.content,
+      reason: '构建器必须交出真人那一条，而不是末尾的 AI 发言',
+    );
+    expect(messages.last['content'], isNot(human.content));
+
+    final guard = ChatReplyPromptGuard.collect(
+      messages,
+      sharedContext: '',
+      personaPrompt: member.rolePlaySystemPrompt,
+      currentUserTurn: captured,
+    );
+    // 把真人那条从请求里拿掉之后必须判为不可发送，哪怕末尾那条 AI 发言还在。
+    final withoutHuman = messages
+        .where((message) => message['content'] != human.content)
+        .toList(growable: false);
+    expect(guard.missingFrom(withoutHuman), '本轮真人输入');
   });
 }

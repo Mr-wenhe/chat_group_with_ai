@@ -627,8 +627,6 @@ class WorkRoleRouter {
               decision.confidence < 0 ||
               decision.confidence > 1) {
             modelNote = '模型候选推荐置信度无效，未采纳模型选择。';
-          } else if (decision.publicReason.trim().isEmpty) {
-            modelNote = '模型候选推荐缺少可展示依据，未采纳模型选择。';
           } else if (selected == null ||
               !_isSuitable(selected, kinds.first, skills,
                   allowImplementationBridge: true)) {

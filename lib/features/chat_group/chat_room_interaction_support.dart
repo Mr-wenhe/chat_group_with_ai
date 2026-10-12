@@ -247,6 +247,9 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
     if (_isRegenerating || _isAiReplying) return;
     final runGuard = _conversationController.beginNormalGuard();
     if (runGuard == null) return;
+    // 与普通回复同一条回合口径：代际号在入口钉住，此后每次 await 之后复检，
+    // 用户在准备阶段离开本群再回来或点了停止都会让这次重新生成作废。
+    final roundGeneration = _roomRoundGeneration;
     _setUiState(() {
       _isRegenerating = true;
       _regenerateMessageId = original.id;
@@ -263,12 +266,19 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       if (config == null || apiKey == null) return;
       // 凭据解析之后、真正发出请求之前复检：重新生成是一次新的模型调用，
       // 不能用 _pageActive（被别的全屏页面盖住或 App 进后台时它仍然为真）。
-      if (!_roomWorkAllowed || _disposed) return;
+      if (_isReplyRoundInvalidated(
+          isAutoChat: false, generation: roundGeneration)) {
+        return;
+      }
 
       final searchTurnContext = await _regenerationSearchContext(
         original,
         forceRefresh: forceRefresh,
       );
+      if (_isReplyRoundInvalidated(
+          isAutoChat: false, generation: roundGeneration)) {
+        return;
+      }
       final webSearch = searchTurnContext?.snapshot;
 
       // 上下文里剔除原消息本身，否则模型会看到"自己上次的答案"而倾向复读。
@@ -281,12 +291,21 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
           (p) => p.name == config.provider,
           orElse: () => ApiProvider.deepseek);
       final capability = _aiGateway.capability(provider, config.modelName);
+      // 重新生成同样要保护"这一轮真人输入"：它是被重新生成的那条回复所依据的
+      // 要求，就是上下文里最后一条真人消息（原 AI 回复已从上下文剔除）。
+      // 与普通回复一样，不能靠"最后一条非 system 消息"反推——它可能是另一位
+      // 角色的发言。
+      final currentUserMessage =
+          ChatReplyPromptGuard.lastHumanInput(_regenerateContext);
+      Object? currentUserTurn;
       final apiMessages = _withWebSearchContext(
         await _buildApiMessages(
           character,
           _regenerateContext,
           null,
           supportsVision: capability.supportsVision,
+          currentUserMessage: currentUserMessage,
+          onCurrentUserTurn: (rendered) => currentUserTurn = rendered,
         ),
         webSearch,
         allowSourceLinks: searchTurnContext?.allowSourceLinks == true,
@@ -298,21 +317,36 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
         contextWindow: capability.contextWindow,
         maxOutput: outputTokens,
       );
+      // 与普通回复同一条必需内容清单：重新生成也不允许丢掉角色身份、本轮真人
+      // 输入或最新输入。
+      final requirements = ChatReplyPromptGuard.collect(
+        apiMessages,
+        sharedContext: _groupSharedContextBlock,
+        personaPrompt: character.rolePlaySystemPrompt,
+        currentUserTurn: currentUserTurn,
+      );
       final boundedApiMessages = ContextWindowManager.fitToTokenBudget(
         apiMessages,
         maxTokens: inputBudget,
-        // 与 _generateAiReply 同一条规则：共同设定是必需区块，先让可选内容让位。
-        isProtected: GroupSharedContext.carriesBlock,
+        // 与 _generateAiReply 同一条规则：必需内容（共同设定、角色人设、本轮
+        // 真人输入、本轮最新一条对话）先让可选内容让位。
+        isProtected: requirements.isRequired,
       );
-      if (!_roomWorkAllowed || _disposed) return;
-      // 与 _generateAiReply 同一条规则：共同设定放不进窗口就明确失败，
-      // 不静默丢设定后照常重新生成。
-      if (!GroupSharedContext.survives(
-          boundedApiMessages, _groupSharedContextBlock)) {
-        await _reportSharedContextDidNotFit(character);
+      if (_isReplyRoundInvalidated(
+          isAutoChat: false, generation: roundGeneration)) {
         return;
       }
-      if (!_roomWorkAllowed || _disposed) return;
+      // 与 _generateAiReply 同一条规则：必需内容放不进窗口就明确失败，
+      // 不静默丢掉其中任何一项后照常重新生成。
+      final missingRequired = requirements.missingFrom(boundedApiMessages);
+      if (missingRequired != null) {
+        await _reportRequiredPromptDidNotFit(character, missingRequired);
+        return;
+      }
+      if (_isReplyRoundInvalidated(
+          isAutoChat: false, generation: roundGeneration)) {
+        return;
+      }
 
       temp = Message(
           groupId: widget.groupId,
@@ -361,6 +395,7 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       if (_disposed) return;
       bool shouldDiscardResult() =>
           _discardCurrentStream ||
+          roundGeneration != _roomRoundGeneration ||
           shouldDiscardStreamingReply(
             stopped: result.stopped,
             // 与普通回合同口径：用"用户还在看这个群"而不是"widget 还在树上"，
@@ -394,6 +429,8 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
           apiMessages: boundedApiMessages,
           maxTokens: outputTokens,
           userInitiated: true,
+          isAutoChat: false,
+          roundGeneration: roundGeneration,
         );
         if (retryContent != null && retryContent.trim().isNotEmpty) {
           failed = false;
@@ -462,7 +499,10 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
       await _recordReplyUsage(character);
       _registerUserMentionIfNeeded(temp);
       if (!failed && fullContent.trim().isNotEmpty) {
-        await _maybeUpdateMemory();
+        await _maybeUpdateMemory(
+          isAutoChat: false,
+          roundGeneration: roundGeneration,
+        );
       }
     } catch (_) {
       failed = true;

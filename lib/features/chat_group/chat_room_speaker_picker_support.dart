@@ -65,6 +65,8 @@ extension _ChatRoomSpeakerPickerSupport on _ChatRoomPageState {
     required bool isAutoChat,
     required List<String> alreadySpoken,
     required UserMessageSentiment? userSentiment,
+    required int roundGeneration,
+    int? autoChatGeneration,
   }) async {
     if (!_roomWorkAllowed) return null;
     final resolved = _resolveSpeakerStep(
@@ -89,11 +91,18 @@ extension _ChatRoomSpeakerPickerSupport on _ChatRoomPageState {
     final outcome = await _askSpeakerPicker(
       candidates: candidates,
       isAutoChat: isAutoChat,
+      roundGeneration: roundGeneration,
+      autoChatGeneration: autoChatGeneration,
     );
     // 等待期间这一轮可能已经失效：用户离开本群、进后台又回来、关掉自动聊天，
     // 或点了停止。失效后既不能采纳迟到的决定，也不能把它降级成本地选人——
     // 那结果和"停止之后照常发言"没有区别。
-    if (_isSpeakerRoundInvalidated(isAutoChat: isAutoChat)) return null;
+    if (_isReplyRoundInvalidated(
+        isAutoChat: isAutoChat,
+        generation: roundGeneration,
+        autoChatGeneration: autoChatGeneration)) {
+      return null;
+    }
     if (outcome.status == _SpeakerPickStatus.endRound) return null;
 
     // 成员、禁言与资格都可能在等待期间变化，因此用**当前**候选重新校验：
@@ -128,17 +137,6 @@ extension _ChatRoomSpeakerPickerSupport on _ChatRoomPageState {
       isAutoChat: isAutoChat,
       userSentiment: userSentiment,
     );
-  }
-
-  /// 这一步的选人是否已经失效。
-  ///
-  /// 三条判据都必须成立才能继续：用户真的在看这个群；自动回合的开关没被关掉；
-  /// 这一轮没有被标记为停止。只看 [_roomWorkAllowed] 挡不住"进后台又立刻回来"
-  /// ——它那时已经恢复为真，而飞行中的请求早已被取消。
-  bool _isSpeakerRoundInvalidated({required bool isAutoChat}) {
-    if (!_roomWorkAllowed) return true;
-    if (isAutoChat && !_isAutoChatEnabled) return true;
-    return _conversationController.state.phase == ConversationPhase.stopping;
   }
 
   /// 算出这一步的候选名单与判定依据。
@@ -256,19 +254,34 @@ extension _ChatRoomSpeakerPickerSupport on _ChatRoomPageState {
   ///
   /// 每一步最多一次实际请求：关闭网关内部自动重试（`maxRetries: 0`），不做
   /// JSON 修复，也不"再选一次"。
+  ///
+  /// 有效性判据（[roundGeneration] / [autoChatGeneration]）必须传到这里，而不
+  /// 只是在外层拿到结果之后检查：凭据解析可能让用户等很久（macOS 上每次重建
+  /// 都可能弹钥匙串），期间用户关掉自动发言、离开本群再回来或点了停止，外层
+  /// 丢弃结果**并不能阻止**这次请求已经发出去——用户等的是同一份时间，账单里
+  /// 也照样多一次调用。
   Future<_SpeakerPickOutcome> _askSpeakerPicker({
     required List<AICharacter> candidates,
     required bool isAutoChat,
+    required int roundGeneration,
+    int? autoChatGeneration,
   }) async {
+    bool invalidated() => _isReplyRoundInvalidated(
+          isAutoChat: isAutoChat,
+          generation: roundGeneration,
+          autoChatGeneration: autoChatGeneration,
+        );
     if (_speakerPickerDisabledForTurn) {
       return const _SpeakerPickOutcome.unavailable();
     }
+    // 入口就先复检一次：轮到这一步时这一轮可能已经被取消。
+    if (invalidated()) return const _SpeakerPickOutcome.endRound();
     final config = _speakerPickerSettings.resolveConfig();
     if (config == null) return const _SpeakerPickOutcome.unavailable();
     final apiKey = await _credentialResolver.resolve(config);
-    // 上面的 await 期间页面可能已经不可见或被停止。这不是"选人器不可用"，
+    // 上面的 await 期间这一轮可能已经失效。这不是"选人器不可用"，
     // 而是这一轮已经不该继续，因此必须结束本轮，而不是退回本地选人。
-    if (!_roomWorkAllowed) return const _SpeakerPickOutcome.endRound();
+    if (invalidated()) return const _SpeakerPickOutcome.endRound();
     if (apiKey == null || apiKey.trim().isEmpty) {
       return const _SpeakerPickOutcome.unavailable();
     }

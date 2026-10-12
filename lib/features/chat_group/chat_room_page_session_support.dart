@@ -321,7 +321,7 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
     _cancelActiveSearch();
     if (!_isStreaming) {
       // 选人阶段没有活跃的 stream，但同样属于"这一轮还在跑"：取消正在飞的
-      // 选择请求，让迟到的结果作废（见 `_isSpeakerRoundInvalidated`）。
+      // 选择请求，让迟到的结果作废（见 `_isReplyRoundInvalidated`）。
       _cancelActiveSpeakerPick();
       // There is no completion callback left to consume a discard latch. Clear
       // it here so a later, unrelated automatic reply cannot be dropped.
@@ -483,6 +483,26 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
   /// 切换空闲自动发言开关（仅本次会话内存态，不改全局治理设置）。
   void _toggleAutoChat(bool enabled) {
     if (!_canTouchUi) return;
+    if (!enabled) {
+      // 关掉开关不只是"不再起新回合"：已经选好角色、正停在凭据解析上的旧自动
+      // 回合必须从此刻起**永久**作废。只置位布尔值挡不住"关掉又打开"——那时
+      // [_isAutoChatEnabled] 已经恢复为真，同一个旧回合会重新被判为有效并照常
+      // 发言。代际号是单向的，重新打开只会启动携带新代际号的新回合。
+      _autoChatRoundGeneration++;
+      // 并且让这一轮**立刻收手**，而不是等它自己跑完再丢弃结果：正在流式输出的
+      // 内容还在往气泡里灌，跑完才丢会让用户看到"关了开关还在说话、说完又消失"。
+      // 只在活跃的确实是自动回合时动手——用户手头发起的那一轮回复跟这个开关无关。
+      if (_conversationController.state.run?.type ==
+          ConversationRunType.automatic) {
+        if (_isStreaming) {
+          _stopStreaming();
+        } else {
+          // 还没进流（选人 / 凭据解析阶段）：取消正在飞的选择请求，剩下的请求由
+          // 代际号在真正发出之前拦下。
+          _cancelActiveSpeakerPick();
+        }
+      }
+    }
     setState(() {
       _isAutoChatEnabled = enabled;
       _autoChatStatus =
@@ -508,6 +528,10 @@ extension _ChatRoomPageSessionSupport on _ChatRoomPageState {
     await WorkModeConfigService(db: _db).setWorkMode(widget.groupId, enabled);
     _workModeSession.setEnabled(enabled);
     if (enabled) {
+      // 工作模式让空闲自动发言整体停摆，与用户关掉开关是同一件事：飞行中的
+      // 旧自动回合必须永久作废，而不是等开关被"重新打开"时复活（见
+      // [_autoChatRoundGeneration]）。
+      _autoChatRoundGeneration++;
       // 正在自动发言的话先丢弃当前这条流式输出，避免它写进工作模式会话。
       if (shouldArmDiscardOnWorkModeToggle(
         schedulerRunning: _autoChatScheduler.isRunning,

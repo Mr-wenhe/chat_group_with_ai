@@ -218,35 +218,32 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
     final role = state.team
         .where((m) => m['memberId'] == member.character.id)
         .firstOrNull?['role'] as String?;
+    final controls = _memberFailureControls();
     var replacements = const <Map<String, dynamic>>[];
     var hiddenSameModel = 0;
+    var hiddenDifferentModel = 0;
     if (role != null) {
-      final candidates = await _replacementOptions(role, avoidModelOf: member);
+      final candidates = await _replacementOptions(role,
+          avoidModelOf: member, reserve: controls.length);
       replacements = candidates.options;
       hiddenSameModel = candidates.hiddenSameModel;
+      hiddenDifferentModel = candidates.hiddenDifferentModel;
     }
+    // 两种"没列出来"的原因必须分开说：同模型换人不解决上游失败，而纯粹装不下的
+    // 候选是可用的——混成一句会让用户以为角色库里已经没有别的选择了。
+    final hiddenNotes = <String>[
+      if (hiddenSameModel > 0)
+        '另有 $hiddenSameModel 个候选与失败成员同一个模型，未列出——换人不改变上游失败。',
+      if (hiddenDifferentModel > 0)
+        '另有 $hiddenDifferentModel 个可用候选因本次决策的选项数量上限未列出。',
+    ];
     await _decision(
         'member',
         member.character.id,
         '成员 ${member.character.name}：$cause'
         '原成员与责任保持不变，成员资格与模型配置仍可用。',
-        hiddenSameModel == 0
-            ? evidence
-            : '$evidence；另有 $hiddenSameModel 个候选与失败成员同一个模型，'
-                '未列出——换人不改变上游失败。',
-        options: [
-          {
-            'id': 'retry-same-member',
-            'label': '保留原成员与原模型，重试',
-            'impact': '不更换成员、模型与责任，按当前台账继续本轮讨论。'
-          },
-          {
-            'id': 'member-config-updated',
-            'label': '我已调整该成员的模型配置，重试',
-            'impact': '重新解析该成员的模型与凭据后继续本轮讨论。'
-          },
-          ...replacements,
-        ],
+        hiddenNotes.isEmpty ? evidence : '$evidence；${hiddenNotes.join('')}',
+        options: [...controls, ...replacements],
         impact: '本轮没有产出正文；未更换成员、模型与责任。'
             '请选择下一步：保留原成员重试，或先调整该成员的模型配置再重试。',
         router: true);
@@ -477,3 +474,21 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
     await runner.database.persistMessage(message);
   }
 }
+
+/// 成员本轮模型请求失败时固定附带的控制项：保留原成员重试，或先改配置再重试。
+///
+/// 它们与换人候选共享同一条决策的选项容量（[WorkDiscussionRunner.maxDecisionOptions]），
+/// 所以候选名额必须按这份列表的长度预先让位。写死一个数字会在改文案时漂走，
+/// 让调用方重新越界。
+List<Map<String, dynamic>> _memberFailureControls() => [
+      {
+        'id': 'retry-same-member',
+        'label': '保留原成员与原模型，重试',
+        'impact': '不更换成员、模型与责任，按当前台账继续本轮讨论。'
+      },
+      {
+        'id': 'member-config-updated',
+        'label': '我已调整该成员的模型配置，重试',
+        'impact': '重新解析该成员的模型与凭据后继续本轮讨论。'
+      },
+    ];

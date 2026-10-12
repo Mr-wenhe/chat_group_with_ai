@@ -185,6 +185,37 @@ void main() {
     expect(contract.requestRevision, 1);
   });
 
+  test('模型推荐缺少理由时仍作为首位候选，不再整条作废', () async {
+    final p1 = _character('p1', '产品甲', '产品经理');
+    final p2 = _character('p2', '产品乙', '产品经理');
+    final routed = WorkRoleRouter(
+      modelSelector: (_) => const WorkRoleModelDecision(
+        characterId: 'p2',
+        publicReason: '',
+        confidence: 0.8,
+        needsHandoff: false,
+      ),
+    );
+    final result = await routed.route(
+      request: '整理一份产品需求文档',
+      conversationId: 'group:optional-reason',
+      characters: [p1, p2],
+      skills: [
+        _skill('p1-skill', p1.id, 'product'),
+        _skill('p2-skill', p2.id, 'product'),
+      ],
+    );
+
+    // 解析层允许缺理由（它是唯一会长到撑破输出上限的字段），路由器必须认同同一份
+    // 契约：整条拒绝会把一条完全可用的推荐丢掉，用户只看到"缺少可展示依据"，而
+    // 实际推荐的角色根本没进候选顺序。
+    expect(result.candidateCharacterIds.first, 'p2');
+    expect(result.publicReason, contains('产品乙'));
+    expect(result.publicReason, isNot(contains('缺少可展示依据')));
+    expect(result.publicReason, isNot(contains('（）')),
+        reason: '缺理由时不能写出空括号');
+  });
+
   test('valid explicit @ wins before handoff and model routing', () async {
     var modelCalled = false;
     final routed = WorkRoleRouter(

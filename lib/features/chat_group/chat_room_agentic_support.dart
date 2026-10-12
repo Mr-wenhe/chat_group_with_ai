@@ -139,6 +139,12 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
     final autoRunGuard = _conversationController.beginAutoGuard();
     if (autoRunGuard == null) return;
 
+    // 与本群普通回合同一条代际口径：中途离开本群（哪怕立刻回来）让这一轮作废，
+    // 循环据此收手，而不是接着往下一位发言者走。
+    final roundGeneration = _roomRoundGeneration;
+    // 空闲自动发言还有自己的代际号：用户关掉开关（或切到工作模式）同样让这一轮
+    // 永久作废，重新打开开关只会启动携带新代际号的新回合。
+    final autoChatGeneration = _autoChatRoundGeneration;
     try {
       _setUiState(() {
         _autoChatRoundCount++;
@@ -152,6 +158,8 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
         // 循环内逐次复检：用户可能中途关闭自动聊天、切到工作模式或离开本群。
         if (!_isAutoChatEnabled || _autoChatPausedByWorkMode) break;
         if (!_roomWorkAllowed) break;
+        if (roundGeneration != _roomRoundGeneration) break;
+        if (autoChatGeneration != _autoChatRoundGeneration) break;
         if (_conversationController.state.phase == ConversationPhase.stopping) {
           break;
         }
@@ -161,6 +169,8 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
           isAutoChat: true,
           alreadySpoken: alreadySpoken,
           userSentiment: null,
+          roundGeneration: roundGeneration,
+          autoChatGeneration: autoChatGeneration,
         );
         if (picked == null) {
           if (!spokeAny && _canTouchUi) {
@@ -180,6 +190,8 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
           null,
           isAutoChat: true,
           intent: picked.intent,
+          roundGeneration: roundGeneration,
+          autoChatGeneration: autoChatGeneration,
         );
         spokeAny = true;
         if (_autoChatPausedByWorkMode) break;
@@ -195,7 +207,11 @@ extension _ChatRoomAgenticRecoverySupport on _ChatRoomPageState {
         _autoChatMemoryTick++;
         if (_autoChatMemoryTick >= 3) {
           _autoChatMemoryTick = 0;
-          await _maybeUpdateMemory();
+          await _maybeUpdateMemory(
+            isAutoChat: true,
+            roundGeneration: roundGeneration,
+            autoChatGeneration: autoChatGeneration,
+          );
         }
       }
     } finally {
