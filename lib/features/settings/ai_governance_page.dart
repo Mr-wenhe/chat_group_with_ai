@@ -9,6 +9,8 @@ import 'package:chat_group/features/web_search/application/search_cache_controll
 import 'package:chat_group/features/web_search/presentation/web_search_audit_card.dart';
 import 'package:chat_group/features/web_search/presentation/web_search_settings_section.dart';
 import 'package:chat_group/features/web_search/presentation/web_search_runtime_settings_card.dart';
+import 'package:chat_group/features/web_search/data/zhipu_native_search_credential_store.dart';
+import 'package:chat_group/features/web_search/presentation/zhipu_native_search_settings_card.dart';
 import 'package:chat_group/features/settings/widgets/model_capability_fields.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -28,6 +30,7 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
   late final DatabaseService _db;
   late final AiGovernanceStore _store;
   late final SearchProviderConfigStore _searchSettings;
+  late final ZhipuNativeSearchCredentialStore _zhipuSearchCredentials;
   final _registry = ModelCapabilityRegistry();
   late BudgetSettings _budget;
   late WebSearchPolicy _searchPolicy;
@@ -42,6 +45,7 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
     _db = ref.read(databaseServiceProvider);
     _store = AiGovernanceStore.forDatabase(_db);
     _searchSettings = SearchProviderConfigStore(db: _db);
+    _zhipuSearchCredentials = ZhipuNativeSearchCredentialStore(db: _db);
     _budget = _store.budgetSettings;
     _searchPolicy = _store.globalSearchPolicy;
     _daily = TextEditingController(
@@ -185,7 +189,8 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
                 const SizedBox(height: 12),
                 const Text(
                   '默认关闭。询问模式每次都需明确同意；启用后，查询会发送给下方配置的 '
-                  'Provider。DuckDuckGo 仅作为百科即时答案兜底，不等同于完整 Web 搜索。',
+                  'Provider 或智谱原生 Web Search。DuckDuckGo 仅作为百科即时答案兜底，'
+                  '不等同于完整 Web 搜索。',
                 ),
               ],
             ),
@@ -193,6 +198,8 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
         ),
         const SizedBox(height: 8),
         WebSearchSettingsSection(store: _searchSettings),
+        const SizedBox(height: 8),
+        ZhipuNativeSearchSettingsCard(store: _zhipuSearchCredentials),
         const SizedBox(height: 8),
         WebSearchRuntimeSettingsCard(
           initialSettings: _searchSettings.runtimeSettings,

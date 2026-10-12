@@ -46,6 +46,8 @@ class _ScriptedChatApi extends ChatApiService {
     int maxRetries = 5,
     CancelToken? cancelToken,
     bool structuredJson = false,
+    // 替身只回一个固定的合法正文，没有需要 `reasoning_content` 兜底的空内容场景。
+    bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
   }) async {
     pickerCalls.add(messages);
@@ -277,8 +279,7 @@ void main() {
     await tester.pump(const Duration(milliseconds: 600));
     expect(find.text('另一个页面'), findsOneWidget);
     await advance(tester, const Duration(seconds: 180));
-    expect(api.pickerCalls, isEmpty,
-        reason: '旧群被别的页面盖住时不得发起选人调用');
+    expect(api.pickerCalls, isEmpty, reason: '旧群被别的页面盖住时不得发起选人调用');
     expect(api.replyCalls, isEmpty);
 
     // 回到前台但旧群仍被别的页面盖住：不得因为"App 回到前台"就恢复调度。
@@ -288,8 +289,7 @@ void main() {
     binding.handleAppLifecycleStateChanged(AppLifecycleState.resumed);
     await tester.pump();
     await advance(tester, const Duration(seconds: 180));
-    expect(api.pickerCalls, isEmpty,
-        reason: '旧群仍被路由遮挡时，回到前台也不得恢复调度');
+    expect(api.pickerCalls, isEmpty, reason: '旧群仍被路由遮挡时，回到前台也不得恢复调度');
 
     // 回到当前群：只恢复一个调度器，初始间隔是群配置（60 秒）+ 抖动。
     hostKey.currentState!.popCover();

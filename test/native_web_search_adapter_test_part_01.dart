@@ -27,6 +27,26 @@ void _registerNativeWebSearchAdapterTestPart1() {
     );
     expect(
       capabilities
+          .resolve(provider: ApiProvider.zhipu, modelId: 'glm-4.7')
+          .supportsNativeWebSearch,
+      isTrue,
+    );
+    expect(
+      capabilities
+          .resolve(provider: ApiProvider.zhipu, modelId: 'glm4.7')
+          .supportsNativeWebSearch,
+      isTrue,
+    );
+    final glm47Adapter = ZhipuWebSearchAdapter(model: 'glm-4.7');
+    expect(
+      glm47Adapter.supports(
+        provider: ApiProvider.zhipu,
+        model: 'glm4.7',
+      ),
+      isTrue,
+    );
+    expect(
+      capabilities
           .resolve(provider: ApiProvider.qwen, modelId: 'qwen-unknown')
           .supportsNativeWebSearch,
       isFalse,

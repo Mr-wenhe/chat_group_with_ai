@@ -26,6 +26,7 @@ class CapturingChatApiService extends ChatApiService {
     Duration? receiveTimeout,
     int? maxRetries,
     CancelToken? cancelToken,
+    bool allowReasoningContentFallback = false,
   }) async {
     sendCount++;
     _capture(messages);

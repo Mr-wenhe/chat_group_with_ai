@@ -109,9 +109,8 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
       return;
     }
     await _runFixedSpeakerRound(
-      charactersToReply: _isDirectChat
-          ? _directReplyCharacters()
-          : roundtableParticipants!,
+      charactersToReply:
+          _isDirectChat ? _directReplyCharacters() : roundtableParticipants!,
       userMessage: userMessage,
       mentionedIds: mentionedIds,
       isAutoChat: isAutoChat,
@@ -161,8 +160,8 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
       isAutoChat: isAutoChat,
       searchEnabled: candidatesForRound.any((character) =>
           character.webSearchEnabled || character.zhipuSearchAnswerOnly),
-      forceSearch:
-          candidatesForRound.any((character) => character.zhipuSearchAnswerOnly),
+      forceSearch: candidatesForRound
+          .any((character) => character.zhipuSearchAnswerOnly),
     );
 
     final repliedIds = <String>[];
@@ -201,6 +200,8 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         searchTurnContext: searchTurnContext,
         repliedIds: repliedIds,
         roundGeneration: roundGeneration,
+        // 普通群聊没有开场事实播报：每位角色都按自己的人设接话。
+        isRoundtableOpeningBrief: false,
       );
     }
 
@@ -245,8 +246,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
       category: roundtableMode ? web_search.SearchCategory.news : null,
       freshness: roundtableMode ? web_search.SearchFreshness.week : null,
       forceSearch: roundtableMode ||
-          charactersToReply
-              .any((character) => character.zhipuSearchAnswerOnly),
+          charactersToReply.any((character) => character.zhipuSearchAnswerOnly),
     );
     if (roundtableMode && searchTurnContext.snapshot?.hasResults != true) {
       _clearPendingRoundtableMentions(mentionedIds);
@@ -261,7 +261,10 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
     }
 
     final repliedIds = <String>[];
-    for (final character in charactersToReply) {
+    for (var characterIndex = 0;
+        characterIndex < charactersToReply.length;
+        characterIndex++) {
+      final character = charactersToReply[characterIndex];
       // 与普通群聊同一条收手口径：用户点了停止、切走页面或 App 进后台，
       // 名单里剩下的角色不再逐个产生回复与"打字延迟"。
       if (_isReplyRoundInvalidated(
@@ -283,6 +286,8 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         searchTurnContext: searchTurnContext,
         repliedIds: repliedIds,
         roundGeneration: roundGeneration,
+        // 圆桌第一位不扮演角色，只做本轮事件的开场事实播报。
+        isRoundtableOpeningBrief: roundtableMode && characterIndex == 0,
       );
     }
 
@@ -298,6 +303,9 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
 
   /// 让一位角色发言一次，并把结果计入本轮。
   ///
+  /// [isRoundtableOpeningBrief] 为真时这条发言不代表角色本身：它只播报本轮搜索
+  /// 到的事实，人设、身份与语气都被刻意忽略（见 [_generateAiReply]）。
+  ///
   /// 单个角色失败不中断整轮：写入可见的失败气泡，继续下一位。
   Future<void> _replyAsSpeaker({
     required AICharacter character,
@@ -310,6 +318,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
     required SearchTurnContext? searchTurnContext,
     required List<String> repliedIds,
     required int roundGeneration,
+    required bool isRoundtableOpeningBrief,
   }) async {
     final wasPendingReply = _pendingMentionedIds.contains(character.id);
     late final String replyContent;
@@ -324,6 +333,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         userSentiment: userSentiment,
         searchTurnContext: searchTurnContext,
         roundGeneration: roundGeneration,
+        isRoundtableOpeningBrief: isRoundtableOpeningBrief,
       );
     } catch (e) {
       replyContent =
@@ -411,8 +421,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         context,
         _replyBlockText(blockReason),
         icon: Icons.info_outline_rounded,
-        actionLabel:
-            blockReason == ReplyBlockReason.noApiConfig ? '去设置' : null,
+        actionLabel: blockReason == ReplyBlockReason.noApiConfig ? '去设置' : null,
         onTap: blockReason == ReplyBlockReason.noApiConfig
             ? () => Navigator.pushNamed(context, '/settings')
             : null,

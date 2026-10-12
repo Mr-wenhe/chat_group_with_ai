@@ -61,7 +61,7 @@ class _ChatGroupFormPageState extends ConsumerState<ChatGroupFormPage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final allCharacters = ref.watch(aiCharactersProvider);
+    final allCharacters = ref.watch(userManagedAICharactersProvider);
     final query = _searchController.text.trim();
     final filtered = query.isEmpty
         ? allCharacters

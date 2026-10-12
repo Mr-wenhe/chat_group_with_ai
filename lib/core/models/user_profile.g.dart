@@ -29,13 +29,18 @@ class UserProfileAdapter extends TypeAdapter<UserProfile> {
       importantBackground: (fields[9] as List?)?.cast<String>(),
       updatedAt: fields[10] as DateTime?,
       createdAt: fields[11] as DateTime?,
+      gender: fields[12] as CharacterGender?,
+      ipImageRelPath: fields[13] == null ? '' : fields[13] as String,
+      avatarFromIpImage: fields[14] == null ? false : fields[14] as bool,
+      ipImageStyle: fields[15] == null ? '' : fields[15] as String,
+      apiConfigId: fields[16] == null ? '' : fields[16] as String,
     );
   }
 
   @override
   void write(BinaryWriter writer, UserProfile obj) {
     writer
-      ..writeByte(12)
+      ..writeByte(17)
       ..writeByte(0)
       ..write(obj.id)
       ..writeByte(1)
@@ -59,7 +64,17 @@ class UserProfileAdapter extends TypeAdapter<UserProfile> {
       ..writeByte(10)
       ..write(obj.updatedAt)
       ..writeByte(11)
-      ..write(obj.createdAt);
+      ..write(obj.createdAt)
+      ..writeByte(12)
+      ..write(obj.gender)
+      ..writeByte(13)
+      ..write(obj.ipImageRelPath)
+      ..writeByte(14)
+      ..write(obj.avatarFromIpImage)
+      ..writeByte(15)
+      ..write(obj.ipImageStyle)
+      ..writeByte(16)
+      ..write(obj.apiConfigId);
   }
 
   @override

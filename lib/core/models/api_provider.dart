@@ -31,7 +31,14 @@ enum ApiProvider {
       'qwen-long',
       'qwen-vl-max',
     ],
-    'zhipu': ['glm-4-plus', 'glm-4-air', 'glm-4-flash', 'glm-4v-plus'],
+    'zhipu': [
+      'glm-4.7',
+      'glm4.7',
+      'glm-4-plus',
+      'glm-4-air',
+      'glm-4-flash',
+      'glm-4v-plus',
+    ],
     'moonshot': ['moonshot-v1-8k', 'moonshot-v1-32k', 'moonshot-v1-128k'],
     'baidu': [
       'ernie-4.0-8k',

@@ -61,6 +61,7 @@ class _ModelClient extends ChatApiService {
       int maxRetries = 3,
       CancelToken? cancelToken,
       bool structuredJson = false,
+      bool allowReasoningContentFallback = false,
       required int maxResponseBytes}) {
     expect(maxTokens, expectedMaxTokens);
     expect(apiKey, 'test-key');

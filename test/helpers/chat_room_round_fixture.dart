@@ -87,6 +87,8 @@ class ScriptedChatApi extends ChatApiService {
     int maxRetries = 5,
     CancelToken? cancelToken,
     bool structuredJson = false,
+    // 替身只回一个固定的合法正文，没有需要 `reasoning_content` 兜底的空内容场景。
+    bool allowReasoningContentFallback = false,
     required int maxResponseBytes,
   }) async {
     pickerCalls.add(messages);
@@ -231,7 +233,8 @@ void removeTtsChannelMock() {
 /// 网关的用量账本是独立的 append-only box，生产里由 `DatabaseService.init`
 /// 打开；这里按同一个名字预开，免得第一次记账落到真实的 `Hive.openBox` 上。
 Future<void> openGovernanceLedgerBox() =>
-    Hive.openBox<dynamic>(DatabaseService.aiGovernanceLedgerBoxName).then((_) {});
+    Hive.openBox<dynamic>(DatabaseService.aiGovernanceLedgerBoxName)
+        .then((_) {});
 
 /// 收尾：刻意**不**调用 `Hive.close()`。
 ///
@@ -335,7 +338,9 @@ Future<void> pumpRoundRoom(
 
 Future<void> pumpUntilRoomLoaded(WidgetTester tester) async {
   final textField = find.byType(TextField);
-  for (var attempt = 0; attempt < 80 && textField.evaluate().isEmpty; attempt++) {
+  for (var attempt = 0;
+      attempt < 80 && textField.evaluate().isEmpty;
+      attempt++) {
     await tester.runAsync(
       () => Future<void>.delayed(const Duration(milliseconds: 20)),
     );

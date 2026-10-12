@@ -13,9 +13,11 @@ import 'package:chat_group/features/web_search/application/search_runtime_provid
 import 'package:chat_group/features/web_search/application/search_flow_logger.dart';
 import 'package:chat_group/features/web_search/application/search_turn_context.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
+import 'package:chat_group/features/web_search/data/zhipu_native_search_credential_store.dart';
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
 import 'package:chat_group/features/web_search/providers/native_web_search_adapter.dart';
 import 'package:chat_group/features/web_search/providers/duckduckgo_result_page_enricher.dart';
+import 'package:chat_group/features/chat_group/roundtable_news_role_service.dart';
 
 typedef ChatRoomApiConfigResolver = ApiConfig? Function(AICharacter character);
 
@@ -91,16 +93,25 @@ class ChatRoomSearchRuntimeController {
     SearchProviderConfigStore settings,
   ) {
     final nativeBinding = _nativeSearchBinding();
+    final characters = allCharacters().toList(growable: false);
     final hasSearchAnswerOnlyRole =
-        allCharacters().any((character) => character.zhipuSearchAnswerOnly);
+        characters.any((character) => character.zhipuSearchAnswerOnly);
+    final hasRoleSearchOptIn = characters.any(
+      (character) =>
+          character.webSearchEnabled || character.zhipuSearchAnswerOnly,
+    );
+    final zhipuSearchCredentials =
+        ZhipuNativeSearchCredentialStore(db: governanceStore.db);
     // Enabling model-native search is fail-closed: once a supported role
     // binding exists, this room does not instantiate an independent search
     // provider. The persisted flag keeps the policy explicit for restored
     // settings and future per-role controls.
     final nativeOnly = hasSearchAnswerOnlyRole ||
         runtimeSettings.nativeSearchOnly ||
-        (runtimeSettings.nativeSearchEnabled &&
-            nativeBinding != null);
+        (zhipuSearchCredentials.hasConfiguredCredential &&
+            hasRoleSearchOptIn) ||
+        (hasRoleSearchOptIn && runtimeSettings.nativeSearchEnabled) ||
+        (runtimeSettings.nativeSearchEnabled && nativeBinding != null);
     SearchFlowLogger.event(
       'runtime_build',
       fields: {
@@ -134,6 +145,32 @@ class ChatRoomSearchRuntimeController {
     final searchAnswerOnly = characters
         .where((character) => character.zhipuSearchAnswerOnly)
         .toList(growable: false);
+    final dedicatedCredentials =
+        ZhipuNativeSearchCredentialStore(db: governanceStore.db);
+    // The built-in roundtable news role always uses the dedicated setting.
+    // A saved dedicated key also takes precedence for every opted-in role,
+    // so a character's chat key can never be spent on web search.
+    final hasBuiltinNewsRole = searchAnswerOnly
+        .any((character) => character.id == roundtableNewsRoleId);
+    final hasUnboundNewsRole =
+        searchAnswerOnly.any((character) => character.apiConfigId.isEmpty);
+    if (dedicatedCredentials.hasConfiguredCredential ||
+        hasBuiltinNewsRole ||
+        hasUnboundNewsRole) {
+      SearchFlowLogger.event(
+        'native_binding_selected',
+        fields: {
+          'provider': ApiProvider.zhipu.name,
+          'model': 'glm-4.7',
+          'credentialSource': 'zhipu-native-search-setting',
+        },
+      );
+      return NativeWebSearchBinding(
+        provider: ApiProvider.zhipu,
+        model: 'glm-4.7',
+        resolveCredential: dedicatedCredentials.resolve,
+      );
+    }
     if (!runtimeSettings.nativeSearchEnabled && searchAnswerOnly.isEmpty) {
       SearchFlowLogger.event(
         'native_binding_skipped',
@@ -265,6 +302,14 @@ class ChatRoomSearchRuntimeController {
     return jsonEncode({
       'configs': configs,
       'characters': characterBindings,
+      'zhipuNativeSearch': {
+        'hasCredential':
+            ZhipuNativeSearchCredentialStore(db: governanceStore.db)
+                .hasConfiguredCredential,
+        'credentialRevision':
+            ZhipuNativeSearchCredentialStore(db: governanceStore.db)
+                .credentialRevision,
+      },
       'runtime': settings.runtimeSettings.toMap(),
     });
   }

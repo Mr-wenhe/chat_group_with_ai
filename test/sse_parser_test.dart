@@ -105,7 +105,7 @@ void main() {
       expect(events, isEmpty);
     });
 
-    test('标准 content 为空时使用 reasoning_content，标准 content 优先', () {
+    test('reasoning_content 默认不外露，内部调用显式启用后才回退', () {
       final reasoningOnly = SseParser();
       expect(
         reasoningOnly.ingest(
@@ -113,9 +113,16 @@ void main() {
         ),
         isEmpty,
       );
-      expect(reasoningOnly.doneEvent().content, '兼容结果');
+      expect(reasoningOnly.doneEvent().content, '');
 
-      final mixed = SseParser();
+      final internalReasoningOnly =
+          SseParser(allowReasoningContentFallback: true);
+      internalReasoningOnly.ingest(
+        'data: {"choices":[{"delta":{"reasoning_content":"兼容结果"}}]}\n',
+      );
+      expect(internalReasoningOnly.doneEvent().content, '兼容结果');
+
+      final mixed = SseParser(allowReasoningContentFallback: true);
       mixed.ingest(
         'data: {"choices":[{"delta":{"reasoning_content":"内部片段"}}]}\n',
       );

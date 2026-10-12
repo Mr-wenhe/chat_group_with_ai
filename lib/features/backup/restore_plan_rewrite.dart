@@ -3,8 +3,9 @@ part of 'restore_executor.dart';
 List<Map<String, dynamic>> _rewriteUserProfiles(
   List<Map<String, dynamic>> records,
   DatabaseService db,
-  Map<String, int> skipped,
-) {
+  Map<String, int> skipped, {
+  required Map<String, String> apiMap,
+}) {
   final result = <Map<String, dynamic>>[];
   for (final record in records) {
     final key = BackupEntityCodec.key(record);
@@ -14,6 +15,10 @@ List<Map<String, dynamic>> _rewriteUserProfiles(
     }
     final value = BackupEntityCodec.value(record);
     value['id'] = 'me';
+    // 外观改写所用的聊天配置 id：ApiConfig 被重映射时跟着走，否则还原后
+    // 下拉框指向一个不存在的配置，静默退化成本地模板。
+    value['apiConfigId'] =
+        apiMap[value['apiConfigId']] ?? value['apiConfigId'];
     result.add(BackupEntityCodec.record('me', value));
   }
   return result;

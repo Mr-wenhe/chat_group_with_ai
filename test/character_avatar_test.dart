@@ -4,6 +4,7 @@ import 'dart:typed_data';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/database/database_service_image.dart';
 import 'package:chat_group/core/models/ai_character.dart';
+import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
@@ -26,6 +27,19 @@ AICharacter _character({
       systemPrompt: '',
       apiKey: '',
       apiProvider: 'custom',
+      ipImageRelPath: ipImageRelPath,
+      avatarFromIpImage: avatarFromIpImage,
+    );
+
+UserProfile _profile({
+  String ipImageRelPath = '',
+  bool avatarFromIpImage = false,
+}) =>
+    UserProfile(
+      displayName: '小明',
+      preferredAddress: '',
+      avatar: '',
+      bio: '',
       ipImageRelPath: ipImageRelPath,
       avatarFromIpImage: avatarFromIpImage,
     );
@@ -183,6 +197,57 @@ void main() {
       expect(
         db.characterAvatarPath(_character(
           ipImageRelPath: 'C:/windows/system32/config.png',
+          avatarFromIpImage: true,
+        )),
+        isNull,
+      );
+    });
+  });
+
+  group('userAvatarPath / userAvatarImage 取值门控', () {
+    late Directory hiveDirectory;
+    late DatabaseService db;
+
+    setUp(() async {
+      hiveDirectory = await openLifecycleHive();
+      db = DatabaseService();
+    });
+
+    tearDown(() async {
+      await closeLifecycleHive(hiveDirectory, db);
+    });
+
+    test('资料为空 / 未启用 IP 图时强制返回 null', () {
+      expect(db.userAvatarPath(null), isNull);
+      expect(db.userAvatarImage(null), isNull);
+      // 未点「设为头像」：即使已有 IP 图也不进头像通道。
+      expect(db.userAvatarPath(_profile(ipImageRelPath: 'a/b.png')), isNull);
+      expect(db.userAvatarImage(_profile(ipImageRelPath: 'a/b.png')), isNull);
+    });
+
+    test('启用后按相对路径解析到真实文件', () async {
+      final root = await Directory.systemTemp.createTemp('user_avatar_root');
+      addTearDown(() => root.deleteSync(recursive: true));
+      await db.saveAiProcessingDirPath(root.path);
+
+      final dir = Directory('${root.path}/me')..createSync(recursive: true);
+      File('${dir.path}/ip.png').writeAsBytesSync(_kTransparentPng);
+
+      final profile = _profile(
+        ipImageRelPath: 'me/ip.png',
+        avatarFromIpImage: true,
+      );
+      final resolved = db.userAvatarPath(profile);
+
+      expect(resolved, isNotNull);
+      expect(File(resolved!).existsSync(), isTrue);
+      expect(db.userAvatarImage(profile), isNotNull);
+    });
+
+    test('文件缺失时静默回落 null（跨设备还原本场景）', () {
+      expect(
+        db.userAvatarImage(_profile(
+          ipImageRelPath: 'definitely_missing_dir/gone.png',
           avatarFromIpImage: true,
         )),
         isNull,

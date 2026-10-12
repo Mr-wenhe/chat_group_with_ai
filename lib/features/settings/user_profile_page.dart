@@ -1,17 +1,19 @@
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
+import 'package:chat_group/core/database/database_service_image.dart';
+import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
+import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/memory/memory_conflict_resolver.dart';
+import 'package:chat_group/features/settings/widgets/user_portrait_section.dart';
+import 'package:chat_group/features/settings/widgets/user_profile_privacy_banner.dart';
 import 'package:chat_group/providers/providers.dart';
 
 /// 输入过滤常量。
 const _kMaxAge = 150;
 const _kMinAge = 1;
-
-/// 隐私提示文案。
-const _kPrivacyNotice = '这些资料可能随聊天上下文发送给你配置的第三方 LLM 服务。';
 
 /// 我的人物信息卡页面。
 class UserProfilePage extends ConsumerStatefulWidget {
@@ -36,6 +38,19 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
   final importantBackgroundController = TextEditingController();
   bool isSaving = false;
 
+  /// IP 提示词用的性别。null = 未选择，提示词里整段省略性别。
+  CharacterGender? selectedGender;
+
+  /// 外观改写所用的聊天 `ApiConfig` id；'' = 不改写。
+  String selectedRewriteConfigId = kUserPortraitNoRewriteConfigId;
+
+  // 以下三项与 AI 角色表单同构：生成期间在内存里游走，保存时一并落库。
+  String workingIpRelPath = '';
+  bool avatarFromIpImage = false;
+  String workingIpStyle = '';
+
+  final portraitSectionKey = GlobalKey<UserPortraitSectionState>();
+
   @override
   void initState() {
     super.initState();
@@ -51,19 +66,28 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
       final db = ref.read(databaseServiceProvider);
       final profile = db.userProfileBox.get('me');
       if (profile == null) return;
-      displayNameController.text = profile.displayName;
-      preferredAddressController.text = profile.preferredAddress;
-      avatarController.text = profile.avatar;
-      pronounsController.text = profile.pronouns;
-      ageController.text = profile.age?.toString() ?? '';
-      bioController.text = profile.bio;
-      personalityController.text = profile.personality.join(', ');
-      interestsController.text = profile.interests.join(', ');
-      importantBackgroundController.text =
-          profile.importantBackground.join(', ');
+      _applyProfileToForm(profile);
     } on Object {
       // Box not yet opened in some test environments.
     }
+  }
+
+  /// 把资料填进表单控件。两处加载入口共用一份字段清单，漏字段只可能漏在一处。
+  void _applyProfileToForm(UserProfile profile) {
+    displayNameController.text = profile.displayName;
+    preferredAddressController.text = profile.preferredAddress;
+    avatarController.text = profile.avatar;
+    pronounsController.text = profile.pronouns;
+    ageController.text = profile.age?.toString() ?? '';
+    bioController.text = profile.bio;
+    personalityController.text = profile.personality.join(', ');
+    interestsController.text = profile.interests.join(', ');
+    importantBackgroundController.text = profile.importantBackground.join(', ');
+    selectedGender = profile.gender;
+    selectedRewriteConfigId = profile.apiConfigId;
+    workingIpRelPath = profile.ipImageRelPath;
+    avatarFromIpImage = profile.avatarFromIpImage;
+    workingIpStyle = profile.ipImageStyle;
   }
 
   @override
@@ -85,16 +109,7 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
       final db = ref.read(databaseServiceProvider);
       final profile = db.userProfileBox.get('me');
       if (!mounted || profile == null) return;
-      displayNameController.text = profile.displayName;
-      preferredAddressController.text = profile.preferredAddress;
-      avatarController.text = profile.avatar;
-      pronounsController.text = profile.pronouns;
-      ageController.text = profile.age?.toString() ?? '';
-      bioController.text = profile.bio;
-      personalityController.text = profile.personality.join(', ');
-      interestsController.text = profile.interests.join(', ');
-      importantBackgroundController.text =
-          profile.importantBackground.join(', ');
+      _applyProfileToForm(profile);
       // No setState needed — TextEditingController.text changes trigger
       // their own widget rebuilds.
     } on Object {
@@ -126,32 +141,19 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
 
     try {
       final db = ref.read(databaseServiceProvider);
-      final ageText = ageController.text.trim();
-      final int? parsedAge = ageText.isEmpty ? null : int.tryParse(ageText);
-
       final now = DateTime.now();
       final existing = db.userProfileBox.get('me');
-      final profile = UserProfile(
-        id: 'me',
-        displayName: trimmedName,
-        preferredAddress: preferredAddressController.text.trim(),
-        avatar: avatarController.text.trim(),
-        pronouns: pronounsController.text.trim(),
-        age: (parsedAge != null &&
-                parsedAge >= _kMinAge &&
-                parsedAge <= _kMaxAge)
-            ? parsedAge
-            : null,
-        bio: bioController.text.trim(),
-        personality: splitList(personalityController.text),
-        interests: splitList(interestsController.text),
-        importantBackground: splitList(importantBackgroundController.text),
+      // 字数与字段清单都交给 `_draftProfile`：保存与草稿必须同源，见其注释。
+      final profile = _draftProfile(
         updatedAt: now,
         createdAt: existing?.createdAt ?? now,
       );
       await db.userProfileBox.put('me', profile);
       await MemoryConflictResolver(db)
           .invalidateConflictingProfileMemories(profile);
+      // 持久化成功才回收草稿；失败则交给面板 dispose 按「放弃」处理。
+      // 必须早于 dispose，否则本次生成的图会被当成未保存草稿删掉。
+      portraitSectionKey.currentState?.markCommitted();
       return true;
     } on Object catch (e) {
       if (!skipToast && mounted) {
@@ -189,6 +191,50 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
     if (n == null) return '请输入数字';
     if (n < _kMinAge || n > _kMaxAge) return '请输入 $_kMinAge–$_kMaxAge 之间的整数';
     return null;
+  }
+
+  /// 生成 IP 形象前必须填齐的字段。
+  ///
+  /// 只拦名字与性别：年龄/简介/标签/兴趣/背景都能整段省略、优雅降级，拦它们
+  /// 只会逼用户编内容。性别必填是因为下拉本身就是二选一，「不选」没有意义。
+  List<String> _missingPortraitFields() => [
+        if (displayNameController.text.trim().isEmpty) '名字',
+        if (selectedGender == null) '性别',
+      ];
+
+  /// 取表单**当前草稿**（不落库）。
+  ///
+  /// 面板拼 prompt / 喂改写模型时调用；[doSave] 也必须经它组装。**字段清单只此
+  /// 一份** —— 曾经保存与草稿各列一遍，而 `UserProfile` 没有 `copyWith`、保存是
+  /// 全量重建，加字段漏改一处就会「保存静默丢字段」或「生成用旧值」
+  /// （角色表单的 `_draftCharacter` 就踩过这个坑）。
+  ///
+  /// [updatedAt] / [createdAt] 只在保存时传：面板用不到时间戳，传 null 时由
+  /// 构造函数兜成当前时刻。
+  UserProfile _draftProfile({DateTime? updatedAt, DateTime? createdAt}) {
+    final ageText = ageController.text.trim();
+    final parsedAge = ageText.isEmpty ? null : int.tryParse(ageText);
+    return UserProfile(
+      id: 'me',
+      displayName: displayNameController.text.trim(),
+      preferredAddress: preferredAddressController.text.trim(),
+      avatar: avatarController.text.trim(),
+      pronouns: pronounsController.text.trim(),
+      age: (parsedAge != null && parsedAge >= _kMinAge && parsedAge <= _kMaxAge)
+          ? parsedAge
+          : null,
+      bio: bioController.text.trim(),
+      personality: splitList(personalityController.text),
+      interests: splitList(interestsController.text),
+      importantBackground: splitList(importantBackgroundController.text),
+      gender: selectedGender,
+      ipImageRelPath: workingIpRelPath,
+      avatarFromIpImage: avatarFromIpImage,
+      ipImageStyle: workingIpStyle,
+      apiConfigId: selectedRewriteConfigId,
+      updatedAt: updatedAt,
+      createdAt: createdAt,
+    );
   }
 
   @override
@@ -229,7 +275,7 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
             crossAxisAlignment: CrossAxisAlignment.stretch,
             children: [
               // ── 隐私提示 ─────────────────────────────────────────────────────────
-              _PrivacyBanner(cs: cs),
+              UserProfilePrivacyBanner(cs: cs),
               const SizedBox(height: 20),
 
               // ── 基本信息 ────────────────────────────────────────────────────────
@@ -240,13 +286,40 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
                 children: [
                   Row(
                     children: [
-                      _AvatarPreview(displayAvatar: displayAvatar, cs: cs),
+                      // 「当前生效头像」预览：仅在「设为头像」开启时出图，
+                      // 未开启/未生成时回落 emoji 或名字首字。
+                      CharacterAvatar(
+                        key: const ValueKey('user-avatar-preview'),
+                        fallbackText: displayAvatar,
+                        size: 52,
+                        image: ref
+                            .read(databaseServiceProvider)
+                            .userAvatarImage(_draftProfile()),
+                        // 走 `decoration` 而不是 `background`：描边是原来那个
+                        // `_AvatarPreview` 的样式，换 widget 时漏掉会让预览比
+                        // 页面其它头像少一圈边。
+                        decoration: BoxDecoration(
+                          shape: BoxShape.circle,
+                          color: cs.primaryContainer,
+                          border: Border.all(
+                            color: cs.primary.withValues(alpha: 0.2),
+                            width: 1.5,
+                          ),
+                        ),
+                        textStyle: TextStyle(
+                          fontSize: 22,
+                          fontWeight: FontWeight.w600,
+                          color: cs.onPrimaryContainer,
+                        ),
+                      ),
                       const SizedBox(width: 14),
                       Expanded(
                         child: TextFormField(
                           controller: displayNameController,
                           decoration: appInputDecoration('名字 *',
                               '你在 AI 面前的显示名称', Icons.badge_outlined, cs),
+                          // IP 形象的生成门禁看名字是否为空，输入时要刷新提示行。
+                          onChanged: (_) => setState(() {}),
                           validator: _validateDisplayName,
                         ),
                       ),
@@ -280,12 +353,42 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
                         '称谓 / 代词', '如：他/她/TA', Icons.transgender_rounded, cs),
                   ),
                   const SizedBox(height: 12),
-                  TextFormField(
-                    controller: ageController,
-                    decoration: appInputDecoration('年龄',
-                        '$_kMinAge–$_kMaxAge，可留空', Icons.cake_outlined, cs),
-                    keyboardType: TextInputType.number,
-                    validator: _validateAge,
+                  Row(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Expanded(
+                        child: TextFormField(
+                          controller: ageController,
+                          decoration: appInputDecoration('年龄',
+                              '$_kMinAge–$_kMaxAge，可留空', Icons.cake_outlined, cs),
+                          keyboardType: TextInputType.number,
+                          validator: _validateAge,
+                        ),
+                      ),
+                      const SizedBox(width: 14),
+                      Expanded(
+                        child: DropdownButtonFormField<CharacterGender>(
+                          value: selectedGender,
+                          decoration: appInputDecoration(
+                            '性别',
+                            '用于 IP 形象',
+                            Icons.wc_rounded,
+                            cs,
+                          ).copyWith(
+                            helperText: '只喂 IP 形象提示词；称谓/代词仍用上面那栏',
+                          ),
+                          isExpanded: true,
+                          items: CharacterGender.values
+                              .map((gender) => DropdownMenuItem(
+                                    value: gender,
+                                    child: Text(gender.label),
+                                  ))
+                              .toList(growable: false),
+                          onChanged: (value) =>
+                              setState(() => selectedGender = value),
+                        ),
+                      ),
+                    ],
                   ),
                   const SizedBox(height: 12),
                   TextFormField(
@@ -333,6 +436,25 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
                   ),
                 ],
               ),
+              const SizedBox(height: 16),
+
+              // ── IP 形象 ────────────────────────────────────────────────────────
+              UserPortraitSection(
+                key: portraitSectionKey,
+                draftProfile: _draftProfile,
+                missingFields: _missingPortraitFields,
+                apiConfigId: selectedRewriteConfigId,
+                onApiConfigIdChanged: (value) =>
+                    setState(() => selectedRewriteConfigId = value),
+                initialRelPath: workingIpRelPath,
+                initialAvatarFromIp: avatarFromIpImage,
+                initialStyle: workingIpStyle,
+                onChanged: (relPath, avatarFromIp, style) => setState(() {
+                  workingIpRelPath = relPath;
+                  avatarFromIpImage = avatarFromIp;
+                  workingIpStyle = style;
+                }),
+              ),
               const SizedBox(height: 28),
 
               // ── 底部保存按钮 ──────────────────────────────────────────────────────
@@ -342,80 +464,6 @@ class UserProfilePageState extends ConsumerState<UserProfilePage> {
               ),
               const SizedBox(height: 32),
             ],
-          ),
-        ),
-      ),
-    );
-  }
-}
-
-/// 隐私提示横幅。
-class _PrivacyBanner extends StatelessWidget {
-  final ColorScheme cs;
-  const _PrivacyBanner({required this.cs});
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 12),
-      decoration: BoxDecoration(
-        color: cs.tertiaryContainer.withValues(alpha: 0.6),
-        borderRadius: BorderRadius.circular(12),
-        border: Border.all(
-          color: cs.tertiary.withValues(alpha: 0.25),
-          width: 0.5,
-        ),
-      ),
-      child: Row(
-        children: [
-          Icon(Icons.shield_outlined, size: 18, color: cs.tertiary),
-          const SizedBox(width: 10),
-          Expanded(
-            child: Text(
-              _kPrivacyNotice,
-              style: TextStyle(
-                fontSize: 13,
-                color: cs.onTertiaryContainer,
-                height: 1.4,
-              ),
-            ),
-          ),
-        ],
-      ),
-    );
-  }
-}
-
-/// 头像预览圆标。
-class _AvatarPreview extends StatelessWidget {
-  final String displayAvatar;
-  final ColorScheme cs;
-
-  const _AvatarPreview({
-    required this.displayAvatar,
-    required this.cs,
-  });
-
-  @override
-  Widget build(BuildContext context) {
-    return Container(
-      width: 52,
-      height: 52,
-      decoration: BoxDecoration(
-        shape: BoxShape.circle,
-        color: cs.primaryContainer,
-        border: Border.all(
-          color: cs.primary.withValues(alpha: 0.2),
-          width: 1.5,
-        ),
-      ),
-      child: Center(
-        child: Text(
-          displayAvatar,
-          style: TextStyle(
-            fontSize: 22,
-            fontWeight: FontWeight.w600,
-            color: cs.onPrimaryContainer,
           ),
         ),
       ),

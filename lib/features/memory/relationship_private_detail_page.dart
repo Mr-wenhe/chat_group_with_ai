@@ -273,7 +273,11 @@ class _RelationshipPrivateDetailPageState
         CharacterAvatar(
           fallbackText: RelationshipAuditPresenter.avatar(character, name),
           size: 48,
-          image: _db.characterAvatarImage(character),
+          // 用户侧的合成 `_userCharacter` 没有 IP 形象字段，只能走资料卡的
+          // `userAvatarImage`，否则「我」的头像永远停在文字上。
+          image: character?.id == 'user'
+              ? _db.userAvatarImage(_userProfile)
+              : _db.characterAvatarImage(character),
           background: Theme.of(context).colorScheme.primaryContainer,
           textStyle: TextStyle(
             color: Theme.of(context).colorScheme.onPrimaryContainer,

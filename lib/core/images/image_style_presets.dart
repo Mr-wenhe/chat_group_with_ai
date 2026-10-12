@@ -22,7 +22,7 @@ class ImageStylePreset {
 
   /// 拼进 prompt 的英文风格片段（不含句号，由拼装处统一分隔）。
   ///
-  /// 只写**画风**，不写构图/光影/安全后缀 —— 那些由 [buildIpImagePrompt] 的
+  /// 只写**画风**，不写构图/光影/安全后缀 —— 那些由 [buildIpPortraitPrompt] 的
   /// 固定框统一提供，避免每条预设各写一份后漏掉安全词。
   final String promptClause;
 }
