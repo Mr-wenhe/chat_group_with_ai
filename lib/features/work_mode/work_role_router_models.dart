@@ -347,9 +347,7 @@ WorkDeliverableContract _deliverableContract(
             : 'generic',
     format: format,
     location: contractLocation ??
-        (RegExp(r'桌面|desktop', caseSensitive: false).hasMatch(lower)
-            ? 'desktop'
-            : 'unspecified'),
+        (statesDesktopLocation(lower) ? 'desktop' : 'unspecified'),
     contentScope:
         request.length <= 4000 ? request : '${request.substring(0, 3999)}…',
     explicitExecutorId: explicitExecutorId,
@@ -401,6 +399,57 @@ String? _contractLocationForOutput(
     return remainder.isEmpty ? 'desktop' : remainder;
   }
   return outputPath;
+}
+
+/// [value] 是否在 [text] 里作为**独立词元**出现。
+///
+/// 判据是每个出现的两侧边界：紧邻路径分隔符或拉丁词字符都不算独立——除非
+/// [value] 自己就以该字符开头 / 结尾（绝对路径 `/Users/x/out.html` 的两侧
+/// 天然是分隔符，它本身就是完整的词元）。
+///
+/// 只看整段文本命中会把路径片段算成位置声明：
+/// `/Users/fengye/Desktop/chat_group_out` 里的 `Desktop` 左侧紧邻 `/` 而它
+/// 自己不以 `/` 开头，说明它是更长路径的一部分，不是"放到桌面"。
+///
+/// 公开而非文件私有：v2 讨论的合同校验在另一个库里，要用同一份判据判定
+/// 合同字段的来源。
+bool statesToken(String text, String value) {
+  final lower = text.toLowerCase();
+  final needle = value.toLowerCase();
+  if (needle.isEmpty) return false;
+  var from = 0;
+  while (true) {
+    final start = lower.indexOf(needle, from);
+    if (start < 0) return false;
+    final end = start + needle.length;
+    final before = start == 0 ? '' : lower[start - 1];
+    final after = end >= lower.length ? '' : lower[end];
+    final leftViolated =
+        _pathOrWordEdge.hasMatch(before) && !needle.startsWith(before);
+    final rightViolated =
+        _pathOrWordEdge.hasMatch(after) && !needle.endsWith(after);
+    if (!leftViolated && !rightViolated) return true;
+    from = start + 1;
+  }
+}
+
+/// 词元续接字符：紧邻它说明当前位置落在更长的路径 / 标识符里。
+final _pathOrWordEdge = RegExp(r'[/\\~.\-A-Za-z0-9_]');
+
+/// 文本里是否把"桌面/desktop"当作**位置词**说出来。
+bool statesDesktopLocation(String text) =>
+    statesToken(text, 'desktop') || statesToken(text, '桌面');
+
+/// [text] 是否出现以 [extension] 结尾的文件名（`.html`、`.docx`）。
+///
+/// 交付格式既可以用独立词说起（"生成一份 HTML"），也可以由文件扩展名给出
+/// （"game.html"）。后者在原话里没有独立出现的 `html` 词元，只看词元会把用户
+/// 亲口指定的格式误判成推导值。
+bool statesExtension(String text, String extension) {
+  if (extension.trim().isEmpty) return false;
+  return RegExp('\\.${RegExp.escape(extension.trim())}(?![A-Za-z0-9_])',
+          caseSensitive: false)
+      .hasMatch(text);
 }
 
 String? _outputPathForFormat(List<String> paths, String format) {

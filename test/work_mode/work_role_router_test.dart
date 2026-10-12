@@ -1099,4 +1099,61 @@ void main() {
     expect(restored.deliveredArtifacts, ['requirements.md']);
     expect(task.assignedCharacterIds, [product.id, developer.id, tester.id]);
   });
+
+  group('合同推导的独立词元判据', () {
+    for (final (label, text, expected) in [
+      ('路径里的 Desktop 不是位置词', '/Users/fengye/Desktop/chat_group_out', false),
+      ('路径里的中文桌面不是位置词', '/Users/x/桌面/foo', false),
+      ('路径结尾的 Desktop 不是位置词', '放到 /home/u/Desktop', false),
+      ('汉字邻接仍是位置词', '放到桌面', true),
+      ('汉字邻接仍是位置词（句首）', '桌面上的文件夹整理一下', true),
+      ('空白邻接仍是位置词', '生成到 Desktop 目录里', true),
+      ('更长拉丁词元不算位置词', '使用 DesktopFoo 工具', false),
+      ('原话同时含路径 Desktop 与独立桌面', '在 /Users/x/Desktop 下，保存到桌面', true),
+    ]) {
+      test(label, () => expect(statesDesktopLocation(text), expected));
+    }
+
+    for (final (label, text, value, expected) in [
+      ('整条绝对路径是独立词元', '保存到 /Users/x/out.html 里', '/Users/x/out.html', true),
+      ('路径片段里的词不是独立词元', '/Users/fengye/Desktop/chat_group_out', 'desktop', false),
+      ('空值恒为假', '任意文本', '', false),
+    ]) {
+      test(label, () => expect(statesToken(text, value), expected));
+    }
+
+    for (final (label, text, extension, expected) in [
+      ('文件名里的扩展名算', '请修改 game.html', 'html', true),
+      ('独立格式词不由扩展名判据负责', '生成一份 HTML', 'html', false),
+      ('扩展名后接数字不算', 'game.html2', 'html', false),
+      ('子串不误判', 'myhtml.txt', 'html', false),
+      ('大小写不敏感', 'GAME.HTML', 'html', true),
+      ('docx 同样成立', '保存到 report.docx 里', 'docx', true),
+      ('空扩展名恒为假', 'game.html', '', false),
+    ]) {
+      test(label, () => expect(statesExtension(text, extension), expected));
+    }
+  });
+
+  test('目录型路径不再把 location 误判成 desktop', () async {
+    final result = await router.route(
+      request: '@小产 在 /Users/fengye/Desktop/chat_group_out 这个文件夹中创建一个目录，'
+          '目录中的内容生成一份 飞行棋游戏的HTML',
+      conversationId: 'group:contract-directory-path',
+      characters: characters,
+      skills: skills,
+    );
+    expect(result.deliverableContract?.location, 'unspecified',
+        reason: '路径片段里的 Desktop 是目录名，不是"放到桌面"');
+  });
+
+  test('用户确实说了桌面时 location 仍为 desktop', () async {
+    final result = await router.route(
+      request: '@小产 生成一份飞行棋游戏的HTML，保存到桌面',
+      conversationId: 'group:contract-desktop-word',
+      characters: characters,
+      skills: skills,
+    );
+    expect(result.deliverableContract?.location, 'desktop');
+  });
 }
