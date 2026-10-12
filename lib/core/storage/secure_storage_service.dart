@@ -6,9 +6,9 @@ import 'package:flutter/services.dart';
 import 'debug_credential_cache.dart';
 
 class SecureStorageService {
-  // Runner 的 macOS Debug/Release 均未启用 App Sandbox；插件默认的 Data
-  // Protection Keychain 需要相应 entitlement，在此签名下写入会报 -34018。
-  // 普通 macOS Keychain 仍是系统安全存储，不回退到 Hive 明文。
+  // macOS 走本地 Hive 库，下面这个实例在 macOS 上不会被调用（见 [_read] 等）。
+  // 选项仍保留给其它平台与测试；Data Protection Keychain 在未启用 App Sandbox
+  // 的签名下写入会报 -34018，故显式关掉。
   static const macOsOptions = MacOsOptions(useDataProtectionKeyChain: false);
 
   static const _storage = FlutterSecureStorage(
@@ -92,22 +92,45 @@ class SecureStorageService {
     }
   }
 
-  /// 非 Release 下先走 [DebugCredentialCache]：ad-hoc 签名的 debug 构建每次重建
-  /// 都会让钥匙串把新二进制当成陌生程序并弹密码框，缓存把这次弹窗收敛到每个键
-  /// 至多一次。Release 与 Web 直接落到平台安全存储，不经过缓存。
-  Future<String?> _read(String key) => DebugCredentialCache.enabled
-      ? DebugCredentialCache.read(key, () => _storage.read(key: key))
-      : _storage.read(key: key);
+  /// 凭据的三个落点，按平台与构建模式分流：
+  ///
+  ///   - **macOS**（[DebugCredentialCache.isPrimaryStore]）：一律读写本机 Hive 库，
+  ///     **完全不碰钥匙串**。原因见该 getter 的注释——ad-hoc 签名下钥匙串要么每次
+  ///     重建都弹密码框，要么根本写不进去，绕开它比继续给签名方式打补丁可靠。
+  ///   - **其余平台非 Release**：先走 [DebugCredentialCache] 镜像，未命中才读一次
+  ///     钥匙串并落盘，把弹窗收敛到每个键至多一次。
+  ///   - **其余平台 Release / Web**：直接落平台安全存储，不经过镜像。
+  ///
+  /// 分支必须按平台走到底，不要为 macOS 再补一条「失败则回落钥匙串」：那条路径在
+  /// 出问题的签名下自身就是不可用的，只会把失败原因藏起来。
+  Future<String?> _read(String key) {
+    if (DebugCredentialCache.isPrimaryStore) {
+      return DebugCredentialCache.readLocal(key);
+    }
+    return DebugCredentialCache.enabled
+        ? DebugCredentialCache.read(key, () => _storage.read(key: key))
+        : _storage.read(key: key);
+  }
 
-  Future<void> _write(String key, String value) => DebugCredentialCache.enabled
-      ? DebugCredentialCache.write(
-          key,
-          value,
-          () => _storage.write(key: key, value: value),
-        )
-      : _storage.write(key: key, value: value);
+  Future<void> _write(String key, String value) {
+    if (DebugCredentialCache.isPrimaryStore) {
+      return DebugCredentialCache.writeLocal(key, value);
+    }
+    return DebugCredentialCache.enabled
+        ? DebugCredentialCache.write(
+            key,
+            value,
+            () => _storage.write(key: key, value: value),
+          )
+        : _storage.write(key: key, value: value);
+  }
 
-  Future<void> _delete(String key) => DebugCredentialCache.enabled
-      ? DebugCredentialCache.delete(key, () => _storage.delete(key: key))
-      : _storage.delete(key: key);
+  Future<void> _delete(String key) {
+    if (DebugCredentialCache.isPrimaryStore) {
+      return DebugCredentialCache.deleteLocal(key);
+    }
+    return DebugCredentialCache.enabled
+        ? DebugCredentialCache.delete(key, () => _storage.delete(key: key))
+        : _storage.delete(key: key);
+  }
 }
