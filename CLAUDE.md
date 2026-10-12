@@ -114,7 +114,7 @@ An explicit per-room toggle. When on, non-empty user input is routed to a work t
 
 - `WorkTaskCoordinator` owns scheduling **app-wide** (mounted via `WorkTaskOverlayHost` in `MaterialApp.builder`), independent of any widget, with `maximumConcurrentTasks = 2`. Tasks survive chat-room disposal.
 - `WorkAgentLoop` drives execution; the model receives public checkpoints, never a private reasoning trace.
-- `WorkRoleRouter` elects an executor among group members from inferred stage/occupation + `CharacterSkill`. A model recommendation can never invent a qualification.
+- `WorkRoleRouter` elects an executor among group members from inferred stage/occupation + `CharacterSkill`. A model recommendation can never invent a qualification. 群聊里没被 `@` 时它只把候选交给群推举，**唯一例外**是群里只有一位成员本职合格（`_nativelyQualified`，不开实现桥梁）：S1 直接指定该成员并跳过选人模型调用，讨论仍会确认方案与逐人认可，合同里刻意**不写** `explicitExecutorId`（自动指定不是用户声明，讨论仍可改派）。用户 `@` 某人只是征求意见时（`consultedCharacterIds` 非空）不做自动指定——判错方向必须是保守，退回旧行为而不是替用户派活。面板是"想自己指定"的真出口（`WorkTaskCoordinator.selectDiscussionExecutor` 把用户点选的候选写进 `executorId` 并写钉定、**不递增** `requestRevision`，因为用户改的是"谁来干"而不是"要干什么"）；路由文案不得再许诺"在群里 @ 一位候选角色"，那条路在任务非终态时只走 `enqueueFollowUp`，不会重跑路由。
 - 新群工作任务从聊天输入、协调器提交及独立追问推广入口统一创建 v2；DM 和普通聊天保持原行为。`WorkDiscussionRunner` 先选择相关团队、实际查证未决问题、形成方案并逐成员认可，再由同一个 `WorkAgentLoop` 制作、冻结候选、独立审查、返工复测和逐成员认可交付；旧“理解 100%”不是 v2 门槛。
 - 启动恢复先保留 FIFO、附件关联和版本索引，再核对项目、当前成员资格/配置、文件摘要、工具收据和权限，重新获取资源锁。讨论和执行共用两个 App 运行槽；待用户/审批、主动暂停、停止、完成及删除任务不会自动执行。旧未完成群任务保留产物后转换，需显式继续重新确认方案；旧已完成历史不伪造签字，未知 schema 保留原状态并阻塞。
 - v2 副作用调用前持久化不确定操作标记，完成后写设备本地提交收据；重启可用已提交收据或完整覆盖写的真实 SHA-256 后置条件核对，无法证明的命令、追加写、安装、删除及外部调用求助，不能盲重放，也不保证普遍 exactly-once。可信本地工具收据、路径授权、审批和资源锁不能作为跨设备可执行权限携带。
@@ -167,6 +167,9 @@ These four named routes plus two `onGenerateRoute` prefixes are the complete rou
 - **搜索与浏览器安全**：搜索结果一律视为不可信外部数据；生产搜索必须走 `gateway/`，不得让客户端自选目标 URL；浏览器访问默认关闭。Frontend 不得为 Web 构建暴露搜索路由（浏览器端无法提供服务端凭据边界）。
 - **前台主动私聊**：允许在 App 运行期间调用已配置的 LLM API，但冷却时间必须保守；没有明确的通知/推送设计前，禁止后台或离线网络生成。
 - **导出/备份内容**：只读展示字段，禁止写入 `apiKey` / `apiProvider` / `apiConfigId`；导出与导入两侧都要断言这一点。
+- **两种「清空」不能合并**：`clearConversation`（菜单「清空对话（含记忆与任务）」）删消息 + 场合记忆 + 关系 + 任务 + 工作区；`clearConversationMessages`（菜单「清空聊天记录（保留记忆与任务）」）只删消息和指向消息的设置（消息索引项、会话摘要、已读位置、该会话的重试记录），记忆、关系、任务、工作区一律保留。旧文案曾把后者叫「清空对话（保留记忆）」，与只删消息的入口并排时会被读成更轻的那个，正好反了。新增任何生命周期操作时**必须**在 `_retryPendingOperation` 里补上对应的 `kind` 分支：漏了它，一次中断的删除会留下永远无法重试的待办标记，而 `hasPendingOperation` 会把此后所有生命周期操作都挡在 `_begin` 之外。
+- **删消息就要清掉指向它的记忆重试记录**：`ObservationEntry._processRetryTask` 拿不到消息会直接 `drop`，留着条目只是让队列每轮空转一次再丢弃。单条与批量删除走 `_settings.planMessageRetryRecords`（`_targetsForMessages` 里挂上，两条路径共用一份清理），「清空聊天记录」按会话收口（`planConversationMessages`）。新增删除入口时要么复用这两个计划，要么自己补这一步。
+- **批量删除与单条删除共用一条判据**：`canDeleteRoomMessage` / `selectableMessageIds`（`message_selection.dart`）同时供长按菜单与多选勾选框使用。客人端、工作模式进度气泡、正在流式输出的那条都不能删——判据各写一份时，新加的规则只会落在其中一边，多选就能绕过它。客人端这条规则同样管着入口本身：`onBatchDelete` 与 `onClearMessages` 都必须对 `_isRealtimeGuest` 置空（漏掉一条入口，规则就等于没有）。批量删除的计划阶段还必须按 `groupId` 过滤传入的 id：调用方传来的集合混进一个越界 id 就会删掉别的会话的消息。多选是模态的：进入即停空闲自动聊天，多选期间不跟随新内容滚动（`_shouldFollowNewContent`），返回键由 `_ChatRoomPageState.build` 的 `PopScope` 只退多选。
 
 ## 死循环防护规则
 
@@ -228,7 +231,7 @@ Large suites are split into `*_part_NN.dart` and `*_helpers_NN.dart` files (back
 
 ## Known limitations
 
-- Backup/restore (`lib/features/backup/`, `.cgbak`) covers every Hive box except `ai_governance_ledger` (the usage audit trail is intentionally device-local). `WorkModeWorkspace.workDirPath` is dropped on import because local paths are not portable. `formatVersion` must match exactly; `schemaVersion` accepts 1 or 2. Backup scopes are `all` / `configurationOnly` / `conversation`. Restored `ApiConfig`s need their key re-bound.
+- Backup/restore (`lib/features/backup/`, `.cgbak`) covers every Hive box except `ai_governance_ledger` (the usage audit trail is intentionally device-local). `WorkModeWorkspace.workDirPath` is dropped on import because local paths are not portable. `formatVersion` must match exactly; `schemaVersion` accepts 1 or 2. Backup scopes are `all` / `configurationOnly` / `conversation`. Restored `ApiConfig`s need their key re-bound. 删除消息刻意保留引用指针（界面显示「原消息已删除」），所以活跃数据里存在悬空的 `replyToMessageId`，而导入侧逐条核验"被引用的消息必须在场"：这条归一化因此必须在**导出**侧做（`_writeMessages` 把指向本份备份之外的引用置 null，恢复后该引用条消失），放宽导入核验会连"重映射 id 漏改"一并放过。
 - Fully offline proactive contact is not implemented: closed-app AI generation would need pre-generated local notifications or a server-side push service. Current proactive DMs are foreground-only.
 - Web builds cannot provide the app's credential boundary, so they are not a release target.
 - UI-heavy chat-room behaviour is mostly covered indirectly through extracted logic tests rather than widget tests.
