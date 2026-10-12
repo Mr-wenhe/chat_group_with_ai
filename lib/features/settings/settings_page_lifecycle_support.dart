@@ -93,14 +93,14 @@ extension _SettingsPageLifecycleSupport on _SettingsPageState {
         child: Icon(icon, size: 18, color: color));
   }
 
-  Widget _statLabel(String label, int value) {
+  Widget _statLabel(String label, String valueText) {
     return Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         mainAxisSize: MainAxisSize.min,
         children: [
           Text(label,
               style: const TextStyle(fontSize: 11, color: Color(0xFF97A0B2))),
-          Text(value.toString(),
+          Text(valueText,
               style: const TextStyle(
                   fontSize: 13,
                   fontWeight: FontWeight.w600,
@@ -115,11 +115,6 @@ extension _SettingsPageLifecycleSupport on _SettingsPageState {
             fontWeight: FontWeight.w600,
             color: cs.onSurface,
             fontFamily: 'monospace'));
-  }
-
-  String _cachePercent(int cachedTokens, int inputTokens) {
-    if (inputTokens <= 0) return '0.0%';
-    return '${(cachedTokens / inputTokens * 100).toStringAsFixed(1)}%';
   }
 
   Future<void> _confirmClearData(

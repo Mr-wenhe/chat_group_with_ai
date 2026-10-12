@@ -1,8 +1,6 @@
 import 'dart:async';
 import 'dart:io';
 
-import 'package:chat_group/core/models/api_config.dart';
-import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/database/data_lifecycle_models.dart';
 import 'package:chat_group/core/database/data_lifecycle_service.dart';
@@ -11,24 +9,24 @@ import 'package:chat_group/features/ai_character/providers/ai_character_provider
 import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
 import 'package:chat_group/features/settings/ai_processing_directory_policy.dart';
 import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
-import 'package:chat_group/features/settings/api_config_form_page.dart';
+import 'package:chat_group/features/settings/api_key_settings_page.dart';
+import 'package:chat_group/features/settings/api_key_settings_snapshot.dart';
 import 'package:chat_group/features/memory/memory_management_page.dart';
 import 'package:chat_group/features/memory/memory_audit_filter.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/settings/backup_restore_page.dart';
 import 'package:chat_group/features/settings/user_profile_page.dart';
 import 'package:chat_group/features/settings/ai_governance_page.dart';
-import 'package:chat_group/features/settings/image_service_settings_page.dart';
-import 'package:chat_group/features/settings/voice_service_settings_page.dart';
+import 'package:chat_group/features/settings/token_count_format.dart';
+import 'package:chat_group/features/settings/token_usage_detail_page.dart';
+import 'package:chat_group/features/settings/widgets/settings_section_header.dart';
+import 'package:chat_group/features/settings/widgets/settings_tile.dart';
 import 'package:chat_group/features/settings/realtime_settings_section.dart';
 import 'package:chat_group/features/settings/work_mode_agent_settings_section.dart';
 import 'package:chat_group/features/memory/relationship_audit_page.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:chat_group/features/search/global_search_page.dart';
-import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
-import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/providers/providers.dart';
-import 'package:chat_group/services/ai_providers/ai_api_service.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter/material.dart';
@@ -36,12 +34,10 @@ import 'package:flutter/foundation.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive/hive.dart';
 import 'package:package_info_plus/package_info_plus.dart';
-import 'package:chat_group/core/theme/provider_style.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/data_lifecycle_result_dialog.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
-import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
@@ -51,7 +47,6 @@ part 'settings_page_config_support.dart';
 part 'settings_page_token_support.dart';
 part 'settings_page_lifecycle_support.dart';
 part 'settings_page_profile_support.dart';
-part 'settings_page_widgets.dart';
 
 class _WeComField extends StatelessWidget {
   final ColorScheme cs;
@@ -172,9 +167,7 @@ class SettingsPage extends ConsumerStatefulWidget {
 }
 
 class _SettingsPageState extends ConsumerState<SettingsPage> {
-  late final AiApiService _apiService;
   late final WorkFolderGrantService _workFolderGrantService;
-  final _credentialResolver = SecureApiCredentialResolver();
   AppSkinMode _currentSkinMode = AppSkinMode.dark;
   bool _isTtsEnabled = true;
   Map<String, dynamic> _tokenUsage = {};
@@ -200,9 +193,6 @@ class _SettingsPageState extends ConsumerState<SettingsPage> {
   void initState() {
     super.initState();
     final db = ref.read(databaseServiceProvider);
-    _apiService = AiApiService(
-      AiRequestGateway(store: AiGovernanceStore.forDatabase(db)),
-    );
     _workFolderGrantService = ref.read(workFolderGrantServiceProvider);
     _currentSkinMode = db.savedAppSkinMode;
     _isTtsEnabled = db.isTtsEnabled;

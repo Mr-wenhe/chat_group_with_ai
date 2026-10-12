@@ -17,7 +17,7 @@ extension _SettingsPageTokenSupport on _SettingsPageState {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _SectionHeader(title: 'Token 消耗', cs: cs),
+        SettingsSectionHeader(title: 'Token 消耗', cs: cs),
         const SizedBox(height: 12),
         AppCard(
           cs: cs,
@@ -29,8 +29,10 @@ extension _SettingsPageTokenSupport on _SettingsPageState {
                 children: [
                   _statIcon(Icons.input_rounded, cs.primary),
                   const SizedBox(width: 12),
-                  Expanded(child: _statLabel('输入 Token', totalInput)),
-                  _statValue(totalInput.toString(), cs),
+                  Expanded(
+                      child:
+                          _statLabel('输入 Token', formatTokenCount(totalInput))),
+                  _statValue(formatTokenCount(totalInput), cs),
                 ],
               ),
             ),
@@ -41,8 +43,10 @@ extension _SettingsPageTokenSupport on _SettingsPageState {
                 children: [
                   _statIcon(Icons.output_rounded, cs.secondary),
                   const SizedBox(width: 12),
-                  Expanded(child: _statLabel('输出 Token', totalOutput)),
-                  _statValue(totalOutput.toString(), cs),
+                  Expanded(
+                      child: _statLabel(
+                          '输出 Token', formatTokenCount(totalOutput))),
+                  _statValue(formatTokenCount(totalOutput), cs),
                 ],
               ),
             ),
@@ -53,7 +57,7 @@ extension _SettingsPageTokenSupport on _SettingsPageState {
                 children: [
                   _statIcon(Icons.query_stats_rounded, cs.tertiary),
                   const SizedBox(width: 12),
-                  Expanded(child: _statLabel('请求次数', requestCount)),
+                  Expanded(child: _statLabel('请求次数', '$requestCount 次')),
                   _statValue('$requestCount 次', cs),
                 ],
               ),
@@ -65,117 +69,38 @@ extension _SettingsPageTokenSupport on _SettingsPageState {
                 children: [
                   _statIcon(Icons.offline_bolt_rounded, cs.primary),
                   const SizedBox(width: 12),
-                  Expanded(child: _statLabel('缓存命中 Token', totalCachedInput)),
-                  _statValue(_cachePercent(totalCachedInput, totalInput), cs),
+                  Expanded(
+                      child: _statLabel(
+                          '缓存命中 Token', formatTokenCount(totalCachedInput))),
+                  _statValue(
+                      formatCacheHitPercent(totalCachedInput, totalInput), cs),
                 ],
               ),
             ),
-            if (byGroup.isNotEmpty) ...[
-              Divider(
-                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                child: Text('各群消耗',
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: cs.onSurfaceVariant,
-                        fontWeight: FontWeight.w600)),
-              ),
-              ...byGroup.entries.map((entry) {
-                final data = Map<String, dynamic>.from(entry.value as Map);
-                final groupIn = data['input'] ?? 0;
-                final groupOut = data['output'] ?? 0;
-                final groupCached = data['cached'] ?? 0;
-                final groupCount = data['count'] ?? 0;
-                final groupName =
-                    db.chatGroupBox.get(entry.key)?.name ?? entry.key;
-                return Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 6),
-                  child: Row(
-                    children: [
-                      Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                              color: cs.secondary,
-                              borderRadius: BorderRadius.circular(2))),
-                      const SizedBox(width: 10),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          mainAxisSize: MainAxisSize.min,
-                          children: [
-                            Text(groupName,
-                                maxLines: 1,
-                                overflow: TextOverflow.ellipsis,
-                                style: TextStyle(
-                                    fontSize: 13, color: cs.onSurface)),
-                            Text(
-                                '$groupCount 次 · 缓存 ${_cachePercent(groupCached, groupIn)}',
-                                style: TextStyle(
-                                    fontSize: 11, color: cs.onSurfaceVariant)),
-                          ],
-                        ),
-                      ),
-                      Text('${groupIn + groupOut}',
-                          style: TextStyle(
-                              fontSize: 13,
-                              color: cs.onSurfaceVariant,
-                              fontFamily: 'monospace')),
-                    ],
+            Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
+            SettingsTile(
+              key: const Key('token-usage-detail-entry'),
+              cs: cs,
+              icon: Icons.table_chart_outlined,
+              iconColor: cs.primary,
+              title: '消耗明细',
+              subtitle: byGroup.isEmpty && byChar.isEmpty
+                  ? '暂无按群或按角色的记录'
+                  : '按群（${byGroup.length}）与按角色（${byChar.length}）查看',
+              onTap: () => Navigator.of(context).push(
+                MaterialPageRoute(
+                  builder: (_) => TokenUsageDetailPage(
+                    byGroup: byGroup,
+                    byCharacter: byChar,
+                    groupNameOf: (groupId) =>
+                        db.chatGroupBox.get(groupId)?.name ?? groupId,
                   ),
-                );
-              }),
-              const SizedBox(height: 4),
-            ],
-            if (byChar.isNotEmpty) ...[
-              Divider(
-                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              Padding(
-                padding: const EdgeInsets.fromLTRB(16, 8, 16, 8),
-                child: Text('各角色消耗',
-                    style: TextStyle(
-                        fontSize: 12,
-                        color: cs.onSurfaceVariant,
-                        fontWeight: FontWeight.w600)),
+                ),
               ),
-              ...byChar.entries.map((entry) {
-                final data = entry.value is Map
-                    ? Map<String, dynamic>.from(entry.value as Map)
-                    : <String, dynamic>{};
-                final charIn = data['input'] ?? 0;
-                final charOut = data['output'] ?? 0;
-                return Padding(
-                  padding:
-                      const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
-                  child: Row(
-                    children: [
-                      Container(
-                          width: 8,
-                          height: 8,
-                          decoration: BoxDecoration(
-                              color: cs.primary,
-                              borderRadius: BorderRadius.circular(2))),
-                      const SizedBox(width: 10),
-                      Expanded(
-                          child: Text(entry.key,
-                              style: TextStyle(
-                                  fontSize: 13, color: cs.onSurface))),
-                      Text('${(charIn + charOut).toStringAsFixed(0)}',
-                          style: TextStyle(
-                              fontSize: 13,
-                              color: cs.onSurfaceVariant,
-                              fontFamily: 'monospace')),
-                    ],
-                  ),
-                );
-              }),
-              const SizedBox(height: 4),
-            ],
-            const SizedBox(height: 4),
+            ),
+            Divider(height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
             Padding(
-              padding: const EdgeInsets.only(right: 12, bottom: 4),
+              padding: const EdgeInsets.only(right: 12, bottom: 4, top: 4),
               child: Align(
                 alignment: Alignment.centerRight,
                 child: TextButton.icon(

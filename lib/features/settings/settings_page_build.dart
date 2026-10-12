@@ -3,7 +3,6 @@ part of 'settings_page.dart';
 extension _SettingsPageBuild on _SettingsPageState {
   Widget _buildPage(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final apiConfigs = ref.watch(apiConfigsProvider);
 
     return Scaffold(
       backgroundColor: cs.surface,
@@ -42,7 +41,7 @@ extension _SettingsPageBuild on _SettingsPageState {
       body: ListView(
         padding: const EdgeInsets.fromLTRB(20, 20, 20, 100),
         children: [
-          _SectionHeader(title: '应用信息', cs: cs),
+          SettingsSectionHeader(title: '应用信息', cs: cs),
           const SizedBox(height: 12),
           AppCard(
             cs: cs,
@@ -87,67 +86,41 @@ extension _SettingsPageBuild on _SettingsPageState {
             ],
           ),
           const SizedBox(height: 28),
-          _SectionHeader(
-            title: 'API 配置',
-            cs: cs,
-            action: _buildAddConfigButton(cs),
-          ),
+          SettingsSectionHeader(title: 'API KEY 设置', cs: cs),
           const SizedBox(height: 4),
-          Text('管理 API Key、Base URL 和模型，角色可复用配置',
+          Text('聊天、语音、图像与联网搜索所需的密钥集中在这里；密钥只写入本机安全存储',
               style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
-          const SizedBox(height: 12),
-          if (apiConfigs.isEmpty)
-            AppCard(
-              cs: cs,
-              children: [
-                Padding(
-                  padding: const EdgeInsets.symmetric(vertical: 24),
-                  child: Center(
-                    child: Column(
-                      children: [
-                        Icon(Icons.settings_remote_outlined,
-                            size: 40,
-                            color: cs.onSurfaceVariant.withValues(alpha: 0.4)),
-                        const SizedBox(height: 12),
-                        Text('还没有 API 配置',
-                            style: TextStyle(
-                                fontSize: 14, color: cs.onSurfaceVariant)),
-                        const SizedBox(height: 12),
-                        FilledButton.icon(
-                          onPressed: () => _openConfigForm(context),
-                          icon: const Icon(Icons.add_rounded, size: 18),
-                          label: const Text('创建配置'),
-                        ),
-                      ],
-                    ),
-                  ),
-                ),
-              ],
-            )
-          else
-            ...apiConfigs.map((c) => _ApiConfigCard(
-                  config: c,
-                  cs: cs,
-                  onEdit: () => _openConfigForm(context, c),
-                  onDelete: () => _confirmDeleteConfig(context, c),
-                  onTest: () => _testApiKey(context, c),
-                )),
           const SizedBox(height: 12),
           AppCard(
             cs: cs,
             margin: EdgeInsets.zero,
             children: [
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
-                icon: Icons.multiple_stop_rounded,
+                icon: Icons.key_rounded,
                 iconColor: cs.primary,
-                title: 'AI 接话选人器',
-                subtitle: _speakerPickerSubtitle,
-                onTap: _chooseSpeakerPickerConfig,
+                title: 'API Key 设置',
+                subtitle: _apiKeyEntrySubtitle,
+                // 副标题是进去之后才会变的进度：返回时必须重建一次，
+                // 否则入口行会一直停在进页面之前的那份计数上。
+                onTap: () async {
+                  await Navigator.of(context).push(
+                    MaterialPageRoute(
+                        builder: (_) => const ApiKeySettingsPage()),
+                  );
+                  if (mounted) _safeSetState(() {});
+                },
               ),
-              Divider(
-                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+            ],
+          ),
+          const SizedBox(height: 28),
+          SettingsSectionHeader(title: '全局搜索', cs: cs),
+          const SizedBox(height: 12),
+          AppCard(
+            cs: cs,
+            margin: EdgeInsets.zero,
+            children: [
+              SettingsTile(
                 cs: cs,
                 icon: Icons.manage_search_rounded,
                 iconColor: cs.primary,
@@ -157,9 +130,16 @@ extension _SettingsPageBuild on _SettingsPageState {
                   builder: (_) => const GlobalSearchPage(),
                 )),
               ),
-              Divider(
-                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+            ],
+          ),
+          const SizedBox(height: 28),
+          SettingsSectionHeader(title: '文档解析缓存', cs: cs),
+          const SizedBox(height: 12),
+          AppCard(
+            cs: cs,
+            margin: EdgeInsets.zero,
+            children: [
+              SettingsTile(
                 cs: cs,
                 icon: Icons.document_scanner_outlined,
                 iconColor: cs.primary,
@@ -168,9 +148,16 @@ extension _SettingsPageBuild on _SettingsPageState {
                     '${DocumentUnderstandingService.cachedDocumentCount} 个本地文档 · 可随时清除并按需重建',
                 onTap: _showDocumentCache,
               ),
-              Divider(
-                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+            ],
+          ),
+          const SizedBox(height: 28),
+          SettingsSectionHeader(title: '模型、成本与联网治理', cs: cs),
+          const SizedBox(height: 12),
+          AppCard(
+            cs: cs,
+            margin: EdgeInsets.zero,
+            children: [
+              SettingsTile(
                 cs: cs,
                 icon: Icons.policy_outlined,
                 iconColor: cs.primary,
@@ -180,38 +167,10 @@ extension _SettingsPageBuild on _SettingsPageState {
                   MaterialPageRoute(builder: (_) => const AiGovernancePage()),
                 ),
               ),
-              Divider(
-                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
-                cs: cs,
-                icon: Icons.record_voice_over_outlined,
-                iconColor: cs.primary,
-                title: '语音服务 · 火山引擎',
-                subtitle: '流式语音播报（TTS）与语音输入（ASR）的 Key、资源 ID 与默认音色',
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => const VoiceServiceSettingsPage(),
-                  ),
-                ),
-              ),
-              Divider(
-                  height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
-                cs: cs,
-                icon: Icons.image_outlined,
-                iconColor: cs.primary,
-                title: '图像服务 · IP 形象生成',
-                subtitle: '为 AI 角色生成 IP 形象的 baseUrl、模型与 API Key',
-                onTap: () => Navigator.of(context).push(
-                  MaterialPageRoute(
-                    builder: (_) => const ImageServiceSettingsPage(),
-                  ),
-                ),
-              ),
             ],
           ),
           const SizedBox(height: 28),
-          _SectionHeader(
+          SettingsSectionHeader(
             title: '企业微信推送',
             cs: cs,
           ),
@@ -221,7 +180,7 @@ extension _SettingsPageBuild on _SettingsPageState {
           const SizedBox(height: 12),
           const _WeComConfigCard(),
           const SizedBox(height: 28),
-          _SectionHeader(
+          SettingsSectionHeader(
             title: '我的资料',
             cs: cs,
           ),
@@ -233,7 +192,7 @@ extension _SettingsPageBuild on _SettingsPageState {
             cs: cs,
             margin: EdgeInsets.zero,
             children: [
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.person_outline_rounded,
                 iconColor: cs.primary,
@@ -249,13 +208,13 @@ extension _SettingsPageBuild on _SettingsPageState {
             ],
           ),
           const SizedBox(height: 28),
-          _SectionHeader(title: '外观', cs: cs),
+          SettingsSectionHeader(title: '外观', cs: cs),
           const SizedBox(height: 12),
           AppCard(
             cs: cs,
             margin: EdgeInsets.zero,
             children: [
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.palette_outlined,
                 iconColor: cs.tertiary,
@@ -291,7 +250,7 @@ extension _SettingsPageBuild on _SettingsPageState {
               ),
               Divider(
                   height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.volume_up_outlined,
                 iconColor: cs.tertiary,
@@ -311,13 +270,13 @@ extension _SettingsPageBuild on _SettingsPageState {
             ],
           ),
           const SizedBox(height: 28),
-          _SectionHeader(title: 'AI 工作根目录', cs: cs),
+          SettingsSectionHeader(title: 'AI 工作根目录', cs: cs),
           const SizedBox(height: 12),
           AppCard(
             cs: cs,
             margin: EdgeInsets.zero,
             children: [
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.folder_open_rounded,
                 iconColor: cs.secondary,
@@ -332,7 +291,7 @@ extension _SettingsPageBuild on _SettingsPageState {
               if (!kIsWeb) ...[
                 Divider(
                     height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-                _SettingTile(
+                SettingsTile(
                   cs: cs,
                   icon: Icons.restore_rounded,
                   iconColor: cs.secondary,
@@ -345,26 +304,26 @@ extension _SettingsPageBuild on _SettingsPageState {
             ],
           ),
           const SizedBox(height: 28),
-          _SectionHeader(title: '工作模式 AI Agent', cs: cs),
+          SettingsSectionHeader(title: '工作模式 AI Agent', cs: cs),
           const SizedBox(height: 12),
           WorkModeAgentSettingsSection(
             service: _workFolderGrantService,
             snapshotService: _tryReadWorkSnapshotService(),
           ),
           const SizedBox(height: 28),
-          _SectionHeader(title: '多人联机', cs: cs),
+          SettingsSectionHeader(title: '多人联机', cs: cs),
           const SizedBox(height: 12),
           const RealtimeSettingsSection(),
           const SizedBox(height: 28),
           _buildTokenSection(cs),
           const SizedBox(height: 28),
-          _SectionHeader(title: '数据管理', cs: cs),
+          SettingsSectionHeader(title: '数据管理', cs: cs),
           const SizedBox(height: 12),
           AppCard(
             cs: cs,
             margin: EdgeInsets.zero,
             children: [
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.upload_rounded,
                 iconColor: cs.primary,
@@ -375,7 +334,7 @@ extension _SettingsPageBuild on _SettingsPageState {
               ),
               Divider(
                   height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.backup_rounded,
                 iconColor: cs.primary,
@@ -385,7 +344,7 @@ extension _SettingsPageBuild on _SettingsPageState {
               ),
               Divider(
                   height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.memory_rounded,
                 iconColor: cs.primary,
@@ -400,7 +359,7 @@ extension _SettingsPageBuild on _SettingsPageState {
               ),
               Divider(
                   height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.account_tree_outlined,
                 iconColor: cs.primary,
@@ -414,7 +373,7 @@ extension _SettingsPageBuild on _SettingsPageState {
               ),
               Divider(
                   height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.info_outline_rounded,
                 iconColor: cs.primary,
@@ -424,7 +383,7 @@ extension _SettingsPageBuild on _SettingsPageState {
               ),
               Divider(
                   height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.cleaning_services_rounded,
                 iconColor: cs.secondary,
@@ -436,7 +395,7 @@ extension _SettingsPageBuild on _SettingsPageState {
               if (_hasPendingDeletion) ...[
                 Divider(
                     height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-                _SettingTile(
+                SettingsTile(
                   cs: cs,
                   icon: Icons.sync_problem_rounded,
                   iconColor: cs.error,
@@ -447,7 +406,7 @@ extension _SettingsPageBuild on _SettingsPageState {
               ],
               Divider(
                   height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.forum_outlined,
                 iconColor: cs.error,
@@ -458,7 +417,7 @@ extension _SettingsPageBuild on _SettingsPageState {
               ),
               Divider(
                   height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.delete_sweep_outlined,
                 iconColor: cs.error,
@@ -469,7 +428,7 @@ extension _SettingsPageBuild on _SettingsPageState {
               ),
               Divider(
                   height: 1, color: cs.outlineVariant.withValues(alpha: 0.5)),
-              _SettingTile(
+              SettingsTile(
                 cs: cs,
                 icon: Icons.restart_alt_rounded,
                 iconColor: cs.error,

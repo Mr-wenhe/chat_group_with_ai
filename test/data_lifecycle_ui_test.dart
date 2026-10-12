@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/ai_character/ai_character_list_page.dart';
 import 'package:chat_group/features/chat_group/chat_group_list_page.dart';
+import 'package:chat_group/features/settings/api_key_settings_page.dart';
 import 'package:chat_group/features/settings/settings_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
@@ -109,7 +110,14 @@ void main() {
       await db.aiCharacterBox.put('c1', testCharacter('c1', apiConfigId: 'a1'));
     });
 
-    await tester.pumpWidget(app(const SettingsPage()));
+    // 配置卡片连同删除入口搬到了「API KEY 设置」页；删除确认对话框本身的行为
+    // 不变，要测它就得进到它现在所在的那一页。窗口放大是为了让卡片一次可见 ——
+    // 页面是 ListView，默认视口里第二张卡根本不在树上。
+    tester.view.physicalSize = const Size(1000, 2400);
+    tester.view.devicePixelRatio = 1.0;
+    addTearDown(tester.view.reset);
+
+    await tester.pumpWidget(app(const ApiKeySettingsPage()));
     await tester.pump(const Duration(milliseconds: 300));
     await tester.tap(find.byIcon(Icons.delete_outline_rounded).first);
     await tester.pump();

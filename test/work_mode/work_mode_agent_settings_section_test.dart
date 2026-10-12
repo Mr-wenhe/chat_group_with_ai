@@ -23,7 +23,37 @@ void main() {
     }
   });
 
-  testWidgets('shows grant controls, limits, and non-disableable confirmations',
+  /// The section is a non-scrolling column that the settings page hosts inside
+  /// a ListView, so tests need the same scrollable context.
+  Future<void> pumpSection(WidgetTester tester, Widget section) async {
+    await tester.pumpWidget(
+      MaterialApp(
+        home: Scaffold(
+          body: SingleChildScrollView(child: section),
+        ),
+      ),
+    );
+    await tester.pump(const Duration(milliseconds: 100));
+    await tester.runAsync(() async {});
+    await tester.pump(const Duration(milliseconds: 100));
+  }
+
+  /// The folder list moved to its own page; every grant assertion now runs
+  /// after navigating there from the section's entry tile.
+  Future<void> openGrantsPage(WidgetTester tester) async {
+    final entry = find.byKey(const Key('work-folder-grants-entry'));
+    await tester.ensureVisible(entry);
+    await tester.pump();
+    await tester.tap(entry);
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
+    await tester.runAsync(() async {});
+    await tester.pump(const Duration(milliseconds: 100));
+    expect(find.byKey(const Key('work-folder-grants-list')), findsOneWidget);
+  }
+
+  testWidgets(
+      'keeps limits on the settings page and lists grants on its own page',
       (tester) async {
     final root = await tester.runAsync(
       () => Directory('${hiveDirectory.path}/project').create(),
@@ -37,20 +67,10 @@ void main() {
     await tester.runAsync(() => service.addDirectory(rootDirectory.path));
     await tester.runAsync(() => service.load());
 
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: WorkModeAgentSettingsSection(service: service),
-        ),
-      ),
-    );
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.runAsync(() async {});
-    await tester.pump(const Duration(milliseconds: 100));
+    await pumpSection(tester, WorkModeAgentSettingsSection(service: service));
     expect(find.byType(WorkModeAgentSettingsSection), findsOneWidget);
 
     expect(find.byKey(const Key('work-mode-agent-settings')), findsOneWidget);
-    expect(find.text('授权目录'), findsOneWidget);
     expect(find.textContaining('30 天'), findsOneWidget);
     expect(find.textContaining('2 GB'), findsOneWidget);
     expect(find.textContaining('100 步'), findsOneWidget);
@@ -58,10 +78,22 @@ void main() {
     expect(find.textContaining('群聊协作任务不设累计步数或总时长上限'), findsOneWidget);
     expect(find.textContaining('私聊和旧版任务的软上限'), findsOneWidget);
     expect(find.textContaining('删除文件和不可撤销覆盖始终需要确认'), findsOneWidget);
-    expect(find.textContaining('移除授权只停止 App 访问'), findsOneWidget);
     expect(find.byKey(const Key('work-folder-confirm-writes')), findsOneWidget);
-    expect(find.byKey(Key('work-folder-remove:${service.grants.single.path}')),
-        findsOneWidget);
+
+    // The list itself is gone from the settings page; only the entry remains.
+    expect(find.byKey(const Key('work-folder-grants-entry')), findsOneWidget);
+    expect(find.textContaining('已授权 1 个 · 全部可用'), findsOneWidget);
+    expect(
+      find.byKey(Key('work-folder-remove:${service.grants.single.path}')),
+      findsNothing,
+    );
+
+    await openGrantsPage(tester);
+    expect(find.textContaining('移除授权只停止 App 访问'), findsOneWidget);
+    expect(
+      find.byKey(Key('work-folder-remove:${service.grants.single.path}')),
+      findsOneWidget,
+    );
   });
 
   testWidgets(
@@ -77,20 +109,15 @@ void main() {
       directoryValidator: (_) async => true,
     );
     await tester.runAsync(() => service.load());
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: WorkModeAgentSettingsSection(
-            service: service,
-            pickDirectory: ([String? _]) async => pickedDirectory.path,
-          ),
-        ),
+    await pumpSection(
+      tester,
+      WorkModeAgentSettingsSection(
+        service: service,
+        pickDirectory: ([String? _]) async => pickedDirectory.path,
       ),
     );
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.runAsync(() async {});
-    await tester.pump(const Duration(milliseconds: 100));
 
+    await openGrantsPage(tester);
     await tester.runAsync(
       () => tester.tap(find.byKey(const Key('work-folder-add'))),
     );
@@ -111,6 +138,11 @@ void main() {
     expect(service.isPathAuthorized('${pickedDirectory.path}/file.md'), isTrue);
     expect(service.grants.single.cloudDisclosureConfirmedAt, isNotNull);
 
+    // The write-confirmation switch stays on the settings page behind the
+    // pushed route.
+    await tester.pageBack();
+    await tester.pump();
+    await tester.pump(const Duration(milliseconds: 400));
     await tester.runAsync(
       () => tester.tap(find.byKey(const Key('work-folder-confirm-writes'))),
     );
@@ -135,23 +167,18 @@ void main() {
       writeDirectoryValidator: (_) async => true,
     );
     await tester.runAsync(() => service.load());
-    await tester.pumpWidget(
-      MaterialApp(
-        home: Scaffold(
-          body: WorkModeAgentSettingsSection(
-            service: service,
-            pickDirectories: () async => <String>[
-              firstDirectory.path,
-              secondDirectory.path,
-            ],
-          ),
-        ),
+    await pumpSection(
+      tester,
+      WorkModeAgentSettingsSection(
+        service: service,
+        pickDirectories: () async => <String>[
+          firstDirectory.path,
+          secondDirectory.path,
+        ],
       ),
     );
-    await tester.pump(const Duration(milliseconds: 100));
-    await tester.runAsync(() async {});
-    await tester.pump(const Duration(milliseconds: 100));
 
+    await openGrantsPage(tester);
     await tester.runAsync(
       () => tester.tap(find.byKey(const Key('work-folder-add'))),
     );
