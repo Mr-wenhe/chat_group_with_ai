@@ -92,7 +92,7 @@ class _ImageServiceSettingsPageState
           Text(
             '开启后：可在角色编辑页根据角色定义一键生成 IP 形象。'
             '支持 OpenAI / 智谱 / 通义 / 火山方舟等 images/generations 兼容接口。'
-            'API Key 保存在系统安全存储，不会写入聊天数据。',
+            'API Key 只保存在本机，不会写入聊天数据。',
             style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
           ),
           const SizedBox(height: 12),

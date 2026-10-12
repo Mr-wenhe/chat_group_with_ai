@@ -42,7 +42,7 @@ class _WebSearchSettingsSectionState extends State<WebSearchSettingsSection> {
             title: const Text('搜索 Provider 配置'),
             subtitle: Text(
               configs.isEmpty
-                  ? '尚未配置；Key 只保存到安全存储'
+                  ? '尚未配置；Key 只保存在本机'
                   : '${configs.length} 个配置 · 恢复备份后需要重新绑定 Key',
             ),
             trailing: IconButton(

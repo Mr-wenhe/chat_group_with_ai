@@ -88,7 +88,7 @@ extension _SettingsPageBuild on _SettingsPageState {
           const SizedBox(height: 28),
           SettingsSectionHeader(title: 'API KEY 设置', cs: cs),
           const SizedBox(height: 4),
-          Text('聊天、语音、图像与联网搜索所需的密钥集中在这里；密钥只写入本机安全存储',
+          Text('聊天、语音、图像与联网搜索所需的密钥集中在这里；密钥只保存在本机，不进备份与导出',
               style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant)),
           const SizedBox(height: 12),
           AppCard(

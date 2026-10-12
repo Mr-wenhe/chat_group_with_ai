@@ -57,7 +57,7 @@ class _SearchCredentialSettingsPageState
           else
             Text(
               '联网搜索默认关闭。启用后查询会发送给你在这里配置的服务商；'
-              'Key 只保存在本机安全存储，不会进入备份或导出文件。'
+              'Key 只保存在本机，不会进入备份或导出文件。'
               '恢复备份后 Provider 记录还在，但 Key 需要重新绑定。',
               style: TextStyle(
                   fontSize: 13, height: 1.5, color: cs.onSurfaceVariant),

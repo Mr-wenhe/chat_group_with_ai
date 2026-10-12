@@ -182,8 +182,10 @@ class _ApiKeySettingsPageState extends ConsumerState<ApiKeySettingsPage> {
               ),
               const SizedBox(height: 8),
               Text(
-                '所有 API Key 都写入系统安全存储（钥匙串 / Keystore），'
-                '不会出现在备份、导出文件或聊天记录里；换机或重装后需要重新填写。',
+                '所有 API Key 都只保存在本机：macOS 写入应用数据目录内的本地库'
+                '（明文，不经系统钥匙串），其余平台写入系统安全存储'
+                '（钥匙串 / Keystore）。都不会出现在备份、导出文件或聊天记录里；'
+                '换机或重装后需要重新填写。',
                 style: TextStyle(
                     fontSize: 13, height: 1.5, color: cs.onSurfaceVariant),
               ),

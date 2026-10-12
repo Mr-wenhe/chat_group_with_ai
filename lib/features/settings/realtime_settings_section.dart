@@ -133,7 +133,7 @@ class _RealtimeSettingsSectionState
                       // 令牌是可选的：默认那台服务器不校验令牌，地址填对就能用。
                       // 说清楚这点，否则用户看到空白的必填样式的输入框会以为没配好。
                       helperText: '留空即可连接不校验令牌的服务；服务端要求令牌时才需要填写，'
-                          '填写后会存进系统安全存储',
+                          '填写后会保存在本机',
                       suffixIcon: IconButton(
                         icon: Icon(
                           _obscureToken

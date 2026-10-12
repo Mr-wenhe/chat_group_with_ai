@@ -77,7 +77,7 @@ class _VoiceServiceSettingsPageState
           const SizedBox(height: 4),
           Text(
             '开启后：AI 回复可流式朗读（TTS），麦克风输入可转文字（ASR）。'
-            'API Key 保存在系统安全存储，不会写入聊天数据。',
+            'API Key 只保存在本机，不会写入聊天数据。',
             style: TextStyle(fontSize: 13, color: cs.onSurfaceVariant),
           ),
           const SizedBox(height: 12),
