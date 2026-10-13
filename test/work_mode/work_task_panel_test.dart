@@ -1537,6 +1537,7 @@ void main() {
           ),
         );
       var versionedCalls = 0;
+      final laterVersions = <int>[];
 
       await tester.pumpWidget(MaterialApp(
         home: Scaffold(
@@ -1550,7 +1551,9 @@ void main() {
             onCollapse: () {},
             onClose: () {},
             onLaterVersioned: (_, version) async {
-              expect(version, greaterThan(0));
+              // 断言必须留在回调之外：`_runAction` 的 `on Object catch` 会把回调
+              // 异常转成面板错误提示，断言不会报出它自己的原因。
+              laterVersions.add(version);
               versionedCalls++;
             },
           ),
@@ -1561,6 +1564,9 @@ void main() {
       await tester.pump();
 
       expect(versionedCalls, 1);
+      expect(laterVersions, isNotEmpty);
+      expect(laterVersions.every((version) => version > 0), isTrue,
+          reason: '版本化动作必须带上真实检查点版本，不能传 0');
     });
 
     testWidgets('shows only folder authorization while a grant is pending',
@@ -2399,7 +2405,8 @@ void main() {
       expect(continued, isTrue);
     });
 
-    testWidgets('offers continue for a stopped v2 task whose discussion never finished',
+    testWidgets(
+        'offers continue for a stopped v2 task whose discussion never finished',
         (tester) async {
       // 停止已经把讨论取消掉，v2 又不允许「从头开始」清空协作记录：这时「继续」
       // 是重新进入讨论的唯一入口。按"请先完成群讨论"挡掉它，任务既答不了也退不出。
@@ -2506,7 +2513,8 @@ void main() {
       expect(continuedWithoutFollowUps, isFalse);
     });
 
-    testWidgets('lets the user drop the interrupted follow-ups', (tester) async {
+    testWidgets('lets the user drop the interrupted follow-ups',
+        (tester) async {
       var continued = false;
       var continuedWithoutFollowUps = false;
       final task = _task(

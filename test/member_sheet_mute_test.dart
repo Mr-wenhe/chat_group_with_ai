@@ -88,11 +88,14 @@ void main() {
 
   testWidgets('选择禁言：回调被触发，且标记立即出现（无需重开面板）', (tester) async {
     final toggled = <String>[];
+    final mutedArgs = <bool>[];
     await pumpSheet(
       tester,
       mutedIds: const {},
       onToggleMute: (character, muted) async {
-        expect(muted, isTrue);
+        // 断言必须留在回调之外：member_sheet 的 `_toggleMute` 用裸 `catch (_)`
+        // 把回调异常转成"禁言设置保存失败"，断言不会报出它自己的原因。
+        mutedArgs.add(muted);
         toggled.add(character.id);
       },
       onMention: (_) {},
@@ -103,6 +106,9 @@ void main() {
     await tester.tap(find.text('禁言（@ 点名仍可回复）'));
     await tester.pumpAndSettle();
 
+    expect(mutedArgs, isNotEmpty);
+    expect(mutedArgs.every((muted) => muted), isTrue,
+        reason: '从"未禁言"切换过去，回调收到的必须是 muted: true');
     expect(toggled, ['a']);
     expect(
       find.text('已禁言 · 在线'),

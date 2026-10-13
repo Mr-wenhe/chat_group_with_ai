@@ -46,6 +46,14 @@ class _ModelClient extends ChatApiService {
   final Future<Map<String, dynamic>> Function(Map<String, dynamic>, String)
       respond;
   final int expectedMaxTokens;
+
+  /// 调用契约不一致的记录（maxTokens / apiKey）。
+  ///
+  /// 断言不能写在这一层：这一层在讨论 runner 的 `_request` 之内，异常会被它的
+  /// `on Object catch` 收成"成员请求失败"，断言不会报出它自己的原因。调用方在
+  /// 跑完讨论之后断言本列表为空。
+  final List<String> contractViolations = [];
+
   _ModelClient(this.respond, {this.expectedMaxTokens = 8192});
   @override
   Future<Map<String, dynamic>> sendChatMessageWithResponseLimit(
@@ -63,8 +71,12 @@ class _ModelClient extends ChatApiService {
       bool structuredJson = false,
       bool allowReasoningContentFallback = false,
       required int maxResponseBytes}) {
-    expect(maxTokens, expectedMaxTokens);
-    expect(apiKey, 'test-key');
+    if (maxTokens != expectedMaxTokens) {
+      contractViolations.add('maxTokens=$maxTokens，期望 $expectedMaxTokens');
+    }
+    if (apiKey != 'test-key') {
+      contractViolations.add('apiKey 不是测试用 key');
+    }
     return respond(
         jsonDecode(messages.last['content'] as String) as Map<String, dynamic>,
         model);
@@ -292,6 +304,13 @@ Map<String, dynamic> approval(Map<String, dynamic> s) => {
       'teamRevision': s['teamRevision'],
       'verificationRevision': s['verificationRevision']
     };
+
+/// 用 [respond] 组装一个只接模型回应的讨论 runner。
+///
+/// **不要在 `respond` 里写 `expect` / `fail`**：`_request` 的 `on Object catch` 会把
+/// 回调抛出的异常收成"成员请求失败"，断言不会报出它自己的原因（可能整条静默通过，
+/// 也可能挂在与断言无关的行上）。要断言就先把值记进外层变量，`runCollaboration`
+/// 之后再比。
 WorkDiscussionRunner modelRunner(
         Future<Map<String, dynamic>> Function(AICharacter, Map<String, dynamic>)
             respond) =>
@@ -515,8 +534,15 @@ void _registerScopeBoundaryTest() {
             requestRevision: current.requestRevision + 1),
         expectedCollaborationRevision: current.revision);
 
-    final runner = modelRunner((_, __) async => fail('已有用户裁决应在请求成员模型前转成待答裁决'));
+    var modelCalled = false;
+    // `fail(...)` 不能写在回调里：`_request` 的 `on Object catch` 会把它收成
+    // "成员请求失败"，这条守卫就永远不会报错。改成记账 + 回调外断言。
+    final runner = modelRunner((member, context) async {
+      modelCalled = true;
+      return confirm(member, context);
+    });
     await runner.runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(modelCalled, isFalse, reason: '已有用户裁决应在请求成员模型前转成待答裁决');
 
     final result =
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
@@ -544,6 +570,14 @@ void _registerDocumentInvestigationTest() {
     await File('${dir.path}/project/diagram.png').writeAsBytes(base64Decode(
         'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+aRZkAAAAASUVORK5CYII='));
     var imageSeen = false;
+    // 断言必须留在回调之外：回调里抛出的异常会被 `_request` 的
+    // `on Object catch` 收成"成员请求失败"，断言不会报出它自己的原因。
+    final investigationCalls = <({
+      String characterId,
+      String imageParts,
+      Map<String, dynamic> context,
+      Object? noProgressCount,
+    })>[];
     final runner = WorkDiscussionRunner(
         database: db,
         credentials: _Credentials(),
@@ -583,15 +617,14 @@ void _registerDocumentInvestigationTest() {
             });
           }
           if ((s['issues'] as List).single['status'] == 'open') {
-            expect(character.id, 'dev');
             final parts = messages.where((m) => m['content'] is List).single;
-            expect(jsonEncode(parts['content']),
-                contains('data:image/png;base64,'));
-            expect(jsonEncode(context), isNot(contains('data:image/')));
-            expect(
-                (jsonDecode(task.executionStateJson) as Map)['v2ProgressGuard']
-                    ['noProgressCount'],
-                0);
+            investigationCalls.add((
+              characterId: character.id,
+              imageParts: jsonEncode(parts['content']),
+              context: context,
+              noProgressCount: (jsonDecode(task.executionStateJson)
+                  as Map)['v2ProgressGuard']['noProgressCount'],
+            ));
             imageSeen = true;
             return _turn('propose',
                 resolutions: [
@@ -613,6 +646,13 @@ void _registerDocumentInvestigationTest() {
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .isPlanReady,
         true);
+    expect(investigationCalls, isNotEmpty);
+    for (final call in investigationCalls) {
+      expect(call.characterId, 'dev');
+      expect(call.imageParts, contains('data:image/png;base64,'));
+      expect(jsonEncode(call.context), isNot(contains('data:image/')));
+      expect(call.noProgressCount, 0);
+    }
     final detail = db.messageBox.values
         .expand((m) => m.media ?? [])
         .singleWhere((a) => a.fileName == '调查来源与结果.json');

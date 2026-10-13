@@ -11,7 +11,7 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
         return _approvalFocus('idea', open['id'] as String);
       }
       return {
-        'stage': 'resolveIssue',
+        'stage': WorkDiscussionStage.resolveIssue.name,
         'issueId': open['id'],
         'objective': '本轮只推进此问题：需要依据则调查一次；已有依据则回应或解决。'
             '新范围需要协调成员提交完整提案，普通成员只说明异议。'
@@ -37,7 +37,7 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
       return _approvalFocus('plan', task.id);
     }
     return {
-      'stage': 'prepareProposal',
+      'stage': WorkDiscussionStage.prepareProposal.name,
       'objective': memberId == state.coordinatorId
           ? '只补齐当前方案的缺项或已指出的错误，保留已有有效条目和完整用户约束。'
               '先在 plan 整理需求、技术及测试口径，再提交最小完整方案；'
@@ -48,15 +48,13 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
   }
 
   Map<String, dynamic> _approvalFocus(String kind, String subject) => {
-        'stage': 'reviewApproval',
+        'stage': WorkDiscussionStage.reviewApproval.name,
+        // 气泡文风条款只在协议里说一遍（`_protocolHead`）。这里复述一遍不会更
+        // 有效，只会让同一批规则在一轮里出现两次、占掉成员的注意力与额度。
         'objective': '仅审阅当前 $kind 的方案或证据并表达自己的意见；'
             '有缺陷则记录，有未知条件则调查，不重新生成已有方案。'
             'approvalIdentifiers 只用于 approval 字段，照抄进 approval 即可；'
-            'public_update 用你自己的话说明认可或反对什么、还缺什么，'
-            '不出现版本整数、approved:true|false、问题编号或阶段名，'
-            '不出现 artifactContract、requiredCapability、V-08 这类内部标识符，'
-            '也不排 ①②③④ 式清单——发现的缺陷与补丁要求写进 issues，'
-            '气泡只给你的判断和依据。'
+            '发现的缺陷与补丁要求写进 issues。'
             '是否认可必须由你审阅后决定，不能因为模板而自动通过。',
         'approvalIdentifiers': {
           'kind': kind,

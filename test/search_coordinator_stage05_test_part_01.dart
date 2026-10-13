@@ -256,16 +256,20 @@ void _registerSearchCoordinatorStage05TestPart1() {
       SearchProviderKind.brave,
       [_failure(SearchFailureType.unauthorized, statusCode: 401)],
     );
+    var slept = false;
     final coordinator = SearchCoordinator(
       store: MemoryGovernanceStore(globalSearchPolicy: WebSearchPolicy.auto),
       routes: [SearchProviderRoute(provider: unauthorized)],
-      sleep: (_) async => fail('non-retryable failure must not sleep'),
+      // `fail(...)` 不能写在回调里：重试层把这个异常收成 failure，守卫就永远
+      // 不报错（见 SearchRetryPolicy 的 try/catch）。改成记账 + 调用后断言。
+      sleep: (_) async => slept = true,
     );
 
     final unauthorizedSnapshot = await coordinator.search(
       request: _request(),
       conversationId: 'conversation-1',
     );
+    expect(slept, isFalse, reason: 'non-retryable failure must not sleep');
     expect(unauthorized.searchCount, 1);
     expect(unauthorizedSnapshot?.failure?.type, SearchFailureType.unauthorized);
 

@@ -97,13 +97,21 @@ void main() {
       globalSearchPolicy: WebSearchPolicy.ask,
     );
     final coordinator = SearchCoordinator(store: store, routes: const []);
+    var consentRequested = false;
 
     final result = await coordinator.searchIfAllowed(
       text: '查找 Flutter 最新版本',
       conversationId: 'group-1',
-      requestConsent: (_) async => fail('no Provider can receive this query'),
+      // 这条链上没有 catch，`fail(...)` 本来就会终止用例；改成记账式是为了与
+      // 检索重试层那些**会被吞掉**的同类守卫同一形状，并给失败一句理由。
+      requestConsent: (_) async {
+        consentRequested = true;
+        return false;
+      },
     );
 
+    expect(consentRequested, isFalse,
+        reason: 'no Provider can receive this query');
     expect(result?.failure?.type, SearchFailureType.invalidConfiguration);
     expect(store.searchAudits.single.status, 'failed');
   });

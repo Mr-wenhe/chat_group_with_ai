@@ -41,6 +41,8 @@ class WorkPublicUpdateStream {
     r'|artifactDigest|workItems|ownerId|dependencies|acceptances)\b'
     r'|\b(?:req|team|ver|revision|rev)\s*=\s*\d+\b'
     r'|\bapproved\s*[:=]\s*(?:true|false)\b'
+    // 这三个阶段名与 WorkDiscussionStage（work_discussion_v2_stage.dart）是同一
+    // 份词表：新增阶段名时要同步改这一行，否则成员把新阶段名写进气泡不再被拦。
     r'|\b(?:reviewApproval|resolveIssue|prepareProposal)\b'
     r'|\b(?:adopt:)?proposal:[0-9a-zA-Z]{6,}'
     r'|\bV-\d{1,2}\b',
@@ -71,7 +73,8 @@ class WorkPublicUpdateStream {
   }
 
   /// 公开正文里的编号清单标记数。
-  static int listMarkerCount(String value) => _listMarker.allMatches(value).length;
+  static int listMarkerCount(String value) =>
+      _listMarker.allMatches(value).length;
 
   /// 公开正文是否被排成编号清单。
   ///

@@ -1,51 +1,111 @@
 part of 'work_discussion_v2_test.dart';
 
 void _registerDiscussionHistoryRegressions() {
-  test('认可阶段的聚焦提示把协议标识与公开文本分开', () async {
-    var checked = false;
+  test('认可阶段的聚焦提示只留本轮动作，文风条款交给协议', () async {
+    String? objective;
+    Map<String, dynamic>? identifiers;
     await modelRunner((member, context) async {
       final focus = context['turnFocus'] as Map;
       if (focus['stage'] == 'reviewApproval') {
-        checked = true;
-        final objective = focus['objective'] as String;
-        expect(objective, contains('approvalIdentifiers 只用于 approval'));
-        expect(objective, contains('public_update'));
-        expect(objective, contains('不出现 artifactContract'));
-        expect(objective, contains('①②③④ 式清单'));
-        expect(objective, contains('写进 issues'));
-        expect(focus['approvalIdentifiers'], isNotNull);
+        // 断言必须留在回调**之外**：讨论 runner 用 `on Object catch` 把成员请求的
+        // 异常收成失败诊断，回调里抛出的 expect 会被吞掉，测试静默变绿。
+        objective ??= focus['objective'] as String;
+        identifiers ??= focus['approvalIdentifiers'] as Map<String, dynamic>?;
       }
       return confirm(member, context);
     }).runCollaboration(task, WorkTaskCancellation(), apply);
-    expect(checked, isTrue);
+    expect(objective, isNotNull, reason: '本轮没有走到认可阶段，断言等于没跑');
+    expect(objective, contains('approvalIdentifiers 只用于 approval'));
+    expect(objective, contains('写进 issues'));
+    // 认可必须由本人审阅后决定，不能被模板带着走。
+    expect(objective, contains('不能因为模板而自动通过'));
+    // 气泡文风条款在协议里已有一份，聚焦提示不再复述：同一批规则发两遍
+    // 既占额度，也让模型对同一件事反复自检。
+    expect(objective, isNot(contains('①②③④')));
+    expect(objective, isNot(contains('不出现 artifactContract')));
+    expect(identifiers, isNotNull);
+  });
+
+  test('协议按 stage 裁剪 approval 段，proposal 段任何 stage 都在', () {
+    for (final stage in WorkDiscussionStage.values) {
+      final protocol = WorkDiscussionV2Turn.protocolFor('', stage: stage);
+      // 审批轮登记 kind=idea 后提交关联 proposal 是文档化的合法路径（"已有方案
+      // 非空时补充 verificationCommands 也属于验收修改"），删掉 proposal 段就是
+      // 让这条路有路无据。
+      expect(protocol, contains('proposal={scope,plan,artifactContract'),
+          reason: '${stage.name} 缺少 proposal 结构');
+    }
+
+    for (final stage in [
+      WorkDiscussionStage.resolveIssue,
+      WorkDiscussionStage.prepareProposal,
+    ]) {
+      final protocol = WorkDiscussionV2Turn.protocolFor('', stage: stage);
+      expect(protocol, isNot(contains('approval={kind:')), reason: stage.name);
+      // 标记词必须独属于 approval 段：「第六个字段」也含「六个字段」。
+      expect(protocol, isNot(contains('approval 结构必须逐字包含')),
+          reason: stage.name);
+    }
+
+    final reviewing = WorkDiscussionV2Turn.protocolFor('',
+        stage: WorkDiscussionStage.reviewApproval);
+    expect(reviewing, contains('approval={kind:'));
+    expect(reviewing, contains('approval 结构必须逐字包含'));
+  });
+
+  test('approval 段落只说一遍协议标识与公开文本的分工', () {
+    final reviewing = WorkDiscussionV2Turn.protocolFor('',
+        stage: WorkDiscussionStage.reviewApproval);
+    expect('不能返回他人签字'.allMatches(reviewing).length, 1);
+  });
+
+  test('协议修复器始终拿到全量协议', () {
+    // 修复器要把任意原始响应转成合法 JSON，原始响应可能包含任何 action；
+    // 按 stage 裁剪它只会让修复失败率上升。
+    final repair = WorkDiscussionV2Turn.repairProtocolFor('');
+    expect(repair, contains('approval={kind:'));
+    expect(repair, contains('approval 结构必须逐字包含'));
+    expect(repair, contains('proposal={scope,plan,artifactContract'));
   });
 
   test('v2 协议把内部标识符与编号清单挡在公开正文外', () {
-    expect(WorkDiscussionV2Turn.protocolFor(''), contains('不出现 artifactContract'));
-    expect(WorkDiscussionV2Turn.protocolFor(''), contains('①②③④ 式清单'));
-    expect(WorkDiscussionV2Turn.protocolFor(''), contains('协议标识'));
+    expect(
+        WorkDiscussionV2Turn.protocolFor('',
+            stage: WorkDiscussionStage.resolveIssue),
+        contains('不出现 artifactContract'));
+    expect(
+        WorkDiscussionV2Turn.protocolFor('',
+            stage: WorkDiscussionStage.resolveIssue),
+        contains('①②③④ 式清单'));
+    expect(
+        WorkDiscussionV2Turn.protocolFor('',
+            stage: WorkDiscussionStage.resolveIssue),
+        contains('协议标识'));
   });
 
   test('单产物请求不再强制材料工作项，多产物与不确定仍强制', () {
-    final single =
-        WorkDiscussionV2Turn.protocolFor('生成一份 飞行棋游戏的HTML，第一版只需要和AI对战即可');
+    final single = WorkDiscussionV2Turn.protocolFor(
+        '生成一份 飞行棋游戏的HTML，第一版只需要和AI对战即可',
+        stage: WorkDiscussionStage.prepareProposal);
     expect(single, contains('只需 kind=produce 的实现工作项'));
     expect(single, isNot(contains('必须有 kind=material')));
     // 放宽的只有材料要求：文件清单与验证命令一项不能少。
     expect(single, contains('artifactContract.files'));
     expect(single, contains('verificationCommands'));
 
-    final multi =
-        WorkDiscussionV2Turn.protocolFor('生成一份 飞行棋游戏的HTML 和一份说明文档');
+    final multi = WorkDiscussionV2Turn.protocolFor('生成一份 飞行棋游戏的HTML 和一份说明文档',
+        stage: WorkDiscussionStage.prepareProposal);
     expect(multi, contains('必须有 kind=material'));
     expect(multi, contains('verificationCommands'));
 
     // 判定不确定时回到材料版——判错的方向必须偏保守。
-    expect(WorkDiscussionV2Turn.protocolFor(''), contains('必须有 kind=material'));
+    expect(
+        WorkDiscussionV2Turn.protocolFor('',
+            stage: WorkDiscussionStage.prepareProposal),
+        contains('必须有 kind=material'));
   });
 
-  test('单产物请求不要求材料工作项，多产物仍要求，且不随 userRequest 改写漂移',
-      () async {
+  test('单产物请求不要求材料工作项，多产物仍要求，且不随 userRequest 改写漂移', () async {
     await db.agentTaskBox.put(task.id, task);
     final discussion = modelRunner(confirm);
     await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
@@ -93,8 +153,7 @@ void _registerDiscussionHistoryRegressions() {
 
     expect(await preparedFor(single), isTrue,
         reason: '单产物请求只剩 produce 工作项不应再被材料要求拦下：${task.lastError}');
-    expect(await preparedFor(multi), isFalse,
-        reason: '多产物请求仍必须补齐材料工作项');
+    expect(await preparedFor(multi), isFalse, reason: '多产物请求仍必须补齐材料工作项');
     // 判据落在这条协议/闸门独有的文案上：`prepareCollaborationWork` 前面还有
     // "方案未就绪"等不设 lastError 的早退，只看返回值分不出是谁拦下的。
     expect(task.lastError, contains('材料工作项'),
@@ -269,8 +328,14 @@ void _registerDiscussionHistoryRegressions() {
             onInvalid: (value) => reason = value),
         isNull);
     expect(reason, contains('verificationRevision'));
-    expect(WorkDiscussionV2Turn.protocolFor(''), contains('六个字段'));
-    expect(WorkDiscussionV2Turn.protocolFor(''), contains('JSON 整数'));
+    expect(
+        WorkDiscussionV2Turn.protocolFor('',
+            stage: WorkDiscussionStage.reviewApproval),
+        contains('六个字段'));
+    expect(
+        WorkDiscussionV2Turn.protocolFor('',
+            stage: WorkDiscussionStage.reviewApproval),
+        contains('JSON 整数'));
   });
 
   test('verificationCommands 要求 command.run 的紧凑 JSON 字符串', () {
@@ -316,8 +381,14 @@ void _registerDiscussionHistoryRegressions() {
             onInvalid: (value) => reason = value),
         isNull);
     expect(reason, contains('verificationCommands'));
-    expect(WorkDiscussionV2Turn.protocolFor(''), contains('紧凑 JSON 参数字符串'));
-    expect(WorkDiscussionV2Turn.protocolFor(''), contains('相对路径字符串'));
+    expect(
+        WorkDiscussionV2Turn.protocolFor('',
+            stage: WorkDiscussionStage.prepareProposal),
+        contains('紧凑 JSON 参数字符串'));
+    expect(
+        WorkDiscussionV2Turn.protocolFor('',
+            stage: WorkDiscussionStage.prepareProposal),
+        contains('相对路径字符串'));
 
     proposal['artifactContract'] = {
       ...proposal['artifactContract'] as Map<String, dynamic>,
@@ -362,28 +433,24 @@ void _registerDiscussionHistoryRegressions() {
             '前端最终确认：\n1. 布局标签：simplified variant\n2. 三项默认值：全部接受'),
         isTrue);
     expect(WorkPublicUpdateStream.looksLikeNumberedList('①甲 ②乙 ③丙'), isTrue);
-    expect(
-        WorkPublicUpdateStream.looksLikeNumberedList('我认可当前方案，按钮要防重复。'),
+    expect(WorkPublicUpdateStream.looksLikeNumberedList('我认可当前方案，按钮要防重复。'),
         isFalse);
     // 单处编号只是正常引用，不构成清单体。
-    expect(
-        WorkPublicUpdateStream.looksLikeNumberedList('按第 1. 条口径执行即可。'),
+    expect(WorkPublicUpdateStream.looksLikeNumberedList('按第 1. 条口径执行即可。'),
         isFalse);
   });
 
   test('重写公开正文只换气泡文本，立场与认可字段原样保留', () {
-    final turn = WorkDiscussionV2Turn.parse(_turn('approve',
-        text: '1. 已确认范围\n2. 已确认默认值',
-        approval: {
-          'kind': 'plan',
-          'subjectId': 'task-1',
-          'approved': true,
-          'requestRevision': 1,
-          'teamRevision': 1,
-          'verificationRevision': 1
-        }))!;
-    expect(
-        WorkPublicUpdateStream.looksLikeNumberedList(turn.publicUpdateFull),
+    final turn = WorkDiscussionV2Turn.parse(
+        _turn('approve', text: '1. 已确认范围\n2. 已确认默认值', approval: {
+      'kind': 'plan',
+      'subjectId': 'task-1',
+      'approved': true,
+      'requestRevision': 1,
+      'teamRevision': 1,
+      'verificationRevision': 1
+    }))!;
+    expect(WorkPublicUpdateStream.looksLikeNumberedList(turn.publicUpdateFull),
         isTrue,
         reason: '用例前提：这条正文确实会被判成清单体');
 
@@ -410,20 +477,17 @@ void _registerDiscussionHistoryRegressions() {
     expect(rewritten.publicUpdate, contains('已截断'));
     expect(rewritten.publicUpdate.length,
         lessThanOrEqualTo(WorkPublicUpdateStream.bubbleTargetCharacters));
-    expect(rewritten.publicUpdateFull, long,
-        reason: '截的是气泡不是内容：完整正文仍交给详情附件');
+    expect(rewritten.publicUpdateFull, long, reason: '截的是气泡不是内容：完整正文仍交给详情附件');
   });
 
   test('重写结果带代码围栏时剥掉围栏，行内反引号不动', () {
     expect(WorkPublicUpdateStream.stripCodeFence('```\n我认可当前方案。\n```'),
         '我认可当前方案。');
-    expect(
-        WorkPublicUpdateStream.stripCodeFence('```text\n我认可当前方案。\n```'),
+    expect(WorkPublicUpdateStream.stripCodeFence('```text\n我认可当前方案。\n```'),
         '我认可当前方案。');
     expect(WorkPublicUpdateStream.stripCodeFence('我认可当前方案。'), '我认可当前方案。');
     // 只有开头没有结尾：仍然按围栏剥，正文不整段作废。
-    expect(WorkPublicUpdateStream.stripCodeFence('```\n我认可当前方案。'),
-        '我认可当前方案。');
+    expect(WorkPublicUpdateStream.stripCodeFence('```\n我认可当前方案。'), '我认可当前方案。');
     expect(WorkPublicUpdateStream.stripCodeFence('用 `game.html` 这个名字即可。'),
         '用 `game.html` 这个名字即可。');
   });
@@ -432,10 +496,7 @@ void _registerDiscussionHistoryRegressions() {
     var listTurnServed = false;
     await modelRunner((member, context) async {
       if (context.containsKey('rewriteTarget')) {
-        return {
-          'success': true,
-          'message': '```\n已确认范围与默认值，我认可当前方案。\n```'
-        };
+        return {'success': true, 'message': '```\n已确认范围与默认值，我认可当前方案。\n```'};
       }
       if (!listTurnServed) {
         listTurnServed = true;
@@ -446,8 +507,7 @@ void _registerDiscussionHistoryRegressions() {
 
     final published = db.messageBox.values.map((m) => m.content).toList();
     expect(published, contains('已确认范围与默认值，我认可当前方案。'));
-    expect(published.any((c) => c.contains('```')), isFalse,
-        reason: '围栏不该进气泡');
+    expect(published.any((c) => c.contains('```')), isFalse, reason: '围栏不该进气泡');
   });
 
   test('命中编号清单的公开正文被打回重写一次', () async {
@@ -456,10 +516,7 @@ void _registerDiscussionHistoryRegressions() {
     await modelRunner((member, context) async {
       if (context.containsKey('rewriteTarget')) {
         rewriteRequests++;
-        return {
-          'success': true,
-          'message': '已确认范围与默认值，我认可当前方案。'
-        };
+        return {'success': true, 'message': '已确认范围与默认值，我认可当前方案。'};
       }
       if (!listTurnServed) {
         listTurnServed = true;
@@ -526,8 +583,7 @@ void _registerDiscussionHistoryRegressions() {
     expect(turn!.publicUpdate, contains('已截断'));
     expect(turn.publicUpdate.length,
         lessThanOrEqualTo(WorkPublicUpdateStream.bubbleTargetCharacters));
-    expect(turn.publicUpdateFull, body,
-        reason: '截的是气泡不是内容：完整正文必须原样交给详情附件');
+    expect(turn.publicUpdateFull, body, reason: '截的是气泡不是内容：完整正文必须原样交给详情附件');
   });
 
   test('公开正文超出气泡上限时可见截断，协议仍按完整正文校验', () {
@@ -636,7 +692,8 @@ void _registerDiscussionHistoryRegressions() {
               'message': '模型返回了空内容'
             };
           }
-          return confirm(character,
+          return confirm(
+              character,
               jsonDecode(messages.last['content'] as String)
                   as Map<String, dynamic>);
         });
@@ -791,21 +848,20 @@ void _registerDiscussionHistoryRegressions() {
         eventStore: events,
         investigate: execution.investigate,
         completion: (
-            {required character,
-            required config,
-            required apiKey,
-            required provider,
-            required conversationId,
-            required messages,
-            required timeout,
-            cancelToken}) async =>
+                {required character,
+                required config,
+                required apiKey,
+                required provider,
+                required conversationId,
+                required messages,
+                required timeout,
+                cancelToken}) async =>
             {'success': false, 'statusCode': 400, 'message': '模型请求被上游拒绝'});
     await runner.runCollaboration(task, WorkTaskCancellation(), apply);
     final ids = _optionIds();
     expect(ids.take(2), ['retry-same-member', 'member-config-updated']);
     expect(ids, contains('fresh'));
-    expect(ids, isNot(contains('helper')),
-        reason: '与失败成员同一个模型的候选换上去也不会改变上游失败');
+    expect(ids, isNot(contains('helper')), reason: '与失败成员同一个模型的候选换上去也不会改变上游失败');
     expect(_pendingEvidence(), contains('另有 1 个候选'));
     expect(_pendingEvidence(), contains('未列出'));
   });
@@ -820,14 +876,14 @@ void _registerDiscussionHistoryRegressions() {
         eventStore: events,
         investigate: execution.investigate,
         completion: (
-            {required character,
-            required config,
-            required apiKey,
-            required provider,
-            required conversationId,
-            required messages,
-            required timeout,
-            cancelToken}) async =>
+                {required character,
+                required config,
+                required apiKey,
+                required provider,
+                required conversationId,
+                required messages,
+                required timeout,
+                cancelToken}) async =>
             {'success': false, 'statusCode': 400, 'message': '模型请求被上游拒绝'});
     await runner.runCollaboration(task, WorkTaskCancellation(), apply);
     final options = _pendingDecisions().single['options'] as List;
@@ -864,9 +920,10 @@ void _registerDiscussionHistoryRegressions() {
   });
 
   test('正文含 JSON 起点但未通过校验时诊断标明起点存在', () async {
-    await modelRunner((member, context) async =>
-        {'success': true, 'message': '{"action":"respond" 这里少了个右花括号'})
-        .runCollaboration(task, WorkTaskCancellation(), apply);
+    await modelRunner((member, context) async => {
+          'success': true,
+          'message': '{"action":"respond" 这里少了个右花括号'
+        }).runCollaboration(task, WorkTaskCancellation(), apply);
     final details = (await events.read(task.id))
         .events
         .where((e) => e.detail.contains('未符合 v2 协议'))
@@ -955,16 +1012,13 @@ void _registerDiscussionHistoryRegressions() {
     String? original;
     String? reply;
     var repaired = false;
+    final repairCalls = <({Map<String, dynamic> context, String memberId})>[];
     await modelRunner((member, context) async {
       if (context.containsKey('originalFinal')) {
-        expect(context['originalFinal'], original);
-        expect(context['protocolError'], contains('JSON 语法错误'));
-        expect(context['taskId'], task.id);
-        expect(context['memberId'], member.id);
-        expect(context['collaboration']['scope'], contains('开发游戏'));
-        expect(context['collaboration']['artifactContract'], isNotEmpty);
-        expect(context.containsKey('skills'), isFalse);
-        expect(context.containsKey('recentDiscussion'), isFalse);
+        // 断言一律留在回调之外：回调里抛出的异常会被 `_request` 的
+        // `on Object catch` 收成"成员请求失败"，断言不会报出它自己的原因
+        // （可能整条静默通过，也可能挂在与它无关的行上）。
+        repairCalls.add((context: context, memberId: member.id));
         repaired = true;
         return {'success': true, 'message': reply!};
       }
@@ -977,6 +1031,17 @@ void _registerDiscussionHistoryRegressions() {
       return result;
     }).runCollaboration(task, WorkTaskCancellation(), apply);
     expect(repaired, isTrue);
+    expect(repairCalls, isNotEmpty);
+    for (final repair in repairCalls) {
+      expect(repair.context['originalFinal'], original);
+      expect(repair.context['protocolError'], contains('JSON 语法错误'));
+      expect(repair.context['taskId'], task.id);
+      expect(repair.context['memberId'], repair.memberId);
+      expect(repair.context['collaboration']['scope'], contains('开发游戏'));
+      expect(repair.context['collaboration']['artifactContract'], isNotEmpty);
+      expect(repair.context.containsKey('skills'), isFalse);
+      expect(repair.context.containsKey('recentDiscussion'), isFalse);
+    }
     expect(
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .isPlanReady,
@@ -1003,15 +1068,24 @@ void _registerDiscussionHistoryRegressions() {
       'errors': ['保留恢复错误'],
       'artifactPaths': ['game.html'],
     });
+    Map<String, dynamic>? snapshot;
+    Map<String, dynamic>? collaboration;
     await modelRunner((member, context) async {
-      final snapshot = jsonDecode(context['currentTaskContext'] as String);
-      expect(snapshot['discussionState'], isNull);
-      expect(snapshot['errors'], contains('保留恢复错误'));
-      expect(snapshot['artifactPaths'], contains('game.html'));
-      expect(context['collaboration']['scope'], contains('开发游戏'));
-      expect(context['collaboration']['requestRevision'], isNotNull);
+      // 断言必须留在回调之外：回调里抛出的异常会被 `_request` 的
+      // `on Object catch` 收成"成员请求失败"，断言不会报出它自己的原因。
+      snapshot ??= jsonDecode(context['currentTaskContext'] as String)
+          as Map<String, dynamic>;
+      collaboration ??=
+          Map<String, dynamic>.from(context['collaboration'] as Map);
       return confirm(member, context);
     }).runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(snapshot, isNotNull);
+    expect(snapshot!['discussionState'], isNull);
+    expect(snapshot!['errors'], contains('保留恢复错误'));
+    expect(snapshot!['artifactPaths'], contains('game.html'));
+    expect(collaboration, isNotNull);
+    expect(collaboration!['scope'], contains('开发游戏'));
+    expect(collaboration!['requestRevision'], isNotNull);
     expect(
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .isPlanReady,
@@ -1019,8 +1093,15 @@ void _registerDiscussionHistoryRegressions() {
   });
 
   test('单次聚焦方案或本人认可，正文建议额度充足且不伪造硬预留', () async {
-    final stages = <String>[];
+    final contexts = <Map<String, dynamic>>[];
     await modelRunner((member, context) async {
+      // 断言必须留在回调之外：回调里抛出的异常会被 `_request` 的
+      // `on Object catch` 收成"成员请求失败"，断言不会报出它自己的原因。
+      contexts.add(context);
+      return confirm(member, context);
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(contexts, isNotEmpty);
+    for (final context in contexts) {
       final s = context['collaboration'] as Map;
       final focus = context['turnFocus'] as Map;
       final budget = context['outputGuidance'] as Map;
@@ -1030,7 +1111,6 @@ void _registerDiscussionHistoryRegressions() {
       expect(finalTarget, lessThanOrEqualTo(total));
       expect(budget['separateReasoningLimitEnforced'], isFalse);
       expect(context['userRequest'], task.userRequest);
-      stages.add(focus['stage'] as String);
       if ((s['plan'] as String).isEmpty) {
         expect(focus['stage'], 'prepareProposal');
       } else {
@@ -1040,8 +1120,11 @@ void _registerDiscussionHistoryRegressions() {
         expect(identifiers['requestRevision'], s['requestRevision']);
         expect(identifiers.containsKey('approved'), isFalse);
       }
-      return confirm(member, context);
-    }).runCollaboration(task, WorkTaskCancellation(), apply);
+    }
+    final stages = [
+      for (final context in contexts)
+        (context['turnFocus'] as Map)['stage'] as String
+    ];
     expect(stages.first, 'prepareProposal');
     expect(stages.skip(1).every((s) => s == 'reviewApproval'), isTrue);
     expect(
@@ -1053,6 +1136,7 @@ void _registerDiscussionHistoryRegressions() {
   test('聚焦提示不把未决问题转成自动认可，也不丢其它未决义务', () async {
     var introduced = false;
     var sawIssue = false;
+    final contexts = <Map<String, dynamic>>[];
     await modelRunner((member, context) async {
       if (!introduced) {
         introduced = true;
@@ -1075,15 +1159,21 @@ void _registerDiscussionHistoryRegressions() {
           }
         ]);
       }
+      // 断言必须留在回调之外：回调里抛出的异常会被 `_request` 的
+      // `on Object catch` 收成"成员请求失败"，断言不会报出它自己的原因。
+      contexts.add(context);
+      sawIssue = true;
+      return _turn('silent', text: '');
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(sawIssue, isTrue);
+    expect(contexts, isNotEmpty);
+    for (final context in contexts) {
       final focus = context['turnFocus'] as Map;
       expect(focus['stage'], 'resolveIssue');
       expect(focus['issueId'], 'first');
       expect(focus.containsKey('approvalIdentifiers'), isFalse);
       expect((context['collaboration']['issues'] as List).length, 2);
-      sawIssue = true;
-      return _turn('silent', text: '');
-    }).runCollaboration(task, WorkTaskCancellation(), apply);
-    expect(sawIssue, isTrue);
+    }
     final state =
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .collaboration!;
@@ -1106,22 +1196,29 @@ void _registerDiscussionHistoryRegressions() {
               timestamp: DateTime(2026, 1, 1).add(Duration(minutes: i))));
     }
     var seen = false;
+    final contexts = <Map<String, dynamic>>[];
     await modelRunner((member, context) async {
+      // 断言必须留在回调之外：回调里抛出的异常会被 `_request` 的
+      // `on Object catch` 收成"成员请求失败"，断言不会报出它自己的原因。
+      contexts.add(context);
+      seen = true;
+      return confirm(member, context);
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+    expect(seen, isTrue);
+    expect(contexts, isNotEmpty);
+    for (final context in contexts) {
       final previews = context['recentChatMessages'] as List;
       expect(previews.length, 6);
-      if (!seen) {
-        expect(previews.first, contains('历史预览10'));
-        expect(previews.last, contains('历史预览15'));
-      }
       expect(previews.every((text) => (text as String).length <= 600), isTrue);
       expect(
           (context['recentDiscussion'] as List).length, lessThanOrEqualTo(6));
       expect(context['userRequest'], task.userRequest);
       expect(context['collaboration']['scope'], contains('开发游戏'));
-      seen = true;
-      return confirm(member, context);
-    }).runCollaboration(task, WorkTaskCancellation(), apply);
-    expect(seen, isTrue);
+    }
+    // 首次请求（回调里 `seen` 仍为 false 的那一次）要看到窗口的开头与末尾。
+    final firstPreviews = contexts.first['recentChatMessages'] as List;
+    expect(firstPreviews.first, contains('历史预览10'));
+    expect(firstPreviews.last, contains('历史预览15'));
     expect(
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .isPlanReady,
@@ -1192,6 +1289,8 @@ void _registerDiscussionHistoryRegressions() {
   test('方案名字不能代替任务认可标识，纠正后才允许签字', () async {
     var rejected = false;
     var recovered = false;
+    String? correctionError;
+    Object? correctionApprovals;
     await modelRunner((member, context) async {
       final current =
           Map<String, dynamic>.from(context['collaboration'] as Map);
@@ -1203,13 +1302,17 @@ void _registerDiscussionHistoryRegressions() {
         });
       }
       if (rejected && !recovered) {
-        expect(context['lastValidationError'], contains('taskId'));
-        expect(current['approvals'], isEmpty);
+        // 断言必须留在回调之外：回调里抛出的异常会被 `_request` 的
+        // `on Object catch` 收成"成员请求失败"，断言不会报出它自己的原因。
+        correctionError = context['lastValidationError'] as String?;
+        correctionApprovals = current['approvals'];
         recovered = true;
       }
       return confirm(member, context);
     }).runCollaboration(task, WorkTaskCancellation(), apply);
     expect(recovered, isTrue);
+    expect(correctionError, contains('taskId'));
+    expect(correctionApprovals, isEmpty);
     final state =
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .collaboration!;
@@ -1226,6 +1329,11 @@ void _registerDiscussionHistoryRegressions() {
     task.executionStateJson = jsonEncode(root);
     var calls = 0;
     var feedbackSeen = false;
+    String? correctionMemberId;
+    String? correctionError;
+    Object? correctionLocation;
+    Object? correctionPlan;
+    Object? correctionApprovals;
     await modelRunner((member, context) async {
       calls++;
       final current =
@@ -1239,16 +1347,23 @@ void _registerDiscussionHistoryRegressions() {
         return _turn('propose', proposal: wrong);
       }
       if (calls == 2) {
-        expect(member.id, 'dev');
-        expect(context['lastValidationError'], contains('location'));
-        expect(current['artifactContract']['location'], 'game.html');
-        expect(current['plan'], isEmpty);
-        expect(current['approvals'], isEmpty);
+        // 断言必须留在回调之外：回调里抛出的异常会被 `_request` 的
+        // `on Object catch` 收成"成员请求失败"，断言不会报出它自己的原因。
+        correctionMemberId = member.id;
+        correctionError = context['lastValidationError'] as String?;
+        correctionLocation = current['artifactContract']['location'];
+        correctionPlan = current['plan'];
+        correctionApprovals = current['approvals'];
         feedbackSeen = true;
       }
       return confirm(member, context);
     }).runCollaboration(task, WorkTaskCancellation(), apply);
     expect(feedbackSeen, isTrue);
+    expect(correctionMemberId, 'dev');
+    expect(correctionError, contains('location'));
+    expect(correctionLocation, 'game.html');
+    expect(correctionPlan, isEmpty);
+    expect(correctionApprovals, isEmpty);
     final state =
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .collaboration!;
@@ -1266,9 +1381,8 @@ void _registerDiscussionHistoryRegressions() {
         WorkDiscussionState.fromExecutionState(subject.executionStateJson)
             ?.collaboration;
     if (collaboration == null) return '没有协作状态';
-    String rows(List<Map<String, dynamic>> items, List<String> keys) => items
-        .map((item) => keys.map((key) => item[key]).join('/'))
-        .join(', ');
+    String rows(List<Map<String, dynamic>> items, List<String> keys) =>
+        items.map((item) => keys.map((key) => item[key]).join('/')).join(', ');
     return [
       'phase=${collaboration.phase}',
       'projectScope=${collaboration.projectScopeId}',
@@ -1281,7 +1395,11 @@ void _registerDiscussionHistoryRegressions() {
       'team=[${rows(collaboration.team, ['memberId', 'role', 'available'])}]',
       'issues=[${rows(collaboration.issues, ['kind', 'status'])}]',
       'decisions='
-          '[${rows(collaboration.decisions, ['kind', 'status', 'answerKind'])}]',
+          '[${rows(collaboration.decisions, [
+            'kind',
+            'status',
+            'answerKind'
+          ])}]',
     ].join(' ');
   }
 
@@ -1299,6 +1417,14 @@ void _registerDiscussionHistoryRegressions() {
       var calls = 0;
       CancelToken? previous;
       final cancellation = WorkTaskCancellation();
+      // 断言必须留在回调之外：回调里抛出的异常会被 `_request` 的
+      // `on Object catch` 收成"成员请求失败"，断言不会报出它自己的原因。
+      final callRecords = <({
+        String characterId,
+        String modelName,
+        String? configuredModelName,
+        bool? previousCancelled,
+      })>[];
       final runner = WorkDiscussionRunner(
           database: db,
           credentials: _Credentials(),
@@ -1313,11 +1439,14 @@ void _registerDiscussionHistoryRegressions() {
               required timeout,
               cancelToken}) async {
             calls++;
-            if (previous != null) expect(previous!.isCancelled, true);
+            callRecords.add((
+              characterId: character.id,
+              modelName: config.modelName,
+              configuredModelName:
+                  db.apiConfigBox.get(character.apiConfigId)!.modelName,
+              previousCancelled: previous?.isCancelled,
+            ));
             previous = cancelToken;
-            if (calls <= 2) expect(character.id, 'dev');
-            expect(config.modelName,
-                db.apiConfigBox.get(character.apiConfigId)!.modelName);
             if (failure == 'cancel') cancellation.cancel();
             if (calls == 1 ||
                 failure == '401' ||
@@ -1369,6 +1498,17 @@ void _registerDiscussionHistoryRegressions() {
                           ? 2
                           : 1,
           reason: calls == 0 ? stopReason(task) : null);
+      for (final record in callRecords) {
+        expect(record.modelName, record.configuredModelName,
+            reason: '重试不能换掉成员的模型身份');
+      }
+      for (final record in callRecords.take(2)) {
+        expect(record.characterId, 'dev');
+      }
+      for (final record in callRecords.skip(1)) {
+        expect(record.previousCancelled, isTrue,
+            reason: '上一次请求的令牌必须在下次请求开始前取消，不能并行跑');
+      }
       final state =
           WorkDiscussionState.fromExecutionState(task.executionStateJson)!
               .collaboration!;
@@ -1703,8 +1843,7 @@ void _registerDiscussionHistoryRegressions() {
     final issue = state.issues.singleWhere((i) => i['id'] == 'valid-first');
     final message = db.messageBox.get(issue['evidenceRef']);
     expect(message, isNotNull);
-    expect(message!.content, original,
-        reason: '第一条问题已提交并引用这条正文，撤回第二项不能改写它');
+    expect(message!.content, original, reason: '第一条问题已提交并引用这条正文，撤回第二项不能改写它');
   });
 
   test('后续环节失败同样不改写已提交问题的证据正文', () async {
@@ -1763,22 +1902,21 @@ void _registerDiscussionHistoryRegressions() {
         eventStore: events,
         investigate: execution.investigate,
         completion: (
-            {required character,
-            required config,
-            required apiKey,
-            required provider,
-            required conversationId,
-            required messages,
-            required timeout,
-            cancelToken}) async =>
+                {required character,
+                required config,
+                required apiKey,
+                required provider,
+                required conversationId,
+                required messages,
+                required timeout,
+                cancelToken}) async =>
             {'success': false, 'statusCode': 400, 'message': '模型请求被上游拒绝'});
     await runner.runCollaboration(task, WorkTaskCancellation(), apply);
 
     final ids = _optionIds();
     expect(ids.take(2), ['retry-same-member', 'member-config-updated']);
     expect(ids, contains('z-fresh'), reason: '换成另一个模型的候选必须看得到');
-    expect(ids, isNot(contains('a0')),
-        reason: '与失败成员同一个模型的候选换上去也不会改变上游失败');
+    expect(ids, isNot(contains('a0')), reason: '与失败成员同一个模型的候选换上去也不会改变上游失败');
     expect(_pendingEvidence(), contains('另有 12 个候选'));
   });
 
@@ -1797,14 +1935,14 @@ void _registerDiscussionHistoryRegressions() {
         eventStore: events,
         investigate: execution.investigate,
         completion: (
-            {required character,
-            required config,
-            required apiKey,
-            required provider,
-            required conversationId,
-            required messages,
-            required timeout,
-            cancelToken}) async =>
+                {required character,
+                required config,
+                required apiKey,
+                required provider,
+                required conversationId,
+                required messages,
+                required timeout,
+                cancelToken}) async =>
             {'success': false, 'statusCode': 400, 'message': '模型请求被上游拒绝'});
     await runner.runCollaboration(task, WorkTaskCancellation(), apply);
 

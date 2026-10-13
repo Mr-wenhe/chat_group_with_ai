@@ -207,10 +207,13 @@ void _registerSearchCoordinatorStage05TestPart2() {
       [_failure(SearchFailureType.cancelled)],
     );
     final states = <SearchRunStatus>[];
+    var slept = false;
     final coordinator = SearchCoordinator(
       store: MemoryGovernanceStore(globalSearchPolicy: WebSearchPolicy.auto),
       routes: [SearchProviderRoute(provider: provider)],
-      sleep: (_) async => fail('cancelled search must not sleep'),
+      // `fail(...)` 不能写在回调里：重试层把这个异常收成 failure，守卫就永远
+      // 不报错（见 SearchRetryPolicy 的 try/catch）。改成记账 + 调用后断言。
+      sleep: (_) async => slept = true,
     );
 
     final snapshot = await coordinator.search(
@@ -219,6 +222,7 @@ void _registerSearchCoordinatorStage05TestPart2() {
       onStatus: (state) => states.add(state.status),
     );
 
+    expect(slept, isFalse, reason: 'cancelled search must not sleep');
     expect(snapshot?.failure?.type, SearchFailureType.cancelled);
     expect(states.last, SearchRunStatus.cancelled);
     expect(provider.searchCount, 1);

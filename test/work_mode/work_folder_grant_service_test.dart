@@ -300,19 +300,30 @@ void main() {
       writeDirectoryValidator: (_) async => true,
     );
     await service.addDirectory(root.path);
+    var pickerCalls = 0;
 
     final withoutCallback = await service.requestFolder(
-      picker: ([String? _]) async =>
-          fail('an existing grant should not reopen the picker'),
+      // 断言不能写在回调里：`requestFolder` 把 picker 包在 `on Object` 里并返回
+      // `unavailable` —— 正好是下面要断言的状态，bug 出现时用例会照常变绿。
+      picker: ([String? _]) async {
+        pickerCalls++;
+        return null;
+      },
     );
+    expect(pickerCalls, 0,
+        reason: 'an existing grant should not reopen the picker');
     expect(withoutCallback.status, WorkFolderRequestStatus.unavailable);
     expect(service.grants.single.cloudDisclosureConfirmedAt, isNull);
 
     final confirmed = await service.requestFolder(
-      picker: ([String? _]) async =>
-          fail('an existing grant should not reopen the picker'),
+      picker: ([String? _]) async {
+        pickerCalls++;
+        return null;
+      },
       consent: (_) async => true,
     );
+    expect(pickerCalls, 0,
+        reason: 'an existing grant should not reopen the picker');
     expect(confirmed.granted, isTrue);
     expect(service.grants.single.cloudDisclosureConfirmedAt, isNotNull);
   });
@@ -327,6 +338,7 @@ void main() {
       writeDirectoryValidator: (_) async => true,
     );
     await service.addDirectory(root.path);
+    var pickerCalls = 0;
     final policy = WorkspacePathPolicy(grantService: service, isWindows: false);
 
     expect(
@@ -339,10 +351,16 @@ void main() {
     );
 
     final confirmed = await service.requestFolder(
-      picker: ([String? _]) async =>
-          fail('an existing grant should not reopen the picker'),
+      // 断言不能写在回调里：`requestFolder` 把 picker 包在 `on Object` 里并返回
+      // `unavailable`，异常被吞掉后守卫就失去了作用。
+      picker: ([String? _]) async {
+        pickerCalls++;
+        return null;
+      },
       consent: (_) async => true,
     );
+    expect(pickerCalls, 0,
+        reason: 'an existing grant should not reopen the picker');
     expect(confirmed.granted, isTrue);
     expect(
       await service.isPathAuthorizedResolved('${root.path}/note.md'),

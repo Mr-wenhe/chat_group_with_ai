@@ -22,6 +22,7 @@ import 'work_agent_loop.dart';
 import 'default_work_task_runner.dart'
     show workModeRequestOutputTokens, workModeRequestInputBudget;
 import 'work_discussion_v2_protocol.dart';
+import 'work_discussion_v2_stage.dart';
 import 'work_task_execution_policy.dart';
 
 import 'package:chat_group/core/database/database_service.dart';

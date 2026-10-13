@@ -24,6 +24,7 @@ import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_discussion_v2_protocol.dart';
+import 'package:chat_group/features/work_mode/work_discussion_v2_stage.dart';
 import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -226,8 +227,8 @@ void main() {
   test('推导出来的 location 允许协调成员提案改写', () async {
     await db.agentTaskBox.put(task.id, task);
     final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
-    final collaboration =
-        root[WorkDiscussionState.jsonKey]['collaboration'] as Map<String, dynamic>;
+    final collaboration = root[WorkDiscussionState.jsonKey]['collaboration']
+        as Map<String, dynamic>;
     // 现场形态：用户给的是目录路径，合同里的 desktop 是兜底推导值。
     collaboration['scope'] = '在 /Users/fengye/Desktop/chat_group_out 这个文件夹中'
         '创建一个目录，目录中的内容生成一份 飞行棋游戏的HTML';
@@ -246,8 +247,9 @@ void main() {
       return _turn('approve', approval: approval(state));
     });
     await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
-    final after = WorkDiscussionState.fromExecutionState(task.executionStateJson)!
-        .collaboration!;
+    final after =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .collaboration!;
     expect(after.artifactContract['location'],
         '/Users/fengye/Desktop/chat_group_out/flight-chess',
         reason: task.lastError);
@@ -267,8 +269,8 @@ void main() {
   test('目录型请求的 unspecified location 由成员补齐后仍能进入方案', () async {
     await db.agentTaskBox.put(task.id, task);
     final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
-    final collaboration =
-        root[WorkDiscussionState.jsonKey]['collaboration'] as Map<String, dynamic>;
+    final collaboration = root[WorkDiscussionState.jsonKey]['collaboration']
+        as Map<String, dynamic>;
     // 目录型请求（用户给的是目录、不是文件）在词元判据之后 location 落
     // unspecified，而 planReady 要求它非 unspecified：必须由成员补齐。
     collaboration['scope'] = '在 /Users/fengye/Desktop/chat_group_out 这个文件夹中'
@@ -298,8 +300,8 @@ void main() {
   test('用户用中文说的格式仍不可覆盖', () async {
     await db.agentTaskBox.put(task.id, task);
     final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
-    final collaboration =
-        root[WorkDiscussionState.jsonKey]['collaboration'] as Map<String, dynamic>;
+    final collaboration = root[WorkDiscussionState.jsonKey]['collaboration']
+        as Map<String, dynamic>;
     // 「网页」不在 formatAliases 里，但它就是路由自己认的 html 格式词：用户
     // 用中文点名了格式，合同里的 html 属于用户声明，模型不得改写。
     collaboration['scope'] = '做一个飞行棋的网页';
@@ -308,9 +310,7 @@ void main() {
     var sawRejection = false;
     final discussion = modelRunner((member, context) async {
       sawRejection = sawRejection ||
-          context['lastValidationError']
-              .toString()
-              .contains('用户产物合同不可覆盖');
+          context['lastValidationError'].toString().contains('用户产物合同不可覆盖');
       final state = Map<String, dynamic>.from(context['collaboration'] as Map);
       if ((state['plan'] as String).isEmpty) {
         final next = proposal(state);
@@ -333,17 +333,15 @@ void main() {
   test('用户亲口说出的 location 仍不可覆盖', () async {
     await db.agentTaskBox.put(task.id, task);
     final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
-    final collaboration =
-        root[WorkDiscussionState.jsonKey]['collaboration'] as Map<String, dynamic>;
+    final collaboration = root[WorkDiscussionState.jsonKey]['collaboration']
+        as Map<String, dynamic>;
     collaboration['scope'] = '生成一份飞行棋游戏的HTML，保存到桌面';
     collaboration['artifactContract']['location'] = 'desktop';
     task.executionStateJson = jsonEncode(root);
     var sawRejection = false;
     final discussion = modelRunner((member, context) async {
       sawRejection = sawRejection ||
-          context['lastValidationError']
-              .toString()
-              .contains('用户产物合同不可覆盖');
+          context['lastValidationError'].toString().contains('用户产物合同不可覆盖');
       final state = Map<String, dynamic>.from(context['collaboration'] as Map);
       if ((state['plan'] as String).isEmpty) {
         final next = proposal(state);
@@ -356,8 +354,7 @@ void main() {
       return _turn('approve', approval: approval(state));
     });
     await discussion.runCollaboration(task, WorkTaskCancellation(), apply);
-    expect(sawRejection, isTrue,
-        reason: '用户说过"保存到桌面"，模型不得改写这个值');
+    expect(sawRejection, isTrue, reason: '用户说过"保存到桌面"，模型不得改写这个值');
     expect(
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .collaboration!
@@ -368,8 +365,8 @@ void main() {
   test('合同值不在 scope 里时判为推导值', () async {
     await db.agentTaskBox.put(task.id, task);
     final root = jsonDecode(task.executionStateJson) as Map<String, dynamic>;
-    final collaboration =
-        root[WorkDiscussionState.jsonKey]['collaboration'] as Map<String, dynamic>;
+    final collaboration = root[WorkDiscussionState.jsonKey]['collaboration']
+        as Map<String, dynamic>;
     // 与"补充要求超过 4096 字符被丢弃"、"location 已被脱敏成 [本地路径]"
     // 相同的可观测形态：合同里有一个原话从未点过的值。
     collaboration['scope'] = '生成一份飞行棋游戏的HTML';
@@ -590,6 +587,15 @@ void main() {
       var calls = 0;
       var readCount = 0;
       final identities = <String>[];
+      // 断言必须留在回调之外：回调里抛出的异常会被 `_request` 的
+      // `on Object catch` 收成"成员请求失败"，断言不会报出它自己的原因。
+      final wiring = <({
+        String characterId,
+        String configId,
+        String systemContent,
+        String personal,
+      })>[];
+      final evidenceBodies = <String>[];
       final runner = WorkDiscussionRunner(
           database: db,
           credentials: _Credentials(),
@@ -607,17 +613,12 @@ void main() {
               cancelToken}) async {
             calls++;
             identities.add(character.id);
-            expect(config.id, 'config-${character.id}');
-            expect(messages.first['content'], contains('我是${character.id}'));
-            final personal = messages[1]['content'] as String;
-            expect(personal, contains('稳定偏好_${character.id}'));
-            expect(
-                personal,
-                isNot(
-                    contains('稳定偏好_${character.id == 'dev' ? 'qa' : 'dev'}')));
-            expect(personal, contains(character.id == 'dev' ? '直接' : '谨慎'));
-            expect(personal,
-                contains(character.id == 'dev' ? '最近情绪warm' : '最近情绪neutral'));
+            wiring.add((
+              characterId: character.id,
+              configId: config.id,
+              systemContent: messages.first['content'] as String,
+              personal: messages[1]['content'] as String,
+            ));
             final context = jsonDecode(messages.last['content'] as String)
                 as Map<String, dynamic>;
             final s =
@@ -645,8 +646,7 @@ void main() {
             }
             if ((s['issues'] as List).any((i) => i['status'] == 'open')) {
               final receipts = context['evidence'] as Map;
-              expect(jsonEncode(receipts.values.last),
-                  contains('diceGuard${reads - 1}'));
+              evidenceBodies.add(jsonEncode(receipts.values.last));
               return _turn('propose',
                   text: '源码声明了移动锁；按这个机制制定实现和验收。',
                   resolutions: [
@@ -672,6 +672,21 @@ void main() {
       expect(state.isExecutionReady, isFalse);
       expect(state.collaboration!.activeMembers.toSet(), {'dev', 'qa'});
       expect(identities, containsAll(['dev', 'qa']));
+      expect(wiring, isNotEmpty);
+      for (final call in wiring) {
+        final id = call.characterId;
+        expect(call.configId, 'config-$id');
+        expect(call.systemContent, contains('我是$id'));
+        expect(call.personal, contains('稳定偏好_$id'));
+        expect(call.personal,
+            isNot(contains('稳定偏好_${id == 'dev' ? 'qa' : 'dev'}')));
+        expect(call.personal, contains(id == 'dev' ? '直接' : '谨慎'));
+        expect(
+            call.personal, contains(id == 'dev' ? '最近情绪warm' : '最近情绪neutral'));
+      }
+      for (final body in evidenceBodies) {
+        expect(body, contains('diceGuard${reads - 1}'));
+      }
       expect(identities, isNot(contains('extra')));
       expect(readCount, reads);
       final methods = db.permanentMemoryBox.values
@@ -823,8 +838,7 @@ void main() {
     expect(
         WorkRoleRouter.requestsSoftwareImplementation('编写开发游戏的需求文档'), isFalse);
     // 「生成/创建」是与「制作」等价的实现动词，漏掉它们会让整类请求丢掉测试阶段。
-    expect(
-        WorkRoleRouter.requestsSoftwareImplementation('生成一份 飞行棋游戏的HTML'),
+    expect(WorkRoleRouter.requestsSoftwareImplementation('生成一份 飞行棋游戏的HTML'),
         isTrue);
     expect(
         WorkRoleRouter.requestsSoftwareImplementation(
@@ -1054,14 +1068,16 @@ void main() {
         }
       }
       var calls = 0;
-      final gateway = AiRequestGateway(
-          store: governance,
-          client: _ModelClient((context, model) async {
-            calls++;
-            expect(context['userRequest'], task.userRequest);
-            return confirm(
-                db.aiCharacterBox.get(context['memberId'])!, context);
-          }));
+      final userRequests = <({Object? actual, Object? expected})>[];
+      final client = _ModelClient((context, model) async {
+        calls++;
+        // 断言必须留在回调之外：讨论 runner 的 `_request` 用 `on Object catch`
+        // 把回调异常收成"成员请求失败"，断言不会报出它自己的原因。
+        userRequests
+            .add((actual: context['userRequest'], expected: task.userRequest));
+        return confirm(db.aiCharacterBox.get(context['memberId'])!, context);
+      });
+      final gateway = AiRequestGateway(store: governance, client: client);
       await WorkDiscussionRunner(
               database: db,
               credentials: _Credentials(),
@@ -1074,6 +1090,11 @@ void main() {
       expect(result.isPlanReady, !smallWindow);
       expect(result.collaboration!.hasPendingDecision, smallWindow);
       expect(calls, smallWindow ? 0 : greaterThanOrEqualTo(3));
+      expect(client.contractViolations, isEmpty,
+          reason: '经治理网关发出的请求必须带上测试凭据与声明的输出预算');
+      for (final request in userRequests) {
+        expect(request.actual, request.expected);
+      }
     });
   }
   for (final budget in [2048, 16384, 65536]) {
@@ -1087,13 +1108,11 @@ void main() {
             CustomModelCapability(contextWindow: 262144, maxOutput: budget));
       }
       var calls = 0;
-      final gateway = AiRequestGateway(
-          store: governance,
-          client: _ModelClient((context, model) async {
-            calls++;
-            return confirm(
-                db.aiCharacterBox.get(context['memberId'])!, context);
-          }, expectedMaxTokens: budget));
+      final client = _ModelClient((context, model) async {
+        calls++;
+        return confirm(db.aiCharacterBox.get(context['memberId'])!, context);
+      }, expectedMaxTokens: budget);
+      final gateway = AiRequestGateway(store: governance, client: client);
       await WorkDiscussionRunner(
               database: db,
               credentials: _Credentials(),
@@ -1102,6 +1121,8 @@ void main() {
               investigate: execution.investigate)
           .runCollaboration(task, WorkTaskCancellation(), apply);
       expect(calls, greaterThanOrEqualTo(3));
+      expect(client.contractViolations, isEmpty,
+          reason: '讨论请求必须按模型能力声明发出 maxTokens');
       expect(
           WorkDiscussionState.fromExecutionState(task.executionStateJson)!
               .isPlanReady,
@@ -1111,12 +1132,11 @@ void main() {
   test('生产 gateway 实际接收不同角色自己的模型配置', () async {
     final seen = <String, String>{};
     final governance = MemoryGovernanceStore();
-    final gateway = AiRequestGateway(
-        store: governance,
-        client: _ModelClient((c, model) async {
-          seen[c['memberId'] as String] = model;
-          return confirm(db.aiCharacterBox.get(c['memberId'])!, c);
-        }));
+    final client = _ModelClient((c, model) async {
+      seen[c['memberId'] as String] = model;
+      return confirm(db.aiCharacterBox.get(c['memberId'])!, c);
+    });
+    final gateway = AiRequestGateway(store: governance, client: client);
     final runner = WorkDiscussionRunner(
         database: db,
         credentials: _Credentials(),
@@ -1125,6 +1145,7 @@ void main() {
         investigate: execution.investigate);
     await runner.runCollaboration(task, WorkTaskCancellation(), apply);
     expect(seen, {'dev': 'deepseek-chat', 'qa': 'deepseek-reasoner'});
+    expect(client.contractViolations, isEmpty);
     expect(
         WorkDiscussionState.fromExecutionState(task.executionStateJson)!
             .isPlanReady,
@@ -1135,40 +1156,43 @@ void main() {
     final models = <String, String>{};
     var stage = 0;
     final longText = '需要说明这个边界：${'必要证据解释。' * 400}';
-    final gateway = AiRequestGateway(
-        store: MemoryGovernanceStore(),
-        client: _ModelClient((c, model) async {
-          models[c['memberId'] as String] = model;
-          final s = Map<String, dynamic>.from(c['collaboration'] as Map);
-          if (stage++ == 0) {
-            return _turn('respond', text: longText, issues: [
-              for (var i = 0; i < 3; i++)
-                {
-                  'id': 'question$i',
-                  'kind': 'decision',
-                  'target': 'general',
-                  'problem': '需要确认规则 $i',
-                  'evidenceRef': '',
-                  'retestCondition': '用户明确选择规则 $i'
-                }
-            ]);
-          }
-          final turn = _turn('silent', text: '');
-          final body =
-              jsonDecode(turn['message'] as String) as Map<String, dynamic>;
-          body['action'] = 'decide';
-          body['public_update'] = '这三项玩法规则需要你确认，问题详情已完整保存。';
-          body['decision'] = {
-            'kind': 'question',
-            'targetId': 'question0',
-            'reason': '三个玩法规则尚未确定',
-            'evidence': '成员收集了全部三个问题',
-            'impact': '等待确认后再收敛方案',
-            'options': <Map<String, dynamic>>[]
-          };
-          expect((s['issues'] as List).length, 3);
-          return {'success': true, 'message': jsonEncode(body)};
-        }));
+    final issueCounts = <int>[];
+    final client = _ModelClient((c, model) async {
+      models[c['memberId'] as String] = model;
+      final s = Map<String, dynamic>.from(c['collaboration'] as Map);
+      if (stage++ == 0) {
+        return _turn('respond', text: longText, issues: [
+          for (var i = 0; i < 3; i++)
+            {
+              'id': 'question$i',
+              'kind': 'decision',
+              'target': 'general',
+              'problem': '需要确认规则 $i',
+              'evidenceRef': '',
+              'retestCondition': '用户明确选择规则 $i'
+            }
+        ]);
+      }
+      final turn = _turn('silent', text: '');
+      final body =
+          jsonDecode(turn['message'] as String) as Map<String, dynamic>;
+      body['action'] = 'decide';
+      body['public_update'] = '这三项玩法规则需要你确认，问题详情已完整保存。';
+      body['decision'] = {
+        'kind': 'question',
+        'targetId': 'question0',
+        'reason': '三个玩法规则尚未确定',
+        'evidence': '成员收集了全部三个问题',
+        'impact': '等待确认后再收敛方案',
+        'options': <Map<String, dynamic>>[]
+      };
+      // 断言必须留在回调之外：讨论 runner 的 `_request` 用 `on Object catch`
+      // 把回调异常收成"成员请求失败"，断言不会报出它自己的原因。
+      issueCounts.add((s['issues'] as List).length);
+      return {'success': true, 'message': jsonEncode(body)};
+    });
+    final gateway =
+        AiRequestGateway(store: MemoryGovernanceStore(), client: client);
     final discussion = WorkDiscussionRunner(
         database: db,
         credentials: _Credentials(),
@@ -1192,6 +1216,10 @@ void main() {
         .singleWhere((a) => a.fileName == '完整公开正文.json');
     expect(await File(detail.localPath).readAsString(), contains(longText));
     expect(models['dev'], 'deepseek-chat');
+    expect(client.contractViolations, isEmpty);
+    expect(issueCounts, isNotEmpty);
+    expect(issueCounts.every((count) => count == 3), isTrue,
+        reason: '每个成员都要看到全部三个未决问题');
   });
   test('旧回复、他人签字、100% 和错误提案均不形成协议', () {
     expect(
