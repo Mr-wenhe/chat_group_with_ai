@@ -239,11 +239,16 @@ extension _V2DiscussionActions on _V2DiscussionSession {
     if (member.id != state.coordinatorId) throw StateError('仅协调成员收敛方案');
     _validateProposal(proposal);
     _validateContract(proposal);
+    lastProposalNoOpHint = '';
     final idea = state.issues
         .where((i) =>
             i['id'] == issueId && i['kind'] == 'idea' && i['status'] == 'open')
         .firstOrNull;
-    if (idea == null && _proposalUnchanged(proposal)) return;
+    if (idea == null && _proposalUnchanged(proposal)) {
+      // 与当前状态一致的提案不写任何增量，但仍要留下可操作提示，否则成员只会重复重提。
+      lastProposalNoOpHint = _proposalStallHint();
+      return;
+    }
     final acceptanceChanged = state.plan.isNotEmpty &&
             state.acceptances.isNotEmpty &&
             jsonEncode([
@@ -260,7 +265,11 @@ extension _V2DiscussionActions on _V2DiscussionSession {
                 jsonEncode((proposal['artifactContract']
                     as Map)['verificationCommands']);
     if (proposal['scope'] != state.scope || idea != null || acceptanceChanged) {
-      if (idea == null) throw StateError('新增范围或验收修改必须关联完整提案并逐人确认');
+      if (idea == null) {
+        throw StateError('新增范围或验收修改必须先登记一条 open 的 kind=idea 问题来承载它，'
+            '并在 proposal.issue_id 指向该问题，再由全体成员逐人确认；'
+            '只登记 defect 或不填 issue_id 不会被采纳');
+      }
       await _recordScopeProposal(proposal, responseRef, idea);
     } else {
       await _detail(proposal, responseRef);
@@ -733,6 +742,57 @@ extension _V2DiscussionActions on _V2DiscussionSession {
           }
       ]
     });
+  }
+
+  /// 未变化的提案被静默丢弃时，给协调成员一份可操作的缺口清单。
+  ///
+  /// 复制 [WorkCollaborationState.planReady] 的判据会随门禁漂移，这里只挑出最常卡住
+  /// 成员的几项（交付合同三元组、验收方式、未决问题），措辞保持"缺什么补什么"。
+  String _proposalStallHint() {
+    final blockers = _planReadyBlockers();
+    if (blockers.isEmpty) {
+      return '你提交的提案与当前讨论状态完全一致，没有带来任何新进展；'
+          '请确认是否已可进入制作阶段，或直接处理未决事项。';
+    }
+    return '你提交的提案与当前讨论状态完全一致，没有带来任何新进展。'
+        '进入制作还缺少：${blockers.join('、')}。请在提案中补齐后再提交。';
+  }
+
+  /// 方案已全员认可、却因合同字段不齐而反复重发同一份认可时，回灌给成员的缺口清单。
+  ///
+  /// 与 [_proposalStallHint] 共享 [_planReadyBlockers]，但措辞指向"补齐合同字段"：
+  /// 此时范围与验收已经确认，缺的是进入制作的交付合同三元组，且这些字段（如
+  /// location）本就允许直接改写，无需登记 idea 问题。没有这条回馈，重复的认可会被
+  /// [WorkCollaborationState] 静默吞掉，成员只能一遍遍重发同一句话。
+  String _approvalStallHint() {
+    final blockers = _planReadyBlockers();
+    if (blockers.isEmpty) {
+      return '本轮认可与已有记录完全相同，没有带来新的进展；请确认是否还有未决事项需要处理。';
+    }
+    return '本轮认可与已有记录完全相同，没有带来新的进展。方案认可已齐备，'
+        '但进入制作还缺少：${blockers.join('、')}。'
+        '请协调成员用一次 propose 补齐这些字段（为空或 unspecified 的合同字段可直接改写，'
+        '不涉及范围与验收变更，无需登记 idea 问题），随后即可进入制作。';
+  }
+
+  /// 进入制作前仍缺失的门禁项，供各类"没有进展"提示共用。
+  List<String> _planReadyBlockers() {
+    final blockers = <String>[];
+    for (final key in const ['type', 'format', 'location']) {
+      final value = state.artifactContract[key]?.toString().trim() ?? '';
+      if (value.isEmpty || value == 'unspecified') {
+        blockers.add('artifactContract.$key');
+      }
+    }
+    if (state.acceptances.isEmpty) {
+      blockers.add('acceptances');
+    } else if (state.acceptances.any((a) =>
+        a['method'].toString().trim().isEmpty ||
+        a['requiredCapability'].toString().trim().isEmpty)) {
+      blockers.add('acceptances 的 method/requiredCapability');
+    }
+    if (!state.issuesResolved) blockers.add('未解决的问题');
+    return blockers;
   }
 
   Future<void> _detail(Map<String, dynamic> proposal, String responseRef) =>

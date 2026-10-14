@@ -94,7 +94,7 @@ class WorkDiscussionV2Turn {
   /// The object still goes through the exact same schema validation below, and
   /// any non-whitespace text after it remains invalid.
   static Object? _decodeResponseObject(String raw) {
-    if (raw.trimLeft().startsWith('{')) return jsonDecode(raw);
+    if (raw.trimLeft().startsWith('{')) return _decodeObjectText(raw);
 
     // Bound candidate starts so malformed output cannot cause quadratic scans.
     const maxPrefaceCharacters = 256;
@@ -132,7 +132,7 @@ class WorkDiscussionV2Turn {
       }
       if (end < 0 || raw.substring(end + 1).trim().isNotEmpty) continue;
       try {
-        final decoded = jsonDecode(raw.substring(start, end + 1));
+        final decoded = _decodeObjectText(raw.substring(start, end + 1));
         if (decoded is Map) return decoded;
       } on FormatException {
         // A brace in the preface may not begin the protocol object. Keep
@@ -141,7 +141,75 @@ class WorkDiscussionV2Turn {
     }
 
     // Preserve the parser's normal syntax diagnostic for malformed output.
-    return jsonDecode(raw);
+    return _decodeObjectText(raw);
+  }
+
+  /// Decode JSON text, repairing stray unescaped quotes inside string values.
+  ///
+  /// 模型偶尔会在字符串值里写半角 `"`（例如引用用户原话），使 JSON 在服务端
+  /// 边界就语法错误。严格解码失败时只转义这些游离引号再重试一次；若仍失败就
+  /// 抛出原始 `FormatException`，让调用方保留既有的“畸形响应”诊断。
+  static Object? _decodeObjectText(String text) {
+    try {
+      return jsonDecode(text);
+    } on FormatException {
+      final repaired = _escapeStrayQuotes(text);
+      if (repaired == null) rethrow;
+      return jsonDecode(repaired);
+    }
+  }
+
+  /// 转义“落在字符串值内部、却不闭合字符串”的引号。
+  ///
+  /// 合法 JSON 里字符串的闭合引号后面（跳过空白）只可能是 `, : } ]`；否则该引号
+  /// 属于正文，应转义。没有可修复内容时返回 `null`，让调用方沿用严格解码的报错。
+  static String? _escapeStrayQuotes(String raw) {
+    final out = StringBuffer();
+    var inString = false;
+    var escaped = false;
+    var changed = false;
+    for (var i = 0; i < raw.length; i++) {
+      final ch = raw[i];
+      if (!inString) {
+        if (ch == '"') inString = true;
+        out.write(ch);
+        continue;
+      }
+      if (escaped) {
+        escaped = false;
+        out.write(ch);
+        continue;
+      }
+      if (ch == r'\') {
+        escaped = true;
+        out.write(ch);
+        continue;
+      }
+      if (ch != '"') {
+        out.write(ch);
+        continue;
+      }
+      if (_quoteClosesString(raw, i)) {
+        inString = false;
+        out.write(ch);
+      } else {
+        out.write(r'\"');
+        changed = true;
+      }
+    }
+    return changed ? out.toString() : null;
+  }
+
+  /// 引号 [index] 是否闭合当前字符串：其后第一个非空白字符须为 `, : } ]`。
+  static bool _quoteClosesString(String raw, int index) {
+    for (var j = index + 1; j < raw.length; j++) {
+      final unit = raw.codeUnitAt(j);
+      if (unit == 0x20 || unit == 0x09 || unit == 0x0a || unit == 0x0d) {
+        continue;
+      }
+      return unit == 0x2c || unit == 0x3a || unit == 0x7d || unit == 0x5d;
+    }
+    return true;
   }
 
   /// 按阶段取协议尾部：认可合同只在认可轮出现。

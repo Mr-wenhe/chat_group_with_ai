@@ -13,7 +13,29 @@ class _V2DiscussionSession {
   String? previousSpeaker;
   int calls = 0;
   String lastValidationError = '';
+
+  /// 成员提交了与当前状态**完全一致**的增量（提案或认可，没带来任何变化）。
+  ///
+  /// 这不是协议/校验错误，所以不抛异常、不计失败，只留一条可操作提示，随下一次请求
+  /// 回灌给成员——否则未变化的提交会被静默丢弃，成员只能反复重提同一份，无进展
+  /// 计数一路加到停滞阈值（见 [_proposalUnchanged] 与 [_approvalStallHint]）。
+  String lastProposalNoOpHint = '';
   _V2DiscussionSession(this.runner, this.task, this.cancellation, this.apply);
+
+  /// 同一成员连续（跨轮）产出不可解析 v2 正文的次数；一旦产出可解析正文即清零。
+  ///
+  /// 与通用无进展守卫（同一失败连续 3 次才停）分开：协议失败是能力不匹配而非偶发，
+  /// 用户要的是尽早拿到"换模型/换人"的出路，而不是被无产出地重试到停滞。
+  final Map<String, int> _protocolFailures = {};
+
+  /// 连续协议失败触发快速收口的门槛。
+  static const int protocolFailureFastStopLimit = 2;
+
+  /// 本次 `_request` 是否因"正文始终不符合 v2 协议"而放弃。
+  ///
+  /// 与超时、传输失败、上下文超窗或取消区分开：只有它能触发快速收口，其余 null
+  /// 仍走各自的处理路径（各自已弹决策或交由守卫记账）。
+  bool _turnEndedByProtocolFailure = false;
   WorkCollaborationState get state =>
       WorkDiscussionState.fromExecutionState(task.executionStateJson)!
           .collaboration!;
@@ -138,8 +160,14 @@ class _V2DiscussionSession {
     calls++;
     task.actionCount++;
     if (turn == null) {
+      if (_turnEndedByProtocolFailure) {
+        return await _onProtocolFailure(member);
+      }
       return await _observe(false, 'protocol:$memberId', failure: true);
     }
+    // 本轮产出了可解析正文即视为讨论在推进：清空所有成员的连续协议失败计数，
+    // 否则中间有人成功产出后，旧计数会被误算成"连续"。
+    _protocolFailures.clear();
     if (!await _checkTeam()) return true;
     final oldFacts = _factsFingerprint();
     if (!await _consumeTurn(member.character, turn, memberId)) {
@@ -157,6 +185,23 @@ class _V2DiscussionSession {
       return true;
     }
     return false;
+  }
+
+  /// 成员本轮没有产出可解析的 v2 正文。
+  ///
+  /// 第一次失败仍交给通用无进展守卫记账（给一次自愈机会）；同一成员连续
+  /// [protocolFailureFastStopLimit] 轮失败即快速收口，弹出一条可执行的成员决策，
+  /// 避免用户在被无产出地反复重试后只看到一句"请补充处理条件"。
+  Future<bool> _onProtocolFailure(_DiscussionMember member) async {
+    final memberId = member.character.id;
+    final count = (_protocolFailures[memberId] ?? 0) + 1;
+    if (count < protocolFailureFastStopLimit) {
+      _protocolFailures[memberId] = count;
+      return await _observe(false, 'protocol:$memberId', failure: true);
+    }
+    _protocolFailures.remove(memberId);
+    await _protocolFailureDecision(member);
+    return true;
   }
 
   Future<bool> _consumeTurn(
@@ -461,7 +506,9 @@ class _V2DiscussionSession {
                 .fromTask(task)
                 .copyWith(clearDiscussionState: true)
                 .toJsonString(),
-        'lastValidationError': lastValidationError,
+        'lastValidationError': lastValidationError.isEmpty
+            ? lastProposalNoOpHint
+            : lastValidationError,
         'turnFocus': turnFocus,
         'outputGuidance': _outputGuidance(member),
         'collaboration': state.toPromptJson(),
