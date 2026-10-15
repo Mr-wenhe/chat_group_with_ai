@@ -7,6 +7,7 @@ import 'package:chat_group/core/models/character_presets.dart';
 import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/features/ai_character/action_skill_count.dart';
 import 'package:chat_group/features/direct_chat/pinned_ordering.dart';
+import 'package:chat_group/features/settings/api_key_settings_page.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
@@ -226,8 +227,14 @@ class _AICharacterListPageState extends ConsumerState<AICharacterListPage> {
             ],
           ),
           const SizedBox(height: 10),
+          // 直接进「API KEY 设置」而不是笼统的设置页：那里才是配 Key 的地方，
+          // 顶部「批量配置」就是导入 / 导出 API KEY——想一次配齐四类服务的人
+          // 不必先在里面找入口。
           _setupStep(cs, hasConfig, '创建 API 配置', () {
-            Navigator.pushNamed(context, '/settings');
+            Navigator.push(
+              context,
+              MaterialPageRoute(builder: (_) => const ApiKeySettingsPage()),
+            );
           }),
           _setupStep(
               cs, hasCharacter, '创建 AI 角色', () => _addCharacter(context)),

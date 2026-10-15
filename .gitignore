@@ -105,3 +105,6 @@ scripts/*
 !scripts/package_macos_dmg.sh
 # 仓库工具（非 QA）：pre-commit 钩子调用它把 pubspec.lock 的镜像地址归一化
 !scripts/normalize_pubspec_lock.sh
+# 授权码生成工具：属于对外交付物，docs/api_bundle_format.md 引用了它，
+# 不白名单的话别人拿到的仓库里没有这个脚本、照着文档跑会找不到文件。
+!scripts/generate_api_bundle.dart

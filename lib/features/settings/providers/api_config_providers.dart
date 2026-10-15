@@ -21,6 +21,13 @@ class ApiConfigsNotifier extends StateNotifier<List<ApiConfig>> {
     state = _db.apiConfigBox.values.toList();
   }
 
+  /// 外部**直接写 `apiConfigBox`** 之后必须调一次。
+  ///
+  /// 这个 notifier 只在构造时读一次，之后只有它自己的三个写方法会刷新。谁绕开
+  /// 它去写 Hive（授权码导入就是这么做的），就必须自己补这一下——否则页面拿到的
+  /// 是写入前的旧列表，"配置明明在、界面却显示未配置"。
+  void reload() => _loadConfigs();
+
   Future<void> addConfig(ApiConfig config) async {
     await _db.saveApiConfig(config);
     _loadConfigs();
