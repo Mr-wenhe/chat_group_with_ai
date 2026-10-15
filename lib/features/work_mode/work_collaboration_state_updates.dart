@@ -9,8 +9,15 @@ extension _WorkCollaborationUpdates on WorkCollaborationState {
     _validateRevision(update);
     _validateBaselineChanges(update.next);
     _validateOrigin(update);
+    if (nextPolicyChanged(update.next) &&
+        !{'autonomy', 'participation'}.contains(update.sourceRole)) {
+      throw StateError('自主策略只能由应用在重新确认任务时建立。');
+    }
     return update.next;
   }
+
+  bool nextPolicyChanged(WorkCollaborationState next) =>
+      _changed(autonomyPolicy, next.autonomyPolicy);
 
   void _validateRevision(WorkCollaborationUpdate update) {
     final next = update.next;
@@ -41,6 +48,7 @@ extension _WorkCollaborationUpdates on WorkCollaborationState {
 
   void _validateBaselineChanges(WorkCollaborationState next) {
     if ((_changed(scope, next.scope) ||
+            _changed(usageAssignments, next.usageAssignments) ||
             _changed([
               for (final a in acceptances)
                 {
@@ -105,6 +113,14 @@ extension _WorkCollaborationUpdates on WorkCollaborationState {
 
   void _validateOrigin(WorkCollaborationUpdate update) {
     switch (update.sourceRole) {
+      case 'participation':
+        return _validateParticipation(update.next, update);
+      case 'autonomy':
+        return _validateAutonomy(update.next, update);
+      case 'usage':
+        return _validateUsage(update.next, update);
+      case 'coordinatorRuling':
+        return _validateRuling(update.next, update);
       case 'projectBinding':
         return _validateProjectBinding(update.next, update);
       case 'member':
@@ -178,6 +194,11 @@ extension _WorkCollaborationUpdates on WorkCollaborationState {
         next.issues.last['status'] == 'open' &&
         next.verificationRevision == verificationRevision + 1;
     if (approvalAdded) {
+      if (isAutonomous &&
+          next.approvals.last['kind'] == 'delivery' &&
+          currentUsageFor(update.sourceId) == null) {
+        throw StateError('交付签字需要本人当前计划及候选的使用证据。');
+      }
       if (!_sameExcept(next, {'approvals'})) {
         throw StateError('成员认可不能改写其他状态。');
       }
@@ -244,6 +265,7 @@ extension _WorkCollaborationUpdates on WorkCollaborationState {
         !_sameExcept(next, {
           'scope',
           'plan',
+          'usageAssignments',
           'phase',
           'artifactContract',
           'workItems',

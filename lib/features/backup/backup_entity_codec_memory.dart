@@ -288,8 +288,7 @@ class _BackupEntityMemoryCodec {
         'domain': item.domain,
         'description': item.description,
         'instructions': item.instructions,
-        'requiredPermissions':
-            item.requiredPermissions.map((item) => item.name).toList(),
+        if (item.resourcePackId != null) 'resourcePackId': item.resourcePackId,
         'createdAt': _date(item.createdAt),
         'updatedAt': _date(item.updatedAt),
       };
@@ -302,8 +301,8 @@ class _BackupEntityMemoryCodec {
         domain: _string(json, 'domain'),
         description: _string(json, 'description'),
         instructions: _strings(json['instructions']),
-        requiredPermissions:
-            _enums(json['requiredPermissions'], ToolPermission.values),
+        requiredPermissions: const [],
+        resourcePackId: json['resourcePackId']?.toString(),
         createdAt: _dateTime(json, 'createdAt'),
         updatedAt: _dateTime(json, 'updatedAt'),
       );
@@ -314,8 +313,6 @@ class _BackupEntityMemoryCodec {
         'characterId': item.characterId,
         'userRequest': _safeTaskText(item.userRequest),
         'status': item.status.name,
-        'requestedPermissions':
-            item.requestedPermissions.map((item) => item.name).toList(),
         'plan': _safeTaskText(item.plan),
         'resultSummary': _safeTaskText(item.resultSummary),
         'createdAt': _date(item.createdAt),
@@ -380,8 +377,7 @@ class _BackupEntityMemoryCodec {
       // A future/unknown status must never be treated as completed or as a
       // runnable checkpoint. Interrupted is the fail-closed recovery state.
       status: status,
-      requestedPermissions:
-          _enums(json['requestedPermissions'], ToolPermission.values),
+      requestedPermissions: const [],
       plan: _safeTaskText(json['plan']?.toString() ?? ''),
       resultSummary: _safeTaskText(json['resultSummary']?.toString() ?? ''),
       createdAt: _dateTime(json, 'createdAt'),
@@ -844,6 +840,11 @@ Object? _portableCollaborationValue(Object? value, {String? key}) {
       'resolutionId',
       'sourceMessageId',
       'artifactDigest',
+      'planDigest',
+      'scenarioId',
+      'participantIds',
+      'opinionEventIds',
+      'feedbackRef',
       'pendingInputIds',
       'dependencyIds',
       'acceptanceIds',
@@ -1048,18 +1049,6 @@ CharacterGender? _decodeGender(Object? raw) {
     if (gender.name == raw) return gender;
   }
   return null;
-}
-
-List<T> _enums<T extends Enum>(Object? value, List<T> values) {
-  final strings = _strings(value);
-  if (strings.isEmpty || values.isEmpty) return const [];
-  return strings.map((name) {
-    final found = values.where((item) => item.name == name);
-    if (found.isEmpty) {
-      throw FormatException('枚举值 "$name" 不在已知枚举 $values 中');
-    }
-    return found.first;
-  }).toList();
 }
 
 String _publicUrl(String value) {

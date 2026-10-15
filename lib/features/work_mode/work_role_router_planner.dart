@@ -256,6 +256,9 @@ String _profile(AICharacter character, List<CharacterSkill> skills) {
   final selectedSkills = skills.where(
     (skill) =>
         !skill.isGlobal &&
+        character.skillIds.contains(skill.id) &&
+        (skill.resourcePackId == null ||
+            character.skillIds.contains(skill.id)) &&
         (skill.characterId == character.id ||
             character.skillIds.contains(skill.id)),
   );

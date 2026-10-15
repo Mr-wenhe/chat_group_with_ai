@@ -9,6 +9,7 @@ import 'package:chat_group/features/web_search/application/search_cache_controll
 import 'package:chat_group/features/web_search/presentation/web_search_audit_card.dart';
 import 'package:chat_group/features/web_search/presentation/web_search_runtime_settings_card.dart';
 import 'package:chat_group/features/settings/search_credential_settings_page.dart';
+import 'package:chat_group/features/settings/ai_governance_diagnostics_text.dart';
 import 'package:chat_group/features/settings/widgets/model_capability_fields.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/foundation.dart';
@@ -326,6 +327,7 @@ class _AiGovernancePageState extends ConsumerState<AiGovernancePage> {
     switch (modelCapabilityPersistAction(
       restoreBuiltin: result.restoreBuiltin,
       declared: result.capability,
+      stored: current,
       registry: _registry,
       provider: provider,
       modelId: model,

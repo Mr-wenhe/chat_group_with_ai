@@ -8,6 +8,7 @@ import 'backup_entity_codec.dart';
 import 'backup_models.dart';
 import 'backup_setting_keys.dart';
 import 'package:chat_group/features/chat_group/group_mute_store.dart';
+import 'package:chat_group/features/agentic/skill_resource_pack.dart';
 
 part 'staged_backup_data_json_guard.dart';
 part 'staged_backup_data_validation.dart';
@@ -40,6 +41,7 @@ class StagedBackupData {
   final List<Map<String, dynamic>> characterMemories;
   final List<Map<String, dynamic>> relationships;
   final List<Map<String, dynamic>> skills;
+  final List<Map<String, dynamic>> skillResourcePacks;
   final List<Map<String, dynamic>> tasks;
   final List<Map<String, dynamic>> workspaces;
   final List<Map<String, dynamic>> userProfiles;
@@ -56,6 +58,7 @@ class StagedBackupData {
     required this.characterMemories,
     required this.relationships,
     required this.skills,
+    required this.skillResourcePacks,
     required this.tasks,
     required this.workspaces,
     required this.userProfiles,
@@ -81,6 +84,8 @@ class StagedBackupData {
           await _records(staging, 'data/character_memories.json'),
       relationships: await _optionalRecords(staging, 'data/relationships.json'),
       skills: await _records(staging, 'data/skills.json'),
+      skillResourcePacks:
+          await _optionalRecords(staging, 'data/skill_resource_packs.json'),
       tasks: await _records(staging, 'data/agent_tasks.json'),
       workspaces: await _records(staging, 'data/work_mode.json'),
       userProfiles: manifest.includesGlobalData

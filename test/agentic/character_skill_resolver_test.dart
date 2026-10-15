@@ -50,6 +50,30 @@ void main() {
     expect(bundle.permissions, contains(ToolPermission.skillDownload));
   });
 
+  test('通用技能管理器不会把缺少内置模板当作创建技能的理由', () {
+    final character = AICharacter(
+      name: '通用助理',
+      avatar: '🤖',
+      age: 25,
+      role: '助理',
+      personalityTags: const [],
+      systemPrompt: '帮助用户完成任务。',
+      apiKey: 'k',
+      apiProvider: 'deepseek',
+    );
+
+    final manager = CharacterSkillResolver.defaultsFor(character).skills.first;
+    final instructions = manager.instructions.join('\n');
+
+    expect(instructions, contains('用户指定来源时优先检查'));
+    expect(instructions, contains('固定 commit'));
+    expect(instructions, contains('不要编造来源链接'));
+    expect(instructions, contains('网络、权限、SDK 或依赖失败不是创建理由'));
+    expect(instructions, contains('实际跑通并复测'));
+    expect(instructions,
+        isNot(contains('If no template fits, request skill.create')));
+  });
+
   test('联合用户意图和角色职业选择最匹配技能', () {
     final character = AICharacter(
       name: '架构师',
@@ -75,7 +99,7 @@ void main() {
     expect(bundle.permissions, contains(ToolPermission.workspacePatch));
   });
 
-  test('无匹配技能时建议创建并自动补充 skillCreate 权限', () {
+  test('无匹配技能时不把缺少模板推断为创建意图', () {
     final character = AICharacter(
       name: '小林',
       avatar: '☕',
@@ -92,9 +116,13 @@ void main() {
       '请建立一套门店咖啡杯测和校准流程',
     );
 
-    expect(bundle.needsSkillCreation, isTrue);
+    expect(bundle.needsSkillCreation, isFalse);
     expect(bundle.permissions, contains(ToolPermission.skillCreate));
-    expect(bundle.skillCreationHint, contains('咖啡杯测'));
+    expect(bundle.skillCreationHint, isEmpty);
+    expect(
+      bundle.skills.map((skill) => skill.id),
+      isNot(contains('general.workbuddy-expert-builder')),
+    );
   });
 
   test('HTML 页面意图自动补充后续文件读写权限', () {

@@ -1,19 +1,29 @@
 import 'dart:async';
+import 'dart:convert';
 import 'dart:io';
 import 'dart:typed_data';
 
+import 'package:crypto/crypto.dart';
+import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/chat_group/multimodal_content.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
+import 'package:chat_group/features/document/document_page_renderer.dart';
 
 import '../agentic/tool_request.dart';
 import 'work_tool_registry.dart';
 import 'workspace_path_policy.dart';
 
 part 'work_document_tool_support.dart';
+
+typedef WorkDocumentEvidenceWriter = Future<String> Function(
+  AgentTask task,
+  String extension,
+  List<int> bytes,
+);
 
 /// Stage 04 / Task 22 document tool.
 ///
@@ -34,6 +44,8 @@ class WorkDocumentTool {
   final bool Function(String path)? isSensitivePath;
   final bool Function(String path)? allowSensitivePath;
   final void Function(String path)? onSensitiveRead;
+  final DocumentPageRenderer pageRenderer;
+  final WorkDocumentEvidenceWriter? writeEvidence;
 
   const WorkDocumentTool({
     required this.pathPolicy,
@@ -45,6 +57,8 @@ class WorkDocumentTool {
     this.isSensitivePath,
     this.allowSensitivePath,
     this.onSensitiveRead,
+    this.pageRenderer = const DocumentPageRenderer(),
+    this.writeEvidence,
   });
 
   /// Creates the read-only registry definition used by the production loop.
@@ -58,6 +72,8 @@ class WorkDocumentTool {
     bool Function(String path)? isSensitivePath,
     bool Function(String path)? allowSensitivePath,
     void Function(String path)? onSensitiveRead,
+    DocumentPageRenderer pageRenderer = const DocumentPageRenderer(),
+    WorkDocumentEvidenceWriter? writeEvidence,
   }) {
     final tool = WorkDocumentTool(
       pathPolicy: pathPolicy,
@@ -69,6 +85,8 @@ class WorkDocumentTool {
       isSensitivePath: isSensitivePath,
       allowSensitivePath: allowSensitivePath,
       onSensitiveRead: onSensitiveRead,
+      pageRenderer: pageRenderer,
+      writeEvidence: writeEvidence,
     );
     return WorkToolDefinition(
       name: AgentToolName.workspaceDocument,
@@ -78,6 +96,8 @@ class WorkDocumentTool {
           'path': WorkToolValueType.string,
           'query': WorkToolValueType.string,
           'startChunk': WorkToolValueType.integer,
+          'operation': WorkToolValueType.string,
+          'page': WorkToolValueType.integer,
         },
         required: {'path'},
       ),
@@ -85,7 +105,7 @@ class WorkDocumentTool {
     );
   }
 
-  /// Reads one authorized workspace file and returns only model-safe chunks.
+  /// Reads document text or renders one authorized page for a vision model.
   Future<WorkToolResult> execute(WorkToolInvocation invocation) async {
     final rawPath = invocation.arguments['path'];
     if (rawPath is! String || rawPath.trim().isEmpty) {
@@ -113,14 +133,27 @@ class WorkDocumentTool {
     final stat = statResult.stat!;
     final mimeType = _mimeType(fileName);
     final kind = _mediaKind(fileName, mimeType);
+    final operation = invocation.arguments['operation'] ?? 'read';
+    if (operation is! String || !const {'read', 'render'}.contains(operation)) {
+      return const WorkToolResult.failed(
+          message: '文档操作仅支持 read 或 render。', failureCode: 'invalidInput');
+    }
     if (kind == _MediaKind.audio || kind == _MediaKind.video) {
       return _unsupportedMedia(fileName, kind);
     }
     final sensitiveResult = _sensitiveResult(rawPath, resolved.path, fileName);
     if (sensitiveResult != null) return sensitiveResult;
     if (kind == _MediaKind.image) {
+      if (operation == 'render') {
+        return const WorkToolResult.failed(
+            message: 'render 仅支持 DOCX 和 PDF。', failureCode: 'unsupportedMedia');
+      }
       return _readImage(
           invocation, resolved.path, fileName, stat.size, mimeType);
+    }
+    if (operation == 'render') {
+      return _renderDocument(invocation, resolved.path, fileName, stat.size,
+          mimeType, invocation.arguments['page']);
     }
     return _readDocument(
       invocation,
@@ -307,6 +340,18 @@ class WorkDocumentTool {
     if (invocation.context.isCancelled) {
       return const WorkToolResult.paused(message: '工具执行已停止。');
     }
+    final chunkIndexes = <int>[
+      for (var index = 0; index < parsed.chunks.length; index++)
+        if (relevant.any((chunk) => identical(chunk, parsed.chunks[index])))
+          index,
+    ];
+    late final String sourceDigest;
+    try {
+      sourceDigest = await _documentDigest(path);
+    } on Object {
+      return WorkToolResult.failed(
+          message: '$fileName 在读取期间发生变化。', failureCode: 'documentChanged');
+    }
     return WorkToolResult.success(
       message: _documentMessage(fileName, relevant),
       data: {
@@ -315,15 +360,123 @@ class WorkDocumentTool {
         'truncated': relevant.length != parsed.chunks.length,
         if (start is int) 'chunkStart': start,
         'totalChunkCount': parsed.chunks.length,
+        'documentDigest': sourceDigest,
         if (start is int && start + relevant.length < parsed.chunks.length)
           'nextChunkStart': start + relevant.length,
         'fileName': fileName,
         'format': _extension(fileName),
         'chunkCount': relevant.length,
+        'chunkIndexes': chunkIndexes,
         'sources': relevant.map(_sourceData).toList(growable: false),
         'unsupportedMedia': false,
       },
     );
+  }
+
+  Future<WorkToolResult> _renderDocument(
+    WorkToolInvocation invocation,
+    String path,
+    String fileName,
+    int fileSize,
+    String? mimeType,
+    Object? pageValue,
+  ) async {
+    final extension = _extension(fileName);
+    if (!const {'docx', 'pdf'}.contains(extension)) {
+      return const WorkToolResult.failed(
+          message: '页图渲染仅支持 DOCX 和 PDF。', failureCode: 'unsupportedMedia');
+    }
+    if (pageValue is! int ||
+        pageValue < 1 ||
+        pageValue > DocumentPageRenderer.maxPages) {
+      return const WorkToolResult.failed(
+          message: 'render.page 必须是 1 到 80 之间的整数。',
+          failureCode: 'invalidInput');
+    }
+    if (!modelCapability.supportsVision) return _visionModelRequired(fileName);
+    final attachment = MediaAttachment(
+      type: 'file',
+      localPath: path,
+      fileName: fileName,
+      fileSize: fileSize,
+      mimeType: mimeType,
+    );
+    final parsed = await _parseDocument(invocation, attachment);
+    if (parsed == null || invocation.context.isCancelled) {
+      return const WorkToolResult.paused(message: '工具执行已停止。');
+    }
+    final failure = _documentFailure(fileName, parsed);
+    if (failure != null) return failure;
+    try {
+      final rendered = await pageRenderer.render(
+        source: File(path),
+        page: pageValue,
+        isCancelled: () => invocation.context.isCancelled,
+      );
+      if (invocation.context.isCancelled) {
+        return const WorkToolResult.paused(message: '工具执行已停止。');
+      }
+      final extractedText = parsed.chunks
+          .map((chunk) => chunk.text)
+          .join(' ')
+          .replaceAll(RegExp(r'\s+'), ' ')
+          .trim();
+      final manifest = <String, dynamic>{
+        ...rendered.manifest,
+        'documentPath': path,
+        'documentSummary': extractedText.substring(
+            0, extractedText.length.clamp(0, 1200).toInt()),
+        'summaryKind': 'extractedTextPreview',
+      };
+      String? imageRef;
+      String? manifestRef;
+      if (writeEvidence != null) {
+        imageRef = await writeEvidence!(invocation.task, 'png', rendered.png);
+        manifestRef = await writeEvidence!(
+            invocation.task, 'json', utf8.encode(jsonEncode(manifest)));
+      }
+      final encoded = base64Encode(rendered.png);
+      if (encoded.length > 7 * 1024 * 1024) {
+        return const WorkToolResult.failed(
+            message: '页图超过当前模型单图传输上限。', failureCode: 'imageTooLarge');
+      }
+      final fontCoverage = manifest['fontCoverage'] as Map;
+      return WorkToolResult.success(
+        message: '$fileName 第 $pageValue 页已渲染；实际页数 ${manifest['pageCount']}，'
+            '字体检查 ${fontCoverage['status']}。',
+        data: {
+          'content': [
+            {
+              'type': 'text',
+              'text': '$fileName 第 $pageValue 页 / 共 ${manifest['pageCount']} 页；'
+                  '字体检查 ${fontCoverage['status']}。'
+            },
+            {
+              'type': 'image_url',
+              'image_url': {'url': 'data:image/png;base64,$encoded'}
+            },
+          ],
+          'path': path,
+          'documentDigest': manifest['documentSha256'],
+          'pageNumber': pageValue,
+          'pageCount': manifest['pageCount'],
+          'manifest': manifest,
+          'imageSha256': sha256.convert(rendered.png).toString(),
+          if (imageRef != null) 'imageRef': imageRef,
+          if (manifestRef != null) 'manifestRef': manifestRef,
+          'fileName': fileName,
+          'format': extension,
+          'fontCoverageComplete': fontCoverage['status'] == 'resolved',
+          'unsupportedMedia': false,
+        },
+      );
+    } on DocumentPageRendererException catch (error) {
+      return WorkToolResult.failed(
+          message: '$fileName：${error.message}', failureCode: error.code);
+    } on Object {
+      return WorkToolResult.failed(
+          message: '$fileName 页图渲染失败。', failureCode: 'renderFailed');
+    }
   }
 
   Future<DocumentParseResult?> _parseDocument(
@@ -341,6 +494,19 @@ class WorkDocumentTool {
     );
     if (parsed == null || invocation.context.isCancelled) token.cancel();
     return parsed;
+  }
+
+  Future<String> _documentDigest(String path) async {
+    final builder = BytesBuilder(copy: false);
+    await for (final chunk in File(path)
+        .openRead(0, DocumentUnderstandingService.maxBinaryDocumentBytes + 1)) {
+      builder.add(chunk);
+      if (builder.length >
+          DocumentUnderstandingService.maxBinaryDocumentBytes) {
+        throw const FileSystemException('文件超过文档操作上限');
+      }
+    }
+    return sha256.convert(builder.takeBytes()).toString();
   }
 
   DocumentProcessingToken _documentToken(WorkToolInvocation invocation) {

@@ -121,8 +121,28 @@ class AiRequestGuard {
     required bool requiresTools,
     required bool userInitiated,
   }) {
+    // Zero omits an optional protocol output field; retain a half-window
+    // reservation here so prompt fitting and governance still have a bound.
     final capability = this.capability(provider, model);
     final inputTokens = estimateTokens(messages);
+    final contextWindow =
+        capability.contextWindow < 1 ? 1 : capability.contextWindow;
+    final outputBudgetTokens = maxTokens > 0
+        ? maxTokens
+        : capability.maxOutput
+            .clamp(
+              1,
+              contextWindow ~/ 2 < 1 ? 1 : contextWindow ~/ 2,
+            )
+            .toInt();
+    final maximumAffordableOutput = maxTokens > 0
+        ? maxTokens
+        : capability.maxOutput
+            .clamp(
+              1,
+              contextWindow - inputTokens < 1 ? 1 : contextWindow - inputTokens,
+            )
+            .toInt();
     if (streaming && !capability.supportsStreaming) {
       return AiRequestPreflight.block('模型能力未知或未声明支持流式输出');
     }
@@ -132,15 +152,15 @@ class AiRequestGuard {
     if (requiresTools && !capability.supportsTools) {
       return AiRequestPreflight.block('模型 ${capability.modelId} 未声明工具能力');
     }
-    if (maxTokens > capability.maxOutput) {
+    if (maxTokens > 0 && maxTokens > capability.maxOutput) {
       return AiRequestPreflight.block(
         '请求输出上限 $maxTokens 超过模型上限 ${capability.maxOutput}',
       );
     }
-    if (inputTokens + maxTokens > capability.contextWindow) {
+    if (inputTokens + outputBudgetTokens > contextWindow) {
       return AiRequestPreflight.block(
-        '估算上下文 ${inputTokens + maxTokens} Token 超过模型上限 '
-        '${capability.contextWindow}',
+        '估算上下文 ${inputTokens + outputBudgetTokens} Token 超过模型上限 '
+        '$contextWindow',
       );
     }
 
@@ -170,7 +190,7 @@ class AiRequestGuard {
     final projected = price.estimateMicros(
       inputTokens: inputTokens,
       cachedInputTokens: 0,
-      outputTokens: maxTokens,
+      outputTokens: maximumAffordableOutput,
     );
     final now = clock();
     final entries = store.ledgerEntries;

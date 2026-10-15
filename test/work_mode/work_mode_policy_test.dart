@@ -151,6 +151,58 @@ void main() {
       );
     });
 
+    test('offers a matching character-local draft for its first trial only',
+        () {
+      final character = _character(id: 'worker');
+      final draft = CharacterSkill(
+        id: 'draft-flowchart',
+        characterId: character.id,
+        name: '流程图草稿',
+        domain: '流程图',
+        description: '绘制流程图并标注分支条件',
+        instructions: const ['使用 Mermaid 流程图语法'],
+        requiredPermissions: const [],
+      );
+      final foreignDraft = CharacterSkill(
+        id: 'foreign-draft',
+        characterId: 'other-worker',
+        name: '流程图草稿',
+        domain: '流程图',
+        description: '绘制流程图并标注分支条件',
+        instructions: const ['使用 Mermaid 流程图语法'],
+        requiredPermissions: const [],
+      );
+      final remoteSkill = CharacterSkill(
+        id: 'remote-skill',
+        characterId: character.id,
+        name: '远程流程图技能',
+        domain: '流程图',
+        description: '绘制流程图并标注分支条件',
+        instructions: const ['使用 Mermaid 流程图语法'],
+        requiredPermissions: const [],
+        resourcePackId: 'unverified-pack',
+      );
+
+      final matching = WorkModePolicy.resolveSkills(
+        character: character,
+        userRequest: '请绘制流程图',
+        installedSkills: [draft, foreignDraft, remoteSkill],
+      );
+      final unrelated = WorkModePolicy.resolveSkills(
+        character: character,
+        userRequest: '请整理会议纪要',
+        installedSkills: [draft],
+      );
+
+      expect(matching.map((skill) => skill.id), contains(draft.id));
+      expect(
+          matching.map((skill) => skill.id), isNot(contains(foreignDraft.id)));
+      expect(
+          matching.map((skill) => skill.id), isNot(contains(remoteSkill.id)));
+      expect(unrelated.map((skill) => skill.id), isNot(contains(draft.id)));
+      expect(character.skillIds, isNot(contains(draft.id)));
+    });
+
     test('requires approval for data access and local side effects', () {
       expect(
           WorkModePolicy.requiresApproval(AgentToolName.workspaceList), isTrue);

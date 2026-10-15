@@ -102,6 +102,10 @@ extension _V2DiscussionActions on _V2DiscussionSession {
         await _approve(member, turn.approval!, responseRef);
       case 'decide':
         final d = turn.decision!;
+        if (d['kind'] == 'ruling') {
+          await _coordinateRuling(member, d, responseRef);
+          break;
+        }
         await _decision(d['kind'] as String, d['targetId'] as String,
             d['reason'] as String, d['evidence'] as String,
             options: (d['options'] as List)
@@ -352,7 +356,8 @@ extension _V2DiscussionActions on _V2DiscussionSession {
       'location',
       'revisionTarget',
       'files',
-      'verificationCommands'
+      'verificationCommands',
+      'nativeBundle'
     };
     final unexpected = contract.keys.where((key) => !fields.contains(key));
     if (unexpected.isNotEmpty) {
@@ -424,7 +429,8 @@ extension _V2DiscussionActions on _V2DiscussionSession {
         // 别名族与扩展名会漏掉路由自己认的中文格式词（`网页`/`网站` → html），
         // 于是用户亲口点名的格式被判成推导值、允许成员改掉——而 `formatAliases`
         // 里没有 CJK 项，不能靠它补。
-        if (WorkRoleRouter.deliverableContractForRequest(scope).format == value) {
+        if (WorkRoleRouter.deliverableContractForRequest(scope).format ==
+            value) {
           return true;
         }
         return _valueSpellings(value, asFormat: true).any((spelling) =>
@@ -582,6 +588,11 @@ extension _V2DiscussionActions on _V2DiscussionSession {
       'workItems': _proposalWorkItems(proposal, userReview, request),
       'acceptances':
           _proposalAcceptances(proposal, userReview, request, verification),
+      if (state.isAutonomous)
+        'usageAssignments': [
+          for (final a in proposal['usageAssignments'] as List)
+            {...a as Map, 'requestRevision': request}
+        ],
       if (issues != null) 'issues': issues,
       'requestRevision': request,
       'verificationRevision': verification,
@@ -672,6 +683,40 @@ extension _V2DiscussionActions on _V2DiscussionSession {
     if (items.isEmpty || (proposal['acceptances'] as List).isEmpty) {
       throw StateError('方案缺少可执行工作项或验收');
     }
+    if (state.isAutonomous) {
+      final makers = items.map((i) => i['ownerId']).toSet();
+      final executor =
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+              .explicitlyPinnedExecutorId;
+      if (makers.length != 1 || executor != null && makers.single != executor) {
+        throw StateError('本轮制作必须由唯一执行者负责，并保持用户指定的执行者。');
+      }
+      final maker = makers.single as String;
+      final responsibility =
+          state.team.singleWhere((m) => m['memberId'] == maker);
+      final role = responsibility['role'] as String;
+      final character = runner.database.aiCharacterBox.get(maker);
+      if (character == null ||
+          !WorkRoleRouter.qualifiesForResponsibility(
+              character, role, const []) ||
+          state.artifactContract['type'] == 'software' &&
+              !{'development', 'developer', 'frontend'}.contains(role)) {
+        throw StateError('制作执行者缺少当前任务的真实实现职责，普通试用资格不能冒充开发资格。');
+      }
+      final assignments = proposal['usageAssignments'];
+      if (assignments is! List) throw StateError('自主方案缺少全员使用场景');
+      final raw = state.toJson()
+        ..['requestRevision'] = state.requestRevision + 1
+        ..['usageAssignments'] = [
+          for (final a in assignments)
+            {...a as Map, 'requestRevision': state.requestRevision + 1}
+        ]
+        ..['acceptances'] = _proposalAcceptances(proposal, false,
+            state.requestRevision + 1, state.verificationRevision);
+      if (WorkCollaborationState.tryParse(raw)?.usagePlanReady != true) {
+        throw StateError('使用计划必须覆盖全部成员、不同场景和全部必达验收');
+      }
+    }
     final ids = items.map((i) => i['id']).toSet();
     if (ids.length != items.length ||
         items.any((i) =>
@@ -716,6 +761,11 @@ extension _V2DiscussionActions on _V2DiscussionSession {
       'scope': state.scope,
       'plan': state.plan,
       'artifactContract': state.artifactContract,
+      if (state.isAutonomous)
+        'usageAssignments': [
+          for (final a in state.usageAssignments)
+            {...a}..remove('requestRevision')
+        ],
       'workItems': [
         for (final i in state.workItems)
           {

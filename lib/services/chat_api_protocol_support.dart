@@ -5,6 +5,19 @@ part of 'chat_api_service.dart';
 extension _ChatApiServiceProtocolSupport on ChatApiService {
   String _requestPath(String url) => Uri.tryParse(url)?.path ?? url;
 
+  /// 本次请求实际生效的服务地址：**配置里存了地址就用它**，没存才用提供商的
+  /// 规范地址。内置提供商过去只能用预设地址，表单里显示的地址因此是「改了也不
+  /// 生效」的假字段；显示可编辑就必须认它，否则内置 + Anthropic 这类协议子路径
+  /// 永远无法配置。
+  String _configuredBaseUrl({
+    required ApiProvider provider,
+    String? customBaseUrl,
+  }) {
+    final stored = customBaseUrl?.trim() ?? '';
+    if (stored.isNotEmpty) return stored;
+    return provider.baseUrl.trim();
+  }
+
   /// Custom endpoints own their model namespace. Never replace a custom
   /// model with one of the application's provider presets.
   String _resolveModelName({

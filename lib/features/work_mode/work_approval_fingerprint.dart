@@ -78,6 +78,9 @@ abstract final class WorkApprovalFingerprint {
     return const {
       'content',
       'contents',
+      'text',
+      'value',
+      'input',
       'replacement',
       'expectedfragment',
       'script',

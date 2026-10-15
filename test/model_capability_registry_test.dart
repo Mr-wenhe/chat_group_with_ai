@@ -34,15 +34,20 @@ void main() {
     );
   });
 
-  test('未知模型保守降级，自定义声明后使用声明值', () {
+  test('未登记模型放行流式与工具，视觉与尺寸仍保守，自定义声明后使用声明值', () {
     final unknown = registry.resolve(
       provider: ApiProvider.custom,
       modelId: 'private-model',
     );
     expect(unknown.isKnown, isFalse);
-    expect(unknown.supportsStreaming, isFalse);
+    // 这两个开关同时是工作模式的启动闸门：兜底全关会让任何没进快照的模型都跑不了
+    // 工作模式，用户必须先到治理页手写一份声明。
+    expect(unknown.supportsStreaming, isTrue);
+    expect(unknown.supportsTools, isTrue);
+    // 把图片发给未必支持的端点只会换来一次 400，不跟着放行。
     expect(unknown.supportsVision, isFalse);
-    expect(unknown.supportsTools, isFalse);
+    expect(unknown.contextWindow, 8192);
+    expect(unknown.maxOutput, 2048);
     expect(unknown.price, isNull);
 
     final declared = registry.resolve(

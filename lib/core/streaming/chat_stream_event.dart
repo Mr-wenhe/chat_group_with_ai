@@ -36,6 +36,13 @@ class ChatStreamEvent {
   /// type == error 时可选：服务端建议的下一次重试等待时间。
   final Duration? retryAfter;
 
+  /// type == error 时可选：这次失败的**归因**——异常类型与脱敏后有界的正文摘要。
+  ///
+  /// [message] 是给人看的分类文案（「请求失败」「连接超时」），多种成因会折叠成
+  /// 同一句，事后无法判断是响应体不是 JSON、TLS 校验失败还是连接被丢包。本字段
+  /// 保留机器可读的成因，只进诊断与事件日志，**不得**用于用户可见文案。
+  final String? failureDetail;
+
   /// type == error 时有效：message 是否已由 ChatApiService 脱敏或分类。
   ///
   /// 为 true 表示这条文案是客户端自己产出的（供应商正文已剥离，例如
@@ -72,6 +79,7 @@ class ChatStreamEvent {
     this.completionTokens,
     this.cachedTokens,
     this.truncated = false,
+    this.failureDetail,
   });
 
   factory ChatStreamEvent.token(String delta) =>
@@ -94,15 +102,17 @@ class ChatStreamEvent {
     String message, {
     Duration? retryAfter,
     bool sanitized = false,
+    String? failureDetail,
   }) =>
       ChatStreamEvent(
         type: ChatStreamEventType.error,
         message: message,
         retryAfter: retryAfter,
         sanitized: sanitized,
+        failureDetail: failureDetail,
       );
 
   @override
   String toString() =>
-      'ChatStreamEvent(type: $type, delta: $delta, content: $content, model: $model, message: $message, retryAfter: $retryAfter, sanitized: $sanitized, truncated: $truncated)';
+      'ChatStreamEvent(type: $type, delta: $delta, content: $content, model: $model, message: $message, retryAfter: $retryAfter, sanitized: $sanitized, truncated: $truncated, failureDetail: $failureDetail)';
 }

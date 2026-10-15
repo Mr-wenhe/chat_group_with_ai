@@ -3,6 +3,7 @@ import 'dart:typed_data';
 import 'dart:ui';
 
 import 'package:archive/archive.dart';
+import 'package:crypto/crypto.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
@@ -10,6 +11,7 @@ import 'package:chat_group/features/ai_governance/model_capability_registry.dart
 import 'package:chat_group/features/chat_group/multimodal_content.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:chat_group/features/document/binary_document_parser.dart';
+import 'package:chat_group/features/document/document_page_renderer.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
 import 'package:chat_group/features/work_mode/work_document_tool.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
@@ -57,6 +59,7 @@ void main() {
     String path, {
     String query = '',
     AgentTask? owner,
+    Map<String, dynamic> arguments = const {},
   }) {
     final currentTask = owner ?? task(query.isEmpty ? '读取文件' : query);
     return documentTool.execute(
@@ -64,7 +67,7 @@ void main() {
         task: currentTask,
         call: AgentToolCall(
           name: AgentToolName.workspaceDocument,
-          arguments: {'path': path, 'query': query},
+          arguments: {'path': path, 'query': query, ...arguments},
         ),
         context: WorkToolExecutionContext(task: currentTask),
       ),
@@ -208,6 +211,179 @@ void main() {
     expect(xlsxResult.data['content'], contains('A1: 设计 | B1: 1200'));
     expect(xlsxResult.message, contains('预算'));
     expect(xlsxResult.message, contains('行 1'));
+  });
+
+  test('reads the font declarations used by DOCX render coverage', () {
+    final bytes = _zip({
+      'word/styles.xml': '''
+        <w:styles xmlns:w="word">
+          <w:rPr><w:rFonts w:ascii="Aptos" w:eastAsia="Noto Sans CJK SC"/></w:rPr>
+        </w:styles>
+      ''',
+    });
+
+    expect(BinaryDocumentParser.declaredDocxFonts(bytes),
+        ['Aptos', 'Noto Sans CJK SC']);
+  });
+
+  test('正文显式字体覆盖未使用的样式和编号字体声明', () {
+    final bytes = _zip({
+      'word/document.xml': '''
+        <w:document xmlns:w="word">
+          <w:body><w:p><w:r><w:rPr>
+            <w:rFonts w:ascii="PingFang SC" w:eastAsia="PingFang SC"/>
+          </w:rPr><w:t>正文</w:t></w:r></w:p></w:body>
+        </w:document>
+      ''',
+      'word/styles.xml': '''
+        <w:styles xmlns:w="word">
+          <w:rPr><w:rFonts w:ascii="Courier"/></w:rPr>
+        </w:styles>
+      ''',
+      'word/numbering.xml': '''
+        <w:numbering xmlns:w="word">
+          <w:rPr><w:rFonts w:ascii="Symbol"/></w:rPr>
+        </w:numbering>
+      ''',
+    });
+
+    expect(BinaryDocumentParser.declaredDocxFonts(bytes), ['PingFang SC']);
+  });
+
+  test('混用直接字体与实际引用样式时同时返回两种正文字体', () {
+    final bytes = _zip({
+      'word/document.xml': '''
+        <w:document xmlns:w="word"><w:body>
+          <w:p><w:r><w:rPr>
+            <w:rFonts w:ascii="Arial"/>
+          </w:rPr><w:t>直接字体</w:t></w:r></w:p>
+          <w:p><w:pPr><w:pStyle w:val="MissingStyle"/></w:pPr>
+            <w:r><w:t>继承字体</w:t></w:r>
+          </w:p>
+          <w:p><w:pPr><w:numPr>
+            <w:ilvl w:val="0"/><w:numId w:val="7"/>
+          </w:numPr></w:pPr><w:r><w:t>编号字体</w:t></w:r></w:p>
+        </w:body></w:document>
+      ''',
+      'word/styles.xml': '''
+        <w:styles xmlns:w="word">
+          <w:style w:type="paragraph" w:styleId="MissingStyle">
+            <w:rPr><w:rFonts w:ascii="ChatGroupMissingFontReview3"/></w:rPr>
+          </w:style>
+          <w:style w:type="paragraph" w:styleId="UnusedStyle">
+            <w:rPr><w:rFonts w:ascii="UnusedFontReview3"/></w:rPr>
+          </w:style>
+        </w:styles>
+      ''',
+      'word/numbering.xml': '''
+        <w:numbering xmlns:w="word">
+          <w:abstractNum w:abstractNumId="42">
+            <w:lvl w:ilvl="0"><w:rPr>
+              <w:rFonts w:ascii="ChatGroupListFontReview3"/>
+            </w:rPr></w:lvl>
+          </w:abstractNum>
+          <w:abstractNum w:abstractNumId="43">
+            <w:lvl w:ilvl="0"><w:rPr>
+              <w:rFonts w:ascii="UnusedListFontReview3"/>
+            </w:rPr></w:lvl>
+          </w:abstractNum>
+          <w:num w:numId="7"><w:abstractNumId w:val="42"/></w:num>
+          <w:num w:numId="8"><w:abstractNumId w:val="43"/></w:num>
+        </w:numbering>
+      ''',
+    });
+
+    expect(BinaryDocumentParser.declaredDocxFonts(bytes),
+        ['Arial', 'ChatGroupListFontReview3', 'ChatGroupMissingFontReview3']);
+  });
+
+  test(
+      'render returns one candidate page, extractive summary and saved manifest',
+      () async {
+    final bytes = _zip({
+      'word/document.xml': '''
+        <w:document xmlns:w="word"><w:body>
+          <w:p><w:r><w:t>方案摘要：跨页表格的日期被遮挡。</w:t></w:r></w:p>
+        </w:body></w:document>
+      ''',
+    });
+    final path = '${root.path}/candidate.docx';
+    await File(path).writeAsBytes(bytes);
+    final renderer = _FakeDocumentPageRenderer();
+    final savedEvidence = <String, List<int>>{};
+    var evidenceNumber = 0;
+    final visual = WorkDocumentTool(
+      pathPolicy: pathPolicy,
+      modelCapability: capabilities.resolve(
+        provider: ApiProvider.qwen,
+        modelId: 'qwen-vl-max',
+      ),
+      pageRenderer: renderer,
+      writeEvidence: (task, extension, value) async {
+        final ref = 'document:$extension:${++evidenceNumber}';
+        savedEvidence[ref] = value;
+        return ref;
+      },
+    );
+
+    final result = await runTool(visual, path,
+        arguments: {'operation': 'render', 'page': 1});
+
+    expect(result.status, WorkToolResultStatus.success);
+    expect(renderer.pages, [1]);
+    expect(result.data['pageNumber'], 1);
+    expect(result.data['pageCount'], 2);
+    final canonicalPath = await File(path).resolveSymbolicLinks();
+    expect(result.data['path'], canonicalPath);
+    expect(result.data['documentDigest'], sha256.convert(bytes).toString());
+    final manifest = result.data['manifest'] as Map;
+    expect(manifest['documentPath'], canonicalPath);
+    expect(manifest['documentSummary'], contains('跨页表格的日期被遮挡'));
+    expect(manifest['summaryKind'], 'extractedTextPreview');
+    expect(manifest['renderEngine'], 'fake-boundary-test');
+    expect(manifest['fontCoverage']['status'], 'resolved');
+    expect(
+        savedEvidence.keys, containsAll(['document:png:1', 'document:json:2']));
+    expect(savedEvidence['document:json:2'], isNotEmpty);
+    final content = result.data['content'] as List;
+    expect(content.where((part) => part['type'] == 'image_url'), hasLength(1));
+    expect((content.last['image_url'] as Map)['url'],
+        startsWith('data:image/png;base64,'));
+  });
+
+  test('render refuses missing vision model and an out of range page',
+      () async {
+    final path = '${root.path}/plan.docx';
+    await File(path).writeAsBytes(_zip({
+      'word/document.xml':
+          '<w:document xmlns:w="word"><w:body><w:p><w:r><w:t>计划</w:t></w:r></w:p></w:body></w:document>',
+    }));
+    final renderer = _FakeDocumentPageRenderer();
+    final current = WorkDocumentTool(
+      pathPolicy: pathPolicy,
+      modelCapability: capabilities.resolve(
+        provider: ApiProvider.qwen,
+        modelId: 'qwen-plus',
+      ),
+      pageRenderer: renderer,
+    );
+    final noVision = await runTool(current, path,
+        arguments: {'operation': 'render', 'page': 1});
+    expect(noVision.failureCode, 'visionModelRequired');
+    expect(renderer.pages, isEmpty);
+
+    final vision = WorkDocumentTool(
+      pathPolicy: pathPolicy,
+      modelCapability: capabilities.resolve(
+        provider: ApiProvider.qwen,
+        modelId: 'qwen-vl-max',
+      ),
+      pageRenderer: renderer,
+    );
+    final invalid = await runTool(vision, path,
+        arguments: {'operation': 'render', 'page': 0});
+    expect(invalid.failureCode, 'invalidInput');
+    expect(renderer.pages, isEmpty);
   });
 
   test('retains size limits and reports damaged documents without hanging',
@@ -455,4 +631,31 @@ int _signatureIndex(Uint8List bytes, List<int> signature) {
     if (matches) return index;
   }
   return -1;
+}
+
+class _FakeDocumentPageRenderer extends DocumentPageRenderer {
+  final pages = <int>[];
+
+  @override
+  Future<RenderedDocumentPage> render({
+    required File source,
+    required int page,
+    required bool Function() isCancelled,
+  }) async {
+    pages.add(page);
+    final bytes = await source.readAsBytes();
+    return RenderedDocumentPage(
+      png: Uint8List.fromList([137, 80, 78, 71]),
+      manifest: {
+        'schemaVersion': 1,
+        'fileName': source.uri.pathSegments.last,
+        'documentSha256': sha256.convert(bytes).toString(),
+        'format': 'docx',
+        'pageNumber': page,
+        'pageCount': 2,
+        'renderEngine': 'fake-boundary-test',
+        'fontCoverage': {'status': 'resolved'},
+      },
+    );
+  }
 }

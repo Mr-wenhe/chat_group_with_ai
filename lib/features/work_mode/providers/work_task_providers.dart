@@ -15,6 +15,7 @@ import 'package:chat_group/features/work_mode/work_resource_lock_manager.dart';
 import 'package:chat_group/features/work_mode/workspace_mutation_service.dart';
 import 'package:chat_group/features/work_mode/workspace_file_service.dart';
 import 'package:chat_group/features/work_mode/workspace_path_policy.dart';
+import 'package:chat_group/features/work_mode/macos_native_app_automation.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:flutter_riverpod/flutter_riverpod.dart';
 import 'package:hive/hive.dart';
@@ -74,6 +75,7 @@ final workTaskRunnerProvider = Provider<WorkTaskRunner>((ref) {
     workspaceFileService: files,
     mutationService: mutations,
     resourceLockManager: ref.watch(workResourceLockManagerProvider),
+    nativeAppAutomation: ref.watch(macosNativeAppAutomationProvider),
     autoOpenHtml: true,
   );
 });
@@ -114,6 +116,15 @@ final workFolderGrantServiceProvider = Provider<WorkFolderGrantService>((ref) {
 final workResourceLockManagerProvider =
     Provider<WorkResourceLockManager>((ref) {
   return WorkResourceLockManager();
+});
+
+/// One Appium session owner and one desktop lock shared across every group.
+final macosNativeAppAutomationProvider =
+    Provider<MacNativeAppAutomation>((ref) {
+  return MacNativeAppAutomation(
+    locks: ref.watch(workResourceLockManagerProvider),
+    events: ref.watch(workTaskEventStoreProvider),
+  );
 });
 
 /// Stage 02's single read boundary. The service is shared by all tasks, while

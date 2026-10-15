@@ -102,6 +102,38 @@ void _registerP6RunnerTests(Directory Function() hiveRoot,
         candidate.digest);
   });
 
+  test('P6 baseline publication reuses frozen candidate bytes', () async {
+    final delivery = await runner();
+    final work = await task(delivery);
+    final source =
+        await delivery.publishCandidate(work, publicationId: 'first');
+    await File(work.lastArtifactPaths.single)
+        .writeAsString('changed after manual acceptance');
+    final shell =
+        WorkDiscussionState.fromExecutionState(work.executionStateJson)!;
+    work.executionStateJson = jsonEncode({
+      'discussionState': shell
+          .copyWith(
+            requestRevision: 2,
+            collaboration: candidateTestState(requestRevision: 2),
+          )
+          .toJson(),
+    });
+
+    final baseline = await delivery.publishCandidate(
+      work,
+      publicationId: 'user-baseline',
+      frozenSource: source,
+      baseline: '复用已人工验收的冻结候选文件。',
+    );
+
+    expect(source.iterationId, 'r001');
+    expect(baseline.iterationId, 'r002');
+    expect(baseline.file('report.txt').readAsStringSync(), 'report r001');
+    expect(await File(work.lastArtifactPaths.single).readAsString(),
+        'changed after manual acceptance');
+  });
+
   test(
       'P6 failed copy resends same iteration with original producer after actor handoff',
       () async {

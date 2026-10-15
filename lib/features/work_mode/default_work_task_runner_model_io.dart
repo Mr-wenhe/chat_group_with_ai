@@ -1,15 +1,13 @@
 part of 'default_work_task_runner.dart';
 
-/// 单次工作模式模型请求的输出上限：模型能力声明的上限与上下文窗口的一半取较小者。
+/// 工作模式输入预算和费用预检用的输出预留，不是可选协议的请求输出上限。
 ///
-/// 不再设绝对天花板：那个值压住的是**用户手工声明**的大输出模型，而声明值本身
-/// 只由设置决定，客户端没有依据替用户判断厂商真实能力——声明超出时上游会返回
-/// 400，这条责任交回设置里的那份声明。
+/// 请求支持省略输出字段的协议不发送这个值；Anthropic 因协议要求仍发送能力声明值。
 ///
 /// 窗口一半这一条是必需的：8k 窗口的模型按声明值要 8k 输出时输入预算会被压到 0，
 /// 请求会带着空 `messages` 发出去（`inputBudget` 的守卫是 `input + maxOutput >
 /// window`，输入为 0 时它恰好拦不住）。
-int workModeRequestOutputTokens({
+int workModeOutputReservationTokens({
   required int capabilityMaxOutput,
   required int capabilityContextWindow,
 }) {
@@ -20,17 +18,16 @@ int workModeRequestOutputTokens({
   return declared < windowBound ? declared : windowBound;
 }
 
-/// 工作模式单次请求的输入预算：模型窗口扣掉本次输出上限与帧开销。
+/// 工作模式单次请求的输入预算：模型窗口扣掉输出预留与帧开销。
 ///
-/// 装配提示词（决定何时压缩）与实际发送（决定何时硬裁剪）都必须用它，否则两者
-/// 会按不同的上限判断同一份上下文。
+/// 装配提示词与实际发送都用它，避免对同一份上下文采用不同的窗口预算。
 int workModeRequestInputBudget({
   required int capabilityMaxOutput,
   required int capabilityContextWindow,
 }) =>
     ContextWindowManager.inputBudget(
       contextWindow: capabilityContextWindow < 1 ? 1 : capabilityContextWindow,
-      maxOutput: workModeRequestOutputTokens(
+      maxOutput: workModeOutputReservationTokens(
         capabilityMaxOutput: capabilityMaxOutput,
         capabilityContextWindow: capabilityContextWindow,
       ),
@@ -104,6 +101,7 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     required WorkTaskCancellation cancellation,
     required int capabilityMaxOutput,
     required int capabilityContextWindow,
+    _ProductionUsage? usage,
   }) async {
     if (task.characterId != actorCharacterId) {
       throw StateError('工作成员已切换，需要重新绑定成员模型与个人上下文。');
@@ -128,7 +126,7 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
             '$boundedRaw',
       });
     }
-    final outputTokens = workModeRequestOutputTokens(
+    final outputTokens = workModeOutputReservationTokens(
       capabilityMaxOutput: capabilityMaxOutput,
       capabilityContextWindow: capabilityContextWindow,
     );
@@ -186,6 +184,8 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     // 首个字符到达就完成它，撤掉首字节停滞看门狗。看门狗本身与总时限一起住在
     // _withModelCompletionDeadline 里，两处时限共用一个撤销点。
     final firstByte = Completer<void>();
+    final runBoundary =
+        await WorkTaskRunBoundary.currentRunBoundaryId(eventStore, task.id);
     final response = await _withModelCompletionDeadline(
       cancellation: cancellation,
       requestToken: modelRequestToken,
@@ -200,13 +200,16 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
         // Deterministic sampling reduces protocol drift; JSON mode is selected
         // by AiRequestGateway for this agent/tool request.
         temperature: 0.2,
-        maxTokens: outputTokens,
+        maxTokens:
+            config.protocol == ApiProtocol.anthropicMessages ? outputTokens : 0,
         receiveTimeout: const Duration(seconds: 300),
         maxRetries: 0,
         cancelToken: requestCancelToken,
         purpose: AiRequestPurpose.agent,
         conversationId: task.groupId,
         characterId: task.characterId,
+        taskId: task.id,
+        runBoundary: runBoundary,
         requiresTools: true,
         userInitiated: true,
         onEvent: (event) {
@@ -333,6 +336,12 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
     // event order while keeping raw protocol content private. Only the
     // explicitly user-facing public_update field is recorded for the panel.
     await progressWrites;
+    if (usage != null &&
+        response['success'] == true &&
+        !cancellationToken.isCancelled &&
+        !cancellation.isCancelled) {
+      await _recordDocumentModelUse(task, usage, request, boundedMessages);
+    }
     return response;
   }
 
@@ -363,6 +372,8 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
       maxOutput: outputTokens,
     );
     final compressionRequestToken = CancelToken();
+    final runBoundary =
+        await WorkTaskRunBoundary.currentRunBoundaryId(eventStore, task.id);
     final response = await _withModelCompletionDeadline(
       cancellation: cancellation,
       requestToken: compressionRequestToken,
@@ -387,8 +398,11 @@ extension _DefaultWorkTaskRunnerModelIo on DefaultWorkTaskRunner {
         purpose: AiRequestPurpose.summary,
         conversationId: task.groupId,
         characterId: task.characterId,
+        taskId: task.id,
+        runBoundary: runBoundary,
         temperature: 0.2,
-        maxTokens: outputTokens,
+        maxTokens:
+            config.protocol == ApiProtocol.anthropicMessages ? outputTokens : 0,
         receiveTimeout: const Duration(seconds: 30),
         maxRetries: 0,
         cancelToken: requestCancelToken,

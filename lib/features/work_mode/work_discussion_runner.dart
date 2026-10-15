@@ -20,8 +20,10 @@ import 'package:chat_group/features/web_search/application/search_context_format
 import 'work_discussion_investigation.dart';
 import 'work_agent_loop.dart';
 import 'default_work_task_runner.dart'
-    show workModeRequestOutputTokens, workModeRequestInputBudget;
+    show workModeOutputReservationTokens, workModeRequestInputBudget;
 import 'work_discussion_v2_protocol.dart';
+import 'work_discussion_v2_protocol_text.dart';
+import 'work_usage_receipt.dart';
 import 'work_discussion_v2_stage.dart';
 import 'work_task_execution_policy.dart';
 
@@ -29,9 +31,11 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/chat_group.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/models/relationship_state.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
@@ -48,6 +52,7 @@ import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_task_run_boundary.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:dio/dio.dart';
 
@@ -112,7 +117,6 @@ class WorkDiscussionRunner
   static const double defaultDiscussionTemperature = 0.35;
   static const int maxCollaborationChatPreviews = 6;
   static const int maxCollaborationPreviewCharacters = 600;
-  static const int preferredDiscussionFinalTokens = 8192;
   static const int maxMembers = 32;
   // 一条待答决策里允许出现的选项**总数**（与 `WorkCollaborationState` 的
   // `decisions` 校验一致）。它是整个决策的容量，不是"候选名额"：候选必须先让出

@@ -1,0 +1,17 @@
+{"protocolVersion":"0.1.1","runnerVersion":null,"pid":84229,"type":"start","time":0}
+{"suite":{"id":0,"platform":"vm","path":"/private/tmp/chat-group-acceptance-shadow-g4ItNG/test/work_mode/work_document_real_render_test.dart"},"type":"suite","time":0}
+{"test":{"id":1,"name":"loading /private/tmp/chat-group-acceptance-shadow-g4ItNG/test/work_mode/work_document_real_render_test.dart","suiteID":0,"groupIDs":[],"metadata":{"skip":false,"skipReason":null},"line":null,"column":null,"url":null},"type":"testStart","time":0}
+{"count":1,"time":4,"type":"allSuites"}
+{"testID":1,"result":"success","skipped":false,"hidden":true,"type":"testDone","time":12709}
+{"group":{"id":2,"suiteID":0,"parentID":null,"name":"","metadata":{"skip":false,"skipReason":null},"testCount":5,"line":null,"column":null,"url":null},"type":"group","time":12718}
+{"test":{"id":3,"name":"P3 renders every before-docx page with verified fonts","suiteID":0,"groupIDs":[2],"metadata":{"skip":false,"skipReason":null},"line":26,"column":5,"url":"file:///private/tmp/chat-group-acceptance-shadow-g4ItNG/test/work_mode/work_document_real_render_test.dart"},"type":"testStart","time":12719}
+{"testID":3,"result":"success","skipped":false,"hidden":false,"type":"testDone","time":26272}
+{"test":{"id":4,"name":"P3 renders every after-docx page with verified fonts","suiteID":0,"groupIDs":[2],"metadata":{"skip":false,"skipReason":null},"line":26,"column":5,"url":"file:///private/tmp/chat-group-acceptance-shadow-g4ItNG/test/work_mode/work_document_real_render_test.dart"},"type":"testStart","time":26275}
+{"testID":4,"result":"success","skipped":false,"hidden":false,"type":"testDone","time":39855}
+{"test":{"id":5,"name":"P3 renders every before-pdf page with verified fonts","suiteID":0,"groupIDs":[2],"metadata":{"skip":false,"skipReason":null},"line":26,"column":5,"url":"file:///private/tmp/chat-group-acceptance-shadow-g4ItNG/test/work_mode/work_document_real_render_test.dart"},"type":"testStart","time":39858}
+{"testID":5,"result":"success","skipped":false,"hidden":false,"type":"testDone","time":42939}
+{"test":{"id":6,"name":"P3 renders every after-pdf page with verified fonts","suiteID":0,"groupIDs":[2],"metadata":{"skip":false,"skipReason":null},"line":26,"column":5,"url":"file:///private/tmp/chat-group-acceptance-shadow-g4ItNG/test/work_mode/work_document_real_render_test.dart"},"type":"testStart","time":42940}
+{"testID":6,"result":"success","skipped":false,"hidden":false,"type":"testDone","time":45208}
+{"test":{"id":7,"name":"missing DOCX run font cannot be reported as resolved after renderer substitution","suiteID":0,"groupIDs":[2],"metadata":{"skip":false,"skipReason":null},"line":117,"column":3,"url":"file:///private/tmp/chat-group-acceptance-shadow-g4ItNG/test/work_mode/work_document_real_render_test.dart"},"type":"testStart","time":45209}
+{"testID":7,"result":"success","skipped":false,"hidden":false,"type":"testDone","time":49048}
+{"success":true,"type":"done","time":49096}

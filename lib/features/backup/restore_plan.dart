@@ -12,6 +12,7 @@ class _RestorePlan {
   final List<Map<String, dynamic>> permanentMemories;
   final List<Map<String, dynamic>> relationshipEvents;
   final List<Map<String, dynamic>> skills;
+  final List<Map<String, dynamic>> skillResourcePacks;
   final List<Map<String, dynamic>> tasks;
   final List<Map<String, dynamic>> workspaces;
   final Map<String, dynamic> settings;
@@ -34,6 +35,7 @@ class _RestorePlan {
     required this.permanentMemories,
     required this.relationshipEvents,
     required this.skills,
+    required this.skillResourcePacks,
     required this.tasks,
     required this.workspaces,
     required this.settings,
@@ -136,14 +138,33 @@ class _RestorePlan {
       value['id'] = skillMap[value['id']]!;
       value['characterId'] =
           characterMap[value['characterId']] ?? value['characterId'];
+      if (value['resourcePackId'] != null) {
+        value['requiredPermissions'] = const <String>[];
+      }
     });
+    final remoteSkillIds = skills
+        .map((record) => BackupEntityCodec.value(record))
+        .where((value) => value['resourcePackId'] != null)
+        .map((value) => value['id'] as String)
+        .toSet();
+    final remotePackIds = skills
+        .map((record) => BackupEntityCodec.value(record)['resourcePackId'])
+        .whereType<String>()
+        .toSet();
+    final skillResourcePacks = data.skillResourcePacks
+        .where((record) => remotePackIds.contains(
+              BackupEntityCodec.value(record)['packId'],
+            ))
+        .toList(growable: false);
     final characters = _rewrite(
         data.characters, characterMap, db.aiCharacterBox.containsKey, strategy,
         (value) {
       value['id'] = characterMap[value['id']]!;
       value['apiConfigId'] =
           apiMap[value['apiConfigId']] ?? value['apiConfigId'];
-      value['skillIds'] = _mapList(value['skillIds'], skillMap);
+      value['skillIds'] = _mapList(value['skillIds'], skillMap)
+          .where((id) => !remoteSkillIds.contains(id))
+          .toList(growable: false);
     });
     final groups = _rewrite(
         data.groups, groupMap, db.chatGroupBox.containsKey, strategy, (value) {
@@ -340,6 +361,7 @@ class _RestorePlan {
       permanentMemories: permanentMemories,
       relationshipEvents: relationshipEvents,
       skills: skills,
+      skillResourcePacks: skillResourcePacks,
       tasks: tasks,
       workspaces: workspaces,
       settings: settings,

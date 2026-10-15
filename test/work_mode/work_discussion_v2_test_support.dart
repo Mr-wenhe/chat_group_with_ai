@@ -54,7 +54,7 @@ class _ModelClient extends ChatApiService {
   /// 跑完讨论之后断言本列表为空。
   final List<String> contractViolations = [];
 
-  _ModelClient(this.respond, {this.expectedMaxTokens = 8192});
+  _ModelClient(this.respond, {this.expectedMaxTokens = 0});
   @override
   Future<Map<String, dynamic>> sendChatMessageWithResponseLimit(
       {required String apiKey,
@@ -90,7 +90,8 @@ Map<String, dynamic> _turn(String action,
         String issue = '',
         Map<String, dynamic>? tool,
         Map<String, dynamic>? proposal,
-        Map<String, dynamic>? approval}) =>
+        Map<String, dynamic>? approval,
+        Map<String, dynamic>? decision}) =>
     {
       'success': true,
       'message': jsonEncode({
@@ -103,7 +104,7 @@ Map<String, dynamic> _turn(String action,
         'resolutions': resolutions,
         'proposal': proposal,
         'approval': approval,
-        'decision': null,
+        'decision': decision,
         'tool': tool
       })
     };
@@ -313,25 +314,28 @@ Map<String, dynamic> approval(Map<String, dynamic> s) => {
 /// 之后再比。
 WorkDiscussionRunner modelRunner(
         Future<Map<String, dynamic>> Function(AICharacter, Map<String, dynamic>)
-            respond) =>
+            respond,
+        {void Function(AICharacter, List<Map<String, dynamic>>)? onMessages}) =>
     WorkDiscussionRunner(
         database: db,
         credentials: _Credentials(),
         eventStore: events,
         investigate: execution.investigate,
         completion: (
-                {required character,
-                required config,
-                required apiKey,
-                required provider,
-                required conversationId,
-                required messages,
-                required timeout,
-                cancelToken}) =>
-            respond(
-                character,
-                jsonDecode(messages.last['content'] as String)
-                    as Map<String, dynamic>));
+            {required character,
+            required config,
+            required apiKey,
+            required provider,
+            required conversationId,
+            required messages,
+            required timeout,
+            cancelToken}) async {
+          onMessages?.call(character, messages);
+          return respond(
+              character,
+              jsonDecode(messages.last['content'] as String)
+                  as Map<String, dynamic>);
+        });
 Future<Map<String, dynamic>> confirm(
     AICharacter member, Map<String, dynamic> context) async {
   final s = Map<String, dynamic>.from(context['collaboration'] as Map);

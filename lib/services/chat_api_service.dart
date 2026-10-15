@@ -6,11 +6,13 @@ import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/retry_handler.dart';
 import 'package:chat_group/core/streaming/chat_stream_event.dart';
 import 'package:chat_group/core/streaming/sse_parser.dart';
+import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:dio/dio.dart';
 import 'package:flutter/foundation.dart';
 
 part 'chat_api_service_support.dart';
 part 'chat_api_protocol_support.dart';
+part 'chat_api_models_support.dart';
 
 class ChatApiService {
   static const String _emptyCompletionMessage = '模型返回了空内容';
@@ -24,6 +26,9 @@ class ChatApiService {
   static const int maxSseLineBytes = 512 * 1024;
   static const int maxSseWireBytes = 8 * 1024 * 1024;
 
+  /// 失败原因摘要的长度上限（字符）。诊断只留够定位问题的开头，正文不进审计。
+  static const int failureDetailMaxLength = 180;
+
   final Dio _dio;
   final RetrySleep _retrySleep;
 
@@ -35,6 +40,10 @@ class ChatApiService {
               // 部分推理模型需要先完成 thinking 过程，回复耗时可达 30-60s；
               // 30s 的默认值经常误杀正常请求。
               receiveTimeout: const Duration(seconds: 120),
+              // 这个客户端发出的每个请求都带 API Key，一律不自动跟随重定向：
+              // 跟随会把整个 headers map 原样发到 Location 指向的来源。各请求点
+              // 也会再显式关一次，注入的 Dio 因此同样受约束。
+              followRedirects: false,
             ));
 
   /// 非流式请求：整段等待后返回结果，供「记忆摘要」等一次性调用复用。
@@ -152,10 +161,10 @@ class ChatApiService {
     required String model,
     bool streaming = false,
   }) {
-    final raw =
-        (provider == ApiProvider.custom ? customBaseUrl : provider.baseUrl)
-                ?.trim() ??
-            '';
+    final raw = _configuredBaseUrl(
+      provider: provider,
+      customBaseUrl: customBaseUrl,
+    );
     if (raw.isEmpty) return '';
 
     final parsed = Uri.tryParse(raw);
@@ -272,6 +281,8 @@ class ChatApiService {
           headers: headers,
           receiveTimeout: receiveTimeout,
           responseType: maxResponseBytes == null ? null : ResponseType.stream,
+          // 见 ChatApiService 的 Dio 构造：带凭据的请求不跟随重定向。
+          followRedirects: false,
           // Keep even 5xx bodies on the bounded stream path so an upstream
           // error payload cannot bypass the response-size guard.
           validateStatus: (s) => s != null && s < 600,
@@ -332,14 +343,23 @@ class ChatApiService {
     } on _ChatResponseTooLargeException {
       return {'success': false, 'message': '模型响应超过安全大小限制'};
     } on DioException catch (e) {
+      final detail = _failureDetail(e);
       if (CancelToken.isCancel(e)) {
-        return {'success': false, 'message': cancelledResultMessage};
+        return {
+          'success': false,
+          'message': cancelledResultMessage,
+          'failureDetail': detail,
+        };
       } else if (e.type == DioExceptionType.connectionTimeout ||
           e.type == DioExceptionType.sendTimeout ||
           e.type == DioExceptionType.receiveTimeout) {
-        return {'success': false, 'message': '连接超时'};
+        return {'success': false, 'message': '连接超时', 'failureDetail': detail};
       } else if (e.type == DioExceptionType.connectionError) {
-        return {'success': false, 'message': '网络连接失败：无法连接到服务器'};
+        return {
+          'success': false,
+          'message': '网络连接失败：无法连接到服务器',
+          'failureDetail': detail,
+        };
       } else if (e.response != null) {
         final providerError = _safeProviderErrorDetail(e.response!.data);
         final retryAfter = _retryAfterFromHeaders(e.response!.headers);
@@ -351,14 +371,19 @@ class ChatApiService {
             e.response!.requestOptions.uri.toString(),
           ),
           'requestModel': modelName,
+          'failureDetail': detail,
           if (providerError != null) 'providerError': providerError,
           if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
         };
       } else {
-        return {'success': false, 'message': '请求失败'};
+        return {'success': false, 'message': '请求失败', 'failureDetail': detail};
       }
     } catch (e) {
-      return {'success': false, 'message': '请求失败'};
+      return {
+        'success': false,
+        'message': '请求失败',
+        'failureDetail': _failureDetail(e),
+      };
     }
   }
 
@@ -366,6 +391,23 @@ class ChatApiService {
   ///
   /// Agent 文件任务可能生成数千 token；使用流式通道可以在模型持续输出时保持连接
   /// 活跃，避免非流式请求必须等整包完成而触发 receiveTimeout。
+  /// 取该配置可用的模型清单（`GET /models`）。
+  ///
+  /// 只用于表单里的「获取模型」：它不经过治理网关，也不写诊断——它不是一次模型
+  /// 调用，没有用途、预算与用量可言。失败只回一句可读原因，绝不回显上游正文。
+  Future<ProviderModelCatalog> fetchModels({
+    required String apiKey,
+    required ApiProvider provider,
+    ApiProtocol apiProtocol = ApiProtocol.defaultValue,
+    String? customBaseUrl,
+  }) =>
+      _fetchModelCatalog(
+        apiKey: apiKey,
+        provider: provider,
+        apiProtocol: apiProtocol,
+        customBaseUrl: customBaseUrl,
+      );
+
   Future<Map<String, dynamic>> sendChatMessageStreamed({
     required String apiKey,
     required ApiProvider provider,
@@ -647,6 +689,8 @@ class ChatApiService {
           // 4xx 不抛异常，交由我们产出 error 事件；>=500 仍抛 DioException。
           validateStatus: (s) => s != null && s < 500,
           receiveTimeout: receiveTimeout,
+          // 见 ChatApiService 的 Dio 构造：带凭据的请求不跟随重定向。
+          followRedirects: false,
         ),
         cancelToken: cancelToken,
       );
@@ -711,9 +755,14 @@ class ChatApiService {
         _dioErrorMessage(e),
         retryAfter: _retryAfterFromHeaders(e.response?.headers),
         sanitized: true,
+        failureDetail: _failureDetail(e),
       );
     } catch (e) {
-      yield ChatStreamEvent.error('请求失败', sanitized: true);
+      yield ChatStreamEvent.error(
+        '请求失败',
+        sanitized: true,
+        failureDetail: _failureDetail(e),
+      );
     }
   }
 }

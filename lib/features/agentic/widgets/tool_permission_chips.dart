@@ -39,6 +39,7 @@ class ToolPermissionChips extends StatelessWidget {
       ToolPermission.browserContext => '浏览器上下文',
       ToolPermission.skillCreate => '生成 Skill',
       ToolPermission.skillDownload => '下载 Skill',
+      ToolPermission.nativeApp => '操作测试 App',
     };
   }
 
@@ -50,6 +51,7 @@ class ToolPermissionChips extends StatelessWidget {
       ToolPermission.browserContext => Icons.public_rounded,
       ToolPermission.skillCreate => Icons.auto_fix_high_rounded,
       ToolPermission.skillDownload => Icons.download_rounded,
+      ToolPermission.nativeApp => Icons.desktop_windows_rounded,
     };
   }
 }

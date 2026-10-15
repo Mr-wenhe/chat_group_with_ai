@@ -21,6 +21,22 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
         confirmed[decision['targetId'] as String] = selected['id'] as String;
       }
     }
+    if (state.isAutonomous) {
+      final policy = state.confirmedParticipationPolicy;
+      if (jsonEncode(policy) != jsonEncode(state.autonomyPolicy)) {
+        await _commit('participation', 'application', {
+          'autonomyPolicy': policy,
+          'plan': '',
+          'workItems': [],
+          'acceptances': [],
+          'usageAssignments': [],
+          'requestRevision': state.requestRevision + 1,
+          'teamRevision': state.teamRevision + 1,
+          'verificationRevision': state.verificationRevision + 1,
+          'phase': 'clarifying',
+        });
+      }
+    }
     if (state.team.isNotEmpty) {
       final team = state.team.map((m) => Map<String, dynamic>.from(m)).toList();
       var changed = false;
@@ -33,7 +49,11 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
         if (role == null ||
             character == null ||
             !WorkRoleRouter.qualifiesForResponsibility(
-                character, role, runner.database.characterSkillBox.values)) {
+                character,
+                role,
+                state.isAutonomous
+                    ? const []
+                    : runner.database.characterSkillBox.values)) {
           continue;
         }
         final resolved = await runner._resolveV2Member(character);
@@ -54,6 +74,25 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
         });
         changed = true;
       }
+      if (state.isAutonomous) {
+        for (final id in state.participantIds) {
+          if (team.any((m) => m['memberId'] == id)) continue;
+          final character = runner.database.aiCharacterBox.get(id);
+          final resolved = character == null
+              ? null
+              : await runner._resolveV2Member(character);
+          team.add({
+            'memberId': id,
+            'role': 'general',
+            'qualificationRef': 'member:$id',
+            'qualified': character != null &&
+                character.isActive &&
+                character.agenticEnabled,
+            'available': resolved?.available == true
+          });
+          changed = true;
+        }
+      }
       if (changed) {
         await _commit('router', 'router', {
           'team': team,
@@ -67,6 +106,7 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
       return !state.hasBlockingDecision && await _checkTeam();
     }
     final characters = group!.aiCharacterIds
+        .where((id) => !state.isAutonomous || state.participantIds.contains(id))
         .map(runner.database.aiCharacterBox.get)
         .whereType<AICharacter>()
         .toList();
@@ -79,13 +119,31 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
     final selected = WorkRoleRouter.selectTeam(
         request: task.userRequest,
         characters: characters,
-        skills: runner.database.characterSkillBox.values);
+        skills: state.isAutonomous
+            ? const []
+            : runner.database.characterSkillBox.values);
     final team =
         selected.team.map((m) => Map<String, dynamic>.from(m)).toList();
+    if (state.isAutonomous) {
+      for (final id in state.participantIds) {
+        if (team.any((m) => m['memberId'] == id)) continue;
+        final character = runner.database.aiCharacterBox.get(id);
+        team.add({
+          'memberId': id,
+          'role': 'general',
+          'qualificationRef': 'member:$id',
+          'qualified': character != null &&
+              character.isActive &&
+              character.agenticEnabled,
+          'available': false
+        });
+      }
+    }
     for (final m in team) {
-      final member = await runner
-          ._resolveV2Member(runner.database.aiCharacterBox.get(m['memberId'])!);
-      m['available'] = member.available;
+      final character = runner.database.aiCharacterBox.get(m['memberId']);
+      final member =
+          character == null ? null : await runner._resolveV2Member(character);
+      m['available'] = member?.available == true;
     }
     if (team.isNotEmpty) {
       await _commit('router', 'router', {
@@ -129,7 +187,9 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
       } else if (!WorkRoleRouter.qualifiesForResponsibility(
           member,
           responsibility['role'] as String,
-          runner.database.characterSkillBox.values)) {
+          state.isAutonomous
+              ? const []
+              : runner.database.characterSkillBox.values)) {
         reason = '成员当前资格或配置不可用';
       } else {
         final resolved = await runner._resolveV2Member(member);
@@ -138,11 +198,14 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
       if (reason != null) {
         await _memberGap(id, reason);
         available = false;
-      } else if (responsibility['available'] != true) {
+      } else if (responsibility['available'] != true ||
+          responsibility['qualified'] != true) {
         await _commit('router', 'router', {
           'team': [
             for (final m in state.team)
-              m['memberId'] == id ? {...m, 'available': true} : m
+              m['memberId'] == id
+                  ? {...m, 'available': true, 'qualified': true}
+                  : m
           ],
           'teamRevision': state.teamRevision + 1
         });
@@ -194,7 +257,8 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
     // 下面可能再追加"我承担本次测试或审查"一项；它和换人候选共享同一个决策容量，
     // 所以候选必须先把这一个名额让出来。
     final extraControls = role == 'testing' ? 1 : 0;
-    final options = (await _replacementOptions(role, reserve: extraControls)).options;
+    final options =
+        (await _replacementOptions(role, reserve: extraControls)).options;
     if (replaceId == null && role == 'testing') {
       options.add({
         'id': 'human-review',
@@ -226,11 +290,12 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
   /// [WorkDiscussionRunner.maxDecisionOptions]，整条增量会被状态闸门拒绝，用户连
   /// 最需要的"重试"都看不到。
   Future<
-      ({
-        List<Map<String, dynamic>> options,
-        int hiddenSameModel,
-        int hiddenDifferentModel,
-      })> _replacementOptions(String role,
+          ({
+            List<Map<String, dynamic>> options,
+            int hiddenSameModel,
+            int hiddenDifferentModel,
+          })>
+      _replacementOptions(String role,
           {_DiscussionMember? avoidModelOf, int reserve = 0}) async {
     final failingModel = avoidModelOf == null
         ? null
@@ -243,7 +308,11 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
         .where((c) =>
             !state.team.any((m) => m['memberId'] == c.id) &&
             WorkRoleRouter.qualifiesForResponsibility(
-                c, role, runner.database.characterSkillBox.values))
+                c,
+                role,
+                state.isAutonomous
+                    ? const []
+                    : runner.database.characterSkillBox.values))
         .toList();
     // 与 `_resolveV2Members` 同一条理由：逐个 await 凭据解析时，一个挂住的
     // 凭据提供方会让这个阻塞弹窗推迟 N × 凭据超时（几十个角色就是几分钟）。

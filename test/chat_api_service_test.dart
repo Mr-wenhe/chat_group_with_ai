@@ -480,4 +480,70 @@ void main() {
     expect(result['success'], isFalse);
     expect(result['message'], '模型响应超过安全大小限制');
   });
+
+  test('non-stream transport failure keeps the wording and records its cause',
+      () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.reject(DioException(
+          requestOptions: options,
+          type: DioExceptionType.unknown,
+          error: const FormatException('provider body was HTML'),
+        ));
+      },
+    ));
+
+    final result = await ChatApiService(dio: dio, retrySleep: (_) async {})
+        .sendChatMessage(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isFalse);
+    // 用户可见文案不变：诊断信息不得混进来。
+    expect(result['message'], '请求失败');
+    final detail = result['failureDetail'] as String;
+    expect(detail, contains('DioException/unknown'));
+    expect(detail, contains('FormatException'));
+    expect(detail, contains('provider body was HTML'));
+  });
+
+  test('non-stream unexpected error records a bounded redacted cause',
+      () async {
+    final body = '{"error":"sk-abcdefgh12345678","pad":"${'x' * 400}';
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.resolve(Response<ResponseBody>(
+          requestOptions: options,
+          statusCode: 200,
+          data: ResponseBody.fromString(body, 200),
+        ));
+      },
+    ));
+
+    final result = await ChatApiService(dio: dio, retrySleep: (_) async {})
+        .sendChatMessage(
+      apiKey: 'key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'model',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['message'], '请求失败');
+    final detail = result['failureDetail'] as String;
+    expect(detail, contains('FormatException'));
+    expect(detail, isNot(contains('sk-abcdefgh12345678')));
+    expect(
+      detail.length,
+      lessThanOrEqualTo(ChatApiService.failureDetailMaxLength + 1),
+    );
+  });
 }

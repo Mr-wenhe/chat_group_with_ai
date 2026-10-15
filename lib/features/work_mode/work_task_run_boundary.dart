@@ -1,4 +1,5 @@
 import 'work_task_event.dart';
+import 'work_task_event_store.dart';
 
 /// 任务时间线上「一次新请求并入同一条记录」的分界。
 ///
@@ -35,5 +36,17 @@ class WorkTaskRunBoundary {
       if (isRunBoundary(events[index])) return index;
     }
     return 0;
+  }
+
+  /// Stable local run identifier for task-scoped model usage. The first event
+  /// in the run is already persisted by the coordinator and has a monotonic
+  /// sequence; absent event history stays unassigned instead of being guessed.
+  static Future<int?> currentRunBoundaryId(
+    WorkTaskEventStore eventStore,
+    String taskId,
+  ) async {
+    final events = (await eventStore.read(taskId)).events;
+    if (events.isEmpty) return null;
+    return events[currentRunStartIndex(events)].sequence;
   }
 }

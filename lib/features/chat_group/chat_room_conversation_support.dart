@@ -204,7 +204,7 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
     if (!_showMentionPopup) {
       final cursorPos = _textController.selection.baseOffset;
       if (_isInMentionQuery(text, cursorPos)) {
-        _filteredMentionMembers = List.from(_allGroupCharacters);
+        _filteredMentionMembers = List.from(_mentionCandidates);
         _mentionSelectedIndex = 0;
         _showMentionOverlay(Offset.zero);
         return;
@@ -234,8 +234,8 @@ extension _ChatRoomConversationSupport on _ChatRoomPageState {
 
     // 空查询显示全部成员；否则按名称/角色/标签过滤。
     _filteredMentionMembers = query.isEmpty
-        ? List.from(_allGroupCharacters)
-        : _allGroupCharacters
+        ? List.from(_mentionCandidates)
+        : _mentionCandidates
             .where((c) =>
                 c.name.contains(query) ||
                 c.role.contains(query) ||

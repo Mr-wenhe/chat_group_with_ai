@@ -13,7 +13,6 @@ import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
 import 'package:chat_group/core/models/relationship_event.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
-import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/models/user_profile.dart';
 import 'package:chat_group/core/models/work_mode_workspace.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';

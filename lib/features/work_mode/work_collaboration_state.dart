@@ -1,10 +1,16 @@
 import 'dart:convert';
 
+import 'package:crypto/crypto.dart';
+
 import 'work_role_router.dart';
 
 part 'work_collaboration_state_gate.dart';
+part 'work_collaboration_state_autonomy.dart';
 part 'work_collaboration_state_history.dart';
 part 'work_collaboration_state_updates.dart';
+part 'work_collaboration_update.dart';
+part 'work_collaboration_state_values.dart';
+part 'work_collaboration_state_autonomy_updates.dart';
 
 /// The bounded business facts of a v2 group task. Full conversation and test
 /// logs live in existing message/event stores; these records contain IDs only.
@@ -29,6 +35,10 @@ class WorkCollaborationState {
   final List<Map<String, dynamic>> iterations;
   final List<Map<String, dynamic>> approvals;
   final List<Map<String, dynamic>> decisions;
+  final Map<String, dynamic>? autonomyPolicy;
+  final List<Map<String, dynamic>> usageAssignments;
+  final List<Map<String, dynamic>> usageEvidenceRefs;
+  final List<Map<String, dynamic>> coordinatorDecisions;
   final List<String> pendingInputIds;
   final List<String> appliedEventIds;
 
@@ -53,6 +63,10 @@ class WorkCollaborationState {
     required List<Map<String, dynamic>> iterations,
     required List<Map<String, dynamic>> approvals,
     required List<Map<String, dynamic>> decisions,
+    Map<String, dynamic>? autonomyPolicy,
+    List<Map<String, dynamic>> usageAssignments = const [],
+    List<Map<String, dynamic>> usageEvidenceRefs = const [],
+    List<Map<String, dynamic>> coordinatorDecisions = const [],
     required List<String> pendingInputIds,
     required List<String> appliedEventIds,
   })  : artifactContract =
@@ -76,6 +90,13 @@ class WorkCollaborationState {
             approvals.map((e) => Map<String, dynamic>.unmodifiable(e))),
         decisions = List.unmodifiable(
             decisions.map((e) => Map<String, dynamic>.unmodifiable(e))),
+        autonomyPolicy =
+            autonomyPolicy == null ? null : _freezeMap(autonomyPolicy),
+        usageAssignments = List.unmodifiable(usageAssignments.map(_freezeMap)),
+        usageEvidenceRefs =
+            List.unmodifiable(usageEvidenceRefs.map(_freezeMap)),
+        coordinatorDecisions =
+            List.unmodifiable(coordinatorDecisions.map(_freezeMap)),
         pendingInputIds = List.unmodifiable(pendingInputIds),
         appliedEventIds = List.unmodifiable(appliedEventIds);
 
@@ -140,6 +161,10 @@ class WorkCollaborationState {
     'iterations',
     'approvals',
     'decisions',
+    'autonomyPolicy',
+    'usageAssignments',
+    'usageEvidenceRefs',
+    'coordinatorDecisions',
     'pendingInputIds',
     'appliedEventIds'
   };
@@ -165,7 +190,8 @@ class WorkCollaborationState {
   static bool _multilineText(Object? value, {int max = 4096}) =>
       value is String &&
       value.length <= max &&
-      !value.contains(RegExp(r'[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]'));
+      !value
+          .contains(RegExp(r'[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]'));
   static bool _revision(Object? value) =>
       value is int && value >= 1 && value <= 2147483647;
   // 每类最多 64 条**当前**记录，账台在构造前先归一化，不让历史把容量占满：
@@ -272,6 +298,13 @@ class WorkCollaborationState {
         'iterations': iterations,
         'approvals': approvals,
         'decisions': decisions,
+        if (autonomyPolicy != null) 'autonomyPolicy': autonomyPolicy,
+        if (autonomyPolicy != null || usageAssignments.isNotEmpty)
+          'usageAssignments': usageAssignments,
+        if (autonomyPolicy != null || usageEvidenceRefs.isNotEmpty)
+          'usageEvidenceRefs': usageEvidenceRefs,
+        if (autonomyPolicy != null || coordinatorDecisions.isNotEmpty)
+          'coordinatorDecisions': coordinatorDecisions,
         'pendingInputIds': pendingInputIds,
         'appliedEventIds': appliedEventIds
       };
@@ -286,6 +319,12 @@ class WorkCollaborationState {
       final m = Map<String, dynamic>.from(value);
       if (!_only(m, _fields)) {
         onInvalid?.call('record');
+        return null;
+      }
+      if (m.containsKey('autonomyPolicy') &&
+          !['usageAssignments', 'usageEvidenceRefs', 'coordinatorDecisions']
+              .every(m.containsKey)) {
+        onInvalid?.call('autonomyPolicy.fields');
         return null;
       }
       List<Map<String, dynamic>> list(String key) => (m[key] as List)
@@ -313,6 +352,18 @@ class WorkCollaborationState {
           iterations: boundedIterations(list('iterations')),
           approvals: compactedApprovals(list('approvals')),
           decisions: list('decisions'),
+          autonomyPolicy: m.containsKey('autonomyPolicy')
+              ? Map<String, dynamic>.from(m['autonomyPolicy'] as Map)
+              : null,
+          usageAssignments: m.containsKey('usageAssignments')
+              ? list('usageAssignments')
+              : const [],
+          usageEvidenceRefs: m.containsKey('usageEvidenceRefs')
+              ? list('usageEvidenceRefs')
+              : const [],
+          coordinatorDecisions: m.containsKey('coordinatorDecisions')
+              ? list('coordinatorDecisions')
+              : const [],
           pendingInputIds: List<String>.from(m['pendingInputIds'] as List),
           appliedEventIds: List<String>.from(m['appliedEventIds'] as List));
       final invalidSection = state.invalidSection;
@@ -446,23 +497,4 @@ class WorkCollaborationState {
           decisions: const [],
           pendingInputIds: const [],
           appliedEventIds: const []);
-}
-
-class WorkCollaborationUpdate {
-  final String taskId;
-  final String conversationId;
-  final int expectedRevision;
-  final String eventId;
-  final String sourceRole;
-  final String sourceId;
-  final WorkCollaborationState next;
-
-  const WorkCollaborationUpdate(
-      {required this.taskId,
-      required this.conversationId,
-      required this.expectedRevision,
-      required this.eventId,
-      required this.sourceRole,
-      required this.sourceId,
-      required this.next});
 }

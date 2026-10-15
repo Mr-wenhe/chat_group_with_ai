@@ -4,6 +4,14 @@ part of 'work_discussion_runner.dart';
 /// member. These are prompt hints; the existing gates remain authoritative.
 extension _V2DiscussionTurnFocus on _V2DiscussionSession {
   Map<String, dynamic> _turnFocus(String memberId) {
+    if (!WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+        .isProductionExecutorConsistent) {
+      return {
+        'stage': WorkDiscussionStage.prepareProposal.name,
+        'objective':
+            '用户已经指定制作执行者，当前方案工作项责任不一致。保留用户范围和验收，重新提交由指定成员负责的单制作人方案及全员场景。'
+      };
+    }
     final open = state.issues.where((i) => i['status'] == 'open').firstOrNull;
     if (open != null) {
       if (open['kind'] == 'idea' &&
@@ -17,6 +25,25 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
             '新范围需要协调成员提交完整提案，普通成员只说明异议。'
             '发现其它真实缺陷仍须记录，不把整个任务重新规划。',
       };
+    }
+    if (state.isAutonomous &&
+        memberId == state.coordinatorId &&
+        state.plan.isNotEmpty &&
+        state.usagePlanReady &&
+        (state.phase != 'reviewing' || state.allMembersUsed)) {
+      final kind = state.phase == 'reviewing' ? 'delivery' : 'plan';
+      final subject = kind == 'delivery'
+          ? (state.currentIteration?['id'] as String?)
+          : task.id;
+      if (subject != null &&
+          state.participantIds.every((id) => _opinion(id, kind, subject))) {
+        return {
+          'stage': WorkDiscussionStage.reviewApproval.name,
+          'objective':
+              '核对全体真实意见后定案。保留反对与理由，实质失败不能通过；用 decision.kind=ruling，options=[]。',
+          'rulingSubjectId': subject
+        };
+      }
     }
     final stale = state.workItems
             .any((i) => i['requestRevision'] != state.requestRevision) ||
@@ -69,26 +96,11 @@ extension _V2DiscussionTurnFocus on _V2DiscussionSession {
       };
 
   Map<String, dynamic> _outputGuidance(_DiscussionMember member) {
-    final config = member.config;
-    final provider = member.provider;
-    final total = config == null || provider == null
-        ? 0
-        : runner._discussionOutputTokens(provider, config.modelName);
-    // This provider exposes a shared limit, not a separate reasoning cap. Give
-    // final JSON at least half of the planning target, but never claim a hard
-    // reservation that the API cannot enforce.
-    final finalTarget = min(
-        total,
-        max((total / 2).ceil(),
-            min(total, WorkDiscussionRunner.preferredDiscussionFinalTokens)));
     return {
-      'sharedMaxTokens': total,
-      'preferredFinalTokens': finalTarget,
-      'separateReasoningLimitEnforced': false,
-      'instruction': '推理与正文共用额度，此处仅为规划建议，不是服务端硬预留。'
+      'instruction': '本次请求不由客户端指定输出 token 上限；最终长度仍受模型与服务商能力约束。'
           '优先留足完整最终 JSON 和公开说明的空间；只处理 turnFocus，'
           '不反复复盘全部历史，不在内部模拟后续开发与测试。'
-          '无需填满正文额度，不删未决义务，不省略协议必填字段。',
+          '无需刻意填满输出，不删未决义务，不省略协议必填字段。',
     };
   }
 }

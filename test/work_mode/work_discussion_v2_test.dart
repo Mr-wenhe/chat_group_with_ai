@@ -44,9 +44,39 @@ import '../helpers/lifecycle_hive.dart';
 part 'work_discussion_v2_test_support.dart';
 
 part 'work_discussion_v2_regressions.dart';
+part 'work_discussion_v2_autonomy_test_cases.dart';
 
 void main() {
+  test('提示预算只压缩可选聊天预览，不丢个人记忆和协作义务', () {
+    final messages = <Map<String, dynamic>>[
+      {'role': 'system', 'content': '固定协议'},
+      {
+        'role': 'user',
+        'content': '【当前成员个人上下文】稳定偏好_dev',
+      },
+      {
+        'role': 'user',
+        'content': jsonEncode({
+          'userRequest': '继续检查',
+          'collaboration': {
+            'acceptances': ['must-preserve']
+          },
+          'recentChatMessages': ['旧消息' * 200, '新消息'],
+          'recentDiscussion': ['旧讨论' * 200, '新讨论'],
+        }),
+      },
+    ];
+    final compacted = compactDiscussionOptionalPreviews(messages, 300);
+    expect(compacted[1]['content'], contains('稳定偏好_dev'));
+    final context = jsonDecode(compacted[2]['content'] as String) as Map;
+    expect(context['collaboration']['acceptances'], ['must-preserve']);
+    expect(context['userRequest'], '继续检查');
+    expect(context['recentChatMessages'], ['新消息']);
+    expect(context['recentDiscussion'], ['新讨论']);
+  });
+
   _registerDiscussionHistoryRegressions();
+  _registerAutonomousDiscussionTests();
 
   test(
       'REREVIEW2 reused historical delivery event cannot be externally re-signed',
@@ -677,6 +707,8 @@ void main() {
         final id = call.characterId;
         expect(call.configId, 'config-$id');
         expect(call.systemContent, contains('我是$id'));
+        expect(call.systemContent, contains('风格例句只示范接话'));
+        expect(call.systemContent, contains('共享证据注明成员来源'));
         expect(call.personal, contains('稳定偏好_$id'));
         expect(call.personal,
             isNot(contains('稳定偏好_${id == 'dev' ? 'qa' : 'dev'}')));
@@ -1091,14 +1123,14 @@ void main() {
       expect(result.collaboration!.hasPendingDecision, smallWindow);
       expect(calls, smallWindow ? 0 : greaterThanOrEqualTo(3));
       expect(client.contractViolations, isEmpty,
-          reason: '经治理网关发出的请求必须带上测试凭据与声明的输出预算');
+          reason: '经治理网关发出的请求必须带上测试凭据并通过输入窗口预检');
       for (final request in userRequests) {
         expect(request.actual, request.expected);
       }
     });
   }
   for (final budget in [2048, 16384, 65536]) {
-    test('讨论请求遵守模型能力输出预算：$budget', () async {
+    test('讨论按模型能力预留输入窗口但不发送输出上限：$budget', () async {
       final governance = MemoryGovernanceStore();
       for (final id in ['dev', 'qa']) {
         final config = db.apiConfigBox.get('config-$id')!
@@ -1111,7 +1143,7 @@ void main() {
       final client = _ModelClient((context, model) async {
         calls++;
         return confirm(db.aiCharacterBox.get(context['memberId'])!, context);
-      }, expectedMaxTokens: budget);
+      }, expectedMaxTokens: 0);
       final gateway = AiRequestGateway(store: governance, client: client);
       await WorkDiscussionRunner(
               database: db,
@@ -1122,7 +1154,7 @@ void main() {
           .runCollaboration(task, WorkTaskCancellation(), apply);
       expect(calls, greaterThanOrEqualTo(3));
       expect(client.contractViolations, isEmpty,
-          reason: '讨论请求必须按模型能力声明发出 maxTokens');
+          reason: '讨论请求保留输入预算校验，但不向可选协议发送 maxTokens');
       expect(
           WorkDiscussionState.fromExecutionState(task.executionStateJson)!
               .isPlanReady,

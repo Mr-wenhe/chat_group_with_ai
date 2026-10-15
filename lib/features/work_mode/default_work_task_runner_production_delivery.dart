@@ -5,19 +5,14 @@ extension _DefaultWorkTaskRunnerProductionDelivery on DefaultWorkTaskRunner {
     final state = _candidateState(task);
     final publisher = await candidatePublisher(task);
     final candidate = (await publisher.recover()).last;
-    final workspace = _workspaceRootForTask(task)!;
-    final tested = {
-      for (final f in candidate.files)
-        f['path'] as String: File(p.join(workspace, f['path'] as String))
-    };
     // User review never transfers to changed content or a changed test baseline.
-    await publisher.verify(candidate,
-        expectedDigest: candidate.digest, testedFiles: tested);
+    await publisher.verify(candidate, expectedDigest: candidate.digest);
     await _productionCommit(task, 'workItem', {'phase': 'producing'});
     await publishCandidate(task,
         publicationId:
             'user-baseline-${state.requestRevision}-${state.teamRevision}',
-        requiredPaths: tested.values.map((f) => f.path).toList());
+        frozenSource: candidate,
+        baseline: '复用已人工验收的冻结候选文件。');
     task
       ..status = AgentTaskStatus.queued
       ..resumeRequired = false;
@@ -43,8 +38,7 @@ extension _DefaultWorkTaskRunnerProductionDelivery on DefaultWorkTaskRunner {
         verificationRevision: state.verificationRevision + 1,
         testedFiles: {
           for (final f in candidate.files)
-            f['path'] as String:
-                File(p.join(_workspaceRootForTask(task)!, f['path'] as String))
+            f['path'] as String: candidate.file(f['path'] as String)
         });
     final report = await publisher.appendReview(review,
         method: '用户明确人工验收或豁免；未声称自动验证通过',
@@ -92,6 +86,7 @@ extension _DefaultWorkTaskRunnerProductionDelivery on DefaultWorkTaskRunner {
         .where((c) => c.iterationId == state.currentIteration!['id'])
         .single;
     await publisher.verify(candidate, expectedDigest: candidate.digest);
+    await _validateUsageReceipts(state);
     if (_candidateState(task).revision != state.revision ||
         task.queuedUserRequests.isNotEmpty) {
       return;
@@ -111,8 +106,35 @@ extension _DefaultWorkTaskRunnerProductionDelivery on DefaultWorkTaskRunner {
     await _persistCheckpoint(task);
   }
 
+  Future<void> _validateUsageReceipts(WorkCollaborationState state) async {
+    if (!state.isAutonomous) return;
+    final store = eventStore;
+    final receipts = WorkUsageReceiptStore(store);
+    final missing = <String>[];
+    for (final member in state.participantIds) {
+      final usage = state.currentUsageFor(member);
+      final feedback =
+          usage == null ? null : database.messageBox.get(usage['feedbackRef']);
+      if (feedback?.senderId != member ||
+          feedback?.groupId != state.conversationId ||
+          feedback?.senderType != Message.senderTypeAi ||
+          feedback!.content.trim().isEmpty ||
+          !await receipts.valid(state, member)) {
+        missing.add(member);
+      }
+    }
+    if (missing.isNotEmpty) {
+      throw StateError('当前候选缺少本人可信使用证据：${missing.join('、')}。');
+    }
+  }
+
   Future<void> _validateDeliveryMembers(
       AgentTask task, WorkCollaborationState state) async {
+    if (!WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+        .isProductionExecutorConsistent) {
+      throw StateError('当前制作责任与用户指定执行者不一致，不能交付。');
+    }
+    await _validateUsageReceipts(state);
     final group = database.chatGroupBox.get(task.groupId);
     for (final id in state.activeMembers) {
       final member = database.aiCharacterBox.get(id);

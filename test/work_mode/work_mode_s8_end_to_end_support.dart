@@ -13,6 +13,8 @@ class _S8ExecutionGateway extends AiRequestGateway {
   int calls = 0;
   int productionCalls = 0;
   int reviewCalls = 0;
+  final usageSystemPrompts = <String>[];
+  final usageModels = <String, String>{};
   AgentTask Function()? task;
   String? root;
 
@@ -38,6 +40,8 @@ class _S8ExecutionGateway extends AiRequestGateway {
     Duration receiveTimeout = const Duration(seconds: 120),
     int maxRetries = 5,
     CancelToken? cancelToken,
+    String? taskId,
+    int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
     void Function(ChatStreamEvent event)? onEvent,
@@ -48,6 +52,47 @@ class _S8ExecutionGateway extends AiRequestGateway {
         ? null
         : (jsonDecode(work.executionStateJson) as Map)['workItemExecution']
             as Map?;
+    if (binding?['stage'] == 'usage') {
+      usageModels[characterId] = model;
+      usageSystemPrompts.add(messages
+          .where((message) => message['role'] == 'system')
+          .map((message) => message['content'])
+          .whereType<String>()
+          .join('\n'));
+      final state =
+          WorkDiscussionState.fromExecutionState(work!.executionStateJson)!
+              .collaboration!;
+      final assignment = state.usageAssignments
+          .singleWhere((item) => item['memberId'] == work.characterId);
+      final capabilities =
+          (assignment['requiredCapabilities'] as List).cast<String>();
+      return {
+        'success': true,
+        'message': jsonEncode({
+          'action': 'finish',
+          'public_update': '当前测试环境不能完成真实文档和 App 检查，已标记阻塞。',
+          'tool': null,
+          'completion': {
+            'summary': '当前测试环境无法完成本人文档与应用场景检查。',
+            'evidence': [
+              jsonEncode({
+                'method': '冻结文档正文与版式检查',
+                'result': 'blocked',
+                'acceptanceIds': assignment['acceptanceIds'],
+                'report': '测试模型没有视觉能力且测试环境没有可核验的 App 会话；未完成文档视觉或应用场景检查，也未签署通过。',
+                'defects': [],
+                if (capabilities
+                    .any(const {'document.body', 'document.visual'}.contains))
+                  'documentEvidence': {
+                    'pageNumbers': <int>[],
+                    'sourceLocations': <Map<String, dynamic>>[],
+                  },
+              })
+            ]
+          }
+        })
+      };
+    }
     if (binding?['stage'] == 'verify') {
       final parsed = await DocumentUnderstandingService.parse(MediaAttachment(
           type: 'file', localPath: '$root/需求文档.docx', fileName: '需求文档.docx'));
@@ -260,6 +305,7 @@ AICharacter _s8Character({
   required String role,
   required String configId,
   required List<ToolPermission> permissions,
+  String modelName = 'deepseek-chat',
 }) {
   return AICharacter(
     id: id,
@@ -271,7 +317,7 @@ AICharacter _s8Character({
     systemPrompt: '请只依据本职业职责公开讨论，明确事实、取舍和风险。',
     apiKey: '',
     apiProvider: ApiProvider.deepseek.name,
-    modelName: 'deepseek-chat',
+    modelName: modelName,
     apiConfigId: configId,
     toolPermissions: permissions,
   );
@@ -280,6 +326,7 @@ AICharacter _s8Character({
 Future<AgentTask> _s8WaitFor(
   DatabaseService database,
   String taskId,
+  WorkTaskEventStore eventStore,
   bool Function(AgentTask task) predicate,
 ) async {
   for (var attempt = 0; attempt < 240; attempt++) {
@@ -288,7 +335,27 @@ Future<AgentTask> _s8WaitFor(
     await Future<void>.delayed(const Duration(milliseconds: 25));
   }
   final task = database.agentTaskBox.get(taskId);
+  final replay = await eventStore.read(taskId);
+  final recentEvents = replay.events
+      .skip(replay.events.length > 12 ? replay.events.length - 12 : 0)
+      .map((event) => '${event.kind.name}:${event.title}:${event.detail}')
+      .join(' | ');
+  final recentMessages = database.messageBox.values
+      .where((message) => message.groupId == task?.groupId)
+      .toList()
+      .reversed
+      .take(6)
+      .map((message) {
+    final content = message.content.replaceAll('\n', ' ');
+    return '${message.senderId}:${content.substring(0, content.length > 240 ? 240 : content.length)}';
+  }).join(' | ');
+  final collaboration = WorkDiscussionState.fromExecutionState(
+    task?.executionStateJson ?? '',
+  )?.collaboration;
+  final progress = collaboration == null
+      ? '无协作状态'
+      : 'phase=${collaboration.phase}, requestRevision=${collaboration.requestRevision}, planReady=${collaboration.planReady}, usagePlanReady=${collaboration.usagePlanReady}, deliveryReady=${collaboration.deliveryReady}, members=${collaboration.activeMembers}';
   throw StateError(
-    '任务未在限定时间内达到预期状态：$taskId（当前：${task?.status.name}，错误：${task?.lastError}）',
+    '任务未在限定时间内达到预期状态：$taskId（当前：${task?.status.name}，错误：${task?.lastError}，进展：$progress，消息：$recentMessages，事件：$recentEvents）',
   );
 }

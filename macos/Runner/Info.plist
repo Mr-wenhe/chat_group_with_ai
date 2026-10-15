@@ -18,6 +18,8 @@
 	<string>伴伴</string>
 	<key>CFBundlePackageType</key>
 	<string>APPL</string>
+	<key>ChatGroupTestDataEnvironment</key>
+	<string>CHAT_GROUP_TEST_DATA_DIR</string>
 	<key>CFBundleShortVersionString</key>
 	<string>$(FLUTTER_BUILD_NAME)</string>
 	<key>CFBundleVersion</key>

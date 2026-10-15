@@ -159,6 +159,15 @@ extension _WorkTaskCoordinatorScheduling on WorkTaskCoordinator {
     final discussion = WorkDiscussionState.decodeExecutionState(
       task.executionStateJson,
     );
+    if (discussion.state?.collaboration != null &&
+        !discussion.state!.collaboration!.isAutonomous &&
+        (task.status != AgentTaskStatus.completed)) {
+      final root = _decodeExecutionMap(task.executionStateJson)
+        ..['autonomyUpgradePending'] = true;
+      task.executionStateJson = jsonEncode(root);
+      await _save(task);
+      return false;
+    }
     final invalidDiscussion = discussion.present && discussion.state == null;
     if (!invalidDiscussion &&
         !workExecutionCheckpointRequiresReview(task.executionStateJson)) {

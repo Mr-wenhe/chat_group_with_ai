@@ -7,6 +7,7 @@ import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:hive_flutter/hive_flutter.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:path/path.dart' as p;
 import 'package:uuid/uuid.dart';
 import 'package:video_player/video_player.dart';
 import 'package:chat_group/core/audio/voice_service_config.dart';
@@ -282,6 +283,33 @@ class DatabaseService {
   }
 
   Future<Directory> _getDataDir() async {
+    final requestedTestData = Platform.isMacOS
+        ? Platform.environment['CHAT_GROUP_TEST_DATA_DIR']?.trim()
+        : null;
+    if (requestedTestData != null && requestedTestData.isNotEmpty) {
+      final root = Directory.systemTemp;
+      final target = Directory(requestedTestData);
+      if (!p.isAbsolute(requestedTestData) ||
+          await FileSystemEntity.type(target.path, followLinks: false) !=
+              FileSystemEntityType.directory) {
+        throw StateError('CHAT_GROUP_TEST_DATA_DIR 必须是已创建的真实临时目录。');
+      }
+      final canonicalRoot = await root.resolveSymbolicLinks();
+      final canonicalTarget = await target.resolveSymbolicLinks();
+      if (!p.isWithin(canonicalRoot, canonicalTarget)) {
+        throw StateError('CHAT_GROUP_TEST_DATA_DIR 必须位于系统临时目录内。');
+      }
+      final dataDir = Directory(p.join(canonicalTarget, 'data'));
+      final dataType =
+          await FileSystemEntity.type(dataDir.path, followLinks: false);
+      if (dataType == FileSystemEntityType.link ||
+          dataType != FileSystemEntityType.notFound &&
+              dataType != FileSystemEntityType.directory) {
+        throw StateError('测试数据目录结构无效。');
+      }
+      await _ensureDir(dataDir);
+      return dataDir;
+    }
     final supportDir = await getApplicationSupportDirectory();
     final userDataDir = Directory('${supportDir.path}/data');
     await _ensureDir(userDataDir);
@@ -487,7 +515,8 @@ class DatabaseService {
   /// 刻意只做「标识」，不做注册登录：群聊需要的是能区分"谁说的"，
   /// 不需要密码、会话或用户表，后者对小组作业场景是纯成本。
   /// 代价是这个标识绑定本次安装——重装应用会变成新用户。
-  String get realtimeUserId => _realtimeUserIdCache ??= _readRealtimeUserId() ?? _mintRealtimeUserId();
+  String get realtimeUserId =>
+      _realtimeUserIdCache ??= _readRealtimeUserId() ?? _mintRealtimeUserId();
 
   Future<void> _ensureRealtimeIdentity() async {
     final existing = _readRealtimeUserId();
@@ -1651,8 +1680,7 @@ class DatabaseService {
   }
 
   static const String _ttsEnabledKey = 'tts_enabled';
-  static const String _voiceApiKeyDebugFallbackKey =
-      'voice_api_key_debug_only';
+  static const String _voiceApiKeyDebugFallbackKey = 'voice_api_key_debug_only';
 
   bool get isTtsEnabled => appSettingsBox.get(_ttsEnabledKey) ?? true;
 

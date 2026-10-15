@@ -58,7 +58,8 @@ extension _WorkTaskCoordinatorStartupRecovery on WorkTaskCoordinator {
         task.status == AgentTaskStatus.paused && task.resumeRequired ||
         task.status == AgentTaskStatus.interrupted;
     var state = decoded.state;
-    final requiresMigrationConfirmation = state?.collaboration == null;
+    final requiresMigrationConfirmation = state?.collaboration == null ||
+        state?.collaboration?.autonomyPolicy == null;
     if (state?.collaboration == null) {
       final old = state ?? _legacyDiscussionState(task);
       state = WorkDiscussionState.fromLegacyTask(task, old,
@@ -90,11 +91,17 @@ extension _WorkTaskCoordinatorStartupRecovery on WorkTaskCoordinator {
     }
     state = WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
     final collaboration = state.collaboration!;
-    if (requiresMigrationConfirmation) {
+    if (requiresMigrationConfirmation && !wasWaiting) {
+      String? recoveryFailure;
+      if (originalRoot.containsKey('uncertainAction')) {
+        recoveryFailure =
+            await (_runner as WorkTaskRecoveryValidator).validateRecovery(task);
+      }
       task
         ..status = AgentTaskStatus.paused
         ..resumeRequired = true
-        ..lastError = '旧任务已保留产物与补充，请显式继续以重新核对 v2 方案；旧理解百分比与签字不生效。';
+        ..lastError =
+            '${recoveryFailure == null ? '' : '$recoveryFailure；'}旧任务已保留产物与补充，请显式继续以建立当前自主策略并重新核对方案；旧签字不授权当前执行。';
     }
     if (wasWaiting ||
         requiresMigrationConfirmation ||

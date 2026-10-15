@@ -6,6 +6,13 @@ class AppToast {
   static OverlayEntry? _entry;
   static Timer? _timer;
 
+  static final RegExp _whitespace = RegExp(r'\s+');
+
+  // 提示是紧凑胶囊，行数直接决定高度。外部文本（模型回复等）带的换行会多渲染一个
+  // 空行，把胶囊撑高、文字挤到中线上方，所以统一折叠成单行。
+  static String _singleLine(String message) =>
+      message.replaceAll(_whitespace, ' ').trim();
+
   static void show(
     BuildContext context,
     String message, {
@@ -16,6 +23,7 @@ class AppToast {
     final overlay = Overlay.maybeOf(context, rootOverlay: true);
     if (overlay == null) return;
     final cs = Theme.of(context).colorScheme;
+    final label = _singleLine(message);
     _entry?.remove();
     _timer?.cancel();
     _entry = OverlayEntry(
@@ -54,7 +62,7 @@ class AppToast {
                         const SizedBox(width: 8),
                         Flexible(
                           child: Text(
-                            message,
+                            label,
                             maxLines: 2,
                             overflow: TextOverflow.ellipsis,
                             style: TextStyle(fontSize: 13, color: cs.onSurface),

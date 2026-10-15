@@ -26,13 +26,16 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
     required String publicationId,
     List<String> requiredPaths = const [],
     String baseline = '',
+    WorkCandidate? frozenSource,
   }) async {
     final state = _candidateState(task);
     if (!state.productionReady ||
         !{'ready', 'producing', 'verifying'}.contains(state.phase)) {
       throw StateError('方案尚未确认，不能发布制作候选。');
     }
-    final sources = await _candidateSources(task, state, requiredPaths);
+    final prepared = frozenSource == null
+        ? await _candidateSources(task, state, requiredPaths)
+        : null;
     final basePublisher = await candidatePublisher(task);
     final publisher =
         WorkCandidatePublisher(basePublisher.directory, fault: (_) async {
@@ -44,21 +47,96 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
         throw StateError('发布期间任务已停止、删除或基线已变化。');
       }
     });
-    final candidate = await publisher.publish(
-        publicationId: publicationId,
-        state: state,
-        producerId: task.characterId,
-        sources: sources,
-        baseline: baseline);
-    await _indexCandidate(task, state, candidate, publicationId);
-    await sendCandidateVersion(task, candidate);
-    return candidate;
+    try {
+      final candidate = frozenSource == null
+          ? await publisher.publish(
+              publicationId: publicationId,
+              state: state,
+              producerId: task.characterId,
+              sources: prepared!.sources,
+              baseline: baseline)
+          : await publisher.publishFromCandidate(
+              publicationId: publicationId,
+              state: state,
+              producerId: task.characterId,
+              source: frozenSource,
+              baseline: baseline);
+      await _indexCandidate(task, state, candidate, publicationId);
+      await sendCandidateVersion(task, candidate);
+      return candidate;
+    } finally {
+      final temporaryDirectory = prepared?.temporaryDirectory;
+      if (temporaryDirectory != null && await temporaryDirectory.exists()) {
+        await temporaryDirectory.delete(recursive: true);
+      }
+    }
   }
 
-  Future<Map<String, File>> _candidateSources(AgentTask task,
-      WorkCollaborationState state, List<String> requiredPaths) async {
+  Future<({Map<String, File> sources, Directory? temporaryDirectory})>
+      _candidateSources(AgentTask task, WorkCollaborationState state,
+          List<String> requiredPaths) async {
     final files = workspaceFileService;
     if (files == null) throw StateError('受控文件服务未就绪。');
+    final nativeContract = state.artifactContract['nativeBundle'];
+    if (nativeContract != null) {
+      if (!Platform.isMacOS ||
+          nativeContract is! Map ||
+          nativeContract['appPath'] is! String ||
+          nativeContract['archivePath'] is! String) {
+        throw StateError('macOS App 候选合同无效或当前平台不支持。');
+      }
+      final appPath = nativeContract['appPath'] as String;
+      final archivePath = nativeContract['archivePath'] as String;
+      if (requiredPaths.isNotEmpty &&
+          (requiredPaths.length != 1 || requiredPaths.single != archivePath)) {
+        throw StateError('macOS App 候选只能使用合同指定的 ZIP 路径。');
+      }
+      final root = _workspaceRootForTask(task);
+      if (root == null) throw StateError('macOS App 必须位于当前授权工作区。');
+      final sourcePath = p.joinAll([root, ...p.posix.split(appPath)]);
+      final resolved = await files.pathPolicy.resolveExisting(sourcePath);
+      if (!resolved.isDirectory ||
+          await FileSystemEntity.type(sourcePath, followLinks: false) !=
+              FileSystemEntityType.directory ||
+          p.basename(resolved.path) != p.posix.basename(appPath)) {
+        throw StateError('macOS App 必须是授权工作区内的真实 .app 目录。');
+      }
+      final temporaryDirectory =
+          await Directory.systemTemp.createTemp('chat-group-native-candidate-');
+      try {
+        final archive = File(
+            p.join(temporaryDirectory.path, p.posix.basename(archivePath)));
+        final description = await MacAppBundleArchive.package(
+          app: Directory(resolved.path),
+          workspaceRoot: Directory(root),
+          destination: archive,
+          appPath: appPath,
+          archivePath: archivePath,
+        );
+        final executable = p.join(resolved.path,
+            p.posix.relative(description.executablePath, from: appPath));
+        final produced = <String>{};
+        for (final raw in task.lastArtifactPaths) {
+          try {
+            produced.add((await files.pathPolicy.resolveExisting(raw)).path);
+          } on Object {
+            // Historical or missing artifact paths are not production proof.
+          }
+        }
+        if (!produced.contains(executable)) {
+          throw StateError('当前任务没有记录该 App 主执行文件为真实产物。');
+        }
+        return (
+          sources: {archivePath: archive},
+          temporaryDirectory: temporaryDirectory,
+        );
+      } on Object {
+        if (await temporaryDirectory.exists()) {
+          await temporaryDirectory.delete(recursive: true);
+        }
+        rethrow;
+      }
+    }
     final validation = await WorkArtifactDeliveryGuard.validateTask(
         task: task,
         pathPolicy: files.pathPolicy,
@@ -93,7 +171,7 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
       if (sources.containsKey(relative)) throw StateError('合同文件相对路径重复。');
       sources[relative] = entry.file;
     }
-    return sources;
+    return (sources: sources, temporaryDirectory: null);
   }
 
   Future<void> _indexCandidate(AgentTask task, WorkCollaborationState state,
@@ -198,20 +276,25 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
       throw StateError('原发送者身份不一致。');
     }
     final paths = await _candidateRelatedFiles(candidate, publisher);
+    final nativeBundle =
+        MacAppBundleDescription.tryParse(candidate.manifest['nativeBundle']);
     message.workDelivery = {
       ...candidate.reference,
       'kind': kind,
       'senderId': senderId,
       'verified': true,
       'evidenceRef': evidence,
-      'files': paths
+      'files': paths,
+      if (nativeBundle != null) 'nativeBundle': nativeBundle.toJson(),
     };
     message.content = switch (kind) {
       'review' =>
         '本轮审查报告 ${candidate.iterationId}，对应摘要 ${candidate.digest.substring(0, 12)}。',
       'final' =>
         '正式交付 ${candidate.iterationId}，${state.acceptances.any((a) => a['status'] == 'waived') ? '含用户明确豁免，' : ''}${state.acceptances.any((a) => a['status'] == 'manual') ? '含用户人工验收，' : ''}验收与逐员认可已封存。',
-      _ => '候选送测 ${candidate.iterationId}，文件已冻结，等待本轮审查。',
+      _ => nativeBundle == null
+          ? '候选送测 ${candidate.iterationId}，文件已冻结，等待本轮审查。'
+          : '候选送测 ${candidate.iterationId}；${nativeBundle.appPath} 已作为冻结 macOS App 包装在 ZIP 中，等待本轮审查。',
     };
     _candidateState(task);
     await database.persistMessage(message);
@@ -233,7 +316,10 @@ extension WorkCandidateDelivery on DefaultWorkTaskRunner {
             .toList();
     File? bundle;
     try {
+      final nativeBundle =
+          MacAppBundleDescription.tryParse(candidate.manifest['nativeBundle']);
       if (kind != 'review' &&
+              nativeBundle == null &&
               (candidate.manifest['contract'] as Map)['type'] == 'software' ||
           deliveryFiles.length >
               DefaultWorkTaskRunner._maxArtifactAttachments) {

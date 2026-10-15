@@ -62,6 +62,8 @@ class _StrictDecisionGateway extends AiRequestGateway {
     Duration receiveTimeout = const Duration(seconds: 120),
     int maxRetries = 5,
     CancelToken? cancelToken,
+    String? taskId,
+    int? runBoundary,
     bool requiresTools = false,
     bool userInitiated = false,
     void Function(ChatStreamEvent event)? onEvent,

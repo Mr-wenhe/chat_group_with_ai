@@ -116,6 +116,12 @@ extension _WorkTaskCoordinatorRecovery on WorkTaskCoordinator {
       final discussion = WorkDiscussionState.decodeExecutionState(
         task.executionStateJson,
       );
+      if (discussion.state?.collaboration?.isRecoverableClarifyingCheckpoint ==
+          true) {
+        await _pauseForDiscussion(task, '旧版检查点需要重新进入群讨论并核对当前候选。');
+        _maybeStartDiscussion(task, allowLegacyClarifyingRecheck: true);
+        return;
+      }
       if (_requiresDiscussionForTask(task) &&
           discussion.present &&
           (discussion.state == null ||

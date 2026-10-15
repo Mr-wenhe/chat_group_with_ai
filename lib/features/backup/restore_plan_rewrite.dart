@@ -17,8 +17,7 @@ List<Map<String, dynamic>> _rewriteUserProfiles(
     value['id'] = 'me';
     // 外观改写所用的聊天配置 id：ApiConfig 被重映射时跟着走，否则还原后
     // 下拉框指向一个不存在的配置，静默退化成本地模板。
-    value['apiConfigId'] =
-        apiMap[value['apiConfigId']] ?? value['apiConfigId'];
+    value['apiConfigId'] = apiMap[value['apiConfigId']] ?? value['apiConfigId'];
     result.add(BackupEntityCodec.record('me', value));
   }
   return result;
@@ -426,6 +425,34 @@ WorkDiscussionState _remapDiscussionState(
     value['team'] = collaboration.team
         .map((e) => {...e, 'memberId': member(e['memberId'] as String)})
         .toList();
+    if (collaboration.autonomyPolicy != null) {
+      value['autonomyPolicy'] = {
+        ...collaboration.autonomyPolicy!,
+        'participantIds': collaboration.participantIds.map(member).toList(),
+      };
+      value['usageAssignments'] = collaboration.usageAssignments
+          .map((e) => {...e, 'memberId': member(e['memberId'] as String)})
+          .toList();
+      value['usageEvidenceRefs'] = collaboration.usageEvidenceRefs
+          .map((e) => {
+                ...e,
+                'taskId': taskMap[e['taskId']] ?? e['taskId'],
+                'conversationId': conversation(e['conversationId'] as String),
+                'memberId': member(e['memberId'] as String),
+                'feedbackRef': message(e['feedbackRef'] as String),
+              })
+          .toList();
+      value['coordinatorDecisions'] = collaboration.coordinatorDecisions
+          .map((e) => {
+                ...e,
+                'coordinatorId': member(e['coordinatorId'] as String),
+                'subjectId': e['kind'] == 'plan'
+                    ? taskMap[e['subjectId']] ?? e['subjectId']
+                    : e['subjectId'],
+                'responseRef': message(e['responseRef'] as String),
+              })
+          .toList();
+    }
     value['workItems'] = collaboration.workItems
         .map((e) => {...e, 'ownerId': member(e['ownerId'] as String)})
         .toList();

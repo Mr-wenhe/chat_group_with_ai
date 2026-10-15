@@ -1,0 +1,9 @@
+{"protocolVersion":"0.1.1","runnerVersion":null,"pid":4593,"type":"start","time":0}
+{"suite":{"id":0,"platform":"vm","path":"/Volumes/new_disk/work/flutter/chat_group/chat_group/test/work_mode/macos_app_bundle_archive_test.dart"},"type":"suite","time":0}
+{"test":{"id":1,"name":"loading /Volumes/new_disk/work/flutter/chat_group/chat_group/test/work_mode/macos_app_bundle_archive_test.dart","suiteID":0,"groupIDs":[],"metadata":{"skip":false,"skipReason":null},"line":null,"column":null,"url":null},"type":"testStart","time":1}
+{"count":1,"time":4,"type":"allSuites"}
+{"testID":1,"result":"success","skipped":false,"hidden":true,"type":"testDone","time":8421}
+{"group":{"id":2,"suiteID":0,"parentID":null,"name":"","metadata":{"skip":false,"skipReason":null},"testCount":1,"line":null,"column":null,"url":null},"type":"group","time":8435}
+{"test":{"id":3,"name":"packages and extracts the real built Flutter app when requested","suiteID":0,"groupIDs":[2],"metadata":{"skip":false,"skipReason":null},"line":115,"column":3,"url":"file:///Volumes/new_disk/work/flutter/chat_group/chat_group/test/work_mode/macos_app_bundle_archive_test.dart"},"type":"testStart","time":8436}
+{"testID":3,"result":"success","skipped":false,"hidden":false,"type":"testDone","time":18934}
+{"success":true,"type":"done","time":18963}

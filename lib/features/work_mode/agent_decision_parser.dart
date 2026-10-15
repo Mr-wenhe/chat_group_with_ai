@@ -136,6 +136,10 @@ class AgentDecisionParser {
     AgentToolName.commandRun,
     AgentToolName.skillCreate,
     AgentToolName.skillDownload,
+    AgentToolName.nativeApp,
+    AgentToolName.skillGithubSearch,
+    AgentToolName.skillGithubImport,
+    AgentToolName.skillResourceRead,
   };
 
   /// Optional injection keeps parser tests deterministic. Production work
@@ -527,13 +531,32 @@ class AgentDecisionParser {
           'query'
         });
       case AgentToolName.workspaceDocument:
-        return _validateRequiredFields(args, const {
+        final error = _validateRequiredFields(args, const {
           'path': _ArgumentType.string,
           'query': _ArgumentType.string,
           'startChunk': _ArgumentType.integer,
+          'operation': _ArgumentType.string,
+          'page': _ArgumentType.integer,
         }, const {
           'path'
         });
+        if (error != null) return error;
+        final operation = args['operation'] ?? 'read';
+        if (!const {'read', 'render'}.contains(operation)) {
+          return 'workspace.document.operation 只允许 read 或 render。';
+        }
+        final page = args['page'];
+        if (operation == 'render' && (page is! int || page < 1 || page > 80)) {
+          return 'workspace.document render 必须指定 1 到 80 之间的 page。';
+        }
+        if (operation == 'read' && page != null) {
+          return 'workspace.document read 不接受 page。';
+        }
+        final startChunk = args['startChunk'];
+        if (startChunk is int && startChunk < 0) {
+          return 'workspace.document.startChunk 不能小于 0。';
+        }
+        return null;
       case AgentToolName.weatherForecast:
         final error = _validateFields(args, const {
           'location': _ArgumentType.string,
@@ -569,14 +592,154 @@ class AgentDecisionParser {
         return _validateSkillCreateArguments(args);
       case AgentToolName.skillDownload:
         return _validateFields(args, const {
-          'name': _ArgumentType.string,
-          'skillId': _ArgumentType.string,
           'id': _ArgumentType.string,
           'templateId': _ArgumentType.string,
-          'url': _ArgumentType.string,
-          'source': _ArgumentType.string,
         });
+      case AgentToolName.skillGithubSearch:
+        return _validateRequiredFields(
+          args,
+          const {'query': _ArgumentType.string},
+          const {'query'},
+        );
+      case AgentToolName.skillGithubImport:
+        return _validateRequiredFields(
+          args,
+          const {
+            'owner': _ArgumentType.string,
+            'repo': _ArgumentType.string,
+            'path': _ArgumentType.string,
+            'ref': _ArgumentType.string,
+          },
+          const {'owner', 'repo', 'path', 'ref'},
+        );
+      case AgentToolName.skillResourceRead:
+        return _validateRequiredFields(
+          args,
+          const {
+            'packId': _ArgumentType.string,
+            'path': _ArgumentType.string,
+          },
+          const {'packId', 'path'},
+        );
+      case AgentToolName.nativeApp:
+        return _validateNativeAppArguments(args);
     }
+  }
+
+  String? _validateNativeAppArguments(Map<String, dynamic> args) {
+    final operation = args['operation'];
+    if (operation == 'open') {
+      return _validateRequiredFields(
+          args, const {'operation': _ArgumentType.string}, const {'operation'});
+    }
+    if (operation == 'observe' || operation == 'close') {
+      final fields = <String, _ArgumentType>{
+        'operation': _ArgumentType.string,
+        if (operation == 'observe' || args.containsKey('sessionRef'))
+          'sessionRef': _ArgumentType.string,
+      };
+      final required = <String>{
+        'operation',
+        if (operation == 'observe' || args.containsKey('sessionRef'))
+          'sessionRef',
+      };
+      final error = _validateRequiredFields(args, fields, required);
+      if (error != null) return error;
+      if (args['sessionRef'] case final String ref when ref.length > 128) {
+        return 'native.app.sessionRef 无效。';
+      }
+      return null;
+    }
+    if (operation != 'act') return 'native.app.operation 无效。';
+    final action = args['action'];
+    final fields = switch (action) {
+      'click' => const {
+          'operation': _ArgumentType.string,
+          'action': _ArgumentType.string,
+          'sessionRef': _ArgumentType.string,
+          'elementId': _ArgumentType.string,
+        },
+      'input' => const {
+          'operation': _ArgumentType.string,
+          'action': _ArgumentType.string,
+          'sessionRef': _ArgumentType.string,
+          'elementId': _ArgumentType.string,
+          'text': _ArgumentType.string,
+        },
+      'scroll' => const {
+          'operation': _ArgumentType.string,
+          'action': _ArgumentType.string,
+          'sessionRef': _ArgumentType.string,
+          'elementId': _ArgumentType.string,
+          'direction': _ArgumentType.string,
+          'distance': _ArgumentType.integer,
+        },
+      'resize' => const {
+          'operation': _ArgumentType.string,
+          'action': _ArgumentType.string,
+          'sessionRef': _ArgumentType.string,
+          'widthDelta': _ArgumentType.integer,
+          'heightDelta': _ArgumentType.integer,
+        },
+      'reopen' => const {
+          'operation': _ArgumentType.string,
+          'action': _ArgumentType.string,
+          'sessionRef': _ArgumentType.string,
+        },
+      'assert' => const {
+          'operation': _ArgumentType.string,
+          'action': _ArgumentType.string,
+          'sessionRef': _ArgumentType.string,
+          'elementId': _ArgumentType.string,
+          'acceptanceId': _ArgumentType.string,
+          'expectedText': _ArgumentType.string,
+        },
+      _ => null,
+    };
+    if (fields == null) return 'native.app.action 无效。';
+    if (!_hasExactlyFields(args, fields.keys.toSet())) {
+      return 'native.app 参数缺失或包含未允许字段。';
+    }
+    final requiredStrings = <String>{'operation', 'action', 'sessionRef'};
+    if (action == 'click' ||
+        action == 'input' ||
+        action == 'scroll' ||
+        action == 'assert') {
+      requiredStrings.add('elementId');
+    }
+    if (action == 'input') requiredStrings.add('text');
+    if (action == 'scroll') requiredStrings.add('direction');
+    final error = _validateRequiredFields(args, fields, requiredStrings);
+    if (error != null) return error;
+    if ((args['sessionRef'] as String).length > 128) {
+      return 'native.app.sessionRef 无效。';
+    }
+    if (action == 'input' && (args['text'] as String).length > 4096) {
+      return 'native.app.text 超过操作上限。';
+    }
+    if (action == 'assert' &&
+        ((args['acceptanceId'] as String).length > 128 ||
+            (args['expectedText'] as String).trim().isEmpty ||
+            (args['expectedText'] as String).length > 512)) {
+      return 'native.app.assert 目标无效或超出长度限制。';
+    }
+    if (action == 'scroll' &&
+        (!{'up', 'down', 'left', 'right'}.contains(args['direction']) ||
+            (args['distance'] as int) < 1 ||
+            (args['distance'] as int) > 800)) {
+      return 'native.app.scroll 参数超出场景范围。';
+    }
+    if (action == 'resize' &&
+        ((args['widthDelta'] as int).abs() > 600 ||
+            (args['heightDelta'] as int).abs() > 600 ||
+            args['widthDelta'] == 0 && args['heightDelta'] == 0)) {
+      return 'native.app.resize 参数超出场景范围。';
+    }
+    if (args['elementId'] case final String id
+        when id.isEmpty || id.length > 128) {
+      return 'native.app.elementId 无效。';
+    }
+    return null;
   }
 
   Map<String, dynamic> _normaliseToolArguments(

@@ -87,6 +87,13 @@ extension _DataLifecycleServiceClear on DataLifecycleService {
         targets.keysFor(DeletionTargetNames.characterSkills),
         incomplete,
       );
+      if (db.dataDirPath != null) {
+        await _runner.attempt(
+          '技能资源清理失败',
+          incomplete,
+          () => SkillResourcePackStore.forDatabase(db).pruneUnreferenced(db),
+        );
+      }
       await _deleteTargetKeys(
         '群聊清理失败',
         db.chatGroupBox,

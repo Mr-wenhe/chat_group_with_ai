@@ -427,7 +427,7 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
 
   String _workModeContext(
       AgentTask task, AICharacter character, WorkToolRegistry registry,
-      {required String workspaceRoot}) {
+      {required String workspaceRoot, WorkCandidate? candidate}) {
     final currentRequest = WorkDiscussionState.currentRequestScope(task);
     final base = WorkModePolicy.planningContext(character);
     final discoverable = WorkModePolicy.discoverableSkills(
@@ -453,12 +453,53 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
         ? const WorkContextBuilder().fromTask(task).toJsonString()
         : task.contextSummary.trim();
     final handoff = WorkHandoffState.fromTask(task);
+    final execution = _decodeMap(task.executionStateJson)['workItemExecution'];
+    final usageAssignment = execution is Map && execution['stage'] == 'usage'
+        ? WorkDiscussionState.fromExecutionState(task.executionStateJson)
+            ?.collaboration
+            ?.usageAssignments
+            .where((item) => item['memberId'] == task.characterId)
+            .firstOrNull
+        : null;
+    final usageCapabilities = usageAssignment == null
+        ? const <String>{}
+        : (usageAssignment['requiredCapabilities'] as List)
+            .cast<String>()
+            .toSet();
+    final documentFiles = candidate?.files
+            .where((entry) => const {'docx', 'pdf'}.contains(p
+                .extension(entry['path'] as String)
+                .toLowerCase()
+                .replaceFirst('.', '')))
+            .map((entry) => {
+                  'path': candidate.file(entry['path'] as String).absolute.path,
+                  'fileName': p.basename(entry['path'] as String),
+                  'sha256': entry['sha256'],
+                })
+            .toList(growable: false) ??
+        const <Map<String, dynamic>>[];
     final targetsDesktop =
         WorkModeDirectoryService.requestTargetsDesktop(currentRequest);
     return [
       base,
       if (_decodeMap(task.executionStateJson)['workItemExecution'] is Map)
         '当前成员工作项：${jsonEncode(_decodeMap(task.executionStateJson)['workItemExecution'])}；协作方案与验收：${jsonEncode(WorkDiscussionState.fromExecutionState(task.executionStateJson)?.collaboration?.toPromptJson())}。只完成当前工作项，不代表整个任务完成。material 工作项须写本任务必要且可打开的工作材料；软件包含需求/技术/测试材料，produce 工作项按合同文件制作。verify 工作项须实际读取或执行验证，禁止改产物和断言；finish.evidence 仅含一个 JSON 字符串 {method,result:"passed|failed|blocked",acceptanceIds:[全部覆盖项],report:"完整报告",defects:[{acceptanceId,reproduction,expected,actual,retestCondition}]}。软件测试命令标准输出须为 JSON {artifactDigest:"当前候选摘要",tests:[{id,status:"passed|failed",method:"对应 requiredCapability",reproduction,expected,actual}]}；必须实际执行对应测试，退出码0或 HTML 结构/打开不能替代交互覆盖，能力缺失返回 blocked。不删失败用例刷绿。',
+      if ((_decodeMap(task.executionStateJson)['workItemExecution']
+              as Map?)?['stage'] ==
+          'usage')
+        '你负责 own_usage 对应的本人场景，只使用当前冻结候选，并由自己的模型逐步决定实际动作。先核对候选版本、目标应用和前置测试数据，再查看真实窗口、页面或输出；每步依据操作后的真实结果继续，观察预期与实际、状态变化、持久化、结果文件和错误。原生、网页界面使用对应已注册操作工具，源码阅读、命令打印的 tests JSON、截图路径或他人报告都不能冒充本人使用；只有图像实际送达且当前模型能够看见时才报告视觉观察。executorId 始终是制作责任人，不能改派；不得修改候选、测试断言或必达验收，发现的问题交回群内下一轮制作。旧缺陷也要实际复测；候选变化后重新使用当前版本，旧截图和观察失效。窗口失焦或元素失效时先重新观察，不能向未知前台输入。报告全部发现；report 引用本人真实工具证据，defects 仅使用已解析字段 {acceptanceId,reproduction,expected,actual,retestCondition} 写清复现步骤、预期、实际和复测条件。文档缺陷按下方已解析结构增加 sourceLocation，不能添加其他字段。通过时说明本人完成的路径；没有真实操作证据不得签通过。finish.summary 写本人观察与反馈，finish.evidence 仅放一份本人反馈 JSON {method,result:"passed|failed|blocked",acceptanceIds:[本场景全部验收ID],report:"实际观察和结果",defects:[{acceptanceId,reproduction,expected,actual,retestCondition}]}；失败列全缺陷，通过不能带缺陷。工具运行时核验当前候选、真实操作与业务结果，模型填写 passed 不会生成通过收据；缺少工具、视觉能力、有效前置数据或场景无法验证时明确阻塞，不用源码阅读冒充使用。',
+      if (usageAssignment != null && documentFiles.isNotEmpty)
+        '当前冻结文档候选：${jsonEncode(documentFiles)}。只允许使用列出的 DOCX/PDF。'
+            '${usageCapabilities.contains('document.body') ? ' 文字检查：从 workspace.document(operation:"read",startChunk:0) 开始，按 nextChunkStart 读完本人责任范围的 totalChunkCount；不能用搜索片段当全文，也不能用正文提取判断版式。检查错字、标点、术语、编号、引用、歧义、重复和空泛表达；文案要具体清楚、适合读者，不删事实、引用、数字或明示要求，也不以 AI 来源检测分数验收。' : ''}'
+            '${usageCapabilities.contains('document.visual') ? ' 视觉检查：使用本人模型实际收到每个指定文件的必要页图，逐页调用 workspace.document(operation:"render",page:N)，核对页码、总页数和渲染 manifest；缺页要补齐，不能用正文提取代替版式检查。检查遮挡、错位、截断、分页、跨页表格、图文关系和样式一致性。模型看不到图、必要页/渲染器/字体覆盖不完整时明确 blocked。' : ''}'
+            '${usageCapabilities.contains('document.body') || usageCapabilities.contains('document.visual') ? ' report 写出全部发现，引用真实原文或页图证据，指出原句/页码/区域、影响和可执行修改；不确定的专有名词或渲染差异先核实，不制造问题。缺陷的 sourceLocation 仅使用解析器允许的 fileName、paragraph、lineStart、lineEnd、page、sheet 字段，具体原句和区域写在 report/defects 文本中。文档反馈额外包含 documentEvidence:{pageNumbers:[本人实际看过的页码],sourceLocations:[本人实际读到的原文位置]}，每个缺陷都要有本人观察到的 sourceLocation。制作人修订并发布新候选后，重新读取/渲染对应内容再复测，旧页图与收据失效。' : ''}',
+      if ((_decodeMap(task.executionStateJson)['workItemExecution']
+                  as Map?)?['stage'] ==
+              'usage' &&
+          WorkDiscussionState.fromExecutionState(task.executionStateJson)
+              ?.collaboration
+              ?.artifactContract['nativeBundle'] is Map)
+        '当前场景绑定已冻结候选中的 macOS .app；仅可用 native.app 的 open、observe、act、close。模型不能提供 appPath、bundleId 或任意坐标。open 会返回本成员当前会话的 sessionRef；后续 observe、act、close 必须原样带回运行时返回的 sessionRef，运行时会核对它属于本成员、当前场景和冻结候选。act 只能引用最近一次本成员 observe 返回的 elementId。只有 expectedResult 或验收 method 中用引号明确写出的可见文本可以作为 native.app assert 的 expectedText；每项 acceptance 都要单独 assert，点击、控件树变化或尺寸变化只证明操作，不代表业务验收通过。每次输入前核对焦点，失焦后必须先 observe。完成本场景后 close；目标进程、Appium 会话和 WDA 清理未核实前不能提交反馈。测试数据环境 CHAT_GROUP_TEST_DATA_DIR 用于应用数据路径验证，不代表操作系统安全沙箱。',
       '角色可发现技能目录（全局技能按需加载；角色已绑定技能正文会注入；权限仍需通过角色授权与工具策略交集校验）：\n$skillCatalog',
       if (skillPreflight != null) skillPreflight,
       '当前生产 WorkAgentLoop 已注册工具：$tools。',
@@ -514,7 +555,8 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     final clipped = description.length <= 180
         ? description
         : '${description.substring(0, 179)}…';
-    return '- ${skill.id}｜${skill.domain}｜${skill.name}：$clipped';
+    return '- ${skill.id}｜${skill.domain}｜${skill.name}：$clipped'
+        '${skill.resourcePackId == null ? '' : '（资源包 ${skill.resourcePackId}；首次使用先通过 skill.resource.read 读取 SKILL.md 和其引用资源）'}';
   }
 
   ExpertSkillTemplate? _matchingSkillTemplate(String request) {
@@ -537,13 +579,8 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
       WorkDiscussionState.currentRequestScope(task),
     );
     if (template == null) return null;
-    final installed = database.characterSkillBox.values.any(
-      (skill) =>
-          skill.name == template.name &&
-          (skill.isGlobal ||
-              skill.characterId == character.id ||
-              character.skillIds.contains(skill.id)),
-    );
+    final installed = database.characterSkillBox.values.any((skill) =>
+        ExpertSkillCatalog.isInstalledTemplate(skill, template, character.id));
     if (installed) return null;
     return AgentToolCall(
       name: AgentToolName.skillDownload,
@@ -551,20 +588,34 @@ extension _DefaultWorkTaskRunnerContext on DefaultWorkTaskRunner {
     );
   }
 
-  List<CharacterSkill> _skillsFor(AICharacter character, String request) {
+  List<CharacterSkill> _skillsFor(AICharacter character, String request,
+      {String? taskId}) {
     final resolution = CharacterSkillResolver.resolveFor(character, request);
     final installed = database.characterSkillBox.values.where(
       (skill) =>
-          skill.isGlobal ||
-          skill.characterId == character.id ||
+          (skill.resourcePackId == null &&
+              (skill.isGlobal || skill.characterId == character.id)) ||
           character.skillIds.contains(skill.id),
     );
-    return WorkModePolicy.resolveSkills(
+    final result = WorkModePolicy.resolveSkills(
       character: character,
       userRequest: request,
       installedSkills: installed,
       resolvedSkills: resolution.skills,
     );
+    if (taskId != null) {
+      final key = '$taskId:${character.id}';
+      final presented = _presentedLocalDrafts.putIfAbsent(key, () => {});
+      for (final skill in result) {
+        if (!skill.isGlobal &&
+            skill.characterId == character.id &&
+            skill.resourcePackId == null &&
+            !character.skillIds.contains(skill.id)) {
+          presented[skill.id] = SkillResourcePackStore.draftFingerprint(skill);
+        }
+      }
+    }
+    return result;
   }
 
   Future<T> _serializeSkillMutation<T>(Future<T> Function() operation) {

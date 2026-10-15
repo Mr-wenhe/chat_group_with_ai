@@ -219,8 +219,13 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
     if (character == null || !character.isActive || !character.agenticEnabled) {
       throw StateError('执行角色不可用');
     }
-    final visualId =
-        _decodeMap(task.executionStateJson)['visionModelCharacterId'];
+    final workItem = _decodeMap(task.executionStateJson)['workItemExecution'];
+    final isAutonomousUsage = workItem is Map &&
+        workItem['stage'] == 'usage' &&
+        v2?.isAutonomous == true;
+    final visualId = isAutonomousUsage
+        ? null
+        : _decodeMap(task.executionStateJson)['visionModelCharacterId'];
     var modelCharacter = character;
     if (visualId is String && visualId.isNotEmpty) {
       if (!supportsVisionModelForTask(task, visualId)) {
@@ -291,8 +296,11 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
       final skills = _skillsFor(
         character,
         WorkDiscussionState.currentRequestScope(task),
+        taskId: task.id,
       );
       final capability = gateway.capability(provider, config.modelName);
+      final review = v2 == null ? null : await _prepareProductionReview(task);
+      final usage = v2 == null ? null : await _prepareProductionUsage(task);
       final registry = _registryFor(
         task: task,
         character: character,
@@ -303,6 +311,7 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
         approvalDecision: decision,
         approvalScope: scope,
         modelCapability: capability,
+        candidate: usage?.candidate,
       );
       final systemPrompt = AgentPromptBuilder.buildAgentDecisionPrompt(
         rolePlaySystemPrompt: character.rolePlaySystemPrompt,
@@ -313,11 +322,14 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           character,
           registry,
           workspaceRoot: workspace.workDirPath,
+          candidate: usage?.candidate,
         ),
       );
-      final review = v2 == null ? null : await _prepareProductionReview(task);
-      final effectiveRegistry =
-          review == null ? registry : _reviewRegistry(task, registry, review);
+      final effectiveRegistry = usage != null
+          ? _usageRegistry(registry, usage)
+          : review == null
+              ? registry
+              : _reviewRegistry(task, registry, review);
       final loop = WorkAgentLoop(
         model: (request) => _completeModelTurn(
           request,
@@ -331,34 +343,48 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           cancellation: cancellation,
           capabilityMaxOutput: capability.maxOutput,
           capabilityContextWindow: capability.contextWindow,
+          usage: usage,
         ),
         registry: effectiveRegistry,
-        onToolResult: review == null
-            ? null
-            : (task, call, result) async {
-                if (!cancellation.isCancelled) {
-                  await _recordProductionReviewReceipt(
-                      task, review, call, result);
+        onToolResult: usage != null
+            ? (task, call, result) async {
+                if (!cancellation.isCancelled &&
+                    {WorkToolResultStatus.success, WorkToolResultStatus.failed}
+                        .contains(result.status) &&
+                    result.usageObservation != null) {
+                  await _recordUsageObservation(
+                      task, usage, result.usageObservation!);
                 }
-              },
+              }
+            : review == null
+                ? null
+                : (task, call, result) async {
+                    if (!cancellation.isCancelled) {
+                      await _recordProductionReviewReceipt(
+                          task, review, call, result);
+                    }
+                  },
         parser: AgentDecisionParser(
           defaultCommandWorkingDirectory: defaultCommandWorkingDirectory,
         ),
         eventStore: eventStore,
         clock: clock,
         onCheckpoint: _persistCheckpoint,
-        completionGuard: review != null
+        completionGuard: usage != null
             ? (task, completion) =>
-                _validateProductionReview(task, review, completion)
-            : (_decodeMap(task.executionStateJson)['workItemExecution']
-                        as Map?)?['stage'] ==
-                    'material'
+                _validateProductionUsage(task, usage, completion)
+            : review != null
                 ? (task, completion) =>
-                    _validateProductionMaterials(task, completion)
-                : _validateCompletion,
+                    _validateProductionReview(task, review, completion)
+                : (_decodeMap(task.executionStateJson)['workItemExecution']
+                            as Map?)?['stage'] ==
+                        'material'
+                    ? (task, completion) =>
+                        _validateProductionMaterials(task, completion)
+                    : _validateCompletion,
         artifactCompletion: _autoCompleteAfterArtifact,
         artifactConfirmation: _offerableDeliverables,
-        preflightTool: review == null
+        preflightTool: review == null && usage == null
             ? (task) => _preflightSkillTool(task, character)
             : null,
         contextCompressionModel: (snapshot) => _compressWorkContext(
@@ -385,13 +411,14 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
         // persisted skill without injecting the entire skill library up front.
         systemPromptBuilder: () => AgentPromptBuilder.buildAgentDecisionPrompt(
           rolePlaySystemPrompt: character.rolePlaySystemPrompt,
-          skills: _skillsFor(character, requestText),
+          skills: _skillsFor(character, requestText, taskId: task.id),
           userRequest: requestText,
           workModeContext: _workModeContext(
             task,
             character,
             registry,
             workspaceRoot: workspace.workDirPath,
+            candidate: usage?.candidate,
           ),
         ),
         maxActions: task.actionLimit,
@@ -414,7 +441,14 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           task.executionStateJson,
         );
         if (v2 != null) {
-          if (review != null) {
+          try {
+            await _recordLocalDraftSkillsAfterSuccess(task, character);
+          } on Object {
+            // Local drafts remain unverified if their validation receipt cannot be saved.
+          }
+          if (usage != null) {
+            await _finishProductionUsage(task, usage, character, cancellation);
+          } else if (review != null) {
             await _finishProductionReview(task, review, character);
           } else {
             await _completeProductionItem(task, character);
@@ -430,6 +464,22 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
           _applyArtifactDeliveryFailure(task, delivery);
         } else {
           await database.recordCharacterReplyUsage(character.id);
+          try {
+            await _recordLocalDraftSkillsAfterSuccess(task, character);
+          } on Object {
+            // Local drafts remain unverified if their validation receipt cannot be saved.
+          }
+          try {
+            await _skillResourcePackStore.recordSuccessfulUse(
+              database: database,
+              taskId: task.id,
+              conversationId: task.groupId,
+              characterId: character.id,
+            );
+          } on Object {
+            // A task remains complete if the optional skill receipt cannot
+            // be persisted; the affected package remains unverified.
+          }
           _clearArtifactDeliveryNotice(task);
           await _tryOpenHtmlArtifact(task);
         }

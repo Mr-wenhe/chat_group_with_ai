@@ -1,0 +1,16 @@
+{
+  "coldRuns": 2,
+  "counterTransitions": [
+    [
+      0,
+      1
+    ],
+    [
+      0,
+      1
+    ]
+  ],
+  "bundleDigest": "28138547797f4589003b35731d1bf758808fa5241b072d15bf9e21aeaa14f957",
+  "bundleUnchanged": true,
+  "targetProcessesExited": true
+}

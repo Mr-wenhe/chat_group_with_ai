@@ -1,3 +1,4 @@
+import 'work_collaboration_state.dart';
 import 'dart:convert';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'agent_decision.dart';
@@ -148,13 +149,17 @@ class WorkDiscussionV2Turn {
   ///
   /// 其余两个阶段不可能被采纳认可（方案/提案/候选都还没就位，闸门会拒），把它的
   /// 结构说明发过去只是让成员对着无关字段反复自检。
-  static String _tailFor(WorkDiscussionStage stage) =>
-      _tail(includeApproval: stage == WorkDiscussionStage.reviewApproval);
+  static String _tailFor(WorkDiscussionStage stage,
+          {required bool autonomous}) =>
+      _tail(
+          includeApproval: stage == WorkDiscussionStage.reviewApproval,
+          autonomous: autonomous);
 
-  static String _tail({required bool includeApproval}) =>
+  static String _tail(
+          {required bool includeApproval, required bool autonomous}) =>
       WorkDiscussionProtocolText.proposalTail +
       (includeApproval ? WorkDiscussionProtocolText.approvalTail : '') +
-      WorkDiscussionProtocolText.tailCommon;
+      WorkDiscussionProtocolText.tailCommon(autonomous: autonomous);
 
   /// 协议总则加材料要求：首轮请求与协议修复器共用同一份。
   static String _withContractRules(String userRequest) =>
@@ -180,15 +185,18 @@ class WorkDiscussionV2Turn {
   static String protocolFor(
     String userRequest, {
     required WorkDiscussionStage stage,
+    bool autonomous = false,
   }) =>
-      _withContractRules(userRequest) + _tailFor(stage);
+      _withContractRules(userRequest) + _tailFor(stage, autonomous: autonomous);
 
   /// 协议修复器用的全量协议：修复器要把任意原始响应转成合法 JSON。
   ///
   /// 原始响应可能包含任何 action，按阶段裁剪它会让"模型写坏了 JSON"这件事更难
   /// 救回来，所以这里刻意不带 stage 参数。
-  static String repairProtocolFor(String userRequest) =>
-      _withContractRules(userRequest) + _tail(includeApproval: true);
+  static String repairProtocolFor(String userRequest,
+          {bool autonomous = false}) =>
+      _withContractRules(userRequest) +
+      _tail(includeApproval: true, autonomous: autonomous);
 
   static WorkDiscussionV2Turn? parse(Map<String, dynamic> response,
       {void Function(String)? onInvalid}) {
@@ -254,7 +262,8 @@ class WorkDiscussionV2Turn {
                 'plan',
                 'artifactContract',
                 'workItems',
-                'acceptances'
+                'acceptances',
+                if (proposal.containsKey('usageAssignments')) 'usageAssignments'
               }) ||
               !_nonempty(proposal['scope']) ||
               !_nonempty(proposal['plan']) ||
@@ -263,6 +272,13 @@ class WorkDiscussionV2Turn {
               _records(proposal['acceptances']) == null)) {
         return invalid(
             'proposal 仅包含 scope/plan/artifactContract/workItems/acceptances；scope、plan 非空且最多 4096 字符');
+      }
+      if (proposal != null &&
+          proposal.containsKey('usageAssignments') &&
+          (_records(proposal['usageAssignments']) == null ||
+              !_records(proposal['usageAssignments'])!
+                  .every(WorkCollaborationAutonomy.validProposalAssignment))) {
+        return invalid('usageAssignments 必须是严格的逐成员场景，不含版本、状态或收据字段');
       }
       if (proposal != null &&
           !isValidArtifactContractFields(
@@ -345,7 +361,8 @@ class WorkDiscussionV2Turn {
                 'impact',
                 'options'
               }) ||
-              !{'question', 'choice', 'dispute'}.contains(decision['kind']) ||
+              !{'question', 'choice', 'dispute', 'ruling'}
+                  .contains(decision['kind']) ||
               !['reason', 'evidence', 'impact']
                   .every((k) => _nonempty(decision[k])) ||
               !_text(decision['targetId'], 128) ||
@@ -453,14 +470,47 @@ class WorkDiscussionV2Turn {
       'location',
       'revisionTarget',
       'files',
-      'verificationCommands'
+      'verificationCommands',
+      'nativeBundle'
     };
     return contract.keys.every(allowed.contains) &&
         _text(contract['type'], 128) &&
         _text(contract['format'], 128) &&
         _text(contract['location'], 512) &&
-        _text(contract['revisionTarget'], 512);
+        _text(contract['revisionTarget'], 512) &&
+        _validNativeBundleContract(contract);
   }
+
+  static bool _validNativeBundleContract(Map<String, dynamic> contract) {
+    final value = contract['nativeBundle'];
+    if (value == null) return true;
+    if (value is! Map ||
+        value.length != 3 ||
+        value.keys.any((key) =>
+            key is! String ||
+            !const {'schemaVersion', 'appPath', 'archivePath'}.contains(key)) ||
+        value['schemaVersion'] != 1 ||
+        !_relativeMacBundlePath(value['appPath'], '.app') ||
+        !_relativeMacBundlePath(value['archivePath'], '.zip') ||
+        contract['type'] != 'software' ||
+        contract['files'] is! List ||
+        (contract['files'] as List).length != 1 ||
+        (contract['files'] as List).single != value['archivePath']) {
+      return false;
+    }
+    return true;
+  }
+
+  static bool _relativeMacBundlePath(Object? value, String suffix) =>
+      value is String &&
+      value.length <= 255 &&
+      value.endsWith(suffix) &&
+      !value.startsWith('/') &&
+      !value.contains('\\') &&
+      !value.contains('\u0000') &&
+      value
+          .split('/')
+          .every((part) => part.isNotEmpty && part != '.' && part != '..');
 
   static bool _validProposalRecords(Object? value, Set<String> allowedKeys,
       {required Set<String> requiredKeys,

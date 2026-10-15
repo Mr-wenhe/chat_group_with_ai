@@ -22,7 +22,9 @@ extension _DefaultWorkTaskRunnerReview on DefaultWorkTaskRunner {
     final root = _workspaceRootForTask(task)!;
     final tested = {
       for (final f in candidate.files)
-        f['path'] as String: File(p.join(root, f['path'] as String))
+        f['path'] as String: candidate.manifest['nativeBundle'] is Map
+            ? candidate.file(f['path'] as String)
+            : File(p.join(root, f['path'] as String))
     };
     final reviews = Directory('${candidate.directory.path}/reviews');
     final attempt = await reviews.exists()
@@ -372,7 +374,9 @@ extension _DefaultWorkTaskRunnerReview on DefaultWorkTaskRunner {
         isWorkMode: true,
         content: task.resultSummary));
     task
-      ..status = AgentTaskStatus.paused
+      ..status = state.isAutonomous && result == 'passed'
+          ? AgentTaskStatus.queued
+          : AgentTaskStatus.paused
       ..resumeRequired = false;
     if (result == 'blocked' ||
         state.acceptances.any((a) =>

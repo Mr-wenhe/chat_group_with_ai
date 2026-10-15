@@ -1,0 +1,21 @@
+{
+  "capabilities": {
+    "alwaysMatch": {
+      "platformName": "Mac",
+      "appium:automationName": "Mac2",
+      "appium:appPath": "/Volumes/new_disk/work/flutter/chat_group/chat_group/build/p0_macos/fixed/P0Sample.app",
+      "appium:bundleId": "com.chatgroup.p0.sample",
+      "appium:environment": {
+        "P0_DATA_DIR": "/Volumes/new_disk/work/flutter/chat_group/chat_group/build/p0_macos/data"
+      },
+      "appium:systemHost": "127.0.0.1",
+      "appium:systemPort": 10123,
+      "appium:serverStartupTimeout": 60000,
+      "appium:showServerLogs": true,
+      "appium:noReset": true
+    },
+    "firstMatch": [
+      {}
+    ]
+  }
+}

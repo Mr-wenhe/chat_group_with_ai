@@ -31,7 +31,7 @@ abstract class GovernancePersistence {
     CustomModelCapability capability,
   );
 
-  /// 清除该模型的用户声明，使其回落到内置快照（或未知模型的保守降级）。
+  /// 清除该模型的用户声明，使其回落到内置快照（或未登记模型的兜底默认值）。
   Future<void> clearCustomCapability(String provider, String model);
   Future<void> addLedgerEntry(UsageLedgerEntry entry);
   Future<void> addDiagnostic(AiRequestDiagnostic diagnostic);
@@ -72,6 +72,7 @@ int _compareSearchAuditCandidates(
 
 class AiGovernanceStore implements GovernancePersistence {
   static const globalSearchPolicyKey = 'web_search_policy_v1';
+
   /// The policy used when no global policy has been persisted yet.
   ///
   /// An explicitly saved policy (including [WebSearchPolicy.off]) always
@@ -114,6 +115,7 @@ class AiGovernanceStore implements GovernancePersistence {
 
   final DatabaseService db;
   bool _legacyLedgerMigrated = false;
+  Set<String>? _ledgerRequestIds;
   AiRequestGuard? _guard;
   Future<void>? _searchAuditMaintenance;
   bool _searchAuditScanWasCapped = false;
@@ -308,10 +310,18 @@ class AiGovernanceStore implements GovernancePersistence {
     // 防御性打开账本 box（幂等），避免未预开时抛 HiveError。
     final box = await _openLedgerBox();
     _ensureLegacyLedgerMigration(box);
-    // append-only：以唯一 key 直接 put，O(1) 写入，不再全量读写整张账本。
-    final key =
-        '${entry.conversationId}:${entry.timestamp.microsecondsSinceEpoch}:${const Uuid().v4()}';
+    final requestIds = _ledgerRequestIds ??= _requestIdsIn(box);
+    final requestId = entry.requestId;
+    final key = requestId.isEmpty
+        ? '${entry.conversationId}:${entry.timestamp.microsecondsSinceEpoch}:${const Uuid().v4()}'
+        : 'request:$requestId';
+    if (requestId.isNotEmpty &&
+        (requestIds.contains(requestId) || box.containsKey(key))) {
+      requestIds.add(requestId);
+      return;
+    }
     await box.put(key, entry.toMap());
+    if (requestId.isNotEmpty) requestIds.add(requestId);
     if (entry.characterId.isNotEmpty) {
       await db.recordTokenUsage(
         characterId: entry.characterId,
@@ -322,6 +332,12 @@ class AiGovernanceStore implements GovernancePersistence {
       );
     }
   }
+
+  Set<String> _requestIdsIn(Box<dynamic> box) => {
+        for (final value in box.values)
+          if (value is Map && value['requestId'] is String)
+            (value['requestId'] as String),
+      };
 
   @override
   Future<void> addDiagnostic(AiRequestDiagnostic diagnostic) =>
@@ -343,6 +359,7 @@ class AiGovernanceStore implements GovernancePersistence {
     // 防御性打开账本 box（幂等），避免未预开时抛 HiveError。
     final box = await _openLedgerBox();
     await box.clear();
+    _ledgerRequestIds = <String>{};
     await db.appSettingsBox.delete(_ledgerKey);
     await db.clearTokenUsage();
   }

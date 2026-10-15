@@ -16,6 +16,7 @@ class ProviderStyle {
     'baidu': Color(0xFF6E7BFF),
     'xfyun': Color(0xFF0066FF),
     'sensenova': Color(0xFF00A88F),
+    'oray': Color(0xFF84CC16),
     'custom': Color(0xFFF59E0B),
   };
 

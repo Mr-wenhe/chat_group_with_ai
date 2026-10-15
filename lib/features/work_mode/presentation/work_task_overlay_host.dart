@@ -6,6 +6,7 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_decision_dialog.dart';
@@ -322,6 +323,19 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     // 标签全被关掉时面板也必须留着：历史任务入口在面板里，一旦整体消失，
     // 用户就再也看不到那些被关掉的任务。
     final hasTasks = _panelHasContent;
+    var usageEntries = const <UsageLedgerEntry>[];
+    var usageDiagnostics = const <AiRequestDiagnostic>[];
+    var usageUnavailable = false;
+    try {
+      final store = AiGovernanceStore.forDatabase(
+        ref.read(databaseServiceProvider),
+      );
+      usageEntries = store.ledgerEntries;
+      usageDiagnostics = store.diagnostics;
+    } on Object {
+      // Lightweight hosts without a database should not present zero as a total.
+      usageUnavailable = true;
+    }
     final viewport = MediaQuery.sizeOf(context);
     final isWide = viewport.width >= _wideLayoutMinWidth;
     return Stack(
@@ -333,6 +347,9 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
             viewportHeight: viewport.height,
             child: WorkTaskPanel(
               showTaskSummarySection: widget.showTaskSummarySection,
+              usageEntries: usageEntries,
+              usageDiagnostics: usageDiagnostics,
+              usageUnavailable: usageUnavailable,
               tasks: _tasks,
               hiddenTaskCount: _hiddenTaskCount,
               historyTasks: _historyTasksForActiveConversation(),
@@ -385,8 +402,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
                   (_coordinator == null ? null : _selectVisionModel),
               onConfirmExecutorSwap:
                   _coordinator == null ? null : _confirmExecutorSwap,
-              onSelectExecutor:
-                  _coordinator == null ? null : _selectExecutor,
+              onSelectExecutor: _coordinator == null ? null : _selectExecutor,
               onConfirmArtifactDelivery:
                   _coordinator == null ? null : _confirmArtifactDelivery,
               onRetry: widget.onRetryTask ??

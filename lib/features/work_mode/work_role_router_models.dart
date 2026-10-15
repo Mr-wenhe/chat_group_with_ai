@@ -5,7 +5,7 @@ enum WorkRoleRouteSource {
   privateChat,
   handoff,
 
-  /// 群内只有一位成员具备本阶段的本职资格，S1 直接指定，不做推举。
+  /// 当前群成员里只有一位具备本阶段的本职资格，S1 直接指定，不做推举。
   soleQualifiedCandidate,
   candidateSelection,
   unavailable,

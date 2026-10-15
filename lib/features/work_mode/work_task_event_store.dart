@@ -47,6 +47,8 @@ class WorkTaskEventReadResult {
 /// App-support JSONL storage for public work-task progress only.
 class WorkTaskEventStore {
   static const maxDiscussionDetailBytes = 1024 * 1024;
+  static const maxNativeScreenshotBytes = 12 * 1024 * 1024;
+  static const maxDocumentPageBytes = 12 * 1024 * 1024;
   static const int defaultMaxTitleCharacters = 240;
   static const int defaultMaxDetailCharacters = 4000;
   static const int defaultMaxMetadataStringCharacters = 512;
@@ -186,6 +188,145 @@ class WorkTaskEventStore {
     return file.readAsString();
   }
 
+  /// Stores target-window evidence in the same task deletion and retention
+  /// boundary as discussion details. References contain no local path.
+  Future<String> writeNativeEvidence(
+          String taskId, String extension, List<int> bytes) =>
+      _scheduleMaintenance(() async {
+        _validateTaskId(taskId);
+        final limit = extension == 'png'
+            ? maxNativeScreenshotBytes
+            : maxDiscussionDetailBytes;
+        if (!const {'png', 'xml', 'json'}.contains(extension) ||
+            bytes.isEmpty ||
+            bytes.length > limit ||
+            _closed ||
+            _appendsSuspendedForDataClear ||
+            _deletedTaskIds.contains(taskId)) {
+          throw StateError('macOS App 操作证据不可写入。');
+        }
+        await _ensureEventsDirectory(create: true);
+        final digest = sha256.convert(bytes).toString();
+        final file =
+            File('${_eventsDirectory.path}/$taskId.native.$digest.$extension');
+        if (await FileSystemEntity.type(file.path, followLinks: false) ==
+            FileSystemEntityType.link) {
+          throw StateError('macOS App 操作证据不能是符号链接。');
+        }
+        if (await file.exists()) {
+          if (await file.length() != bytes.length ||
+              sha256.convert(await file.readAsBytes()).toString() != digest) {
+            throw StateError('不可变 macOS App 操作证据已变化。');
+          }
+        } else {
+          await file.writeAsBytes(bytes, flush: true);
+        }
+        return 'native:${digest.substring(0, 24)}.$extension';
+      });
+
+  Future<List<int>> readNativeEvidence(String taskId, String reference) async {
+    _validateTaskId(taskId);
+    final match = RegExp(r'^native:([a-f0-9]{24})\.(png|xml|json)$')
+        .firstMatch(reference);
+    if (match == null || !await _ensureEventsDirectory(create: false)) {
+      throw StateError('macOS App 操作证据引用无效。');
+    }
+    final prefix = match.group(1)!;
+    final extension = match.group(2)!;
+    final files = await _eventsDirectory
+        .list(followLinks: false)
+        .where((entity) => entity.path
+            .split(Platform.pathSeparator)
+            .last
+            .startsWith('$taskId.native.$prefix'))
+        .where((entity) => entity.path.endsWith('.$extension'))
+        .toList();
+    if (files.length != 1 || files.single is! File) {
+      throw StateError('macOS App 操作证据缺失或重复。');
+    }
+    final file = files.single as File;
+    final limit = extension == 'png'
+        ? maxNativeScreenshotBytes
+        : maxDiscussionDetailBytes;
+    if (await file.length() > limit) {
+      throw StateError('macOS App 操作证据超过读取上限。');
+    }
+    final bytes = await file.readAsBytes();
+    final digest = sha256.convert(bytes).toString();
+    if (!digest.startsWith(prefix)) {
+      throw StateError('macOS App 操作证据摘要不匹配。');
+    }
+    return bytes;
+  }
+
+  Future<String> writeDocumentEvidence(
+          String taskId, String extension, List<int> bytes) =>
+      _scheduleMaintenance(() async {
+        _validateTaskId(taskId);
+        final limit = extension == 'png'
+            ? maxDocumentPageBytes
+            : maxDiscussionDetailBytes;
+        if (!const {'png', 'json'}.contains(extension) ||
+            bytes.isEmpty ||
+            bytes.length > limit ||
+            _closed ||
+            _appendsSuspendedForDataClear ||
+            _deletedTaskIds.contains(taskId)) {
+          throw StateError('文档页图证据不可写入。');
+        }
+        await _ensureEventsDirectory(create: true);
+        final digest = sha256.convert(bytes).toString();
+        final file = File(
+            '${_eventsDirectory.path}/$taskId.document.$digest.$extension');
+        if (await FileSystemEntity.type(file.path, followLinks: false) ==
+            FileSystemEntityType.link) {
+          throw StateError('文档页图证据不能是链接。');
+        }
+        if (await file.exists()) {
+          if (await file.length() != bytes.length ||
+              sha256.convert(await file.readAsBytes()).toString() != digest) {
+            throw StateError('不可变文档页图证据已变化。');
+          }
+        } else {
+          await file.writeAsBytes(bytes, flush: true);
+        }
+        return 'document:${digest.substring(0, 24)}.$extension';
+      });
+
+  Future<List<int>> readDocumentEvidence(
+      String taskId, String reference) async {
+    _validateTaskId(taskId);
+    final match =
+        RegExp(r'^document:([a-f0-9]{24})\.(png|json)$').firstMatch(reference);
+    if (match == null || !await _ensureEventsDirectory(create: false)) {
+      throw StateError('文档页图证据引用无效。');
+    }
+    final prefix = match.group(1)!;
+    final extension = match.group(2)!;
+    final files = await _eventsDirectory
+        .list(followLinks: false)
+        .where((entity) => entity.path
+            .split(Platform.pathSeparator)
+            .last
+            .startsWith('$taskId.document.$prefix'))
+        .where((entity) => entity.path.endsWith('.$extension'))
+        .toList();
+    if (files.length != 1 || files.single is! File) {
+      throw StateError('文档页图证据缺失或重复。');
+    }
+    final file = files.single as File;
+    final limit =
+        extension == 'png' ? maxDocumentPageBytes : maxDiscussionDetailBytes;
+    if (await file.length() > limit) {
+      throw StateError('文档页图证据超过读取上限。');
+    }
+    final bytes = await file.readAsBytes();
+    if (!sha256.convert(bytes).toString().startsWith(prefix)) {
+      throw StateError('文档页图证据摘要不匹配。');
+    }
+    return bytes;
+  }
+
   /// Appends one event after every earlier write for the same task has flushed.
   Future<WorkTaskEvent> append({
     required String taskId,
@@ -274,8 +415,9 @@ class WorkTaskEventStore {
       final cutoff = DateTime.now().subtract(retention);
       var removed = 0;
       await for (final entity in _eventsDirectory.list(followLinks: false)) {
-        if (entity is! File || !entity.path.endsWith('.jsonl')) continue;
-        final taskId = entity.uri.pathSegments.last.replaceFirst('.jsonl', '');
+        if (entity is! File) continue;
+        final name = entity.uri.pathSegments.last;
+        final taskId = name.split('.').first;
         if (!RegExp(r'^[A-Za-z0-9_-]{1,128}$').hasMatch(taskId) ||
             isTaskActive?.call(taskId) == true) {
           continue;
@@ -306,13 +448,13 @@ class WorkTaskEventStore {
     _deletedTaskIds.add(taskId);
     return _scheduleMaintenance(() async {
       if (!await _ensureEventsDirectory(create: false)) return;
-      final details = await _eventsDirectory
-          .list(followLinks: false)
-          .where((entity) => entity.path
-              .split(Platform.pathSeparator)
-              .last
-              .startsWith('$taskId.detail.'))
-          .toList();
+      final details =
+          await _eventsDirectory.list(followLinks: false).where((entity) {
+        final name = entity.path.split(Platform.pathSeparator).last;
+        return name.startsWith('$taskId.detail.') ||
+            name.startsWith('$taskId.native.') ||
+            name.startsWith('$taskId.document.');
+      }).toList();
       for (final detail in details) {
         if (detail is File) await detail.delete();
       }

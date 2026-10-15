@@ -24,6 +24,7 @@ extension WorkCollaborationGate on WorkCollaborationState {
         !WorkCollaborationState._refs(appliedEventIds)) {
       return 'header';
     }
+    if (autonomyInvalidSection != null) return autonomyInvalidSection;
     if (!WorkCollaborationState._text(artifactContract['type'], max: 128)) {
       return 'artifactContract.type';
     }
@@ -43,7 +44,8 @@ extension WorkCollaborationGate on WorkCollaborationState {
       'location',
       'revisionTarget',
       'files',
-      'verificationCommands'
+      'verificationCommands',
+      'nativeBundle'
     };
     final unexpectedContractFields = artifactContract.keys
         .where((key) => !artifactContractFields.contains(key))
@@ -74,6 +76,26 @@ extension WorkCollaborationGate on WorkCollaborationState {
             files.length > 64 ||
             !files.every(WorkCollaborationState._id))) {
       return 'artifactContract.files';
+    }
+    final nativeBundle = artifactContract['nativeBundle'];
+    if (nativeBundle != null) {
+      const fields = {'schemaVersion', 'appPath', 'archivePath'};
+      final appPath = nativeBundle is Map ? nativeBundle['appPath'] : null;
+      final archivePath =
+          nativeBundle is Map ? nativeBundle['archivePath'] : null;
+      if (nativeBundle is! Map ||
+          nativeBundle.length != fields.length ||
+          nativeBundle.keys
+              .any((key) => key is! String || !fields.contains(key)) ||
+          nativeBundle['schemaVersion'] != 1 ||
+          !_relativeMacBundlePath(appPath, '.app') ||
+          !_relativeMacBundlePath(archivePath, '.zip') ||
+          artifactContract['type'] != 'software' ||
+          files is! List ||
+          files.length != 1 ||
+          files.single != archivePath) {
+        return 'artifactContract.nativeBundle';
+      }
     }
     if (!WorkCollaborationState._records(
             team,
@@ -375,6 +397,10 @@ extension WorkCollaborationGate on WorkCollaborationState {
   bool _allApproved(String kind, String subjectId,
       {String iterationId = '', String digest = ''}) {
     if (!teamQualified) return false;
+    if (isAutonomous && {'plan', 'delivery'}.contains(kind)) {
+      return opinionsSettled(kind, subjectId,
+          iterationId: iterationId, digest: digest);
+    }
     return activeMembers.every((member) {
       final opinions = approvals.where((a) =>
           a['memberId'] == member &&
@@ -422,6 +448,8 @@ extension WorkCollaborationGate on WorkCollaborationState {
   bool get planReady =>
       isValid &&
       teamQualified &&
+      usagePlanReady &&
+      singleMakerReady &&
       scope.trim().isNotEmpty &&
       plan.trim().isNotEmpty &&
       ['type', 'format', 'location'].every((key) =>
@@ -439,57 +467,11 @@ extension WorkCollaborationGate on WorkCollaborationState {
   Map<String, dynamic>? get currentIteration =>
       iterations.isEmpty ? null : iterations.last;
 
-  /// 容量只数**当前可读**的签字。
-  ///
-  /// 台账解析时先按同键归档（[WorkCollaborationState.compactedApprovals]），但
-  /// delivery 的键带着随迭代变化的 `subjectId`，失效候选的签字因此永远不与新签字
-  /// 同键、只能一路堆下去：迭代够久就把上限占满，第 65 条**当前**签字让整个状态
-  /// 解析成 null，任务被永久卡住。而所有读取判据都钉在当前主体上——[planReady] 读
-  /// `taskId`、[deliveryReady] 读当前迭代 id、[ideaApproved] 读问题 id——旧迭代的
-  /// 签字对任何判据都不可见，历史凭证仍在群里的公开回复（`evidenceRef`）与事件日志
-  /// 里，所以容量只看当前主体及门禁实际读取的版本。
-  int get liveApprovalGroups {
-    return currentApprovals
-        .map(WorkCollaborationState._approvalKey)
-        .toSet()
-        .length;
-  }
-
-  /// 与方案、提案及交付门禁使用相同的版本绑定。过期签字只作历史凭证。
-  Iterable<Map<String, dynamic>> get currentApprovals {
-    final members = activeMembers.toSet();
-    final issueRequests = {
-      for (final issue in issues) issue['id']: issue['requestRevision']
-    };
-    return approvals.where((a) {
-      if (a['teamRevision'] != teamRevision) return false;
-      if (a['kind'] == 'idea') {
-        // ideaApproved 以最后一条意见的验证版本为准，不能隐去反对意见。
-        return issueRequests[a['subjectId']] == a['requestRevision'];
-      }
-      if (!members.contains(a['memberId']) ||
-          a['requestRevision'] != requestRevision) {
-        return false;
-      }
-      if (a['kind'] == 'plan') {
-        return a['subjectId'] == taskId &&
-            a['iterationId'] == '' &&
-            a['artifactDigest'] == '';
-      }
-      final iteration = currentIteration;
-      return a['kind'] == 'delivery' &&
-          iteration != null &&
-          a['subjectId'] == iteration['id'] &&
-          a['iterationId'] == iteration['id'] &&
-          a['artifactDigest'] == iteration['artifactDigest'] &&
-          a['verificationRevision'] == verificationRevision;
-    });
-  }
-
   bool get deliveryReady {
     final iteration = currentIteration;
     if (!isValid ||
         !planReady ||
+        !allMembersUsed ||
         !{'reviewing', 'delivered'}.contains(phase) ||
         iteration == null ||
         iteration['requestRevision'] != requestRevision ||
@@ -513,3 +495,14 @@ extension WorkCollaborationGate on WorkCollaborationState {
         digest: iteration['artifactDigest'] as String);
   }
 }
+
+bool _relativeMacBundlePath(Object? value, String suffix) =>
+    value is String &&
+    value.length <= 255 &&
+    value.endsWith(suffix) &&
+    !value.startsWith('/') &&
+    !value.contains('\\') &&
+    !value.contains('\u0000') &&
+    value
+        .split('/')
+        .every((part) => part.isNotEmpty && part != '.' && part != '..');

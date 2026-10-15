@@ -57,6 +57,8 @@ class AiRequestGateway {
     required AiRequestPurpose purpose,
     required String conversationId,
     required String characterId,
+    String? taskId,
+    int? runBoundary,
     double temperature = 0.85,
     int maxTokens = 1024,
     Duration? receiveTimeout,
@@ -73,6 +75,8 @@ class AiRequestGateway {
       purpose: purpose,
       conversationId: conversationId,
       characterId: characterId,
+      taskId: taskId,
+      runBoundary: runBoundary,
       maxTokens: maxTokens,
       maxRetries: maxRetries,
       streaming: false,
@@ -109,6 +113,8 @@ class AiRequestGateway {
     required AiRequestPurpose purpose,
     required String conversationId,
     required String characterId,
+    String? taskId,
+    int? runBoundary,
     double temperature = 0.85,
     int maxTokens = 1024,
     Duration? receiveTimeout,
@@ -127,6 +133,8 @@ class AiRequestGateway {
       purpose: purpose,
       conversationId: conversationId,
       characterId: characterId,
+      taskId: taskId,
+      runBoundary: runBoundary,
       maxTokens: maxTokens,
       maxRetries: maxRetries,
       streaming: false,
@@ -161,6 +169,8 @@ class AiRequestGateway {
     required AiRequestPurpose purpose,
     required String conversationId,
     required String characterId,
+    String? taskId,
+    int? runBoundary,
     double temperature = 0.85,
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
@@ -178,6 +188,8 @@ class AiRequestGateway {
       purpose: purpose,
       conversationId: conversationId,
       characterId: characterId,
+      taskId: taskId,
+      runBoundary: runBoundary,
       maxTokens: maxTokens,
       maxRetries: maxRetries,
       streaming: true,
@@ -329,6 +341,8 @@ class AiRequestGateway {
     required AiRequestPurpose purpose,
     required String conversationId,
     required String characterId,
+    String? taskId,
+    int? runBoundary,
     double temperature = 0.85,
     int maxTokens = 1024,
     Duration receiveTimeout = const Duration(seconds: 120),
@@ -357,6 +371,8 @@ class AiRequestGateway {
         provider: provider,
         model: model,
         purpose: purpose,
+        taskId: taskId,
+        runBoundary: runBoundary,
         reason: prepared.reason!,
       );
       yield ChatStreamEvent.error('$blockedPrefix${prepared.reason}');
@@ -373,6 +389,7 @@ class AiRequestGateway {
     var outputCharacters = 0;
     String status = 'cancelled';
     String? failureType;
+    String? failureDetail;
     bool attemptRecorded = false;
     try {
       await for (final event in client.streamChatMessage(
@@ -397,6 +414,7 @@ class AiRequestGateway {
         } else if (event.type == ChatStreamEventType.error) {
           status = 'failed';
           failureType = _failureType(event.message);
+          failureDetail = event.failureDetail;
         }
         if (event.type == ChatStreamEventType.done) {
           attemptRecorded = true;
@@ -408,6 +426,8 @@ class AiRequestGateway {
             characterId: characterId,
             conversationId: conversationId,
             purpose: purpose,
+            taskId: taskId,
+            runBoundary: runBoundary,
             originPurpose: purpose,
             capability: prepared.capability!,
             estimatedInputTokens: prepared.inputTokens,
@@ -420,6 +440,7 @@ class AiRequestGateway {
             retryCount: 0,
             status: status,
             failureType: failureType,
+            failureDetail: failureDetail,
           );
         }
         yield event;
@@ -435,6 +456,8 @@ class AiRequestGateway {
           characterId: characterId,
           conversationId: conversationId,
           purpose: purpose,
+          taskId: taskId,
+          runBoundary: runBoundary,
           originPurpose: purpose,
           capability: prepared.capability!,
           estimatedInputTokens: prepared.inputTokens,
@@ -447,6 +470,7 @@ class AiRequestGateway {
           retryCount: 0,
           status: status,
           failureType: failureType,
+          failureDetail: failureDetail,
         );
       }
     }

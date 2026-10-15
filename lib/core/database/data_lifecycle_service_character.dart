@@ -78,6 +78,13 @@ extension _DataLifecycleServiceCharacter on DataLifecycleService {
       targets.keysFor(DeletionTargetNames.characterSkills),
       incomplete,
     );
+    if (db.dataDirPath != null) {
+      await _runner.attempt(
+        '角色技能资源清理失败',
+        incomplete,
+        () => SkillResourcePackStore.forDatabase(db).pruneUnreferenced(db),
+      );
+    }
     await _deleteTargetKeys(
       '角色任务删除失败',
       db.agentTaskBox,

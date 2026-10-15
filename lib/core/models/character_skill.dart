@@ -34,6 +34,9 @@ class CharacterSkill extends HiveObject {
   @HiveField(8)
   DateTime updatedAt;
 
+  @HiveField(9)
+  final String? resourcePackId;
+
   CharacterSkill({
     String? id,
     required this.characterId,
@@ -44,6 +47,7 @@ class CharacterSkill extends HiveObject {
     required this.requiredPermissions,
     DateTime? createdAt,
     DateTime? updatedAt,
+    this.resourcePackId,
   })  : id = id ?? const Uuid().v4(),
         createdAt = createdAt ?? DateTime.now(),
         updatedAt = updatedAt ?? DateTime.now();

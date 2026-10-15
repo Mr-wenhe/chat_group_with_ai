@@ -42,7 +42,10 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
 
   Future<bool> _prepareCollaborationWork(AgentTask task) async {
     final state = _candidateState(task);
-    if (!state.productionReady || state.pendingInputIds.isNotEmpty) {
+    if (!WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .isProductionExecutorConsistent ||
+        !state.productionReady ||
+        state.pendingInputIds.isNotEmpty) {
       return false;
     }
     if (!await _productionContractAvailable(task, state)) return false;
@@ -139,6 +142,7 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
       return _prepareProductionReviewer(task, _candidateState(task));
     }
     if (state.phase == 'reviewing') {
+      if (await _prepareUsageActor(task, state)) return true;
       if (!state.deliveryReady) return false;
       _bindWorkItem(task, 'final', state.currentIteration!['id'] as String);
       return true;
@@ -272,6 +276,7 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
       root.remove('publicUpdates');
       root.remove('v2WorkItemCompletion');
       root.remove('v2ReviewReceiptRef');
+      root.remove('v2UsageObservationRef');
       _pendingRequests.remove(task.id);
     }
     root['workItemExecution'] = binding;

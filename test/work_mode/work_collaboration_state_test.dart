@@ -1,13 +1,22 @@
+import 'dart:io';
 import 'dart:convert';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/features/backup/backup_entity_codec.dart';
 import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
+import 'package:chat_group/features/work_mode/work_usage_receipt.dart';
+import 'package:chat_group/features/work_mode/work_usage_feedback.dart';
+import 'package:chat_group/features/work_mode/agent_decision.dart';
+import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_agent_loop.dart';
+import 'package:chat_group/features/work_mode/work_tool_registry.dart';
+import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_context_builder.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 part 'work_collaboration_state_regressions.dart';
+part 'work_collaboration_state_autonomy_test_cases.dart';
 
 Map<String, dynamic> _approval(String member, String kind, String subject,
         {String iteration = '',
@@ -130,6 +139,7 @@ void _replaceRecord(Map<String, dynamic> fixture, String key, int index,
 
 void main() {
   _registerCollaborationHistoryRegressions();
+  _registerAutonomyTests();
 
   test('散文字段放行换行，身份与路径字段仍然拒绝换行', () {
     // 讨论协议本来就把 \t \n \r 放行给模型，用户原话也常带换行；散文里出现

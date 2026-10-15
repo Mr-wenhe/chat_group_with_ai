@@ -84,6 +84,21 @@ void main() {
         endsWith('（已截断，原文 1500 字）'),
       );
     });
+
+    test(
+        'format signals only trigger bounded cleanup and do not grade naturalness',
+        () {
+      expect(
+          WorkPublicUpdateStream.looksLikeFormattedUpdate(
+              'req=3 下我仍反对按第 2 页遮挡的版本交付。'),
+          isTrue);
+      expect(WorkPublicUpdateStream.looksLikeFormattedUpdate('前端：我负责把遮挡修掉。'),
+          isTrue);
+      expect(
+          WorkPublicUpdateStream.looksLikeFormattedUpdate(
+              '我看了第 2 页，表格压住了日期；这版先别交。'),
+          isFalse);
+    });
   });
 
   testWidgets(
@@ -191,8 +206,9 @@ void main() {
     // 收起/展开只在时间线内部生效，时间线高度与面板总高度都不变。
     final panelHeightBefore =
         tester.getSize(find.byKey(const Key('work-task-panel'))).height;
-    final timelineHeightBefore =
-        tester.getSize(find.byKey(const Key('work-task-event-timeline'))).height;
+    final timelineHeightBefore = tester
+        .getSize(find.byKey(const Key('work-task-event-timeline')))
+        .height;
     expect(find.byKey(const Key('work-task-event-scrollbar')), findsOneWidget);
 
     await tester.tap(find.byKey(const Key('work-task-timeline-toggle')));

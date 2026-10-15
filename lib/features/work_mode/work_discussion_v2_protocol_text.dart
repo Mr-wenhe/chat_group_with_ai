@@ -6,17 +6,29 @@ import 'work_public_update_stream.dart';
 /// 协议解析与字段校验。混在一个文件里既让文件越过仓库的 500 行界限，也让"改提示
 /// 词"和"改校验"变成同一处的编辑。
 class WorkDiscussionProtocolText {
+  static const autonomyRules =
+      '''当前 collaboration.autonomyPolicy 是应用固化的自主策略。以下规则适用于当前任务的普通实现及偏好取舍：全体成员分别表达真实意见后，由协调者本人用 decide 的 decision.kind=ruling 定案；targetId 是当前 taskId（方案）或 iterationId（交付），options=[]，reason/evidence/impact 写真实理由与依据。保留 approved:false 和反对理由，不要求成员改成同意，不把普通分歧交用户。实质验收失败、开放缺陷、缺失本人使用仍阻止交付，不能裁决为通过。改变用户明示目标、扩大权限或无法补齐环境仍走原用户决策。
+自主 proposal 另须 usageAssignments 数组：每个 participantIds 成员恰好一个不同且有意义的场景，字段严格为 memberId、scenarioId、goal、preconditions、stepGoals（非空字符串数组）、expectedResult、acceptanceIds（非空 ID 数组）、requiredCapabilities（非空能力数组）、resetMethod；不写版本、状态、收据或权限。全员场景覆盖所有必达验收。当前轮全部制作工作项（含材料）只能由同一位真实合格的制作执行者负责，保持用户指定执行者；general 试用资格不是软件实现资格。运行时负责冻结与试用，成员用自己的模型和工具决定操作；只有当前本人真实收据及反馈可用于交付签字。
+''';
+
+  static const coordinatorGuidance =
+      '协调者按 turnFocus 分阶段推进：先请未贡献成员，再围绕未决项找合适成员；不固定职业顺序、不代答。'
+      '授权内普通分歧据证据定案并保留异议，不重复讨论、不覆盖真实失败。'
+      '制作或试用每轮结束，先核当前候选与本人收据，再组织真实反馈、缺陷复现、修复与复测；非必达改进留待后续。'
+      '仅在目标改变、越权、缺必要能力或调整无效时问用户；空转有据调整，仍无进展就暂停保留现场。';
+
   static const head = '''只返回严格 JSON object，不输出 Markdown 或私有推理。
 全部顶层字段必须出现：schemaVersion:2、action、public_update、issue_id、next_member_id、issues、resolutions、proposal、approval、decision、tool。无内容字段用空字符串、空数组或 null。
 完整顶层结构示例（内容需按你的真实判断填写）：{"schemaVersion":2,"action":"respond","public_update":"本轮公开意见","issue_id":"","next_member_id":"","issues":[],"resolutions":[],"proposal":null,"approval":null,"decision":null,"tool":null}。不增加其他顶层字段，不把公开说明放在 JSON 外。
 action: respond/investigate/propose/approve/decide/silent。respond 与 silent 时 proposal/approval/decision/tool 全部为 null；propose 只填 proposal，approve 只填 approval（包括本人不认可 approved:false），decide 只填 decision，investigate 只填 tool，其余三个为 null。public_update 是自然公开回应，不展示合同 JSON，不写理解百分比，不出现版本整数、approved:true|false、阶段名或 proposal 摘要等协议标识，不出现 artifactContract、requiredCapability、V-08 这类内部标识符，也不排 ①②③④ 式清单——那些值只填进对应字段，缺陷与补丁要求写进 issues 或详情，气泡只给你的判断和依据。公开气泡目标是 ${WorkPublicUpdateStream.bubbleTargetCharacters} 字以内（一到三个短句），按目标写而不是写到它的边上；超出部分会被截断并标注，完整正文转存为详情附件，所以只写当前结论、依据或异议，明细交给 issues 与详情。
 本轮只推进上下文 turnFocus 指明的一项工作，不在一次回应中模拟整场会议、完整开发和未来验收。它是注意力提示，不是批准或工具授权；真实缺陷与分歧必须继续记录。outputGuidance 指定正文优先的建议预算，不保证服务端预留；先保证完整最终 JSON，不反复推演同一方案。
-recentDiscussion 与 recentChatMessages 是有界聊天预览，可能截断，不能据此判定方案内容缺失；审查完整提案使用 collaboration 中的权威方案与关联问题。准备提交的命令必须写入完整 proposal.artifactContract.verificationCommands，不能只口头列在 public_update 中让其他成员从预览猜测。effectiveTools 表示角色与任务允许的权限，不保证工具已注册、依赖已安装或讨论阶段允许执行；browserContext 权限不能证明浏览器运行时可用，commandRun 权限不能证明 jsdom 已安装。
+recentDiscussion 与 recentChatMessages 是有界聊天预览，可能截断，不能据此判定方案内容缺失；审查完整提案使用 collaboration 中的权威方案与关联问题。准备提交的命令必须写入完整 proposal.artifactContract.verificationCommands，不能只口头列在 public_update 中让其他成员从预览猜测。effectiveTools 只表示角色与任务的权限交集；capabilities.registeredInvestigationAdapter 表示调查入口是否接通，modelCapabilityKnown/supportsVision/supportsTools 来自当前成员模型能力登记。它们不能证明某个具体工具、依赖或外部应用已就绪；这些状态必须由当前运行结果核实，缺少结果时按未知处理。
 issues 是本轮全部新问题，每项 {id,kind:"defect|idea|decision",target,problem,evidenceRef,retestCondition}。问题、依据、解决条件必须具体；evidenceRef 引用当前真实证据或你的响应，不伪造代码读取。
 新问题仅依据本轮本人意见时，issues.evidenceRef 填空字符串，运行时收到真实回应后才绑定响应 ID；不能填 self、current-response、userRequest 等占位符或自造引用。引用旧工具或用户答复时逐字复制 evidence 中真实键或 collaboration.decisions.responseRef。resolutions 必须引用已有真实证据，不引用尚未取得 ID 的当前回应。
 resolutions 是 {id,resolution,evidenceRef} 数组，只引用真实工具/成员回应/用户答复，不因模型自称完成删除问题。
 调查：action=investigate，issue_id 指向已有 open 问题，tool={name,arguments}。只允许 workspace.list/read/search/document；调查结果回台账后再讨论，禁止 command.run、写文件、安装、写探针或浏览器。工具能力与权限以运行时为准。
-proposal={scope,plan,artifactContract:{type,format,location,revisionTarget,files:[相对路径字符串]},workItems:[{id,ownerId,dependencies,kind:"material|produce"}],acceptances:[{id,method,requiredCapability}]}。workItems 只允许 id/ownerId/dependencies/kind 四个字段，kind 可省略或为 material/produce；acceptances 只允许 id/method/requiredCapability 三个字段。不要把执行状态、说明文字或额外字段放进这些对象，运行时会生成状态字段。files 必须是相对路径字符串数组，不是对象数组。只协调成员可建立/修改当前方案，不默许原型；制作和测试工作项这里只规划，不声称已经执行。仅要求软件需求文档时不得扩展交付成软件。工作项、验收的 requestRevision 必须匹配当前需求；用户裁决/补充后旧版工作项必须由协调成员重新形成 proposal，不能只重新签字。
+proposal={scope,plan,artifactContract:{type,format,location,revisionTarget,files:[相对路径字符串]},workItems:[{id,ownerId,dependencies,kind:"material|produce"}],acceptances:[{id,method,requiredCapability}]}。workItems 只允许 id/ownerId/dependencies/kind 四个字段，kind 可省略或为 material/produce；acceptances 只允许 id/method/requiredCapability 三个字段。不要把执行状态、说明文字或额外字段放进这些对象，运行时会生成状态字段。files 必须是相对路径字符串数组，不是对象数组。只协调成员可建立/修改当前方案，不默许原型；制作和测试工作项这里只规划，不声称已经执行。仅要求软件需求文档时不得扩展交付成软件。工作项、验收的 requestRevision 必须匹配当前需求；用户裁决/补充后旧版工作项必须由协调成员重新形成 proposal，不能只重新签字。macOS 原生 App 验收若要由界面文本断言，expectedResult 或 acceptance.method 必须用中文双引号“...”或成对 ASCII 双引号"..."明确写出预期可见文本；试用时 native.app assert 只能逐项使用该原文，不得用任意控件变化代替业务验收。
+面向 macOS 原生 App 的软件交付时，artifactContract 必须另外包含 nativeBundle:{schemaVersion:1,appPath:"相对路径/产品.app",archivePath:"相对路径/产品.zip"}，其中 appPath 是冻结候选内的 .app 目录，archivePath 是同一候选内的 .zip 文件，且 files 必须包含且只包含 archivePath；不要把原生 App 写成普通源码文件合同，也不要遗漏 nativeBundle。
 形成原范围方案时，proposal.scope 必须逐字复制 collaboration.scope（包含用户补充、禁止事项及原语言），不能翻译、摘要或重述；自然语言整理写在 plan 和 public_update。只有关联既有 open idea 的完整范围提案才能改变 scope 或既有验收，仍需逐人确认，不能用“意思相同”绕过。
 proposal.artifactContract 从 collaboration.artifactContract 完整复制并保留全部现有字段，不只复制上方示例字段。字段值能否改写按它的来源判断：把每个值与 collaboration.scope 里的用户原话逐字对照，原话里逐字出现的值属于用户声明，必须原样保留（尤其原话点过的 location 绝对路径、format、revisionTarget）；原话里没有逐字出现、只由平台从上下文推断出来的值（典型：location 只由目录路径推断而出，或已被脱敏成 [本地路径]）允许在完整 proposal 里提案补齐或改写，改写会一并递增需求版本，旧工作项与认可随之失效。任何值都不能换成 basename、相对路径或中文描述；尚未明确的空值、unspecified、generic 可以直接补齐；files 使用相对路径清单不意味着可以改写 location。
 ''';
@@ -45,7 +57,7 @@ approval 结构必须逐字包含 kind、subjectId、approved、requestRevision�
 ''';
 
   /// 每个阶段都要遵守的收尾规则。
-  static const tailCommon =
-      '''decision={kind:"question|choice|dispute",targetId,reason,evidence,impact,options:[{id,label,impact}]}，用户偏好、未知规则与真实分歧走用户决策；不要把普通实现取舍推给用户。
+  static String tailCommon({required bool autonomous}) =>
+      '''decision={kind:"question|choice|dispute",targetId,reason,evidence,impact,options:[{id,label,impact}]}，${autonomous ? '授权内普通技术和偏好分歧由协调者据证据定案并保留异议；只有改变用户目标、越权、缺必要能力或调整仍无法推进时请求用户。' : '用户偏好、未知规则与真实分歧走用户决策；不要把普通实现取舍推给用户。'}
 next_member_id 可请求当前团队具体成员回应当前问题，不能用它调入群外成员。没有新增信息且无必要答复可以 silent。''';
 }

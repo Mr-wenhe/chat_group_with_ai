@@ -28,7 +28,7 @@
 
 ### 1.3 预算从哪来
 
-20480 是能力表里的**声明值**，不是厂商硬限：`app_settings` 的 `custom_model_capabilities_v1` 给 `custom/sensenova-6.8-flash-lite` 声明 `maxOutput = 20480`，经 `workModeRequestOutputTokens`（`default_work_task_runner_model_io.dart:13`）取「声明值 / 上下文窗口一半 / 绝对天花板 32768（`:29`）」三者最小得到。抬声明值只是把失败点往后挪，产物更大照样撞，而且每次失败更贵。
+本节记录的是 2026-09-30 时的请求行为：`app_settings` 的 `custom_model_capabilities_v1` 给 `custom/sensenova-6.8-flash-lite` 声明 `maxOutput = 20480`，当时客户端将其作为 `max_tokens` 发送。2026-10-15 起，工作模式对 OpenAI Chat Completions、OpenAI Responses、Gemini 不再发送输出上限；`workModeOutputReservationTokens` 仅用于输入窗口和费用预检。上游仍可能按自己的默认值或硬上限在 20480 处结束，因此这条 usage 只能证明上游报告了该次用量，不能证明它是客户端设置的请求上限。长产物仍需分块写，以应对服务商长度限制和成本。
 
 ### 1.4 现有兜底为什么不够
 

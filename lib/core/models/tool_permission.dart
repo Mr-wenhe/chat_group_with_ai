@@ -16,4 +16,6 @@ enum ToolPermission {
   skillCreate,
   @HiveField(5)
   skillDownload,
+  @HiveField(6)
+  nativeApp,
 }

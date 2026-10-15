@@ -169,6 +169,39 @@ void main() {
     expect(events.single.message, '流式响应超过安全大小限制');
   });
 
+  test('streamed transport failure keeps the wording and records its cause',
+      () async {
+    final dio = Dio();
+    dio.interceptors.add(InterceptorsWrapper(
+      onRequest: (options, handler) {
+        handler.reject(DioException(
+          requestOptions: options,
+          type: DioExceptionType.unknown,
+          error: const FormatException('body sk-abcdefgh12345678 was not JSON'),
+        ));
+      },
+    ));
+
+    final events = await ChatApiService(dio: dio).streamChatMessage(
+      apiKey: 'test-key',
+      provider: ApiProvider.custom,
+      customBaseUrl: 'http://127.0.0.1:12345',
+      model: 'test-model',
+      messages: const [
+        {'role': 'user', 'content': 'hello'}
+      ],
+    ).toList();
+
+    expect(events, hasLength(1));
+    expect(events.single.type, ChatStreamEventType.error);
+    // 用户可见文案不变：诊断信息不得混进来。
+    expect(events.single.message, '请求失败');
+    final detail = events.single.failureDetail!;
+    expect(detail, contains('DioException/unknown'));
+    expect(detail, contains('FormatException'));
+    expect(detail, isNot(contains('sk-abcdefgh12345678')));
+  });
+
   test('DeepSeek v4 model names are forwarded unchanged to streaming payload',
       () async {
     final capturedModels = <String>[];

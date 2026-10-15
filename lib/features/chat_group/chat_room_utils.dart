@@ -69,6 +69,29 @@ List<String> parseMentionedCharacterIds(
 ) =>
     analyzeMentionedCharacterIds(content, characters).characterIds;
 
+/// The `@` popup may only offer **current group members**.
+///
+/// The room loader deliberately keeps characters that spoke here but were later
+/// removed from the group in the same `allCharacters` list, because rendering
+/// their historical messages needs their name and avatar. Listing them as
+/// mention candidates offers an entry that cannot produce a result: ordinary
+/// chat resolves `@` against the active members and work-mode routing resolves
+/// it against the group member list, so neither knows the name — picking it
+/// silently does nothing (work mode answers 「未找到角色」) while the menu
+/// implies the person is in the room.
+///
+/// Members that are merely inactive stay listed on purpose: routing answers
+/// 「被 @ 的角色「X」当前未启用」, which tells the user what to fix.
+List<AICharacter> mentionCandidatesForGroup(
+  List<AICharacter> characters,
+  Iterable<String> memberIds,
+) {
+  final members = memberIds.toSet();
+  return characters
+      .where((character) => members.contains(character.id))
+      .toList(growable: false);
+}
+
 /// Parses mentions once and exposes routing diagnostics to callers that need
 /// to explain unknown or duplicate names to the user.
 MentionParseResult analyzeMentionedCharacterIds(

@@ -1,0 +1,250 @@
+[
+  {
+    "method": "POST",
+    "path": "/session",
+    "body": {
+      "capabilities": {
+        "alwaysMatch": {
+          "platformName": "Mac",
+          "appium:automationName": "Mac2",
+          "appium:appPath": "/Volumes/new_disk/work/flutter/chat_group/chat_group/build/p0_macos/flutter_sample/build/macos/Build/Products/Debug/p0_flutter.app",
+          "appium:bundleId": "com.chatgroup.p0.p0Flutter",
+          "appium:systemHost": "127.0.0.1",
+          "appium:systemPort": 10123,
+          "appium:noReset": true,
+          "appium:newCommandTimeout": 300,
+          "appium:environment": {
+            "P0_ENABLE_NATIVE_SEMANTICS": "1"
+          }
+        }
+      }
+    },
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "POST",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "_NS:6"
+    },
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/element/BD903805-17AD-47DC-98F5-BEA7EC6815DB/screenshot",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "POST",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/element",
+    "body": {
+      "using": "xpath",
+      "value": "//XCUIElementTypeGroup[@label='p0_flutter']//XCUIElementTypeButton"
+    },
+    "result": "response received"
+  },
+  {
+    "method": "POST",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/element/32008E6B-B607-477C-9238-7A8C89A1C7EB/click",
+    "body": {},
+    "result": {
+      "value": null
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "POST",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "_NS:6"
+    },
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/element/E04D205A-B9D7-4EA0-A577-55A578F54CCA/screenshot",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "POST",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf/execute/sync",
+    "body": {
+      "script": "macos: terminateApp",
+      "args": [
+        {
+          "bundleId": "com.chatgroup.p0.p0Flutter"
+        }
+      ]
+    },
+    "result": "response received"
+  },
+  {
+    "method": "DELETE",
+    "path": "/session/5095f8c9-e84c-49a1-ba27-b9fa0aeacdcf",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "POST",
+    "path": "/session",
+    "body": {
+      "capabilities": {
+        "alwaysMatch": {
+          "platformName": "Mac",
+          "appium:automationName": "Mac2",
+          "appium:appPath": "/Volumes/new_disk/work/flutter/chat_group/chat_group/build/p0_macos/flutter_sample/build/macos/Build/Products/Debug/p0_flutter.app",
+          "appium:bundleId": "com.chatgroup.p0.p0Flutter",
+          "appium:systemHost": "127.0.0.1",
+          "appium:systemPort": 10123,
+          "appium:noReset": true,
+          "appium:newCommandTimeout": 300,
+          "appium:environment": {
+            "P0_ENABLE_NATIVE_SEMANTICS": "1"
+          }
+        }
+      }
+    },
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "POST",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "_NS:6"
+    },
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/element/8321EC09-034B-4075-98DF-685FBF21C738/screenshot",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "POST",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/element",
+    "body": {
+      "using": "xpath",
+      "value": "//XCUIElementTypeGroup[@label='p0_flutter']//XCUIElementTypeButton"
+    },
+    "result": "response received"
+  },
+  {
+    "method": "POST",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/element/EE1B3CE7-97B2-4FA3-A1D1-21601197C4AC/click",
+    "body": {},
+    "result": {
+      "value": null
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/source",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "POST",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "_NS:6"
+    },
+    "result": "response received"
+  },
+  {
+    "method": "GET",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/element/4ACB9C6C-DA03-44D4-A110-DDE39880547E/screenshot",
+    "body": null,
+    "result": "response received"
+  },
+  {
+    "method": "POST",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba/execute/sync",
+    "body": {
+      "script": "macos: terminateApp",
+      "args": [
+        {
+          "bundleId": "com.chatgroup.p0.p0Flutter"
+        }
+      ]
+    },
+    "result": "response received"
+  },
+  {
+    "method": "DELETE",
+    "path": "/session/ced9e12c-826a-4fc9-afef-6be52c4d0cba",
+    "body": null,
+    "result": "response received"
+  }
+]

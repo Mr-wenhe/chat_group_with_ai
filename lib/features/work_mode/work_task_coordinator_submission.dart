@@ -307,6 +307,10 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
       _serialize(() async {
         _ensureOpen();
         if ({
+              'autonomy',
+              'participation',
+              'usage',
+              'coordinatorRuling',
               'router',
               'memberResolution',
               'projectBinding',
@@ -333,6 +337,22 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
           throw StateError('任务没有可写的 v2 协作状态。');
         }
         final current = state.collaboration!;
+        if (current.isAutonomous &&
+            !fromDiscussionRunner &&
+            update.sourceRole != 'user') {
+          throw StateError('自主任务的角色状态必须来自实际运行器，不能由外部冒用成员或协调者。');
+        }
+        if (!fromDiscussionRunner &&
+            (jsonEncode(current.autonomyPolicy) !=
+                    jsonEncode(update.next.autonomyPolicy) ||
+                jsonEncode(current.usageAssignments) !=
+                    jsonEncode(update.next.usageAssignments) ||
+                jsonEncode(current.usageEvidenceRefs) !=
+                    jsonEncode(update.next.usageEvidenceRefs) ||
+                jsonEncode(current.coordinatorDecisions) !=
+                    jsonEncode(update.next.coordinatorDecisions))) {
+          throw StateError('自主策略、使用计划、工具证据和协调决议只能来自实际运行器。');
+        }
         // 公开增量只能**原样**携带已有签字，新增或改写一条 delivery 签字都必须来自
         // 实际成员请求与响应。只比 eventId 挡不住改写：id 由调用方给出，台账解析时
         // 又会归档被同键新签字顶掉的旧记录，于是旧 id 一旦滚出索引，换个验证版本的
@@ -343,14 +363,25 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
         };
         if (!fromDiscussionRunner &&
             update.next.approvals.any((approval) =>
-                approval['kind'] == 'delivery' &&
+                (current.isAutonomous || approval['kind'] == 'delivery') &&
                 !knownApprovals.contains(
                     WorkCollaborationState.approvalFingerprint(approval)))) {
           throw StateError('最终认可必须来自实际成员请求与响应，不能由外部增量代签。');
         }
         final next = current.apply(update);
         if (identical(next, current)) return task;
+        final replacement =
+            update.sourceRole == 'participation' && state.executorId != null
+                ? current.confirmedMemberChoices[state.executorId]
+                : null;
+        final oldContract = state.deliverableContract;
         final updated = state.copyWith(
+          executorId: replacement ?? state.executorId,
+          deliverableContract: replacement != null &&
+                  oldContract != null &&
+                  oldContract['explicitExecutorId'] == state.executorId
+              ? {...oldContract, 'explicitExecutorId': replacement}
+              : oldContract,
           requestRevision: next.requestRevision,
           phase: next.planReady
               ? WorkDiscussionPhase.ready
@@ -513,7 +544,9 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
           task.status != AgentTaskStatus.interrupted) {
         throw StateError('当前任务没有可稍后处理的阻碍。');
       }
-      task.updatedAt = _clock();
+      task
+        ..resumeRequired = true
+        ..updatedAt = _clock();
       await _save(task);
       await _record(task, WorkTaskEventKind.paused, '用户选择稍后处理当前阻碍');
     });

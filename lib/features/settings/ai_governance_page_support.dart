@@ -52,8 +52,10 @@ extension _AiGovernancePageSupport on _AiGovernancePageState {
                 '${entry.purpose.label} · ${entry.provider}/${entry.model}',
               ),
               subtitle: Text(
+                '任务 ${entry.taskId ?? '未关联'} · 运行段 ${entry.runBoundary ?? '未知'} · '
                 '${entry.inputTokens} 入 / ${entry.cachedInputTokens} 缓存 / '
-                '${entry.outputTokens} 出 · ${entry.exactUsage ? '精确' : '估算'}',
+                '${entry.outputTokens} 出 · ${entry.exactUsage ? '精确' : '估算'} · '
+                '${entry.status == 'success' ? '成功' : '失败请求'}',
               ),
               trailing: Text(entry.estimatedCostMicros == null
                   ? '价格未知'
@@ -82,10 +84,8 @@ extension _AiGovernancePageSupport on _AiGovernancePageState {
             ListTile(
               dense: true,
               title: Text('${item.purpose.label} · ${item.status}'),
-              subtitle: Text(
-                '${item.provider}/${item.model} · ${item.latencyMs}ms · '
-                '重试 ${item.retryCount}',
-              ),
+              isThreeLine: item.failureDetail != null,
+              subtitle: Text(diagnosticSummaryText(item)),
               trailing: IconButton(
                 icon: const Icon(Icons.copy_rounded, size: 18),
                 tooltip: '复制脱敏诊断',

@@ -68,19 +68,26 @@ class ModelCapabilityRegistry {
 
     if (spec != null) return spec(modelId);
 
+    // 未登记模型的兜底：流式与工具默认**放行**，视觉仍关闭。
+    //
+    // 这两个开关同时是工作模式的启动闸门（见 AiRequestGuard），全关的后果不是
+    // 「更安全」而是「任何没进快照的模型都跑不了工作模式」，用户必须先到治理页
+    // 手写一份声明——而多数新模型本来就支持这两项。视觉不跟着放行：把图片发给
+    // 未必支持的端点只会换来一次 400，代价比收益大。尺寸仍保守，避免凭空承诺
+    // 一个长上下文预算。
     return ModelCapability(
       provider: provider.name,
       modelId: modelId,
       isKnown: false,
-      supportsStreaming: false,
+      supportsStreaming: true,
       supportsVision: false,
-      supportsTools: false,
+      supportsTools: true,
       supportsNativeWebSearch: false,
       supportsNativeWebSearchFreshness: false,
       contextWindow: 8192,
       maxOutput: 2048,
       price: null,
-      source: '未知模型：保守降级',
+      source: '未登记模型：流式/工具按通用文本模型放行，视觉与尺寸保守',
       version: _version,
       updatedAt: _snapshotDate,
     );

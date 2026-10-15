@@ -1,8 +1,31 @@
 import 'package:chat_group/core/models/tool_permission.dart';
+import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('内置模板只复用来源和完整内容都匹配的已安装技能', () {
+    final template = ExpertSkillCatalog.findById('meta.create-skills')!;
+    final trusted = template.instantiateFor('character-a');
+    final draft = CharacterSkill(
+      characterId: 'character-a',
+      name: template.name,
+      domain: template.domain,
+      description: '同名但未经验证的草稿',
+      instructions: const ['任意指令'],
+      requiredPermissions: const [],
+    );
+
+    expect(
+      ExpertSkillCatalog.isInstalledTemplate(trusted, template, 'character-a'),
+      isTrue,
+    );
+    expect(
+      ExpertSkillCatalog.isInstalledTemplate(draft, template, 'character-a'),
+      isFalse,
+    );
+  });
+
   test('目录包含基础、元技能、Ponytail 和文档工作流模板', () {
     final ids = ExpertSkillCatalog.templates.map((template) => template.id);
 
@@ -34,6 +57,21 @@ void main() {
     expect(planning.instructions.length, greaterThanOrEqualTo(4));
   });
 
+  test('技能沉淀先去重并要求真实方法缺口或成功复用证据', () {
+    final create = ExpertSkillCatalog.findById('meta.create-skills')!;
+    final find = ExpertSkillCatalog.findById('meta.find-skills')!;
+
+    expect(create.instructions.join('\n'), contains('用户明确要求创建'));
+    expect(create.instructions.join('\n'), contains('网络失败'));
+    expect(create.instructions.join('\n'), contains('代表性任务中真实执行并复测'));
+    expect(create.instructions.join('\n'), contains('用户指定 GitHub 来源'));
+    expect(create.instructions.join('\n'), contains('不可信资料'));
+    expect(find.instructions.join('\n'), contains('生产搜索 Gateway'));
+    expect(find.instructions.join('\n'), contains('固定 commit'));
+    expect(find.instructions.join('\n'), contains('只加载当前任务需要'));
+    expect(find.instructions.join('\n'), contains('不能单独触发 skill.create'));
+  });
+
   test('目录按用户意图推荐最具体的基础工作流', () {
     expect(
       ExpertSkillCatalog.recommendForText('帮我创建一个可复用的新技能').first.id,
@@ -59,6 +97,10 @@ void main() {
       ExpertSkillCatalog.recommendForText('生成 Java 命令行程序').first.id,
       'coding.flutter-reviewer',
     );
+    final fallback = ExpertSkillCatalog.recommendForText('建立一套门店咖啡杯测流程').single;
+    expect(fallback.id, 'general.workbuddy-expert-builder');
+    expect(fallback.instructions.join('\n'), contains('真实方法缺口'));
+    expect(fallback.instructions.join('\n'), isNot(contains('没有模板时创建')));
   });
 
   test('元技能和文档格式都能直接命中对应模板', () {

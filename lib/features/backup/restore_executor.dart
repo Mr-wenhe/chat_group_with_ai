@@ -19,6 +19,7 @@ import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/work_mode/work_context_boundary.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
+import 'package:chat_group/features/agentic/skill_resource_pack_store.dart';
 
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';
@@ -110,6 +111,20 @@ class RestoreExecutor {
       );
       String resolveAttachment(String path) =>
           attachmentPaths[path] ?? (throw BackupException('附件未进入提交计划：$path'));
+
+      if (plan.skillResourcePacks.isNotEmpty) {
+        final store = SkillResourcePackStore.forDatabase(db);
+        for (final record in plan.skillResourcePacks) {
+          final value = BackupEntityCodec.value(record);
+          final created = await store.restoreBackupValue(value);
+          if (created) {
+            inserted.update('skillResourcePacks', (count) => count + 1,
+                ifAbsent: () => 1);
+            transaction
+                .addRollback(() => store.deletePack(value['packId'] as String));
+          }
+        }
+      }
 
       await _putRecords(
           db.apiConfigBox,
@@ -436,6 +451,9 @@ class _RestoreTransaction {
     _rollbacks.add(() => box.delete(key));
     await _afterWrite();
   }
+
+  void addRollback(Future<void> Function() rollback) =>
+      _rollbacks.add(rollback);
 
   Future<void> replace<T>(Box<T> box, Object key, T value) async {
     final existed = box.containsKey(key);

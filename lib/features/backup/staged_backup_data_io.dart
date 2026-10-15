@@ -9,6 +9,7 @@ const List<String> _stagedBackupDataPaths = [
   'data/character_memories.json',
   'data/relationships.json',
   'data/skills.json',
+  'data/skill_resource_packs.json',
   'data/agent_tasks.json',
   'data/work_mode.json',
   'data/user_profile.json',

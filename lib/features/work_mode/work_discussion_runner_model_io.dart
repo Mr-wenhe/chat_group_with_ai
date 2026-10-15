@@ -104,6 +104,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
         return const WorkDiscussionTurn.invalid();
       }
       var response = await _sendTurnRequest(
+        task: task,
         member: member,
         conversationId: task.groupId,
         messages: prompt,
@@ -124,6 +125,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
           '${describeEmptyCompletion(response['emptyCompletionDetail'])}',
         );
         response = await _sendTurnRequest(
+          task: task,
           member: member,
           conversationId: task.groupId,
           messages: prompt,
@@ -163,6 +165,7 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
         },
       ];
       final repairedResponse = await _sendTurnRequest(
+        task: task,
         member: member,
         conversationId: task.groupId,
         messages: repairMessages,
@@ -234,12 +237,13 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
   /// providers reject `response_format` even when the prompt itself asks for a
   /// JSON object, and the strict parser still gates the result afterwards.
   Future<Map<String, dynamic>> _sendTurnRequest({
+    required AgentTask task,
     required _DiscussionMember member,
     required String conversationId,
     required List<Map<String, dynamic>> messages,
     required Duration timeout,
     required CancelToken cancelToken,
-  }) {
+  }) async {
     final override = completion;
     if (override != null) {
       return override(
@@ -253,11 +257,16 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
         cancelToken: cancelToken,
       ).timeout(timeout);
     }
+    final runBoundary = eventStore == null
+        ? null
+        : await WorkTaskRunBoundary.currentRunBoundaryId(eventStore!, task.id);
     return _complete(
       character: member.character,
       config: member.config!,
       apiKey: member.apiKey!,
       provider: member.provider!,
+      taskId: task.id,
+      runBoundary: runBoundary,
       conversationId: conversationId,
       messages: messages,
       timeout: timeout,
@@ -270,6 +279,8 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     required ApiConfig config,
     required String apiKey,
     required ApiProvider provider,
+    required String taskId,
+    required int? runBoundary,
     required String conversationId,
     required List<Map<String, dynamic>> messages,
     required Duration timeout,
@@ -291,11 +302,15 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
       purpose: AiRequestPurpose.agent,
       conversationId: conversationId,
       characterId: character.id,
+      taskId: taskId,
+      runBoundary: runBoundary,
       // 讨论是方案/审阅任务，统一用同一个保守采样温度。曾对
       // sensenova-6.8-flash-lite 单独抬到 1.0，但那个模型在讨论路径上的协议失败
       // 远高于它在执行路径（0.2）上的表现，抬高采样没有任何实测依据。
       temperature: WorkDiscussionRunner.defaultDiscussionTemperature,
-      maxTokens: _discussionOutputTokens(provider, config.modelName),
+      maxTokens: config.protocol == ApiProtocol.anthropicMessages
+          ? _discussionOutputTokens(provider, config.modelName)
+          : 0,
       receiveTimeout: timeout,
       maxRetries: 0,
       cancelToken: cancelToken,
@@ -306,11 +321,10 @@ extension _WorkDiscussionRunnerModelIo on WorkDiscussionRunner {
     );
   }
 
-  // 推理 token 也占输出预算；固定 4096 会使推理模型耗尽预算却没有正文。
-  // 与执行共用能力上限，并在提示词装配时预留同一份输出空间。
+  // 与执行共用输入窗口/治理预检的输出预留；可选协议不会把它当作 API 输出上限。
   int _discussionOutputTokens(ApiProvider provider, String model) {
     final capability = gateway.capability(provider, model);
-    return workModeRequestOutputTokens(
+    return workModeOutputReservationTokens(
       capabilityMaxOutput: capability.maxOutput,
       capabilityContextWindow: capability.contextWindow,
     );

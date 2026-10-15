@@ -20,6 +20,7 @@ import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/core/storage/debug_credential_cache.dart';
 import 'package:chat_group/core/storage/secure_storage_service.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
+import 'package:chat_group/features/agentic/skill_resource_pack_store.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';

@@ -511,6 +511,153 @@ void main() {
     expect(decision.tool.arguments['workingDirectory'], isNot('.'));
   });
 
+  test('native.app accepts only the narrow operation contract', () async {
+    for (final arguments in <Map<String, Object?>>[
+      {'operation': 'open'},
+      {'operation': 'observe', 'sessionRef': 'native:0123456789abcdef01234567'},
+      {'operation': 'close', 'sessionRef': 'native:0123456789abcdef01234567'},
+      {
+        'operation': 'act',
+        'action': 'click',
+        'sessionRef': 'native:0123456789abcdef01234567',
+        'elementId': 'save',
+      },
+      {
+        'operation': 'act',
+        'action': 'input',
+        'sessionRef': 'native:0123456789abcdef01234567',
+        'elementId': 'title',
+        'text': 'draft',
+      },
+      {
+        'operation': 'act',
+        'action': 'scroll',
+        'sessionRef': 'native:0123456789abcdef01234567',
+        'elementId': 'list',
+        'direction': 'down',
+        'distance': 120,
+      },
+      {
+        'operation': 'act',
+        'action': 'resize',
+        'sessionRef': 'native:0123456789abcdef01234567',
+        'widthDelta': 30,
+        'heightDelta': 20,
+      },
+      {
+        'operation': 'act',
+        'action': 'reopen',
+        'sessionRef': 'native:0123456789abcdef01234567',
+      },
+      {'operation': 'close'},
+    ]) {
+      final result = await parser.parse(_json({
+        'action': 'tool',
+        'public_update': '我按当前场景操作应用。',
+        'tool': {'name': 'native.app', 'arguments': arguments},
+        'completion': null,
+      }));
+      expect(result.isSuccess, isTrue, reason: result.detail);
+    }
+
+    final injectedTarget = await parser.parse(_json({
+      'action': 'tool',
+      'public_update': '我试着切换目标。',
+      'tool': {
+        'name': 'native.app',
+        'arguments': {
+          'operation': 'open',
+          'appPath': '/Applications/Other.app',
+          'bundleId': 'com.example.other',
+        },
+      },
+      'completion': null,
+    }));
+    expect(injectedTarget.isSuccess, isFalse);
+
+    final missingSession = await parser.parse(_json({
+      'action': 'tool',
+      'public_update': '观察当前窗口。',
+      'tool': {
+        'name': 'native.app',
+        'arguments': {'operation': 'observe'},
+      },
+      'completion': null,
+    }));
+    expect(missingSession.isSuccess, isFalse);
+
+    final emptySession = await parser.parse(_json({
+      'action': 'tool',
+      'public_update': '操作当前窗口。',
+      'tool': {
+        'name': 'native.app',
+        'arguments': {
+          'operation': 'act',
+          'action': 'click',
+          'sessionRef': '',
+          'elementId': 'save',
+        },
+      },
+      'completion': null,
+    }));
+    expect(emptySession.isSuccess, isFalse);
+
+    final emptyCloseSession = await parser.parse(_json({
+      'action': 'tool',
+      'public_update': '关闭当前窗口。',
+      'tool': {
+        'name': 'native.app',
+        'arguments': {'operation': 'close', 'sessionRef': ''},
+      },
+      'completion': null,
+    }));
+    expect(emptyCloseSession.isSuccess, isFalse);
+  });
+
+  test('技能导入只接受内置模板 ID 或结构化 GitHub 资源字段', () async {
+    final requests = <Map<String, Object?>>[
+      {
+        'name': 'skill.download',
+        'arguments': {
+          'templateId': 'document.pdf',
+          'url': 'https://github.com/x/y'
+        },
+      },
+      {
+        'name': 'skill.github.import',
+        'arguments': {
+          'owner': 'sample',
+          'repo': 'skills',
+          'path': 'sample/SKILL.md',
+          'ref': List.filled(40, 'a').join(),
+          'url': 'https://example.test/',
+        },
+      },
+      {
+        'name': 'skill.github.search',
+        'arguments': {'query': 'flutter skill', 'url': 'https://example.test/'},
+      },
+      {
+        'name': 'skill.resource.read',
+        'arguments': {
+          'packId': List.filled(64, 'a').join(),
+          'path': 'SKILL.md',
+          'url': 'file:///etc/passwd',
+        },
+      },
+    ];
+
+    for (final tool in requests) {
+      final result = await parser.parse(_json({
+        'action': 'tool',
+        'public_update': '尝试传入非结构化目标。',
+        'tool': tool,
+        'completion': null,
+      }));
+      expect(result.isSuccess, isFalse, reason: tool['name'] as String);
+    }
+  });
+
   test('normalizes a JSON-encoded command argument list', () async {
     final result = await parser.parse(_json({
       'action': 'tool',

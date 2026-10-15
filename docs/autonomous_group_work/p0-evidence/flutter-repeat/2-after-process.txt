@@ -1,0 +1,1 @@
+54562 /Volumes/new_disk/work/flutter/chat_group/chat_group/build/p0_macos/flutter_sample/build/macos/Build/Products/Debug/p0_flutter.app/Contents/MacOS/p0_flutter

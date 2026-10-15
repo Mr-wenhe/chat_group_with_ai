@@ -1,0 +1,12 @@
+<XCUIElementTypeWindow elementType="4" identifier="_NS:6" label="" title="p0_flutter" enabled="false" selected="false" x="560" y="232" width="800" height="628">
+    <XCUIElementTypeGroup elementType="3" identifier="" label="p0_flutter" title="" enabled="false" selected="false" x="560" y="260" width="800" height="600" />
+    <XCUIElementTypeButton elementType="9" identifier="_XCUI:CloseWindow" label="" title="" enabled="true" selected="false" x="566" y="238" width="16" height="16" />
+    <XCUIElementTypeButton elementType="9" identifier="_XCUI:FullScreenWindow" label="" title="" enabled="true" selected="false" x="606" y="238" width="16" height="16">
+      <XCUIElementTypeGroup elementType="3" identifier="" label="" title="" enabled="false" selected="false" x="607" y="238" width="14" height="16">
+        <XCUIElementTypeGroup elementType="3" identifier="" label="" title="" enabled="false" selected="false" x="607" y="238" width="14" height="16" />
+      </XCUIElementTypeGroup>
+    </XCUIElementTypeButton>
+    <XCUIElementTypeButton elementType="9" identifier="_XCUI:MinimizeWindow" label="" title="" enabled="true" selected="false" x="586" y="238" width="16" height="16" />
+    <XCUIElementTypeStaticText elementType="48" identifier="" value="p0_flutter" label="" title="" enabled="true" selected="false" x="925" y="237" width="70" height="16" />
+  </XCUIElementTypeWindow>
+  

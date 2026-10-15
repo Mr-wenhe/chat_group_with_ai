@@ -12,6 +12,8 @@ import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/ai_governance/model_capability_registry.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/ai_providers/ai_api_service.dart';
+import 'package:chat_group/services/chat_api_service.dart';
+import './model_catalog_picker.dart';
 import './providers/api_config_providers.dart';
 import './widgets/model_capability_fields.dart';
 
@@ -40,10 +42,13 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   late ModelCapability _capabilityBuiltin;
   ApiProvider _selectedProvider = ApiProvider.deepseek;
   ApiProtocol _selectedProtocol = ApiProtocol.defaultValue;
-  String _selectedModel = '';
   bool _obscureApiKey = true;
   bool _isSaving = false;
   bool _isTesting = false;
+
+  /// 本次会话拉到的真实模型清单；为空表示还没拉过或已失效（改用内置候选）。
+  List<ProviderModelInfo>? _fetchedModels;
+  bool _isFetchingModels = false;
 
   /// 能力字段当前是为哪个「提供商/模型」回填的。只在模型身份真的变了才重新回填，
   /// 否则用户在字段上的编辑会被一次失焦build抹掉。
@@ -60,17 +65,21 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     _apiService = AiApiService(AiRequestGateway(store: _governanceStore));
     final c = widget.config;
     _nameController = TextEditingController(text: c?.name ?? '');
-    _modelController = TextEditingController(text: c?.modelName ?? '');
     // 密钥不会从持久化模型回填到编辑框；留空代表保留现有安全凭据。
     _apiKeyController = TextEditingController();
-    _baseUrlController = TextEditingController(text: c?.customBaseUrl ?? '');
     _selectedProvider = _parseProvider(c?.provider);
-    _selectedProtocol = ApiProtocol.fromName(c?.apiProtocol);
-    _selectedModel =
-        c?.modelName ?? ApiProvider.defaultModels[_selectedProvider.name] ?? '';
-    if (_selectedProvider != ApiProvider.custom) {
-      _modelController.text = _selectedModel;
-    }
+    // 新建时按提供商的默认协议起手（Oray 这类只支持一种协议的提供商不能靠
+    // 全站默认值），编辑已有配置时以存下来的为准。
+    _selectedProtocol = c == null
+        ? _selectedProvider.defaultProtocol
+        : ApiProtocol.fromName(c.apiProtocol);
+    // 模型不再预填内置默认值：那份清单会过时（deepseek-chat 已不存在），预填等于
+    // 让用户保存一个跑不通的模型。留空，由「获取模型」给出真实候选。
+    _modelController = TextEditingController(text: c?.modelName ?? '');
+    // 内置提供商也显示地址，所以起手值必须在"还没填过"时等于请求实际会用的地址。
+    _baseUrlController = TextEditingController(
+      text: initialBaseUrl(config: c, provider: _selectedProvider),
+    );
     _capabilityBuiltin = _resolveBuiltinCapability();
     _capabilityController = ModelCapabilityController(_effectiveCapability());
     _capabilitySeededFor = _capabilityModelKey;
@@ -87,16 +96,11 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     }
   }
 
-  /// Custom providers use the text field as the source of truth. In
-  /// particular, an edited existing config must not reuse its old model ID.
-  String get _configuredModelName {
-    if (_selectedProvider == ApiProvider.custom) {
-      return _modelController.text.trim();
-    }
-    return _selectedModel.isNotEmpty
-        ? _selectedModel
-        : _modelController.text.trim();
-  }
+  /// 模型名就是输入框里的文字，没有第二处来源。
+  ///
+  /// 过去内置提供商走下拉、自定义走手输，两套来源让「已填的模型」要按提供商分叉
+  /// 判断；下拉去掉后只剩一个口，编辑已有配置时也不会再拿旧模型 ID 冒充新值。
+  String get _configuredModelName => _modelController.text.trim();
 
   /// 能力字段的回填边界：提供商或模型名任一改变都要重新回填。
   String get _capabilityModelKey =>
@@ -115,7 +119,7 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
         _storedDeclaration(),
       );
 
-  /// 该模型的内置快照值；未知模型会落到保守降级值。
+  /// 该模型的内置快照值；未登记模型会落到兜底默认值。
   ModelCapability _resolveBuiltinCapability() => _resolveCapability(null);
 
   ModelCapability _resolveCapability(CustomModelCapability? custom) =>
@@ -139,12 +143,104 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
     if (_restoreBuiltin) _restoreBuiltin = false;
   }
 
-  /// 自定义提供商的模型名是手输的，只在失焦时重新回填，避免每个按键都清空编辑。
+  /// 模型名是手输的，只在失焦时重新回填，避免每个按键都清空编辑。
   void _onModelFocusChanged() {
     if (_modelFocusNode.hasFocus) return;
     if (_capabilityModelKey == _capabilitySeededFor) return;
     setState(_reseedCapabilityFields);
   }
+
+  /// 换服务商：地址回到新提供商的预设，模型清空——上一个服务商的模型名
+  /// 在新服务商上没有任何意义。
+  void _onProviderChanged(ApiProvider? value) {
+    if (value == null) return;
+    setState(() {
+      _selectedProvider = value;
+      _selectedProtocol = value.defaultProtocol;
+      _baseUrlController.text = initialBaseUrl(config: null, provider: value);
+      _modelController.text = '';
+      _fetchedModels = null;
+      _reseedCapabilityFields();
+    });
+  }
+
+  void _applyModelChoice(ProviderModelInfo info) {
+    setState(() {
+      _modelController.text = info.id;
+      _reseedCapabilityFields();
+      applyFetchedCapability(_capabilityController, info);
+    });
+  }
+
+  /// 用当前 API Key 拉取模型清单。
+  ///
+  /// Key 的取法遵循「测试连接」的同一红线：输入框里新填的直接用；留空且是编辑已有
+  /// 配置才读已保存凭据；两者都没有就明说，不去猜。
+  Future<void> _fetchModels() async {
+    if (_isFetchingModels) return;
+    final provider = _selectedProvider;
+    var apiKey = _apiKeyController.text.trim();
+    if (apiKey.isEmpty) {
+      final existing = widget.config;
+      if (existing == null) {
+        AppToast.show(context, '请先填写 API Key', icon: Icons.key_off_outlined);
+        return;
+      }
+      apiKey = await _credentialResolver.resolve(existing) ?? '';
+      if (!mounted) return;
+      if (apiKey.isEmpty) {
+        AppToast.show(context, '安全 API 凭据不可用', icon: Icons.key_off_outlined);
+        return;
+      }
+    }
+
+    setState(() => _isFetchingModels = true);
+    try {
+      final catalog = await _apiService.fetchModels(
+        apiKey: apiKey,
+        provider: provider,
+        apiProtocol: _selectedProtocol,
+        customBaseUrl: _baseUrlController.text.trim(),
+      );
+      if (!mounted) return;
+      if (!catalog.ok) {
+        AppToast.show(context, '获取模型失败：${catalog.message}',
+            icon: Icons.error_outline_rounded);
+        return;
+      }
+      setState(() => _fetchedModels = catalog.models);
+      // 内置与自定义走同一个出口：清单让用户自己挑，挑完回填输入框。
+      final picked = await showModelPicker(
+        context,
+        models: modelChoices(
+          fetched: catalog.models,
+          provider: provider,
+          currentModel: _configuredModelName,
+        ),
+        selectedId: _configuredModelName,
+      );
+      if (picked != null && mounted) _applyModelChoice(picked);
+    } catch (_) {
+      if (mounted) {
+        AppToast.show(context, '获取模型失败', icon: Icons.error_outline_rounded);
+      }
+    } finally {
+      if (mounted) setState(() => _isFetchingModels = false);
+    }
+  }
+
+  Widget _fetchModelsButton(ColorScheme cs) => IconButton(
+        key: const Key('fetch-models-button'),
+        tooltip: '用当前 API Key 获取可用模型',
+        onPressed: _isFetchingModels ? null : _fetchModels,
+        icon: _isFetchingModels
+            ? const SizedBox(
+                width: 18,
+                height: 18,
+                child: CircularProgressIndicator(strokeWidth: 2),
+              )
+            : const Icon(Icons.cloud_download_outlined, size: 20),
+      );
 
   void _restoreCapabilityBuiltin() {
     setState(() {
@@ -171,7 +267,6 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
   @override
   Widget build(BuildContext context) {
     final cs = Theme.of(context).colorScheme;
-    final isCustom = _selectedProvider == ApiProvider.custom;
 
     return Scaffold(
       backgroundColor: cs.surface,
@@ -222,128 +317,97 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
                   items: ApiProvider.values.map((p) {
                     return DropdownMenuItem(value: p, child: Text(p.label));
                   }).toList(),
+                  onChanged: _onProviderChanged,
+                ),
+                const SizedBox(height: 14),
+                DropdownButtonFormField<ApiProtocol>(
+                  key: const Key('protocol-field'),
+                  value: _selectedProtocol,
+                  isExpanded: true,
+                  decoration: appInputDecoration(
+                    '上游格式 *',
+                    null,
+                    Icons.alt_route_rounded,
+                    cs,
+                  ),
+                  items: ApiProtocol.values
+                      .map((protocol) => DropdownMenuItem(
+                            value: protocol,
+                            child: Text(
+                              protocol.label,
+                              overflow: TextOverflow.ellipsis,
+                            ),
+                          ))
+                      .toList(),
                   onChanged: (v) {
                     if (v != null) {
                       setState(() {
-                        _selectedProvider = v;
-                        if (v != ApiProvider.custom) {
-                          _selectedProtocol = ApiProtocol.defaultValue;
-                        }
-                        if (v == ApiProvider.custom) {
-                          _selectedModel = '';
-                          _modelController.text = '';
-                        } else {
-                          _selectedModel =
-                              ApiProvider.defaultModels[v.name] ?? '';
-                          _modelController.text = _selectedModel;
-                        }
-                        _reseedCapabilityFields();
+                        _selectedProtocol = v;
+                        // 协议变了，拉到的清单不再保证属于这个端点。
+                        _fetchedModels = null;
                       });
                     }
                   },
                 ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 6),
+                  child: Text(
+                    _selectedProtocol.description,
+                    style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+                  ),
+                ),
+                Padding(
+                  padding: const EdgeInsets.only(top: 4),
+                  child: Text(
+                    '请选择与 Base URL 对应的上游协议；内置提供商的预设地址同样按此协议拼接，'
+                    '本应用不会自动开启或依赖本地路由。',
+                    style: TextStyle(
+                      fontSize: 11,
+                      color: cs.onSurfaceVariant,
+                    ),
+                  ),
+                ),
                 const SizedBox(height: 14),
-                if (isCustom) ...[
-                  DropdownButtonFormField<ApiProtocol>(
-                    value: _selectedProtocol,
-                    isExpanded: true,
+                Semantics(
+                  container: true,
+                  textField: true,
+                  label: 'Base URL 输入框',
+                  onTap: _baseUrlFocusNode.requestFocus,
+                  child: TextFormField(
+                    key: const Key('api-config-base-url'),
+                    controller: _baseUrlController,
+                    focusNode: _baseUrlFocusNode,
                     decoration: appInputDecoration(
-                      '上游格式 *',
-                      null,
-                      Icons.alt_route_rounded,
+                      'Base URL *',
+                      _selectedProtocol.baseUrlHint,
+                      Icons.link_rounded,
                       cs,
                     ),
-                    items: ApiProtocol.values
-                        .map((protocol) => DropdownMenuItem(
-                              value: protocol,
-                              child: Text(
-                                protocol.label,
-                                overflow: TextOverflow.ellipsis,
-                              ),
-                            ))
-                        .toList(),
-                    onChanged: (v) {
-                      if (v != null) setState(() => _selectedProtocol = v);
+                    onChanged: (_) {
+                      // 地址改了，已拉到的清单可能属于另一个端点。
+                      if (_fetchedModels != null) {
+                        setState(() => _fetchedModels = null);
+                      }
                     },
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.only(top: 6),
-                    child: Text(
-                      _selectedProtocol.description,
-                      style:
-                          TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
-                    ),
-                  ),
-                  Padding(
-                    padding: const EdgeInsets.only(top: 4),
-                    child: Text(
-                      '请选择与 Base URL 对应的上游协议；本应用不会自动开启或依赖本地路由。',
-                      style: TextStyle(
-                        fontSize: 11,
-                        color: cs.onSurfaceVariant,
-                      ),
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  Semantics(
-                    container: true,
-                    textField: true,
-                    label: 'Base URL 输入框',
-                    onTap: _baseUrlFocusNode.requestFocus,
-                    child: TextFormField(
-                      key: const Key('api-config-base-url'),
-                      controller: _baseUrlController,
-                      focusNode: _baseUrlFocusNode,
-                      decoration: appInputDecoration(
-                        'Base URL *',
-                        _selectedProtocol.baseUrlHint,
-                        Icons.link_rounded,
-                        cs,
-                      ),
-                      validator: (v) =>
-                          v?.trim().isEmpty ?? true ? '请输入 Base URL' : null,
-                    ),
-                  ),
-                  const SizedBox(height: 14),
-                  TextFormField(
-                    controller: _modelController,
-                    focusNode: _modelFocusNode,
-                    decoration: appInputDecoration(
-                        '模型名称 *', '输入模型 ID', Icons.model_training_outlined, cs),
                     validator: (v) =>
-                        v?.trim().isEmpty ?? true ? '请输入模型名称' : null,
+                        v?.trim().isEmpty ?? true ? '请输入 Base URL' : null,
                   ),
-                ] else ...[
-                  DropdownButtonFormField<String>(
-                    value: _selectedModel.isNotEmpty &&
-                            (ApiProvider.providerModels[_selectedProvider.name]
-                                    ?.contains(_selectedModel) ??
-                                false)
-                        ? _selectedModel
-                        : null,
-                    decoration: appInputDecoration(
-                        '模型 *', null, Icons.model_training_outlined, cs),
-                    items:
-                        (ApiProvider.providerModels[_selectedProvider.name] ??
-                                [])
-                            .map((model) {
-                      return DropdownMenuItem(
-                          value: model,
-                          child: Text(model,
-                              style: const TextStyle(
-                                  fontFamily: 'monospace', fontSize: 13)));
-                    }).toList(),
-                    onChanged: (v) {
-                      setState(() {
-                        _selectedModel = v ?? '';
-                        _modelController.text = _selectedModel;
-                        _reseedCapabilityFields();
-                      });
-                    },
-                    validator: (v) => v == null ? '请选择模型' : null,
-                  ),
-                  const SizedBox(height: 14),
-                ],
+                ),
+                const SizedBox(height: 14),
+                // 模型一律手输：下拉把「这个服务商到底有哪些模型」当成一份固定清单，
+                // 而这份清单由服务商随时改（内置候选里的 deepseek-chat 已经不存在），
+                // 用户真正想要的那个别名又常常不在列表里。给一个自由输入框，把
+                // 「获取模型」当成可选帮助。
+                TextFormField(
+                  key: const Key('model-field'),
+                  controller: _modelController,
+                  focusNode: _modelFocusNode,
+                  decoration: appInputDecoration('模型名称 *', '输入模型 ID，或点右侧按钮获取',
+                          Icons.model_training_outlined, cs)
+                      .copyWith(suffixIcon: _fetchModelsButton(cs)),
+                  validator: (v) =>
+                      v?.trim().isEmpty ?? true ? '请输入模型名称' : null,
+                ),
                 TextFormField(
                   controller: _apiKeyController,
                   decoration: appInputDecoration(
@@ -461,34 +525,24 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
 
   /// 保存模型能力声明。写不写、写什么，全部由 [modelCapabilityPersistAction]
   /// 判定——表单里的字段与线上生效值之间隔着内置快照的合并规则，就地重写一遍
-  /// 判据迟早会与治理页那份分叉。
+  /// 判据迟早会与治理页那份分叉（未登记模型的补写规则也在那里）。
   Future<void> _persistCapabilityDeclaration(
     ApiProvider provider,
     String modelName,
   ) async {
-    // 字段回填的仍是上一个模型的值：自定义提供商的模型名是手输的，而移动端
-    // 点击按钮不会让输入框失焦，"_onModelFocusChanged" 于是不触发——用户改完
-    // 模型名直接点保存时就会走到这里。这份草稿描述的是另一个模型，写下去等于
-    // 给它凭空固化一份自己从未有过的声明（例如沿用旧模型的"工具/流式"开关，
-    // 让工作模式对着一个未必支持工具的模型启动）。保存模型名本身仍然进行。
-    //
-    // "恢复内置默认"不受这道守卫约束：它是清除、没有草稿可污染，而它自己的按钮
-    // 本就按保存时的模型名决定是否出现；挡住它只会让按钮保持隐藏、用户无从重试。
-    if (!_restoreBuiltin &&
-        _capabilitySeededFor != '${provider.name}/$modelName') {
-      return;
-    }
     final declared = _capabilityController.declared;
+    final stored = _governanceStore.customCapability(provider.name, modelName);
     final action = modelCapabilityPersistAction(
       restoreBuiltin: _restoreBuiltin,
       declared: declared,
+      stored: stored,
       registry: _registry,
       provider: provider,
       modelId: modelName,
       effective: _registry.resolve(
         provider: provider,
         modelId: modelName,
-        custom: _governanceStore.customCapability(provider.name, modelName),
+        custom: stored,
       ),
     );
     switch (action) {
@@ -507,6 +561,11 @@ class _ApiConfigFormPageState extends ConsumerState<ApiConfigFormPage> {
 
   Future<void> _save() async {
     if (!_formKey.currentState!.validate() || _isSaving) return;
+    // 模型名是手输的，而移动端点击按钮不会让输入框失焦，"_onModelFocusChanged"
+    // 于是不触发——不回填就保存，能力字段描述的仍是上一个模型。保存前对齐一次，
+    // 而不是在写盘口把这份草稿拦下来：拦下来只会静默丢掉用户的开关设置。
+    // 模型没变时 [_reseedCapabilityFields] 直接早退，用户的编辑不受影响。
+    _reseedCapabilityFields();
     _isSaving = true;
     setState(() {});
 

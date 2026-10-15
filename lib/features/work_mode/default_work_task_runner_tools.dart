@@ -11,6 +11,7 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
     required WorkChangeApprovalDecision? approvalDecision,
     required WorkApprovalScope? approvalScope,
     required ModelCapability modelCapability,
+    WorkCandidate? candidate,
   }) {
     // A mutation approval without an exact file scope belongs to an
     // application-skill mutation (or a stale checkpoint), not to Stage 02.
@@ -56,7 +57,26 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
     // character's own permissions; a stale first-role list must never grant
     // the next role extra tools.
     final permissions = _permissionsForTask(task, character);
-    final attachmentPaths = _attachmentPathsForTask(task);
+    final attachmentPaths = <String>{
+      ..._attachmentPathsForTask(task),
+      if (candidate != null)
+        for (final entry in candidate.files)
+          if (const {'docx', 'pdf'}.contains(p
+              .extension(entry['path'] as String)
+              .toLowerCase()
+              .replaceFirst('.', '')))
+            candidate.file(entry['path'] as String).path,
+    };
+    final usageAssignment = candidate == null
+        ? null
+        : WorkDiscussionState.fromExecutionState(task.executionStateJson)
+            ?.collaboration
+            ?.usageAssignments
+            .where((assignment) => assignment['memberId'] == character.id)
+            .firstOrNull;
+    final canUseCandidateDocument = usageAssignment != null &&
+        (usageAssignment['requiredCapabilities'] as List).any((capability) =>
+            const {'document.body', 'document.visual'}.contains(capability));
     WorkToolResult permission(ToolPermission required) =>
         permissions.contains(required)
             ? const WorkToolResult.success()
@@ -69,11 +89,19 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
       // ponytail: exact user attachments are the smallest safe exception;
       // arbitrary workspace reads still require the explicit role capability.
       return path is String &&
-          _isReferencedAttachmentPath(
-            path,
-            attachmentPaths,
-            isWindows: files.pathPolicy.isWindows,
-          );
+          (_isReferencedAttachmentPath(
+                path,
+                _attachmentPathsForTask(task),
+                isWindows: files.pathPolicy.isWindows,
+              ) ||
+              canUseCandidateDocument &&
+                  candidate!.files.any((entry) => p.equals(
+                        p.normalize(File(path).absolute.path),
+                        p.normalize(candidate
+                            .file(entry['path'] as String)
+                            .absolute
+                            .path),
+                      )));
     }
 
     final documentDefinition = WorkDocumentTool.definition(
@@ -95,6 +123,8 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
         operation: 'document',
         path: path,
       ),
+      writeEvidence: (task, extension, bytes) =>
+          eventStore.writeDocumentEvidence(task.id, extension, bytes),
     );
     Future<WorkToolResult> documentHandler(
       WorkToolInvocation invocation,
@@ -481,7 +511,12 @@ extension _DefaultWorkTaskRunnerTools on DefaultWorkTaskRunner {
           workspaceRoot,
         ),
       ),
-      ..._skillDefinitions(task, character, permission),
+      ..._skillDefinitions(
+        task,
+        character,
+        permission,
+        cancellationToken: cancellationToken,
+      ),
     ];
     return WorkToolRegistry(definitions: definitions);
   }

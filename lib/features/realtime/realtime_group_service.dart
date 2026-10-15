@@ -96,9 +96,13 @@ class RealtimeGroupService {
   ///
   /// 发一个 `Bearer ` （空值）服务端虽然也认，但那是"带着一个空凭据"，
   /// 在抓包和日志里看着像配错了；不带才是"这台服务不需要凭据"。
+  ///
+  /// 同时关掉自动重定向：跟随会把 Authorization 原样发到 Location 指向的来源，
+  /// 就是把令牌交给用户没有配置过的一方。
   Options _options(RealtimeSettings settings) {
     final token = settings.token.trim();
     return Options(
+      followRedirects: false,
       headers: token.isEmpty
           ? const <String, String>{}
           : <String, String>{'Authorization': 'Bearer $token'},
@@ -147,6 +151,11 @@ class RealtimeGroupService {
         return '服务地址正确但接口不匹配，请确认填的是实时服务而不是别的服务';
       case 413:
         return '群名称过长';
+      case >= 300 && < 400:
+        // 这个区间的响应是本服务主动不跟随的（见 [_options]）：说清是"不让令牌
+        // 跟着跳"，而不是把令牌交给没配置过的地址。
+        return '服务地址要求跳转（HTTP $status），已停止请求：共享令牌只发给配置里的地址，'
+            '请把服务地址改成最终地址';
       default:
         return status >= 500
             ? '实时服务暂时不可用（HTTP $status）'

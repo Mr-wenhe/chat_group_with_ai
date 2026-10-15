@@ -1,0 +1,9 @@
+{
+  "nativeTreeHasBusinessButton": true,
+  "elementClickChangedCounter": [
+    0,
+    1
+  ],
+  "voiceOverRequired": false,
+  "requiresInstrumentedBuild": true
+}

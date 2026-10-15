@@ -70,6 +70,7 @@ dependencies:
   # DOCX/XLSX 的 Open XML 解析。
   xml: 6.5.0
   crypto: ^3.0.7
+  yaml: 3.1.4
   package_info_plus: ">=8.0.0 <9.0.0"
   record: ^6.2.1
   audioplayers: ^6.6.0

@@ -2,6 +2,53 @@ part of 'work_collaboration_state.dart';
 
 /// 保留当前授权和未决义务；模型投影与权威落盘使用不同入口。
 extension WorkCollaborationHistory on WorkCollaborationState {
+  /// 容量只数**当前可读**的签字。
+  ///
+  /// 台账解析时先按同键归档（[WorkCollaborationState.compactedApprovals]），但
+  /// delivery 的键带着随迭代变化的 `subjectId`，失效候选的签字因此永远不与新签字
+  /// 同键、只能一路堆下去：迭代够久就把上限占满，第 65 条**当前**签字让整个状态
+  /// 解析成 null，任务被永久卡住。而所有读取判据都钉在当前主体上——[planReady] 读
+  /// `taskId`、[deliveryReady] 读当前迭代 id、[ideaApproved] 读问题 id——旧迭代的
+  /// 签字对任何判据都不可见，历史凭证仍在群里的公开回复（`evidenceRef`）与事件日志
+  /// 里，所以容量只看当前主体及门禁实际读取的版本。
+  int get liveApprovalGroups {
+    return currentApprovals
+        .map(WorkCollaborationState._approvalKey)
+        .toSet()
+        .length;
+  }
+
+  /// 与方案、提案及交付门禁使用相同的版本绑定。过期签字只作历史凭证。
+  Iterable<Map<String, dynamic>> get currentApprovals {
+    final members = activeMembers.toSet();
+    final issueRequests = {
+      for (final issue in issues) issue['id']: issue['requestRevision']
+    };
+    return approvals.where((a) {
+      if (a['teamRevision'] != teamRevision) return false;
+      if (a['kind'] == 'idea') {
+        // ideaApproved 以最后一条意见的验证版本为准，不能隐去反对意见。
+        return issueRequests[a['subjectId']] == a['requestRevision'];
+      }
+      if (!members.contains(a['memberId']) ||
+          a['requestRevision'] != requestRevision) {
+        return false;
+      }
+      if (a['kind'] == 'plan') {
+        return a['subjectId'] == taskId &&
+            a['iterationId'] == '' &&
+            a['artifactDigest'] == '';
+      }
+      final iteration = currentIteration;
+      return a['kind'] == 'delivery' &&
+          iteration != null &&
+          a['subjectId'] == iteration['id'] &&
+          a['iterationId'] == iteration['id'] &&
+          a['artifactDigest'] == iteration['artifactDigest'] &&
+          a['verificationRevision'] == verificationRevision;
+    });
+  }
+
   /// 落盘前的历史窗口：把**已了结**条目移出状态，只留最新 [WorkCollaborationState.maxSettledHistory] 条。
   ///
   /// `issues` 与 `decisions` 都是只追加的台账。它们与签字不同，旧记录**仍会被读**：
@@ -24,21 +71,38 @@ extension WorkCollaborationHistory on WorkCollaborationState {
       for (final acceptance in acceptances) acceptance['id'] as String,
     };
     final keptDecisions = _windowedDecisions(decisions, liveIds);
+    final keptRulingIds = {
+      ...currentCoordinatorDecisions.map((d) => d['eventId']),
+      ...coordinatorDecisions.reversed
+          .take(WorkCollaborationState.maxSettledHistory)
+          .map((d) => d['eventId']),
+    };
+    final keptRulings = coordinatorDecisions
+        .where((d) => keptRulingIds.contains(d['eventId']))
+        .toList();
     if (keptIssues.length == issues.length &&
-        keptDecisions.length == decisions.length) {
+        keptDecisions.length == decisions.length &&
+        keptRulings.length == coordinatorDecisions.length) {
       return this;
     }
-    return WorkCollaborationState.tryParse(toJson()
-          ..['issues'] = keptIssues
-          ..['decisions'] = keptDecisions) ??
-        this;
+    final raw = toJson()
+      ..['issues'] = keptIssues
+      ..['decisions'] = keptDecisions;
+    if (isAutonomous) raw['coordinatorDecisions'] = keptRulings;
+    return WorkCollaborationState.tryParse(raw) ?? this;
   }
 
   /// 模型只需当前门禁事实；完整签字与版本历史仍由 [toJson] 保存。
   /// 不改变需求、问题、验收或用户决策，也不把投影写回权威检查点。
-  Map<String, dynamic> toPromptJson() => toJson()
-    ..['approvals'] = currentApprovals.toList()
-    ..['iterations'] = [if (currentIteration != null) currentIteration!];
+  Map<String, dynamic> toPromptJson() {
+    final raw = toJson()
+      ..['approvals'] = currentApprovals.toList()
+      ..['iterations'] = [if (currentIteration != null) currentIteration!];
+    if (isAutonomous) {
+      raw['coordinatorDecisions'] = currentCoordinatorDecisions.toList();
+    }
+    return raw;
+  }
 
   /// 问题的历史窗口：未决义务一条不丢，已了结的只留最新 [WorkCollaborationState.maxSettledHistory] 条。
   List<Map<String, dynamic>> _windowedIssues(

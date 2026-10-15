@@ -232,23 +232,38 @@ class WorkDiscussionState {
 
   bool get hasExecutor => _nullableId(executorId) != null;
 
+  String? get explicitlyPinnedExecutorId =>
+      _nullableId(deliverableContract?['explicitExecutorId']);
+
   /// Only this exact state is eligible to cross into the execution runner.
   /// Approval, installation, and folder permissions remain separate gates.
+  bool get isProductionExecutorConsistent =>
+      collaboration?.isAutonomous != true ||
+      explicitlyPinnedExecutorId == null ||
+      collaboration!.workItems
+          .every((i) => i['ownerId'] == explicitlyPinnedExecutorId);
+
   bool get isPlanReady =>
       schemaVersion == currentSchemaVersion &&
       isWithinBounds &&
       collaboration != null &&
-      collaboration!.planReady;
+      collaboration!.planReady &&
+      isProductionExecutorConsistent;
 
   // Ready plans still need an explicit member work item. No v2 executor
   // election or legacy handoff is inferred from the discussion shell.
   bool get isExecutionReady => schemaVersion == legacySchemaVersion
       ? _legacyExecutionReady
-      : collaboration?.productionReady == true &&
+      : isProductionExecutorConsistent &&
+          collaboration?.productionReady == true &&
           ({'producing', 'verifying'}.contains(collaboration!.phase) ||
+              collaboration!.isAutonomous &&
+                  collaboration!.phase == 'reviewing' &&
+                  !collaboration!.allMembersUsed ||
               collaboration!.deliveryReady);
 
   bool get isDeliveryReady =>
+      isProductionExecutorConsistent &&
       schemaVersion == currentSchemaVersion &&
       isWithinBounds &&
       phase == WorkDiscussionPhase.ready &&

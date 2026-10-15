@@ -5,6 +5,7 @@ import 'dart:io';
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 // 任务胶囊与聊天页共用右上角，几何断言要量会话控件行的真实高度。
 import 'package:chat_group/features/chat_group/widgets/compact_conversation_controls.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_message_bubble.dart';
@@ -111,6 +112,39 @@ AgentTask _task({
     workModeTask: true,
   );
 }
+
+UsageLedgerEntry _usageEntry({
+  required String requestId,
+  required String taskId,
+  required String characterId,
+  required int? runBoundary,
+  required int inputTokens,
+  required int cachedInputTokens,
+  required int outputTokens,
+  required int? estimatedCostMicros,
+  required String? currency,
+  required bool exactUsage,
+}) =>
+    UsageLedgerEntry(
+      requestId: requestId,
+      rootRequestId: requestId,
+      timestamp: DateTime.utc(2026, 10, 14),
+      provider: 'test',
+      model: 'model',
+      characterId: characterId,
+      conversationId: 'group-one',
+      taskId: taskId,
+      runBoundary: runBoundary,
+      purpose: AiRequestPurpose.agent,
+      originPurpose: AiRequestPurpose.agent,
+      inputTokens: inputTokens,
+      cachedInputTokens: cachedInputTokens,
+      outputTokens: outputTokens,
+      estimatedCostMicros: estimatedCostMicros,
+      currency: currency,
+      priceVersion: null,
+      exactUsage: exactUsage,
+    );
 
 AgentTask _decisionTask(String id, String conversationId) {
   final task =
@@ -4681,5 +4715,105 @@ void main() {
 
       expect(panelOpacity(tester), 1.0);
     });
+  });
+
+  testWidgets('任务用量只汇总当前 taskId 并按币种与运行段展开', (tester) async {
+    final task = _task(
+      id: 'task-usage-current',
+      conversationId: 'group-one',
+      characterId: 'maker',
+    );
+    final entries = <UsageLedgerEntry>[
+      _usageEntry(
+        requestId: 'usage-1',
+        taskId: task.id,
+        characterId: 'developer',
+        runBoundary: 11,
+        inputTokens: 100,
+        cachedInputTokens: 25,
+        outputTokens: 20,
+        estimatedCostMicros: 2500,
+        currency: 'USD',
+        exactUsage: true,
+      ),
+      _usageEntry(
+        requestId: 'usage-2',
+        taskId: task.id,
+        characterId: 'tester',
+        runBoundary: 12,
+        inputTokens: 10,
+        cachedInputTokens: 0,
+        outputTokens: 10,
+        estimatedCostMicros: 350,
+        currency: 'JPY',
+        exactUsage: false,
+      ),
+      _usageEntry(
+        requestId: 'other-task',
+        taskId: 'task-usage-other',
+        characterId: 'developer',
+        runBoundary: 9,
+        inputTokens: 100000,
+        cachedInputTokens: 0,
+        outputTokens: 100000,
+        estimatedCostMicros: 900000,
+        currency: 'USD',
+        exactUsage: true,
+      ),
+    ];
+    final diagnostics = [
+      AiRequestDiagnostic(
+        requestId: 'unknown-usage',
+        rootRequestId: 'unknown-usage',
+        timestamp: DateTime.utc(2026, 10, 14),
+        purpose: AiRequestPurpose.agent,
+        provider: 'test',
+        model: 'unknown-model',
+        taskId: task.id,
+        runBoundary: 12,
+        latencyMs: 0,
+        retryCount: 0,
+        inputTokens: null,
+        cachedInputTokens: null,
+        outputTokens: null,
+        estimatedCostMicros: null,
+        currency: null,
+        status: 'failed',
+        failureType: 'network',
+      ),
+    ];
+
+    await tester.pumpWidget(MaterialApp(
+      home: Scaffold(
+        body: WorkTaskPanel(
+          tasks: [task],
+          usageEntries: entries,
+          usageDiagnostics: diagnostics,
+          characterNameFor: (id) => id == 'developer' ? '开发' : '测试',
+          eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
+          onSelectTask: (_) {},
+          onStop: (_) {},
+          onContinue: (_) {},
+          onOpenConversation: (_) {},
+          onCollapse: () {},
+          onClose: () {},
+        ),
+      ),
+    ));
+
+    expect(find.text('用量 140 Token'), findsOneWidget);
+    await tester.tap(find.byKey(const Key('work-task-usage-details')));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('输入 110 Token（缓存 25，已包含在输入中）'), findsOneWidget);
+    expect(find.textContaining('USD'), findsOneWidget);
+    expect(find.textContaining('JPY'), findsOneWidget);
+    expect(find.textContaining('估算用量 1 · 未知用量 1 · 价格未知 0'), findsOneWidget);
+    expect(find.byKey(const Key('work-task-usage-breakdown')), findsOneWidget);
+
+    await tester.tap(find.text('按运行段和成员展开'));
+    await tester.pumpAndSettle();
+    expect(find.textContaining('运行段 11 · 开发'), findsOneWidget);
+    expect(find.textContaining('运行段 12 · 测试'), findsOneWidget);
+    expect(find.textContaining('运行段 9'), findsNothing);
   });
 }

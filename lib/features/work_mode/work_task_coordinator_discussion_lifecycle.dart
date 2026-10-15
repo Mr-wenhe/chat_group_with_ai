@@ -160,7 +160,8 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     return drain;
   }
 
-  void _maybeStartDiscussion(AgentTask task) {
+  void _maybeStartDiscussion(AgentTask task,
+      {bool allowLegacyClarifyingRecheck = false}) {
     final runner = _discussionRunner;
     if (runner == null ||
         _disposed ||
@@ -171,18 +172,27 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     final decoded = WorkDiscussionState.decodeExecutionState(
       task.executionStateJson,
     );
+    final upgrading = decoded.state?.collaboration != null &&
+        !decoded.state!.collaboration!.isAutonomous &&
+        _decodeExecutionMap(
+                task.executionStateJson)['autonomyUpgradePending'] ==
+            true;
     if (!decoded.isValid ||
         (decoded.state!.schemaVersion ==
                 WorkDiscussionState.currentSchemaVersion &&
             (runner is! WorkTaskCollaborationDiscussionRunner ||
-                decoded.state!.isPlanReady &&
-                    decoded.state!.collaboration!.phase != 'reviewing' ||
+                !upgrading &&
+                    decoded.state!.isPlanReady &&
+                    decoded.state!.collaboration!.phase != 'reviewing' &&
+                    !(allowLegacyClarifyingRecheck &&
+                        decoded.state!.collaboration!
+                            .isRecoverableClarifyingCheckpoint) ||
                 decoded.state!.collaboration!.hasBlockingDecision ||
                 decoded.state!.collaboration!.hasPendingDecision &&
                     decoded.state!.collaboration!.workItems.isNotEmpty &&
                     decoded.state!.collaboration!.workItems
                         .every((i) => i['status'] == 'done'))) ||
-        decoded.state!.isExecutionReady ||
+        !upgrading && decoded.state!.isExecutionReady ||
         (decoded.state!.schemaVersion ==
                 WorkDiscussionState.legacySchemaVersion &&
             decoded.state!.phase == WorkDiscussionPhase.blocked) ||
@@ -276,7 +286,14 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
                   ?.collaboration;
           if (collaboration != null &&
               collaboration.productionReady &&
-              (collaboration.phase == 'ready' || collaboration.deliveryReady)) {
+              (collaboration.phase == 'ready' ||
+                  collaboration.deliveryReady ||
+                  collaboration.isAutonomous &&
+                      collaboration.phase == 'reviewing' &&
+                      !collaboration.allMembersUsed &&
+                      !collaboration.hasOpenIssue &&
+                      !collaboration.acceptances
+                          .any((a) => a['status'] == 'failed'))) {
             stored
               ..status = AgentTaskStatus.queued
               ..resumeRequired = false
@@ -493,6 +510,10 @@ extension _WorkTaskCoordinatorDiscussionLifecycle on WorkTaskCoordinator {
     }
     if (state.collaboration != null) {
       final root = _decodeExecutionMap(task.executionStateJson);
+      if (!state.collaboration!.isAutonomous &&
+          root['autonomyUpgradePending'] == true) {
+        return '继续旧任务前需建立当前自主策略并重新确认方案。';
+      }
       if (state.collaboration!.productionReady &&
           (root['startupRecoveryPending'] == true ||
               root.containsKey('uncertainAction'))) {

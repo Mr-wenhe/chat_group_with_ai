@@ -4,6 +4,7 @@ import 'package:flutter/services.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
+import 'package:chat_group/services/chat_api_service.dart';
 import 'package:chat_group/features/ai_governance/model_capability_registry.dart';
 
 /// 能力区块的说明文案。集中在这里，是为了让表单页与治理页弹窗永远说同一句话。
@@ -35,9 +36,16 @@ enum ModelCapabilityPersistAction {
 /// [ModelCapabilityRegistry.resolve]），用户把值**调小**时草稿变了、生效值却没变。
 /// 此时写入只会凭空固化一份声明，连同流式/视觉/工具一起钉死在当前快照上——
 /// 既没有效果，又挡住了将来的快照更新，所以必须判为 [keep]。
+///
+/// 未登记模型是这条规则的反面：快照对它没有任何判断，生效值只是
+/// [ModelCapabilityRegistry.resolve] 的兜底默认、不是任何人做过的决定。此时草稿
+/// 与生效值必然一致，判 [keep] 就等于让用户看着流式/工具开着、落盘却一份声明都
+/// 没有。这类模型只要没有已存声明（`stored == null`）就写一份，把用户当时看到并
+/// 接受的开关固化下来；已有声明时仍走上面的「改动才写」。
 ModelCapabilityPersistAction modelCapabilityPersistAction({
   required bool restoreBuiltin,
   required CustomModelCapability? declared,
+  required CustomModelCapability? stored,
   required ModelCapabilityRegistry registry,
   required ApiProvider provider,
   required String modelId,
@@ -55,9 +63,12 @@ ModelCapabilityPersistAction modelCapabilityPersistAction({
       resolved.supportsTools != effective.supportsTools ||
       resolved.contextWindow != effective.contextWindow ||
       resolved.maxOutput != effective.maxOutput;
-  return changes
-      ? ModelCapabilityPersistAction.save
-      : ModelCapabilityPersistAction.keep;
+  if (changes) return ModelCapabilityPersistAction.save;
+  final builtin = registry.resolve(provider: provider, modelId: modelId);
+  if (stored == null && !builtin.isKnown) {
+    return ModelCapabilityPersistAction.save;
+  }
+  return ModelCapabilityPersistAction.keep;
 }
 
 /// 「模型能力」区块的编辑状态。由调用方持有并 dispose，与 [TextEditingController] 同寿。
@@ -135,6 +146,29 @@ class ModelCapabilityController extends ChangeNotifier {
     _outputController.dispose();
     super.dispose();
   }
+}
+
+/// 把服务商返回的能力值写进能力字段。
+///
+/// 只写上游真的给了的字段：没给就保持现状，绝不拿猜的值覆盖用户或快照给出的值。
+/// 输出上限大于上下文窗口是非法组合（`declared` 会整份判为无效），这种情况只写
+/// 窗口，不把字段写成无效值。
+void applyFetchedCapability(
+  ModelCapabilityController controller,
+  ProviderModelInfo model,
+) {
+  final window = model.contextWindow;
+  if (window != null) controller.contextController.text = '$window';
+  final output = model.maxOutputTokens;
+  if (output != null) {
+    final effectiveWindow =
+        window ?? int.tryParse(controller.contextController.text.trim());
+    if (effectiveWindow == null || output <= effectiveWindow) {
+      controller.outputController.text = '$output';
+    }
+  }
+  final vision = model.supportsVision;
+  if (vision != null) controller.supportsVision = vision;
 }
 
 /// 「模型能力」区块：开关、Token 字段、逐字段说明与校验的唯一实现。

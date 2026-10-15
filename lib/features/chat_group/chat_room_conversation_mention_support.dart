@@ -1,6 +1,16 @@
 part of 'chat_room_page.dart';
 
 extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
+  /// `@` 面板的候选名单：只列当前群成员。
+  ///
+  /// 不能用 `_allGroupCharacters`：那份列表额外收了"发过言但已被移出群"的历史
+  /// 发言人（消息回显要用），把他们摆进面板等于给一个点不出结果的 @ 项——
+  /// 普通聊天按活跃成员解析 @、工作模式路由按群成员名单解析，两边都认不出。
+  List<AICharacter> get _mentionCandidates => mentionCandidatesForGroup(
+        _allGroupCharacters,
+        _group?.aiCharacterIds ?? const <String>[],
+      );
+
   void _hideMentionOverlay() {
     _mentionOverlay?.remove();
     _mentionOverlay = null;
@@ -92,7 +102,7 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
                         fontWeight: FontWeight.w600,
                         color: cs.onSurfaceVariant)),
                 const Spacer(),
-                Text('${_allGroupCharacters.length} 人',
+                Text('${_mentionCandidates.length} 人',
                     style: TextStyle(fontSize: 11, color: cs.onSurfaceVariant)),
               ],
             ),
@@ -145,10 +155,10 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
   void _onMentionSearchChanged(String query) {
     final q = query.trim();
     if (q.isEmpty) {
-      _filteredMentionMembers = List.from(_allGroupCharacters);
+      _filteredMentionMembers = List.from(_mentionCandidates);
     } else {
       _filteredMentionMembers = PinyinSearch.exactFirst(
-        _allGroupCharacters
+        _mentionCandidates
             .where((c) => PinyinSearch.matchesFields(
                   c.searchFields,
                   q,
@@ -266,9 +276,7 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
                         color: pColor.withValues(alpha: 0.3), width: 1.2),
                   ),
                   textStyle: TextStyle(
-                      fontSize: 15,
-                      fontWeight: FontWeight.w700,
-                      color: pColor),
+                      fontSize: 15, fontWeight: FontWeight.w700, color: pColor),
                 ),
                 const SizedBox(width: 12),
                 Expanded(

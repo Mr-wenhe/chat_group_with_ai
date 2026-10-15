@@ -1,3 +1,4 @@
+import 'work_usage_receipt.dart';
 import 'dart:async';
 import 'dart:convert';
 
@@ -155,8 +156,10 @@ class WorkToolResult {
   final Map<String, dynamic> data;
   final String? failureCode;
   final bool committed;
+  final WorkUsageObservation? usageObservation;
 
   WorkToolResult({
+    this.usageObservation,
     required this.status,
     this.message = '',
     Map<String, dynamic>? data,
@@ -165,6 +168,7 @@ class WorkToolResult {
   }) : data = Map.unmodifiable(Map<String, dynamic>.from(data ?? const {}));
 
   const WorkToolResult.success({
+    this.usageObservation,
     this.message = '',
     this.data = const {},
     this.committed = false,
@@ -172,6 +176,7 @@ class WorkToolResult {
         failureCode = null;
 
   const WorkToolResult.alreadyCommitted({
+    this.usageObservation,
     this.message = '该动作已在先前检查点提交，已跳过重复执行。',
     this.data = const {},
   })  : status = WorkToolResultStatus.alreadyCommitted,
@@ -179,6 +184,7 @@ class WorkToolResult {
         committed = true;
 
   const WorkToolResult.retryableFailure({
+    this.usageObservation,
     required this.message,
     this.data = const {},
     this.failureCode = 'retryableNetwork',
@@ -186,6 +192,7 @@ class WorkToolResult {
         committed = false;
 
   const WorkToolResult.permissionDenied({
+    this.usageObservation,
     required this.message,
     this.data = const {},
     this.failureCode = 'permissionDenied',
@@ -193,6 +200,7 @@ class WorkToolResult {
         committed = false;
 
   const WorkToolResult.pathRejected({
+    this.usageObservation,
     required this.message,
     this.data = const {},
     this.failureCode = 'pathRejected',
@@ -200,6 +208,7 @@ class WorkToolResult {
         committed = false;
 
   const WorkToolResult.waitingForApproval({
+    this.usageObservation,
     required this.message,
     this.data = const {},
     this.failureCode = 'userActionRequired',
@@ -207,6 +216,7 @@ class WorkToolResult {
         committed = false;
 
   const WorkToolResult.paused({
+    this.usageObservation,
     required this.message,
     this.data = const {},
     this.failureCode = 'userActionRequired',
@@ -214,6 +224,7 @@ class WorkToolResult {
         committed = false;
 
   const WorkToolResult.failed({
+    this.usageObservation,
     required this.message,
     this.data = const {},
     this.failureCode = 'internal',

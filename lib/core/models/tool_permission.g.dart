@@ -25,6 +25,8 @@ class ToolPermissionAdapter extends TypeAdapter<ToolPermission> {
         return ToolPermission.skillCreate;
       case 5:
         return ToolPermission.skillDownload;
+      case 6:
+        return ToolPermission.nativeApp;
       default:
         return ToolPermission.workspaceRead;
     }
@@ -50,6 +52,9 @@ class ToolPermissionAdapter extends TypeAdapter<ToolPermission> {
         break;
       case ToolPermission.skillDownload:
         writer.writeByte(5);
+        break;
+      case ToolPermission.nativeApp:
+        writer.writeByte(6);
         break;
     }
   }

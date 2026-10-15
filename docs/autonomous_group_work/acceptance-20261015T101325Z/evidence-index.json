@@ -1,0 +1,176 @@
+{
+  "runId": "acceptance-20261015T101325Z",
+  "date": "2026-10-15",
+  "matrixSummary": {
+    "total": 77,
+    "blocked": 45,
+    "partial": 7,
+    "notRun": 25,
+    "passed": 0,
+    "failed": 0
+  },
+  "source": {
+    "head": "9bbaef70752dcfe26c2b784728bae8556f2abf52",
+    "workingTreeDirty": true,
+    "initialDirtyFileCount": "not independently captured for this follow-up",
+    "dirtyStatusLineCountObservedBeforeReportCreation": 184,
+    "notes": "大量改动在本轮开始前已存在；本轮不把整个 dirty tree 归属为本次修改。"
+  },
+  "app": {
+    "path": "/Volumes/new_disk/work/flutter/chat_group/chat_group/build/macos/Build/Products/Debug/伴伴.app",
+    "bundleId": "com.example.chatGroup",
+    "version": "2.1.0",
+    "buildNumber": "225",
+    "configuration": "Debug",
+    "executableSha256": "29ef91e660e4341c75af16bf10cd4d8d7deebb9d3a248ad3eb4b47dcdc2c14ef",
+    "flutterKernelSha256": "de45c8b245db3d581dceb0cc8233321460d9097429e9c2c31f5c6f66f2d1ca95",
+    "signature": "codesign --verify --deep --strict --verbose=2 succeeded; valid on disk and satisfies Designated Requirement",
+    "buildTimestamp": "2026-10-15 17:57:39 CST executable; 17:57:31 CST Flutter kernel",
+    "pid": "unavailable",
+    "cuapWindowObserved": true,
+    "debugBadgeObserved": true,
+    "dataRootRequested": "/var/folders/8g/ld5ysm9x2zvc9_2y2kn6233h0000gn/T/chat-group-debug-ui.yTG5zj",
+    "dataRootConfirmedFromProcessOpenFiles": false,
+    "uiDisplayedSavedConfig": true,
+    "apiKeyValueRead": false,
+    "settingsTestEditDeleteOrTaskSubmission": false,
+    "closedAfterObservation": true
+  },
+  "environment": {
+    "os": "macOS 15.6 (24G84)",
+    "architecture": "arm64",
+    "flutter": "3.27.1",
+    "dart": "3.6.0",
+    "xcode": "16.3 (16E140)"
+  },
+  "checks": [
+    {
+      "id": "E1-analyze",
+      "command": "flutter analyze --no-pub",
+      "exitCode": 0,
+      "result": "No issues found"
+    },
+    {
+      "id": "E1-diff-check",
+      "command": "git diff --check",
+      "exitCode": 0,
+      "result": "passed"
+    },
+    {
+      "id": "E1-focused-flutter",
+      "command": "CHAT_GROUP_RUN_MACOS_APPIUM_TEST=1 flutter test --no-pub --concurrency=1 --timeout 30s --reporter failures-only test/work_mode/work_task_coordinator_test.dart test/work_mode/macos_app_bundle_archive_test.dart test/work_mode/macos_appium_service_owner_test.dart test/work_mode/work_document_tool_test.dart test/work_mode/default_work_task_runner_stage02_test.dart test/agentic/skill_resource_pack_test.dart",
+      "exitCode": 0,
+      "passed": 301,
+      "skipped": 1,
+      "failed": 0,
+      "result": "passed focused regressions"
+    },
+    {
+      "id": "E1-appium-owner",
+      "command": "CHAT_GROUP_RUN_MACOS_APPIUM_TEST=1 flutter test --no-pub --concurrency=1 --timeout 30s --reporter expanded test/work_mode/macos_appium_service_owner_test.dart",
+      "exitCode": 0,
+      "passed": 8,
+      "skipped": 0,
+      "failed": 0,
+      "result": "test doubles/ownership checks only; not real Appium GUI acceptance"
+    },
+    {
+      "id": "E1-output-tokens",
+      "command": "flutter test --no-pub --concurrency=1 --timeout 30s --reporter expanded test/work_mode/work_request_output_tokens_test.dart",
+      "exitCode": 0,
+      "passed": 5,
+      "failed": 0
+    },
+    {
+      "id": "E1-protocol",
+      "command": "flutter test --no-pub --concurrency=1 --timeout 30s --reporter failures-only test/chat_api_protocol_test.dart",
+      "exitCode": 0,
+      "passed": 11,
+      "failed": 0
+    },
+    {
+      "id": "E1-gateway",
+      "command": "npm test (gateway)",
+      "exitCode": 0,
+      "passed": 32,
+      "failed": 0
+    },
+    {
+      "id": "E2-build",
+      "command": "flutter build macos --debug --no-pub",
+      "exitCode": 0,
+      "result": "built repository Debug product"
+    },
+    {
+      "id": "E2-current-app-bundle",
+      "command": "CHAT_GROUP_P2_APP_PATH=$PWD/build/macos/Build/Products/Debug/伴伴.app flutter test --no-pub --concurrency=1 --timeout 30s --reporter expanded test/work_mode/macos_app_bundle_archive_test.dart",
+      "exitCode": 0,
+      "passed": 5,
+      "failed": 0,
+      "result": "includes real built app archive and signed fake-secret rejection"
+    },
+    {
+      "id": "E2-signature",
+      "command": "codesign --verify --deep --strict --verbose=2 build/macos/Build/Products/Debug/伴伴.app",
+      "exitCode": 0,
+      "result": "valid"
+    },
+    {
+      "id": "E1-format",
+      "command": "dart format --output=none --set-exit-if-changed on 138 changed Dart files plus new archive test",
+      "exitCode": 1,
+      "changedFiles": [
+        "test/api_config_form_capability_test.dart"
+      ],
+      "result": "unrelated existing user file left unchanged; this run's three modified Dart files and archive test pass formatting"
+    }
+  ],
+  "liveAttempts": [
+    {
+      "taskId": "c8a9a090",
+      "conversationId": "unavailable; synthetic group label DEBUG-QA-ExpenseLedger-1015-v2",
+      "actorId": "qa-maker-1015",
+      "provider": "SenseNova",
+      "noOutputTimeouts": 4,
+      "additionalRetryObserved": true,
+      "usageTokens": 0,
+      "artifact": "none",
+      "taskBodyExported": false,
+      "result": "blocked by no-output model timeout; do not treat as completed group work"
+    },
+    {
+      "taskId": "7664a72f",
+      "conversationId": "unavailable",
+      "result": "pre-existing paused task preserved; body not inspected"
+    }
+  ],
+  "artifacts": {
+    "approvedWorkspace": "/tmp/chat-group-debug-acceptance.0oN8Sr/expense-ledger",
+    "round01ContainsWorkModeDeliverable": false,
+    "workModeGeneratedApp": false,
+    "workModeGeneratedDocxOrPdf": false,
+    "bundleTestTemporaryArchiveRetained": false,
+    "bundleTestTemporaryArchiveCleanup": "automatic test cleanup; no real credentials were included"
+  },
+  "observations": [
+    {
+      "id": "B2",
+      "source": "CUA inline accessibility/screenshot observation",
+      "summary": "DEBUG badge visible; Settings showed one saved API configuration with masked key",
+      "screenshotFile": "unavailable; CUA observation was not saved to a local evidence file",
+      "isolationConclusion": "unconfirmed"
+    },
+    {
+      "id": "B3",
+      "source": "previous acceptance run system capability checks",
+      "summary": "Automation Mode disabled/requires user authentication; DevToolsSecurity disabled; Appium absent",
+      "currentUserAuthorizationRequested": false
+    }
+  ],
+  "sensitiveDataPolicy": {
+    "apiKeyContentsRecorded": false,
+    "personalHiveContentsReadByThisReport": false,
+    "rolesOrChatsDeleted": false,
+    "userDataIsolationProvenForLatestGuiLaunch": false
+  }
+}

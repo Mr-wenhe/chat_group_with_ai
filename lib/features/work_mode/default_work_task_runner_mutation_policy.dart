@@ -4,8 +4,9 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
   List<WorkToolDefinition> _skillDefinitions(
     AgentTask task,
     AICharacter character,
-    WorkToolResult Function(ToolPermission) permission,
-  ) =>
+    WorkToolResult Function(ToolPermission) permission, {
+    required CancelToken cancellationToken,
+  }) =>
       [
         WorkToolDefinition(
           name: AgentToolName.skillCreate,
@@ -41,10 +42,6 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
             fields: {
               'templateId': WorkToolValueType.string,
               'id': WorkToolValueType.string,
-              'skillId': WorkToolValueType.string,
-              'name': WorkToolValueType.string,
-              'url': WorkToolValueType.string,
-              'source': WorkToolValueType.string,
             },
             allowAdditional: false,
           ),
@@ -59,6 +56,70 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
               await _serializeSkillMutation(
                 () => _downloadSkill(character, invocation.arguments),
               ),
+            );
+          },
+        ),
+        WorkToolDefinition(
+          name: AgentToolName.skillGithubImport,
+          access: WorkToolAccess.mutation,
+          schema: const WorkToolSchema(
+            fields: {
+              'owner': WorkToolValueType.string,
+              'repo': WorkToolValueType.string,
+              'path': WorkToolValueType.string,
+              'ref': WorkToolValueType.string,
+            },
+            required: {'owner', 'repo', 'path', 'ref'},
+          ),
+          mutationPipeline: _skillMutationPipeline(
+            task: task,
+            label: '导入公开 GitHub Skill 资源包',
+          ),
+          handler: (invocation) async {
+            final denied = permission(ToolPermission.skillDownload);
+            if (!denied.succeeded) return denied;
+            return _serializeSkillMutation(
+              () => _importGithubSkill(
+                character,
+                invocation.arguments,
+                cancellationToken: cancellationToken,
+              ),
+            );
+          },
+        ),
+        WorkToolDefinition(
+          name: AgentToolName.skillGithubSearch,
+          access: WorkToolAccess.readOnly,
+          schema: const WorkToolSchema(
+            fields: {'query': WorkToolValueType.string},
+            required: {'query'},
+          ),
+          handler: (invocation) async {
+            final denied = permission(ToolPermission.skillDownload);
+            if (!denied.succeeded) return denied;
+            return _searchGithubSkills(
+              invocation.arguments,
+              cancellationToken: cancellationToken,
+            );
+          },
+        ),
+        WorkToolDefinition(
+          name: AgentToolName.skillResourceRead,
+          access: WorkToolAccess.readOnly,
+          schema: const WorkToolSchema(
+            fields: {
+              'packId': WorkToolValueType.string,
+              'path': WorkToolValueType.string,
+            },
+            required: {'packId', 'path'},
+          ),
+          handler: (invocation) async {
+            final denied = permission(ToolPermission.skillDownload);
+            if (!denied.succeeded) return denied;
+            return _readGithubSkillResource(
+              task,
+              character,
+              invocation.arguments,
             );
           },
         ),

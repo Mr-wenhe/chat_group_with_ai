@@ -42,7 +42,8 @@ bool taskRequiresNoUndoApproval(
 ) {
   final pending = ToolRequest.fromJsonString(task.pendingToolRequestJson);
   if (pending?.tool == AgentToolName.skillCreate ||
-      pending?.tool == AgentToolName.skillDownload) {
+      pending?.tool == AgentToolName.skillDownload ||
+      pending?.tool == AgentToolName.skillGithubImport) {
     return true;
   }
   return approvalPlan != null &&

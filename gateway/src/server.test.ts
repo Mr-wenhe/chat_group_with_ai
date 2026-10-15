@@ -81,6 +81,44 @@ test('Gateway enforces a per-principal daily quota after a valid request', async
   }
 });
 
+test('GitHub import route shares authentication, rate limits, quota, and structured input', async () => {
+  var imports = 0;
+  const server = createGatewayServer(
+    {...config, quotaPerDay: 1},
+    {
+      importGitHubSkill: async (payload) => {
+        imports++;
+        assert.deepEqual(payload, {
+          owner: 'octo', repo: 'skills', path: 'skills/demo', ref: '0123456789abcdef0123456789abcdef01234567',
+        });
+        return {
+          owner: 'octo', repo: 'skills', path: 'skills/demo',
+          commit: '0123456789abcdef0123456789abcdef01234567',
+          license: 'MIT', files: [],
+        };
+      },
+    },
+  );
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  const address = server.address();
+  assert.ok(address != null && typeof address !== 'string');
+  try {
+    const input = {
+      owner: 'octo', repo: 'skills', path: 'skills/demo',
+      ref: '0123456789abcdef0123456789abcdef01234567',
+    };
+    assert.equal((await post(address.port, undefined, input, undefined, '/v1/github/skills/import')).statusCode, 401);
+    const imported = await post(address.port, 'Bearer client-token', input, undefined, '/v1/github/skills/import');
+    assert.equal(imported.statusCode, 200);
+    const repeated = await post(address.port, 'Bearer client-token', input, undefined, '/v1/github/skills/import');
+    assert.equal(repeated.statusCode, 402);
+    assert.equal(repeated.body.error.code, 'QUOTA_EXCEEDED');
+    assert.equal(imports, 1);
+  } finally {
+    await new Promise<void>((resolve, reject) => server.close((error) => error == null ? resolve() : reject(error)));
+  }
+});
+
 test('Gateway opens a circuit after three retryable upstream failures', async () => {
   var calls = 0;
   const server = createGatewayServer(
@@ -364,6 +402,7 @@ function post(
   authorization: string | undefined,
   body: unknown,
   origin?: string,
+  path = '/v1/search',
 ): Promise<{
   statusCode: number;
   body: { error: { code: string } };
@@ -374,7 +413,7 @@ function post(
     const client = request({
       hostname: '127.0.0.1',
       port,
-      path: '/v1/search',
+      path,
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

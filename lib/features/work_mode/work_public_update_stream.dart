@@ -33,7 +33,7 @@ class WorkPublicUpdateStream {
   /// 成员的意见（`req=48 / team=22 / ver=10 下我仍判 approved:false`，或
   /// `V-08 的 requiredCapability`）。判据刻意只收完整成词的协议词元，不做
   /// `AC-02` 这类编号的形状猜测——`UTF-8`、`SHA-256` 在正常讨论里就会出现，
-  /// 误报会让诊断本身失去可信度。
+  /// 误报会让清理提示失去可信度。
   static final RegExp _protocolNotation = RegExp(
     r'\b(?:requestRevision|teamRevision|verificationRevision|schemaVersion'
     r'|artifactContract|public_update|approvalIdentifiers|requiredCapability'
@@ -57,13 +57,17 @@ class WorkPublicUpdateStream {
     r'[①-⑳⑴-⒇⒈-⒛]|(?:^|\n)\s*[(（]?\d{1,2}[.、)）]',
   );
 
+  static final RegExp _rolePrefix = RegExp(
+    r'(?:^|\n)\s*(?:产品经理|产品|前端|后端|测试人员|测试|QA|设计师|设计|开发|程序员|协调者)\s*[：:]',
+    caseSensitive: false,
+  );
+
   /// 编号清单至少出现几处才算"被格式化"：一处可能只是正常引用，两处以上就是清单体。
   static const int listMarkerLimit = 2;
 
   /// 公开正文里出现的协议标识，按首次出现顺序去重。
   ///
-  /// 只做识别，不用于改写：正文换成中性文案会丢掉成员真实说过的内容，这里只
-  /// 供调用方记录诊断。
+  /// 只提供有界改写的触发信号，不参与自然度评分，也不单独决定任务是否通过。
   static List<String> protocolNotations(String value) {
     final found = <String>{};
     for (final match in _protocolNotation.allMatches(value)) {
@@ -78,12 +82,19 @@ class WorkPublicUpdateStream {
 
   /// 公开正文是否被排成编号清单。
   ///
-  /// 这是 `_reportFormattedUpdate` 判据里"清单"的那一半：那条诊断还看协议标识，
-  /// 而打回重写只看清单——协议标识仍按 2026-10-09 的裁决只记诊断。两处共用
-  /// [listMarkerLimit]，各自维护一份会让"诊断说命中、重写说没命中"这种分叉
-  /// 只能靠比对日志才发现。
+  /// 只检查清单形状；协议标识和职业前缀由 [looksLikeFormattedUpdate] 合并检查。
   static bool looksLikeNumberedList(String value) =>
       listMarkerCount(value) >= listMarkerLimit;
+
+  /// A bounded rewrite trigger for visible protocol ledgers and role labels.
+  /// This is only a cleanup hint; it does not grade whether a conversation
+  /// sounds natural.
+  static bool looksLikeFormattedUpdate(String value) =>
+      protocolNotations(value).isNotEmpty ||
+      looksLikeNumberedList(value) ||
+      _rolePrefix.hasMatch(value);
+
+  static bool usesFixedRolePrefix(String value) => _rolePrefix.hasMatch(value);
 
   /// 剥掉模型给正文套上的代码围栏。
   ///

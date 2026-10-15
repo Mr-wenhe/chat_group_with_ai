@@ -16,6 +16,8 @@ import {
   writePreflight,
 } from './http_helpers.ts';
 import { searchUpstream } from './upstream_client.ts';
+import { importGitHubSkill } from './github_skill_upstream.ts';
+import type { GitHubSkillPack } from './github_skill_upstream.ts';
 import { GatewayError } from './types.ts';
 import type { GatewayConfig, GatewaySearchRequest } from './types.ts';
 
@@ -206,6 +208,11 @@ type GatewaySearch = (
 
 type GatewayServerDependencies = {
   search?: GatewaySearch;
+  importGitHubSkill?: (
+    request: unknown,
+    config: GatewayConfig,
+    signal?: AbortSignal,
+  ) => Promise<GitHubSkillPack>;
 };
 
 export function createGatewayServer(
@@ -220,11 +227,61 @@ export function createGatewayServer(
   const defaultSearch: GatewaySearch = (request, upstreamConfig, signal) =>
       searchUpstream(request, upstreamConfig, undefined, undefined, signal);
   const search = dependencies.search ?? defaultSearch;
+  const defaultGitHubSkillImport = (
+    payload: unknown,
+    upstreamConfig: GatewayConfig,
+    signal?: AbortSignal,
+  ) => importGitHubSkill(payload, upstreamConfig, undefined, undefined, signal);
+  const importSkill = dependencies.importGitHubSkill ?? defaultGitHubSkillImport;
   const server = createServer(async (request, response) => {
     const requestId = requestIdFrom(request);
     var corsOrigin: string | undefined;
     try {
-      if (request.url?.split('?')[0] !== '/v1/search') {
+      const route = request.url?.split('?')[0];
+      if (route === '/v1/github/skills/import') {
+        corsOrigin = allowedCorsOrigin(request, config);
+        if (request.method === 'OPTIONS') {
+          if (header(request, 'access-control-request-method')?.toUpperCase() !== 'POST') {
+            throw new GatewayError('NOT_FOUND', 404, false);
+          }
+          writePreflight(response, corsOrigin);
+          logOutcome(requestId, 204);
+          return;
+        }
+        if (request.method !== 'POST') throw new GatewayError('NOT_FOUND', 404, false);
+        const principal = requireAuthorized(header(request, 'authorization'), config);
+        const principalKey = rateLimitKey(principal, request);
+        if (!limiter.consume(principalKey)) throw new GatewayError('RATE_LIMITED', 429, true);
+        const payload = await readJson(request, config.requestTimeoutMs);
+        if (!quota.consume(principalKey)) throw new GatewayError('QUOTA_EXCEEDED', 402, false);
+        if (!circuitBreaker.canAttempt('github')) {
+          throw new GatewayError('UPSTREAM_UNAVAILABLE', 503, true);
+        }
+        const upstreamAbort = new AbortController();
+        const abortOnRequest = () => upstreamAbort.abort();
+        const abortOnResponseClose = () => {
+          if (!response.writableEnded) upstreamAbort.abort();
+        };
+        if (request.aborted) upstreamAbort.abort();
+        request.once('aborted', abortOnRequest);
+        response.once('close', abortOnResponseClose);
+        let pack: GitHubSkillPack;
+        try {
+          pack = await importSkill(payload, config, upstreamAbort.signal);
+          circuitBreaker.recordSuccess('github');
+        } catch (error) {
+          const safeError = asGatewayError(error);
+          circuitBreaker.recordFailure('github', safeError.retryable);
+          throw safeError;
+        } finally {
+          request.removeListener('aborted', abortOnRequest);
+          response.removeListener('close', abortOnResponseClose);
+        }
+        writeJson(response, 200, { request_id: requestId, pack }, corsOrigin);
+        logOutcome(requestId, 200);
+        return;
+      }
+      if (route !== '/v1/search') {
         throw new GatewayError('NOT_FOUND', 404, false);
       }
       corsOrigin = allowedCorsOrigin(request, config);

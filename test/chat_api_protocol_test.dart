@@ -8,6 +8,62 @@ import 'package:dio/dio.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
+  test('工作模式可省略可选协议的输出 token 上限', () async {
+    for (final protocol in [
+      ApiProtocol.openAiChatCompletions,
+      ApiProtocol.openAiResponses,
+      ApiProtocol.geminiGenerateContent,
+    ]) {
+      late RequestOptions request;
+      final response = switch (protocol) {
+        ApiProtocol.openAiChatCompletions => {
+            'choices': [
+              {
+                'message': {'content': 'OK'}
+              }
+            ]
+          },
+        ApiProtocol.openAiResponses => {'output_text': 'OK'},
+        ApiProtocol.geminiGenerateContent => {
+            'candidates': [
+              {
+                'content': {
+                  'parts': [
+                    {'text': 'OK'}
+                  ]
+                }
+              }
+            ]
+          },
+        ApiProtocol.anthropicMessages => throw StateError('not optional'),
+      };
+      final result = await ChatApiService(dio: _respondingDio((options) {
+        request = options;
+        return response;
+      })).sendChatMessage(
+        apiKey: 'test-key',
+        provider: ApiProvider.custom,
+        apiProtocol: protocol,
+        customBaseUrl: 'https://gateway.example.test/v1',
+        model: 'test-model',
+        messages: const [],
+        maxTokens: 0,
+        maxRetries: 0,
+      );
+
+      expect(result['success'], isTrue, reason: protocol.name);
+      final body = request.data as Map<String, dynamic>;
+      expect(body.containsKey('max_tokens'), isFalse, reason: protocol.name);
+      expect(body.containsKey('max_output_tokens'), isFalse,
+          reason: protocol.name);
+      final generation = body['generationConfig'];
+      if (generation is Map) {
+        expect(generation.containsKey('maxOutputTokens'), isFalse,
+            reason: protocol.name);
+      }
+    }
+  });
+
   test('SenseNova built-in config resolves the documented endpoint', () async {
     late RequestOptions request;
     final dio = _respondingDio((options) {
@@ -36,6 +92,67 @@ void main() {
         'https://token.sensenova.cn/v1/chat/completions');
     expect((request.data as Map<String, dynamic>)['model'],
         'sensenova-6.8-flash-lite');
+  });
+
+  test('Oray 预设指向 Anthropic 原生端点，默认协议也是它', () {
+    expect(ApiProvider.oray.label, 'Oray');
+    expect(ApiProvider.oray.baseUrl, 'https://ai-api.orayer.com/v1');
+    expect(ApiProvider.oray.defaultProtocol, ApiProtocol.anthropicMessages);
+    // 其余提供商保持 OpenAI 兼容，不能被这一个改变带偏。
+    expect(ApiProvider.deepseek.defaultProtocol,
+        ApiProtocol.openAiChatCompletions);
+    expect(
+        ApiProvider.custom.defaultProtocol, ApiProtocol.openAiChatCompletions);
+  });
+
+  test('Oray 预设按 Anthropic 协议解析到 /messages', () async {
+    late RequestOptions request;
+    final dio = _respondingDio((options) {
+      request = options;
+      return {
+        'content': [
+          {'type': 'text', 'text': 'OK'}
+        ],
+      };
+    });
+
+    final result = await ChatApiService(dio: dio).sendChatMessage(
+      apiKey: 'test-key',
+      provider: ApiProvider.oray,
+      apiProtocol: ApiProvider.oray.defaultProtocol,
+      model: 'deepseek/deepseek-flash',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isTrue);
+    expect(request.uri.toString(), 'https://ai-api.orayer.com/v1/messages');
+  });
+
+  test('内置提供商也认配置里存的服务地址（协议子路径）', () async {
+    late RequestOptions request;
+    final dio = _respondingDio((options) {
+      request = options;
+      return {
+        'content': [
+          {'type': 'text', 'text': 'OK'}
+        ],
+      };
+    });
+
+    final result = await ChatApiService(dio: dio).sendChatMessage(
+      apiKey: 'test-key',
+      provider: ApiProvider.deepseek,
+      apiProtocol: ApiProtocol.anthropicMessages,
+      customBaseUrl: 'https://api.deepseek.com/anthropic',
+      model: 'deepseek-flash',
+      messages: const [],
+      maxRetries: 0,
+    );
+
+    expect(result['success'], isTrue);
+    expect(
+        request.uri.toString(), 'https://api.deepseek.com/anthropic/messages');
   });
 
   test('custom Base URL keeps its user-provided version path', () async {

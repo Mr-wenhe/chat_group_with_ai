@@ -23,6 +23,12 @@ enum WebSearchPolicy {
   const WebSearchPolicy(this.label);
 }
 
+String? _nonEmptyText(Object? value) =>
+    value is String && value.isNotEmpty ? value : null;
+
+int? _usageRunBoundary(Object? value) =>
+    value is int && value > 0 ? value : null;
+
 class ModelPrice {
   final String currency;
   final int inputMicrosPerMillion;
@@ -258,6 +264,8 @@ class UsageLedgerEntry {
   final String model;
   final String characterId;
   final String conversationId;
+  final String? taskId;
+  final int? runBoundary;
   final AiRequestPurpose purpose;
   final AiRequestPurpose originPurpose;
   final int inputTokens;
@@ -267,6 +275,7 @@ class UsageLedgerEntry {
   final String? currency;
   final String? priceVersion;
   final bool exactUsage;
+  final String status;
 
   const UsageLedgerEntry({
     required this.requestId,
@@ -276,6 +285,8 @@ class UsageLedgerEntry {
     required this.model,
     required this.characterId,
     required this.conversationId,
+    this.taskId,
+    this.runBoundary,
     required this.purpose,
     required this.originPurpose,
     required this.inputTokens,
@@ -285,6 +296,7 @@ class UsageLedgerEntry {
     required this.currency,
     required this.priceVersion,
     required this.exactUsage,
+    this.status = 'success',
   });
 
   factory UsageLedgerEntry.fromMap(Map<dynamic, dynamic> map) {
@@ -298,6 +310,8 @@ class UsageLedgerEntry {
       model: map['model']?.toString() ?? '',
       characterId: map['characterId']?.toString() ?? '',
       conversationId: map['conversationId']?.toString() ?? '',
+      taskId: _nonEmptyText(map['taskId']),
+      runBoundary: _usageRunBoundary(map['runBoundary']),
       purpose: AiRequestPurpose.values.firstWhere(
         (value) => value.name == purposeName,
         orElse: () => AiRequestPurpose.reply,
@@ -316,6 +330,7 @@ class UsageLedgerEntry {
       currency: map['currency']?.toString(),
       priceVersion: map['priceVersion']?.toString(),
       exactUsage: map['exactUsage'] == true,
+      status: map['status']?.toString() ?? 'success',
     );
   }
 
@@ -327,6 +342,8 @@ class UsageLedgerEntry {
         'model': model,
         'characterId': characterId,
         'conversationId': conversationId,
+        'taskId': taskId,
+        'runBoundary': runBoundary,
         'purpose': purpose.name,
         'originPurpose': originPurpose.name,
         'inputTokens': inputTokens,
@@ -336,6 +353,7 @@ class UsageLedgerEntry {
         'currency': currency,
         'priceVersion': priceVersion,
         'exactUsage': exactUsage,
+        'status': status,
       };
 }
 
@@ -378,6 +396,8 @@ class AiRequestDiagnostic {
   final AiRequestPurpose purpose;
   final String provider;
   final String model;
+  final String? taskId;
+  final int? runBoundary;
   final int latencyMs;
   final int retryCount;
   final int? inputTokens;
@@ -385,8 +405,15 @@ class AiRequestDiagnostic {
   final int? outputTokens;
   final int? estimatedCostMicros;
   final String? currency;
+  final bool? exactUsage;
   final String status;
   final String? failureType;
+
+  /// 失败归因：异常类型与脱敏后有界的正文摘要（不含 Key，也不含提示词正文）。
+  ///
+  /// [failureType] 只到「provider_error」「http_500」这一层，一次上游丢包、
+  /// 一次响应体不是 JSON、一次证书被拒在它看来完全一样；排查时需要这个字段。
+  final String? failureDetail;
 
   const AiRequestDiagnostic({
     required this.requestId,
@@ -395,6 +422,8 @@ class AiRequestDiagnostic {
     required this.purpose,
     required this.provider,
     required this.model,
+    this.taskId,
+    this.runBoundary,
     required this.latencyMs,
     required this.retryCount,
     required this.inputTokens,
@@ -402,8 +431,10 @@ class AiRequestDiagnostic {
     required this.outputTokens,
     required this.estimatedCostMicros,
     required this.currency,
+    this.exactUsage,
     required this.status,
     required this.failureType,
+    this.failureDetail,
   });
 
   factory AiRequestDiagnostic.fromMap(Map<dynamic, dynamic> map) {
@@ -419,6 +450,8 @@ class AiRequestDiagnostic {
       ),
       provider: map['provider']?.toString() ?? '',
       model: map['model']?.toString() ?? '',
+      taskId: _nonEmptyText(map['taskId']),
+      runBoundary: _usageRunBoundary(map['runBoundary']),
       latencyMs: (map['latencyMs'] as num?)?.toInt() ?? 0,
       retryCount: (map['retryCount'] as num?)?.toInt() ?? 0,
       inputTokens: (map['inputTokens'] as num?)?.toInt(),
@@ -426,8 +459,10 @@ class AiRequestDiagnostic {
       outputTokens: (map['outputTokens'] as num?)?.toInt(),
       estimatedCostMicros: (map['estimatedCostMicros'] as num?)?.toInt(),
       currency: map['currency']?.toString(),
+      exactUsage: map['exactUsage'] is bool ? map['exactUsage'] as bool : null,
       status: map['status']?.toString() ?? 'unknown',
       failureType: map['failureType']?.toString(),
+      failureDetail: _nonEmptyText(map['failureDetail']),
     );
   }
 
@@ -438,6 +473,8 @@ class AiRequestDiagnostic {
         'purpose': purpose.name,
         'provider': provider,
         'model': model,
+        'taskId': taskId,
+        'runBoundary': runBoundary,
         'latencyMs': latencyMs,
         'retryCount': retryCount,
         'inputTokens': inputTokens,
@@ -445,13 +482,17 @@ class AiRequestDiagnostic {
         'outputTokens': outputTokens,
         'estimatedCostMicros': estimatedCostMicros,
         'currency': currency,
+        'exactUsage': exactUsage,
         'status': status,
         'failureType': failureType,
+        'failureDetail': failureDetail,
       };
 
   String toSafeText() => [
         'requestId=$requestId',
         'rootRequestId=$rootRequestId',
+        'taskId=${taskId ?? '-'}',
+        'runBoundary=${runBoundary ?? '-'}',
         'time=${timestamp.toUtc().toIso8601String()}',
         'purpose=${purpose.name}',
         'provider=$provider',
@@ -459,10 +500,12 @@ class AiRequestDiagnostic {
         'latencyMs=$latencyMs',
         'retryCount=$retryCount',
         'tokens=${inputTokens ?? '-'}+${outputTokens ?? '-'}',
+        'exactUsage=${exactUsage ?? '-'}',
         'cachedTokens=${cachedInputTokens ?? '-'}',
         'costMicros=${estimatedCostMicros ?? '-'}',
         'currency=${currency ?? '-'}',
         'status=$status',
         'failureType=${failureType ?? '-'}',
+        'failureDetail=${failureDetail ?? '-'}',
       ].join('\n');
 }

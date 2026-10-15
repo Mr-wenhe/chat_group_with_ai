@@ -103,6 +103,25 @@ void main() {
     expect((await publish('second')).iterationId, 'r002');
   });
 
+  test('new baseline reuses frozen accepted bytes after the workspace changes',
+      () async {
+    final first = await publish('first');
+    await working.writeAsString('changed after manual acceptance');
+
+    final baseline = await publisher.publishFromCandidate(
+      publicationId: 'user-baseline',
+      state: candidateTestState(requestRevision: 2),
+      producerId: 'a',
+      source: first,
+      baseline: '复用已人工验收的冻结候选文件。',
+    );
+
+    expect(first.file('report.txt').readAsStringSync(), 'broken r001');
+    expect(baseline.file('report.txt').readAsStringSync(), 'broken r001');
+    expect(await working.readAsString(), 'changed after manual acceptance');
+    expect(baseline.manifest['requestRevision'], 2);
+  });
+
   for (final phase in ['beforePublish', 'afterPublish', 'beforeIndex']) {
     test(
         'crash $phase retries same reservation and recovers without duplicate iteration',

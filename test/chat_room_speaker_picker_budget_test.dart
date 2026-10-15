@@ -84,6 +84,8 @@ void main() {
       isEmpty,
       reason: '选择器被硬预算阻止后仍启动了未知价格角色请求',
     );
+    await toggleAutoChatOff(tester);
+    await drainRound(tester, rounds: 20);
     await settleRoundTimers(tester);
   });
 }

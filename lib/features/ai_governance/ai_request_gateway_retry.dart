@@ -8,6 +8,8 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
     required AiRequestPurpose purpose,
     required String conversationId,
     required String characterId,
+    required String? taskId,
+    required int? runBoundary,
     required int maxTokens,
     required int maxRetries,
     required bool streaming,
@@ -46,6 +48,8 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
               model: model,
               purpose:
                   attempt.retryNumber == 0 ? purpose : AiRequestPurpose.retry,
+              taskId: taskId,
+              runBoundary: runBoundary,
               reason: prepared.reason!,
               retryCount: attempt.retryNumber,
             );
@@ -77,6 +81,8 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
             conversationId: conversationId,
             purpose:
                 attempt.retryNumber == 0 ? purpose : AiRequestPurpose.retry,
+            taskId: taskId,
+            runBoundary: runBoundary,
             originPurpose: purpose,
             capability: prepared.capability!,
             estimatedInputTokens: prepared.inputTokens,
@@ -92,6 +98,8 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
             failureType: success
                 ? null
                 : AiRequestGateway._failureType(responseText, response),
+            failureDetail:
+                success ? null : response['failureDetail']?.toString(),
           );
           return {
             ...response,
@@ -122,6 +130,8 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
     required String characterId,
     required String conversationId,
     required AiRequestPurpose purpose,
+    required String? taskId,
+    required int? runBoundary,
     required AiRequestPurpose originPurpose,
     required ModelCapability capability,
     required int estimatedInputTokens,
@@ -134,10 +144,13 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
     required int retryCount,
     required String status,
     required String? failureType,
+    required String? failureDetail,
   }) async {
     final effectiveInput = inputTokens ?? estimatedInputTokens;
     final effectiveCached = cachedTokens ?? 0;
     final effectiveOutput = outputTokens ?? estimatedOutputTokens;
+    final hasCompleteReportedUsage =
+        inputTokens != null && outputTokens != null;
     int? cost;
     final price = capability.price;
     if (price != null) {
@@ -147,7 +160,7 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
         outputTokens: effectiveOutput,
       );
     }
-    if (status == 'success') {
+    if (status == 'success' || (inputTokens != null && outputTokens != null)) {
       await store.addLedgerEntry(UsageLedgerEntry(
         requestId: requestId,
         rootRequestId: rootRequestId,
@@ -156,6 +169,8 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
         model: model,
         characterId: characterId,
         conversationId: conversationId,
+        taskId: taskId,
+        runBoundary: runBoundary,
         purpose: purpose,
         originPurpose: originPurpose,
         inputTokens: effectiveInput,
@@ -164,7 +179,8 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
         estimatedCostMicros: cost,
         currency: price?.currency,
         priceVersion: price?.version,
-        exactUsage: exactUsage,
+        exactUsage: status == 'success' ? exactUsage : true,
+        status: status,
       ));
     }
     await store.addDiagnostic(AiRequestDiagnostic(
@@ -174,15 +190,22 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
       purpose: purpose,
       provider: provider.name,
       model: model,
+      taskId: taskId,
+      runBoundary: runBoundary,
       latencyMs: latencyMs,
       retryCount: retryCount,
       inputTokens: status == 'success' ? effectiveInput : inputTokens,
       cachedInputTokens: status == 'success' ? effectiveCached : cachedTokens,
       outputTokens: status == 'success' ? effectiveOutput : outputTokens,
-      estimatedCostMicros: status == 'success' ? cost : null,
-      currency: status == 'success' ? price?.currency : null,
+      estimatedCostMicros:
+          status == 'success' || hasCompleteReportedUsage ? cost : null,
+      currency: status == 'success' || hasCompleteReportedUsage
+          ? price?.currency
+          : null,
+      exactUsage: status == 'success' ? exactUsage : hasCompleteReportedUsage,
       status: status,
       failureType: failureType,
+      failureDetail: failureDetail,
     ));
   }
 
@@ -192,6 +215,8 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
     required ApiProvider provider,
     required String model,
     required AiRequestPurpose purpose,
+    required String? taskId,
+    required int? runBoundary,
     required String reason,
     int retryCount = 0,
   }) {
@@ -202,6 +227,8 @@ extension _AiRequestGatewayRetrySupport on AiRequestGateway {
       purpose: purpose,
       provider: provider.name,
       model: model,
+      taskId: taskId,
+      runBoundary: runBoundary,
       latencyMs: 0,
       retryCount: retryCount,
       inputTokens: null,

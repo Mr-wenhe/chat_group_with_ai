@@ -19,7 +19,7 @@
 #   ./scripts/publish_local.sh 1.3.8        # 或带 v 前缀：./scripts/publish_local.sh v1.3.8
 #
 # 产物命名（与 CI 的 Windows 产物风格一致）：
-#   release_artifacts/chat_group-macos-vX.Y.Z.zip
+#   release_artifacts/chat_group-macos-vX.Y.Z.dmg
 #   release_artifacts/chat_group-ios-app-vX.Y.Z.zip
 #   release_artifacts/chat_group-android-apk-vX.Y.Z.apk
 #   release_artifacts/chat_group-android-aab-vX.Y.Z.aab
@@ -90,6 +90,7 @@ ok "已临时写入版本号 $VERSION+$BUILD_NUM 到 pubspec.yaml"
 cleanup() {
   cp "$BAK" "$PUBSPEC" 2>/dev/null || true
   rm -f "$BAK" 2>/dev/null || true
+  rm -rf "${DMG_STAGE:-}" 2>/dev/null || true
   ok "已还原 pubspec.yaml"
 }
 trap cleanup EXIT
@@ -101,12 +102,20 @@ build_one() {
   flutter build "$@" 2>&1 | tail -4
 }
 
-# ===== macOS =====
+# ===== macOS（DMG：含 Applications 软链，支持拖拽安装；未签名分发见 README）=====
 build_one "macOS" macos --release
 MAC_APP="$(find build/macos/Build/Products/Release -maxdepth 1 -name '*.app' | head -n1)"
 [ -n "$MAC_APP" ] || { err "未找到 macOS .app"; exit 1; }
-ditto -c -k --sequesterRsrc --keepParent "$MAC_APP" "$ART_DIR/chat_group-macos-v$VERSION.zip"
-ok "macOS 已打包 → $ART_DIR/chat_group-macos-v$VERSION.zip"
+DMG_STAGE="$(mktemp -d "${TMPDIR:-/tmp}/chat_group_dmg.XXXXXX")"
+cp -R "$MAC_APP" "$DMG_STAGE/"
+ln -s /Applications "$DMG_STAGE/Applications"
+# -ov：DMG 文件名只由版本号决定，同一版本重跑（例如上次在后半段构建或上传时失败）
+# 必须能覆盖旧产物；不加这个选项 hdiutil 会以「文件已经存在」直接失败。
+hdiutil create -format UDZO -imagekey zlib-level=9 -ov \
+  -volname "chat_group $VERSION" \
+  -srcfolder "$DMG_STAGE" \
+  "$ART_DIR/chat_group-macos-v$VERSION.dmg" >/dev/null
+ok "macOS 已打包 → $ART_DIR/chat_group-macos-v$VERSION.dmg"
 
 # ===== iOS（未签名，产出 .app；依赖本机已有的签名/team 配置）=====
 build_one "iOS" ios --release --no-codesign
@@ -134,7 +143,7 @@ else
 fi
 
 gh release upload "$TAG" \
-  "$ART_DIR/chat_group-macos-v$VERSION.zip" \
+  "$ART_DIR/chat_group-macos-v$VERSION.dmg" \
   "$ART_DIR/chat_group-ios-app-v$VERSION.zip" \
   "$ART_DIR/chat_group-android-apk-v$VERSION.apk" \
   "$ART_DIR/chat_group-android-aab-v$VERSION.aab" \

@@ -16,6 +16,29 @@ void _validateBackupData(StagedBackupData data, BackupManifest manifest) {
     'permanentMemories': StagedBackupData._ids(data.permanentMemories),
     'relationshipEvents': StagedBackupData._ids(data.relationshipEvents),
   };
+  final skillPackIds = <String>{};
+  for (final record in data.skillResourcePacks) {
+    final pack = SkillResourcePack.fromBackupValue(
+      BackupEntityCodec.value(record),
+    );
+    if (BackupEntityCodec.key(record) != pack.id ||
+        !skillPackIds.add(pack.id)) {
+      throw const BackupException('技能资源包记录 ID 无效或重复');
+    }
+  }
+  final missingSkillPacks = manifest.missingAttachments.toSet();
+  for (final record in data.skills) {
+    final value = BackupEntityCodec.value(record);
+    if (!value.containsKey('resourcePackId')) continue;
+    final packId = value['resourcePackId'];
+    if (packId is! String || !RegExp(r'^[0-9a-f]{64}$').hasMatch(packId)) {
+      throw const BackupException('技能资源包引用格式无效');
+    }
+    if (!skillPackIds.contains(packId) &&
+        !missingSkillPacks.contains('skill-resource-pack:$packId')) {
+      throw BackupException('技能资源包缺失但未在备份中标明：$packId');
+    }
+  }
   _expectBackupCounts(data, manifest);
   final apiIds = ids['apiConfigs']!;
   final characterIds = ids['characters']!;
@@ -228,6 +251,7 @@ void _expectBackupCounts(StagedBackupData data, BackupManifest manifest) {
     'characterMemories': data.characterMemories.length,
     'relationships': data.relationships.length,
     'skills': data.skills.length,
+    'skillResourcePacks': data.skillResourcePacks.length,
     'agentTasks': data.tasks.length,
     'workMode': data.workspaces.length,
     'settings': data.settings.length,

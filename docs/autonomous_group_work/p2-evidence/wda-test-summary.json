@@ -1,0 +1,43 @@
+{
+  "devicesAndConfigurations": [
+    {
+      "device": {
+        "architecture": "arm64",
+        "deviceName": "My Mac",
+        "modelName": "Mac mini",
+        "osBuildNumber": "24G84",
+        "osVersion": "15.6",
+        "platform": "macOS"
+      },
+      "expectedFailures": 0,
+      "failedTests": 1,
+      "passedTests": 0,
+      "skippedTests": 0,
+      "testPlanConfiguration": {
+        "configurationId": "1",
+        "configurationName": "Test Scheme Action"
+      }
+    }
+  ],
+  "environmentDescription": "WebDriverAgentRunner · Built with macOS 15.6",
+  "expectedFailures": 0,
+  "failedTests": 1,
+  "finishTime": 1791882706.492,
+  "passedTests": 0,
+  "result": "Failed",
+  "skippedTests": 0,
+  "startTime": 1791882705.842,
+  "statistics": [],
+  "testFailures": [
+    {
+      "failureText": "The test runner failed to initialize for UI testing. (Underlying Error: Timed out while enabling automation mode.)",
+      "targetName": "WebDriverAgentRunner",
+      "testIdentifier": 1,
+      "testIdentifierString": "WebDriverAgentRunner-Runner (69093) encountered an error",
+      "testName": "WebDriverAgentRunner-Runner (69093) encountered an error"
+    }
+  ],
+  "title": "Test - WebDriverAgentRunner",
+  "topInsights": [],
+  "totalTestCount": 1
+}

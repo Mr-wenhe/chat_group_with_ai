@@ -14,7 +14,11 @@ enum AgentToolName {
   commandRun('command.run'),
   browserContext('browser.context'),
   skillCreate('skill.create'),
-  skillDownload('skill.download');
+  skillDownload('skill.download'),
+  nativeApp('native.app'),
+  skillGithubSearch('skill.github.search'),
+  skillGithubImport('skill.github.import'),
+  skillResourceRead('skill.resource.read');
 
   final String wireName;
   const AgentToolName(this.wireName);

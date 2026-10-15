@@ -30,6 +30,28 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
     }
   }
 
+  Future<void> _loadOwnUsageEvidence(String actorId) async {
+    final current = state.currentUsageFor(actorId);
+    if (current == null) return;
+    final store = runner.eventStore;
+    final message = runner.database.messageBox.get(current['feedbackRef']);
+    if (store == null ||
+        message?.senderId != actorId ||
+        message?.groupId != task.groupId ||
+        !await WorkUsageReceiptStore(store).valid(state, actorId)) {
+      throw StateError('本人当前使用收据或反馈失效，需要重新试用。');
+    }
+    evidence['own-usage:$actorId'] = {
+      'memberId': actorId,
+      'tool': 'runtime.usage',
+      'result': {
+        'receipt': jsonDecode(await store.readDiscussionDetail(
+            task.id, (current['receiptRef'] as String).substring(6))),
+        'feedback': message!.content,
+      }
+    };
+  }
+
   Future<void> _approve(AICharacter member, Map<String, dynamic> approval,
       String responseRef) async {
     if (approval['requestRevision'] != state.requestRevision ||
@@ -66,11 +88,26 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
             approval['artifactDigest'] !=
                 state.currentIteration?['artifactDigest'] ||
             state.phase != 'reviewing' ||
+            state.isAutonomous && state.currentUsageFor(member.id) == null ||
             state.hasOpenIssue ||
             state.acceptances.any((a) =>
                 !{'passed', 'manual', 'waived'}.contains(a['status']) ||
                 a['verificationRevision'] != state.verificationRevision))) {
       throw StateError('当前候选或验证尚未就绪，不能签字');
+    }
+    if (kind == 'delivery' && state.isAutonomous) {
+      final store = runner.eventStore;
+      final usage = state.currentUsageFor(member.id);
+      final feedback = usage == null
+          ? null
+          : runner.database.messageBox.get(usage['feedbackRef']);
+      if (store == null ||
+          feedback?.senderId != member.id ||
+          feedback?.groupId != task.groupId ||
+          feedback?.senderType != Message.senderTypeAi ||
+          !await WorkUsageReceiptStore(store).valid(state, member.id)) {
+        throw StateError('本人使用收据或模型反馈无法核验，不能签字。');
+      }
     }
     final current = state;
     final previous = current.approvals
@@ -120,7 +157,8 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
     if (kind == 'idea' && approval['approved'] == true) {
       await _adoptIdea(subject);
     }
-    if (approval['approved'] == false) {
+    if (approval['approved'] == false &&
+        !(state.isAutonomous && {'plan', 'delivery'}.contains(kind))) {
       final idea = state.issues
           .where((i) => i['id'] == subject && i['kind'] == 'idea')
           .firstOrNull;
@@ -152,6 +190,56 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
                     }
                 ]);
     }
+  }
+
+  Future<void> _coordinateRuling(AICharacter member,
+      Map<String, dynamic> decision, String responseRef) async {
+    if (!state.isAutonomous ||
+        member.id != state.coordinatorId ||
+        runner.database.messageBox.get(responseRef)?.senderId != member.id) {
+      throw StateError('只有真实协调者回应可形成协调决议');
+    }
+    final current = state;
+    final kind = current.phase == 'reviewing' ? 'delivery' : 'plan';
+    final candidate = current.currentIteration;
+    final subject = kind == 'delivery' ? (candidate?['id']) : task.id;
+    if (subject == null ||
+        decision['targetId'] != subject ||
+        (decision['options'] as List).isNotEmpty) {
+      throw StateError('协调决议必须针对当前方案或候选，不能替用户回答选项');
+    }
+    final opinions = current.currentApprovals
+        .where((a) => a['kind'] == kind && a['subjectId'] == subject);
+    final event = _key('ruling', '${task.id}:${current.revision}:$responseRef');
+    await _commit(
+        'coordinatorRuling',
+        member.id,
+        {
+          'coordinatorDecisions': [
+            ...current.coordinatorDecisions,
+            {
+              'eventId': event,
+              'coordinatorId': member.id,
+              'kind': kind,
+              'subjectId': subject,
+              'requestRevision': current.requestRevision,
+              'teamRevision': current.teamRevision,
+              'verificationRevision': current.verificationRevision,
+              'iterationId': kind == 'delivery' ? candidate!['id'] : '',
+              'artifactDigest':
+                  kind == 'delivery' ? candidate!['artifactDigest'] : '',
+              'opinionEventIds': [
+                for (final id in current.participantIds)
+                  if (opinions.where((a) => a['memberId'] == id).lastOrNull !=
+                      null)
+                    opinions.where((a) => a['memberId'] == id).last['eventId']
+              ],
+              'reason': decision['reason'],
+              'responseRef': responseRef,
+            }
+          ]
+        },
+        eventId: event);
   }
 
   Future<void> _adoptIdea(String subject, {bool userRuling = false}) async {

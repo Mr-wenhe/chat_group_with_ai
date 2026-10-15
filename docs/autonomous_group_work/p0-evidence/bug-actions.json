@@ -1,0 +1,122 @@
+[
+  {
+    "method": "GET",
+    "path": "/source",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-window"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/element/EAC21D10-0689-4CFD-A37B-02D652859165/screenshot",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-note"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/element/5A3E5521-A035-4050-987F-C2148BA0EC22/click",
+    "body": {}
+  },
+  {
+    "method": "POST",
+    "path": "/element/5A3E5521-A035-4050-987F-C2148BA0EC22/clear",
+    "body": {}
+  },
+  {
+    "method": "POST",
+    "path": "/element/5A3E5521-A035-4050-987F-C2148BA0EC22/value",
+    "body": {
+      "text": "P0-bug-重启核对"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-save"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/element/6599FDA1-E123-4FC4-BCD1-0DE362CB319E/click",
+    "body": {}
+  },
+  {
+    "method": "GET",
+    "path": "/source",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-window"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/element/EF2798FF-E451-4B8A-9F42-11AC2E3CA736/screenshot",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/execute/sync",
+    "body": {
+      "script": "macos: terminateApp",
+      "args": [
+        {
+          "bundleId": "com.chatgroup.p0.sample"
+        }
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/execute/sync",
+    "body": {
+      "script": "macos: launchApp",
+      "args": [
+        {
+          "bundleId": "com.chatgroup.p0.sample",
+          "path": "/Volumes/new_disk/work/flutter/chat_group/chat_group/build/p0_macos/bug/P0Sample.app",
+          "environment": {
+            "P0_DATA_DIR": "/Volumes/new_disk/work/flutter/chat_group/chat_group/build/p0_macos/data"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/source",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-window"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/element/6361EBA6-7AA7-42FA-A5CE-CFC59D4DBEB0/screenshot",
+    "body": null
+  }
+]

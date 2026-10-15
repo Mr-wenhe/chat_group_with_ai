@@ -81,6 +81,120 @@ Future<WorkCandidate> _seedP6BackupCandidate() async {
 }
 
 void _registerP6BackupTests() {
+  test('P1 自主策略、成员场景、收据引用和定案随备份重映射但不带本地授权', () async {
+    await _seedP6BackupCandidate();
+    final raw = candidateTestState().toJson()
+      ..['taskId'] = 'p6-task'
+      ..['conversationId'] = 'group-1'
+      ..['coordinatorId'] = 'char-1'
+      ..['autonomyPolicy'] = WorkCollaborationAutonomy.policyFor(['char-1'])
+      ..['usageAssignments'] = [
+        {
+          'memberId': 'char-1',
+          'scenarioId': 'document-scene',
+          'goal': '检查真实正文',
+          'preconditions': '当前报告',
+          'stepGoals': ['核对术语'],
+          'expectedResult': '术语准确',
+          'acceptanceIds': ['qa'],
+          'requiredCapabilities': ['document'],
+          'resetMethod': '重新打开文件',
+          'requestRevision': 1,
+        }
+      ]
+      ..['usageEvidenceRefs'] = []
+      ..['coordinatorDecisions'] = []
+      ..['approvals'] = [candidateTestApproval('char-1', 'plan', 'p6-task')]
+      ..['team'] = [
+        {
+          'memberId': 'char-1',
+          'role': 'writer',
+          'qualificationRef': 'skill',
+          'qualified': true,
+          'available': true,
+        }
+      ];
+    final plan = WorkCollaborationState.tryParse(raw)!;
+    raw['usageEvidenceRefs'] = [
+      {
+        'taskId': 'p6-task',
+        'conversationId': 'group-1',
+        'memberId': 'char-1',
+        'scenarioId': 'document-scene',
+        'requestRevision': 1,
+        'teamRevision': 1,
+        'iterationId': 'r001',
+        'artifactDigest': 'digest',
+        'planDigest': plan.usagePlanDigest,
+        'verificationRevision': 1,
+        'receiptRef': 'usage:${'a' * 24}',
+        'feedbackRef': 'p6-delivery',
+        'status': 'passed',
+      }
+    ];
+    raw['coordinatorDecisions'] = [
+      {
+        'eventId': 'ruling',
+        'coordinatorId': 'char-1',
+        'kind': 'plan',
+        'subjectId': 'p6-task',
+        'requestRevision': 1,
+        'teamRevision': 1,
+        'verificationRevision': 1,
+        'iterationId': '',
+        'artifactDigest': '',
+        'opinionEventIds': ['plan-char-1-1'],
+        'reason': '确认当前方案',
+        'responseRef': 'p6-delivery',
+      }
+    ];
+    final task = AgentTask(
+        id: 'p6-task',
+        groupId: 'group-1',
+        characterId: 'char-1',
+        userRequest: '报告',
+        workModeTask: true);
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        '',
+        WorkDiscussionState(
+            schemaVersion: 2,
+            conversationId: 'group-1',
+            phase: WorkDiscussionPhase.ready,
+            requestRevision: 1,
+            collaboration: WorkCollaborationState.tryParse(raw)!));
+    await db.agentTaskBox.put(task.id, task);
+    final service = BackupRestoreService(
+        db: db, mediaDirectory: mediaDirectory, tempRoot: testRoot);
+    final backup = File('${testRoot.path}/autonomy.cgbak');
+    await service.createBackup(
+        destination: backup, selection: const BackupSelection.all());
+    final prepared = await service.inspect(backup);
+    addTearDown(prepared.dispose);
+    await service.restore(prepared,
+        strategy: RestoreConflictStrategy.copyWithNewIds);
+    final restoredTask = db.agentTaskBox.values
+        .where((t) => t.id != 'p6-task' && t.workModeTask)
+        .single;
+    final state =
+        WorkDiscussionState.fromExecutionState(restoredTask.executionStateJson)!
+            .collaboration!;
+    final restoredMember = state.participantIds.single;
+    expect(restoredMember, isNot('char-1'));
+    expect(state.usageAssignments.single['memberId'], restoredMember);
+    final receipt = state.usageEvidenceRefs.single;
+    expect(receipt['memberId'], restoredMember);
+    expect(receipt['taskId'], restoredTask.id);
+    expect(receipt['conversationId'], restoredTask.groupId);
+    expect(receipt['feedbackRef'], isNot('p6-delivery'));
+    expect(state.coordinatorDecisions.single['coordinatorId'], restoredMember);
+    expect(state.coordinatorDecisions.single['subjectId'], restoredTask.id);
+    expect(state.coordinatorDecisions.single['responseRef'],
+        receipt['feedbackRef']);
+    expect(state.planReady, isFalse);
+    expect(state.deliveryReady, isFalse);
+    expect(state.projectScopeId, 'portable-unbound');
+  });
+
   for (final selection in [
     const BackupSelection.all(),
     const BackupSelection.conversation('group-1')

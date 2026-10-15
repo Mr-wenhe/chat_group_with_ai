@@ -105,6 +105,9 @@ class ImageGenerationService {
       options: Options(
         responseType: ResponseType.stream,
         headers: {'Authorization': 'Bearer $_apiKey'},
+        // 与图片下载同一条红线：跟随重定向会把 Authorization 原样发到 Location
+        // 指向的来源，等于把 Key 交给用户没有配置过的一方。
+        followRedirects: false,
       ),
     );
     _ensureOk(response);
@@ -311,7 +314,9 @@ Uri generationsEndpoint(String baseUrl) {
   final hasPath = uri != null && uri.path.isNotEmpty && uri.path != '/';
   // 只有域名时按 OpenAI 形态补 /v1；已有路径则尊重用户给的前缀，不再插入版本段。
   return Uri.parse(
-    hasPath ? '$normalized$_kGenerationsPath' : '$normalized/v1$_kGenerationsPath',
+    hasPath
+        ? '$normalized$_kGenerationsPath'
+        : '$normalized/v1$_kGenerationsPath',
   );
 }
 
@@ -350,8 +355,7 @@ bool _isRetryable(Object error) {
     DioExceptionType.receiveTimeout ||
     DioExceptionType.connectionError =>
       true,
-    DioExceptionType.badResponse =>
-      (error.response?.statusCode ?? 0) >= 500,
+    DioExceptionType.badResponse => (error.response?.statusCode ?? 0) >= 500,
     _ => false,
   };
 }

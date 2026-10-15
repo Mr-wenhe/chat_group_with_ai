@@ -84,6 +84,174 @@ void _registerP8RunnerTests(Directory Function() hive,
     return instance;
   }
 
+  test('P1 逐成员串行试用切换 actor，不改用户钉定 executor 或借前人上下文', () async {
+    final runner = await recoveryRunner(_HangingModelGateway());
+    final raw = candidateTestState().toJson()
+      ..['autonomyPolicy'] = WorkCollaborationAutonomy.policyFor(['a', 'b'])
+      ..['usageAssignments'] = [
+        for (final member in ['a', 'b'])
+          {
+            'memberId': member,
+            'scenarioId': 'scene-$member',
+            'goal': '使用场景 $member',
+            'preconditions': '独立测试数据',
+            'stepGoals': ['完成场景 $member'],
+            'expectedResult': '场景 $member 预期结果',
+            'acceptanceIds': ['qa'],
+            'requiredCapabilities': ['native'],
+            'resetMethod': '清理独立数据',
+            'requestRevision': 1,
+          }
+      ]
+      ..['usageEvidenceRefs'] = []
+      ..['coordinatorDecisions'] = [
+        {
+          'eventId': 'plan-ruling',
+          'coordinatorId': 'a',
+          'kind': 'plan',
+          'subjectId': 'task-a',
+          'requestRevision': 1,
+          'teamRevision': 1,
+          'verificationRevision': 1,
+          'iterationId': '',
+          'artifactDigest': '',
+          'opinionEventIds': ['plan-a-1', 'plan-b-1'],
+          'reason': '已听取各成员意见',
+          'responseRef': 'ruling-message',
+        }
+      ]
+      ..['phase'] = 'reviewing'
+      ..['workItems'] = [
+        {
+          'id': 'make',
+          'ownerId': 'a',
+          'kind': 'produce',
+          'dependencies': [],
+          'status': 'done',
+          'requestRevision': 1
+        }
+      ]
+      ..['iterations'] = [
+        {
+          'id': 'r001',
+          'artifactDigest': 'digest-a',
+          'requestRevision': 1,
+          'teamRevision': 1,
+          'manifestRef': 'manifest',
+          'reviewRef': 'review',
+          'status': 'reviewed'
+        }
+      ]
+      ..['acceptances'] = [
+        for (final a in candidateTestState().acceptances)
+          {...a, 'status': 'passed', 'evidenceRef': 'report'}
+      ];
+    final state = WorkCollaborationState.tryParse(raw)!;
+    final task = candidateTestTask(state);
+    final nativeEvidence =
+        await events().writeNativeEvidence(task.id, 'png', [1, 2, 3]);
+    final shell =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!
+            .copyWith(
+      executorId: 'a',
+      deliverableContract: WorkRoleRouter.deliverableContractForRequest(
+              task.userRequest,
+              explicitExecutorId: 'a')
+          .toJson(),
+    );
+    task.executionStateJson = jsonEncode({'discussionState': shell.toJson()});
+    await runner.database.agentTaskBox.put(task.id, task);
+    expect(await runner.prepareCollaborationWork(task), isTrue);
+    expect(task.characterId, 'a');
+    final receiptState = state.toJson()
+      ..['revision'] = 2
+      ..['appliedEventIds'] = ['used-a'];
+    final receiptRef = await WorkUsageReceiptStore(events()).record(
+        state: state,
+        actorId: 'a',
+        feedbackRef: 'feedback-a',
+        observations: [
+          WorkUsageObservation(
+            taskId: task.id,
+            conversationId: task.groupId,
+            actorId: 'a',
+            scenarioId: 'scene-a',
+            iterationId: 'r001',
+            artifactDigest: 'digest-a',
+            planDigest: state.usagePlanDigest,
+            verificationRevision: 1,
+            runtime: 'macos-native',
+            sessionRef: 'session-a',
+            operation: 'click',
+            beforeRef: 'before-a',
+            afterRef: 'after-a',
+            outputRefs: [nativeEvidence],
+            verifiedAcceptanceIds: ['qa'],
+            businessResultVerified: true,
+          )
+        ]);
+    receiptState['usageEvidenceRefs'] = [
+      {
+        'taskId': task.id,
+        'conversationId': task.groupId,
+        'memberId': 'a',
+        'scenarioId': 'scene-a',
+        'requestRevision': 1,
+        'teamRevision': 1,
+        'iterationId': 'r001',
+        'artifactDigest': 'digest-a',
+        'planDigest': state.usagePlanDigest,
+        'verificationRevision': 1,
+        'receiptRef': receiptRef,
+        'feedbackRef': 'feedback-a',
+        'status': 'passed',
+      }
+    ];
+    final next = state.apply(WorkCollaborationUpdate(
+        taskId: task.id,
+        conversationId: task.groupId,
+        expectedRevision: 1,
+        eventId: 'used-a',
+        sourceRole: 'usage',
+        sourceId: 'a',
+        next: WorkCollaborationState.tryParse(receiptState)!));
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson, shell.copyWith(collaboration: next),
+        expectedCollaborationRevision: 1);
+    final rootState =
+        jsonDecode(task.executionStateJson) as Map<String, dynamic>;
+    task.executionStateJson = jsonEncode({
+      ...rootState,
+      'lastToolResult': {'message': 'a 的观察'}
+    });
+    expect(await runner.prepareCollaborationWork(task), isTrue);
+    expect(task.characterId, 'b');
+    final after =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    expect(after.executorId, 'a');
+    final reassigned = after.collaboration!.toJson()
+      ..['workItems'] = [
+        for (final item in after.collaboration!.workItems)
+          {...item, if (item['kind'] == 'produce') 'ownerId': 'b'}
+      ];
+    expect(
+        after
+            .copyWith(
+                collaboration: WorkCollaborationState.tryParse(reassigned)!)
+            .isProductionExecutorConsistent,
+        isFalse);
+    final binding = (jsonDecode(task.executionStateJson)
+        as Map)['workItemExecution'] as Map;
+    expect(binding['stage'], 'usage');
+    expect(binding['actorId'], 'b');
+    expect(binding['workItemId'], 'scene-b');
+    expect(
+        (jsonDecode(task.executionStateJson) as Map)
+            .containsKey('lastToolResult'),
+        isFalse);
+    expect(after.collaboration!.deliveryReady, isFalse);
+  });
+
   test(
       'P8 recovery proves overwrite postcondition or retains uncertain operation',
       () async {
@@ -194,9 +362,7 @@ void _registerP8RunnerTests(Directory Function() hive,
     await Future<void>.delayed(const Duration(milliseconds: 20));
     expect(task.lastError, contains('恢复现场核对失败'));
     expect(
-        (await events().read(task.id))
-            .events
-            .any((e) => e.title == '恢复现场核对失败'),
+        (await events().read(task.id)).events.any((e) => e.title == '恢复现场核对失败'),
         isTrue,
         reason: '恢复通道失败必须能在事件日志里看到，否则永远查不出它跑没跑过');
   });
@@ -224,9 +390,7 @@ void _registerP8RunnerTests(Directory Function() hive,
     });
   }
 
-  test(
-      'P8 startup does not apply legacy automatic attempt deadline to healthy v2',
-      () async {
+  test('P1 旧 v2 启动保留现场并等待显式策略升级，不自动重跑', () async {
     final gateway = _HangingModelGateway();
     final runner = await recoveryRunner(gateway);
     final raw = candidateTestState().toJson()
@@ -250,14 +414,15 @@ void _registerP8RunnerTests(Directory Function() hive,
       await Future<void>.delayed(const Duration(milliseconds: 5));
     }
     await Future<void>.delayed(const Duration(milliseconds: 40));
-    expect(gateway.requestTokens, hasLength(1),
-        reason: '${task.lastError} ${task.executionStateJson}');
-    expect(gateway.requestTokens.single.isCancelled, isFalse);
-    expect(owner.runningTaskCount, 1);
+    expect(gateway.requestTokens, isEmpty);
+    expect(task.status, AgentTaskStatus.paused);
+    expect(task.resumeRequired, isTrue);
+    expect(task.lastError, contains('自主策略'));
+    expect(owner.runningTaskCount, 0);
     expect((jsonDecode(task.executionStateJson) as Map)['autoResumeCount'],
         isNull);
     await owner.dispose();
-    expect(gateway.requestTokens.single.isCancelled, isTrue);
+    expect(gateway.requestTokens, isEmpty);
   });
 
   test(

@@ -45,7 +45,8 @@ void main() {
           kind: WorkTaskEventKind.queued,
           title: '换了一句文案',
           safeMetadata: const <String, dynamic>{
-            WorkTaskRunBoundary.metadataKey: WorkTaskRunBoundary.followUpPromotion,
+            WorkTaskRunBoundary.metadataKey:
+                WorkTaskRunBoundary.followUpPromotion,
           },
         ),
         _event(3),

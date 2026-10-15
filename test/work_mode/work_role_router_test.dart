@@ -214,8 +214,7 @@ void main() {
     expect(result.candidateCharacterIds.first, 'p2');
     expect(result.publicReason, contains('产品乙'));
     expect(result.publicReason, isNot(contains('缺少可展示依据')));
-    expect(result.publicReason, isNot(contains('（）')),
-        reason: '缺理由时不能写出空括号');
+    expect(result.publicReason, isNot(contains('（）')), reason: '缺理由时不能写出空括号');
   });
 
   test('valid explicit @ wins before handoff and model routing', () async {
@@ -437,6 +436,10 @@ void main() {
       expect(result.needsExecutorSelection, isFalse);
       expect(result.publicReason, contains('按职业资格指定'));
       expect(result.publicReason, contains('你无需操作'));
+      // 文案不得把"当前群成员"说成"群内"：@ 面板曾经还列着已被移出群的历史
+      // 发言人（他们可能具备同样的职业职责），"群内只有这一位"会被读成假话。
+      expect(result.publicReason, contains('当前群成员'));
+      expect(result.publicReason, isNot(contains('群内只有这一位')));
       // 自动指定不是用户声明：合同里不写 explicitExecutorId，讨论仍有权改派。
       expect(result.deliverableContract?.explicitExecutorId, isNull);
     }
@@ -644,8 +647,7 @@ void main() {
 
     expect(result.candidateCharacterIds, [engine.id]);
     expect(
-        WorkRoleRouter.qualifiesForResponsibility(
-            engine, 'frontend', const []),
+        WorkRoleRouter.qualifiesForResponsibility(engine, 'frontend', const []),
         isTrue,
         reason: '换人候选列表走的就是这条判据，否则周鹏飞根本进不了候选');
 
@@ -1149,7 +1151,12 @@ void main() {
 
     for (final (label, text, value, expected) in [
       ('整条绝对路径是独立词元', '保存到 /Users/x/out.html 里', '/Users/x/out.html', true),
-      ('路径片段里的词不是独立词元', '/Users/fengye/Desktop/chat_group_out', 'desktop', false),
+      (
+        '路径片段里的词不是独立词元',
+        '/Users/fengye/Desktop/chat_group_out',
+        'desktop',
+        false
+      ),
       ('空值恒为假', '任意文本', '', false),
     ]) {
       test(label, () => expect(statesToken(text, value), expected));

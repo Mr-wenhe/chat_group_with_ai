@@ -55,7 +55,6 @@ class _BackupEntityRecordCodec {
       'apiConfigId': item.apiConfigId,
       'agenticEnabled': item.agenticEnabled,
       'skillIds': item.skillIds,
-      'toolPermissions': item.toolPermissions.map((item) => item.name).toList(),
       // voiceId 是本类曾漏写的字段：解码端一直读得到，编码端一直没写，
       // 备份来回一趟就丢音色。补上它。
       'voiceId': item.voiceId,
@@ -104,7 +103,8 @@ class _BackupEntityRecordCodec {
       apiConfigId: json['apiConfigId']?.toString(),
       agenticEnabled: json['agenticEnabled'] as bool? ?? true,
       skillIds: _strings(json['skillIds']),
-      toolPermissions: _enums(json['toolPermissions'], ToolPermission.values),
+      // Device-local execution authority must be granted again after restore.
+      toolPermissions: const [],
       webSearchEnabled: json['webSearchEnabled'] as bool? ?? false,
       zhipuSearchAnswerOnly: json['zhipuSearchAnswerOnly'] as bool? ?? false,
       proactiveChatEnabled: json['proactiveChatEnabled'] as bool? ?? true,

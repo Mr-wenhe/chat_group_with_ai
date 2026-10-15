@@ -17,7 +17,6 @@ import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_request_gateway.dart';
 import 'package:chat_group/features/document/binary_document_parser.dart';
 import 'package:chat_group/features/work_mode/default_work_task_runner.dart';
-import 'package:chat_group/features/work_mode/work_artifact_delivery_guard.dart';
 import 'package:chat_group/features/work_mode/work_command_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
@@ -68,8 +67,7 @@ void main() {
     await closeLifecycleHive(hiveDirectory, database);
   });
 
-  test(
-      'routes the screenshot request through discussion, approvals and real DOCX delivery',
+  test('keeps a frozen DOCX blocked until every member performs real usage',
       () async {
     const groupId = 's8-screenshot-group';
     final permissions = <ToolPermission>[
@@ -89,7 +87,8 @@ void main() {
           id: configId,
           name: configId,
           provider: ApiProvider.deepseek.name,
-          modelName: 'deepseek-chat',
+          modelName:
+              configId == configIds[1] ? 'deepseek-vl2' : 'deepseek-chat',
           hasCredential: true,
           credentialId: 'credential-$configId',
         ),
@@ -109,6 +108,7 @@ void main() {
         role: '前端工程师',
         configId: configIds[1],
         permissions: permissions,
+        modelName: 'deepseek-vl2',
       ),
       _s8Character(
         id: 's8-qa',
@@ -177,6 +177,11 @@ void main() {
         '',
         fresh.copyWith(
             collaboration: WorkCollaborationState.tryParse(collaboration)!));
+    final taskExecution = jsonDecode(task.executionStateJson) as Map;
+    task.executionStateJson = jsonEncode({
+      ...taskExecution,
+      'visionModelCharacterId': 's8-front',
+    });
 
     final grants = WorkFolderGrantService(
       box: database.appSettingsBox,
@@ -251,11 +256,26 @@ void main() {
                 .collaboration!;
         final proposing = current.plan.isEmpty;
         final delivering = current.phase == 'reviewing';
+        final ruling = !proposing &&
+            current.isAutonomous &&
+            character.id == current.coordinatorId &&
+            current.participantIds.every((id) => current.currentApprovals.any(
+                  (approval) =>
+                      approval['memberId'] == id &&
+                      approval['kind'] == 'plan' &&
+                      approval['subjectId'] == current.taskId,
+                )) &&
+            !current.currentCoordinatorDecisions
+                .any((decision) => decision['kind'] == 'plan');
         return {
           'success': true,
           'message': jsonEncode({
             'schemaVersion': 2,
-            'action': proposing ? 'propose' : 'approve',
+            'action': proposing
+                ? 'propose'
+                : ruling
+                    ? 'decide'
+                    : 'approve',
             'public_update': character.id == 's8-front'
                 ? '可实现性已核对；本次只交需求文档。'
                 : character.id == 's8-qa'
@@ -287,10 +307,48 @@ void main() {
                         'method': '正文与格式审查',
                         'requiredCapability': 'read'
                       }
+                    ],
+                    'usageAssignments': [
+                      {
+                        'memberId': 's8-product',
+                        'scenarioId': 's8-product-review',
+                        'goal': '以产品视角核对核心能力与本期范围',
+                        'preconditions': '当前候选包含真实 DOCX 文件',
+                        'stepGoals': ['打开候选文档并核对五项核心能力', '确认非本期范围未混入交付'],
+                        'expectedResult': 'DOCX 内容符合用户明确的范围与验收要求',
+                        'acceptanceIds': ['doc-review'],
+                        'requiredCapabilities': [
+                          'document.body',
+                          'document.visual'
+                        ],
+                        'resetMethod': '关闭文档后重新打开当前候选',
+                      },
+                      {
+                        'memberId': 's8-front',
+                        'scenarioId': 's8-front-review',
+                        'goal': '以实现视角核对能力描述能否落实',
+                        'preconditions': '当前候选包含真实 DOCX 文件',
+                        'stepGoals': ['读取能力与验收条目', '检查范围边界是否清楚'],
+                        'expectedResult': '能力描述可实现且验收边界清晰',
+                        'acceptanceIds': ['doc-review'],
+                        'requiredCapabilities': ['read'],
+                        'resetMethod': '关闭文档后重新打开当前候选',
+                      },
+                      {
+                        'memberId': 's8-qa',
+                        'scenarioId': 's8-qa-review',
+                        'goal': '以测试视角核对验收要求是否可验证',
+                        'preconditions': '当前候选包含真实 DOCX 文件',
+                        'stepGoals': ['读取验收标准', '确认核心能力都有可检查结果'],
+                        'expectedResult': '每项核心能力均有明确的验收结果',
+                        'acceptanceIds': ['doc-review'],
+                        'requiredCapabilities': ['read'],
+                        'resetMethod': '关闭文档后重新打开当前候选',
+                      }
                     ]
                   }
                 : null,
-            'approval': proposing
+            'approval': proposing || ruling
                 ? null
                 : {
                     'kind': delivering ? 'delivery' : 'plan',
@@ -307,7 +365,16 @@ void main() {
                       'artifactDigest':
                           current.currentIteration!['artifactDigest']
                   },
-            'decision': null,
+            'decision': ruling
+                ? {
+                    'kind': 'ruling',
+                    'targetId': current.taskId,
+                    'reason': '成员已分别确认当前范围与交付方式。',
+                    'evidence': '已核对全体成员针对当前方案的真实认可记录。',
+                    'impact': '维持用户范围，由指定执行者制作。',
+                    'options': [],
+                  }
+                : null,
             'tool': null
           })
         };
@@ -327,6 +394,7 @@ void main() {
     final approvalForPatch = await _s8WaitFor(
       database,
       task.id,
+      eventStore,
       (value) =>
           value.status == AgentTaskStatus.waitingForApproval &&
           value.pendingToolRequestJson.contains('workspace.patch'),
@@ -342,6 +410,7 @@ void main() {
     final approvalForPandoc = await _s8WaitFor(
       database,
       task.id,
+      eventStore,
       (value) =>
           value.status == AgentTaskStatus.waitingForApproval &&
           value.pendingToolRequestJson.contains('command.run'),
@@ -355,27 +424,45 @@ void main() {
     );
 
     await coordinator.approveWithoutUndo(task.id);
-    final completed = await _s8WaitFor(
+    final blocked = await _s8WaitFor(
       database,
       task.id,
-      (value) => value.status == AgentTaskStatus.completed,
+      eventStore,
+      (value) => value.status == AgentTaskStatus.paused && value.resumeRequired,
     );
-    // Two tool turns (conversion source, then pandoc) are enough: the DOCX
-    // satisfies the contract, so the loop completes from that result instead of
-    // spending a third model turn on a finish decision.
     expect(executionGateway.calls, greaterThanOrEqualTo(5));
     expect(pandoc.conversionCount, 1);
-    expect(
-        WorkDiscussionState.fromExecutionState(completed.executionStateJson)!
-            .collaboration!
-            .deliveryReady,
-        isTrue);
-    expect(completed.lastArtifactPaths, contains(endsWith('需求文档.docx')));
+    expect(executionGateway.usageSystemPrompts, isNotEmpty);
+    final usagePrompt = executionGateway.usageSystemPrompts.first;
+    for (final instruction in const [
+      '你负责 own_usage 对应的本人场景',
+      '先核对候选版本、目标应用和前置测试数据',
+      '每步依据操作后的真实结果继续',
+      '不得修改候选、测试断言或必达验收',
+      '旧缺陷也要实际复测',
+      '只有图像实际送达且当前模型能够看见时才报告视觉观察',
+      '没有真实操作证据不得签通过',
+      '不能用搜索片段当全文',
+      '不能用正文提取代替版式检查',
+      'documentEvidence:{pageNumbers:',
+      '每个缺陷都要有本人观察到的 sourceLocation',
+    ]) {
+      expect(usagePrompt, contains(instruction));
+    }
+    for (final entry in executionGateway.usageModels.entries) {
+      final actor = database.aiCharacterBox.get(entry.key)!;
+      final actorConfig = database.apiConfigBox.get(actor.apiConfigId)!;
+      expect(entry.value, actorConfig.modelName,
+          reason: '试用成员 ${entry.key} 必须用自己的模型');
+    }
+    expect(blocked.lastError, contains('未完成实际使用'));
+    final blockedState =
+        WorkDiscussionState.fromExecutionState(blocked.executionStateJson)!;
+    expect(blockedState.executorId, 's8-product');
+    expect(blockedState.collaboration!.allMembersUsed, isFalse);
+    expect(blockedState.collaboration!.deliveryReady, isFalse);
 
-    final artifactPath = completed.lastArtifactPaths.firstWhere(
-      (path) => path.endsWith('需求文档.docx'),
-    );
-    final artifact = File(artifactPath);
+    final artifact = File('${isolatedDesktop.path}/需求文档.docx');
     expect(await artifact.exists(), isTrue);
     final sections = BinaryDocumentParser.validateDocxForDelivery(
       Uint8List.fromList(await artifact.readAsBytes()),
@@ -393,12 +480,7 @@ void main() {
     ]) {
       expect(body, contains(item));
     }
-    final delivery = await WorkArtifactDeliveryGuard.validateTask(
-      task: completed,
-      pathPolicy: pathPolicy,
-      workspaceRoot: isolatedDesktop.path,
-    );
-    expect(delivery.valid, isTrue, reason: delivery.message);
+    expect(blocked.lastArtifactPaths, contains(endsWith('需求文档.docx')));
 
     final messages = database.messageBox.values
         .where((message) => message.groupId == groupId)

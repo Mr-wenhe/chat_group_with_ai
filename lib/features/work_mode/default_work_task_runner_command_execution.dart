@@ -129,6 +129,21 @@ extension _DefaultWorkTaskRunnerCommandExecution on DefaultWorkTaskRunner {
       }
     }
     if (result.succeeded) {
+      try {
+        data['skillScriptReceipt'] =
+            await _skillResourcePackStore.recordScriptExecution(
+          taskId: task.id,
+          characterId: character.id,
+          exitCode: result.exitCode,
+          executable: result.command.executable,
+          arguments: result.command.arguments,
+          workingDirectory: result.command.workingDirectory,
+          workspaceRoot: workspaceRoot,
+        );
+      } on Object {
+        // A receipt failure never changes the real command result; it simply
+        // prevents this run from contributing to skill validation.
+      }
       return WorkToolResult.success(message: result.message, data: data);
     }
     if (result.status == WorkCommandRunStatus.waitingForApproval) {

@@ -16,6 +16,8 @@ import 'package:chat_group/features/chat_group/group_mute_store.dart';
 import 'package:chat_group/features/web_search/models/search_runtime_settings.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:chat_group/features/work_mode/work_context_boundary.dart';
+import 'package:chat_group/features/work_mode/work_discussion_state.dart';
+import 'package:chat_group/features/agentic/skill_resource_pack_store.dart';
 
 import 'backup_entity_codec.dart';
 import 'backup_models.dart';
@@ -35,6 +37,7 @@ class BackupExporter {
     'characterMemories': 'data/character_memories.json',
     'relationships': 'data/relationships.json',
     'skills': 'data/skills.json',
+    'skillResourcePacks': 'data/skill_resource_packs.json',
     'agentTasks': 'data/agent_tasks.json',
     'workMode': 'data/work_mode.json',
     'settings': 'data/settings.json',
@@ -193,8 +196,43 @@ class BackupExporter {
       }
       await _writeJson(staging, _dataFiles['skills']!, snapshot.skills,
           (item) => BackupEntityCodec.skill(item), files, counts, 'skills');
+      final packIds = snapshot.skills
+          .map((entry) => entry.value.resourcePackId)
+          .whereType<String>()
+          .toSet();
+      final packSnapshot = packIds.isEmpty
+          ? (records: <Map<String, dynamic>>[], missing: <String>[])
+          : await SkillResourcePackStore.forDatabase(db).backupRecords(packIds);
+      missing.addAll(packSnapshot.missing);
+      await _writeJson(
+        staging,
+        _dataFiles['skillResourcePacks']!,
+        [
+          for (final record in packSnapshot.records)
+            MapEntry<Object, Map<String, dynamic>>(
+              record['key'] as String,
+              record['value'] as Map<String, dynamic>,
+            ),
+        ],
+        (value) => value,
+        files,
+        counts,
+        'skillResourcePacks',
+      );
       await _writeJson(staging, _dataFiles['agentTasks']!, snapshot.tasks,
           (item) => BackupEntityCodec.task(item), files, counts, 'agentTasks');
+      for (final entry in snapshot.tasks) {
+        final task = entry.value;
+        final collaboration =
+            WorkDiscussionState.fromExecutionState(task.executionStateJson)
+                ?.collaboration;
+        for (final evidence in collaboration?.usageEvidenceRefs ?? const []) {
+          final receiptRef = evidence['receiptRef'];
+          if (receiptRef is String && receiptRef.isNotEmpty) {
+            missing.add('work-usage-evidence:${task.id}:$receiptRef');
+          }
+        }
+      }
       await _writeJson(
           staging,
           _dataFiles['workMode']!,
@@ -204,6 +242,7 @@ class BackupExporter {
           counts,
           'workMode');
       await _writeSettings(staging, snapshot.settings, files, counts);
+      counts['missingAttachments'] = missing.length;
 
       final manifest = BackupManifest(
         formatVersion: BackupManifest.currentFormatVersion,

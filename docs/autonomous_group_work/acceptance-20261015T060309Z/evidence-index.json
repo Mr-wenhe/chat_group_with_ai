@@ -1,0 +1,202 @@
+{
+  "schemaVersion": 1,
+  "runId": "acceptance-20261015T060309Z",
+  "startedAt": "2026-10-15T06:03:09Z",
+  "updatedAt": "2026-10-15T06:44:10Z",
+  "repositoryHead": "9bbaef70752dcfe26c2b784728bae8556f2abf52",
+  "repositoryRoot": "/Volumes/new_disk/work/flutter/chat_group/chat_group",
+  "evidenceRoot": "/Volumes/new_disk/work/flutter/chat_group/chat_group/docs/autonomous_group_work/acceptance-20261015T060309Z",
+  "pathResolution": "Absolute paths are absolute. Relative commands/, artifacts/, computer/ paths use evidenceRoot. Relative build/ paths use repositoryRoot.",
+  "records": [
+    {
+      "caseId": "E4-baseline",
+      "relatedCaseIds": ["R01-R16", "A01-A30"],
+      "result": "blocked",
+      "actualTime": "2026-10-15; exact CUA action timestamp unavailable",
+      "taskId": "unavailable",
+      "conversationId": "unavailable",
+      "actorId": "unavailable",
+      "makerExecutorId": "unavailable",
+      "sceneId": "isolated-macos-product-baseline",
+      "requirementVersion": "docs/autonomous_group_work/02-design.md at HEAD 9bbaef7",
+      "teamVersion": "unavailable; isolated app has no roles",
+      "validationVersion": "2.1.0+225",
+      "candidateIterationId": "unavailable; no work-mode candidate",
+      "artifactDigest": "82824c65516c19de6fea91514f5ed88abb50bac0c297e9bf8db66425682ea3ef",
+      "planDigest": "unavailable; no task plan",
+      "files": [
+        {
+          "path": "/Volumes/new_disk/work/flutter/chat_group/chat_group/build/macos/Build/Products/Release/伴伴.app/Contents/MacOS/伴伴",
+          "sha256": "82824c65516c19de6fea91514f5ed88abb50bac0c297e9bf8db66425682ea3ef"
+        },
+        {
+          "path": "commands/app-info-plist.log",
+          "sha256": "e2a9f58d658b31199cefbc68f52c55c0407de1bf668ec446729632ad931d0e25"
+        },
+        {
+          "path": "computer/observations.md",
+          "sha256": "9c20d9e0bf3b9dce73d232d97e633185d7227d2b4b26c0c81333693932f1fa93"
+        },
+        {
+          "path": "commands/platform-info.log",
+          "sha256": "e8d51ca650971f3817a898b4c267070529a0449688df5d3a407b0fd2ef4ba787"
+        },
+        {
+          "path": "commands/system-permissions.log",
+          "sha256": "e5b688fd43da727d764cd567c2fa3ad4e2786572653051efa5eefce3dda73e79"
+        }
+      ],
+      "modelRequestIds": [],
+      "toolRequestIds": [],
+      "evidencePaths": ["commands/app-info-plist.log", "commands/codesign-verify.log"],
+      "evidenceSummary": "CUA 绑定精确 Release App 窗口；画面显示 2.1.0+225、本地存储、API Key 0/4。没有角色/群/私聊或模型请求。截图只在 CUA 工具输出中显示，没有本地截图文件。测试数据根目录为 /private/var/folders/8g/ld5ysm9x2zvc9_2y2kn6233h0000gn/T/chat-group-acceptance-20261015T060309Z.0jdWc5。",
+      "unavailableReason": "测试数据为空且没有用户授权的模型配置；缺真实 task/conversation/actor/receipt/model ID。"
+    },
+    {
+      "caseId": "P0-SAMPLE-PERSISTENCE",
+      "relatedCaseIds": ["A13", "N04"],
+      "result": "supporting-only-not-product-acceptance",
+      "actualTime": "2026-10-15; exact CUA action timestamp unavailable",
+      "taskId": "not-applicable",
+      "conversationId": "not-applicable",
+      "actorId": "not-applicable; CUA operator used a trusted synthetic sample",
+      "makerExecutorId": "not-applicable",
+      "sceneId": "separate-macos-sample-bug-and-fixed",
+      "requirementVersion": "P0 persistence sample only",
+      "teamVersion": "not-applicable",
+      "validationVersion": "sample build from current workspace",
+      "candidateIterationId": "not-applicable",
+      "artifactDigest": "bug=d8a449421e97fcef916617c935160eba92d11f5ff9398b5896737a0d37d5f9cd; fixed=cdc376a2567dc0ca94d3bb730638abb72a6ec4a4b4aebdd9dadaf5d65906b1fd",
+      "planDigest": "not-applicable",
+      "files": [
+        {
+          "path": "build/p0_macos/bug/P0Sample.app/Contents/MacOS/P0Sample",
+          "sha256": "d8a449421e97fcef916617c935160eba92d11f5ff9398b5896737a0d37d5f9cd"
+        },
+        {
+          "path": "build/p0_macos/fixed/P0Sample.app/Contents/MacOS/P0Sample",
+          "sha256": "cdc376a2567dc0ca94d3bb730638abb72a6ec4a4b4aebdd9dadaf5d65906b1fd"
+        },
+        {
+          "path": "commands/p0-build-bug.log",
+          "sha256": "deed6caa5628dcfab6f1520695428e09e2362bb58811c6dae464e2234d9f9824"
+        },
+        {
+          "path": "commands/p0-build-fixed.log",
+          "sha256": "3c6ceedb4bf00ea74bd25fcbf8fae6a1ab9399ac89c67cae9b5c0dddea2b5e44"
+        }
+      ],
+      "modelRequestIds": [],
+      "toolRequestIds": ["CUA UI actions; product request ID unavailable"],
+      "evidencePaths": ["commands/p0-build-bug.log", "commands/p0-build-fixed.log"],
+      "evidenceSummary": "CUA 操作 bug/fixed 两个可信样本，关闭后重新打开并读回各自本地值。仅证明独立样本的桌面持久化路径；CUA 截图未落盘，样本不属于伴伴工作模式。"
+    },
+    {
+      "caseId": "D03-renderer-font-coverage",
+      "relatedCaseIds": ["A16", "A17", "D03"],
+      "result": "partial",
+      "actualTime": "2026-10-15; test-runner relative timestamps are in commands/work-document-real-render-isolated.jsonl",
+      "taskId": "test-fixture:p3-document-review; not a product task",
+      "conversationId": "unavailable; no product conversation",
+      "actorId": "automated-test-harness; no AI role",
+      "makerExecutorId": "not-applicable",
+      "sceneId": "synthetic-docx-pdf-rendering",
+      "requirementVersion": "docs/autonomous_group_work/02-design.md D03/A16/A17",
+      "teamVersion": "not-applicable",
+      "validationVersion": "WorkDocumentTool / DocumentPageRenderer from HEAD 9bbaef7",
+      "candidateIterationId": "unavailable; no work-mode candidate",
+      "artifactDigest": "review-before.docx sha256 65419f649948fe25c82b8a70c8ea77b48a7825eed16881b13b48facdfb6cf657",
+      "planDigest": "unavailable; local test fixture only",
+      "files": [
+        {"path": "artifacts/document-render-fontconfig/source.docx", "sha256": "65419f649948fe25c82b8a70c8ea77b48a7825eed16881b13b48facdfb6cf657"},
+        {"path": "artifacts/document-render-fontconfig/source.pdf", "sha256": "03f0848092e031af6dfc80ab6560e52f2bbd3205c3cf84f76e1ae7621b92bbfd"},
+        {"path": "artifacts/document-tool-render/sources/review-before.docx", "sha256": "65419f649948fe25c82b8a70c8ea77b48a7825eed16881b13b48facdfb6cf657"},
+        {"path": "artifacts/document-tool-render/sources/review-before.pdf", "sha256": "d20c40d07872c1e988180ed0a7d5ce44802eee8d2049575b5afd7cf71c77dfb6"},
+        {"path": "artifacts/document-tool-render/sources/review-after.docx", "sha256": "0479fef710d0710fac194bb758c169556e8de5e792d215404cd479cde557e8cf"},
+        {"path": "artifacts/document-tool-render/sources/review-after.pdf", "sha256": "6501d5e617786611e41aa0e55fd65694c8499e01d53240c935db73e9367a5218"},
+        {"path": "artifacts/document-render-fontconfig/page-1.png", "sha256": "f450aee4c187dffefad1957571b1a49b8a4662c89089ee053bd4994cfc360a91"},
+        {"path": "artifacts/document-render-fontconfig/page-2.png", "sha256": "763363536baeadd63fff5fd30c420d1410d4c06043bb9e0dfa4a6f2df8896fcc"},
+        {"path": "artifacts/document-render-fontconfig/page-3.png", "sha256": "5a7d3812e42dbbf11d91194331dbcbec23228d983def060a95a482e778bbcdce"},
+        {"path": "artifacts/document-render-fontconfig/page-4.png", "sha256": "04ad0111f1d5ea2380dbe5f74ff535f6a6d97d824c7fa951cb1289386c42449a"},
+        {"path": "artifacts/document-tool-render/tool-render/before-docx/page-1.png", "sha256": "f450aee4c187dffefad1957571b1a49b8a4662c89089ee053bd4994cfc360a91"},
+        {"path": "artifacts/document-tool-render/tool-render/before-docx/page-1.json", "sha256": "d252e3bed232b0b0f536edceeeed72ea019501036e7e2b75f16d677a311383c3"},
+        {"path": "artifacts/document-tool-render/tool-render/before-docx/page-2.png", "sha256": "763363536baeadd63fff5fd30c420d1410d4c06043bb9e0dfa4a6f2df8896fcc"},
+        {"path": "artifacts/document-tool-render/tool-render/before-docx/page-2.json", "sha256": "6c77e14c631386ef1d2b1ac4d2e89fc2ee044389a7524fce5a94c148128b4bb0"},
+        {"path": "artifacts/document-tool-render/tool-render/before-docx/page-3.png", "sha256": "5a7d3812e42dbbf11d91194331dbcbec23228d983def060a95a482e778bbcdce"},
+        {"path": "artifacts/document-tool-render/tool-render/before-docx/page-3.json", "sha256": "87d2a29cfd32c2ce5a61baa78bd8be52d34702d8743a51e10ff575e9fb7166ed"},
+        {"path": "artifacts/document-tool-render/tool-render/before-docx/page-4.png", "sha256": "04ad0111f1d5ea2380dbe5f74ff535f6a6d97d824c7fa951cb1289386c42449a"},
+        {"path": "artifacts/document-tool-render/tool-render/before-docx/page-4.json", "sha256": "24d6c3e77b4b3431996b1cf766bcf6cbb19b8beb4edb9f60f4fad1599f4fdb0d"},
+        {"path": "artifacts/document-tool-render/tool-render/after-docx/page-1.png", "sha256": "767fb47b97f7eb52b6550c07f413cc6e826bffc8aa8e428fde3336c554f560ad"},
+        {"path": "artifacts/document-tool-render/tool-render/after-docx/page-1.json", "sha256": "3b3fa8a8b7c07de6b5355c9c0d112f573571c2d9914d6b533371ff2493e1e318"},
+        {"path": "artifacts/document-tool-render/tool-render/after-docx/page-2.png", "sha256": "4c27282d72b257761fe3e947ab60fcde18ebc988b82886212d5656e4b2cd7d1c"},
+        {"path": "artifacts/document-tool-render/tool-render/after-docx/page-2.json", "sha256": "30ac66a6c4c41cf8790b0a8d8f9ebb3423064cdf2dc2373e1995ab04f8753fdc"},
+        {"path": "artifacts/document-tool-render/tool-render/after-docx/page-3.png", "sha256": "5a7d3812e42dbbf11d91194331dbcbec23228d983def060a95a482e778bbcdce"},
+        {"path": "artifacts/document-tool-render/tool-render/after-docx/page-3.json", "sha256": "ca5b241545530fe64e7fd36e6ce6213fb3647dec522e9c5147ab0efd16c2329c"},
+        {"path": "artifacts/document-tool-render/tool-render/after-docx/page-4.png", "sha256": "cdc28d95e1a674b668f04b17930539a0a2ca216b96e22c1f0404715828158328"},
+        {"path": "artifacts/document-tool-render/tool-render/after-docx/page-4.json", "sha256": "3b61fd34ca6dd98e0fee9e7a368bfc8d5be19bcaa0480be2fa3c7586665064c0"},
+        {"path": "artifacts/document-tool-render/tool-render/before-pdf/page-1.png", "sha256": "f450aee4c187dffefad1957571b1a49b8a4662c89089ee053bd4994cfc360a91"},
+        {"path": "artifacts/document-tool-render/tool-render/before-pdf/page-1.json", "sha256": "c58c9d7fba946818a4318f45dc3a450f6d4c4506b1b17d6edef47f5aadff8818"},
+        {"path": "artifacts/document-tool-render/tool-render/before-pdf/page-2.png", "sha256": "763363536baeadd63fff5fd30c420d1410d4c06043bb9e0dfa4a6f2df8896fcc"},
+        {"path": "artifacts/document-tool-render/tool-render/before-pdf/page-2.json", "sha256": "f5cb509bb0d645328308104370040171f9a3b4c54496ea7374fdb70fb5b2d441"},
+        {"path": "artifacts/document-tool-render/tool-render/before-pdf/page-3.png", "sha256": "5a7d3812e42dbbf11d91194331dbcbec23228d983def060a95a482e778bbcdce"},
+        {"path": "artifacts/document-tool-render/tool-render/before-pdf/page-3.json", "sha256": "62807d24f8d4a2df8814184ef80de274b9726b2ed0735563bf8b01c402ec0f5c"},
+        {"path": "artifacts/document-tool-render/tool-render/before-pdf/page-4.png", "sha256": "04ad0111f1d5ea2380dbe5f74ff535f6a6d97d824c7fa951cb1289386c42449a"},
+        {"path": "artifacts/document-tool-render/tool-render/before-pdf/page-4.json", "sha256": "8f7e60b33334420b370a64efc5e34e6c6aa784978deb7d4f0651bb545e1b3c1f"},
+        {"path": "artifacts/document-tool-render/tool-render/after-pdf/page-1.png", "sha256": "767fb47b97f7eb52b6550c07f413cc6e826bffc8aa8e428fde3336c554f560ad"},
+        {"path": "artifacts/document-tool-render/tool-render/after-pdf/page-1.json", "sha256": "3ac513fa1502de84a88a849b7e5abe577cdff3af31e378563150681c7f22904b"},
+        {"path": "artifacts/document-tool-render/tool-render/after-pdf/page-2.png", "sha256": "4c27282d72b257761fe3e947ab60fcde18ebc988b82886212d5656e4b2cd7d1c"},
+        {"path": "artifacts/document-tool-render/tool-render/after-pdf/page-2.json", "sha256": "23f54eb74ed47f3db22d4e0e4d99cafe49daa78b85ccd94616ffc44f630a99a9"},
+        {"path": "artifacts/document-tool-render/tool-render/after-pdf/page-3.png", "sha256": "5a7d3812e42dbbf11d91194331dbcbec23228d983def060a95a482e778bbcdce"},
+        {"path": "artifacts/document-tool-render/tool-render/after-pdf/page-3.json", "sha256": "89c499b5ab0372ad73801b6c061ffd0d5d602f1eb11292d129399cf95fdd051c"},
+        {"path": "artifacts/document-tool-render/tool-render/after-pdf/page-4.png", "sha256": "cdc28d95e1a674b668f04b17930539a0a2ca216b96e22c1f0404715828158328"},
+        {"path": "artifacts/document-tool-render/tool-render/after-pdf/page-4.json", "sha256": "09cacdb51b58efd4feda9f32b06d8c8243c9277957bd239fadc95058185bf469"}
+      ],
+      "modelRequestIds": [],
+      "toolRequestIds": ["test harness invocation; production request ID unavailable"],
+      "evidencePaths": ["commands/work-document-real-render-isolated.jsonl", "artifacts/document-tool-render/tool-render/"],
+      "evidenceSummary": "在临时 shadow project 内调用真实 WorkDocumentTool/DocumentPageRenderer，4 类 DOCX/PDF 各渲染完整 4 页并核验 manifest；缺失字体 fixture 被报告为非 resolved。测试报告 5/5 成功。没有实际 AI 模型请求或群内成员查看页图。"
+    },
+    {
+      "caseId": "CODE-REGRESSION",
+      "relatedCaseIds": ["R01-R16", "A01-A30", "N01-N14", "D01-D07", "K01-K10", "F01-F19", "T01-T04"],
+      "result": "automated-regression-passed-with-opt-in-skips",
+      "actualTime": "2026-10-15; command-relative durations are in the JSONL logs",
+      "taskId": "not-applicable; no product work-mode task",
+      "conversationId": "not-applicable; no product conversation",
+      "actorId": "flutter-test-runner",
+      "makerExecutorId": "not-applicable",
+      "sceneId": "serial-flutter-gateway-build-and-signing-regression",
+      "requirementVersion": "workspace HEAD 9bbaef70752dcfe26c2b784728bae8556f2abf52",
+      "teamVersion": "not-applicable",
+      "validationVersion": "Flutter 3.27.1 / Dart 3.6.0 / Xcode 16.3",
+      "candidateIterationId": "not-applicable",
+      "artifactDigest": "Release executable sha256 82824c65516c19de6fea91514f5ed88abb50bac0c297e9bf8db66425682ea3ef",
+      "planDigest": "not-applicable",
+      "files": [
+        {"path": "commands/flutter-test-full-excluding-destructive-render.jsonl", "sha256": "6e31d5f026d0f29c3fd682424ef1b52c8f3433cb9828ab2bec3f653c900d27f9"},
+        {"path": "commands/work-document-real-render-isolated.jsonl", "sha256": "c30a04a7e9c3e86b960ca1162d92ef1eaa12bf2b0bbb01599e89f43f2bcfe0c1"},
+        {"path": "commands/macos-app-bundle-real-app.jsonl", "sha256": "b08601211764ab4733b4400665561d7841f3efc29506fd80c7c663b843de43ca"},
+        {"path": "commands/gateway-npm-test.log", "sha256": "f2e88feab86431244b816f4e5fdb2233326391702cb2f29ca784fe7f7b46b381"},
+        {"path": "commands/flutter-analyze.log", "sha256": "cfd2a68b94ae4c5c9d88179899c6dc72a7a2f141a45151b373d24c6f825756d9"},
+        {"path": "commands/flutter-build-macos-release.log", "sha256": "61fa15531219da70bd077021f05945277f02c9dd10389783493fbc7ea1d3d18c"},
+        {"path": "commands/codesign-verify.log", "sha256": "e2df43172e242bd6dbd4ecd63b7bc85db5456b38bfd97682e75354834d3ce0f9"},
+        {"path": "commands/git-diff-check.log", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        {"path": "commands/dart-format-check.log", "sha256": "449259525acea93736ffbcec16369105941a41bc1bfe4f32b412d315c54d1241"},
+        {"path": "commands/python-compile.log", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        {"path": "commands/publish-script-syntax.log", "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"},
+        {"path": "commands/platform-info.log", "sha256": "e8d51ca650971f3817a898b4c267070529a0449688df5d3a407b0fd2ef4ba787"},
+        {"path": "commands/system-permissions.log", "sha256": "e5b688fd43da727d764cd567c2fa3ad4e2786572653051efa5eefce3dda73e79"},
+        {"path": "commands/document-render-soffice.log", "sha256": "43e2fdffb773d2b5c07ab09183025c1da99588c1980ea14db6478a996e462f2e"},
+        {"path": "commands/document-render-fontconfig.log", "sha256": "2575e222a12afcf48fe633f6aed2757603012e0e99af06b5f6c0bb7f9558067b"},
+        {"path": "commands/document-render-pdfinfo.log", "sha256": "0ccdf6f3159fd1b80a98133132f67295a056a6e0aa42cd4f36deaabe7a62631a"},
+        {"path": "commands.log", "sha256": "2a22178cd311483d7ef4c3a1dec1cb27e711ba23a9d03ac3bc8688e0d8ffd90d"},
+        {"path": "REPORT.md", "sha256": "50727f55f0844c166e88359868151f377c70f0044db9f200bd6ea49b755448d6"},
+        {"path": "matrix.md", "sha256": "c6e9c8acc95bca2898e5937fad8dff5655c5bf150d46ba3db6b267c18158dbc1"}
+      ],
+      "modelRequestIds": [],
+      "toolRequestIds": ["Flutter test/build process; no product request ID"],
+      "evidencePaths": ["commands.log", "commands/"],
+      "evidenceSummary": "串行全量回归排除一个写既有证据的渲染测试后运行；该测试在隔离副本单独通过。一个真实 App 包打包测试用精确 Release 路径补跑；两个 Appium opt-in 测试保留 skip。合并去重并加入文档测试后 3506 pass、2 skip、0 fail。自动化结果不等于现场 AI 使用。"
+    }
+  ]
+}

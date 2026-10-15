@@ -6,12 +6,14 @@ import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 
 WorkCollaborationState candidateTestState(
-    {String type = 'document', String format = 'txt'}) {
+    {String type = 'document',
+    String format = 'txt',
+    int requestRevision = 1}) {
   final json = WorkCollaborationState.fromLegacy(
       taskId: 'task-a',
       conversationId: 'group-a',
       projectScopeId: 'scope-a',
-      requestRevision: 1,
+      requestRevision: requestRevision,
       requestMessageId: 'request-a',
       scope: '生成候选文件',
       artifactContract: {
@@ -46,26 +48,30 @@ WorkCollaborationState candidateTestState(
         'requiredCapability': 'command',
         'status': 'pending',
         'evidenceRef': '',
-        'requestRevision': 1,
+        'requestRevision': requestRevision,
         'verificationRevision': 1
       }
     ]
     ..['approvals'] = [
       for (final member in ['a', 'b'])
-        candidateTestApproval(member, 'plan', 'task-a')
+        candidateTestApproval(member, 'plan', 'task-a',
+            requestRevision: requestRevision)
     ];
   return WorkCollaborationState.tryParse(json)!;
 }
 
 Map<String, dynamic> candidateTestApproval(
         String member, String kind, String subject,
-        {String iteration = '', String digest = '', int verification = 1}) =>
+        {String iteration = '',
+        String digest = '',
+        int verification = 1,
+        int requestRevision = 1}) =>
     {
       'eventId': '$kind-$member-$verification',
       'memberId': member,
       'kind': kind,
       'subjectId': subject,
-      'requestRevision': 1,
+      'requestRevision': requestRevision,
       'teamRevision': 1,
       'iterationId': iteration,
       'artifactDigest': digest,

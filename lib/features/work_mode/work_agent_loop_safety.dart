@@ -184,7 +184,8 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       lastPath: path is String ? path : '',
       // 旧版落盘的是"正文开头"指纹（`headFingerprints`），在整份正文的判据下
       // 永远匹配不上，刻意不读回来：留着只会占掉有限的槽位。
-      writeDigests: contents is List          ? contents
+      writeDigests: contents is List
+          ? contents
               .whereType<String>()
               .take(_stagedRewriteFingerprintLimit)
               .toList(growable: false)
@@ -544,7 +545,8 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     final normalized = key.toLowerCase().replaceAll(RegExp(r'[^a-z0-9]'), '');
     // This is an ephemeral, bounded view of a tool's public result. File
     // content and command output are useful to the next model turn, while
-    // credential-bearing request fields remain excluded by the deny-list.
+    // credential-bearing request fields remain excluded. sessionRef is visible
+    // only to the live loop and is removed from the persisted result view.
     return const {
       'content',
       'contents',
@@ -556,6 +558,7 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       'output',
       'result',
       'response',
+      'sessionref',
     }.contains(normalized);
   }
 
@@ -1135,6 +1138,7 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
       'token',
       'secret',
       'apikey',
+      'sessionref',
       'authorization',
       'password',
     };

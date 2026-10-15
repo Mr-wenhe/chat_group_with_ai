@@ -1,0 +1,14 @@
+<XCUIElementTypeWindow elementType="4" identifier="p0-window" label="" title="P0 持久化样本" enabled="false" selected="false" x="680" y="188" width="560" height="348">
+    <XCUIElementTypeTextField elementType="49" identifier="p0-note" value="P0-fixed-重启核对" label="便签内容" title="" placeholderValue="输入一条便签" enabled="true" selected="false" x="711" y="247" width="498" height="23" />
+    <XCUIElementTypeButton elementType="9" identifier="p0-save" label="" title="保存便签" enabled="true" selected="false" x="923" y="292" width="74" height="22" />
+    <XCUIElementTypeStaticText elementType="48" identifier="p0-result" value="已保存：P0-fixed-重启核对" label="" title="" enabled="true" selected="false" x="878" y="336" width="164" height="18" />
+    <XCUIElementTypeButton elementType="9" identifier="_XCUI:CloseWindow" label="" title="" enabled="true" selected="false" x="686" y="194" width="16" height="16" />
+    <XCUIElementTypeButton elementType="9" identifier="_XCUI:FullScreenWindow" label="" title="" enabled="true" selected="false" x="726" y="194" width="16" height="16">
+      <XCUIElementTypeGroup elementType="3" identifier="" label="" title="" enabled="false" selected="false" x="727" y="194" width="14" height="16">
+        <XCUIElementTypeGroup elementType="3" identifier="" label="" title="" enabled="false" selected="false" x="727" y="194" width="14" height="16" />
+      </XCUIElementTypeGroup>
+    </XCUIElementTypeButton>
+    <XCUIElementTypeButton elementType="9" identifier="_XCUI:MinimizeWindow" label="" title="" enabled="true" selected="false" x="706" y="194" width="16" height="16" />
+    <XCUIElementTypeStaticText elementType="48" identifier="" value="P0 持久化样本" label="" title="" enabled="true" selected="false" x="915" y="193" width="90" height="16" />
+  </XCUIElementTypeWindow>
+  

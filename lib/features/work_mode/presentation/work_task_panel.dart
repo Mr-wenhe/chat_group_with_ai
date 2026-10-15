@@ -4,6 +4,8 @@ import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
+import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
+import 'package:chat_group/features/ai_governance/money_micros.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_confirmation.dart';
@@ -136,6 +138,11 @@ class WorkTaskPanel extends StatefulWidget {
   /// （回归测试覆盖上半区内容时就是这么打开的）。
   final bool showTaskSummarySection;
 
+  /// 设备本地账本；面板按 taskId 过滤，不拿会话累计冒充任务用量。
+  final List<UsageLedgerEntry> usageEntries;
+  final List<AiRequestDiagnostic> usageDiagnostics;
+  final bool usageUnavailable;
+
   /// 已被用户从标签栏隐藏的任务 id；历史列表用它标注"已从标签栏隐藏"，
   /// 让用户知道记录还在、可以继续基于它追加要求。
   final Set<String> hiddenTaskIds;
@@ -194,6 +201,9 @@ class WorkTaskPanel extends StatefulWidget {
     this.historyTasks = const <AgentTask>[],
     this.onHideTask,
     this.showTaskSummarySection = false,
+    this.usageEntries = const <UsageLedgerEntry>[],
+    this.usageDiagnostics = const <AiRequestDiagnostic>[],
+    this.usageUnavailable = false,
     DateTime Function()? clock,
   }) : clock = clock ?? DateTime.now;
 
@@ -410,6 +420,9 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
             toolName: toolName,
             actionError: _actionError,
             showSummarySection: widget.showTaskSummarySection,
+            usageEntries: widget.usageEntries,
+            usageDiagnostics: widget.usageDiagnostics,
+            usageUnavailable: widget.usageUnavailable,
             characterNameFor: widget.characterNameFor,
             eventStreamFor: widget.eventStreamFor,
             onLatestEvent: _rememberLatestEvent,
@@ -500,6 +513,9 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               toolName: null,
               actionError: null,
               showSummarySection: widget.showTaskSummarySection,
+              usageEntries: widget.usageEntries,
+              usageDiagnostics: widget.usageDiagnostics,
+              usageUnavailable: widget.usageUnavailable,
               characterNameFor: widget.characterNameFor,
               eventStreamFor: widget.eventStreamFor,
               onLatestEvent: (_) {},

@@ -77,6 +77,8 @@ extension _ChatApiServiceSupport on ChatApiService {
                   : _safeStreamErrorMessage(event.message),
               if (statusCode != null) 'statusCode': statusCode,
               if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
+              if (event.failureDetail != null)
+                'failureDetail': event.failureDetail,
             };
         }
       }
@@ -86,11 +88,16 @@ extension _ChatApiServiceSupport on ChatApiService {
       return {
         'success': false,
         'message': _dioErrorMessage(e),
+        'failureDetail': _failureDetail(e),
         if (statusCode != null) 'statusCode': statusCode,
         if (retryAfter != null) 'retryAfterMs': retryAfter.inMilliseconds,
       };
     } catch (e) {
-      return {'success': false, 'message': '流式请求失败'};
+      return {
+        'success': false,
+        'message': '流式请求失败',
+        'failureDetail': _failureDetail(e),
+      };
     }
     if (content.trim().isEmpty) {
       // 部分 OpenAI 兼容服务的 SSE 通道只返回 [DONE]，但同一
@@ -127,8 +134,37 @@ extension _ChatApiServiceSupport on ChatApiService {
     };
   }
 
-  String _safeHttpErrorMessage(int? statusCode) =>
-      statusCode == null ? '请求失败' : 'HTTP $statusCode 请求失败';
+  String _safeHttpErrorMessage(int? statusCode) => switch (statusCode) {
+        null => '请求失败',
+        final int code when _isRedirectStatus(code) =>
+          _redirectBlockedMessage(code),
+        _ => 'HTTP $statusCode 请求失败',
+      };
+
+  /// 把异常折成「异常类型 + 脱敏后有界的正文摘要」，只供诊断归因使用。
+  ///
+  /// 用户可见文案已经把这些成因折叠成同一句（「请求失败」「流式请求失败」），
+  /// 事后无法区分响应体不是 JSON、TLS 证书被拒还是连接被丢包；审计里必须留下
+  /// 类型与开头。dio 的 `toString()` 会带出整个请求上下文，这里显式只取类型、
+  /// 内层异常与 message，避免把无关上下文写进诊断。
+  String _failureDetail(Object error) {
+    final parts = <String>[];
+    if (error is DioException) {
+      parts.add('DioException/${error.type.name}');
+      final inner = error.error;
+      if (inner != null) parts.add('${inner.runtimeType}: $inner');
+      final message = error.message;
+      if (message != null && message.trim().isNotEmpty) parts.add(message);
+    } else {
+      parts.add(error.runtimeType.toString());
+      parts.add('$error');
+    }
+    final redacted =
+        const SearchSecretScanner().redact(parts.join(' | ')).trim();
+    return redacted.length <= ChatApiService.failureDetailMaxLength
+        ? redacted
+        : '${redacted.substring(0, ChatApiService.failureDetailMaxLength)}…';
+  }
 
   String _safeStreamErrorMessage(String? message) {
     final statusCode = _streamStatusCode(message);
@@ -219,3 +255,12 @@ extension _ChatApiServiceSupport on ChatApiService {
     }
   }
 }
+
+bool _isRedirectStatus(int statusCode) => statusCode >= 300 && statusCode < 400;
+
+/// 带凭据的请求一律不自动跟随重定向，3xx 因此原样回到调用方。文案要说清这是
+/// 「不让 Key 跟着跳」而不是网络故障，并给出用户自己能做的动作——把 Base URL
+/// 直接改成最终地址。目标地址不回显：它来自上游的 Location，属于不可信正文。
+String _redirectBlockedMessage(int statusCode) =>
+    'HTTP $statusCode：服务地址要求跳转，已停止请求（API Key 只发给配置里的地址）；'
+    '请把 Base URL 改成最终地址';

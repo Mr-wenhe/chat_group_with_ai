@@ -489,7 +489,10 @@ Map<String, dynamic> workDocumentContextWithoutImageBytes(
 
 bool _isDocumentImageResult(Object? rawResult) {
   if (rawResult is! Map) return false;
-  return rawResult['tool'] == AgentToolName.workspaceDocument.wireName &&
+  return {
+        AgentToolName.workspaceDocument.wireName,
+        AgentToolName.nativeApp.wireName,
+      }.contains(rawResult['tool']) &&
       rawResult['status'] == WorkToolResultStatus.success.name;
 }
 

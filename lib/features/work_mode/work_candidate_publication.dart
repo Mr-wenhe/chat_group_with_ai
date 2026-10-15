@@ -1,6 +1,7 @@
 import 'dart:async';
 import 'dart:convert';
 import 'dart:io';
+import 'dart:typed_data';
 import 'package:chat_group/features/document/binary_document_parser.dart';
 
 import 'package:crypto/crypto.dart';
@@ -8,6 +9,7 @@ import 'work_artifact_delivery_guard.dart';
 import 'work_public_update_stream.dart';
 import 'package:chat_group/features/web_search/security/search_secret_scanner.dart';
 import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
+import 'macos_app_bundle_archive.dart';
 import 'package:path/path.dart' as p;
 
 part 'work_candidate_evidence.dart';
@@ -58,7 +60,21 @@ class WorkCandidatePublisher {
         final names = sources.keys.toList()..sort();
         for (final name in names) {
           _relative(name);
-          _allowed(name);
+          validateDeliveryPath(name);
+        }
+        MacAppBundleDescription? nativeBundle;
+        final nativeContract = state.artifactContract['nativeBundle'];
+        if (nativeContract != null) {
+          if (nativeContract is! Map ||
+              sources.length != 1 ||
+              sources.keys.single != nativeContract['archivePath']) {
+            throw StateError('macOS App 候选只能发布合同指定的 ZIP。');
+          }
+          nativeBundle = await MacAppBundleArchive.inspect(
+            sources.values.single,
+            appPath: nativeContract['appPath'] as String,
+            archivePath: nativeContract['archivePath'] as String,
+          );
         }
         await _prepareDirectory(directory);
         final binding = {
@@ -73,7 +89,9 @@ class WorkCandidatePublisher {
           'contract': {
             'type': state.artifactContract['type'],
             'format': state.artifactContract['format'],
+            if (nativeContract != null) 'nativeBundle': nativeContract,
           },
+          if (nativeBundle != null) 'nativeBundle': nativeBundle.toJson(),
           'baseline': WorkPublicUpdateStream.sanitize(baseline),
           'requiredPaths': names,
         };
@@ -91,6 +109,47 @@ class WorkCandidatePublisher {
         return _publishReserved(
             pending, sources, reservation, existing.lastOrNull);
       });
+
+  Future<WorkCandidate> publishFromCandidate({
+    required String publicationId,
+    required WorkCollaborationState state,
+    required String producerId,
+    required WorkCandidate source,
+    String baseline = '',
+  }) async {
+    await verify(source, expectedDigest: source.digest);
+    final sourceContract = source.manifest['contract'];
+    final currentNative = state.artifactContract['nativeBundle'];
+    final sourceNative =
+        sourceContract is Map ? sourceContract['nativeBundle'] : null;
+    final sameNativeBundle = currentNative == null && sourceNative == null ||
+        currentNative is Map &&
+            sourceNative is Map &&
+            const ['schemaVersion', 'appPath', 'archivePath']
+                .every((key) => currentNative[key] == sourceNative[key]);
+    final names = source.files.map((file) => file['path'] as String).toSet();
+    final required = state.artifactContract['files'];
+    if (source.manifest['taskId'] != state.taskId ||
+        source.manifest['conversationId'] != state.conversationId ||
+        sourceContract is! Map ||
+        sourceContract['type'] != state.artifactContract['type'] ||
+        sourceContract['format'] != state.artifactContract['format'] ||
+        !sameNativeBundle ||
+        required is List &&
+            (required.length != names.length ||
+                !required.every(names.contains))) {
+      throw StateError('冻结候选与当前任务合同不一致，不能沿用人工决定。');
+    }
+    return publish(
+      publicationId: publicationId,
+      state: state,
+      producerId: producerId,
+      sources: {
+        for (final name in names) name: source.file(name),
+      },
+      baseline: baseline,
+    );
+  }
 
   Future<Map<String, dynamic>> _reserve(
       Map<String, dynamic> binding,
@@ -163,17 +222,26 @@ class WorkCandidatePublisher {
       final source = sources[name]!;
       await _plainFile(source);
       final size = await source.length();
+      final isNativeBundle = pending['nativeBundle'] is Map &&
+          name == (pending['nativeBundle'] as Map)['archivePath'];
       total += size;
       if (size <= 0 ||
-          size > maxFileBytes ||
-          total > maxCandidateBytes ||
+          size >
+              (isNativeBundle
+                  ? MacAppBundleArchive.maxArchiveBytes
+                  : maxFileBytes) ||
+          total >
+              (isNativeBundle
+                  ? MacAppBundleArchive.maxArchiveBytes
+                  : maxCandidateBytes) ||
           await _historyBytes() + total * 2 > maxHistoryBytes) {
         throw StateError('候选包或磁盘保留额度不足，请调整合同或明确清理附件。');
       }
-      if (!await WorkArtifactDeliveryGuard.validateFrozenFile(source)) {
+      if (!isNativeBundle &&
+          !await WorkArtifactDeliveryGuard.validateFrozenFile(source)) {
         throw StateError('候选包含格式无效或空正文文件。');
       }
-      await _checkSecrets(source, name as String);
+      await checkDeliveredSecrets(source, name as String);
       final before = await fileDigest(source);
       final target = File('${staging.path}/artifacts/$name');
       await _prepareDirectory(target.parent);
@@ -278,6 +346,24 @@ class WorkCandidatePublisher {
       throw StateError('候选身份已变化，原测试和签字无效。');
     }
     final files = candidate.files;
+    final contract = manifest['contract'];
+    final nativeContract = contract is Map ? contract['nativeBundle'] : null;
+    final rawNativeBundle = manifest['nativeBundle'];
+    if (nativeContract != null || rawNativeBundle != null) {
+      final description = MacAppBundleDescription.tryParse(rawNativeBundle);
+      if (nativeContract is! Map ||
+          nativeContract.length != 3 ||
+          nativeContract['schemaVersion'] != 1 ||
+          description == null ||
+          nativeContract['appPath'] != description.appPath ||
+          nativeContract['archivePath'] != description.archivePath ||
+          !files.any((entry) =>
+              entry['path'] == description.archivePath &&
+              entry['bytes'] == description.archiveBytes &&
+              entry['sha256'] == description.archiveSha256)) {
+        throw StateError('macOS App 候选元数据或 ZIP 摘要无效。');
+      }
+    }
     if (files.isEmpty || files.length > maxFiles) throw StateError('候选文件清单无效。');
     final names = files.map((f) => f['path']).toList();
     if (jsonEncode(names) != jsonEncode(manifest['requiredPaths'])) {
@@ -302,7 +388,7 @@ class WorkCandidatePublisher {
     for (final entry in files) {
       final name = entry['path'] as String;
       _relative(name);
-      _allowed(name);
+      validateDeliveryPath(name);
       final file = candidate.file(name);
       await _plainFile(file);
       if (await file.length() != entry['bytes'] ||
@@ -344,6 +430,7 @@ class WorkCandidatePublisher {
           'requiredPaths'
         ])
           key: m[key],
+        if (m.containsKey('nativeBundle')) 'nativeBundle': m['nativeBundle'],
       };
   static String _jsonHash(Object value) =>
       sha256.convert(utf8.encode(jsonEncode(value))).toString();
@@ -366,7 +453,7 @@ class WorkCandidatePublisher {
     }
   }
 
-  static void _allowed(String name) {
+  static void validateDeliveryPath(String name) {
     final segments = name.toLowerCase().split('/');
     if (segments.any((s) =>
         const {
@@ -392,23 +479,51 @@ class WorkCandidatePublisher {
     }
   }
 
-  static Future<void> _checkSecrets(File file, String name) async {
+  static Future<void> checkDeliveredSecrets(File file, String name) async {
+    await checkDeliveredBytes(name, await file.readAsBytes());
+  }
+
+  static Future<void> checkDeliveredBytes(String name, List<int> bytes) async {
     if (name.toLowerCase().endsWith('.docx')) {
       final sections = BinaryDocumentParser.validateDocxForDelivery(
-          await file.readAsBytes());
+        Uint8List.fromList(bytes),
+      );
       if (sections.any((section) =>
           const SearchSecretScanner().containsSensitiveData(section.text))) {
         throw StateError('候选包含敏感信息，未发布。');
       }
       return;
     }
-    if (!RegExp(r'\.(txt|md|html?|json|ya?ml|js|ts|py|dart|css|sh|xml|csv)$',
+    if (!RegExp(
+            r'\.(txt|md|html?|json|ya?ml|js|ts|py|dart|css|sh|xml|plist|csv)$',
             caseSensitive: false)
         .hasMatch(name)) {
       return;
     }
-    if (const SearchSecretScanner()
-        .containsSensitiveData(await file.readAsString())) {
+    String text;
+    if (name.toLowerCase().endsWith('.plist') &&
+        bytes.length >= 8 &&
+        ascii.decode(bytes.sublist(0, 8), allowInvalid: true) == 'bplist00') {
+      if (!Platform.isMacOS || bytes.length > 8 * 1024 * 1024) {
+        throw StateError('二进制 plist 无法在当前环境安全扫描。');
+      }
+      final temp = await Directory.systemTemp.createTemp('chat-group-plist-');
+      try {
+        final source = File(p.join(temp.path, 'resource.plist'));
+        await source.writeAsBytes(bytes, flush: true);
+        final converted = await Process.run(
+            '/usr/bin/plutil', ['-convert', 'json', '-o', '-', source.path]);
+        if (converted.exitCode != 0 || converted.stdout is! String) {
+          throw StateError('二进制 plist 无法安全解析。');
+        }
+        text = converted.stdout as String;
+      } finally {
+        await temp.delete(recursive: true);
+      }
+    } else {
+      text = utf8.decode(bytes, allowMalformed: false);
+    }
+    if (const SearchSecretScanner().containsSensitiveData(text)) {
       throw StateError('候选包含敏感信息，未发布。');
     }
   }

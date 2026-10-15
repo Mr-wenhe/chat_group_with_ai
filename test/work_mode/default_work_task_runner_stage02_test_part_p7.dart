@@ -391,8 +391,12 @@ void _registerP7RunnerTests(Directory Function() hive,
         work.status = AgentTaskStatus.planning;
         await db.agentTaskBox.put(work.id, work);
         await coordinator.restore();
-        await coordinator
-            .restore(); // One startup dispatch, even on repeated reads.
+        await coordinator.restore();
+        expect(work.status, AgentTaskStatus.paused);
+        expect(work.resumeRequired, isTrue);
+        expect(gateway.actors, isEmpty);
+        expect(work.lastError, contains('自主策略'));
+        return; // Old v2 history cannot silently regain execution authority.
       } else {
         await coordinator.submit(work);
       }
@@ -454,6 +458,16 @@ void _registerP7RunnerTests(Directory Function() hive,
       }
       if (negative) {
         await _p7AssertBlocked(scenario, injected, work, db, root(), events());
+        return;
+      }
+      if (scenario == 'portable-import') {
+        final state =
+            WorkDiscussionState.fromExecutionState(work.executionStateJson)!
+                .collaboration!;
+        expect(work.status, AgentTaskStatus.paused);
+        expect(state.isAutonomous, isTrue);
+        expect(state.deliveryReady, isFalse);
+        expect(state.usageAssignments, isEmpty, reason: '旧脚本没有全员场景，不能冒充新策略通过');
         return;
       }
       expect(work.status, AgentTaskStatus.completed,

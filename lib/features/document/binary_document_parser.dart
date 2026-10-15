@@ -44,6 +44,183 @@ class BinaryDocumentParser {
         _ => throw const FormatException('不支持的二进制文档格式'),
       };
 
+  /// Declared DOCX fonts used by the renderer manifest. The same archive
+  /// preflight and bounded XML reader as document parsing protects this path.
+  static List<String> declaredDocxFonts(Uint8List bytes) {
+    final archive = _openOfficeArchive(bytes);
+    Set<String> readFonts(ArchiveFile file) {
+      final fonts = <String>{};
+      final xml = _xml(file);
+      for (final element in xml.descendants.whereType<XmlElement>()) {
+        if (element.name.local != 'rFonts') continue;
+        for (final attribute in element.attributes) {
+          if (!const {'ascii', 'hAnsi', 'eastAsia', 'cs'}
+              .contains(attribute.name.local)) {
+            continue;
+          }
+          final value = attribute.value.trim();
+          if (value.isNotEmpty &&
+              value.length <= 80 &&
+              !value.startsWith('+')) {
+            fonts.add(value);
+          }
+        }
+      }
+      return fonts;
+    }
+
+    final document = archive.find('word/document.xml');
+    final fonts = <String>{};
+    if (document != null) {
+      final documentXml = _xml(document);
+      fonts.addAll(readFonts(document));
+      final styleIds = <String>{};
+      final numberingFonts = <String>{};
+      final numberingFile = archive.find('word/numbering.xml');
+      if (numberingFile != null && _elements(documentXml, 'numPr').isNotEmpty) {
+        _collectUsedDocxNumberingFonts(
+          documentXml,
+          _xml(numberingFile),
+          numberingFonts,
+          styleIds,
+        );
+      }
+      final styles = archive.find('word/styles.xml');
+      if (styles != null) {
+        fonts.addAll(_referencedDocxStyleFonts(
+          documentXml,
+          _xml(styles),
+          additionalStyleIds: styleIds,
+        ));
+      }
+      fonts.addAll(numberingFonts);
+      return fonts.toList()..sort();
+    }
+
+    for (final file in archive.files.where((file) =>
+        file.isFile &&
+        file.name.startsWith('word/') &&
+        file.name.endsWith('.xml') &&
+        const {'word/styles.xml', 'word/numbering.xml'}.contains(file.name))) {
+      fonts.addAll(readFonts(file));
+    }
+    return fonts.toList()..sort();
+  }
+
+  static Set<String> _referencedDocxStyleFonts(
+    XmlDocument document,
+    XmlDocument styles, {
+    Set<String> additionalStyleIds = const {},
+  }) {
+    final byId = <String, XmlElement>{};
+    for (final style in _elements(styles, 'style')) {
+      final id = _localAttribute(style, 'styleId');
+      if (id != null) byId[id] = style;
+    }
+    final used = _elements(document, 'pStyle')
+        .followedBy(_elements(document, 'rStyle'))
+        .map((style) => _localAttribute(style, 'val'))
+        .whereType<String>()
+        .toSet()
+      ..addAll(additionalStyleIds);
+    final paragraphs = _elements(document, 'p').toList();
+    if (paragraphs.any((p) => _elements(p, 'pStyle').isEmpty)) {
+      final defaultParagraph = byId.values.where((style) =>
+          _localAttribute(style, 'type') == 'paragraph' &&
+          _localAttribute(style, 'default') == '1');
+      used.addAll(defaultParagraph
+          .map((style) => _localAttribute(style, 'styleId'))
+          .whereType<String>());
+    }
+    final fonts = <String>{};
+    final visited = <String>{};
+    void addStyle(String id) {
+      if (!visited.add(id)) return;
+      final style = byId[id];
+      if (style == null) return;
+      for (final element in _elements(style, 'rFonts')) {
+        fonts.addAll(_fontNames(element));
+      }
+      final basedOn = _elements(style, 'basedOn').firstOrNull;
+      final parent = basedOn == null ? null : _localAttribute(basedOn, 'val');
+      if (parent != null) addStyle(parent);
+    }
+
+    for (final id in used) {
+      addStyle(id);
+    }
+    return fonts;
+  }
+
+  static void _collectUsedDocxNumberingFonts(
+    XmlDocument document,
+    XmlDocument numbering,
+    Set<String> fonts,
+    Set<String> styleIds,
+  ) {
+    for (final numProperties in _elements(document, 'numPr')) {
+      final numId = _elements(numProperties, 'numId').firstOrNull;
+      final id = numId == null ? null : _localAttribute(numId, 'val');
+      final levelElement = _elements(numProperties, 'ilvl').firstOrNull;
+      final level =
+          levelElement == null ? '0' : _localAttribute(levelElement, 'val');
+      if (id == null || id == '0' || level == null) continue;
+      final num = _elements(numbering, 'num')
+          .where((element) => _localAttribute(element, 'numId') == id)
+          .firstOrNull;
+      final abstractIdElement =
+          num == null ? null : _elements(num, 'abstractNumId').firstOrNull;
+      final abstractId = abstractIdElement == null
+          ? null
+          : _localAttribute(abstractIdElement, 'val');
+      if (abstractId == null) continue;
+      final abstractNum = _elements(numbering, 'abstractNum')
+          .where((element) =>
+              _localAttribute(element, 'abstractNumId') == abstractId)
+          .firstOrNull;
+      if (abstractNum != null) {
+        final usedLevel = _elements(abstractNum, 'lvl')
+            .where((element) => _localAttribute(element, 'ilvl') == level)
+            .firstOrNull;
+        if (usedLevel != null) {
+          _collectNumberingLevel(usedLevel, fonts, styleIds);
+        }
+      }
+      if (num != null) {
+        for (final override in _elements(num, 'lvlOverride')
+            .where((element) => _localAttribute(element, 'ilvl') == level)) {
+          _collectNumberingLevel(override, fonts, styleIds);
+        }
+      }
+    }
+  }
+
+  static void _collectNumberingLevel(
+      XmlElement level, Set<String> fonts, Set<String> styleIds) {
+    for (final element in _elements(level, 'rFonts')) {
+      fonts.addAll(_fontNames(element));
+    }
+    styleIds.addAll(_elements(level, 'pStyle')
+        .map((element) => _localAttribute(element, 'val'))
+        .whereType<String>());
+  }
+
+  static Set<String> _fontNames(XmlElement element) => {
+        for (final attribute in element.attributes)
+          if (const {'ascii', 'hAnsi', 'eastAsia', 'cs'}
+              .contains(attribute.name.local))
+            if (attribute.value.trim().isNotEmpty &&
+                attribute.value.trim().length <= 80 &&
+                !attribute.value.trim().startsWith('+'))
+              attribute.value.trim()
+      };
+
+  static String? _localAttribute(XmlElement element, String name) =>
+      element.attributes
+          .where((attribute) => attribute.name.local == name)
+          .map((attribute) => attribute.value)
+          .firstOrNull;
+
   /// Validates the stronger contract required before a DOCX is delivered as
   /// a user-facing artifact. Ordinary document understanding intentionally
   /// keeps accepting older minimal fixtures, so this stricter entry point is

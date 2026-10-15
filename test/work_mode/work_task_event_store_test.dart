@@ -68,6 +68,65 @@ void main() {
     expect(replay.issues, isEmpty);
   });
 
+  test('current usage boundary is the persisted sequence for this run',
+      () async {
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    await store.append(
+      taskId: 'task-usage-boundary',
+      kind: WorkTaskEventKind.queued,
+      title: '初次排队',
+    );
+    await store.append(
+      taskId: 'task-usage-boundary',
+      kind: WorkTaskEventKind.queued,
+      title: '开始处理已排队的追问',
+    );
+    await store.append(
+      taskId: 'task-usage-boundary',
+      kind: WorkTaskEventKind.planning,
+      title: '当前运行段',
+    );
+
+    expect(
+      await WorkTaskRunBoundary.currentRunBoundaryId(
+        store,
+        'task-usage-boundary',
+      ),
+      2,
+    );
+    await store.close();
+  });
+
+  test('native app evidence is content addressed and removed with its task',
+      () async {
+    final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
+    final bytes = <int>[1, 2, 3, 4, 5];
+    final reference =
+        await store.writeNativeEvidence('native-task', 'xml', bytes);
+    final nativeFiles =
+        await Directory('${appSupportDirectory.path}/work_mode_agent/events')
+            .list(followLinks: false)
+            .toList();
+    expect(nativeFiles, hasLength(1));
+    expect(nativeFiles.single, isA<File>());
+    expect(nativeFiles.single.path.split(Platform.pathSeparator).last,
+        startsWith('native-task.native.${reference.substring(7, 31)}'));
+    expect(await store.readNativeEvidence('native-task', reference), bytes);
+
+    final file = File(
+        '${appSupportDirectory.path}/work_mode_agent/events/native-task.native.${reference.substring(7, 31)}.xml');
+    await file.writeAsBytes(<int>[9, 9]);
+    await expectLater(
+        store.readNativeEvidence('native-task', reference), throwsStateError);
+
+    final replacement =
+        await store.writeNativeEvidence('native-delete', 'xml', bytes);
+    await store.deleteEvents('native-delete');
+    await expectLater(store.readNativeEvidence('native-delete', replacement),
+        throwsStateError);
+    await store.close();
+  });
+
   test('serializes concurrent appends for the same task', () async {
     final store = WorkTaskEventStore(appSupportDirectory: appSupportDirectory);
 

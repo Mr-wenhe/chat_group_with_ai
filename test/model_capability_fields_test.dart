@@ -75,6 +75,7 @@ void main() {
         modelCapabilityPersistAction(
           restoreBuiltin: restoreBuiltin,
           declared: declared,
+          stored: stored,
           registry: registry,
           provider: provider,
           modelId: modelId,
@@ -105,7 +106,7 @@ void main() {
       );
     });
 
-    test('字段与生效值一致时不写', () {
+    test('已登记模型：字段与生效值一致时不写', () {
       final effective = effectiveOf(ApiProvider.deepseek, 'deepseek-chat');
       expect(
         actionFor(
@@ -124,15 +125,54 @@ void main() {
       );
     });
 
-    test('改动了生效值就写', () {
-      // 未知模型：保守降级为不支持工具，开启工具会真的改变生效值。
+    test('未登记模型：草稿与兜底值一致也要落盘', () {
+      // 兜底值只是默认、不是任何人做过的决定。不写就等于用户看着流式/工具开着、
+      // 落盘却一份声明都没有——这正是「新建配置后两个开关没同步进配置」的成因。
       expect(
         actionFor(
           restoreBuiltin: false,
           declared: const CustomModelCapability(
+            supportsStreaming: true,
             supportsTools: true,
             contextWindow: 8192,
             maxOutput: 2048,
+          ),
+          provider: ApiProvider.custom,
+          modelId: 'my-llm',
+        ),
+        ModelCapabilityPersistAction.save,
+      );
+    });
+
+    test('未登记模型已有声明时，草稿没改动就不重写', () {
+      const stored = CustomModelCapability(
+        supportsStreaming: true,
+        supportsTools: true,
+        contextWindow: 8192,
+        maxOutput: 2048,
+      );
+      expect(
+        actionFor(
+          restoreBuiltin: false,
+          declared: stored,
+          stored: stored,
+          provider: ApiProvider.custom,
+          modelId: 'my-llm',
+        ),
+        ModelCapabilityPersistAction.keep,
+      );
+    });
+
+    test('改动生效值就写', () {
+      // 未登记模型的兜底是 8192/2048，声明一个更大的窗口会真的改变生效值。
+      expect(
+        actionFor(
+          restoreBuiltin: false,
+          declared: const CustomModelCapability(
+            supportsStreaming: true,
+            supportsTools: true,
+            contextWindow: 32000,
+            maxOutput: 4000,
           ),
           provider: ApiProvider.custom,
           modelId: 'my-llm',

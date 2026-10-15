@@ -304,18 +304,30 @@ WorkAgentLoop _loop({
 }
 
 void main() {
-
   test('REREVIEW2 whitespace-sensitive distinct HTML files complete', () async {
-    final model=_FakeModel();
-    for (var i=1;i<=6;i++) {
-      model.responses.add(_toolDecision(name:AgentToolName.workspacePatch,arguments:{'path':'spacing_$i.html','content':'<!DOCTYPE html><html><body><pre>A${List.filled(i," ").join()}B</pre></body></html>'}));
+    final model = _FakeModel();
+    for (var i = 1; i <= 6; i++) {
+      model.responses
+          .add(_toolDecision(name: AgentToolName.workspacePatch, arguments: {
+        'path': 'spacing_$i.html',
+        'content':
+            '<!DOCTYPE html><html><body><pre>A${List.filled(i, " ").join()}B</pre></body></html>'
+      }));
     }
     model.responses.add(_finishDecision());
-    final tool=_FakeTool()..behavior=(invocation)=>WorkToolResult.success(message:'文件已写入。',data:{'path':invocation.arguments['path'],'changed':true});
-    final task=_task(id:'rereview2-significant-whitespace')..userRequest='创建六个 HTML 页面，用 pre 分别演示一个至六个空格的显示效果';
-    final result=await _loop(model:model,registry:WorkToolRegistry(definitions:[_patchDefinition(tool)])).execute(task);
-    expect(result.status,WorkAgentLoopStatus.completed,reason:'${task.lastError}; 实际工具调用 ${tool.calls} 次');
-    expect(tool.calls,6);
+    final tool = _FakeTool()
+      ..behavior = (invocation) => WorkToolResult.success(
+          message: '文件已写入。',
+          data: {'path': invocation.arguments['path'], 'changed': true});
+    final task = _task(id: 'rereview2-significant-whitespace')
+      ..userRequest = '创建六个 HTML 页面，用 pre 分别演示一个至六个空格的显示效果';
+    final result = await _loop(
+            model: model,
+            registry: WorkToolRegistry(definitions: [_patchDefinition(tool)]))
+        .execute(task);
+    expect(result.status, WorkAgentLoopStatus.completed,
+        reason: '${task.lastError}; 实际工具调用 ${tool.calls} 次');
+    expect(tool.calls, 6);
   });
 
   test('six independent new files complete without a rebuild pause', () async {
@@ -3837,6 +3849,36 @@ void main() {
     expect(task.executionStateJson, isNot(contains('PRIVATE_FILE_BODY_')));
     expect(task.resultSummary, isNot(contains('PRIVATE_FILE_BODY_')));
     expect(task.contextSummary, contains('读取完成'));
+  });
+
+  test('runtime sessionRef reaches the live model but not its checkpoint',
+      () async {
+    const sessionRef = 'native:0123456789abcdef01234567';
+    final model = _FakeModel()
+      ..responses.add(_toolDecision())
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.success(
+            message: '目标窗口已打开。',
+            data: {'sessionRef': sessionRef},
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(
+        definitions: [_definition(AgentToolName.workspaceRead, tool)],
+      ),
+    );
+    final task = _task(id: 'session-ref-ephemeral');
+
+    await loop.execute(task);
+
+    expect(model.requests, hasLength(2));
+    expect(
+      jsonEncode(model.requests[1].context['recentToolResults']),
+      contains(sessionRef),
+    );
+    expect(task.contextSummary, isNot(contains(sessionRef)));
+    expect(task.executionStateJson, isNot(contains(sessionRef)));
   });
 
   test('checkpoint keeps a validated structured command approval plan',

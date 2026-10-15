@@ -8,6 +8,8 @@ import 'work_task_execution_policy.dart';
 import 'package:chat_group/features/memory/memory_context_selector.dart';
 import 'work_mode_memory_runner.dart';
 import 'work_collaboration_state.dart';
+import 'work_usage_receipt.dart';
+import 'work_usage_feedback.dart';
 
 import 'package:archive/archive_io.dart';
 import 'package:chat_group/features/document/document_understanding_service.dart';
@@ -16,6 +18,7 @@ import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/models/api_protocol.dart';
 import 'package:chat_group/core/models/character_skill.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
@@ -28,6 +31,8 @@ import 'package:chat_group/features/agentic/character_skill_resolver.dart';
 import 'package:chat_group/features/agentic/context_window_manager.dart';
 import 'package:chat_group/features/agentic/expert_skill_catalog.dart';
 import 'package:chat_group/features/agentic/skill_download_service.dart';
+import 'package:chat_group/features/agentic/github_skill_service.dart';
+import 'package:chat_group/features/agentic/skill_resource_pack_store.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
@@ -49,6 +54,8 @@ import 'work_discussion_investigation.dart';
 import 'package:chat_group/features/work_mode/work_folder_grant_service.dart';
 import 'package:chat_group/features/work_mode/work_handoff_state.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
+import 'package:chat_group/features/work_mode/macos_native_app_automation.dart';
+import 'package:chat_group/features/work_mode/macos_app_bundle_archive.dart';
 import 'package:chat_group/features/work_mode/work_mode_directory_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_workspace_service.dart';
 import 'package:chat_group/features/work_mode/work_model_deadline.dart';
@@ -60,6 +67,7 @@ import 'package:chat_group/features/work_mode/work_role_router.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
+import 'package:chat_group/features/work_mode/work_task_run_boundary.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/features/work_mode/work_tool_registry.dart';
 import 'package:chat_group/features/work_mode/work_model_progress_throttle.dart';
@@ -85,6 +93,7 @@ part 'default_work_task_runner_production.dart';
 part 'default_work_task_runner_recovery.dart';
 part 'default_work_task_runner_production_delivery.dart';
 part 'default_work_task_runner_review.dart';
+part 'default_work_task_runner_usage.dart';
 part 'default_work_task_runner_attachments.dart';
 
 /// App-scoped adapter between durable work tasks and the one production loop.
@@ -188,6 +197,7 @@ class DefaultWorkTaskRunner
   final WorkspaceFileService? workspaceFileService;
   final WorkspaceMutationService? mutationService;
   final WorkResourceLockManager? resourceLockManager;
+  final MacNativeAppAutomation? nativeAppAutomation;
   final WorkCommandRunner? commandRunner;
 
   /// Resolves explicit desktop destinations before the workspace service is
@@ -206,6 +216,11 @@ class DefaultWorkTaskRunner
   /// successful delivery. Tests can leave this disabled to avoid UI side
   /// effects; the production provider enables it.
   final bool autoOpenHtml;
+
+  late final GitHubSkillService _githubSkillService =
+      GitHubSkillService(database: database);
+  late final SkillResourcePackStore _skillResourcePackStore =
+      SkillResourcePackStore.forDatabase(database);
 
   /// 一次模型请求的**总**时限：它管的是"这一轮请求的整体耗时"。
   final Duration modelCompletionTimeout;
@@ -243,6 +258,7 @@ class DefaultWorkTaskRunner
   void Function(AgentTask task)? _taskUpdateSink;
   Future<void> Function(AgentTask task)? _taskCheckpointSink;
   final Set<String> _coordinatorDeliveryTasks = {};
+  final Map<String, Map<String, String>> _presentedLocalDrafts = {};
 
   /// The full request is retained only while this process is waiting for a
   /// user decision. Durable task fields contain the redacted checkpoint.
@@ -263,6 +279,7 @@ class DefaultWorkTaskRunner
     this.workspaceFileService,
     this.mutationService,
     this.resourceLockManager,
+    this.nativeAppAutomation,
     this.commandRunner,
     this.directoryService = const WorkModeDirectoryService(),
     this.weatherForecastService,

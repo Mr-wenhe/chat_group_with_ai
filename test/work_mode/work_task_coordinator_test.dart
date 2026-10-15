@@ -647,6 +647,12 @@ class _CountingV2DiscussionRunner
   }
 }
 
+class _RecoverableFakeWorkTaskRunner extends _FakeWorkTaskRunner
+    implements WorkTaskRecoveryValidator {
+  @override
+  Future<String?> validateRecovery(AgentTask task) async => null;
+}
+
 void main() {
   late Directory directory;
   late Box<AgentTask> taskBox;
@@ -1603,7 +1609,9 @@ void main() {
       task.id,
       (value) =>
           _autoResumeCountOf(value) == 2 &&
-          value.status == AgentTaskStatus.failed,
+          value.status == AgentTaskStatus.failed &&
+          value.resumeRequired &&
+          runner.startedTaskIds.where((id) => id == task.id).length == 3,
     );
 
     expect(task.status, AgentTaskStatus.failed);
@@ -2789,6 +2797,68 @@ void main() {
     await _waitForStartedCount(runner, 1);
     expect(runner.startedTaskIds, ['approval-successor']);
     runner.complete(successor.id);
+  });
+
+  test(
+      'deferred discussion remains paused across restart until explicit resume',
+      () async {
+    await coordinator.dispose();
+    final recoveryRunner = _RecoverableFakeWorkTaskRunner();
+    final discussionRunner = _CountingV2DiscussionRunner();
+    coordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: recoveryRunner,
+      discussionRunner: discussionRunner,
+      installerIsMacOS: true,
+    );
+    final task = _task(
+      id: 'deferred-discussion-restart',
+      conversationId: 'group-deferred-discussion',
+    )..status = AgentTaskStatus.paused;
+    final discussion = _v2PendingDiscussionTask(
+      task.id,
+      conversationId: task.groupId,
+    );
+    var state = WorkDiscussionState.fromExecutionState(
+      discussion.executionStateJson,
+    )!;
+    final collaborationJson = state.collaboration!.toJson()
+      ..['autonomyPolicy'] = {
+        'schemaVersion': 1,
+        'mode': 'coordinator',
+        'source': 'application',
+        'participantIds': ['worker'],
+      }
+      ..['usageAssignments'] = <Map<String, dynamic>>[]
+      ..['usageEvidenceRefs'] = <Map<String, dynamic>>[]
+      ..['coordinatorDecisions'] = <Map<String, dynamic>>[];
+    final collaboration = WorkCollaborationState.tryParse(collaborationJson)!;
+    state = state.copyWith(collaboration: collaboration);
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+      task.executionStateJson,
+      state,
+    );
+    await taskBox.put(task.id, task);
+    await coordinator.deferUserAction(task.id);
+
+    await coordinator.dispose();
+    coordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: recoveryRunner,
+      discussionRunner: discussionRunner,
+      installerIsMacOS: true,
+    );
+    await coordinator.restore();
+    await _drainEventLoop();
+
+    expect(discussionRunner.calls, 0);
+    expect(taskBox.get(task.id)?.status, AgentTaskStatus.paused);
+    expect(taskBox.get(task.id)?.resumeRequired, isTrue);
+
+    await coordinator.resumeByUser(task.id);
+    await _waitUntil(() => discussionRunner.calls == 1);
   });
 
   test('cancelled discussion ignores a late ready transition', () async {
@@ -6301,8 +6371,8 @@ void main() {
 
     await expectLater(
       coordinator.confirmExecutorSwap(task.id, version: version, swap: true),
-      throwsA(isA<StateError>().having((e) => e.message, 'message',
-          contains('不能通过旧讨论入口重建'))),
+      throwsA(isA<StateError>()
+          .having((e) => e.message, 'message', contains('不能通过旧讨论入口重建'))),
     );
     await _settle();
 

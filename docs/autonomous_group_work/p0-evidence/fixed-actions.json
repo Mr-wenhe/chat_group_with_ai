@@ -1,0 +1,181 @@
+[
+  {
+    "method": "GET",
+    "path": "/source",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-window"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/element/EC4552B0-511D-4C29-84AF-F01C94AFEEDF/screenshot",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-note"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/element/B7288713-21FC-4615-BCDA-189ADDA5B9FF/click",
+    "body": {}
+  },
+  {
+    "method": "POST",
+    "path": "/element/B7288713-21FC-4615-BCDA-189ADDA5B9FF/clear",
+    "body": {}
+  },
+  {
+    "method": "POST",
+    "path": "/element/B7288713-21FC-4615-BCDA-189ADDA5B9FF/value",
+    "body": {
+      "text": "P0-fixed-重启核对"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-save"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/element/CDFD659B-BF31-48E5-B618-1AE44FF2AF9A/click",
+    "body": {}
+  },
+  {
+    "method": "GET",
+    "path": "/source",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-window"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/element/198E61A6-34F5-4C6F-A607-936C974A5C89/screenshot",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/execute/sync",
+    "body": {
+      "script": "macos: terminateApp",
+      "args": [
+        {
+          "bundleId": "com.chatgroup.p0.sample"
+        }
+      ]
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/execute/sync",
+    "body": {
+      "script": "macos: launchApp",
+      "args": [
+        {
+          "bundleId": "com.chatgroup.p0.sample",
+          "path": "/Volumes/new_disk/work/flutter/chat_group/chat_group/build/p0_macos/fixed/P0Sample.app",
+          "environment": {
+            "P0_DATA_DIR": "/Volumes/new_disk/work/flutter/chat_group/chat_group/build/p0_macos/data"
+          }
+        }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/source",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-window"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/element/8B7BDEDB-D622-49C1-A8EE-53D3DB40A708/screenshot",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/execute/sync",
+    "body": {
+      "script": "macos: clickAndDrag",
+      "args": [
+        {
+          "duration": 1,
+          "startX": 1239.0,
+          "startY": 535.0,
+          "endX": 1339.0,
+          "endY": 615.0
+        }
+      ]
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/source",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-window"
+    }
+  },
+  {
+    "method": "GET",
+    "path": "/element/88D50460-1197-46F3-8090-2B185E831BC2/screenshot",
+    "body": null
+  },
+  {
+    "method": "POST",
+    "path": "/element",
+    "body": {
+      "using": "accessibility id",
+      "value": "p0-save"
+    }
+  },
+  {
+    "method": "POST",
+    "path": "/execute/sync",
+    "body": {
+      "script": "macos: terminateApp",
+      "args": [
+        {
+          "bundleId": "com.chatgroup.p0.sample"
+        }
+      ]
+    }
+  },
+  {
+    "method": "DELETE",
+    "path": "",
+    "body": null
+  }
+]

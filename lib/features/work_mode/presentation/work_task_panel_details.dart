@@ -12,6 +12,9 @@ class _TaskDetails extends StatefulWidget {
   /// 默认关闭时面板只剩任务标签、执行动态与底部操作按钮，上半区整块不挂载；
   /// 代码保留在这里，传 true 即可整块恢复。见 [WorkTaskPanel.showTaskSummarySection]。
   final bool showSummarySection;
+  final List<UsageLedgerEntry> usageEntries;
+  final List<AiRequestDiagnostic> usageDiagnostics;
+  final bool usageUnavailable;
 
   final String Function(String characterId)? characterNameFor;
   final WorkTaskEventStream eventStreamFor;
@@ -24,6 +27,9 @@ class _TaskDetails extends StatefulWidget {
     required this.toolName,
     required this.actionError,
     required this.showSummarySection,
+    required this.usageEntries,
+    required this.usageDiagnostics,
+    required this.usageUnavailable,
     required this.characterNameFor,
     required this.eventStreamFor,
     required this.onLatestEvent,
@@ -107,6 +113,125 @@ class _TaskDetailsState extends State<_TaskDetails> {
     return approval['approved'] == true ? '同意' : '异议';
   }
 
+  List<UsageLedgerEntry> get _taskUsageEntries => widget.usageEntries
+      .where((entry) => entry.taskId == widget.task.id)
+      .toList(growable: false);
+
+  List<AiRequestDiagnostic> get _taskUsageDiagnostics => widget.usageDiagnostics
+      .where((entry) => entry.taskId == widget.task.id)
+      .toList(growable: false);
+
+  String _taskUsageLabel(List<UsageLedgerEntry> entries) {
+    final tokens = entries.fold<int>(
+      0,
+      (total, entry) => total + entry.inputTokens + entry.outputTokens,
+    );
+    return '用量 $tokens Token';
+  }
+
+  Future<void> _showTaskUsageDetails() {
+    final entries = _taskUsageEntries;
+    final diagnostics = _taskUsageDiagnostics;
+    final requestIds = entries.map((entry) => entry.requestId).toSet();
+    final unrepresentedDiagnostics = diagnostics
+        .where((item) => !requestIds.contains(item.requestId))
+        .toList(growable: false);
+    final unknownUsage = unrepresentedDiagnostics
+        .where((item) =>
+            item.inputTokens == null ||
+            item.outputTokens == null ||
+            item.exactUsage == null)
+        .length;
+    final estimatedUsage = entries.where((entry) => !entry.exactUsage).length;
+    final unknownPrices = entries
+        .where((entry) =>
+            entry.estimatedCostMicros == null || entry.currency == null)
+        .length;
+    final total = UsageTotals();
+    for (final entry in entries) {
+      total.add(entry);
+    }
+    final byRunAndMember = <(int?, String), UsageTotals>{};
+    for (final entry in entries) {
+      final key = (entry.runBoundary, entry.characterId);
+      byRunAndMember.putIfAbsent(key, UsageTotals.new).add(entry);
+    }
+    final details = byRunAndMember.entries.toList()
+      ..sort((left, right) {
+        final run = (left.key.$1 ?? 0).compareTo(right.key.$1 ?? 0);
+        return run != 0 ? run : left.key.$2.compareTo(right.key.$2);
+      });
+    final costs = total.costMicrosByCurrency.entries
+        .map((item) => '${item.key} ${MoneyMicros.display(item.value)}')
+        .join(' · ');
+    return showDialog<void>(
+      context: context,
+      builder: (context) => AlertDialog(
+        title: const Text('当前任务用量'),
+        content: SizedBox(
+          width: 460,
+          child: SingleChildScrollView(
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                if (widget.usageUnavailable)
+                  const Text('当前设备账本不可用，未显示估算总量。')
+                else if (entries.isEmpty)
+                  const Text('没有带当前 taskId 的用量记录；旧记录不会按会话推断归属。')
+                else ...[
+                  Text(
+                    '输入 ${total.inputTokens} Token（缓存 ${total.cachedInputTokens}，已包含在输入中）'
+                    ' · 输出 ${total.outputTokens} Token · ${total.requestCount} 次记录',
+                  ),
+                  const SizedBox(height: 8),
+                  Text(costs.isEmpty ? '费用未知或无可计价记录' : costs),
+                  const SizedBox(height: 4),
+                  Text(
+                    '估算用量 $estimatedUsage · 未知用量 $unknownUsage · 价格未知 $unknownPrices',
+                  ),
+                  if (details.isNotEmpty)
+                    ExpansionTile(
+                      key: const Key('work-task-usage-breakdown'),
+                      tilePadding: EdgeInsets.zero,
+                      title: const Text('按运行段和成员展开'),
+                      children: [
+                        for (final item in details)
+                          ListTile(
+                            dense: true,
+                            title: Text(
+                              '运行段 ${item.key.$1 ?? '未知'} · '
+                              '${widget.characterNameFor?.call(item.key.$2) ?? item.key.$2}',
+                            ),
+                            subtitle: Text(
+                              '输入 ${item.value.inputTokens}（缓存 ${item.value.cachedInputTokens}）'
+                              ' · 输出 ${item.value.outputTokens} · '
+                              '${item.value.requestCount} 次 · '
+                              '${item.value.costMicrosByCurrency.entries.map((cost) => '${cost.key} ${MoneyMicros.display(cost.value)}').join(' · ')}',
+                            ),
+                          ),
+                      ],
+                    ),
+                ],
+                if (unrepresentedDiagnostics.isNotEmpty &&
+                    unknownUsage == 0) ...[
+                  const SizedBox(height: 8),
+                  Text('另有 ${unrepresentedDiagnostics.length} 条未计入账本的请求诊断。'),
+                ],
+              ],
+            ),
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('关闭'),
+          ),
+        ],
+      ),
+    );
+  }
+
   @override
   void didUpdateWidget(covariant _TaskDetails oldWidget) {
     super.didUpdateWidget(oldWidget);
@@ -147,15 +272,27 @@ class _TaskDetailsState extends State<_TaskDetails> {
     final discussionExecutorName = discussionState?.executorId == null
         ? null
         : widget.characterNameFor?.call(discussionState!.executorId!).trim();
-    final executorLabel = characterName?.isNotEmpty == true
-        ? characterName!
-        : discussionExecutorName?.isNotEmpty == true
-            ? discussionExecutorName!
-            : discussionState != null
-                ? '待群内推举'
-                : widget.task.characterId.trim().isEmpty
-                    ? '待确定'
-                    : widget.task.characterId;
+    final autonomous = discussionState?.collaboration?.isAutonomous == true;
+    final plannedMakerId = discussionState?.collaboration?.workItems
+        .where((i) => i['kind'] != 'material')
+        .firstOrNull?['ownerId'] as String?;
+    final makerId = autonomous
+        ? plannedMakerId ?? discussionState?.executorId
+        : discussionState?.executorId ?? plannedMakerId;
+    final makerLabel = makerId == null
+        ? '待群内定案'
+        : widget.characterNameFor?.call(makerId) ?? makerId;
+    final executorLabel = autonomous
+        ? makerLabel
+        : characterName?.isNotEmpty == true
+            ? characterName!
+            : discussionExecutorName?.isNotEmpty == true
+                ? discussionExecutorName!
+                : discussionState != null
+                    ? '待群内推举'
+                    : widget.task.characterId.trim().isEmpty
+                        ? '待确定'
+                        : widget.task.characterId;
     final colors = Theme.of(context).colorScheme;
     final hintStyle = TextStyle(fontSize: 11, color: colors.onSurfaceVariant);
     // 进度条必须始终拿到确定值：value 为 null 时 LinearProgressIndicator 会
@@ -250,6 +387,17 @@ class _TaskDetailsState extends State<_TaskDetails> {
                               discussionState!.collaboration!.plan)),
                           Text(
                               '阶段：${discussionState.collaboration!.phase} · 当前成员：${widget.characterNameFor?.call(widget.task.characterId) ?? widget.task.characterId}'),
+                          if (autonomous) ...[
+                            Text('制作执行者：$makerLabel'),
+                            for (final assignment in discussionState
+                                .collaboration!.usageAssignments)
+                              Text(WorkPublicUpdateStream.sanitize(
+                                  '使用场景 ${widget.characterNameFor?.call(assignment['memberId'] as String) ?? assignment['memberId']}：${assignment['goal']} · ${discussionState.collaboration!.currentUsageFor(assignment['memberId'] as String) == null ? '待实际使用' : '已记录本轮反馈'}')),
+                            for (final ruling in discussionState
+                                .collaboration!.currentCoordinatorDecisions)
+                              SelectableText(WorkPublicUpdateStream.sanitize(
+                                  '协调定案：${ruling['reason']}')),
+                          ],
                           for (final iteration
                               in discussionState.collaboration!.iterations)
                             SelectableText(
@@ -344,7 +492,8 @@ class _TaskDetailsState extends State<_TaskDetails> {
                             child: Column(
                               crossAxisAlignment: CrossAxisAlignment.start,
                               children: <Widget>[
-                                Text('执行角色：$executorLabel'),
+                                Text(
+                                    '${autonomous ? '制作执行者' : '执行角色'}：$executorLabel'),
                                 if (discussionState != null &&
                                     hasCumulativeLimit) ...<Widget>[
                                   const SizedBox(height: 4),
@@ -526,6 +675,16 @@ class _TaskDetailsState extends State<_TaskDetails> {
                           style: Theme.of(context).textTheme.titleSmall,
                         ),
                       ),
+                      if (_taskUsageEntries.isNotEmpty ||
+                          _taskUsageDiagnostics.isNotEmpty ||
+                          widget.usageUnavailable)
+                        TextButton(
+                          key: const Key('work-task-usage-details'),
+                          onPressed: _showTaskUsageDetails,
+                          child: Text(widget.usageUnavailable
+                              ? '用量不可用'
+                              : _taskUsageLabel(_taskUsageEntries)),
+                        ),
                       _PanelToggleButton(
                         toggleKey: const Key('work-task-timeline-toggle'),
                         expanded: _timelineExpanded,

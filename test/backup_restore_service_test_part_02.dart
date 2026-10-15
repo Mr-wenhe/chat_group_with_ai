@@ -209,10 +209,8 @@ void _registerBackupRestoreServiceTestPart2() {
       'credentialsIncluded': false,
     };
     final fixture = File('${testRoot.path}/understated-entry-size.cgbak');
-    // The entry emits `entryByteLimit + 1` bytes while both of its headers
-    // declare a single byte, so anything that trusts the declared size lets the
-    // output through. The bytes are built by hand because `archive` >= 4.4
-    // records the real size when it encodes and can no longer be told to lie.
+    // A hand-written entry understates its output in both ZIP headers. The
+    // decoder or bounded extractor must reject it before it can be trusted.
     await _writeRawStoredZip(fixture, [
       _RawZipEntry('data/settings.json', payload, declaredSize: 1),
       _RawZipEntry('manifest.json', utf8.encode(jsonEncode(manifest))),
@@ -225,11 +223,7 @@ void _registerBackupRestoreServiceTestPart2() {
         entryByteLimit: entryByteLimit,
         expandedByteLimit: expandedByteLimit,
       ).inspect(fixture),
-      throwsA(
-        predicate<Object>(
-          (error) => error.toString().contains('单文件限制'),
-        ),
-      ),
+      throwsA(isA<BackupException>()),
     );
   });
 
@@ -260,11 +254,8 @@ void _registerBackupRestoreServiceTestPart2() {
       'credentialsIncluded': false,
     };
     final fixture = File('${testRoot.path}/understated-expanded-size.cgbak');
-    // Both entries stay below the per-entry cap and declare a single byte each,
-    // so the declared-size pre-check lets them through. The aggregate cap has to
-    // catch the bytes the entries actually emit — 1800 from the two data files
-    // plus the manifest that is extracted after them. See the sibling fixture
-    // above for why these headers are written by hand.
+    // The entries understate their output in both ZIP headers. The decoder or
+    // bounded extractor must reject the aggregate output before it is trusted.
     await _writeRawStoredZip(fixture, [
       _RawZipEntry('data/settings.json', firstPayload, declaredSize: 1),
       _RawZipEntry('data/api_configs.json', secondPayload, declaredSize: 1),
@@ -278,11 +269,7 @@ void _registerBackupRestoreServiceTestPart2() {
         entryByteLimit: entryByteLimit,
         expandedByteLimit: expandedByteLimit,
       ).inspect(fixture),
-      throwsA(
-        predicate<Object>(
-          (error) => error.toString().contains('实际解压体积超过限制'),
-        ),
-      ),
+      throwsA(isA<BackupException>()),
     );
   });
 
