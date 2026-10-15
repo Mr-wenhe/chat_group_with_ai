@@ -1,3 +1,4 @@
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/features/work_mode/work_task_decision.dart';
 import 'package:flutter/material.dart';
 
@@ -14,11 +15,15 @@ class WorkTaskDecisionDialog extends StatefulWidget {
   final WorkDecisionReply onReply;
   final ValueChanged<WorkTaskDecision>? onDecisionShown;
 
+  /// 反显期实体 id → 人话标签；null 表示不提供（文案原样显示 id）。
+  final EntityLabels? entityLabels;
+
   const WorkTaskDecisionDialog({
     super.key,
     required this.decisions,
     required this.onReply,
     this.onDecisionShown,
+    this.entityLabels,
   });
 
   @override
@@ -95,11 +100,14 @@ class _WorkTaskDecisionDialogState extends State<WorkTaskDecisionDialog> {
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              Text(decision.reason,
+              Text(
+                  widget.entityLabels?.humanize(decision.reason) ??
+                      decision.reason,
                   key: const Key('work-task-decision-reason')),
               if (decision.evidence.isNotEmpty) ...[
                 const SizedBox(height: 8),
-                Text('依据：${decision.evidence}'),
+                Text(
+                    '依据：${widget.entityLabels?.humanize(decision.evidence) ?? decision.evidence}'),
               ],
               if (decision.impact.isNotEmpty) ...[
                 const SizedBox(height: 8),

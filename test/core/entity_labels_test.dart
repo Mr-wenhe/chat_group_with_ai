@@ -71,4 +71,18 @@ void main() {
     expect(looksLikeUuid('成员 $_memberId 发言'), isFalse);
     expect(looksLikeUuid('产品经理'), isFalse);
   });
+
+  test('withResolver 追加一族领域解析器，且不动原有解析结果', () {
+    final labels = EntityLabels.fixed(const {_memberId: '产品经理'});
+    final merged = labels.withResolver(
+      (id) => id == _taskId ? '第 1 轮候选' : null,
+    );
+
+    expect(
+      merged.humanize('$_memberId 的 $_taskId 已冻结'),
+      '产品经理 的 第 1 轮候选 已冻结',
+    );
+    // 原实例不受影响（withResolver 返回新实例，不改前者）。
+    expect(labels.humanize('$_memberId 的 $_taskId 已冻结'), '产品经理 的 未知对象（ab12cd34） 已冻结');
+  });
 }

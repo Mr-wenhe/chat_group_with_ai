@@ -5,6 +5,7 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/api_config.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/core/models/api_provider.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
@@ -63,6 +64,11 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
   final Future<void> Function(String taskId)? onOpenInTabStrip;
   final WorkTaskUndoPreview? undoPreviewFor;
   final WorkSnapshotService? snapshotService;
+
+  /// 反显期实体 id → 人话标签；测试或嵌入场景可注入自己的解析器。
+  final EntityLabels? entityLabels;
+
+  /// 仅测试/嵌入用的角色名解析器：不提供 [entityLabels] 时按它装配。
   final String Function(String characterId)? characterNameFor;
 
   /// 是否渲染面板上半区（「任务详情」开关、任务需求 / 运行状态 / 执行细节三张卡、
@@ -97,6 +103,7 @@ class WorkTaskOverlayHost extends ConsumerStatefulWidget {
     this.onOpenInTabStrip,
     this.undoPreviewFor,
     this.snapshotService,
+    this.entityLabels,
     this.characterNameFor,
     this.showTaskSummarySection = false,
   });
@@ -424,7 +431,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
               // 把历史里的任务放回标签栏是纯展示动作，不依赖协调器。
               onOpenInTabStrip: widget.onOpenInTabStrip ?? _openTask,
               onOpenConversation: _openConversation,
-              characterNameFor: widget.characterNameFor ?? _characterName,
+              entityLabels: _resolveEntityLabels(),
               onModalVisibilityChanged: _setPanelModalVisibility,
               dialogContext: widget.navigatorKey?.currentContext,
               onCollapse: () => setState(() => _isCollapsed = true),
@@ -990,6 +997,7 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         context: widget.navigatorKey?.currentContext ?? context,
         builder: (_) => WorkTaskDecisionDialog(
           decisions: decisions,
+          entityLabels: _resolveEntityLabels(),
           onDecisionShown: shownDecisions.add,
           onReply: (decision, answer, {choiceId, disposition = 'answer'}) =>
               coordinator.respondToDecision(
@@ -1423,13 +1431,21 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
     return slash < 0 ? normalized : normalized.substring(slash + 1);
   }
 
-  String _characterName(String characterId) {
+  /// 面板用的实体标签：注入的优先，其次测试传入的角色名解析器，最后读库。
+  ///
+  /// 读库失败（嵌入式/widget 测试没开 Hive）时返回 null —— 面板按「不提供标签」
+  /// 原样显示，而不是把未经解析的文本压成短码。
+  EntityLabels? _resolveEntityLabels() {
+    final injected = widget.entityLabels;
+    if (injected != null) return injected;
+    final names = widget.characterNameFor;
+    if (names != null) {
+      return EntityLabels(resolvers: <EntityIdResolver>[names]);
+    }
     try {
-      final database = ref.read(databaseServiceProvider);
-      return database.aiCharacterBox.get(characterId)?.name ?? characterId;
+      return EntityLabels.from(ref.read(databaseServiceProvider));
     } on Object {
-      // Embedded/widget tests may provide a task stream without opening Hive.
-      return characterId;
+      return null;
     }
   }
 

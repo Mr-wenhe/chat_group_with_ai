@@ -31,8 +31,8 @@ class _TaskActions extends StatelessWidget {
   /// 确认把本次运行写出的文件当作交付物；只在门禁已经问过、还在等回答时出现。
   final WorkTaskAction? onConfirmArtifactDelivery;
 
-  /// 把角色 id 显示成名字；执行人冲突的确认框必须让用户看清是"哪两个人"。
-  final String Function(String characterId)? characterNameFor;
+  /// 反显期实体 id → 人话标签；执行人冲突的确认框必须让用户看清是"哪两个人"。
+  final EntityLabels? entityLabels;
 
   final WorkTaskAction onStop;
   final WorkTaskAction onContinue;
@@ -73,7 +73,7 @@ class _TaskActions extends StatelessWidget {
     this.onConfirmExecutorSwap,
     this.onSelectExecutor,
     this.onConfirmArtifactDelivery,
-    this.characterNameFor,
+    this.entityLabels,
     required this.onStop,
     required this.onContinue,
     this.onContinueWithoutFollowUps,
@@ -194,7 +194,7 @@ class _TaskActions extends StatelessWidget {
           const SizedBox(height: 4),
           _ExecutorCandidateButtons(
             candidateIds: executorCandidates,
-            characterNameFor: characterNameFor,
+            entityLabels: entityLabels,
             enabled: !actionInFlight,
             onSubmit: (characterId) => runAction(
               (_) => onSelectExecutor!(task.id, characterId),
@@ -216,6 +216,7 @@ class _TaskActions extends StatelessWidget {
             focusNode: replyFocusNode,
             actionInFlight: actionInFlight,
             actionError: actionError,
+            entityLabels: entityLabels,
             onSubmit: (reply) async {
               final replyAction = onReply;
               if (replyAction == null) return;

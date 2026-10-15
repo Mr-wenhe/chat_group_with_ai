@@ -5,10 +5,14 @@ class _EventStreamError extends StatelessWidget {
   final VoidCallback onRetry;
   final bool singleLine;
 
+  /// 反显期实体 id → 人话标签；null 表示不提供。
+  final EntityLabels? entityLabels;
+
   const _EventStreamError({
     required this.error,
     required this.onRetry,
     this.singleLine = false,
+    this.entityLabels,
   });
 
   @override
@@ -31,7 +35,7 @@ class _EventStreamError extends StatelessWidget {
             const SizedBox(width: 8),
             Expanded(
               child: Text(
-                '执行动态读取失败：${_safePanelText(error)}',
+                '执行动态读取失败：${_safePanelText(error, entityLabels)}',
                 maxLines: singleLine ? 1 : null,
                 overflow: singleLine ? TextOverflow.ellipsis : null,
                 style: const TextStyle(fontSize: 12.5),
@@ -128,14 +132,21 @@ class _EventCard extends StatelessWidget {
   /// 折叠态只占一行：标题超长省略，详情整行不渲染。展开态完整显示。
   final bool singleLine;
 
-  const _EventCard({required this.event, this.singleLine = false});
+  /// 反显期实体 id → 人话标签；null 表示不提供。
+  final EntityLabels? entityLabels;
+
+  const _EventCard({
+    required this.event,
+    this.singleLine = false,
+    this.entityLabels,
+  });
 
   @override
   Widget build(BuildContext context) {
     final colors = Theme.of(context).colorScheme;
     final tone = _eventTone(context, event.kind);
-    final title = _safePanelText(event.title);
-    final detail = _safePanelText(event.detail);
+    final title = _safePanelText(event.title, entityLabels);
+    final detail = _safePanelText(event.detail, entityLabels);
     // 左侧竖条用 ClipRRect 裁圆角，而不是给非均匀 Border 直接加 borderRadius：
     // `BoxDecoration` 在边框各边宽度不等时会断言"圆角只允许均匀边框"。
     return ClipRRect(
@@ -327,9 +338,11 @@ class _LivePublicOutput extends StatelessWidget {
   }
 }
 
-String _safePanelText(String value) {
+String _safePanelText(String value, EntityLabels? labels) {
+  // 人话替换在脱敏之前：脱敏规则将来若扩到 UUID，后置替换就再也拿不到可解析的 id。
+  final localized = labels?.humanize(value.trim()) ?? value.trim();
   var safe = const SearchSecretScanner().redact(
-    value.trim(),
+    localized,
     includeOpaqueTokens: true,
   );
   safe = safe.replaceAll(RegExp(r'https?://[^\s,;）)]+'), '[外部地址]');

@@ -211,7 +211,7 @@ extension _TaskActionRecovery on _TaskActions {
           key: const Key('work-task-no-undo-dialog'),
           title: const Text('确认无撤销执行'),
           content: Text(
-            '${_safePanelText(task.lastError)}\n\n'
+            '${_safePanelText(task.lastError, entityLabels)}\n\n'
             '该应用内配置没有文件快照，执行后不能通过任务撤销恢复。是否继续？',
           ),
           actions: [
@@ -354,8 +354,8 @@ extension _TaskActionRecovery on _TaskActions {
   String _executorDisplayName(String characterId) {
     final trimmed = characterId.trim();
     if (trimmed.isEmpty) return '未指定角色';
-    final name = characterNameFor?.call(trimmed).trim() ?? '';
-    return name.isEmpty ? trimmed : name;
+    final name = entityLabels?.resolveOrNull(trimmed) ?? '';
+    return name.trim().isEmpty ? trimmed : name.trim();
   }
 
   Future<void> _confirmInstallTool(
@@ -371,7 +371,7 @@ extension _TaskActionRecovery on _TaskActions {
           key: const Key('work-task-install-tool-dialog'),
           title: const Text('安装缺失工具？'),
           content: Text(
-            '${_safePanelText(task.lastError)}\n\n'
+            '${_safePanelText(task.lastError, entityLabels)}\n\n'
             '仅执行应用识别的可信安装命令；不会加入永久授权。安装完成后将继续原任务。',
           ),
           actions: [

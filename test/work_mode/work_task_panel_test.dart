@@ -4,6 +4,7 @@ import 'dart:io';
 
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/core/models/message.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 // 任务胶囊与聊天页共用右上角，几何断言要量会话控件行的真实高度。
@@ -900,8 +901,8 @@ void main() {
           body: WorkTaskPanel(
             tasks: <AgentTask>[task],
             eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
-            characterNameFor: (characterId) =>
-                characterId == 'elected' ? '乙' : '甲',
+            entityLabels: EntityLabels(resolvers: <EntityIdResolver>[
+                (id) => id == 'elected' ? '乙' : '甲']),
             onConfirmExecutorSwap: (taskId, version, swap) async {
               choices.add('$taskId:$swap');
             },
@@ -1433,7 +1434,7 @@ void main() {
             onOpenConversation: (_) {},
             onCollapse: () {},
             onClose: () {},
-            characterNameFor: (_) => '产品经理',
+            entityLabels: EntityLabels(resolvers: <EntityIdResolver>[(id) => '产品经理']),
           ),
         ),
       ));
@@ -4789,7 +4790,7 @@ void main() {
           tasks: [task],
           usageEntries: entries,
           usageDiagnostics: diagnostics,
-          characterNameFor: (id) => id == 'developer' ? '开发' : '测试',
+          entityLabels: EntityLabels(resolvers: <EntityIdResolver>[(id) => id == 'developer' ? '开发' : '测试']),
           eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
           onSelectTask: (_) {},
           onStop: (_) {},

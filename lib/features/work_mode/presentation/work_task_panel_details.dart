@@ -16,7 +16,8 @@ class _TaskDetails extends StatefulWidget {
   final List<AiRequestDiagnostic> usageDiagnostics;
   final bool usageUnavailable;
 
-  final String Function(String characterId)? characterNameFor;
+  /// 反显期实体 id → 人话标签；null 表示不提供（文本原样显示 id）。
+  final EntityLabels? entityLabels;
   final WorkTaskEventStream eventStreamFor;
   final ValueChanged<WorkTaskEvent> onLatestEvent;
   final DateTime Function() clock;
@@ -30,7 +31,7 @@ class _TaskDetails extends StatefulWidget {
     required this.usageEntries,
     required this.usageDiagnostics,
     required this.usageUnavailable,
-    required this.characterNameFor,
+    required this.entityLabels,
     required this.eventStreamFor,
     required this.onLatestEvent,
     required this.clock,
@@ -201,7 +202,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                             dense: true,
                             title: Text(
                               '运行段 ${item.key.$1 ?? '未知'} · '
-                              '${widget.characterNameFor?.call(item.key.$2) ?? item.key.$2}',
+                              '${widget.entityLabels?.labelFor(item.key.$2) ?? item.key.$2}',
                             ),
                             subtitle: Text(
                               '输入 ${item.value.inputTokens}（缓存 ${item.value.cachedInputTokens}）'
@@ -248,6 +249,17 @@ class _TaskDetailsState extends State<_TaskDetails> {
     super.dispose();
   }
 
+  /// 宿主的通用标签 + 本任务的协作状态解析器（候选/问题/验收/工作项）。
+  ///
+  /// 领域 id 只有 work_mode 认识，而状态就在面板手里，所以在这里叠加，
+  /// 不去扫任务集合。
+  EntityLabels? _labelsWithDomain(WorkDiscussionState? discussionState) {
+    final base = widget.entityLabels;
+    final collaboration = discussionState?.collaboration;
+    if (base == null || collaboration == null) return base;
+    return base.withResolver(WorkDomainLabels(collaboration).resolver);
+  }
+
   @override
   Widget build(BuildContext context) {
     final approvalText =
@@ -267,11 +279,12 @@ class _TaskDetailsState extends State<_TaskDetails> {
       widget.task.executionStateJson,
     );
     final discussionState = discussion.state;
+    final labels = _labelsWithDomain(discussionState);
     final characterName =
-        widget.characterNameFor?.call(widget.task.characterId).trim();
+        widget.entityLabels?.resolveOrNull(widget.task.characterId);
     final discussionExecutorName = discussionState?.executorId == null
         ? null
-        : widget.characterNameFor?.call(discussionState!.executorId!).trim();
+        : widget.entityLabels?.resolveOrNull(discussionState!.executorId!);
     final autonomous = discussionState?.collaboration?.isAutonomous == true;
     final plannedMakerId = discussionState?.collaboration?.workItems
         .where((i) => i['kind'] != 'material')
@@ -281,7 +294,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
         : discussionState?.executorId ?? plannedMakerId;
     final makerLabel = makerId == null
         ? '待群内定案'
-        : widget.characterNameFor?.call(makerId) ?? makerId;
+        : widget.entityLabels?.labelFor(makerId) ?? makerId;
     final executorLabel = autonomous
         ? makerLabel
         : characterName?.isNotEmpty == true
@@ -292,7 +305,8 @@ class _TaskDetailsState extends State<_TaskDetails> {
                     ? '待群内推举'
                     : widget.task.characterId.trim().isEmpty
                         ? '待确定'
-                        : widget.task.characterId;
+                        : widget.entityLabels?.labelFor(widget.task.characterId) ??
+                            widget.task.characterId;
     final colors = Theme.of(context).colorScheme;
     final hintStyle = TextStyle(fontSize: 11, color: colors.onSurfaceVariant);
     // 进度条必须始终拿到确定值：value 为 null 时 LinearProgressIndicator 会
@@ -386,13 +400,13 @@ class _TaskDetailsState extends State<_TaskDetails> {
                           SelectableText(WorkPublicUpdateStream.sanitize(
                               discussionState!.collaboration!.plan)),
                           Text(
-                              '阶段：${discussionState.collaboration!.phase} · 当前成员：${widget.characterNameFor?.call(widget.task.characterId) ?? widget.task.characterId}'),
+                              '阶段：${discussionState.collaboration!.phase} · 当前成员：${labels?.labelFor(widget.task.characterId) ?? widget.task.characterId}'),
                           if (autonomous) ...[
                             Text('制作执行者：$makerLabel'),
                             for (final assignment in discussionState
                                 .collaboration!.usageAssignments)
                               Text(WorkPublicUpdateStream.sanitize(
-                                  '使用场景 ${widget.characterNameFor?.call(assignment['memberId'] as String) ?? assignment['memberId']}：${assignment['goal']} · ${discussionState.collaboration!.currentUsageFor(assignment['memberId'] as String) == null ? '待实际使用' : '已记录本轮反馈'}')),
+                                  '使用场景 ${labels?.labelFor(assignment['memberId'] as String) ?? assignment['memberId']}：${assignment['goal']} · ${discussionState.collaboration!.currentUsageFor(assignment['memberId'] as String) == null ? '待实际使用' : '已记录本轮反馈'}')),
                             for (final ruling in discussionState
                                 .collaboration!.currentCoordinatorDecisions)
                               SelectableText(WorkPublicUpdateStream.sanitize(
@@ -401,7 +415,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                           for (final iteration
                               in discussionState.collaboration!.iterations)
                             SelectableText(
-                                '候选 ${iteration['id']} · ${iteration['status']}\n${iteration['artifactDigest']}\n审查 ${iteration['reviewRef']}'),
+                                '候选 ${labels?.labelFor(iteration['id'] as String) ?? iteration['id']} · ${iteration['status']}\n${iteration['artifactDigest']}\n审查 ${iteration['reviewRef']}'),
                           for (final approval in discussionState
                               .collaboration!.approvals
                               .where((a) =>
@@ -410,7 +424,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                                       discussionState.collaboration!
                                           .currentIteration?['id']))
                             Text(
-                                '认可 ${widget.characterNameFor?.call(approval['memberId'] as String) ?? approval['memberId']}：${_v2ApprovalLabel(discussionState.collaboration!, approval)} · ${approval['iterationId']} · 验证版本 ${approval['verificationRevision']}'),
+                                '认可 ${labels?.labelFor(approval['memberId'] as String) ?? approval['memberId']}：${_v2ApprovalLabel(discussionState.collaboration!, approval)} · ${labels?.labelFor(approval['iterationId'] as String) ?? approval['iterationId']} · 验证版本 ${approval['verificationRevision']}'),
                           for (final issue
                               in discussionState.collaboration!.issues)
                             Padding(
@@ -421,7 +435,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                           for (final item
                               in discussionState.collaboration!.workItems)
                             Text(
-                                '工作项 ${item['id']}：${widget.characterNameFor?.call(item['ownerId'] as String) ?? item['ownerId']} · ${item['status']}\n交接依据：${item['resultRef'] ?? ''}'),
+                                '工作项 ${labels?.labelFor(item['id'] as String) ?? item['id']}：${labels?.labelFor(item['ownerId'] as String) ?? item['ownerId']} · ${item['status']}\n交接依据：${item['resultRef'] ?? ''}'),
                           for (final item
                               in discussionState.collaboration!.acceptances)
                             SelectableText(WorkPublicUpdateStream.sanitize(
@@ -475,7 +489,8 @@ class _TaskDetailsState extends State<_TaskDetails> {
                             icon: Icons.description_outlined,
                             collapsed: !_summaryExpanded,
                             child: Text(
-                              _safePanelText(widget.task.userRequest),
+                              // 任务需求是用户原话，与真人消息同一条克制原则：不改写。
+                              _safePanelText(widget.task.userRequest, null),
                               key: const Key('work-task-request'),
                               style: Theme.of(context)
                                   .textTheme
@@ -565,21 +580,24 @@ class _TaskDetailsState extends State<_TaskDetails> {
                                   title: '计划摘要',
                                   text: widget.task.plan.trim().isEmpty
                                       ? '尚未生成公开计划。'
-                                      : _safePanelText(widget.task.plan),
+                                      : _safePanelText(
+                                          widget.task.plan, labels),
                                 ),
                                 const SizedBox(height: 8),
                                 _PublicDetail(
                                   title: '当前动作',
                                   text: displayAction == null
                                       ? _statusLabel(widget.task.status)
-                                      : _safePanelText(displayAction.title),
+                                      : _safePanelText(
+                                          displayAction.title, labels),
                                   inline: true,
                                 ),
                                 if (widget.toolName != null) ...<Widget>[
                                   const SizedBox(height: 8),
                                   _PublicDetail(
                                     title: '工具',
-                                    text: _safePanelText(widget.toolName!),
+                                    text: _safePanelText(
+                                        widget.toolName!, labels),
                                     inline: true,
                                   ),
                                 ],
@@ -587,7 +605,8 @@ class _TaskDetailsState extends State<_TaskDetails> {
                                   const SizedBox(height: 8),
                                   _PublicDetail(
                                     title: '审批',
-                                    text: _safePanelText(approvalText),
+                                    text: _safePanelText(
+                                        approvalText, labels),
                                     inline: true,
                                   ),
                                 ],
@@ -598,7 +617,8 @@ class _TaskDetailsState extends State<_TaskDetails> {
                                   _PublicDetail(
                                     title: '结论',
                                     text: _safePanelText(
-                                        widget.task.resultSummary),
+                                        widget.task.resultSummary,
+                                        widget.entityLabels),
                                   ),
                                 ],
                                 if (widget.task.lastArtifactPaths
@@ -619,6 +639,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                             _FailureDetails(
                               failure: failure,
                               collapsed: !_summaryExpanded,
+                              entityLabels: labels,
                             ),
                           ],
                           if (widget.task.eventLogIncomplete ||
@@ -642,7 +663,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                                   if (widget.actionError != null)
                                     _PublicDetail(
                                       title: '操作失败',
-                                      text: _safePanelText(widget.actionError!),
+                                      text: _safePanelText(widget.actionError!, labels),
                                     ),
                                 ],
                               ),
@@ -658,7 +679,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                   widget.actionError?.trim().isNotEmpty == true) ...<Widget>[
                 const SizedBox(height: 10),
                 Text(
-                  '操作失败：${_safePanelText(widget.actionError!)}',
+                  '操作失败：${_safePanelText(widget.actionError!, labels)}',
                   key: const Key('work-task-action-error'),
                   style: TextStyle(color: colors.error),
                 ),
@@ -719,6 +740,7 @@ class _TaskDetailsState extends State<_TaskDetails> {
                         child: _TaskEventTimeline(
                           key: ValueKey<String>(widget.task.id),
                           taskId: widget.task.id,
+                          entityLabels: labels,
                           eventStreamFor: widget.eventStreamFor,
                           onLatestEvent: widget.onLatestEvent,
                           clock: widget.clock,
@@ -744,12 +766,21 @@ class _FailureDetails extends StatelessWidget {
   /// 收起态：只留标题行，和上半区另外几张卡一样只占一行。
   final bool collapsed;
 
-  const _FailureDetails({required this.failure, this.collapsed = false});
+  /// 反显期实体 id → 人话标签；null 表示不提供。
+  final EntityLabels? entityLabels;
+
+  const _FailureDetails({
+    required this.failure,
+    this.collapsed = false,
+    this.entityLabels,
+  });
 
   @override
   Widget build(BuildContext context) {
     final completed = failure.completedContent;
-    final title = '${_safePanelText(failure.title)} · ${failure.type.name}';
+    final labels = entityLabels;
+    final title =
+        '${_safePanelText(failure.title, labels)} · ${failure.type.name}';
     return DecoratedBox(
       key: const Key('work-task-failure'),
       decoration: BoxDecoration(
@@ -791,24 +822,26 @@ class _FailureDetails extends StatelessWidget {
                   const SizedBox(height: 4),
                   _PublicDetail(
                     title: '具体原因',
-                    text: _safePanelText(failure.reason),
+                    text: _safePanelText(failure.reason, labels),
                   ),
                   const SizedBox(height: 4),
                   _PublicDetail(
                     title: '技术细节',
-                    text: _safePanelText(failure.technicalDetail),
+                    text: _safePanelText(failure.technicalDetail, labels),
                   ),
                   if (completed.isNotEmpty) ...<Widget>[
                     const SizedBox(height: 4),
                     _PublicDetail(
                       title: '已完成内容',
-                      text: completed.map(_safePanelText).join('；'),
+                      text: completed
+                          .map((value) => _safePanelText(value, labels))
+                          .join('；'),
                     ),
                   ],
                   const SizedBox(height: 4),
                   _PublicDetail(
                     title: '下一步',
-                    text: _safePanelText(failure.panelSuggestedAction),
+                    text: _safePanelText(failure.panelSuggestedAction, labels),
                   ),
                 ],
               ),

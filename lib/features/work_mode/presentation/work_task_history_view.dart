@@ -16,7 +16,8 @@ String workTaskHistoryTitle(AgentTask task, {int maxLength = 28}) {
       .split(RegExp(r'\r?\n'))
       .map((line) => line.trim())
       .firstWhere((line) => line.isNotEmpty, orElse: () => '');
-  final safe = _safePanelText(firstLine);
+  // 标题来自用户原话，与真人消息同一条克制原则：不改写实体 id。
+  final safe = _safePanelText(firstLine, null);
   if (safe.isEmpty) return '未命名任务';
   return safe.length <= maxLength ? safe : '${safe.substring(0, maxLength)}…';
 }

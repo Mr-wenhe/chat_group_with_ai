@@ -17,6 +17,9 @@ class _TaskReplyBox extends StatelessWidget {
   final String? actionError;
   final Future<void> Function(String reply) onSubmit;
 
+  /// 反显期实体 id → 人话标签；null 表示不提供。
+  final EntityLabels? entityLabels;
+
   const _TaskReplyBox({
     required this.task,
     this.discussionQuestion,
@@ -26,6 +29,7 @@ class _TaskReplyBox extends StatelessWidget {
     required this.actionInFlight,
     required this.actionError,
     required this.onSubmit,
+    this.entityLabels,
   });
 
   @override
@@ -64,7 +68,7 @@ class _TaskReplyBox extends StatelessWidget {
             ),
             const SizedBox(height: 4),
             SelectableText(
-              _safePanelText(question),
+              _safePanelText(question, entityLabels),
               key: const Key('work-task-reply-question'),
             ),
             if (answerRejected) ...[
@@ -117,7 +121,7 @@ class _TaskReplyBox extends StatelessWidget {
             if (actionError != null && actionError!.trim().isNotEmpty) ...[
               const SizedBox(height: 6),
               Text(
-                '发送失败：${_safePanelText(actionError!)}',
+                '发送失败：${_safePanelText(actionError!, entityLabels)}',
                 key: const Key('work-task-reply-error'),
                 style: TextStyle(color: colors.error),
               ),
@@ -340,6 +344,9 @@ class _TaskEventTimeline extends StatefulWidget {
   /// 不会因为 `shrinkWrap + NeverScrollableScrollPhysics` 被 SizedBox 静默裁掉半张。
   final int collapsedItemLimit;
 
+  /// 反显期实体 id → 人话标签；null 表示不提供。
+  final EntityLabels? entityLabels;
+
   /// 面板的"现在"。等待时长按它计算，而不是各自 `DateTime.now()`：面板每 30 秒
   /// 重绘一次，这个值跟着走，等待分钟数就自己往前跳。
   final DateTime Function() clock;
@@ -352,6 +359,7 @@ class _TaskEventTimeline extends StatefulWidget {
     required this.clock,
     this.expanded = false,
     this.collapsedItemLimit = 4,
+    this.entityLabels,
   });
 
   @override
@@ -472,6 +480,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
         final isModelProgress = _isModelProgressEvent(event);
         final liveDraft = _safePanelText(
           _publicDraftFromEvent(event),
+          widget.entityLabels,
         ).trim();
         setState(() {
           _seenSequences.add(event.sequence);
@@ -565,7 +574,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
   String _pendingTextFromEvent(WorkTaskEvent event) {
     final value = event.safeMetadata['pendingText'];
     if (value is String && value.trim().isNotEmpty) {
-      return _safePanelText(value);
+      return _safePanelText(value, widget.entityLabels);
     }
     return 'AI 正在整理公开进度…';
   }
@@ -665,6 +674,7 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
             error: error,
             onRetry: _retry,
             singleLine: singleLine,
+            entityLabels: widget.entityLabels,
           ),
         );
       }
@@ -698,7 +708,10 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     final earlierCount = _showEarlierEvents ? _earlierEventCount : 0;
     if (remaining < earlierCount) {
       return _TimelineItemPadding(
-        child: _EventCard(event: _events[remaining], singleLine: singleLine),
+        child: _EventCard(
+            event: _events[remaining],
+            singleLine: singleLine,
+            entityLabels: widget.entityLabels),
       );
     }
     remaining -= earlierCount;
@@ -717,7 +730,8 @@ class _TaskEventTimelineState extends State<_TaskEventTimeline> {
     }
     final event = _currentRunEvents[remaining];
     return _TimelineItemPadding(
-      child: _EventCard(event: event, singleLine: singleLine),
+      child: _EventCard(
+          event: event, singleLine: singleLine, entityLabels: widget.entityLabels),
     );
   }
 
@@ -1177,13 +1191,13 @@ class _CandidateButtons extends StatelessWidget {
 /// 给出选择。
 class _ExecutorCandidateButtons extends StatelessWidget {
   final List<String> candidateIds;
-  final String Function(String characterId)? characterNameFor;
+  final EntityLabels? entityLabels;
   final bool enabled;
   final Future<void> Function(String characterId) onSubmit;
 
   const _ExecutorCandidateButtons({
     required this.candidateIds,
-    required this.characterNameFor,
+    required this.entityLabels,
     required this.enabled,
     required this.onSubmit,
   });
@@ -1214,8 +1228,9 @@ class _ExecutorCandidateButtons extends StatelessWidget {
   }
 
   String _displayName(String characterId) {
-    final name = (characterNameFor?.call(characterId) ?? '').trim();
-    return name.isEmpty ? _shortId(characterId) : name;
+    // 只解析不兜底：解析不到时退回短码，比「未知对象（短码）」更适合候选人按钮。
+    final name = entityLabels?.resolveOrNull(characterId) ?? '';
+    return name.trim().isEmpty ? _shortId(characterId) : name.trim();
   }
 
   String _shortId(String characterId) =>

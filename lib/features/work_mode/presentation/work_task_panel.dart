@@ -4,11 +4,13 @@ import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
 
 import 'package:chat_group/core/models/agent_task.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/money_micros.dart';
 import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/presentation/work_change_approval_dialog.dart';
 import 'package:chat_group/features/work_mode/work_artifact_delivery_confirmation.dart';
+import 'package:chat_group/features/work_mode/work_domain_labels.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_run_boundary.dart';
 import 'package:chat_group/features/work_mode/work_task_action_notice.dart';
@@ -124,7 +126,10 @@ class WorkTaskPanel extends StatefulWidget {
   final VoidCallback onClose;
   final ValueChanged<bool>? onModalVisibilityChanged;
   final BuildContext? dialogContext;
-  final String Function(String characterId)? characterNameFor;
+  /// 反显期实体 id → 人话标签；null 表示不提供（面板文本原样显示 id）。
+  ///
+  /// 取代原先只解析成员名的 `characterNameFor`：同一层并存两个同义解析器迟早漂移。
+  final EntityLabels? entityLabels;
   final DateTime Function() clock;
 
   /// 当前会话的历史任务（含已被用户关掉标签的任务），按时间倒序。
@@ -197,7 +202,7 @@ class WorkTaskPanel extends StatefulWidget {
     this.onConfirmArtifactDelivery,
     this.onDeleteTask,
     this.onOpenInTabStrip,
-    this.characterNameFor,
+    this.entityLabels,
     this.historyTasks = const <AgentTask>[],
     this.onHideTask,
     this.showTaskSummarySection = false,
@@ -423,7 +428,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
             usageEntries: widget.usageEntries,
             usageDiagnostics: widget.usageDiagnostics,
             usageUnavailable: widget.usageUnavailable,
-            characterNameFor: widget.characterNameFor,
+            entityLabels: widget.entityLabels,
             eventStreamFor: widget.eventStreamFor,
             onLatestEvent: _rememberLatestEvent,
             clock: widget.clock,
@@ -461,7 +466,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               onConfirmExecutorSwap: widget.onConfirmExecutorSwap,
               onSelectExecutor: widget.onSelectExecutor,
               onConfirmArtifactDelivery: widget.onConfirmArtifactDelivery,
-              characterNameFor: widget.characterNameFor,
+              entityLabels: widget.entityLabels,
               onStop: widget.onStop,
               onContinue: widget.onContinue,
               onContinueWithoutFollowUps: widget.onContinueWithoutFollowUps,
@@ -516,7 +521,7 @@ class _WorkTaskPanelState extends State<WorkTaskPanel> {
               usageEntries: widget.usageEntries,
               usageDiagnostics: widget.usageDiagnostics,
               usageUnavailable: widget.usageUnavailable,
-              characterNameFor: widget.characterNameFor,
+              entityLabels: widget.entityLabels,
               eventStreamFor: widget.eventStreamFor,
               onLatestEvent: (_) {},
               // 历史任务已经结束，用最后更新时间当基准，否则耗时会按

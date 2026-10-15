@@ -63,6 +63,14 @@ class EntityLabels {
   String labelFor(String id) =>
       resolveOrNull(id) ?? '$unknownEntity（${shortCode(id)}）';
 
+  /// 追加一族领域解析器（如 work_mode 的候选版本/问题），返回新实例。
+  ///
+  /// 宿主给的是通用解析器，具体任务状态只有使用方认识 —— 合成处因此必须能叠加，
+  /// 而不是让使用方各自再造一份 core 解析器。
+  EntityLabels withResolver(EntityIdResolver resolver) => EntityLabels(
+        resolvers: <EntityIdResolver>[..._resolvers, resolver],
+      );
+
   /// 只解析、不兜底：调用方需要区分「没有标签」与「标签是空的」时用它。
   String? resolveOrNull(String id) {
     for (final resolver in _resolvers) {

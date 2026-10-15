@@ -1,3 +1,4 @@
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/features/work_mode/work_change_plan.dart';
 import 'package:chat_group/features/work_mode/work_approval_decision.dart';
 import 'package:flutter/material.dart';
@@ -78,7 +79,8 @@ class WorkChangeApprovalDialog extends StatelessWidget {
               ],
               const SizedBox(height: 14),
               _sectionTitle('将做什么：${plan.actionType.displayName}'),
-              Text('任务：${plan.taskId}'),
+              // 任务 id 没有对应名字，统一显示 8 位短码（与气泡里的既有约定一致）。
+              Text('任务：${EntityLabels.shortCode(plan.taskId)}'),
               const SizedBox(height: 10),
               _sectionTitle('准确路径'),
               if (plan.exactPaths.isEmpty)

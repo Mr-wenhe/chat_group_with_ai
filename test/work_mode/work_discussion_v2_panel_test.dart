@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
@@ -153,7 +154,7 @@ void main() {
                 child: WorkTaskPanel(
                     tasks: [task],
                     eventStreamFor: (_) => const Stream<WorkTaskEvent>.empty(),
-                    characterNameFor: (id) => id == 'dev' ? '制作成员' : '试用成员',
+                    entityLabels: EntityLabels(resolvers: <EntityIdResolver>[(id) => id == 'dev' ? '制作成员' : '试用成员']),
                     onSelectTask: (_) {},
                     onStop: (_) {},
                     onContinue: (_) {},

@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/agent_task.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/features/work_mode/presentation/work_task_panel.dart';
 import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
@@ -68,7 +69,7 @@ Future<void> _pumpPanel(
   WidgetTester tester,
   AgentTask task, {
   WorkTaskExecutorPick? onSelectExecutor,
-  String Function(String characterId)? characterNameFor,
+  EntityLabels? entityLabels,
 }) async {
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
@@ -86,7 +87,7 @@ Future<void> _pumpPanel(
             onCollapse: () {},
             onClose: () {},
             onSelectExecutor: onSelectExecutor,
-            characterNameFor: characterNameFor,
+            entityLabels: entityLabels,
           ),
         ),
       ),
@@ -102,7 +103,7 @@ void main() {
       tester,
       task,
       onSelectExecutor: (_, __) {},
-      characterNameFor: (id) => id == 'front' ? '程序媛' : '周鹏飞',
+      entityLabels: EntityLabels(resolvers: <EntityIdResolver>[(id) => id == 'front' ? '程序媛' : '周鹏飞']),
     );
 
     expect(find.text('指定最终执行人'), findsOneWidget);
@@ -127,7 +128,7 @@ void main() {
       onSelectExecutor: (taskId, characterId) {
         picked.add('$taskId:$characterId');
       },
-      characterNameFor: (id) => id,
+      entityLabels: EntityLabels.none(),
     );
 
     await tester.tap(find.byKey(const Key('work-task-executor-option-engine')));
@@ -214,7 +215,7 @@ void main() {
       tester,
       task,
       onSelectExecutor: (_, __) {},
-      characterNameFor: (_) => '程序媛',
+      entityLabels: EntityLabels(resolvers: <EntityIdResolver>[(id) => '程序媛']),
     );
 
     expect(find.text('程序媛（front-a）'), findsOneWidget);
