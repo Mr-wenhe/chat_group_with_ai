@@ -52,6 +52,17 @@ class _ChatRoomPageState extends ConsumerState<ChatRoomPage>
   /// 首屏数据加载器（群信息、成员、消息、记忆、关系态一次性取回）。
   late final ChatRoomLoader _loader;
 
+  /// 反显期实体 id → 人话标签。
+  ///
+  /// **必须缓存**：领域解析器要等到文本里真的出现 UUID 才会解析本会话的任务状态
+  /// 建索引，每次 build 重建它会让这份解析在流式输出期间反复发生。
+  late final EntityLabels _entityLabels = EntityLabels.from(
+    _db,
+    domainResolvers: <EntityIdResolver>[
+      WorkDomainLabels.forConversation(_db, widget.groupId),
+    ],
+  );
+
   /// 记忆控制器：群记忆 / 角色记忆的生成与更新。
   late final MemoryControls _memoryControls;
 

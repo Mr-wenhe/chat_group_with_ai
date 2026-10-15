@@ -31,6 +31,7 @@ import 'package:chat_group/core/models/tool_permission.dart';
 import 'package:chat_group/core/storage/api_credential_resolver.dart';
 import 'package:chat_group/core/text/pinyin_search.dart';
 import 'package:chat_group/core/theme/app_theme.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/agentic/agent_task_recovery_dialog.dart';
@@ -106,6 +107,7 @@ import 'package:chat_group/features/memory/relationship_private_detail_page.dart
 import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
 import 'package:chat_group/features/settings/export_page.dart';
 import 'package:chat_group/features/settings/user_profile_page.dart';
+import 'package:chat_group/features/work_mode/work_domain_labels.dart';
 import 'package:chat_group/features/work_mode/work_mode_config_service.dart';
 import 'package:chat_group/features/work_mode/work_mode_policy.dart';
 import 'package:chat_group/features/work_mode/work_mode_session.dart';

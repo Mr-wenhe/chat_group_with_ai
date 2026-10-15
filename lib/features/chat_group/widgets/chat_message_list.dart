@@ -2,6 +2,7 @@ import 'dart:async';
 
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/features/chat_group/message_action_item.dart';
 import 'package:chat_group/features/work_mode/work_task_user_action.dart';
 import 'package:chat_group/features/chat_group/widgets/chat_message_bubble.dart';
@@ -87,6 +88,12 @@ class ChatMessageList extends StatelessWidget {
   /// 历史消息仍显示当时的名字，查不到时才回退到这张实时花名册。
   final Map<String, String> memberNames;
 
+  /// 反显期把实体 id 换成人话标签；null 表示不提供，气泡正文原样显示。
+  ///
+  /// 与 [senderColor]、[senderNameById] 同构的纯值对象：本类不碰 DatabaseService，
+  /// 由宿主页面装配后下传。
+  final EntityLabels? entityLabels;
+
   const ChatMessageList({
     super.key,
     required this.messages,
@@ -121,6 +128,7 @@ class ChatMessageList extends StatelessWidget {
     this.selectedIds = const <String>{},
     this.selectableIds = const <String>{},
     this.onToggleSelection = _noopToggleSelection,
+    this.entityLabels,
   });
 
   static void _noopToggleSelection(String messageId) {}
@@ -214,6 +222,7 @@ class ChatMessageList extends StatelessWidget {
           // 私聊同样会收到任务提醒（任务卡在等待审批/授权时），按钮必须
           // 可点，否则文案让人点、按钮却是灰的。
           onTaskAction: onTaskAction,
+          entityLabels: entityLabels,
         );
 
         return KeyedSubtree(

@@ -152,6 +152,7 @@ extension _ChatRoomPageBuildSupport on _ChatRoomPageState {
                   : ChatMessageList(
                       messages: _messages,
                       characters: _allGroupCharacters,
+                      entityLabels: _entityLabels,
                       progressStartTimes: const <String, int>{},
                       messageIndex: messageIndex,
                       characterIndex: characterIndex,

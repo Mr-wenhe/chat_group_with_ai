@@ -5,6 +5,7 @@ import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/attachment_data_uri.dart';
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/core/models/message.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/core/widgets/character_avatar.dart';
 import 'package:chat_group/core/widgets/readable_json_dialog.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
@@ -116,6 +117,11 @@ class ChatMessageBubble extends StatelessWidget {
   /// 角色配色和 @ 提及里。单独开一个入口，让他们只借用"别人的消息"的排版。
   final String? memberName;
 
+  /// 反显期把实体 id 换成人话标签；null 表示调用方不提供，正文原样显示。
+  ///
+  /// 与 [senderColor]、[senderAvatarImage] 同构：本类不碰 DatabaseService。
+  final EntityLabels? entityLabels;
+
   /// 多选进行中：正文交出选择手势，让整行的点击用于勾选。
   final bool selectionMode;
 
@@ -150,6 +156,7 @@ class ChatMessageBubble extends StatelessWidget {
     this.userAvatarText = '',
     this.selectionMode = false,
     this.onTap,
+    this.entityLabels,
   });
 
   @override
@@ -449,7 +456,13 @@ class ChatMessageBubble extends StatelessWidget {
 
   Widget _buildContent(BuildContext context, Message message) {
     final textColor = WeComChatTokens.text(context);
-    final content = message.content.replaceAll('\\n', '\n');
+    final labels = entityLabels;
+    // 只清洗 AI 与系统消息：真人原话（user / member）一个字都不改。
+    final rawContent = message.content.replaceAll('\\n', '\n');
+    final shouldLocalize = labels != null &&
+        (message.senderType == Message.senderTypeAi ||
+            message.senderType == Message.senderTypeSystem);
+    final content = shouldLocalize ? labels.humanize(rawContent) : rawContent;
     final mentionNames = <String>{
       ownerName,
       ...characters.map((character) => character.name),
