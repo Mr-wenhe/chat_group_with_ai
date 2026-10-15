@@ -18,6 +18,7 @@ import 'package:chat_group/features/agentic/tool_request.dart';
 import 'package:chat_group/features/work_mode/providers/work_task_providers.dart';
 import 'package:chat_group/features/work_mode/work_snapshot_service.dart';
 import 'package:chat_group/features/work_mode/work_task_coordinator.dart';
+import 'package:chat_group/features/work_mode/work_domain_labels.dart';
 import 'package:chat_group/features/work_mode/work_task_event.dart';
 import 'package:chat_group/features/work_mode/work_task_event_store.dart';
 import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
@@ -997,7 +998,12 @@ class _WorkTaskOverlayHostState extends ConsumerState<WorkTaskOverlayHost> {
         context: widget.navigatorKey?.currentContext ?? context,
         builder: (_) => WorkTaskDecisionDialog(
           decisions: decisions,
-          entityLabels: _resolveEntityLabels(),
+          // 决策依据里带 iterationId（应用自己 jsonEncode 的），必须叠加本任务的
+          // 协作状态解析器，否则同一份 id 在弹窗里退成「未知对象」、面板里却是人话。
+          entityLabels: WorkDomainLabels.labelsForTask(
+            _resolveEntityLabels(),
+            task.executionStateJson,
+          ),
           onDecisionShown: shownDecisions.add,
           onReply: (decision, answer, {choiceId, disposition = 'answer'}) =>
               coordinator.respondToDecision(

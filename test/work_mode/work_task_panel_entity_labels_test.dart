@@ -74,6 +74,7 @@ Future<void> _pumpPanel(
   WidgetTester tester,
   AgentTask task, {
   EntityLabels? entityLabels,
+  bool showTaskSummarySection = false,
 }) async {
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
@@ -91,6 +92,7 @@ Future<void> _pumpPanel(
             onCollapse: () {},
             onClose: () {},
             entityLabels: entityLabels,
+            showTaskSummarySection: showTaskSummarySection,
           ),
         ),
       ),
@@ -141,18 +143,22 @@ void main() {
     expect(find.textContaining(_iterationId), findsWidgets);
   });
 
-  testWidgets('长正文截断不产生半个名字', (tester) async {
-    final task = _v2Task(
-      'label-4',
-      iterationId: _iterationId,
-      request: '${'长'.padRight(3990, '长')}$_memberId 结束',
-    );
+  testWidgets('长正文经过人话替换与 4000 字截断后不露 UUID、不崩', (tester) async {
+    final task = _v2Task('label-4', iterationId: _iterationId);
+    // 方案正文是人话化后再截断的字段：把成员 id 放到截断边界附近，
+    // 若顺序反了（先截断再替换）这里就会留下半个 UUID。
+    task.plan = '${'长'.padRight(3990, '长')}$_memberId 结束';
     await _pumpPanel(
       tester,
       task,
       entityLabels: EntityLabels.fixed(const {_memberId: '产品经理'}),
+      showTaskSummarySection: true,
     );
+    // 方案在「运行状态」卡里，上半区默认收起。
+    await tester.tap(find.byKey(const Key('work-task-details-toggle')));
+    await tester.pump();
 
     expect(tester.takeException(), isNull);
+    expect(find.textContaining(_memberId), findsNothing);
   });
 }

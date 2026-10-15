@@ -252,13 +252,12 @@ class _TaskDetailsState extends State<_TaskDetails> {
   /// 宿主的通用标签 + 本任务的协作状态解析器（候选/问题/验收/工作项）。
   ///
   /// 领域 id 只有 work_mode 认识，而状态就在面板手里，所以在这里叠加，
-  /// 不去扫任务集合。
-  EntityLabels? _labelsWithDomain(WorkDiscussionState? discussionState) {
-    final base = widget.entityLabels;
-    final collaboration = discussionState?.collaboration;
-    if (base == null || collaboration == null) return base;
-    return base.withResolver(WorkDomainLabels(collaboration).resolver);
-  }
+  /// 不去扫任务集合；判据与决策弹窗共用 `WorkDomainLabels.labelsForTask`。
+  EntityLabels? _labelsWithDomain(WorkDiscussionState? discussionState) =>
+      WorkDomainLabels.labelsForTask(
+        widget.entityLabels,
+        widget.task.executionStateJson,
+      );
 
   @override
   Widget build(BuildContext context) {

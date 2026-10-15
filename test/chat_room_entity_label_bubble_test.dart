@@ -20,6 +20,7 @@ Future<void> _pumpBubble(
   WidgetTester tester,
   Message message, {
   EntityLabels? labels,
+  Message? quoted,
 }) async {
   await tester.pumpWidget(MaterialApp(
     home: Scaffold(
@@ -30,6 +31,8 @@ Future<void> _pumpBubble(
         senderColor: (_) => Colors.blue,
         ownerName: '文和先生',
         entityLabels: labels,
+        quotedMessage: quoted,
+        quotedSenderName: quoted == null ? null : '提醒',
       ),
     ),
   ));
@@ -73,5 +76,27 @@ void main() {
     await _pumpBubble(tester, _systemMessage('成员 $_memberId：不可用。'));
     expect(find.textContaining('未知对象（e1f80660）'), findsNothing);
     expect(find.textContaining(_memberId), findsOneWidget);
+  });
+
+  testWidgets('引用提醒时的预览同样不露 UUID', (tester) async {
+    final quoted = _systemMessage('成员 $_memberId：成员当前资格或配置不可用。');
+    final reply = Message(
+      id: 'm-3',
+      groupId: 'group-1',
+      senderId: 'user',
+      senderType: Message.senderTypeUser,
+      content: '我看下这条',
+      replyToMessageId: quoted.id,
+      timestamp: DateTime(2026, 10, 15, 20, 1),
+    );
+    await _pumpBubble(
+      tester,
+      reply,
+      labels: EntityLabels.fixed(const {_memberId: '产品经理'}),
+      quoted: quoted,
+    );
+
+    expect(find.textContaining(_memberId), findsNothing);
+    expect(find.textContaining('产品经理'), findsWidgets);
   });
 }

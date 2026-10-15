@@ -409,9 +409,16 @@ class ChatMessageBubble extends StatelessWidget {
     // 调用方只在本条 `replyToMessageId` 非空时才进来，所以查不到就等于被引用的
     // 那条已被删除（滑出分页窗口的由父页回库补齐，见 `chat_room_page_build_support`）。
     if (quoted == null) return _buildDeletedQuotedRef(context, isUser);
-    final snippet = quoted.content.length > 50
-        ? '${quoted.content.substring(0, 50)}...'
+    // 与正文同一条判据：只清洗 AI/系统消息；人话替换必须在截断之前——先截断会把
+    // id 切掉一半，那时再没有可解析的 id，残缺 UUID 就留在气泡上方了。
+    final quotedContent = entityLabels != null &&
+            (quoted.senderType == Message.senderTypeAi ||
+                quoted.senderType == Message.senderTypeSystem)
+        ? entityLabels!.humanize(quoted.content)
         : quoted.content;
+    final snippet = quotedContent.length > 50
+        ? '${quotedContent.substring(0, 50)}...'
+        : quotedContent;
     return GestureDetector(
       onTap: onQuotedTap,
       child: Container(

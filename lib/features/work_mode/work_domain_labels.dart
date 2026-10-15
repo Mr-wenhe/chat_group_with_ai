@@ -37,27 +37,63 @@ class WorkDomainLabels {
   }
 
   /// 气泡侧用：文案里出现 token 时才解析该会话的任务状态，避免每次渲染都解析 JSON。
+  ///
+  /// **按 id 归属解析，而不是只认某一条任务**：一个会话可以有多条 v2 任务（当前这条、
+  /// 更早那条、刚被追问接手的），只取第一条会让当前任务的候选版本 id 解析不到、
+  /// 退成「未知对象」。任务集合发生变化（新任务落库、旧任务被删）时重扫一次，
+  /// 集合没变就只做零成本的命中判断——既不把「当前解析不到」永久钉死，也不在
+  /// 每次渲染都解析一遍全部任务 JSON。
   static EntityIdResolver forConversation(
     DatabaseService database,
     String conversationId,
   ) {
-    WorkDomainLabels? cached;
-    var loaded = false;
+    var resolvers = _collect(database, conversationId);
+    var knownTaskCount = database.agentTaskBox.length;
     return (id) {
-      if (!loaded) {
-        loaded = true;
-        for (final task in database.agentTaskBox.values) {
-          if (task.groupId != conversationId) continue;
-          final decoded =
-              WorkDiscussionState.decodeExecutionState(task.executionStateJson);
-          final collaboration = decoded.state?.collaboration;
-          if (collaboration != null) {
-            cached = WorkDomainLabels(collaboration);
-            break;
-          }
-        }
-      }
-      return cached?.resolver(id);
+      final hit = _firstHit(resolvers, id);
+      if (hit != null) return hit;
+      if (database.agentTaskBox.length == knownTaskCount) return null;
+      knownTaskCount = database.agentTaskBox.length;
+      resolvers = _collect(database, conversationId);
+      return _firstHit(resolvers, id);
     };
+  }
+
+  static String? _firstHit(List<EntityIdResolver> resolvers, String id) {
+    for (final resolve in resolvers) {
+      final label = resolve(id);
+      if (label != null) return label;
+    }
+    return null;
+  }
+
+  static List<EntityIdResolver> _collect(
+    DatabaseService database,
+    String conversationId,
+  ) {
+    final collected = <EntityIdResolver>[];
+    for (final task in database.agentTaskBox.values) {
+      if (task.groupId != conversationId) continue;
+      final decoded =
+          WorkDiscussionState.decodeExecutionState(task.executionStateJson);
+      final collaboration = decoded.state?.collaboration;
+      if (collaboration != null) {
+        collected.add(WorkDomainLabels(collaboration).resolver);
+      }
+    }
+    return collected;
+  }
+
+  /// 把任务的协作状态解析器叠加到已有标签上（面板与决策弹窗共用一份判据）。
+  static EntityLabels? labelsForTask(
+    EntityLabels? base,
+    String executionStateJson,
+  ) {
+    if (base == null) return null;
+    final collaboration = WorkDiscussionState.decodeExecutionState(
+      executionStateJson,
+    ).state?.collaboration;
+    if (collaboration == null) return base;
+    return base.withResolver(WorkDomainLabels(collaboration).resolver);
   }
 }
