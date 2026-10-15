@@ -236,7 +236,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
         groupId: widget.groupId,
         senderId: 'system',
         senderType: 'system',
-        content: '这条工作指令没能提交成功（${sanitizeWorkTaskError(error)}）；'
+        content: '这条工作指令没能提交成功（${ref.read(entityLabelsProvider).humanize(sanitizeWorkTaskError(error))}）；'
             '消息已保留，可重发或到任务面板确认。',
       ));
     }
@@ -306,7 +306,7 @@ extension _ChatRoomAgenticInputSupport on _ChatRoomPageState {
               groupId: widget.groupId,
               senderId: 'system',
               senderType: 'system',
-              content: '这条答复没能应用（${sanitizeWorkTaskError(error)}）；'
+              content: '这条答复没能应用（${ref.read(entityLabelsProvider).humanize(sanitizeWorkTaskError(error))}）；'
                   '问题可能已经更新，请在任务面板查看最新待决事项。',
             ));
             return;

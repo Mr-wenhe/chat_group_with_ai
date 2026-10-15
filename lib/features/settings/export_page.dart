@@ -4,6 +4,7 @@ import 'dart:io';
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/core/widgets/top_toast.dart';
 import 'package:chat_group/features/chat_group/providers/chat_group_providers.dart';
+import 'package:chat_group/features/work_mode/work_task_error_sanitizer.dart';
 import 'package:chat_group/providers/providers.dart';
 import 'package:chat_group/services/conversation_export_service.dart';
 import 'package:flutter/material.dart';
@@ -231,7 +232,7 @@ class _ExportPageState extends ConsumerState<ExportPage> {
         );
       }
     } catch (e) {
-      if (mounted) _snack('导出失败: $e');
+      if (mounted) _snack('导出失败：${_safeErrorText(e)}');
     } finally {
       if (mounted) setState(() => _isExporting = false);
     }
@@ -242,9 +243,14 @@ class _ExportPageState extends ConsumerState<ExportPage> {
     try {
       await ConversationExportService().share(file);
     } catch (e) {
-      if (mounted) _snack('分享失败: $e');
+      if (mounted) _snack('分享失败：${_safeErrorText(e)}');
     }
   }
+
+  /// 失败的自由文本先脱敏、再人话化：异常 `toString()` 不直接反显。
+  String _safeErrorText(Object error) => ref
+      .read(entityLabelsProvider)
+      .humanize(redactSensitiveText(error));
 
   /// 导出前的安全提示：明文存本机、不含 Key，但仍需妥善保管。
   Future<bool> _showSafetyDialog() async {

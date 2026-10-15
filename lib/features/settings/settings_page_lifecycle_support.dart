@@ -58,7 +58,7 @@ extension _SettingsPageLifecycleSupport on _SettingsPageState {
       if (!mounted) return;
       AppToast.show(
         context,
-        '选择目录失败：${sanitizeWorkTaskError(e)}',
+        '选择目录失败：${ref.read(entityLabelsProvider).humanize(sanitizeWorkTaskError(e))}',
         icon: Icons.error_outline_rounded,
       );
     }
@@ -280,7 +280,7 @@ extension _SettingsPageLifecycleSupport on _SettingsPageState {
       if (mounted) {
         AppToast.show(
           context,
-          '导入已完成，但工作模式任务状态同步失败：${sanitizeWorkTaskError(error)}',
+          '导入已完成，但工作模式任务状态同步失败：${ref.read(entityLabelsProvider).humanize(sanitizeWorkTaskError(error))}',
           icon: Icons.error_outline_rounded,
         );
       }
