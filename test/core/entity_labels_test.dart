@@ -72,6 +72,15 @@ void main() {
     expect(looksLikeUuid('产品经理'), isFalse);
   });
 
+  test('诊断页保留短码以便排查', () {
+    final labels = EntityLabels.fixed(const {_memberId: '产品经理'});
+    expect(
+      '角色：${labels.labelFor(_memberId)}（${EntityLabels.shortCode(_memberId)}）',
+      '角色：产品经理（e1f80660）',
+    );
+    expect('角色：${labels.labelFor(_foreignId)}', '角色：未知对象（deadbeef）');
+  });
+
   test('withResolver 追加一族领域解析器，且不动原有解析结果', () {
     final labels = EntityLabels.fixed(const {_memberId: '产品经理'});
     final merged = labels.withResolver(

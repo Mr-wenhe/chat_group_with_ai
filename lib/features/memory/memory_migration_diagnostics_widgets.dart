@@ -2,6 +2,16 @@ part of 'memory_migration_diagnostics_page.dart';
 
 extension _MemoryMigrationDiagnosticsWidgets
     on _MemoryMigrationDiagnosticsPageState {
+  /// 诊断页仍要能按短码回溯，所以标签后面保留 8 位短码。
+  EntityLabels get _entityLabels => ref.read(entityLabelsProvider);
+
+  /// 有名字就「名字（短码）」，没有名字只留短码 —— 诊断页不该出现完整 UUID。
+  String _diagnosticLabel(String id) {
+    final name = _entityLabels.resolveOrNull(id);
+    final code = EntityLabels.shortCode(id);
+    return name == null ? code : '$name（$code）';
+  }
+
   Widget _buildHeader(
     BuildContext context,
     _MigrationSnapshot snapshot,
@@ -181,7 +191,9 @@ extension _MemoryMigrationDiagnosticsWidgets
             tilePadding: EdgeInsets.zero,
             childrenPadding: EdgeInsets.zero,
             title: const Text('技术信息'),
-            children: [Text('角色 ID：${record.characterId}')],
+            children: [
+              Text('角色：${_diagnosticLabel(record.characterId)}'),
+            ],
           ),
         ],
       ),
@@ -223,7 +235,9 @@ extension _MemoryMigrationDiagnosticsWidgets
               tilePadding: EdgeInsets.zero,
               childrenPadding: EdgeInsets.zero,
               title: const Text('技术信息'),
-              children: [Text('会话 ID：${conversation.id}')],
+              children: [
+                Text('会话：${_diagnosticLabel(conversation.id)}'),
+              ],
             ),
           ],
         ],

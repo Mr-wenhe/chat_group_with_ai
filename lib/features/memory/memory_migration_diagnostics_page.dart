@@ -3,6 +3,7 @@ import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/character_memory.dart';
 import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/features/ai_character/character_gender_migrator.dart';
 import 'package:chat_group/features/memory/memory_audit_presenter.dart';
 import 'package:chat_group/features/memory/memory_migrator.dart';

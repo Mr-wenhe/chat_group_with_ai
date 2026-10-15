@@ -52,7 +52,9 @@ extension _AiGovernancePageSupport on _AiGovernancePageState {
                 '${entry.purpose.label} · ${entry.provider}/${entry.model}',
               ),
               subtitle: Text(
-                '任务 ${entry.taskId ?? '未关联'} · 运行段 ${entry.runBoundary ?? '未知'} · '
+                // 任务 id 没有对应名字，只显示 8 位短码供回溯。
+                '任务 ${entry.taskId == null ? '未关联' : EntityLabels.shortCode(entry.taskId!)} · '
+                '运行段 ${entry.runBoundary ?? '未知'} · '
                 '${entry.inputTokens} 入 / ${entry.cachedInputTokens} 缓存 / '
                 '${entry.outputTokens} 出 · ${entry.exactUsage ? '精确' : '估算'} · '
                 '${entry.status == 'success' ? '成功' : '失败请求'}',

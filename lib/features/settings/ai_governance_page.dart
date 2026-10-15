@@ -1,5 +1,6 @@
 import 'package:chat_group/core/database/database_service.dart';
 import 'package:chat_group/core/models/api_provider.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_models.dart';
 import 'package:chat_group/features/ai_governance/ai_governance_store.dart';
 import 'package:chat_group/features/ai_governance/model_capability_registry.dart';

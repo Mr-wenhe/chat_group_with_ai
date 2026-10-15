@@ -193,7 +193,8 @@ void main() {
           const ValueKey('memory-migration-technical-session-deleted-group')),
     );
     await tester.pumpAndSettle();
-    expect(find.text('会话 ID：deleted-group'), findsOneWidget);
+    // 诊断页保留 8 位短码供回溯，但不再裸露完整 id（这一条会话没有对应群名）。
+    expect(find.text('会话：deleted-'), findsOneWidget);
 
     expect(find.text('编辑'), findsNothing);
     expect(find.text('固定'), findsNothing);

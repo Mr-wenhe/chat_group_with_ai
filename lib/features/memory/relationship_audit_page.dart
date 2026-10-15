@@ -361,6 +361,7 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
             filter: _filter,
             characters: _characters,
             originConversations: _originConversations,
+            entityLabels: ref.read(entityLabelsProvider),
             originConversationLocked: widget.conversationId != null,
             observerSelectionLocked: widget.allowedObserverCharacterIds != null,
             onChanged: _handleFilterChanged,
@@ -669,7 +670,8 @@ class _RelationshipAuditPageState extends ConsumerState<RelationshipAuditPage> {
                   '${_observerName(relationship, characterById)} → '
                   '${_targetName(relationship, characterById)}',
                 ),
-                subtitle: Text('来源群组：${relationship.groupId} · 旧版数据 · 只读'),
+                subtitle: Text(
+                    '来源群组：${ref.read(entityLabelsProvider).labelFor(relationship.groupId)} · 旧版数据 · 只读'),
               ),
           ],
         ),

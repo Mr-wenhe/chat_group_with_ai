@@ -1,5 +1,6 @@
 import 'package:chat_group/core/models/ai_character.dart';
 import 'package:chat_group/core/models/relationship_state.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/features/memory/relationship_audit_filter.dart';
 import 'package:chat_group/features/memory/relationship_audit_presenter.dart';
 import 'package:flutter/material.dart';
@@ -14,6 +15,9 @@ class RelationshipAuditFilterWidget extends StatelessWidget {
   final bool observerSelectionLocked;
   final ValueChanged<RelationshipAuditFilter> onChanged;
 
+  /// 反显期实体 id → 人话标签，用于 `originConversations` 里没有的来源。
+  final EntityLabels? entityLabels;
+
   const RelationshipAuditFilterWidget({
     super.key,
     required this.filter,
@@ -22,6 +26,7 @@ class RelationshipAuditFilterWidget extends StatelessWidget {
     this.originConversationLocked = false,
     this.observerSelectionLocked = false,
     required this.onChanged,
+    this.entityLabels,
   });
 
   @override
@@ -122,7 +127,8 @@ class RelationshipAuditFilterWidget extends StatelessWidget {
     if (context.mounted && next != null) onChanged(next);
   }
 
-  String _originLabel(String id) => originConversations[id] ?? id;
+  String _originLabel(String id) =>
+      originConversations[id] ?? entityLabels?.labelFor(id) ?? id;
 }
 
 class _RelationshipSearchField extends StatefulWidget {
