@@ -54,9 +54,8 @@ jobs:
         run: dart run build_runner build --delete-conflicting-outputs
 
       - name: 静态分析 (flutter analyze)
-        # 默认仅 errors 会令步骤失败（warnings/info 不阻断）。
-        # 如需更严格，可改为：flutter analyze --fatal-warnings --fatal-infos
-        run: flutter analyze
+        # 显式让 warnings/info 不阻断；Flutter 3.27.1 默认会把 info 视为致命问题。
+        run: flutter analyze --no-fatal-warnings --no-fatal-infos
 
       - name: 单元测试
         run: flutter test
