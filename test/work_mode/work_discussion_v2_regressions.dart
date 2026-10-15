@@ -273,6 +273,22 @@ void _registerDiscussionHistoryRegressions() {
     expect(WorkDiscussionV2Turn.parse(response), isNotNull);
   });
 
+  test('协议可从字符串值内的游离半角引号中恢复', () {
+    // 现场（麦当劳海报任务）真实坏法：public_update 里引用了用户原话
+    // "100 字左右"，半角引号未转义，JSON 在服务端边界就语法错误。
+    final response = {
+      'success': true,
+      'message': '{"schemaVersion":2,"action":"respond","public_update":'
+          '"等于放宽了用户"100 字左右"的边界。","issue_id":"",'
+          '"next_member_id":"","issues":[],"resolutions":[],"proposal":null,'
+          '"approval":null,"decision":null,"tool":null}',
+    };
+    final parsed = WorkDiscussionV2Turn.parse(response);
+    expect(parsed, isNotNull, reason: '字符串值内的游离引号不应让整段协议判废');
+    expect(parsed!.publicUpdateFull, contains('"100 字左右"'),
+        reason: '修复只转义游离引号，原正文内容保持不变');
+  });
+
   test('协议快速拒绝字符上限内含大量花括号的畸形前置响应', () {
     final response = {
       'success': true,

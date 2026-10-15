@@ -119,7 +119,15 @@ extension _V2DiscussionApprovals on _V2DiscussionSession {
             a['teamRevision'] == current.teamRevision &&
             a['verificationRevision'] == current.verificationRevision)
         .lastOrNull;
-    if (previous?['approved'] == approval['approved']) return;
+    if (previous?['approved'] == approval['approved']) {
+      // 重复的认可不会改动台账，但会静默吞掉本轮，成员只看到"没有进展"。
+      // 方案认可已齐备却进不了制作时，必须把缺口回灌给下一轮请求，否则协调成员
+      // 只会一遍遍重发同一份认可，直到无进展计数触顶停滞（见 [_approvalStallHint]）。
+      if (approval['approved'] == true && !state.planReady) {
+        lastProposalNoOpHint = _approvalStallHint();
+      }
+      return;
+    }
     final eventId = _key(
         'approval', '${task.id}:${current.revision}:${member.id}:$responseRef');
     final signature = {

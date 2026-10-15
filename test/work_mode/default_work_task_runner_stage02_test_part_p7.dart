@@ -159,6 +159,7 @@ void _registerP7RunnerTests(Directory Function() hive,
       var deliveryFailures = 0;
       late WorkTaskCoordinator coordinator;
       var injected = false;
+      var reviewerDeclined = false;
       final runner = DefaultWorkTaskRunner(
           database: db,
           eventStore: events(),
@@ -423,6 +424,28 @@ void _registerP7RunnerTests(Directory Function() hive,
         final state =
             WorkDiscussionState.fromExecutionState(work.executionStateJson)!
                 .collaboration!;
+        if (scenario == 'manual-no-tester' && !reviewerDeclined) {
+          // 团队里没有独立审查人时，上游会先给角色库候选。本场景要的是
+          // 「没有测试者 → 人工验收」，所以先谢绝候选，再退回验收决策。
+          final decision =
+              state.decisions.isEmpty ? null : state.decisions.last;
+          if (decision != null &&
+              decision['kind'] == 'member' &&
+              decision['status'] == 'pending') {
+            final humanReview = (decision['options'] as List? ?? const [])
+                .whereType<Map>()
+                .where((option) => option['id'] == 'human-review')
+                .toList();
+            if (humanReview.isNotEmpty) {
+              reviewerDeclined = true;
+              await coordinator.respondToDecision(work.id,
+                  decisionId: decision['id'] as String,
+                  revision: decision['revision'] as int,
+                  choiceId: 'human-review',
+                  answer: humanReview.first['label'] as String);
+            }
+          }
+        }
         if ({'manual', 'manual-no-tester', 'waiver'}.contains(scenario) &&
             !injected &&
             state.decisions.isNotEmpty) {
@@ -489,13 +512,24 @@ void _registerP7RunnerTests(Directory Function() hive,
       }
       final candidates =
           await (await runner.candidatePublisher(work)).recover();
+      // manual-no-tester 多一版候选：团队里没有独立审查人时，上游会先弹一次
+      // “从角色库指定审查角色 / 改由人工验收”的决策；每弹一次决策都会推进
+      // requestRevision，当前候选随之作废并按原样重发一版（文件摘要与上一版相同，
+      // 见下方 files 断言）。
       expect(
           candidates.map((c) => c.iterationId),
           scenario == 'portable-import'
               ? ['r008', 'r009']
-              : scenario == 'retest-failure'
+              : scenario == 'retest-failure' ||
+                      scenario == 'manual-no-tester'
                   ? ['r001', 'r002', 'r003']
                   : ['r001', 'r002']);
+      if (scenario == 'manual-no-tester') {
+        expect(
+            candidates.last.files.map((f) => f['sha256']),
+            candidates[candidates.length - 2].files.map((f) => f['sha256']),
+            reason: '重发的那一版必须是同一份产物，不能借闸门改动内容');
+      }
       expect(
           signatures,
           scenario == 'portable-import'
@@ -503,7 +537,7 @@ void _registerP7RunnerTests(Directory Function() hive,
               : scenario == 'retest-failure'
                   ? ['r003:a', 'r003:b']
                   : scenario == 'manual-no-tester'
-                      ? ['r002:a']
+                      ? ['r003:a']
                       : ['r002:a', 'r002:b']);
       if (!document) {
         expect(

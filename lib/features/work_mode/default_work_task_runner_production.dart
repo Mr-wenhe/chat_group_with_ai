@@ -1,5 +1,9 @@
 part of 'default_work_task_runner.dart';
 
+/// 状态闸门对单条决策的选项上限（校验里写死 12，与
+/// `WorkDiscussionRunner.maxDecisionOptions` 同值）；本决策还要留 1 个“人工验收”。
+const int _reviewerOptionLimit = 11;
+
 /// One work item per scheduled lease. The business record remains collaboration;
 /// workItemExecution only binds the loop's receipts and deduplication namespace.
 extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
@@ -181,12 +185,37 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
                     .hasMatch(m['role'] as String)))
         .firstOrNull;
     if (reviewer == null) {
-      await _productionDecision(
-          task,
-          'acceptance',
-          state.acceptances.firstWhere(
-                  (a) => !{'manual', 'waived'}.contains(a['status']))['id']
-              as String,
+      final acceptanceId = state.acceptances
+          .firstWhere((a) => !{'manual', 'waived'}.contains(a['status']))['id']
+          as String;
+      // 纯文档任务只会选出单一 product 阶段，团队里没有第二个人能当审查人；
+      // 直接在弹窗里给角色库候选，用户点选后由下一轮讨论写进团队
+      // （见 _formTeam 对 kind='member' + targetId='role:xxx' 的处理）。
+      final role = WorkRoleRouter.canonicalArtifactType(
+                  state.artifactContract['type']?.toString()) ==
+              'software'
+          ? 'testing'
+          : 'reviewer';
+      if (!_reviewerOptedManual(state, role)) {
+        final options = await _independentReviewerOptions(
+            state, candidate.producerId, role);
+        if (options.isNotEmpty) {
+          options.add({
+            'id': 'human-review',
+            'label': '无需额外审查，改由人工验收',
+            'impact': '不新增审查成员，改为对当前候选记录人工验收或明确豁免。'
+          });
+          await _productionDecision(
+              task,
+              'member',
+              'role:$role',
+              '缺少独立且合格的审查成员，请从角色库指定一位审查角色，或改为人工验收。',
+              options: options,
+              persist: false);
+          return false;
+        }
+      }
+      await _productionDecision(task, 'acceptance', acceptanceId,
           '缺少独立且合格的审查成员，请补充已有成员能力、人工验收、明确豁免或暂缓。',
           persist: false);
       return false;
@@ -195,6 +224,60 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
     if (!await _productionActorAvailable(task, persist: false)) return false;
     _bindWorkItem(task, 'verify', candidate.iterationId);
     return true;
+  }
+
+  /// 用户是否已在“指定审查角色”弹窗里选了“改由人工验收”。
+  ///
+  /// 该选项 id 不属于任何角色，`_formTeam` 不会因此改动团队；若不在这里识别，
+  /// 团队不变会再次走到同一个候选弹窗，形成“选了人工验收又弹回候选”的死循环。
+  bool _reviewerOptedManual(WorkCollaborationState state, String role) =>
+      state.decisions.any((d) =>
+          d['kind'] == 'member' &&
+          d['status'] == 'answered' &&
+          d['answerKind'] == 'choice' &&
+          d['targetId'] == 'role:$role' &&
+          (d['options'] as List? ?? const []).whereType<Map>().any(
+              (o) => o['id'] == 'human-review' && o['label'] == d['answer']));
+
+  /// 角色库里“独立、可用、且能承担 [role] 责任”的审查候选，用于“缺审查人”弹窗。
+  ///
+  /// 与讨论换人同口径：排除产出人、已在团队的人，以及承担非材料工作项的人；
+  /// 凭据并发解析，避免一个挂住的凭据提供方把弹窗推迟 N × 凭据超时。
+  Future<List<Map<String, dynamic>>> _independentReviewerOptions(
+      WorkCollaborationState state, String producerId, String role) async {
+    final candidates = database.aiCharacterBox.values
+        .where((c) =>
+            c.id != producerId &&
+            !state.team.any((m) => m['memberId'] == c.id) &&
+            !state.workItems
+                .any((i) => i['kind'] != 'material' && i['ownerId'] == c.id) &&
+            WorkRoleRouter.qualifiesForResponsibility(
+                c, role, database.characterSkillBox.values))
+        .toList();
+    final resolved = await Future.wait(candidates.map((c) async {
+      final config = _resolveApiConfig(c);
+      if (config == null) return null;
+      try {
+        final credential = await credentials.resolve(config);
+        return credential?.trim().isNotEmpty == true ? config : null;
+      } on Object {
+        return null;
+      }
+    }));
+    // 状态闸门限制单条决策 12 个选项，本决策还要留 1 个“人工验收”。
+    final optionLimit = _reviewerOptionLimit;
+    final options = <Map<String, dynamic>>[];
+    for (var i = 0; i < candidates.length && options.length < optionLimit; i++) {
+      final config = resolved[i];
+      if (config == null) continue;
+      final c = candidates[i];
+      options.add({
+        'id': c.id,
+        'label': '${c.name}（${c.role}，${config.modelName}）',
+        'impact': '只加入本次任务的审查责任；保留目录、工具和模型治理边界。'
+      });
+    }
+    return options;
   }
 
   bool _productionMemberAuthorized(AgentTask task, String id) {
@@ -318,7 +401,8 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
 
   Future<void> _productionDecision(
       AgentTask task, String kind, String target, String reason,
-      {bool persist = true}) async {
+      {List<Map<String, dynamic>> options = const [],
+      bool persist = true}) async {
     final state = _candidateState(task);
     final actor = task.characterId;
     task.characterId = state.coordinatorId;
@@ -345,7 +429,8 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
                 }),
                 'answer': '',
                 'impact': '保留候选，处理后重新核对方案与验收。',
-                'responseRef': ''
+                'responseRef': '',
+                if (options.isNotEmpty) 'options': options,
               }
             ]
           },
