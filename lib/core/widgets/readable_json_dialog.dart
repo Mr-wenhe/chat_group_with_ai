@@ -14,17 +14,25 @@ const int maxReadableJsonBytes = 256 * 1024;
 const int maxReadableJsonCharacters = 100 * 1000;
 
 /// 打开一份内部留档 JSON 的可读视图。
+///
+/// [prettifyJson] 为 false 时按纯文本处理：不尝试 JSON 美化，也不会提示
+/// "内容不是合法 JSON"。纯文本附件（md / txt 等）走这条路径。
 Future<void> showReadableJsonDialog(
   BuildContext context, {
   required String title,
   required String path,
+  bool prettifyJson = true,
 }) =>
     showDialog<void>(
       context: context,
-      builder: (_) => ReadableJsonDialog(title: title, path: path),
+      builder: (_) => ReadableJsonDialog(
+        title: title,
+        path: path,
+        prettifyJson: prettifyJson,
+      ),
     );
 
-/// 内部留档 JSON 的只读呈现：等宽、缩进、可滚动、可复制全文。
+/// 内部留档 JSON（以及纯文本附件）的只读呈现：等宽、可滚动、可复制全文。
 ///
 /// 只吃「标题 + 路径」，不认识 Message / MediaAttachment 之类的业务对象，
 /// 所以放在 core/widgets 而不进某个 feature。
@@ -37,10 +45,14 @@ class ReadableJsonDialog extends StatefulWidget {
     super.key,
     required this.title,
     required this.path,
+    this.prettifyJson = true,
   });
 
   final String title;
   final String path;
+
+  /// 是否按 JSON 美化显示。纯文本附件（md / txt 等）传 false。
+  final bool prettifyJson;
 
   @override
   State<ReadableJsonDialog> createState() => _ReadableJsonDialogState();
@@ -52,7 +64,7 @@ class _ReadableJsonDialogState extends State<ReadableJsonDialog> {
   @override
   void initState() {
     super.initState();
-    _body = _readDetail(widget.path);
+    _body = _readDetail(widget.path, prettifyJson: widget.prettifyJson);
   }
 
   Future<void> _copyAll() async {
@@ -142,19 +154,19 @@ class _DetailBody {
   bool get isError => error.isNotEmpty;
 }
 
-_DetailBody _readDetail(String path) {
+_DetailBody _readDetail(String path, {bool prettifyJson = true}) {
   final String raw;
   final bool readTruncated;
   try {
     (raw, readTruncated) = _readBounded(path);
   } on Object {
-    return const _DetailBody(error: '读取失败。这份内部记录可能已被清理或无法访问。');
+    return const _DetailBody(error: '读取失败。这份文件可能已被清理或无法访问。');
   }
   final notes = <String>[];
   var text = raw;
   if (readTruncated) {
     notes.add('内容过大，仅读取前 ${maxReadableJsonBytes ~/ 1024} KB。');
-  } else {
+  } else if (prettifyJson) {
     try {
       text = const JsonEncoder.withIndent('  ').convert(jsonDecode(raw));
     } on Object {

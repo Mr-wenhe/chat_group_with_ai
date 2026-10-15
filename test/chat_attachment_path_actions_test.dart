@@ -2,6 +2,7 @@ import 'dart:io';
 
 import 'package:chat_group/core/models/media_attachment.dart';
 import 'package:chat_group/features/chat_group/attachment_path_actions.dart';
+import 'package:chat_group/features/chat_group/attachment_utils.dart';
 import 'package:flutter_test/flutter_test.dart';
 
 void main() {
@@ -51,6 +52,33 @@ void main() {
       expect(await cache.exists(), isTrue);
     } finally {
       await directory.delete(recursive: true);
+    }
+  });
+
+  test('Windows 定位参数把正斜杠路径归一化为反斜杠', () {
+    // 工作模式产物路径是正斜杠风格；explorer.exe 的 /select, 只认反斜杠，
+    // 否则只会打开一个默认的资源管理器窗口。
+    expect(
+      windowsExplorerSelectArgument(r'C:/Users/oray/data/方案.md'),
+      r'/select,C:\Users\oray\data\方案.md',
+    );
+  });
+
+  test('纯文本附件走应用内可读视图，其余交给系统打开', () {
+    MediaAttachment withName(String name) =>
+        MediaAttachment(type: 'file', localPath: '/tmp/$name', fileName: name);
+
+    for (final name in const [
+      'plan.md',
+      'notes.txt',
+      'config.json',
+      'data.yaml',
+      'rows.csv',
+    ]) {
+      expect(isPlainTextAttachment(withName(name)), isTrue, reason: name);
+    }
+    for (final name in const ['report.pdf', 'brief.docx', 'photo.png']) {
+      expect(isPlainTextAttachment(withName(name)), isFalse, reason: name);
     }
   });
 }

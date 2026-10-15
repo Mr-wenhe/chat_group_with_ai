@@ -89,6 +89,37 @@ IconData fileIconForExtension(String ext) {
 }
 
 // ---------------------------------------------------------------------------
+// In-app readable text attachments
+// ---------------------------------------------------------------------------
+
+/// 可以用应用内只读视图打开的文件类型。
+///
+/// 这些类型在 Windows 上完全依赖系统文件关联：关联缺失或失效时，`cmd /c
+/// start` 仍然返回成功，于是"点击没反应"而没有任何提示。改用应用内只读视图
+/// 既可靠，也不必调用外部程序。
+const Set<String> plainTextAttachmentExtensions = {
+  'md',
+  'markdown',
+  'txt',
+  'text',
+  'log',
+  'json',
+  'yaml',
+  'yml',
+  'csv',
+  'tsv',
+  'xml',
+  'ini',
+  'toml',
+  'conf',
+  'properties',
+};
+
+/// 是否应改用应用内只读文本视图打开该附件（而不是交给系统默认程序）。
+bool isPlainTextAttachment(MediaAttachment att) => plainTextAttachmentExtensions
+    .contains(extensionOfPath(att.fileName ?? att.localPath));
+
+// ---------------------------------------------------------------------------
 // File size formatting
 // ---------------------------------------------------------------------------
 

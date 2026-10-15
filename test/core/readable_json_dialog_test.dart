@@ -15,7 +15,8 @@ void main() {
     if (dir.existsSync()) dir.deleteSync(recursive: true);
   });
 
-  Future<void> open(WidgetTester tester, String path) async {
+  Future<void> open(WidgetTester tester, String path,
+      {bool prettifyJson = true}) async {
     await tester.pumpWidget(MaterialApp(
       home: Builder(
         builder: (context) => Scaffold(
@@ -25,6 +26,7 @@ void main() {
                 context,
                 title: '方案与验收详情',
                 path: path,
+                prettifyJson: prettifyJson,
               ),
               child: const Text('打开'),
             ),
@@ -91,5 +93,14 @@ void main() {
 
     expect(find.textContaining('读取失败'), findsOneWidget);
     expect(find.byType(SelectableText), findsNothing);
+  });
+
+  testWidgets('纯文本模式按原文显示且不提示 JSON 说明', (tester) async {
+    final file = File('${dir.path}/plan.md')..writeAsStringSync('# 方案\n\n- 第一步');
+
+    await open(tester, file.path, prettifyJson: false);
+
+    expect(shownText(tester), '# 方案\n\n- 第一步');
+    expect(find.textContaining('不是合法 JSON'), findsNothing);
   });
 }

@@ -31,6 +31,13 @@ class _V2DiscussionSession {
   /// 连续协议失败触发快速收口的门槛。
   static const int protocolFailureFastStopLimit = 2;
 
+  /// 同一成员连续（跨轮）"正文可解析但方案被校验判废"的次数；提交被采纳即清零。
+  ///
+  /// 与 [_protocolFailures] 并列但成因不同：那是"产不出可解析 JSON"，这是"JSON 能
+  /// 解析但方案不合法"（越权改写合同、缺 usageAssignments 等）。两者的出路一样——
+  /// 成员靠自愈改不对就得尽早换模型/换人——所以共用同一套收口决策与阈值。
+  final Map<String, int> _rejectedTurns = {};
+
   /// 本次 `_request` 是否因"正文始终不符合 v2 协议"而放弃。
   ///
   /// 与超时、传输失败、上下文超窗或取消区分开：只有它能触发快速收口，其余 null
@@ -54,7 +61,15 @@ class _V2DiscussionSession {
     final upgrading = runner._decodeExecutionMap(
             task.executionStateJson)['autonomyUpgradePending'] ==
         true;
-    if (!state.isAutonomous && (shell.blockers.isEmpty || upgrading)) {
+    // 自主模式要求为每位成员编出各不相同的使用场景，只有"需要多人"的任务才讲得通。
+    // 单阶段（典型：一份文档）且未点名多人参与的请求硬升级后，方案永远缺
+    // usageAssignments 被判废，于是每轮都回到同一个成员，用户看到的就是"卡住"。
+    final multiStage =
+        WorkRoleRouter.stageKindsForRequest(task.userRequest).length > 1;
+    final multiMember =
+        WorkRoleRouter.requestsMultiMemberParticipation(task.userRequest);
+    if (!state.isAutonomous &&
+        (upgrading || (shell.blockers.isEmpty && (multiStage || multiMember)))) {
       if (group == null || group!.aiCharacterIds.isEmpty) return;
       final participants =
           {...group!.aiCharacterIds, ...state.activeMembers}.toList();
@@ -210,7 +225,7 @@ class _V2DiscussionSession {
     _protocolFailures.clear();
     if (!await _checkTeam()) return true;
     final oldFacts = _factsFingerprint();
-    if (!await _consumeTurn(member.character, turn, memberId)) {
+    if (!await _consumeTurn(member, turn, memberId)) {
       return state.hasPendingDecision;
     }
     previousSpeaker = memberId;
@@ -245,7 +260,8 @@ class _V2DiscussionSession {
   }
 
   Future<bool> _consumeTurn(
-      AICharacter character, WorkDiscussionV2Turn turn, String memberId) async {
+      _DiscussionMember member, WorkDiscussionV2Turn turn, String memberId) async {
+    final character = member.character;
     final response = await _publish(character, turn.publicUpdate);
     final responseRef = response?.id ??
         _key('response', '${task.id}:${state.revision}:$calls:$memberId');
@@ -261,6 +277,7 @@ class _V2DiscussionSession {
     try {
       await _consume(character, turn, responseRef);
       lastValidationError = '';
+      _rejectedTurns.remove(memberId);
     } on Object catch (error) {
       lastValidationError = sanitizeWorkTaskError(error);
       await runner._recordDiagnostic(task, '成员协作增量未被采纳：$lastValidationError');
@@ -274,9 +291,23 @@ class _V2DiscussionSession {
       final adopted =
           await _adoptUserRewrittenContract(turn.proposal ?? const {});
       // Never infer state from a malformed/unauthorised public preview.
-      await _observe(
+      final stalled = await _observe(
           adopted, adopted ? _factsFingerprint() : 'invalid:$memberId',
           failure: !adopted);
+      if (adopted) {
+        _rejectedTurns.remove(memberId);
+      } else if (!stalled) {
+        // 正文能解析、但方案被判不合法：这也是"成员自愈改不对"的一类。守卫生效前
+        // 先用同一套收口给出"换模型/换人"的出路，避免空转到停滞阈值（守卫已弹窗时
+        // 不再重复弹）。
+        final count = (_rejectedTurns[memberId] ?? 0) + 1;
+        if (count >= protocolFailureFastStopLimit) {
+          _rejectedTurns.remove(memberId);
+          await _protocolFailureDecision(member, rejection: lastValidationError);
+        } else {
+          _rejectedTurns[memberId] = count;
+        }
+      }
       return false;
     }
     return true;
