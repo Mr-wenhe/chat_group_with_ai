@@ -265,7 +265,7 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
       }
     }));
     // 状态闸门限制单条决策 12 个选项，本决策还要留 1 个“人工验收”。
-    final optionLimit = _reviewerOptionLimit;
+    const optionLimit = _reviewerOptionLimit;
     final options = <Map<String, dynamic>>[];
     for (var i = 0; i < candidates.length && options.length < optionLimit; i++) {
       final config = resolved[i];
