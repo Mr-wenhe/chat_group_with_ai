@@ -1,4 +1,5 @@
 import 'package:chat_group/core/models/permanent_memory.dart';
+import 'package:chat_group/core/text/entity_labels.dart';
 import 'package:chat_group/features/direct_chat/direct_chat_session.dart';
 
 /// A localized term used by the memory browser.
@@ -193,10 +194,6 @@ class MemoryAuditPresenter {
   static const _deletedCharacterName = '已删除角色';
   static const _deletedGroupName = '已删除群聊';
   static const _deletedDirectName = '已删除私聊';
-  static final _uuidPattern = RegExp(
-    r'^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$',
-    caseSensitive: false,
-  );
 
   final Map<String, String> characterNames;
   final Map<String, String> characterAvatars;
@@ -379,7 +376,7 @@ class MemoryAuditPresenter {
     return normalized == id ||
         normalized == _directCharacterId(id) ||
         normalized.startsWith(DirectChatSession.prefix) ||
-        _uuidPattern.hasMatch(normalized);
+        looksLikeUuid(normalized);
   }
 
   static String safeDisplayName(String? value, [String? id]) {
