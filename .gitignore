@@ -75,6 +75,9 @@ output/
 star.html
 test.html
 release_artifacts/
+# scripts/package_macos_dmg.sh 的输出目录。只放打包出来的 DMG（每个 30 MB 上下），
+# 提交它等于把二进制塞进版本库历史；发布走 GitHub Release，不需要入库。
+dist/
 
 # Search Gateway local deployment secrets and private TLS material
 gateway/.env*
