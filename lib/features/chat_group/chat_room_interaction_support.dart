@@ -328,9 +328,15 @@ extension _ChatRoomInteractionSupport on _ChatRoomPageState {
         _flushStreamingUi();
       }
 
-      final mentionedIds = _isDirectChat
+      // 与主回复路径同一条圆桌 @ 规则：新闻角色是幕后检索助手，剥离其协议
+      // 效果（可见文本按设计保留）。
+      var mentionedIds = _isDirectChat
           ? const <String>[]
           : parseMentionedCharacterIds(fullContent, _characters);
+      if (_roundtableModeEnabled && !_isDirectChat) {
+        mentionedIds =
+            stripRoundtableNewsRoleMentions(mentionedIds, _characters);
+      }
       fullContent = _stripNamePrefix(fullContent, character.name);
       fullContent =
           _chatRoomSearchContextFormatter.sanitizeCitationsWithSourceIds(

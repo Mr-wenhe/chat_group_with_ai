@@ -120,14 +120,12 @@ class WorkRoleRouter {
             .hasMatch(clause));
   }
 
-  /// Minimal relevant team from current membership. Missing responsibilities
-  /// remain gaps; library candidates require a persisted user decision.
-  static WorkTeamSelection selectTeam(
-      {required String request,
-      required List<AICharacter> characters,
-      Iterable<CharacterSkill> skills = const [],
-      List<String> confirmedMemberIds = const []}) {
-    final availableSkills = skills.toList();
+  /// 请求对应的责任阶段集合，与 [selectTeam] 的选人口径同源。
+  ///
+  /// 抽出来给"要不要动用自主协作模式"做判据：单阶段（含纯文档）请求由一名成员
+  /// 一次做完更合适，硬升级成自主会要求为每个成员编出各不相同的使用场景，语义上
+  /// 无解（2026-10-15 现场："写个麦当劳海报设计文档"卡在产品参谋）。
+  static List<WorkRoleStageKind> stageKindsForRequest(String request) {
     final contract = _deliverableContract(request, requestRevision: 1);
     final software = requestsSoftwareImplementation(request);
     final documentOnly = !software &&
@@ -138,10 +136,36 @@ class WorkRoleRouter {
         ? <WorkRoleStageKind>[WorkRoleStageKind.product]
         : _inferStages(request,
             deliverableFormat: software ? 'unspecified' : contract.format);
-    if (requestsSoftwareImplementation(request) &&
-        !kinds.contains(WorkRoleStageKind.testing)) {
+    if (software && !kinds.contains(WorkRoleStageKind.testing)) {
       kinds.add(WorkRoleStageKind.testing);
     }
+    return kinds;
+  }
+
+  /// 请求是否显式要求多方参与：直接 @全体，或点名了两个人以上。
+  ///
+  /// 与 [stageKindsForRequest] 配合决定"要不要动用自主协作模式"。阶段数只反映
+  /// 交付物需要几道工序，反映不出"用户要一群人一起看"：`@all 讨论…最后由@产品
+  /// 经理输出一份 Word 文档` 是单阶段（product）文档任务，但用户已经点名要集体
+  /// 讨论，硬按单角色处理会丢掉多方视角。反过来，只点了一个人的请求不在此列。
+  static bool requestsMultiMemberParticipation(String request) {
+    if (RegExp(r'@\s*(?:all|everyone|全体|所有人|大家)|全体成员|所有人|大家',
+            caseSensitive: false)
+        .hasMatch(request)) {
+      return true;
+    }
+    return RegExp(r'@[\w\u4e00-\u9fa5]+').allMatches(request).length >= 2;
+  }
+
+  /// Minimal relevant team from current membership. Missing responsibilities
+  /// remain gaps; library candidates require a persisted user decision.
+  static WorkTeamSelection selectTeam(
+      {required String request,
+      required List<AICharacter> characters,
+      Iterable<CharacterSkill> skills = const [],
+      List<String> confirmedMemberIds = const []}) {
+    final availableSkills = skills.toList();
+    final kinds = stageKindsForRequest(request);
     final mentions = analyzeMentionedCharacterIds(request, characters);
     final intent = _workRoleMentionIntent(request, characters);
     final errors = <String>[

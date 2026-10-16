@@ -42,13 +42,18 @@ Future<AttachmentPathActionResult> revealAttachmentPath(String path) async {
   final absolutePath = inspected.absolutePath!;
 
   try {
+    if (Platform.isWindows) {
+      // explorer 把请求转交给已运行的资源管理器进程后就返回，定位成功时退出码
+      // 仍可能是 1，因此不能用退出码判定成败；命令能发出且未抛 ProcessException
+      // 即视为已请求定位。
+      await Process.run('explorer.exe', [
+        windowsExplorerSelectArgument(absolutePath),
+      ]);
+      return AttachmentPathActionResult.ok(absolutePath);
+    }
     final ProcessResult result;
     if (Platform.isMacOS) {
       result = await Process.run('open', ['-R', absolutePath]);
-    } else if (Platform.isWindows) {
-      // explorer.exe accepts /select,<absolute path> as one argument. Passing
-      // argv directly avoids shell interpolation and path injection.
-      result = await Process.run('explorer.exe', ['/select,$absolutePath']);
     } else if (Platform.isLinux) {
       result = await Process.run(
         'xdg-open',
@@ -73,3 +78,10 @@ Future<AttachmentPathActionResult> revealAttachmentPath(String path) async {
     return const AttachmentPathActionResult.failure('显示附件位置失败，请稍后重试。');
   }
 }
+
+/// explorer.exe 的定位参数：`/select,<路径>`。
+///
+/// 只接受反斜杠路径 —— 正斜杠会被当成无效选择器，结果是打开一个默认的资源
+/// 管理器窗口而不是定位到文件；而工作模式产物路径恰好是正斜杠风格。
+String windowsExplorerSelectArgument(String absolutePath) =>
+    '/select,${absolutePath.replaceAll('/', r'\')}';

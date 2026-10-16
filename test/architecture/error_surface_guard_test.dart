@@ -22,7 +22,7 @@ const _pendingGenericErrorToasts = <String>{
   'lib/features/chat_group/chat_room_input_attachments_support.dart:146',
   'lib/features/chat_group/chat_room_input_attachments_support.dart:201',
   'lib/features/chat_group/chat_room_input_attachments_support.dart:316',
-  'lib/features/chat_group/widgets/chat_message_media.dart:239',
+  'lib/features/chat_group/widgets/chat_message_media.dart:252',
   'lib/features/chat_group/chat_group_form_page.dart:320',
   'lib/features/ai_character/ai_character_form_page.dart:850',
 };

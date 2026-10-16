@@ -46,7 +46,7 @@ proposal.artifactContract 从 collaboration.artifactContract 完整复制并保�
   /// proposal 是文档化的合法路径），所以这一段不可按阶段裁。
   static const proposalTail =
       '''只写“前端制作、测试验收”两行不足以启动软件制作；冻结候选后独立验证由运行时安排，讨论中不自称测试已通过。工具不足应明确提出能力问题，不虚构测试命令或批准收据。
-verificationCommands 必须放在 proposal.artifactContract 内，不能成为 proposal 的第六个字段。它必须是非空字符串数组；每项都是 command.run 的紧凑 JSON 参数字符串，只能包含 executable 与 arguments，键顺序固定为 executable、arguments，例如元素文本为 {"executable":"node","arguments":["verify.js"]}。不得把元素写成对象，不得在命令字符串内添加编号或环境字段；V-01 等用例编号、每条命令的运行环境及其映射写在 plan 中。每条字符串不超过 1024 字符。proposal 本身必须包含 scope、plan、artifactContract、workItems、acceptances 五个基础字段；自主模式下还必须且只可额外包含 usageAssignments。
+verificationCommands 必须放在 proposal.artifactContract 内，不能成为 proposal 的第六个字段。它必须是非空字符串数组；每项都是 command.run 的紧凑 JSON 参数字符串，只能包含 executable 与 arguments，键顺序固定为 executable、arguments，例如元素文本为 {"executable":"node","arguments":["verify.js"]}。不得把元素写成对象，不得在命令字符串内添加编号或环境字段；V-01 等用例编号、每条命令的运行环境及其映射写在 plan 中。每条字符串不超过 1024 字符。proposal 本身必须包含 scope、plan、artifactContract、workItems、acceptances 五个基础字段；自主模式下还必须且只可额外包含 usageAssignments，其字段约束见自主规则。
 已有方案非空时，补充原来没有的 verificationCommands 也属于验收修改；必须先登记 kind=idea 的问题，完整 proposal 用 issue_id 关联它，再由全员确认后采纳。可在同轮 issues 登记该提案问题并提交关联 proposal，但不能自称已被认可。既有 acceptances 的 id、method、requiredCapability 必须逐字保留；更新需求版本不意味着允许改写验收口径。任何新增或修改同样要关联提案。
 新增范围作为 kind=idea 的问题，全体成员对该提案明确认可后再更新范围、计划和验收；有分歧用 decide 交用户。保留用户原始范围和所有禁止事项，不能扩大工具授权。非自主模式不得包含 usageAssignments，也不得添加其他 proposal 字段。
 ''';

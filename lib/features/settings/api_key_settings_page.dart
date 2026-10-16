@@ -3,6 +3,8 @@ import 'package:flutter_riverpod/flutter_riverpod.dart';
 
 import 'package:chat_group/core/widgets/app_widgets.dart';
 import 'package:chat_group/features/settings/ai_speaker_picker_dialog.dart';
+import 'package:chat_group/features/settings/api_bundle_export_page.dart';
+import 'package:chat_group/features/settings/api_bundle_import_page.dart';
 import 'package:chat_group/features/settings/api_config_list_section.dart';
 import 'package:chat_group/features/settings/api_key_settings_snapshot.dart';
 import 'package:chat_group/features/settings/api_key_settings_status.dart';
@@ -48,6 +50,46 @@ class _ApiKeySettingsPageState extends ConsumerState<ApiKeySettingsPage> {
         padding: const EdgeInsets.fromLTRB(20, 16, 20, 80),
         children: [
           _introCard(cs, overview),
+          const SizedBox(height: 24),
+          AppSectionHeader(title: '批量配置', cs: cs),
+          const SizedBox(height: 12),
+          // 这里刻意不用 ApiKeyEntryTile：那个组件带一个「凭据状态」徽章
+          // （已配置 / 待配置 / 可选），而这两行是**动作**而不是某类凭据，
+          // 它们没有状态可报。套上去只会多出两个语义不准的徽章。
+          _tileCard(cs, [
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.vpn_key_outlined, color: cs.primary),
+              title: Text(
+                ApiBundleImportPage.title,
+                style: TextStyle(fontSize: 14, color: cs.onSurface),
+              ),
+              subtitle: Text(
+                '粘贴分发方给你的加密授权码，解析后会先列出将新增 / 覆盖 / 跳过'
+                '哪些条目，确认之后才写入。',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+              trailing: Icon(Icons.chevron_right_rounded,
+                  color: cs.onSurfaceVariant),
+              onTap: () => _openPage(const ApiBundleImportPage()),
+            ),
+            _divider(cs),
+            ListTile(
+              contentPadding: EdgeInsets.zero,
+              leading: Icon(Icons.ios_share_rounded, color: cs.primary),
+              title: Text(
+                ApiBundleExportPage.title,
+                style: TextStyle(fontSize: 14, color: cs.onSurface),
+              ),
+              subtitle: Text(
+                '把本机已配置的 API Key 打成一串授权码，在其它客户端导入即可。',
+                style: TextStyle(fontSize: 12, color: cs.onSurfaceVariant),
+              ),
+              trailing: Icon(Icons.chevron_right_rounded,
+                  color: cs.onSurfaceVariant),
+              onTap: () => _openPage(const ApiBundleExportPage()),
+            ),
+          ]),
           const SizedBox(height: 24),
           AppSectionHeader(title: '对话', cs: cs),
           const SizedBox(height: 12),

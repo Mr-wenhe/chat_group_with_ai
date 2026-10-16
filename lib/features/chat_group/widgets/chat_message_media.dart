@@ -229,6 +229,19 @@ class ChatMessageMedia extends StatelessWidget {
         }
         return;
       }
+      // 纯文本（md / txt / json 等）改用应用内只读视图：交给系统默认程序会
+      // 依赖文件关联，关联缺失时 `cmd /c start` 仍返回成功，用户看到的是
+      // "点击没反应"。应用内视图既可靠，也让正文立刻可见。
+      if (isPlainTextAttachment(att)) {
+        if (!context.mounted) return;
+        await showReadableJsonDialog(
+          context,
+          title: att.fileName ?? fileNameFromPath(att.localPath),
+          path: inspected.absolutePath ?? att.localPath,
+          prettifyJson: false,
+        );
+        return;
+      }
       final result = await OpenFilex.open(att.localPath, type: att.mimeType);
       if (result.type.name != 'done' && context.mounted) {
         AppToast.show(context, '打开失败：${result.message}',

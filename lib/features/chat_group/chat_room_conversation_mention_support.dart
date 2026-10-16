@@ -6,10 +6,20 @@ extension _ChatRoomConversationMentionSupport on _ChatRoomPageState {
   /// 不能用 `_allGroupCharacters`：那份列表额外收了"发过言但已被移出群"的历史
   /// 发言人（消息回显要用），把他们摆进面板等于给一个点不出结果的 @ 项——
   /// 普通聊天按活跃成员解析 @、工作模式路由按群成员名单解析，两边都认不出。
-  List<AICharacter> get _mentionCandidates => mentionCandidatesForGroup(
+  ///
+  /// 圆桌会议开启时新闻角色（幕后检索助手）不是 @ 对象，从弹窗入口就不列出。
+  List<AICharacter> get _mentionCandidates {
+    if (_roundtableModeEnabled && !_isDirectChat) {
+      return roundtableMentionCandidates(
         _allGroupCharacters,
         _group?.aiCharacterIds ?? const <String>[],
       );
+    }
+    return mentionCandidatesForGroup(
+      _allGroupCharacters,
+      _group?.aiCharacterIds ?? const <String>[],
+    );
+  }
 
   void _hideMentionOverlay() {
     _mentionOverlay?.remove();

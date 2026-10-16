@@ -92,6 +92,38 @@ List<AICharacter> mentionCandidatesForGroup(
       .toList(growable: false);
 }
 
+/// 圆桌会议开启时 @ 弹窗的候选名单：新闻角色（幕后检索助手）从入口就不出现。
+///
+/// 新闻角色是群成员（圆桌开启时被加入），但它不参与讨论；把它摆进弹窗等于
+/// 给一个没有语义的 @ 项。用户手输的 @新闻角色 仍由圆桌流程无害化
+/// （清 pending、排除出参与者名单），这里只管"列不列"。
+List<AICharacter> roundtableMentionCandidates(
+  List<AICharacter> characters,
+  Iterable<String> memberIds,
+) =>
+    mentionCandidatesForGroup(characters, memberIds)
+        .where((character) => !character.zhipuSearchAnswerOnly)
+        .toList(growable: false);
+
+/// 圆桌模式下成员不得 @ 新闻角色：即使模型输出了「@新闻角色」，也剥离其
+/// 协议效果（mentionedAiIds / isMention），避免把幕后检索助手当成发言对象。
+///
+/// 可见文本里的「@新闻角色」字样按设计保留——这里只裁决协议效果，不改写
+/// 模型输出。[mentionedIds] 中的未知 id 一律保留，由调用方既有路径处理。
+List<String> stripRoundtableNewsRoleMentions(
+  List<String> mentionedIds,
+  List<AICharacter> characters,
+) {
+  final newsRoleIds = characters
+      .where((character) => character.zhipuSearchAnswerOnly)
+      .map((character) => character.id)
+      .toSet();
+  if (newsRoleIds.isEmpty) return mentionedIds;
+  return mentionedIds
+      .where((id) => !newsRoleIds.contains(id))
+      .toList(growable: false);
+}
+
 /// Parses mentions once and exposes routing diagnostics to callers that need
 /// to explain unknown or duplicate names to the user.
 MentionParseResult analyzeMentionedCharacterIds(

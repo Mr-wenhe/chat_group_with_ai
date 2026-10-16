@@ -339,7 +339,11 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
   /// 空完成），换人不解决上游故障，所以不动成员资格；这里是模型**反复产出无法解析的
   /// JSON**，属能力不匹配，最有效的出路是调整模型或换人，因此明确列出换人候选，并把
   /// 任务停在成员选择上，不再无产出地重试。
-  Future<void> _protocolFailureDecision(_DiscussionMember member) async {
+  ///
+  /// [rejection] 非空表示另一种形态：正文能解析，但方案被状态校验判废（[rejection]
+  /// 就是那条校验错误）。成因不同、出路相同，所以共用同一套收口与阈值。
+  Future<void> _protocolFailureDecision(_DiscussionMember member,
+      {String rejection = ''}) async {
     final role = state.team
         .where((m) => m['memberId'] == member.character.id)
         .firstOrNull?['role'] as String?;
@@ -360,20 +364,33 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
       if (hiddenDifferentModel > 0)
         '另有 $hiddenDifferentModel 个可用候选因本次决策的选项数量上限未列出。',
     ];
-    final evidence = lastValidationError.isEmpty
-        ? '未产出可解析的 v2 JSON 正文。'
-        : boundedDiscussionText(lastValidationError,
-            maximum: WorkDiscussionRunner.invalidFinalPreviewCharacters);
+    final rejected = rejection.isNotEmpty;
+    final evidence = rejected
+        ? boundedDiscussionText(rejection,
+            maximum: WorkDiscussionRunner.invalidFinalPreviewCharacters)
+        : lastValidationError.isEmpty
+            ? '未产出可解析的 v2 JSON 正文。'
+            : boundedDiscussionText(lastValidationError,
+                maximum: WorkDiscussionRunner.invalidFinalPreviewCharacters);
+    final reason = rejected
+        ? '成员 ${member.character.name} 连续 '
+            '${_V2DiscussionSession.protocolFailureFastStopLimit} 轮提交的方案都被校验判废，'
+            '没有带来任何被采纳的进展。'
+        : '成员 ${member.character.name} 连续 '
+            '${_V2DiscussionSession.protocolFailureFastStopLimit} 轮未产出可解析的 v2 协议正文，'
+            '该模型很可能不具备稳定的结构化输出能力。';
+    final impact = rejected
+        ? '本轮方案未通过校验；任务停在成员选择上，不会被无进展地反复重试。'
+            '请选择下一步：保留原成员重试，或调整该成员的模型配置、更换成员后再继续。'
+        : '本轮没有产出正文；任务停在成员选择上，不会被无产出地反复重试。'
+            '请选择下一步：保留原成员重试，或调整该成员的模型配置、更换成员后再继续。';
     await _decision(
         'member',
         member.character.id,
-        '成员 ${member.character.name} 连续 '
-            '${_V2DiscussionSession.protocolFailureFastStopLimit} 轮未产出可解析的 v2 协议正文，'
-            '该模型很可能不具备稳定的结构化输出能力。',
+        reason,
         hiddenNotes.isEmpty ? evidence : '$evidence；${hiddenNotes.join('')}',
         options: [...controls, ...replacements],
-        impact: '本轮没有产出正文；任务停在成员选择上，不会被无产出地反复重试。'
-            '请选择下一步：保留原成员重试，或调整该成员的模型配置、更换成员后再继续。',
+        impact: impact,
         router: true);
   }
 
