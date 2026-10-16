@@ -286,7 +286,7 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
         searchTurnContext: searchTurnContext,
         repliedIds: repliedIds,
         roundGeneration: roundGeneration,
-        // 圆桌第一位不扮演角色，只做本轮事件的开场事实播报。
+        // 圆桌第一位不扮演角色，只做本轮新闻检索结果的概括总结。
         isRoundtableOpeningBrief: roundtableMode && characterIndex == 0,
       );
     }
@@ -303,8 +303,9 @@ extension _ChatRoomAgenticRoundExecutionSupport on _ChatRoomPageState {
 
   /// 让一位角色发言一次，并把结果计入本轮。
   ///
-  /// [isRoundtableOpeningBrief] 为真时这条发言不代表角色本身：它只播报本轮搜索
-  /// 到的事实，人设、身份与语气都被刻意忽略（见 [_generateAiReply]）。
+  /// [isRoundtableOpeningBrief] 为真时这条发言不代表角色本身：它只概括本轮
+  /// 新闻检索到的内容，并作为后续成员发言的共同上下文；人设、身份与语气都被
+  /// 刻意忽略（见 [_generateAiReply]）。
   ///
   /// 单个角色失败不中断整轮：写入可见的失败气泡，继续下一位。
   Future<void> _replyAsSpeaker({

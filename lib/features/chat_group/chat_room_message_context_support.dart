@@ -221,6 +221,15 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
             ? '【圆桌会议：空闲讨论续聊】当前没有新的用户事件输入。请接着最近一轮用户提出的主题与群成员讨论自然接话，表达观点、追问或提出不同看法；不要再次联网搜索，也不要补充未经核验的实时事实。'
             : '【圆桌会议：根据搜索结果自由讨论】本轮联网搜索结果会作为共同上下文提供给所有群成员。请结合其中与用户事件或主题最相关的事实，表达你的观点、影响判断、疑问或不同意见；不必代替群聊生成新闻简报，也不要声称有角色先发布了简报。只依据搜索证据谈实时事实，不要输出 [S1]、[S2] 等来源编号或“来源于智谱搜索结果”一类归因文案。以自然群聊发言为主，通常 1-3 句。',
       });
+      // 圆桌 @ 规则与讨论基础：新闻角色是幕后检索助手、不参与讨论；第一条
+      // 发言是对检索结果的概括总结，是后续成员发言的共同上下文。
+      msgs.add({
+        'role': 'system',
+        'content': '【圆桌会议规则】新闻角色（幕后联网检索助手）不参与讨论、不会发言：'
+            '任何成员都不得 @ 新闻角色，也不要要求它发言、代它转达或把它列为讨论对象。'
+            '若对话中已有对新闻检索结果的概括总结（通常是用户输入后的第一条发言），'
+            '后续发言请以它为讨论基础，再结合自己的角色观点展开。',
+      });
     }
 
     if (!scene.isGeneral) {
@@ -312,8 +321,15 @@ extension _ChatRoomMessageContextSupport on _ChatRoomPageState {
         _characters.where((c) => c.id != character.id).toList();
     if (otherCharacters2.isNotEmpty) {
       final characterInfo = otherCharacters2
-          .map((c) =>
-              '${c.name}(${c.displayGenderLabel}, ${c.role}, ${c.age}岁, ${c.personalityTags.join('/')})')
+          .map((c) {
+            final base =
+                '${c.name}(${c.displayGenderLabel}, ${c.role}, ${c.age}岁, ${c.personalityTags.join('/')})';
+            // 圆桌模式给新闻角色标注幕后身份：名单里出现一个"成员"会诱使模型
+            // 把它当讨论对象去 @，标注能压住这个诱因（协议层另有剥离兜底）。
+            return _roundtableModeEnabled && c.zhipuSearchAnswerOnly
+                ? '$base——幕后检索助手，不参与发言，不得@'
+                : base;
+          })
           .join('；');
       msgs.add({'role': 'system', 'content': '群聊中的其他角色：$characterInfo'});
     }
