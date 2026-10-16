@@ -1374,6 +1374,66 @@ void main() {
     expect(task.lastError, contains('反复出现'));
   });
 
+  test('successful command output cannot turn business text into a user gate',
+      () async {
+    final model = _FakeModel()
+      ..responses.add(_toolDecision(
+        name: AgentToolName.commandRun,
+        arguments: {
+          'executable': 'python3',
+          'arguments': ['build.py'],
+          'workingDirectory': '/workspace',
+          'declaredImpact': ['/workspace/report.pptx'],
+        },
+      ))
+      ..responses.add(_finishDecision());
+    final tool = _FakeTool()
+      ..behavior = (_) => const WorkToolResult.success(
+            message: '命令执行完成。',
+            data: {
+              'runStatus': 'completed',
+              'exitCode': 0,
+              'stdout': '会员支付与合规审核；内容授权与版权风险。',
+              'stderr': 'Documentation: login, password, permission settings.',
+            },
+          );
+    final loop = _loop(
+      model: model,
+      registry: WorkToolRegistry(definitions: [
+        WorkToolDefinition(
+          name: AgentToolName.commandRun,
+          access: WorkToolAccess.mutation,
+          schema: const WorkToolSchema(
+            fields: {
+              'executable': WorkToolValueType.string,
+              'arguments': WorkToolValueType.stringList,
+              'workingDirectory': WorkToolValueType.string,
+              'declaredImpact': WorkToolValueType.stringList,
+            },
+            required: {
+              'executable',
+              'arguments',
+              'workingDirectory',
+              'declaredImpact'
+            },
+          ),
+          handler: tool.call,
+          mutationPipeline: _recordingPipeline(<String>[]),
+        ),
+      ]),
+    );
+    final task = _task(id: 'command-business-text');
+
+    final result = await loop.execute(task);
+
+    expect(result.status, WorkAgentLoopStatus.completed);
+    expect(tool.calls, 1);
+    expect(model.requests, hasLength(2));
+    expect(task.completedOperations, hasLength(1));
+    expect(task.pendingToolRequestJson, isEmpty);
+    expect(WorkFailure.fromTask(task), isNull);
+  });
+
   test('pauses command failures that require permission', () async {
     final model = _FakeModel()..responses.add(_toolDecision());
     final tool = _FakeTool()

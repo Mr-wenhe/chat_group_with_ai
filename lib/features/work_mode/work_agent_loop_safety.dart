@@ -888,6 +888,8 @@ extension _WorkAgentLoopSafety on WorkAgentLoop {
     if (code != null && WorkAgentLoop._userActionFailureCodes.contains(code)) {
       return true;
     }
+    // Successful output can quote business text about permissions or login.
+    if (result.succeeded) return false;
     final diagnostic = <String>[
       result.message,
       for (final key in const ['stderr', 'stdout'])
