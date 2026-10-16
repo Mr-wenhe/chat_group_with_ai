@@ -24,6 +24,10 @@
 #   release_artifacts/chat_group-android-apk-vX.Y.Z.apk
 #   release_artifacts/chat_group-android-aab-vX.Y.Z.aab
 # （release_artifacts/ 已在 .gitignore 中，不会入库）
+#
+# 除三平台产物外，脚本还会重建 docs/伴伴使用手册.html（源在 docs/user_guide_src/），
+# 提交它，并作为 chat_group-user-guide-vX.Y.Z.html 上传到同一个 Release。
+# 提交只在索引干净时发生，且不推送。
 # ============================================================================
 
 set -euo pipefail
@@ -149,6 +153,37 @@ gh release upload "$TAG" \
   "$ART_DIR/chat_group-android-aab-v$VERSION.aab" \
   --clobber
 ok "3 个平台产物已上传到 $TAG"
+
+# ===== 使用手册：重建 → 提交 → 上传为 Release 附件 =====
+# 刻意放在三平台产物之后：此时所有构建都已结束，可以安全地提前还原 pubspec.yaml。
+# 不提前还原的话，下面那次 git commit 会把脚本临时写进去的版本号一起提交进去。
+log "重建使用手册 ..."
+cp "$BAK" "$PUBSPEC" 2>/dev/null || true
+
+GUIDE_HTML="$ROOT/docs/伴伴使用手册.html"
+GUIDE_ASSET="$ART_DIR/chat_group-user-guide-v$VERSION.html"
+
+if [ -f "$GUIDE_HTML" ]; then
+  "$ROOT/scripts/build_user_guide.sh"
+  cp "$GUIDE_HTML" "$GUIDE_ASSET"
+
+  # 只在索引干净时提交：发版过程中若已有人暂存了别的改动，
+  # 一次顺手 git commit 会把不相关的东西卷进发版提交里。
+  if [ -n "$(git diff --cached --name-only)" ]; then
+    warn "索引里已有暂存改动，跳过自动提交手册（内容已重建，请自行确认后提交）"
+  elif git diff --quiet -- "$GUIDE_HTML"; then
+    ok "手册内容无变化，跳过提交"
+  else
+    git add "$GUIDE_HTML"
+    git commit -q -m "docs: 随 v$VERSION 重建使用手册"
+    ok "手册已提交（未推送，需要你自己 push）"
+  fi
+
+  gh release upload "$TAG" "$GUIDE_ASSET" --clobber
+  ok "手册已作为 Release 附件上传 → $(basename "$GUIDE_ASSET")"
+else
+  warn "未找到 $GUIDE_HTML，跳过手册重建（源在 docs/user_guide_src/）"
+fi
 
 REPO_SLUG="$(gh repo view --json owner,name -q '.owner.login + "/" + .name' 2>/dev/null || echo "OWNER/REPO")"
 echo

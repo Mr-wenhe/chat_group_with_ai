@@ -111,3 +111,6 @@ scripts/*
 # 授权码生成工具：属于对外交付物，docs/api_bundle_format.md 引用了它，
 # 不白名单的话别人拿到的仓库里没有这个脚本、照着文档跑会找不到文件。
 !scripts/generate_api_bundle.dart
+# 重建用户手册：docs/user_guide_src/ 是源，HTML 是产物；
+# 不白名单的话拿不到仓库的人改不了手册，发版流程也重建不出来。
+!scripts/build_user_guide.sh
