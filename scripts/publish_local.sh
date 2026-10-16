@@ -164,23 +164,28 @@ GUIDE_HTML="$ROOT/docs/伴伴使用手册.html"
 GUIDE_ASSET="$ART_DIR/chat_group-user-guide-v$VERSION.html"
 
 if [ -f "$GUIDE_HTML" ]; then
-  "$ROOT/scripts/build_user_guide.sh"
-  cp "$GUIDE_HTML" "$GUIDE_ASSET"
-
-  # 只在索引干净时提交：发版过程中若已有人暂存了别的改动，
-  # 一次顺手 git commit 会把不相关的东西卷进发版提交里。
-  if [ -n "$(git diff --cached --name-only)" ]; then
-    warn "索引里已有暂存改动，跳过自动提交手册（内容已重建，请自行确认后提交）"
-  elif git diff --quiet -- "$GUIDE_HTML"; then
-    ok "手册内容无变化，跳过提交"
+  # 手册重建失败不能拖垮整次发布：三平台产物此时已经传完了（这一点很重要——
+  # set -e 下未加保护的失败命令会把一个已经成功的发布变成失败）。
+  if ! "$ROOT/scripts/build_user_guide.sh"; then
+    warn "手册重建失败（缺 pandoc？），跳过提交与上传；本次发布的其他产物不受影响"
   else
-    git add "$GUIDE_HTML"
-    git commit -q -m "docs: 随 v$VERSION 重建使用手册"
-    ok "手册已提交（未推送，需要你自己 push）"
-  fi
+    cp "$GUIDE_HTML" "$GUIDE_ASSET"
 
-  gh release upload "$TAG" "$GUIDE_ASSET" --clobber
-  ok "手册已作为 Release 附件上传 → $(basename "$GUIDE_ASSET")"
+    # 只在索引干净时提交：发版过程中若已有人暂存了别的改动，
+    # 一次顺手 git commit 会把不相关的东西卷进发版提交里。
+    if [ -n "$(git diff --cached --name-only)" ]; then
+      warn "索引里已有暂存改动，跳过自动提交手册（内容已重建，请自行确认后提交）"
+    elif git diff --quiet -- "$GUIDE_HTML"; then
+      ok "手册内容无变化，跳过提交"
+    else
+      git add "$GUIDE_HTML"
+      git commit -q -m "docs: 随 v$VERSION 重建使用手册"
+      ok "手册已提交（未推送，需要你自己 push）"
+    fi
+
+    gh release upload "$TAG" "$GUIDE_ASSET" --clobber
+    ok "手册已作为 Release 附件上传 → $(basename "$GUIDE_ASSET")"
+  fi
 else
   warn "未找到 $GUIDE_HTML，跳过手册重建（源在 docs/user_guide_src/）"
 fi
