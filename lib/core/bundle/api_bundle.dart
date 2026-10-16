@@ -136,6 +136,20 @@ class ApiBundleSearchEntry {
   final bool isDefault;
 }
 
+/// 「智谱原生 Web Search」的凭据。
+///
+/// 它**不是** [ApiBundleSearchEntry] 的一种：那一条是「独立搜索 Provider」
+/// （Tavily / Brave / Gateway…），元数据与密钥都归 `SearchProviderConfigStore`
+/// 管；这一条由 `ZhipuNativeSearchCredentialStore` 单独持有，在设置页也是另外
+/// 一张卡片。曾经只导出前者，结果把「搜索服务」配成智谱原生的用户导出的包里
+/// 一条搜索凭据都没有——包能解开、导入不报错，只是静默少了整整一类，用户从
+/// 导出页与导入结果页都看不出是导出漏了还是对方没配。
+class ApiBundleZhipuNativeSearchEntry {
+  const ApiBundleZhipuNativeSearchEntry({required this.apiKey});
+
+  final String apiKey;
+}
+
 /// 一份配置包。
 class ApiBundle {
   const ApiBundle({
@@ -146,6 +160,7 @@ class ApiBundle {
     required this.image,
     required this.search,
     required this.issues,
+    this.zhipuNativeSearch,
   });
 
   /// 载荷 schema 版本。与信封前缀 `BBK1` 是两道独立闸门：前者管 JSON 形状，
@@ -159,18 +174,31 @@ class ApiBundle {
   final ApiBundleImageEntry? image;
   final List<ApiBundleSearchEntry> search;
 
+  /// 智谱原生搜索凭据。可选段，缺省表示「不动这一项」。
+  ///
+  /// 刻意**不**并进 [search] 列表：那一段的每一条都会被导入侧当作
+  /// `SearchProviderConfig` 写进 Provider 存储，而智谱原生搜索走的是另一套
+  /// 绑定（`ZhipuNativeSearchCredentialStore`）。混进去只会造出一条谁也不会读的
+  /// Provider 记录——旧版本客户端读到新包时更是如此。
+  final ApiBundleZhipuNativeSearchEntry? zhipuNativeSearch;
+
   /// 结构层被拒的条目。见 [ApiBundleIssue]。
   final List<ApiBundleIssue> issues;
 
   /// 四类都没东西可配（全是结构层被拒的条目，或载荷本来就没写服务）。
   bool get hasNoEntries =>
-      chat.isEmpty && voice == null && image == null && search.isEmpty;
+      chat.isEmpty &&
+      voice == null &&
+      image == null &&
+      search.isEmpty &&
+      zhipuNativeSearch == null;
 
   int get totalEntries =>
       chat.length +
       (voice == null ? 0 : 1) +
       (image == null ? 0 : 1) +
-      search.length;
+      search.length +
+      (zhipuNativeSearch == null ? 0 : 1);
 
   /// 解析载荷。只对**整包级别**的问题抛异常（版本不认识、形状不对）；
   /// 条目级问题记进 [issues]，不抛。
@@ -192,6 +220,7 @@ class ApiBundle {
       voice: _parseVoice(json['voice'], issues),
       image: _parseImage(json['image'], issues),
       search: _parseSearch(json['search'], issues),
+      zhipuNativeSearch: _parseZhipuNativeSearch(json['zhipuNativeSearch'], issues),
       issues: issues,
     );
   }
@@ -401,6 +430,29 @@ class ApiBundle {
       ));
     }
     return result;
+  }
+
+  static ApiBundleZhipuNativeSearchEntry? _parseZhipuNativeSearch(
+    Object? raw,
+    List<ApiBundleIssue> issues,
+  ) {
+    const section = '搜索';
+    const title = '智谱原生搜索';
+    if (raw == null) return null;
+    final map = _asMap(raw);
+    if (map == null) {
+      issues.add(const ApiBundleIssue(
+          section: section, title: title, reason: '不是配置对象'));
+      return null;
+    }
+    final apiKey = _requireText(map['apiKey'],
+        maxLength: ApiBundleLimits.maxCredentialLength,
+        section: section,
+        title: title,
+        label: 'apiKey',
+        issues: issues);
+    if (apiKey == null) return null;
+    return ApiBundleZhipuNativeSearchEntry(apiKey: apiKey);
   }
 
   /// 超长时返回空串而不是截断：截断会把一个坏配置**伪装成**好配置，用户看不出

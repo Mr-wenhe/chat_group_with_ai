@@ -11,6 +11,7 @@ import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
 import 'package:chat_group/features/settings/api_bundle_import_models.dart';
 import 'package:chat_group/features/settings/api_bundle_import_service.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
+import 'package:chat_group/features/web_search/data/zhipu_native_search_credential_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
@@ -28,6 +29,7 @@ ApiBundle buildBundle({
   ApiBundleVoiceEntry? voice,
   ApiBundleImageEntry? image,
   List<ApiBundleSearchEntry>? search,
+  ApiBundleZhipuNativeSearchEntry? zhipuNativeSearch,
   List<ApiBundleIssue> issues = const [],
 }) =>
     ApiBundle(
@@ -37,6 +39,7 @@ ApiBundle buildBundle({
       voice: voice,
       image: image,
       search: search ?? const [],
+      zhipuNativeSearch: zhipuNativeSearch,
       issues: issues,
     );
 
@@ -307,6 +310,67 @@ void main() {
     expect(db.apiConfigBox.length, 1);
     expect(db.voiceServiceConfig.apiKeyBound, isTrue);
     expect(db.imageServiceConfig.apiKeyBound, isTrue);
+  });
+
+  test('智谱原生搜索凭据单独落地，且不进 app_settings 明文', () async {
+    const zhipuKey = 'zhipu-SENTINEL-9x8y7z';
+    final bundle = buildBundle(
+      zhipuNativeSearch:
+          const ApiBundleZhipuNativeSearchEntry(apiKey: zhipuKey),
+    );
+
+    final plan = service().plan(bundle);
+    expect(plan.createCount, 1);
+    expect(plan.skipCount, 0);
+    expect(plan.changes.single.service, BundleService.search);
+    expect(plan.changes.single.title, '智谱原生搜索');
+
+    final result = await service().apply(bundle);
+    expect(result.failureCount, 0);
+    expect(result.successCount, 1);
+    expect(
+      ZhipuNativeSearchCredentialStore(db: db).hasConfiguredCredential,
+      isTrue,
+      reason: '导入没有写回智谱原生搜索的元数据绑定',
+    );
+    expect(
+      credentialBox.get('v:credential.web-search.zhipu-native-search'),
+      zhipuKey,
+    );
+    // 它和「独立 Provider」是两套存储：导入一类不该在另一类里留下任何痕迹。
+    expect(SearchProviderConfigStore(db: db).configs, isEmpty);
+    expectNoPlaintextAnywhere();
+    expect(
+      db.appSettingsBox.values.map((v) => v.toString()).join('\n')
+          .contains(zhipuKey),
+      isFalse,
+      reason: 'app_settings 里出现了明文密钥',
+    );
+  });
+
+  test('智谱原生搜索缺 apiKey 时跳过，不影响其余三类服务', () async {
+    final bundle = buildBundle(
+      chat: [chatEntry()],
+      voice: const ApiBundleVoiceEntry(
+        apiKey: voiceKey,
+        ttsResourceId: '',
+        asrResourceId: '',
+        defaultVoiceId: '',
+      ),
+      zhipuNativeSearch: const ApiBundleZhipuNativeSearchEntry(apiKey: ''),
+    );
+
+    final plan = service().plan(bundle);
+    expect(plan.skipCount, 1);
+    expect(plan.changes.last.detail, 'apiKey 不能为空');
+    expect(plan.createCount, 2);
+
+    final result = await service().apply(bundle);
+    expect(result.successCount, 2);
+    expect(
+      ZhipuNativeSearchCredentialStore(db: db).hasConfiguredCredential,
+      isFalse,
+    );
   });
 
   test('重复导入是幂等的：第二次全部呈覆盖，不产生重复记录', () async {

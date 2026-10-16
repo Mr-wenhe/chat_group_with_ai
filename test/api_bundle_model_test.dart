@@ -177,6 +177,48 @@ void main() {
     expect(bundle.issues.single.reason, '不是配置对象');
   });
 
+  test('智谱原生搜索是独立一段，不与 search 列表混同', () {
+    final bundle = ApiBundle.parse(<String, dynamic>{
+      'v': 1,
+      'search': [
+        {'id': 'tavily-main', 'name': 'Tavily', 'provider': 'tavily', 'apiKey': 't-x'},
+      ],
+      'zhipuNativeSearch': {'apiKey': 'zp-x'},
+    });
+
+    expect(bundle.issues, isEmpty);
+    expect(bundle.search.single.id, 'tavily-main');
+    expect(bundle.zhipuNativeSearch!.apiKey, 'zp-x');
+    expect(bundle.totalEntries, 2);
+  });
+
+  test('只配智谱原生搜索也算「有内容」', () {
+    final bundle = ApiBundle.parse(<String, dynamic>{
+      'v': 1,
+      'zhipuNativeSearch': {'apiKey': 'zp-x'},
+    });
+
+    expect(bundle.hasNoEntries, isFalse);
+    expect(bundle.totalEntries, 1);
+    expect(bundle.search, isEmpty);
+  });
+
+  test('智谱原生搜索缺 apiKey → 条目级跳过并给原因，不拖垮整包', () {
+    final bundle = ApiBundle.parse(<String, dynamic>{
+      'v': 1,
+      'zhipuNativeSearch': <String, dynamic>{},
+      'chat': [
+        {'provider': 'deepseek', 'apiKey': 'sk-x'},
+      ],
+    });
+
+    expect(bundle.zhipuNativeSearch, isNull);
+    expect(bundle.issues.single.section, '搜索');
+    expect(bundle.issues.single.title, '智谱原生搜索');
+    expect(bundle.issues.single.reason, contains('apiKey'));
+    expect(bundle.chat.length, 1);
+  });
+
   test('与编解码层串起来：seal → open → parse 全链路一致', () {
     final code = ApiBundleCodec.seal(<String, dynamic>{
       'v': 1,

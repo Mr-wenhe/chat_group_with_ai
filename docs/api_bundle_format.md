@@ -87,7 +87,15 @@ mac = HMAC-SHA256(kMac, "BBK1" || salt || nonce || ciphertext)[0..16]
     "apiKey": "tvly-…",                  // 该 provider 需要凭据时必填
     "enabled": true,                     // 可选
     "isDefault": true                    // 可选
-  }]
+  }],
+
+  // 智谱原生 Web Search 的凭据。与上面 `search` 里的条目是**两套不同的东西**：
+  // 那条是「独立搜索 Provider」（Tavily / Brave / Gateway…），走
+  // `SearchProviderConfigStore`；这条由 `ZhipuNativeSearchCredentialStore` 单独
+  // 持有，在设置页也是另外一张卡片。两者都可以只配其中一个。
+  "zhipuNativeSearch": {
+    "apiKey": "…"                        // 必填
+  }
 }
 ```
 
@@ -141,7 +149,7 @@ App 侧用 `--dart-define=BUNDLE_KEY_SECRET=...` 覆盖（变量名相同，但�
 
 - **聊天**：导出**全部已绑定密钥**的配置（不只是默认那条），并带上各自的 `id`，因此在同一台机器上导入时按 id 精确覆盖，而在别的机器上则按原样重建。
 - **语音 / 图像**：各自最多一条（它们本来就是全局单配置）。
-- **搜索**：只导出**带令牌**的提供方。无令牌的那几个（DuckDuckGo、内置）没有可分享的秘密，塞进包里只是噪声。
+- **搜索**：两类凭据都会导出——`search` 段里只导出**带令牌**的独立提供方（无令牌的那几个 DuckDuckGo / 内置没有可分享的秘密，塞进包里只是噪声），另外**单独**导出「智谱原生 Web Search」（`zhipuNativeSearch` 段）。这两条是并行的，只配了其中一个也能正常导出；早先只覆盖前者，把搜索配成智谱原生的用户会导出一个不含任何搜索凭据的包。
 - **默认聊天配置**的指向会跟着走（写进 `makeDefault`）。
 
 导出侧在交付前会**自己先解析一遍**生成的载荷（`ApiBundle.parse`）。生成一份导入侧不肯接受的配置包，用户要等拿到另一台机器上才发现「校验失败」，而那时已经无从回查是哪一项写坏了。
@@ -161,7 +169,8 @@ App 侧用 `--dart-define=BUNDLE_KEY_SECRET=...` 覆盖（变量名相同，但�
 | 聊天 | Hive `api_configs`（`ApiConfig`） | `CredentialRepository`，id = `credential.api-config.{configId}` |
 | 语音 | `app_settings` 的 `volc_voice_service` 单 Map | `credential.api-config.voice.volcengine` |
 | 图像 | `app_settings` 的 `image_generation_service` 单 Map | `credential.api-config.image.openai-compatible` |
-| 搜索 | `app_settings` 的 `web_search_provider_configs_v1` | `credential.web-search.{id}`（独立命名空间） |
+| 搜索（独立 Provider） | `app_settings` 的 `web_search_provider_configs_v1` | `credential.web-search.{id}`（独立命名空间） |
+| 搜索（智谱原生） | `app_settings` 的 `zhipu_native_search_credential_v1` | `credential.web-search.zhipu-native-search` |
 
 元数据里只有 `apiKeyBound` / `hasCredential` 这类布尔位，**明文密钥绝不进 `app_settings`**——那个 box 受 git 跟踪。
 
