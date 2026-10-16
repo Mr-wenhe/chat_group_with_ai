@@ -25,6 +25,7 @@ import 'package:chat_group/core/storage/credential_repository.dart';
 import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
 import 'package:chat_group/features/settings/api_bundle_import_models.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
+import 'package:chat_group/features/web_search/data/zhipu_native_search_credential_store.dart';
 import 'package:chat_group/features/web_search/models/search_models.dart';
 import 'package:chat_group/features/web_search/models/search_provider_config.dart';
 import 'package:chat_group/features/web_search/security/search_endpoint_validator.dart';
@@ -42,12 +43,21 @@ class ApiBundleImportService {
             SearchProviderConfigStore(
               db: db,
               isRelease: isRelease ?? kReleaseMode,
-            );
+            ),
+        // `isRelease` 必须透传：release 下 macOS 的开发回退被禁用，用 `kReleaseMode`
+        // 的默认值在注入 `isRelease: false` 的测试里会得到不一致的平台分流。
+        _zhipuSearchStore = ZhipuNativeSearchCredentialStore(
+          db: db,
+          isRelease: isRelease ?? kReleaseMode,
+        );
 
   final DatabaseService _db;
   final CredentialRepository _credentials;
   final SearchProviderConfigStore _searchStore;
+  final ZhipuNativeSearchCredentialStore _zhipuSearchStore;
   final bool _isRelease;
+
+  static const String _zhipuNativeSearchTitle = '智谱原生搜索';
 
   /// 写前唯一硬闸。不通过就**一个字节都不写**。
   ///
@@ -99,6 +109,9 @@ class ApiBundleImportService {
     for (final write in resolution.searchWrites) {
       outcomes.add(await _applySearch(write));
     }
+    if (resolution.zhipuSearchWrite != null) {
+      outcomes.add(await _applyZhipuNativeSearch(resolution.zhipuSearchWrite!));
+    }
 
     return BundleImportResult(outcomes);
   }
@@ -132,6 +145,8 @@ class ApiBundleImportService {
       final write = _resolveSearch(entry, changes);
       if (write != null) searchWrites.add(write);
     }
+    final zhipuSearchWrite =
+        _resolveZhipuNativeSearch(bundle.zhipuNativeSearch, changes);
 
     return _Resolution(
       changes: changes,
@@ -139,6 +154,7 @@ class ApiBundleImportService {
       voiceWrite: voiceWrite,
       imageWrite: imageWrite,
       searchWrites: searchWrites,
+      zhipuSearchWrite: zhipuSearchWrite,
     );
   }
 
@@ -359,6 +375,38 @@ class ApiBundleImportService {
     return _SearchWrite(entry: entry, id: id, kind: kind, existing: existing);
   }
 
+  /// 智谱原生搜索是**另一类**搜索凭据，落点与上面那条 Provider 路径完全不同
+  /// （`ZhipuNativeSearchCredentialStore`，不是 `SearchProviderConfigStore`）。
+  /// 它不需要 id / provider / baseUrl 这些字段，因此单独走一条解析与写入。
+  _ZhipuNativeSearchWrite? _resolveZhipuNativeSearch(
+    ApiBundleZhipuNativeSearchEntry? entry,
+    List<BundleChange> changes,
+  ) {
+    if (entry == null) return null;
+    if (entry.apiKey.isEmpty) {
+      changes.add(const BundleChange(
+        service: BundleService.search,
+        action: BundleChangeAction.skip,
+        title: _zhipuNativeSearchTitle,
+        detail: 'apiKey 不能为空',
+      ));
+      return null;
+    }
+    // 与语音 / 图像同一口径：不再比对密钥内容。判定一致势必要读一次安全存储，
+    // 而「已配置即覆盖」语义确定，且重复导入本来就是幂等的。
+    final configured = _zhipuSearchStore.hasConfiguredCredential;
+    changes.add(BundleChange(
+      service: BundleService.search,
+      action: configured
+          ? BundleChangeAction.overwrite
+          : BundleChangeAction.create,
+      title: _zhipuNativeSearchTitle,
+      detail: configured ? '替换智谱原生搜索 API Key' : '写入智谱原生搜索 API Key',
+      keyFingerprint: _fingerprint(entry.apiKey),
+    ));
+    return _ZhipuNativeSearchWrite(entry);
+  }
+
   // ---------------------------------------------------------------- 执行
 
   Future<BundleImportOutcome> _applyChat(
@@ -501,6 +549,23 @@ class ApiBundleImportService {
     );
   }
 
+  Future<BundleImportOutcome> _applyZhipuNativeSearch(
+    _ZhipuNativeSearchWrite write,
+  ) async {
+    // 与设置页那张卡片走同一个调用：平台分流、release 边界与 macOS 的 Hive
+    // 回退都由它自己处理。失败是返回值不是异常，取 message 记为单条失败原因，
+    // 其余服务继续。
+    final result = await _zhipuSearchStore.save(write.entry.apiKey);
+    return BundleImportOutcome(
+      service: BundleService.search,
+      title: _zhipuNativeSearchTitle,
+      succeeded: result.isSuccess,
+      reason: result.isSuccess
+          ? ''
+          : (result.message ?? '智谱原生搜索凭据写入失败'),
+    );
+  }
+
   // ---------------------------------------------------------------- 工具
 
   /// 按 [entry] 的 id（优先）或「服务商 + 模型 + Base URL」匹配现有聊天配置。
@@ -597,6 +662,7 @@ class _Resolution {
     required this.voiceWrite,
     required this.imageWrite,
     required this.searchWrites,
+    required this.zhipuSearchWrite,
   });
 
   final List<BundleChange> changes;
@@ -604,6 +670,7 @@ class _Resolution {
   final _VoiceWrite? voiceWrite;
   final _ImageWrite? imageWrite;
   final List<_SearchWrite> searchWrites;
+  final _ZhipuNativeSearchWrite? zhipuSearchWrite;
 }
 
 class _ChatWrite {
@@ -646,4 +713,10 @@ class _SearchWrite {
   final String id;
   final SearchProviderKind kind;
   final SearchProviderConfig? existing;
+}
+
+class _ZhipuNativeSearchWrite {
+  const _ZhipuNativeSearchWrite(this.entry);
+
+  final ApiBundleZhipuNativeSearchEntry entry;
 }

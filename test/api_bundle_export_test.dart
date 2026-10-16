@@ -8,6 +8,8 @@ import 'package:chat_group/core/storage/debug_credential_cache.dart';
 import 'package:chat_group/features/settings/api_bundle_export_service.dart';
 import 'package:chat_group/features/settings/api_bundle_import_models.dart';
 import 'package:chat_group/features/settings/api_bundle_import_service.dart';
+import 'package:chat_group/features/web_search/data/search_credential_repository.dart';
+import 'package:chat_group/features/web_search/data/zhipu_native_search_credential_store.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:hive/hive.dart';
 
@@ -181,6 +183,67 @@ void main() {
     expect(
       result.included.every((e) => e.fingerprint.length == 8),
       isTrue,
+    );
+  });
+
+  test('只配了智谱原生搜索时，它也会进包（此前整类被遗漏）', () async {
+    const zhipuKey = 'zhipu-export-SENTINEL-ee';
+    await ZhipuNativeSearchCredentialStore(db: db).save(zhipuKey);
+
+    final result = await exporter().export();
+    expect(result.hasContent, isTrue);
+    expect(result.included.map((e) => e.title), contains('智谱原生搜索'));
+    expect(result.omitted, isEmpty);
+
+    final parsed = ApiBundle.parse(ApiBundleCodec.open(result.code));
+    expect(parsed.zhipuNativeSearch!.apiKey, zhipuKey);
+    // 独立 Provider 一条都没配，`search` 段就该是空的——智谱原生走的是它自己的段，
+    // 不能被混进那张会被当成 `SearchProviderConfig` 写入的列表里。
+    expect(parsed.search, isEmpty);
+  });
+
+  test('智谱原生搜索凭据能导到另一台机器并重建绑定', () async {
+    const zhipuKey = 'zhipu-export-SENTINEL-ff';
+    await ZhipuNativeSearchCredentialStore(db: db).save(zhipuKey);
+    final code = (await exporter().export()).code;
+
+    // 模拟换机：元数据与凭据一并抹掉。
+    await db.appSettingsBox
+        .delete(ZhipuNativeSearchCredentialStore.settingsKey);
+    await SearchCredentialRepository()
+        .delete(ZhipuNativeSearchCredentialStore.credentialConfigId);
+    expect(
+      ZhipuNativeSearchCredentialStore(db: db).hasConfiguredCredential,
+      isFalse,
+    );
+
+    final imported = await importer().apply(
+      ApiBundle.parse(ApiBundleCodec.open(code)),
+    );
+    expect(imported.failureCount, 0);
+
+    final restored = ZhipuNativeSearchCredentialStore(db: db);
+    expect(restored.hasConfiguredCredential, isTrue);
+    expect(await restored.resolve(), zhipuKey);
+  });
+
+  test('导出清单里不含智谱原生搜索的明文', () async {
+    const zhipuKey = 'zhipu-export-SENTINEL-gg';
+    await ZhipuNativeSearchCredentialStore(db: db).save(zhipuKey);
+
+    final result = await exporter().export();
+    final shown = [
+      for (final entry in [...result.included, ...result.omitted])
+        '${entry.service.label}|${entry.title}|${entry.detail}|${entry.fingerprint}',
+    ].join('\n');
+
+    expect(shown.contains(zhipuKey), isFalse);
+    expect(
+      result.included
+          .firstWhere((e) => e.title == '智谱原生搜索')
+          .fingerprint
+          .length,
+      8,
     );
   });
 

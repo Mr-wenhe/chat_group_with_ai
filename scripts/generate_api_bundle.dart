@@ -144,6 +144,14 @@ void _printSummary(ApiBundle bundle) {
       '${entry.apiKey.isEmpty ? '' : '  指纹 ${_fingerprint(entry.apiKey)}'}',
     );
   }
+  // 智谱原生搜索是独立的一段，不与上面的 search 列表同流。漏打印它，生成端就
+  // 看不出这一项到底进没进包——和当初导出侧整类遗漏是同一个盲区。
+  if (bundle.zhipuNativeSearch != null) {
+    stderr.writeln(
+      '  搜索  智谱原生 Web Search'
+      '  指纹 ${_fingerprint(bundle.zhipuNativeSearch!.apiKey)}',
+    );
+  }
 
   for (final issue in bundle.issues) {
     stderr.writeln('  跳过  [${issue.section}] ${issue.title}：${issue.reason}');

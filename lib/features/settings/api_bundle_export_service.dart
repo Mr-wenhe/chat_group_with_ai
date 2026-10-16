@@ -18,6 +18,7 @@ import 'package:chat_group/features/settings/ai_speaker_picker_settings.dart';
 import 'package:chat_group/features/settings/api_bundle_import_models.dart';
 import 'package:chat_group/features/web_search/data/search_credential_repository.dart';
 import 'package:chat_group/features/web_search/data/search_settings_store.dart';
+import 'package:chat_group/features/web_search/data/zhipu_native_search_credential_store.dart';
 
 /// 导出清单里的一行（含被略过的那些）。
 class ApiBundleExportEntry {
@@ -90,6 +91,9 @@ class ApiBundleExportService {
 
     final search = await _collectSearch(included, omitted);
     if (search.isNotEmpty) payload['search'] = search;
+
+    final zhipuSearch = await _collectZhipuNativeSearch(included, omitted);
+    if (zhipuSearch != null) payload['zhipuNativeSearch'] = zhipuSearch;
 
     // 自检：导出侧拒绝生成一份导入侧不肯接受的包。
     ApiBundle.parse(payload);
@@ -246,5 +250,38 @@ class ApiBundleExportService {
       ));
     }
     return result;
+  }
+
+  /// 智谱原生 Web Search 走的是**另一套**凭据存储
+  /// （`ZhipuNativeSearchCredentialStore`），上面那个循环看不到它。
+  ///
+  /// 少了这一段，「搜索服务」配成智谱原生的用户导出的包里一条搜索凭据都没有：
+  /// 包能解开、导入也不报错，只是静默少了一整类。所以这里的「读不出来」必须
+  /// 进 [omitted] 带原因，和其余三类服务同一口径。
+  Future<Map<String, dynamic>?> _collectZhipuNativeSearch(
+    List<ApiBundleExportEntry> included,
+    List<ApiBundleExportEntry> omitted,
+  ) async {
+    const service = BundleService.search;
+    const title = '智谱原生搜索';
+    final store = ZhipuNativeSearchCredentialStore(db: _db);
+    if (!store.hasConfiguredCredential) return null;
+
+    final apiKey = await store.resolve() ?? '';
+    if (apiKey.isEmpty) {
+      omitted.add(const ApiBundleExportEntry(
+        service: service,
+        title: title,
+        detail: '已绑定但密钥读不出来（系统安全存储不可用）',
+      ));
+      return null;
+    }
+    included.add(ApiBundleExportEntry(
+      service: service,
+      title: title,
+      detail: '智谱 AI · 原生联网',
+      fingerprint: apiBundleKeyFingerprint(apiKey),
+    ));
+    return <String, dynamic>{'apiKey': apiKey};
   }
 }
