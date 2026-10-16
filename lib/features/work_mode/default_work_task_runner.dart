@@ -132,20 +132,24 @@ class DefaultWorkTaskRunner
       throw StateError('调查成员或需求版本不匹配。');
     }
     final current = database.aiCharacterBox.get(character.id);
-    final config = current?.apiConfigId == null
-        ? null
-        : database.apiConfigBox.get(current!.apiConfigId);
-    if (current == null ||
-        !current.isActive ||
-        !current.agenticEnabled ||
-        config == null ||
-        (await credentials
-                    .resolve(config)
-                    .timeout(investigationCredentialTimeout))
-                ?.trim()
-                .isNotEmpty !=
-            true) {
-      throw StateError('调查成员或模型配置已不可用，未自动换人。');
+    // 成因逐条报出：一句「调查成员或模型配置已不可用」把已删除、未启用、未开
+    // Agentic、没绑配置和凭据读不出来揉成一团，用户看不出该恢复哪一个。
+    if (current == null) throw StateError('调查成员已删除，未自动换人。');
+    final unavailable = WorkRoleRouter.availabilityFailure(current);
+    if (unavailable != null) {
+      throw StateError('调查成员$unavailable，未自动换人。');
+    }
+    final config = database.apiConfigBox.get(current.apiConfigId);
+    if (config == null) {
+      throw StateError('调查成员没有可用的模型配置，未自动换人。');
+    }
+    if ((await credentials
+                .resolve(config)
+                .timeout(investigationCredentialTimeout))
+            ?.trim()
+            .isNotEmpty !=
+        true) {
+      throw StateError('调查成员模型凭据不可用，未自动换人。');
     }
     final files = workspaceFileService;
     final mutations = mutationService;

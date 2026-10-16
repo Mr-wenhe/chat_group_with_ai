@@ -544,6 +544,7 @@ extension _WorkTaskCoordinatorSubmission on WorkTaskCoordinator {
           task.status != AgentTaskStatus.interrupted) {
         throw StateError('当前任务没有可稍后处理的阻碍。');
       }
+      _discussionCancellations[taskId]?.cancel();
       task
         ..resumeRequired = true
         ..updatedAt = _clock();

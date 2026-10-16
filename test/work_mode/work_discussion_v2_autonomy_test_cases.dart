@@ -35,8 +35,10 @@ void _registerAutonomousDiscussionTests() {
     });
     final calls = <String>[];
     final prompts = <String, String>{};
+    Map<String, dynamic>? autonomousContext;
     await modelRunner((member, context) async {
       calls.add(member.id);
+      autonomousContext ??= context;
       final state = context['collaboration'] as Map<String, dynamic>;
       if ((state['plan'] as String).isEmpty) {
         return _turn('propose', proposal: _autonomousProposal(state));
@@ -70,7 +72,16 @@ void _registerAutonomousDiscussionTests() {
     expect(current.decisions, isEmpty);
     expect(current.coordinatorDecisions.single['coordinatorId'], 'dev');
     expect(calls, containsAll(['dev', 'qa', 'extra']));
+    final roster = autonomousContext!['participantRoster'] as List;
+    expect(roster.map((item) => (item as Map)['memberId']).toList(),
+        ['dev', 'qa', 'extra']);
+    expect(
+        roster.every((item) =>
+            (item as Map)['displayName'] ==
+            db.aiCharacterBox.get(item['memberId'])!.name),
+        isTrue);
     expect(prompts['dev'], contains('协调者按 turnFocus 分阶段推进'));
+    expect(prompts['dev'], contains('displayName 仅供识人'));
     expect(prompts['dev'], contains('普通分歧据证据定案并保留异议'));
     expect(prompts['dev'], contains('先核当前候选与本人收据'));
     expect(prompts['dev'], isNot(contains('真实分歧走用户决策')));
@@ -137,5 +148,39 @@ void _registerAutonomousDiscussionTests() {
     final repair = WorkDiscussionV2Turn.repairProtocolFor('', autonomous: true);
     expect(repair, contains('普通技术和偏好分歧由协调者据证据定案'));
     expect(repair, isNot(contains('真实分歧走用户决策')));
+  });
+
+  test('自主协议修复请求同样带上参与者名册', () async {
+    // `autonomyRules` 要求按名册的 memberId 对齐参与者，而修复请求也嵌入这份
+    // 规则；名册只出现在首轮上下文里时，修复器只能拿显示名去凑 memberId。
+    task.executionStateJson = jsonEncode({
+      ...jsonDecode(task.executionStateJson) as Map,
+      'autonomyUpgradePending': true,
+    });
+    final repairs = <Map<String, dynamic>>[];
+    await modelRunner((member, context) async {
+      if (context.containsKey('originalFinal')) {
+        repairs.add(context);
+        final repaired = context['collaboration'] as Map<String, dynamic>;
+        return _turn('propose', proposal: _autonomousProposal(repaired));
+      }
+      final state = context['collaboration'] as Map<String, dynamic>;
+      if ((state['plan'] as String).isEmpty) {
+        final clean = _turn('propose', proposal: _autonomousProposal(state));
+        // 围栏包裹的正文通不过 JSON 语法校验，修复器因此一定会被调用。
+        return {'success': true, 'message': '```json\n${clean['message']}\n```'};
+      }
+      return _turn('approve', approval: {...approval(state)});
+    }).runCollaboration(task, WorkTaskCancellation(), apply);
+
+    expect(repairs, isNotEmpty);
+    final roster = repairs.first['participantRoster'];
+    expect(roster, isA<List>(),
+        reason: '修复器与首轮请求看到的名册必须是同一份，缺了它模型只能拿显示名凑 memberId');
+    expect(
+        (roster as List)
+            .map((item) => (item as Map)['memberId'] as String)
+            .toList(),
+        ['dev', 'qa', 'extra']);
   });
 }

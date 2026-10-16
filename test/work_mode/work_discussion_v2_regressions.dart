@@ -151,6 +151,50 @@ void _registerDiscussionHistoryRegressions() {
     expect(repair, contains('proposal={scope,plan,artifactContract'));
   });
 
+  test('协议明确 issues 字段长度边界，避免模型把讨论塞进单个问题', () {
+    final protocol = WorkDiscussionV2Turn.protocolFor(
+      '',
+      stage: WorkDiscussionStage.prepareProposal,
+    );
+    expect(protocol,
+        contains('id、target、problem、retestCondition 均须为非空字符串且各不超过 4096 字符'));
+    expect(protocol, contains('evidenceRef 不超过 128 字符'));
+    expect(protocol, contains('不把讨论记录、完整需求或实施方案塞进单个字段'));
+  });
+
+  test('自主提案明确将 usageAssignments 作为五个基础字段之外的唯一字段', () {
+    final protocol = WorkDiscussionV2Turn.protocolFor(
+      '',
+      stage: WorkDiscussionStage.prepareProposal,
+      autonomous: true,
+    );
+    final combined = '$protocol\n${WorkDiscussionProtocolText.autonomyRules}';
+    expect(
+      combined,
+      contains(
+          '自主 proposal 必须在五个基础字段 scope、plan、artifactContract、workItems、acceptances 之外'),
+    );
+    expect(
+      combined,
+      contains('自主模式下还必须且只可额外包含 usageAssignments'),
+    );
+    expect(
+      combined,
+      contains(
+          'usageAssignments 数量必须等于 collaboration.autonomyPolicy.participantIds'),
+    );
+    expect(
+      combined,
+      contains('这些数组的并集必须覆盖每个验收 ID'),
+    );
+    expect(
+      combined,
+      isNot(contains(
+          'proposal 本身只包含 scope、plan、artifactContract、workItems、acceptances。')),
+    );
+    expect(combined, contains('非自主模式不得包含 usageAssignments'));
+  });
+
   test('v2 协议把内部标识符与编号清单挡在公开正文外', () {
     expect(
         WorkDiscussionV2Turn.protocolFor('',
@@ -968,6 +1012,60 @@ void _registerDiscussionHistoryRegressions() {
     expect(pending.single['reason'], contains('API 配置缺失'));
     expect(_optionIds(), contains('helper'),
         reason: '成员不可用不是模型的问题，同模型的候选不能被筛掉');
+  });
+
+  test('成员没绑定模型时如实报出成因，不并进笼统文案', () async {
+    await db.agentTaskBox.put(task.id, task);
+    // 群任务升级成全员参与后，第三个成员只有 general 责任：这正是 2026-10-15
+    // 现场的形态——弹窗只写「资格或配置不可用」，用户看不出该恢复配置还是换人。
+    task.executionStateJson = jsonEncode({
+      ...jsonDecode(task.executionStateJson) as Map,
+      'autonomyUpgradePending': true,
+    });
+    final extra = db.aiCharacterBox.get('extra')!;
+    extra.apiConfigId = '';
+    extra.apiKey = '';
+    await db.aiCharacterBox.put('extra', extra);
+    await modelRunner(confirm)
+        .runCollaboration(task, WorkTaskCancellation(), apply);
+    final pending = _pendingDecisions();
+    expect(pending, hasLength(1));
+    expect(pending.single['reason'], contains('尚未配置可用模型'),
+        reason: '具体成因是用户唯一能据以处置的信息，不能被合并文案吃掉');
+    expect(pending.single['reason'], isNot(contains('资格或配置不可用')));
+    expect(_teamRecord('extra')['available'], isFalse);
+  });
+
+  test('成员资格不足时按责任归因，不牵连模型配置', () async {
+    await db.agentTaskBox.put(task.id, task);
+    // 团队里已经有一位不具备该责任的成员（角色改行、或旧检查点带过来的责任）。
+    final state =
+        WorkDiscussionState.fromExecutionState(task.executionStateJson)!;
+    final collaboration = state.collaboration!.toJson();
+    collaboration['team'] = [
+      ...(collaboration['team'] as List)
+          .map((m) => Map<String, dynamic>.from(m as Map)),
+      {
+        'memberId': 'extra',
+        'role': 'development',
+        'qualificationRef': 'member:extra',
+        'qualified': true,
+        'available': true,
+      }
+    ];
+    collaboration['revision'] = (collaboration['revision'] as int) + 1;
+    task.executionStateJson = WorkDiscussionState.mergeIntoExecutionState(
+        task.executionStateJson,
+        state.copyWith(
+            collaboration: WorkCollaborationState.tryParse(collaboration)!),
+        expectedCollaborationRevision: state.collaboration!.revision);
+    await modelRunner(confirm)
+        .runCollaboration(task, WorkTaskCancellation(), apply);
+    final pending = _pendingDecisions();
+    expect(pending, hasLength(1));
+    expect(pending.single['reason'], contains('开发能力'),
+        reason: '缺的是责任资格，就该说责任；模型配置此时是好的');
+    expect(pending.single['reason'], isNot(contains('资格或配置不可用')));
   });
 
   test('有别的模型可选时不列同模型的候选，并在依据里说明', () async {

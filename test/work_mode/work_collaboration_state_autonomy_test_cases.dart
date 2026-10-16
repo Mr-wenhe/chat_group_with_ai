@@ -141,6 +141,61 @@ void _registerAutonomyTests() {
     expect(next.allMembersUsed, isFalse);
   });
 
+  test('重试控制项不被当作参与成员替换', () {
+    final baseline = _state(_autonomousFixture());
+    for (final id in ['retry-same-member', 'member-config-updated']) {
+      final current = _state(_autonomousFixture()
+        ..['decisions'] = [
+          {
+            'id': 'retry-$id',
+            'revision': 1,
+            'status': 'answered',
+            'reason': '保留当前成员继续任务',
+            'answer': id,
+            'impact': '原成员与责任不变',
+            'responseRef': 'response-$id',
+            'evidence': '用户选择继续',
+            'options': [
+              {'id': id, 'label': id, 'impact': '原成员与责任不变'}
+            ],
+            'targetId': 'a',
+            'kind': 'member',
+            'answerKind': 'choice',
+          }
+        ]);
+
+      expect(current.confirmedMemberChoices, isEmpty, reason: id);
+      expect(current.confirmedParticipationPolicy, baseline.autonomyPolicy,
+          reason: id);
+    }
+  });
+
+  test('缺少 options 的已答复成员决策不会让团队核对抛异常', () {
+    // 状态闸门明确接受 `options == null`（旧检查点里就有这种记录）。团队核对现在
+    // 走 `confirmedMemberChoices`，它曾经用 `as List` 硬转，这条记录会让整轮核对
+    // 抛 TypeError 而不是"没有候选可选"。
+    final current = _state(_autonomousFixture()
+      ..['decisions'] = [
+        {
+          'id': 'no-options',
+          'revision': 1,
+          'status': 'answered',
+          'reason': '用户答复了一个没有候选的问题',
+          'answer': '稍后再说',
+          'impact': '原成员与责任不变',
+          'responseRef': 'user-response',
+          'evidence': '用户选择',
+          'targetId': 'a',
+          'kind': 'member',
+          'answerKind': 'choice',
+        }
+      ]);
+
+    expect(current.confirmedMemberChoices, isEmpty);
+    expect(current.confirmedParticipationPolicy,
+        _state(_autonomousFixture()).autonomyPolicy);
+  });
+
   test('本人使用反馈严格解析；通过标签、命令 tests 与未列真实失败均不能冒充反馈', () {
     final valid = {
       'method': '实际使用',

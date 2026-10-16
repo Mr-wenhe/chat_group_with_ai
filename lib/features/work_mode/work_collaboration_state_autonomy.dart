@@ -253,10 +253,17 @@ extension WorkCollaborationAutonomy on WorkCollaborationState {
           (decision['responseRef'] as String).isEmpty) {
         continue;
       }
-      final selected = (decision['options'] as List)
+      // `options` 允许缺失（状态闸门明确接受 `options == null`），缺失时这条决策
+      // 只是"没有候选可选"，不能让它把整轮团队核对炸掉。
+      final selected = (decision['options'] as List? ?? const [])
           .whereType<Map>()
           .where((o) =>
-              o['label'] == decision['answer'] && o['id'] != 'human-review')
+              o['label'] == decision['answer'] &&
+              !const {
+                'human-review',
+                'retry-same-member',
+                'member-config-updated'
+              }.contains(o['id']))
           .firstOrNull;
       if (selected != null) {
         choices[decision['targetId'] as String] = selected['id'] as String;

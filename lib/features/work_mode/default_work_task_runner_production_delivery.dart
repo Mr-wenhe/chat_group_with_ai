@@ -135,36 +135,19 @@ extension _DefaultWorkTaskRunnerProductionDelivery on DefaultWorkTaskRunner {
       throw StateError('当前制作责任与用户指定执行者不一致，不能交付。');
     }
     await _validateUsageReceipts(state);
-    final group = database.chatGroupBox.get(task.groupId);
     for (final id in state.activeMembers) {
+      // 与制作入口共用同一份成因判据：交付期同样只有写明成因，用户才知道该恢复
+      // 配置、重新启用成员、补人还是改责任。
       final member = database.aiCharacterBox.get(id);
-      if (member == null ||
-          !member.isActive ||
-          !member.agenticEnabled ||
-          !WorkRoleRouter.qualifiesForResponsibility(
-              member,
-              state.team.singleWhere((m) => m['memberId'] == id)['role']
-                  as String,
-              database.characterSkillBox.values) ||
-          group == null ||
-          !_productionMemberAuthorized(task, id)) {
-        await _productionDecision(task, 'member', id, '成员 $id 当前失效，需重新确认团队与认可。',
+      final failure = member == null
+          ? '成员已删除'
+          : _productionMemberFailure(task, state, member) ??
+              await _productionCredentialFailure(member);
+      if (failure != null) {
+        await _productionDecision(task, 'member', id,
+            '成员 $id 当前不可用：$failure。请恢复或确认已有合格成员接任，未代签。',
             persist: false);
-        throw StateError('成员 $id 当前失效，需重新确认团队与认可。');
-      }
-      final config = _resolveApiConfig(member);
-      var credentialAvailable = false;
-      if (config != null) {
-        try {
-          credentialAvailable =
-              (await credentials.resolve(config))?.trim().isNotEmpty == true;
-        } on Object {/* Unavailable credentials require user action. */}
-      }
-      if (!credentialAvailable) {
-        await _productionDecision(
-            task, 'member', id, '成员 $id 模型凭据已失效，请恢复后重新确认。',
-            persist: false);
-        throw StateError('成员 $id 模型凭据已失效。');
+        throw StateError('成员 $id 当前不可用：$failure。');
       }
     }
   }

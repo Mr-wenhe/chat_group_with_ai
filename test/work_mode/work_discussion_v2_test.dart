@@ -24,6 +24,7 @@ import 'package:chat_group/features/work_mode/work_discussion_runner.dart';
 import 'package:chat_group/features/work_mode/work_discussion_state.dart';
 import 'package:chat_group/features/work_mode/work_collaboration_state.dart';
 import 'package:chat_group/features/work_mode/work_discussion_v2_protocol.dart';
+import 'package:chat_group/features/work_mode/work_discussion_v2_protocol_text.dart';
 import 'package:chat_group/features/work_mode/work_discussion_v2_stage.dart';
 import 'package:chat_group/features/work_mode/work_public_update_stream.dart';
 import 'package:chat_group/features/work_mode/agent_decision.dart';
@@ -1253,6 +1254,101 @@ void main() {
     expect(issueCounts.every((count) => count == 3), isTrue,
         reason: '每个成员都要看到全部三个未决问题');
   });
+  test('原生应用合同失败时诊断包含 nativeBundle 的完整约束', () {
+    final invalidProposal = {
+      'scope': '交付一个 macOS 应用',
+      'plan': '构建并验证应用',
+      'artifactContract': {
+        'type': 'software',
+        'format': 'macOS app',
+        'location': '临时目录',
+        'revisionTarget': '',
+        'files': ['ExpenseLedger.app', 'ExpenseLedger.zip'],
+        'nativeBundle': {
+          'schemaVersion': 1,
+          'appPath': 'ExpenseLedger.app',
+          'archivePath': 'ExpenseLedger.zip',
+        },
+      },
+      'workItems': <Map<String, dynamic>>[],
+      'acceptances': <Map<String, dynamic>>[],
+    };
+    String? diagnostic;
+
+    expect(
+      WorkDiscussionV2Turn.parse(
+        _turn('propose', proposal: invalidProposal),
+        onInvalid: (reason) => diagnostic = reason,
+      ),
+      isNull,
+    );
+    expect(diagnostic, contains('nativeBundle'));
+    expect(diagnostic, contains('files 只能包含 archivePath'));
+  });
+
+  test('issues 协议诊断指出多余字段和超长字段', () {
+    String reasonFor(Map<String, dynamic> issue) {
+      String? reason;
+      expect(
+        WorkDiscussionV2Turn.parse(
+          _turn('respond', issues: [issue]),
+          onInvalid: (value) => reason = value,
+        ),
+        isNull,
+      );
+      return reason!;
+    }
+
+    final validIssue = <String, dynamic>{
+      'id': 'i1',
+      'kind': 'defect',
+      'target': 'proposal',
+      'problem': '缺少可核验证据',
+      'evidenceRef': '',
+      'retestCondition': '补齐证据后复测',
+    };
+    expect(
+      reasonFor({...validIssue, 'status': 'open'}),
+      contains('issues[0] 必须且只能包含'),
+    );
+    expect(
+      reasonFor({...validIssue, 'problem': 'p' * 4097}),
+      contains('issues[0].problem'),
+    );
+  });
+
+  test('验收方法超过长度限制时诊断要求拆分验收项', () {
+    final invalidProposal = {
+      'scope': '交付一份文档',
+      'plan': '生成并验证文档',
+      'artifactContract': {
+        'type': 'document',
+        'format': 'md',
+        'location': '临时目录',
+        'revisionTarget': '',
+        'files': ['report.md'],
+      },
+      'workItems': <Map<String, dynamic>>[],
+      'acceptances': [
+        {
+          'id': 'long-method',
+          'method': '验收' * 65,
+          'requiredCapability': 'document',
+        },
+      ],
+    };
+    String? diagnostic;
+
+    expect(
+      WorkDiscussionV2Turn.parse(
+        _turn('propose', proposal: invalidProposal),
+        onInvalid: (reason) => diagnostic = reason,
+      ),
+      isNull,
+    );
+    expect(diagnostic, contains('method 必须非空且最多 128 字符'));
+  });
+
   test('旧回复、他人签字、100% 和错误提案均不形成协议', () {
     expect(
         WorkDiscussionV2Turn.parse(

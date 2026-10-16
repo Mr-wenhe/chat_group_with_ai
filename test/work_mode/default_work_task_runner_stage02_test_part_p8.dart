@@ -473,7 +473,9 @@ void _registerP8RunnerTests(Directory Function() hive,
     expect(gateway.requestTokens, isEmpty);
     final valid = candidateTestTask(candidateTestState());
     runner.database.aiCharacterBox.get('b')!.isActive = false;
-    expect(await runner.validateRecovery(valid), contains('责任成员失效'));
+    // 拒绝的理由必须写到具体成因：一句「责任成员失效」看不出该恢复配置、
+    // 重新启用成员，还是换人。
+    expect(await runner.validateRecovery(valid), contains('当前未启用'));
     expect(
         WorkDiscussionState.fromExecutionState(valid.executionStateJson)!
             .collaboration!

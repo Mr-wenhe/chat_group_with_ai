@@ -186,8 +186,13 @@ class WorkRoleRouter {
     }
     for (final id in {...intent.consultedCharacterIds, ...confirmedMemberIds}) {
       final member = _findUnique(characters, id);
-      if (member == null || _availabilityFailure(member) != null) {
-        errors.add('指定成员 $id 不可用，责任保留，需用户处理。');
+      final unavailable = member == null ? null : _availabilityFailure(member);
+      if (member == null) {
+        errors.add('指定成员 $id 不存在或重名，责任保留，需用户处理。');
+      } else if (unavailable != null) {
+        // 病因必须写出来：只说"不可用"，用户不知道该恢复配置、启用 Agentic
+        // 还是换人（和讨论侧 `_checkTeam` 同一条理由）。
+        errors.add('指定成员 $id：$unavailable，责任保留，需用户处理。');
       } else if (used.add(id)) {
         selected.add({
           'memberId': id,
@@ -201,22 +206,24 @@ class WorkRoleRouter {
     return WorkTeamSelection(selected, missing, errors);
   }
 
+  /// 成员可用性的具体成因，null 表示可用。
+  ///
+  /// [qualifiesForResponsibility] 把可用性与职业资格合成一个布尔，调用方只拿到
+  /// 布尔时就只能报「资格或配置不可用」——没绑模型、没启用 Agentic、未启用这些
+  /// 可操作的成因被一并吃掉，用户既看不出病因也拿不到出路（2026-10-15 现场：
+  /// 成员 `apiConfigId` 为空，弹窗写的是"资格或配置不可用"）。需要如实归因的
+  /// 调用方走这个，别自己再判一遍 isActive / agenticEnabled。
+  static String? availabilityFailure(AICharacter character) =>
+      _availabilityFailure(character);
+
+  /// 责任名称的人话标签，用于把「资格不足」说清缺的是哪一种责任。
+  static String responsibilityLabel(String role) =>
+      _stageLabel(_stageKindForRole(role));
+
   static bool qualifiesForResponsibility(AICharacter character, String role,
           Iterable<CharacterSkill> skills) =>
       _availabilityFailure(character) == null &&
-      _isSuitable(
-          character,
-          WorkRoleStageKind.values
-                  .where((k) =>
-                      k.name ==
-                      (role == 'developer'
-                          ? 'development'
-                          : role == 'tester'
-                              ? 'testing'
-                              : role))
-                  .firstOrNull ??
-              WorkRoleStageKind.general,
-          skills.toList(),
+      _isSuitable(character, _stageKindForRole(role), skills.toList(),
           // 这条判据同时决定"谁算合格候选""换人时谁可选""已选定的成员是否仍然
           // 合格"，所以必须与候选口径一致：引擎/后端开发在前端责任上也算合格。
           allowImplementationBridge: true);

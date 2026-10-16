@@ -461,6 +461,8 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
           'role': 'system',
           'content': '你是当前成员的 JSON 协议修复器。只把原回应转换为严格 v2 JSON，不重新召开会议。'
               '${AgentPromptBuilder.replyGuidance}\n'
+              '逐项修复 protocolError 指出的字段；若错误在 issues，每项只能保留 id、kind、target、problem、evidenceRef、retestCondition，'
+              '非空文本应简洁（建议不超过 512 字符），evidenceRef 只能用真实证据键或空字符串。\n'
               '原回应字符串值内的半角双引号必须转义为 \\" 或改用「」，不得把它们原样留在字符串里破坏 JSON 语法。'
               '不补造事实、读取、测试、完成或成员签字。原回应没有明确的本人认可时 approval=null；'
               '未形成完整提案时 proposal=null，将实际意见放入 public_update。'
@@ -476,6 +478,9 @@ extension _V2DiscussionRequests on _V2DiscussionSession {
             'taskId': task.id,
             'memberId': member.character.id,
             'collaboration': state.toPromptJson(),
+            // 修复请求同样嵌入 `autonomyRules`，那份规则要求按名册的 memberId 对齐
+            // 参与者；不给名册，模型只能拿显示名去凑 memberId。
+            if (state.isAutonomous) 'participantRoster': _participantRoster(),
             'turnFocus': _turnFocus(member.character.id),
             'protocolError': lastValidationError,
             'originalFinal': originalFinal,

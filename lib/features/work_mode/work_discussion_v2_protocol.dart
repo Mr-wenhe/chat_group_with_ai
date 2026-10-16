@@ -296,21 +296,36 @@ class WorkDiscussionV2Turn {
       if (issues == null || resolutions == null) {
         return invalid('issues/resolutions 必须为对象数组，每项最多 64 条');
       }
-      for (final item in issues) {
-        if (!_keys(item, {
-              'id',
-              'kind',
-              'target',
-              'problem',
-              'evidenceRef',
-              'retestCondition'
-            }) ||
-            !{'defect', 'idea', 'decision'}.contains(item['kind']) ||
-            !['id', 'target', 'problem', 'retestCondition']
-                .every((k) => _nonempty(item[k])) ||
-            !_text(item['evidenceRef'], 128)) {
+      const issueKeys = {
+        'id',
+        'kind',
+        'target',
+        'problem',
+        'evidenceRef',
+        'retestCondition'
+      };
+      for (var index = 0; index < issues.length; index++) {
+        final item = issues[index];
+        if (!_keys(item, issueKeys)) {
           return invalid(
-              'issues 项必须仅包含六个协议字段，非空文本最多 4096 字符，evidenceRef 最多 128 字符');
+              'issues[$index] 必须且只能包含 id、kind、target、problem、evidenceRef、retestCondition');
+        }
+        if (!{'defect', 'idea', 'decision'}.contains(item['kind'])) {
+          return invalid('issues[$index].kind 必须为 defect、idea 或 decision');
+        }
+        for (final field in const [
+          'id',
+          'target',
+          'problem',
+          'retestCondition'
+        ]) {
+          final value = item[field];
+          if (value is! String || value.trim().isEmpty || !_text(value, 4096)) {
+            return invalid('issues[$index].$field 必须是非空、无控制字符且不超过 4096 字符的字符串');
+          }
+        }
+        if (!_text(item['evidenceRef'], 128)) {
+          return invalid('issues[$index].evidenceRef 必须是不超过 128 字符且无控制字符的字符串');
         }
       }
       for (final item in resolutions) {
@@ -339,7 +354,7 @@ class WorkDiscussionV2Turn {
               _records(proposal['workItems']) == null ||
               _records(proposal['acceptances']) == null)) {
         return invalid(
-            'proposal 仅包含 scope/plan/artifactContract/workItems/acceptances；scope、plan 非空且最多 4096 字符');
+            'proposal 须仅包含 scope/plan/artifactContract/workItems/acceptances 五个基础字段；自主策略下还必须且只可增加 usageAssignments。scope、plan 非空且最多 4096 字符');
       }
       if (proposal != null &&
           proposal.containsKey('usageAssignments') &&
@@ -352,7 +367,7 @@ class WorkDiscussionV2Turn {
           !isValidArtifactContractFields(
               Map<String, dynamic>.from(proposal['artifactContract'] as Map))) {
         return invalid(
-            'proposal.artifactContract 只能包含 type、format、location、revisionTarget、files、verificationCommands，合同文本长度须符合字段边界');
+            'proposal.artifactContract 只能包含 type、format、location、revisionTarget、files、verificationCommands、nativeBundle；type/format 最多 128 字符，location/revisionTarget 最多 512 字符。若提供 nativeBundle，必须含 schemaVersion:1、相对路径 appPath（.app）和 archivePath（.zip），且 type 为 software、files 只能包含 archivePath');
       }
       if (proposal != null &&
           !isValidVerificationCommands(
@@ -391,7 +406,7 @@ class WorkDiscussionV2Turn {
                   (item['method'] as String).length <= 128 &&
                   _text(item['requiredCapability'], 128))) {
         return invalid(
-            'proposal.acceptances 只能包含 id、method、requiredCapability，且均须为有效文本');
+            'proposal.acceptances 每项只能包含 id、method、requiredCapability；id 和 requiredCapability 最多 128 字符，method 必须非空且最多 128 字符，长验收条件应拆分为多项');
       }
       if (approval != null &&
           (!_keys(approval, {

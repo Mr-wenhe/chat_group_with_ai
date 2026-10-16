@@ -167,6 +167,20 @@ WorkRoleStageKind _stageKind(String stageId) => switch (stageId) {
       _ => WorkRoleStageKind.general,
     };
 
+/// 责任名 → 阶段类型。`developer` / `tester` 是旧存档里 v1 阶段的写法，其余按
+/// 枚举名；认不出的（如 `consultation`）落到通用阶段。
+WorkRoleStageKind _stageKindForRole(String role) =>
+    WorkRoleStageKind.values
+        .where((kind) =>
+            kind.name ==
+            (role == 'developer'
+                ? 'development'
+                : role == 'tester'
+                    ? 'testing'
+                    : role))
+        .firstOrNull ??
+    WorkRoleStageKind.general;
+
 AICharacter? _bestCandidate(
   List<AICharacter> candidates,
   WorkRoleStageKind kind,

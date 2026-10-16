@@ -7,20 +7,7 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
           router: true);
       return false;
     }
-    final confirmed = <String, String>{};
-    for (final decision in state.decisions.where((d) =>
-        d['kind'] == 'member' &&
-        d['status'] == 'answered' &&
-        d['answerKind'] == 'choice')) {
-      final options = (decision['options'] as List?) ?? const [];
-      final selected = options
-          .whereType<Map>()
-          .where((o) => o['label'] == decision['answer'])
-          .firstOrNull;
-      if (selected != null) {
-        confirmed[decision['targetId'] as String] = selected['id'] as String;
-      }
-    }
+    final confirmed = state.confirmedMemberChoices;
     if (state.isAutonomous) {
       final policy = state.confirmedParticipationPolicy;
       if (jsonEncode(policy) != jsonEncode(state.autonomyPolicy)) {
@@ -184,16 +171,27 @@ extension _V2DiscussionTeam on _V2DiscussionSession {
         reason = '成员已删除';
       } else if (!group!.aiCharacterIds.contains(id) && !userJoined) {
         reason = '成员已离开当前群，未获任务加入确认';
-      } else if (!WorkRoleRouter.qualifiesForResponsibility(
-          member,
-          responsibility['role'] as String,
-          state.isAutonomous
-              ? const []
-              : runner.database.characterSkillBox.values)) {
-        reason = '成员当前资格或配置不可用';
       } else {
-        final resolved = await runner._resolveV2Member(member);
-        reason = resolved.available ? null : resolved.unavailableReason;
+        final role = responsibility['role'] as String;
+        // 可用性先判、单独归因：`qualifiesForResponsibility` 把可用性与职业资格
+        // 合成一个布尔，合并报成「资格或配置不可用」会把病因整块吃掉，用户只能
+        // 靠猜是补人、恢复配置还是改责任（2026-10-15 现场：成员 `apiConfigId`
+        // 为空，弹窗给的却是"资格或配置不可用"加一串与病因无关的换人候选）。
+        final unavailable = WorkRoleRouter.availabilityFailure(member);
+        if (unavailable != null) {
+          reason = unavailable;
+        } else if (!WorkRoleRouter.qualifiesForResponsibility(
+            member,
+            role,
+            state.isAutonomous
+                ? const []
+                : runner.database.characterSkillBox.values)) {
+          reason = '成员不具备本次任务所需的'
+              '${WorkRoleRouter.responsibilityLabel(role)}能力';
+        } else {
+          final resolved = await runner._resolveV2Member(member);
+          reason = resolved.available ? null : resolved.unavailableReason;
+        }
       }
       if (reason != null) {
         await _memberGap(id, reason);

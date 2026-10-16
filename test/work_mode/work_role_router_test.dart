@@ -96,6 +96,30 @@ void main() {
     expect(roles, contains('testing'));
   });
 
+  test('被确认的成员不可用时，错误里写明具体成因', () {
+    // 与 2026-10-15 现场的形态一致：成员没绑定任何模型配置。
+    final unavailable = AICharacter(
+      id: 'extra',
+      name: '小财',
+      avatar: '🤖',
+      age: 30,
+      role: '财务会计',
+      personalityTags: const [],
+      systemPrompt: '负责账目',
+      apiKey: '',
+      apiProvider: 'deepseek',
+      apiConfigId: '',
+    );
+    final result = WorkRoleRouter.selectTeam(
+      request: '生成一个 HTML 页面',
+      characters: [product, unavailable],
+      confirmedMemberIds: const ['extra'],
+    );
+
+    expect(result.errors.single, contains('尚未配置可用模型'),
+        reason: '只写"不可用"等于没写：用户不知道该恢复配置还是换人');
+  });
+
   test('QA of an existing HTML file routes to testing and the report output',
       () async {
     final front = _character('front', '小前', '前端工程师');

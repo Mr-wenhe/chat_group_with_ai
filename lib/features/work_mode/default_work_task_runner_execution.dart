@@ -72,30 +72,15 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
   ) async {
     final identityError = _discussionExecutorIdentityError(task, state);
     if (identityError != null) return identityError;
-    final executorId = state.executorId!.trim();
-    final character = database.aiCharacterBox.get(executorId);
-    if (character == null || !character.isActive || !character.agenticEnabled) {
-      return '群讨论选定的执行角色当前不可用。';
-    }
-    if (task.groupId.startsWith('dm:')) {
-      if (task.groupId.substring(3) != executorId) {
-        return '私聊任务不能改派给其他角色。';
-      }
-    } else {
-      final group = database.chatGroupBox.get(task.groupId);
-      if (group == null || !group.aiCharacterIds.contains(executorId)) {
-        return '群讨论选定的执行角色不属于当前群组。';
-      }
-    }
-    if (!WorkRoleRouter.isQualifiedForRequest(
-      request: WorkDiscussionState.currentRequestScope(task),
-      character: character,
-      skills: database.characterSkillBox.values,
-    )) {
-      return '群讨论选定的执行角色不具备当前任务所需职业资格，已阻止执行。';
-    }
+    // 身份、可用性、群归属与职业资格已由上面那次判据逐条核过并各自报出成因，
+    // 这里只补它不管的模型配置与凭据——把同一批判据抄第二遍，两边的文案迟早
+    // 分叉（这里曾经整段重复 `_discussionExecutorIdentityError`）。
+    final character = database.aiCharacterBox.get(state.executorId?.trim() ?? '');
+    if (character == null) return '群讨论选定的执行角色已删除。';
     final config = _resolveApiConfig(character);
-    if (config == null) return '群讨论选定的执行角色尚未配置模型。';
+    if (config == null) {
+      return '群讨论选定的执行角色没有可用的模型配置，请重新选择模型。';
+    }
     try {
       final apiKey = await credentials.resolve(config);
       if (apiKey == null || apiKey.trim().isEmpty) {
@@ -133,8 +118,12 @@ extension _DefaultWorkTaskRunnerExecution on DefaultWorkTaskRunner {
       return '讨论状态与产物合同中的最终执行人不一致。';
     }
     final character = database.aiCharacterBox.get(executorId);
-    if (character == null || !character.isActive || !character.agenticEnabled) {
-      return '群讨论选定的执行角色当前不可用。';
+    if (character == null) return '群讨论选定的执行角色已删除。';
+    // 未启用与未开 Agentic 必须各自报出：合成一句「当前不可用」时，用户看不出
+    // 该在角色设置里重新启用它、打开 Agentic，还是换人。
+    final unavailable = WorkRoleRouter.availabilityFailure(character);
+    if (unavailable != null) {
+      return '群讨论选定的执行角色$unavailable。';
     }
     if (task.groupId.startsWith('dm:')) {
       if (task.groupId.substring(3) != executorId) {

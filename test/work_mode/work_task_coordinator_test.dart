@@ -647,6 +647,34 @@ class _CountingV2DiscussionRunner
   }
 }
 
+class _BlockingV2DiscussionRunner
+    implements WorkTaskDiscussionRunner, WorkTaskCollaborationDiscussionRunner {
+  final Completer<void> started = Completer<void>();
+  final Completer<void> finished = Completer<void>();
+  WorkTaskCancellation? cancellation;
+  int calls = 0;
+
+  @override
+  Future<void> runDiscussion(AgentTask task, WorkTaskCancellation cancellation,
+      WorkTaskDiscussionStateSink updateState) async {}
+
+  @override
+  Future<void> runCollaboration(
+    AgentTask task,
+    WorkTaskCancellation cancellation,
+    Future<AgentTask> Function(WorkCollaborationUpdate) apply,
+  ) async {
+    calls++;
+    this.cancellation = cancellation;
+    started.complete();
+    try {
+      await cancellation.whenCancelled;
+    } finally {
+      finished.complete();
+    }
+  }
+}
+
 class _RecoverableFakeWorkTaskRunner extends _FakeWorkTaskRunner
     implements WorkTaskRecoveryValidator {
   @override
@@ -2859,6 +2887,38 @@ void main() {
 
     await coordinator.resumeByUser(task.id);
     await _waitUntil(() => discussionRunner.calls == 1);
+  });
+
+  test('deferring an active discussion cancels it and keeps the checkpoint',
+      () async {
+    await coordinator.dispose();
+    final discussionRunner = _BlockingV2DiscussionRunner();
+    coordinator = WorkTaskCoordinator(
+      taskBox: taskBox,
+      eventStore: eventStore,
+      runner: runner,
+      discussionRunner: discussionRunner,
+      installerIsMacOS: true,
+    );
+    final task = _v2PendingDiscussionTask(
+      'defer-active-discussion',
+      conversationId: 'group-defer-active',
+    );
+
+    await coordinator.submit(task);
+    await discussionRunner.started.future.timeout(const Duration(seconds: 5));
+    final cancellation = discussionRunner.cancellation!;
+    expect(cancellation.isCancelled, isFalse);
+
+    await coordinator.deferUserAction(task.id);
+    await discussionRunner.finished.future.timeout(const Duration(seconds: 5));
+    await _drainEventLoop();
+
+    final stored = taskBox.get(task.id)!;
+    expect(cancellation.isCancelled, isTrue);
+    expect(stored.status, AgentTaskStatus.paused);
+    expect(stored.resumeRequired, isTrue);
+    expect(discussionRunner.calls, 1, reason: '稍后处理不能隐式启动下一轮讨论');
   });
 
   test('cancelled discussion ignores a late ready transition', () async {

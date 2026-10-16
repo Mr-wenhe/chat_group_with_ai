@@ -185,9 +185,8 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
                     .hasMatch(m['role'] as String)))
         .firstOrNull;
     if (reviewer == null) {
-      final acceptanceId = state.acceptances
-          .firstWhere((a) => !{'manual', 'waived'}.contains(a['status']))['id']
-          as String;
+      final acceptanceId = state.acceptances.firstWhere(
+          (a) => !{'manual', 'waived'}.contains(a['status']))['id'] as String;
       // 纯文档任务只会选出单一 product 阶段，团队里没有第二个人能当审查人；
       // 直接在弹窗里给角色库候选，用户点选后由下一轮讨论写进团队
       // （见 _formTeam 对 kind='member' + targetId='role:xxx' 的处理）。
@@ -205,13 +204,9 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
             'label': '无需额外审查，改由人工验收',
             'impact': '不新增审查成员，改为对当前候选记录人工验收或明确豁免。'
           });
-          await _productionDecision(
-              task,
-              'member',
-              'role:$role',
+          await _productionDecision(task, 'member', 'role:$role',
               '缺少独立且合格的审查成员，请从角色库指定一位审查角色，或改为人工验收。',
-              options: options,
-              persist: false);
+              options: options, persist: false);
           return false;
         }
       }
@@ -267,7 +262,9 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
     // 状态闸门限制单条决策 12 个选项，本决策还要留 1 个“人工验收”。
     const optionLimit = _reviewerOptionLimit;
     final options = <Map<String, dynamic>>[];
-    for (var i = 0; i < candidates.length && options.length < optionLimit; i++) {
+    for (var i = 0;
+        i < candidates.length && options.length < optionLimit;
+        i++) {
       final config = resolved[i];
       if (config == null) continue;
       final c = candidates[i];
@@ -299,34 +296,65 @@ extension _DefaultWorkTaskRunnerProduction on DefaultWorkTaskRunner {
   Future<bool> _productionActorAvailable(AgentTask task,
       {required bool persist}) async {
     final member = database.aiCharacterBox.get(task.characterId);
-    final group = database.chatGroupBox.get(task.groupId);
-    final config = member == null ? null : _resolveApiConfig(member);
-    var available = member != null &&
-        member.isActive &&
-        member.agenticEnabled &&
-        group != null &&
-        _productionMemberAuthorized(task, member.id) &&
-        WorkRoleRouter.qualifiesForResponsibility(
-            member,
-            _candidateState(task)
-                    .team
-                    .singleWhere((m) => m['memberId'] == member.id)['role']
-                as String,
-            database.characterSkillBox.values) &&
-        config != null;
-    if (available) {
-      try {
-        final credential = await credentials.resolve(config);
-        available = credential?.trim().isNotEmpty == true;
-      } on Object {
-        available = false;
-      }
+    // 成因逐条分开报：把启用状态、团队授权、责任资格、模型配置与凭据揉成一句
+    // 「当前责任成员失效或模型凭据不可用」，用户不知道该恢复配置、补人还是改
+    // 责任（与讨论侧 `_checkTeam` 同一条理由，2026-10-15 现场）。
+    String? failure;
+    if (member == null) {
+      failure = '成员已删除';
+    } else {
+      failure = _productionMemberFailure(task, _candidateState(task), member);
+      failure ??= await _productionCredentialFailure(member);
     }
-    if (available) return true;
+    if (failure == null) return true;
     await _productionDecision(task, 'member', task.characterId,
-        '当前责任成员失效或模型凭据不可用，请恢复或确认已有合格成员接任，未代签。',
+        '当前责任成员不可用：$failure。请恢复或确认已有合格成员接任，未代签。',
         persist: persist);
     return false;
+  }
+
+  /// 责任成员在 [state] 这次任务里不可用的**具体成因**，null 表示可用。
+  ///
+  /// `qualifiesForResponsibility` 把可用性与职业资格合成一个布尔，只报它就只能
+  /// 写出「当前失效」「资格或配置不可用」——用户看不出该恢复配置、重新启用成员、
+  /// 补人还是改责任。授权/离群、不在团队里、资格不足、模型配置缺失**各说各的**，
+  /// 不要再加分支把它们合并回去（讨论侧 `_checkTeam` 与执行侧各入口共用这条判据）。
+  ///
+  /// 判断顺序即处置顺序：先看成员与群是否还在、是否仍获任务加入确认，再看团队
+  /// 责任与可用性。团队责任**先于**可用性——成员不在团队里时，它有没有绑模型都
+  /// 不影响结论，先报配置只会让用户白修一轮，下次再撞上"不在团队里"。
+  String? _productionMemberFailure(
+      AgentTask task, WorkCollaborationState state, AICharacter member) {
+    if (database.chatGroupBox.get(task.groupId) == null) return '群组已删除';
+    if (!_productionMemberAuthorized(task, member.id)) {
+      return '成员已离开当前群，未获任务加入确认';
+    }
+    // 责任条目缺失时 `singleWhere` 会抛 StateError，执行期不该以异常代替一句
+    // 可处置的成因。
+    final role = state.team
+        .where((item) => item['memberId'] == member.id)
+        .firstOrNull?['role'];
+    if (role is! String) return '成员已不在本次任务的团队里';
+    final unavailable = WorkRoleRouter.availabilityFailure(member);
+    if (unavailable != null) return unavailable;
+    if (!WorkRoleRouter.qualifiesForResponsibility(
+        member, role, database.characterSkillBox.values)) {
+      return '成员不具备本次任务所需的${WorkRoleRouter.responsibilityLabel(role)}能力';
+    }
+    return null;
+  }
+
+  /// 责任成员的模型配置与凭据成因，null 表示可用。单独一步是因为解析凭据是
+  /// 异步的，且它只在前面的成员级检查都通过后才值得做。
+  Future<String?> _productionCredentialFailure(AICharacter member) async {
+    final config = _resolveApiConfig(member);
+    if (config == null) return '没有绑定模型配置';
+    try {
+      final credential = await credentials.resolve(config);
+      return credential?.trim().isNotEmpty == true ? null : '模型凭据不可用';
+    } on Object {
+      return '模型凭据不可用';
+    }
   }
 
   void _bindWorkItem(AgentTask task, String stage, String id) {

@@ -629,6 +629,7 @@ class _V2DiscussionSession {
       'conversationCue': _replyContext(member, turnFocus),
       'outputGuidance': _outputGuidance(member),
       'collaboration': state.toPromptJson(),
+      if (state.isAutonomous) 'participantRoster': _participantRoster(),
       'currentIssue':
           state.issues.where((i) => i['status'] == 'open').firstOrNull,
       'evidence': promptEvidence,
@@ -735,4 +736,16 @@ class _V2DiscussionSession {
     }
     return messages;
   }
+
+  /// 自主任务的参与者名册：`autonomyRules` 要求成员按这里的 memberId 对齐
+  /// participants 与 usageAssignments，`displayName` 只用来识人。首次请求与协议
+  /// 修复请求都会带上 `autonomyRules`，所以两处都必须带上这份名册——修复请求缺了
+  /// 它，模型就只能拿显示名去凑 memberId。
+  List<Map<String, dynamic>> _participantRoster() => [
+        for (final id in state.participantIds)
+          {
+            'memberId': id,
+            'displayName': runner.database.aiCharacterBox.get(id)?.name ?? id,
+          },
+      ];
 }
