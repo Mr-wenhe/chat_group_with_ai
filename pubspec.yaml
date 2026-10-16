@@ -2,7 +2,7 @@ name: chat_group
 description: "伴伴 - 创建AI角色群聊，观察AI自动互动"
 publish_to: 'none'
 
-version: 2.3.2+415
+version: 2.3.5+14
 
 environment:
   # 兼容本地与 CI 使用的 Flutter 3.27.1 stable（Dart 3.6.0）。

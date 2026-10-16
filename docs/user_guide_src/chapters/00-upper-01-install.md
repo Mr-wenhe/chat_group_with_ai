@@ -22,10 +22,10 @@
 
 | 你的系统 | 下哪个 |
 |---|---|
-| Mac | `chat_group-macos-v2.3.1.dmg`（约 30 MB） |
-| Windows | `chat_group-windows-v2.3.1.zip`（约 18 MB） |
+| Mac | `chat_group-macos-v2.3.5.dmg`（约 30 MB） |
+| Windows | `chat_group-windows-v2.3.5.zip`（约 18 MB） |
 
-> 文件名里的 `v2.3.1` 是版本号，以页面上显示的最新版为准。认准文件名中间的 `macos` 和 `windows` 两个词。
+> 文件名里的 `v2.3.5` 是版本号，以页面上显示的最新版为准。认准文件名中间的 `macos` 和 `windows` 两个词。
 
 ![Releases 页面](images/01-releases.jpg)
 
