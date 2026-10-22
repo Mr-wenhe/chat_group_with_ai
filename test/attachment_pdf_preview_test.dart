@@ -10,6 +10,7 @@ import 'package:pdfx/src/renderer/interfaces/platform.dart';
 import 'package:pdfx/src/renderer/io/platform_method_channel.dart';
 
 void main() {
+  // pdfx has no Linux renderer.
   testWidgets('PDF navigation and zoom share bounded state', (tester) async {
     final originalPlatform = PdfxPlatform.instance;
     PdfxPlatform.instance = PdfxPlatformMethodChannel();
@@ -57,5 +58,5 @@ void main() {
     await tester.pump(const Duration(milliseconds: 300));
     expect(pdf.controller.page, 2);
     expect(tester.takeException(), isNull);
-  });
+  }, skip: Platform.isLinux);
 }

@@ -327,13 +327,21 @@ void _registerP8RunnerTests(Directory Function() hive,
     }
 
     intent('browser.context');
-    expect(await runner.validateRecovery(task), contains('仍未确认关闭'));
-    active = 0;
-    expect(await runner.validateRecovery(task), isNull);
-    expect(
-        (jsonDecode(task.executionStateJson) as Map)
-            .containsKey('uncertainAction'),
-        isFalse);
+    if (Platform.isMacOS) {
+      expect(await runner.validateRecovery(task), contains('仍未确认关闭'));
+      active = 0;
+      expect(await runner.validateRecovery(task), isNull);
+      expect(
+          (jsonDecode(task.executionStateJson) as Map)
+              .containsKey('uncertainAction'),
+          isFalse);
+    } else {
+      expect(await runner.validateRecovery(task), contains('无法证明结果'));
+      expect(
+          (jsonDecode(task.executionStateJson) as Map)
+              .containsKey('uncertainAction'),
+          isTrue);
+    }
     intent('command.run');
     expect(await runner.validateRecovery(task), contains('无法证明结果'));
   }, timeout: const Timeout(Duration(seconds: 30)));
