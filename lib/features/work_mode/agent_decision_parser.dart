@@ -890,11 +890,17 @@ class AgentDecisionParser {
   }
 
   String? _validateSkillCreateArguments(Map<String, dynamic> args) {
+    // `steps` / `content` 是模型对“技能正文”最常用的两个字段名。旧校验把它们
+    // 当作未知字段直接拒绝（“tool.arguments 不支持字段 steps”），模型于是换一个
+    // 名字再试，每次创建技能都白烧一轮。三个名字现在都是 instructions 的合法
+    // 别名，正文不再是猜谜。
     final error = _validateFields(args, const {
       'name': _ArgumentType.string,
       'domain': _ArgumentType.string,
       'description': _ArgumentType.string,
-      'instructions': _ArgumentType.stringList,
+      'instructions': _ArgumentType.stringOrStringList,
+      'steps': _ArgumentType.stringOrStringList,
+      'content': _ArgumentType.stringOrStringList,
       'permissions': _ArgumentType.stringList,
     });
     if (error != null) return error;
@@ -904,13 +910,20 @@ class AgentDecisionParser {
         return 'skill.create.arguments.$key 必须是非空字符串。';
       }
     }
-    final instructions = args['instructions'];
-    if (instructions is! List ||
-        instructions.isEmpty ||
-        instructions.any(
-          (item) => item is! String || item.trim().isEmpty,
-        )) {
-      return 'skill.create.arguments.instructions 必须是非空字符串数组。';
+    final instructions =
+        args['instructions'] ?? args['steps'] ?? args['content'];
+    if (instructions is! String && instructions is! List) {
+      return 'skill.create 缺少技能正文：请用 instructions（字符串数组，'
+          '也可用 steps 或 content）写入可复核的步骤。';
+    }
+    final lines = instructions is String
+        ? instructions.split(RegExp(r'\r?\n'))
+        : List<Object?>.from(instructions as List);
+    // 空白条目一律丢弃，而不是判为错误：正文分段写的空行是正常排版，执行层的
+    // `_skillInstructions` 也按同样规则归一化。两边判定不一致时，一段带空行的
+    // 正文会在这里被拒、在 handler 又被接受，模型只能反复重写。
+    if (!lines.any((item) => item is String && item.trim().isNotEmpty)) {
+      return 'skill.create.arguments.instructions 必须包含至少一条非空步骤。';
     }
     return null;
   }
@@ -1062,6 +1075,11 @@ class AgentDecisionParser {
       _ArgumentType.stringMap => value is Map &&
           value.keys.every((key) => key is String) &&
           value.values.every((item) => item is String),
+      // 一段正文用字符串写、多段用数组写，两种都是模型的自然写法；只接受数组
+      // 时它会退化成试字段名（steps/content），白烧一整轮。
+      _ArgumentType.stringOrStringList =>
+        value is String ||
+            value is List && value.every((item) => item is String),
     };
   }
 
@@ -1125,7 +1143,14 @@ const Set<String> _exactPatchArgumentKeys = {
   'replacement',
 };
 
-enum _ArgumentType { string, integer, boolean, stringList, stringMap }
+enum _ArgumentType {
+  string,
+  integer,
+  boolean,
+  stringList,
+  stringMap,
+  stringOrStringList,
+}
 
 class _ResponseContent {
   final String? content;

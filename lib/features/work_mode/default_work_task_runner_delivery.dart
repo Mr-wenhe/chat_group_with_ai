@@ -1,6 +1,28 @@
 part of 'default_work_task_runner.dart';
 
 extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
+  /// Normalizes the skill body the model supplied into a list of steps.
+  ///
+  /// A list is used as given (entries trimmed, blanks dropped); a single string
+  /// is split on line breaks so that "写一段正文" and "列几条步骤" both land here.
+  /// Returns null when nothing usable was supplied, which the caller reports as
+  /// `skill_fields_invalid`.
+  List<String>? _skillInstructions(Object? raw) {
+    final List<Object?> lines;
+    if (raw is String) {
+      lines = raw.split(RegExp(r'\r?\n'));
+    } else if (raw is List) {
+      lines = raw;
+    } else {
+      return null;
+    }
+    final steps = <String>[
+      for (final line in lines)
+        if (line is String && line.trim().isNotEmpty) line.trim(),
+    ];
+    return steps.isEmpty ? null : steps;
+  }
+
   Future<void> _recordLocalDraftSkillsAfterSuccess(
       AgentTask task, AICharacter character) async {
     final key = '${task.id}:${character.id}';
@@ -33,18 +55,20 @@ extension _DefaultWorkTaskRunnerDelivery on DefaultWorkTaskRunner {
     final name = args['name'];
     final domain = args['domain'];
     final description = args['description'];
-    final rawInstructions = args['instructions'];
+    // 正文有三个合法来源：instructions、steps、content（后两个是模型最常用的
+    // 别名）。一段字符串按行拆成步骤，数组原样使用，这样“正文怎么写”不再是
+    // 一次猜字段名的试错。
+    final rawInstructions =
+        args['instructions'] ?? args['steps'] ?? args['content'];
+    final instructions = _skillInstructions(rawInstructions);
     if (name is! String ||
         name.trim().isEmpty ||
         domain is! String ||
         domain.trim().isEmpty ||
         description is! String ||
-        rawInstructions is! List ||
-        rawInstructions.isEmpty ||
-        rawInstructions.any((item) => item is! String)) {
+        instructions == null) {
       return {'ok': false, 'error': 'skill_fields_invalid'};
     }
-    final instructions = rawInstructions.cast<String>();
     final source = [name, domain, description, ...instructions].join('\n');
     if (const SearchSecretScanner()
         .containsSensitiveData(source, includeOpaqueTokens: true)) {

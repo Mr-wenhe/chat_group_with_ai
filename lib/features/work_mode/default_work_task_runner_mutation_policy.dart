@@ -16,10 +16,14 @@ extension _DefaultWorkTaskRunnerMutationPolicy on DefaultWorkTaskRunner {
               'name': WorkToolValueType.string,
               'domain': WorkToolValueType.string,
               'description': WorkToolValueType.string,
-              'instructions': WorkToolValueType.stringList,
+              // 正文可以是字符串数组，也可以是一段字符串。`steps` / `content`
+              // 是模型最常用的两个别名，这里一并接受，由 handler 归一化。
+              'instructions': WorkToolValueType.any,
+              'steps': WorkToolValueType.any,
+              'content': WorkToolValueType.any,
               'permissions': WorkToolValueType.stringList,
             },
-            required: {'name', 'domain', 'description', 'instructions'},
+            required: {'name', 'domain', 'description'},
           ),
           mutationPipeline: _skillMutationPipeline(
             task: task,

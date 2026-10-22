@@ -54,6 +54,64 @@ void main() {
     );
   });
 
+  test('creating a skill is metadata work, not a file contract', () {
+    // 回归（任务 ab8549a1）：「创建这个 UI 相关的 skill，优化润色 HTML 界面的」
+    // 被读成“要交付 .html 文件”，而 skill.create 只写数据库记录、永不产文件，
+    // 于是技能明明建好了，任务却连续 4 次死在「没有可读取的真实文件」上。
+    const request = '那你自己创建这个UI相关的skill 吗\n'
+        '用户对上述问题的回答：优化润色 HTML界面的，要有科技感的';
+
+    expect(WorkArtifactDeliveryGuard.requiresFileArtifact(request), isFalse);
+    expect(WorkArtifactDeliveryGuard.requiresSourceArtifact(request), isFalse);
+    expect(
+      WorkArtifactDeliveryGuard.failureFor(
+        request: request,
+        hasReadableArtifact: false,
+      ),
+      isNull,
+    );
+    final task = AgentTask(
+      id: 'skill-task',
+      groupId: 'skill-group',
+      characterId: 'worker',
+      userRequest: request,
+      workModeTask: true,
+    );
+    // 也不许把技能主题读成交付格式，否则下游的文件筛选仍会要 .html。
+    expect(WorkArtifactDeliveryGuard.declaredOutputFormats(task), isEmpty);
+  });
+
+  test('a skill request that also names a file keeps its file contract', () {
+    // 豁免只成立在“文书全是技能”的请求上：同一句里点名了文件名或文件名词时，
+    // 用户要的仍然是那个文件，不能因为出现 skill 就放过。
+    expect(
+      WorkArtifactDeliveryGuard.requiresFileArtifact(
+        '创建一个 UI skill，并把示例写进 demo.html',
+      ),
+      isTrue,
+    );
+    expect(
+      WorkArtifactDeliveryGuard.requiresFileArtifact(
+        '创建一个 UI 技能，同时生成一份说明文件',
+      ),
+      isTrue,
+    );
+    // “技能”当定语时（技能商店页面）交付物仍然是页面，不能因为出现“技能”
+    // 就当成技能管理任务，否则只回一段文字也能被判完成。
+    expect(
+      WorkArtifactDeliveryGuard.requiresFileArtifact('生成一个技能商店页面'),
+      isTrue,
+    );
+  });
+
+  test('generating a page with an existing skill is still a file task', () {
+    // 反向回归：动词的宾语是页面而不是技能时，格式契约必须保留。
+    const request = '用最新前端 skill 生成一个飞行棋 html 文件';
+
+    expect(WorkArtifactDeliveryGuard.requiresFileArtifact(request), isTrue);
+    expect(WorkArtifactDeliveryGuard.requiresSourceArtifact(request), isTrue);
+  });
+
   test('Markdown document creation without a real artifact fails explicitly',
       () {
     const request = '帮我生成一份MD文档，记录未来7天的天气';

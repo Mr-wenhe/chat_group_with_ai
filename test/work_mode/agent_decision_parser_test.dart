@@ -773,6 +773,71 @@ void main() {
     }
   });
 
+  test('skill.create accepts a single string body and the steps/content aliases',
+      () async {
+    // 回归（任务 ab8549a1）：模型把技能正文写成 `steps` / `content`，旧校验
+    // 报「tool.arguments 不支持字段 steps」，只能换个名字再试，每次创建技能
+    // 都白烧一轮。三个名字现在是等价别名，正文写成一段字符串也成立。
+    final bodies = <Map<String, Object?>>[
+      {
+        'name': 'html-tech-ui-polish',
+        'domain': 'frontend',
+        'description': '优化润色 HTML 界面',
+        'instructions': ['读取目标文件', '应用科技感设计语言'],
+      },
+      {
+        'name': 'html-tech-ui-polish',
+        'domain': 'frontend',
+        'description': '优化润色 HTML 界面',
+        'steps': ['读取目标文件', '应用科技感设计语言'],
+      },
+      {
+        'name': 'html-tech-ui-polish',
+        'domain': 'frontend',
+        'description': '优化润色 HTML 界面',
+        'content': '读取目标文件\n应用科技感设计语言',
+      },
+      {
+        // 正文分段写出的空行是正常排版，不能判成非法条目：执行层也会丢弃它们。
+        'name': 'html-tech-ui-polish',
+        'domain': 'frontend',
+        'description': '优化润色 HTML 界面',
+        'content': '读取目标文件\n\n应用科技感设计语言\n',
+      },
+    ];
+
+    for (final arguments in bodies) {
+      final result = await parser.parse(_json({
+        'action': 'tool',
+        'public_update': '创建技能。',
+        'tool': {'name': 'skill.create', 'arguments': arguments},
+        'completion': null,
+      }));
+      expect(result.isSuccess, isTrue, reason: arguments.toString());
+    }
+  });
+
+  test('skill.create reports the missing body with the accepted field names',
+      () async {
+    final result = await parser.parse(_json({
+      'action': 'tool',
+      'public_update': '创建技能。',
+      'tool': {
+        'name': 'skill.create',
+        'arguments': {
+          'name': 'html-tech-ui-polish',
+          'domain': 'frontend',
+          'description': '优化润色 HTML 界面',
+        },
+      },
+      'completion': null,
+    }));
+
+    expect(result.isSuccess, isFalse);
+    expect(result.detail ?? '', contains('instructions'));
+    expect(result.detail ?? '', contains('steps'));
+  });
+
   test('normalizes a JSON-encoded command argument list', () async {
     final result = await parser.parse(_json({
       'action': 'tool',

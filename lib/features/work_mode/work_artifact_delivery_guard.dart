@@ -143,6 +143,7 @@ class WorkArtifactDeliveryGuard {
     final text = _formatScanText(request);
     if (text.isEmpty) return false;
     if (!_mentionsSourceArtifact(text)) return false;
+    if (_isSkillMetadataRequest(text)) return false;
 
     return _containsCreationVerb(text);
   }
@@ -237,6 +238,71 @@ class WorkArtifactDeliveryGuard {
     r'指南|纪要|论文|简历|讲义)',
     caseSensitive: false,
   );
+
+  /// A creation verb whose object is the skill noun itself, as in
+  /// “创建这个 UI 相关的 skill”.
+  ///
+  /// The verb list must stay in step with [_containsCreationVerb]: that outer
+  /// gate already requires one, so a verb only listed here would never fire.
+  ///
+  /// The gap is bounded and refuses sentence punctuation on purpose: with an
+  /// unbounded `.*` any request that mentions a skill somewhere and also says
+  /// “生成” would be read as skill creation, including the artifact task that
+  /// generated pages *with* that skill.
+  static final RegExp _skillCreationTarget = RegExp(
+    r'(?:生成|创建|新建|写入|保存|导出|输出|编写|实现|开发|修改|修复|更新|'
+    r'重构|制作|转换|转成|转为|generate|create|write|save|export|output|'
+    r'implement|develop|modify|fix|update|refactor|convert|build|make)'
+    r'[^，。；;!?\n]{0,12}?(?:技能|skill)',
+    caseSensitive: false,
+  );
+
+  /// A noun that names a file the run has to produce.
+  ///
+  /// Matched only to *cancel* the skill-metadata reading, so it stays narrow:
+  /// a request that names a concrete file next to a skill (“创建技能并把示例写进
+  /// demo.html”) asked for both and keeps its file contract.
+  static final RegExp _fileDeliverableNoun = RegExp(
+    r'(?:文件|文档|报告|报表|表格|清单|附件|markdown)',
+    caseSensitive: false,
+  );
+
+  /// A file name carrying an extension, e.g. `demo.html`.
+  ///
+  /// The trailing `(?!\.)` keeps an abbreviation such as `U.S.` from reading as
+  /// the format `s`, mirroring [_sourceExtension].
+  static final RegExp _fileExtensionToken = RegExp(
+    r'\.[a-z][a-z0-9]{0,7}\b(?!\.)',
+    caseSensitive: false,
+  );
+
+  /// A page-like noun right after the skill word, as in “技能商店页面”.
+  ///
+  /// There the skill is an attribute of the page, so the deliverable is still a
+  /// file. Without this veto “做一个技能商店页面” looked like skill management
+  /// and a text-only answer could be accepted for a page request.
+  static final RegExp _skillModifiesPageNoun = RegExp(
+    r'(?:技能|skill)[^，。；;!?\n]{0,4}?(?:页面|网页|网站|前端)',
+    caseSensitive: false,
+  );
+
+  /// Whether [text] asks the app to create or update a skill, whose only
+  /// deliverable is a database record.
+  ///
+  /// `skill.create` writes a `CharacterSkill` record and never touches the
+  /// filesystem, so a request such as “创建这个 UI 相关的 skill，优化润色 HTML
+  /// 界面的” cannot satisfy a file contract: the only format word in it names
+  /// what the *skill* is about. Read as a file task it failed four retries on
+  /// the same “没有可读取的真实文件” while the skill had in fact been created
+  /// (task `ab8549a1`).
+  ///
+  /// A request that also names a concrete file keeps its contract — there the
+  /// user asked for the file as well.
+  static bool _isSkillMetadataRequest(String text) =>
+      _skillCreationTarget.hasMatch(text) &&
+      !_skillModifiesPageNoun.hasMatch(text) &&
+      !_fileDeliverableNoun.hasMatch(text) &&
+      !_fileExtensionToken.hasMatch(text);
 
   /// Word is a distinct final format. A durable discussion contract keeps the
   /// requirement through terse continuations, while opening or reviewing an
@@ -381,6 +447,10 @@ class WorkArtifactDeliveryGuard {
   static bool requiresFileArtifact(String request) {
     final text = _formatScanText(request);
     if (text.isEmpty || !_containsCreationVerb(text)) return false;
+    // Creating a skill writes a database record, never a file. Without this the
+    // format word describing what the skill is *for* (“…优化润色 HTML 界面的”)
+    // demanded a fresh `.html` that `skill.create` can never produce.
+    if (_isSkillMetadataRequest(text)) return false;
     // Whether a contract exists is a deliberately broad question: a request
     // that mentions a format in passing (“生成一份报告，包含 png 图表”) still has
     // to deliver a real file. What keeps that mention from over-constraining
@@ -1238,6 +1308,10 @@ class WorkArtifactDeliveryGuard {
   /// the deliverable's format rejects the very file the user asked for.
   static Set<String> _formatsNamedBy(String request) {
     final text = _formatScanText(request);
+    // A skill request names no output format: the format word in “创建一个 UI
+    // skill，优化润色 HTML 界面” describes the skill's subject, and constraining
+    // the run to `{html}` is what rejected the metadata-only delivery.
+    if (_isSkillMetadataRequest(text)) return <String>{};
     final formats = <String>{};
     for (final match in RegExp(r'[a-z0-9]+').allMatches(text)) {
       final token = match.group(0)!;
