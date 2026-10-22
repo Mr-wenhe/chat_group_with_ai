@@ -48,7 +48,7 @@ The gateway is plain TypeScript executed via Node's type-stripping — there is 
 
 **AI Group Chat Simulator** — a local-first Flutter app that simulates group conversations between AI characters backed by LLM providers, plus a work-mode agent that executes real file/command tasks.
 
-Toolchain: **Flutter 3.27.1 / Dart 3.6.0** (`pubspec.yaml` requires `sdk: ">=3.5.0 <4.0.0"`; CI and release workflows pin 3.27.1). Current version `2.6.0+14`.
+Toolchain: **Flutter 3.27.1 / Dart 3.6.0** (`pubspec.yaml` requires `sdk: ">=3.5.0 <4.0.0"`; CI and release workflows pin 3.27.1). Current version `2.6.1+15`.
 
 ### Repository layout
 
